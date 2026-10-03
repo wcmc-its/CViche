@@ -589,10 +589,10 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     the place (#1223, EBYSBC EQADVR-02). A value with no street, number or
     state (`_names_a_street_or_number`) is a department or school name, not
     an address, and fills no slot either (#1222, EBYSBC RVROVQ-04). When a
-    non-A entry's text carries the same name, a record of its own renders
-    it and the True third value keeps the header line out of the Appendix;
-    otherwise the entry is left to the Appendix recovery, as a displaced
-    banner address is."""
+    non-A entry's text carries the same name and the line holds nothing
+    else but a label, a record of its own renders it and the True third
+    value keeps the header line out of the Appendix; otherwise the entry is
+    left to the Appendix recovery, as a displaced banner address is."""
     if _labels_its_own_address_slots(address):
         return (home_address or _address_cell_text(address, 'home'),
                 office_address or _address_cell_text(address, 'office'), False)
@@ -603,10 +603,25 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
         return home_address, office_address, True
     office_text = _address_cell_text(address, 'office')
     if not _names_a_street_or_number(office_text):
-        return home_address, office_address, office_text.lower() in ctx.other_entries_text
+        name = office_text.lower()
+        return (home_address, office_address,
+                name in ctx.other_entries_text and _holds_only_a_label_and(name, ctx.text))
     if any(word in ctx.text for word in _WORK_PLACE_WORDS) or not office_address:
         office_address = address_rank.offer(office_address, address, ctx.entry)
     return home_address, office_address, False
+
+
+#: What may sit beside a department name on a line that is set aside: a
+#: label of at most two words and punctuation ("Department:", "School -").
+_LABEL_ONLY_RE = re.compile(r'\W*(?:[^\W\d_]+(?:\s+[^\W\d_]+)?\W*)?')
+
+
+def _holds_only_a_label_and(name: str, text: str) -> bool:
+    """Whether `text` is `name` with at most a short label beside it. A
+    line holding more ("WEBPAGES <department>: <url> <url>") is not set
+    aside when a record carries the name: its other content would be lost
+    (#1222, CTXOTY)."""
+    return name in text and _LABEL_ONLY_RE.fullmatch(text.replace(name, '', 1)) is not None
 
 
 class _PhoneSlots(NamedTuple):

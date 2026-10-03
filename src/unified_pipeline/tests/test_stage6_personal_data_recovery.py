@@ -1495,6 +1495,7 @@ def test_a_department_name_does_not_block_a_later_street_address(tmp_path):
     ("Example Hall, Example University", True),
     ("Example University, Exampleton, ZZ", True),
     ("Room B-12, Example Building", True),
+    ("Unit 4B, Example Institute", True),
 ])
 def test_names_a_street_or_number(address, expected):
     from unified_pipeline.stage6.sections import personal_data
@@ -1653,3 +1654,121 @@ def test_an_orcid_already_in_an_s0_entry_renders_once(tmp_path):
         _entry("ORCID iD: https://orcid.org/0000-0002-1825-0097", "S0", idx=40),
     ])
     assert text.count("0000-0002-1825-0097") == 1
+
+
+def test_an_off_schema_address_from_a_protected_fragment_is_not_taken(tmp_path):
+    entry = _a("Contact", {"research_address": "9 Private Lane, Exampleton, ZZ 00000"})
+    entry["_pii_fragments"] = ["Spouse: 9 Private Lane, Exampleton, ZZ 00000"]
+    rows = _contact_rows(tmp_path, [entry])
+    assert rows["Office address:"] == ""
+
+
+def test_an_orcid_from_a_protected_fragment_does_not_render(tmp_path):
+    entry = _a("Contact", {"orcid": "0000-0002-1825-0097"})
+    entry["_pii_fragments"] = ["Spouse ORCID: 0000-0002-1825-0097"]
+    text = _render(tmp_path, [entry])
+    assert "0000-0002-1825-0097" not in text
+
+
+def _owner_and_block(block_text, fields=None, owner_fields=None):
+    return [_a("Jane Doe\tjdoe@example.edu",
+               {"name": "Jane Doe", "email": "jdoe@example.edu", **(owner_fields or {})}, idx=0),
+            _entry(f"Current Position: Professor\tExample Hospital\t{block_text}\tjdoe@example.edu",
+                   "D1", {"title": "Professor", "institution": "Example Hospital", **(fields or {})},
+                   idx=7)]
+
+
+@pytest.mark.parametrize("fragment, row", [
+    ("Spouse phone: (555) 555-0103", "Office telephone:"),
+    ("Spouse: 100 Sample Avenue\nExampleton, ZZ 00000", "Office address:"),
+])
+def test_a_contact_block_value_from_a_protected_fragment_is_not_taken(tmp_path, fragment, row):
+    entries = _owner_and_block("100 Sample Avenue\tExampleton, ZZ 00000\tPhone: (555) 555-0103")
+    entries[1]["_pii_fragments"] = [fragment]
+    rows = _contact_rows(tmp_path, entries)
+    assert rows[row] == ""
+    # The value the fragment does not hold is still taken.
+    other = {"Office telephone:", "Office address:"} - {row}
+    assert rows[other.pop()] != ""
+
+
+@pytest.mark.parametrize("block", [
+    pytest.param("Fax Phone: (555) 555-0104", id="fax-phone"),
+    pytest.param("Home Tel: (555) 555-0199", id="home-tel"),
+    pytest.param("Mobile Phone: (555) 555-0102", id="mobile-phone"),
+    pytest.param("Office 10-120", id="room-number-not-a-phone"),
+])
+def test_a_contact_block_takes_no_other_kind_of_number_for_office(tmp_path, block):
+    rows = _contact_rows(tmp_path, _owner_and_block(block))
+    assert rows["Office telephone:"] == ""
+
+
+def test_a_contact_block_never_displaces_an_a_entry_phone(tmp_path):
+    rows = _contact_rows(tmp_path, _owner_and_block(
+        "100 Sample Avenue\tExampleton, ZZ 00000\tPhone: (555) 555-0103",
+        owner_fields={"phone": "(555) 555-0101"}))
+    assert rows["Office telephone:"] == "(555) 555-0101"
+    # The cell's lines are joined without a separator by this reader.
+    assert rows["Office address:"] == "100 Sample AvenueExampleton, ZZ 00000"
+
+
+def test_the_contact_block_net_reads_no_a_entry_text(tmp_path):
+    """A entries are routed by their stage-4 fields; the net reads only
+    blocks coded elsewhere."""
+    rows = _contact_rows(tmp_path, [
+        _a("Jane Doe\tjdoe@example.edu\tPhone: (555) 555-0101",
+           {"name": "Jane Doe", "email": "jdoe@example.edu"}, idx=0),
+    ])
+    assert rows["Office telephone:"] == ""
+
+
+@pytest.mark.parametrize("lines, address", [
+    ("100 Sample Avenue\tExample Bldg\tExampleton, ZZ 00000",
+     "100 Sample Avenue\nExample Bldg\nExampleton, ZZ 00000"),
+    ("100 Sample Avenue\tExample Bldg\tRoom 4\tExampleton, ZZ 00000", "100 Sample Avenue"),
+])
+def test_street_address_in_reads_at_most_two_lines_past_the_street(lines, address):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._street_address_in(lines) == address
+
+
+def test_a_cell_label_after_another_number_does_not_make_this_one_a_cell(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Tel: 555-555-0101\t555-555-0102 (cell)", {"phone": "555-555-0101"}),
+    ])
+    assert rows["Office telephone:"] == "555-555-0101"
+    assert rows["Cell phone:"] == ""
+
+
+@pytest.mark.parametrize("text", [
+    "Home: 9 Private Lane\tHome address: 10 Private Lane",
+    "Home Office: 1 Sample Way",
+    "Office: 1 Sample Way",
+])
+def test_home_and_office_parts_needs_a_home_and_a_work_label(text):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._home_and_office_parts(text) == []
+
+
+def test_a_department_line_with_more_than_a_label_is_not_set_aside(tmp_path):
+    """CTXOTY's shape: a department line that also holds URLs went
+    nowhere when a record carried the department name."""
+    rows = _contact_rows(tmp_path, [
+        _a("WEBPAGES Department of Example Studies: https://example.edu/a https://example.edu/b",
+           {"address": "Department of Example Studies"}, idx=1),
+        _entry("2001-Present Professor, Department of Example Studies", "D1",
+               {"title": "Professor", "department": "Department of Example Studies",
+                "start_date": "2001", "end_date": "Present"}, idx=20),
+    ])
+    assert rows["Office address:"] == ""
+    assert "https://example.edu/a" in _all_text(tmp_path / "out.docx")
+
+
+def test_a_home_word_in_a_protected_fragment_does_not_route_an_office_part_number(tmp_path):
+    """The fragments hold the whole entry's original text; once the number
+    is routed by its own Office part, a 'home' in them is another part's."""
+    entry = _a("Home: 9 Private Lane, Exampleton\tOffice: 1 Sample Way, Exampleton, 555-555-0101",
+               {"phone": "555-555-0101"})
+    entry["_pii_fragments"] = ["Home phone: 555-555-0199"]
+    rows = _contact_rows(tmp_path, [entry])
+    assert rows["Office telephone:"] == "555-555-0101"
