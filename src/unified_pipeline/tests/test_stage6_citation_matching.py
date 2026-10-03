@@ -294,6 +294,9 @@ _LINE = '4. Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A ti
      _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Le, Wren W, Du H',
      _LINE.replace('Gorse G, Wren W.', 'Le G, Wren W, Du H.'),
      'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Le G, Wren W, Du H. A title. J Wood. 2020;1:2-3.'),
+    ('5d doubled the period after "et al.": the restore prints one',
+     _CUT.replace('et al.', 'et al..'), '', _LINE,
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood. 2020;1:2-3.'),
 ])
 def test_restore_stage5d_owner_gives_the_owner_back(
     case: str, citation: str, authors: str, source: str, expected: str,
@@ -354,6 +357,7 @@ def test_a_given_name_5d_shortened_is_not_a_cut_owner() -> None:
     # a three-letter initials group is never checked against the line
     ('Ash A, Gorse GHI, Wren W', 'Ash A, Gorse G.H.I., Wren W.', False),
     ('Ash A, Gorse GI Jr, Wren W', 'Ash A, Gorse GI Jr, Wren W.', False),
+    ('Jr AB, Wren W', 'Gorse AB Jr, Wren W.', True),
 ])
 def test_prints_junk_author(authors: str, source: str, junk: bool) -> None:
     assert _prints_junk_author(authors, source) is junk

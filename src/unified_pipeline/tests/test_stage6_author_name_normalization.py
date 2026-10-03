@@ -888,6 +888,22 @@ _LEAD = 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F'
     ('given name first, an MA credential',
      'Ann Ash MA, Bo Birch BA, Cy Cedar MD, Di Daly MD, Ed Elm MD, Kim Fir MEd, Juno Wren MA. A title.',
      ['Ash A', 'Birch B', 'Cedar C', 'Daly D', 'Elm E', 'Fir K'], (['Wren J'], False)),
+    # Round 4 (#1259 review): rows for the anchor and reader guards a blind
+    # mutant set showed unpinned.
+    ('an earlier kept author with the same first initial does not raise the anchor\'s occurrence',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Alder A, Gorse G, Wren W. A title.',
+     _KEPT[:5] + ['Alder A'], (['Gorse G', 'Wren W'], False)),
+    ('the CV prints the anchor\'s surname hyphenated, as 5d does',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Quill-Rowan C, Gorse G, Wren W. A title.',
+     _KEPT[:5] + ['Quill-Rowan C'], (['Gorse G', 'Wren W'], False)),
+    ('an apostrophe in a co-author\'s surname after the anchor',
+     _LEAD + ", O'Wren W, Holly H. A title.", _KEPT, (["O'Wren W", 'Holly H'], False)),
+    ('the anchor\'s suffix and its repeated initials, two trailer pieces, are both skipped',
+     _LEAD + ', Jr., F., Wren W. A title.', _KEPT, (['Wren W'], False)),
+    ('a bracket ends the run inside a co-author\'s piece',
+     _LEAD + ', Wren W [Lantern Note], Holly H. A title.', _KEPT, (['Wren W'], False)),
+    ('a team inside the run is a group author',
+     _LEAD + ', The Lantern Team, Wren W. A title.', _KEPT, (['The Lantern Team', 'Wren W'], False)),
 ])
 def test_source_authors_after_reads_the_run_after_the_kept_authors(
     case: str, source: str, kept: list[str], expected: tuple[list[str], bool],
@@ -904,6 +920,12 @@ def test_source_authors_after_reads_the_run_after_the_kept_authors(
     ('a bare surname followed by "et al."', _LEAD + ', Wren, et al. A title.'),
     ('a bare surname followed by a piece that is not its initials',
      _LEAD + ', Wren, The Lantern Effect in a trial. A title'),
+    ('a bare surname followed by a suffix piece: the suffix is not the last author\'s',
+     _LEAD + ', Wren W, Holly, Jr, H. A title.'),
+    ('a bare surname followed by another bare surname',
+     _LEAD + ', Wren W, Holly, Gorse, G. A title.'),
+    ('a bare surname followed by a group author',
+     _LEAD + ', Wren W, Holly, The Lantern Study Group, Gorse G. A title.'),
 ])
 def test_source_authors_after_declines(case: str, source: str) -> None:
     assert _source_authors_after(source, _KEPT) is None, case
@@ -918,6 +940,10 @@ def test_source_authors_after_declines(case: str, source: str) -> None:
      _KEPT[:5] + ['Rowan F']),
     ('a four-letter surname is not matched at one edit',
      'Ash A, Birch B, Cedar C, Daly D, Elm E, Rowa F, Wren W. A title.', _KEPT[:5] + ['Rowe F']),
+    ('5d repeats a kept pair the line holds once',
+     'Elm M, Ash A, Gorse G, Holly H. A title.', ['Elm M', 'Ash A', 'Elm M']),
+    ('the line holds the anchor\'s exact spelling too few times; one-edit items do not make up the count',
+     'Rowen F, Ash A, Rowan F, Rowen F, Gorse G. A title.', ['Rowan F', 'Ash A', 'Rowan F']),
 ])
 def test_source_authors_after_declines_an_anchor_it_cannot_trust(
     case: str, source: str, kept: list[str],
