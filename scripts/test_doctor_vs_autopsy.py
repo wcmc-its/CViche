@@ -68,6 +68,8 @@ def test_finding_idxs_reads_every_emitter_format():
                   "as a source table header row", ["element_idx_start=12"]), {12}),
         (_finding("wrong_start_date", "entry 30.0 (D1): start_date '2001' with an empty end_date"), {30}),
         (_finding("under_extraction", "entry 474.1: extraction coverage 12% of 900 chars"), {474}),
+        (_finding("under_extraction", "entry 474.6: extraction coverage 9% of 900 chars"), {474}),
+        (_finding("offschema_fields", "1 D1 entry", ["  entry 8: {}"]), {8}),
         (_finding("some_lint", "flag", ["idx 7"]), {7}),
     ]
     for finding, expected in cases:
@@ -139,7 +141,8 @@ def test_stage6_shape_names_each_emitter_message():
 def _scoring_inputs(tmp):
     reports = {
         UID_A: {"findings": [
-            _finding("offschema_fields", "1 D1 entry: `key` ...", ["entry 10: {}"]),  # matches A-01
+            _finding("offschema_fields", "1 D1 entry: `key` ...", ["entry 10: {}"],
+                     "ERROR"),  # matches A-01
             _finding("offschema_fields", "1 H entry: `key` ...", ["entry 99: {}"], "INFO"),  # unmatched
             _finding("dedup_drops", "1 drop(s)", ["H (jaccard=0.9): dropped 'x' vs kept 'y'"]),  # unlocated
             _finding("implausible_year", "entry 21 (C): start_date=1900 -- before 1950"),  # matches A-02
@@ -149,7 +152,8 @@ def _scoring_inputs(tmp):
             _finding("stage6_render_warnings", "stage 6 self-check: hierarchy-mismatch reroute "
                      "K1->S8 refused fields do not fit: 1 entry", ["element_idx_start 5"], "INFO"),
         ]},
-        UID_C: {"findings": [_finding("offschema_fields", "unlabelled run", ["entry 1: {}"])]},
+        UID_C: {"findings": [{"lint": "offschema_fields", "severity": "WARN",  # no status: ran
+                              "message": "unlabelled run", "evidence": ["entry 1: {}"]}]},
         dva.FAILED_KEY: {},
     }
     labels = [
@@ -164,7 +168,9 @@ def _scoring_inputs(tmp):
               "element_idx_start": None},
              {"lint": "pipe_leaks", "shape": None, "severity": "WARN", "verdict": "FP",
               "element_idx_start": None}]},
-        {"uid": UID_B, "batch": "BATCH2", "findings": [_verified("TSTBBB-01", 6, batch_class=None)],
+        # TSTBBB-02 shares index 99 with an unmatched TSTAAA hit: a hit matches only its own uid
+        {"uid": UID_B, "batch": "BATCH2", "findings": [_verified("TSTBBB-01", 6, batch_class=None),
+                                                       _verified("TSTBBB-02", 99, class_ref="cls-3")],
          "doctor_review": [{"lint": "stage6_render_warnings", "shape": "reroute_refused",
                             "severity": "INFO", "verdict": "partial", "element_idx_start": [5]}]},
         # labelled but absent from this doctor run: never scored
@@ -184,6 +190,7 @@ def test_report_counts_hits_matches_and_caught_findings_per_lint():
     assert (offschema["hits"], offschema["loud"], offschema["located"], offschema["matched"]) == (2, 1, 2, 1)
     assert offschema["caught_ids"] == ["TSTAAA-01"]
     assert [list(h) for h in offschema["unmatched_hits"]] == [[UID_A, [99]]]
+    assert "TSTBBB-02" not in {cid for r in report["lints"] for cid in r["caught_ids"]}
     dedup = _row(report, "dedup_drops")
     assert (dedup["hits"], dedup["located"], dedup["unlocated_uids"]) == (1, 0, [UID_A])
     assert _row(report, "implausible_year")["caught_ids"] == ["TSTAAA-02"]
@@ -195,13 +202,13 @@ def test_report_counts_hits_matches_and_caught_findings_per_lint():
 def test_recall_groups_and_no_idx_findings():
     with tempfile.TemporaryDirectory() as tmp:
         recall = dva.build_report(*_scoring_inputs(tmp))["recall"]
-    assert recall["overall"] == {"findings": 3, "caught": 2}
+    assert recall["overall"] == {"findings": 4, "caught": 2}
     assert recall["no_idx"] == 1
-    assert recall["by_severity"] == {"high": {"findings": 2, "caught": 1}, "low": {"findings": 1, "caught": 1}}
-    assert recall["by_batch"] == {"BATCH1": {"findings": 2, "caught": 2}, "BATCH2": {"findings": 1, "caught": 0}}
+    assert recall["by_severity"] == {"high": {"findings": 3, "caught": 1}, "low": {"findings": 1, "caught": 1}}
+    assert recall["by_batch"] == {"BATCH1": {"findings": 2, "caught": 2}, "BATCH2": {"findings": 2, "caught": 0}}
     assert recall["by_class_ref"]["cls-2"] == {"findings": 1, "caught": 1}
     assert recall["by_batch_class"][dva.NO_CLASS] == {"findings": 1, "caught": 0}
-    assert recall["autopsy_credit"] == {"judged": 3, "yes": 1, "no": 2}
+    assert recall["autopsy_credit"] == {"judged": 4, "yes": 1, "no": 3}
 
 
 def test_verdicts_are_tallied_and_split_by_whether_the_arm_still_fires():
@@ -224,11 +231,13 @@ def test_main_prints_the_table_and_writes_the_same_numbers_as_json():
         code, out, _ = _run_main([doctor, labels_dir, "--json", out_json])
         written = json.loads(out_json.read_text())
     assert code == 0
-    assert written["recall"]["overall"] == {"findings": 3, "caught": 2}
+    assert written["recall"]["overall"] == {"findings": 4, "caught": 2}
     line = next(ln for ln in out.splitlines() if ln.startswith("offschema_fields "))
     assert line.split()[1:8] == ["2", "1", "2", "1", "1", "0", "1"], line
-    assert "recall: 2/3 (67%)" in out
-    assert "  by_class_ref: 2 smaller groups 2/3 (each in --json)" in out.splitlines(), out
+    line = next(ln for ln in out.splitlines() if ln.startswith("implausible_year "))
+    assert line.split()[1:8] == ["1", "1", "1", "1", "0", "0", "1"], line  # match != unmat
+    assert "recall: 2/4 (50%)" in out
+    assert "  by_class_ref: 3 smaller groups 2/4 (each in --json)" in out.splitlines(), out
 
 
 def _unclassed_inputs(tmp):
