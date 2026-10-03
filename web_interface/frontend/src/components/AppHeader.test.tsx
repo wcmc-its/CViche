@@ -14,7 +14,10 @@ const MEMBER: User = {
 }
 let currentUser: User = MEMBER
 vi.mock('../api/inbox', () => ({ listInbox: vi.fn(), discardInboxItem: vi.fn() }))
-vi.mock('../contexts/AuthContext', () => ({ useAuth: () => ({ user: currentUser, logout: vi.fn() }) }))
+vi.mock('../contexts/AuthContext', () => ({
+  useAuth: () => ({ user: currentUser, logout: vi.fn() }),
+  useCanViewAllRuns: () => currentUser.role === 'admin' || currentUser.role === 'staff',
+}))
 
 const renderHeader = () => render(<MemoryRouter initialEntries={['/runs']}><InboxProvider><AppHeader /></InboxProvider></MemoryRouter>)
 beforeEach(() => { vi.mocked(listInbox).mockResolvedValue([]) })
@@ -53,6 +56,18 @@ describe('AppHeader narrow menu', () => {
     expect(button.getAttribute('aria-expanded')).toBe('false')
     expect(screen.queryByRole('link', { name: 'Dashboard' })).toBeNull()
     expect(document.activeElement).toBe(button)
+  })
+
+  it('lists Dashboard for staff too, in the narrow menu and on the wide tabs', () => {
+    currentUser = { ...MEMBER, role: 'staff' }
+    mockViewport(360)
+    renderHeader()
+    fireEvent.click(screen.getByRole('button', { name: 'Main menu' }))
+    expect(screen.getByRole('link', { name: 'Dashboard' })).toBeTruthy()
+    cleanup()
+    mockViewport(480)
+    renderHeader()
+    expect(screen.getByRole('link', { name: 'Dashboard' })).toBeTruthy()
   })
 
   it('closes after picking a link', () => {

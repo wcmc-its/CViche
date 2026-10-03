@@ -137,6 +137,7 @@ phases:
           enabled: true
           access_group: "${AUTH_ACCESS_GROUP}"
           admin_group: "${AUTH_ADMIN_GROUP}"
+          staff_group: "${AUTH_STAFF_GROUP}"
           contact_name: "${AUTH_CONTACT_NAME}"
           contact_email: "${AUTH_CONTACT_EMAIL}"
         EOF

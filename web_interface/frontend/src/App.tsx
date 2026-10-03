@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom'
-import { useAuth } from './contexts/AuthContext'
+import { useAuth, useCanViewAllRuns } from './contexts/AuthContext'
 import { setUnauthorizedHandler } from './api/client'
 import UploadPage from './components/UploadPage'
 import PipelineViewer from './components/PipelineViewer'
@@ -73,11 +73,13 @@ function RequireConsent({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Gate: redirects to / if user is not an admin.
+ * Gate: redirects to / unless the user may see the dashboard -- admin, or staff
+ * (read-only; AdminDashboard shows staff the Feedback tab only).
  * Must be nested inside RequireAuth (assumes user is present).
  */
-function RequireAdmin({ children }: { children: React.ReactNode }) {
+function RequireDashboardAccess({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
+  const canViewAllRuns = useCanViewAllRuns()
 
   if (loading) {
     return (
@@ -87,7 +89,7 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
     )
   }
 
-  if (!user || user.role !== 'admin') {
+  if (!user || !canViewAllRuns) {
     return <Navigate to="/" replace />
   }
 
@@ -274,11 +276,11 @@ function App() {
             path="/admin"
             element={
               <RequireAuth>
-                <RequireAdmin>
+                <RequireDashboardAccess>
                   <WithHeader>
                     <AdminDashboard />
                   </WithHeader>
-                </RequireAdmin>
+                </RequireDashboardAccess>
               </RequireAuth>
             }
           />
