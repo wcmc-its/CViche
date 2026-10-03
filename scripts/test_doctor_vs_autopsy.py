@@ -126,6 +126,11 @@ def test_stage6_shape_names_each_emitter_message():
         "any section_render_failed record for that section)": "appendix_section_declined",
         "M1: 1 entry diverted to the Appendix — no research summary rendered":
             "appendix_no_research_summary",
+        "M1: 1 dated entry diverted to the Appendix — the generated research summary does not "
+        "reproduce it and no other section renders it": "appendix_m1_not_in_summary",
+        "2 D1 entries: `appointments` holds records that were not split into separate rows (the "
+        "entry's text holds content its fields do not carry); a record may be missing from the "
+        "output": "fanout_list_not_split",
         "2 geographic scope classification(s) failed and defaulted to National; the Regional/"
         "National/International split may be wrong": "geo_scope_failed",
         "1 appendix entry reclassification(s) failed or came back incomplete; those entries "
