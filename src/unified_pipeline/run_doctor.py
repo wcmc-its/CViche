@@ -613,12 +613,13 @@ LINT_PREVALENCE = {
     # 38/63, 35 at WARN; the autopsies found the class it reports on 17 of
     # EBYSBC's 40 CVs, so it is common rather than surprising.
     "multi_record_coverage": 0.508,
-    # date_cell_shape (EBYSBC E9/E21): 28 of the 63 runs of the EBYSBC/s7ab/
-    # pilot farm fire at any severity (8 at WARN), as rendered by origin/dev
-    # 2dd78920, measured 2026-10-03. That render still has the defects: raw
-    # mentee periods and same-year ranges are most of it, and the rate should
-    # fall as the date fixes ship. Same mixed-corpus caveat as above.
-    "date_cell_shape": 0.444,
+    # date_cell_shape (EBYSBC E9/E21): 19 of the 63 runs of the EBYSBC/s7ab/
+    # pilot farm fire at any severity (18 at WARN), as rendered by origin/dev
+    # 8a0a5445, measured 2026-10-03. #1368's stage-6 date fixes removed most
+    # raw and same-ended dates; open D2/D3 and earlier-D1 rows, which stage 6
+    # still prints '-Present' under the 2026-10-02 decision on #1342, are
+    # most of what is left. Same mixed-corpus caveat as above.
+    "date_cell_shape": 0.302,
 }
 
 

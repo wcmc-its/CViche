@@ -4317,11 +4317,11 @@ def test_field_lint_prevalence_is_the_measured_wave1_fraction():
 
 
 def test_date_cell_shape_prevalence_is_the_measured_farm_fraction():
-    """Measured 2026-10-02 over the 63-run EBYSBC/s7ab/pilot doctor farm as
-    rendered by origin/dev c3d87c5f (one fire per run at any severity); a
+    """Measured 2026-10-03 over the 63-run EBYSBC/s7ab/pilot doctor farm as
+    rendered by origin/dev 8a0a5445 (one fire per run at any severity); a
     new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
-    assert LINT_PREVALENCE["date_cell_shape"] == round(28 / 63, 3)
+    assert LINT_PREVALENCE["date_cell_shape"] == round(19 / 63, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
