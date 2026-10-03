@@ -760,3 +760,33 @@ class TestDisciplineAndStringDates:
         row = self._render(degree="PhD", dates_attended="1987", year_awarded="1987")
         assert row.cells[2].text == ""
         assert row.cells[3].text == "1987"
+
+
+class TestDegreeHonors:
+    """#817 (EBYSBC E14): stage 4's off-schema B1 `honors` follows the degree
+    in parentheses; before, no column read it. Synthetic values only."""
+
+    @staticmethod
+    def _render(**fields):
+        return TestDisciplineAndStringDates._render(**fields)
+
+    def test_honors_follow_the_degree_and_discipline(self):
+        row = self._render(degree="BA", discipline="Zymology", honors="magna cum laude")
+        assert row.cells[0].text == "BA, Zymology (magna cum laude)"
+
+    def test_a_list_of_honors_is_comma_joined(self):
+        row = self._render(degree="MD", honors=["Quill Honor Society", " ", 7, "cum laude"])
+        assert row.cells[0].text == "MD (Quill Honor Society, cum laude)"
+
+    def test_honors_the_degree_already_holds_are_not_repeated(self):
+        row = self._render(degree="BA cum laude", honors="Cum Laude")
+        assert row.cells[0].text == "BA cum laude"
+
+    @pytest.mark.parametrize("honors", [None, "", "  ", {"a": "b"}])
+    def test_blank_or_unusable_honors_change_nothing(self, honors):
+        assert self._render(degree="PhD", honors=honors).cells[0].text == "PhD"
+
+    def test_honors_alone_do_not_create_a_row(self):
+        gen = _generator()
+        gen._fill_education([{"text": "x", "extracted_fields": {"honors": "cum laude"}}])
+        assert _education_rows(gen) == []
