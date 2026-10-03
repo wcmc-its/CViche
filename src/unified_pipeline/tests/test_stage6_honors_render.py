@@ -315,16 +315,19 @@ def test_a_list_whose_only_date_is_on_the_extracted_award_keeps_every_award():
     """The guard on the one-row reading: stage 4 extracted the last award of
     a fused list, and that award's own line is the only dated one. A curly
     quote in the source must not hide that line (stage 4 wrote a straight
-    one), which would collapse the list into its last award."""
-    rows = _render_honors([_h_entry(
-        "Pretend Mentoring Certificate\n"
-        "Imaginary Service Medal\n"
-        "Doe’s Neighbourhood Service Prize | 2015",
-        award_name="Doe's Neighbourhood Service Prize", date="2015")])
-    assert [row[0] for row in rows] == [
-        "Pretend Mentoring Certificate", "Imaginary Service Medal",
-        "Doe's Neighbourhood Service Prize"]
-    assert rows[2][2] == "2015"
+    one), which would collapse the list into its last award. The year is
+    written in free text as well as in a '|' date column: the column alone
+    is caught earlier, by the date-cell guard, and would not reach this one."""
+    for dated_line in ("Doe’s Neighbourhood Service Prize | 2015",
+                       "Doe’s Neighbourhood Service Prize, 2015"):
+        rows = _render_honors([_h_entry(
+            "Pretend Mentoring Certificate\n"
+            "Imaginary Service Medal\n" + dated_line,
+            award_name="Doe's Neighbourhood Service Prize", date="2015")])
+        assert [row[0] for row in rows] == [
+            "Pretend Mentoring Certificate", "Imaginary Service Medal",
+            "Doe's Neighbourhood Service Prize"], dated_line
+        assert rows[2][2] == "2015"
 
 
 def test_an_undated_list_is_still_read_as_a_list():
