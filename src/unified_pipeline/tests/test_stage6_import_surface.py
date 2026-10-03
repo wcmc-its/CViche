@@ -192,7 +192,9 @@ HOME_ONLY_IMPORTS = {
                                       "_DECISION_FIELD_MAX_CHARS", "_decision_fields",
                                       "_GROUP_HEADER_RE", "_bare_occasion_apart", "_carries_record",
                                       "_different_book", "_different_rank", "_part_numbers",
-                                      "_verbatim_contained"),
+                                      "_verbatim_contained",
+                                      "_YEAR_RE", "_is_subsequence", "_is_word_run", "_ordered_words",
+                                      "_rank_qualifiers"),
 }
 
 _RELOCATED_CASES = [

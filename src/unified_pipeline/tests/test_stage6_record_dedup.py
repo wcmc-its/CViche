@@ -64,10 +64,33 @@ def test_a_grant_in_two_m2_codes_keeps_the_fuller_copy() -> None:
     {"title": "Widget Flux in Quenby Cells II"},   # another title
     {"pi_role": "Principal Investigator"},         # another role
     {"agency": "Gadget Trust"},                    # another funder
+    {"end_date": "2034"},                          # another end year
 ])
 def test_a_grant_that_differs_in_a_field_stays(change: dict) -> None:
-    grouped, decisions, _ = _run([_grant("M2A", 10), _grant("M2B", 50, **change)])
+    grouped, decisions, _ = _run([_grant("M2A", 10, end_date="2033"), _grant("M2B", 50, **change)])
     assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_dropped_grant_copy_neither_drops_nor_vouches_again() -> None:
+    """Three copies: the sparse M2A copy goes once, then the M2C copy goes to
+    the fuller M2B one; neither is dropped twice."""
+    sparse = _grant("M2A", 10)
+    full = _grant("M2B", 50, total_funding="$100,000", percent_effort="5%")
+    middle = _grant("M2C", 70, total_funding="$100,000")
+    grouped, decisions, _ = _run([sparse, full, middle])
+    assert _indexes(grouped) == [50]
+    assert [d["dropped_text"] for d in decisions] == [sparse["text"], middle["text"]]
+
+
+def test_an_entry_already_dropped_is_not_paired_again() -> None:
+    """The M2B copy goes to the first M2A copy; the second M2A copy, which the
+    cross-code rule may not drop against its own code, does not drop it again."""
+    first = _grant("M2A", 10, total_funding="$100,000", percent_effort="5%")
+    second = _grant("M2A", 20, total_funding="$100,000")
+    sparse = _grant("M2B", 50)
+    grouped, decisions, _ = _run([first, second, sparse])
+    assert _indexes(grouped) == [10, 20]
+    assert [d["dropped_text"] for d in decisions] == [sparse["text"]]
 
 
 def test_two_grant_numbers_stay_and_a_same_code_pair_is_left_to_text_dedup() -> None:
@@ -159,9 +182,9 @@ def test_a_one_word_specialty_never_pairs() -> None:
 
 
 def _leader(idx: int, institution: str, unit: str = "Widget Consult Service",
-            start: str = "2031") -> dict:
-    return _entry("L3", idx, f"{start}-2034 Medical Director {unit} {institution}",
-                  leadership_role="Medical Director", institution=institution,
+            start: str = "2031", role: str = "Medical Director") -> dict:
+    return _entry("L3", idx, f"{start}-2034 {role} {unit} {institution}",
+                  leadership_role=role, institution=institution,
                   unit_program=unit, start_date=start, end_date="2034")
 
 
@@ -173,11 +196,17 @@ def test_a_leadership_role_under_an_acronym_affiliate_drops_once() -> None:
 
 
 @pytest.mark.parametrize("other", [
-    {"unit": "Gadget Consult Service"}, {"start": "2030"}, {"institution": "Quexley Clinic"}])
+    {"unit": "Gadget Consult Service"}, {"start": "2030"}, {"institution": "Quexley Clinic"},
+    {"role": "Associate Medical Director"}])
 def test_a_leadership_role_of_another_unit_span_or_place_stays(other: dict) -> None:
     args = {"institution": "Norvale Children's Hospital"}
     args.update(other)
     grouped, _, _ = _run([_leader(23, "Norvale University"), _leader(212, **args)])
+    assert _indexes(grouped) == [23, 212]
+
+
+def test_an_acronym_does_not_pair_with_a_row_that_names_no_institution() -> None:
+    grouped, _, _ = _run([_leader(23, ""), _leader(212, "NGCH")])
     assert _indexes(grouped) == [23, 212]
 
 
@@ -222,6 +251,7 @@ def test_an_undated_institution_with_a_plural_ending_still_matches() -> None:
     _appointment(8, "Associate Professor", "Quexley College"),      # another institution
     _appointment(8, "Associate Professor; Chair, Gadget Council"),  # a title held nowhere else
     _appointment(8, "Associate Professor", text="Associate Professor 2031"),  # a year in its text
+    _appointment(8, "Associate Professor of Gadgetry"),             # a word the dated row lacks
 ])
 def test_an_undated_row_of_another_rank_place_or_title_stays(undated: dict) -> None:
     dated = _appointment(23, "Associate Professor of Widgetry", "Norvale University", "2031", "present")
