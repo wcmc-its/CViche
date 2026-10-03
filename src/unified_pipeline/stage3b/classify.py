@@ -719,9 +719,12 @@ Respond with a JSON array of objects, one per entry:
                 )
                 new_code = "T"
                 kept_t_tag = f"T-validation: {raw_new_code} not allowed, kept T"
-            elif refusal := t_recode_refusal(
-                    _entry_text(updated_entries[entry_idx]), raw_new_code, reasoning):
+            elif raw_new_code != "T" and (refusal := t_recode_refusal(
+                    _entry_text(updated_entries[entry_idx]), raw_new_code, reasoning)):
                 # A date tail or an employer sub-heading is not a record (#986, #985).
+                # Only a real recode is refused: a confirmed T must keep the
+                # "[T-validation confirmed]" tag the Appendix's structural
+                # drop (appendix._confirmed_structural_reason) reads.
                 new_code = "T"
                 kept_t_tag = f"T-validation: {raw_new_code} refused, {refusal}, kept T"
             else:

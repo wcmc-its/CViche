@@ -355,6 +355,34 @@ def test_fragment_recode_keeps_t_and_a_content_recode_still_applies(monkeypatch)
     assert stats["t_entries_reclassified"] == 1
 
 
+def test_confirmed_t_keeps_the_confirmed_tag_the_appendix_drop_reads(monkeypatch):
+    """The fragment guard runs only on a real recode. A confirmed T on a bare
+    date or a section-header line would match both of its rules, but it must
+    keep "[T-validation confirmed]": appendix._confirmed_structural_reason
+    needs that prefix to drop the line as a date stamp or section header."""
+    from unified_pipeline.stage6.sections.appendix import _confirmed_structural_reason
+
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
+        "content": json.dumps([
+            {"entry_index": 0, "new_code": "T", "confidence": 0.9,
+             "reasoning": "Date stamp of the document"},
+            {"entry_index": 1, "new_code": "T", "confidence": 0.9,
+             "reasoning": "Section header for teaching"},
+        ])
+    })
+
+    updated, stats = classify.validate_t_classifications(
+        [_t_entry("June 3, 2019"), _t_entry("Teaching Activities")], _taxonomy())
+
+    assert [e["classification_reasoning"] for e in updated] == [
+        "[T-validation confirmed] Date stamp of the document",
+        "[T-validation confirmed] Section header for teaching",
+    ]
+    assert [_confirmed_structural_reason(e["text"], e["classification_reasoning"])
+            for e in updated] == ["date-stamp", "section-header"]
+    assert stats["t_entries_reclassified"] == 0
+
+
 def test_llm_outage_propagates_instead_of_returning_entries_unchanged(monkeypatch):
     """A provider outage past the budget fails the run (#810); only other
     errors fall back to returning the entries unchanged."""
