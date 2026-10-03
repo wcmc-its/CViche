@@ -148,7 +148,7 @@ def _haystacks(blocks: list[tuple[str, str]]) -> Haystack:
 # function, as run_doctor's `_get_docx_document` does, so the JSON-only lints
 # still import cleanly where the extra is absent.
 
-def _docx_text(element, *, with_whitespace: bool = False) -> str:
+def _docx_text(element, *, with_whitespace: bool = False, deleted: bool = False) -> str:
     """All ``w:t`` text under a docx element in document order. Unlike
     python-docx's ``.text``, this INCLUDES text inside tracked-change ``<w:ins>``
     runs and EXCLUDES ``<w:delText>`` — the accepted-changes view a reader sees.
@@ -163,8 +163,18 @@ def _docx_text(element, *, with_whitespace: bool = False) -> str:
     its template-paragraph match need them; the lints do not, so it is off by
     default). A ``<w:tab/>`` inside ``<w:pPr><w:tabs>`` is a tab STOP
     definition, not a character, and any element inside a ``<w:del>`` is
-    deleted content; both are skipped."""
+    deleted content; both are skipped.
+
+    ``deleted=True`` returns the OTHER half instead: only the ``<w:delText>``
+    text, the struck-through content Word still shows in its default markup
+    view. A tracked deletion is still in the file a reader opens, so the
+    protected-data lint (#1223) scans it too. Plain text only: no caller needs
+    it with ``with_whitespace``, so that pairing raises rather than guessing."""
     from docx.oxml.ns import qn
+    if deleted:
+        if with_whitespace:
+            raise ValueError("_docx_text: deleted=True has no whitespace view")
+        return "".join(node.text or "" for node in element.iter(qn("w:delText")))
     if not with_whitespace:
         return "".join(node.text or "" for node in element.iter(qn("w:t")))
     w_t, w_r, w_del = qn("w:t"), qn("w:r"), qn("w:del")
@@ -184,13 +194,14 @@ def _docx_text(element, *, with_whitespace: bool = False) -> str:
     return "".join(parts)
 
 
-def _cell_text(cell) -> str:
+def _cell_text(cell, *, deleted: bool = False) -> str:
     """Track-change-aware equivalent of ``cell.text``: the cell's own paragraphs
-    (nested tables excluded, matching python-docx), including ``<w:ins>`` text."""
-    return "\n".join(_docx_text(p._p) for p in cell.paragraphs)
+    (nested tables excluded, matching python-docx), including ``<w:ins>`` text
+    -- or only its ``<w:delText>`` text with ``deleted=True`` (`_docx_text`)."""
+    return "\n".join(_docx_text(p._p, deleted=deleted) for p in cell.paragraphs)
 
 
-def _table_lines(tbl) -> list[str]:
+def _table_lines(tbl, *, deleted: bool = False) -> list[str]:
     """Text lines of one Word table: each non-empty cell, nested tables
     recursed into (cell.text never surfaces them), and every row with more
     than one non-empty cell ALSO joined as one line — a record rendered as a
@@ -199,35 +210,40 @@ def _table_lines(tbl) -> list[str]:
     mirror in stage_6_word_template.py's _rendered_output_lines() (the #221
     recovery pass, PR #225): both sides must agree on what counts as
     rendered. Extra lines only ever prove presence — strictly fewer false
-    'absent' verdicts, never more."""
+    'absent' verdicts, never more. ``deleted=True`` reads each cell's
+    ``<w:delText>`` text instead (`_docx_text`)."""
     lines: list[str] = []
     for row in tbl.rows:
         cell_texts = []
         for cell in row.cells:
-            ctext = _cell_text(cell)
+            ctext = _cell_text(cell, deleted=deleted)
             if ctext.strip():
                 cell_texts.append(ctext)
                 lines.append(ctext)
             for nested in cell.tables:
-                lines.extend(_table_lines(nested))
+                lines.extend(_table_lines(nested, deleted=deleted))
         if len(cell_texts) > 1:
             lines.append(TABLE_ROW_JOINER.join(" ".join(t.split()) for t in cell_texts))
     return lines
 
 
-def docx_body_blocks(doc: DocumentType) -> list[tuple[str, str]]:
+def docx_body_blocks(doc: DocumentType, *, deleted: bool = False) -> list[tuple[str, str]]:
     """Body-order blocks of an OPEN python-docx Document: ("p", text) per
     paragraph, ("table", _table_lines joined by newlines) per table. Grants
     render as one Word table per grant, so any output check must read
     tables AND paragraphs. `run_doctor.read_docx_blocks` is the by-path
-    form; `quality_score` calls this on the document it already loaded."""
+    form; `quality_score` calls this on the document it already loaded.
+
+    ``deleted=True`` is the tracked-deletion view (`_docx_text`): the same
+    blocks in the same order, each holding only its ``<w:delText>`` text, so
+    block i of either view is the same paragraph or table."""
     from docx.oxml.ns import qn
     from docx.table import Table
 
     blocks: list[tuple[str, str]] = []
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
-            blocks.append(("p", _docx_text(child)))
+            blocks.append(("p", _docx_text(child, deleted=deleted)))
         elif child.tag == qn("w:tbl"):
-            blocks.append(("table", "\n".join(_table_lines(Table(child, doc)))))
+            blocks.append(("table", "\n".join(_table_lines(Table(child, doc), deleted=deleted))))
     return blocks

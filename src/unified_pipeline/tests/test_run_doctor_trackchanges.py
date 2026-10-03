@@ -20,6 +20,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
@@ -68,6 +69,50 @@ def test_docx_text_with_whitespace_skips_tab_stops_deletions_and_page_breaks():
 def test_docx_text_empty_paragraph():
     p = parse_xml(f'<w:p {nsdecls("w")}></w:p>')
     assert _docx_text(p) == ""
+
+
+def test_docx_text_deleted_view_reads_only_the_tracked_deletions():
+    """#1223: a tracked deletion is still in the file a reader opens (Word's
+    default markup view shows it struck through), so the protected-data lint
+    reads it through `deleted=True`: the other half of the default view."""
+    p = parse_xml(
+        f'<w:p {nsdecls("w")}>'
+        '<w:r><w:t>plain </w:t></w:r>'
+        '<w:ins><w:r><w:t>inserted</w:t></w:r></w:ins>'
+        '<w:del><w:r><w:delText>deleted one</w:delText></w:r></w:del>'
+        '<w:del><w:r><w:delText>, two</w:delText></w:r></w:del>'
+        '</w:p>'
+    )
+    assert _docx_text(p, deleted=True) == "deleted one, two"
+    with pytest.raises(ValueError):
+        _docx_text(p, with_whitespace=True, deleted=True)
+
+
+def test_read_docx_blocks_deleted_view_is_block_for_block(tmp_path):
+    """Block i of the deleted view is block i of the default view -- the same
+    paragraph or table -- holding only that block's deleted text."""
+    doc = Document()
+    doc.add_paragraph("kept")
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:del {nsdecls("w")} w:id="1" w:author="a" w:date="2026-07-25T00:00:00Z">'
+        '<w:r><w:delText>struck</w:delText></w:r></w:del>'))
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Label:"
+    table.rows[0].cells[1].paragraphs[0]._p.append(parse_xml(
+        f'<w:del {nsdecls("w")} w:id="2" w:author="a" w:date="2026-07-25T00:00:00Z">'
+        '<w:r><w:delText>old value</w:delText></w:r></w:del>'))
+    nested = table.rows[0].cells[0].add_table(rows=1, cols=1)
+    nested.rows[0].cells[0].paragraphs[0]._p.append(parse_xml(
+        f'<w:del {nsdecls("w")} w:id="3" w:author="a" w:date="2026-07-25T00:00:00Z">'
+        '<w:r><w:delText>nested old</w:delText></w:r></w:del>'))
+    path = tmp_path / "x.docx"
+    doc.save(path)
+    accepted = read_docx_blocks(str(path))
+    deleted = read_docx_blocks(str(path), deleted=True)
+    assert [kind for kind, _ in deleted] == [kind for kind, _ in accepted]
+    assert [text for _, text in deleted] == ["", "struck", "nested old\nold value"]
+    # (python-docx adds an empty paragraph after a nested table: the "\n")
+    assert [text for _, text in accepted] == ["kept", "", "Label:\n"]
 
 
 def _tracked_changes_run(root, uid, cv_owner):

@@ -132,6 +132,32 @@ _DATE_SPAN = re.compile(
 _TEXT_CELL_SEPARATORS = re.compile(r'[\t\n|]+')
 _EDGE_PUNCTUATION = ' ,;:.-–—|"“”'
 
+# A Q2 row with no stage-4 role gets the default 'Member' only when the row is
+# a membership: its source heading, or its own line, names a body one sits on.
+# Under a heading of hospital consultations (EBYSBC CXRYCF-05), duties or grant
+# reviews, 'Member' invented a membership the CV never claims, so the Role
+# cell stays blank (#1254 point 3).
+DEFAULT_BOARD_ROLE = 'Member'
+_MEMBERSHIP_BODY_RE = re.compile(
+    r'\b(?:(?:sub)?committee|board|council|cabinet|commission|task\s*force'
+    r'|(?:work(?:ing)?|advisory|steering)\s*group|(?:advisory|expert|review)\s+panel'
+    r'|members?)s?\b',
+    re.IGNORECASE)
+
+
+def _default_board_role(entry: dict) -> str:
+    """'Member' when the headings above `entry` or its own text name a
+    committee-like body; '' otherwise."""
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    fields = entry.get('extracted_fields') or {}
+    texts = [*map(str, headings), str(entry.get('text') or ''),
+             _cell_text(fields.get('committee_name'))]
+    if any(_MEMBERSHIP_BODY_RE.search(text) for text in texts):
+        return DEFAULT_BOARD_ROLE
+    return ''
+
 
 def _organization_left_in_text(text: object, role: object, start_date: object,
                                end_date: object) -> str:
@@ -827,7 +853,7 @@ class ServiceSection:
                 taxonomy_code = entry.get('taxonomy_code', 'Q2')
 
                 committee = _cell_text(fields.get('committee_name'))
-                role = _cell_text(fields.get('role')) or 'Member'
+                role = _cell_text(fields.get('role')) or _default_board_role(entry)
                 organization = _cell_text(fields.get('organization'))
 
                 # When Stage 4 merges committee name into the role field

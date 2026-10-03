@@ -64,9 +64,14 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     REASON_NO_RENDER_ROUTE,
     REASON_RECOVERED_UNRENDERED,
     REASON_RENDERER_DECLINED,
+    SEVERITY_INFO,
+    SEVERITY_WARN,
+    RecoveredLine,
     _appendix_diversion_reason,
     _diversion_message,
+    _owner_signature_tokens,
     build_appendix_diversion_warnings,
+    is_routine_recovered_line,
 )
 from unified_pipeline.stage6.sections.passthrough import (  # noqa: E402
     PASSTHROUGH_CODES,
@@ -179,8 +184,12 @@ def test_build_warnings_entry_with_no_taxonomy_code_groups_under_question_mark()
     assert warnings[0]["reason"] == REASON_NO_RENDER_ROUTE
 
 
+def _recovered(*codes: str) -> list[RecoveredLine]:
+    return [RecoveredLine(code, f"Sample recovered line {i}") for i, code in enumerate(codes)]
+
+
 def test_build_warnings_recovered_codes_produce_recovered_unrendered_reason():
-    warnings = build_appendix_diversion_warnings([], ["D1", "D1"], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    warnings = build_appendix_diversion_warnings([], _recovered("D1", "D1"), RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert len(warnings) == 1
     w = warnings[0]
     assert w["code"] == "D1"
@@ -193,7 +202,7 @@ def test_build_warnings_recovered_codes_produce_recovered_unrendered_reason():
 
 def test_build_warnings_recovered_singular_count_is_grammatical():
     # F5 singular case, for the recovered_unrendered message's verb agreement.
-    w = build_appendix_diversion_warnings([], ["D1"], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)[0]
+    w = build_appendix_diversion_warnings([], _recovered("D1"), RENDER_ROUTED_CODES, PASSTHROUGH_CODES)[0]
     assert w["message"] == (
         "D1: 1 entry classified D1 was not found in the rendered document "
         "and was recovered into the Appendix")
@@ -204,7 +213,8 @@ def test_build_warnings_same_code_both_streams_two_warnings_sorted():
     # one (recovered_unrendered) yields two distinct (code, reason) rows,
     # sorted with reason as the tiebreak -- "no_render_route" < "recovered_
     # unrendered" alphabetically.
-    warnings = build_appendix_diversion_warnings([_entry("T"), _entry("T")], ["T"], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    warnings = build_appendix_diversion_warnings([_entry("T"), _entry("T")], _recovered("T"),
+                                                 RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert [(w["code"], w["reason"], w["count"]) for w in warnings] == [
         ("T", REASON_NO_RENDER_ROUTE, 2),
         ("T", REASON_RECOVERED_UNRENDERED, 1),
@@ -370,7 +380,7 @@ def test_recovered_unrendered_one_routed_code_bullet(tmp_path):
         "count": 1, "reason": REASON_RECOVERED_UNRENDERED,
         "message": ("D1: 1 entry classified D1 was not found in the rendered "
                     "document and was recovered into the Appendix"),
-        "evidence": [],
+        "evidence": [], "severity": SEVERITY_WARN,
     }]
 
 
@@ -443,7 +453,7 @@ def test_end_to_end_generate_writes_warning_into_sidecar_json(tmp_path):
         "count": 1, "reason": REASON_NO_RENDER_ROUTE,
         "message": ("ZZ: 1 entry diverted to the Appendix — no stage 6 "
                     "section is routed to render this taxonomy code"),
-        "evidence": [],
+        "evidence": [], "severity": SEVERITY_WARN,
     }]
     assert "dedup_decisions" in on_disk  # sidecar shape otherwise unchanged
 
@@ -462,9 +472,9 @@ def test_negative_routed_code_only_no_appendix_diversion_warning(tmp_path):
 def test_negative_no_appendix_at_all_warnings_unchanged(tmp_path):
     """No unrouted/discarded code in the input at all: the sidecar's
     `warnings` list is exactly what _validate_output() alone would have
-    produced (here: the always-fires-on-a-K-less-render teaching check) --
-    proof the merge is purely additive, never present when there is nothing
-    to add."""
+    produced for the same entries (here: nothing, since a render with no K
+    entry no longer gets the teaching check, #1221) -- proof the merge is
+    purely additive, never present when there is nothing to add."""
     entries = [_OWNER_ENTRY,
                _t_entry("Distinguished Teaching Award 2020 from the medical school",
                         "H", ["Honors"], 1)]
@@ -476,22 +486,30 @@ def test_negative_no_appendix_at_all_warnings_unchanged(tmp_path):
     input_path.write_text(json.dumps(data))
     gen.generate(str(input_path), str(output_path), research_summary_path=None)
     doc = Document(str(output_path))
-    direct = gen._validate_output()
+    direct = gen._validate_output({entry["taxonomy_code"]: [entry] for entry in entries})
     sidecar = json.loads((tmp_path / "T531H_render_warnings.json").read_text())
     assert sidecar["warnings"] == direct
     assert _diversion_warnings(sidecar) == []
 
 
 def test_negative_existing_checks_output_unchanged_when_diversion_also_fires(tmp_path):
-    """The bundled template's own EDUCATIONAL CONTRIBUTIONS header with no K
-    content triggers _validate_output's real no_visible_teaching_content
-    check on every render here; confirm it survives byte-for-byte alongside
-    a new appendix_diversion warning, in a fixed dict order (existing checks
-    first, since _validate_output runs before the appendix-diversion merge)."""
+    """A K entry the teaching section shows nothing for (its writer stubbed
+    out) triggers _validate_output's real no_visible_teaching_content check;
+    confirm it survives byte-for-byte alongside a new appendix_diversion
+    warning, in a fixed dict order (existing checks first, since
+    _validate_output runs before the appendix-diversion merge). Without the K
+    entry the teaching check stays quiet (#1221)."""
     entries = [_OWNER_ENTRY,
                _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1)]
-    _doc, sidecar = _render(tmp_path, "T531I", entries)
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1),
+               _t_entry("SAMPLE_K1 lecture series", "K1", ["Teaching"], 2)]
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: None
+    gen._fill_teaching = lambda *_a, **_k: None
+    input_path = tmp_path / "in.json"
+    input_path.write_text(json.dumps({"document_uid": "T531I", "entries": entries}))
+    gen.generate(str(input_path), str(tmp_path / "out.docx"), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T531I_render_warnings.json").read_text())
     assert sidecar["warnings"] == [
         {"check": "no_visible_teaching_content", "code": "K",
          "section": "EDUCATIONAL CONTRIBUTIONS",
@@ -502,8 +520,10 @@ def test_negative_existing_checks_output_unchanged_when_diversion_also_fires(tmp
          "count": 1, "reason": REASON_NO_RENDER_ROUTE,
          "message": ("ZZ: 1 entry diverted to the Appendix — no stage "
                      "6 section is routed to render this taxonomy code"),
-         "evidence": []},
+         "evidence": [], "severity": SEVERITY_WARN},
     ]
+    _doc, k_less = _render(tmp_path, "T531J", entries[:2])
+    assert [w["check"] for w in k_less["warnings"]] == ["appendix_diversion"]
 
 
 # ---------------------------------------------------- R2 verifier r7 / r10
@@ -544,7 +564,7 @@ def test_recover_unrendered_records_wire_a_coded_orphan_becomes_bullet(tmp_path)
         "count": 1, "reason": REASON_RECOVERED_UNRENDERED,
         "message": ("A: 1 entry classified A was not found in the rendered "
                     "document and was recovered into the Appendix"),
-        "evidence": [],
+        "evidence": [], "severity": SEVERITY_WARN,
     }]
 
 
@@ -805,3 +825,149 @@ def test_t_validation_recoded_m1_is_reported_as_its_own_reason():
         "M1: 2 entries diverted to the Appendix — stage 3b T-validation "
         "recoded them from T to M1, which only the research summary renders")
     assert recoded["evidence"] == []
+
+
+def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendered():
+    # AUTOPSY-EBYSBC-batch-2026-10-02 E27: while the research summary renders,
+    # the only M1 entries in the Appendix are T-validation recodes and dated
+    # records the generated summary left out. Without a summary, every M1
+    # entry is there because none rendered.
+    from unified_pipeline.stage6.sections.appendix import (
+        REASON_M1_RECORD_NOT_IN_SUMMARY, REASON_T_VALIDATION_RECODED)
+    written = [{"taxonomy_code": "M1"}, {"taxonomy_code": "M1"},
+               {"taxonomy_code": "M1", "t_validation_applied": True},
+               {"taxonomy_code": "H"}]
+    got = {(w["code"], w["reason"]): w for w in build_appendix_diversion_warnings(
+        written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES, summary_rendered=True)}
+    assert set(got) == {("M1", REASON_M1_RECORD_NOT_IN_SUMMARY), ("M1", REASON_T_VALIDATION_RECODED),
+                        ("H", REASON_RENDERER_DECLINED)}
+    left_out = got[("M1", REASON_M1_RECORD_NOT_IN_SUMMARY)]
+    assert left_out["count"] == 2
+    assert left_out["message"] == (
+        "M1: 2 dated entries diverted to the Appendix — the generated research "
+        "summary does not reproduce them and no other section renders them")
+    assert left_out["evidence"] == []
+    # #1221 lowers only routine recovered A lines to INFO; a left-out record stays WARN.
+    assert left_out["severity"] == SEVERITY_WARN
+
+    without =build_appendix_diversion_warnings(written[:2], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    assert [(w["code"], w["reason"]) for w in without] == [("M1", REASON_RENDERER_DECLINED)]
+
+
+def test_m1_record_not_in_summary_singular_count_is_grammatical():
+    # Both pronouns in the E27 message agree with a count of one.
+    from unified_pipeline.stage6.sections.appendix import REASON_M1_RECORD_NOT_IN_SUMMARY
+    [w] = build_appendix_diversion_warnings([{"taxonomy_code": "M1"}], [], RENDER_ROUTED_CODES,
+                                            PASSTHROUGH_CODES, summary_rendered=True)
+    assert (w["reason"], w["count"]) == (REASON_M1_RECORD_NOT_IN_SUMMARY, 1)
+    assert w["message"] == (
+        "M1: 1 dated entry diverted to the Appendix — the generated research "
+        "summary does not reproduce it and no other section renders it")
+
+
+# ------------------------------------- #1221: the recovered A warning's severity
+
+_SAMPLE_OWNER = {"first_name": "Jane", "middle_name": "Q.", "last_name": "Public",
+                 "full_name_with_credentials": "Jane Q. Public, MD"}
+_SAMPLE_OWNER_TOKENS = _owner_signature_tokens(_SAMPLE_OWNER)
+
+
+@pytest.mark.parametrize("text", [
+    "School: Example University School of Medicine",
+    "Current affiliation: Example University",
+    "URL: https://example.edu/faculty/sample",
+    "www.example.org/sample-profile",
+    "Contact Details:",  # a label whose value the PII pass withheld
+    "Curriculum Vitae: Jane Q. Public, MD",
+    "Name Jane Q. Public, MD",
+    "Jane Q. Public, MD 4",
+])
+def test_routine_recovered_lines(text):
+    assert is_routine_recovered_line(text, _SAMPLE_OWNER_TOKENS)
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Q. Public, MD: Professor of Medicine, Example University",  # the current rank
+    "School: Example University, Associate Professor of Surgery",
+    "Married: Pat Sample",
+    "Grandchildren: Sam, Alex",
+    "Email: sample@example.org",
+    "Citizenship: Exampleland",
+    "January 1986",
+    "Department: Sample Medicine, 2019-2021",  # a dated appointment
+])
+def test_recovered_lines_that_keep_the_warning(text):
+    assert not is_routine_recovered_line(text, _SAMPLE_OWNER_TOKENS)
+
+
+def test_owner_banner_is_routine_only_with_the_owner_tokens():
+    assert not is_routine_recovered_line("Name Jane Q. Public, MD")
+
+
+def test_build_warnings_recovered_a_is_info_only_when_every_line_is_routine():
+    routine = [RecoveredLine("A", "School: Example University School of Medicine"),
+               RecoveredLine("A", "Name Jane Q. Public, MD")]
+    mixed = routine + [RecoveredLine("A", "Married: Pat Sample")]
+    [info] = build_appendix_diversion_warnings(
+        [], routine, RENDER_ROUTED_CODES, PASSTHROUGH_CODES, _SAMPLE_OWNER_TOKENS)
+    [warn] = build_appendix_diversion_warnings(
+        [], mixed, RENDER_ROUTED_CODES, PASSTHROUGH_CODES, _SAMPLE_OWNER_TOKENS)
+    assert (info["count"], info["severity"]) == (2, SEVERITY_INFO)
+    assert (warn["count"], warn["severity"]) == (3, SEVERITY_WARN)
+
+
+def test_build_warnings_only_code_a_is_split_by_its_lines():
+    # A routine-looking line under another code, or a numbered T line, stays WARN.
+    warnings = build_appendix_diversion_warnings(
+        [_entry("T")], [RecoveredLine("D1", "School: Example University")],
+        RENDER_ROUTED_CODES, PASSTHROUGH_CODES, _SAMPLE_OWNER_TOKENS)
+    assert [(w["code"], w["severity"]) for w in warnings] == [
+        ("D1", SEVERITY_WARN), ("T", SEVERITY_WARN)]
+
+
+def test_build_warnings_numbered_a_line_stays_warn_beside_routine_recovered_ones():
+    # Only the recovered stream is split by its text: a numbered A line keeps
+    # its WARN even when it counts as many lines as the routine recovered ones.
+    warnings = build_appendix_diversion_warnings(
+        [_entry("A")], [RecoveredLine("A", "School: Example University")],
+        RENDER_ROUTED_CODES, PASSTHROUGH_CODES, _SAMPLE_OWNER_TOKENS)
+    assert [(w["reason"], w["severity"]) for w in warnings] == [
+        (REASON_RECOVERED_UNRENDERED, SEVERITY_INFO), (REASON_RENDERER_DECLINED, SEVERITY_WARN)]
+
+
+def test_recovered_school_line_reaches_the_sidecar_as_info(tmp_path):
+    """The real post-render recovery pass, cv_owner threaded from the input."""
+    sidecars = {}
+    for uid, extra in (("T1221A", []), ("T1221B", ["Citizenship: Exampleland"])):
+        entries = [_t_entry(text, "A", ["Personal Data"], i) for i, text in enumerate(
+            ["School: Example University School of Medicine", *extra])]
+        gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=True)
+        gen._reconsider_appendix_entries = lambda: None
+        input_path = tmp_path / f"{uid}.json"
+        input_path.write_text(json.dumps(
+            {"document_uid": uid, "entries": entries, "cv_owner": _SAMPLE_OWNER}))
+        gen.generate(str(input_path), str(tmp_path / f"{uid}.docx"), research_summary_path=None)
+        sidecars[uid] = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
+    assert [(w["code"], w["count"], w["severity"]) for w in _diversion_warnings(sidecars["T1221A"])] == [
+        ("A", 1, SEVERITY_INFO)]
+    assert [(w["code"], w["count"], w["severity"]) for w in _diversion_warnings(sidecars["T1221B"])] == [
+        ("A", 2, SEVERITY_WARN)]
+
+
+def test_recovered_owner_banner_is_info_with_the_renders_cv_owner(tmp_path):
+    """A banner reaching the Appendix by the reconsider pass is routine only
+    because generate() hands its cv_owner to the warning builder."""
+    severities = {}
+    for uid, owner in (("T1221C", _SAMPLE_OWNER), ("T1221D", None)):
+        gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+        gen._reconsider_appendix_entries = lambda gen=gen: gen._add_remaining_to_appendix(
+            [("Name Jane Q. Public, MD", "A", 0.0)])
+        payload = {"document_uid": uid, "entries": [_OWNER_ENTRY]}
+        if owner:
+            payload["cv_owner"] = owner
+        input_path = tmp_path / f"{uid}.json"
+        input_path.write_text(json.dumps(payload))
+        gen.generate(str(input_path), str(tmp_path / f"{uid}.docx"), research_summary_path=None)
+        sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
+        severities[uid] = [w["severity"] for w in _diversion_warnings(sidecar)]
+    assert severities == {"T1221C": [SEVERITY_INFO], "T1221D": [SEVERITY_WARN]}

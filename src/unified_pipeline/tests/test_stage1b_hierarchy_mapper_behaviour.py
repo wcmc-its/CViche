@@ -32,6 +32,7 @@ from unified_pipeline import stage_1b_hierarchy_mapper as stage1b  # noqa: E402
 from unified_pipeline.core.output_manager import OutputManager as _RealOutputManager  # noqa: E402
 from unified_pipeline.stage_1b_hierarchy_mapper import (  # noqa: E402
     compute_section_boundaries,
+    drop_headers_absent_from_document,
     find_header_in_sequence,
     get_first_child_element_idx,
     has_mapped_children,
@@ -152,6 +153,24 @@ def test_is_header_match_empty_paragraph_does_not_match():
     # why this has never bitten a run -- but the function itself should say no.
     assert is_header_match("education", "") is False
     assert is_header_match("education", "", strict=True) is False
+
+
+def test_is_header_match_strict_mode_ignores_a_leading_separator_run():
+    # EBYSBC E17 / #1252: an asterisk rule on the heading's own line counted
+    # toward the 3x length cap, so the heading was never placed.
+    para = normalize_text("*" * 85 + " EDUCATION:")
+    assert is_header_match("education", para, strict=True) is True
+    assert is_header_match("education", normalize_text("__________Education"), strict=True) is True
+
+
+def test_is_header_match_separator_only_paragraph_does_not_match():
+    assert is_header_match("education", "*" * 40, strict=True) is False
+
+
+def test_map_hierarchy_node_places_a_heading_that_follows_a_separator_run():
+    elements = [_elem(0, "A. Person"), _elem(1, "*" * 85 + " EDUCATION:"), _elem(2, "PhD, 2001")]
+    mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] == 1
 
 
 # ------------------------------------------------------------- find_header_in_sequence
@@ -1423,3 +1442,87 @@ def test_child_may_partial_match_its_mapped_parents_own_line():
     mapped, _ = map_hierarchy_node(node, elements, [], 0)
     assert mapped["element_idx"] == 2
     assert mapped["children"][0]["element_idx"] == 2
+
+
+# ------------------------------------------------------ drop_headers_absent_from_document
+
+def _absent_fixture_elements() -> list[dict]:
+    return [
+        _elem(0, "A. Person"),
+        _elem(1, "Education"),                            # fragment of a longer 1a header
+        _elem(2, "AWARDS\t\tFirst prize, 2001, a long run-in record line"),
+        _elem(3, "PhD, Somewhere University, 2001"),
+        _elem(4, "Grant row", "table_content"),
+    ]
+
+
+def test_drop_headers_absent_from_document_drops_only_headers_on_no_line():
+    hierarchy = [
+        {"text": "PERSONAL DATA", "level": "H1", "paragraph_index": -1},
+        {"text": "Education and Training", "level": "H1"},
+        {"text": "Invented Heading", "level": "H1"},
+        {"text": "Awards", "level": "H1"},
+        {"text": "Grant Row", "level": "H1"},
+    ]
+
+    kept, dropped = drop_headers_absent_from_document(hierarchy, _absent_fixture_elements())
+
+    assert [n["text"] for n in kept] == ["PERSONAL DATA", "Education and Training", "Awards", "Grant Row"]
+    assert dropped == ["Invented Heading"]
+
+
+def test_drop_headers_absent_from_document_keeps_an_absent_parent_of_a_real_child():
+    hierarchy = [
+        {"text": "Invented Parent", "level": "H1", "children": [
+            {"text": "Awards", "level": "H2"},
+            {"text": "Invented Child", "level": "H2"},
+        ]},
+    ]
+
+    kept, dropped = drop_headers_absent_from_document(hierarchy, _absent_fixture_elements())
+
+    assert [(n["text"], [c["text"] for c in n["children"]]) for n in kept] == [("Invented Parent", ["Awards"])]
+    assert dropped == ["Invented Child"]
+    assert len(hierarchy[0]["children"]) == 2  # the input is not mutated
+
+
+def test_drop_headers_absent_from_document_drops_a_synthetic_group_left_empty():
+    hierarchy = [
+        {"text": "GROUP", "level": "H1", "text_metadata": {"synthetic": True}, "children": [
+            {"text": "Invented One", "level": "H2"},
+            {"text": "Invented Two", "level": "H2"},
+        ]},
+        {"text": "Invented Three", "level": "H1", "children": [{"text": "Invented Four", "level": "H2"}]},
+    ]
+
+    kept, dropped = drop_headers_absent_from_document(hierarchy, _absent_fixture_elements())
+
+    assert kept == []
+    assert dropped == ["Invented One", "Invented Two", "Invented Four", "Invented Three"]
+
+
+def test_run_stage_1b_drops_absent_headers_and_records_them(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    doc = Document()
+    doc.add_paragraph("A. Person")
+    _bold_paragraph(doc, "EDUCATION")
+    doc.add_paragraph("PhD, Somewhere University, 2001")
+    docx_path = tmp_path / "absent_cv.docx"
+    doc.save(docx_path)
+    hierarchy = {
+        "document_uid": "ABSENT",
+        "hierarchy": [
+            {"text": "Education", "level": "H1", "children": []},
+            {"text": "Invented Heading", "level": "H1", "children": []},
+        ],
+    }
+    hierarchy_path = tmp_path / "absent_hierarchy.json"
+    hierarchy_path.write_text(json.dumps(hierarchy))
+
+    output_data, _ = stage1b.run_stage_1b(str(docx_path), str(hierarchy_path))
+
+    assert [n["text"] for n in output_data["hierarchy_with_indices"]] == ["Education"]
+    assert output_data["meta"]["headers_absent_from_document"] == ["Invented Heading"]
+    boundaries = {tuple(s["hierarchy"]): (s["element_idx_start"], s["element_idx_end"])
+                  for s in output_data["section_boundaries"]}
+    assert boundaries == {("Personal Data",): (0, 0), ("Education",): (1, 2)}
