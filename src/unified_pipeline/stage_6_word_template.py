@@ -1711,8 +1711,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
         # own docstring for what it merges and why.
         validation_issues = _merge_appendix_diversion_warnings(
-            validation_issues, written_appendix_entries, recovered_appendix_lines,
-            research_summary_rendered, cv_owner)
+            validation_issues, written_appendix_entries, recovered_appendix_lines, research_summary_rendered, cv_owner)
 
         all_warnings = self._section_failures + validation_issues + self._llm_fallback_warnings()
         _log_validation_warnings(all_warnings)
