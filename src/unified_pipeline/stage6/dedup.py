@@ -17,8 +17,11 @@ import `stage_6_word_template`.
 import re
 from types import MappingProxyType
 
+from unified_pipeline.core.text_norm import is_placeholder_title
+
 from .fan_out import _FORMATTED_KEYS, _RENDERED_FIELDS, FANNED_OUT_FROM
 from .normalization import _squash
+from .normalization.publication import ResolvedPublication, resolve_publication
 from .parsing import _MONTH_NAME_TO_NUM, _dates_overlap_or_match, _parse_date_components
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
 
@@ -1148,6 +1151,192 @@ def recovered_row_already_rendered(entry: dict, rendered_lines: list[str]) -> bo
     return all(_value_contained_in_text(cell, rendered_text) for cell in cells)
 
 
+# #446: a citation's identity, compared before any text similarity. One paper
+# listed twice (EBYSBC SJWASY-01, VVRTUC-06) or split by stage 2 into two
+# entries that 5d completed into the same citation (MIFYLG-02, RNKYST-05,
+# NDXXAD-02's PMID-only tail) renders twice: the copies differ by role notes,
+# typos and author-list cuts, so the word-similarity loop below either misses
+# them or `_drop_is_safe` refuses them. Bibliography codes only; S0 is the
+# researcher-profile list, not citations.
+_CITATION_CODE_RE = re.compile(r'S[1-9]')
+_DOI_PREFIX_RE = re.compile(r'^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)', re.IGNORECASE)
+_DOI_SHAPE_RE = re.compile(r'10\.\d{4,}/\S+')
+# Two titles of one paper share at least this share of their significant words
+# (Jaccard): a source typo or a PubMed spelling still agrees, and two abstracts
+# under one supplement DOI (0.04-0.10 on the farm) or two protocol reports
+# that differ by a patient group (0.71) do not.
+_CITATION_TITLE_AGREEMENT = 0.8
+
+
+def _citation_doi(pub: ResolvedPublication) -> str:
+    """The DOI, lower-cased with any URL or `doi:` prefix and trailing period
+    removed, or '' when the value is not DOI-shaped."""
+    doi = _DOI_PREFIX_RE.sub('', pub.doi.strip()).rstrip('.').lower()
+    return doi if _DOI_SHAPE_RE.fullmatch(doi) else ''
+
+
+def _citation_pmid(pub: ResolvedPublication) -> str:
+    """The PMID's digits, or '' when it has fewer than an identifier's."""
+    pmid = re.sub(r'\D', '', pub.pmid)
+    return pmid if len(pmid) >= _RECORD_ID_MIN_DIGITS else ''
+
+
+def _citation_year(pub: ResolvedPublication) -> str:
+    """The four-digit year the citation states, or ''."""
+    match = _YEAR_RE.search(pub.year)
+    return match.group(0) if match else ''
+
+
+def _citation_identity_keys(entry: dict, pub: ResolvedPublication) -> set[tuple[str, str]]:
+    """Keys that name one paper: its PMID, its DOI, its normalized title +
+    journal + year, and its whole 5d citation when that names a title. Every
+    text key needs a real title (not a 5d placeholder), so two thin fragments
+    never share one by accident."""
+    keys = {('pmid', pmid) for pmid in (_citation_pmid(pub),) if pmid}
+    keys |= {('doi', doi) for doi in (_citation_doi(pub),) if doi}
+    title = _alnum(pub.title)
+    if not title or is_placeholder_title(pub.title, entry.get('text') or ''):
+        return keys
+    journal = _alnum(pub.journal or pub.book_title)
+    year = _citation_year(pub)
+    if journal and year:
+        keys.add(('title_journal_year', f'{title}|{journal}|{year}'))
+    if pub.formatted_citation:
+        keys.add(('citation', _alnum(pub.formatted_citation)))
+    return keys
+
+
+def _first_author(pub: ResolvedPublication) -> str:
+    """The first author's first word, lower-cased ('' when no author list)."""
+    match = re.match(r"[^\W\d_][\w'-]*", pub.authors.strip())
+    return match.group(0).lower() if match else ''
+
+
+def _source_title_words(entry: dict) -> set[str]:
+    """The significant words of the title stage 4 read off the CV itself,
+    before any PubMed title replaced it."""
+    fields = entry.get('extracted_fields') or {}
+    title = fields.get('title') or fields.get('chapter_title')
+    return _significant_words(title) if isinstance(title, str) else set()
+
+
+def _titles_disagree(first: set[str], second: set[str]) -> bool:
+    """Both titles known, and sharing under `_CITATION_TITLE_AGREEMENT` of their words."""
+    return bool(first and second
+                and len(first & second) / len(first | second) < _CITATION_TITLE_AGREEMENT)
+
+
+def _citations_conflict(kind: str, first: tuple[dict, ResolvedPublication],
+                        second: tuple[dict, ResolvedPublication]) -> bool:
+    """True when two copies sharing a `kind` key say they are two records.
+
+    The same printed citation (`citation`) is one record on the page whatever
+    the fields say: a stage-2 split half can carry the wrong title field and
+    the same 5d citation (VGHNZD). Any other shared key is a coincidence when
+    the PMIDs, DOIs or years differ, or the titles disagree
+    (`_titles_disagree`): the printed ones, because a journal supplement gives
+    every abstract in it one DOI, and the CV's own, because PubMed enrichment
+    can resolve two papers to one record and print one title twice (AQCLHS-02,
+    VQFSDI). A shared title, journal and year is weaker still, so a different
+    volume, pages or first author also refuses: a meeting lists posters with
+    one title by different groups, and a letter and its reply share a title,
+    journal and year (farm replay, 63 runs). A PMID or DOI match ignores those
+    three: a CV's own volume typo or author spelling is not a second paper
+    (RXYBVF)."""
+    if kind == 'citation':
+        return False
+    (first_entry, first_pub), (second_entry, second_pub) = first, second
+    if (_titles_disagree(_significant_words(first_pub.title), _significant_words(second_pub.title))
+            or _titles_disagree(_source_title_words(first_entry), _source_title_words(second_entry))):
+        return True
+    pairs = [(_citation_pmid(first_pub), _citation_pmid(second_pub)),
+             (_citation_doi(first_pub), _citation_doi(second_pub)),
+             (_citation_year(first_pub), _citation_year(second_pub))]
+    if kind == 'title_journal_year':
+        pairs += [(_alnum(first_pub.volume), _alnum(second_pub.volume)),
+                  (_alnum(first_pub.pages), _alnum(second_pub.pages)),
+                  (_first_author(first_pub), _first_author(second_pub))]
+    return any(a and b and a != b for a, b in pairs)
+
+
+def _citation_fullness(entry: dict, pub: ResolvedPublication) -> tuple[bool, int, int]:
+    """Sort key for which copy of a citation to keep: a PubMed-enriched copy,
+    then the one filling more fields, then the longer source text."""
+    filled = (pub.authors, pub.title, pub.journal, pub.book_title, pub.year, pub.volume,
+              pub.issue, pub.pages, pub.doi, pub.pmid, pub.pmcid)
+    return (entry.get('enrichment_status') == 'enriched', sum(map(bool, filled)),
+            len(entry.get('text') or ''))
+
+
+def _citation_identity_text(kind: str, pub: ResolvedPublication) -> str:
+    """What the `kind` key matched on: the 5d citation for `citation`, else the
+    title and year (the 5d citation or the authors when there is no title).
+    Venue and authors are left out because each copy spells them its own way
+    (an abbreviated journal, an "et al." cut)."""
+    if kind == 'citation' or not pub.title:
+        return pub.formatted_citation or pub.authors
+    return '. '.join(part for part in (pub.title, _citation_year(pub)) if part)
+
+
+def _citation_decision(kind: str, dropped: dict, kept: dict, code: str | None) -> dict:
+    """The sidecar record of one identity drop, in `deduplicate_entries`'s
+    shape so the doctor's `dedup_drops` lint reads it like any other.
+
+    Its texts are what the two copies matched on, not their source lines:
+    a stage-2 split half shares no source words with its other half, and a
+    second listing carries the CV's own role notes, so on source text the
+    lint would call every identity drop a lost record (farm A/B: 22 of 26 on
+    one CV). On those it still warns when the two name different papers."""
+    return {"metric": f"citation_{kind}", "jaccard": None, "containment": None,
+            "title_containment": None,
+            "dropped_text": _citation_identity_text(kind, resolve_publication(dropped))[:500],
+            "kept_text": _citation_identity_text(kind, resolve_publication(kept))[:500],
+            "dropped_fields": _decision_fields(dropped, code),
+            "kept_fields": _decision_fields(kept, code)}
+
+
+def _drop_citation_copies(entries: list[dict], code: str | None,
+                          decisions: list[dict] | None,
+                          dropped_ids: set[int]) -> list[dict]:
+    """Keep one copy of each citation in a bibliography group (#446).
+
+    Two entries are one paper when they share a `_citation_identity_keys` key
+    and `_citations_conflict` finds nothing apart. The fuller copy
+    (`_citation_fullness`) is kept wherever it sits; the section sorts by
+    year, so position does not matter. A fanned-out record (#983) is left to
+    the similarity loop's own rule."""
+    kept_by_key: dict[tuple[str, str], int] = {}
+    pubs = [resolve_publication(entry) for entry in entries]
+    dropped: set[int] = set()
+    for index, entry in enumerate(entries):
+        if entry.get(FANNED_OUT_FROM):
+            continue
+        keys = _citation_identity_keys(entry, pubs[index])
+        match = next(((key, kept_by_key[key]) for key in sorted(keys)
+                      if key in kept_by_key and kept_by_key[key] not in dropped
+                      and not _citations_conflict(key[0], (entry, pubs[index]),
+                                                  (entries[kept_by_key[key]],
+                                                   pubs[kept_by_key[key]]))),
+                     None)
+        if match is not None:
+            key, other = match
+            keep, drop = sorted((other, index),
+                                key=lambda i: _citation_fullness(entries[i], pubs[i]),
+                                reverse=True)
+            dropped.add(drop)
+            dropped_ids.add(id(entries[drop]))
+            if decisions is not None:
+                decisions.append(_citation_decision(key[0], entries[drop],
+                                                    entries[keep], code))
+            if keep == other:
+                continue
+        for key in keys:
+            kept_by_key.setdefault(key, index)
+            if kept_by_key[key] in dropped:
+                kept_by_key[key] = index
+    return [entry for index, entry in enumerate(entries) if index not in dropped]
+
+
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None,
@@ -1183,6 +1372,10 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     set across its groups keeps a dropped entry from vouching for another
     drop in any later group, and two identical copies keep exactly one.
 
+    A bibliography code (S1-S9) first keeps one copy of each citation by
+    identity (`_drop_citation_copies`, #446): PMID, DOI, title + journal +
+    year, or the whole 5d citation.
+
     Pairwise and order-dependent by design, not clustered: entries are
     compared left-to-right and a drop removes that index from further
     comparison (see the `break` below), so for A~B~C where A and C aren't
@@ -1197,6 +1390,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
 
     if dropped_ids is None:
         dropped_ids = set()
+    if code and _CITATION_CODE_RE.fullmatch(code):
+        entries = _drop_citation_copies(entries, code, decisions, dropped_ids)
     sigs = [_entry_signature_words(e) for e in entries]
     titles = [_entry_title_words(e) for e in entries]
     drop_indices = set()

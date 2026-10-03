@@ -1655,7 +1655,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
                 unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
-        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries)  # #420/A5IZ6Q
+        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries) + (section_results['bibliography'] or [])  # #420/A5IZ6Q; #446 declines
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of

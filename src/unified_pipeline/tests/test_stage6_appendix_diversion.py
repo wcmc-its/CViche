@@ -971,3 +971,27 @@ def test_recovered_owner_banner_is_info_with_the_renders_cv_owner(tmp_path):
         sidecar = json.loads((tmp_path / f"{uid}_render_warnings.json").read_text())
         severities[uid] = [w["severity"] for w in _diversion_warnings(sidecar)]
     assert severities == {"T1221C": [SEVERITY_INFO], "T1221D": [SEVERITY_WARN]}
+
+
+def test_untitled_undated_citation_goes_to_the_appendix_not_the_bibliography(tmp_path):
+    """#446 (EBYSBC HFAJCC-05, NDXXAD-02): an S1 entry with no title and no
+    year -- an author-only split head, or a 5d placeholder title -- is not a
+    citation. It reaches the Appendix as a renderer decline, and the dated,
+    titled citation beside it still renders numbered."""
+    head = _t_entry("Quill A, Brandt B, HEAD_ONLY_TOKEN C,", "S1", ["Publications"], 1)
+    head["extracted_fields"] = {"authors": "Quill A, Brandt B, Head C",
+                                "title": "[Title not provided]",
+                                "formatted_citation": "Quill A, Brandt B, Head C. [Title not provided].",
+                                "formatting_source": "stage_5d_llm"}
+    whole = _t_entry("Quill A. WHOLE_TOKEN study. J Imag Stud. 2019.", "S1", ["Publications"], 2)
+    whole["extracted_fields"] = {"formatted_citation": "Quill A. WHOLE_TOKEN study. J Imag Stud. 2019.",
+                                 "formatting_source": "stage_5d_llm", "year": "2019",
+                                 "title": "WHOLE_TOKEN study"}
+    doc, sidecar = _render(tmp_path, "T446A", [_OWNER_ENTRY, head, whole])
+    lines = _appendix_numbered_lines(doc)
+    assert len(lines) == 1 and "HEAD_ONLY_TOKEN" in lines[0]
+    texts = [p.text for p in doc.paragraphs]
+    assert "1. Quill A. WHOLE_TOKEN study. J Imag Stud. 2019." in texts
+    assert not any("[Title not provided]" in t for t in texts)
+    assert {(w["code"], w["reason"]) for w in _diversion_warnings(sidecar)} == {
+        ("S1", REASON_RENDERER_DECLINED)}
