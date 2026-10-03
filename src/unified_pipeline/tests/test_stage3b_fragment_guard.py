@@ -98,7 +98,7 @@ def test_a_header_named_as_the_lines_parent_does_not_count(reasoning):
 
 
 @pytest.mark.parametrize(
-    "code", ["A", "B1", "B2", "C", "I", "D1", "D3", "M2", "M2A", "M2B", "M2C", "M2D"])
+    "code", ["A", "B1", "B2", "C", "I", "D1", "D2", "D3", "M2", "M2A", "M2B", "M2C", "M2D"])
 def test_codes_built_from_pieces_are_exempt_from_the_reasoning_rule(code):
     assert t_recode_refusal("Exampleton University", code,
                             "Institution fragment under Experience") is None
@@ -124,3 +124,81 @@ def test_header_word_as_a_compound_prefix_does_not_count():
 def test_long_line_starting_with_closing_punctuation_is_a_sentence_tail():
     text = ") and the Example Regional Board for Sample Outreach Programs in Northfield County"
     assert t_recode_refusal(text, "H", "Fragment of an award entry") == REASON_REASONING_SAYS_FRAGMENT
+
+
+# --- one test per alternative: each word list and regex branch on its own -----
+
+@pytest.mark.parametrize("month", [
+    "Jan", "January", "Feb", "February", "Mar", "March", "Apr", "April", "May",
+    "Jun", "June", "Jul", "July", "Aug", "August", "Sep", "Sept", "September",
+    "Oct", "October", "Nov", "November", "Dec", "December",
+])
+def test_every_month_name_and_abbreviation_is_not_content(month):
+    assert t_recode_refusal(f"{month} 2019", "H", _NEUTRAL_REASONING) == REASON_NO_CONTENT_WORDS
+
+
+@pytest.mark.parametrize("text", [
+    "2019, 1st", "2019, 2nd", "2019, 3rd", "2019, 4th",
+    "2019 to present", "2019 - current", "2019 - now", "2019 - ongoing",
+])
+def test_every_ordinal_suffix_and_date_filler_is_not_content(text):
+    assert t_recode_refusal(text, "H", _NEUTRAL_REASONING) == REASON_NO_CONTENT_WORDS
+
+
+def test_a_single_letter_is_not_a_content_word():
+    assert t_recode_refusal("(b) 2019.", "H", _NEUTRAL_REASONING) == REASON_NO_CONTENT_WORDS
+
+
+@pytest.mark.parametrize("reasoning", [
+    "Continuation of the award line above",
+    "Continues the award line above",
+    "Continuing text of the award line above",
+    "Subheader grouping the courses below",
+])
+def test_each_fragment_reasoning_word_counts_on_its_own(reasoning):
+    assert t_recode_refusal("Example Hall", "R", reasoning) == REASON_REASONING_SAYS_FRAGMENT
+
+
+@pytest.mark.parametrize("reasoning", [
+    "Category/label header for mentees",
+    "Author's own header for the list",
+    "Author’s own header for the list",
+    "Sub-unit name header",
+])
+def test_lead_words_may_hold_a_slash_apostrophe_or_hyphen(reasoning):
+    assert t_recode_refusal("Example Hall", "R", reasoning) == REASON_REASONING_SAYS_FRAGMENT
+
+
+@pytest.mark.parametrize("stop_word", [
+    "under", "in", "within", "below", "beneath", "after", "listed", "located",
+])
+def test_each_placing_word_ends_the_header_lead(stop_word):
+    """'Role <stop word> committee header': the header is the parent's."""
+    assert t_recode_refusal("Example Hall", "R", f"Role {stop_word} committee header") is None
+
+
+@pytest.mark.parametrize("reasoning", [
+    "Though a fragment, it names a specific talk",
+    "Although a fragment, it names a specific talk",
+    "Though formatted as a header, it names a specific award",
+])
+def test_each_negation_word_counts_on_its_own(reasoning):
+    assert t_recode_refusal("Example Talk Title", "R", reasoning) is None
+
+
+@pytest.mark.parametrize("lead", ["]", ",", ";", ":", "&"])
+def test_each_closing_punctuation_start_is_a_sentence_tail(lead):
+    text = f"{lead} The Example Regional Board for Sample Outreach Programs in Northfield"
+    assert t_recode_refusal(text, "H", "Fragment of an award entry") == REASON_REASONING_SAYS_FRAGMENT
+
+
+def test_a_line_opening_with_a_nineteen_hundreds_year_is_a_dated_record_head():
+    assert t_recode_refusal("1998 Example Committee, Sample Agency", "Q2",
+                            "Fragment referencing agency service") is None
+
+
+def test_fragment_word_cap_is_eight_words():
+    eight = "Example Board of the Sample Society Northfield Chapter"
+    nine = "Example Board of the Sample Society Northfield Chapter Office"
+    assert t_recode_refusal(eight, "Q2", "Fragment of a service entry") == REASON_REASONING_SAYS_FRAGMENT
+    assert t_recode_refusal(nine, "Q2", "Fragment of a service entry") is None
