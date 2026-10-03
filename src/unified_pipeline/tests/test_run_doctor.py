@@ -1733,6 +1733,19 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     ("July 2002 to July 2002", ["same_ends"]),
     ("May 2008 - May 2008", ["same_ends"]),
     ("Autumn 2019 - Autumn 2019", ["same_ends"]),
+    ("January 2002 to January 2002", ["same_ends"]),
+    ("February 2002 to February 2002", ["same_ends"]),
+    ("March 2002 to March 2002", ["same_ends"]),
+    ("April 2002 to April 2002", ["same_ends"]),
+    ("August 2002 to August 2002", ["same_ends"]),
+    ("September 2002 to September 2002", ["same_ends"]),
+    ("November 2002 to November 2002", ["same_ends"]),
+    ("December 2002 to December 2002", ["same_ends"]),
+    # Every season word is read as a raw stored value.
+    ("2009-Spring", ["raw_value"]),
+    ("2009-Fall", ["raw_value"]),
+    ("2009-Autumn", ["raw_value"]),
+    ("2009-Winter", ["raw_value"]),
     ("2013\u20142013", ["same_ends"]),
     ("2019-2020", []),
     # An ISO side needs a real month and day: "2004-13-07" and "2004-10-32"
@@ -1890,6 +1903,14 @@ def test_date_cell_shape_reads_a_date_that_opens_a_paragraph():
      "oct 2013 to oct 2013"),
     ("2013-2013 \u2013 Lecture on example topics, Example Medical School",
      "2013-2013"),
+    ("2013-2013 \u2014 Lecture on example topics, Example Medical School",
+     "2013-2013"),
+    ("\u00b7 2013-2013 - Lecture on example topics, Example Medical School",
+     "2013-2013"),
+    ("* 2013-2013 - Lecture on example topics, Example Medical School",
+     "2013-2013"),
+    ("   2013-2013 - Lecture on example topics, Example Medical School",
+     "2013-2013"),
 ])
 def test_date_cell_shape_reads_each_dated_paragraph_shape(line, rendered):
     """A bullet before the date; a colon, comma or tab after it; and a
@@ -2010,6 +2031,47 @@ def test_date_cell_shape_does_not_read_a_marker_inside_a_longer_word(text):
     findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
     assert [(f["severity"], f["evidence"]) for f in findings] == [
         ("WARN", ["2015-Present"])]
+
+
+@pytest.mark.parametrize("text", [
+    "Example Widget Committee, member, 2015, presentations lead",
+    "Example Widget Committee, member, 2015, nowhere listed",
+    "Example Widget Committee, member, 2015, sincere thanks",
+])
+def test_date_cell_shape_does_not_read_a_marker_at_the_start_of_a_longer_word(text):
+    """'presentations' opens with 'present', 'nowhere' with 'now' and
+    'sincere' with 'since', but none of them is an open marker."""
+    stage4 = {"entries": [_dated4(text, "P", "2015", "present", idx=12)]}
+    findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("WARN", ["2015-Present"])]
+
+
+@pytest.mark.parametrize("text", [
+    "Example Widget Committee, member, 2015/03-",
+    "2015/03 - Example Widget Committee, member",
+])
+def test_date_cell_shape_reads_a_slash_month_before_an_open_dash(text):
+    """'YYYY/MM-' and a line opening 'YYYY/MM - <text>' are open markers,
+    as 'YYYY.MM-' is."""
+    stage4 = {"entries": [_dated4(text, "P", "2015", "present", idx=12)]}
+    assert lint_date_cell_shape(stage4, [_COMMITTEE_ROW], []) == []
+
+
+def test_date_cell_shape_does_not_read_a_dash_before_a_spaced_end_year_as_open():
+    """'2015- 2016' is a closed range with a space after its dash, not a
+    trailing dash."""
+    stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015- 2016",
+                                  "P", "2015", "present", idx=12)]}
+    findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("WARN", ["2015-Present"])]
+
+
+def test_date_cell_shape_does_not_read_a_date_followed_by_a_bare_dash():
+    """A dated paragraph needs text after its separator: '2013-2013 -' with
+    nothing after the dash is not read as a dated line."""
+    assert lint_date_cell_shape({"entries": []}, [], [("p", "2013-2013 -")]) == []
 
 
 def test_date_cell_shape_does_not_read_a_line_opening_closed_range_as_open():
