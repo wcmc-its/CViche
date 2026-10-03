@@ -22,19 +22,26 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
+    _GROUP_HEADER_RE,
+    _bare_occasion_apart,
+    _carries_record,
     _decision_fields,
     _dates_compatible,
     _companion_title,
+    _different_book,
     _different_institution,
+    _different_rank,
     _distinct_bare_names,
     _drop_is_safe,
     _lists_name,
     _names_a_sibling,
     _names_record,
     _other_journal_same_row,
+    _part_numbers,
     _place_only_event,
     _record_name,
     _title_only_fragment,
+    _verbatim_contained,
     recovered_row_already_rendered,
     _row_residue,
 )
@@ -186,16 +193,23 @@ def test_decision_name_fields_are_clipped():
 def test_decision_name_fields_follow_the_code():
     entry = {"extracted_fields": {"institution": "Example Hospital",
                                   "organization": "Example Society",
-                                  "title": "Example Title", "location": "X"}}
+                                  "title": "Example Title", "location": "X",
+                                  "award_name": "Example Award",
+                                  "committee_name": "Example Committee"}}
     assert _decision_fields(entry, "D2") == {"institution": "Example Hospital"}
     assert _decision_fields(entry, "I") == {"organization": "Example Society"}
     assert _decision_fields(entry, "S3") == {"title": "Example Title"}
+    # #666 (EBYSBC): the lint could not see a D1 title, H award or P committee.
+    assert _decision_fields(entry, "D1") == {"title": "Example Title"}
+    assert _decision_fields(entry, "H") == {"award_name": "Example Award"}
+    assert _decision_fields(entry, "P") == {"committee_name": "Example Committee"}
     assert _decision_fields(entry, "R") == {}
     assert _decision_fields(entry, None) == {}
 
 
 @pytest.mark.parametrize("code,key", [("I", "organization"), ("D2", "institution"),
-                                      ("S3", "title")])
+                                      ("S3", "title"), ("D1", "title"),
+                                      ("H", "award_name"), ("P", "committee_name")])
 def test_deduplicate_entries_writes_the_code_keyed_name_fields(code, key):
     # #666: the code must reach _decision_fields from the dedup loop itself.
     decisions = []
@@ -405,6 +419,22 @@ def test_undated_dropped_entry_is_date_compatible():
     ("May 14, 2031", "given again in 2031", True),
     ("no dates here", "2021-2024", True),
     ("2015-2018", "no dates here", False),
+    # #666 (EBYSBC): a date stated to the month, or the day, is compared there
+    ("3/2029 widget talk", "9/2029 widget talk", False),         # another month
+    ("4/8/27 session", "02/11/27 session", False),               # two-digit year
+    ("4/8/27 session", "4/15/27 session", False),                # another day
+    ("4/8/27 session", "04/08/2027 session", True),
+    ("8/2029 panel", "August 2029 panel", True),                 # named month
+    ("August 2nd, 2029", "August 2, 2029", True),
+    ("August 2nd, 2029", "August 3, 2029", False),
+    ("6/2028 talk", "7/2028 talk, 8/2028 talk", False),         # a list, not a range
+    ("8/2028 talk", "7/2028 talk, 8/2028 talk", True),
+    ("2011-6/30/2019", "9/1/2011-6/30/2019", True),              # a range holds its ends
+    ("8/2014", "7/2011 - 12/2019", True),                        # and what lies between
+    ("8/2021", "7/2011 - present", True),                        # an open end
+    ("3/2016-present", "2016-present", True),                    # kept states no month
+    ("Spring 2029", "4/2029", True),                             # a season states none
+    ("Market 2029", "Mar 2029", True),                           # not a month name
 ])
 def test_dates_compatible(dropped, kept, compatible):
     assert _dates_compatible(dropped, kept) is compatible
@@ -1534,3 +1564,261 @@ def test_a_title_only_grant_that_is_the_kept_title_plus_a_suffix_is_still_droppe
                   agency="Example Foundation")
     dropped = _grant("Sprocket Dynamics of Gizmo Assembly Under Cold Storage Conditions", pi_role="PI")
     assert not _kept_both("M2B", dropped, kept)
+
+
+# ------------------------------- #666 (EBYSBC E4): distinct records over-dropped
+# Shapes of the EBYSBC autopsy's verified dedup losses, with invented content.
+
+def test_a_course_part_inside_a_longer_part_number_is_not_verbatim():
+    # OIYKZE-01: squashed, "... II" sits inside "... III"; so does "Page 2"
+    # inside "Page 21". Neither ends on a word boundary there.
+    assert not _verbatim_contained("Widget Teamwork Seminar II", "Widget Teamwork Seminar III")
+    assert not _verbatim_contained("Page 2", "Page 21")
+    assert not _verbatim_contained("Seminar II", "Widget Seminar III and IV")
+    assert _verbatim_contained("Widget Teamwork Seminar II", "Fall: Widget Teamwork Seminar II, 3 credits")
+
+
+def test_spacing_inside_a_verbatim_copy_is_still_ignored():
+    # A footnote mark glued onto a word ("Studiesb" for "Studies b") is the same text.
+    assert _verbatim_contained("Gizmo Studies b Lecturer, 6 hours",
+                               "2031 Gizmo Studiesb Lecturer, 6 hours")
+
+
+def test_numbered_course_parts_are_both_kept():
+    kept = _entry("K1", "Widget Teamwork in Practice (WTP) III",
+                  course_title="Widget Teamwork in Practice (WTP) III")
+    dropped = _entry("K1", "Widget Teamwork in Practice (WTP) II",
+                     course_title="Widget Teamwork in Practice (WTP) II")
+    assert _kept_both("K1", dropped, kept)
+
+
+@pytest.mark.parametrize("text, parts", [
+    ("Widget Care Part I, noon conference", {"1"}),
+    ("Widget Care Part II", {"2"}),
+    ("Widget care, part 2.", {"2"}),
+    ("Widget Care Parts I and II", {"1", "2"}),
+    ("Widget Care Part 03", {"3"}),
+    ("a particular widget, department 2, partly", set()),
+])
+def test_part_numbers(text, parts):
+    assert _part_numbers(text) == parts
+
+
+_SERIES_TALK = ("“Widget Care Part {}”, co-taught with Dr. Sprocket, Lunch Seminar for "
+                "Gizmo Residents, Example University, Harbor City, Nov. 2031")
+
+
+def test_two_parts_of_one_talk_are_both_kept():
+    # XWNZWW-03: "i" is a stop word, so every word of Part I is in Part II.
+    kept, dropped = {"text": _SERIES_TALK.format("II")}, {"text": _SERIES_TALK.format("I")}
+    assert deduplicate_entries([kept, dropped]) == [kept, dropped]
+
+
+def test_a_listing_of_both_parts_still_covers_a_copy_of_one():
+    listing, dropped = {"text": _SERIES_TALK.format("I and II")}, {"text": _SERIES_TALK.format("I")}
+    assert deduplicate_entries([listing, dropped]) == [listing]
+
+
+def test_one_lecture_given_in_two_months_is_two_records():
+    # DPEHSZ-01: the year alone read "3/2029" and "9/2029" as one date.
+    kept = {"text": "9/2029 “Widget Repair Basics”, Example Medical School, for trainees"}
+    dropped = {"text": "3/2029 “Widget Repair Basics”, Example Medical School, for trainees"}
+    assert deduplicate_entries([kept, dropped]) == [kept, dropped]
+
+
+def test_a_lecture_dated_outside_a_kept_list_of_dates_is_kept():
+    kept = {"text": "7/2028 “Gizmo Exam”, Example Medical School, for trainees "
+                    "8/2028 “Widget Repair Basics”, Example Medical School, for trainees"}
+    dropped = {"text": "6/2028 “Widget Repair Basics”, Example Medical School, for trainees"}
+    assert deduplicate_entries([kept, dropped]) == [kept, dropped]
+    same_month = {"text": "8/2028 “Widget Repair Basics”, Example Medical School, for trainees"}
+    assert deduplicate_entries([kept, same_month]) == [kept]
+
+
+def _appointment_of_rank(title: str, text: str, **dates) -> dict:
+    return _entry("D1", text, title=title, institution="Example University", **dates)
+
+
+def test_an_appointment_of_another_rank_is_kept():
+    # SEKQUI-01: the dropped text is verbatim inside the kept one.
+    kept = _appointment_of_rank("Clinical Assistant Professor, Widget Medicine",
+                                "2029-2031 Clinical Assistant Professor, Widget Medicine, "
+                                "Example University", start_date="2029", end_date="2031")
+    dropped = _appointment_of_rank("Assistant Professor, Widget Medicine",
+                                   "Assistant Professor, Widget Medicine, Example University")
+    assert _kept_both("D1", dropped, kept)
+    same_rank = _appointment_of_rank("Clinical Assistant Professor, Widget Medicine",
+                                     "Clinical Assistant Professor, Widget Medicine, Example University")
+    assert not _kept_both("D1", same_rank, kept)
+
+
+@pytest.mark.parametrize("code, key, dropped_value, kept_value", [
+    ("D1", "title", "Professor", "Associate Professor"),                      # KDAZOM-01
+    ("D1", "title", "Professor of Gizmology", "Asst. Clinical Professor"),    # VNUAHA-01
+    ("D2", "title", "Fellow", "Senior Fellow"),
+    ("H", "award_name", "Gizmo Service Award", "Outreach Gizmo Service Award"),  # NDXXAD-01
+    ("P", "committee_name", "Widget Safety Committee", "Widget Safety Research Committee"),  # VYICGW-02
+    ("P", "committee_name", "Acme Widget Center", "Executive Committee of the Acme Widget Center"),
+    ("O", "leadership_role", "Division Chief", "Co-Division Chief"),
+    ("Q1", "role", "President", "Vice President"),
+])
+def test_another_rank_or_body_is_another_record(code, key, dropped_value, kept_value):
+    assert _different_rank(code, {key: dropped_value}, {key: kept_value}) == dropped_value
+    assert _different_rank(code, {key: kept_value}, {key: dropped_value}) == kept_value
+
+
+@pytest.mark.parametrize("code, dropped_fields, kept_fields", [
+    ("D1", {"title": "Assoc. Professor"}, {"title": "Associate Professor of Gizmology"}),
+    ("D1", {"title": "Asst. Professor"}, {"title": "Assistant Professor of Gizmology"}),
+    ("D1", {"title": "Clin. Professor"}, {"title": "Clinical Professor of Gizmology"}),
+    ("Q1", {"role": "Chair"}, {"role": "Chair and Treasurer, Board of Governors"}),
+    ("P", {"committee_name": "Widget Committee"}, {"committee_name": "Widget Committee", "role": "Member"}),
+    ("D1", {"title": "Professor"}, {}),                                  # nothing to compare
+    ("R", {"title": "Professor"}, {"title": "Associate Professor"}),     # not a ranked code
+])
+def test_the_same_rank_or_no_rank_is_not_another_record(code, dropped_fields, kept_fields):
+    assert _different_rank(code, dropped_fields, kept_fields) is None
+
+
+def test_a_committee_of_a_center_is_not_the_center():
+    # RNKYST-01: the dropped row is verbatim inside the committee row.
+    kept = _entry("P", "2031  Member, Acme Widget Center Seminar Committee",
+                  committee_name="Acme Widget Center Seminar Committee", role="Member",
+                  start_date="2031")
+    dropped = _entry("P", "2031     Member, Acme Widget Center",
+                     committee_name="Acme Widget Center", role="Member", start_date="2031")
+    assert _kept_both("P", dropped, kept)
+
+
+def test_one_chapter_in_two_books_is_two_records():
+    # TAUBPU-02: a board's curriculum and the pediatric board's.
+    def chapter(book: str) -> dict:
+        return _entry("S4", f"Quill A, Sprocket B. Widget Repair. Online course for the "
+                            f"{book} program. 2031",
+                      authors="Quill A, Sprocket B", chapter_title="Widget Repair",
+                      book_title=f"Online course for the {book} program", year="2031")
+    assert _kept_both("S4", chapter("Example Board of Gizmos"),
+                      chapter("Example Board of Pediatric Gizmos"))
+    assert _different_book("S4", {"book_title": "Gizmo Atlas"}, {"book_title": "Gizmo Atlas"}) is None
+    assert _different_book("S3", {"book_title": "Gizmo Atlas"}, {"book_title": "Widget Atlas"}) is None
+
+
+def _talk(location: str, event: str) -> dict:
+    return _entry("R", f"2031 “Widget Safety for Families” {event} at {location}",
+                  title="Widget Safety for Families", location=location, date="2031",
+                  event_name=event)
+
+
+def test_one_lecture_in_two_towns_is_two_talks():
+    # RNKYST-01: every word of the first venue is in the second's name.
+    kept = _talk("Gizmo Outreach-Harbor City, East City, ZZ", "Talk in French")
+    dropped = _talk("Gizmo Outreach-Harbor City, Harbor City, ZZ", "Talk")
+    assert _kept_both("R", dropped, kept)
+
+
+def test_a_venue_cut_short_is_still_one_talk():
+    assert _different_institution("R", {"location": "Example University"},
+                                  {"location": "Example University College of Widgets"}) is None
+
+
+def _headed(entry: dict, heading: str) -> dict:
+    return dict(entry, hierarchy=[heading])
+
+
+def test_a_dated_place_under_another_heading_is_another_occasion():
+    # TAUBPU: a course's later offering beside a conference talk that day.
+    kept = _headed(_entry("R", "Gizmo Families Conference. August 2nd, 2031. Harbor City, Zedland.",
+                          location="Harbor City, Zedland", date="2031-08-02",
+                          event_name="Gizmo Families Conference"), "GUEST SPEAKER")
+    dropped = _headed(_entry("R", "August 2nd, 2031 - Harbor City, Zedland",
+                             location="Harbor City, Zedland", date="2031-08-02"), "COURSES")
+    assert _kept_both("R", dropped, kept)
+    assert not _kept_both("R", _headed(dropped, "GUEST SPEAKER"), kept)
+    assert _bare_occasion_apart("D1", dropped, kept) is None
+
+
+def _award(text: str, name: str, date: str) -> dict:
+    return _entry("H", text, award_name=name, granting_body="Example Ceremony", date=date)
+
+
+_FUSED_AWARDS = ("Gizmo Faculty Award, Example Ceremony, May 2030 "
+                 "Widget Faculty Award, Example Ceremony, March 2030 "
+                 "Gizmo Faculty Award, Example Ceremony, May 2031")
+
+
+def test_an_award_of_another_year_inside_a_fused_kept_row_is_kept():
+    # VNUAHA-02: the kept row's fields are the 2030 award, so they print no 2031.
+    kept = _award(_FUSED_AWARDS, "Gizmo Faculty Award", "2030-05")
+    dropped = _award("Gizmo Faculty Award, Example Ceremony, May 2031",
+                     "Gizmo Faculty Award", "2031-05")
+    assert _kept_both("H", dropped, kept)
+    same_year = _award("Gizmo Faculty Award, Example Ceremony, May 2030",
+                       "Gizmo Faculty Award", "2030-05")
+    assert not _kept_both("H", same_year, kept)
+
+
+def test_the_award_in_other_years_does_not_vouch_for_this_year():
+    # VNUAHA-02: four other years of one award vouched for the dropped fifth.
+    kept = _award(_FUSED_AWARDS, "Gizmo Faculty Award", "2030-05")
+    dropped = _award("Widget Faculty Award, Example Ceremony, March 2030",
+                     "Widget Faculty Award", "2030-03")
+    other_year = _award("Widget Faculty Award, Example Ceremony, March 2028",
+                        "Widget Faculty Award", "2028-03")
+    assert _kept_both("H", dropped, kept, other_year)
+    same_year = _award("Widget Faculty Award, Example Ceremony, 2030",
+                       "Widget Faculty Award", "2030")
+    assert not _kept_both("H", dropped, kept, same_year)
+
+
+@pytest.mark.parametrize("text, carries", [
+    ("Widget Faculty Award, 2030", True),
+    ("Widget Faculty Award, March 2030", True),
+    ("Widget Faculty Award (every year)", True),     # no year: still a mention
+    ("Widget Faculty Award, March 2028", False),
+    ("Widget Faculty Award, May 2030", False),       # another month
+    ("Gizmo Faculty Award, March 2030", False),
+])
+def test_carries_record(text, carries):
+    assert _carries_record(text, "Widget Faculty Award",
+                           "Widget Faculty Award, Example Ceremony, March 2030") is carries
+
+
+def _row(code: str, index: int, text: str) -> dict:
+    return {"taxonomy_code": code, "element_idx_start": index, "text": text,
+            "extracted_fields": {}, "hierarchy": ["TEACHING", "Resident Training"]}
+
+
+def test_one_activity_under_two_employer_lines_is_two_records():
+    # BZZNRL-04: the employer lines are rows of their own, not fields.
+    first_employer = _row("K4", 1, "Example University School of Widgets (2028-2031)")
+    kept = _row("K4", 2, "Gizmo Repair Widget/Imaging Rounds (weekly)")
+    second_employer = _row("K4", 5, "Acme University School of Widgets (2031 to present)")
+    dropped = _row("K4", 6, "Gizmo Repair Widget Rounds (weekly)")
+    assert _kept_both("K4", dropped, kept, first_employer, second_employer)
+    assert not _kept_both("K4", dropped, kept, first_employer)
+    other_section = dict(second_employer, hierarchy=["SERVICE"])
+    assert not _kept_both("K4", dropped, kept, first_employer, other_section)
+
+
+def test_one_activity_under_two_year_lines_is_two_records():
+    rows = [_row("T", 1, "2029"),
+            _row("K2", 2, "Widget lab instructor (WID 101), 4 hours, 40 learners"),
+            _row("T", 3, "2030 (on leave)"),
+            _row("K2", 4, "Widget lab instructor (WID 101), 5 hours, 40 learners")]
+    assert _kept_both("K2", rows[3], rows[1], rows[0], rows[2])
+    assert not _kept_both("K2", rows[3], rows[1], rows[0])
+    assert not _kept_both("D1", rows[3], rows[1], rows[0], rows[2])  # not a list code
+
+
+@pytest.mark.parametrize("text, is_group_line", [
+    ("Example University School of Widgets (2028-2031)", True),
+    ("Acme University School of Widgets (2031 to present)", True),
+    ("2029", True),
+    ("2030 (on leave)", True),
+    ("2028-2031", True),
+    ("Grand Rounds 2031", False),                         # a record with its year
+    ("Widget lab instructor 4 hours, 2028-2031", False),
+    ("Gizmo Repair Widget Rounds (weekly)", False),
+])
+def test_group_header_shape(text, is_group_line):
+    assert bool(_GROUP_HEADER_RE.fullmatch(text)) is is_group_line

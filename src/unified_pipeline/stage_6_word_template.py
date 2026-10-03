@@ -499,7 +499,10 @@ RENDER_ROUTED_CODES = frozenset({
 # words but differ in rank -- `_group_and_dedup_entries` uses date-aware dedup
 # for them, merging only entries whose date ranges overlap or match. A
 # taxonomy fact, not a setting (§7.2: no new configuration mechanism).
-_DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
+# Courses (K1), other teaching (K4) and talks (R) are given again on other
+# dates under the same title, so a different date is a different record there
+# too (#666, EBYSBC KDAZOM-03, DPEHSZ-01).
+_DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1', 'K1', 'K4', 'R'})
 
 # Codes routed by the entry's own publication status, not by the heading it
 # sits under: a submitted / in-review / in-preparation manuscript (S7) belongs
