@@ -805,3 +805,28 @@ def test_t_validation_recoded_m1_is_reported_as_its_own_reason():
         "M1: 2 entries diverted to the Appendix — stage 3b T-validation "
         "recoded them from T to M1, which only the research summary renders")
     assert recoded["evidence"] == []
+
+
+def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendered():
+    # AUTOPSY-EBYSBC-batch-2026-10-02 E27: while the research summary renders,
+    # the only M1 entries in the Appendix are T-validation recodes and dated
+    # records the generated summary left out. Without a summary, every M1
+    # entry is there because none rendered.
+    from unified_pipeline.stage6.sections.appendix import (
+        REASON_M1_RECORD_NOT_IN_SUMMARY, REASON_T_VALIDATION_RECODED)
+    written = [{"taxonomy_code": "M1"}, {"taxonomy_code": "M1"},
+               {"taxonomy_code": "M1", "t_validation_applied": True},
+               {"taxonomy_code": "H"}]
+    got = {(w["code"], w["reason"]): w for w in build_appendix_diversion_warnings(
+        written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES, summary_rendered=True)}
+    assert set(got) == {("M1", REASON_M1_RECORD_NOT_IN_SUMMARY), ("M1", REASON_T_VALIDATION_RECODED),
+                        ("H", REASON_RENDERER_DECLINED)}
+    left_out = got[("M1", REASON_M1_RECORD_NOT_IN_SUMMARY)]
+    assert left_out["count"] == 2
+    assert left_out["message"] == (
+        "M1: 2 dated entries diverted to the Appendix — the generated research "
+        "summary does not reproduce them and no other section renders them")
+    assert left_out["evidence"] == []
+
+    without = build_appendix_diversion_warnings(written[:2], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    assert [(w["code"], w["reason"]) for w in without] == [("M1", REASON_RENDERER_DECLINED)]
