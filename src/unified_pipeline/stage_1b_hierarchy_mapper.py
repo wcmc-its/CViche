@@ -92,6 +92,15 @@ def normalize_text(text: str) -> str:
     return " ".join(text.lower().strip().split())
 
 
+# Characters a heading paragraph may open with before the heading itself: a
+# rule of asterisks or underscores typed on the same line ("***** EDUCATION:").
+# The run counted toward the strict-mode length cap, so the heading was never
+# placed (#1252, EBYSBC class E17). normalize_text already deletes '-'; it is
+# listed so the set reads as the separators a CV uses, not as what survives
+# normalization.
+_LEADING_SEPARATOR_CHARS = "*-_= "
+
+
 def is_header_match(expected_header: str, para_text: str, strict: bool = False) -> bool:
     """
     Check if the paragraph text matches the expected header.
@@ -109,6 +118,8 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
         True if this is a valid header match
     """
     import re
+
+    para_text = para_text.lstrip(_LEADING_SEPARATOR_CHARS)
 
     # An empty paragraph is a substring of every string, so the "contained"
     # branch below would otherwise match it against ANY header (#851). Every
@@ -327,10 +338,7 @@ def map_hierarchy_node(
     current_path = parent_path + ([node_text] if node_text else [])
 
     # Check if this is a synthetic header (added by LLM, not in original document)
-    is_synthetic = (
-        node.get("text_metadata", {}).get("synthetic", False) or
-        node.get("paragraph_index") == -1
-    )
+    is_synthetic = _is_synthetic_node(node)
 
     # Try to find this node's header in the document
     element_idx: int | None = None
@@ -415,6 +423,74 @@ def top_level_header_texts(hierarchy: list[HierarchyNode]) -> frozenset[str]:
     return frozenset(
         normalize_text(n.get("text", "")) for n in hierarchy if n.get("text", "").strip()
     )
+
+
+def _header_occurs_in_document(header_text: str, normalized_lines: list[str]) -> bool:
+    """True when a line could carry the header: it contains the normalized
+    header anywhere (a run-in or separator-prefixed heading stage 2 may still
+    promote), or 1b's own strict match accepts it (a short fragment of a
+    longer 1a header)."""
+    expected = normalize_text(header_text)
+    return any(
+        expected in line or is_header_match(expected, line, strict=True)
+        for line in normalized_lines
+    )
+
+
+def _is_synthetic_node(node: HierarchyNode) -> bool:
+    """Same test map_hierarchy_node applies: an LLM-added node with no line."""
+    return node.get("text_metadata", {}).get("synthetic", False) or node.get("paragraph_index") == -1
+
+
+def _prune_absent_header(
+    node: HierarchyNode, normalized_lines: list[str], dropped: list[str]
+) -> HierarchyNode | None:
+    """The node with its absent headers removed, or None when it goes too.
+    Appends each dropped header's text to ``dropped``."""
+    original_children = node.get("children") or []
+    children = [
+        kept for child in original_children
+        if (kept := _prune_absent_header(child, normalized_lines, dropped)) is not None
+    ]
+    if not children:
+        text = (node.get("text") or "").strip()
+        if _is_synthetic_node(node):
+            if original_children:
+                return None
+        elif text and not _header_occurs_in_document(text, normalized_lines):
+            dropped.append(text)
+            return None
+    if len(children) == len(original_children):
+        return node
+    return {**node, "children": children}
+
+
+def drop_headers_absent_from_document(
+    hierarchy: list[HierarchyNode], elements: list[dict[str, Any]]
+) -> tuple[list[HierarchyNode], list[str]]:
+    """Remove the stage-1a headers whose text occurs on no document line.
+
+    1a can return headings the document does not contain (EBYSBC class E17:
+    a converted CV kept no heading lines, yet 1a returned 13 headings and 1b
+    placed none). Such a node can never be placed here nor promoted by stage
+    2, so it is dropped before mapping. A node is dropped only when nothing
+    under it survives: a real header keeps its absent parent as a grouping
+    node, and a synthetic grouping node is dropped once every child it had is
+    gone. A synthetic node with no children (the PERSONAL DATA preamble) is
+    always kept. Every element type counts as a line, table cells included.
+
+    Returns (kept hierarchy, texts of the dropped headers, each child before
+    its parent).
+    """
+    normalized_lines = [
+        line for line in (normalize_text(e.get("text") or "") for e in elements) if line
+    ]
+    dropped: list[str] = []
+    kept_nodes = [
+        kept for node in hierarchy
+        if (kept := _prune_absent_header(node, normalized_lines, dropped)) is not None
+    ]
+    return kept_nodes, dropped
 
 
 def get_first_child_element_idx(children: list[MappedNode]) -> int | None:
@@ -905,7 +981,9 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
     mapped_hierarchy: list[MappedNode] = []
     next_search_idx = 0
 
-    top_level = hierarchy_data.get("hierarchy", [])
+    top_level, absent_headers = drop_headers_absent_from_document(
+        hierarchy_data.get("hierarchy", []), elements
+    )
     top_level_headers = top_level_header_texts(top_level)
     for node in top_level:
         mapped_node, next_search_idx = map_hierarchy_node(
@@ -965,7 +1043,8 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
                 "percentage": coverage_percentage,
                 "unmapped_count": len(unmapped_indices),
                 "synthetic_sections_added": len(synthetic_sections)
-            }
+            },
+            "headers_absent_from_document": absent_headers,
         }
     }
 

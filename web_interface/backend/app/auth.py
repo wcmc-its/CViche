@@ -14,11 +14,12 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
-from app.models import User
+from app.models import User, UserRole, can_view_all_runs  # can_view_all_runs re-exported
 from app.config_loader import get_config_value
 from app.services import ed_access
 from app.ed_group_lookup import (
     check_ed_membership,
+    MembershipResult,
 )
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 from app.session_idle import get_idle_store, SessionStoreUnavailable
@@ -505,8 +506,8 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
     """Per-request ED group re-check for SAML users, when ED is enabled.
 
     Re-verifies on every request that the user is still in the access group and
-    syncs their role from the admin group; a removal takes effect on the next
-    request rather than at the next login. The check itself is
+    syncs their role from the admin and staff groups; a removal takes effect on
+    the next request rather than at the next login. The check itself is
     ``ed_access.verify_ed_access`` (shared with the emailed-CV intake, #1298);
     this wraps it with the 401s and audit events.
     """
@@ -534,7 +535,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
         return
 
     # Sync role from ED group membership
-    new_role = "admin" if membership.in_admin_group else "user"
+    new_role = role_for_membership(membership)
     if user.role != new_role:
         old_role = user.role
         # Update the in-memory value WITHOUT marking the request session's
@@ -572,6 +573,19 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def role_for_membership(membership: MembershipResult) -> UserRole:
+    """The role ED membership grants: admin wins over staff, staff over user.
+
+    The caller has already denied a user outside the access group; the
+    MembershipResult invariant also keeps admin/staff False for such a user.
+    """
+    if membership.in_admin_group:
+        return UserRole.ADMIN
+    if membership.in_staff_group:
+        return UserRole.STAFF
+    return UserRole.USER
+
+
 def can_see_cost(user: User) -> bool:
     """Processing cost is admin-only (#1111). The UI hides it by role too; the
     API withholding it is what keeps it out of the network tab."""
@@ -588,6 +602,16 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(
             status_code=403,
             detail={"error": "forbidden", "message": "Admin access required."}
+        )
+    return user
+
+
+def require_view_all_runs(user: User = Depends(get_current_user)) -> User:
+    """FastAPI dependency for the read-only routes can_view_all_runs opens."""
+    if not can_view_all_runs(user):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "forbidden", "message": "Admin or staff access required."}
         )
     return user
 

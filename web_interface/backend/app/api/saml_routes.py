@@ -19,6 +19,7 @@ from app.auth import (
     get_cookie_settings,
     get_cookie_delete_settings,
     resolve_session_identity,
+    role_for_membership,
     SessionEpochUnreadable,
     COOKIE_NAME,
 )
@@ -314,6 +315,7 @@ def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectRe
 
     ed_access_group = get_config_value(db, "ed_access_group") or ""
     ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+    ed_staff_group = get_config_value(db, "ed_staff_group") or ""
     ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
     bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
     bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
@@ -343,6 +345,7 @@ def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectRe
             cwid=attrs["cwid"],
             access_group=ed_access_group,
             admin_group=ed_admin_group,
+            staff_group=ed_staff_group,
             cfg=ldap_cfg,
             use_cache=False,
         )
@@ -358,7 +361,7 @@ def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectRe
         )
         return None, RedirectResponse("/login?error=not_authorized", status_code=302)
 
-    return ("admin" if membership.in_admin_group else "user"), None
+    return role_for_membership(membership), None
 
 
 def _saml_department_from_ed(cwid: str, db: Session) -> str | None:

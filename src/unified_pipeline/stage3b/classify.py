@@ -24,6 +24,8 @@ from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
+from .fragment_guard import t_recode_refusal
+from .header_pin import is_note_not_record
 from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
@@ -590,6 +592,51 @@ def _parse_t_validation_response(content: str) -> list:
     return reclassifications
 
 
+def _t_validation_verdict(
+    raw_new_code: object, valid_codes: set[str], entry_text: str, reasoning: str, entry_idx: int,
+) -> tuple[str, str]:
+    """Return (new_code, kept_t_tag) for one T-validation proposal."""
+    # isinstance-guard before the set membership check: `new_code` is
+    # untrusted LLM output and could be any JSON type, which would
+    # raise TypeError: unhashable type on `in valid_codes` instead of
+    # degrading to "T".
+    new_code_rejected = not isinstance(raw_new_code, str) or raw_new_code not in valid_codes
+    kept_t_tag = "T-validation confirmed"
+    if new_code_rejected:
+        logger.warning(
+            "Stage 3b T-validation: LLM returned unknown taxonomy "
+            "code %r for entry %d; keeping T", raw_new_code, entry_idx
+        )
+        new_code = "T"
+        kept_t_tag = "T-validation: unknown code rejected, kept T"
+    elif raw_new_code in T_VALIDATION_FORBIDDEN_CODES:
+        logger.info(
+            "Stage 3b T-validation: %s is not a T-validation target "
+            "(entry %d); keeping T", raw_new_code, entry_idx
+        )
+        new_code = "T"
+        kept_t_tag = f"T-validation: {raw_new_code} not allowed, kept T"
+    elif raw_new_code != "T" and (refusal := t_recode_refusal(
+            entry_text, raw_new_code, reasoning)):
+        # A date tail or an employer sub-heading is not a record (#986, #985).
+        # Only a real recode is refused: a confirmed T must keep the
+        # "[T-validation confirmed]" tag the Appendix's structural
+        # drop (appendix._confirmed_structural_reason) reads.
+        new_code = "T"
+        kept_t_tag = f"T-validation: {raw_new_code} refused, {refusal}, kept T"
+    else:
+        new_code = raw_new_code
+    return new_code, kept_t_tag
+
+
+def _opening_line(entries: list[dict]) -> tuple[dict | None, str | None]:
+    """The CV's first entry (lowest element index) and its text, or (None, None)."""
+    if not entries:
+        return None, None
+    first = min(entries, key=lambda e: _safe_float(e.get("element_idx_start"), float("inf")))
+    return first, first.get("text")
+
+
 def validate_t_classifications(
     entries: list[dict],
     taxonomy: dict
@@ -615,7 +662,15 @@ def validate_t_classifications(
     # Find entries classified as exactly "T" (miscellaneous)
     # NOTE: We only review "T", not T-family codes like T1 (Community Engagement)
     # which are valid specific classifications
-    t_entries = [(i, e) for i, e in enumerate(entries) if e.get("taxonomy_code") == "T"]
+    # A T the header pin set is final, and a bare URL, a pointer-only line or the
+    # repeated running header is a note, not a record: neither is offered for
+    # reclassification (#312, EBYSBC E11).
+    opening_entry, opening_line = _opening_line(entries)
+    t_entries = [
+        (i, e) for i, e in enumerate(entries)
+        if e.get("taxonomy_code") == "T" and "pre_pin_code" not in e and not (
+            e is not opening_entry and is_note_not_record(e.get("text", ""), opening_line))
+    ]
 
     if not t_entries:
         return entries, {"t_entries_reviewed": 0, "t_entries_reclassified": 0, "cost": 0.0}
@@ -680,6 +735,9 @@ Respond with a JSON array of objects, one per entry:
 
         reclassified_count = 0
         malformed = 0
+        # Only an entry the prompt offered may be moved: the model never saw the
+        # notes kept back above, so an index naming one is not an answer about it.
+        offered_indices = {i for i, _ in t_entries}
         for reclass in reclassifications:
             if not isinstance(reclass, dict):
                 malformed += 1
@@ -690,37 +748,17 @@ Respond with a JSON array of objects, one per entry:
             # boolean entry_index must be excluded explicitly or it would
             # pass this check and index entries[True]/entries[False].
             if (not isinstance(entry_idx, int) or isinstance(entry_idx, bool)
-                    or not (0 <= entry_idx < len(updated_entries))):
+                    or entry_idx not in offered_indices):
                 malformed += 1
                 continue
 
             raw_new_code = live_taxonomy_code(reclass.get("new_code")) or "T"
-            # isinstance-guard before the set membership check: `new_code` is
-            # untrusted LLM output and could be any JSON type, which would
-            # raise TypeError: unhashable type on `in valid_codes` instead of
-            # degrading to "T".
-            new_code_rejected = not isinstance(raw_new_code, str) or raw_new_code not in valid_codes
-            kept_t_tag = "T-validation confirmed"
-            if new_code_rejected:
-                logger.warning(
-                    "Stage 3b T-validation: LLM returned unknown taxonomy "
-                    "code %r for entry %d; keeping T", raw_new_code, entry_idx
-                )
-                new_code = "T"
-                kept_t_tag = "T-validation: unknown code rejected, kept T"
-            elif raw_new_code in T_VALIDATION_FORBIDDEN_CODES:
-                logger.info(
-                    "Stage 3b T-validation: %s is not a T-validation target "
-                    "(entry %d); keeping T", raw_new_code, entry_idx
-                )
-                new_code = "T"
-                kept_t_tag = f"T-validation: {raw_new_code} not allowed, kept T"
-            else:
-                new_code = raw_new_code
-            confidence = _normalize_confidence(reclass.get("confidence"), 0.5)
             reasoning = reclass.get("reasoning", "")
             if not isinstance(reasoning, str):
                 reasoning = ""
+            new_code, kept_t_tag = _t_validation_verdict(
+                raw_new_code, valid_codes, _entry_text(updated_entries[entry_idx]), reasoning, entry_idx)
+            confidence = _normalize_confidence(reclass.get("confidence"), 0.5)
 
             old_code = updated_entries[entry_idx].get("taxonomy_code")
             if old_code == "T" and new_code != "T":

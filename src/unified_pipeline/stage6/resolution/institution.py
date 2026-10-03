@@ -64,8 +64,9 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     not as the bare city word anywhere in the name. The word match dropped the
     location from every institution whose name contains its city -- New York
     University, New York Presbyterian, Boston Children's -- which is most WCM
-    faculty CVs (#897). The three renderers that append a location all consult
-    this one predicate, so the rule cannot drift between them.
+    faculty CVs (#897). Every renderer that appends a location consults this
+    one predicate (B2 through `_location_remainder`), so the rule cannot drift
+    between them.
     """
     if not (location and institution):
         return False
@@ -86,6 +87,41 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     # against "Cambridge, UK" is still treated as already present.
     stated, wanted = _us_state(found.group(1) or ''), _us_state(parts[1] if len(parts) > 1 else '')
     return not (stated and wanted and stated != wanted)
+
+
+def _location_remainder(location: str, institution: str | None) -> str:
+    """The part of `location` an institution cell still lacks: '' when the
+    institution already carries all of it, the whole location when it
+    carries none of it.
+
+    Two ways the institution already says it. As a comma-led tail, judged by
+    `_location_already_in_institution`. Or by BEING the place: a conference
+    row whose source names only "Riverton, OR" gets that string as its stage-4
+    institution and the same string as its location, so the cell read
+    "Riverton, OR, Riverton, OR" (#1257); stage 5b cleans "Riverton, OR" to
+    "Riverton" and the cell read "Riverton, Riverton, OR". When the
+    institution's comma parts are the location's leading parts, only the
+    parts after them are still missing. A part matches case-insensitively,
+    or as the same US state written two ways ("Oregon" against "OR").
+    """
+    if not (location and institution):
+        return location
+    if _location_already_in_institution(location, institution):
+        return ''
+    held = [p.strip() for p in institution.split(',')]
+    wanted = [p.strip() for p in location.split(',')]
+    if len(held) > len(wanted) or not all(
+            _same_place_part(h, w) for h, w in zip(held, wanted)):
+        return location
+    return ', '.join(wanted[len(held):])
+
+
+def _same_place_part(held: str, wanted: str) -> bool:
+    """True when two comma parts of a place name say the same thing."""
+    if held.casefold() == wanted.casefold():
+        return True
+    state = _us_state(held)
+    return bool(state) and state == _us_state(wanted)
 
 
 def _us_state(token: str) -> str:
