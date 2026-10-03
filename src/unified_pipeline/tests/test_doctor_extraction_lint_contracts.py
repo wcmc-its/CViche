@@ -1234,6 +1234,7 @@ def test_offschema_scalar_is_info_and_names_the_fact():
     findings = _offschema(_anchored("B1", {"degree": "BA", "honors": "with distinction"}))
     assert [f["severity"] for f in findings] == ["INFO"]
     assert "each holds one fact" in findings[0]["message"]
+    assert "missing from the output" in findings[0]["message"]
     assert findings[0]["evidence"] == ["entry 11: with distinction"]
 
 
@@ -1787,6 +1788,154 @@ def test_offschema_owner_contact_on_another_record_is_shown_by_personal_data():
     assert _graded(blocks, _owner(email="pat@example.org"), role) == []
     # The same address held by no Personal Data entry is only shown elsewhere.
     assert [f["severity"] for f in _graded(blocks, _owner(), role)] == ["INFO"]
+
+
+def test_offschema_date_list_is_shown_only_when_its_row_shows_every_year():
+    """An H `dates` of two years whose row shows one of them has lost the
+    other: one year on the row is not the value shown."""
+    entry = _fields_entry("H", {"award_name": "Silver Lamp Award",
+                                "granting_body": "Example Society",
+                                "dates": ["2019", "2021"]},
+                          text="Silver Lamp Award, Example Society, 2019, 2021")
+    one_year = _table(_row("Silver Lamp Award", "Example Society", "2021"))
+    findings = _graded([one_year], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "dates")]
+    both = _table(_row("Silver Lamp Award", "Example Society", "2019, 2021"))
+    assert _graded([both], entry) == []
+
+
+def test_offschema_value_the_text_states_only_in_part_stays_info():
+    """Sharing some words with the entry's text (the mentee's name) is not
+    stating the value: below `RENDER_TOKEN_OVERLAP` it stays INFO."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "note": "Ann Pupil later left the program"},
+                          text="Ann Pupil, summer student")
+    findings = _graded([_table(_row("Name:", "Ann Pupil"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("block", [
+    _table(_row("Ann Pupil", "2001"), _row("Awards:", "Gold Ribbon")),
+    ("p", "Name: | Ann Pupil\nAwards: | Gold Ribbon"),
+], ids=["table-with-an-unlabelled-row", "paragraph"])
+def test_offschema_only_a_wholly_labelled_table_is_a_form(block):
+    """One labelled row does not make a table one record's form, and a
+    paragraph is never one: the value's row is not the name's."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil", "awards": "Gold Ribbon"},
+                          text="Ann Pupil; Gold Ribbon")
+    findings = _graded([block], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "the document shows it, but not with its record" in findings[0]["message"]
+
+
+def test_offschema_date_key_on_a_code_declaring_no_date_is_not_reported():
+    """Personal Data declares no date at all: a date key there is not the
+    single-date shape `_is_offschema_date` admits."""
+    assert _graded([_PERSONAL_TABLE], _owner(start_date="2004")) == []
+
+
+def test_offschema_a_date_value_never_marks_a_records_row():
+    """A date-named key's value, even one with words in it, is not an anchor:
+    the row it sits on need not be the record's."""
+    entry = _fields_entry("H", {"award_name": "Silver Lamp Award",
+                                "date": "Founders Day 2004",
+                                "citation": "for long service"},
+                          text="Silver Lamp Award, Founders Day 2004, for long service")
+    blocks = [_table(_row("Silver Lamp Award", "Example Society")),
+              _table(_row("Founders Day 2004", "for long service"))]
+    findings = _graded(blocks, entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def _degree_beside_an_award(degree, institution="Lakeside College", **extra):
+    degree_entry = _fields_entry("B1", {"degree": degree, "institution": institution,
+                                        "honors": "with honors", **extra},
+                                 text=f"{degree}, Lakeside College, with honors", idx=1)
+    award = _fields_entry("H", {"award_name": "Lakeside Prize",
+                                "granting_body": "Lakeside College"}, idx=2)
+    return degree_entry, award
+
+
+@pytest.mark.parametrize("degree, other_row", [
+    ("MS Ed", ("Lakeside College", "Rams Edge", "with honors")),
+    ("MS Ed", ("Lakeside College", "Ed Hall", "with honors")),
+    ("MPhil", ("MPhil prize", "with honors")),
+], ids=["short-anchor-inside-a-word", "short-anchor-one-word-of-two",
+        "short-anchor-alone"])
+def test_offschema_a_short_anchor_marks_a_row_only_as_all_its_words(degree, other_row):
+    """A short anchor ("MS Ed") is carried only as whole words, all of them,
+    and is never distinctive alone: a row with "Rams Edge", "Ed Hall" or
+    another "MPhil" is not the degree's row."""
+    blocks = [_table(_row(degree, "Lakeside College", "2001")), _table(_row(*other_row))]
+    findings = _graded(blocks, *_degree_beside_an_award(degree))
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("INFO", ["entry 1: with honors"])]
+
+
+def test_offschema_an_anchor_only_its_object_holds_is_not_distinctive():
+    """An institution written as an object is not among the record's own
+    string values, so another record holding it makes it shared."""
+    blocks = [_table(_row("BA", "Lakeside College", "2001")),
+              _table(_row("Lakeside Prize", "Lakeside College, with honors"))]
+    findings = _graded(blocks, *_degree_beside_an_award(
+        "BA", institution={"name": "Lakeside College"}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_an_anchor_under_two_keys_still_counts_once():
+    """The same value under two keys is one anchor, not none."""
+    degree = _fields_entry("B1", {"degree": "PhD", "discipline": "PhD",
+                                  "institution": "Northfield University",
+                                  "honors": "with distinction"}, idx=1)
+    medal = _fields_entry("H", {"award_name": "Northfield Medal",
+                                "granting_body": "Northfield University"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University, with distinction", "1991")),
+              _table(_row("Northfield Medal", "Northfield University"))]
+    assert _graded(blocks, degree, medal) == []
+
+
+def test_offschema_a_row_carrying_most_shared_anchors_is_the_records():
+    """Two of three shared anchors is a majority: the row is the record's."""
+    degree = _fields_entry("B1", {"degree": "PhD", "institution": "Northfield University",
+                                  "advisor": "Bea Guide", "honors": "with distinction"},
+                           idx=1)
+    medal = _fields_entry("H", {"award_name": "Northfield Medal",
+                                "granting_body": "Northfield University",
+                                "description": "nominated by Bea Guide"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University, with distinction", "1991")),
+              _table(_row("Northfield Medal", "Northfield University"))]
+    assert _graded(blocks, degree, medal) == []
+
+
+def test_offschema_list_value_is_shown_only_when_its_row_shows_every_item():
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": ["Gold Ribbon", "Blue Medal"]},
+                          text="Ann Pupil; Gold Ribbon; Blue Medal")
+    findings = _graded([_table(_row("Ann Pupil", "Gold Ribbon"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_offschema_a_string_with_no_words_is_never_stated_by_the_text():
+    """A value with no letters or digits in one of its strings is never
+    WARN: the entry's text cannot be said to state it."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": ["Gold Ribbon", "\u2014"]},
+                          text="Ann Pupil; Gold Ribbon")
+    findings = _graded([_table(_row("Ann Pupil", "2001"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_a_rendered_field_is_an_anchor(monkeypatch):
+    """A key only `fan_out._RENDERED_FIELDS` names still writes the
+    record's row, so it finds that row."""
+    monkeypatch.setattr(extraction_lints, "_RENDERED_FIELDS",
+                        {"I": frozenset({"chapter"})})
+    entry = _fields_entry("I", {"chapter": "Delta Chapter Lodge",
+                                "standing": "charter member"},
+                          text="Delta Chapter Lodge, charter member")
+    assert _graded([_table(_row("Delta Chapter Lodge", "charter member"))], entry) == []
 
 
 def test_offschema_constants_are_pinned():
