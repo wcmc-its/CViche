@@ -668,3 +668,25 @@ def test_moved_row_keeps_its_attendance_dates_in_other_education() -> None:
         "dates_attended": {"start_date": "1990", "end_date": "1994"}}}
     flat_dates = _normalize_other_education_entry(flat).dates
     assert "2001" in flat_dates and "1990" not in flat_dates
+
+
+@pytest.mark.parametrize("code, fields, text", [
+    ("D1", {"title": "Science Teacher", "institution": "Example High School"},
+     "Example entry 2001-2004"),
+    ("K4", {"activity_title": "Example Workshop",
+            "institution": "Example Elementary School"}, "Example entry 2001-2004"),
+    ("P", {"committee_name": "Example Committee", "role": "Member",
+           "institution": "Example Parochial School"}, "Example entry 2001-2004"),
+    ("Q1", {"role": "Board Member", "organization": "Example Board"},
+     "Board Member, Example Secondary School Board, 2001-2004"),
+], ids=["appointment", "outreach", "committee", "service-text-only"])
+def test_non_b1_row_naming_a_school_keeps_its_own_code(code: str, fields: dict,
+                                                        text: str) -> None:
+    # Only B1 is screened: a degree-less appointment, outreach, committee or
+    # service row that names a pre-collegiate school is not schooling attended.
+    entry = {"text": text, "taxonomy_code": code,
+             "element_idx_start": 7, "extracted_fields": dict(fields)}
+    gen, grouped = _gen_and_code(entry)
+    assert grouped == code
+    assert entry["taxonomy_code"] == code and "taxonomy_code_original" not in entry
+    assert _precollegiate_records(gen) == []
