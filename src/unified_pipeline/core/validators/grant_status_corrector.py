@@ -4,10 +4,12 @@ Grant Status Corrector
 Post-classification validator that corrects grant status codes (M2A/M2B/M2C)
 based on date analysis, overriding section header-based misclassifications.
 
-Problem: Grants in "Pending" sections may have ended (should be M2B, not M2C).
-         Grants in "Non-funded applications" may have been funded (amounts present → M2B).
+Problem: the LLM's M2A/M2B/M2C code can disagree with the grant's own dates:
+         a "current" grant that ended, a "completed" one still running.
 
-Solution: Parse date ranges from grant text and compare to current date.
+Solution: Parse date ranges from grant text and compare to current date. An
+application (M2C) is not moved to completed on its dates alone: an old
+application is not a completed award (EBYSBC E7).
 """
 
 import re
@@ -20,10 +22,24 @@ CURRENT_YEAR = datetime.now().year
 # A hierarchy heading that says the grant is an application, not an award
 # (#981). Whole words: "Grants Pending Review" matches, "Impending" does not.
 # Under such a heading a date range is the proposed project period, so it says
-# nothing about whether the grant ended or is running.
+# nothing about whether the grant ended or is running. "Grants Applied" and
+# "Grant Applications" name applications too (EBYSBC E7: fifteen applications
+# under an "applied" heading were filed as completed awards); "Proposals
+# Submitted" was already covered by "submitted".
 _PENDING_HEADING_RE = re.compile(
     r'\b(?:pending|submitted|awaiting|(?:under|in)\s+review|(?:not|non)[\s-]?funded'
-    r'|unfunded|declined|withdrawn)\b'
+    r'|unfunded|declined|withdrawn|applied|applications?)\b'
+)
+# A hierarchy heading that files its grants as awarded: running, ended or
+# funded. It is the only corroboration that lets an ended date range move an
+# application (M2C) to completed (M2B). Without it the dates alone say nothing
+# about whether the application was ever funded, so the LLM's M2C stands
+# (EBYSBC E7: eight applications under a generic research heading, whose own
+# pending sub-heading never reached the hierarchy, were filed as completed
+# awards). A heading that also names a pending bucket ("Current and
+# Pending Support") never gets here: `_PENDING_HEADING_RE` returns first.
+_AWARDED_HEADING_RE = re.compile(
+    r'\b(?:current|active|ongoing|present|past|previous|prior|completed|funded|awarded)\b'
 )
 # The same words as an explicit status line in the entry's own text ("Status
 # of Support: Pending"), for a grant whose heading is silent because the
@@ -114,7 +130,10 @@ def correct_grant_status(entry: dict) -> dict:
     Correct grant status code based on date analysis.
 
     Rules:
-    1. If end year < current year → M2B (completed)
+    1. If end year < current year → M2B (completed). An M2A or bare M2 moves on
+       its dates alone; an M2C moves only under a heading that files it as
+       awarded (`_AWARDED_HEADING_RE`), since an old application is not a
+       completed award (EBYSBC E7).
     2. If end year >= current year and has "present" or ongoing → M2A (active)
 
     A grant under a pending / not-funded heading, or whose text carries a
@@ -150,9 +169,11 @@ def correct_grant_status(entry: dict) -> dict:
     if date_range:
         start_year, end_year = date_range
 
-        # Rule 1: End year in the past → M2B (completed)
+        # Rule 1: End year in the past → M2B (completed). An application
+        # needs its heading to say it was awarded as well (EBYSBC E7).
         if end_year < CURRENT_YEAR:
-            if code in ('M2A', 'M2C', 'M2'):
+            if code in ('M2A', 'M2') or (
+                    code == 'M2C' and _AWARDED_HEADING_RE.search(hierarchy_str)):
                 code = 'M2B'
                 correction_reason = f"Date range {start_year}-{end_year} ended; corrected to M2B (completed)"
 
