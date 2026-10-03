@@ -32,6 +32,7 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES, WCMTemplateGenerator,
 )
 from unified_pipeline.doctor.lints.render import lint_stage6_warnings  # noqa: E402
+from unified_pipeline.stage6.sections.appendix import RecoveredLine  # noqa: E402
 
 # The 21-name flat dispatch this replaced (`stage_6_word_template.py:812-833`
 # on the pre-fix tree), in the exact order `generate()` called them.
@@ -367,7 +368,7 @@ def test_appendix_failure_with_recovered_codes_still_writes_the_document(tmp_pat
         raise RuntimeError("appendix boom")
 
     gen._fill_appendix = _boom
-    gen._recover_unrendered_records = lambda *_a, **_k: ["T"]
+    gen._recover_unrendered_records = lambda *_a, **_k: [RecoveredLine("T", "Recovered sample line")]
 
     entries = [
         _personal_data_entry(),
