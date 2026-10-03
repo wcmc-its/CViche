@@ -1370,21 +1370,19 @@ def _absence_is_a_loss(entry: _FieldsEntry, key: str, value: object) -> bool:
     rather than only a value the page does not carry (INFO). A date: yes --
     it was judged on its own record's line. A Personal Data value: when its
     key names a row of the Personal Data table (`PERSONAL_DATA_ROW_WORDS`).
-    Anything else: when the entry's own text states it -- whole, or
-    `RENDER_TOKEN_OVERLAP` of its words, since stage 4 rewrites a date
-    inside a value (WIANVH's F2 `notes`). The model's own remark on an entry
-    (BMAMWE's N3B `note` that no mentee was named) is not content of the CV."""
+    Anything else: when the entry's own text states it -- at least
+    `RENDER_TOKEN_OVERLAP` of the words of each of its strings, not every
+    word, since stage 4 rewrites a date inside a value (WIANVH's F2
+    `notes`). The model's own remark on an entry (BMAMWE's N3B `note` that
+    no mentee was named) is not content of the CV."""
     if _DATE_NAMED_KEY_RE.search(key):
         return True
     if entry.code == PERSONAL_DATA_CODE:
         return bool(set(key.split("_")) & PERSONAL_DATA_ROW_WORDS)
-    text, text_words = squash(entry.text), set(_alphanumeric_tokens(entry.text))
-    for leaf in _value_leaves(value):
-        words = set(_alphanumeric_tokens(leaf))
-        if not (_value_on_line(squash(leaf), text) or (
-                words and len(words & text_words) / len(words) >= RENDER_TOKEN_OVERLAP)):
-            return False
-    return True
+    text_words = set(_alphanumeric_tokens(entry.text))
+    leaves = [set(_alphanumeric_tokens(leaf)) for leaf in _value_leaves(value)]
+    return all(words and len(words & text_words) / len(words) >= RENDER_TOKEN_OVERLAP
+               for words in leaves)
 
 
 def _offschema_candidates(entry: _FieldsEntry, declared: frozenset[str],
