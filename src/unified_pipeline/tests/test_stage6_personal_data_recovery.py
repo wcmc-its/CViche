@@ -1419,3 +1419,237 @@ def test_owner_banner_needs_the_cv_owner_to_be_recognised(tmp_path):
     # so the recovery pass is reading the render's own cv_owner.
     items = _list_item_texts_after(tmp_path, [_a("Name Jane Q. Sample, MD")], None)
     assert "Name Jane Q. Sample, MD" in items
+
+
+# --------------------------------------------------------------------------
+# #1222 (EBYSBC E25, E10, E14): contact values that reached the wrong slot or
+# none -- a Home/Office line, a department as an address, labels after the
+# numbers, off-schema keys, a contact block coded as a position, an ORCID iD
+# --------------------------------------------------------------------------
+
+def test_a_home_and_office_line_routes_each_half_by_its_own_label(tmp_path):
+    """EQADVR-03: the word 'home' on the line sent the office address and
+    the office phone to the withheld home slots."""
+    entry = _a("Addresses: Home: 9 Private Lane, Exampleton, ZZ 00000\t"
+               "Office: Department of Examples, Example University\t"
+               "Example Bldg, Room 12, 555-0100\tjdoe@example.edu",
+               {"address": "Home: 9 Private Lane, Exampleton, ZZ 00000; Office: Department "
+                           "of Examples, Example University, Example Bldg, Room 12",
+                "phone": "555-0100", "email": "jdoe@example.edu"})
+    rows = _contact_rows(tmp_path, [entry])
+    assert "Example Bldg, Room 12" in rows["Office address:"]
+    assert rows["Office telephone:"] == "555-0100"
+    assert "Private Lane" not in _all_text(tmp_path / "out.docx")
+
+
+def test_a_home_and_office_line_keeps_a_home_number_withheld(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Home: 9 Private Lane, Exampleton\t555-0199\tOffice: 1 Sample Way, Exampleton",
+           {"phone": "555-0199"}),
+    ])
+    assert rows["Office telephone:"] == ""
+    assert rows["Cell phone:"] == ""
+
+
+def test_a_department_name_is_not_an_office_address(tmp_path):
+    """RVROVQ-04: a 'Department:' line filled Office address; neither it
+    nor the school line is an address."""
+    rows = _contact_rows(tmp_path, [
+        _a("Department: Department of Example Studies",
+           {"address": "Department of Example Studies"}, idx=0),
+        _a("School: Example University School of Medicine",
+           {"address": "Example University School of Medicine"}, idx=1),
+    ])
+    assert rows["Office address:"] == ""
+    # Not lost: the lines are recovered into the Appendix, as a displaced
+    # banner address is.
+    assert {"Department: Department of Example Studies",
+            "School: Example University School of Medicine"} <= _list_item_texts(tmp_path / "out.docx")
+
+
+def test_a_school_name_another_record_carries_stays_out_of_the_appendix(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("School: Example University School of Medicine",
+           {"address": "Example University School of Medicine"}, idx=1),
+        _entry("2001-Present Professor, Example University School of Medicine", "D1",
+               {"title": "Professor", "institution": "Example University School of Medicine",
+                "start_date": "2001", "end_date": "Present"}, idx=20),
+    ])
+    assert rows["Office address:"] == ""
+    assert "School: Example University School of Medicine" not in _list_item_texts(tmp_path / "out.docx")
+
+
+def test_a_department_name_does_not_block_a_later_street_address(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Example University School of Medicine",
+           {"address": "Example University School of Medicine"}, idx=0),
+        _a("1 Sample Way, Exampleton", {"address": "1 Sample Way, Exampleton"}, idx=1),
+    ])
+    assert rows["Office address:"] == "1 Sample Way, Exampleton"
+
+
+@pytest.mark.parametrize("address, expected", [
+    ("Department of Example Studies", False),
+    ("Example University School of Medicine", False),
+    ("1 Sample Way, Exampleton", True),
+    ("Example Hall, Example University", True),
+    ("Example University, Exampleton, ZZ", True),
+    ("Room B-12, Example Building", True),
+])
+def test_names_a_street_or_number(address, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._names_a_street_or_number(address) is expected
+
+
+def test_numbers_labelled_after_them_take_their_own_rows(tmp_path):
+    """EQGGRB-04: '<n> (cell) <n> (office)' put the office number in the
+    Cell phone row and left Office telephone empty."""
+    rows = _contact_rows(tmp_path, [
+        _a("1 Sample Way, Exampleton\tTelephone: (555) 555-0101 (cell)\t(555) 555-0102 (office)",
+           {"phone": "(555) 555-0101 (cell); (555) 555-0102 (office)",
+            "address": "1 Sample Way, Exampleton"}),
+    ])
+    assert rows["Cell phone:"] == "(555) 555-0101"
+    assert rows["Office telephone:"] == "(555) 555-0102"
+
+
+def test_each_part_of_a_joined_phone_value_keeps_its_own_label(tmp_path):
+    """The labels ride on the parts of the stage-4 value, not beside the
+    numbers in the text; a fax part is no office number."""
+    rows = _contact_rows(tmp_path, [
+        _a("1 Sample Way, Exampleton\tPhone numbers (cell), (fax) and (office)\t"
+           "(555) 555-0101\t(555) 555-0103\t(555) 555-0102",
+           {"phone": "(555) 555-0101 (cell); (555) 555-0103 (fax); (555) 555-0102 (office)",
+            "address": "1 Sample Way, Exampleton"}),
+    ])
+    assert rows["Cell phone:"] == "(555) 555-0101"
+    assert rows["Office telephone:"] == "(555) 555-0102"
+
+
+def test_a_cell_label_at_another_number_does_not_make_this_one_a_cell(tmp_path):
+    """ZCTARO-06: 'Tel: <n> Cell: <n>' with the Tel number as `phone` and the
+    cell number under `cell_phone`; the Tel number took the Cell phone row."""
+    rows = _contact_rows(tmp_path, [
+        _a("Research Address\t1 Sample Way, Exampleton, ZZ 00000\t"
+           "Tel: 555-555-0101 Cell: 555-555-0102\tFax: 555-555-0103",
+           {"phone": "555-555-0101", "cell_phone": "555-555-0102", "fax_research": "555-555-0103",
+            "research_address": "1 Sample Way, Exampleton, ZZ 00000"}),
+    ])
+    assert rows["Office telephone:"] == "555-555-0101"
+    assert rows["Cell phone:"] == "555-555-0102"
+    assert rows["Office address:"] == "1 Sample Way, Exampleton, ZZ 00000"
+
+
+def test_off_schema_street_and_phone_keys_fill_the_office_rows(tmp_path):
+    """YYVHNN-02: stage 4 left `address` and `phone` null and set the parts
+    under keys of their own."""
+    rows = _contact_rows(tmp_path, [
+        _a("Example University\t1 Sample Way\tExampleton, ZZ 00000\t"
+           "(office): 555-555-0101\t(cell): 555-555-0102",
+           {"street_address": "1 Sample Way", "city": "Exampleton", "state": "ZZ",
+            "zip_code": "00000", "office_phone": "555-555-0101",
+            "cell_phone": "555-555-0102"}),
+    ])
+    assert rows["Office address:"] == "1 Sample Way, Exampleton, ZZ 00000"
+    assert rows["Office telephone:"] == "555-555-0101"
+    assert rows["Cell phone:"] == "555-555-0102"
+
+
+def test_an_off_schema_office_address_beside_a_home_line_fills_the_office_rows(tmp_path):
+    entry = _a("Home: 9 Private Lane, Exampleton, ZZ 00000\tOffice: Department of "
+               "Examples, Slot #5, Example University, Exampleton\tPhone: (555) 555-0101",
+               {"home_address": "9 Private Lane, Exampleton, ZZ 00000",
+                "office_address": "Department of Examples, Slot #5, Example University",
+                "phone": "(555) 555-0101"})
+    rows = _contact_rows(tmp_path, [entry])
+    assert "Slot #5" in rows["Office address:"]
+    assert rows["Office telephone:"] == "(555) 555-0101"
+    assert "Private Lane" not in _all_text(tmp_path / "out.docx")
+
+
+@pytest.mark.parametrize("fields, phone, address", [
+    ({"research_phone": "555-555-0101", "cell_phone": "555-555-0102"},
+     {"office": "555-555-0101", "cell": "555-555-0102"}, None),
+    ({"work_phone": "555-555-0101", "clinic_address": "2 Clinic Road, Exampleton"},
+     {"office": "555-555-0101"}, {"office_address": "2 Clinic Road, Exampleton"}),
+    # `address` set: an off-schema address is not read
+    ({"address": "1 Sample Way", "research_address": "2 Clinic Road"}, None, None),
+    ({"street": "1 Sample Way", "city": "Exampleton"}, None,
+     {"office_address": "1 Sample Way, Exampleton"}),
+    # a city and state with no street are not an address
+    ({"city": "Exampleton", "state": "ZZ"}, None, None),
+    # a home key is never read
+    ({"home_address": "9 Private Lane", "home_phone": "555-555-0199"}, None, None),
+])
+def test_offschema_contact_maps_slot_named_keys(fields, phone, address):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._offschema_contact(fields, []) == (phone, address)
+
+
+def test_an_off_schema_value_from_a_protected_fragment_is_not_taken(tmp_path):
+    entry = _a("Contact", {"office_phone": "555-555-0101"})
+    entry["_pii_fragments"] = ["Home phone: 555-555-0101"]
+    rows = _contact_rows(tmp_path, [entry])
+    assert rows["Office telephone:"] == ""
+
+
+def _position_with_contact_block(email="jdoe@example.edu", extra=""):
+    return _entry(f"Current Position: Professor\tExample Hospital\t{extra}"
+                  "Example Bldg, Room 4\t100 Sample Avenue, Box 2\tExampleton, Examplestate\t"
+                  f"Phone: (555) 555-0103\tFax: (555) 555-0104\tEmail: {email}",
+                  "D1", {"title": "Professor", "institution": "Example Hospital"}, idx=7)
+
+
+def test_a_contact_block_coded_as_a_position_fills_the_office_rows(tmp_path):
+    """E10 (BZZNRL 7, HZGJFM 729, MUHLLD 10, GJXIWD 2): the block holding
+    the owner's work email was coded D1, so its phone and street address
+    reached no Personal Data row."""
+    rows = _contact_rows(tmp_path, [_a("Jane Doe", {"name": "Jane Doe"}, idx=0),
+                                    _position_with_contact_block()])
+    assert rows["Work email:"] == "jdoe@example.edu"
+    assert rows["Office telephone:"] == "(555) 555-0103"
+    # The cell's lines are joined without a separator by this reader.
+    assert rows["Office address:"] == "Example Bldg, Room 4100 Sample Avenue, Box 2Exampleton, Examplestate"
+    assert "555-0104" not in " ".join(rows.values())
+
+
+def test_a_street_line_that_holds_its_city_takes_no_later_line(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Jane Doe", {"name": "Jane Doe"}, idx=0),
+        _entry("Current Position: Professor\t10000 Sample Avenue, Exampleton, ZZ 00000\t"
+               "Example Clinic, Otherton, ZZ 00001\tPhone: (555) 555-0103\tjdoe@example.edu",
+               "D1", {"title": "Professor"}, idx=7),
+    ])
+    assert rows["Office address:"] == "10000 Sample Avenue, Exampleton, ZZ 00000"
+
+
+@pytest.mark.parametrize("entry", [
+    pytest.param(_position_with_contact_block(email="referee@example.org"), id="not-the-owner-email"),
+    pytest.param(_position_with_contact_block(extra="Born 1960, Exampleton\t"), id="birth-line"),
+    pytest.param(_position_with_contact_block(extra="Home\t"), id="home-label"),
+])
+def test_a_contact_block_is_read_only_when_it_holds_the_owner_work_email(tmp_path, entry):
+    rows = _contact_rows(tmp_path, [
+        _a("Jane Doe\tjdoe@example.edu", {"name": "Jane Doe", "email": "jdoe@example.edu"}, idx=0),
+        entry,
+    ])
+    assert rows["Office telephone:"] == ""
+    assert rows["Office address:"] == ""
+
+
+def test_an_orcid_on_a_contact_line_renders_as_a_researcher_profile(tmp_path):
+    """SJWASY-05: the A entry's ORCID iD rendered nowhere."""
+    text = _render(tmp_path, [
+        _a("Phone: 555-555-0101\tORCID: https://orcid.org/0000-0002-1825-0097",
+           {"phone": "555-555-0101", "orcid": "0000-0002-1825-0097"}),
+    ])
+    assert text.count("0000-0002-1825-0097") == 1
+    assert "ORCID: 0000-0002-1825-0097" in _paragraph_texts(tmp_path / "out.docx")
+
+
+def test_an_orcid_already_in_an_s0_entry_renders_once(tmp_path):
+    text = _render(tmp_path, [
+        _a("ORCID: 0000-0002-1825-0097", {"orcid": "0000-0002-1825-0097"}),
+        _entry("ORCID iD: https://orcid.org/0000-0002-1825-0097", "S0", idx=40),
+    ])
+    assert text.count("0000-0002-1825-0097") == 1

@@ -324,9 +324,22 @@ _LABELLED_NUMBER_RE = re.compile(
 # home label before the number, as the block-level 'cell' word did before
 # #946. Words only, and never when another number follows: in
 # "(o) 212-555-0100 (c) 917-555-0101" the "(c)" labels the number after it.
-_NO_NUMBER_FOLLOWS = r'(?!\s*[+(]?\d)'
+# A colon makes it a label for what follows: "(office): 212-555-0100
+# (cell): 917-555-0101" labels the second number cell, not the first.
+_NO_NUMBER_FOLLOWS = r'(?![ \t]*:)(?!\s*[+(]?\d)'
 _CELL_LABEL_AFTER_NUMBER_RE = re.compile(
     rf'(?P<number>{_PHONE_NUMBER_PATTERN})\s*\((?:{_CELL_WORDS})\){_NO_NUMBER_FOLLOWS}',
+    re.IGNORECASE,
+)
+# ... except in a run whose every number carries its label AFTER it (#1222,
+# EBYSBC EQGGRB-04): in "212-555-0100 (cell) 917-555-0101 (office)" the
+# next number has its own trailing label, so "(cell)" labels the number
+# before it. A "(c)" straight before a number with no trailing label after
+# that number still labels the number after it, as above.
+_TRAILING_KIND_LABEL = r'\((?:cell(?:ular)?|mobile|office|work|home|business|lab|fax)\)'
+_CELL_LABEL_IN_A_TRAILING_RUN_RE = re.compile(
+    rf'(?P<number>{_PHONE_NUMBER_PATTERN})\s*\((?:{_CELL_WORDS})\)'
+    rf'(?=\s*{_PHONE_NUMBER_PATTERN}\s*{_TRAILING_KIND_LABEL})',
     re.IGNORECASE,
 )
 _PHONE_LABEL_CELL = 'cell'
@@ -411,7 +424,8 @@ def _nearest_phone_label(phone: _PhoneNumber, text: str) -> str | None:
     falls back to the block-level words. A phone value holding several
     numbers pairs with no single number in the text and returns None."""
     if any(phone.is_same_number(_PhoneNumber.parse(match.group('number')))
-           for match in _CELL_LABEL_AFTER_NUMBER_RE.finditer(text)):
+           for pattern in (_CELL_LABEL_AFTER_NUMBER_RE, _CELL_LABEL_IN_A_TRAILING_RUN_RE)
+           for match in pattern.finditer(text)):
         return _PHONE_LABEL_CELL
     for match in _LABELLED_NUMBER_RE.finditer(text):
         if phone.is_same_number(_PhoneNumber.parse(match.group('number'))):
@@ -423,11 +437,28 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
                            pii_fragments: list[str]) -> tuple[bool, bool]:
     """(is cell, is home) for one stage-4 phone value -- the label nearest
     the number when there is one (#946), else the entry's block-level words."""
-    nearest = _nearest_phone_label(_PhoneNumber.parse(phone), text)
+    number = _PhoneNumber.parse(phone)
+    nearest = _nearest_phone_label(number, text)
     if nearest is not None:
         return nearest == _PHONE_LABEL_CELL, nearest == _PHONE_LABEL_HOME
-    return (bool(_CELL_KEYWORD_AS_LABEL_RE.search(text)),
+    return (bool(_CELL_KEYWORD_AS_LABEL_RE.search(text))
+            and not _cell_label_is_at_another_number(phone, text),
             _label_word_present('home', text, pii_fragments))
+
+
+def _cell_label_is_at_another_number(phone: _JsonValue, text: str) -> bool:
+    """Whether the entry's cell label sits right before a number that is
+    not `phone`, so it is that number's label (the #952 rule; #1222, EBYSBC
+    ZCTARO-06): in "Tel: 317-555-0100 Cell: 317-555-0101" the Tel number
+    took the Cell phone row from the block-level 'cell'. Only a value
+    holding one number: a joined "a; b" pairs with no single number, and
+    the mixed branch in `_route_phone` labels each of its parts."""
+    if not isinstance(phone, str) or len(_PHONE_SEGMENT_SPLIT.split(phone)) > 1:
+        return False
+    # `_nearest_phone_label` found no cell label at `phone`, so any number
+    # these match is another one.
+    return (any(match.group('cell') for match in _LABELLED_NUMBER_RE.finditer(text))
+            or _CELL_LABEL_AFTER_NUMBER_RE.search(text) is not None)
 
 
 #: The words that place an entry's address at a workplace: the Office
@@ -532,18 +563,21 @@ def _office_slot_ranks(unconsumed: list[dict]) -> tuple[_SlotRank, _SlotRank]:
 
 class _AddressContext(NamedTuple):
     """What the address routing reads from one entry: its lowercased text,
-    the fragments the pii pass cut from it, its stage-4 phone value, and the
-    entry itself (the Office slot ranking records it)."""
+    the fragments the pii pass cut from it, its stage-4 phone value, the
+    entry itself (the Office slot ranking records it), and the lowercased
+    text of every non-A entry (where a department or school name is
+    carried by a record of its own)."""
     text: str
     pii_fragments: list[str]
     phone: _JsonValue
     entry: dict
+    other_entries_text: str = ''
 
 
 def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str | None,
                    office_address: str | None, address_rank: _SlotRank,
                    withheld: list[WithheldItem]) -> tuple[str | None, str | None, bool]:
-    """(home_address, office_address, birthplace_withheld) after routing one
+    """(home_address, office_address, set_aside) after routing one
     entry's stage-4 `address`; lifted out of `_fill_personal_data` (#1223).
 
     A dict that names its own halves fills both slots from them instead of
@@ -552,7 +586,13 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     raw text, same as a string. A place of birth fills no slot: it is
     recorded on `withheld`, and the True third value makes the caller count
     the entry consumed, since the recovery pass would render its residual,
-    the place (#1223, EBYSBC EQADVR-02)."""
+    the place (#1223, EBYSBC EQADVR-02). A value with no street, number or
+    state (`_names_a_street_or_number`) is a department or school name, not
+    an address, and fills no slot either (#1222, EBYSBC RVROVQ-04). When a
+    non-A entry's text carries the same name, a record of its own renders
+    it and the True third value keeps the header line out of the Appendix;
+    otherwise the entry is left to the Appendix recovery, as a displaced
+    banner address is."""
     if _labels_its_own_address_slots(address):
         return (home_address or _address_cell_text(address, 'home'),
                 office_address or _address_cell_text(address, 'office'), False)
@@ -561,9 +601,305 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     if _address_is_birthplace(ctx.text, ctx.pii_fragments):
         withheld.append(WithheldItem(CAT_PLACE_OF_BIRTH, _PERSONAL_DATA_SECTION_LABEL, None))
         return home_address, office_address, True
+    office_text = _address_cell_text(address, 'office')
+    if not _names_a_street_or_number(office_text):
+        return home_address, office_address, office_text.lower() in ctx.other_entries_text
     if any(word in ctx.text for word in _WORK_PLACE_WORDS) or not office_address:
         office_address = address_rank.offer(office_address, address, ctx.entry)
     return home_address, office_address, False
+
+
+class _PhoneSlots(NamedTuple):
+    """The three phone slots `_fill_personal_data` fills from its entries."""
+    office: str | None
+    cell: str | None
+    home: str | None
+
+
+def _phone_text_for_routing(phone: _JsonValue, text: str) -> str:
+    """The part of `text` whose label routes `phone`: the whole entry, or,
+    when one line carries both a home and an office label ("Home: ...
+    Office: ..."), the labelled part that holds the number (#1222, EBYSBC
+    EQADVR-03). The block-level 'home' word sent the office number to the
+    withheld home slot."""
+    number = _digits(str(phone))
+    for _kind, part in _home_and_office_parts(text):
+        if len(number) >= _MIN_PHONE_DIGITS_TO_PAIR and number in _digits(part):
+            return part
+    return text
+
+
+def _route_phone(phone: _JsonValue, text: str, pii_fragments: list[str], entry: dict,
+                 slots: _PhoneSlots, phone_rank: _SlotRank) -> _PhoneSlots:
+    """`slots` after routing one stage-4 phone value by the label the
+    entry's text gives it; lifted out of `_fill_personal_data` (#1222)."""
+    office_phone, cell_phone, home_phone = slots
+    routing_text = _phone_text_for_routing(phone, text)
+    if routing_text is not text:
+        pii_fragments = []
+    # Check if text contains multiple phone type labels
+    has_mobile, has_home = _cell_and_home_signals(phone, routing_text, pii_fragments)
+    has_work = 'office' in routing_text or 'work' in routing_text
+
+    if _labels_its_own_phone_slots(phone):
+        # A structured phone names its own halves, so trust those
+        # rather than the entry's raw text label (#450). web147's
+        # contact block is labelled "Home" but the dict carries
+        # cell/office/fax; the raw-text routing sent all three to
+        # home_phone, which the WCM template has no row for, so
+        # every number was dropped.
+        cell_phone = cell_phone or _phone_cell_text(phone, 'cell')
+        office_phone = office_phone or _phone_cell_text(phone, 'office')
+    elif has_mobile and has_work and ';' in str(phone):
+        # Both types in the same entry: each number takes the label it
+        # carries, else the label nearest it in the text on either side
+        # (#952; #1222, EBYSBC EQGGRB-04).
+        mixed_cell, mixed_office = _cell_and_office_numbers(str(phone), routing_text)
+        cell_phone = cell_phone or mixed_cell
+        office_phone = office_phone or mixed_office
+    elif has_mobile:
+        if not cell_phone:
+            cell_phone = _phone_cell_text(phone, 'cell')
+    elif has_home:
+        # The WCM template has exactly two phone rows, Office
+        # telephone and Cell phone -- there is no home row, so
+        # home_phone is written and never read, and a home-labelled
+        # number is deliberately not rendered.
+        #
+        # Routing it to the office row instead was tried and is
+        # WRONG: on web113 the HOME entry is processed before the
+        # BUSINESS entry, so the office row took the home number and
+        # the real business number was then skipped as already-set.
+        # Recovering a home phone needs a template row to put it in,
+        # not a slot to squat in.
+        if not home_phone:
+            home_phone = _phone_cell_text(phone, 'home')
+    elif has_work or not office_phone:
+        office_phone = phone_rank.offer(office_phone, phone, entry)
+    return _PhoneSlots(office_phone, cell_phone, home_phone)
+
+
+def _cell_and_office_numbers(phone: str, text: str) -> tuple[str | None, str | None]:
+    """(cell number, office number) out of a ';'-joined phone value. Each
+    part is a cell number when it carries a cell label itself ("(cell)")
+    or the text puts one at its number (`_nearest_phone_label`, either
+    side); a fax part is skipped and any other part is the office number.
+    The first of each kind wins. The scans this replaced took the first
+    number AFTER the word 'cell' and the word 'office', so a label written
+    after its number ("<n> (cell) <n> (office)") put the office number in
+    the Cell phone row."""
+    cell = office = None
+    for part in phone.split(';'):
+        number = re.search(_PHONE_NUMBER_PATTERN, part)
+        if number is None or _FAX_LABEL.search(part.lower()):
+            continue
+        if (_CELL_KEYWORD_AS_LABEL_RE.search(part)
+                or _nearest_phone_label(_PhoneNumber.parse(part), text) == _PHONE_LABEL_CELL):
+            cell = cell or number.group(0)
+        else:
+            office = office or number.group(0)
+    return cell, office
+
+
+#: A "Home:" / "Office:" label inside one contact line (#1222, EBYSBC
+#: EQADVR-03). The colon is required: "Home Office" and "office hours" are
+#: not labels.
+_HOME_OR_OFFICE_LABEL_RE = re.compile(
+    r'\b(?P<kind>home|office|work|business)(?:[ \t]+address)?[ \t]*:', re.IGNORECASE)
+_LABEL_KIND_HOME = 'home'
+
+
+def _home_and_office_parts(text: str) -> list[tuple[str, str]]:
+    """(kind, part) for each labelled part of a line that carries both a
+    home and a work label, kind 'home' or 'office', each part starting at
+    its own label; [] for any other line."""
+    labels = list(_HOME_OR_OFFICE_LABEL_RE.finditer(text))
+    kinds = [_LABEL_KIND_HOME if m.group('kind').lower() == _LABEL_KIND_HOME else 'office'
+             for m in labels]
+    if _LABEL_KIND_HOME not in kinds or set(kinds) == {_LABEL_KIND_HOME}:
+        return []
+    ends = [m.start() for m in labels[1:]] + [len(text)]
+    return [(kind, text[m.start():end]) for kind, m, end in zip(kinds, labels, ends)]
+
+
+def _address_halves(address: _JsonValue, text: str) -> list[tuple[_JsonValue, str]]:
+    """(address, routing text) pairs to route one stage-4 address by: the
+    value and the entry's text, or, when the value itself is a "Home: ...;
+    Office: ..." string, each half with its own label as its text, so the
+    home half stays withheld and the office half reaches Office address
+    (#1222, EBYSBC EQADVR-03)."""
+    if not address:
+        return []
+    if not isinstance(address, str):
+        return [(address, text)]
+    parts = _home_and_office_parts(address)
+    if not parts:
+        return [(address, text)]
+    return [(_HOME_OR_OFFICE_LABEL_RE.sub('', part, count=1).strip(' \t;,'),
+             part.lower()) for _kind, part in parts]
+
+
+#: Stage-4 keys outside the A schema (`config/field_schemas_v1.1.json`:
+#: name, email, phone, address) that name their own contact slot (#1222,
+#: #741; EBYSBC ZCTARO-06, YYVHNN-02). Personal Data read only `phone` and
+#: `address`, so a value under one of these rendered nowhere.
+_OFFSCHEMA_PHONE_KEYS = {
+    'office': ('office_phone', 'work_phone', 'business_phone', 'research_phone', 'clinic_phone'),
+    'cell': ('cell_phone', 'mobile_phone'),
+}
+_OFFSCHEMA_OFFICE_ADDRESS_KEYS = ('office_address', 'work_address', 'business_address',
+                                  'research_address', 'clinic_address')
+#: A street address stage 4 split into parts, joined "street, city, state zip".
+_STREET_KEYS = ('street_address', 'street')
+_CITY_KEYS = ('city',)
+_STATE_KEYS = ('state',)
+_ZIP_KEYS = ('zip_code', 'zip', 'postal_code')
+
+
+class _OffSchemaContact(NamedTuple):
+    """The off-schema contact values of one A entry, as values that name
+    their own slots: a phone dict {'office': ..., 'cell': ...} and an
+    address dict {'office_address': ...}, or None."""
+    phone: dict[str, str] | None
+    address: dict[str, str] | None
+
+
+def _first_value(fields: dict, keys: tuple[str, ...]) -> str:
+    """The first non-empty string value among `keys`, else ''."""
+    return next((str(fields[key]).strip() for key in keys
+                 if isinstance(fields.get(key), (str, int)) and str(fields[key]).strip()), '')
+
+
+def _offschema_contact(fields: dict, pii_fragments: list[str]) -> _OffSchemaContact:
+    """One A entry's contact values under off-schema keys. A value cut from
+    a protected-data fragment is skipped, as for `phone` and `address`. The
+    address is read only when stage 4 set no `address`."""
+    phone = {slot: value for slot, keys in _OFFSCHEMA_PHONE_KEYS.items()
+             if (value := _first_value(fields, keys))
+             and not _from_pii_fragment(value, pii_fragments)}
+    address = ''
+    if not fields.get('address'):
+        street = _first_value(fields, _STREET_KEYS)
+        address = _first_value(fields, _OFFSCHEMA_OFFICE_ADDRESS_KEYS) or (street and ', '.join(
+            part for part in (street, _first_value(fields, _CITY_KEYS),
+                              ' '.join(p for p in (_first_value(fields, _STATE_KEYS),
+                                                   _first_value(fields, _ZIP_KEYS)) if p))
+            if part))
+    if address and _from_pii_fragment(address, pii_fragments):
+        address = ''
+    return _OffSchemaContact(phone or None, {'office_address': address} if address else None)
+
+
+#: What makes a value a place someone can be reached at rather than the
+#: name of a department or school (#1222, EBYSBC RVROVQ-04): a digit, a
+#: street or building word, or a ", ST" state abbreviation.
+_PLACE_WORD_RE = re.compile(
+    r'\b(?:street|st|avenue|ave|road|rd|drive|dr|boulevard|blvd|lane|ln|way|place|pl|plaza'
+    r'|court|ct|parkway|pkwy|highway|hwy|circle|terrace|suite|ste|room|rm|floor|building'
+    r'|bldg|hall|box)\b\.?', re.IGNORECASE)
+_STATE_ABBREVIATION_RE = re.compile(r',\s*[A-Z]{2}\b')
+
+
+def _names_a_street_or_number(address: str) -> bool:
+    """Whether `address` holds a digit, a street or building word, or a
+    state abbreviation. "Department of Example Studies" and "Example
+    University School of Medicine" hold none: they filled Office address
+    and blocked the real one."""
+    return bool(re.search(r'\d', address) or _PLACE_WORD_RE.search(address)
+                or _STATE_ABBREVIATION_RE.search(address))
+
+
+#: The keys stage 4 puts an A entry's ORCID iD under.
+_ORCID_KEYS = ('orcid', 'orcid_id')
+
+
+def _orcid_of(fields: dict, pii_fragments: list[str]) -> str | None:
+    """The ORCID iD stage 4 found on an A contact line, or None. Personal
+    Data has no ORCID row and the S0 renderer read only S0 entries, so it
+    rendered nowhere (#817, EBYSBC SJWASY-05)."""
+    orcid = _first_value(fields, _ORCID_KEYS)
+    return orcid if orcid and not _from_pii_fragment(orcid, pii_fragments) else None
+
+
+def _orcid_profile_entry(orcid: str, s0_text: str) -> dict | None:
+    """An S0 researcher-profile entry for `orcid`, or None when an S0 entry
+    (or an earlier A entry's profile) already carries the same iD."""
+    if _digits(orcid)[-8:] in _digits(s0_text):
+        return None
+    return {'text': f'ORCID: {orcid}', 'taxonomy_code': 'S0', 'extracted_fields': {}}
+
+
+#: A work phone label straight before a number in a non-A entry's text:
+#: "Phone:", "Tel.", "Telephone", "Office:". Fax, pager, cell and home
+#: numbers carry other labels and are never taken.
+_WORK_PHONE_IN_TEXT_RE = re.compile(
+    rf'\b(?:phone|tel|telephone|office|work)\b[ \t.:#-]*(?P<number>{_PHONE_NUMBER_PATTERN})',
+    re.IGNORECASE)
+#: Words before a phone label that make it another kind of number.
+_OTHER_PHONE_KIND_RE = re.compile(r'\b(?:home|cell|mobile|fax|pager|residence)\W*$', re.IGNORECASE)
+_STREET_LINE_RE = re.compile(
+    r'^\d+[A-Za-z]?\s+(?:.*\s)?(?:street|st|avenue|ave|road|rd|drive|dr|boulevard|blvd|lane|ln'
+    r'|way|place|pl|plaza|court|ct|parkway|pkwy|highway|hwy|circle|terrace)\b', re.IGNORECASE)
+_UNIT_LINE_RE = re.compile(r'\b(?:room|suite|floor|building|bldg|box)\b', re.IGNORECASE)
+_CITY_LINE_RE = re.compile(
+    r'\b\d{5}(?:-\d{4})?\b|,\s*[A-Z]{2}\b|^[A-Z][a-z]+(?: [A-Z][a-z]+)*, [A-Z][a-z]+(?: [A-Z][a-z]+)?$')
+#: A street line, then at most this many more lines to reach the city line.
+_MAX_LINES_AFTER_STREET = 2
+
+
+def _street_address_in(text: str) -> str | None:
+    """The first street address in a tab- or newline-separated text: a
+    unit line straight before the street line, the street line, and the
+    lines after it through the city line; None when no line is a street."""
+    lines = [line.strip() for line in re.split(r'[\t\n]', text)]
+    for i, line in enumerate(lines):
+        street = _STREET_LINE_RE.match(line)
+        if not street:
+            continue
+        start = i - 1 if i and _UNIT_LINE_RE.search(lines[i - 1]) else i
+        end = i
+        # The street number itself can be five digits, so only the text
+        # after the street word can say the city is on this line.
+        if not _CITY_LINE_RE.search(line[street.end():]):
+            for j in range(i + 1, min(i + _MAX_LINES_AFTER_STREET + 1, len(lines))):
+                if _CITY_LINE_RE.search(lines[j]):
+                    end = j
+                    break
+        return '\n'.join(lines[start:end + 1])
+    return None
+
+
+def _labelled_work_number_in(text: str) -> str | None:
+    """The first number a work phone label introduces in `text`."""
+    for match in _WORK_PHONE_IN_TEXT_RE.finditer(text):
+        if (len(_digits(match.group('number'))) >= _MIN_PHONE_DIGITS
+                and not _OTHER_PHONE_KIND_RE.search(text[:match.start()])):
+            return match.group('number')
+    return None
+
+
+def _work_contact_in_entries(entries: list[dict], work_email: str | None
+                             ) -> tuple[str | None, str | None]:
+    """(office phone, office address) from the first non-A entry that holds
+    the owner's work email -- a contact block stage 3b coded as a position
+    (#1222, EBYSBC E10: BZZNRL 7, HZGJFM 729, MUHLLD 10, GJXIWD 2); (None,
+    None) when there is none. The email is the anchor that makes it the
+    owner's block and not a referee's. An entry carrying a home, residence
+    or birth word is skipped whole, and a value cut from a protected-data
+    fragment is not taken (#1367 must keep holding)."""
+    if not work_email:
+        return None, None
+    for entry in entries:
+        text = entry.get('text') or ''
+        pii_fragments = entry.get('_pii_fragments', [])
+        if (entry.get('taxonomy_code') == 'A' or work_email.lower() not in text.lower()
+                or _HOME_LABEL.search(text.lower())
+                or any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments))):
+            continue
+        phone, address = _labelled_work_number_in(text), _street_address_in(text)
+        return ((phone if phone and not _from_pii_fragment(phone, pii_fragments) else None),
+                (address if address and not _from_pii_fragment(address, pii_fragments) else None))
+    return None, None
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -934,13 +1270,18 @@ class PersonalDataSection:
         # when the loop learns to read a new one.
         unconsumed = []
         address_rank, phone_rank = _office_slot_ranks(unconsumed)
+        # An A entry's ORCID iD, for the S0 researcher-profile renderer.
+        self._a_researcher_profiles: list[dict] = []
+        s0_text = ' '.join(e.get('text', '') for e in all_entries or [] if e.get('taxonomy_code') == 'S0')
+        other_entries_text = '\n'.join(e.get('text') or '' for e in all_entries or []
+                                       if e.get('taxonomy_code') != 'A').lower()
 
         for entry in entries:
             fields = entry.get('extracted_fields', {}) or {}
             text = entry.get('text', '').lower()
             slots_before = (work_email, personal_email, office_phone,
                             cell_phone, office_address, home_address)
-            birthplace_withheld = False
+            address_set_aside = False
 
             # Values stage 4 lifted out of a protected-personal-data fragment
             # are not contact details and must not reach the template. web07's
@@ -960,6 +1301,7 @@ class PersonalDataSection:
             # Determine type based on original text labels
             extracted_phone = _drop_home_phone_segments(fields.get('phone'), self._pii_result.withheld, text)
             extracted_address = fields.get('address')
+            offschema = _offschema_contact(fields, pii_fragments)
             email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
             extracted_email = fields.get(email_key) if email_key else None
 
@@ -971,64 +1313,27 @@ class PersonalDataSection:
                 if _from_pii_fragment(extracted_email, pii_fragments):
                     extracted_email = None
 
-            # Classify phone by type
-            # Handle case where multiple phones are in one entry (e.g., "Mobile: X  Work: Y")
-            if extracted_phone:
-                # Check if text contains multiple phone type labels
-                has_mobile, has_home = _cell_and_home_signals(extracted_phone, text, pii_fragments)
-                has_work = 'office' in text or 'work' in text
+            # Classify phone by type; then the numbers stage 4 put under
+            # slot-named keys of their own (#1222, EBYSBC ZCTARO-06, YYVHNN-02).
+            phones = _PhoneSlots(office_phone, cell_phone, home_phone)
+            for phone_value in (extracted_phone, offschema.phone):
+                if phone_value:
+                    phones = _route_phone(phone_value, text, pii_fragments, entry,
+                                          phones, phone_rank)
+            office_phone, cell_phone, home_phone = phones
 
-                if _labels_its_own_phone_slots(extracted_phone):
-                    # A structured phone names its own halves, so trust those
-                    # rather than the entry's raw text label (#450). web147's
-                    # contact block is labelled "Home" but the dict carries
-                    # cell/office/fax; the raw-text routing sent all three to
-                    # home_phone, which the WCM template has no row for, so
-                    # every number was dropped.
-                    cell_phone = cell_phone or _phone_cell_text(extracted_phone, 'cell')
-                    office_phone = office_phone or _phone_cell_text(extracted_phone, 'office')
-                elif has_mobile and has_work and ';' in str(extracted_phone):
-                    # Both types in the same entry -- only the original text
-                    # says which number carries which label. Each scan runs
-                    # lazily from its own label and never crosses a ';' or a
-                    # newline, so it takes the first number AFTER that label;
-                    # what it replaced could not cross a '(' instead, which
-                    # worked only because its one shape started with one.
-                    mobile_match = re.search(
-                        rf'(?:cell|mobile)[^;\n]*?({_PHONE_NUMBER_PATTERN})',
-                        text, re.IGNORECASE)
-                    work_match = re.search(
-                        rf'(?:work|office)[^;\n]*?({_PHONE_NUMBER_PATTERN})',
-                        text, re.IGNORECASE)
-                    if mobile_match and not cell_phone:
-                        cell_phone = mobile_match.group(1)
-                    if work_match and not office_phone:
-                        office_phone = work_match.group(1)
-                elif has_mobile:
-                    if not cell_phone:
-                        cell_phone = _phone_cell_text(extracted_phone, 'cell')
-                elif has_home:
-                    # The WCM template has exactly two phone rows, Office
-                    # telephone and Cell phone -- there is no home row, so
-                    # home_phone is written and never read, and a home-labelled
-                    # number is deliberately not rendered.
-                    #
-                    # Routing it to the office row instead was tried and is
-                    # WRONG: on web113 the HOME entry is processed before the
-                    # BUSINESS entry, so the office row took the home number and
-                    # the real business number was then skipped as already-set.
-                    # Recovering a home phone needs a template row to put it in,
-                    # not a slot to squat in.
-                    if not home_phone:
-                        home_phone = _phone_cell_text(extracted_phone, 'home')
-                elif has_work or not office_phone:
-                    office_phone = phone_rank.offer(office_phone, extracted_phone, entry)
-
-            # Classify address by type
-            if extracted_address:
-                home_address, office_address, birthplace_withheld = _route_address(
-                    extracted_address, _AddressContext(text, pii_fragments, fields.get('phone'), entry),
+            # Classify address by type, each half of a "Home: ...; Office: ..." on its own
+            for address, address_text in _address_halves(extracted_address or offschema.address, text):
+                home_address, office_address, set_aside = _route_address(
+                    address, _AddressContext(address_text, pii_fragments, fields.get('phone'), entry,
+                                             other_entries_text),
                     home_address, office_address, address_rank, self._pii_result.withheld)
+                address_set_aside = address_set_aside or set_aside
+            orcid = _orcid_of(fields, pii_fragments)
+            profile = _orcid_profile_entry(orcid, s0_text) if orcid else None
+            if profile:
+                self._a_researcher_profiles.append(profile)
+                s0_text += ' ' + profile['text']
 
             # Classify email by type
             if extracted_email:
@@ -1048,7 +1353,7 @@ class PersonalDataSection:
             # that sets only home_phone reaches the document nowhere and is
             # genuinely unconsumed. Two corpus entries are in exactly that
             # state.
-            if not birthplace_withheld and (work_email, personal_email, office_phone, cell_phone,
+            if not address_set_aside and not orcid and (work_email, personal_email, office_phone, cell_phone,
                                             office_address, home_address) == slots_before:
                 unconsumed.append(entry)
 
@@ -1102,6 +1407,9 @@ class PersonalDataSection:
         work_email = recovered.work_email
         office_phone = recovered.office_phone
         office_address = recovered.office_address
+        if not (office_phone and office_address):
+            block_phone, block_address = _work_contact_in_entries(all_entries or [], work_email)
+            office_phone, office_address = office_phone or block_phone, office_address or block_address
 
         # A recovered email that is already `personal_email` must not also
         # duplicate into work_email (#550 round 1, XLYVYA_sample_vasquez_cv):
