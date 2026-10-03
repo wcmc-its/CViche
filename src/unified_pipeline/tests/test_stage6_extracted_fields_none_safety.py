@@ -24,6 +24,7 @@ fictional.
 """
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ from docx.oxml.ns import qn  # noqa: E402
 from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
+from unified_pipeline.stage6.sections import mentoring as mentoring_module  # noqa: E402
 from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     _normalize_mentee,
     _partition_mentoring_entries,
@@ -408,6 +410,11 @@ def test_partition_keeps_a_current_mentee_that_has_not_ended(fields):
     ('2004', "Faculty advisor for the chief resident 04-present (Ada Lovelace)"),
     ('2015', "2015-2016 Ada Lovelace, intern\t2016-pres PhD student"),
     ('2015', "Ada Lovelace | PhD student | 2015 \u2013 | Fictional Institute"),
+    # A later period whose dash closes the line: at the end of the text, and
+    # at the end of an inner line. The strict check reads only the start
+    # year, which here opens a closed range.
+    ('2014', "2014 - 2015 Ada Lovelace, intern; PhD student 2016 \u2013"),
+    ('2014', "2014 - 2015 Ada Lovelace, intern\nPhD student 2016 \u2013\nFictional Institute"),
 ])
 def test_partition_keeps_a_current_mentee_whose_source_leaves_the_year_open(start_date, text):
     entry = _mentee('N3A', 'Ada Lovelace', start_date=start_date)
@@ -442,6 +449,48 @@ def test_ended_current_mentee_renders_its_year_under_past_mentees():
     assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
     assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2015'
     assert _mentoring_period_cell(gen.doc, 'Grace Hopper') == '2021-present'
+
+
+def test_fill_mentoring_without_a_year_reads_the_clock_as_the_dispatcher_does():
+    """Production's section dispatch calls `_fill_mentoring(entries_by_code)`
+    with no year (stage_6_word_template.py), so the clock default is the live
+    path. A lone year long past renders under "Past Mentees:" and a lone year
+    far ahead stays under "Current Mentees:", whenever the test runs."""
+    gen = _mentoring_doc()
+    ended = _mentee('N3A', 'Ada Lovelace', start_date='1990')
+    ended['text'] = "1990 Ada Lovelace, PhD dissertation"
+    expected = _mentee('N3A', 'Grace Hopper', start_date='2999')
+    expected['text'] = "Grace Hopper, PhD student, defense expected 2999"
+
+    gen._fill_mentoring({'N3A': [ended, expected]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '1990'
+
+
+def _frozen_datetime(year: int) -> type:
+    """A stand-in for mentoring.datetime whose now() is 1 January of `year`,
+    so the clock default's boundary is testable."""
+    class _Frozen:
+        @staticmethod
+        def now() -> datetime:
+            return datetime(year, 1, 1)
+    return _Frozen
+
+
+def test_fill_mentoring_without_a_year_judges_by_this_calendar_year(monkeypatch):
+    """The clock default is this calendar year exactly: on 1 January, a lone
+    year from last year is past and one from this year is not."""
+    monkeypatch.setattr(mentoring_module, 'datetime', _frozen_datetime(_CURRENT_YEAR))
+    gen = _mentoring_doc()
+    last_year = _mentee('N3A', 'Ada Lovelace', start_date=str(_CURRENT_YEAR - 1))
+    this_year = _mentee('N3A', 'Grace Hopper', start_date=str(_CURRENT_YEAR))
+
+    gen._fill_mentoring({'N3A': [last_year, this_year]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
 
 
 # --- mentoring: summary and N4 outcome lines ------------------------------------
