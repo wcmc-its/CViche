@@ -20,8 +20,9 @@ rather than imported: nothing under `stage6/` may import `stage4`
 
 What is deliberately NOT fanned out:
 
-- a list that is not 2+ dicts (a one-item list is not a fused entry, and a list
-  of strings is a list of values);
+- a list that is not made of dicts (a list of strings is a list of values).
+  A one-item list IS a record (`_MIN_LIST_ITEMS`), and a list is looked for
+  one level down too, inside an object under a key the schema does not define;
 - a list any of whose dicts shares no key with the schema (plus the
   `_EXTRA_RECORD_KEYS` the code's items are known to carry) -- web181's K2
   `mentees: [{name, year}]` is the named example. Its items name nothing the K2
@@ -55,21 +56,51 @@ from __future__ import annotations
 import copy
 import re
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
+from unified_pipeline.core.text_norm import norm
+from unified_pipeline.core.two_digit_year import expand_two_digit_year
 from unified_pipeline.stage6.formatting.dates import format_date_for_section
+from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES, _MONTH_NAME_TO_NUM
 
 # Provenance key written on every child. Shows which list the record came from
 # and where in it: `{'key': 'awards', 'index': 1, 'count': 3}`.
 FANNED_OUT_FROM = 'fanned_out_from'
 
+# The same provenance, written instead on the last child of stage 4's records
+# list, which is the parent itself (`_stage4_children`). That child keeps the
+# parent's whole text and no `FANNED_OUT_FROM`, so dedup weighs it as it
+# weighed the parent; dedup and the doctor do not read this key. The scope
+# rules read it (`record_scope`, `record_text`): the last record is a record
+# of the list like its siblings (EBYSBC E34, BZZNRL 137).
+LAST_STAGE4_RECORD = 'last_stage4_record'
+
 # A list of records has at least this many; below it the entry is one record.
+# Stage 4's own records list (`records_key`) is held to it.
 _MIN_RECORDS = 2
+
+# A list under a key the schema does not define is a record list from one item
+# up: `additional_roles: [{role, start_date, end_date}]` beside the parent's own role is
+# a second record (MRJDWE 101), as #1291 already treats a single object, and
+# `appointments: [{...}]` under a parent holding only its dates is the record
+# itself (the pilot's BFSUMA, #1187). `_parent_is_own_record` tells them apart.
+_MIN_LIST_ITEMS = 1
+
+# Where a record list sits in `extracted_fields`: its key, or (EBYSBC E6,
+# ZGBCIT 36) an object's key and the key inside it
+# (`additional_info.telehealth_licensures`). Named in `FANNED_OUT_FROM` and in
+# the warning with the parts joined by `_PATH_SEPARATOR`.
+ListPath = tuple[str, ...]
+_PATH_SEPARATOR = '.'
 
 # The text stage 2 fused N paragraphs into is tab-joined.
 _TEXT_SEGMENT_SEPARATOR = '\t'
+
+# What stage 4 joins several values of one field with when it puts them all
+# in the parent ("Alpha Fund; Beta Trust"): see `_own_values`.
+_JOINED_VALUE_SEPARATOR = ';'
 
 # The built-text separator: the same one stage 2 uses between table cells, so
 # a child's built text reads as the record line it stands for and stays visible
@@ -90,6 +121,46 @@ _BUILT_TEXT_SEPARATOR = ' | '
 # the Board" against `role: Chair`, `committee_name: Board`).
 _STOPWORDS = frozenset({'a', 'an', 'and', 'at', 'for', 'in', 'of', 'on', 'the', 'to'})
 _TOKEN_RE = re.compile(r'[a-z0-9]+')
+
+# EBYSBC E6 (#1187): what the coverage test does NOT count as content, on
+# both sides of the comparison (the entry's text and every rendered value).
+# Each one kept a correctly extracted record list whole, and the list then
+# rendered as nothing (KYOPUV 32, XELRLZ 19) or as one fused row (MIFYLG 136):
+# - a month. The date column writes a month as a number or drops it, by the
+#   section's format (`format_date_for_section`), for a fanned and an unfanned
+#   record alike, so a date is compared by its year: "March 1988", "03/88" and
+#   "3/1988" all read 1988 (a month name is dropped only beside a number, so
+#   "May" in a name stays a word);
+# - a two-digit year: "'88", the "96" of "1993-96" and the "02" of "3/02" are
+#   the years 1988, 1996 and 2002, read through the same pivot stage 4 uses;
+# - an open end: "current", "ongoing", "now" are what the date column writes
+#   as "Present";
+# - a list number ("1.", "2)") at the start of the text or of a tab segment:
+#   furniture, not content (MRJDWE 99);
+# - a section label the CV writes in front of its first record's date
+#   ("Positions      March '88-May '89 Lecturer ...", the KYOPUV 32 shape): one to
+#   three words set off by a colon, a tab or a run of spaces, then a date.
+#   Dropped only when every record carries its own `_ROLE_FIELDS` value, so
+#   the label cannot be the role the records left out ("Chair: 2010-2012
+#   Alpha Board, Beta Board" keeps the entry whole; so does every entry of a
+#   code with no such field).
+_OPEN_END_TOKEN = 'present'
+_MONTH_WORDS = '|'.join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+_MONTH_NAME_RE = re.compile(rf"\b(?:{_MONTH_WORDS})\b\.?(?=[\s,]*['‘’`]?\d)", re.IGNORECASE)
+_APOSTROPHE_YEAR_RE = re.compile(r"['‘’`](\d{2})(?!\d)")
+_MONTH_YEAR_RE = re.compile(r'(?<![\d/])(\d{1,2})/(?:(\d{4})|(\d{2}))(?![\d/])')
+_SHORT_RANGE_END_RE = re.compile(r'(?<!\d)(\d{4})(\s*[-–—]\s*)(\d{2})(?![\d/])')
+_LIST_NUMBER_RE = re.compile(r'(^|\t|\n)\s*(?:\d{1,3}[.)]|[a-z]\))(?=\s)', re.IGNORECASE)
+_LEADING_LABEL_RE = re.compile(
+    r"^\s*[A-Za-z]+(?: [A-Za-z]+){0,2}(?:\s*:\s*|\t\s*| {2,})"
+    rf"(?=['‘’`]?\d|(?:{_MONTH_WORDS})\b)", re.IGNORECASE)
+# The fields that name a record's role or title, per `_RENDERED_FIELDS`.
+_ROLE_FIELDS = frozenset({'leadership_role', 'membership_type', 'role', 'title'})
+_MONTHS_IN_YEAR = 12
+_CENTURY = 100
+# "2019-07" is July 2019, not 2019-2107: a two-digit end read as a span
+# longer than this is not a year range and is left as written.
+_MAX_SHORT_RANGE_YEARS = 50
 
 # Per taxonomy code, the `extracted_fields` keys its section renderer writes
 # into the document, read off the renderer by rendering one entry per code with
@@ -174,10 +245,15 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
 
 # #1187: codes whose renderer writes nothing for a record list left whole --
 # `sections/education.py` skips a B1 row with no top-level degree or
-# institution, so an unsplit `degrees` list vanishes. Other codes keep the
-# entry's text (K2/K4 refuse to split by design), so a declined list there
-# loses nothing; warning on them put 31 false alarms in 16 corpus CVs.
-_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1'})
+# institution, so an unsplit `degrees` list vanishes; the appointment,
+# licence, membership and service renderers write a row from the schema
+# fields alone, so an unsplit `appointments` / `committees` /
+# `additional_roles` list is not in the document either (EBYSBC E6: 23
+# records in 5 CVs, KYOPUV and XELRLZ losing the owner's current rank).
+# Codes that keep the entry's text (K2/K4 refuse to split by design) lose
+# nothing to a declined list; warning on them put 31 false alarms in 16
+# corpus CVs.
+_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'Q1', 'Q2'})
 
 # #1187: the attendance dates `sections/education.py` writes into B1's Dates
 # column on top of `_RENDERED_FIELDS['B1']`: flat, generic, and the nested
@@ -211,6 +287,18 @@ REJECTED_LIST_CHECK = 'fan_out_record_list_rejected'
 _WARN_SEVERITY = 'WARN'
 _EVIDENCE_KEYS_SHOWN = 8
 
+# EBYSBC E34 (BZZNRL 137): the geographic scopes the service and presentation
+# sections have a table for (`_classify_geographic_scope`). A CV files a whole
+# line of records under a heading that names its scope ("National"). Stage 4
+# split one such line into three meetings, one abroad; the last record, which
+# carries the parent's whole text, was classified on that text, whose first
+# record is the meeting abroad, and a US meeting went under International. A
+# record keeps the scope its heading names unless the classifier, asked about
+# that record alone, puts it in another country (`_ABROAD_SCOPE`).
+_SCOPES = ('Regional', 'National', 'International')
+_SCOPE_RES = tuple((scope, re.compile(rf'\b{scope}\b', re.IGNORECASE)) for scope in _SCOPES)
+_ABROAD_SCOPE = 'International'
+
 _DATE_KEY_SUFFIX = '_date'
 _BARE_DATE_KEYS = frozenset({'date', 'year'})
 # `dates_attended` and its flat `dates_attended_start_date` / `_end_date` (#1187).
@@ -227,8 +315,54 @@ def _is_blank(value: object) -> bool:
         or (isinstance(value, (list, dict)) and not value)
 
 
+def _four_digit_year(match: re.Match[str]) -> str:
+    return str(expand_two_digit_year(int(match.group(1))))
+
+
+def _year_of_month_year(match: re.Match[str]) -> str:
+    """'3/02' -> '2002', '11/1988' -> '1988'; not a month -> as written."""
+    if not 1 <= int(match.group(1)) <= _MONTHS_IN_YEAR:
+        return match.group(0)
+    return match.group(2) or str(expand_two_digit_year(int(match.group(3))))
+
+
+def _full_range_end(match: re.Match[str]) -> str:
+    """'1993-96' -> '1993-1996', '1998-01' -> '1998-2001'; anything that
+    would not be a forward span of at most `_MAX_SHORT_RANGE_YEARS` is left."""
+    start = int(match.group(1))
+    end = start - start % _CENTURY + int(match.group(3))
+    if end <= start:
+        end += _CENTURY
+    if end - start > _MAX_SHORT_RANGE_YEARS:
+        return match.group(0)
+    return f'{match.group(1)}{match.group(2)}{end}'
+
+
+def _comparable(text: str) -> str:
+    """`text` with every date reduced to its four-digit year (the comment on
+    `_OPEN_END_TOKEN` says why)."""
+    text = _MONTH_NAME_RE.sub(' ', text)
+    text = _APOSTROPHE_YEAR_RE.sub(_four_digit_year, text)
+    text = _MONTH_YEAR_RE.sub(_year_of_month_year, text)
+    return _SHORT_RANGE_END_RE.sub(_full_range_end, text)
+
+
 def _tokens(text: str) -> Counter[str]:
-    return Counter(t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS)
+    """The content words of `text`, lowercased, dates compared by year and an
+    open end ('current', 'now') counted as the 'Present' it renders as."""
+    words = (t for t in _TOKEN_RE.findall(_comparable(text).lower()) if t not in _STOPWORDS)
+    return Counter(_OPEN_END_TOKEN if t in CURRENT_DATE_VALUES else t for t in words)
+
+
+def _text_to_cover(text: str, child_fields: Sequence[Mapping[str, Any]],
+                   rendered: frozenset[str]) -> str:
+    """The entry's text less its list numbers and, when every child names its
+    own role, a leading section label (see `_LEADING_LABEL_RE` above)."""
+    text = _LIST_NUMBER_RE.sub(r'\1', text)
+    roles = _ROLE_FIELDS & rendered
+    if all(any(not _is_blank(fields.get(key)) for key in roles) for fields in child_fields):
+        text = _LEADING_LABEL_RE.sub('', text, count=1)
+    return text
 
 
 def _leaf_text(value: object) -> str:
@@ -281,16 +415,14 @@ def _fields_carry_text(entry: Mapping[str, Any],
                 held += _tokens(_rendered_text(key, value, code))
             elif _is_written_date(code, key, value, fields):
                 held += _tokens(_leaf_text(value))
-    return not _tokens(str(entry.get('text') or '')) - held
+    return not _tokens(_text_to_cover(str(entry.get('text') or ''), child_fields, rendered)) - held
 
 
-def _record_list(value: object, schema: frozenset[str]) -> bool:
-    """True when `value` is 2+ dicts, every one of which is made of schema
-    keys and shares at least one with the schema."""
-    if not isinstance(value, list) or len(value) < _MIN_RECORDS:
-        return False
-    return all(isinstance(item, Mapping) and item
-               and set(item) <= schema for item in value)
+def _record_list(value: object, schema: frozenset[str],
+                 minimum: int = _MIN_LIST_ITEMS) -> bool:
+    """True when `value` is `minimum`+ dicts, every one of which is made of
+    schema keys and shares at least one with the schema."""
+    return _is_dict_list(value, minimum) and all(set(item) <= schema for item in value)
 
 
 def _record_schema(code: object, schema: frozenset[str]) -> frozenset[str]:
@@ -299,10 +431,47 @@ def _record_schema(code: object, schema: frozenset[str]) -> frozenset[str]:
     return schema | _EXTRA_RECORD_KEYS.get(str(code), frozenset())
 
 
-def _record_keys(fields: Mapping[str, Any], schema: frozenset[str]) -> list[str]:
-    """The `extracted_fields` keys outside the schema that hold a record list."""
-    return [key for key, value in fields.items()
-            if key not in schema and _record_list(value, schema)]
+def _list_candidates(fields: Mapping[str, Any],
+                     schema: frozenset[str]) -> Iterator[tuple[ListPath, object]]:
+    """`(path, value)` for every key outside the schema and, inside an object
+    under such a key, every key outside the schema one level down."""
+    for key, value in fields.items():
+        if key in schema:
+            continue
+        yield (key,), value
+        if isinstance(value, Mapping):
+            for inner, nested in value.items():
+                if inner not in schema:
+                    yield (key, inner), nested
+
+
+def _record_keys(fields: Mapping[str, Any], schema: frozenset[str],
+                 minimum: int = _MIN_LIST_ITEMS) -> list[ListPath]:
+    """The paths in `extracted_fields`, outside the schema, of a record list."""
+    return [path for path, value in _list_candidates(fields, schema)
+            if _record_list(value, schema, minimum)]
+
+
+def _list_at(fields: Mapping[str, Any], path: ListPath) -> list[Mapping[str, Any]]:
+    """The record list `_record_keys` found at `path`."""
+    outer, *inner = path
+    value = fields[outer]
+    return value[inner[0]] if inner else value
+
+
+def _without(fields: Mapping[str, Any], path: ListPath) -> dict[str, Any]:
+    """`fields` less the value at `path`; an object the removal empties goes too."""
+    outer, *inner = path
+    rest = {key: value for key, value in fields.items() if key != outer}
+    if inner:
+        container = {key: value for key, value in fields[outer].items() if key != inner[0]}
+        if container:
+            rest[outer] = container
+    return rest
+
+
+def _path_name(path: ListPath) -> str:
+    return _PATH_SEPARATOR.join(path)
 
 
 def _parent_is_own_record(scalars: Mapping[str, Any],
@@ -314,22 +483,48 @@ def _parent_is_own_record(scalars: Mapping[str, Any],
     Needs an identity value first: a non-date field the items also use. A
     `mentee_level` the items never carry is shared context, and start/end dates
     the items repeat are the same span, so a parent with neither is not a record.
+    Items that carry nothing but dates are the parent's other periods
+    (`additional_dates: [{start_date, end_date}]`), so there any non-date
+    field of the parent is its identity.
     Given one, the entry's own text settles it when it can: one more tab
     segment than list items means the parent is the extra record, exactly as
     many means the list already holds every one of them (a first post stage 4
-    also left in the parent's scalars). When the counts say neither, a parent
-    whose values some item repeats is that item, not emitted twice.
+    also left in the parent's scalars). A single segment says nothing -- every
+    one-line entry has one -- so it does not count for a one-item list. When
+    the counts say neither, a parent whose values some item repeats is that
+    item, not emitted twice.
     """
     item_keys = set().union(*items)
+    periods_only = all(_is_date_key(key) for key in item_keys)
     identity = {key: value for key, value in scalars.items()
-                if key in schema and key in item_keys
+                if key in schema and (periods_only or key in item_keys)
                 and not _is_date_key(key) and not _is_blank(value)}
     if not identity:
         return False
-    if segment_count in (len(items), len(items) + 1):
+    if segment_count > 1 and segment_count in (len(items), len(items) + 1):
         return segment_count == len(items) + 1
     return not any(all(item.get(key) == value for key, value in identity.items())
                    for item in items)
+
+
+def _own_values(scalars: Mapping[str, Any],
+                items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The parent's own record: `scalars` less every `_JOINED_VALUE_SEPARATOR`
+    part of a value that an item holds as its own value of the same field.
+    EBYSBC E34 (CTWLTR 55): stage 4 put all three consultancies, joined, in
+    the parent's `organization` and two of them in items too, so they rendered
+    twice. A value no item repeats a part of is kept whole, and so is one
+    every part of which an item holds (nothing would be left of its own)."""
+    own = dict(scalars)
+    for key, value in scalars.items():
+        if not isinstance(value, str) or _JOINED_VALUE_SEPARATOR not in value:
+            continue
+        named = {norm(item[key]) for item in items if isinstance(item.get(key), str)}
+        parts = [part.strip() for part in value.split(_JOINED_VALUE_SEPARATOR) if part.strip()]
+        kept = [part for part in parts if norm(part) not in named]
+        if kept and len(kept) < len(parts):
+            own[key] = f'{_JOINED_VALUE_SEPARATOR} '.join(kept)
+    return own
 
 
 def _segments(text: object) -> list[str]:
@@ -348,7 +543,10 @@ def _child_texts(text: object, records: Sequence[Mapping[str, Any]]) -> list[str
     """Each record's text: its own tab segment when the segments line up one to
     one with the records, else a line built from the record's values (a record
     that wrapped across lines makes the counts disagree, and pairing segments
-    by position then would hand a record another record's tail)."""
+    by position then would hand a record another record's tail). A lone
+    record -- a one-item list the parent adds nothing to -- is the whole text."""
+    if len(records) == 1:
+        return [str(text or '')]
     segments = _segments(text)
     if len(segments) == len(records):
         return segments
@@ -364,21 +562,20 @@ def _child(entry: Mapping[str, Any], fields: dict[str, Any], text: str,
     return child
 
 
-def _is_dict_list(value: object) -> bool:
-    """2+ non-empty dicts: record-like, whatever their keys."""
-    return (isinstance(value, list) and len(value) >= _MIN_RECORDS
+def _is_dict_list(value: object, minimum: int = _MIN_RECORDS) -> bool:
+    """`minimum`+ non-empty dicts: record-like, whatever their keys."""
+    return (isinstance(value, list) and len(value) >= minimum
             and all(isinstance(item, Mapping) and item for item in value))
 
 
 def _rejected_record_lists(fields: Mapping[str, Any],
                            schema: frozenset[str]) -> dict[str, list[str]]:
-    """`{key: item keys outside the schema}` for every field outside the
-    schema that holds a list of record-like dicts `_record_list` refused
-    (#1187). Key names only; never a value."""
-    return {key: sorted({k for item in value for k in item} - schema)
-            for key, value in fields.items()
-            if key not in schema and _is_dict_list(value)
-            and not _record_list(value, schema)}
+    """`{path: item keys outside the schema}` for every list of record-like
+    dicts outside the schema that `_record_list` refused (#1187). Key names
+    only; never a value."""
+    return {_path_name(path): sorted({k for item in value for k in item} - schema)
+            for path, value in _list_candidates(fields, schema)
+            if _is_dict_list(value, _MIN_LIST_ITEMS) and not _record_list(value, schema)}
 
 
 def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> list[dict[str, Any]]:
@@ -397,7 +594,7 @@ def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> 
             'code': code,
             'section': None,
             'message': (f"{len(cases)} {code} entr{'y' if len(cases) == 1 else 'ies'}: "
-                        f"`{key}` holds several records that were not split into "
+                        f"`{key}` holds records that were not split into "
                         f"separate rows ({why}); a record may be missing from "
                         "the output"),
             'evidence': [f"{code}.{key}: {len(cases)} entr{'y' if len(cases) == 1 else 'ies'}",
@@ -414,7 +611,7 @@ def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> 
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return {}
-    return {**{key: [] for key in _record_keys(fields, schema)},
+    return {**{_path_name(path): [] for path in _record_keys(fields, schema)},
             **_rejected_record_lists(fields, schema)}
 
 
@@ -433,7 +630,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     entry's text (the low-coverage overflow that re-emits a narrative the
     row does not carry, `_recover_unrendered_records`) sees what it saw
     before. It carries no `FANNED_OUT_FROM` either, so dedup weighs it as it
-    weighed the parent. Every earlier child is its record alone, with its own
+    weighed the parent; `LAST_STAGE4_RECORD` marks it for the scope rules
+    instead. Every earlier child is its record alone, with its own
     segment or built line, and without the parent's `_STAGE5_ENTRY_KEYS`: a
     scalar or an enrichment inherited from the last record would put that
     record's value on another one. Declined for a code whose section
@@ -454,6 +652,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     last = copy.deepcopy(dict(entry))
     last['extracted_fields'] = {key: value for key, value in last['extracted_fields'].items()
                                 if key != records_key}
+    last[LAST_STAGE4_RECORD] = {'key': records_key, 'index': len(records) - 1,
+                                'count': len(records)}
     return [*earlier, last]
 
 
@@ -462,11 +662,12 @@ def _fan_out_stage4_records(entry: Mapping[str, Any], schema: frozenset[str],
     """`(children, entry)`: the children of an entry carrying stage 4's
     records list, when `_stage4_children` splits it, and the entry the generic
     rules should see otherwise -- `entry` without that key, so a declined
-    list changes nothing. An entry whose own scalars also hold a record list
-    is left to the generic rules, which split that list as before."""
+    list changes nothing. An entry whose own scalars also hold a list of two
+    or more records is left to the generic rules, which split that list as
+    before."""
     fields = entry['extracted_fields']
     own = {key: value for key, value in fields.items() if key != records_key}
-    if _is_dict_list(fields[records_key]) and not _record_keys(own, schema):
+    if _is_dict_list(fields[records_key]) and not _record_keys(own, schema, _MIN_RECORDS):
         children = _stage4_children(entry, fields, records_key)
         if children is not None:
             return children, entry
@@ -484,21 +685,55 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str],
         if children is not None:
             return children
         fields = entry['extracted_fields']
-    keys = _record_keys(fields, schema)
-    if len(keys) != 1 or any(fields.get(k) for k in _FORMATTED_KEYS):
+    paths = _record_keys(fields, schema)
+    if len(paths) != 1 or any(fields.get(k) for k in _FORMATTED_KEYS):
         return None
-    key = keys[0]
-    items = fields[key]
-    scalars = {k: v for k, v in fields.items() if k not in (key, _ENTRY_REMARK_KEY)}
+    items = _list_at(fields, paths[0])
+    scalars = {k: v for k, v in _without(fields, paths[0]).items() if k != _ENTRY_REMARK_KEY}
     own = _parent_is_own_record(scalars, items, schema, len(_segments(entry.get('text'))))
-    records = ([scalars] if own else []) \
+    records = ([_own_values(scalars, items)] if own else []) \
         + [dict(item) for item in items]
     child_fields = [{**copy.deepcopy(scalars), **copy.deepcopy(record)} for record in records]
     if not _fields_carry_text(entry, child_fields):
         return None
     texts = _child_texts(entry.get('text'), records)
-    return [_child(entry, fields, text, key, i, len(records))
+    return [_child(entry, fields, text, _path_name(paths[0]), i, len(records))
             for i, (fields, text) in enumerate(zip(child_fields, texts))]
+
+
+def inherited_scope(entry: Mapping[str, Any]) -> str | None:
+    """The geographic scope a fanned-out child takes from its parent: the one
+    scope its nearest CV heading names ("National", "NATIONAL SERVICE ROLES").
+    Every child counts, the last of stage 4's records included. None when the
+    entry is not a child, or when that heading names two scopes
+    ("International/National") or none does."""
+    if FANNED_OUT_FROM not in entry and LAST_STAGE4_RECORD not in entry:
+        return None
+    for heading in reversed(entry.get('hierarchy') or []):
+        named = [scope for scope, pattern in _SCOPE_RES if pattern.search(str(heading))]
+        if named:
+            return named[0] if len(named) == 1 else None
+    return None
+
+
+def record_scope(entry: Mapping[str, Any], own_scope: str) -> str:
+    """The scope `entry` files under, given `own_scope`, the classifier's
+    answer about its `record_text`: a child keeps the scope its heading names
+    (`inherited_scope`) unless the classifier puts the record abroad; any
+    other entry takes `own_scope`."""
+    heading = inherited_scope(entry)
+    if heading is None or own_scope == _ABROAD_SCOPE:
+        return own_scope
+    return heading
+
+
+def record_text(entry: Mapping[str, Any]) -> str:
+    """The text of the one record `entry` stands for: its own text, except for
+    the last of stage 4's records, whose text is the parent's whole line (every
+    record of the list); that one is the line built from its own fields."""
+    if LAST_STAGE4_RECORD in entry:
+        return _built_text(entry.get('extracted_fields') or {})
+    return str(entry.get('text') or '')
 
 
 def fan_out_multi_record_entries(
@@ -517,8 +752,9 @@ def fan_out_multi_record_entries(
 
     A list of record-like dicts that is not fanned out -- `_record_list`
     refused it, or a later guard declined the entry -- is not dropped silently
-    (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is given, one render-warning dict per (code, list
-    key) is appended to it (`REJECTED_LIST_CHECK`).
+    (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is
+    given, one render-warning dict per (code, list path) is appended to it
+    (`REJECTED_LIST_CHECK`).
 
     `records_key` names the list stage 4 keeps when the LLM returned several
     records for one entry (`stage4.schemas.STAGE4_RECORDS_KEY`); None splits

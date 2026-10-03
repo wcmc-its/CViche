@@ -20,15 +20,93 @@ unclassifiable talk is published in the middle bucket rather than dropped.
 Dates arrive under four different field names and field extraction emits the
 STRING "None" often enough that it is checked for explicitly at both the `year`
 and the `start_date` fallback; a literal "None" in the year column is worse than
-a blank one. A title-less entry falls back to its first 150 characters of raw
-text.
+a blank one. A title-less entry is titled by `_untitled_talk_title`: role and
+event name when the source line holds nothing else, otherwise the source line
+without the list number, year and venue the other two cells already show.
 """
 import logging
+import re
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
+
+# The pieces of an R source line the row already shows elsewhere, stripped when
+# stage 4 found no talk title (EBYSBC E23: RNKYST-06, MRJDWE-08, GJXIWD-04).
+_LIST_NUMBER_RE = re.compile(r'^\s*(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
+_LEADING_YEAR_RE = re.compile(r'^\s*((?:19|20)\d{2})(?!\d)[\s.,:;\-–—]*')
+_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+_MONTH = r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?'
+# A date closing the line ("..., March 3-4, 1997."); group 1 is its year.
+_WEEKDAY = r'(?:mon|tues|wednes|thurs|fri|satur|sun)day'
+_TRAILING_DATE_RE = re.compile(
+    rf'[\s,;:\-–—(]*(?:{_WEEKDAY},?\s*)?(?:{_MONTH}\s*)?(?:\d{{1,2}}(?:st|nd|rd|th)?(?:\s*[-–]\s*\d{{1,2}})?,?\s*)?'
+    r'((?:19|20)\d{2})\)?\.?\s*$', re.IGNORECASE)
+_WORD_RE = re.compile(r'[^\W\d_]{2,}')
+_DATE_WORD_RE = re.compile(rf'\b{_MONTH}(?!\w)|\d+(?:st|nd|rd|th)?\b', re.IGNORECASE)
+# Joining words left over once role, event and venue are taken out of a source
+# line: "Invited Speaker at the <event>" says nothing more than its parts.
+_CONNECTIVES = frozenset({'at', 'the', 'of', 'and', 'in', 'on', 'for', 'to', 'an', 'by', 'with'})
+_TITLE_EDGES = ' \t,;:|-–—'
+_SEPARATOR_RUN_RE = re.compile(r'\s*([,;:|\-–—])(?:\s*[,;:|.\-–—])+\s*')
+
+
+def _normalize_space(text: str) -> str:
+    """Collapse whitespace runs (source lines are often tab-aligned) and fold
+    curly apostrophes so field values match the line they were taken from."""
+    return re.sub(r'\s+', ' ', text.replace('\u2019', "'").replace('\u2018', "'")).strip()
+
+
+def _remove_phrase(text: str, phrase: str) -> str:
+    """`text` without each whole-word, case-insensitive occurrence of `phrase`."""
+    if not phrase:
+        return text
+    return re.sub(rf'(?<!\w){re.escape(phrase)}(?!\w)', ' ', text, flags=re.IGNORECASE)
+
+
+def _remove_venue(text: str, venue: str) -> str:
+    """`text` without `venue` where it stands as a segment of its own, set off
+    by separators or the line's edges. Inside a phrase ("a conference hosted
+    by <venue>") it stays, or the phrase would be left cut short."""
+    if not venue:
+        return text
+    return re.sub(
+        rf'(?:^|(?<=[,;:|\-–—(]))\s*{re.escape(venue)}(?=\s*(?:[,;:|.\-–—()]|$|\d|{_MONTH}(?!\w)))',
+        ' ', text, flags=re.IGNORECASE)
+
+
+def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
+                         date_cell: str) -> str:
+    """The Title cell of an R entry stage 4 found no title for.
+
+    The source line restates what the Institution and Dates cells already
+    show. Strip its list number, the year the Dates cell shows when it opens
+    or closes the line, and the venue. When nothing is left beyond role,
+    event name and date words, the title is role + event name ("Visiting
+    Professor, <event>"); anything more may be the talk title stage 4 missed
+    (#475), so the stripped line renders instead.
+    """
+    shown_years = set(_YEAR_RE.findall(date_cell or ''))
+    line = _LIST_NUMBER_RE.sub('', _normalize_space(text or ''), count=1)
+    leading_year = _LEADING_YEAR_RE.match(line)
+    if leading_year and leading_year.group(1) in shown_years:
+        line = line[leading_year.end():]
+    line = _remove_venue(line, _normalize_space(venue or ''))
+    trailing_date = _TRAILING_DATE_RE.search(line)
+    if trailing_date and trailing_date.group(1) in shown_years:
+        line = line[:trailing_date.start()]
+
+    residue = _remove_phrase(line, _normalize_space(venue or ''))
+    for phrase in sorted((_normalize_space(role or ''), _normalize_space(event_name or '')),
+                         key=len, reverse=True):
+        residue = _remove_phrase(residue, phrase)
+    residue = _DATE_WORD_RE.sub(' ', residue)
+    if not any(w.casefold() not in _CONNECTIVES for w in _WORD_RE.findall(residue)):
+        # The stage-4 values as given, so the venue's own duplicate check
+        # in `_fill_presentations` recognises them in the title.
+        return ', '.join(part.strip() for part in (role or '', event_name or '') if part.strip())
+    return _SEPARATOR_RUN_RE.sub(r'\1 ', _normalize_space(line)).strip(_TITLE_EDGES)
 
 
 class PresentationsSection:
@@ -129,15 +207,14 @@ class PresentationsSection:
                 # Format date as yyyy per WCM template requirements
                 formatted_date = format_date_for_section(raw_date, 'R') if raw_date else ''
 
-                # The role never replaces the title: when the LLM empties title
-                # the raw entry text below still renders, and the role leads the
-                # venue.
                 role = str(fields.get('role') or '').strip()
                 if role.lower() == 'none':
                     role = ''
 
                 if not title:
-                    title = entry.get('text', '')
+                    title = _untitled_talk_title(
+                        entry.get('text', ''), role,
+                        str(fields.get('event_name') or ''), institution, formatted_date)
 
                 # The R block is Title | Institution/Location | Dates, so the
                 # meeting that hosted the talk has no column of its own and

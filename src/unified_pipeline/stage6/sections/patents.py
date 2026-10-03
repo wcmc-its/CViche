@@ -28,10 +28,18 @@ The template's own instruction line ("Please include inventors, title of
 invention and patent number.") sits directly under the heading and is blanked
 before anything is written, so it does not read as part of the first patent.
 
-An entry with neither a title nor a patent number is skipped: patents arrive
-with sparse partial records fairly often, and a table of nothing but a filing
-date is noise. A `narrative` of MIN_NARRATIVE_CHARS or fewer is dropped for the
-same reason.
+An entry with neither a title, a patent number nor a source-text note is skipped:
+patents arrive with sparse partial records fairly often, and a table of nothing
+but a filing date is noise. A `narrative` of MIN_NARRATIVE_CHARS or fewer is
+dropped for the same reason.
+
+The Description row also carries stage 4's `notes`, a key the M2D schema does
+not define, which stage 4 fills with a line it could not map to a field (a
+licence agreement listed under the patents). Before #817 no row read it, and a
+record holding only `notes` was skipped as sparse: the whole line was lost
+(EBYSBC E14, XELRLZ-06). Stage 4 also writes `notes` as its own remark about
+an entry ("Entry contains three patents"), which is not CV content, so a note
+renders only when every word of it is in the entry's own source text.
 
 Rendering twice into the same document used to append a second set of tables.
 `_remove_rendered_patent_tables` now clears the tables this writer built --
@@ -39,6 +47,7 @@ recognised by their first label, which no template table carries -- and the
 spacing paragraphs between them, before rendering again.
 """
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -111,13 +120,27 @@ class Patent:
     issue_date: str = ''
     assignee: str = ''
     narrative: str = ''
+    notes: str = ''
     source_entry: Mapping[str, Any] | None = None
 
     @property
     def is_renderable(self) -> bool:
-        """A patent with neither a title nor a number is a sparse partial
-        record; a table of its remaining attributes would be noise."""
-        return bool(self.title or self.patent_number)
+        """A patent with neither a title, a number nor a source-text note is
+        a sparse partial record; a table of its remaining attributes would be
+        noise. A note alone is a whole CV line stage 4 could not map, so it
+        renders (#817); a `narrative` alone still does not, as before."""
+        return bool(self.title or self.patent_number
+                    or len(self.notes.strip()) > MIN_NARRATIVE_CHARS)
+
+    @property
+    def description(self) -> str:
+        """The Description row: a substantive `narrative`, then a `notes` line
+        that is not already in it, joined by a space. '' when neither has one."""
+        parts = [part for part in (self.narrative.strip(), self.notes.strip())
+                 if len(part) > MIN_NARRATIVE_CHARS]
+        if len(parts) == 2 and _words(parts[1]) in _words(parts[0]):
+            parts = parts[:1]
+        return ' '.join(parts)
 
 
 def _text(value: object) -> str:
@@ -126,13 +149,32 @@ def _text(value: object) -> str:
     return str(value) if value else ''
 
 
+_NON_ALNUM_RUN = re.compile(r'[^a-z0-9]+')
+
+
+def _words(text: str) -> str:
+    """`text` lowercased with every run of punctuation or space as one space,
+    padded with a space at each end so a containment test matches whole words."""
+    return f" {_NON_ALNUM_RUN.sub(' ', text.lower()).strip()} "
+
+
+def _source_note(fields: Mapping[str, Any], source_text: object) -> str:
+    """Stage 4's off-schema `notes`, kept only when its words are all in the
+    entry's source text in order -- a line copied from the CV. A remark stage 4
+    wrote about the entry is not, and yields ''."""
+    notes = _text(fields.get('notes')).strip()
+    if not notes or not isinstance(source_text, str) or not _words(notes).strip():
+        return ''
+    return notes if _words(notes) in _words(source_text) else ''
+
+
 def _normalize_patent(entry: Mapping[str, Any]) -> Patent:
     """Resolve one raw stage-4 M2D dict into a `Patent`.
 
     `extracted_fields` is sometimes explicitly `None` rather than absent
     (#659), which a bare `.get('extracted_fields', {})` does not cover.
     Stage-4 fields: patent_number, title, inventors, filing_date, issue_date,
-    status, assignee, narrative.
+    status, assignee, narrative, and the off-schema `notes` (`_source_note`).
     """
     fields = entry.get('extracted_fields') or {}
     filing_date = _text(fields.get('filing_date'))
@@ -148,6 +190,7 @@ def _normalize_patent(entry: Mapping[str, Any]) -> Patent:
                     if issue_date else ''),
         assignee=_text(fields.get('assignee')),
         narrative=_text(fields.get('narrative')),
+        notes=_source_note(fields, entry.get('text')),
         source_entry=entry,
     )
 
@@ -163,8 +206,7 @@ def _build_patent_rows(patent: Patent) -> tuple[tuple[str, str], ...]:
         (FILING_DATE_LABEL, patent.filing_date),
         (ISSUE_DATE_LABEL, patent.issue_date),
         (ASSIGNEE_LABEL, patent.assignee),
-        (DESCRIPTION_LABEL,
-         patent.narrative if len(patent.narrative.strip()) > MIN_NARRATIVE_CHARS else ''),
+        (DESCRIPTION_LABEL, patent.description),
     )
     return tuple((label, value) for label, value in candidates if value)
 

@@ -134,3 +134,139 @@ def test_t_validation_recoded_m1_is_written_once_when_no_summary_renders(tmp_pat
     text = _render(tmp_path, _recoded_and_own_m1_entries())
     assert text.count(RECODED_TOKEN) == 1
     assert text.count(OWN_M1_TOKEN) == 1
+
+
+# AUTOPSY-EBYSBC-batch-2026-10-02 class E27: a dated M1 record (a position, a
+# project) handed to a generated summary that never reproduces it rendered
+# nowhere. "Quorvex", "Zentrix", "Plimsoll" and "Vantorel" are invented words
+# that occur nowhere else in the fixtures or the bundled template.
+RECORD_TOKEN = "Quorvex"
+SHORT_RECORD_TOKEN = "Zentrix"
+PROSE_FIELDS_TOKEN = "Plimsoll"
+EMPTY_FIELDS_TOKEN = "Vantorel"
+
+
+def _dated_record() -> dict:
+    return {"text": f"2004-2007: Research Associate, {RECORD_TOKEN} Widget Institute, "
+                    "Springfield; studied gear lubrication kinetics",
+            "taxonomy_code": "M1",
+            "extracted_fields": {"position": "Research Associate",
+                                 "institution": f"{RECORD_TOKEN} Widget Institute",
+                                 "start_date": "2004", "end_date": "2007", "narrative": None},
+            "element_idx_start": 12}
+
+
+def _record_entries(*records: dict) -> list[dict]:
+    """The owner's own prose M1 statement plus *records*."""
+    return _recoded_and_own_m1_entries()[:2] + list(records)
+
+
+def _render_with_sidecar(tmp_path, entries, research_summary=None) -> tuple[str, list[dict]]:
+    """The output text and the sidecar's M1 Appendix-diversion warnings."""
+    text = _render(tmp_path, entries, research_summary=research_summary)
+    sidecar = json.loads((tmp_path / "TESTAA_render_warnings.json").read_text())
+    return text, [w for w in sidecar["warnings"]
+                  if w.get("check") == "appendix_diversion" and w.get("code") == "M1"]
+
+
+def _prose_m1_entries() -> list[dict]:
+    """Two M1 entries that are prose, not records: only the prose fields are
+    populated, or a record field is present but empty."""
+    return [
+        {"text": f"Our {PROSE_FIELDS_TOKEN} group asks how widget surfaces wear under repeated load",
+         "taxonomy_code": "M1", "element_idx_start": 16,
+         "extracted_fields": {"narrative": "how widget surfaces wear", "description": "surface wear",
+                              "research_area": "tribology"}},
+        {"text": f"A {EMPTY_FIELDS_TOKEN} theme across the program concerns lubricant chemistry broadly",
+         "taxonomy_code": "M1", "element_idx_start": 18,
+         "extracted_fields": {"narrative": "lubricant chemistry", "start_date": None, "title": ""}},
+    ]
+
+
+def test_dated_m1_record_a_generated_summary_leaves_out_reaches_the_appendix(tmp_path):
+    """E27: the record reaches the Appendix with its own warning reason; the
+    owner's prose statements still feed the summary only."""
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    entries = _record_entries(_dated_record(), *_prose_m1_entries())
+    text, diversions = _render_with_sidecar(tmp_path, entries, summary)
+    assert SUMMARY_TOKEN in text
+    assert text.count(RECORD_TOKEN) == 1, "the dated M1 record rendered nowhere, or twice"
+    for token in (OWN_M1_TOKEN, PROSE_FIELDS_TOKEN, EMPTY_FIELDS_TOKEN):
+        assert token not in text, f"a prose M1 entry ({token}) leaked to the Appendix"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "m1_record_not_in_summary", 1)]
+
+
+def test_dated_m1_record_the_summary_reproduces_is_not_repeated(tmp_path):
+    """The summary paragraph is a tracked insertion; it still counts as the
+    page the reader sees, so a record it carries stays out of the Appendix."""
+    summary = _summary("llm_generated",
+                       f"From 2004 to 2007 Dr. Public was a Research Associate at the {RECORD_TOKEN} "
+                       "Widget Institute in Springfield, studying gear lubrication kinetics.")
+    text = _render(tmp_path, _record_entries(_dated_record()), research_summary=summary)
+    assert text.count(RECORD_TOKEN) == 1
+
+
+def test_dated_m1_record_too_short_to_verify_stays_out(tmp_path):
+    """A record with too few distinctive words cannot be proven absent, so it
+    is not added: the Appendix only takes a verified miss."""
+    short = {"text": f"2019-2020: {SHORT_RECORD_TOKEN} lab", "taxonomy_code": "M1",
+             "extracted_fields": {"start_date": "2019", "end_date": "2020"}, "element_idx_start": 14}
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    text = _render(tmp_path, _record_entries(short), research_summary=summary)
+    assert SHORT_RECORD_TOKEN not in text
+
+
+def test_dated_m1_record_is_not_repeated_when_the_summary_is_the_m1_text(tmp_path):
+    summary = _summary("existing_content",
+                       f"The {SUMMARY_TOKEN} summary is the CV's own M1 text, joined verbatim here.")
+    text = _render(tmp_path, _record_entries(_dated_record()), research_summary=summary)
+    assert RECORD_TOKEN not in text
+
+
+def test_dated_m1_record_is_written_once_with_the_old_reason_when_no_summary_renders(tmp_path):
+    """No summary: every M1 entry reaches the Appendix through the unmapped-code
+    path (#317) and is reported as such, not as a record the summary left out."""
+    text, diversions = _render_with_sidecar(tmp_path, _record_entries(_dated_record()))
+    assert text.count(RECORD_TOKEN) == 1
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "renderer_declined", 2)]
+
+
+def test_t_validation_recoded_m1_with_only_prose_fields_still_reaches_the_appendix(tmp_path):
+    """#1328 routes every recode, whether or not stage 4 found a record field
+    in it. A recode carrying only `narrative` is not an E27 record, so the
+    recode test alone must bring it to the Appendix, with its own reason."""
+    entries = _recoded_and_own_m1_entries()
+    entries[2]["extracted_fields"] = {"narrative": "website for the widget lab"}
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    text, diversions = _render_with_sidecar(tmp_path, entries, summary)
+    assert text.count(RECODED_TOKEN) == 1, "a prose-only T-validation recode rendered nowhere"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "t_validation_recoded", 1)]
+
+
+# Invented token for the instruction-box case below.
+BOX_RECORD_TOKEN = "Mardella"
+
+
+def test_dated_m1_record_is_not_vouched_for_by_the_template_instruction_box(tmp_path):
+    """The template's instruction box is still in the document when the M1
+    check runs and is deleted before save. A record whose second line shares
+    its words with the box's "'Local' refers to the home institution;
+    'regional' refers to city, state and nearby states" prompt must not count
+    as rendered on the strength of that box text, or it is lost with the box."""
+    record = {"text": f"2011-2015: Outreach Liaison, {BOX_RECORD_TOKEN} Widget Office\n"
+                      "Linked the home institution with local, regional and nearby states",
+              "taxonomy_code": "M1",
+              "extracted_fields": {"position": "Outreach Liaison", "start_date": "2011",
+                                   "end_date": "2015"},
+              "element_idx_start": 20}
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    text = _render(tmp_path, _record_entries(record), research_summary=summary)
+    assert "delete this instruction box" not in text.lower()
+    assert text.count(BOX_RECORD_TOKEN) == 1, "the instruction box vouched for an M1 record"

@@ -52,6 +52,8 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_CV_TITLE,
     DROP_DATE_STAMP,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
+    DROP_ON_REQUEST,
+    DROP_PAGE_FURNITURE,
     DROP_RENDERS_EMPTY,
     DROP_RULE_LINE,
     DROP_SECTION_HEADER,
@@ -1122,8 +1124,6 @@ def test_signature_blocks_are_dropped_with_both_signals(text, sentence):
     ("Jane Q. Doe, Example University, 03/04/2019", "Signature block."),
     ("Date of Birth: 01/02/1970", "Signature block."),
     ("Signed: Pat Roe, MD", "Signature line."),  # a name that is not the owner's
-    ("Jane Q. Doe", "Signature line."),  # a bare name has no date or signature word
-    ("March 3, 2021   Jane Q. Doe", "Structural artifact."),  # owner name plus date alone
     ("Of", "Signature line."),
     ("Candidate of Medicine, 06/15/2010", "Structural artifact."),
     # Degree candidacy lines hold a date and the owner's credential.
@@ -1157,7 +1157,7 @@ def test_each_reasoning_word_alone_is_a_signature_signal(text, lead):
 ])
 def test_signature_reasoning_signal_is_word_bounded_and_not_negated(lead):
     reasoning = f"[T-validation confirmed] {lead}"
-    assert _sig("Jane Doe 3/4/2020", reasoning) is None
+    assert _sig("Date: ____ Signature ____", reasoning) is None
 
 
 def test_signature_shape_alone_or_reasoning_alone_keeps_the_entry():
@@ -1233,3 +1233,168 @@ def test_fill_appendix_passes_the_cv_owner_to_the_signature_shape(tmp_path, capl
     assert "Signed:" not in text
     doc2 = Document(str(_render(tmp_path, [_NAME_ENTRY, entry, keeper], caplog)))
     assert "Signed:" in "\n".join(p.text for p in doc2.paragraphs)
+
+
+# ------------------------------------------- #1221 (EBYSBC E24): page furniture
+
+@pytest.mark.parametrize("text", [
+    # Word field-code text left in the runs by a .doc conversion.
+    "PAGE \\* MERGEFORMAT 7",
+    "Page PAGE 3 of NUMPAGES 12",
+    "page PAGE \\* MERGEFORMAT 4/ NUMPAGES \\* MERGEFORMAT 11",
+    "PAGE iv",
+    "SHAPE \\* CHARFORMAT",
+    "Curriculum Vitae Page PAGE 23",
+    'JQDoe vita, version DATE \\@ "d MMMM yyyy" \\* MERGEFORMAT 3 November 2011',
+    'DATE \\@ "yy-MM-dd" 11-03-02 JQD vitae',
+    # A lone page word and the owner's running header or footer.
+    "Page",
+    "Jane Q. Doe P a g e | 2",
+    "Jane Doe Curriculum Vitae 7",
+    "Jane Q. Doe, MD",
+    "March 3, 2021   Jane Q. Doe",
+    "Jane Q. Doe, MD -- vita as of 3/11/2011",
+    "Jane Q. Doe, M.D., F.A.C.P. (revision of 2 Nov 2011)",
+    "p. 3 -- Doe, Jane, M.D. -- C.V. 2/11/03",
+    "Jane Q. Doe\u2019s Curriculum Vitae",
+    # Revision stamps, month-name or numeric, two- or four-digit year.
+    "Vitae updated 7 November 2011",
+    "Last revision date: 2 Oct 2011",
+    "Revision 11/3/02",
+    "(revised 02-11-03)",
+    "Version of 3/11/2011",
+    "Version of November 2011",
+    # A section label repeated at the top of the next page.
+    "SAMPLE APPOINTMENTS  (Continued):",
+    "Sample Committees (cont'd)",
+])
+def test_page_furniture_is_dropped_text_only_when_t_coded(text):
+    assert _sig(text, None) == DROP_PAGE_FURNITURE
+    assert _sig(text, None, code="K1") is None
+
+
+@pytest.mark.parametrize("text", [
+    "1979-1983",  # no furniture evidence: a date range alone is kept as before
+    "September 1983",
+    "Spring 1979",
+    "Pages 12-19",  # a citation's page range
+    "p. 45-67",
+    "Page Street Clinic",
+    "Example Lab, Page 2",
+    "Jane Q. Doe Lab, Example University",
+    "Doe J, Roe P. Sample title. Example Journal 2019",
+    "PAGE 3 Doe J. Sample title",
+    "Pat Roe, MD",  # a name that is not the owner's
+    "Updated the curriculum for the sample course, 2019",
+    "Date of Birth: 01/02/1970",
+    "Statement of Sample Goals:",
+    "Sample Program 2 (Continued)",
+    "Continued",
+    # Record numbers: a phone number, a ZIP code, a run-together phone number
+    # and a citation's volume and pages are content beside the owner's name.
+    "Jane Q. Doe, MD 555-010-0199",
+    "Jane Q. Doe 12345",
+    "Jane Q. Doe 5550100199",
+    "Doe J. 2011;7:101-109",
+    # "(continued)" after a record rather than a heading.
+    "Served on the sample review committee (continued)",
+    "Member, Example Society (continued)",
+    "Example Society Annual Meeting Program Planning Committee (Continued)",
+])
+def test_page_furniture_never_drops_a_line_with_other_words(text):
+    assert _sig(text, None) not in {DROP_PAGE_FURNITURE, DROP_ON_REQUEST}
+
+
+def test_owner_name_needs_the_owner_tokens():
+    # Without the owner's tokens the name is just two words, kept.
+    assert _sig("Jane Q. Doe, MD", None, tokens=OwnerTokens()) is None
+    assert _sig("Page PAGE 3", None, tokens=OwnerTokens()) == DROP_PAGE_FURNITURE
+
+
+def test_fused_initials_are_the_owners_only():
+    # "JQDoe" is the owner's initials on her surname; "XYDoe" and "JQRoe" are not.
+    assert appendix_module.is_page_furniture("JQDoe CV", _OWNER_TOKENS)
+    assert not appendix_module.is_page_furniture("XYDoe CV", _OWNER_TOKENS)
+    assert not appendix_module.is_page_furniture("JQRoe CV", _OWNER_TOKENS)
+    assert not appendix_module.is_page_furniture("JQDZDoe CV", _OWNER_TOKENS)  # four initials
+
+
+def test_owner_signature_tokens_carry_names_and_initials():
+    assert _OWNER_TOKENS.names == {"jane", "doe"}
+    assert _OWNER_TOKENS.initials == {"j", "q", "d"}
+
+
+@pytest.mark.parametrize("text", [
+    "References: Available on Request",
+    "Available upon request |",
+    "References available upon request.",
+])
+def test_references_on_request_is_dropped_when_t_coded(text):
+    assert _sig(text, None) == DROP_ON_REQUEST
+    assert _sig(text, None, code="K1") is None
+
+
+def test_on_request_needs_the_whole_line():
+    assert _sig("Sample data set, available on request from the author", None) is None
+
+
+@pytest.mark.parametrize("text, sentence", [
+    ("Project Sponsor Role Percent Total Period", "Table header row with column labels."),
+    ("Lecture # Topic Audience Venue Hours", "Structural header row with column labels."),
+    ("Prize Title Given By Year Received", "Structural header line with only column labels."),
+])
+def test_single_spaced_column_header_rows_are_dropped_with_both_signals(text, sentence):
+    assert _sig(text, _confirmed(sentence)) == DROP_COLUMN_HEADER
+    assert _sig(text, _confirmed("Software skill listing.")) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Sample Grant Title Example Funder 2019",  # a digit means data
+    "Example Society, Member",  # sentence punctuation
+    "Sample Site",  # two words
+    "Member of the Guild",  # fewer than three capitalised words
+    "Example Lecture Series hosted Sample Speakers",  # a lowercase word that is no connector
+])
+def test_label_run_shape_keeps_data_and_prose(text):
+    assert _sig(text, _confirmed("Table header row.")) is None
+
+
+def test_labelled_directive_is_dropped_with_both_signals():
+    text = "Sample Statement:  (to be completed by the applicant; please be brief.)"
+    assert _sig(text, _confirmed("Template instruction placeholder text.")) == DROP_TEMPLATE_INSTRUCTION
+    assert _sig(text, _confirmed("Hobby list.")) is None
+    # A digit inside the parentheses is a real value, not the template's directive.
+    held = "Sample Statement:  (to be completed by the applicant, 2011)"
+    assert _sig(held, _confirmed("Template instruction placeholder text.")) is None
+
+
+def test_furniture_drops_are_counted_and_described():
+    entries = [
+        {"text": "PAGE \\* MERGEFORMAT 17", "taxonomy_code": "T"},
+        {"text": "Jane Q. Doe, MD", "taxonomy_code": "T"},
+        {"text": "References: Available on Request", "taxonomy_code": "T"},
+        {"text": "Example Hobby Club, Member, 2019", "taxonomy_code": "T"},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["Example Hobby Club, Member, 2019"]
+    assert dropped == Counter({DROP_PAGE_FURNITURE: 2, DROP_ON_REQUEST: 1})
+    assert _describe_dropped(dropped) == (
+        "3 non-content blocks removed (page-furniture 2, on-request 1)"
+    )
+
+
+def test_older_checks_keep_their_drop_over_page_furniture():
+    # A CV title and a date stamp were dropped under their own reasons before
+    # #1221; the furniture check runs after them and claims neither.
+    assert _sig("Curriculum Vitae", None) == DROP_SOURCE_BOILERPLATE
+    assert _sig("As of 02/14/2017", _confirmed("Date stamp.")) == DROP_DATE_STAMP
+
+
+def test_fill_appendix_drops_the_owners_running_header(tmp_path, caplog):
+    header = _t_entry("Jane Q. Doe Curriculum Vitae 21", ["Publications"], 3)
+    keeper = _t_entry("Example Leftover Society Membership, 2015", ["Publications"], 4)
+    doc = Document(str(_render(tmp_path, [_NAME_ENTRY, header, keeper], caplog,
+                               cv_owner=_FAKE_OWNER)))
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert "Example Leftover Society Membership" in text
+    assert "Curriculum Vitae 21" not in text
