@@ -10,6 +10,7 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 - **judged TP / partial / FP**: the verdicts an adversarial verifier gave the lint's findings while auditing the batch. **TP / judged** is the hand-checked precision. Only the EBYSBC batch has verdicts.
 - **matched / hits**: hits that name the same entry (`element_idx_start`) as a verified autopsy finding on the same run. This is a lower bound on precision: the autopsy recorded the defects it verified, not every true signal, so an unmatched hit still needs a hand-check before it counts as a false positive. It also counts a hit on the right entry for the wrong reason as a match. "names text" means the lint's findings quote text and name no entry, so they cannot be matched by index.
 - **caught**: the verified findings this lint matched, which is its contribution to recall.
+- **Evidence cap.** The doctor prints at most 3 evidence items per finding: the stage-6 re-emit in `doctor/lints/render.py` slices to 3, and `offschema_fields` keeps `FIELD_EVIDENCE_MAX_VALUES = 3` (`doctor/lints/extraction.py`). The scorer reads only the indices a finding prints. A finding about more entries is matched on the 3 it lists, so on the reroute rows and `offschema_fields`, matched and caught can undercount, and they depend on which 3 entries come first. On M1 the cap hides 85 of 206 reroute indices (in 11 of 72 findings) and 19 of 89 `offschema_fields` indices (in 5 of 47 findings). M1's doctor was re-run once with both caps lifted, in a scratch copy that is not committed: no matched, caught or recall number changed. Only the reroute rows' unmatched-index lists grew, `reroute_refused` from 57 to 92 indices and `reroute_same_family` from 16 to 46. Another arm can differ, so a lint PR on one of these rows says how many of its findings hit the cap.
 - `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `scripts/doctor_vs_autopsy.py` (`_STAGE6_SHAPES`).
 
 ## Measurements
@@ -63,14 +64,18 @@ All lints together matched 60 of the 487 indexed verified findings (12%). By sev
 
 Matching by index both under- and over-credits, so compare it with the autopsies' own judgement. EBYSBC and the pilot recorded whether the doctor caught each finding: yes for 46, partly for 17, of 404.
 
-Per-class recall (by EBYSBC class `E1`..`E36` and by `class_ref`) is in the `--json` output. Recompute it rather than copying it here.
+Per-class recall (`by_batch_class` and `by_class_ref`) is in the `--json` output. Recompute it rather than copying it here. Where each batch's classes come from:
+
+- EBYSBC: `batch_class` is the synthesis's own class, `E1`..`E36`, and `class_ref` is the cross-batch class each verified finding cites, mostly an s7ab class (`s7ab-1`..`s7ab-21`).
+- s7ab: its verified findings carry no class. The label converter reads the class table in the s7ab synthesis, which names each class's records by uid and entry index in prose. A finding gets `s7ab-<n>`, as both `batch_class` and `class_ref`, when exactly one class row names its uid and one of its indices. When several rows do, it gets one only if exactly one of those rows lists the finding's own category. This assigns 83 of the 112. Each of the 83 was read against the finding's own description, and one was wrong: RXYBVF-04 is set by hand to `s7ab-2`, whose row gives that run a record count rather than an index. Of the other 29, 2 are named by more than one row and 27 by none. Some rows give no index at all: class 1, for instance, names its runs and record counts only. Those 29 are grouped as `(none)`, so per-class recall for s7ab covers 83 findings.
+- pilot: `class_ref` is the pilot's `failure_class`. It has no batch class.
 
 ## How to re-measure
 
 The farm and the labels hold CV content, so they live outside the repo:
 
 - `~/worktrees/eb-farm/` holds the 63 runs' stage outputs (`outputs/`), their source docx (`src_docx/`) and a base render (`base/`).
-- `~/worktrees/eb-labels/<uid>.json` holds one label file per run, converted from each run's verified autopsy (`analysis/<uid>/autopsy_verified.json`, and the pilot's `analysis/pilot/_tools/wf_result.json`). A label holds ids, codes, severities, entry indices and verdicts, and no CV text. The schema is in `scripts/doctor_vs_autopsy.py`'s docstring.
+- `~/worktrees/eb-labels/<uid>.json` holds one label file per run, converted from each run's verified autopsy (`analysis/<uid>/autopsy_verified.json`, and the pilot's `analysis/pilot/_tools/wf_result.json`), with s7ab's classes read from its synthesis (`docs/analysis/AUTOPSY-s7ab-batch-2026-10-02.md`, local). A label holds ids, codes, severities, entry indices and verdicts, and no CV text. The schema is in `scripts/doctor_vs_autopsy.py`'s docstring.
 
 Run from the worktree of the arm being measured. A doctor-only change can reuse the base render; a change to stage 6 renders first (`scripts/render_gate.py`, see `docs/guides/render-doctor-gates.md`) and passes its own render directory.
 

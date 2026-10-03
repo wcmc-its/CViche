@@ -17,7 +17,11 @@ re-emits about twenty unrelated stage-6 checks, so it is split by `_STAGE6_SHAPE
   are counted apart and never scored.
 - located: hits whose message or evidence starts with an entry index
   (`_IDX_PREFIX_RE`). The other lints name text, not an entry, and cannot be
-  matched by index.
+  matched by index. Only the indices a finding prints are read, and the doctor
+  prints at most 3 evidence items per finding (the stage-6 re-emit in
+  doctor/lints/render.py, `FIELD_EVIDENCE_MAX_VALUES` for offschema_fields).
+  A finding about more entries is matched on the 3 it lists, so matched and
+  caught undercount for it.
 - matched: located hits sharing an element_idx_start with a verified finding
   of the same uid -- the same entry, not necessarily the same defect.
   matched / located is a LOWER bound on precision: the autopsy listed defects
@@ -32,7 +36,8 @@ re-emits about twenty unrelated stage-6 checks, so it is split by `_STAGE6_SHAPE
 
 Recall: the verified findings carrying an element_idx_start that at least one
 hit matched, overall and by severity, batch, batch_class (a batch synthesis's
-own class, EBYSBC's E1..E36) and class_ref (the cross-batch class it cites).
+own class: EBYSBC's E1..E36, s7ab's s7ab-1..s7ab-21) and class_ref (the
+cross-batch class it cites). A null class is grouped as "(none)".
 A finding with no index (`element_idx_start: null`) is counted apart: no hit
 can match it. The autopsy's own `doctor_caught` verdicts are tallied beside it.
 
@@ -371,11 +376,11 @@ def _lint_lines(lints: list[dict]) -> list[str]:
 def _group_line(name: str, groups: dict[str, dict[str, int]]) -> str:
     shown = {k: v for k, v in groups.items() if v["findings"] >= CLASS_TEXT_MIN}
     rest = [v for k, v in groups.items() if k not in shown]
-    line = f"  {name}: " + ", ".join(f"{k} {_pct(v['caught'], v['findings'])}" for k, v in shown.items())
+    parts = [", ".join(f"{k} {_pct(v['caught'], v['findings'])}" for k, v in shown.items())]
     if rest:
-        line += (f"; {len(rest)} smaller groups {sum(v['caught'] for v in rest)}/"
-                 f"{sum(v['findings'] for v in rest)} (each in --json)")
-    return line
+        parts.append(f"{len(rest)} smaller groups {sum(v['caught'] for v in rest)}/"
+                     f"{sum(v['findings'] for v in rest)} (each in --json)")
+    return f"  {name}: " + "; ".join(p for p in parts if p)
 
 
 def _recall_lines(recall: dict) -> list[str]:

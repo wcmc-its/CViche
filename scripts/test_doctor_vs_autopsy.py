@@ -115,6 +115,20 @@ def test_stage6_shape_names_each_emitter_message():
         "2 D1 entries: `appointments` holds several records that were not split into separate "
         "rows (the entry's text holds content its fields do not carry); a record may be missing "
         "from the output": "fanout_list_not_split",
+        "X1: 1 entry diverted to the Appendix — stage 4 quarantined it: the stage 3b taxonomy "
+        "code was not a valid taxonomy code (see original_taxonomy_code in the stage 4 artifact)":
+            "appendix_invalid_code",
+        "G: 3 entries diverted to the Appendix — refused by the passthrough writer for G (source "
+        "section label did not match)": "appendix_passthrough_refused",
+        "K1: 2 entries diverted to the Appendix — not placed by the section routed for K1 (see "
+        "any section_render_failed record for that section)": "appendix_section_declined",
+        "M1: 1 entry diverted to the Appendix — no research summary rendered":
+            "appendix_no_research_summary",
+        "2 geographic scope classification(s) failed and defaulted to National; the Regional/"
+        "National/International split may be wrong": "geo_scope_failed",
+        "1 appendix entry reclassification(s) failed or came back incomplete; those entries "
+        "stayed in the appendix whole instead of being split and routed to their sections":
+            "appendix_reclassification_failed",
         "section K failed: ValueError: synthetic": "section_failed",
         "a message no emitter writes": dva.STAGE6_OTHER_SHAPE,
     }
@@ -214,6 +228,48 @@ def test_main_prints_the_table_and_writes_the_same_numbers_as_json():
     line = next(ln for ln in out.splitlines() if ln.startswith("offschema_fields "))
     assert line.split()[1:8] == ["2", "1", "2", "1", "1", "0", "1"], line
     assert "recall: 2/3 (67%)" in out
+    assert "  by_class_ref: 2 smaller groups 2/3 (each in --json)" in out.splitlines(), out
+
+
+def _unclassed_inputs(tmp):
+    """One batch whose findings mostly carry no class and no doctor_caught,
+    as the s7ab labels' unassigned findings do."""
+    unclassed = {"class_ref": None, "batch_class": None, "doctor_caught": None}
+    reports = {UID_A: {"findings": [
+        _finding("offschema_fields", "1 D1 entry: `key` ...", ["entry 1: {}"])]}}
+    labels = [{"uid": UID_A, "batch": "BATCH1", "findings": [
+        {**_verified("TSTAAA-01", 1), **unclassed},
+        {**_verified("TSTAAA-02", 2), **unclassed},
+        {**_verified("TSTAAA-03", 3), **unclassed},
+        _verified("TSTAAA-04", 4, class_ref="cls-1", credit="yes")]}]
+    return _write_inputs(tmp, reports, labels)
+
+
+def test_findings_with_no_class_or_credit_are_grouped_not_dropped():
+    with tempfile.TemporaryDirectory() as tmp:
+        doctor, labels_dir = _unclassed_inputs(tmp)
+        recall = dva.build_report(doctor, labels_dir)["recall"]
+        out_json = Path(tmp) / "report.json"
+        code, _, err = _run_main([doctor, labels_dir, "--json", out_json])
+        written = json.loads(out_json.read_text())["recall"]
+    assert recall["by_class_ref"] == {dva.NO_CLASS: {"findings": 3, "caught": 1},
+                                      "cls-1": {"findings": 1, "caught": 0}}
+    assert recall["by_batch_class"] == {dva.NO_CLASS: {"findings": 3, "caught": 1},
+                                        "E1": {"findings": 1, "caught": 0}}
+    assert recall["autopsy_credit"] == {"judged": 1, "yes": 1}  # null doctor_caught is not judged
+    assert (code, err) == (0, "")
+    assert written["by_class_ref"] == recall["by_class_ref"]
+
+
+def test_recall_text_lists_big_groups_and_sums_the_small_ones():
+    with tempfile.TemporaryDirectory() as tmp:
+        code, out, _ = _run_main(list(_unclassed_inputs(tmp)))
+    lines = out.splitlines()
+    assert code == 0
+    assert "  by_batch: BATCH1 1/4 (25%)" in lines, out  # nothing small: no remainder clause
+    assert ("  by_class_ref: (none) 1/3 (33%); 1 smaller groups 0/1 (each in --json)"
+            in lines), out
+    assert "  by_severity: high 1/4 (25%)" in lines, out
 
 
 def test_inputs_that_cannot_be_scored_exit_2():
@@ -227,6 +283,8 @@ def test_inputs_that_cannot_be_scored_exit_2():
         "no doctored run is labelled": ({UID_B: {"findings": []}}, [label], "nothing to score"),
         "label uid differs from its file name": (both, [{**label, "uid": UID_B}], "does not match"),
         "unknown verdict": (both, [{**label, "doctor_review": [review]}], "verdict"),
+        "element_idx_start not numeric": (
+            both, [{**label, "findings": [_verified("TSTAAA-01", "abc")]}], "not numeric"),
         "finding without element_idx_start": (
             both, [{**label, "findings": [{"id": "TSTAAA-01", "severity": "high"}]}], "malformed"),
         "no label files": (both, [], "no <uid>.json label files"),
@@ -253,5 +311,7 @@ if __name__ == "__main__":
     test_recall_groups_and_no_idx_findings()
     test_verdicts_are_tallied_and_split_by_whether_the_arm_still_fires()
     test_main_prints_the_table_and_writes_the_same_numbers_as_json()
+    test_findings_with_no_class_or_credit_are_grouped_not_dropped()
+    test_recall_text_lists_big_groups_and_sums_the_small_ones()
     test_inputs_that_cannot_be_scored_exit_2()
     print("ok")
