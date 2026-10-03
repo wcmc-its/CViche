@@ -1746,8 +1746,21 @@ def test_offschema_a_further_span_pair_is_judged_as_a_date_on_its_row():
     assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
         ("WARN", "additional_period_start")]
     assert "its span did not reach the record's date cell" in findings[0]["message"]
+    assert "1 of them not on its record's line" in findings[0]["message"]
     shown = [_table(_row("Example Panel", "Member", "1990-1993, 2001-Present"))]
     assert _graded(shown, entry) == []
+
+
+def test_offschema_a_further_span_is_not_reported_without_a_document():
+    """EBYSBC E22: like any date, a further span is judged only against the
+    rendered document. Without one, `additional_period_start` (a key the
+    date-name pattern does not match) and `additional_periods` are left out
+    rather than reported as unread facts."""
+    entry = _anchored("P", {
+        "start_date": "1990", "end_date": "1993",
+        "additional_period_start": "2001", "additional_period_end": "2004",
+        "additional_periods": [{"start_date": "2008", "end_date": "2009"}]})
+    assert _offschema(entry) == []
 
 
 def test_offschema_a_list_of_further_periods_is_dates_not_whole_records():

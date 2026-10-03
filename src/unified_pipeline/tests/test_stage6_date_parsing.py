@@ -913,6 +913,15 @@ def test_a_span_repeating_an_earlier_one_is_written_once():
     assert extra_date_spans(fields, "O") == ["2022"]
 
 
+def test_a_span_reading_as_the_records_own_range_is_not_repeated():
+    """A record with no end shows "2019-Present"; a further span 2019-present
+    reaches past its own year (so it is not covered) but reads the same, and
+    the cell must not say it twice."""
+    fields = {"start_date": "2019", "additional_period_start": "2019",
+              "additional_period_end": "present"}
+    assert extra_date_spans(fields, "O") == []
+
+
 def test_a_mm_yy_code_formats_the_span_as_its_own_range():
     fields = {"start_date": "2010-03", "end_date": "2012-06",
               "additional_dates": [{"start_date": "2014-09", "end_date": "2015-01"}]}

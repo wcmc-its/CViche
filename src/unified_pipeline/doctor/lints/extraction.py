@@ -1291,7 +1291,7 @@ def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
     `_offschema_values` uses this to drop only the one-fact values of such
     an entry."""
     return any(not _is_blank(entry.fields.get(key)) for key in keys
-               if not _is_date_key(key))
+               if not _DATE_NAMED_KEY_RE.search(key))
 
 
 def _is_offschema_date(key: str, value: object, declared: frozenset[str]) -> bool:
@@ -1325,7 +1325,7 @@ def _personal_value_withheld(key: str, value: object) -> bool:
 def _anchor_values(entry: _FieldsEntry, keys: frozenset[str]) -> list[str]:
     """The entry's values under `keys` -- the ones its section writes -- that
     can say which line is its own: not a date, not template scaffolding."""
-    return [leaf for key in keys if not _is_date_key(key)
+    return [leaf for key in keys if not _DATE_NAMED_KEY_RE.search(key)
             for leaf in _leaf_strings(entry.fields.get(key))
             if leaf.strip() and not _is_date_only_text(leaf)
             and not _piece_in_template(squash(leaf))]
