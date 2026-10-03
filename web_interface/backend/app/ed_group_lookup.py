@@ -58,13 +58,16 @@ class LDAPConfig:
 
 @dataclass(frozen=True)
 class MembershipResult:
-    """A user's membership in the two ED groups that gate this app.
+    """A user's membership in the ED groups that gate this app.
 
-    ``in_admin_group`` is only ever True when ``in_access_group`` is True --
-    admin membership does not imply access (locked decision).
+    ``in_admin_group`` and ``in_staff_group`` are only ever True when
+    ``in_access_group`` is True -- neither admin nor staff membership implies
+    access (locked decision). ``in_staff_group`` is also only resolved for a
+    user who is not an admin: admin wins, so its LDAP search is skipped.
     """
     in_access_group: bool
     in_admin_group: bool
+    in_staff_group: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class MembershipCacheKey:
     cwid: str
     access_group: str
     admin_group: str
+    staff_group: str = ""
 
 
 @dataclass
@@ -130,18 +134,19 @@ _key_lock_waiters: dict[MembershipCacheKey, int] = {}
 # Cache accessor functions
 # ---------------------------------------------------------------------------
 
-def get_cached_membership(cwid: str, access_group: str,
-                          admin_group: str) -> MembershipResult | None:
+def get_cached_membership(cwid: str, access_group: str, admin_group: str,
+                          staff_group: str = "") -> MembershipResult | None:
     """Return cached membership for (cwid, groups), or None on cache miss."""
-    key = MembershipCacheKey(cwid, access_group, admin_group)
+    key = MembershipCacheKey(cwid, access_group, admin_group, staff_group)
     with _cache_lock:
         return _group_cache.get(key)
 
 
 def set_cached_membership(cwid: str, access_group: str, admin_group: str,
-                          membership: MembershipResult) -> None:
+                          membership: MembershipResult,
+                          staff_group: str = "") -> None:
     """Store membership result in both live TTL cache and stale fallback."""
-    key = MembershipCacheKey(cwid, access_group, admin_group)
+    key = MembershipCacheKey(cwid, access_group, admin_group, staff_group)
     now = time.time()
     with _cache_lock:
         _group_cache[key] = membership
@@ -153,15 +158,15 @@ def set_cached_membership(cwid: str, access_group: str, admin_group: str,
             del _stale_cache[k]
 
 
-def get_stale_membership(cwid: str, access_group: str,
-                         admin_group: str) -> MembershipResult | None:
+def get_stale_membership(cwid: str, access_group: str, admin_group: str,
+                         staff_group: str = "") -> MembershipResult | None:
     """Return last-known membership for (cwid, groups) if within the age bound.
 
     Returns None if entry is older than _STALE_MAX_AGE seconds (30 min). The
     read and the expiry check are both under _cache_lock, so a concurrent
     set_cached_membership/clear_cache cannot swap the entry out mid-check.
     """
-    key = MembershipCacheKey(cwid, access_group, admin_group)
+    key = MembershipCacheKey(cwid, access_group, admin_group, staff_group)
     with _cache_lock:
         entry = _stale_cache.get(key)
         if entry is None:
@@ -556,18 +561,26 @@ def _ldap_check_membership(cwid: str, group_dn: str, cfg: LDAPConfig,
 
 
 def _query_ed(cwid: str, access_group: str, admin_group: str,
-              cfg: LDAPConfig) -> MembershipResult:
-    """Resolve both group memberships over a single bind.
+              cfg: LDAPConfig, staff_group: str = "") -> MembershipResult:
+    """Resolve the group memberships over a single bind.
 
     Admin is only checked when access is True AND admin_group is non-empty:
-    admin group membership does NOT imply access (per locked decision).
+    admin group membership does NOT imply access (per locked decision). Staff
+    follows the same rule, and is checked only for a non-admin -- admin wins,
+    so an admin's staff membership is never needed. An empty staff_group means
+    nobody is staff.
     """
     with _bind(cfg) as conn:
         in_access = _ldap_check_membership(cwid, access_group, cfg, conn)
         in_admin = False
         if in_access and admin_group:
             in_admin = _ldap_check_membership(cwid, admin_group, cfg, conn)
-    return MembershipResult(in_access_group=in_access, in_admin_group=in_admin)
+        in_staff = False
+        if in_access and not in_admin and staff_group:
+            in_staff = _ldap_check_membership(cwid, staff_group, cfg, conn)
+    return MembershipResult(
+        in_access_group=in_access, in_admin_group=in_admin, in_staff_group=in_staff,
+    )
 
 
 # ED attributes that carry a person's department name, in preference order.
@@ -659,8 +672,9 @@ def validate_startup_config(ldap_url: str, bind_dn: str, bind_password: str,
 
 def check_ed_membership(cwid: str, access_group: str, admin_group: str,
                         cfg: LDAPConfig, *,
-                        use_cache: bool = True) -> MembershipResult:
-    """Return the user's membership in the access and admin ED groups.
+                        use_cache: bool = True,
+                        staff_group: str = "") -> MembershipResult:
+    """Return the user's membership in the access, admin and staff ED groups.
 
     Keyed on CWID (resolved via `(uid=<cwid>)`), not email. This is the whole
     cache-aside flow, so both call sites share one implementation:
@@ -690,8 +704,9 @@ def check_ed_membership(cwid: str, access_group: str, admin_group: str,
 
     Raises ValueError if `access_group` is empty/whitespace -- an empty group DN
     would go to LDAP as an empty search_base and come back False, which is
-    fail-closed only by accident. `admin_group` may legitimately be empty
-    (documented short-circuit: no admin group configured).
+    fail-closed only by accident. `admin_group` and `staff_group` may
+    legitimately be empty (documented short-circuit: no such group configured,
+    so nobody holds that role).
 
     Raises EdUnavailableError if LDAP is unreachable and no stale answer is
     usable, or EdConfigurationError (a subclass) if ED rejected our bind.
@@ -703,26 +718,26 @@ def check_ed_membership(cwid: str, access_group: str, admin_group: str,
         )
 
     if use_cache:
-        cached = get_cached_membership(cwid, access_group, admin_group)
+        cached = get_cached_membership(cwid, access_group, admin_group, staff_group)
         if cached is not None:
             return cached
 
-    key = MembershipCacheKey(cwid, access_group, admin_group)
+    key = MembershipCacheKey(cwid, access_group, admin_group, staff_group)
     with _single_flight(key):
         if use_cache:
             # A concurrent miss on the same key may have populated the cache
             # while we waited on the lock -- reuse its answer instead of
             # re-querying. Skipped under use_cache=False for the same reason
             # the first read is: this path must always see ED itself.
-            cached = get_cached_membership(cwid, access_group, admin_group)
+            cached = get_cached_membership(cwid, access_group, admin_group, staff_group)
             if cached is not None:
                 return cached
 
         try:
-            membership = _query_ed(cwid, access_group, admin_group, cfg)
+            membership = _query_ed(cwid, access_group, admin_group, cfg, staff_group)
         except EdUnavailableError:
             if use_cache:
-                stale = get_stale_membership(cwid, access_group, admin_group)
+                stale = get_stale_membership(cwid, access_group, admin_group, staff_group)
                 if stale is not None:
                     logger.warning(
                         "ED unavailable for cwid=%s -- serving last-known "
@@ -733,5 +748,5 @@ def check_ed_membership(cwid: str, access_group: str, admin_group: str,
 
         # Written in BOTH modes: a fresh login warms the cache the subsequent
         # per-request checks read.
-        set_cached_membership(cwid, access_group, admin_group, membership)
+        set_cached_membership(cwid, access_group, admin_group, membership, staff_group)
         return membership

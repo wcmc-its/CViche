@@ -184,7 +184,7 @@ async def get_feedback(
     Returns the user's feedback (or null if none submitted), along with
     which pipeline stages completed and which WCM sections are populated.
     """
-    run = check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db, read_only=True)
 
     # Get existing feedback for this user on this run
     feedback = db.query(Feedback).filter(
@@ -227,9 +227,9 @@ def get_all_feedback(
 ) -> list[FeedbackDetail]:
     """Every reviewer's feedback on this run, newest first.
 
-    Run owner or admin only (403 otherwise, 404 for an unknown run).
+    Run owner, admin or staff only (403 otherwise, 404 for an unknown run).
     """
-    check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db, read_only=True)
     rows = load_run_feedback_with_reviewers(db, run_id)
     return [
         FeedbackDetail(**serialize_feedback(feedback), display_name=display_name)

@@ -142,12 +142,12 @@ function StatusBar({ counts, timeLeft }: { counts: BatchStatusCounts; timeLeft: 
 interface RowProps {
   row: BatchRunRow
   index: number
-  isAdmin: boolean
+  allRunsView: boolean
   grid: string
   onSelectRun: (runId: string) => void
 }
 
-function BatchRunLine({ row, index, isAdmin, grid, onSelectRun }: RowProps) {
+function BatchRunLine({ row, index, allRunsView, grid, onSelectRun }: RowProps) {
   const openable = OPENABLE.has(row.status)
   const open = openable ? () => onSelectRun(row.run_id) : undefined
   return (
@@ -171,7 +171,7 @@ function BatchRunLine({ row, index, isAdmin, grid, onSelectRun }: RowProps) {
           <span className="font-normal text-gray-400">{row.queue_position} ahead</span>
         )}
       </span>
-      {isAdmin && (
+      {allRunsView && (
         <span className={`font-semibold tabular-nums ${row.quality_score === null ? 'text-gray-400' : 'text-gray-900'}`}>
           {row.quality_score ?? NO_SCORE_TEXT}
         </span>
@@ -182,13 +182,13 @@ function BatchRunLine({ row, index, isAdmin, grid, onSelectRun }: RowProps) {
 
 interface BatchViewProps {
   batchId: string
-  isAdmin: boolean
+  allRunsView: boolean
   currentUserId: number | undefined
   onSelectRun: (runId: string) => void
 }
 
 /** The batch view the Runs page shows when ?batch= is set: header, status bar, one row per run. */
-export default function BatchView({ batchId, isAdmin, currentUserId, onSelectRun }: BatchViewProps) {
+export default function BatchView({ batchId, allRunsView, currentUserId, onSelectRun }: BatchViewProps) {
   const { batch, lane, error } = useBatchDetail(batchId)
   const card = 'mt-4 overflow-hidden rounded-xl border border-sand-300 bg-white shadow-[0_1px_2px_rgba(60,40,10,0.05)]'
   if (error) return <section className={`${card} px-5 py-8 text-center text-sm text-gray-500`}>{error}</section>
@@ -200,7 +200,7 @@ export default function BatchView({ batchId, isAdmin, currentUserId, onSelectRun
       </div>
     )
   }
-  const grid = `grid gap-3 ${isAdmin ? 'grid-cols-[28px_minmax(0,1.6fr)_minmax(0,1fr)_170px_70px]' : 'grid-cols-[28px_minmax(0,1.6fr)_minmax(0,1fr)_170px]'}`
+  const grid = `grid gap-3 ${allRunsView ? 'grid-cols-[28px_minmax(0,1.6fr)_minmax(0,1fr)_170px_70px]' : 'grid-cols-[28px_minmax(0,1.6fr)_minmax(0,1fr)_170px]'}`
   const note = missingFilesNote(batch)
   return (
     <section className={card} aria-label="Batch">
@@ -220,11 +220,11 @@ export default function BatchView({ batchId, isAdmin, currentUserId, onSelectRun
       <div className="overflow-x-auto">
         <div className="min-w-[560px]">
           <div className={`${grid} border-b border-sand-200 bg-sand-50 px-[22px] py-2.5 text-xs font-medium text-gray-500`}>
-            <span className="text-right">#</span><span>File</span><span>Faculty</span><span>Status</span>{isAdmin && <span>Score</span>}
+            <span className="text-right">#</span><span>File</span><span>Faculty</span><span>Status</span>{allRunsView && <span>Score</span>}
           </div>
           <ul aria-label="Runs in this batch">
             {batch.runs.map((row, i) => (
-              <BatchRunLine key={row.run_id} row={row} index={i} isAdmin={isAdmin} grid={grid} onSelectRun={onSelectRun} />
+              <BatchRunLine key={row.run_id} row={row} index={i} allRunsView={allRunsView} grid={grid} onSelectRun={onSelectRun} />
             ))}
           </ul>
         </div>
