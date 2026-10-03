@@ -1086,6 +1086,19 @@ def test_an_int_is_a_value_for_a_scalar_field_and_a_repr_for_a_prose_one(field):
     ({'end_date': '2021'}, False, '2021'),
     ({'start_date': None, 'end_date': '2002-12'}, False, '2002'),
     ({'start_date': '', 'end_date': '2006-06-21'}, True, '2006'),
+    # Both ends render as their years, never the raw ISO join
+    # "2019-08-2020-06" (class E21, EBYSBC autopsy) ...
+    ({'start_date': '2019-08', 'end_date': '2020-06'}, False, '2019-2020'),
+    ({'start_date': '1992-11', 'end_date': '1999'}, False, '1992-1999'),
+    # ... and a range whose ends then read the same is one value.
+    ({'start_date': '2011', 'end_date': '2011'}, False, '2011'),
+    ({'start_date': '2021-08', 'end_date': '2021-12'}, False, '2021'),
+    ({'start_date': '2006-03-14', 'end_date': '2006-03-14'}, False, '2006'),
+    # The start of an open range renders as its year too; the end word
+    # passes through as written.
+    ({'start_date': '2018-03'}, True, '2018-present'),
+    ({'start_date': '2019-03', 'end_date': 'present'}, True, '2019-present'),
+    ({'start_date': '2019', 'end_date': 'Present'}, True, '2019-Present'),
 ])
 def test_format_mentee_duration_covers_every_branch(fields, ongoing, expected):
     """Every branch: start+end, start alone (ongoing or past), end alone,

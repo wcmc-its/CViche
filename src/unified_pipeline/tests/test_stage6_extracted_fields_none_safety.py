@@ -89,6 +89,11 @@ def _mentee(code: str, name: str, **fields) -> dict:
             'extracted_fields': {'mentee_name': name, **fields}}
 
 
+#: The year the partition judges an N3A period against
+#: (`_n3a_entry_has_ended`), fixed so no test depends on the clock.
+_CURRENT_YEAR = 2026
+
+
 # --- mentoring: extracted_fields=None at every #659 site ------------------------
 
 @pytest.mark.parametrize("code, heading", [("N3A", "Current Mentees:"),
@@ -123,7 +128,7 @@ def test_partition_tolerates_none_extracted_fields_in_ongoing_rule():
     """The N3B ongoing-mentorship rule is the first #659 site reached; a None
     entry is neither moved nor dropped -- it partitions as a past summary."""
     entry = {'taxonomy_code': 'N3B', 'text': 'Completed: 27', 'extracted_fields': None}
-    partition = _partition_mentoring_entries({'N3B': [entry]})
+    partition = _partition_mentoring_entries({'N3B': [entry]}, current_year=_CURRENT_YEAR)
     assert partition.past_summaries == (entry,)
     assert partition.moved_to_current == 0
     assert partition.current == () and partition.past == ()
@@ -187,7 +192,7 @@ def test_n2_none_extracted_fields_renders_as_its_raw_text():
 ], ids=lambda f: repr(f.get('end_date', '<absent>')))
 def test_partition_moves_ongoing_past_mentee_to_current(fields):
     entry = _mentee('N3B', 'Ada Lovelace', **fields)
-    partition = _partition_mentoring_entries({'N3B': [entry]})
+    partition = _partition_mentoring_entries({'N3B': [entry]}, current_year=_CURRENT_YEAR)
     assert partition.current == (entry,)
     assert partition.past == ()
     assert partition.moved_to_current == 1
@@ -210,7 +215,7 @@ def test_partition_moves_start_only_mentee_when_source_leaves_range_open(text, e
         fields['end_date'] = end_date
     entry = _mentee('N3B', 'Ada Lovelace', **fields)
     entry['text'] = text
-    partition = _partition_mentoring_entries({'N3B': [entry]})
+    partition = _partition_mentoring_entries({'N3B': [entry]}, current_year=_CURRENT_YEAR)
     assert partition.current == (entry,)
     assert partition.past == ()
     assert partition.moved_to_current == 1
@@ -230,7 +235,7 @@ def test_partition_keeps_start_only_mentee_with_a_lone_year_in_past(text):
     range, and a dash used as a column separator, do not make it ongoing."""
     entry = _mentee('N3B', 'Ada Lovelace', start_date='2019', end_date=None)
     entry['text'] = text
-    partition = _partition_mentoring_entries({'N3B': [entry]})
+    partition = _partition_mentoring_entries({'N3B': [entry]}, current_year=_CURRENT_YEAR)
     assert partition.past == (entry,)
     assert partition.current == ()
     assert partition.moved_to_current == 0
@@ -244,7 +249,7 @@ def test_partition_keeps_start_only_mentee_with_a_lone_year_in_past(text):
 ], ids=lambda f: repr(f))
 def test_partition_keeps_ended_or_undated_past_mentee_in_past(fields):
     entry = _mentee('N3B', 'Ada Lovelace', **fields)
-    partition = _partition_mentoring_entries({'N3B': [entry]})
+    partition = _partition_mentoring_entries({'N3B': [entry]}, current_year=_CURRENT_YEAR)
     assert partition.past == (entry,)
     assert partition.current == ()
     assert partition.moved_to_current == 0
@@ -283,8 +288,9 @@ def test_start_only_past_mentee_renders_bare_year_under_past_mentees():
     past = _mentee('N3B', 'Ada Lovelace', start_date='2007-05', end_date=None)
     past['text'] = "Ada Lovelace, MS 2007"
     current = _mentee('N3A', 'Grace Hopper', start_date='2021', end_date=None)
+    current['text'] = "Grace Hopper, PhD student, 2021-"
 
-    gen._fill_mentoring({'N3A': [current], 'N3B': [past]})
+    gen._fill_mentoring({'N3A': [current], 'N3B': [past]}, current_year=_CURRENT_YEAR)
 
     assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
     assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
@@ -329,6 +335,92 @@ def test_start_only_mentee_moved_to_current_renders_open_range():
 
     assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Ada Lovelace')]
     assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2019-present'
+
+
+# --- mentoring: Current -> Past migration (class E9, EBYSBC autopsy) -------------
+
+@pytest.mark.parametrize("fields", [
+    {'start_date': '2015'},                                  # a lone past year
+    {'start_date': '2015', 'end_date': None},
+    {'start_date': '2023-09'},
+    {'start_date': '2023', 'end_date': '2024'},              # a closed past period
+    {'start_date': '2024', 'end_date': str(_CURRENT_YEAR - 1)},
+    {'end_date': '2020'},
+], ids=lambda f: repr(f))
+def test_partition_moves_an_ended_current_mentee_to_past(fields):
+    """Stage 3b codes N3A for a lone past year or a closed period; neither
+    is still running, so the entry renders under Past Mentees."""
+    entry = _mentee('N3A', 'Ada Lovelace', **fields)
+    entry['text'] = "Ada Lovelace, PhD dissertation"
+    partition = _partition_mentoring_entries({'N3A': [entry]}, current_year=_CURRENT_YEAR)
+    assert partition.past == (entry,)
+    assert partition.current == ()
+    assert partition.moved_to_past == 1
+    assert partition.moved_to_current == 0
+
+
+@pytest.mark.parametrize("fields", [
+    {'start_date': str(_CURRENT_YEAR)},                     # this year: may still run
+    {'start_date': '2025', 'end_date': str(_CURRENT_YEAR)},
+    {'start_date': '2029'},                                  # an expected completion
+    {'start_date': '2026', 'end_date': '2028'},
+    {'start_date': '2029 (anticipated)'},                    # no readable year
+    {'start_date': '2016-17'},
+    {'start_date': '2015', 'end_date': 'present'},           # says it is running
+    {},                                                      # no dates at all
+], ids=lambda f: repr(f))
+def test_partition_keeps_a_current_mentee_that_has_not_ended(fields):
+    entry = _mentee('N3A', 'Ada Lovelace', **fields)
+    entry['text'] = "Ada Lovelace, PhD dissertation"
+    partition = _partition_mentoring_entries({'N3A': [entry]}, current_year=_CURRENT_YEAR)
+    assert partition.current == (entry,)
+    assert partition.past == ()
+    assert partition.moved_to_past == 0
+
+
+@pytest.mark.parametrize("start_date, text", [
+    ('2015', "Ada Lovelace, PhD student, 2015-"),
+    ('2015', "Ada Lovelace, PhD student, 2015 - present"),
+    # The entry opens with the year and a dash: "since 2015", with the tab
+    # after the dash lost by the reader.
+    ('2015', "2015 \u2013 Ada Lovelace, PhD student"),
+    ('2015-03', "2015.03 \u2013 Ada Lovelace, PhD student"),
+    # A box-drawing line as the dash.
+    ('2015-03', "Ada Lovelace, PhD student 03/2015 \u2500 current"),
+])
+def test_partition_keeps_a_current_mentee_whose_source_leaves_the_year_open(start_date, text):
+    entry = _mentee('N3A', 'Ada Lovelace', start_date=start_date)
+    entry['text'] = text
+    partition = _partition_mentoring_entries({'N3A': [entry]}, current_year=_CURRENT_YEAR)
+    assert partition.current == (entry,)
+    assert partition.moved_to_past == 0
+
+
+def test_partition_judges_an_n3a_period_by_the_year_it_is_given():
+    """The boundary, both sides: a period ending the year before
+    `current_year` is past, one ending in `current_year` is not."""
+    entry = _mentee('N3A', 'Ada Lovelace', start_date='2019', end_date='2021')
+    assert _partition_mentoring_entries(
+        {'N3A': [entry]}, current_year=2022).past == (entry,)
+    assert _partition_mentoring_entries(
+        {'N3A': [entry]}, current_year=2021).current == (entry,)
+
+
+def test_ended_current_mentee_renders_its_year_under_past_mentees():
+    """The render: an N3A lone past year sits under "Past Mentees:" as the
+    bare year, not under "Current Mentees:" as "<year>-present"."""
+    gen = _mentoring_doc()
+    ended = _mentee('N3A', 'Ada Lovelace', start_date='2015', end_date=None)
+    ended['text'] = "2015 Ada Lovelace, PhD dissertation"
+    running = _mentee('N3A', 'Grace Hopper', start_date='2021', end_date=None)
+    running['text'] = "2021 \u2013 Grace Hopper, PhD student"
+
+    gen._fill_mentoring({'N3A': [ended, running]}, current_year=_CURRENT_YEAR)
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2015'
+    assert _mentoring_period_cell(gen.doc, 'Grace Hopper') == '2021-present'
 
 
 # --- mentoring: summary and N4 outcome lines ------------------------------------
