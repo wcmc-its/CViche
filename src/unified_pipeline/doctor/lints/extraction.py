@@ -58,7 +58,7 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
-from unified_pipeline.stage6.formatting.dates import EXTRA_SPAN_KEYS
+from unified_pipeline.stage6.formatting.dates import EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS
 from unified_pipeline.stage6.normalization.institutions import (
     _get_cleaned_institution_name,
 )
@@ -1527,10 +1527,18 @@ class OffschemaSummary(NamedTuple):
 
 
 #: Why an off-schema value is unwritten: no renderer reads its key, or -- for
-#: a further span (`EXTRA_SPAN_KEYS`), which the date cell does read -- the
-#: span still did not reach its record's date cell (EBYSBC E22).
+#: a further span (`EXTRA_SPAN_KEYS`) on a code whose date cell reads it
+#: (`EXTRA_SPAN_CODES`) -- the span still did not reach its record's date
+#: cell (EBYSBC E22). On any other code (ZDCXIV's H `additional_dates`) the
+#: key is unread like any other.
 _UNREAD_KEY = "no renderer reads it"
 _UNREAD_SPAN = "its span did not reach the record's date cell"
+
+
+def _unwritten_reason(code: str, key: str) -> str:
+    """`_UNREAD_SPAN` for a span key on a code whose date cell reads it,
+    `_UNREAD_KEY` otherwise."""
+    return _UNREAD_SPAN if key in EXTRA_SPAN_KEYS and code in EXTRA_SPAN_CODES else _UNREAD_KEY
 
 
 def _one_fact_outcome(key: str, hits: list[OffschemaValue]) -> str:
@@ -1561,7 +1569,7 @@ def _offschema_summary(code: str, key: str,
     return OffschemaSummary(
         "WARN" if any(hit.warn for hit in hits) else "INFO",
         f"{len(hits)} {code} {noun}: `{key}` is outside the {code} schema and "
-        f"{_UNREAD_SPAN if key in EXTRA_SPAN_KEYS else _UNREAD_KEY} -- {lost} (#817)",
+        f"{_unwritten_reason(code, key)} -- {lost} (#817)",
         [f"entry {hit.element_idx}: "
          f"{PERSONAL_VALUE_EVIDENCE if hit.personal else _evidence_value(hit.value)}"
          for hit in hits[:FIELD_EVIDENCE_MAX_VALUES]])

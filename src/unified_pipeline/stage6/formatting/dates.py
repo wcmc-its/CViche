@@ -304,6 +304,14 @@ EXTRA_SPAN_END_KEY = 'additional_period_end'
 EXTRA_SPAN_KEYS = frozenset({*EXTRA_SPAN_LIST_KEYS, EXTRA_SPAN_START_KEY,
                              EXTRA_SPAN_END_KEY})
 
+# The codes whose date cell calls `with_extra_date_spans` (or, for K, its
+# `extra_date_spans` core): O (leadership.py), P (administrative_activities.py,
+# one record per entry), Q1 and Q2 (service.py), D1-D3 (positions.py, rows not
+# superseded) and K1-K5 (teaching.py). On any other code (H, say) no renderer
+# reads the span keys at all.
+EXTRA_SPAN_CODES = frozenset({'O', 'P', 'Q1', 'Q2', 'D1', 'D2', 'D3',
+                              'K1', 'K2', 'K3', 'K4', 'K5'})
+
 # How the spans of one record are joined in its date cell: "2019-2020, 2021".
 DATE_SPAN_SEPARATOR = ', '
 

@@ -1765,6 +1765,20 @@ def test_offschema_a_list_of_further_periods_is_dates_not_whole_records():
     assert _graded([shown], entry) == []
 
 
+def test_offschema_a_span_key_on_a_code_no_date_cell_extends_is_unread():
+    """EBYSBC E22: only the O/P/Q1/Q2/D/K date cells read the span keys. On
+    H, which renders no further span, `additional_dates` is a key no
+    renderer reads, and the message says so."""
+    entry = _fields_entry("H", {
+        "award_name": "Example Prize", "granting_body": "Example Society",
+        "date": "2001", "additional_dates": "2004"})
+    findings = _graded([_table(_row("Example Prize", "Example Society", "2001"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_dates")]
+    assert "no renderer reads it" in findings[0]["message"]
+    assert "date cell" not in findings[0]["message"]
+
+
 def test_offschema_row_found_when_its_name_is_split_across_cells():
     """The honors renderer moves an award name's tail into its own cell, and
     the document writes a typographic apostrophe stage 4 wrote plainly."""

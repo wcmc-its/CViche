@@ -971,3 +971,14 @@ class TestFurtherSpansFollowStage5csDate:
         fields = self._fields("**1990-1994** - Fictional Course", additional_dates="1991; 1993")
         assert _teaching_entry_lines(fields, "Fictional Course 1990-1994",
                                      taxonomy_code="K1") == ["1990-1994 - Fictional Course"]
+
+
+def test_the_spans_skip_a_start_year_inside_a_longer_number():
+    """EBYSBC E22 (#1245): the row's own date is a whole token, not the tail
+    of a course number that ends in its start year."""
+    fields = {"formatted_text": "Fictional Course 41990 (1990-1994)", "start_date": "1990",
+              "end_date": "1994", "additional_periods": [{"start_date": "1997",
+                                                          "end_date": "2001"}]}
+    assert _teaching_entry_lines(fields, "Fictional Course 41990 1990-94, 1997-2001",
+                                 taxonomy_code="K3") == [
+        "Fictional Course 41990 (1990-1994, 1997-2001)"]

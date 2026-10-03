@@ -226,9 +226,9 @@ def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) ->
     year; a text with none is left as it is, since there is no date to
     extend."""
     extras = extra_date_spans(fields, taxonomy_code)
-    start_year = _parse_date_components(str(fields.get('start_date') or '').strip())[0]
-    if not extras or start_year is None:
+    if not extras:  # also when the start has no year: extra_date_spans is [] then
         return text
+    start_year = _parse_date_components(str(fields.get('start_date') or '').strip())[0]
     own_date = re.search(_OWN_DATE_TOKEN.format(year=start_year), text, re.IGNORECASE)
     if own_date is None:
         return text

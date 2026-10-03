@@ -932,3 +932,25 @@ def test_a_span_inside_a_running_range_adds_nothing():
     fields = {"start_date": "2010", "end_date": "present",
               "additional_period_start": "2015", "additional_period_end": "2016"}
     assert extra_date_spans(fields, "O") == []
+
+
+def test_a_span_starting_before_the_records_own_range_is_written():
+    """Only a span wholly inside the record's range is dropped: one that
+    opens before the record's start year still adds years the row lacks."""
+    fields = {"start_date": "2010", "end_date": "2020",
+              "additional_periods": [{"start_date": "2005", "end_date": "2012"}]}
+    assert extra_date_spans(fields, "O") == ["2005-2012"]
+
+
+def test_a_period_written_under_date_is_read_as_its_start():
+    fields = _spans(additional_periods=[{"date": "2022"}])
+    assert extra_date_spans(fields, "O") == ["2022"]
+
+
+def test_a_reversed_span_after_the_records_range_is_not_taken_as_covered():
+    """A span whose end year precedes its start covers its start year only:
+    2025 lies outside 2010-2020, so the span is written, not hidden as if
+    it ended inside the range."""
+    fields = {"start_date": "2010", "end_date": "2020",
+              "additional_period_start": "2025", "additional_period_end": "2015"}
+    assert len(extra_date_spans(fields, "O")) == 1
