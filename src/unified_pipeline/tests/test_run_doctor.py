@@ -2188,6 +2188,16 @@ def test_date_cell_shape_leaves_every_d1_rank_sharing_the_latest_start_year():
     assert lint_date_cell_shape(stage4, rows, []) == []
 
 
+def test_date_cell_shape_ignores_a_d1_row_with_no_year_for_the_latest_rank():
+    """A D1 row with no year in its start_date or its text has no start year:
+    it neither breaks the ordering (max over a year and None) nor moves the
+    latest rank, so the dated D1 rank is still left open by decision."""
+    stage4, rows = _two_ranks(None, "2016")
+    stage4["entries"][0]["text"] = ("Assistant Professor of Widgetry, "
+                                    "Example University")
+    assert lint_date_cell_shape(stage4, rows, []) == []
+
+
 @pytest.mark.parametrize("code, text, cell, shape", [
     ("D1", "Example Widget Lab, research fellow, 03/2010-05/2012",
      "2010-03-2012-05", "raw_value"),
