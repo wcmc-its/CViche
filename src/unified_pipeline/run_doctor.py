@@ -146,6 +146,16 @@ Lints, ranked by the severity of the failure class they catch:
                           fatal record (they all are today), WARN otherwise
                           (#1174)
 
+14p. date_cell_shape      a rendered date that reads wrong, in a table's date
+                          cell or at the start of a body paragraph, tied back
+                          to the stage-4 entry it renders: "<start>-Present"
+                          when the entry's text has no open marker (WARN; D
+                          rows and I memberships keep it by decision), a raw
+                          stored value "2003-04-2005-09" or "2009-Summer", or
+                          a range whose ends are equal "2013-2013" (both
+                          INFO). Before it, the 24 verified findings of
+                          EBYSBC classes E9 and E21 had no doctor finding
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -314,6 +324,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _record_rendered,
     appendix_entry_count,
     honors_table_totals,
+    lint_date_cell_shape,
     lint_dead_sections,
     lint_date_only_lines,
     lint_duplicate_passages,
@@ -421,6 +432,7 @@ KNOWN_LINTS = (
     "llm_refusal_in_output",
     "llm_fallback_served",
     "stage_failure_recorded",
+    "date_cell_shape",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -527,6 +539,12 @@ LINT_PREVALENCE = {
     # and both should fall toward zero as the renderers are fixed.
     "python_repr_in_output": 0.061,
     "llm_refusal_in_output": 0.006,
+    # date_cell_shape (EBYSBC E9/E21): 28 of the 63 runs of the EBYSBC/s7ab/
+    # pilot farm fire at any severity (9 at WARN), as rendered by origin/dev
+    # c3d87c5f, measured 2026-10-02. That render still has the defects: raw
+    # mentee periods and same-year ranges are most of it, and the rate should
+    # fall as the date fixes ship. Same mixed-corpus caveat as above.
+    "date_cell_shape": 0.444,
 }
 
 
@@ -1034,6 +1052,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("llm_fallback_served", lint_llm_fallback_served, ("stage_4",),
              optional=("stage_4_5",)),
     LintSpec("stage_failure_recorded", lint_stage_failure_recorded, ("stage_errors",)),
+    # `blocks` reads the same docx as `table_rows`, so it is gated by that
+    # view's row; a row may name each artifact only once.
+    LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
+             optional=("blocks",)),
 )
 
 

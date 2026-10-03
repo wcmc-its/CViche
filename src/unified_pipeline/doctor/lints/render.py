@@ -1373,3 +1373,292 @@ def lint_llm_refusal_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         f"{len(refusals)} distinct language-model refusal or "
         "request-for-input text(s) rendered in the output",
         refusals[:OUTPUT_LEAK_EVIDENCE_LIMIT])]
+
+
+# --------------------------------------------------------------------------
+# Lint 14p: a rendered date that reads wrong (EBYSBC E9/E21).
+#
+# Three shapes, read from the date cells of the rendered tables and from the
+# date that opens a body paragraph, each tied back to the stage-4 entry it
+# renders so the finding names that entry:
+#   open_range  "<start>-Present" where the entry's own text has no open
+#               marker, so a one-time role reads as current (WARN)
+#   raw_value   a stage-4 value printed as stored: "2003-04-2005-09",
+#               "2004-10-07", "2009-Summer" (INFO)
+#   same_ends   a range whose two ends read the same: "2013-2013",
+#               "October 2008 to October 2008" (INFO)
+DATE_SHAPE_OPEN_RANGE = "open_range"
+DATE_SHAPE_RAW_VALUE = "raw_value"
+DATE_SHAPE_SAME_ENDS = "same_ends"
+
+#: Codes whose start-only rows keep "<start>-Present" by decision, so an open
+#: range on them is not reported: every D row (#946, decision 2026-09-24:
+#: non-rank positions are unchanged) and I, whose memberships are ongoing
+#: (the `POINT_IN_TIME_CODES` comment in stage6/formatting/dates.py).
+DATE_CELL_OPEN_BY_DECISION_CODES = frozenset({"D1", "D2", "D3", "I"})
+
+#: Word tokens a date's context must share with one stage-4 entry, and with
+#: no other entry as many, for the date to be read as that entry's. A date
+#: tied to no entry has no source text to judge an open range by, so an
+#: unattributed open range is not reported.
+DATE_CELL_MIN_SHARED_TOKENS = 2
+
+#: Shortest word that can tie a date to an entry: a surname can have three
+#: letters, while "of" and "in" would tie everything to everything.
+DATE_CELL_MIN_TOKEN_CHARS = 3
+_ATTRIBUTION_STOPWORDS = frozenset({"and", "the", "for", "with", "from"})
+
+#: Rendered dates quoted per finding.
+DATE_CELL_EVIDENCE_LIMIT = 3
+
+_MONTH_WORD = (r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+               r"June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+               r"Nov(?:ember)?|Dec(?:ember)?)\.?")
+_SEASON_WORD = r"(?:Spring|Summer|Fall|Autumn|Winter)"
+_ISO_DAY = r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?!\d)"
+_ISO_MONTH = r"\d{4}-(?:0[1-9]|1[0-2])(?![\d/])"
+_RAW_SEASON = rf"\d{{4}}-{_SEASON_WORD}\b"
+_DATE_SIDE = (rf"(?:{_ISO_DAY}|{_ISO_MONTH}|{_RAW_SEASON}"
+              rf"|\d{{1,2}}/\d{{1,2}}/\d{{4}}|\d{{1,2}}/\d{{2}}(?:\d{{2}})?(?!\d)"
+              rf"|\b(?:{_MONTH_WORD}|{_SEASON_WORD})\s+\d{{4}}|\d{{4}})")
+_OPEN_END_WORD = r"(?:present|current|ongoing)\b"
+_DATE_EXPR = (rf"(?P<start>{_DATE_SIDE})(?:\s*(?:[-\u2013\u2014]|\bto\b)\s*"
+              rf"(?P<end>{_DATE_SIDE}|{_OPEN_END_WORD}))?")
+
+#: One line of a table cell that is wholly a date.
+_DATE_CELL_RE = re.compile(rf"\s*{_DATE_EXPR}\s*", re.IGNORECASE)
+#: A body paragraph that opens with a date: the date, then a separator and
+#: text, or nothing. A date inside running text, such as a citation's, is
+#: not read.
+_DATED_LINE_RE = re.compile(
+    rf"\s*(?:[\u2022\u00b7\u25aa\u25e6*]\s*)?{_DATE_EXPR}"
+    rf"(?:\s*(?:[-\u2013\u2014:,]|\t)\s*\S|\s*$)", re.IGNORECASE)
+_RAW_SIDE_RE = re.compile(rf"{_ISO_DAY}|{_RAW_SEASON}", re.IGNORECASE)
+_ISO_MONTH_RE = re.compile(_ISO_MONTH)
+_OPEN_END_RE = re.compile(_OPEN_END_WORD, re.IGNORECASE)
+_FOUR_DIGIT_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+# The open markers of the 2026-10-02 class-13 decision: what makes an
+# entry's own text say its range is still open. A word anywhere in the text
+# or its headings ("Current Mentees", "since 2006", "2012 - date"); a dash
+# after a year with no end year after it ("2020-", "2009.04 -<tab>",
+# "(2007- )"); or a line that opens "YYYY(.MM) - <text>", which stage 6
+# reads as open because the reader turns the tab of "2008 -<tab>Member" into
+# a space. Read loosely on purpose: a marker anywhere spares the row, so a
+# false marker costs a missed hit, never a false one.
+_OPEN_MARKER_WORD_RE = re.compile(
+    r"\b(?:present|current(?:ly)?|now|ongoing|active|since|continu\w*"
+    r"|to\s+date)\b|[-\u2013\u2014]\s*date\b", re.IGNORECASE)
+_OPEN_MARKER_DASH_RE = re.compile(
+    r"(?<!\d)\d{4}(?:[./]\d{1,2})?(?:[-\u2013\u2014](?!\s*\d)"
+    r"|\s+[-\u2013\u2014][ \t]*(?:\t|\)|$))"
+    r"|^\W*\d{4}(?:[./]\d{1,2})?\s*[-\u2013\u2014]\s", re.MULTILINE)
+
+_DATE_SHAPE_MESSAGES = MappingProxyType({
+    DATE_SHAPE_OPEN_RANGE: "renders as an open range ('-Present') but the "
+                           "entry's text has no open marker (present, "
+                           "current, now, ongoing, to date, or a trailing "
+                           "dash)",
+    DATE_SHAPE_RAW_VALUE: "the date renders as the raw stored value",
+    DATE_SHAPE_SAME_ENDS: "the date renders as a range whose two ends are "
+                          "the same",
+})
+
+
+class _DatedEntry(NamedTuple):
+    """What the lint reads off one stage-4 entry, read once (§8.1)."""
+    element_idx: object
+    code: str
+    text: str
+    headings: str
+    tokens: frozenset[str]
+
+
+class _RenderedDate(NamedTuple):
+    """One wrongly shaped date on the page and the words beside it."""
+    rendered: str
+    start_year: str
+    shapes: tuple[str, ...]
+    context: frozenset[str]
+
+
+def _attribution_tokens(text: str) -> frozenset[str]:
+    """Words that can tie a rendered date to an entry: `_name_tokens`
+    (names are short words) without numbers and function words."""
+    return frozenset(tok for tok in _name_tokens(text)
+                     if len(tok) >= DATE_CELL_MIN_TOKEN_CHARS
+                     and not tok.isdigit() and tok not in _ATTRIBUTION_STOPWORDS)
+
+
+def _dated_entries(stage4: dict) -> dict[str, list[_DatedEntry]]:
+    """Every stage-4 entry, indexed by each four-digit year its text or its
+    extracted fields carry, so a rendered date can be tied only to an entry
+    that holds its start year."""
+    by_year: dict[str, list[_DatedEntry]] = defaultdict(list)
+    for raw in stage4.get("entries", []):
+        fields = raw.get("extracted_fields")
+        values = (" ".join(str(v) for v in fields.values() if v)
+                  if isinstance(fields, dict) else "")
+        text = str(raw.get("text") or "")
+        hierarchy = raw.get("hierarchy")
+        headings = [str(h) for h in hierarchy] if isinstance(hierarchy, list) else []
+        headings.append(str(raw.get("context_heading") or ""))
+        entry = _DatedEntry(raw.get("element_idx_start"),
+                            str(raw.get("taxonomy_code") or ""), text,
+                            "\n".join(headings),
+                            _attribution_tokens(f"{text} {values}"))
+        for year in set(_FOUR_DIGIT_YEAR_RE.findall(f"{text} {values}")):
+            by_year[year].append(entry)
+    return by_year
+
+
+def _date_shapes(match: re.Match) -> tuple[str, ...]:
+    """The wrong shapes of one matched date expression; empty if none."""
+    start, end = match["start"], match["end"]
+    if end is None:
+        return (DATE_SHAPE_RAW_VALUE,) if _RAW_SIDE_RE.fullmatch(start) else ()
+    shapes = []
+    open_end = bool(_OPEN_END_RE.fullmatch(end))
+    if open_end:
+        shapes.append(DATE_SHAPE_OPEN_RANGE)
+    sides = (start,) if open_end else (start, end)
+    if any(_RAW_SIDE_RE.fullmatch(side) or _ISO_MONTH_RE.fullmatch(side)
+           for side in sides):
+        shapes.append(DATE_SHAPE_RAW_VALUE)
+    if not open_end and norm(start) == norm(end):
+        shapes.append(DATE_SHAPE_SAME_ENDS)
+    return tuple(shapes)
+
+
+def _date_end(match: re.Match) -> int:
+    """Where the matched date expression ends in the matched text."""
+    return match.end("end") if match["end"] is not None else match.end("start")
+
+
+def _rendered_date(text: str, match: re.Match, context: str) -> _RenderedDate | None:
+    """The date `match` found in `text`, or None when its shape is fine or
+    it has no four-digit year to tie it to an entry by."""
+    shapes = _date_shapes(match)
+    year = _FOUR_DIGIT_YEAR_RE.search(match["start"])
+    if not shapes or year is None:
+        return None
+    return _RenderedDate(text[match.start("start"):_date_end(match)],
+                         year.group(0), shapes, _attribution_tokens(context))
+
+
+def _is_label_cell(cell: str) -> bool:
+    return cell.rstrip().endswith(":")
+
+
+def _table_dates(table_rows: list[list[list[str]]]) -> list[_RenderedDate]:
+    """Wrongly shaped dates in table cells. A date's context is the rest of
+    its row. A row that labels its date ("Mentoring Period: | 2019-2019")
+    is in a label/value table, one record per table (a mentee, a grant), so
+    there the context is every value cell of the table."""
+    found = []
+    for table in table_rows:
+        values = [cell for row in table for cell in dict.fromkeys(row)
+                  if cell and not _is_label_cell(cell)]
+        for row in table:
+            cells = list(dict.fromkeys(cell for cell in row if cell))
+            neighbours = values if any(map(_is_label_cell, cells)) else cells
+            for cell in cells:
+                context = " ".join(c for c in neighbours
+                                   if c != cell and not _is_label_cell(c))
+                for line in cell.split("\n"):
+                    match = _DATE_CELL_RE.fullmatch(line)
+                    if match is None:
+                        continue
+                    date = _rendered_date(line, match, context)
+                    if date is not None:
+                        found.append(date)
+    return found
+
+
+def _paragraph_dates(blocks: list[tuple[str, str]]) -> list[_RenderedDate]:
+    """Wrongly shaped dates that open a body paragraph ("2013-2013 - Lecture,
+    ..."), outside the Appendix, which is the CV's own text by contract. The
+    context is the rest of the paragraph."""
+    found = []
+    in_appendix = False
+    for kind, text in blocks:
+        line = str(text or "")
+        if kind != "p":
+            continue
+        if line.strip() == _APPENDIX_HEADER:
+            in_appendix = True
+            continue
+        if _output_section_header(line) is not None:
+            in_appendix = False
+            continue
+        match = None if in_appendix else _DATED_LINE_RE.match(line)
+        if match is None:
+            continue
+        date = _rendered_date(line, match, line[_date_end(match):])
+        if date is not None:
+            found.append(date)
+    return found
+
+
+def _attributed_entry(date: _RenderedDate,
+                      by_year: dict[str, list[_DatedEntry]]) -> _DatedEntry | None:
+    """The one entry holding the date's start year that shares the most
+    words with its context: at least DATE_CELL_MIN_SHARED_TOKENS, and
+    strictly more than any other entry. None when no entry does."""
+    candidates = by_year.get(date.start_year, [])
+    scores = sorted(((len(entry.tokens & date.context), i)
+                     for i, entry in enumerate(candidates)), reverse=True)
+    if not scores or scores[0][0] < DATE_CELL_MIN_SHARED_TOKENS:
+        return None
+    if len(scores) > 1 and scores[1][0] == scores[0][0]:
+        return None
+    return candidates[scores[0][1]]
+
+
+def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> bool:
+    """Whether `shape` is wrong for this entry. A date printed the way the
+    entry's own text writes it is the CV's wording, never a defect. An open
+    range is a defect only outside DATE_CELL_OPEN_BY_DECISION_CODES and only
+    when neither the entry's text nor its headings carry an open marker."""
+    if date.rendered in entry.text:
+        return False
+    if shape != DATE_SHAPE_OPEN_RANGE:
+        return True
+    if entry.code in DATE_CELL_OPEN_BY_DECISION_CODES:
+        return False
+    return not (_OPEN_MARKER_WORD_RE.search(f"{entry.text}\n{entry.headings}")
+                or _OPEN_MARKER_DASH_RE.search(entry.text))
+
+
+def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],
+                         blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """Rendered dates that read wrong (EBYSBC E9/E21): an open range the
+    source never states, a raw stored value, a range whose two ends are the
+    same. One finding per entry and shape, WARN for an open range and INFO
+    for the other two. A raw value or same-ended range that no entry can be
+    tied to is still reported, in one INFO per shape that names no entry."""
+    by_year = _dated_entries(stage4)
+    per_entry: dict[tuple[object, str, str], list[str]] = defaultdict(list)
+    unattributed: dict[str, list[str]] = defaultdict(list)
+    for date in _table_dates(table_rows) + _paragraph_dates(blocks or []):
+        entry = _attributed_entry(date, by_year)
+        for shape in date.shapes:
+            if entry is None:
+                if shape != DATE_SHAPE_OPEN_RANGE:
+                    unattributed[shape].append(date.rendered)
+            elif _shape_is_defect(shape, date, entry):
+                per_entry[(entry.element_idx, entry.code, shape)].append(date.rendered)
+    findings = []
+    for (element_idx, code, shape), rendered in per_entry.items():
+        findings.append(_finding(
+            "date_cell_shape",
+            "WARN" if shape == DATE_SHAPE_OPEN_RANGE else "INFO",
+            f"entry {element_idx} ({code}): {shape}: {_DATE_SHAPE_MESSAGES[shape]}",
+            list(dict.fromkeys(rendered))[:DATE_CELL_EVIDENCE_LIMIT]))
+    for shape, rendered in unattributed.items():
+        findings.append(_finding(
+            "date_cell_shape", "INFO",
+            f"{shape}: {len(rendered)} rendered date(s) tied to no stage-4 "
+            f"entry: {_DATE_SHAPE_MESSAGES[shape]}",
+            list(dict.fromkeys(rendered))[:DATE_CELL_EVIDENCE_LIMIT]))
+    return findings

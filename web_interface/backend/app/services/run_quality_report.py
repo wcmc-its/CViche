@@ -363,6 +363,12 @@ LINT_COPY = {
         "research summary when stage 4.5 fails.",
         "Check the named part of the document. Rerun the CV, and send the run to the CViche team if "
         "it fails again."),
+    "date_cell_shape": LintCopy(
+        "Date reads wrong",
+        "A date prints in a form the CV does not use: a range ending in Present that the CV never "
+        "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
+        "same, such as 2013-2013.",
+        "Correct the date from the source CV."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
