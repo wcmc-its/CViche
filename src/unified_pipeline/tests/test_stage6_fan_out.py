@@ -13,6 +13,7 @@ and web228's K4 `sessions`.
     python3 -m pytest src/unified_pipeline/tests/test_stage6_fan_out.py -p no:cacheprovider
 """
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY as _RECORDS  # no
 from unified_pipeline.stage6 import fan_out  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
     fan_out_multi_record_entries,
 )
 
@@ -139,9 +141,6 @@ class TestFanOut:
 class TestWhatIsNotFannedOut:
     def _unchanged(self, entry):
         assert _fan(entry) == [entry]
-
-    def test_a_single_record_list(self):
-        self._unchanged(_honors('Alpha Prize, Hollis College', [_award('Alpha Prize')]))
 
     def test_a_list_of_strings(self):
         self._unchanged(_honors('Alpha Prize\tBeta Prize', ['Alpha Prize', 'Beta Prize']))
@@ -279,9 +278,17 @@ class TestTextCoverage:
         entry = self._committee_entry(self._RECORDS.format(a=' 1999', b=''), start_date='1999')
         assert len(_fan(entry)) == 2
 
-    def test_a_month_the_date_column_does_not_show_keeps_the_entry_whole(self):
-        # P's date column is `yyyy`: "07/2009" is written as "2009".
+    def test_a_month_the_date_column_does_not_show_is_not_content(self):
+        # EBYSBC E6: P's date column is `yyyy`, so "07/2009" is written as
+        # "2009" whether the entry is fanned out or not; a date is compared by
+        # its year (it used to keep the entry whole).
         entry = self._committee_entry(self._RECORDS.format(a=' 07/2009', b=''), start_date='07/2009')
+        assert len(_fan(entry)) == 2
+
+    def test_a_day_the_date_column_does_not_show_still_keeps_the_entry_whole(self):
+        # Only month/year is reduced to its year: a full m/d/y date is left as
+        # written, so its day is a token no yyyy column holds.
+        entry = self._committee_entry(self._RECORDS.format(a=' 07/15/2009', b=''), start_date='2009')
         assert _fan(entry) == [entry]
 
     def test_a_date_range_the_column_shows_in_full_is_fine(self):
@@ -656,8 +663,10 @@ class TestStage4Records:
         assert last['text'] == parent['text']
         assert last['extracted_fields'] == _THREE_COMMITTEES[-1]
         assert FANNED_OUT_FROM not in last
+        assert last[LAST_STAGE4_RECORD] == {'key': _RECORDS, 'index': 2, 'count': 3}
         assert [c[FANNED_OUT_FROM] for c in children[:-1]] == [
             {'key': _RECORDS, 'index': 0, 'count': 3}, {'key': _RECORDS, 'index': 1, 'count': 3}]
+        assert all(LAST_STAGE4_RECORD not in c for c in children[:-1])
 
     def test_an_earlier_record_inherits_no_scalar_from_the_last(self):
         records = [{'committee_name': 'Glade Board'}, _committee('Moss Panel')]
@@ -746,3 +755,403 @@ class TestStage4Records:
         children[-1]['institution_enrichment']['city'] = 'changed'
         children[0]['extracted_fields']['role'] = 'changed'
         assert parent == original
+
+
+# --- EBYSBC E6 (#1187): record lists the coverage test used to decline ------
+# Invented values (names, titles and dates alike), in the shapes the EBYSBC
+# batch carried: a D1 `appointments` list behind a section label with month
+# names and 'YY years, a Q2 `committees` list with YYYY-YY year ends, a Q2
+# `additional_entries` list dated M/YY, a D1 list whose end is "current", a
+# numbered Q1 line.
+
+
+def _appointment(title, start, end, institution='Ashby University'):
+    return {'title': title, 'institution': institution, 'start_date': start, 'end_date': end}
+
+
+class TestCoverageComparesWhatTheColumnShows:
+    @pytest.mark.parametrize('text,tokens', [
+        ("March '88-May '89", {'1988': 1, '1989': 1}),
+        ('Sept. 2011 - Aug 2013', {'2011': 1, '2013': 1}),
+        ('3/02-11/03', {'2002': 1, '2003': 1}),
+        ('11/1988', {'1988': 1}),
+        ('1991-1993; 1993-96; 1998-01', {'1991': 1, '1993': 2, '1996': 1, '1998': 1, '2001': 1}),
+        ('2016-08', {'2016': 1, '08': 1}),
+        ('6/3/2012', {'6': 1, '3': 1, '2012': 1}),
+        ('13/04', {'13': 1, '04': 1}),
+        ('2016 - current, now, ongoing, Present', {'2016': 1, 'present': 4}),
+        ('May Hollis Fund', {'may': 1, 'hollis': 1, 'fund': 1}),
+    ], ids=['month-names-and-apostrophe-years', 'abbreviated-months', 'month-slash-yy',
+            'month-slash-yyyy', 'yyyy-yy-ends', 'iso-month-is-not-a-range', 'full-date-left-whole',
+            'not-a-month', 'open-ends', 'month-name-without-a-number-is-a-word'])
+    def test_tokens(self, text, tokens):
+        assert fan_out._tokens(text) == tokens
+
+    def test_month_names_and_apostrophe_years_against_an_mm_yy_column(self):
+        # D1 writes `mm/yy` ("03/88"): both sides read 1988.
+        entry = {'taxonomy_code': 'D1',
+                 'text': "March '88-May '89 Lecturer, Ashby University\t"
+                         "June '89-present Reader, Ashby University",
+                 'extracted_fields': {'appointments': [
+                     _appointment('Lecturer', '1988-03', '1989-05'),
+                     _appointment('Reader', '1989-06', 'present')]}}
+        assert [c['extracted_fields']['title'] for c in _fan(entry)] == ['Lecturer', 'Reader']
+
+    def test_an_open_end_written_current_is_held_by_present(self):
+        entry = {'taxonomy_code': 'D1',
+                 'text': '2016 - current Reader, Ashby University\tVisiting Fellow, Birch Hollow University',
+                 'extracted_fields': {'appointments': [
+                     _appointment('Reader', '2016', 'current'),
+                     _appointment('Visiting Fellow', '2016', 'current', 'Birch Hollow University')]}}
+        assert len(_fan(entry)) == 2
+
+    def test_two_digit_year_ends(self):
+        committees = [{'committee_name': name, 'organization': 'Glade Society',
+                       'start_date': start, 'end_date': end}
+                      for name, start, end in [('Alpha Council', '1991', '1993'),
+                                               ('Beta Council', '1993', '1996'),
+                                               ('Gamma Council', '2004', '2008')]]
+        entry = {'taxonomy_code': 'Q2',
+                 'text': 'Glade Society: Alpha Council 1991-1993, Beta Council 1993-96, '
+                         'Gamma Council 2004-08',
+                 'extracted_fields': {'start_date': '1991', 'end_date': '1993',
+                                      'committees': committees}}
+        assert [c['extracted_fields']['committee_name'] for c in _fan(entry)] == [
+            'Alpha Council', 'Beta Council', 'Gamma Council']
+
+    def test_month_slash_two_digit_year(self):
+        entry = {'taxonomy_code': 'Q2',
+                 'text': 'Glade Society Alpha Working Group, 3/02-11/03; Beta Working Group, 6/04-2/05',
+                 'extracted_fields': {
+                     'committee_name': 'Alpha Working Group', 'organization': 'Glade Society',
+                     'start_date': '2002-03', 'end_date': '2003-11',
+                     'additional_entries': [{'committee_name': 'Beta Working Group',
+                                             'organization': 'Glade Society',
+                                             'start_date': '2004-06', 'end_date': '2005-02'}]}}
+        assert [c['extracted_fields']['committee_name'] for c in _fan(entry)] == [
+            'Alpha Working Group', 'Beta Working Group']
+
+    def test_a_list_number_is_not_content(self):
+        entry = {'taxonomy_code': 'Q1',
+                 'text': '2. Glade Society: Secretary (2003-2006), Chair-elect (2008-2010).',
+                 'extracted_fields': {'organization': 'Glade Society', 'additional_roles': [
+                     {'role': 'Secretary', 'start_date': '2003', 'end_date': '2006'},
+                     {'role': 'Chair-elect', 'start_date': '2008', 'end_date': '2010'}]}}
+        assert [c['extracted_fields']['role'] for c in _fan(entry)] == ['Secretary', 'Chair-elect']
+
+    def test_a_number_inside_the_text_is_still_content(self):
+        entry = {'taxonomy_code': 'Q1',
+                 'text': 'Glade Society Secretary 2003-2006 2. Chair-elect 2008-2010',
+                 'extracted_fields': {'organization': 'Glade Society', 'additional_roles': [
+                     {'role': 'Secretary', 'start_date': '2003', 'end_date': '2006'},
+                     {'role': 'Chair-elect', 'start_date': '2008', 'end_date': '2010'}]}}
+        assert _fan(entry) == [entry]
+
+
+_TWO_APPOINTMENTS = [_appointment('Lecturer', '1988-03', '1989-05'),
+                     _appointment('Senior Lecturer', '1989-06', '1994-02')]
+
+
+class TestSectionLabel:
+    _TEXT = ("March '88-May '89 Lecturer, Ashby University\t"
+             "June '89-Feb '94 Senior Lecturer, Ashby University")
+
+    def _d1(self, label, items=_TWO_APPOINTMENTS):
+        return {'taxonomy_code': 'D1', 'text': label + self._TEXT,
+                'extracted_fields': {'appointments': copy.deepcopy(items)}}
+
+    @pytest.mark.parametrize('label', ['Positions      ', 'Positions:\t', 'Teaching Posts: '])
+    def test_a_label_before_the_first_date_is_dropped(self, label):
+        assert len(_fan(self._d1(label))) == 2
+
+    def test_a_label_not_followed_by_a_date_is_content(self):
+        entry = self._d1('Positions      ')
+        entry['text'] = entry['text'].replace(
+            "March '88-May '89 Lecturer, Ashby University",
+            "Lecturer, Ashby University, March '88-May '89", 1)
+        assert _fan(entry) == [entry]
+
+    def test_a_label_that_may_be_the_role_a_record_left_out_is_content(self):
+        items = [dict(item) for item in _TWO_APPOINTMENTS]
+        del items[1]['title']
+        entry = self._d1('Tutor      ', items)
+        entry['text'] = entry['text'].replace(" Senior Lecturer,", '', 1)
+        assert _fan(entry) == [entry]
+        del entry['extracted_fields']['appointments'][1]
+        entry['text'] = entry['text'].split('\t')[0]
+        assert len(_fan(entry)) == 1
+
+    def test_a_label_further_in_is_content(self):
+        entry = self._d1('')
+        entry['text'] = entry['text'].replace('\t', '\tPositions      ')
+        assert _fan(entry) == [entry]
+
+
+class TestOneItemList:
+    def test_beside_the_parents_own_role_it_is_a_second_record(self):
+        # MRJDWE 101's shape; the one segment holds both records.
+        entry = {'taxonomy_code': 'Q1',
+                 'text': '4. Glade Society board member - 2004-2007; Secretary 2007-2009.',
+                 'extracted_fields': {'role': 'Board member', 'organization': 'Glade Society',
+                                      'start_date': '2004', 'end_date': '2007',
+                                      'additional_roles': [{'role': 'Secretary', 'start_date': '2007',
+                                                            'end_date': '2009'}]}}
+        first, second = _fan(entry)
+        assert first['extracted_fields'] == {'role': 'Board member', 'organization': 'Glade Society',
+                                             'start_date': '2004', 'end_date': '2007'}
+        assert second['extracted_fields'] == {'role': 'Secretary', 'organization': 'Glade Society',
+                                              'start_date': '2007', 'end_date': '2009'}
+        assert [c[FANNED_OUT_FROM]['count'] for c in (first, second)] == [2, 2]
+
+    def test_under_a_parent_holding_only_its_dates_it_is_the_record(self):
+        # The pilot's BFSUMA shape (#1187): the item is the whole record.
+        entry = {'taxonomy_code': 'D1',
+                 'text': 'Ashby University, School of Nursing\tTutor in Nursing, 1983-1984',
+                 'extracted_fields': {'appointments': [_appointment(
+                     'Tutor in Nursing', '1983', '1984', 'Ashby University, School of Nursing')],
+                     'start_date': '1983', 'end_date': '1984'}}
+        (child,) = _fan(entry)
+        assert child['extracted_fields']['title'] == 'Tutor in Nursing'
+        assert child['text'] == entry['text']
+        assert child[FANNED_OUT_FROM] == {'key': 'appointments', 'index': 0, 'count': 1}
+
+    def test_a_list_of_dates_is_the_parents_second_period(self):
+        entry = {'taxonomy_code': 'O',
+                 'text': 'Acting Dean, Ashby University\tMarch 2011-May 2012\tOctober 2013-April 2014',
+                 'extracted_fields': {'leadership_role': 'Acting Dean', 'institution': 'Ashby University',
+                                      'start_date': '2011-03', 'end_date': '2012-05',
+                                      'additional_dates': [{'start_date': '2013-10',
+                                                            'end_date': '2014-04'}]}}
+        children = _fan(entry)
+        assert [(c['extracted_fields']['leadership_role'], c['extracted_fields']['start_date'])
+                for c in children] == [('Acting Dean', '2011-03'), ('Acting Dean', '2013-10')]
+
+    def test_an_award_list_of_one_renders_from_its_fields(self):
+        (child,) = _fan(_honors('Alpha Prize, Hollis College', [_award('Alpha Prize')]))
+        assert child['extracted_fields'] == _award('Alpha Prize')
+
+    def test_an_item_that_repeats_the_parent_is_not_emitted_twice(self):
+        entry = {'taxonomy_code': 'Q1', 'text': 'Glade Society Secretary 2007-2009',
+                 'extracted_fields': {'role': 'Secretary', 'organization': 'Glade Society',
+                                      'additional_roles': [{'role': 'Secretary', 'start_date': '2007',
+                                                            'end_date': '2009'}]}}
+        assert len(_fan(entry)) == 1
+
+    def test_the_stage4_records_list_still_needs_two(self):
+        entry = _stage4_entry([_committee('Glade Board')])
+        assert _fan4(entry) == [entry]
+
+    def test_a_one_item_list_in_the_last_record_leaves_the_stage4_list_to_split(self):
+        # Only a list of two or more in the scalars hands the entry to the
+        # generic rules, which would drop the stage-4 records.
+        last = dict(_committee('Moss Panel'), additional_roles=[{'role': 'Chair'}])
+        children = _fan4(_stage4_entry([_committee('Glade Board'), last]))
+        assert [c['extracted_fields']['committee_name'] for c in children] == ['Glade Board', 'Moss Panel']
+
+    def test_a_one_item_list_with_a_stray_key_warns(self):
+        entry = {'taxonomy_code': 'D3', 'text': 'Consultant, Glade Agency 1990-1992',
+                 'extracted_fields': {'consultantships': [{
+                     'title': 'Consultant', 'organization': 'Glade Agency', 'start_date': '1990',
+                     'end_date': '1992', 'description': 'advised on staffing'}]}}
+        warnings = []
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert warnings[0]['evidence'] == ['D3.consultantships: 1 entry', 'description']
+
+
+_LICENCES = [{'state_country': 'Arden', 'issue_date': '2014'},
+             {'state_country': 'Brinmoor', 'issue_date': '2014'}]
+
+
+class TestNestedRecordList:
+    def _f1(self, text='Corvale 2012\tArden 2014\tBrinmoor 2014', **extra):
+        return {'taxonomy_code': 'F1', 'text': text,
+                'extracted_fields': {'state_country': 'Corvale', 'issue_date': '2012',
+                                     'additional_info': {'remote_licences': copy.deepcopy(_LICENCES),
+                                                         **extra}}}
+
+    def test_a_list_one_level_down_fans_out(self):
+        children = _fan(self._f1())
+        assert [c['extracted_fields']['state_country'] for c in children] == [
+            'Corvale', 'Arden', 'Brinmoor']
+        assert [c[FANNED_OUT_FROM]['key'] for c in children] == ['additional_info.remote_licences'] * 3
+        assert all('additional_info' not in c['extracted_fields'] for c in children)
+
+    def test_the_rest_of_the_object_stays_with_every_child(self):
+        children = _fan(self._f1(license_type='Medical'))
+        assert all(c['extracted_fields']['additional_info'] == {'license_type': 'Medical'}
+                   for c in children)
+
+    def test_a_declined_nested_list_warns_with_its_path(self):
+        warnings = []
+        entry = self._f1(text='Corvale 2012 Remote Permits Arden 2014 Brinmoor 2014')
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert warnings[0]['evidence'] == ['F1.additional_info.remote_licences: 1 entry']
+
+    def test_a_nested_list_with_a_stray_key_warns_naming_it(self):
+        entry = self._f1()
+        entry['extracted_fields']['additional_info']['remote_licences'][0]['portal'] = 'web'
+        warnings = []
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert warnings[0]['evidence'] == ['F1.additional_info.remote_licences: 1 entry', 'portal']
+
+    def test_two_levels_down_is_not_read(self):
+        entry = self._f1()
+        entry['extracted_fields']['additional_info'] = {
+            'more': {'remote_licences': copy.deepcopy(_LICENCES)}}
+        assert _fan(entry) == [entry]
+
+
+class TestDeclinedListWarnsForEveryFieldRenderedCode:
+    @pytest.mark.parametrize('code,list_item', [
+        ('D1', {'title': 'Instructor'}), ('D2', {'title': 'Attending'}),
+        ('D3', {'title': 'Consultant'}), ('F1', {'state_country': 'Arden'}),
+        ('I', {'organization': 'Glade Society'}), ('Q1', {'role': 'Chair'}),
+        ('Q2', {'committee_name': 'Alpha Council'})])
+    def test_a_declined_list_warns(self, code, list_item):
+        entry = {'taxonomy_code': code, 'text': 'Zzunheld prose no field carries',
+                 'extracted_fields': {'records': [dict(list_item), dict(list_item)]}}
+        warnings = []
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert [(w['check'], w['code']) for w in warnings] == [(fan_out.REJECTED_LIST_CHECK, code)]
+
+
+class TestParentKeepsItsOwnPart:
+    """EBYSBC E34 (CTWLTR 55): the parent's `organization` joined every
+    consultancy, two of which the items render again."""
+
+    def _q2(self, organization):
+        return {'taxonomy_code': 'Q2',
+                'text': 'Adviser: Alpha Fund, 2004; Beta Trust 2006; Gamma Forum 2006-present',
+                'extracted_fields': {'role': 'Adviser', 'organization': organization,
+                                     'start_date': '2004', 'end_date': '2004',
+                                     'additional_roles': [
+                                         {'role': 'Adviser', 'organization': 'Beta Trust',
+                                          'start_date': '2006', 'end_date': '2006'},
+                                         {'role': 'Adviser', 'organization': 'Gamma Forum',
+                                          'start_date': '2006', 'end_date': 'present'}]}}
+
+    def test_parts_an_item_names_leave_the_parent(self):
+        children = _fan(self._q2('Alpha Fund; Beta Trust; Gamma Forum'))
+        assert [c['extracted_fields']['organization'] for c in children] == [
+            'Alpha Fund', 'Beta Trust', 'Gamma Forum']
+
+    def test_a_value_every_part_of_which_an_item_holds_is_kept(self):
+        entry = self._q2('Beta Trust; Gamma Forum')
+        entry['text'] += ' Alpha Fund'
+        entry['extracted_fields']['committee_name'] = 'Alpha Fund'
+        assert _fan(entry)[0]['extracted_fields']['organization'] == 'Beta Trust; Gamma Forum'
+
+    def test_an_item_inherits_the_whole_value_it_lacks(self):
+        entry = self._q2('Alpha Fund; Beta Trust; Gamma Forum')
+        del entry['extracted_fields']['additional_roles'][1]['organization']
+        children = _fan(entry)
+        assert children[0]['extracted_fields']['organization'] == 'Alpha Fund; Gamma Forum'
+        assert children[2]['extracted_fields']['organization'] == 'Alpha Fund; Beta Trust; Gamma Forum'
+
+
+def _scope_generator(monkeypatch, abroad):
+    """A generator whose scope classifier answers International when the
+    activity it is asked about names `abroad`, and Regional otherwise, so a
+    National heading that wins is visible."""
+    import unified_pipeline.stage_6_word_template as s6
+
+    def classify(*args, **kwargs):
+        activity = next(line for line in kwargs['messages'][1]['content'].splitlines()
+                        if line.startswith('**Activity'))
+        return {'content': json.dumps({'scope': 'International' if abroad in activity else 'Regional'})}
+
+    monkeypatch.setattr(s6, 'call_llm', classify)
+    generator = s6.WCMTemplateGenerator(verbose=False)
+    generator.cv_owner_location = {'primary_location': {'institution': 'Ashby University',
+                                                        'city': 'Ashby', 'state': 'AB'}}
+    return generator
+
+
+def _meeting(place, year):
+    return {'committee_name': f'Poster Talk, Autumn Meeting, {place}', 'role': 'Moderator',
+            'organization': '', 'start_date': year, 'end_date': year}
+
+
+class TestInheritedScope:
+    """EBYSBC E34 (BZZNRL 137): a fanned child keeps its heading's scope
+    unless the classifier, asked about that record alone, puts it abroad."""
+
+    @pytest.mark.parametrize('hierarchy,scope', [
+        (['SERVICE', 'National'], 'National'), (['NATIONAL SERVICE ROLES'], 'National'),
+        (['International', 'Talks'], 'International'), (['Regional'], 'Regional'),
+        (['International Activities', 'National'], 'National'),
+        (['Talks: National, International'], None), (['Editorial Work'], None), ([], None)])
+    def test_the_nearest_heading_naming_one_scope(self, hierarchy, scope):
+        assert fan_out.inherited_scope({FANNED_OUT_FROM: {}, 'hierarchy': hierarchy}) == scope
+
+    def test_the_last_stage4_record_inherits_too(self):
+        assert fan_out.inherited_scope({LAST_STAGE4_RECORD: {}, 'hierarchy': ['National']}) == 'National'
+
+    def test_an_entry_that_was_not_fanned_out_inherits_nothing(self):
+        assert fan_out.inherited_scope({'hierarchy': ['National']}) is None
+
+    @pytest.mark.parametrize('marker,heading,own,scope', [
+        (FANNED_OUT_FROM, 'National', 'Regional', 'National'),
+        (LAST_STAGE4_RECORD, 'National', 'Regional', 'National'),
+        (FANNED_OUT_FROM, 'National', 'International', 'International'),
+        (FANNED_OUT_FROM, 'Regional', 'National', 'Regional'),
+        (FANNED_OUT_FROM, 'International', 'National', 'International'),
+        (FANNED_OUT_FROM, 'Editorial Work', 'Regional', 'Regional'),
+        (None, 'National', 'Regional', 'Regional')])
+    def test_a_record_keeps_its_heading_unless_the_classifier_puts_it_abroad(
+            self, marker, heading, own, scope):
+        entry = {'hierarchy': ['SERVICE', heading], **({marker: {}} if marker else {})}
+        assert fan_out.record_scope(entry, own) == scope
+
+    def test_the_last_stage4_record_is_its_own_fields_not_the_whole_line(self):
+        entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text='Glade Board\tFern Council and Moss Panel')
+        children = _fan4(entry)
+        assert fan_out.record_text(children[-1]) == 'Moss Panel | Member | Ashby University | 2004 | 2006'
+        assert fan_out.record_text(children[0]) == children[0]['text']
+        assert fan_out.record_text({'text': None}) == ''
+
+    def test_every_stage4_record_keeps_the_heading_unless_it_is_abroad(self, monkeypatch):
+        # BZZNRL 137's shape: the whole line names the meeting abroad first,
+        # and the last record, the parent itself, is a meeting at home.
+        meetings = [_meeting('Varnor, Kesh', '2010'), _meeting('Corvale, Westmark', '2012'),
+                    _meeting('Lindell, Westmark', '2013')]
+        text = 'Moderator:\t' + '\t'.join(f"{m['committee_name']}, {m['start_date']}" for m in meetings)
+        children = _fan4(_stage4_entry(meetings, text=text, code='Q2', hierarchy=['SERVICE', 'National']))
+        generator = _scope_generator(monkeypatch, abroad='Varnor')
+        assert [generator._classify_geographic_scope(c) for c in children] == [
+            'International', 'National', 'National']
+        # Classified on the whole line, as the parent was, the last record goes abroad.
+        whole = {key: value for key, value in children[-1].items() if key != LAST_STAGE4_RECORD}
+        assert generator._classify_geographic_scope(whole) == 'International'
+
+    def test_a_listed_child_keeps_the_heading_unless_it_is_abroad(self, monkeypatch):
+        entry = {'taxonomy_code': 'Q2', 'hierarchy': ['SERVICE', 'National'],
+                 'text': 'Panelist: Spring Forum, Ashby\tSpring Forum, Varnor',
+                 'extracted_fields': {'committee_name': 'Spring Forum, Ashby', 'role': 'Panelist',
+                                      'additional_entries': [{'committee_name': 'Spring Forum, Varnor',
+                                                              'role': 'Panelist'}]}}
+        generator = _scope_generator(monkeypatch, abroad='Varnor')
+        assert [generator._classify_geographic_scope(c) for c in _fan(entry)] == [
+            'National', 'International']
+        # An entry that was not fanned out takes the classifier's answer.
+        assert generator._classify_geographic_scope({**entry, 'text': 'Spring Forum, Ashby'}) == 'Regional'
+
+
+def test_every_appointment_of_a_label_led_list_renders(tmp_path):
+    import json
+
+    from docx import Document
+
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+    entry = {'taxonomy_code': 'D1', 'element_idx_start': 3,
+             'text': "Positions      March '88-May '89 Zqlecturer, Ashby University\t"
+                     "June '89-present Zqreader, Ashby University",
+             'extracted_fields': {'appointments': [
+                 _appointment('Zqlecturer', '1988-03', '1989-05'),
+                 _appointment('Zqreader', '1989-06', 'present')]}}
+    source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+    source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
+        '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    assert 'Zqlecturer' in body and 'Zqreader' in body
