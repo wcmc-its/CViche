@@ -214,8 +214,9 @@ def _restore_stage5d_owner(
 
 def _extend_from_source_line(formatted_citation: str, source_text: str, target_name: str) -> str:
     """5d's kept authors, then the ones the CV's line lists after them, then
-    "et al." only if the line says it. Unchanged unless that run names the
-    owner, and 5d's authors name no word of `target_name` (a given name
+    "et al." when the line's run goes on past them: it says "et al.", or the
+    read stopped at a person it cannot read. Unchanged unless that run names
+    the owner, and 5d's authors name no word of `target_name` (a given name
     5d shortened to an initial is not a cut owner). A run that meets a
     non-author (a group credit closing it, an affiliation, the title) stops
     there."""
@@ -227,12 +228,12 @@ def _extend_from_source_line(formatted_citation: str, source_text: str, target_n
     run = _source_authors_after(source_text, kept)
     if run is None:
         return formatted_citation
-    following, et_al = run
+    following, goes_on = run
     if not any(_names(w, author) for author in following for w in owner):
         return formatted_citation
     rest = formatted_citation[len(segment):]
     rest = rest[_ET_AL_RE.match(rest).end():].lstrip(" .")
-    tail = ", et al" if et_al else ""
+    tail = ", et al" if goes_on else ""
     return f"{', '.join(kept + following)}{tail}. {rest}"
 
 

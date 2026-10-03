@@ -315,10 +315,12 @@ def _join_spaced_initials(authors: str) -> str:
 # hyphen) and printed junk on three more (a consortium credit and an
 # affiliation read as authors). The CV's own line still holds the run, in
 # whatever spelling that CV uses. The functions below read it back one author
-# at a time and accept only these shapes; anything else ends the run, so a
-# title word, a group credit or an affiliation is never printed as an author:
+# at a time and accept only these shapes; anything else ends the read, so a
+# title word, a group credit or an affiliation is never printed as an author.
+# A read that ends at a person it cannot read says "et al." instead of
+# printing a list that looks complete:
 #
-#     Surname Initials [Suffix]    "Wren C", "Quill W.C.", "Rowan ID 3rd"
+#     Surname Initials [Suffix]    "Wren C", "Quill W.C.", "Rowan ID 3rd", "Le T"
 #     Surname, Initials            "Sorrel, M.H.", "Tansy, .S" (a stray period)
 #     Initials Surname [Suffix]    "J. Umber", "J.R. Vetch Jr."
 #     Given Initial Surname        "Opal V. Yarrow"     given-name-first
@@ -420,12 +422,20 @@ def _is_name_token(token: str) -> bool:
 
 
 def _surname_at(tokens: list[str]) -> tuple[str, list[str]] | None:
-    """Leading particles plus one name word, and the tokens after them."""
+    """Leading particles plus one name word, and the tokens after them.
+
+    Capitalised particles with no name word after them are the surname
+    itself ("Le T", "Du D", "T. Le"); each caller checks that only initials,
+    or nothing, follow. Read as a particle, such a co-author's surname
+    stopped the run there and dropped the co-authors after it (QITQWH
+    269/283 on the EBYSBC farm, #1259)."""
     i = 0
     while i < len(tokens) and tokens[i].casefold() in _SURNAME_PARTICLES:
         i += 1
     if i < len(tokens) and _is_name_token(tokens[i]):
         return ' '.join(tokens[:i + 1]), tokens[i + 1:]
+    if i and tokens[i - 1][0].isupper():
+        return ' '.join(tokens[:i]), tokens[i:]
     return None
 
 
@@ -455,19 +465,31 @@ def _given_first_author(tokens: list[str]) -> str | None:
 
 def _vancouver_author(tokens: list[str], given_first: bool) -> str | None:
     """One author's source words as "Surname Initials[ Suffix]", or None when
-    they are not one of the shapes listed above this section."""
-    suffix = ''
+    they are not one of the shapes listed above this section.
+
+    A last word shaped like a suffix is one only when the words before it
+    are an author ("Vetch JR Jr", "Opal V. Yarrow Jr"). Otherwise it is the
+    initials: "Wren SR" and "Gorse JR" are initials, which `_AUTHOR_SUFFIX_RE`
+    (case-blind) also matches. Read as a suffix, they stopped the read on 10
+    of the 1,387 cut citations on the 63-run farm (#1259)."""
     if len(tokens) > 1 and _is_suffix_token(tokens[-1]):
-        suffix, tokens = f" {tokens[-1].rstrip('.')}", tokens[:-1]
+        author = _unsuffixed_author(tokens[:-1], given_first)
+        if author is not None:
+            return f"{author} {tokens[-1].rstrip('.')}"
+    return _unsuffixed_author(tokens, given_first)
+
+
+def _unsuffixed_author(tokens: list[str], given_first: bool) -> str | None:
+    """`_vancouver_author` once a suffix is set aside."""
     surname_first = _surname_at(tokens)
     if surname_first is not None and _initials_of(surname_first[1]):
-        return f"{surname_first[0]} {_initials_of(surname_first[1])}{suffix}"
+        return f"{surname_first[0]} {_initials_of(surname_first[1])}"
     name_start = next((i for i, t in enumerate(tokens) if not _is_initials_token(t)), 0)
     initials_first = _surname_at(tokens[name_start:])
     if (name_start and _initials_of(tokens[:name_start])
             and initials_first is not None and not initials_first[1]):
-        return f"{initials_first[0]} {_initials_of(tokens[:name_start])}{suffix}"
-    if given_first and not suffix:
+        return f"{initials_first[0]} {_initials_of(tokens[:name_start])}"
+    if given_first:
         return _given_first_author(tokens)
     return None
 
@@ -522,10 +544,40 @@ def _group_author(piece: str) -> str | None:
     return None
 
 
+def _is_author_word(word: str) -> bool:
+    """A word one author's name can hold: a name word, an initials group (a
+    credential such as "MD" is shaped like one), a particle or a suffix."""
+    return (_is_name_token(word) or _is_initials_token(word) or _is_suffix_token(word)
+            or word.casefold() in _SURNAME_PARTICLES)
+
+
+def _names_a_person(piece: str, given_first: bool) -> bool:
+    """Whether a piece the reader could not read as an author still names a
+    person, so the run goes on past the authors read. Up to where the piece
+    ends a sentence or breaks the run: one to `_MAX_AUTHOR_TOKENS` words, each
+    one an author can hold, no group word, and an initials group unless the
+    run is given-name-first. "S. Gorse Holly" does, and so does "Juno Wren"
+    in a run of "Given I. Surname" items; a title ("The Lantern Effect", with
+    no initials), an affiliation with a lower-case word ("School of
+    Medicine"), a closing group credit, a lone credential ("MD.") or "J Wood
+    2020" do not."""
+    ends = [m.start() for m in (_SENTENCE_END_RE.search(piece), _RUN_BREAK_RE.search(piece)) if m]
+    head = piece[:min(ends)] if ends else piece
+    words = _item_words(_AUTHOR_TOKEN_RE.findall(head))
+    return (0 < len(words) <= _MAX_AUTHOR_TOKENS and not _GROUP_AUTHOR_RE.search(head)
+            and all(_is_author_word(w) for w in words)
+            and not all(w.rstrip('.').casefold() in _AUTHOR_CREDENTIALS for w in words)
+            and (given_first or any(_is_initials_token(w) for w in words)))
+
+
 def _authors_in_run(pieces: list[str], given_first: bool) -> tuple[list[str], bool] | None:
     """Read authors off the run's pieces until one is not an author. Returns
-    them and whether the run says "et al.", or None when a bare surname is
-    left with no initials to complete it."""
+    them and whether the run goes on past them -- it says "et al.", or the
+    piece that stopped the read still names a person -- or None when a bare
+    surname is left with no initials to complete it. A list that stops short
+    of the run's end must say "et al." rather than read as complete (#1259:
+    a reader that stopped at a particle-word surname printed QITQWH 283 five
+    co-authors short)."""
     authors: list[str] = []
     open_surname: list[str] = []
     for piece in pieces:
@@ -549,7 +601,7 @@ def _authors_in_run(pieces: list[str], given_first: bool) -> tuple[list[str], bo
         if author is None and _initials_of(words) is not None:
             return None  # initials with no surname to finish: the pairs are misaligned
         if author is None:
-            break
+            return None if open_surname else (authors, _names_a_person(piece, given_first))
         authors.append(author)
         open_surname = []
         if run_ends:
@@ -608,8 +660,9 @@ def _source_authors_after(
 ) -> tuple[list[str], bool] | None:
     """The authors a CV's source line lists after the last of `kept` (the
     authors stage 5d kept, in its own spelling), each as "Surname Initials",
-    and whether the line's run ends in "et al." (#1259). None when that
-    author cannot be found in the line, or the run leaves a bare surname.
+    and whether the run goes on past them: the line says "et al.", or the
+    read stopped at a person it cannot read (#1259). None when that author
+    cannot be found in the line, or the run leaves a bare surname.
 
     The anchor is the last kept author's surname, at the same occurrence it
     has among the kept ("Elm EC, Elm M" anchors on the second "Elm"). Its

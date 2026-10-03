@@ -285,6 +285,14 @@ _LINE = '4. Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A ti
      _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W, et al',
      _LINE.replace('Wren W.', 'Wren W, et al.'),
      'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W, et al. A title. J Wood. 2020;1:2-3.'),
+    ('the line goes on past the owner with a person the reader cannot read: "et al.", not a short list',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W, S, Holly Rowan',
+     _LINE.replace('Wren W.', 'Wren W, S. Holly Rowan.'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W, et al. A title. J Wood. 2020;1:2-3.'),
+    ('co-authors whose surnames are particle words are read, before and after the owner',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Le, Wren W, Du H',
+     _LINE.replace('Gorse G, Wren W.', 'Le G, Wren W, Du H.'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Le G, Wren W, Du H. A title. J Wood. 2020;1:2-3.'),
 ])
 def test_restore_stage5d_owner_gives_the_owner_back(
     case: str, citation: str, authors: str, source: str, expected: str,
@@ -298,6 +306,8 @@ def test_restore_stage5d_owner_gives_the_owner_back(
      'Ash A, Wren W, Cedar C, Daly D, Elm E, Fir F, Gorse G', ''),
     ('a CV\'s own elided list names the owner between two "et al."',
      'Ash A, et al., Wren W, et al., Holly H. A title. 2020.', 'Ash A, Wren W, Holly H', ''),
+    ('a 5d list with no "et al." was not cut, even when the line goes on to the owner',
+     'Ash A, Birch B, Fir F', 'Ash A, Birch B, Fir F, G, Gorse, Wren W', 'Ash A, Birch B, Fir F, Wren W. A title.'),
     ('stage 4 is damaged and there is no source line',
      _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W', ''),
     ('the line\'s run ends before the owner (a group credit closes it)',
@@ -308,6 +318,16 @@ def test_restore_stage5d_owner_leaves_the_citation_alone(
     case: str, citation: str, authors: str, source: str,
 ) -> None:
     assert _restore_stage5d_owner(citation, authors, source, 'Wren W') == citation, case
+
+
+def test_a_credential_in_capitals_in_the_owners_name_is_not_their_surname() -> None:
+    """The owner ("Wren W, FAAP") is among 5d's authors. Stage 4's list
+    carries the credential, 5d's does not; that is not a cut owner."""
+    citation = 'Ash A, Wren W, Birch B, Cedar C, Daly D, Elm E, et al. A title. 2020.'
+    authors = 'Ash A, Wren W FAAP, Birch B, Cedar C, Daly D, Elm E, Fir F'
+    source = 'Ash A, Wren W FAAP, Birch B, Cedar C, Daly D, Elm E, Fir F. A title. 2020.'
+
+    assert _restore_stage5d_owner(citation, authors, source, 'Wren W, FAAP') == citation
 
 
 def test_a_given_name_5d_shortened_is_not_a_cut_owner() -> None:
@@ -325,6 +345,8 @@ def test_a_given_name_5d_shortened_is_not_a_cut_owner() -> None:
     ('Ash A, 3rd GI, Wren W', 'Ash A, Gorse GI 3rd, Wren W.', True),
     ('Ash A, Jr, Wren W', 'Ash A, Jr, Wren W.', True),
     ('Ash A, Gorse GHIJ', 'Ash A, Gorse GHIJ.', False),
+    # a three-letter initials group is never checked against the line
+    ('Ash A, Gorse GHI, Wren W', 'Ash A, Gorse G.H.I., Wren W.', False),
     ('Ash A, Gorse GI Jr, Wren W', 'Ash A, Gorse GI Jr, Wren W.', False),
 ])
 def test_prints_junk_author(authors: str, source: str, junk: bool) -> None:
@@ -335,6 +357,8 @@ def test_prints_junk_author(authors: str, source: str, junk: bool) -> None:
     ('Ash A, Birch B, et al. A title. 2020.', 'Ash A, Birch B, '),
     # the "et al." is the editors', after the title
     ('Ash A. A chapter. In: Birch B, et al., eds. 2020.', 'Ash A. A chapter. In: Birch B, et al., eds. 2020.'),
+    # the same, with no comma after the "et al."
+    ('Ash A. A chapter. In: Birch B, et al. A book. 2020.', 'Ash A. A chapter. In: Birch B, et al. A book. 2020.'),
     # a CV's own elided list goes on after the "et al."
     ('Ash A, et al., Wren W. A title. 2020.', 'Ash A, et al., Wren W. A title. 2020.'),
     ('Ash A, Birch B. A title. 2020.', 'Ash A, Birch B. A title. 2020.'),
