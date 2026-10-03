@@ -366,11 +366,17 @@ def _collapse_whitespace(text: str) -> str:
     return " ".join(text.split())
 
 
+# Characters a heading line may open with before the heading itself: a rule of
+# asterisks, dashes, underscores or equals signs typed on the same line
+# ("***** EDUCATION:", EBYSBC class E17, #1254).
+_HEADING_LEAD_SEPARATORS = "*-_= "
+
+
 def _line_is_heading(line_text: str, heading_text: str) -> bool:
     """True when the line is the heading, or the heading followed by a short
-    non-word suffix ("ABSTRACTS (selected)"). Case-sensitive: 1a copies the
-    heading's text from the line itself."""
-    line = _collapse_whitespace(line_text)
+    non-word suffix ("ABSTRACTS (selected)"), after any leading separator run.
+    Case-sensitive: 1a copies the heading's text from the line itself."""
+    line = _collapse_whitespace(line_text).lstrip(_HEADING_LEAD_SEPARATORS)
     heading = _collapse_whitespace(heading_text)
     if not heading or not line.startswith(heading):
         return False
