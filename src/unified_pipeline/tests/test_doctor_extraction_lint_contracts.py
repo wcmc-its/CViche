@@ -1628,23 +1628,25 @@ def _not_in_source(*entries, stage5d=None):
     return lint_year_not_in_source({"entries": list(entries)}, stage5d)
 
 
-@pytest.mark.parametrize("code, fields, text", [
+@pytest.mark.parametrize("code, fields, text, flagged", [
     # EBYSBC HFAJCC 392's shape: an mm/dd/yy start read as another year.
     ("M2A", {"start_date": "1997-04-01", "end_date": "2024-03-31"},
-     "Example Agency (PI) 04/01/19 \u2013 03/31/24 Example aims"),
+     "Example Agency (PI) 04/01/19 \u2013 03/31/24 Example aims", "start_date=1997"),
     # EBYSBC VVRTUC 43's: the year of the entry before it in the batch.
     ("D1", {"start_date": "1981-03", "end_date": "current"},
-     "Example Professor (current) March 2012 -"),
+     "Example Professor (current) March 2012 -", "start_date=1981"),
     # EBYSBC YYVHNN 480's: "3-24-11-26" is Mar 2024 to Nov 2026; no 2011.
+    # The start year is the target. No year is read out of a dash-joined
+    # run of numbers, so the right end year, written "26", is listed too.
     ("M2B", {"start_date": "2011-03-24", "end_date": "2026"},
-     "Co-I Example contract 10% 3-24-11-26 $1.000"),
+     "Co-I Example contract 10% 3-24-11-26 $1.000", "start_date=2011, end_date=2026"),
 ])
-def test_year_not_in_source_fires_on_a_year_the_text_never_states(code, fields, text):
+def test_year_not_in_source_fires_on_a_year_the_text_never_states(code, fields, text, flagged):
     findings = _not_in_source(_fields_entry(code, fields, text=text, idx=43))
     assert len(findings) == 1
     assert findings[0]["lint"] == "year_not_in_source"
     assert findings[0]["severity"] == "WARN"
-    assert findings[0]["message"].startswith(f"entry 43 ({code}): ")
+    assert findings[0]["message"].startswith(f"entry 43 ({code}): {flagged} -- ")
     assert findings[0]["evidence"] == [text[:FIELD_EVIDENCE_VALUE_CHARS]]
 
 

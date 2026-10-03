@@ -1792,6 +1792,67 @@ def test_table_shape_a_row_two_entries_share_is_traced_to_neither():
     assert lint_table_shape(tables, stage4) == []
 
 
+def _split_evidence(tables, stage4):
+    """The evidence of the split finding, [] when there is none."""
+    return [ev for f in lint_table_shape(tables, stage4) if "split" in f["message"]
+            for ev in f["evidence"]]
+
+
+# One award whose 'Organization - date' line renders as a second row.
+_SPLIT_TEXT = "Example Teaching Award\nExample College - 04/15/2003"
+_SPLIT_TABLE = [[_HONORS_HEADER, ["Example Teaching Award", "", ""],
+                 ["Example College — 04/15/2003", "", ""]]]
+
+
+def test_table_shape_only_honors_entries_own_honors_rows():
+    """An appointment whose text also names the award is no owner of the
+    award's row: counted as one, it would make the row shared and hide the
+    split. On the EBYSBC farm, every split finding changes without this."""
+    stage4 = _honors_stage4((12, _SPLIT_TEXT, _ONE_AWARD))
+    stage4["entries"].append({
+        "taxonomy_code": "D1", "element_idx_start": 40,
+        "text": "Chair, Example Teaching Award Committee, 2005-2008",
+        "extracted_fields": {"position": "Chair"}})
+    assert _split_evidence(_SPLIT_TABLE, stage4) == [
+        "entry 12 (H): 2 rows from 1 stage-4 award(s)"]
+
+
+def test_table_shape_a_list_of_plain_values_is_one_award():
+    """Only a list of records counts awards. A list of plain values, here two
+    bodies that gave one award jointly, is still one award, so its two rows
+    are a split."""
+    joint = {**_ONE_AWARD, "granting_body": ["Example College", "Sample Society"]}
+    assert _split_evidence(_SPLIT_TABLE, _honors_stage4((12, _SPLIT_TEXT, joint))) == [
+        "entry 12 (H): 2 rows from 1 stage-4 award(s)"]
+
+
+def test_table_shape_a_row_without_letters_or_digits_is_no_entrys():
+    """A name cell of punctuation only has an empty key, which every line
+    contains: it is traced to no entry, even when only one entry exists."""
+    stage4 = _honors_stage4((12, "Example Teaching Award, Example College, 2003", _ONE_AWARD))
+    tables = [[_HONORS_HEADER, ["Example Teaching Award", "Example College", "2003"],
+               ["—", "", ""]]]
+    assert _split_evidence(tables, stage4) == []
+
+
+def test_table_shape_a_row_is_one_line_of_an_entry_not_text_across_a_break():
+    """The honors parser renders each source line as a row, so a row is one
+    line, or part of one. Entry 82's wrapped "...Example" / "University
+    Hospital" can render no "Example University" row, so that row is entry
+    80's alone, and both entries are split."""
+    stage4 = _honors_stage4(
+        (80, "Example Merit Award\nExample University", {"award_name": "Example Merit Award"}),
+        (82, "Example Service Award, Example\nUniversity Hospital",
+         {"award_name": "Example Service Award"}))
+    tables = [[_HONORS_HEADER, ["Example Merit Award", "", "2001"],
+               ["Example University", "", ""],
+               ["Example Service Award, Example", "", "2002"],
+               ["University Hospital", "", ""]]]
+    assert _split_evidence(tables, stage4) == [
+        "entry 80 (H): 2 rows from 1 stage-4 award(s)",
+        "entry 82 (H): 2 rows from 1 stage-4 award(s)"]
+
+
 def test_table_shape_message_does_not_cite_closed_issue():
     f = lint_table_shape([[_HONORS_HEADER, ["Prize. Given here. Then there.",
                                             "NY", ""]]])[0]
