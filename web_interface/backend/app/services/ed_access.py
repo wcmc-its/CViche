@@ -52,6 +52,7 @@ def verify_ed_access(
         raise EdCwidMissing(user.id)
     ed_access_group = get_config_value(db, "ed_access_group") or ""
     ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+    ed_staff_group = get_config_value(db, "ed_staff_group") or ""
     ldap_url, _ = get_config("ldap", "ED_LDAP_URL", default="")
     ldap_bind_dn, _ = get_config("ldap", "ED_LDAP_BIND_DN", default="")
     cfg = LDAPConfig(
@@ -63,7 +64,7 @@ def verify_ed_access(
         # 5-minute live cache, and an ED outage must not evict them.
         membership = (check_membership or check_ed_membership)(
             cwid=user.cwid, access_group=ed_access_group, admin_group=ed_admin_group,
-            cfg=cfg, use_cache=True,
+            staff_group=ed_staff_group, cfg=cfg, use_cache=True,
         )
     except EdUnavailableError as e:  # EdConfigurationError is a subclass
         raise EdUnverifiable("directory unavailable") from e

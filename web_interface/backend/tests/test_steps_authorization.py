@@ -1,5 +1,5 @@
 """Authorization matrix for the steps.py endpoints (#780 review r3965862896#3):
-owner / non-owner / admin / unauthenticated, for /step/{n}, /data/{f},
+owner / non-owner / admin / staff (read-only) / unauthenticated, for /step/{n}, /data/{f},
 /prompt-logs and /json/{f} -- plus the non-admin .json preview/data gate.
 """
 from __future__ import annotations
@@ -82,14 +82,25 @@ class TestStepDetailAuthorization:
         resp = client.get(f"/api/run/{run.id}/step/1")
         assert resp.status_code == 200
 
+    def test_staff_gets_200_on_another_users_run(self, client, db, seed_simple_mode):
+        _, run = _user_and_run(db, suffix="-step-s-owner")
+        staff, _ = _user_and_run(db, role="staff", suffix="-step-staff")
+        db.add(Step(run_id=run.id, step_number=1, stage_id="1a", step_name="Hierarchy",
+                    status="complete"))
+        db.commit()
+        _auth(client, staff)
+        resp = client.get(f"/api/run/{run.id}/step/1")
+        assert resp.status_code == 200
+
     def test_unauthenticated_gets_401(self, client, db, seed_simple_mode):
         _, run = _user_and_run(db, suffix="-step-u")
         resp = client.get(f"/api/run/{run.id}/step/1")
         assert resp.status_code == 401
 
-    @pytest.mark.parametrize("role, expected", [("admin", 0.42), ("user", None)])
+    @pytest.mark.parametrize("role, expected", [("admin", 0.42), ("user", None), ("staff", None)])
     def test_step_cost_is_admin_only(self, client, db, seed_simple_mode, role, expected):
-        """#1111: the owner sees a step's cost only when they are an admin."""
+        """#1111: the owner sees a step's cost only when they are an admin --
+        staff's elevated read access does not extend to cost."""
         user, run = _user_and_run(db, role=role, suffix=f"-step-cost-{role}")
         db.add(Step(run_id=run.id, step_number=1, stage_id="1a", step_name="Hierarchy",
                     status="complete", cost=0.42))
@@ -144,6 +155,28 @@ class TestDataFileAuthorization:
         monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
         _seed_local_file(monkeypatch, tmp_path, run.id, "cv.docx")
         resp = client.get(f"/api/run/{run.id}/data/cv.docx")
+        assert resp.status_code == 200
+
+    def test_staff_gets_200_on_another_users_run(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path
+    ):
+        _, run = _user_and_run(db, suffix="-data-s-owner")
+        staff, _ = _user_and_run(db, role="staff", suffix="-data-staff")
+        _auth(client, staff)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "cv.docx")
+        resp = client.get(f"/api/run/{run.id}/data/cv.docx")
+        assert resp.status_code == 200
+
+    def test_staff_json_data_not_forbidden(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
+        """Staff see stage JSON on any run -- the same gate the non-admin owner
+        tests above hit, opened by can_view_all_runs."""
+        _, run = _user_and_run(db, suffix="-data-json-s-owner")
+        staff, _ = _user_and_run(db, role="staff", suffix="-data-json-staff")
+        _auth(client, staff)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "stage1a.json", b"{}")
+        resp = client.get(f"/api/run/{run.id}/data/stage1a.json")
         assert resp.status_code == 200
 
     def test_unauthenticated_gets_401(self, client, db, seed_simple_mode):
@@ -228,6 +261,17 @@ class TestJsonContentAuthorization:
         resp = client.get(f"/api/run/{run.id}/json/stage1a.json")
         assert resp.status_code == 200
 
+    def test_staff_gets_200_on_another_users_run(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path
+    ):
+        _, run = _user_and_run(db, suffix="-json-s-owner")
+        staff, _ = _user_and_run(db, role="staff", suffix="-json-staff")
+        _auth(client, staff)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "stage1a.json", b'{"x": 1}')
+        resp = client.get(f"/api/run/{run.id}/json/stage1a.json")
+        assert resp.status_code == 200
+
     def test_malformed_local_json_returns_500_and_logs_warning(
         self, client, db, seed_simple_mode, monkeypatch, tmp_path, caplog
     ):
@@ -271,6 +315,13 @@ class TestPromptLogsAuthorization:
         _, run = _user_and_run(db, suffix="-pl-a-owner")
         admin, _ = _user_and_run(db, role="admin", suffix="-pl-admin")
         _auth(client, admin)
+        resp = client.get(f"/api/run/{run.id}/prompt-logs")
+        assert resp.status_code == 200
+
+    def test_staff_gets_200_on_another_users_run(self, client, db, seed_simple_mode):
+        _, run = _user_and_run(db, suffix="-pl-s-owner")
+        staff, _ = _user_and_run(db, role="staff", suffix="-pl-staff")
+        _auth(client, staff)
         resp = client.get(f"/api/run/{run.id}/prompt-logs")
         assert resp.status_code == 200
 

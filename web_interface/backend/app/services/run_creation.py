@@ -21,7 +21,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.errors import bad_request, duplicate_file, internal_error
-from app.models import Run, Step, User
+from app.models import Run, Step, User, can_view_all_runs
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.schemas import UploadResponse
 from app.services.config_service import BASE_OVERHEAD_SECONDS, TIME_PER_1K_TOKENS
@@ -382,12 +382,13 @@ class DuplicateInfo(NamedTuple):
 
 def duplicate_info(db: Session, sha256: str, user: User) -> DuplicateInfo | None:
     """The #1286 privacy rule in one place: any run (any submitter) holding this
-    file's hash counts, but non-admins get only the date; the run id goes to
-    admins and to the run's own submitter, never anyone else's."""
+    file's hash counts, but other users get only the date; the run id goes to
+    admins and staff (who may read every run) and to the run's own submitter,
+    never anyone else's."""
     latest = latest_run_with_hash(db, sha256)
     if latest is None:
         return None
-    can_see_run = user.role == "admin" or latest.user_id == user.id
+    can_see_run = can_view_all_runs(user) or latest.user_id == user.id
     return DuplicateInfo(latest.started_at.strftime(DUPLICATE_DATE_FORMAT), latest.id if can_see_run else None)
 
 

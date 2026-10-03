@@ -24,6 +24,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.resolution import (  # noqa: E402
     _get_institution_location,
     _location_already_in_institution,
+    _location_remainder,
     _recover_institution_from_nearby_entries,
 )
 from unified_pipeline.stage6.resolution.institution import _TRAINING_CODES  # noqa: E402
@@ -115,6 +116,32 @@ def test_same_place_written_two_ways_still_counts_as_present(location, instituti
 ])
 def test_degenerate_inputs_are_false(location, institution):
     assert _location_already_in_institution(location, institution) is False
+
+
+@pytest.mark.parametrize("location, institution, remainder", [
+    # the institution IS the place (#1257)
+    ("Riverton, OR", "Riverton, OR", ""),
+    ("Riverton, OR", "riverton, oregon", ""),
+    ("Lyon, France", "Lyon, France", ""),
+    # the institution is the place's leading part: only the rest is missing
+    ("Riverton, OR", "Riverton", "OR"),
+    ("Riverton, OR, USA", "Riverton, OR", "USA"),
+    # a comma-led trailing location (the shared tail predicate)
+    ("Riverton, OR", "Some College, Riverton, OR", ""),
+    # nothing in common, or the city inside a name: the whole location
+    ("Riverton, OR", "Some College", "Riverton, OR"),
+    ("Riverton, OR", "Riverton Community College", "Riverton, OR"),
+    # same city, another US state: not the same place
+    ("Riverton, OR", "Riverton, WY", "Riverton, OR"),
+    # more parts than the location: not the place itself
+    ("Riverton, OR", "Riverton, OR, Annex", "Riverton, OR"),
+    # degenerate
+    ("", "Riverton", ""),
+    ("Riverton, OR", "", "Riverton, OR"),
+    ("Riverton, OR", None, "Riverton, OR"),  # stage 4 writes a JSON null
+])
+def test_location_remainder(location, institution, remainder):
+    assert _location_remainder(location, institution) == remainder
 
 
 @pytest.mark.parametrize("enrichment", [["a"], "abc"])

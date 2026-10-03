@@ -123,6 +123,10 @@ def test_duplicate_info_follows_the_1286_privacy_rule(client, db, storage, pat):
     _hold(db, storage, admin, "dup.docx", label="dup.docx")
     _auth(client, admin)
     assert client.get("/api/inbox").json()["items"][0]["duplicate"]["run_id"] == "SAMRUN"
+    staff = _user(db, "reader@med.cornell.edu", role="staff")  # reads every run: gets the id too
+    _hold(db, storage, staff, "dup.docx", label="dup.docx")
+    _auth(client, staff)
+    assert client.get("/api/inbox").json()["items"][0]["duplicate"]["run_id"] == "SAMRUN"
 
 
 # --- discard ------------------------------------------------------------------

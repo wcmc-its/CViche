@@ -168,3 +168,19 @@ def test_admin_managed_keys_not_clobbered_on_reseed(db):
 
     assert json.loads(db.query(SystemConfig).filter_by(key="allowed_users").first().value) == \
         ["admin-added@example.com"]
+
+
+def test_ed_staff_group_seeded_from_yaml_and_empty_when_absent(db):
+    """ed.staff_group reaches SystemConfig like admin_group does. A YAML with no
+    staff_group (every existing deploy) seeds "" -- nobody is staff."""
+    from app.config_loader import seed_system_config
+
+    with patch("app.config_loader.load_yaml_config", return_value=_yaml()):
+        seed_system_config(db)
+    assert json.loads(db.query(SystemConfig).filter_by(key="ed_staff_group").first().value) == ""
+
+    staff_dn = "cn=ITS:Library:CViche/staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+    with patch("app.config_loader.load_yaml_config",
+               return_value={**_yaml(), "ed": {"staff_group": staff_dn}}):
+        seed_system_config(db)
+    assert json.loads(db.query(SystemConfig).filter_by(key="ed_staff_group").first().value) == staff_dn

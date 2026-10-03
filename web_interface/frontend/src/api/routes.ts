@@ -61,7 +61,7 @@ export const feedbackRoutes = {
   get: (id: string) => `/api/run/${id}/feedback` as const,
   /** POST /api/run/:id/feedback  (submit feedback) */
   submit: (id: string) => `/api/run/${id}/feedback` as const,
-  /** GET /api/run/:id/feedback/all  (every reviewer's feedback; owner or admin) */
+  /** GET /api/run/:id/feedback/all  (every reviewer's feedback; owner, admin or staff) */
   all: (id: string) => `/api/run/${id}/feedback/all` as const,
 } as const
 

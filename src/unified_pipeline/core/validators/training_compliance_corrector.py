@@ -74,6 +74,10 @@ FACILITATOR_PATTERNS = [
     r'\bOrganized\s+training\b',
 ]
 
+# A row naming a committee, board or council is service on that body, not a
+# course taken: a radiation-safety committee stays P (#312, EBYSBC KDAZOM-10).
+SERVICE_BODY_PATTERN = re.compile(r'\b(?:committees?|boards?|councils?)\b', re.IGNORECASE)
+
 # Compile patterns
 TRAINING_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in TRAINING_PATTERNS]
 FACILITATOR_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in FACILITATOR_PATTERNS]
@@ -116,6 +120,10 @@ def correct_training_compliance(entry: dict) -> dict:
     # Check if the CV owner facilitated (should stay P or become K)
     if is_training_facilitated(text):
         return entry  # Keep as is
+
+    # Service on a committee, board or council is P whatever it is about
+    if SERVICE_BODY_PATTERN.search(text):
+        return entry
 
     # Check if it's a training course received
     is_training, training_match = is_training_received(text)
