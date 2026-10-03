@@ -341,18 +341,21 @@ def test_degree_target_needs_a_degree() -> None:
 
 
 def test_position_target_needs_an_institution_and_a_title() -> None:
-    talk = _fielded("S8", ["D1"], {"title": "A synthetic talk", "conference_name": "Meeting X",
-                                   "year": "2020"})
-    program = _fielded("B2", ["D1"], {"program_name": "Program X", "institution": "Society X",
-                                      "start_date": "1999"})
-    unit = _fielded("G", ["D1"], {"organization": "Center X", "department": "Department X"})
-    for entry in (talk, program, unit):
-        assert _gen_and_code(entry)[1] == entry["hierarchy_mismatch_detail"]["assigned_code"]
-    position = _fielded("G", ["D1"], {"title": "Instructor", "institution": "Example U"})
-    assert _gen_and_code(position)[1] == "D1"
+    for target in ("D1", "D2"):
+        talk = _fielded("S8", [target], {"title": "A synthetic talk",
+                                         "conference_name": "Meeting X", "year": "2020"})
+        program = _fielded("B2", [target], {"program_name": "Program X",
+                                            "institution": "Society X", "start_date": "1999"})
+        unit = _fielded("G", [target], {"organization": "Center X", "department": "Department X"})
+        for entry in (talk, program, unit):
+            assigned = entry["hierarchy_mismatch_detail"]["assigned_code"]
+            assert _gen_and_code(entry)[1] == assigned, (target, assigned)
+        position = _fielded("G", [target], {"title": "Instructor", "institution": "Example U"})
+        assert _gen_and_code(position)[1] == target
     # D3 writes `organization`, not `institution`.
     for fields, expected in (({"title": "Analyst", "organization": "Firm X"}, "D3"),
-                             ({"title": "Analyst", "institution": "Firm X"}, "G")):
+                             ({"title": "Analyst", "institution": "Firm X"}, "G"),
+                             ({"organization": "Firm X", "department": "Unit X"}, "G")):
         assert _gen_and_code(_fielded("G", ["D3"], fields))[1] == expected, fields
 
 
