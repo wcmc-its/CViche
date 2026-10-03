@@ -427,6 +427,33 @@ def test_missed_headers_owner_exemption_is_subset_by_construction():
     assert [f["evidence"][0] for f in found] == kept
 
 
+def test_missed_headers_skips_lines_of_the_personal_data_block():
+    """EBYSBC: a CV title line and an employer line that stage 3b filed as
+    the owner's Personal Data are the contact block, not missed headers; a
+    header filed anywhere else is still reported, and so is any line when
+    stage 4 is absent."""
+    title, employer, header = ("CURRICULUM VITAE, JANE Q. SAMPLE",
+                               "EXAMPLE STATE UNIVERSITY", "PROFESSIONAL EXPERIENCE")
+    stage4 = {"entries": [
+        {"taxonomy_code": "A", "text": title},
+        {"taxonomy_code": "A", "text": f"{employer}\tDepartment of Examples\nExample City"},
+        {"taxonomy_code": "T", "text": header}]}
+    found = lint_missed_headers([title, employer, header], _STAGE1A,
+                                {"entries": []}, stage4)
+    assert [f["evidence"][0] for f in found] == [header]
+    assert len(lint_missed_headers([title, employer, header], _STAGE1A,
+                                   {"entries": []})) == 3
+
+
+def test_missed_headers_contact_block_matches_whole_lines_and_cells_only():
+    """A header word that only sits INSIDE a Personal Data line is not that
+    line: 'UNIVERSITY' alone is still reported."""
+    stage4 = {"entries": [{"taxonomy_code": "A",
+                           "text": "Example State University\tDepartment of Examples"}]}
+    found = lint_missed_headers(["UNIVERSITY"], _STAGE1A, {"entries": []}, stage4)
+    assert len(found) == 1
+
+
 def test_missed_headers_fires_on_demoted_header():
     findings = lint_missed_headers(
         ["PROFESSIONAL EXPERIENCE"], _STAGE1A,
@@ -1571,6 +1598,27 @@ def test_pipe_leaks_flags_pipe_free_fused_citation():
     assert findings[0]["evidence"][0].startswith("[bibliography] 31.")
 
 
+def test_pipe_leaks_one_abstract_at_several_meetings_is_not_fused():
+    """EBYSBC: one abstract listing the meetings it was presented at has two
+    venue-date wedges with only venue names between them; 0 of 2 such hits
+    were real. The fused shape needs a second author list and title."""
+    venues = ("12. Doe J, Roe K, Poe L, et al. Widget outcomes in example "
+              "cohorts. Example Society Annual Meeting; 2025 Apr; Springfield, "
+              "IL; Sample Research Conference; 2025 Jan; Shelbyville, CA.")
+    also = ("13. Doe J, Roe K. Gizmo trends. Example Forum; 2021 Mar; Virtual. "
+            "Also presented at Sample Symposium; 2020 Nov; Example City, CA.")
+    blocks = [("p", "S. BIBLIOGRAPHY"), ("p", venues), ("p", also)]
+    assert lint_pipe_leaks(blocks) == []
+
+
+def test_pipe_leaks_initials_between_wedges_are_not_a_second_citation():
+    """'Dr.' and single-letter initials are not sentence ends, so a venue
+    named after a person does not read as a second citation's body."""
+    line = ("14. Doe J. Widget study. Example Meeting; 2019 May; Example City, "
+            "CA; Dr. A. B. Sample Memorial Lecture; 2019 Jun; Other City, NY.")
+    assert lint_pipe_leaks([("p", "S. BIBLIOGRAPHY"), ("p", line)]) == []
+
+
 # ----------------------------------------------------- lint 13: table shape
 
 _HONORS_HEADER = ["Name of award", "Organization", "Date awarded (yyyy)"]
@@ -1583,9 +1631,8 @@ _BLOB = ("Basic Science Innovation in Education Award – Runner-up "
 def test_table_shape_flags_malformed_honors_rows():
     tables = [[_HONORS_HEADER,
                [_BLOB, "MD", ""],
-               ["Association for Educational Communication and Technology "
-                "Award 2020",
-                "Association for Educational Communication and Technology",
+               ["College of Example Studies 2020 Outstanding Thesis Award",
+                "College of Example Studies 2020 Outstanding Thesis",
                 "2020"],
                ["Distinguished Teaching Award", "Indiana University", "2013"]]]
     findings = lint_table_shape(tables)
@@ -1609,6 +1656,11 @@ _GRANTOR_NAMED_AWARDS = [
      "RSNA R&E Foundation"),
     ("College of Basic Sciences Dean's List", "College of Basic Sciences"),
     ("Japanese Government Monbusho Scholarship", "Japanese Government"),
+    # EBYSBC: the org plus nothing but an award word is the award's real
+    # name and grantor (5 of 5 farm hits), and so is a name equal to its org.
+    ("Example Service Corps Scholarship", "Example Service Corps"),
+    ("Example Foundation Fellowship", "Example Foundation"),
+    ("Example Honor Society", "Example Honor Society"),
 ]
 
 
@@ -1624,19 +1676,38 @@ def test_table_shape_does_not_flag_awards_named_after_their_grantor():
 
 
 def test_table_shape_flags_org_fabricated_from_the_name():
-    """#889: name == org, org + an award word, or org + a year."""
-    org = "Association for Educational Research"
-    for name in (org, f"{org} Award", f"{org} Fellowship", f"{org} 2019",
-                 f"{org} Prize 2019", f"{org} List", f"{org} Scholarship",
-                 f"{org} Fellow", f"{org}, 2019", f"{org} (2019)"):
+    """#887's shapes: an organization cut out of the award name that carries
+    a year or ends in a holder's role word -- no grantor's name does."""
+    for name, org in (
+            ("College of Example Studies 2015 Outstanding Thesis Award",
+             "College of Example Studies 2015 Outstanding Thesis"),
+            ("Example University Representative, Example Student Conference",
+             "Example University Representative"),
+            ("Example Society Fellow Award", "Example Society Fellow"),
+            ("Example Academy Member of the Year", "Example Academy Member")):
         ev = _honors_evidence(name, org)
         assert any("duplicated in name" in e for e in ev), name
 
 
+def test_table_shape_an_org_not_cut_from_the_name_is_not_fabricated():
+    """A year or role word in an organization the award name does not
+    contain says nothing about the name."""
+    for org in ("Example Society 2019 Meeting", "Example University Representative"):
+        assert _honors_evidence("Best Poster Award", org) == [], org
+
+
+def test_table_shape_a_role_word_inside_an_org_name_is_not_a_tell():
+    """Only a TRAILING role word marks a role; 'Fellows' and an inner
+    'Member' are part of real grantors' names."""
+    for name, org in (("Example Fellows Program Award", "Example Fellows Program"),
+                      ("Example Member Society Prize", "Example Member Society")):
+        assert _honors_evidence(name, org) == [], name
+
+
 def test_table_shape_org_check_is_linear_on_runs_of_years():
     """A starred-alternation fullmatch backtracked ~13x per listed year; eight
-    years plus one more word took minutes. Must stay instant, and the
-    leftover word means the org was not fabricated from the name."""
+    years plus one more word took minutes. Must stay instant, and an org
+    with no year or role word of its own was not fabricated from the name."""
     import time
     org = "Association for Educational Research"
     name = f"{org} " + ", ".join(str(y) for y in range(1990, 2010)) + " Grant"
@@ -1662,6 +1733,63 @@ def test_table_shape_initials_and_dr_are_not_sentence_boundaries():
                             "Some University") == []
     two = "Best Poster Award. Given at the meeting. Judged by peers."
     assert any("blob" in e for e in _honors_evidence(two, "Some University"))
+
+
+def _honors_stage4(*entries):
+    return {"entries": [{"taxonomy_code": "H", "element_idx_start": idx,
+                         "text": text, "extracted_fields": fields}
+                        for idx, text, fields in entries]}
+
+
+_ONE_AWARD = {"award_name": "Example Teaching Award",
+              "granting_body": "Example College", "date": "2003-04-15"}
+
+
+def test_table_shape_warns_when_one_award_renders_as_several_rows():
+    """EBYSBC ZDCXIV-02: an award on one line and its 'Organization - date'
+    on the next is ONE stage-4 award, but the honors parser renders each
+    line as a row."""
+    stage4 = _honors_stage4(
+        (12, "Example Teaching Award\nExample College - 04/15/2003", _ONE_AWARD),
+        (14, "Distinguished Example Prize, Sample Society, 2010",
+         {"award_name": "Distinguished Example Prize", "date": "2010"}))
+    tables = [[_HONORS_HEADER,
+               ["Example Teaching Award", "", ""],
+               ["Example College \u2014 04/15/2003", "", ""],
+               ["Distinguished Example Prize", "Sample Society", "2010"]]]
+    split = [f for f in lint_table_shape(tables, stage4) if "split" in f["message"]]
+    assert len(split) == 1
+    assert split[0]["severity"] == "WARN"
+    assert "1 row(s) split off 1 award entry" in split[0]["message"]
+    assert split[0]["evidence"] == ["entry 12 (H): 2 rows from 1 stage-4 award(s)"]
+    # Without stage 4 there is nothing to count rows against.
+    assert not [f for f in lint_table_shape(tables) if "split" in f["message"]]
+
+
+def test_table_shape_rows_stage4_extracted_as_awards_are_not_split():
+    """A fused list stage 4 split into records (`stage4_records`, or an
+    off-schema `awards` list) renders one row per record, rightly."""
+    records = [{"award_name": "Example Alpha Award"}, {"award_name": "Example Beta Award"}]
+    stage4 = _honors_stage4(
+        (20, "Example Alpha Award\nExample Beta Award",
+         {"award_name": "Example Beta Award", "stage4_records": records}),
+        (22, "Example Gamma Prize\nExample Delta Prize",
+         {"awards": [{"name": "Example Gamma Prize"}, {"name": "Example Delta Prize"}]}))
+    tables = [[_HONORS_HEADER] + [[name, "", "2001"] for name in (
+        "Example Alpha Award", "Example Beta Award",
+        "Example Gamma Prize", "Example Delta Prize")]]
+    assert lint_table_shape(tables, stage4) == []
+
+
+def test_table_shape_a_row_two_entries_share_is_traced_to_neither():
+    """'Example University' sits in both entries' text, so its row counts
+    for no entry: the split count is a floor, never a guess."""
+    stage4 = _honors_stage4(
+        (30, "Example Merit Award\nExample University", {"award_name": "Example Merit Award"}),
+        (32, "Example Service Award\nExample University", {"award_name": "Example Service Award"}))
+    tables = [[_HONORS_HEADER, ["Example Merit Award", "", "2001"],
+               ["Example University", "", ""], ["Example Service Award", "", "2002"]]]
+    assert lint_table_shape(tables, stage4) == []
 
 
 def test_table_shape_message_does_not_cite_closed_issue():
@@ -2299,6 +2427,9 @@ def _build_clean_run(tmp_path, uid=_UID):
     _write_stage(root, "stage_5b_institution_enrichment",
                  f"{uid}_cv_institution_enriched.json",
                  {"document_uid": uid, "entries": []})
+    _write_stage(root, "stage_5d_citation_formatted",
+                 f"{uid}_cv_citation_formatted.json",
+                 {"document_uid": uid, "entries": []})
     _write_stage(root, "stage_4_5_research_summary", f"{uid}_cv_research_summary.json",
                  {"document_uid": uid, "research_summary": {"text": "x"}})
 
@@ -2328,14 +2459,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (34), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (35), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 32
+    assert len(payload["findings"]) == 33
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -2845,12 +2976,73 @@ def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
     assert "entry 96 (R): date=1902" in hits[0]["message"]
 
 
+def test_run_doctor_hands_the_year_lints_stage_5d(tmp_path):
+    """The registry rows give implausible_year and year_not_in_source the
+    stage-5d artifact: a year a formatter rewrote out of the entry is not
+    judged, and without 5d the same entries are. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [
+        {"taxonomy_code": "K4", "element_type": "paragraph", "element_idx_start": 97,
+         "element_idx_end": 97, "text": "Example lecture, March 3, 2014",
+         "extracted_fields": {"date": "1900-03-03"}},
+        {"taxonomy_code": "K1", "element_type": "paragraph", "element_idx_start": 98,
+         "element_idx_end": 98, "text": "Example course 2017-2019",
+         "extracted_fields": {"start_date": "2016"}}]
+    fields.write_text(json.dumps(data))
+
+    def year_hits():
+        payload = run_doctor(root, _UID)
+        return sorted(f["lint"] for f in payload["findings"]
+                      if f["lint"] in ("implausible_year", "year_not_in_source"))
+
+    assert year_hits() == ["implausible_year", "year_not_in_source"]
+    _write_stage(root, "stage_5d_citation_formatted", f"{_UID}_cv_citation_formatted.json",
+                 {"document_uid": _UID, "entries": [
+                     {"element_idx_start": 97, "element_idx_end": 97,
+                      "extracted_fields": {"formatted_text": "**2014-03-03** - Example lecture"}},
+                     {"element_idx_start": 98, "element_idx_end": 98,
+                      "extracted_fields": {"formatted_text": "2017-2019 Example course"}}]})
+    assert year_hits() == []
+
+
+def test_run_doctor_hands_table_shape_stage_4(tmp_path):
+    """The table_shape row gives the lint stage 4, so a one-award honors entry
+    rendered as two rows reaches the report as a WARN."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "H", "element_type": "paragraph", "element_idx_start": 99,
+        "text": "Example Teaching Award\nExample College - 2005",
+        "extracted_fields": {"award_name": "Example Teaching Award", "date": "2005"}})
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(docx_path)
+    table = output.add_table(rows=3, cols=3)
+    for row, cells in zip(table.rows, (_HONORS_HEADER, ["Example Teaching Award", "", "2005"],
+                                       ["Example College \u2014 2005", "", ""])):
+        for cell, text in zip(row.cells, cells):
+            cell.paragraphs[0].text = text
+    output.save(docx_path)
+
+    payload = run_doctor(root, _UID)
+
+    split = [f for f in payload["findings"]
+             if f["lint"] == "table_shape" and "split" in f["message"]]
+    assert len(split) == 1 and split[0]["severity"] == "WARN"
+    assert split[0]["evidence"] == ["entry 99 (H): 2 rows from 1 stage-4 award(s)"]
+
+
 def test_field_lint_prevalence_is_the_measured_wave1_fraction():
     """Measured 2026-10-02 over the 163-CV wave-1 stage-4 farm (one fire per
     CV at any severity); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["offschema_fields"] == round(37 / 163, 3)
     assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
+    # 63-run EBYSBC/s7ab/pilot farm, 2026-10-02.
+    assert LINT_PREVALENCE["year_not_in_source"] == round(11 / 63, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

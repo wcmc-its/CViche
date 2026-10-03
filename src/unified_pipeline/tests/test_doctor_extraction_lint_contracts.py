@@ -63,9 +63,11 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEGREE_YEAR_LEAD,
     FIELD_EVIDENCE_MAX_VALUES,
     FIELD_EVIDENCE_VALUE_CHARS,
+    IMPLAUSIBLE_YEAR_CEILING,
     IMPLAUSIBLE_YEAR_FLOOR,
     lint_implausible_year,
     lint_offschema_fields,
+    lint_year_not_in_source,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack)
@@ -1485,8 +1487,8 @@ def _degree(year, text=None, code="B1"):
 
 def test_implausible_year_floor_rises_to_ten_years_before_the_earliest_degree():
     floor = 1990 - DEGREE_YEAR_LEAD
-    old = _fields_entry("H", {"date": str(floor - 1)}, text="Prize '79")
-    edge = _fields_entry("H", {"date": str(floor)}, text="Prize '80")
+    old = _fields_entry("H", {"date": str(floor - 1)}, text="Example prize")
+    edge = _fields_entry("H", {"date": str(floor)}, text="Example prize")
     findings = _implausible(_degree("1995"), _degree("1990"), old, edge)
     assert len(findings) == 1
     assert f"date={floor - 1}" in findings[0]["message"]
@@ -1494,7 +1496,7 @@ def test_implausible_year_floor_rises_to_ten_years_before_the_earliest_degree():
 
 
 @pytest.mark.parametrize("degree", [
-    _degree("1990", text="MD, Example University '90"),   # degree year not written
+    _degree("1990", text="MD, Example University"),       # degree year not written
     _degree("1990", code="B2"),                           # not an academic degree
     _degree("1925"),                                      # degree itself pre-floor
 ])
@@ -1529,7 +1531,7 @@ def test_implausible_year_a_pre_floor_degree_year_does_not_mask_a_later_one():
     """A degree year that is itself a wrong century is not the earliest
     degree: the next written B1 year sets the floor."""
     findings = _implausible(_degree("1925"), _degree("1990"),
-                            _fields_entry("H", {"date": "1975"}, text="Prize '75"))
+                            _fields_entry("H", {"date": "1975"}, text="Example prize"))
     assert len(findings) == 1
     assert "earliest degree year, 1990" in findings[0]["message"]
 
@@ -1541,10 +1543,167 @@ def test_implausible_year_degree_floor_never_drops_below_the_fixed_floor():
     assert f"before {IMPLAUSIBLE_YEAR_FLOOR}" in findings[0]["message"]
 
 
+def test_implausible_year_a_two_digit_year_in_its_pivot_century_is_stated():
+    """s7ab QZWBKQ's shape: a CV writing every date as m/yy. "9/68" read as
+    1968 is the right century, and a B1 "5/72" sets the degree floor (a
+    Ph.D. year written in four digits used to set it alone, decades late)."""
+    findings = _implausible(
+        _fields_entry("B1", {"dates_attended": {"start_date": "1968-09", "end_date": "1972-05"}},
+                      text="9/68-5/72 Example College; B.A."),
+        _fields_entry("B1", {"dates_attended": {"start_date": "1995-08", "end_date": "1999-05"}},
+                      text="8/1995-5/1999 Example Institute; Ph.D."),
+        _fields_entry("C", {"start_date": "1978", "end_date": "1979"},
+                      text="7/78-6/79 Internship, Example Hospital"))
+    assert findings == []
+
+
+def test_implausible_year_degree_floor_reads_a_two_digit_degree_year():
+    """The B.A. "9/68" sets the floor (1958), not the four-digit Ph.D. year
+    alone (1990): an undated 1975 is above the floor, so it is no wrong
+    century -- year_not_in_source reports it instead."""
+    entries = [
+        _fields_entry("B1", {"dates_attended": {"start_date": "1968-09", "end_date": "1972-05"}},
+                      text="9/68-5/72 Example College; B.A."),
+        _fields_entry("B1", {"year": "2000"}, text="Ph.D., Example Institute, 2000"),
+        _fields_entry("H", {"date": "1975"}, text="Example prize", idx=60)]
+    assert _implausible(*entries) == []
+    assert len(lint_year_not_in_source({"entries": entries})) == 1
+
+
+def test_implausible_year_a_range_shorthand_end_is_written():
+    """"1975-79" writes 1979, below a 1990 degree's floor: not a wrong
+    century."""
+    findings = _implausible(_degree("1990"), _fields_entry(
+        "P", {"start_date": "1975", "end_date": "1979"}, text="Example committee 1975-79"))
+    assert findings == []
+
+
+def test_implausible_year_judges_the_date_a_formatter_rendered():
+    """EBYSBC MIFYLG 234's shape: stage 4 wrote 1900 for a written-out date;
+    5c's text, which stage 6 renders instead of the field, has the text's
+    year. Judged only when the formatter's text drops the stage-4 year."""
+    entry = _fields_entry("K4", {"date": "1900-03-03"},
+                          text="12. Example lecture to fellows, March 3, 2014.", idx=34)
+    entry["element_idx_end"] = 35
+
+    def stage5d(formatted):
+        return {"entries": [{"element_idx_start": 34, "element_idx_end": 35,
+                             "extracted_fields": {"formatted_text": formatted}}]}
+    assert len(lint_implausible_year({"entries": [entry]})) == 1
+    assert lint_implausible_year({"entries": [entry]},
+                                 stage5d("**2014-03-03** - Example lecture")) == []
+    assert len(lint_implausible_year({"entries": [entry]},
+                                     stage5d("**1900-03-03** - Example lecture"))) == 1
+    # A span two 5d entries share says nothing about which one this is.
+    shared = stage5d("**2014-03-03** - Example lecture")
+    shared["entries"] *= 2
+    assert len(lint_implausible_year({"entries": [entry]}, shared)) == 1
+
+
+def test_implausible_year_ceiling_is_info_for_a_source_typo_warn_otherwise():
+    """EBYSBC VNUAHA 175's shape: the source itself mistypes the end year.
+    Stage 4 copied it faithfully; a reviewer should still see it."""
+    assert IMPLAUSIBLE_YEAR_CEILING == 2100
+    typo = _implausible(_fields_entry("P", {"start_date": "2013", "end_date": "7013"},
+                                      text="Example committee, 2013-7013", idx=175))
+    assert len(typo) == 1 and typo[0]["severity"] == "INFO"
+    assert "entry 175 (P): end_date=7013 -- after 2100" in typo[0]["message"]
+    made_up = _implausible(_fields_entry("P", {"end_date": "2201"},
+                                         text="Example committee, 2010-2012"))
+    assert len(made_up) == 1 and made_up[0]["severity"] == "WARN"
+    assert _implausible(_fields_entry("P", {"end_date": "2100"}, text="until 2100")) == []
+
+
 def test_implausible_year_leaves_the_value_alone():
     entry = _fields_entry("R", {"date": "1902-11"}, text="11/02")
     _implausible(entry)
     assert entry["extracted_fields"] == {"date": "1902-11"}
+
+
+
+# ==========================================================================
+# lint_year_not_in_source: a plausible year the entry's text never states.
+
+def _not_in_source(*entries, stage5d=None):
+    return lint_year_not_in_source({"entries": list(entries)}, stage5d)
+
+
+@pytest.mark.parametrize("code, fields, text", [
+    # EBYSBC HFAJCC 392's shape: an mm/dd/yy start read as another year.
+    ("M2A", {"start_date": "1997-04-01", "end_date": "2024-03-31"},
+     "Example Agency (PI) 04/01/19 \u2013 03/31/24 Example aims"),
+    # EBYSBC VVRTUC 43's: the year of the entry before it in the batch.
+    ("D1", {"start_date": "1981-03", "end_date": "current"},
+     "Example Professor (current) March 2012 -"),
+    # EBYSBC YYVHNN 480's: "3-24-11-26" is Mar 2024 to Nov 2026; no 2011.
+    ("M2B", {"start_date": "2011-03-24", "end_date": "2026"},
+     "Co-I Example contract 10% 3-24-11-26 $1.000"),
+])
+def test_year_not_in_source_fires_on_a_year_the_text_never_states(code, fields, text):
+    findings = _not_in_source(_fields_entry(code, fields, text=text, idx=43))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "year_not_in_source"
+    assert findings[0]["severity"] == "WARN"
+    assert findings[0]["message"].startswith(f"entry 43 ({code}): ")
+    assert findings[0]["evidence"] == [text[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+@pytest.mark.parametrize("fields, text", [
+    ({"start_date": "2005"}, "Example course, 2005"),                 # four digits
+    ({"start_date": "1997-04"}, "Example review 04/081997"),          # fused on the left
+    ({"end_date": "2024"}, "Example 20232024Total"),                  # fused table cells
+    ({"start_date": "1987"}, "Example board l987"),                   # scanned l for 1
+    ({"end_date": "2034-05-31"}, "Example grant 6/1/29\u20135/31/34"),  # any century
+    ({"start_date": "2006-03-14"}, "Example lecture 3/14/06"),
+    ({"start_date": "2008"}, "Example award 0415/08"),
+    ({"start_date": "2012-06"}, "Example talk 6//12"),
+    ({"start_date": "2004"}, "Example talk, June '04"),
+    ({"start_date": "1997", "end_date": "1997"}, "Example award FY97 $1000"),
+    ({"date": "2009-05-21"}, "Example interview 5.21.09"),
+    ({"start_date": "1964", "end_date": "1966"}, "Example mentee 64-66"),
+    ({"start_date": "2011", "end_date": "2012"}, "Example committee 2011-2"),
+    ({"start_date": "1985", "end_date": "1989"}, "Example committee 1985-89"),
+    ({"start_date": "1993", "end_date": "1994"}, "Example committee 1993-994"),
+    ({"start_date": "1998", "end_date": "2002"}, "Example committee 1998-02"),
+    ({"start_date": "1986", "end_date": "1988"}, "1986,88 Example reviewer"),
+    ({"start_date": "2006"}, "EXM 1234 Example seminar (Fall Sem., 06)"),
+    ({"title": "1973"}, "Example title"),                             # not a date key
+])
+def test_year_not_in_source_silent_when_the_text_states_the_year(fields, text):
+    assert _not_in_source(_fields_entry("C", fields, text=text)) == []
+
+
+def test_year_not_in_source_skips_personal_data_and_publications():
+    """Code A is personal data. A citation's year renders through 5d and
+    PubMed; on the farm each publication hit was a split citation or a
+    corrected typo, never a wrong year."""
+    for code in ("A", "S1", "S8"):
+        assert _not_in_source(_fields_entry(code, {"year": "2007"}, text="Example")) == []
+
+
+def test_year_not_in_source_leaves_the_floor_and_ceiling_to_implausible_year():
+    """One defect, one lint: a year below the owner's floor or above the
+    ceiling is implausible_year's, so it is not reported twice."""
+    below = _fields_entry("R", {"date": "1902-11"}, text="Example talk 11/02")
+    above = _fields_entry("R", {"date": "2201"}, text="Example talk")
+    assert _not_in_source(below, above) == []
+    assert len(_implausible(below, above)) == 2
+
+
+def test_year_not_in_source_skips_a_year_a_formatter_replaced():
+    entry = _fields_entry("K1", {"start_date": "2016"}, text="Example course 2017-2019", idx=8)
+    entry["element_idx_end"] = 8
+    stage5d = {"entries": [{"element_idx_start": 8, "element_idx_end": 8,
+                            "extracted_fields": {"formatted_text": "2017-2019 Example course"}}]}
+    assert len(_not_in_source(entry)) == 1
+    assert _not_in_source(entry, stage5d=stage5d) == []
+
+
+def test_year_not_in_source_leaves_the_value_alone():
+    entry = _fields_entry("D1", {"start_date": "1981-03"}, text="March 2012 -")
+    before = json.dumps(entry, sort_keys=True)
+    _not_in_source(entry)
+    assert json.dumps(entry, sort_keys=True) == before
 
 
 if __name__ == "__main__":

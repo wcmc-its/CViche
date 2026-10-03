@@ -290,8 +290,8 @@ LINT_COPY = {
     "table_shape": LintCopy(
         "Honors table rows misshaped",
         "Honors and awards tables have rows with a very long name cell, an empty date beside a year "
-        "in the name, a bare state abbreviation as the organization, or the organization repeated "
-        "inside the name.",
+        "in the name, a bare state abbreviation as the organization, an organization cut out of the "
+        "name, or one award split over several rows.",
         "Tidy the listed rows in the awards table."),
     "duplicate_passages": LintCopy(
         "Repeated passage",
@@ -336,7 +336,8 @@ LINT_COPY = {
     "implausible_year": LintCopy(
         "Year probably wrong century",
         "A date field holds a year before 1930 (or 10 or more years before the owner's earliest "
-        "degree) that the entry's text never states, most likely a two-digit year read as 19xx.",
+        "degree) that the entry's text never states, most likely a two-digit year read as 19xx, "
+        "or a year after 2100.",
         "Check the date against the source and correct it."),
     "stage4_group_failures": LintCopy(
         "A group of entries failed",
@@ -363,6 +364,11 @@ LINT_COPY = {
         "research summary when stage 4.5 fails.",
         "Check the named part of the document. Rerun the CV, and send the run to the CViche team if "
         "it fails again."),
+    "year_not_in_source": LintCopy(
+        "Year not in the source",
+        "A date field holds a year the entry's text never states, in four digits or in two, so it "
+        "came from somewhere else, often the entry before it, and may be wrong.",
+        "Check the date against the source and correct it."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
