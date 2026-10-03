@@ -435,6 +435,7 @@ def test_undated_dropped_entry_is_date_compatible():
     ("3/2016-present", "2016-present", True),                    # kept states no month
     ("Spring 2029", "4/2029", True),                             # a season states none
     ("Market 2029", "Mar 2029", True),                           # not a month name
+    ("May 45 2029", "May 3, 2029", True),                        # 45 is no day: the month alone
 ])
 def test_dates_compatible(dropped, kept, compatible):
     assert _dates_compatible(dropped, kept) is compatible
@@ -1575,6 +1576,7 @@ def test_a_course_part_inside_a_longer_part_number_is_not_verbatim():
     assert not _verbatim_contained("Widget Teamwork Seminar II", "Widget Teamwork Seminar III")
     assert not _verbatim_contained("Page 2", "Page 21")
     assert not _verbatim_contained("Seminar II", "Widget Seminar III and IV")
+    assert not _verbatim_contained("2 Widget Rounds", "12 Widget Rounds")
     assert _verbatim_contained("Widget Teamwork Seminar II", "Fall: Widget Teamwork Seminar II, 3 credits")
 
 
@@ -1590,6 +1592,19 @@ def test_numbered_course_parts_are_both_kept():
     dropped = _entry("K1", "Widget Teamwork in Practice (WTP) II",
                      course_title="Widget Teamwork in Practice (WTP) II")
     assert _kept_both("K1", dropped, kept)
+
+
+def test_a_course_part_is_kept_when_another_entry_names_the_longer_part():
+    # OIYKZE-01's shape: a third entry names part III too. Its letters hold
+    # "... II", so it lists the dropped name and `_distinct_bare_names` keeps
+    # nothing; only the word boundary in `_verbatim_contained` keeps part II.
+    kept = _entry("K1", "Widget Teamwork Seminar III",
+                  course_title="Widget Teamwork Seminar III")
+    dropped = _entry("K1", "Widget Teamwork Seminar II",
+                     course_title="Widget Teamwork Seminar II")
+    other = _entry("K1", "Widget Teamwork Seminar III, spring term",
+                   course_title="Widget Teamwork Seminar III")
+    assert _kept_both("K1", dropped, kept, other)
 
 
 @pytest.mark.parametrize("text, parts", [
@@ -1659,6 +1674,7 @@ def test_an_appointment_of_another_rank_is_kept():
     ("H", "award_name", "Gizmo Service Award", "Outreach Gizmo Service Award"),  # NDXXAD-01
     ("P", "committee_name", "Widget Safety Committee", "Widget Safety Research Committee"),  # VYICGW-02
     ("P", "committee_name", "Acme Widget Center", "Executive Committee of the Acme Widget Center"),
+    ("P", "committee_name", "Widget Safety Committee", "Executive Widget Safety Committee"),
     ("O", "leadership_role", "Division Chief", "Co-Division Chief"),
     ("Q1", "role", "President", "Vice President"),
 ])
@@ -1674,6 +1690,7 @@ def test_another_rank_or_body_is_another_record(code, key, dropped_value, kept_v
     ("Q1", {"role": "Chair"}, {"role": "Chair and Treasurer, Board of Governors"}),
     ("P", {"committee_name": "Widget Committee"}, {"committee_name": "Widget Committee", "role": "Member"}),
     ("D1", {"title": "Professor"}, {}),                                  # nothing to compare
+    ("D1", {"title": "Associate Professor"}, {"institution": "Acme"}),   # no kept title
     ("R", {"title": "Professor"}, {"title": "Associate Professor"}),     # not a ranked code
 ])
 def test_the_same_rank_or_no_rank_is_not_another_record(code, dropped_fields, kept_fields):
@@ -1737,6 +1754,20 @@ def test_a_dated_place_under_another_heading_is_another_occasion():
     assert _bare_occasion_apart("D1", dropped, kept) is None
 
 
+def test_a_titled_talk_under_another_heading_is_still_dropped():
+    # Only a row that is a place and a date takes its event from its heading.
+    # A row that names its talk is that talk listed again under any heading,
+    # and keeping it would print it twice.
+    title, place = "Widget Safety for Families", "Harbor City, Zedland"
+    kept = _headed(_entry("R", f"Gizmo Families Conference: “{title}”, {place}, August 2nd, 2031",
+                          title=title, location=place, date="2031-08-02",
+                          event_name="Gizmo Families Conference"), "GUEST SPEAKER")
+    dropped = _headed(_entry("R", f"“{title}”, {place}, August 2nd, 2031",
+                             title=title, location=place, date="2031-08-02"), "COURSES")
+    assert _bare_occasion_apart("R", dropped, kept) is None
+    assert not _kept_both("R", dropped, kept)
+
+
 def _award(text: str, name: str, date: str) -> dict:
     return _entry("H", text, award_name=name, granting_body="Example Ceremony", date=date)
 
@@ -1798,6 +1829,15 @@ def test_one_activity_under_two_employer_lines_is_two_records():
     assert not _kept_both("K4", dropped, kept, first_employer)
     other_section = dict(second_employer, hierarchy=["SERVICE"])
     assert not _kept_both("K4", dropped, kept, first_employer, other_section)
+
+
+def test_a_group_line_over_the_dropped_row_alone_does_not_refuse_the_drop():
+    # The kept row sits in another source section, so it is listed under
+    # neither group line: the line above the dropped row tells nothing apart.
+    kept = dict(_row("K4", 2, "Gizmo Repair Widget/Imaging Rounds (weekly)"), hierarchy=["SERVICE"])
+    employer = _row("K4", 5, "Acme University School of Widgets (2031 to present)")
+    dropped = _row("K4", 6, "Gizmo Repair Widget Rounds (weekly)")
+    assert not _kept_both("K4", dropped, kept, employer)
 
 
 def test_one_activity_under_two_year_lines_is_two_records():
