@@ -32,6 +32,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E402
     _append_missing_stage5d_values,
+    _owner_words,
     _prints_junk_author,
     _restore_stage5d_owner,
     _stage5d_author_segment,
@@ -313,6 +314,10 @@ def test_restore_stage5d_owner_gives_the_owner_back(
     ('the line\'s run ends before the owner (a group credit closes it)',
      _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W',
      _LINE.replace('Gorse G,', 'Gorse G; for the Lantern Network. A title,')),
+    ('5d corrected a swap the next co-author\'s surname shares (ZCTARO 810): no trusted anchor',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Rowan F, et al. A title. J Wood. 2020;1:2-3.',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, G, Rowna, Rowan C, Wren W',
+     '4. Ash A, Birch B, Cedar C, Daly D, Elm E, Rowna F, Rowan C, and Wren W. A title. J Wood 2020;1:2-3.'),
 ])
 def test_restore_stage5d_owner_leaves_the_citation_alone(
     case: str, citation: str, authors: str, source: str,
@@ -361,8 +366,13 @@ def test_prints_junk_author(authors: str, source: str, junk: bool) -> None:
     ('Ash A. A chapter. In: Birch B, et al. A book. 2020.', 'Ash A. A chapter. In: Birch B, et al. A book. 2020.'),
     # a CV's own elided list goes on after the "et al."
     ('Ash A, et al., Wren W. A title. 2020.', 'Ash A, et al., Wren W. A title. 2020.'),
+    ('Ash A, et al.; Wren W. A title. 2020.', 'Ash A, et al.; Wren W. A title. 2020.'),
     ('Ash A, Birch B. A title. 2020.', 'Ash A, Birch B. A title. 2020.'),
 ])
 def test_stage5d_author_segment(citation: str, segment: str) -> None:
     assert _stage5d_author_segment(citation) == segment
 
+
+
+def test_owner_words_leave_out_credentials() -> None:
+    assert _owner_words('Juno Wren PhD') == {'juno', 'wren'}

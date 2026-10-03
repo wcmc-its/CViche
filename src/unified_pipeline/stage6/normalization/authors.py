@@ -626,18 +626,6 @@ def _letters(word: str) -> str:
     return ''.join(c for c in word if c.isalpha()).casefold()
 
 
-def _anchor_in_source(source_text: str, surname: str, occurrence: int) -> re.Match[str] | None:
-    """The `occurrence`-th word of the source line that is `surname`, compared
-    by `_letters` ("Quill-Rowan" is "QuillRowan"); one edit apart when no
-    word matches exactly and the surname is long enough to trust that."""
-    key = _letters(surname)
-    words = list(re.finditer(r"[^\W\d_][\w'’-]*", source_text))
-    matches = [w for w in words if _letters(w.group()) == key]
-    if not matches and len(key) >= _ANCHOR_FUZZY_MIN_LEN:
-        matches = [w for w in words if _one_edit_apart(_letters(w.group()), key)]
-    return matches[occurrence - 1] if len(matches) >= occurrence else None
-
-
 def _last_surname_word(author: str) -> str:
     """A Vancouver author's last surname word ("van den Wren PA" -> "Wren",
     "Vetch JR Jr" -> "Vetch")."""
@@ -647,12 +635,88 @@ def _last_surname_word(author: str) -> str:
     return words[-1] if words else ''
 
 
+def _first_initial(author: str) -> str:
+    """A Vancouver author's first initial ("Wren JA" -> "J", "Vetch JR Jr"
+    -> "J"), or '' when the author shows none ("The Lantern Study Group")."""
+    words = author.split()
+    while len(words) > 1 and _is_suffix_token(words[-1]):
+        words.pop()
+    if len(words) > 1 and _is_initials_token(words[-1]):
+        return words[-1][0]
+    return ''
+
+
 def _is_anchor_trailer(piece: str) -> bool:
     """A piece that only finishes the author before it: its initials or its
     suffix printed after a comma ("Sorrel, J", "Wren AB, Jr")."""
     words = _item_words(_AUTHOR_TOKEN_RE.findall(piece))
     return bool(words) and (_initials_of(words) is not None
                             or (len(words) == 1 and _is_suffix_token(words[0])))
+
+
+def _anchor_item(
+    source_text: str, anchor: re.Match[str],
+) -> tuple[str | None, list[str], bool]:
+    """What the source line holds at an anchor word: the author its item
+    names ("Surname Initials"; None when the item is not one of the shapes
+    above, or the run ends inside it), the run's pieces after that item
+    (none when the run ends inside it), and whether the run reads
+    given-name-first.
+
+    The item runs to the next separator, plus the piece after a bare surname
+    ("Sorrel, J", "Quill, Opal J.") and any piece that only repeats initials
+    or adds a suffix. The run reads given-name-first only when a name word
+    came before the anchor's surname and no initials follow it ("Juno
+    Zinnia MD", not the two-word surname of "Quill Rowan M")."""
+    item_head = [t for t in _SOURCE_AUTHOR_SEPARATOR_RE.split(source_text[:anchor.start()])[-1].split()
+                 if t.casefold() not in _SURNAME_PARTICLES]
+    pieces = _SOURCE_AUTHOR_SEPARATOR_RE.split(
+        _INLINE_SPACE_RE.sub(' ', source_text[anchor.start():]))
+    anchor_words = _item_words(_AUTHOR_TOKEN_RE.findall(pieces[0]))
+    given_first = (any(_is_name_token(t) for t in item_head)
+                   and not any(_is_initials_token(w) for w in anchor_words[1:]))
+    if len(anchor_words) > _MAX_AUTHOR_TOKENS or _run_ended_in(pieces[0]):
+        return None, [], given_first
+    following = pieces[1:]
+    author = _vancouver_author(item_head + anchor_words, given_first)
+    if not item_head and len(anchor_words) == 1 and following:
+        # A bare surname: its initials or given name follow ("Quill, Opal J.").
+        trailer = following.pop(0)
+        if len(_AUTHOR_TOKEN_RE.findall(trailer)) > _MAX_TRAILER_TOKENS or _run_ended_in(trailer):
+            return None, [], given_first
+        author = _vancouver_author(anchor_words + _item_words(_AUTHOR_TOKEN_RE.findall(trailer)), False)
+    while following and _is_anchor_trailer(following[0]):
+        following = following[1:]
+    return author, following, given_first
+
+
+def _anchored_item(
+    source_text: str, surname: str, initial: str, occurrence: int,
+) -> tuple[str | None, list[str], bool] | None:
+    """`_anchor_item` at the `occurrence`-th item of the source line whose
+    word is `surname` (compared by `_letters`: "Quill-Rowan" is "QuillRowan")
+    and whose first initial is `initial`; an item the reader cannot put
+    initials to, or an `initial` of '', does not disagree. A word one edit
+    apart is tried only when no item of the exact word agrees, and the
+    surname is long enough to trust that.
+
+    The initials check is what keeps the anchor on the kept author: 5d
+    corrected a co-author's swapped letters, and the next co-author on the
+    line carried the corrected surname; anchored there, the read printed
+    the list complete with one co-author missing (ZCTARO 810 on the EBYSBC
+    farm, #1259). None when no item agrees."""
+    key = _letters(surname)
+    words = list(re.finditer(r"[^\W\d_][\w'’-]*", source_text))
+    exact = [w for w in words if _letters(w.group()) == key]
+    fuzzy = ([w for w in words if _one_edit_apart(_letters(w.group()), key)]
+             if len(key) >= _ANCHOR_FUZZY_MIN_LEN else [])
+    for matches in (exact, fuzzy):
+        items = [_anchor_item(source_text, m) for m in matches]
+        agreeing = [item for item in items
+                    if not initial or item[0] is None or _first_initial(item[0]) == initial]
+        if agreeing:
+            return agreeing[occurrence - 1] if len(agreeing) >= occurrence else None
+    return None
 
 
 def _source_authors_after(
@@ -664,35 +728,17 @@ def _source_authors_after(
     read stopped at a person it cannot read (#1259). None when that author
     cannot be found in the line, or the run leaves a bare surname.
 
-    The anchor is the last kept author's surname, at the same occurrence it
-    has among the kept ("Elm EC, Elm M" anchors on the second "Elm"). Its
-    item runs to the next separator, plus the piece after a bare surname
-    ("Sorrel, J", "Quill, Opal J.") and any piece that only repeats initials
-    or adds a suffix. The run reads given-name-first only when a name word
-    came before the anchor's surname and no initials follow it ("Juno
-    Zinnia MD", not the two-word surname of "Quill Rowan M")."""
+    The anchor is the last kept author's surname and first initial, at the
+    same occurrence that pair has among the kept ("Elm EC, Elm M" anchors on
+    the "Elm" whose initial is M; "Elm M, Elm M" on the second)."""
     surname = _last_surname_word(kept[-1]) if kept else ''
     if not surname:
         return None
-    occurrence = sum(1 for author in kept if _last_surname_word(author) == surname)
-    anchor = _anchor_in_source(source_text, surname, occurrence)
-    if anchor is None:
+    initial = _first_initial(kept[-1])
+    occurrence = sum(1 for author in kept
+                     if _last_surname_word(author) == surname and _first_initial(author) == initial)
+    item = _anchored_item(source_text, surname, initial, occurrence)
+    if item is None:
         return None
-    item_head = [t for t in _SOURCE_AUTHOR_SEPARATOR_RE.split(source_text[:anchor.start()])[-1].split()
-                 if t.casefold() not in _SURNAME_PARTICLES]
-    pieces = _SOURCE_AUTHOR_SEPARATOR_RE.split(
-        _INLINE_SPACE_RE.sub(' ', source_text[anchor.start():]))
-    anchor_words = _item_words(_AUTHOR_TOKEN_RE.findall(pieces[0]))
-    if len(anchor_words) > _MAX_AUTHOR_TOKENS or _run_ended_in(pieces[0]):
-        return [], False
-    following = pieces[1:]
-    if not item_head and len(anchor_words) == 1 and following:
-        # A bare surname: its initials or given name follow ("Quill, Opal J.").
-        trailer = following.pop(0)
-        if len(_AUTHOR_TOKEN_RE.findall(trailer)) > _MAX_TRAILER_TOKENS or _run_ended_in(trailer):
-            return [], False
-    while following and _is_anchor_trailer(following[0]):
-        following = following[1:]
-    given_first = (any(_is_name_token(t) for t in item_head)
-                   and not any(_is_initials_token(w) for w in anchor_words[1:]))
+    _, following, given_first = item
     return _authors_in_run(following, given_first)
