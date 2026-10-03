@@ -221,12 +221,17 @@ from unified_pipeline.stage6.sections.appendix import (
     APPENDIX_MAX_CHARS,
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
     APPENDIX_INTRO_TEXT,
+    OwnerTokens,
+    RecoveredLine,
     UnmappedEntry,
     _appendix_drop_reason,
+    _owner_signature_tokens,
     build_appendix_diversion_warnings,
+    is_page_furniture,
     is_t_validation_recoded_m1,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 
 from unified_pipeline.core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -863,7 +868,8 @@ def _record_reroute(decisions: list[RerouteDecision] | None, entry: Mapping[str,
 
 
 def _merge_appendix_diversion_warnings(
-    issues: list[dict], written: list[UnmappedEntry], recovered: list[str], summary_rendered: bool,
+    issues: list[dict], written: list[UnmappedEntry], recovered: list[RecoveredLine],
+    summary_rendered: bool, cv_owner: Mapping[str, object] | None = None,
 ) -> list[dict]:
     """Append #531/#531-R2 per-(code, reason) Appendix-diversion warnings
     (from what `_fill_appendix`/`_add_remaining_to_appendix` report they
@@ -873,11 +879,13 @@ def _merge_appendix_diversion_warnings(
     are `stage6/sections/*` peers (CODING_STANDARDS.md 1.3, `[gate]`); this
     module is not a peer of either and is free to import both (#531-R3
     task 4). *summary_rendered* is whether the research summary rendered,
-    which decides why an M1 entry is in the Appendix (E27)."""
+    which decides why an M1 entry is in the Appendix (E27). *cv_owner* names
+    the owner whose banner a recovered A line may repeat (#1221)."""
     if not written and not recovered:
         return issues
     return issues + build_appendix_diversion_warnings(
-        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES, summary_rendered=summary_rendered)
+        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES,
+        _owner_signature_tokens(cv_owner), summary_rendered=summary_rendered)
 
 
 def _log_validation_warnings(all_warnings: list[dict]) -> None:
@@ -1666,9 +1674,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Reconsider appendix entries (reclassify segments to other sections)
         # then recover unrendered records (#221, after reconsider so its
         # inserts count as rendered) -- both bullet leftover content into the
-        # Appendix and report back each bullet's code (#531-R2 finding F1).
-        recovered_appendix_codes = list(self._reconsider_appendix_entries() or [])
-        recovered_appendix_codes += self._recover_unrendered_records(pre_dedup_entries_by_code) or []
+        # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
+        recovered_appendix_lines = list(self._reconsider_appendix_entries() or [])
+        recovered_appendix_lines += self._recover_unrendered_records(pre_dedup_entries_by_code, cv_owner) or []
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -1698,12 +1706,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # self-check findings (#565) -- one list feeds both the banner below
         # and the sidecar, so a missing section is never quieter than a
         # cosmetic self-check finding.
-        validation_issues = self._validate_output()
+        validation_issues = self._validate_output(entries_by_code)
 
         # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
         # own docstring for what it merges and why.
         validation_issues = _merge_appendix_diversion_warnings(
-            validation_issues, written_appendix_entries, recovered_appendix_codes, research_summary_rendered)
+            validation_issues, written_appendix_entries, recovered_appendix_lines, research_summary_rendered, cv_owner)
 
         all_warnings = self._section_failures + validation_issues + self._llm_fallback_warnings()
         _log_validation_warnings(all_warnings)
@@ -2834,7 +2842,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             taxonomy_code = entry.get('taxonomy_code', '?')
             logger.info(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
 
-    def _reconsider_appendix_entries(self) -> list[str]:
+    def _reconsider_appendix_entries(self) -> list[RecoveredLine]:
         """Analyze appendix-pending entries and reclassify segments to appropriate sections.
 
         For each entry queued for appendix, this method:
@@ -2843,7 +2851,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         3. Routes segments to appropriate WCM sections as bullets
         4. Only truly unmappable content remains for the appendix
 
-        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        Returns the `RecoveredLine` of each bullet `_add_remaining_to_appendix`
         actually wrote for the entries that stayed unmappable (#531-R2
         finding F1) -- `[]` when nothing was pending or everything was
         reclassified elsewhere.
@@ -2894,14 +2902,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 remaining_for_appendix.append((segment_text, new_code, 0.0))
 
         # Add remaining unmappable content to appendix
-        recovered_codes: list[str] = []
+        recovered: list[RecoveredLine] = []
         if remaining_for_appendix:
-            recovered_codes = self._add_remaining_to_appendix(remaining_for_appendix)
+            recovered = self._add_remaining_to_appendix(remaining_for_appendix)
 
         if self.verbose and segments_to_route:
             logger.info(f"  Reclassified {len(segments_to_route)} segments to other sections")
 
-        return recovered_codes
+        return recovered
 
     def _reclassify_entry_segments(self, text: str, original_code: str) -> List[Tuple[str, str]]:
         """Use LLM to segment and reclassify content from an appendix entry.
@@ -3150,15 +3158,15 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
-    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]) -> list[str]:
+    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]) -> list[RecoveredLine]:
         """Add remaining unmappable segments to the appendix as bullet lines.
 
-        Returns the taxonomy code of each segment actually written -- one
-        entry per "• text" bullet, in write order -- the same "report back
-        what was actually consumed" contract `_fill_appendix` and the
-        passthrough writers use (#531-R2 finding F1). A segment this method
-        drops (blank, template-instruction, source-boilerplate) is NOT in
-        the returned list.
+        Returns the taxonomy code and text of each segment actually written --
+        one `RecoveredLine` per "• text" bullet, in write order -- the same
+        "report back what was actually consumed" contract `_fill_appendix` and
+        the passthrough writers use (#531-R2 finding F1); the text decides the
+        warning's severity (#1221). A segment this method drops (blank,
+        template-instruction, source-boilerplate) is NOT in the returned list.
         """
         # Filter BEFORE creating the section header so an all-noise batch
         # doesn't leave an empty T. APPENDIX behind (#213).
@@ -3214,7 +3222,7 @@ Now analyze the text above:"""
                 author="Classification",
             )
 
-        return [code for _, code, _ in remaining]
+        return [RecoveredLine(code, text) for text, code, _ in remaining]
 
     def _rendered_output_lines(self, *, exclude_instruction_box: bool = False,
                                include_tracked_insertions: bool = False) -> list[str]:
@@ -3280,7 +3288,9 @@ Now analyze the text above:"""
             walk_table(tbl)
         return lines
 
-    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]) -> list[str]:
+    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]],
+                                    cv_owner: Mapping[str, object] | None = None,
+                                    ) -> list[RecoveredLine]:
         """Post-render safety net (#221): re-emit record lines the structured
         render dropped.
 
@@ -3305,11 +3315,13 @@ Now analyze the text above:"""
         indication of that behind an unrelated recovery toggle was a second,
         silent loss on top of the first.
 
-        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        Returns the `RecoveredLine` of each bullet `_add_remaining_to_appendix`
         actually wrote for the lines that landed in the appendix fallback
         (#531-R2 finding F1) -- `[]` when nothing fell through to the
         appendix. The #820 withheld notice is written by its own call and is
-        never in the returned list: it is not a recovered entry.
+        never in the returned list: it is not a recovered entry. *cv_owner*
+        lets the A-orphan recovery recognise the owner's own running header
+        (#1221).
         """
         out_lines = self._rendered_output_lines()
         haystack = "\x00".join(_squash(line) for line in out_lines)
@@ -3395,11 +3407,12 @@ Now analyze the text above:"""
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,
             # unlike the notice below.
-            appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+            appendix_batch.extend(self._unconsumed_personal_data_batch(
+                haystack, _owner_signature_tokens(cv_owner)))
 
-        recovered_codes: list[str] = []
+        recovered: list[RecoveredLine] = []
         if appendix_batch:
-            recovered_codes = self._add_remaining_to_appendix(appendix_batch)
+            recovered = self._add_remaining_to_appendix(appendix_batch)
 
         if self._pii_result.withheld:
             # The withheld notice is NOT part of the recovery safety net: the
@@ -3416,9 +3429,10 @@ Now analyze the text above:"""
             logger.info(f"  Recovered {n_recovered} unrendered record line(s) "
                         f"({len(appendix_batch)} routed to appendix)")
 
-        return recovered_codes
+        return recovered
 
-    def _unconsumed_personal_data_batch(self, haystack: str
+    def _unconsumed_personal_data_batch(self, haystack: str,
+                                        owner_tokens: OwnerTokens = OwnerTokens(),
                                         ) -> List[Tuple[str, str, float]]:
         """A-coded entries that reached no Personal Data slot and no page.
 
@@ -3436,7 +3450,10 @@ Now analyze the text above:"""
         - Already-rendered entries are skipped. Most orphans are the faculty
           member's own name/title banner, which renders from `cv_owner` rather
           than from the A entry -- 75 of 76 are already on the page, and
-          appending them would be pure duplication.
+          appending them would be pure duplication. A banner the page holds in
+          another form ("Name: <owner>"), and a running header (the owner's
+          name with a page number or a Word field code), are skipped by
+          `is_page_furniture` with *owner_tokens* (#1221).
         - A PII-withheld entry renders its RESIDUAL text -- `entry['text']`
           after `run_pii_pass` (#820 piece 2, `pii_pass.py`) has already cut
           only the withheld fragment(s) out of it (`_cut_spans`), not the
@@ -3503,7 +3520,7 @@ Now analyze the text above:"""
                 continue
             if not text:
                 continue
-            if _squash(text) in haystack:
+            if _squash(text) in haystack or is_page_furniture(text, owner_tokens):
                 continue
             batch.append((text, 'A', 0))
 
@@ -3978,7 +3995,7 @@ Now analyze the text above:"""
         lines.append('</w:comments>')
         return '\n'.join(lines)
 
-    def _validate_output(self) -> List[Dict]:
+    def _validate_output(self, entries_by_code: Mapping[str, object] | None = None) -> List[Dict]:
         """Validate the generated document for common issues.
 
         Returns a list of structured warning dicts ({check, code, section,
@@ -3989,6 +4006,11 @@ Now analyze the text above:"""
         - K sections: content should be bulleted, not combined into single entries
         - P section tables: should not have bare dates in column A
         - Other structural issues
+
+        *entries_by_code* is the render's grouped entries: the empty-teaching
+        check runs only when one of them is a teaching code, since a CV with no
+        teaching entries has nothing to show there (#1221). None, for a caller
+        with no entries to hand, runs it unconditionally, as before.
         """
         issues = []
 
@@ -4049,8 +4071,9 @@ Now analyze the text above:"""
                 })
 
         # Check 3: Teaching section should have visible content (not just track changes)
+        teaching_coded = entries_by_code is None or any(code in TEACHING_CODES for code in entries_by_code)
         teaching_idx = self._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
-        if teaching_idx is not None:
+        if teaching_idx is not None and teaching_coded:
             has_visible_bullets = False
             for i in range(teaching_idx + 1, min(teaching_idx + 30, len(self.doc.paragraphs))):
                 para = self.doc.paragraphs[i]
