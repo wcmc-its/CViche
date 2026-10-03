@@ -678,13 +678,47 @@ _REROUTE_GENERIC_FIELDS = frozenset({
 })
 
 # Targets whose renderer is filled by fields narrower than "any rendered,
-# non-generic one". A grant table renders a `title`, but so does nearly every
-# publication, position and talk; a grant is named by its funder or award
-# number. BMAMWE idx 932: a commentary (S2, title only) rerouted to M2C
-# rendered an otherwise empty Pending Funding table.
+# non-generic one". Each lists anchor groups; a record fits only when it fills
+# a field of EVERY group. A grant table renders a `title`, but so does nearly
+# every publication, position and talk; a grant is named by its funder or
+# award number. BMAMWE idx 932: a commentary (S2, title only) rerouted to M2C
+# rendered an otherwise empty Pending Funding table. The rest are EBYSBC class
+# E18, accepted reroutes that still misplaced the record:
+# - B1 is a degree. ZCTARO idx 506/518: two trainees (N3A, `institution`, no
+#   degree) rendered as the owner's Academic Degrees rows.
+# - A position is an institution (D3: organization) AND a title. Only the
+#   A/D1/D2/D3 stage-4 schemas name both, so a title held alone is a paper's
+#   or a talk's: ZGBCIT idx 117, a webinar (S8, title only), rendered as a
+#   bare Academic Appointments row. No other code's record in the 63-run
+#   EBYSBC farm fills both.
+# - Q1 is a leadership role in an organization. EOSAFF idx 39: an affiliation
+#   (I, its role in `membership_type`, which Q1 does not write) rendered as an
+#   extramural leadership row with no role.
 _GRANT_ANCHOR_FIELDS = frozenset({'agency', 'grant_number'})
-_REROUTE_ANCHOR_OVERRIDES = MappingProxyType({
-    'M2A': _GRANT_ANCHOR_FIELDS, 'M2B': _GRANT_ANCHOR_FIELDS, 'M2C': _GRANT_ANCHOR_FIELDS,
+_POSITION_TITLE_FIELDS = frozenset({'title'})
+_REROUTE_ANCHOR_OVERRIDES: Mapping[str, tuple[frozenset[str], ...]] = MappingProxyType({
+    'M2A': (_GRANT_ANCHOR_FIELDS,), 'M2B': (_GRANT_ANCHOR_FIELDS,), 'M2C': (_GRANT_ANCHOR_FIELDS,),
+    'B1': (frozenset({'degree'}),),
+    'D1': (frozenset({'institution'}), _POSITION_TITLE_FIELDS),
+    'D2': (frozenset({'institution'}), _POSITION_TITLE_FIELDS),
+    'D3': (frozenset({'organization'}), _POSITION_TITLE_FIELDS),
+    'Q1': (frozenset({'organization'}), frozenset({'role'})),
+})
+
+# Mentee codes describe someone the CV owner trained; the owner-record
+# families (B education, C training, D positions) render rows about the owner
+# himself. No heading turns one into the other, whatever fields the record
+# holds (ZCTARO idx 506/518 above, EBYSBC class E18).
+_MENTEE_CODES = frozenset({'N3', 'N3A', 'N3B'})
+_OWNER_RECORD_FAMILIES = frozenset({'B', 'C', 'D'})
+
+# (assigned, target) same-family pairs a hierarchy mismatch does not reroute
+# when the record fills one of the listed fields: they make it the assigned
+# code's kind, and the target's renderer writes none of them. HTNNHG idx
+# 159/166: two chapters (S4, with book title, editors and publisher) under a
+# peer-reviewed heading rendered as research articles (EBYSBC class E18).
+_SAME_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingProxyType({
+    ('S4', 'S1'): frozenset({'book_title', 'editors', 'publisher'}),
 })
 
 # Outcomes of a hierarchy-mismatch reroute, one render-warnings record each
@@ -692,6 +726,7 @@ _REROUTE_ANCHOR_OVERRIDES = MappingProxyType({
 REROUTE_ACCEPTED_SAME_FAMILY = 'accepted_same_family'
 REROUTE_ACCEPTED_CROSS_FAMILY = 'accepted_cross_family'
 REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
+REROUTE_REFUSED_MENTEE = 'refused_mentee_to_owner_record'
 
 # Render-warnings `check` value for every reroute record, and each outcome's
 # severity: an accepted cross-family move is a low-confidence guess that moved
@@ -701,6 +736,7 @@ _REROUTE_SEVERITY = MappingProxyType({
     REROUTE_ACCEPTED_SAME_FAMILY: 'INFO',
     REROUTE_ACCEPTED_CROSS_FAMILY: 'WARN',
     REROUTE_REFUSED_FIELDS: 'INFO',
+    REROUTE_REFUSED_MENTEE: 'INFO',
 })
 
 
@@ -741,16 +777,37 @@ def _fields_fit_reroute_target(entry: Mapping[str, Any], target_code: str) -> bo
     """Whether the target code's renderer can write this record (class 3 of
     AUTOPSY-s7ab-batch-2026-10-02): it must hold a non-blank field the target
     renders (`_RENDERED_FIELDS`) beyond the generic date/place/role ones, or
-    for a grant target an agency or award number. A mentee or a course
-    rerouted to S8 holds no author or title, and rendered as a bare numbered
-    item. True when the target renders the entry's text rather
-    than its fields, or the entry has no stage-4 fields, as before this check."""
+    one of each anchor group `_REROUTE_ANCHOR_OVERRIDES` lists for the target.
+    A mentee or a course rerouted to S8 holds no author or title, and rendered
+    as a bare numbered item. True when the target renders the entry's text
+    rather than its fields, or the entry has no stage-4 fields, as before this check."""
     rendered = _RENDERED_FIELDS.get(target_code)
     filled = _filled_field_names(entry)
     if rendered is None or not filled:
         return True
-    anchors = _REROUTE_ANCHOR_OVERRIDES.get(target_code, rendered - _REROUTE_GENERIC_FIELDS)
-    return bool(filled & anchors)
+    anchor_groups = _REROUTE_ANCHOR_OVERRIDES.get(
+        target_code, (rendered - _REROUTE_GENERIC_FIELDS,))
+    return all(filled & anchors for anchors in anchor_groups)
+
+
+def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
+                          target_code: str) -> str | None:
+    """The outcome refusing a cross-family reroute, or None to apply it: a
+    mentee never becomes an owner record, and any other record must fit the
+    target (`_fields_fit_reroute_target`)."""
+    if assigned_code in _MENTEE_CODES and target_code[:1] in _OWNER_RECORD_FAMILIES:
+        return REROUTE_REFUSED_MENTEE
+    if not _fields_fit_reroute_target(entry, target_code):
+        return REROUTE_REFUSED_FIELDS
+    return None
+
+
+def _holds_assigned_kind_fields(entry: Mapping[str, Any], assigned_code: str,
+                                target_code: str) -> bool:
+    """Whether a same-family reroute would move a record that fills a field
+    marking it as the assigned code's kind (`_SAME_FAMILY_KIND_FIELDS`)."""
+    kind_fields = _SAME_FAMILY_KIND_FIELDS.get((assigned_code, target_code), frozenset())
+    return bool(_filled_field_names(entry) & kind_fields)
 
 
 def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
@@ -999,19 +1056,23 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
           names codes in several sections ("Committees" -> P, Q2, O) does not
           say which one it means, and the longest-code pick only favoured the
           two-character code (#946 item 3: 200 corpus reroutes, most wrong).
+          Nor when the record fills a field that makes it the assigned code's
+          kind (`_SAME_FAMILY_KIND_FIELDS`: a chapter's book, EBYSBC E18).
         - Cross-family reroutes (e.g., C→K1): only applied when the LLM's confidence
           was low (< 0.7), since the content analysis may have been uncertain,
-          and the record's stage-4 fields fit the target's renderer
-          (`_fields_fit_reroute_target`): mentee, course and committee
-          records rerouted to S8 rendered as bare numbered items, 28 of them
-          on 2 of 10 CVs (class 3, AUTOPSY-s7ab-batch-2026-10-02).
+          and `_cross_family_refusal` finds no reason to refuse: a mentee
+          never becomes an owner record, and the record's stage-4 fields
+          must fit the target's renderer (`_fields_fit_reroute_target`):
+          mentee, course and committee records rerouted to S8 rendered as
+          bare numbered items, 28 of them on 2 of 10 CVs (class 3,
+          AUTOPSY-s7ab-batch-2026-10-02).
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
           heading whose expected codes tie across WCM sections
           (`_pick_mismatch_target`) (#946).
 
-        Every reroute applied, and every cross-family one refused for its
-        fields, is appended to *decisions* (`reroute_warnings` turns them into
-        render-warnings records).
+        Every reroute applied, and every one refused for the record's fields
+        or kind, is appended to *decisions* (`reroute_warnings` turns them
+        into render-warnings records).
 
         Returns:
             The (possibly corrected) taxonomy code to use for routing.
@@ -1041,6 +1102,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if ((assigned_code, best_expected) in _TAXONOMY_WARNED_CONFUSIONS
                     or len({TAXONOMY_TO_SECTION.get(code) for code in expected_codes}) > 1):
                 return assigned_code
+            if _holds_assigned_kind_fields(entry, assigned_code, best_expected):
+                _record_reroute(decisions, entry, assigned_code, best_expected,
+                                REROUTE_REFUSED_FIELDS)
+                return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
@@ -1052,12 +1117,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # Cross-family: only if LLM confidence was low
         if confidence < 0.7:
-            if not _fields_fit_reroute_target(entry, best_expected):
-                logger.info("    Mismatch correction refused: %s→%s (cross-family, "
-                            "fields do not fit the target) [element_idx_start %s]",
-                            assigned_code, best_expected, entry.get('element_idx_start'))
-                _record_reroute(decisions, entry, assigned_code, best_expected,
-                                REROUTE_REFUSED_FIELDS)
+            refusal = _cross_family_refusal(entry, assigned_code, best_expected)
+            if refusal is not None:
+                logger.info("    Mismatch correction refused: %s→%s (cross-family, %s) "
+                            "[element_idx_start %s]", assigned_code, best_expected,
+                            refusal, entry.get('element_idx_start'))
+                _record_reroute(decisions, entry, assigned_code, best_expected, refusal)
                 return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
