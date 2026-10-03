@@ -8,7 +8,9 @@ reach the page a reader opens" can be asked at all.
 
 One responsibility: scan the RENDERED docx's paragraphs and table cells
 for the policy's label and value shapes, plus a bare full date inside the
-Personal Data block, and say only the block/section and the policy
+Personal Data block, plus this lint's own label-and-value shapes that do
+not go through the withhold's matcher (#1223: the independent check,
+tracked deletions included), and say only the block/section and the policy
 CATEGORY in the finding -- NEVER the matched value, because this JSON is
 copied into Teams cards and issues (#820's own report was found by
 grepping a docx by hand for exactly this reason).
@@ -24,8 +26,14 @@ scorer cannot disagree about a document.
 import re
 
 from unified_pipeline.stage6.normalization.pii import (
+    CAT_CHILDREN,
+    CAT_DATE_OF_BIRTH,
     CAT_DEA,
+    CAT_FAMILY,
     CAT_HOME_CONTACT,
+    CAT_MARITAL_STATUS,
+    CAT_PLACE_OF_BIRTH,
+    CAT_SPOUSE,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     _MONTH_NAMES,
@@ -174,6 +182,166 @@ _BARE_DATE_RE = re.compile(
 )
 
 
+# --------------------------------------------------------------------------
+# The independent check (#1223; EBYSBC class E2)
+# --------------------------------------------------------------------------
+#
+# Everything above finds a value through `_pii_matches`, the SAME matcher the
+# render-time withhold (`stage6/pii_pass.py`) cuts with. A shape that matcher
+# recognises never reaches the page, and a shape it does not recognise reaches
+# the page with this lint unable to see it: the scan inherits every miss of the
+# thing it is meant to check. EBYSBC hit exactly that, with the lint silent: a
+# "Married:" colon row and a "Grandchildren" en-dash row recovered into the
+# Appendix (EQADVR-01), a "(h)"-labelled number in the Office telephone cell
+# (MRJDWE-01). The shapes below are this lint's own and share nothing with
+# `pii.py` but the category names (the notice's vocabulary): a family, birth or
+# home label followed by the VALUE that makes the line protected -- a
+# capitalised name, a date or a count after a family word; a date or a place
+# after a birth word; a phone number or a street address beside a home label.
+# A bare label, a title ("Children - A Review") or an institution ("Children's
+# Hospital") carries no such value and does not match.
+#
+# Scope: the Personal Data block and the Appendix only. The body sections hold
+# research titles and citations ("very low birth weight", a publisher "& Sons",
+# a co-author surnamed Son) that no label-plus-value shape tells apart from a
+# family line; the scan above keeps covering the labels unambiguous anywhere.
+# Calibrated on the 63-run EBYSBC/s7ab/pilot farm: every hit hand-checked.
+
+#: A person's or a place's name: a capitalised word of two or more letters
+#: that is not a title's function word ("Children - The Forgotten ...").
+_NAME = r"(?!(?:The|An|And|Of|In|On|For|With|From|To|At|By)\b)[A-Z][a-z][\w'’.-]*"
+#: One or more names in a row ("Pat Lee", "Ann, Bob and Cy") -- the whole run
+#: is the value `_locate_entries` looks for in stage 4.
+_NAMES = _NAME + r"(?:[ \t]*,?[ \t]+(?:and[ \t]+)?" + _NAME + r")*"
+_DATE = (r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+         r"|(?i:" + _MONTH_NAMES + r")\.?[ \t]+\d{1,2}(?:st|nd|rd|th)?,?[ \t]+\d{4}\b"
+         r"|\d{1,2}[ \t]+(?i:" + _MONTH_NAMES + r")\.?[ \t]+\d{4}\b"
+         r"|(?:19|20)\d{2}\b)")
+#: A small head count: "three children", "Sons: 2". A single digit only, so a
+#: study's "40 children" never reads as a family.
+_COUNT = r"(?:[1-9]|(?i:one|two|three|four|five|six|seven|eight|nine|ten))\b"
+#: Label-to-value separator: a colon, a dash with a space after it (so a
+#: compound like "Son-in-law" or "Child-Parent" is not a label), or an open
+#: parenthesis.
+_SEP = r"[ \t]*(?::|[-–—](?=[ \t])|\()[ \t]*"
+_CHILD_WORDS = r"(?i:children|sons?|daughters?)"
+_GRANDCHILD_WORDS = r"(?i:(?:great[- ]?)?grand(?:children|child|sons?|daughters?))"
+#: A North American number, with or without its area-code parentheses.
+_PHONE = r"(?:\+?1[ .-]?)?(?:\(\d{3}\)[ .-]?|\b\d{3}[ .-])\d{3}[ .-]\d{4}\b"
+_STREET = (r"\b\d{1,6}[ \t]+(?:[A-Z][\w.'’-]*[ \t]+){1,4}"
+           r"(?i:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct"
+           r"|circle|cir|place|pl|terrace|ter|parkway|pkwy|highway|hwy|trail|trl)\b")
+_HOME_LABEL = (r"(?:\b(?i:home|residence)\b"
+               r"(?:[ \t]+(?i:phone|telephone|tel|ph|address|addr|number|no|fax)\b\.?)?"
+               r"|\((?i:h|home|res)\))")
+_HOME_TAG_AFTER = r"(?:\((?i:h|home|res|residence)\)|\b(?i:home)\b)"
+
+#: (shape, policy category). Every shape names its value `value`. Same line
+#: only (`[ \t]`, never `\s`): a Personal Data row's label and value sit on
+#: two "lines" of a table block, and `_home_contact_value_leaked` above owns
+#: that case.
+_INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?i:spouse|wife|husband)\b" + _SEP
+                + r"(?P<value>" + _NAMES + "|" + _DATE + ")"), CAT_SPOUSE),
+    (re.compile(r"\b(?i:married)\b(?:" + _SEP + r"|[ \t]+(?i:to)[ \t]+)"
+                + r"(?P<value>" + _NAMES + "|" + _DATE + ")"), CAT_MARITAL_STATUS),
+    # "& Sons" / "and Sons" is a publisher ("Example & Sons: Hoboken").
+    (re.compile(r"(?<!& )(?<!and )\b" + _CHILD_WORDS + r"\b" + _SEP
+                + r"(?P<value>" + _NAMES + "|" + _DATE + "|" + _COUNT + ")"), CAT_CHILDREN),
+    (re.compile(r"\b" + _GRANDCHILD_WORDS + r"\b" + _SEP
+                + r"(?P<value>" + _NAMES + "|" + _DATE + "|" + _COUNT + ")"), CAT_FAMILY),
+    # A count ending its fragment ("Nationality: ...; three children"), not one
+    # opening a sentence ("five children with asthma were enrolled").
+    (re.compile(r"\b(?P<value>" + _COUNT + r"[ \t]+(?:" + _GRANDCHILD_WORDS + "|"
+                + _CHILD_WORDS + r"))\b(?=[ \t]*(?:[;,(]|\.?[ \t]*(?:\n|$)))"), CAT_CHILDREN),
+    (re.compile(r"(?:\b(?i:born|date[ \t]+of[ \t]+birth|birth[ \t]*date|dob)\b|(?i:d\.o\.b)\.?)"
+                + r"(?:" + _SEP + r"|[ \t]*,?[ \t]+(?:(?i:in|on)[ \t]+)?)"
+                + r"(?P<value>" + _DATE + ")"), CAT_DATE_OF_BIRTH),
+    (re.compile(r"\b(?i:born|birthplace|place[ \t]+of[ \t]+birth)\b"
+                + r"(?:" + _SEP + r"|[ \t]+(?i:in)[ \t]+)(?P<value>" + _NAMES + ")"),
+     CAT_PLACE_OF_BIRTH),
+    (re.compile(_HOME_LABEL + r"[ \t]*(?:[:\-–—][ \t]*)?(?P<value>" + _PHONE + "|" + _STREET + ")"),
+     CAT_HOME_CONTACT),
+    (re.compile(r"(?P<value>" + _PHONE + "|" + _STREET + r")[ \t]*[,;:]?[ \t]*" + _HOME_TAG_AFTER),
+     CAT_HOME_CONTACT),
+)
+
+#: `_locate_entries`: a value shorter than this (a lone given name, a year)
+#: is in too many stage-4 entries to name one; longer than the probe cap, a
+#: value is matched on its first 40 characters so a renderer's tail edit
+#: ("..., Esq." -> "..., Esq") does not lose the entry.
+_LOCATOR_MIN_CHARS = 8
+_LOCATOR_PROBE_CHARS = 40
+#: The harness (`doctor_vs_autopsy.py`) reads at most this many entry indices.
+_LOCATED_MAX = 3
+
+
+def _alnum(text: str) -> str:
+    """Letters and digits only, casefolded: the rendered value and the stage-4
+    source text it came from differ in punctuation, dashes and spacing."""
+    return re.sub(r"[\W_]+", "", text.casefold())
+
+
+def _shape_hits(text: str, claimed: list[tuple[int, int]]) -> list[tuple[str, str]]:
+    """(category, normalised value) per independent-shape match in one block,
+    leftmost first and, at one start, longest first ("Born: March 3, 1950" is
+    a date of birth, not the place "March"). A match overlapping a span the
+    matcher scan already reported (`claimed`), or an earlier independent
+    match, is skipped: one leak, one finding."""
+    matches = sorted((m.start(), -m.end(), category, _alnum(m.group("value")))
+                     for pattern, category in _INDEPENDENT_SHAPES
+                     for m in pattern.finditer(text))
+    taken = list(claimed)
+    hits: list[tuple[str, str]] = []
+    for start, neg_end, category, value in matches:
+        end = -neg_end
+        if any(start < t_end and t_start < end for t_start, t_end in taken):
+            continue
+        taken.append((start, end))
+        hits.append((category, value))
+    return hits
+
+
+def _stage4_entry_texts(stage_4: dict | None) -> list[tuple[int | float, str]]:
+    """(element_idx_start, `_alnum` text) per stage-4 entry; [] without stage 4."""
+    if not isinstance(stage_4, dict):
+        return []
+    texts = []
+    for entry in stage_4.get("entries") or []:
+        idx, text = entry.get("element_idx_start"), entry.get("text")
+        if isinstance(idx, (int, float)) and isinstance(text, str):
+            texts.append((idx, _alnum(text)))
+    return texts
+
+
+def _locate_entries(value: str, entry_texts: list[tuple[int | float, str]]) -> list[str]:
+    """`entry N` for the stage-4 entries whose source text holds this value --
+    the index the autopsy labels and the harness match on, never the value."""
+    if len(value) < _LOCATOR_MIN_CHARS:
+        return []
+    probe = value[:_LOCATOR_PROBE_CHARS]
+    return [f"entry {idx}" for idx, text in entry_texts if probe in text][:_LOCATED_MAX]
+
+
+def _independent_findings(text: str, deleted_text: str, claimed: list[tuple[int, int]],
+                          where: str, entry_texts: list[tuple[int | float, str]]) -> list[dict]:
+    """One ERROR per distinct (category, value) the independent shapes find in a
+    block's accepted text or its tracked deletions. Distinct, because a table
+    block repeats every cell in its joined-row line. The message says which:
+    an accepted-text hit is a shape `_pii_matches` did not match (its spans are
+    `claimed`); the matcher never reads the deletions at all."""
+    origin: dict[tuple[str, str], str] = {}
+    for hit in _shape_hits(text, claimed):
+        origin.setdefault(hit, "; the withhold's own matcher does not recognise this shape")
+    for hit in _shape_hits(deleted_text, []):
+        origin.setdefault(hit, "; it is in a tracked deletion, still shown struck through")
+    return [_finding(
+        "protected_data_in_output", "ERROR",
+        f"protected personal data ({category}) found in {where} -- value withheld "
+        f"from this finding{why}",
+        _locate_entries(value, entry_texts)) for (category, value), why in origin.items()]
+
+
 def _block_sections(blocks: list[tuple[str, str]]) -> list[str | None]:
     """The normalized WCM section name each block falls under: from its
     section header paragraph (exclusive) to the next recognized header, or
@@ -217,13 +385,22 @@ def _section_label(kind: str, section: str | None) -> str:
     return _SECTION_BODY_TABLE if kind == "table" else _SECTION_BODY_PARAGRAPH
 
 
-def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
+def lint_protected_data_in_output(blocks: list[tuple[str, str]],
+                                  deleted_blocks: list[tuple[str, str]] | None = None,
+                                  stage_4: dict | None = None) -> list[dict]:
     """Protected personal data visible in the rendered document.
 
     Hard-fail, like `owner_contact_missing`/`pipeline_errors_present`:
     `quality_score.score_protected_data` calls this same scan (#825: the
     doctor and the scorer's gate lists must not diverge) and caps a run
     carrying any finding into the RED band.
+
+    `deleted_blocks` is the same document's tracked-deletion view
+    (`docx_body_blocks(..., deleted=True)`, block for block); the independent
+    shapes scan it as well as the accepted text. `stage_4` only locates an
+    independent hit (its finding's evidence names the source entry index); it
+    never adds or removes a finding, so the scorer, which passes none, counts
+    the same hits.
 
     The withheld notice paragraph (`PII_REDACTED_NOTICE`) is skipped: it
     names categories, and a category name that ever coincides with a label
@@ -233,6 +410,11 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
     """
     findings: list[dict] = []
     sections = _block_sections(blocks)
+    deleted_texts = ([str(text) for _, text in deleted_blocks] if deleted_blocks is not None
+                     else [""] * len(blocks))
+    if len(deleted_texts) != len(blocks):
+        raise ValueError("deleted_blocks is not the same document's block list")
+    entry_texts = _stage4_entry_texts(stage_4)
 
     for i, (kind, text) in enumerate(blocks):
         stripped = str(text)
@@ -240,6 +422,7 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
             continue
         section = sections[i]
         where = _section_label(kind, section)
+        claimed: list[tuple[int, int]] = []
 
         # One finding per merged match, named by its POLICY CATEGORY -- the
         # same vocabulary the notice and the Word comment use -- never by
@@ -253,10 +436,15 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
                     and _HOME_CONTACT_LABEL_ONLY_RE.match(
                         stripped[match.start:match.end])):
                 continue
+            claimed.append((match.start, match.end))
             findings.append(_finding(
                 "protected_data_in_output", "ERROR",
                 f"protected personal data ({match.category}) found in {where} "
                 f"-- value withheld from this finding"))
+
+        if section in (_PERSONAL_DATA_SECTION, _APPENDIX_SECTION):
+            findings.extend(_independent_findings(
+                stripped, deleted_texts[i], claimed, where, entry_texts))
 
         if section == _PERSONAL_DATA_SECTION:
             for _match in _BARE_DATE_RE.finditer(stripped):
