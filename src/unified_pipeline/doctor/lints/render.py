@@ -1803,10 +1803,17 @@ DATE_SHAPE_RAW_VALUE = "raw_value"
 DATE_SHAPE_SAME_ENDS = "same_ends"
 
 #: Codes whose start-only rows keep "<start>-Present" by decision, so an open
-#: range on them is not reported: every D row (#946, decision 2026-09-24:
-#: non-rank positions are unchanged) and I, whose memberships are ongoing
-#: (the `POINT_IN_TIME_CODES` comment in stage6/formatting/dates.py).
-DATE_CELL_OPEN_BY_DECISION_CODES = frozenset({"D1", "D2", "D3", "I"})
+#: range on them is not reported: I, whose memberships are ongoing (the
+#: `POINT_IN_TIME_CODES` comment in stage6/formatting/dates.py). D rows follow
+#: the source-open-marker rule like any other row (Paul's 2026-10-02 decision
+#: on #1342, superseding the 2026-09-24 one on #946), with one exception below.
+DATE_CELL_OPEN_BY_DECISION_CODES = frozenset({"I"})
+
+#: The one D code whose latest row keeps "<start>-Present" by that decision:
+#: the CV's latest D1 rank, with no later D1 row, is the faculty member's
+#: current rank. "Latest" is by start year; D1 rows that share the latest
+#: start year are all exempt, so a tie never raises a WARN.
+DATE_CELL_LATEST_RANK_CODE = "D1"
 
 #: Word tokens a date's context must share with one stage-4 entry, and with
 #: no other entry as many, for the date to be read as that entry's. A date
@@ -1883,6 +1890,8 @@ class _DatedEntry(NamedTuple):
     text: str
     headings: str
     tokens: frozenset[str]
+    start_year: str | None
+    open_by_decision: bool = False
 
 
 class _RenderedDate(NamedTuple):
@@ -1905,22 +1914,49 @@ def _dated_entries(stage4: dict) -> dict[str, list[_DatedEntry]]:
     """Every stage-4 entry, indexed by each four-digit year its text or its
     extracted fields carry, so a rendered date can be tied only to an entry
     that holds its start year."""
+    entries = [_dated_entry(raw) for raw in stage4.get("entries", [])]
+    entries = _mark_latest_rank(entries)
     by_year: dict[str, list[_DatedEntry]] = defaultdict(list)
-    for raw in stage4.get("entries", []):
-        fields = raw.get("extracted_fields")
-        values = (" ".join(str(v) for v in fields.values() if v)
-                  if isinstance(fields, dict) else "")
-        text = str(raw.get("text") or "")
-        hierarchy = raw.get("hierarchy")
-        headings = [str(h) for h in hierarchy] if isinstance(hierarchy, list) else []
-        headings.append(str(raw.get("context_heading") or ""))
-        entry = _DatedEntry(raw.get("element_idx_start"),
-                            str(raw.get("taxonomy_code") or ""), text,
-                            "\n".join(headings),
-                            _attribution_tokens(f"{text} {values}"))
-        for year in set(_FOUR_DIGIT_YEAR_RE.findall(f"{text} {values}")):
+    for entry, years in entries:
+        for year in years:
             by_year[year].append(entry)
     return by_year
+
+
+def _dated_entry(raw: dict) -> tuple[_DatedEntry, set[str]]:
+    """One stage-4 entry read into a `_DatedEntry`, with every four-digit
+    year its text or extracted fields carry. Its start year is the first
+    year of `start_date`, else the first year of its text."""
+    fields = raw.get("extracted_fields")
+    fields = fields if isinstance(fields, dict) else {}
+    values = " ".join(str(v) for v in fields.values() if v)
+    text = str(raw.get("text") or "")
+    hierarchy = raw.get("hierarchy")
+    headings = [str(h) for h in hierarchy] if isinstance(hierarchy, list) else []
+    headings.append(str(raw.get("context_heading") or ""))
+    start_years = (_FOUR_DIGIT_YEAR_RE.findall(str(fields.get("start_date") or ""))
+                   or _FOUR_DIGIT_YEAR_RE.findall(text))
+    entry = _DatedEntry(raw.get("element_idx_start"),
+                        str(raw.get("taxonomy_code") or ""), text,
+                        "\n".join(headings),
+                        _attribution_tokens(f"{text} {values}"),
+                        start_years[0] if start_years else None)
+    return entry, set(_FOUR_DIGIT_YEAR_RE.findall(f"{text} {values}"))
+
+
+def _mark_latest_rank(entries: list[tuple[_DatedEntry, set[str]]]
+                      ) -> list[tuple[_DatedEntry, set[str]]]:
+    """Mark the CV's latest DATE_CELL_LATEST_RANK_CODE rows (no later row of
+    that code by start year) as keeping an open range by decision."""
+    rank_years = [entry.start_year for entry, _ in entries
+                  if entry.code == DATE_CELL_LATEST_RANK_CODE and entry.start_year]
+    if not rank_years:
+        return entries
+    latest = max(rank_years)
+    return [(entry._replace(open_by_decision=True)
+             if entry.code == DATE_CELL_LATEST_RANK_CODE and entry.start_year == latest
+             else entry, years)
+            for entry, years in entries]
 
 
 def _date_shapes(match: re.Match) -> tuple[str, ...]:
@@ -2029,13 +2065,14 @@ def _attributed_entry(date: _RenderedDate,
 def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> bool:
     """Whether `shape` is wrong for this entry. A date printed the way the
     entry's own text writes it is the CV's wording, never a defect. An open
-    range is a defect only outside DATE_CELL_OPEN_BY_DECISION_CODES and only
-    when neither the entry's text nor its headings carry an open marker."""
+    range is a defect only outside DATE_CELL_OPEN_BY_DECISION_CODES and the
+    CV's latest D1 rank, and only when neither the entry's text nor its
+    headings carry an open marker."""
     if date.rendered in entry.text:
         return False
     if shape != DATE_SHAPE_OPEN_RANGE:
         return True
-    if entry.code in DATE_CELL_OPEN_BY_DECISION_CODES:
+    if entry.code in DATE_CELL_OPEN_BY_DECISION_CODES or entry.open_by_decision:
         return False
     return not (_OPEN_MARKER_WORD_RE.search(f"{entry.text}\n{entry.headings}")
                 or _OPEN_MARKER_DASH_RE.search(entry.text))

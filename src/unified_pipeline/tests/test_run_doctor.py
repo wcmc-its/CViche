@@ -2090,13 +2090,102 @@ def test_date_cell_shape_reads_entry_years_only_as_whole_four_digit_numbers(numb
     assert lint_date_cell_shape(stage4, [_COMMITTEE_ROW], []) == []
 
 
-@pytest.mark.parametrize("code", ["D1", "D2", "D3", "I"])
-def test_date_cell_shape_leaves_positions_and_memberships_open_by_decision(code):
-    """#946 (decision 2026-09-24): start-only D rows and I memberships keep
-    '<start>-Present', so the lint must not report them."""
+@pytest.mark.parametrize("code", ["D1", "I"])
+def test_date_cell_shape_leaves_memberships_and_the_latest_rank_open_by_decision(code):
+    """#1342 (decision 2026-10-02): I memberships and the CV's latest D1 rank
+    keep '<start>-Present', so the lint must not report them. A lone D1 row
+    is the latest one."""
     stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015",
                                   code, "2015", None, idx=12)]}
     assert lint_date_cell_shape(stage4, [_COMMITTEE_ROW], []) == []
+
+
+@pytest.mark.parametrize("code", ["D2", "D3"])
+def test_date_cell_shape_warns_on_an_open_d2_or_d3_row(code):
+    """#1342 (decision 2026-10-02, superseding #946's): a D2 or D3 row
+    follows the source-open-marker rule, so a past post printed as current
+    is reported."""
+    stage4 = {"entries": [_dated4("Example Widget Lab, research fellow, 2015",
+                                  code, "2015", None, idx=12)]}
+    rows = [[["Example Widget Lab", "Research Fellow", "2015-Present"]]]
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("WARN", ["2015-Present"])]
+    assert findings[0]["message"].startswith(f"entry 12 ({code}): open_range:")
+
+
+def _two_ranks(earlier_start, later_start):
+    """An earlier and a later D1 rank, both rendered '-Present'."""
+    stage4 = {"entries": [
+        _dated4("Assistant Professor of Widgetry, Example University, 2010",
+                "D1", earlier_start, None, idx=12),
+        _dated4("Associate Professor of Widgetry, Example University, 2016",
+                "D1", later_start, None, idx=13)]}
+    rows = [[["Assistant Professor", "Widgetry, Example University", "2010-Present"],
+             ["Associate Professor", "Widgetry, Example University", "2016-Present"]]]
+    return stage4, rows
+
+
+def test_date_cell_shape_warns_on_an_open_d1_rank_with_a_later_d1_row():
+    """Only the latest D1 rank is current: an earlier rank printed
+    '-Present' is reported, the latest one is not."""
+    stage4, rows = _two_ranks("2010", "2016")
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["message"].split(": ")[0], f["severity"], f["evidence"])
+            for f in findings] == [("entry 12 (D1)", "WARN", ["2010-Present"])]
+
+
+def test_date_cell_shape_reads_a_d1_start_year_from_the_text_without_a_start_date():
+    """A D1 row with no start_date is ordered by the first year of its text,
+    so the 2010 rank is still the earlier one, a later year in its text
+    notwithstanding."""
+    stage4, rows = _two_ranks(None, None)
+    stage4["entries"][0]["text"] += " (renewed 2019)"
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["message"].split(": ")[0], f["evidence"]) for f in findings] == [
+        ("entry 12 (D1)", ["2010-Present"])]
+
+
+def test_date_cell_shape_orders_d1_ranks_by_start_date_before_text():
+    """The start year is the stage-4 start_date's when there is one: a
+    degree year earlier in the text does not make the later rank the
+    earlier one."""
+    stage4, rows = _two_ranks("2010", "2016")
+    stage4["entries"][1]["text"] = ("Associate Professor of Widgetry, Example "
+                                    "University (PhD 2005), 2016")
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["message"].split(": ")[0], f["evidence"]) for f in findings] == [
+        ("entry 12 (D1)", ["2010-Present"])]
+
+
+def test_date_cell_shape_judges_the_latest_rank_among_d1_rows_only():
+    """A D2 or D3 row neither is the latest rank nor moves it: a D2 row that
+    starts the rank's year and a D3 row that starts later are both
+    reported, and the D1 rank is not."""
+    stage4 = {"entries": [
+        _dated4("Associate Professor of Widgetry, Example University, 2016",
+                "D1", "2016", None, idx=12),
+        _dated4("Visiting Scholar, Sample Gadget Institute, 2016",
+                "D2", "2016", None, idx=13),
+        _dated4("Consultant, Demo Sprocket Clinic, 2019",
+                "D3", "2019", None, idx=14)]}
+    rows = [[["Associate Professor", "Widgetry, Example University", "2016-Present"],
+             ["Visiting Scholar", "Sample Gadget Institute", "2016-Present"],
+             ["Consultant", "Demo Sprocket Clinic", "2019-Present"]]]
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["message"].split(": ")[0], f["severity"]) for f in findings] == [
+        ("entry 13 (D2)", "WARN"), ("entry 14 (D3)", "WARN")]
+
+
+def test_date_cell_shape_leaves_every_d1_rank_sharing_the_latest_start_year():
+    """Two D1 ranks that start the same latest year have no later D1 row,
+    so neither is reported."""
+    stage4, rows = _two_ranks("2016", "2016")
+    rows = [[["Assistant Professor", "Widgetry, Example University", "2016-Present"],
+             ["Associate Professor", "Widgetry, Example University", "2016-Present"]]]
+    for entry in stage4["entries"]:
+        entry["text"] = entry["text"].replace("2010", "2016")
+    assert lint_date_cell_shape(stage4, rows, []) == []
 
 
 @pytest.mark.parametrize("code, text, cell, shape", [
@@ -2503,10 +2592,12 @@ def test_date_cell_shape_reads_a_slash_month_before_an_open_dash(text):
     assert lint_date_cell_shape(stage4, [_COMMITTEE_ROW], []) == []
 
 
-def test_date_cell_shape_does_not_read_a_dash_before_a_spaced_end_year_as_open():
-    """'2015- 2016' is a closed range with a space after its dash, not a
-    trailing dash."""
-    stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015- 2016",
+@pytest.mark.parametrize("closed", ["2015- 2016", "2015-\t2016"])
+def test_date_cell_shape_does_not_read_a_dash_before_a_spaced_end_year_as_open(closed):
+    """'2015- 2016' and '2015-<tab>2016' are closed ranges with a space or a
+    tab after the dash, not a trailing dash. The tab form also pins the
+    space required before the dash in the 'YYYY -<tab>' marker."""
+    stage4 = {"entries": [_dated4(f"Example Widget Committee, member, {closed}",
                                   "P", "2015", "present", idx=12)]}
     findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
     assert [(f["severity"], f["evidence"]) for f in findings] == [
