@@ -45,6 +45,13 @@ _COMPLETED_STATUS_RE = re.compile(
     r'\bcompleted?\b'
     r'|\bclosed\b(?!\s+to\s+(?:accrual|enrollment|enrolment|recruitment|new\s+patients))'
     r'|\bexpired\b')
+# A status that only says a section is empty: "PENDING - none" is a CV's "no
+# pending grants" label that stage 2 left inside the next grant's lines and
+# stage 4 read as that grant's status (EBYSBC E7: a funded, ended grant filed
+# under Pending Funding with that label as its status). "None" or "N/A" alone
+# says the same. It names no bucket, so the heading and dates decide.
+_EMPTY_SECTION_STATUS_RE = re.compile(
+    r'(?:[a-z][a-z /&]*?\s*[-–—:]\s*)?(?:none|n/?a)\.?')
 # A heading that names a current grant as well as a pending or completed one
 # ("Current and Pending Support", "Past and Present") does not say which bucket
 # one grant under it belongs in (#981).
@@ -132,6 +139,15 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     return out
 
 
+def grant_status_is_empty_section_label(status: str | None) -> bool:
+    """Whether a grant's status is only a CV's empty-section label ("PENDING -
+    none", "None", "N/A") rather than a status of this grant (EBYSBC E7). Such
+    a value is neither a bucket for `grant_status_rebucket_target` nor a
+    Status row in the rendered grant."""
+    lowered = str(status or '').strip().lower()
+    return bool(_EMPTY_SECTION_STATUS_RE.fullmatch(lowered))
+
+
 def grant_status_rebucket_target(
     status: str, label: str = 'Status'
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -144,10 +160,11 @@ def grant_status_rebucket_target(
     An explicit status beats date inference: "Under review" / "In review" /
     "Submitted" / "Awaiting sponsor decision" is Pending (M2C) no matter what
     dates say; "Not funded" is kept under Pending with a review comment
-    rather than silently dropped.
+    rather than silently dropped. An empty-section label ("PENDING - none")
+    is no status at all (`grant_status_is_empty_section_label`).
     """
     status = (status or '').strip()
-    if not status:
+    if not status or grant_status_is_empty_section_label(status):
         return None, None
     lowered = status.lower()
     if _NOT_FUNDED_STATUS_RE.search(lowered):

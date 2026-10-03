@@ -305,12 +305,16 @@ Corrects grant status codes based on date analysis:
 
 | Scenario | From | To | Reason |
 |----------|------|-----|--------|
-| End year < current year | M2A/M2C | M2B | Grant completed |
+| End year < current year | M2A | M2B | Grant completed |
+| End year < current year, heading files it as awarded | M2C | M2B | Grant completed |
 | End year ≥ current year | M2B/M2C | M2A | Grant still active |
 
 A grant under a pending / submitted / in-review / not-funded / declined /
-withdrawn heading, or whose text has a `Status: Pending`-style line, is left
-alone whatever its code: its dates are a proposed period (#981).
+withdrawn / applied / application heading, or whose text has a
+`Status: Pending`-style line, is left alone whatever its code: its dates are a
+proposed period (#981). An M2C under any other heading moves to M2B on ended
+dates only when the heading names current, past, completed, funded or awarded
+grants: an old application is not a completed award (EBYSBC E7).
 
 **Key patterns:** `2019-2024`, `2020-present`, `01/2019-12/2024`, `03/01/2024-12/31/2028`
 

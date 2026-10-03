@@ -57,6 +57,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     claim_goal_rows,
     fill_major_goals_from_text,
     filter_role_effort_headers,
+    grant_end_year,
     is_role_effort_header,
     match_effort_for_title,
     normalize_percent_effort,
@@ -69,6 +70,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
 )
 from unified_pipeline.stage6.normalization import (  # noqa: E402
     grant_heading_rebucket_target,
+    grant_status_is_empty_section_label,
     grant_status_rebucket_target,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -2502,3 +2504,152 @@ def test_no_co_investigators_keeps_the_eight_row_block():
     fields = {'title': 'Solo Study', 'co_investigators': None, 'start_date': '01/2019'}
 
     assert len(_generator()._create_grant_table(fields, 'M2A').rows) == 8
+
+
+# --- EBYSBC E7: an empty-section label is no status ----------------------------
+
+@pytest.mark.parametrize('status', [
+    'PENDING \u2013 none', 'Pending - none.', 'Pending: None', 'CURRENT \u2014 none',
+    'none', 'None.', 'N/A', 'n/a',
+])
+def test_an_empty_section_label_is_no_status(status):
+    """A CV's "PENDING - none" label, left inside the next grant's lines, names no bucket."""
+    assert grant_status_is_empty_section_label(status)
+    assert grant_status_rebucket_target(status) == (None, None)
+
+
+@pytest.mark.parametrize('status', [
+    'Pending', 'Submitted/Under review', 'Pending (none yet)', 'Funded', 'No-cost extension',
+    'Not funded', 'Nonetheless pending', '',
+])
+def test_a_real_status_is_not_an_empty_section_label(status):
+    assert not grant_status_is_empty_section_label(status)
+
+
+def test_a_funded_grant_carrying_an_empty_pending_label_stays_completed():
+    """The E7 shape: 3b filed an ended, funded grant under an Active heading as
+    completed; its status is the CV's "PENDING - none" label, which must not
+    move it to Pending."""
+    entry = _under(['Research Support', 'Active'], code='M2B', title='Funded Cohort Study',
+                   status='PENDING \u2013 none', total_funding='900,000',
+                   start_date='2014', end_date='2019')
+
+    current, completed, pending, messages = rebucket_grants_by_status(
+        [], [entry], [])
+
+    assert (current, completed, pending, messages) == ([], [entry], [], [])
+
+
+def test_an_empty_section_label_renders_no_status_row():
+    label_only = {'title': 'Funded Cohort Study', 'status': 'PENDING \u2013 none',
+                  'start_date': '01/2015'}
+    real_status = {'title': 'Funded Cohort Study', 'status': 'Pending',
+                   'start_date': '01/2015'}
+
+    assert 'Status:' not in _cells(_generator()._create_grant_table(label_only, 'M2B'))
+    assert _cells(_generator()._create_grant_table(real_status, 'M2C'))['Status:'] == 'Pending'
+
+
+def test_an_empty_pending_label_reaches_neither_bucket_nor_row_through_the_section_fill():
+    """The wire: `_fill_research_support` keeps the grant under Past with no Status row."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_under(['Research Support', 'Active'], code='M2B',
+                        title='Funded Cohort Study', agency='NIH',
+                        status='PENDING \u2013 none', total_funding='900,000',
+                        start_date='2014', end_date='2019')]},
+        current_year=TEST_YEAR)
+
+    (table,) = _tables_under(gen, COMPLETED)
+    assert _cells(table)['Project title:'] == 'Funded Cohort Study'
+    assert 'Status:' not in _cells(table)
+    assert _tables_under(gen, PENDING) == []
+
+
+# --- EBYSBC E7: an explicit pending status still beats an amount and old dates --
+
+@pytest.mark.parametrize('status', ['Under review', 'Submitted', 'Pending'])
+@pytest.mark.parametrize('heading', [('Research Support',), ('Research Support', 'Active')])
+@pytest.mark.parametrize('code', ['M2A', 'M2B'])
+def test_an_explicit_pending_status_moves_an_amounted_ended_grant_to_pending(
+        status, heading, code):
+    """#210: an explicit status beats date inference. Stage 6 has no award signal
+    independent of the 3b code: an M2A/M2B schema's `total_funding` is filled for
+    an application too, so an amount and an ended range under a generic heading
+    must not keep a grant whose own status says it awaits a decision out of
+    Pending (that would render a requested budget as Total award)."""
+    entry = _under(list(heading), code=code, title='Old Application Study',
+                   status=status, total_funding='$250,000',
+                   start_date='2010', end_date='2013')
+    buckets = {'M2A': [], 'M2B': []}
+    buckets[code].append(entry)
+
+    current, completed, pending, _ = rebucket_grants_by_status(
+        buckets['M2A'], buckets['M2B'], [])
+
+    assert (current, completed, pending) == ([], [], [entry])
+
+
+# --- EBYSBC E7: a two-digit-year end date is read --------------------------------
+
+@pytest.mark.parametrize('end_date, expected', [
+    ('4/15/14', 2014),
+    ('03/31/11', 2011),
+    ('9-30-28', 2028),
+    ('6/30/31', 2031),
+    ('8/31/36', 2036),
+    ('8/31/37', 1937),
+    ('6/30/95', 1995),
+    ('13/45/14', None),
+    ('2016-10-21', 2016),
+    ('June 2015', 2015),
+    ('2015-16', 2015),
+    ('7/31/1', None),
+    ('12/13', None),
+    ('present', None),
+    ('', None),
+    (None, None),
+])
+def test_grant_end_year(end_date, expected):
+    """A two-digit year reads against TEST_YEAR (2026) plus the ten-year horizon,
+    not the shared past-leaning pivot of 30."""
+    assert grant_end_year(end_date, TEST_YEAR) == expected
+
+
+@pytest.mark.parametrize('end_date', ['6/30/31', '8/31/32'])
+def test_a_current_grant_ending_past_the_shared_pivot_stays_current(end_date):
+    """A five-year award starting mid-2026 ends 6/30/31: 2031, not 1931."""
+    running = _entry('M2A', title='New Award Study', start_date='7/1/26', end_date=end_date)
+
+    current, completed, messages = reclassify_past_m2a_grants([running], [], TEST_YEAR)
+
+    assert (current, completed, messages) == ([running], [], [])
+
+
+def test_a_current_grant_with_a_two_digit_year_end_in_the_past_moves_to_completed():
+    ended = _entry('M2A', title='Ended Study', start_date='4/1/09', end_date='4/15/14')
+    running = _entry('M2A', title='Running Study', start_date='10/1/24', end_date='9/30/28')
+
+    current, completed, messages = reclassify_past_m2a_grants([ended, running], [], TEST_YEAR)
+
+    assert (current, completed) == ([running], [ended])
+    assert ended['reclassification_note'].endswith(f'4/15/14 is before {TEST_YEAR}')
+
+
+def test_a_completed_grant_with_a_two_digit_year_end_still_running_is_promoted():
+    running = _entry('M2B', title='Running Study', start_date='10/1/24', end_date='9/30/28')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_YEAR)
+
+    assert (current, completed) == ([running], [])
+
+
+def test_a_two_digit_year_end_reaches_past_funding_through_the_section_fill():
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Ended Study', agency='NIH',
+                        start_date='4/1/09', end_date='4/15/14')]},
+        current_year=TEST_YEAR)
+
+    assert _titles_under(gen, COMPLETED) == ['Ended Study']
+    assert _tables_under(gen, CURRENT) == []

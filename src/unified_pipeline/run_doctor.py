@@ -154,6 +154,26 @@ Lints, ranked by the severity of the failure class they catch:
                           fatal record (they all are today), WARN otherwise
                           (#1174)
 
+14n. owner_missing_from_citation a publication whose source credits the CV
+                          owner (stage 4's authors, the source text, or a
+                          co-presented talk) and whose own rendered
+                          bibliography line does not name them: stage 5d's
+                          "first 6 authors, et al." cut where the #1292
+                          restore declined, a PubMed author list that stops
+                          short, a dropped consortium credit. WARN, one per
+                          citation. Its sibling `etal_added` reports, at
+                          INFO, a line whose author list ends in "et al."
+                          where the source elides no author: co-authors cut
+                          (#1259)
+14o. multi_record_coverage a stage-4 entry whose text holds several records
+                          -- two or more dated clauses, or undated parts that
+                          each name a title and an institution -- while stage
+                          4 returned one record and no `stage4_records`; or
+                          one record holding several mentees, degree years or
+                          licence/patent numbers (#1243: TAUBPU's concurrent
+                          faculty rank, VNUAHA's paragraphs of 2-3 roles).
+                          WARN when a left-out clause, mentee, degree year or
+                          number is on no rendered line, INFO otherwise
 14q. year_not_in_source   a stage-4 date-named field whose year, inside
                           implausible_year's band, the entry's text states in
                           no form -- four digits, a two-digit year, a range
@@ -292,6 +312,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_dedup_drops,
     lint_implausible_year,
     lint_invented_records,
+    lint_multi_record_coverage,
     lint_offschema_fields,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
@@ -340,8 +361,10 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
+    lint_etal_added,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
+    lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_python_repr_in_output,
     lint_section_lost,
@@ -443,6 +466,9 @@ KNOWN_LINTS = (
     "llm_refusal_in_output",
     "llm_fallback_served",
     "stage_failure_recorded",
+    "owner_missing_from_citation",
+    "etal_added",
+    "multi_record_coverage",
     "year_not_in_source",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -556,6 +582,21 @@ LINT_PREVALENCE = {
     # and both should fall toward zero as the renderers are fixed.
     "python_repr_in_output": 0.061,
     "llm_refusal_in_output": 0.006,
+    # #1259: runs with a finding, on the 63-run farm of the 2026-10-02
+    # EBYSBC, s7ab and pilot batches (rendered from origin/dev c3d87c5f,
+    # scripts/doctor_gate.py). The 5d "first 6, et al." rule is still in the
+    # prompt there, so both are high, and both should fall toward zero once
+    # it is removed. Same mixed-corpus caveat as duplicate_records above.
+    "owner_missing_from_citation": 0.476,
+    "etal_added": 0.937,
+    # #1243: 64 of the 126 census CVs of the wave-1 stage-4 farm the two rows
+    # above were measured on, one fire per CV at any severity (firing reads
+    # stage 4 only; the docx sets severity), measured 2026-10-02. The farm's
+    # 37 IPXFBA artifacts are no longer on disk, so the denominator is 126,
+    # not 163. On the 63 autopsied runs (EBYSBC 40, s7ab 10, pilot 13) it is
+    # 38/63, 35 at WARN; the autopsies found the class it reports on 17 of
+    # EBYSBC's 40 CVs, so it is common rather than surprising.
+    "multi_record_coverage": 0.508,
 }
 
 
@@ -1071,6 +1112,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("llm_fallback_served", lint_llm_fallback_served, ("stage_4",),
              optional=("stage_4_5",)),
     LintSpec("stage_failure_recorded", lint_stage_failure_recorded, ("stage_errors",)),
+    LintSpec("owner_missing_from_citation", lint_owner_missing_from_citation,
+             ("stage_4", "blocks")),
+    LintSpec("etal_added", lint_etal_added, ("stage_4", "blocks")),
+    LintSpec("multi_record_coverage", lint_multi_record_coverage, ("stage_4", "blocks")),
     LintSpec("year_not_in_source", lint_year_not_in_source, ("stage_4",),
              optional=("stage_5d",)),
 )

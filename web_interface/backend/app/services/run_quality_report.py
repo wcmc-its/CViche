@@ -364,6 +364,22 @@ LINT_COPY = {
         "research summary when stage 4.5 fails.",
         "Check the named part of the document. Rerun the CV, and send the run to the CViche team if "
         "it fails again."),
+    "owner_missing_from_citation": LintCopy(
+        "Owner's name missing from own citation",
+        "The source CV names the faculty member on a publication (as an author, a group member or "
+        "a co-presenter), but its citation in the document does not, usually because the author "
+        "list was cut to the first six names and \"et al.\".",
+        "Copy the full author list, with the faculty member's name, from the source CV."),
+    "etal_added": LintCopy(
+        "Co-authors cut to \"et al.\"",
+        "A citation lists its first authors and then \"et al.\", although the source CV lists "
+        "every author.",
+        "Copy the full author list from the source CV."),
+    "multi_record_coverage": LintCopy(
+        "Several records read as one",
+        "One source entry lists several records (roles, dates, talks or mentees), but only one was "
+        "extracted, so the others are missing or squeezed into one row.",
+        "Compare the quoted entry with the source and add each missing record as its own row."),
     "year_not_in_source": LintCopy(
         "Year not in the source",
         "A date field holds a year the entry's text never states, in four digits or in two, so it "

@@ -173,9 +173,21 @@ def _year_of_calendar_invalid_date(date_str: str) -> int | None:
 
 
 def _get_entry_date_range(entry: Dict) -> tuple:
-    """Extract (start_date, end_date) strings from an entry for dedup comparison."""
+    """Extract (start_date, end_date) strings from an entry for dedup comparison.
+
+    A record that states no start or end but one `date` (a talk, an award, a
+    teaching session) spans that date; the range dict stage 4 sometimes puts
+    there (#1233) spans its two keys. Without it those records read as undated
+    and "can't be proven different" (#666, EBYSBC KDAZOM-03, VNUAHA-02).
+    """
     fields = entry.get('extracted_fields', {}) or {}
-    return (fields.get('start_date', '') or '', fields.get('end_date', '') or '')
+    start, end = fields.get('start_date', '') or '', fields.get('end_date', '') or ''
+    date = fields.get('date')
+    if start or end or not date:
+        return (start, end)
+    if isinstance(date, dict):
+        return (date.get(RANGE_START_KEY) or '', date.get(RANGE_END_KEY) or '')
+    return (date, date)
 
 
 # Sentinel for a range whose end is absent or a current-date keyword: it has no
