@@ -415,6 +415,12 @@ def test_partition_keeps_a_current_mentee_that_has_not_ended(fields):
     # year, which here opens a closed range.
     ('2014', "2014 - 2015 Ada Lovelace, intern; PhD student 2016 \u2013"),
     ('2014', "2014 - 2015 Ada Lovelace, intern\nPhD student 2016 \u2013\nFictional Institute"),
+    # The marker is read case-blind, with "ongoing" and "date" as end words,
+    # and a box-drawing dash closing the line after a month/year.
+    ('2004', "Faculty advisor for the chief resident 04-Present (Ada Lovelace)"),
+    ('2004', "Faculty advisor for the chief resident 04-ongoing (Ada Lovelace)"),
+    ('2004', "Faculty advisor for the chief resident 04 to date (Ada Lovelace)"),
+    ('2015-03', "Ada Lovelace, PhD student 03/2015 \u2500"),
 ])
 def test_partition_keeps_a_current_mentee_whose_source_leaves_the_year_open(start_date, text):
     entry = _mentee('N3A', 'Ada Lovelace', start_date=start_date)

@@ -706,6 +706,12 @@ def test_an_entry_opening_with_a_dotted_month_and_a_dash_keeps_present(code):
     assert format_date_range("2014-01", "", code, source_text) == "2014-Present"
 
 
+def test_an_entry_opening_with_a_single_digit_dotted_month_keeps_present():
+    """Some CVs write the month without a leading zero: "YYYY.M - <text>"."""
+    source_text = "2021.7 - Member, Fictional Society of Testing"
+    assert format_date_range("2021-07", "", "Q3", source_text) == "2021-Present"
+
+
 def test_a_dotted_month_closed_range_stays_the_start_year():
     source_text = "2014.01 - 2016.12 Fictional Journal of Testing, Editorial Board"
     assert format_date_range("2014-01", "", "Q4C", source_text) == "2014"
