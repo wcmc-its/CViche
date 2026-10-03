@@ -553,6 +553,32 @@ def test_promote_unlocated_heading_accepts_the_bare_heading_and_a_suffix_at_the_
         assert entries[3]["element_type"] == "header"
 
 
+@pytest.mark.parametrize("line", [
+    "*" * 85 + " POSTERS:",            # a rule of asterisks typed on the heading's line
+    "----- POSTERS",
+    "_____POSTERS (selected)",
+    "= = = POSTERS",
+])
+def test_promote_unlocated_heading_accepts_the_heading_after_a_separator_run(line):
+    # EBYSBC E17 / #1254: startswith() alone left such a heading a break.
+    entries, hierarchy = _unlocated_fixture()
+    entries[3]["text"] = line
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[3]["element_type"] == "header"
+    assert entries[4]["hierarchy"] == ["POSTERS"]
+
+
+def test_promote_unlocated_heading_leaves_a_separator_run_before_other_text():
+    entries, hierarchy = _unlocated_fixture()
+    entries[3]["text"] = "***** Poster one, 2002"
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[3]["element_type"] == "break"
+
+
 def test_promote_unlocated_heading_ignores_a_content_entry_with_the_heading_text():
     entries, hierarchy = _unlocated_fixture()
     entries[3]["element_type"] = "paragraph"
