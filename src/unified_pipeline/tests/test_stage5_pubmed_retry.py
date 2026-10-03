@@ -1049,12 +1049,36 @@ def test_title_search_with_only_an_erratum_leaves_the_entry_unmatched(tmp_path, 
 
 
 def test_title_search_still_matches_an_editorial_typed_comment(tmp_path, monkeypatch):
-    # An editorial is typed Comment; both Comment-typed title-search matches in
-    # the EBYSBC farm were the CV's own editorial, so Comment is not a notice.
+    # An editorial is typed Comment; two of the three Comment-typed
+    # title-search matches in the EBYSBC farm were the CV's own commentary.
     editorial = _article(PAPER_PMID, INPRESS_TITLE, pubtypes=('Editorial', 'Comment'))
     [result], _, _ = _run_entries(tmp_path, monkeypatch, [_inpress_entry()], [
         _hits(PAPER_PMID), _article_set(editorial)])
     assert result['enrichment_data']['pubmed_pmid'] == PAPER_PMID
+
+
+@pytest.mark.parametrize('comment_first', [True, False])
+def test_title_search_takes_the_paper_over_an_equal_comment_on_it(tmp_path, monkeypatch,
+                                                                  comment_first):
+    # QSWXKR (dev-242): a "Discussion of:" piece, typed Comment, came ahead of
+    # the paper in the hit list at the same overlap and was taken for it.
+    comment = (NOTICE_PMID, _article(NOTICE_PMID, f'Discussion of: {INPRESS_TITLE}',
+                                     pubtypes=('Journal Article', 'Comment')))
+    paper = (PAPER_PMID, _article(PAPER_PMID, INPRESS_TITLE))
+    hits = [comment, paper] if comment_first else [paper, comment]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_inpress_entry()], [
+        _hits(*(pmid for pmid, _ in hits)), _article_set(*(xml for _, xml in hits))])
+    assert result['enrichment_data']['pubmed_pmid'] == PAPER_PMID
+
+
+def test_title_search_keeps_a_comment_that_matches_better_than_the_other_hits(tmp_path, monkeypatch):
+    # The rank is by overlap first: a weaker non-Comment hit (6 of 7 words)
+    # does not displace a Comment that is the full title.
+    comment = _article(NOTICE_PMID, INPRESS_TITLE, pubtypes=('Journal Article', 'Comment'))
+    weaker = _article(PAPER_PMID, 'Statin adherence after myocardial infarction in younger adults')
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_inpress_entry()], [
+        _hits(PAPER_PMID, NOTICE_PMID), _article_set(weaker, comment)])
+    assert result['enrichment_data']['pubmed_pmid'] == NOTICE_PMID
 
 
 # One DOI printed on two papers (AQCLHS, dev-242): the PubMed record is the
@@ -1132,6 +1156,44 @@ def test_a_pmid_held_in_another_document_is_not_shared(tmp_path, monkeypatch):
         path.write_text(json.dumps({'document_uid': 'x', 'entries': [_paper_entry(title, 10)]}))
         outputs.append(enricher.enrich_stage4_output(str(path))['entries'][0])
     assert [e['enrichment_status'] for e in outputs] == ['enriched', 'enriched']
+
+
+# An in-press listing whose DOI names the paper the CV also lists as
+# published, under the title it was accepted with (4 of 7 words: 0.57).
+RETITLED_IN_PRESS = 'Statin adherence and outcomes after infarction among elderly patients'
+
+
+def _in_press_with_doi(title, idx=20):
+    return {'element_idx_start': idx, 'taxonomy_code': 'S7',
+            'text': f'Garcia M, Doe J. {title}. Heart Journal. In press.',
+            'extracted_fields': {'title': title, 'authors': 'Garcia M, Doe J',
+                                 'year': 'in press', 'doi': DOI}}
+
+
+def test_weaker_in_press_holder_of_a_shared_pmid_is_superseded_not_released(tmp_path, monkeypatch):
+    # Releasing it would promote it from S7 and print the paper twice.
+    published = dict(_published_entry(title=INPRESS_TITLE, pmid=PMID), element_idx_start=10)
+    responses = [FakeResponse(200, content=_published_xml())] + _found()
+    results, _, _ = _run_entries(tmp_path, monkeypatch,
+                                 [published, _in_press_with_doi(RETITLED_IN_PRESS)], responses)
+    in_press = results[1]
+    assert [r['enrichment_status'] for r in results] == ['enriched', 'enriched']
+    assert (in_press['taxonomy_code'], in_press['in_press_superseded']) == ('S7', True)
+
+
+def test_in_press_holder_of_a_shared_pmid_still_counts_as_its_best_match(tmp_path, monkeypatch):
+    # A published entry with a weaker title (3 of 6 words) is released to the
+    # in-press entry that names the paper, which then resolves as published.
+    published = {'element_idx_start': 10, 'taxonomy_code': 'S1', 'text': 'Garcia M. Other paper.',
+                 'extracted_fields': {'title': 'Statin adherence in younger adults with diabetes',
+                                      'authors': 'Garcia M', 'year': '2025', 'doi': DOI}}
+    results, _, _ = _run_entries(tmp_path, monkeypatch,
+                                 [published, _in_press_with_doi(INPRESS_TITLE)], _found() * 2)
+    released, in_press = results
+    assert released['enrichment_status'] == 'title_check_failed'
+    assert released['enrichment_rejected']['shared_pmid_with'] == 20
+    assert in_press['enrichment_status'] == 'enriched'
+    assert (in_press['taxonomy_code'], in_press.get('in_press_superseded')) == ('S1', None)
 
 
 def test_equal_weak_matches_both_keep_a_shared_pmid():

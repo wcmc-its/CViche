@@ -98,11 +98,16 @@ PREPRINT_PUBTYPE = 'Preprint'
 # A title search can also return a notice about the paper, whose title is the
 # paper's own with "Correction:" in front (QNZADH, dev-242: an "accepted"
 # article was cited as its Published Erratum). None of these is ever what a CV
-# lists as in press. 'Comment' is not one of them: an editorial or commentary
-# is typed Comment, and both Comment-typed title-search matches in the
-# 63-run EBYSBC farm (2026-10-02) were the CV's own editorial.
+# lists as in press.
 NOTICE_PUBTYPES = frozenset({'Published Erratum', 'Retraction Notice', 'Expression of Concern'})
 TITLE_SEARCH_EXCLUDED_PUBTYPES = NOTICE_PUBTYPES | {PREPRINT_PUBTYPE}
+# A Comment can be either. Of the three Comment-typed title-search matches in
+# the 63-run EBYSBC farm (2026-10-02), two were the CV's own commentary, each
+# its search's only hit; the third was a "Discussion of:" piece about the
+# paper (QSWXKR), listed ahead of the paper itself at the same overlap. So a
+# Comment is not skipped, but ranks below a non-Comment hit that matches at
+# least as well.
+COMMENT_PUBTYPE = 'Comment'
 # A paper in press is published within a couple of years of the year the CV
 # gives it. Of the 87 corpus matches (2026-10-02) with a CV year, 64 were 0-2
 # years later; the one at 4 years was a different paper by the same group
@@ -174,6 +179,18 @@ def in_press_phrase(text: str, title: str = '') -> str | None:
             or NOT_YET_ACCEPTED_PATTERN.search(text)):
         return None
     return re.sub(r'\s+', ' ', matches[-1].lower())
+
+
+def listed_in_press(entry: dict) -> str | None:
+    """The phrase by which the CV lists `entry` as in press or accepted, or
+    None: only an article code can be, and only a titled entry, since without
+    a title a status cannot be told from a title that says "(in press)"
+    (letters, corrigenda) or ends "accepted."."""
+    if entry.get('taxonomy_code') not in IN_PRESS_ELIGIBLE_CODES:
+        return None
+    fields = entry.get('extracted_fields') or {}
+    title = fields.get('title') or fields.get('chapter_title') or ''
+    return in_press_phrase(entry.get('text') or '', title) if title else None
 
 
 def _folded_words(text: str, min_len: int) -> set[str]:
@@ -673,16 +690,11 @@ class PubMedEnricher:
         Word comment stage 6 attaches to the tracked change. One PubMed did
         not match still leaves S7, by its own text (#1166)."""
         for entry in pub_entries:
-            if entry.get('taxonomy_code') not in IN_PRESS_ELIGIBLE_CODES:
+            phrase = listed_in_press(entry)
+            if not phrase:
                 continue
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
-            # No title, no way to tell a status from a title that says
-            # "(in press)" (letters, corrigenda) or ends "accepted." -- and no
-            # title search either.
-            phrase = title and in_press_phrase(entry.get('text') or '', title)
-            if not phrase:
-                continue
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
                 self._enrich_by_title(entry, title)
             if entry.get('enrichment_status') != 'enriched':
@@ -714,12 +726,13 @@ class PubMedEnricher:
         # names (QZWBKQ, dev-239: an "Appl Environ Microbiol, in press" entry
         # matched its bioRxiv record, PubMed type Preprint); an erratum is a
         # notice about the paper (QNZADH, dev-242).
-        scored = [(title_word_overlap(title, [r['title'], r['vernacular_title']]) or 0, r)
+        scored = [(title_word_overlap(title, [r['title'], r['vernacular_title']]) or 0,
+                   COMMENT_PUBTYPE not in r['publication_types'], r)
                   for r in records.values()
                   if not TITLE_SEARCH_EXCLUDED_PUBTYPES.intersection(r['publication_types'])]
         if not scored:
             return
-        overlap, best = max(scored, key=lambda pair: pair[0])
+        overlap, _, best = max(scored, key=lambda hit: hit[:2])
         fields = entry.get('extracted_fields') or {}
         if (overlap >= MIN_TITLE_SEARCH_OVERLAP
                 and shares_an_author(fields.get('authors'), best['authors'])
@@ -1153,15 +1166,19 @@ class PubMedEnricher:
         consecutive papers one DOI, and the second, at 0.43, was replaced by
         a copy of the first). Order-independent, so it runs once every ID
         path is done. An untitled entry has no overlap to compare and is
-        left alone."""
+        left alone. An entry the CV lists as in press can keep the PMID but
+        is never released: the in-press step marks it superseded when a
+        published entry holds the PMID (a paper retitled after acceptance),
+        and a release would promote it to a second copy of that paper."""
         holders: dict[str, list[_Acceptance]] = {}
         for accepted in self._acceptances:
-            if accepted.overlap is not None and accepted.entry.get('enrichment_status') == 'enriched':
+            if accepted.overlap is not None:
                 holders.setdefault(accepted.pmid, []).append(accepted)
         for group in holders.values():
             best = max(group, key=lambda accepted: accepted.overlap)
             for accepted in group:
-                if accepted.overlap < min(best.overlap, MIN_TITLE_SEARCH_OVERLAP):
+                if (accepted.overlap < min(best.overlap, MIN_TITLE_SEARCH_OVERLAP)
+                        and not listed_in_press(accepted.before)):
                     self._restore_and_reject(accepted, best)
 
     def _restore_and_reject(self, accepted: _Acceptance, keeper: _Acceptance) -> None:
