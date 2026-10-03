@@ -76,6 +76,8 @@ def test_empty_table_header_row_is_not_promoted():
         ("ABXY, Example Subspecialty, 2031", ["Experience"], "I"),
         ("Certifications: Diplomate, National Board of Example Examiners, 2031", ["Experience"], "I"),
         ("2031 American Board of Example Medicine", ["Educational History"], "B2"),
+        # A short leading parenthetical (the diplomate mark) before the abbreviation.
+        ("(D)ABXY - Certified in Example Specialty, 2031-current", ["Service", "Community"], "H"),
     ],
 )
 def test_board_abbreviation_national_board_and_b2_rows_become_f2(text, hierarchy, code):
@@ -93,6 +95,10 @@ def test_board_abbreviation_national_board_and_b2_rows_become_f2(text, hierarchy
         ("About Example Topics, 2031", ["Experience"], "I"),
         # A board-review row is not a certification, course word or not.
         ("2031 American Board of Example Medicine item review panel", ["Educational History"], "B2"),
+        # A course row naming a board, without the word "review", is not a certification either.
+        ("2031 American Board of Example Medicine preparation course", ["Educational History"], "B2"),
+        # A longer parenthetical before the abbreviation is not the diplomate mark.
+        ("(Example) ABXY Example Society, 2031", ["Experience"], "I"),
     ],
 )
 def test_board_abbreviation_mid_line_or_in_award_context_is_not_flipped(text, hierarchy, code):

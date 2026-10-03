@@ -84,27 +84,36 @@ _NOT_A_GRANT_REVIEW = re.compile(
 )
 
 # Content pins: shapes whose code does not depend on the heading they sit under.
-_ATTENDED = re.compile(r"\battend(?:ed|ee|ees|ance|ing)?\b", re.I)
+# Only the owner-attended forms: "attending" is a physician title and "attendees" or
+# a bare "attendance" counts the audience of a course the owner taught.
+_ATTENDED = re.compile(r"\b(?:attended|attendee|attendance\s+at)\b", re.I)
 _TEACHING_ROLE = re.compile(
     r"\b(?:director|faculty|speaker|instructor|lecturer|moderator|organi[sz]er|presenter|taught|chair)\b",
     re.I,
 )
 # A training title at the head of the row, after an optional date range:
 # "2031-2032 Intern, Example Medicine", "Chief Resident, ...", "Postdoctoral Fellow in ...".
-# "Faculty Fellow", "Senior Staff Fellow", "Teaching Fellow", "Fellow of ..." and
-# "Resident Director" do not match, nor does a "Senior ... Fellow" affiliate title
-# (`_SENIOR_FELLOW`): those are positions, not training.
+# "Faculty Fellow", "Senior Staff Fellow", "Teaching Fellow", "Fellow of ...", a bare
+# "Research Fellow, <body>" ("Research Fellow in <field>" is training) and "Resident
+# Director" do not match, nor does a "Senior ... Fellow" affiliate title
+# (`_SENIOR_FELLOW`) or an honorific "Fellow, <college/academy/society>"
+# (`_HONORIFIC_FELLOW`): those are positions or honours, not training.
 _TRAINEE_TITLE = re.compile(
     r"^[\s\d/\-\u2013\u2014,.]*(?:present\s*)?[,\s]*"
     r"(?:(?:assistant|junior|senior|chief)\s+(?:and\s+(?:senior|chief)\s+)?)?"
-    r"(?:(?:post-?doctoral|clinical|research)\s+(?:research\s+)?)?"
+    r"(?:(?:post-?doctoral|clinical)\s+(?:research\s+)?|research\s+(?=fellow\s+in\b))?"
     r"(?:intern|resident(?!\s+director\b)|fellow)\b(?!\s+of\b)",
     re.I,
 )
 _SENIOR_FELLOW = re.compile(r"\bsenior\s+(?:\w+\s+)?fellow\b", re.I)
+_HONORIFIC_FELLOW = re.compile(
+    r"^[\s\d/\-\u2013\u2014,.]*(?:present\s*)?[,\s]*fellow\b,?\s+(?:the\s+)?"
+    r"(?:[\w&'\u2019-]+\s+){0,4}(?:college|academy|society)\b",
+    re.I,
+)
 _POSITION_CODES = frozenset({"D1", "D2", "D3"})
 _LIFE_SUPPORT = re.compile(
-    r"\b(?:B?CLS|BLS|ACLS|PALS|NRP|ATLS|basic\s+life\s+support"
+    r"\b(?:BCLS|BLS|ACLS|PALS|NRP|ATLS|basic\s+life\s+support"
     r"|advanced\s+(?:cardiac|cardiovascular|trauma|pediatric)\s+life\s+support)\b",
     re.I,
 )
@@ -209,6 +218,12 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | Non
     return None
 
 
+def _is_trainee_title(text: str) -> bool:
+    """An intern, resident or fellow title at the head of the row, not an affiliate or honorific one."""
+    trainee = _TRAINEE_TITLE.match(text)
+    return bool(trainee) and not _SENIOR_FELLOW.search(trainee.group(0)) and not _HONORIFIC_FELLOW.match(text)
+
+
 def content_pin_code(entry: dict) -> tuple[str, str] | None:
     """(code, why) an entry's own shape pins it to whatever its heading, or None.
 
@@ -221,8 +236,7 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
     heading = " ".join(str(h) for h in entry.get("hierarchy") or [])
     if code == "K4" and (_ATTENDED.search(heading) or _ATTENDED.search(text)) and not _TEACHING_ROLE.search(text):
         return "B2", "A course the owner attended is education received"
-    trainee = _TRAINEE_TITLE.match(text)
-    if code in _POSITION_CODES and trainee and not _SENIOR_FELLOW.search(trainee.group(0)):
+    if code in _POSITION_CODES and _is_trainee_title(text):
         return "C", "An intern, resident or fellow title is postdoctoral training"
     if code == "F1" and (_LIFE_SUPPORT.search(text) or _TEACHING_CERTIFICATE.search(text)):
         return "B2", "A life-support or teaching certificate is not a medical licence"

@@ -400,3 +400,19 @@ def test_the_opening_line_itself_is_still_reviewed(monkeypatch):
     _updated, stats = classify.validate_t_classifications(entries, _taxonomy(("H", "T")))
 
     assert stats["t_entries_reviewed"] == 2
+
+
+def test_running_header_is_compared_with_the_lowest_indexed_line_not_the_first_listed(monkeypatch):
+    # The list is out of document order: the opening line is element 0, listed second.
+    entries = [
+        _indexed(9, "Jane Example, MD"),
+        _indexed(0, "Jane Example, MD", code="A"),
+        _indexed(4, "2031 Example Prize"),
+    ]
+    seen = []
+    _reclassify_everything_to_h(monkeypatch, seen)
+
+    updated, stats = classify.validate_t_classifications(entries, _taxonomy(("A", "H", "T")))
+
+    assert stats["t_entries_reviewed"] == 1
+    assert [e["taxonomy_code"] for e in updated] == ["T", "A", "H"]

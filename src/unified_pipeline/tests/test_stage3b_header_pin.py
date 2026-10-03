@@ -196,6 +196,20 @@ def test_confident_s8_under_r_stays():
     assert n == 0 and out == entry
 
 
+def test_surname_with_bare_initials_and_comma_is_an_author_list():
+    # Only the "Doe JA," alternative matches: no initial carries a period, no "et al".
+    entry = _row("S8", "Doe JA, Roe BC: Signals in an example tissue. Example Society Meeting, 2031")
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("confidence", [None, "high", ""])
+def test_s8_with_an_unreadable_confidence_counts_as_certain(confidence):
+    entry = _row("S8", '"Signals in an example tissue." Example Society Meeting, 2031.', confidence=confidence)
+    (out,), n = apply_header_pin([entry], R_CTX)
+    assert n == 0 and out == entry
+
+
 def test_a_city_with_initials_is_not_an_author_list():
     talk = _row("S8", "Example Society Meeting, Washington, D.C.; 2031. Signals in an example tissue")
     (out,), _ = apply_header_pin([talk], R_CTX)
@@ -264,8 +278,14 @@ NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))
     ("D1", "Chief Resident, Example Medicine, Example Hospital", ("Appointments",), "C"),
     ("D3", "2031-2034 Postdoctoral Fellow in Example Medicine, Example University", ("Appointments",), "C"),
     ("D3", "2031\tPost-doctoral fellow\tExample University", ("Appointments",), "C"),
+    ("D3", "2031-2033 Postdoctoral Research Fellow, Example University", ("Appointments",), "C"),
+    ("D3", "2031-2033 Clinical Fellow, Example College of Medicine", ("Appointments",), "C"),
+    ("D1", "2031-2033 Research Fellow in Example Medicine, Example School of Medicine", ("Appointments",), "C"),
+    ("K4", "Example Society Meeting, 2031 (attendee)", ("Teaching",), "B2"),
+    ("K4", "Attendance at the Example Review Course, 2031", ("Teaching",), "B2"),
     ("F1", "ACLS certification, 2031-2033", ("Credentials",), "B2"),
-    ("F1", "Basic Life Support, last renewal 2031", ("Licensure",), "B2"),
+    ("F1", "Basic Life Support provider card, 2031-2033", ("Licensure",), "B2"),
+    ("F1", "BCLS certification, 2031-2033", ("Licensure",), "B2"),
     ("F1", "2031 Teacher certificate, Example State Department of Education", ("Licensure",), "B2"),
     ("F1", "Licensed as a teacher, Example State, 2031", ("Licensure",), "B2"),
     ("S2", "Wrote an invited commentary for Example Journal (see publication #12).", ("Honors",), "T"),
@@ -283,6 +303,21 @@ def test_content_pins_recode_whatever_the_heading(code, text, hierarchy, expecte
     ("D3", "2031-2034 Senior Staff Fellow, Example Institute", ("Appointments",)),
     ("D3", "Postdoctoral Research Mentor, Example Center, 2031", ("Experience",)),
     ("D1", "2031 Teaching Fellow, Example University", ("Appointments",)),
+    # Owner-attended forms only: a physician "attending", an audience count, and a
+    # bare "attendance" figure describe a course the owner taught (K4 stays).
+    ("K4", "2031 Example lecture on valve disease (120 attendees)", ("Teaching",)),
+    ("K4", "Example clinic attending for medical students, 2031", ("Teaching",)),
+    ("K4", "2031 Example review course, course attendance 300", ("Teaching",)),
+    # A training title on a row that is not a position keeps its code.
+    ("H", "Resident Example Prize, Example Hospital, 2031", ("Honors",)),
+    ("K4", "Fellow education day, Example Hospital, 2031", ("Teaching",)),
+    # An honorific fellowship and a bare research-fellow appointment are not training.
+    ("D1", "Fellow, Example College of Physicians, 2031", ("Appointments",)),
+    ("D1", "2031 Fellow, the Example Academy of Sciences", ("Appointments",)),
+    ("D1", "Fellow, Example Rhythm Society, 2031", ("Appointments",)),
+    ("D3", "2031-2034 Research Fellow, Example Institute", ("Appointments",)),
+    # Bare "CLS" is a laboratory scientist licence, not life support.
+    ("F1", "Clinical Laboratory Scientist (CLS) License, Example State, 2031", ("Licensure",)),
     ("D3", "Example research fellow, Example Institute, 2031", ("Pregraduate research",)),
     ("H", "2031 Fellow of the Example College", ("Honors",)),
     ("D3", "2031 Fellow of the Example Society", ("Appointments",)),
@@ -306,7 +341,7 @@ def test_content_pins_leave_other_rows(code, text, hierarchy):
     ("Q2", "2031 Ad hoc reviewer, Example Research Council", GRANT_CTX),
     ("K4", "Attended the Example Review Course, 2031 (professional education K4)", NO_PIN_CTX),
     ("D3", "2031-2032 Intern, Example Medicine, Example Hospital", NO_PIN_CTX),
-    ("F1", "Basic Life Support, last renewal 2031", NO_PIN_CTX),
+    ("F1", "Basic Life Support provider card, 2031-2033", NO_PIN_CTX),
     ("S2", "Wrote an invited example article (see publication #12).", NO_PIN_CTX),
 ])
 def test_no_new_pin_is_flipped_back_by_the_reasoning_check(code, text, ctx):

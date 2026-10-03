@@ -42,8 +42,9 @@ _BOARD = re.compile(
 # A specialty board's own abbreviation leading the line ("ABIM, Cardiovascular
 # Disease 1995"), matched case-sensitively so ordinary words never read as one.
 # Only at the head: a residency row that names the board later on stays a residency
-# (#312, EBYSBC E11).
-_BOARD_ABBREV = re.compile(r"^[^A-Za-z]*AB[A-Z]{1,4}\b")
+# (#312, EBYSBC E11). A short parenthetical may come first ("(D)ABXY ...", the
+# diplomate mark; EBYSBC MRJDWE-03).
+_BOARD_ABBREV = re.compile(r"^[^A-Za-z]*(?:\([A-Za-z]{1,3}\)\s*)?AB[A-Z]{1,4}\b")
 # A board-certification shape beyond the board's name (#1235): a certification
 # word, or a board name plus a year outside an awards/honors/committee/
 # membership context.
