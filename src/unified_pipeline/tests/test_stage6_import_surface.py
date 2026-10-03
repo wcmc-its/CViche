@@ -189,7 +189,10 @@ HOME_ONLY_IMPORTS = {
                                       "_names_a_sibling", "_names_record", "_other_journal_same_row",
                                       "_place_only_event", "_record_name", "_title_only_fragment",
                                       "recovered_row_already_rendered","_row_residue",
-                                      "_DECISION_FIELD_MAX_CHARS", "_decision_fields"),
+                                      "_DECISION_FIELD_MAX_CHARS", "_decision_fields",
+                                      "_GROUP_HEADER_RE", "_bare_occasion_apart", "_carries_record",
+                                      "_different_book", "_different_rank", "_part_numbers",
+                                      "_verbatim_contained"),
 }
 
 _RELOCATED_CASES = [

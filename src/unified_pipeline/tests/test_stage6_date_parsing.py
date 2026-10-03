@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 
 import pytest  # noqa: E402
 
+from unified_pipeline.stage6.parsing import _get_entry_date_range  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     _dates_overlap_or_match,
     _parse_date_components,
@@ -494,6 +495,33 @@ class TestDatesOverlapOrMatch:
         a = _entry("2019-01", "2020-06")
         b = _entry("2015", "2016")
         assert _dates_overlap_or_match(a, b) is False
+
+
+# --- #666 (EBYSBC): a record dated by one `date` field spans that date --------
+
+def _dated(date):
+    return {"extracted_fields": {"date": date}}
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"date": "2031-04-08"}, ("2031-04-08", "2031-04-08")),
+    ({"date": {"start_date": "2028", "end_date": "2030"}}, ("2028", "2030")),  # #1233 dict
+    ({"date": {"start_date": "2028"}}, ("2028", "")),
+    ({"start_date": "2028", "date": "2031"}, ("2028", "")),   # a stated range wins
+    ({"end_date": "2030", "date": "2031"}, ("", "2030")),
+    ({"date": ""}, ("", "")),
+    ({}, ("", "")),
+])
+def test_entry_date_range_reads_a_single_date(fields, expected):
+    assert _get_entry_date_range({"extracted_fields": fields}) == expected
+
+
+def test_two_sessions_dated_in_different_months_are_provably_disjoint():
+    # KDAZOM-03 shape: one teaching session, two dates in one year.
+    assert _dates_overlap_or_match(_dated("2031-04-08"), _dated("2031-02-11")) is False
+    assert _dates_overlap_or_match(_dated("2031-04-08"), _dated("2031-04")) is True
+    assert _dates_overlap_or_match(_dated("2031-04-08"), _dated("2031")) is True
+    assert _dates_overlap_or_match(_dated("Monthly"), _dated("2031-02-11")) is True
 
 
 # --- #716 review round 1: _overlap_boundary coerces non-string input --------

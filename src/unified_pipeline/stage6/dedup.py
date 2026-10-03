@@ -15,10 +15,11 @@ reach the page" is the question #983's fan-out answers too. Nothing here may
 import `stage_6_word_template`.
 """
 import re
+from types import MappingProxyType
 
 from .fan_out import _FORMATTED_KEYS, _RENDERED_FIELDS, FANNED_OUT_FROM
 from .normalization import _squash
-from .parsing import _dates_overlap_or_match
+from .parsing import _MONTH_NAME_TO_NUM, _dates_overlap_or_match, _parse_date_components
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
 
 
@@ -128,14 +129,109 @@ _PHASE_NUMERAL = r'(?:[1-4]|iv|i{1,3})'
 _TRIAL_PHASE_RE = re.compile(
     rf'\bphases?\s*({_PHASE_NUMERAL}(?:\s*(?:/|-|&|,|and)\s*{_PHASE_NUMERAL})*)\b',
     re.IGNORECASE)
-_ROMAN_PHASE = {'i': '1', 'ii': '2', 'iii': '3', 'iv': '4'}
+_ROMAN_NUMERALS = MappingProxyType({
+    'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5', 'vi': '6',
+    'vii': '7', 'viii': '8', 'ix': '9', 'x': '10'})
 
 
 def _trial_phases(text: str) -> set[str]:
     """Every trial phase the text names, Roman numerals as digits."""
-    return {_ROMAN_PHASE.get(n.lower(), n)
+    return {_ROMAN_NUMERALS.get(n.lower(), n)
             for group in _TRIAL_PHASE_RE.findall(text)
             for n in re.findall(_PHASE_NUMERAL, group, re.IGNORECASE)}
+
+
+# #666 (EBYSBC): "Part I" / "Part 2" tells two parts of one series apart the
+# way a phase tells two trials apart, and is as invisible to token
+# containment ("i" is a stop word, a digit too short): XWNZWW lost a talk's
+# "Part I" beside its "Part II". A listing of several parts names each, so it
+# covers a copy naming any one.
+_PART_NUMERAL = r'(?:\d{1,2}|[ivx]{1,4})'
+_PART_NUMBER_RE = re.compile(
+    rf'\bparts?\s*({_PART_NUMERAL}(?:\s*(?:/|-|&|,|and)\s*{_PART_NUMERAL})*)\b',
+    re.IGNORECASE)
+
+
+def _part_numbers(text: str) -> set[str]:
+    """Every part number the text names, Roman numerals as digits."""
+    return {_ROMAN_NUMERALS.get(n.lower(), n.lstrip('0') or n)
+            for group in _PART_NUMBER_RE.findall(text)
+            for n in re.findall(_PART_NUMERAL, group, re.IGNORECASE)}
+
+
+# #666 (EBYSBC): a date stated to the month, or the day, tells two records
+# apart where the year cannot: DPEHSZ lost five dated instances of a resident
+# lecture given again in another month of the same year, and KDAZOM a
+# teaching session given again on another day ("3/2029" beside "9/2029",
+# "4/8/27" beside "2/11/27"). A numeric date ("3/2029", "4/8/27",
+# "6/30/2019") is read by the shared parser; a named month may carry a day
+# ("August 2nd, 2031"). A bare "8/27" is not read: it may be a day, not a
+# year (#867).
+_NUMERIC_MONTH_DATE_RE = re.compile(
+    r'(?<![\d/.])\d{1,2}/(?:\d{1,2}/(?:\d{4}|\d{2})|\d{4})(?![\d/])')
+_NAMED_MONTH_DATE_RE = re.compile(
+    r'\b([a-z]{3,9})\.?\s+(?:(\d{1,2})(?:st|nd|rd|th)?,?\s+)?((?:19|20)\d{2})\b',
+    re.IGNORECASE)
+_DAYS_IN_LONGEST_MONTH = 31
+# What joins the two ends of a range, and an open end after it.
+_MONTH_RANGE_JOIN_RE = re.compile(r'\s*(?:[-–—]|to|through|until)\s*',
+                                  re.IGNORECASE)
+_MONTH_OPEN_END_RE = re.compile(
+    r'\s*(?:[-–—]|to)\s*(?:present|current|now|ongoing)\b', re.IGNORECASE)
+
+# (year, month, day or None)
+_MonthDate = tuple[int, int, int | None]
+
+
+def _month_dates(text: str) -> list[tuple[_MonthDate, int, int]]:
+    """Every date `text` states to the month, with its start and end offset,
+    in the order the text states them."""
+    found = []
+    for match in _NUMERIC_MONTH_DATE_RE.finditer(text):
+        year, month, day = _parse_date_components(match.group())
+        if year and month:
+            found.append(((year, month, day), match.start(), match.end()))
+    for match in _NAMED_MONTH_DATE_RE.finditer(text):
+        month = _MONTH_NAME_TO_NUM.get(match.group(1).lower())
+        day = int(match.group(2)) if match.group(2) else None
+        if month:
+            if day is not None and not 1 <= day <= _DAYS_IN_LONGEST_MONTH:
+                day = None
+            found.append(((int(match.group(3)), month, day), match.start(), match.end()))
+    return sorted(found, key=lambda date: date[1])
+
+
+def _month_spans(text: str) -> list[tuple[_MonthDate, _MonthDate | None]]:
+    """(first, last) of every date or range `text` states to the month; a
+    lone date is its own range, an open end ("6/2029-present") is None."""
+    dates = _month_dates(text)
+    spans = []
+    index = 0
+    while index < len(dates):
+        date, _start, end = dates[index]
+        following = dates[index + 1] if index + 1 < len(dates) else None
+        if following and _MONTH_RANGE_JOIN_RE.fullmatch(text[end:following[1]]):
+            spans.append((date, following[0]))
+            index += 2
+            continue
+        spans.append((date, None if _MONTH_OPEN_END_RE.match(text, end) else date))
+        index += 1
+    return spans
+
+
+def _month_date_before(earlier: _MonthDate, later: _MonthDate) -> bool:
+    """True when `earlier` provably precedes `later`: an earlier month, or the
+    same month and an earlier day when both state one."""
+    if earlier[:2] != later[:2]:
+        return earlier[:2] < later[:2]
+    return earlier[2] is not None and later[2] is not None and earlier[2] < later[2]
+
+
+def _month_spans_overlap(span: tuple[_MonthDate, _MonthDate | None],
+                         other: tuple[_MonthDate, _MonthDate | None]) -> bool:
+    (start, end), (other_start, other_end) = span, other
+    return not ((end is not None and _month_date_before(end, other_start))
+                or (other_end is not None and _month_date_before(other_end, start)))
 
 
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
@@ -144,8 +240,11 @@ def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
     Each dropped range must overlap a RANGE the kept text states (a kept entry
     that only mentions the two boundary years in passing does not vouch for it);
     each bare dropped year must appear in the kept text or fall inside one of
-    its ranges. Undated dropped text is compatible with anything. Doubt keeps
-    the entry: a surviving duplicate is visible to a reader, a lost record is not.
+    its ranges. When the kept text states dates to the month, each date the
+    dropped text states to the month must fall in one of them too, to the day
+    when both state one (#666, EBYSBC). Undated dropped text is compatible
+    with anything. Doubt keeps the entry: a surviving duplicate is visible to
+    a reader, a lost record is not.
     """
     kept_ranges = _year_ranges(kept_text)
     for low, high in _year_ranges(dropped_text):
@@ -157,7 +256,10 @@ def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
         if int(year) not in kept_years and not any(
                 low <= int(year) <= high for low, high in kept_ranges):
             return False
-    return True
+    kept_spans = _month_spans(kept_text)
+    return not kept_spans or all(
+        any(_month_spans_overlap(span, kept) for kept in kept_spans)
+        for span in _month_spans(dropped_text))
 
 
 # #666: the verbatim branch below proves the dropped TEXT sits inside the kept
@@ -209,12 +311,14 @@ def _record_name(fields: dict, rendered: frozenset[str]) -> str | None:
 # text contains all of its words. Only the field that names the record is
 # written, and only for the codes where a name conflict has been a real drop:
 # a journal name on any code (Q4D "Optics" beside "European Optics"), an I
-# society, a D2 hospital, an S3 textbook title. The other name keys (R location,
-# H award, Q3 panel, P committee) were 0 real on IPXFBA, because a fused row's
-# fragment reads as a different name.
+# society, a D2 hospital, an S3 textbook title, and (EBYSBC: SEKQUI-01,
+# VNUAHA-01/02, NDXXAD-01, VYICGW-02, none of which the lint could see) a D1
+# title, an H award and a P committee. R location and Q3 panel were 0 real on
+# IPXFBA, because a fused row's fragment reads as a different name.
 _DECISION_NAME_ANY_CODE = ('journal_name',)
-_DECISION_NAME_BY_CODE = {'I': ('organization',), 'D2': ('institution',),
-                          'S3': ('title',)}
+_DECISION_NAME_BY_CODE = {'I': ('organization',), 'D1': ('title',),
+                          'D2': ('institution',), 'H': ('award_name',),
+                          'P': ('committee_name',), 'S3': ('title',)}
 _DECISION_FIELD_MAX_CHARS = 120
 
 
@@ -268,15 +372,21 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
       outside every value its section writes (`_names_a_sibling`): a fused
       row whose sibling the kept fields leave out, reworded or not;
     - either branch, and both entries are bare names that differ
-      (`_distinct_bare_names`): "Widgets" is not "Widgets Quarterly".
+      (`_distinct_bare_names`): "Widgets" is not "Widgets Quarterly";
+    - either branch, and the two entries' extracted dates are disjoint
+      (`_dates_overlap_or_match`): the kept entry renders its fields' date, so
+      a fused kept text vouches for no other date it holds (#666, EBYSBC
+      VNUAHA-02: a 2013 award against a fused row whose fields are 2012's).
 
     Each shape also needs that no other entry of `document` carries the
-    record, so keeping this copy cannot print it twice. Entries in
+    record (`_carries_record`: the name, on the dropped record's dates or on
+    none), so keeping this copy cannot print it twice. Entries in
     `dropped_ids` (dropped already, this group or an earlier one) carry
     nothing: two identical copies must not each vouch for the other's drop.
     One more shape needs no such check: the fields say it is another record
-    (`_distinct_record_label`: another institution, a companion title, a
-    grant's title alone, a bare place). Doubt drops, as it did before.
+    (`_distinct_record_label`: another institution, venue, rank or book, a
+    companion title, a grant's title alone, a bare place; or
+    `_bare_occasion_apart`). Doubt drops, as it did before.
     """
     rendered = _RENDERED_FIELDS.get(code or '', frozenset())
     dropped_fields = dropped_entry.get('extracted_fields') or {}
@@ -290,11 +400,13 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
     others = [entry for entry in document or ()
               if entry is not dropped_entry and entry is not kept_entry
               and id(entry) not in dropped_ids]
-    if _distinct_record_label(code, dropped_fields, kept_fields):
+    if (_distinct_record_label(code, dropped_fields, kept_fields)
+            or _bare_occasion_apart(code, dropped_entry, kept_entry)):
         return True
     if ((verbatim and not _significant_words(name) <= _rendered_words(kept_fields, rendered))
-            or _names_a_sibling(kept_entry, kept_fields, rendered, name)):
-        return not any(_names_record(entry.get('text') or '', name)
+            or _names_a_sibling(kept_entry, kept_fields, rendered, name)
+            or not _dates_overlap_or_match(dropped_entry, kept_entry)):
+        return not any(_carries_record(entry.get('text') or '', name, dropped_text)
                        for entry in others)
     if (_distinct_bare_names(dropped_entry, kept_entry,
                              name, _record_name(kept_fields, rendered))
@@ -309,8 +421,10 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
 # differ and returns what the dropped record is called, or None.
 
 # The field that tells two records of an appointment code apart: the same title
-# ("Senior Fellow") at two hospitals is two appointments.
-_INSTITUTION_FIELD_BY_CODE = {'D1': 'institution', 'D2': 'institution', 'D3': 'organization'}
+# ("Senior Fellow") at two hospitals is two appointments. For a talk (R) it is
+# the venue: one lecture given in two towns is two talks (#666, EBYSBC RNKYST-01).
+_INSTITUTION_FIELD_BY_CODE = {'D1': 'institution', 'D2': 'institution', 'D3': 'organization',
+                              'R': 'location'}
 
 
 def _ordered_words(text: str) -> list[str]:
@@ -347,6 +461,74 @@ def _different_institution(code: str | None, dropped_fields: dict,
             or _is_subsequence(kept_words, dropped_words)):
         return None
     return dropped
+
+
+# A word that makes a title another rank, or a name another award or body:
+# "Assistant Professor" is not "Professor", the "Research Committee" is not the
+# "Committee", and a committee of a center is not the center (#666, EBYSBC:
+# SEKQUI-01 Clinical, KDAZOM-01 and VNUAHA-01 Associate/Assistant, NDXXAD-01
+# Outreach, VYICGW-02 Research, RNKYST-01 Executive Committee). An
+# abbreviation maps to the word it shortens. "Board" is not one: "Chair and
+# Treasurer, Board of Governors" is still the chair.
+# ponytail: a closed word list read off the fields. A qualifier not on it
+# ("Regional", a spelled-out "Codirector") still lets the drop through; if
+# that recurs, stage 4 should extract the rank as a field of its own.
+_RANK_QUALIFIERS = MappingProxyType({
+    'assistant': 'assistant', 'asst': 'assistant',
+    'associate': 'associate', 'assoc': 'associate', 'asso': 'associate',
+    'clinical': 'clinical', 'clin': 'clinical', 'adjunct': 'adjunct',
+    'visiting': 'visiting', 'research': 'research', 'emeritus': 'emeritus',
+    'interim': 'interim', 'acting': 'acting', 'vice': 'vice', 'deputy': 'deputy',
+    'co': 'co', 'senior': 'senior', 'executive': 'executive', 'outreach': 'outreach',
+    'committee': 'committee', 'subcommittee': 'subcommittee', 'council': 'council'})
+# The fields that hold a record's rank, for the codes whose records have one.
+_RANK_FIELDS_BY_CODE = MappingProxyType({
+    'D1': ('title',), 'D2': ('title',), 'D3': ('title',), 'H': ('award_name',),
+    'O': ('leadership_role',), 'P': ('committee_name', 'role'), 'Q1': ('role',)})
+
+
+def _rank_qualifiers(fields: dict, keys: tuple[str, ...]) -> set[str] | None:
+    """The `_RANK_QUALIFIERS` words the `keys` fields hold; None when the
+    fields fill none of the keys."""
+    values = [fields[key] for key in keys
+              if isinstance(fields.get(key), str) and fields[key].strip()]
+    if not values:
+        return None
+    return {_RANK_QUALIFIERS[word] for value in values
+            for word in re.findall(r'[a-z]+', value.lower()) if word in _RANK_QUALIFIERS}
+
+
+def _different_rank(code: str | None, dropped_fields: dict,
+                    kept_fields: dict) -> str | None:
+    """The dropped record's rank-bearing value when the kept record's carries
+    other qualifier words ("Professor" beside "Associate Professor")."""
+    keys = _RANK_FIELDS_BY_CODE.get(code or '', ())
+    dropped = _rank_qualifiers(dropped_fields, keys)
+    kept = _rank_qualifiers(kept_fields, keys)
+    if dropped is None or kept is None or dropped == kept:
+        return None
+    return next(dropped_fields[key] for key in keys
+                if isinstance(dropped_fields.get(key), str) and dropped_fields[key].strip())
+
+
+# One chapter title in two books is two chapters: a module written for two
+# boards' curricula, one board's name a word longer than the other's (#666,
+# EBYSBC TAUBPU-02). A word added counts, unlike for an institution: a book's
+# title is copied, not reworded.
+_BOOK_FIELD_BY_CODE = MappingProxyType({'S4': 'book_title'})
+
+
+def _different_book(code: str | None, dropped_fields: dict,
+                    kept_fields: dict) -> str | None:
+    """The dropped record's book title when the kept record's differs in a
+    significant word."""
+    key = _BOOK_FIELD_BY_CODE.get(code or '')
+    dropped, kept = dropped_fields.get(key), kept_fields.get(key)
+    if (isinstance(dropped, str) and isinstance(kept, str)
+            and _significant_words(dropped) and _significant_words(kept)
+            and _significant_words(dropped) != _significant_words(kept)):
+        return dropped
+    return None
 
 
 # A title that sits inside a longer one after "<companion> for" is the companion
@@ -424,11 +606,33 @@ def _place_only_event(code: str | None, dropped_fields: dict,
     return None
 
 
+# An invited-talk row that is a date and a place and nothing else takes its
+# event from the heading it is listed under: under another heading than the
+# kept row it is another occasion, even on that day in that city (#666, EBYSBC
+# TAUBPU: a course's later offering, listed under the course, beside a
+# conference talk in the same city that day).
+_BARE_OCCASION_FIELDS = frozenset({'location', 'date'})
+
+
+def _bare_occasion_apart(code: str | None, dropped_entry: dict,
+                         kept_entry: dict) -> str | None:
+    """The dropped place when the R row is a place and a date only and the
+    kept row sits under another source heading."""
+    fields = dropped_entry.get('extracted_fields') or {}
+    if (code == 'R' and fields.get('location')
+            and _filled_keys(fields) <= _BARE_OCCASION_FIELDS
+            and dropped_entry.get('hierarchy') != kept_entry.get('hierarchy')):
+        return fields['location']
+    return None
+
+
 def _distinct_record_label(code: str | None, dropped_fields: dict,
                            kept_fields: dict) -> str | None:
     """What the dropped record is called when its fields say it is not the kept
     record, else None."""
     return (_different_institution(code, dropped_fields, kept_fields)
+            or _different_rank(code, dropped_fields, kept_fields)
+            or _different_book(code, dropped_fields, kept_fields)
             or _companion_title(code, dropped_fields, kept_fields)
             or _title_only_fragment(code, dropped_fields, kept_fields)
             or _place_only_event(code, dropped_fields, kept_fields))
@@ -625,6 +829,15 @@ def _names_record(text: str, name: str) -> bool:
     return _alnum(name) in _alnum(text)
 
 
+def _carries_record(text: str, name: str, dropped_text: str) -> bool:
+    """True when `text` names the record called `name` (`_names_record`) on
+    the dates the dropped text states, or states no year at all: another
+    year's "Widget Award" does not carry this year's (#666, EBYSBC VNUAHA-02,
+    where four other years of one award vouched for a dropped fifth)."""
+    return _names_record(text, name) and (
+        not _YEAR_RE.search(text) or _dates_compatible(dropped_text, text))
+
+
 def _alnum(text: str) -> str:
     """Lowercased letters and digits only: punctuation and spacing ignored."""
     return re.sub(r'[^a-z0-9]', '', text.lower())
@@ -645,6 +858,59 @@ def _different_mentees(dropped_entry: dict, kept_entry: dict) -> bool:
     names = {_alnum(str((entry.get('extracted_fields') or {}).get('mentee_name') or ''))
              for entry in (dropped_entry, kept_entry)}
     return len(names) == 2 and not names & _PLACEHOLDER_NAMES
+
+
+def _verbatim_contained(text: str, container: str) -> bool:
+    """True when `text`, whitespace ignored (`_squash`), stands in `container`
+    starting and ending on a word boundary there. Squashed, "Part II" sits
+    inside "Part III" (#666, EBYSBC OIYKZE-01) and "Page 2" inside "Page 21";
+    neither ends on a boundary. Spacing inside the text is still ignored, so a
+    footnote mark glued on ("Studiesb" for "Studies b") stays verbatim."""
+    squashed = _squash(text)
+    if not squashed or squashed not in _squash(container):
+        return False
+    lead = r'(?<![a-z0-9])' if squashed[0].isalnum() else ''
+    trail = r'(?![a-z0-9])' if squashed[-1].isalnum() else ''
+    body = r'\s*'.join(re.escape(char) for char in squashed)
+    return re.search(lead + body + trail, container.lower()) is not None
+
+
+# #666 (EBYSBC BZZNRL-04): a teaching or talk list grouped under employer lines
+# ("<institution> (2001-2006)", later "<institution> (2006 to present)") or
+# year lines ("2006") repeats one activity under each, and only the group line
+# tells the two apart: stage 3b leaves that line a row of its own, not a field
+# of the rows below it (#985). So such a line standing between the two
+# entries, in the same source section, makes them two records. A name with a
+# single year is not a group line: "Grand Rounds 2030" is a record.
+# ponytail: a group line is recognised by shape alone. One whose year sits on
+# the group's first row ("2002 Course A ...") is not seen; the upgrade is #985,
+# carrying the group line into the rows below it as context.
+_GROUP_HEADED_CODES = frozenset({'K1', 'K2', 'K3', 'K4', 'K5', 'R'})
+_GROUP_YEAR_RANGE = (r'(?:19|20)\d{2}\s*(?:[-–—]|to)\s*'
+                     r'(?:(?:19|20)\d{2}|present|current)')
+_GROUP_HEADER_RE = re.compile(
+    rf'[^\d,;:|\t\n]{{3,120}}?[\s,(]*{_GROUP_YEAR_RANGE}\s*\)?\.?'
+    rf'|(?:{_GROUP_YEAR_RANGE}|(?:19|20)\d{{2}})\s*(?:\([^)]*\))?\.?', re.IGNORECASE)
+
+
+def _group_header_between(dropped_entry: dict, kept_entry: dict,
+                          code: str | None, document: list[dict] | None) -> bool:
+    """True when an entry of `document` whose whole text is a group line
+    (`_GROUP_HEADER_RE`: a name and a year range, or a year or year range
+    alone) stands between the two entries in source order, in their source
+    section."""
+    hierarchy = dropped_entry.get('hierarchy')
+    positions = (dropped_entry.get('element_idx_start'), kept_entry.get('element_idx_start'))
+    if (code not in _GROUP_HEADED_CODES or not hierarchy
+            or kept_entry.get('hierarchy') != hierarchy
+            or not all(isinstance(position, int) for position in positions)):
+        return False
+    low, high = sorted(positions)
+    return any(isinstance(entry.get('element_idx_start'), int)
+               and low < entry['element_idx_start'] < high
+               and entry.get('hierarchy') == hierarchy
+               and _GROUP_HEADER_RE.fullmatch((entry.get('text') or '').strip())
+               for entry in document or ())
 
 
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
@@ -676,10 +942,15 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     another entry of `document` (every pre-dedup entry of the run, less the
     `dropped_ids` dedup has already dropped) carries it.
     `_record_lines()` finds no line in prose for the #221/#225 recovery pass
-    to re-verify."""
-    dropped_squashed = _squash(dropped_entry.get('text', ''))
-    verbatim = bool(dropped_squashed
-                    and dropped_squashed in _squash(kept_entry.get('text', '')))
+    to re-verify.
+
+    #666 (EBYSBC): verbatim containment starts and ends on word boundaries
+    (`_verbatim_contained`), the date test reads months and days, a differing
+    part number refuses like a trial phase, and in a teaching or talk list a
+    group line between the two entries refuses (`_group_header_between`)."""
+    dropped_text = dropped_entry.get('text') or ''
+    kept_text = kept_entry.get('text') or ''
+    verbatim = _verbatim_contained(dropped_text, kept_text)
     if dropped_entry.get(FANNED_OUT_FROM):
         # #983: a record fanned out of a multi-record entry is a single short
         # line, so the two branches below (token containment; fused-blob
@@ -694,17 +965,19 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         # single-record case (#227).
         return verbatim and (dropped_entry.get('extracted_fields')
                              == kept_entry.get('extracted_fields'))
+    if _group_header_between(dropped_entry, kept_entry, code, document):
+        return False  # #666: listed under two group lines, so two records
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())
     if _different_mentees(dropped_entry, kept_entry):
         return False  # #1181: a different mentee is a different record
-    if not _dates_compatible(dropped_entry.get('text') or '',
-                             kept_entry.get('text') or ''):
+    if not _dates_compatible(dropped_text, kept_text):
         return False  # #666: a different date is a different record
-    if not _trial_phases(dropped_entry.get('text') or '') <= _trial_phases(
-            kept_entry.get('text') or ''):
+    if not _trial_phases(dropped_text) <= _trial_phases(kept_text):
         return False  # #1106: a different trial phase is a different trial
+    if not _part_numbers(dropped_text) <= _part_numbers(kept_text):
+        return False  # #666: a different part is a different record
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)
