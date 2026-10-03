@@ -153,9 +153,9 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 34, (
+    assert len(known) == 35, (
         f"KNOWN_LINTS changed size ({len(known)}, was 27 -- this change added "
-        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded). That is fine if a lint was genuinely added or "
+        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded; #1243 then added multi_record_coverage). That is fine if a lint was genuinely added or "
         f"removed -- update this count and say so in the commit message."
     )
 
@@ -272,7 +272,7 @@ def test_known_lints_literal_expected_order():
         "stage3b_second_pass_error", "offschema_fields", "implausible_year",
         "stage4_group_failures",
         "python_repr_in_output", "llm_refusal_in_output",
-        "llm_fallback_served", "stage_failure_recorded",
+        "llm_fallback_served", "stage_failure_recorded", "multi_record_coverage",
         "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
 

@@ -363,6 +363,11 @@ LINT_COPY = {
         "research summary when stage 4.5 fails.",
         "Check the named part of the document. Rerun the CV, and send the run to the CViche team if "
         "it fails again."),
+    "multi_record_coverage": LintCopy(
+        "Several records read as one",
+        "One source entry lists several records (roles, dates, talks or mentees), but only one was "
+        "extracted, so the others are missing or squeezed into one row.",
+        "Compare the quoted entry with the source and add each missing record as its own row."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "

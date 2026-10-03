@@ -146,6 +146,16 @@ Lints, ranked by the severity of the failure class they catch:
                           fatal record (they all are today), WARN otherwise
                           (#1174)
 
+14o. multi_record_coverage a stage-4 entry whose text holds several records
+                          -- two or more dated clauses, or undated parts that
+                          each name a title and an institution -- while stage
+                          4 returned one record and no `stage4_records`; or
+                          one record holding several mentees, degree years or
+                          licence/patent numbers (#1243: TAUBPU's concurrent
+                          faculty rank, VNUAHA's paragraphs of 2-3 roles).
+                          WARN when a left-out clause is on no rendered line,
+                          INFO otherwise
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -271,6 +281,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_dedup_drops,
     lint_implausible_year,
     lint_invented_records,
+    lint_multi_record_coverage,
     lint_offschema_fields,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
@@ -421,6 +432,7 @@ KNOWN_LINTS = (
     "llm_refusal_in_output",
     "llm_fallback_served",
     "stage_failure_recorded",
+    "multi_record_coverage",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -527,6 +539,11 @@ LINT_PREVALENCE = {
     # and both should fall toward zero as the renderers are fixed.
     "python_repr_in_output": 0.061,
     "llm_refusal_in_output": 0.006,
+    # #1243: 38 of the 63 autopsied runs (EBYSBC 40, s7ab 10, pilot 13; stage-6
+    # docx rendered by origin/dev c3d87c5f, 2026-10-02), 35 of them at WARN.
+    # The autopsies found the class it reports on 17 of EBYSBC's 40 CVs, so
+    # it is common rather than surprising.
+    "multi_record_coverage": 0.603,
 }
 
 
@@ -1034,6 +1051,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("llm_fallback_served", lint_llm_fallback_served, ("stage_4",),
              optional=("stage_4_5",)),
     LintSpec("stage_failure_recorded", lint_stage_failure_recorded, ("stage_errors",)),
+    LintSpec("multi_record_coverage", lint_multi_record_coverage, ("stage_4", "blocks")),
 )
 
 
