@@ -743,6 +743,22 @@ def test_raw_text_employer_candidate_must_name_an_employer():
         assert _institution_from_raw_text(text) == "", f"accepted {text!r}"
 
 
+def test_a_labelled_form_line_is_never_echoed_as_the_employer():
+    """EBYSBC HTNNHG-01, VYICGW-06: a promotion form's "Proposed for ...:" line
+    reads as employer + location ("..., Traditional Track"), so the raw line
+    printed in the Institution cell. A label that names an employer keeps
+    its value, without the label."""
+    for text in (
+        "Proposed for Promotion to: Assistant Professor, Department of Widgets, Standard Track"
+        "\tTerm: 2031 to 2034",
+        "Proposed for Reappointment as: Associate Professor, Section of Gadgets, Educator Track"
+        "\tTerm: 2031 - 2036",
+    ):
+        assert _institution_from_raw_text(text) == "", f"accepted {text!r}"
+    assert (_institution_from_raw_text("Staff Physician\tHospital: Quexley Infirmary, Norvale, ZQ")
+            == "Quexley Infirmary, Norvale, ZQ")
+
+
 def test_merge_needs_employer_evidence_not_adjacency():
     """Pins that the merge refuses a pair whose employers disagree.
 

@@ -165,6 +165,15 @@ _MIN_INSTITUTION_FRAGMENT_CHARS = 3
 # A source table's column header emitted as data ("Title", "Dates", "City").
 _COLUMN_HEADER_FRAGMENT_RE = re.compile(r'^(title|institution|dates?|city|state|\d)')
 
+# A fragment that opens with a label ending in ':' ("Proposed for Promotion
+# to:", "Term:") is a line of a promotion form, not an employer's name: echoed
+# into the Institution cell it printed the raw line (EBYSBC HTNNHG-01, VYICGW-06).
+# A label that names an employer ("Institution:", "Hospital:") keeps its value.
+_LABELLED_FRAGMENT_RE = re.compile(r'^([^:,\d]{1,40}):\s+')
+_EMPLOYER_LABEL_RE = re.compile(
+    r'\b(?:institution|employer|organi[sz]ation|affiliation|hospital|university|school)\b',
+    re.IGNORECASE)
+
 # A location at the END of a fragment: ", NY", ", New York", ", Qatar". Anchored
 # on purpose -- a location in the middle of a fragment means the fragment is a
 # whole record line, not an employer (#476 review item 5).
@@ -262,6 +271,15 @@ def _names_employer_and_location(part: str) -> bool:
     return bool(re.search(r'[A-Za-z]{3}', ' '.join(components[:-2])))
 
 
+def _unlabelled_employer_fragment(part: str) -> str:
+    """`part` without its label when the label names an employer, '' when
+    another label opens it, `part` itself when it has none."""
+    label = _LABELLED_FRAGMENT_RE.match(part)
+    if label is None:
+        return part
+    return part[label.end():] if _EMPLOYER_LABEL_RE.search(label.group(1)) else ''
+
+
 def _institution_from_raw_text(text: str) -> str:
     """Last-resort employer for a record whose extracted fields and stage-5b
     enrichment both name none: the first tab- or newline-separated fragment of
@@ -284,7 +302,8 @@ def _institution_from_raw_text(text: str) -> str:
             continue
         if _COLUMN_HEADER_FRAGMENT_RE.match(part.lower()):
             continue
-        if _names_employer_and_location(part):
+        part = _unlabelled_employer_fragment(part)
+        if part and _names_employer_and_location(part):
             return part
     return ''
 
