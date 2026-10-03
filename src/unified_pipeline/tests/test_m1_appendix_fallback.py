@@ -233,3 +233,40 @@ def test_dated_m1_record_is_written_once_with_the_old_reason_when_no_summary_ren
     assert text.count(RECORD_TOKEN) == 1
     assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
         ("M1", "renderer_declined", 2)]
+
+
+def test_t_validation_recoded_m1_with_only_prose_fields_still_reaches_the_appendix(tmp_path):
+    """#1328 routes every recode, whether or not stage 4 found a record field
+    in it. A recode carrying only `narrative` is not an E27 record, so the
+    recode test alone must bring it to the Appendix, with its own reason."""
+    entries = _recoded_and_own_m1_entries()
+    entries[2]["extracted_fields"] = {"narrative": "website for the widget lab"}
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    text, diversions = _render_with_sidecar(tmp_path, entries, summary)
+    assert text.count(RECODED_TOKEN) == 1, "a prose-only T-validation recode rendered nowhere"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "t_validation_recoded", 1)]
+
+
+# Invented token for the instruction-box case below.
+BOX_RECORD_TOKEN = "Mardella"
+
+
+def test_dated_m1_record_is_not_vouched_for_by_the_template_instruction_box(tmp_path):
+    """The template's instruction box is still in the document when the M1
+    check runs and is deleted before save. A record whose second line shares
+    its words with the box's "'Local' refers to the home institution;
+    'regional' refers to city, state and nearby states" prompt must not count
+    as rendered on the strength of that box text, or it is lost with the box."""
+    record = {"text": f"2011-2015: Outreach Liaison, {BOX_RECORD_TOKEN} Widget Office\n"
+                      "Linked the home institution with local, regional and nearby states",
+              "taxonomy_code": "M1",
+              "extracted_fields": {"position": "Outreach Liaison", "start_date": "2011",
+                                   "end_date": "2015"},
+              "element_idx_start": 20}
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    text = _render(tmp_path, _record_entries(record), research_summary=summary)
+    assert "delete this instruction box" not in text.lower()
+    assert text.count(BOX_RECORD_TOKEN) == 1, "the instruction box vouched for an M1 record"

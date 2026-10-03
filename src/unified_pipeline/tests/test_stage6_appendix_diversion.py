@@ -830,3 +830,14 @@ def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendere
 
     without = build_appendix_diversion_warnings(written[:2], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert [(w["code"], w["reason"]) for w in without] == [("M1", REASON_RENDERER_DECLINED)]
+
+
+def test_m1_record_not_in_summary_singular_count_is_grammatical():
+    # Both pronouns in the E27 message agree with a count of one.
+    from unified_pipeline.stage6.sections.appendix import REASON_M1_RECORD_NOT_IN_SUMMARY
+    [w] = build_appendix_diversion_warnings([{"taxonomy_code": "M1"}], [], RENDER_ROUTED_CODES,
+                                            PASSTHROUGH_CODES, summary_rendered=True)
+    assert (w["reason"], w["count"]) == (REASON_M1_RECORD_NOT_IN_SUMMARY, 1)
+    assert w["message"] == (
+        "M1: 1 dated entry diverted to the Appendix — the generated research "
+        "summary does not reproduce it and no other section renders it")
