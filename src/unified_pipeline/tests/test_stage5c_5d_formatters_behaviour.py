@@ -372,6 +372,69 @@ def test_5c_entry_records_is_the_fields_for_a_single_record_entry():
     assert s5c.entry_records(entry) == [entry["extracted_fields"]]
 
 
+def _two_talk_entry() -> dict:
+    """A K4 entry stage 4 kept as two dated talks (invented values)."""
+    first = {"activity_title": "Lantern Making", "date": "2011"}
+    last = {"activity_title": "Paper Boats", "date": "2013"}
+    return {
+        "taxonomy_code": "K4",
+        "text": "Lantern Making 2011; Paper Boats 2013",
+        "extracted_fields": {**last, "stage4_records": [first, last]},
+    }
+
+
+def test_5c_build_raw_content_sends_each_k4_record_its_own_title_and_date():
+    # MRJDWE 89: a K4 record (activity_title/date) yielded no K1 fields, so
+    # both ids carried the entry's whole text and the entry rendered twice.
+    raw, id_map = s5c.build_raw_content({"K4": [_two_talk_entry()]})
+    assert list(id_map) == ["EC-0001", "EC-0002"]
+    assert "[EC-0001] 2011 | Lantern Making\n" in raw
+    assert "[EC-0002] 2013 | Paper Boats\n  Original: Lantern Making 2011; Paper Boats 2013" in raw
+
+
+def test_5c_build_raw_content_sends_k2_role_and_k3_program_per_record():
+    # EQADVR-04: a K3 record used to go out as its bare date range.
+    first = {"program_name": "Pond Study Track", "role": "Director", "start_date": "1975", "end_date": "1980"}
+    last = {"program_name": "Pond Study Track", "role": "Advisor", "start_date": "1981", "end_date": "1990"}
+    k3 = {"text": "Pond Study Track: Director 1975-1980, Advisor 1981-1990",
+          "extracted_fields": {**last, "stage4_records": [first, last]}}
+    raw, _ = s5c.build_raw_content({"K3": [k3], "K2": [_two_record_entry()]})
+    assert "[EC-0001] 1981-1990 | Simulation Lab Leader\n" in raw
+    assert "[EC-0003] 1975-1980 | Pond Study Track | Director\n" in raw
+    assert "[EC-0004] 1981-1990 | Pond Study Track | Advisor\n" in raw
+
+
+def test_5c_build_raw_content_single_record_line_is_unchanged():
+    # A single-record entry sends the K1 fields and its Original: line, as
+    # before E20: its Original: line already holds the title and date.
+    entry = {"text": "Kite Day 2006 lecture",
+             "extracted_fields": {"activity_title": "Kite Day", "date": "2006", "role": "Lecturer"}}
+    raw, _ = s5c.build_raw_content({"K4": [entry]})
+    assert "[EC-0001] Lecturer\n  Original: Kite Day 2006 lecture" in raw
+
+
+def test_5c_entry_records_keeps_one_id_when_a_record_line_is_empty_or_repeated():
+    # Each such id would carry the whole entry text, or a copy of another
+    # id's line, and stage 6 would render the entry twice.
+    bare = {"text": "Two talks", "extracted_fields": {
+        "stage4_records": [{"description": "first"}, {"activity_title": "Paper Boats"}]}}
+    twins = {"text": "Paper Boats twice", "extracted_fields": {
+        "stage4_records": [{"activity_title": "Paper Boats"}, {"activity_title": "Paper Boats"}]}}
+    for entry in (bare, twins):
+        assert s5c.entry_records(entry) == [entry["extracted_fields"]]
+        raw, id_map = s5c.build_raw_content({"K4": [entry]})
+        assert list(id_map) == ["EC-0001"]
+        assert raw.count(entry["text"]) == 1
+
+
+def test_run_stage_5c_formats_both_talks_of_a_k4_entry_once_each(tmp_path, monkeypatch):
+    reply = ('- [EC-0001] **2011** - "Lantern Making"\n'
+             '- [EC-0002] **2013** - "Paper Boats"\n')
+    out = _run_5c(tmp_path, monkeypatch, [_two_talk_entry()], reply)
+    assert out["entries"][0]["extracted_fields"]["formatted_text"] == \
+        '**2011** - "Lantern Making"\n**2013** - "Paper Boats"'
+
+
 def test_5c_parse_llm_output_strips_every_repeated_id_tag():
     parsed = s5c.parse_llm_output("- [EC-0021] [EC-0021] Board prep course (1990, 1994)\n", {})
     assert parsed["EC-0021"] == "Board prep course (1990, 1994)"
@@ -428,6 +491,53 @@ def test_5c_postcheck_rejects_dates_separated_from_their_titles():
     paired = '**3/2007** "Lichen Basics"; **4/2007** "Moss Survey" (residents)'
     assert s5c.postcheck_line(merged, record, source) == "date_not_beside_title"
     assert s5c.postcheck_line(paired, record, source) is None
+
+
+def test_5c_postcheck_holds_the_line_to_every_activity_year():
+    record = {"activities": [
+        {"activity_title": "Lichen Basics", "date": "2007"},
+        {"activity_title": "Moss Survey", "date": "2008"},
+    ]}
+    line = '**2007** - "Lichen Basics"; "Moss Survey"'
+    assert s5c.postcheck_line(line, record, "Lichen Basics 2007, Moss Survey 2008") == "year_missing:2008"
+
+
+def test_5c_postcheck_a_single_titled_record_is_its_own_activity():
+    record = {"activity_title": "Lichen Basics", "date": "8/2008"}
+    line = '**8/2008, 9/2008** - "Lichen Basics"'
+    assert s5c.postcheck_line(line, record, "8/2008 Lichen Basics; 9/2008 repeat") == "date_not_beside_title"
+
+
+def test_5c_postcheck_does_not_judge_a_title_the_model_reworded():
+    record = {"activity_title": "Lichen Basics", "date": "8/2008"}
+    line = "Introduction to lichens, 9/2008 and 8/2008"
+    assert s5c.postcheck_line(line, record, "8/2008 Lichen Basics, repeated 9/2008") is None
+
+
+def test_5c_postcheck_finds_a_title_through_markdown_and_curly_quotes():
+    source = "8/2008 Kid's Ponds; 9/2008 Moss Survey"
+    record = {"activities": [
+        {"activity_title": "Kid's Ponds", "date": "8/2008"},
+        {"activity_title": "Moss Survey", "date": "9/2008"},
+    ]}
+    italic = {"activities": [
+        {"activity_title": "Moss Survey", "date": "8/2008"},
+        {"activity_title": "Pond Ecology", "date": "9/2008"},
+    ]}
+    assert s5c.postcheck_line("**8/2008, 9/2008** - Kid\u2019s Ponds; Moss Survey", record, source) \
+        == "date_not_beside_title"
+    assert s5c.postcheck_line("**8/2008, 9/2008** - *Moss* Survey; Pond Ecology", italic,
+                              "8/2008 Moss Survey; 9/2008 Pond Ecology") == "date_not_beside_title"
+
+
+def test_5c_postcheck_reads_month_names_in_activity_dates():
+    record = {"activities": [
+        {"activity_title": "Lichen Basics", "date": "Aug 2008"},
+        {"activity_title": "Moss Survey", "date": "Sep 2008"},
+    ]}
+    line = "**Aug 2008, Sep 2008** - Lichen Basics; Moss Survey"
+    assert s5c.postcheck_line(line, record, "Aug 2008 Lichen Basics; Sep 2008 Moss Survey") \
+        == "date_not_beside_title"
 
 
 def test_5c_postcheck_rejects_a_role_the_record_does_not_state():

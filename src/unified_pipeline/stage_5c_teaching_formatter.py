@@ -174,17 +174,49 @@ def entry_records(entry: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     `extracted_fields` hold. One id per entry used to let a fused entry's
     second line take the NEXT entry's id, shifting every later id by one, and
     dropped every record but the last from the formatted text (E20).
+
+    A multi-record entry stays ONE record when a record's line would be empty
+    or two records' lines are the same: each such id would carry the entry's
+    whole text (or a copy of another id's line), and the joined reply would
+    render the entry twice.
     """
     fields = entry.get('extracted_fields') or {}
     records = fields.get(STAGE4_RECORDS_KEY)
-    if (isinstance(records, list) and len(records) >= _MIN_STAGE4_RECORDS
+    if not (isinstance(records, list) and len(records) >= _MIN_STAGE4_RECORDS
             and all(isinstance(r, Mapping) and r for r in records)):
-        return records
-    return [fields]
+        return [fields]
+    lines = [record_line(record) for record in records]
+    if not all(lines) or len(set(lines)) < len(lines):
+        return [fields]
+    return records
 
 
-def _record_parts(fields: Mapping[str, Any]) -> list[str]:
-    """The structured fields of one record, in the order the prompt sends them."""
+def _first_text(fields: Mapping[str, Any], keys: tuple[str, ...]) -> str:
+    """The first of `keys` whose value in `fields` is a non-empty string."""
+    for key in keys:
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ''
+
+
+# What one record of a multi-record entry sends beyond a single-record line
+# (the K1 fields): the K2-K5 schemas keep the title in program_name (K3) or
+# activity_title (K4/K5), the role in teaching_role (K2) and a one-off date
+# in `date` (K4/K5). Without them a K4 record's line was empty.
+_RECORD_DATE_KEYS = ('date',)
+_RECORD_TITLE_KEYS = ('program_name', 'activity_title')
+_RECORD_ROLE_KEYS = ('teaching_role',)
+
+
+def _record_parts(fields: Mapping[str, Any], per_record: bool = False) -> list[str]:
+    """The structured fields of one record, in the order the prompt sends them.
+
+    `per_record` adds the K2-K5 date, title and role fields for one record of
+    a multi-record entry, which carries no `Original:` line of its own. A
+    single-record entry sends only the K1 fields, as it always has: its
+    `Original:` line already holds the rest.
+    """
     parts = []
     start_date = fields.get('start_date', '')
     end_date = fields.get('end_date', '')
@@ -192,6 +224,8 @@ def _record_parts(fields: Mapping[str, Any]) -> list[str]:
         date_str = f"{start_date or ''}-{end_date or ''}".strip('-')
         if date_str:
             parts.append(date_str)
+    elif per_record and _first_text(fields, _RECORD_DATE_KEYS):
+        parts.append(_first_text(fields, _RECORD_DATE_KEYS))
 
     course_code = fields.get('course_code', '')
     course_title = fields.get('course_title', '')
@@ -201,11 +235,22 @@ def _record_parts(fields: Mapping[str, Any]) -> list[str]:
         parts.append(course_title)
     elif course_code:
         parts.append(course_code)
+    elif per_record and _first_text(fields, _RECORD_TITLE_KEYS):
+        parts.append(_first_text(fields, _RECORD_TITLE_KEYS))
 
-    for key in ('role', 'institution', 'audience'):
+    if fields.get('role'):
+        parts.append(fields['role'])
+    elif per_record and _first_text(fields, _RECORD_ROLE_KEYS):
+        parts.append(_first_text(fields, _RECORD_ROLE_KEYS))
+    for key in ('institution', 'audience'):
         if fields.get(key):
             parts.append(fields[key])
     return parts
+
+
+def record_line(record: Mapping[str, Any]) -> str:
+    """The line one record of a multi-record entry sends to the model."""
+    return ' | '.join(_record_parts(record, per_record=True))
 
 
 def build_raw_content(entries_by_k_code: dict[str, list[dict]]) -> tuple[str, dict[str, dict]]:
@@ -234,7 +279,11 @@ def build_raw_content(entries_by_k_code: dict[str, list[dict]]) -> tuple[str, di
 
         for entry in entries:
             raw_text = entry.get('text', '')
-            record_texts = [' | '.join(_record_parts(record)) for record in entry_records(entry)]
+            records = entry_records(entry)
+            if len(records) == 1:
+                record_texts = [' | '.join(_record_parts(records[0]))]
+            else:
+                record_texts = [record_line(record) for record in records]
             for i, record_text in enumerate(record_texts):
                 entry_counter += 1
                 entry_id = f"{ENTRY_ID_PREFIX}-{entry_counter:04d}"
