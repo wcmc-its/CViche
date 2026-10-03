@@ -1023,7 +1023,8 @@ def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
         ("1. Sample Leave: N/A", "T", 0.0),
         ("Served on the sample review panel for the Example Society", "T", 0.0),
     ])
-    assert written == ["T"]
+    assert [(line.code, line.text) for line in written] == [
+        ("T", "Served on the sample review panel for the Example Society")]
     bullets = _bulleted_texts(gen.doc.paragraphs)
     assert "Served on the sample review panel for the Example Society" in bullets
     assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)
