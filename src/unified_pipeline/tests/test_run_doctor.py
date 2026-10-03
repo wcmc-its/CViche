@@ -26,6 +26,7 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
@@ -48,12 +49,14 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_etal_added,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
+    lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
     lint_python_repr_in_output,
@@ -1523,6 +1526,421 @@ def test_run_doctor_wires_repr_and_refusal_through_to_the_verdict(tmp_path):
     assert payload["counts"]["ERROR"] == 0
 
 
+# ------------------------- lint 14n: the CV owner's name, citation by citation
+
+_CITE_OWNER = {"first_name": "Rowan", "last_name": "Thornquist"}
+_CITE_KEPT = "Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, Fenwick F"
+_CITE_ALL = f"{_CITE_KEPT}, Garrow G, Thornquist R"
+_CITE_TITLE = "Tidal patterns in synthetic estuary sediment cores"
+_CITE_TRAILER = "J Synth Geol. 2019;12(3):45-67."
+#: Stage 5d's "first 6 authors, et al." cut of `_CITE_ALL`, owner gone.
+_CUT_LINE = f"{_CITE_KEPT}, et al. {_CITE_TITLE}. {_CITE_TRAILER}"
+_FULL_LINE = f"{_CITE_ALL}. {_CITE_TITLE}. {_CITE_TRAILER}"
+
+
+def _publication(idx, text, authors=None, code="S1"):
+    fields = {} if authors is None else {"authors": authors}
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+            "extracted_fields": fields}
+
+
+def _source(authors=_CITE_ALL, title=_CITE_TITLE, tail=""):
+    return f"{authors}. {title}. {_CITE_TRAILER}{tail}"
+
+
+def _cite_run(*entries, owner=_CITE_OWNER):
+    return {"cv_owner": owner, "entries": list(entries)}
+
+
+def _bibliography(*lines):
+    """A render's BIBLIOGRAPHY section, each citation numbered as stage 6 numbers it."""
+    return ([("p", "BIBLIOGRAPHY"), ("p", "Peer-reviewed Research Articles:")]
+            + [("p", f"{n}. {line}") for n, line in enumerate(lines, 1)])
+
+
+def test_owner_missing_fires_when_the_et_al_cut_drops_the_owner():
+    # VNUAHA-05 / KYOPUV-06 shape: stage 5d kept six authors, the owner was
+    # ninth, and the #1292 restore declined on a damaged stage-4 list.
+    stage4 = _cite_run(_publication(381, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE)
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [(f["lint"], f["severity"]) for f in findings] == [
+        ("owner_missing_from_citation", "WARN")]
+    assert findings[0]["message"] == (
+        "entry 381 (S1): stage 4's author list names the CV owner, but the rendered "
+        "citation does not name them (its author list is cut to 'et al.')")
+    assert findings[0]["evidence"] == [_CUT_LINE[:CITATION_EVIDENCE_CHARS]]
+    # The same citation is not reported again as a bare co-author cut.
+    assert lint_etal_added(stage4, blocks) == []
+
+
+def test_owner_missing_quiet_when_the_rendered_list_keeps_the_owner():
+    stage4 = _cite_run(_publication(12, _source(), authors=_CITE_ALL))
+    assert lint_owner_missing_from_citation(stage4, _bibliography(_FULL_LINE)) == []
+
+
+def test_owner_missing_reads_only_the_author_list_an_et_al_closes():
+    # ZGBCIT 348: the owner's name survived only in a trailing note.
+    line = f"{_CITE_KEPT}, et al. {_CITE_TITLE}. {_CITE_TRAILER} Presented by Thornquist R."
+    stage4 = _cite_run(_publication(348, _source(tail=" Presented by Thornquist R."),
+                                    authors=_CITE_ALL))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(line))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 348 (S1)"]
+
+
+def test_owner_missing_quiet_when_et_al_comma_continues_the_list():
+    # KYOPUV 408 / TXTATQ 279: the source elides the middle of its list and
+    # the owner follows the "et al.,".
+    source = "Ashdown A, Brimley B... Thornquist R, Garrow G. " + _CITE_TITLE + ". " + _CITE_TRAILER
+    line = f"Ashdown A, Brimley B, et al., Thornquist R, Garrow G. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(408, source, authors="Ashdown A, Brimley B, Thornquist R, Garrow G"))
+    blocks = _bibliography(line)
+    assert lint_owner_missing_from_citation(stage4, blocks) == []
+    assert lint_etal_added(stage4, blocks) == []
+
+
+@pytest.mark.parametrize(("surname", "rendered", "fires"), [
+    ("Thornquist", "Thornqvist", False),  # PubMed's spelling, one letter off
+    ("Thornquist", "Thornquists", False),
+    ("Thornquist", "Thornqvisst", True),  # two letters off
+    ("Thornquist", "Thornqvast", True),   # two letters off, same length
+    ("Lindo", "Linde", True),             # too short to tolerate a letter
+])
+def test_owner_missing_tolerates_one_letter_only_on_a_long_surname(surname, rendered, fires):
+    # NDXXAD 160/276: a PubMed rebuild printed its own spelling of the owner.
+    source = _source(authors=f"{_CITE_KEPT}, {surname} R")
+    line = f"{_CITE_KEPT}, {rendered} R. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(160, source, authors=f"{_CITE_KEPT}, {surname} R"),
+                       owner={"last_name": surname})
+    assert bool(lint_owner_missing_from_citation(stage4, _bibliography(line))) is fires
+
+
+def test_owner_missing_falls_back_to_the_source_text_for_a_dropped_credit():
+    # BMAMWE 1028, CXRYCF 762: a consortium credit that names the owner is
+    # in the source line, not in stage 4's authors, and the rebuilt citation
+    # drops it.
+    source = _source(authors=_CITE_KEPT, tail=" (including Thornquist R)")
+    line = f"{_CITE_KEPT}. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(1028, source, authors=_CITE_KEPT))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(line))
+    assert [f["message"] for f in findings] == [
+        "entry 1028 (S1): the source citation names the CV owner, but the rendered "
+        "citation does not name them"]
+
+
+def test_owner_missing_ignores_the_surname_inside_an_email_address():
+    # MRJDWE 288: contact data fused onto the entry is not an author credit.
+    source = _source(authors=_CITE_KEPT, tail=" Contact: rowan.thornquist@example.org")
+    line = f"{_CITE_KEPT}. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(288, source, authors=_CITE_KEPT))
+    assert lint_owner_missing_from_citation(stage4, _bibliography(line)) == []
+
+
+def _co_presented_talk(co_presented="co-presented with"):
+    """A talk the source says was co-presented, as stage 4 stored it (S8,
+    the co-presenter as its only author), and its rendered line, which
+    credits the co-presenter alone."""
+    source = (f"“{_CITE_TITLE},” {co_presented} Garrow G, Annual Synthetic "
+              f"Geology Meeting, Larkspur, 2001")
+    line = f"Garrow G. {_CITE_TITLE}. Annual Synthetic Geology Meeting; 2001; Larkspur."
+    return _publication(762, source, authors="Garrow G", code="S8"), line
+
+
+@pytest.mark.parametrize("co_presented", ["co-presented with", "co presented with", "copresenter"])
+def test_owner_missing_fires_on_a_co_presented_talk_credited_to_the_others(co_presented):
+    # XWNZWW-04: "co-presented with" names only the co-presenters, and the
+    # rendered citation credits the talk to them alone. CVs spell it with a
+    # hyphen, a space or neither.
+    talk, line = _co_presented_talk(co_presented)
+    findings = lint_owner_missing_from_citation(_cite_run(talk), _bibliography(line))
+    assert [f["message"] for f in findings] == [
+        "entry 762 (S8): the source says the CV owner co-presented this talk, but the "
+        "rendered citation does not name them"]
+
+
+@pytest.mark.parametrize("owner", [None, {}, {"last_name": ""}, {"last_name": "Wu"}])
+def test_owner_missing_judges_nothing_without_a_usable_owner_surname(owner):
+    # No surname is owner_contact_missing's finding; a two-letter one is an
+    # author's initials as often as a name.
+    source = _source(authors=f"{_CITE_KEPT}, Garrow G, Wu R")
+    stage4 = _cite_run(_publication(5, source, authors=f"{_CITE_KEPT}, Garrow G, Wu R"),
+                       owner=owner)
+    assert lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE)) == []
+    # A co-presented talk credits the owner without naming them, so with no
+    # surname to look for in its line there is nothing to judge either.
+    talk, line = _co_presented_talk()
+    assert lint_owner_missing_from_citation(_cite_run(talk, owner=owner),
+                                            _bibliography(line)) == []
+
+
+@pytest.mark.parametrize("surname", ["Worth", "Core"])
+def test_owner_missing_credits_only_the_whole_surname(surname):
+    # A short surname inside a longer word is not the owner: "Worth" inside
+    # the co-author "Elsworth", "Core" inside the title word "cores".
+    stage4 = _cite_run(_publication(9, _source(), authors=_CITE_ALL),
+                       owner={"last_name": surname})
+    assert lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE)) == []
+
+
+def test_citation_pairing_reads_only_the_bibliography_and_needs_four_tokens():
+    stage4 = _cite_run(_publication(7, _source(), authors=_CITE_ALL))
+    # A numbered Appendix entry is verbatim source, not a citation stage 6
+    # wrote, and a numbered line that is a year alone pairs with nothing.
+    appendix = [("p", "T. APPENDIX"), ("p", f"1. {_CUT_LINE}")]
+    assert lint_owner_missing_from_citation(stage4, appendix) == []
+    assert lint_owner_missing_from_citation(stage4, _bibliography("2019")) == []
+    # Another publication's line is not this entry's line either, even one
+    # by the same six co-authors: their names are under 60% of its tokens.
+    other = "Holloway H, Ivesdale I. Glacial varves of a model lake. Synth Limnol. 2004;3:1-9."
+    same_group = (f"{_CITE_KEPT}. Glacial varves of a model lake and their dating by "
+                  f"layer counting. Synth Limnol. 2004;3:1-9.")
+    assert lint_owner_missing_from_citation(stage4, _bibliography(other)) == []
+    assert lint_owner_missing_from_citation(stage4, _bibliography(same_group)) == []
+    # The floor is four shared tokens exactly: an author list cut after three
+    # names is wholly the source's but does not pair; cut after four, it does.
+    three = "Ashdown A, Brimley B, Corwen C, et al."
+    four = "Ashdown A, Brimley B, Corwen C, Dunmore D, et al."
+    assert lint_owner_missing_from_citation(stage4, _bibliography(three)) == []
+    assert [f["message"].split(":")[0] for f in lint_owner_missing_from_citation(
+        stage4, _bibliography(four))] == ["entry 7 (S1)"]
+
+
+def test_citation_pairing_folds_case_and_accents():
+    # RNKYST 374 / ZDCXIV 65 shape: a PubMed rebuild prints the title in
+    # sentence case and the names without their accents, so the line shares
+    # few tokens with the source as written; it is still that entry's line.
+    authors = "Áshdöwn A, Brímley B, Córwen C, Dunmore D, Elsworth E, Fenwick F, Garrow G, Thornquist R"
+    source = f"{authors}. {_CITE_TITLE.upper()}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(374, source, authors=authors))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 374 (S1)"]
+
+
+def test_owner_missing_judges_a_three_letter_surname():
+    # ZCTARO-08: the shortest surname the lint judges is three letters.
+    authors = f"{_CITE_KEPT}, Garrow G, Orr R"
+    stage4 = _cite_run(_publication(804, _source(authors=authors), authors=authors),
+                       owner={"last_name": "Orr"})
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 804 (S1)"]
+
+
+def test_citation_pairing_keeps_an_entry_on_its_best_line():
+    # One entry, two lines over both thresholds: its full line and a cut
+    # copy (MQSUIC 382 shape). It keeps the full line, which names the owner,
+    # and is not re-paired with the worse one.
+    stage4 = _cite_run(_publication(382, _source(), authors=_CITE_ALL))
+    assert lint_owner_missing_from_citation(
+        stage4, _bibliography(_FULL_LINE, _CUT_LINE)) == []
+
+
+def test_citation_pairing_does_not_count_initials_or_one_digit_numbers():
+    # The same seven co-authors' other paper shares 8 of the 14 tokens of
+    # three or more characters in its line (57%). Counting initials and short
+    # numbers as tokens would make that 16 of 25 (64%) and pair it.
+    stage4 = _cite_run(_publication(7, _source(), authors=_CITE_ALL))
+    other = f"{_CITE_KEPT}, Garrow G. Glacial varves of a model lake. Synth Limnol. 2004;3:1-9."
+    assert lint_owner_missing_from_citation(stage4, _bibliography(other)) == []
+
+
+def test_citation_pairing_takes_the_share_of_the_line_not_of_the_source():
+    # A source carrying a long note renders as a much shorter line: all 15 of
+    # the line's tokens are the source's, though they are under half of the
+    # source's 32.
+    note = (" Selected for the quarterly highlights of the Larkspur Mossgrove society, "
+            "with an invited commentary on coring methods by its editors.")
+    stage4 = _cite_run(_publication(7, _source(tail=note), authors=_CITE_ALL))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 7 (S1)"]
+
+
+def test_citation_pairing_reads_only_publication_entries():
+    # Only an S entry prints in the bibliography. A talk (R) whose text
+    # repeats the paper's cut citation word for word matches that line
+    # better than the paper's own entry does, but it is not a candidate.
+    talk = _publication(90, _CUT_LINE, code="R")
+    stage4 = _cite_run(talk, _publication(10, _source(), authors=_CITE_ALL))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_reads_numbered_lines_through_an_all_caps_sub_heading():
+    stage4 = _cite_run(_publication(7, _source(), authors=_CITE_ALL))
+    # An all-caps sub-heading names no output section, so the numbered lines
+    # after it are still the bibliography's.
+    blocks = [("p", "BIBLIOGRAPHY"), ("p", "BOOKS AND CHAPTERS"), ("p", f"1. {_CUT_LINE}")]
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 7 (S1)"]
+    # An unnumbered paragraph in the section is not a citation stage 6
+    # numbered, so it pairs with nothing.
+    assert lint_owner_missing_from_citation(
+        stage4, [("p", "BIBLIOGRAPHY"), ("p", _CUT_LINE)]) == []
+
+
+def test_citation_pairing_gives_an_abstract_and_its_paper_their_own_lines():
+    # The abstract and the paper that followed it share authors and title;
+    # only the paper's line was cut, so only the paper is reported.
+    abstract = (f"{_CITE_ALL}. {_CITE_TITLE}. Annual Synthetic Geology Meeting; "
+                f"2018 Oct 2; Larkspur.")
+    stage4 = _cite_run(_publication(30, abstract, authors=_CITE_ALL, code="S8"),
+                       _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE) + [("p", "Abstracts"), ("p", f"1. {abstract}")]
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_takes_each_line_once():
+    # A near-duplicate entry whose own line was dropped does not borrow the
+    # line the paper rendered as: one line, one entry, one finding.
+    abstract = f"{_CITE_ALL}. {_CITE_TITLE}. Annual Synthetic Geology Meeting; 2018."
+    stage4 = _cite_run(_publication(10, _source(), authors=_CITE_ALL),
+                       _publication(30, abstract, authors=_CITE_ALL, code="S8"))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_prefers_the_entry_closest_in_size():
+    # The CV lists the paper twice, once with a note. Each copy's line holds
+    # only that copy's tokens, so both lines are wholly "in" the longer
+    # entry; the overlap over both sizes still gives each line to its own
+    # entry, and only the copy whose line was cut is reported.
+    note = " Featured in the Larkspur Mossgrove geology quarterly review highlights."
+    stage4 = _cite_run(_publication(4, _source(tail=note), authors=_CITE_ALL),
+                       _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE, _FULL_LINE + note)
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_ranks_by_overlap_over_both_sizes_not_shared_count():
+    # The CV lists the paper twice, once followed by "Erratum.", and only
+    # that copy's line was cut; the cut line keeps the "Erratum", so it is
+    # that copy's. By shared-token count both copies tie for the full line
+    # (17 tokens each), the first-listed copy takes it, and the plain copy is
+    # left the cut line, with a word it does not hold.
+    stage4 = _cite_run(_publication(4, _source(tail=" Erratum."), authors=_CITE_ALL),
+                       _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_FULL_LINE, f"{_CUT_LINE} Erratum.")
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 4 (S1)"]
+
+
+def test_citation_pairing_ranks_by_overlap_over_both_sizes_not_share_of_the_source():
+    # The plain copy's tokens are all in the noted copy's line, so by share
+    # of the source that line is the plain copy's best match (100%, against
+    # 89% for the noted copy, whose "Epub ahead of print" the line leaves
+    # out). Over both sizes the noted copy keeps its line, and the plain
+    # copy, whose line was cut, is reported.
+    note = " Featured in the Larkspur Mossgrove geology quarterly review highlights."
+    stage4 = _cite_run(
+        _publication(4, _source(tail=f"{note} Epub ahead of print."), authors=_CITE_ALL),
+        _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE, _FULL_LINE + note)
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_owner_lints_quote_the_head_of_a_long_line():
+    title = ("Tidal patterns in synthetic estuary sediment cores across four model "
+             "basins, with a reanalysis of layer counts from earlier coring campaigns")
+    authors = f"Thornquist R, {_CITE_KEPT}, Garrow G"
+    owner_kept = f"Thornquist R, Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, et al. {title}. {_CITE_TRAILER}"
+    owner_cut = f"{_CITE_KEPT}, et al. {title}. {_CITE_TRAILER}"
+    assert min(len(owner_kept), len(owner_cut)) > CITATION_EVIDENCE_CHARS
+    cut = _cite_run(_publication(1, _source(title=title), authors=_CITE_ALL))
+    kept = _cite_run(_publication(2, _source(authors=authors, title=title), authors=authors))
+    assert [f["evidence"] for f in lint_owner_missing_from_citation(cut, _bibliography(owner_cut))] == [
+        [owner_cut[:CITATION_EVIDENCE_CHARS]]]
+    assert [f["evidence"] for f in lint_etal_added(kept, _bibliography(owner_kept))] == [
+        [owner_kept[:CITATION_EVIDENCE_CHARS]]]
+
+
+def test_etal_added_reports_a_cut_that_keeps_the_owner():
+    authors = f"Thornquist R, {_CITE_KEPT}, Garrow G"
+    line = f"Thornquist R, Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, et al. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(12, _source(authors=authors), authors=authors))
+    blocks = _bibliography(line)
+    findings = lint_etal_added(stage4, blocks)
+    assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [(
+        "etal_added", "INFO",
+        "entry 12 (S1): the rendered citation keeps 6 author(s) and then 'et al.', "
+        "where the source elides no author")]
+    assert lint_owner_missing_from_citation(stage4, blocks) == []
+
+
+def test_etal_added_reports_a_cut_with_no_owner_surname_to_judge():
+    stage4 = _cite_run(_publication(12, _source(), authors=_CITE_ALL), owner={})
+    assert [f["lint"] for f in lint_etal_added(stage4, _bibliography(_CUT_LINE))] == ["etal_added"]
+
+
+@pytest.mark.parametrize("elided", ["Garrow G, et al", "Garrow G, et. al.", "Garrow G and colleagues",
+                                    "Garrow G and col.", "Garrow G…", "Garrow G..."])
+def test_etal_added_quiet_when_the_source_elides_authors_itself(elided):
+    # TAUBPU 202 ("and col."), EQADVR 144 ("et.al."): the rendered "et al."
+    # reproduces the source.
+    source = _source(authors=f"{_CITE_KEPT}, {elided}")
+    stage4 = _cite_run(_publication(202, source, authors=_CITE_KEPT), owner={})
+    assert lint_etal_added(stage4, _bibliography(_CUT_LINE)) == []
+
+
+@pytest.mark.parametrize("editors", ["In: Garrow G, Holloway H, et al., eds.",
+                                     "In: Garrow G, et al. eds."])
+def test_etal_added_ignores_an_et_al_in_an_editor_list(editors):
+    # VVRTUC 703: the "et al." closes the editors after the title, not the authors.
+    line = f"Thornquist R, Ashdown A. Chapter on tidal cores. {editors} Synthetic Geology. Larkspur: Mossgrove Press; 2019."
+    source = f"Thornquist R, Ashdown A. Chapter on tidal cores. In: Synthetic Geology, Garrow G, Holloway H, Ivesdale I, Jessop J, Larkspur, Mossgrove Press, 2019."
+    stage4 = _cite_run(_publication(703, source, authors="Thornquist R, Ashdown A", code="S4"))
+    assert lint_etal_added(stage4, _bibliography(line)) == []
+
+
+def test_owner_lints_are_registered_lints():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    for lint_id, rule in (("owner_missing_from_citation", lint_owner_missing_from_citation),
+                          ("etal_added", lint_etal_added)):
+        assert lint_id in KNOWN_LINTS
+        assert any(spec.lint_id == lint_id and spec.rule is rule
+                   and spec.inputs == ("stage_4", "blocks") for spec in LINT_REGISTRY)
+
+
+def test_owner_lint_prevalence_is_the_measured_farm_fraction():
+    """Runs with a finding, measured 2026-10-02 over the 63-run EBYSBC, s7ab
+    and pilot farm (#1259); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["owner_missing_from_citation"] == round(30 / 63, 3)
+    assert LINT_PREVALENCE["etal_added"] == round(59 / 63, 3)
+
+
+def test_run_doctor_reads_the_tracked_insertion_not_the_deleted_source(tmp_path):
+    """#1259 end to end, the OIYKZE-02 shape: stage 6 replaced the CV line
+    with a tracked deletion plus a tracked insertion of a citation without
+    the owner. The owner survives only as w:delText, which accepting the
+    changes removes, so the finding must come from the inserted text."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    root = _build_clean_run(tmp_path)
+    fields_path = next((root / "stage_4_field_extraction").glob(f"{_UID}*_fields.json"))
+    stage4 = json.loads(fields_path.read_text())
+    authors = f"{_CITE_KEPT}, Garrow G, Shapiro M"
+    stage4["entries"].append(_publication(115, _source(authors=authors), authors=authors))
+    fields_path.write_text(json.dumps(stage4))
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    doc = Document(str(docx_path))
+    doc.add_paragraph("BIBLIOGRAPHY")
+    para = doc.add_paragraph("1. ")
+    para._p.append(parse_xml(f'<w:del {nsdecls("w")} w:id="1" w:author="t"><w:r>'
+                             f'<w:delText>{_source(authors=authors)}</w:delText></w:r></w:del>'))
+    para._p.append(parse_xml(f'<w:ins {nsdecls("w")} w:id="2" w:author="t"><w:r>'
+                             f'<w:t>{_CUT_LINE}</w:t></w:r></w:ins>'))
+    doc.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    owner = [f for f in payload["findings"] if f["lint"] == "owner_missing_from_citation"]
+    assert [(f["severity"], f["evidence"]) for f in owner] == [
+        ("WARN", [_CUT_LINE[:CITATION_EVIDENCE_CHARS]])]
+    assert owner[0]["message"].startswith("entry 115 (S1): ")
+
+
 # ------------------------------------------------------ lint 12: pipe leaks
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
@@ -2328,14 +2746,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (34), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (36), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 32
+    assert len(payload["findings"]) == 34
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
