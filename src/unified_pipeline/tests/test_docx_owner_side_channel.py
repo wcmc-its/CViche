@@ -83,6 +83,25 @@ def test_body_level_sdt_paragraph_is_collected(tmp_path):
     assert channel["footer_lines"] == []
 
 
+def test_sdt_line_reads_a_non_breaking_hyphen_as_a_hyphen(tmp_path):
+    # A hyphenated surname written with Word's <w:noBreakHyphen/>: no '-' in
+    # any w:t, so a w:t-only walk would hand stage 4 the fused name.
+    doc = Document()
+    after = doc.add_paragraph("after")
+    sdt_xml = (
+        f'<w:sdt {nsdecls("w")}><w:sdtContent><w:p>'
+        '<w:r><w:t>Synthetic Testname</w:t></w:r>'
+        '<w:r><w:noBreakHyphen/></w:r>'
+        '<w:r><w:t>Example</w:t></w:r>'
+        '</w:p></w:sdtContent></w:sdt>'
+    )
+    after._p.addprevious(parse_xml(sdt_xml))
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["sdt_lines"] == ["Synthetic Testname-Example"]
+
+
 def test_sdt_nested_inside_a_table_cell_is_also_collected(tmp_path):
     doc = Document()
     doc.add_paragraph("cover text")
