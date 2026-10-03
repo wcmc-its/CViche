@@ -300,7 +300,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 41, (
+    assert len(STAGE6_IMPORT_SURFACE) == 42, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
