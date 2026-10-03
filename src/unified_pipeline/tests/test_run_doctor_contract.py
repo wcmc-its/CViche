@@ -153,9 +153,9 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 34, (
+    assert len(known) == 38, (
         f"KNOWN_LINTS changed size ({len(known)}, was 27 -- this change added "
-        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded). That is fine if a lint was genuinely added or "
+        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded; #1259 then added owner_missing_from_citation and etal_added; #1243 then added multi_record_coverage; #819 then added year_not_in_source). That is fine if a lint was genuinely added or "
         f"removed -- update this count and say so in the commit message."
     )
 
@@ -273,6 +273,8 @@ def test_known_lints_literal_expected_order():
         "stage4_group_failures",
         "python_repr_in_output", "llm_refusal_in_output",
         "llm_fallback_served", "stage_failure_recorded",
+        "owner_missing_from_citation", "etal_added", "multi_record_coverage",
+        "year_not_in_source",
         "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
 
@@ -561,7 +563,7 @@ def test_every_json_artifact_kind_declares_its_record_shape():
         assert spec.record_lists or spec.optional_lists, key
     assert set(mod._JSON_ARTIFACTS) == {
         "stage_1a", "stage_2", "stage_3b", "stage_4", "stage_4_5",
-        "stage_5_enrichment", "stage_5b", "stage_6_report"}
+        "stage_5_enrichment", "stage_5b", "stage_5d", "stage_6_report"}
 
 
 def test_ten_of_the_surface_is_private():

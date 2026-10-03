@@ -26,6 +26,7 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
@@ -48,12 +49,14 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_etal_added,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
+    lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
     lint_python_repr_in_output,
@@ -425,6 +428,33 @@ def test_missed_headers_owner_exemption_is_subset_by_construction():
             "SAMPLE", "JANE Q. SMITH"]
     found = lint_missed_headers(kept, _STAGE1A, stage2, _MH_STAGE4)
     assert [f["evidence"][0] for f in found] == kept
+
+
+def test_missed_headers_skips_lines_of_the_personal_data_block():
+    """EBYSBC: a CV title line and an employer line that stage 3b filed as
+    the owner's Personal Data are the contact block, not missed headers; a
+    header filed anywhere else is still reported, and so is any line when
+    stage 4 is absent."""
+    title, employer, header = ("CURRICULUM VITAE, JANE Q. SAMPLE",
+                               "EXAMPLE STATE UNIVERSITY", "PROFESSIONAL EXPERIENCE")
+    stage4 = {"entries": [
+        {"taxonomy_code": "A", "text": title},
+        {"taxonomy_code": "A", "text": f"{employer}\tDepartment of Examples\nExample City"},
+        {"taxonomy_code": "T", "text": header}]}
+    found = lint_missed_headers([title, employer, header], _STAGE1A,
+                                {"entries": []}, stage4)
+    assert [f["evidence"][0] for f in found] == [header]
+    assert len(lint_missed_headers([title, employer, header], _STAGE1A,
+                                   {"entries": []})) == 3
+
+
+def test_missed_headers_contact_block_matches_whole_lines_and_cells_only():
+    """A header word that only sits INSIDE a Personal Data line is not that
+    line: 'UNIVERSITY' alone is still reported."""
+    stage4 = {"entries": [{"taxonomy_code": "A",
+                           "text": "Example State University\tDepartment of Examples"}]}
+    found = lint_missed_headers(["UNIVERSITY"], _STAGE1A, {"entries": []}, stage4)
+    assert len(found) == 1
 
 
 def test_missed_headers_fires_on_demoted_header():
@@ -1523,6 +1553,421 @@ def test_run_doctor_wires_repr_and_refusal_through_to_the_verdict(tmp_path):
     assert payload["counts"]["ERROR"] == 0
 
 
+# ------------------------- lint 14n: the CV owner's name, citation by citation
+
+_CITE_OWNER = {"first_name": "Rowan", "last_name": "Thornquist"}
+_CITE_KEPT = "Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, Fenwick F"
+_CITE_ALL = f"{_CITE_KEPT}, Garrow G, Thornquist R"
+_CITE_TITLE = "Tidal patterns in synthetic estuary sediment cores"
+_CITE_TRAILER = "J Synth Geol. 2019;12(3):45-67."
+#: Stage 5d's "first 6 authors, et al." cut of `_CITE_ALL`, owner gone.
+_CUT_LINE = f"{_CITE_KEPT}, et al. {_CITE_TITLE}. {_CITE_TRAILER}"
+_FULL_LINE = f"{_CITE_ALL}. {_CITE_TITLE}. {_CITE_TRAILER}"
+
+
+def _publication(idx, text, authors=None, code="S1"):
+    fields = {} if authors is None else {"authors": authors}
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+            "extracted_fields": fields}
+
+
+def _source(authors=_CITE_ALL, title=_CITE_TITLE, tail=""):
+    return f"{authors}. {title}. {_CITE_TRAILER}{tail}"
+
+
+def _cite_run(*entries, owner=_CITE_OWNER):
+    return {"cv_owner": owner, "entries": list(entries)}
+
+
+def _bibliography(*lines):
+    """A render's BIBLIOGRAPHY section, each citation numbered as stage 6 numbers it."""
+    return ([("p", "BIBLIOGRAPHY"), ("p", "Peer-reviewed Research Articles:")]
+            + [("p", f"{n}. {line}") for n, line in enumerate(lines, 1)])
+
+
+def test_owner_missing_fires_when_the_et_al_cut_drops_the_owner():
+    # VNUAHA-05 / KYOPUV-06 shape: stage 5d kept six authors, the owner was
+    # ninth, and the #1292 restore declined on a damaged stage-4 list.
+    stage4 = _cite_run(_publication(381, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE)
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [(f["lint"], f["severity"]) for f in findings] == [
+        ("owner_missing_from_citation", "WARN")]
+    assert findings[0]["message"] == (
+        "entry 381 (S1): stage 4's author list names the CV owner, but the rendered "
+        "citation does not name them (its author list is cut to 'et al.')")
+    assert findings[0]["evidence"] == [_CUT_LINE[:CITATION_EVIDENCE_CHARS]]
+    # The same citation is not reported again as a bare co-author cut.
+    assert lint_etal_added(stage4, blocks) == []
+
+
+def test_owner_missing_quiet_when_the_rendered_list_keeps_the_owner():
+    stage4 = _cite_run(_publication(12, _source(), authors=_CITE_ALL))
+    assert lint_owner_missing_from_citation(stage4, _bibliography(_FULL_LINE)) == []
+
+
+def test_owner_missing_reads_only_the_author_list_an_et_al_closes():
+    # ZGBCIT 348: the owner's name survived only in a trailing note.
+    line = f"{_CITE_KEPT}, et al. {_CITE_TITLE}. {_CITE_TRAILER} Presented by Thornquist R."
+    stage4 = _cite_run(_publication(348, _source(tail=" Presented by Thornquist R."),
+                                    authors=_CITE_ALL))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(line))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 348 (S1)"]
+
+
+def test_owner_missing_quiet_when_et_al_comma_continues_the_list():
+    # KYOPUV 408 / TXTATQ 279: the source elides the middle of its list and
+    # the owner follows the "et al.,".
+    source = "Ashdown A, Brimley B... Thornquist R, Garrow G. " + _CITE_TITLE + ". " + _CITE_TRAILER
+    line = f"Ashdown A, Brimley B, et al., Thornquist R, Garrow G. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(408, source, authors="Ashdown A, Brimley B, Thornquist R, Garrow G"))
+    blocks = _bibliography(line)
+    assert lint_owner_missing_from_citation(stage4, blocks) == []
+    assert lint_etal_added(stage4, blocks) == []
+
+
+@pytest.mark.parametrize(("surname", "rendered", "fires"), [
+    ("Thornquist", "Thornqvist", False),  # PubMed's spelling, one letter off
+    ("Thornquist", "Thornquists", False),
+    ("Thornquist", "Thornqvisst", True),  # two letters off
+    ("Thornquist", "Thornqvast", True),   # two letters off, same length
+    ("Lindo", "Linde", True),             # too short to tolerate a letter
+])
+def test_owner_missing_tolerates_one_letter_only_on_a_long_surname(surname, rendered, fires):
+    # NDXXAD 160/276: a PubMed rebuild printed its own spelling of the owner.
+    source = _source(authors=f"{_CITE_KEPT}, {surname} R")
+    line = f"{_CITE_KEPT}, {rendered} R. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(160, source, authors=f"{_CITE_KEPT}, {surname} R"),
+                       owner={"last_name": surname})
+    assert bool(lint_owner_missing_from_citation(stage4, _bibliography(line))) is fires
+
+
+def test_owner_missing_falls_back_to_the_source_text_for_a_dropped_credit():
+    # BMAMWE 1028, CXRYCF 762: a consortium credit that names the owner is
+    # in the source line, not in stage 4's authors, and the rebuilt citation
+    # drops it.
+    source = _source(authors=_CITE_KEPT, tail=" (including Thornquist R)")
+    line = f"{_CITE_KEPT}. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(1028, source, authors=_CITE_KEPT))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(line))
+    assert [f["message"] for f in findings] == [
+        "entry 1028 (S1): the source citation names the CV owner, but the rendered "
+        "citation does not name them"]
+
+
+def test_owner_missing_ignores_the_surname_inside_an_email_address():
+    # MRJDWE 288: contact data fused onto the entry is not an author credit.
+    source = _source(authors=_CITE_KEPT, tail=" Contact: rowan.thornquist@example.org")
+    line = f"{_CITE_KEPT}. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(288, source, authors=_CITE_KEPT))
+    assert lint_owner_missing_from_citation(stage4, _bibliography(line)) == []
+
+
+def _co_presented_talk(co_presented="co-presented with"):
+    """A talk the source says was co-presented, as stage 4 stored it (S8,
+    the co-presenter as its only author), and its rendered line, which
+    credits the co-presenter alone."""
+    source = (f"“{_CITE_TITLE},” {co_presented} Garrow G, Annual Synthetic "
+              f"Geology Meeting, Larkspur, 2001")
+    line = f"Garrow G. {_CITE_TITLE}. Annual Synthetic Geology Meeting; 2001; Larkspur."
+    return _publication(762, source, authors="Garrow G", code="S8"), line
+
+
+@pytest.mark.parametrize("co_presented", ["co-presented with", "co presented with", "copresenter"])
+def test_owner_missing_fires_on_a_co_presented_talk_credited_to_the_others(co_presented):
+    # XWNZWW-04: "co-presented with" names only the co-presenters, and the
+    # rendered citation credits the talk to them alone. CVs spell it with a
+    # hyphen, a space or neither.
+    talk, line = _co_presented_talk(co_presented)
+    findings = lint_owner_missing_from_citation(_cite_run(talk), _bibliography(line))
+    assert [f["message"] for f in findings] == [
+        "entry 762 (S8): the source says the CV owner co-presented this talk, but the "
+        "rendered citation does not name them"]
+
+
+@pytest.mark.parametrize("owner", [None, {}, {"last_name": ""}, {"last_name": "Wu"}])
+def test_owner_missing_judges_nothing_without_a_usable_owner_surname(owner):
+    # No surname is owner_contact_missing's finding; a two-letter one is an
+    # author's initials as often as a name.
+    source = _source(authors=f"{_CITE_KEPT}, Garrow G, Wu R")
+    stage4 = _cite_run(_publication(5, source, authors=f"{_CITE_KEPT}, Garrow G, Wu R"),
+                       owner=owner)
+    assert lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE)) == []
+    # A co-presented talk credits the owner without naming them, so with no
+    # surname to look for in its line there is nothing to judge either.
+    talk, line = _co_presented_talk()
+    assert lint_owner_missing_from_citation(_cite_run(talk, owner=owner),
+                                            _bibliography(line)) == []
+
+
+@pytest.mark.parametrize("surname", ["Worth", "Core"])
+def test_owner_missing_credits_only_the_whole_surname(surname):
+    # A short surname inside a longer word is not the owner: "Worth" inside
+    # the co-author "Elsworth", "Core" inside the title word "cores".
+    stage4 = _cite_run(_publication(9, _source(), authors=_CITE_ALL),
+                       owner={"last_name": surname})
+    assert lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE)) == []
+
+
+def test_citation_pairing_reads_only_the_bibliography_and_needs_four_tokens():
+    stage4 = _cite_run(_publication(7, _source(), authors=_CITE_ALL))
+    # A numbered Appendix entry is verbatim source, not a citation stage 6
+    # wrote, and a numbered line that is a year alone pairs with nothing.
+    appendix = [("p", "T. APPENDIX"), ("p", f"1. {_CUT_LINE}")]
+    assert lint_owner_missing_from_citation(stage4, appendix) == []
+    assert lint_owner_missing_from_citation(stage4, _bibliography("2019")) == []
+    # Another publication's line is not this entry's line either, even one
+    # by the same six co-authors: their names are under 60% of its tokens.
+    other = "Holloway H, Ivesdale I. Glacial varves of a model lake. Synth Limnol. 2004;3:1-9."
+    same_group = (f"{_CITE_KEPT}. Glacial varves of a model lake and their dating by "
+                  f"layer counting. Synth Limnol. 2004;3:1-9.")
+    assert lint_owner_missing_from_citation(stage4, _bibliography(other)) == []
+    assert lint_owner_missing_from_citation(stage4, _bibliography(same_group)) == []
+    # The floor is four shared tokens exactly: an author list cut after three
+    # names is wholly the source's but does not pair; cut after four, it does.
+    three = "Ashdown A, Brimley B, Corwen C, et al."
+    four = "Ashdown A, Brimley B, Corwen C, Dunmore D, et al."
+    assert lint_owner_missing_from_citation(stage4, _bibliography(three)) == []
+    assert [f["message"].split(":")[0] for f in lint_owner_missing_from_citation(
+        stage4, _bibliography(four))] == ["entry 7 (S1)"]
+
+
+def test_citation_pairing_folds_case_and_accents():
+    # RNKYST 374 / ZDCXIV 65 shape: a PubMed rebuild prints the title in
+    # sentence case and the names without their accents, so the line shares
+    # few tokens with the source as written; it is still that entry's line.
+    authors = "Áshdöwn A, Brímley B, Córwen C, Dunmore D, Elsworth E, Fenwick F, Garrow G, Thornquist R"
+    source = f"{authors}. {_CITE_TITLE.upper()}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(374, source, authors=authors))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 374 (S1)"]
+
+
+def test_owner_missing_judges_a_three_letter_surname():
+    # ZCTARO-08: the shortest surname the lint judges is three letters.
+    authors = f"{_CITE_KEPT}, Garrow G, Orr R"
+    stage4 = _cite_run(_publication(804, _source(authors=authors), authors=authors),
+                       owner={"last_name": "Orr"})
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 804 (S1)"]
+
+
+def test_citation_pairing_keeps_an_entry_on_its_best_line():
+    # One entry, two lines over both thresholds: its full line and a cut
+    # copy (MQSUIC 382 shape). It keeps the full line, which names the owner,
+    # and is not re-paired with the worse one.
+    stage4 = _cite_run(_publication(382, _source(), authors=_CITE_ALL))
+    assert lint_owner_missing_from_citation(
+        stage4, _bibliography(_FULL_LINE, _CUT_LINE)) == []
+
+
+def test_citation_pairing_does_not_count_initials_or_one_digit_numbers():
+    # The same seven co-authors' other paper shares 8 of the 14 tokens of
+    # three or more characters in its line (57%). Counting initials and short
+    # numbers as tokens would make that 16 of 25 (64%) and pair it.
+    stage4 = _cite_run(_publication(7, _source(), authors=_CITE_ALL))
+    other = f"{_CITE_KEPT}, Garrow G. Glacial varves of a model lake. Synth Limnol. 2004;3:1-9."
+    assert lint_owner_missing_from_citation(stage4, _bibliography(other)) == []
+
+
+def test_citation_pairing_takes_the_share_of_the_line_not_of_the_source():
+    # A source carrying a long note renders as a much shorter line: all 15 of
+    # the line's tokens are the source's, though they are under half of the
+    # source's 32.
+    note = (" Selected for the quarterly highlights of the Larkspur Mossgrove society, "
+            "with an invited commentary on coring methods by its editors.")
+    stage4 = _cite_run(_publication(7, _source(tail=note), authors=_CITE_ALL))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 7 (S1)"]
+
+
+def test_citation_pairing_reads_only_publication_entries():
+    # Only an S entry prints in the bibliography. A talk (R) whose text
+    # repeats the paper's cut citation word for word matches that line
+    # better than the paper's own entry does, but it is not a candidate.
+    talk = _publication(90, _CUT_LINE, code="R")
+    stage4 = _cite_run(talk, _publication(10, _source(), authors=_CITE_ALL))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_reads_numbered_lines_through_an_all_caps_sub_heading():
+    stage4 = _cite_run(_publication(7, _source(), authors=_CITE_ALL))
+    # An all-caps sub-heading names no output section, so the numbered lines
+    # after it are still the bibliography's.
+    blocks = [("p", "BIBLIOGRAPHY"), ("p", "BOOKS AND CHAPTERS"), ("p", f"1. {_CUT_LINE}")]
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 7 (S1)"]
+    # An unnumbered paragraph in the section is not a citation stage 6
+    # numbered, so it pairs with nothing.
+    assert lint_owner_missing_from_citation(
+        stage4, [("p", "BIBLIOGRAPHY"), ("p", _CUT_LINE)]) == []
+
+
+def test_citation_pairing_gives_an_abstract_and_its_paper_their_own_lines():
+    # The abstract and the paper that followed it share authors and title;
+    # only the paper's line was cut, so only the paper is reported.
+    abstract = (f"{_CITE_ALL}. {_CITE_TITLE}. Annual Synthetic Geology Meeting; "
+                f"2018 Oct 2; Larkspur.")
+    stage4 = _cite_run(_publication(30, abstract, authors=_CITE_ALL, code="S8"),
+                       _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE) + [("p", "Abstracts"), ("p", f"1. {abstract}")]
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_takes_each_line_once():
+    # A near-duplicate entry whose own line was dropped does not borrow the
+    # line the paper rendered as: one line, one entry, one finding.
+    abstract = f"{_CITE_ALL}. {_CITE_TITLE}. Annual Synthetic Geology Meeting; 2018."
+    stage4 = _cite_run(_publication(10, _source(), authors=_CITE_ALL),
+                       _publication(30, abstract, authors=_CITE_ALL, code="S8"))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_prefers_the_entry_closest_in_size():
+    # The CV lists the paper twice, once with a note. Each copy's line holds
+    # only that copy's tokens, so both lines are wholly "in" the longer
+    # entry; the overlap over both sizes still gives each line to its own
+    # entry, and only the copy whose line was cut is reported.
+    note = " Featured in the Larkspur Mossgrove geology quarterly review highlights."
+    stage4 = _cite_run(_publication(4, _source(tail=note), authors=_CITE_ALL),
+                       _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE, _FULL_LINE + note)
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_citation_pairing_ranks_by_overlap_over_both_sizes_not_shared_count():
+    # The CV lists the paper twice, once followed by "Erratum.", and only
+    # that copy's line was cut; the cut line keeps the "Erratum", so it is
+    # that copy's. By shared-token count both copies tie for the full line
+    # (17 tokens each), the first-listed copy takes it, and the plain copy is
+    # left the cut line, with a word it does not hold.
+    stage4 = _cite_run(_publication(4, _source(tail=" Erratum."), authors=_CITE_ALL),
+                       _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_FULL_LINE, f"{_CUT_LINE} Erratum.")
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 4 (S1)"]
+
+
+def test_citation_pairing_ranks_by_overlap_over_both_sizes_not_share_of_the_source():
+    # The plain copy's tokens are all in the noted copy's line, so by share
+    # of the source that line is the plain copy's best match (100%, against
+    # 89% for the noted copy, whose "Epub ahead of print" the line leaves
+    # out). Over both sizes the noted copy keeps its line, and the plain
+    # copy, whose line was cut, is reported.
+    note = " Featured in the Larkspur Mossgrove geology quarterly review highlights."
+    stage4 = _cite_run(
+        _publication(4, _source(tail=f"{note} Epub ahead of print."), authors=_CITE_ALL),
+        _publication(10, _source(), authors=_CITE_ALL))
+    blocks = _bibliography(_CUT_LINE, _FULL_LINE + note)
+    findings = lint_owner_missing_from_citation(stage4, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (S1)"]
+
+
+def test_owner_lints_quote_the_head_of_a_long_line():
+    title = ("Tidal patterns in synthetic estuary sediment cores across four model "
+             "basins, with a reanalysis of layer counts from earlier coring campaigns")
+    authors = f"Thornquist R, {_CITE_KEPT}, Garrow G"
+    owner_kept = f"Thornquist R, Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, et al. {title}. {_CITE_TRAILER}"
+    owner_cut = f"{_CITE_KEPT}, et al. {title}. {_CITE_TRAILER}"
+    assert min(len(owner_kept), len(owner_cut)) > CITATION_EVIDENCE_CHARS
+    cut = _cite_run(_publication(1, _source(title=title), authors=_CITE_ALL))
+    kept = _cite_run(_publication(2, _source(authors=authors, title=title), authors=authors))
+    assert [f["evidence"] for f in lint_owner_missing_from_citation(cut, _bibliography(owner_cut))] == [
+        [owner_cut[:CITATION_EVIDENCE_CHARS]]]
+    assert [f["evidence"] for f in lint_etal_added(kept, _bibliography(owner_kept))] == [
+        [owner_kept[:CITATION_EVIDENCE_CHARS]]]
+
+
+def test_etal_added_reports_a_cut_that_keeps_the_owner():
+    authors = f"Thornquist R, {_CITE_KEPT}, Garrow G"
+    line = f"Thornquist R, Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, et al. {_CITE_TITLE}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(12, _source(authors=authors), authors=authors))
+    blocks = _bibliography(line)
+    findings = lint_etal_added(stage4, blocks)
+    assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [(
+        "etal_added", "INFO",
+        "entry 12 (S1): the rendered citation keeps 6 author(s) and then 'et al.', "
+        "where the source elides no author")]
+    assert lint_owner_missing_from_citation(stage4, blocks) == []
+
+
+def test_etal_added_reports_a_cut_with_no_owner_surname_to_judge():
+    stage4 = _cite_run(_publication(12, _source(), authors=_CITE_ALL), owner={})
+    assert [f["lint"] for f in lint_etal_added(stage4, _bibliography(_CUT_LINE))] == ["etal_added"]
+
+
+@pytest.mark.parametrize("elided", ["Garrow G, et al", "Garrow G, et. al.", "Garrow G and colleagues",
+                                    "Garrow G and col.", "Garrow G…", "Garrow G..."])
+def test_etal_added_quiet_when_the_source_elides_authors_itself(elided):
+    # TAUBPU 202 ("and col."), EQADVR 144 ("et.al."): the rendered "et al."
+    # reproduces the source.
+    source = _source(authors=f"{_CITE_KEPT}, {elided}")
+    stage4 = _cite_run(_publication(202, source, authors=_CITE_KEPT), owner={})
+    assert lint_etal_added(stage4, _bibliography(_CUT_LINE)) == []
+
+
+@pytest.mark.parametrize("editors", ["In: Garrow G, Holloway H, et al., eds.",
+                                     "In: Garrow G, et al. eds."])
+def test_etal_added_ignores_an_et_al_in_an_editor_list(editors):
+    # VVRTUC 703: the "et al." closes the editors after the title, not the authors.
+    line = f"Thornquist R, Ashdown A. Chapter on tidal cores. {editors} Synthetic Geology. Larkspur: Mossgrove Press; 2019."
+    source = f"Thornquist R, Ashdown A. Chapter on tidal cores. In: Synthetic Geology, Garrow G, Holloway H, Ivesdale I, Jessop J, Larkspur, Mossgrove Press, 2019."
+    stage4 = _cite_run(_publication(703, source, authors="Thornquist R, Ashdown A", code="S4"))
+    assert lint_etal_added(stage4, _bibliography(line)) == []
+
+
+def test_owner_lints_are_registered_lints():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    for lint_id, rule in (("owner_missing_from_citation", lint_owner_missing_from_citation),
+                          ("etal_added", lint_etal_added)):
+        assert lint_id in KNOWN_LINTS
+        assert any(spec.lint_id == lint_id and spec.rule is rule
+                   and spec.inputs == ("stage_4", "blocks") for spec in LINT_REGISTRY)
+
+
+def test_owner_lint_prevalence_is_the_measured_farm_fraction():
+    """Runs with a finding, measured 2026-10-02 over the 63-run EBYSBC, s7ab
+    and pilot farm (#1259); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["owner_missing_from_citation"] == round(30 / 63, 3)
+    assert LINT_PREVALENCE["etal_added"] == round(59 / 63, 3)
+
+
+def test_run_doctor_reads_the_tracked_insertion_not_the_deleted_source(tmp_path):
+    """#1259 end to end, the OIYKZE-02 shape: stage 6 replaced the CV line
+    with a tracked deletion plus a tracked insertion of a citation without
+    the owner. The owner survives only as w:delText, which accepting the
+    changes removes, so the finding must come from the inserted text."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    root = _build_clean_run(tmp_path)
+    fields_path = next((root / "stage_4_field_extraction").glob(f"{_UID}*_fields.json"))
+    stage4 = json.loads(fields_path.read_text())
+    authors = f"{_CITE_KEPT}, Garrow G, Shapiro M"
+    stage4["entries"].append(_publication(115, _source(authors=authors), authors=authors))
+    fields_path.write_text(json.dumps(stage4))
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    doc = Document(str(docx_path))
+    doc.add_paragraph("BIBLIOGRAPHY")
+    para = doc.add_paragraph("1. ")
+    para._p.append(parse_xml(f'<w:del {nsdecls("w")} w:id="1" w:author="t"><w:r>'
+                             f'<w:delText>{_source(authors=authors)}</w:delText></w:r></w:del>'))
+    para._p.append(parse_xml(f'<w:ins {nsdecls("w")} w:id="2" w:author="t"><w:r>'
+                             f'<w:t>{_CUT_LINE}</w:t></w:r></w:ins>'))
+    doc.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    owner = [f for f in payload["findings"] if f["lint"] == "owner_missing_from_citation"]
+    assert [(f["severity"], f["evidence"]) for f in owner] == [
+        ("WARN", [_CUT_LINE[:CITATION_EVIDENCE_CHARS]])]
+    assert owner[0]["message"].startswith("entry 115 (S1): ")
+
+
 # ------------------------------------------------------ lint 12: pipe leaks
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
@@ -1571,6 +2016,27 @@ def test_pipe_leaks_flags_pipe_free_fused_citation():
     assert findings[0]["evidence"][0].startswith("[bibliography] 31.")
 
 
+def test_pipe_leaks_one_abstract_at_several_meetings_is_not_fused():
+    """EBYSBC: one abstract listing the meetings it was presented at has two
+    venue-date wedges with only venue names between them; 0 of 2 such hits
+    were real. The fused shape needs a second author list and title."""
+    venues = ("12. Doe J, Roe K, Poe L, et al. Widget outcomes in example "
+              "cohorts. Example Society Annual Meeting; 2025 Apr; Springfield, "
+              "IL; Sample Research Conference; 2025 Jan; Shelbyville, CA.")
+    also = ("13. Doe J, Roe K. Gizmo trends. Example Forum; 2021 Mar; Virtual. "
+            "Also presented at Sample Symposium; 2020 Nov; Example City, CA.")
+    blocks = [("p", "S. BIBLIOGRAPHY"), ("p", venues), ("p", also)]
+    assert lint_pipe_leaks(blocks) == []
+
+
+def test_pipe_leaks_initials_between_wedges_are_not_a_second_citation():
+    """'Dr.' and single-letter initials are not sentence ends, so a venue
+    named after a person does not read as a second citation's body."""
+    line = ("14. Doe J. Widget study. Example Meeting; 2019 May; Example City, "
+            "CA; Dr. A. B. Sample Memorial Lecture; 2019 Jun; Other City, NY.")
+    assert lint_pipe_leaks([("p", "S. BIBLIOGRAPHY"), ("p", line)]) == []
+
+
 # ----------------------------------------------------- lint 13: table shape
 
 _HONORS_HEADER = ["Name of award", "Organization", "Date awarded (yyyy)"]
@@ -1583,9 +2049,8 @@ _BLOB = ("Basic Science Innovation in Education Award – Runner-up "
 def test_table_shape_flags_malformed_honors_rows():
     tables = [[_HONORS_HEADER,
                [_BLOB, "MD", ""],
-               ["Association for Educational Communication and Technology "
-                "Award 2020",
-                "Association for Educational Communication and Technology",
+               ["College of Example Studies 2020 Outstanding Thesis Award",
+                "College of Example Studies 2020 Outstanding Thesis",
                 "2020"],
                ["Distinguished Teaching Award", "Indiana University", "2013"]]]
     findings = lint_table_shape(tables)
@@ -1609,6 +2074,11 @@ _GRANTOR_NAMED_AWARDS = [
      "RSNA R&E Foundation"),
     ("College of Basic Sciences Dean's List", "College of Basic Sciences"),
     ("Japanese Government Monbusho Scholarship", "Japanese Government"),
+    # EBYSBC: the org plus nothing but an award word is the award's real
+    # name and grantor (5 of 5 farm hits), and so is a name equal to its org.
+    ("Example Service Corps Scholarship", "Example Service Corps"),
+    ("Example Foundation Fellowship", "Example Foundation"),
+    ("Example Honor Society", "Example Honor Society"),
 ]
 
 
@@ -1624,19 +2094,38 @@ def test_table_shape_does_not_flag_awards_named_after_their_grantor():
 
 
 def test_table_shape_flags_org_fabricated_from_the_name():
-    """#889: name == org, org + an award word, or org + a year."""
-    org = "Association for Educational Research"
-    for name in (org, f"{org} Award", f"{org} Fellowship", f"{org} 2019",
-                 f"{org} Prize 2019", f"{org} List", f"{org} Scholarship",
-                 f"{org} Fellow", f"{org}, 2019", f"{org} (2019)"):
+    """#887's shapes: an organization cut out of the award name that carries
+    a year or ends in a holder's role word -- no grantor's name does."""
+    for name, org in (
+            ("College of Example Studies 2015 Outstanding Thesis Award",
+             "College of Example Studies 2015 Outstanding Thesis"),
+            ("Example University Representative, Example Student Conference",
+             "Example University Representative"),
+            ("Example Society Fellow Award", "Example Society Fellow"),
+            ("Example Academy Member of the Year", "Example Academy Member")):
         ev = _honors_evidence(name, org)
         assert any("duplicated in name" in e for e in ev), name
 
 
+def test_table_shape_an_org_not_cut_from_the_name_is_not_fabricated():
+    """A year or role word in an organization the award name does not
+    contain says nothing about the name."""
+    for org in ("Example Society 2019 Meeting", "Example University Representative"):
+        assert _honors_evidence("Best Poster Award", org) == [], org
+
+
+def test_table_shape_a_role_word_inside_an_org_name_is_not_a_tell():
+    """Only a TRAILING role word marks a role; 'Fellows' and an inner
+    'Member' are part of real grantors' names."""
+    for name, org in (("Example Fellows Program Award", "Example Fellows Program"),
+                      ("Example Member Society Prize", "Example Member Society")):
+        assert _honors_evidence(name, org) == [], name
+
+
 def test_table_shape_org_check_is_linear_on_runs_of_years():
     """A starred-alternation fullmatch backtracked ~13x per listed year; eight
-    years plus one more word took minutes. Must stay instant, and the
-    leftover word means the org was not fabricated from the name."""
+    years plus one more word took minutes. Must stay instant, and an org
+    with no year or role word of its own was not fabricated from the name."""
     import time
     org = "Association for Educational Research"
     name = f"{org} " + ", ".join(str(y) for y in range(1990, 2010)) + " Grant"
@@ -1662,6 +2151,124 @@ def test_table_shape_initials_and_dr_are_not_sentence_boundaries():
                             "Some University") == []
     two = "Best Poster Award. Given at the meeting. Judged by peers."
     assert any("blob" in e for e in _honors_evidence(two, "Some University"))
+
+
+def _honors_stage4(*entries):
+    return {"entries": [{"taxonomy_code": "H", "element_idx_start": idx,
+                         "text": text, "extracted_fields": fields}
+                        for idx, text, fields in entries]}
+
+
+_ONE_AWARD = {"award_name": "Example Teaching Award",
+              "granting_body": "Example College", "date": "2003-04-15"}
+
+
+def test_table_shape_warns_when_one_award_renders_as_several_rows():
+    """EBYSBC ZDCXIV-02: an award on one line and its 'Organization - date'
+    on the next is ONE stage-4 award, but the honors parser renders each
+    line as a row."""
+    stage4 = _honors_stage4(
+        (12, "Example Teaching Award\nExample College - 04/15/2003", _ONE_AWARD),
+        (14, "Distinguished Example Prize, Sample Society, 2010",
+         {"award_name": "Distinguished Example Prize", "date": "2010"}))
+    tables = [[_HONORS_HEADER,
+               ["Example Teaching Award", "", ""],
+               ["Example College \u2014 04/15/2003", "", ""],
+               ["Distinguished Example Prize", "Sample Society", "2010"]]]
+    split = [f for f in lint_table_shape(tables, stage4) if "split" in f["message"]]
+    assert len(split) == 1
+    assert split[0]["severity"] == "WARN"
+    assert "1 row(s) split off 1 award entry" in split[0]["message"]
+    assert split[0]["evidence"] == ["entry 12 (H): 2 rows from 1 stage-4 award(s)"]
+    # Without stage 4 there is nothing to count rows against.
+    assert not [f for f in lint_table_shape(tables) if "split" in f["message"]]
+
+
+def test_table_shape_rows_stage4_extracted_as_awards_are_not_split():
+    """A fused list stage 4 split into records (`stage4_records`, or an
+    off-schema `awards` list) renders one row per record, rightly."""
+    records = [{"award_name": "Example Alpha Award"}, {"award_name": "Example Beta Award"}]
+    stage4 = _honors_stage4(
+        (20, "Example Alpha Award\nExample Beta Award",
+         {"award_name": "Example Beta Award", "stage4_records": records}),
+        (22, "Example Gamma Prize\nExample Delta Prize",
+         {"awards": [{"name": "Example Gamma Prize"}, {"name": "Example Delta Prize"}]}))
+    tables = [[_HONORS_HEADER] + [[name, "", "2001"] for name in (
+        "Example Alpha Award", "Example Beta Award",
+        "Example Gamma Prize", "Example Delta Prize")]]
+    assert lint_table_shape(tables, stage4) == []
+
+
+def test_table_shape_a_row_two_entries_share_is_traced_to_neither():
+    """'Example University' sits in both entries' text, so its row counts
+    for no entry: the split count is a floor, never a guess."""
+    stage4 = _honors_stage4(
+        (30, "Example Merit Award\nExample University", {"award_name": "Example Merit Award"}),
+        (32, "Example Service Award\nExample University", {"award_name": "Example Service Award"}))
+    tables = [[_HONORS_HEADER, ["Example Merit Award", "", "2001"],
+               ["Example University", "", ""], ["Example Service Award", "", "2002"]]]
+    assert lint_table_shape(tables, stage4) == []
+
+
+def _split_evidence(tables, stage4):
+    """The evidence of the split finding, [] when there is none."""
+    return [ev for f in lint_table_shape(tables, stage4) if "split" in f["message"]
+            for ev in f["evidence"]]
+
+
+# One award whose 'Organization - date' line renders as a second row.
+_SPLIT_TEXT = "Example Teaching Award\nExample College - 04/15/2003"
+_SPLIT_TABLE = [[_HONORS_HEADER, ["Example Teaching Award", "", ""],
+                 ["Example College — 04/15/2003", "", ""]]]
+
+
+def test_table_shape_only_honors_entries_own_honors_rows():
+    """An appointment whose text also names the award is no owner of the
+    award's row: counted as one, it would make the row shared and hide the
+    split. On the EBYSBC farm, every split finding changes without this."""
+    stage4 = _honors_stage4((12, _SPLIT_TEXT, _ONE_AWARD))
+    stage4["entries"].append({
+        "taxonomy_code": "D1", "element_idx_start": 40,
+        "text": "Chair, Example Teaching Award Committee, 2005-2008",
+        "extracted_fields": {"position": "Chair"}})
+    assert _split_evidence(_SPLIT_TABLE, stage4) == [
+        "entry 12 (H): 2 rows from 1 stage-4 award(s)"]
+
+
+def test_table_shape_a_list_of_plain_values_is_one_award():
+    """Only a list of records counts awards. A list of plain values, here two
+    bodies that gave one award jointly, is still one award, so its two rows
+    are a split."""
+    joint = {**_ONE_AWARD, "granting_body": ["Example College", "Sample Society"]}
+    assert _split_evidence(_SPLIT_TABLE, _honors_stage4((12, _SPLIT_TEXT, joint))) == [
+        "entry 12 (H): 2 rows from 1 stage-4 award(s)"]
+
+
+def test_table_shape_a_row_without_letters_or_digits_is_no_entrys():
+    """A name cell of punctuation only has an empty key, which every line
+    contains: it is traced to no entry, even when only one entry exists."""
+    stage4 = _honors_stage4((12, "Example Teaching Award, Example College, 2003", _ONE_AWARD))
+    tables = [[_HONORS_HEADER, ["Example Teaching Award", "Example College", "2003"],
+               ["—", "", ""]]]
+    assert _split_evidence(tables, stage4) == []
+
+
+def test_table_shape_a_row_is_one_line_of_an_entry_not_text_across_a_break():
+    """The honors parser renders each source line as a row, so a row is one
+    line, or part of one. Entry 82's wrapped "...Example" / "University
+    Hospital" can render no "Example University" row, so that row is entry
+    80's alone, and both entries are split."""
+    stage4 = _honors_stage4(
+        (80, "Example Merit Award\nExample University", {"award_name": "Example Merit Award"}),
+        (82, "Example Service Award, Example\nUniversity Hospital",
+         {"award_name": "Example Service Award"}))
+    tables = [[_HONORS_HEADER, ["Example Merit Award", "", "2001"],
+               ["Example University", "", ""],
+               ["Example Service Award, Example", "", "2002"],
+               ["University Hospital", "", ""]]]
+    assert _split_evidence(tables, stage4) == [
+        "entry 80 (H): 2 rows from 1 stage-4 award(s)",
+        "entry 82 (H): 2 rows from 1 stage-4 award(s)"]
 
 
 def test_table_shape_message_does_not_cite_closed_issue():
@@ -2299,6 +2906,9 @@ def _build_clean_run(tmp_path, uid=_UID):
     _write_stage(root, "stage_5b_institution_enrichment",
                  f"{uid}_cv_institution_enriched.json",
                  {"document_uid": uid, "entries": []})
+    _write_stage(root, "stage_5d_citation_formatted",
+                 f"{uid}_cv_citation_formatted.json",
+                 {"document_uid": uid, "entries": []})
     _write_stage(root, "stage_4_5_research_summary", f"{uid}_cv_research_summary.json",
                  {"document_uid": uid, "research_summary": {"text": "x"}})
 
@@ -2328,14 +2938,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (34), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (38), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 32
+    assert len(payload["findings"]) == 36
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -2868,12 +3478,75 @@ def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
     assert "entry 96 (R): date=1902" in hits[0]["message"]
 
 
+def test_run_doctor_hands_the_year_lints_stage_5d(tmp_path):
+    """The registry rows give implausible_year and year_not_in_source the
+    stage-5d artifact: a year a formatter rewrote out of the entry is not
+    judged, and without 5d the same entries are. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [
+        {"taxonomy_code": "K4", "element_type": "paragraph", "element_idx_start": 97,
+         "element_idx_end": 97, "text": "Example lecture, March 3, 2014",
+         "extracted_fields": {"date": "1900-03-03"}},
+        {"taxonomy_code": "K1", "element_type": "paragraph", "element_idx_start": 98,
+         "element_idx_end": 98, "text": "Example course 2017-2019",
+         "extracted_fields": {"start_date": "2016"}}]
+    fields.write_text(json.dumps(data))
+
+    def year_hits():
+        payload = run_doctor(root, _UID)
+        return sorted(f["lint"] for f in payload["findings"]
+                      if f["lint"] in ("implausible_year", "year_not_in_source"))
+
+    assert year_hits() == ["implausible_year", "year_not_in_source"]
+    _write_stage(root, "stage_5d_citation_formatted", f"{_UID}_cv_citation_formatted.json",
+                 {"document_uid": _UID, "entries": [
+                     {"element_idx_start": 97, "element_idx_end": 97,
+                      "extracted_fields": {"formatted_text": "**2014-03-03** - Example lecture"}},
+                     {"element_idx_start": 98, "element_idx_end": 98,
+                      "extracted_fields": {"formatted_text": "2017-2019 Example course"}}]})
+    assert year_hits() == []
+
+
+def test_run_doctor_hands_table_shape_stage_4(tmp_path):
+    """The table_shape row gives the lint stage 4, so a one-award honors entry
+    rendered as two rows reaches the report as a WARN."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "H", "element_type": "paragraph", "element_idx_start": 99,
+        "text": "Example Teaching Award\nExample College - 2005",
+        "extracted_fields": {"award_name": "Example Teaching Award", "date": "2005"}})
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(docx_path)
+    table = output.add_table(rows=3, cols=3)
+    for row, cells in zip(table.rows, (_HONORS_HEADER, ["Example Teaching Award", "", "2005"],
+                                       ["Example College \u2014 2005", "", ""])):
+        for cell, text in zip(row.cells, cells):
+            cell.paragraphs[0].text = text
+    output.save(docx_path)
+
+    payload = run_doctor(root, _UID)
+
+    split = [f for f in payload["findings"]
+             if f["lint"] == "table_shape" and "split" in f["message"]]
+    assert len(split) == 1 and split[0]["severity"] == "WARN"
+    assert split[0]["evidence"] == ["entry 99 (H): 2 rows from 1 stage-4 award(s)"]
+
+
 def test_field_lint_prevalence_is_the_measured_wave1_fraction():
     """Measured 2026-10-02 over the 163-CV wave-1 stage-4 farm (one fire per
     CV at any severity); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["offschema_fields"] == round(37 / 163, 3)
     assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
+    # #1243: the farm's 126 census CVs; its 37 IPXFBA artifacts are gone.
+    assert LINT_PREVALENCE["multi_record_coverage"] == round(64 / 126, 3)
+    # 63-run EBYSBC/s7ab/pilot farm, 2026-10-02.
+    assert LINT_PREVALENCE["year_not_in_source"] == round(11 / 63, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

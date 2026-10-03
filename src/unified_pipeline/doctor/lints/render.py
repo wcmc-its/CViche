@@ -15,6 +15,7 @@ import functools
 import json
 import re
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Tuple
@@ -31,6 +32,7 @@ from unified_pipeline.core.text_norm import (
     looks_like_record,
     norm,
 )
+from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
@@ -756,13 +758,36 @@ _NUMBERED_LINE_RE = re.compile(r"^\s*\d+\.\s")
 _VENUE_DATE_RE = re.compile(r";\s*(?:19|20)\d{2}\b[^;.\n]*;")
 
 
+#: Sentence ends between two venue-date wedges that make the text between
+#: them a second citation's body: its author list and its title each end in
+#: one. One abstract presented at several meetings has only the next
+#: meeting's place and name there, at most one sentence end before an "also
+#: presented at". On the 63-run EBYSBC farm the 10 flagged items of EOSAFF
+#: and ZGBCIT (both findings verified false) and 3 more on JNATFN and VGHNZD
+#: were that shape; the one item left, on BMHBJZ, is two abstracts.
+FUSED_CITATION_GAP_SENTENCES = 2
+
+
+def _fuses_citations(line: str) -> bool:
+    """Whether a numbered item holds a second citation, not just a second
+    venue: some gap between consecutive venue-date wedges carries
+    `FUSED_CITATION_GAP_SENTENCES` sentence ends (`_SENTENCE_BOUNDARY_RE`,
+    so an initial or "Dr." is not one)."""
+    wedges = list(_VENUE_DATE_RE.finditer(line))
+    return any(
+        len(_SENTENCE_BOUNDARY_RE.findall(line, left.end(), right.start()))
+        >= FUSED_CITATION_GAP_SENTENCES
+        for left, right in zip(wedges, wedges[1:]))
+
+
 def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
     """Verbatim-fallback formatting reaching the output document: paragraphs
     carrying multiple raw ' | ' field separators, clusters of single-pipe
     bullets under one section, and numbered citations fusing several
-    venue-date patterns (#208 rendered costs). Paragraph blocks only:
-    _table_lines synthesizes ' | ' row joins by design. The appendix is
-    excluded — it is verbatim-by-contract."""
+    citations' venue-date patterns (#208 rendered costs) -- not one abstract
+    listing the meetings it was presented at (`_fuses_citations`). Paragraph
+    blocks only: _table_lines synthesizes ' | ' row joins by design. The
+    appendix is excluded — it is verbatim-by-contract."""
     multi: List[str] = []
     fused: List[str] = []
     clusters: Dict[str, List[str]] = {}
@@ -789,7 +814,7 @@ def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
         elif seps == 1 and line.startswith("•"):
             clusters.setdefault(section or "?", []).append(line[:100])
         if (seps < PIPE_LEAK_MIN_SEPS and _NUMBERED_LINE_RE.match(line)
-                and len(_VENUE_DATE_RE.findall(line)) >= 2):
+                and _fuses_citations(line)):
             fused.append(f"[{section or '?'}] {line[:100]}")
     findings = []
     if multi:
@@ -828,26 +853,21 @@ _SENTENCE_BOUNDARY_RE = re.compile(r"(?<!\bDr)(?<!\b[A-Z])\.\s+[A-Z]")
 HONORS_ORG_MIN_CHARS = 8
 
 
-# What may remain of a name once its org is removed for the org to count as
-# "fabricated from the name" (#889): only an award word and/or digits (a year).
-# Stripped with sub() and tested for emptiness, never fullmatch() over a
-# starred alternation -- that shape backtracks exponentially on runs of years.
-_AWARD_ORG_LEFTOVER_RE = re.compile(
-    r"award|prize|fellow(?:ship)?|scholarship|list"
-    r"|\d+|[\s,.;:()\-\u2013\u2014/&]+",
-    re.IGNORECASE)
-
-
 def _org_fabricated_from_name(org: str, name: str) -> bool:
-    """True when `name` is `org` plus nothing but an award word and/or a
-    year -- the org column was copied out of the name (#229/#889). An award
-    merely NAMED AFTER its grantor ("<org> Postdoc Travel Award") has other
-    words left over and is legitimate."""
-    org_n, name_n = norm(org), norm(name)
-    if org_n not in name_n:
+    """True when the organization was cut out of the award name (#229/#887):
+    it occurs inside the name and carries what no grantor's own name does --
+    a digit (a year belongs in the date column) or a trailing holder's role
+    word (`_ORG_ROLE_WORDS`): "College of Example Studies 2015 Outstanding
+    Thesis" from "... Thesis Award". An award named after its grantor ("<org>
+    Fellowship" granted by <org>) is legitimate whatever else its name says:
+    every such hit was a real award in batch 4 (#889: 20 of 23) and on the
+    63-run EBYSBC farm (5 of 5), and stage 6's own fallback has refused to
+    derive an org from the award name that way since #979."""
+    org_n = norm(org)
+    if not org_n or org_n not in norm(name):
         return False
-    leftover = name_n.replace(org_n, " ", 1)
-    return not _AWARD_ORG_LEFTOVER_RE.sub("", leftover)
+    return (any(ch.isdigit() for ch in org_n)
+            or org_n.split()[-1].strip(".,;") in _ORG_ROLE_WORDS)
 
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -896,6 +916,19 @@ class _HonorsTableShape(NamedTuple):
     non_blank_rows: int
 
 
+def _honors_header(tbl: list[list[str]]) -> list[str] | None:
+    """The normalized header row of an honors/awards table with at least one
+    data row, or None when `tbl` is not one (no 'name of award'/'date
+    awarded' header)."""
+    if len(tbl) < 2 or not tbl[0]:
+        return None
+    header = [norm(cell) for cell in tbl[0]]
+    header_all = " ".join(header)
+    if "name of award" not in header_all and "date awarded" not in header_all:
+        return None
+    return header
+
+
 def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     """One table's honors-shape defects (#229), or None when it is not an
     honors/awards table at all (no 'name of award'/'date awarded' header).
@@ -903,13 +936,9 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     (#816's `honors_malformed_rows`/`honors_rows`) sums the SAME per-row
     predicate the finding below is built from, not a second definition of
     'malformed'."""
-    if len(tbl) < 2 or not tbl[0]:
+    header = _honors_header(tbl)
+    if header is None:
         return None
-    header = [norm(cell) for cell in tbl[0]]
-    header_all = " ".join(header)
-    if "name of award" not in header_all and "date awarded" not in header_all:
-        return None
-
     name_i = _alias_col(header, _AWARD_NAME_ALIASES)
     org_i = _alias_col(header, _AWARD_ORG_ALIASES)
     date_i = _alias_col(header, _AWARD_DATE_ALIASES)
@@ -962,12 +991,123 @@ def honors_table_totals(tables: list[list[list[str]]]) -> tuple[int, int]:
     return malformed, total
 
 
-def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
+# --- honors rows split off one award ------------------------------------------
+#
+# A CV that writes an award on one line and its "Organization - date", or the
+# paper it was given for, on the next reaches stage 6 as ONE H entry holding
+# ONE stage-4 award, and the honors parser renders every line as an award of
+# its own (EBYSBC ZDCXIV-02: 24 entries, 43 rows). A row is traced to its
+# entry by text, so the count is a floor: a row whose name more than one
+# entry's text carries ("University of X") is traced to none.
+
+#: The taxonomy code whose entries the honors table renders.
+HONORS_CODE = "H"
+
+#: Split-off entries a finding lists as evidence (the malformed-row finding
+#: lists 6 defects).
+HONORS_SPLIT_EVIDENCE_MAX = 6
+
+
+class _HonorsEntry(NamedTuple):
+    """One stage-4 H entry as the split check reads it: its index, the
+    punctuation-free keys of its text's lines and tab cells, and how many
+    awards stage 4 extracted from it."""
+    element_idx: object
+    line_keys: tuple[str, ...]
+    awards: int
+
+
+class HonorsSplit(NamedTuple):
+    """An H entry that renders as more honors rows than stage 4 has awards."""
+    element_idx: object
+    rows: int
+    awards: int
+
+
+def _row_key(text: str) -> str:
+    return _PASSAGE_PUNCT_RE.sub("", norm(text))
+
+
+def _stage4_award_count(fields: object) -> int:
+    """How many awards stage 4 extracted for one entry: the longest list of
+    objects among its fields (`stage4_records`, or an off-schema list such
+    as `awards`, which a fused award list fills), else one."""
+    if not isinstance(fields, Mapping):
+        return 1
+    return max((len(value) for value in fields.values()
+                if isinstance(value, list) and value
+                and all(isinstance(item, Mapping) for item in value)), default=1)
+
+
+def _honors_entries(stage4: dict) -> list[_HonorsEntry]:
+    entries = []
+    for raw in stage4.get("entries", []):
+        if raw.get("taxonomy_code") != HONORS_CODE:
+            continue
+        parts = re.split(r"[\n\t]", str(raw.get("text") or ""))
+        entries.append(_HonorsEntry(
+            raw.get("element_idx_start"),
+            tuple(key for key in map(_row_key, parts) if key),
+            _stage4_award_count(raw.get("extracted_fields"))))
+    return entries
+
+
+def _row_owner(name: str, entries: list[_HonorsEntry]) -> int | None:
+    """Position in `entries` of the one entry whose text has a line holding
+    this row's name, or None when no entry, or more than one, does. The
+    whole cell is the key, a " — 04/2003" stage 6 kept from the source
+    line included: it is what tells one "University of X" line from
+    another."""
+    key = _row_key(name)
+    if not key:
+        return None
+    owners = [pos for pos, entry in enumerate(entries)
+              if any(key in line for line in entry.line_keys)]
+    return owners[0] if len(owners) == 1 else None
+
+
+def honors_split_entries(tables: list[list[list[str]]],
+                         stage4: dict) -> list[HonorsSplit]:
+    """The H entries whose rows in the honors table outnumber the awards
+    stage 4 extracted from them: one award rendered as several rows."""
+    entries = _honors_entries(stage4)
+    rows: Counter = Counter()
+    for tbl in tables:
+        header = _honors_header(tbl)
+        name_i = None if header is None else _alias_col(header, _AWARD_NAME_ALIASES)
+        if name_i is None:
+            continue
+        for row in tbl[1:]:
+            if name_i < len(row) and row[name_i]:
+                owner = _row_owner(row[name_i], entries)
+                if owner is not None:
+                    rows[owner] += 1
+    return [HonorsSplit(entry.element_idx, rows[pos], entry.awards)
+            for pos, entry in enumerate(entries) if rows[pos] > entry.awards]
+
+
+def _honors_split_finding(splits: list[HonorsSplit]) -> dict:
+    """WARN, unlike the malformed-row finding: each split row is a record
+    that is not one (EBYSBC: 4 of 63 farm runs, each a verified finding)."""
+    extra = sum(split.rows - split.awards for split in splits)
+    return _finding(
+        "table_shape", "WARN",
+        f"honors table: {extra} row(s) split off {len(splits)} award "
+        f"entr{'y' if len(splits) == 1 else 'ies'} -- one stage-4 award "
+        f"renders as several rows",
+        [f"entry {split.element_idx} ({HONORS_CODE}): {split.rows} rows from "
+         f"{split.awards} stage-4 award(s)"
+         for split in splits[:HONORS_SPLIT_EVIDENCE_MAX]])
+
+
+def lint_table_shape(tables: list[list[list[str]]],
+                     stage4: dict | None = None) -> list[dict]:
     """Honors-like tables whose rows are mis-shaped (#229): the stage-6
     multi-award fallback puts citation blobs in the name cell, leaks state
     abbreviations into the organization column, leaves the date column empty
-    while the year sits in the name, and duplicates the organization inside
-    the name."""
+    while the year sits in the name, and cuts the organization out of the
+    name. With `stage4` (optional), also an award rendered as several rows
+    (`honors_split_entries`)."""
     findings = []
     for tbl in tables:
         shape = _honors_table_shape(tbl)
@@ -983,6 +1123,9 @@ def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
             f"honors table: {len(shape.defective_rows)}/{shape.non_blank_rows} "
             f"row(s) malformed ({len(shape.defects)} defect(s))",
             shape.defects[:6]))
+    splits = honors_split_entries(tables, stage4) if stage4 else []
+    if splits:
+        findings.append(_honors_split_finding(splits))
     return findings
 
 
@@ -1373,3 +1516,271 @@ def lint_llm_refusal_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         f"{len(refusals)} distinct language-model refusal or "
         "request-for-input text(s) rendered in the output",
         refusals[:OUTPUT_LEAK_EVIDENCE_LIMIT])]
+
+
+# Lint 14n, owner_missing_from_citation, and its sibling etal_added (#1259):
+# each publication read against its OWN rendered bibliography line. Stage 5d's
+# prompt cuts an author list to "first 6 authors, et al.", and the #1292 owner
+# restore declines whenever stage 4's author list is damaged, so the CV owner
+# disappears from their own citation; the co-authors after the sixth go on
+# every cut list. The whole-page probes above cannot see either, because the
+# owner's name is on every other line: batch EBYSBC (2026-10-02) carried 20
+# owner-cut citations on 14 CVs and about 150 co-author cuts on 27, and
+# nothing fired.
+
+#: The taxonomy letter of a publication, and of the output section stage 6
+#: prints every publication under (`_SECTION_HEADING_PREFIXES`).
+_BIBLIOGRAPHY_LETTER = "S"
+
+#: A matching token: 3+ letters or digits, so a year, a volume and a page
+#: range count and an author's initials do not.
+_CITATION_TOKEN_RE = re.compile(r"[^\W_]{3,}")
+
+#: A rendered line and a publication entry pair when they share at least
+#: CITATION_MATCH_MIN_TOKENS tokens and those are at least
+#: CITATION_MATCH_MIN_SHARE of the line's own: the line reformats the source
+#: citation, so nearly every token it prints is the source's (a PubMed
+#: rebuild adds a few). The floor keeps a numbered line that is a year and
+#: little else from pairing with every citation of that year. On the 63-run
+#: EBYSBC/s7ab/pilot farm rendered from origin/dev c3d87c5f, 8,870 of 8,998
+#: publication entries pair; for a share anywhere from 0.5 to 0.7 and a floor
+#: from 2 to 6, the 112 owner findings change by at most one and the 706
+#: etal_added findings by at most two.
+CITATION_MATCH_MIN_TOKENS = 4
+CITATION_MATCH_MIN_SHARE = 0.6
+
+#: A word of a name: letters only.
+_NAME_WORD_RE = re.compile(r"[^\W\d_]+")
+
+#: The shortest surname word judged. A two-letter word is an author's
+#: initials as often as a name ("Example LI"); no owner on the farm has a
+#: surname that short, so it is left unjudged rather than guessed at.
+OWNER_SURNAME_MIN_CHARS = 3
+
+#: A surname word this long still counts as shown one letter off: a PubMed
+#: rebuild prints PubMed's spelling of the owner's name (NDXXAD: a letter
+#: doubled), which is the owner, not their absence.
+OWNER_SPELLING_TOLERANCE_MIN_CHARS = 6
+
+#: An "et al." that closes an author list. "et al.," does not: a source that
+#: elides the middle of its list goes on after it ("A, B, et al., Owner X").
+_ET_AL_CLOSE_RE = re.compile(r"\bet\s+al\b(?!\.?\s*,)", re.IGNORECASE)
+
+#: A source that elides authors itself: "et al.", "et.al.", "and colleagues",
+#: "and col.", or an ellipsis. A rendered "et al." then reproduces it.
+_SOURCE_ELISION_RE = re.compile(
+    r"\bet\.?\s*al\b|\band\s+col(?:l(?:eagues)?)?\b|\u2026|\.\.\.", re.IGNORECASE)
+
+#: A talk the source says was given with others ("co-presented with",
+#: "co-presenter"): the owner presented it whether or not the line names them.
+_CO_PRESENTED_RE = re.compile(r"\bco-?\s?present(?:ed|er|ers|ing)?\b", re.IGNORECASE)
+
+#: Contact data a source line can carry. The owner's surname inside an email
+#: address does not credit them (MRJDWE).
+_EMAIL_OR_URL_RE = re.compile(r"\S+@\S+|\bhttps?://\S+|\bwww\.\S+", re.IGNORECASE)
+
+#: Characters of the rendered line quoted as evidence.
+CITATION_EVIDENCE_CHARS = 160
+
+
+class RenderedCitation(NamedTuple):
+    """One publication entry and the bibliography line it rendered as, read
+    once at the artifact boundary (§8.1). `line` is the accepted-changes
+    text -- `docx_body_blocks` keeps `w:ins` and drops `w:delText` -- with
+    its citation number removed. `authors` is stage 4's own value, or ''
+    when it is absent or not text."""
+    element_idx: object
+    code: str
+    source: str
+    authors: str
+    line: str
+
+
+def _bibliography_lines(blocks: list[tuple[str, str]]) -> list[str]:
+    """The numbered paragraphs under the BIBLIOGRAPHY heading, numbers
+    removed: stage 6 prints each publication as one ("12. Author A, ...").
+    The Appendix's numbered verbatim entries are not citations it wrote."""
+    lines: list[str] = []
+    letter = None
+    for kind, text in blocks:
+        if kind != "p":
+            continue
+        if _output_section_header(text):
+            letter = _section_letter(text) or letter
+        elif letter == _BIBLIOGRAPHY_LETTER and _NUMBERED_LINE_RE.match(text):
+            lines.append(_NUMBERED_LINE_RE.sub("", text, count=1).strip())
+    return lines
+
+
+def _citation_tokens(text: str) -> frozenset[str]:
+    return frozenset(_CITATION_TOKEN_RE.findall(norm(text)))
+
+
+def _pair_lines(sources: list[frozenset[str]],
+                lines: list[frozenset[str]]) -> dict[int, int]:
+    """Source index -> line index, one to one. Every pair over both
+    thresholds is ranked by its Dice overlap (shared tokens over both sizes,
+    so of an abstract and the paper that followed it, each keeps its own
+    line) and taken best first; ties go to the earlier source and line."""
+    ranked = []
+    for i, source in enumerate(sources):
+        for j, line in enumerate(lines):
+            shared = len(source & line)
+            if (shared >= CITATION_MATCH_MIN_TOKENS
+                    and shared >= CITATION_MATCH_MIN_SHARE * len(line)):
+                ranked.append((-2 * shared / (len(source) + len(line)), i, j))
+    pairs: dict[int, int] = {}
+    taken: set[int] = set()
+    for _, i, j in sorted(ranked):
+        if i not in pairs and j not in taken:
+            pairs[i] = j
+            taken.add(j)
+    return pairs
+
+
+def _rendered_citations(stage4: dict,
+                        blocks: list[tuple[str, str]]) -> list[RenderedCitation]:
+    """Every stage-4 publication paired with its bibliography line. One that
+    pairs with no line (routed elsewhere, dropped as a duplicate, superseded)
+    is not judged: whether it rendered at all is classified_unrendered's
+    question."""
+    entries = [e for e in stage4.get("entries", [])
+               if str(e.get("taxonomy_code") or "").startswith(_BIBLIOGRAPHY_LETTER)]
+    lines = _bibliography_lines(blocks)
+    pairs = _pair_lines([_citation_tokens(str(e.get("text") or "")) for e in entries],
+                        [_citation_tokens(line) for line in lines])
+    citations = []
+    for i, entry in enumerate(entries):
+        if i not in pairs:
+            continue
+        fields = entry.get("extracted_fields")
+        authors = fields.get("authors") if isinstance(fields, Mapping) else None
+        citations.append(RenderedCitation(
+            entry.get("element_idx_start"), str(entry.get("taxonomy_code")),
+            str(entry.get("text") or ""), authors if isinstance(authors, str) else "",
+            lines[pairs[i]]))
+    return citations
+
+
+def _owner_surname_words(stage4: dict) -> frozenset[str]:
+    """The words of `cv_owner.last_name` the lint judges (OWNER_SURNAME_MIN_CHARS)."""
+    owner = stage4.get("cv_owner")
+    surname = owner.get("last_name") if isinstance(owner, Mapping) else None
+    if not isinstance(surname, str):
+        return frozenset()
+    return frozenset(word for word in _NAME_WORD_RE.findall(norm(surname))
+                     if len(word) >= OWNER_SURNAME_MIN_CHARS)
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Whether two different words are one substitution, insertion or
+    deletion apart."""
+    if len(a) > len(b):
+        a, b = b, a
+    if a == b or len(b) - len(a) > 1:
+        return False
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    if len(a) == len(b):
+        return a[i + 1:] == b[i + 1:]
+    return a[i:] == b[i + 1:]
+
+
+def _names_owner(text: str, owner: frozenset[str]) -> bool:
+    """Whether `text` holds a word of the owner's surname, exactly."""
+    return bool(owner & set(_NAME_WORD_RE.findall(norm(text))))
+
+
+def _shows_owner(text: str, owner: frozenset[str]) -> bool:
+    """`_names_owner`, or a word one letter off a long surname word
+    (OWNER_SPELLING_TOLERANCE_MIN_CHARS). Lenient on the rendered side only:
+    the lint fires when the source credits the owner exactly and the line
+    shows no form of them."""
+    words = set(_NAME_WORD_RE.findall(norm(text)))
+    return bool(owner & words) or any(
+        _one_edit_apart(word, name)
+        for name in owner if len(name) >= OWNER_SPELLING_TOLERANCE_MIN_CHARS
+        for word in words)
+
+
+def _author_list_end(line: str) -> int | None:
+    """Where an "et al." closes the line's author list, or None. One after a
+    "." is not in the author list -- a Vancouver author list holds no ".",
+    and "In: Editor A, et al. eds." follows the title -- the same rule
+    `_restore_stage5d_authors` applies to this text."""
+    match = _ET_AL_CLOSE_RE.search(line)
+    if match is None or "." in line[:match.start()]:
+        return None
+    return match.start()
+
+
+def _owner_credit(citation: RenderedCitation, owner: frozenset[str]) -> str | None:
+    """How the source credits the CV owner with this publication, or None:
+    stage 4's author list, else the source text (a credit such as "(including
+    X)" that stage 4 left out of `authors`, or a list it damaged), else a talk
+    the source says was co-presented."""
+    if _names_owner(citation.authors, owner):
+        return "stage 4's author list names the CV owner"
+    if _names_owner(_EMAIL_OR_URL_RE.sub(" ", citation.source), owner):
+        return "the source citation names the CV owner"
+    if _CO_PRESENTED_RE.search(citation.source):
+        return "the source says the CV owner co-presented this talk"
+    return None
+
+
+def _owner_missing_message(citation: RenderedCitation,
+                           owner: frozenset[str]) -> str | None:
+    """The finding's message when the source credits the owner and the
+    rendered author list does not show them, else None. Only the author list
+    is read when an "et al." closes it, so a name left in a trailing note
+    ("Presented by X") does not count as an author."""
+    credit = _owner_credit(citation, owner)
+    end = _author_list_end(citation.line)
+    if credit is None or _shows_owner(citation.line[:end], owner):
+        return None
+    cut = "" if end is None else " (its author list is cut to 'et al.')"
+    return (f"entry {citation.element_idx} ({citation.code}): {credit}, but the "
+            f"rendered citation does not name them{cut}")
+
+
+def lint_owner_missing_from_citation(stage4: dict,
+                                     blocks: list[tuple[str, str]]) -> list[dict]:
+    """One WARN per publication whose source credits the CV owner
+    (`_owner_credit`) and whose own rendered bibliography line does not name
+    them (#1259). The owner is `cv_owner.last_name`; with none, nothing is
+    judged -- owner_contact_missing reports that run."""
+    owner = _owner_surname_words(stage4)
+    if not owner:
+        return []
+    findings = []
+    for citation in _rendered_citations(stage4, blocks):
+        message = _owner_missing_message(citation, owner)
+        if message is not None:
+            findings.append(_finding(
+                "owner_missing_from_citation", "WARN", message,
+                [citation.line[:CITATION_EVIDENCE_CHARS]]))
+    return findings
+
+
+def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """One INFO per rendered citation whose author list ends in "et al."
+    (`_author_list_end`) where the source text elides no author
+    (`_SOURCE_ELISION_RE`): co-authors cut, the stage 5d "first 6" rule (#1259).
+    A citation that also lost the owner is owner_missing_from_citation's
+    WARN, not reported again here."""
+    owner = _owner_surname_words(stage4)
+    findings = []
+    for citation in _rendered_citations(stage4, blocks):
+        end = _author_list_end(citation.line)
+        if (end is None or _SOURCE_ELISION_RE.search(citation.source)
+                or (owner and _owner_missing_message(citation, owner))):
+            continue
+        kept = len([name for name in citation.line[:end].split(",") if name.strip()])
+        findings.append(_finding(
+            "etal_added", "INFO",
+            f"entry {citation.element_idx} ({citation.code}): the rendered "
+            f"citation keeps {kept} author(s) and then 'et al.', where the "
+            f"source elides no author",
+            [citation.line[:CITATION_EVIDENCE_CHARS]]))
+    return findings

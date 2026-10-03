@@ -734,12 +734,14 @@ def test_1223_a_tracked_deletion_is_scanned_too():
 
 def test_1223_stage_4_locates_the_entry_and_never_changes_the_count():
     """The evidence names the source entry index (what the autopsy labels and
-    the harness match on); without stage 4 the same findings are unlocated."""
-    appendix = [_p("T. APPENDIX"), _p("Married: Pat Example Lee, Esq."),
+    the harness match on); without stage 4 the same findings are unlocated.
+    A spouse line under a spaced dash: since #1223 the withhold's matcher
+    claims "Married: <name>" itself, and a matcher hit is not located."""
+    appendix = [_p("T. APPENDIX"), _p("Spouse \u2013 Pat Example Lee, Esq."),
                 _p("Grandchildren \u2013 Ann Beth, Cy, Dee")]
     stage_4 = {"entries": [
         {"element_idx_start": 3, "text": "Born: [withheld]; Sampletown, Ohio"},
-        {"element_idx_start": 4, "text": "Married:  Pat Example Lee, Esq."},
+        {"element_idx_start": 4, "text": "Spouse -  Pat Example Lee, Esq."},
         {"element_idx_start": 6, "text": "Grandchildren - Ann Beth, Cy, Dee"},
         {"element_idx_start": 9, "text": None}]}
     located = lint_protected_data_in_output(appendix, None, stage_4)

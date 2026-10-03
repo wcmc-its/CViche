@@ -314,12 +314,14 @@ def _written_in_source(value: str, source_text: str) -> bool:
     return bool(re.search(rf'(?<![\d/]){re.escape(value)}(?![\d/])', source_text))
 
 
-def _mentee_single_date(value: str, source_text: str) -> str:
-    """A mentee period that has only one date, as the bare year it names.
+def _mentee_date(value: str, source_text: str) -> str:
+    """One date of a mentee period, as the bare year it names.
 
     A completion, visit or class year stored with a month or season stage 4
     added ("2007-05", "2005-Summer") renders as its year, the way the N3A/N3B
-    rows read everywhere else (`DATE_FORMATS` gives both codes 'yyyy').
+    rows read everywhere else (`DATE_FORMATS` gives both codes 'yyyy'). Each
+    end of a range renders the same way, so "2019-08" to "2020-06" reads
+    "2019-2020", not the raw "2019-08-2020-06" (EBYSBC autopsy, class E21).
 
     Two exceptions keep what the CV wrote. A value the source text carries
     verbatim renders as written: "1999-02" there is the author's own
@@ -345,17 +347,24 @@ def _format_mentee_duration(fields: Mapping[str, Any], *, ongoing: bool,
     (class 1 of the 2026-10-02 s7ab autopsy: 121 rows on 4 CVs). An end
     date with no start renders the same way; it used to render an empty
     cell (class 2: 72 rows on 5 CVs). `source_text` is the entry's text,
-    read only by `_mentee_single_date`.
+    read only by `_mentee_date`.
+
+    Every date renders through `_mentee_date`, the start of an open range
+    and both ends of a closed one included, and a closed range whose ends
+    then read the same is one value: "2011" rather than "2011-2011", and
+    "2021" rather than "2021-08-2021-12" (EBYSBC autopsy, class E21). An
+    end date that is a word ("present") passes through as written.
     """
     start = str(fields.get('start_date') or '').strip()
     end = str(fields.get('end_date') or '').strip()
 
     if start and end:
-        return f"{start}-{end}"
+        first, last = _mentee_date(start, source_text), _mentee_date(end, source_text)
+        return first if first == last else f"{first}-{last}"
     if start and ongoing:
-        return f"{start}-present"
+        return f"{_mentee_date(start, source_text)}-present"
     if start:
-        return _mentee_single_date(start, source_text)
+        return _mentee_date(start, source_text)
     if end:
-        return _mentee_single_date(end, source_text)
+        return _mentee_date(end, source_text)
     return ''

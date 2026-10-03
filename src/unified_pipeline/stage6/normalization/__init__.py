@@ -51,7 +51,9 @@ normalization, stage-5d reconciliation -- and the renderer receives a record
 whose every field is already the text it will print.
 
 Dependencies run one way, inside this package and out of it. `publication`
-imports `citation_matching` and `authors`; nothing imports `publication`. Nothing
+imports `citation_matching` and `authors`; `citation_matching` imports
+`authors` (the stage-5d owner restore reads a CV's own author run, #1259);
+nothing imports `publication`. Nothing
 here imports `formatting/`, `sections/`, or `stage_6_word_template` -- those
 import this, so a back-edge would be an import cycle that fails at load rather
 than at render.
@@ -95,6 +97,7 @@ from .pii import (  # noqa: F401
     _PII_FRAGMENT_SPLIT_RE,
     CAT_DEA,
     CAT_HOME_CONTACT,
+    CAT_PLACE_OF_BIRTH,
     WithheldItem,
     _squash,
     _pii_fragments,
@@ -110,6 +113,7 @@ from .publication import (  # noqa: F401
 from .records import (  # noqa: F401
     grant_heading_is_past,
     grant_heading_rebucket_target,
+    grant_status_is_empty_section_label,
     grant_status_rebucket_target,
     split_fused_citation_entries,
 )

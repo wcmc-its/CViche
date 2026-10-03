@@ -32,6 +32,10 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E402
     _append_missing_stage5d_values,
+    _owner_words,
+    _prints_junk_author,
+    _restore_stage5d_owner,
+    _stage5d_author_segment,
     _value_referenced,
 )
 
@@ -243,3 +247,137 @@ def test_append_missing_stage5d_values_table(
     case, citation, editors, publisher, expected
 ):
     assert _append_missing_stage5d_values(citation, editors, publisher) == expected, case
+
+
+# ---------------------------------------------------------------------------
+# #1259: the CV owner back in a citation stage 5d cut to "first 6, et al."
+# Every name below is invented. The owner is Wren.
+# ---------------------------------------------------------------------------
+
+_CUT = 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, et al. A title. J Wood. 2020;1:2-3.'
+_LINE = '4. Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood 2020;1:2-3.'
+
+
+@pytest.mark.parametrize('case, citation, authors, source, expected', [
+    ('stage 4\'s list is intact: printed whole, as #1292 shipped',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W', '',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood. 2020;1:2-3.'),
+    ('stage 4 split an author (lone initials): the line supplies the authors after the kept six',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W', _LINE,
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood. 2020;1:2-3.'),
+    ('stage 4\'s list starts unlike 5d\'s (5d fixed a spelling): the kept six keep 5d\'s',
+     _CUT, 'Ash A, Brich B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W', _LINE.replace('Birch', 'Brich'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood. 2020;1:2-3.'),
+    ('stage 4 read a group credit as an author: not printed',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W, Network LRSN',
+     _LINE.replace('Wren W.', 'Wren W; for the Lantern Research Network.'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood. 2020;1:2-3.'),
+    ('stage 4 put a suffix first in an item: not printed',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, 3rd GI, Wren W', _LINE.replace('Gorse G', 'Gorse GI 3rd'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse GI 3rd, Wren W. A title. J Wood. 2020;1:2-3.'),
+    ('a four-letter initials group the line prints is a real author: stage 4\'s list stands',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse GHIJ, Wren W', _LINE.replace('Gorse G', 'Gorse GHIJ'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse GHIJ, Wren W. A title. J Wood. 2020;1:2-3.'),
+    ('the owner only in a note after the title is still cut from the authors',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, et al. A title. Venue; 2020. Presented by Wren W.',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Wren W, Gorse G', '',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Wren W, Gorse G. A title. Venue; 2020. Presented by Wren W.'),
+    ('the line says "et al." after the owner',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W, et al',
+     _LINE.replace('Wren W.', 'Wren W, et al.'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W, et al. A title. J Wood. 2020;1:2-3.'),
+    ('the line goes on past the owner with a person the reader cannot read: "et al.", not a short list',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W, S, Holly Rowan',
+     _LINE.replace('Wren W.', 'Wren W, S. Holly Rowan.'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W, et al. A title. J Wood. 2020;1:2-3.'),
+    ('co-authors whose surnames are particle words are read, before and after the owner',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Le, Wren W, Du H',
+     _LINE.replace('Gorse G, Wren W.', 'Le G, Wren W, Du H.'),
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Le G, Wren W, Du H. A title. J Wood. 2020;1:2-3.'),
+    ('5d doubled the period after "et al.": the restore prints one',
+     _CUT.replace('et al.', 'et al..'), '', _LINE,
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G, Wren W. A title. J Wood. 2020;1:2-3.'),
+])
+def test_restore_stage5d_owner_gives_the_owner_back(
+    case: str, citation: str, authors: str, source: str, expected: str,
+) -> None:
+    assert _restore_stage5d_owner(citation, authors, source, 'Wren W') == expected, case
+
+
+@pytest.mark.parametrize('case, citation, authors, source', [
+    ('the owner is among 5d\'s authors',
+     'Ash A, Wren W, Cedar C, Daly D, Elm E, Fir F, et al. A title. 2020.',
+     'Ash A, Wren W, Cedar C, Daly D, Elm E, Fir F, Gorse G', ''),
+    ('a CV\'s own elided list names the owner between two "et al."',
+     'Ash A, et al., Wren W, et al., Holly H. A title. 2020.', 'Ash A, Wren W, Holly H', ''),
+    ('a 5d list with no "et al." was not cut, even when the line goes on to the owner',
+     'Ash A, Birch B, Fir F', 'Ash A, Birch B, Fir F, G, Gorse, Wren W', 'Ash A, Birch B, Fir F, Wren W. A title.'),
+    ('stage 4 is damaged and there is no source line',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W', ''),
+    ('the line\'s run ends before the owner (a group credit closes it)',
+     _CUT, 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Wren W',
+     _LINE.replace('Gorse G,', 'Gorse G; for the Lantern Network. A title,')),
+    ('5d corrected a swap the next co-author\'s surname shares (ZCTARO 810): no trusted anchor',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Rowan F, et al. A title. J Wood. 2020;1:2-3.',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, G, Rowna, Rowan C, Wren W',
+     '4. Ash A, Birch B, Cedar C, Daly D, Elm E, Rowna F, Rowan C, and Wren W. A title. J Wood 2020;1:2-3.'),
+])
+def test_restore_stage5d_owner_leaves_the_citation_alone(
+    case: str, citation: str, authors: str, source: str,
+) -> None:
+    assert _restore_stage5d_owner(citation, authors, source, 'Wren W') == citation, case
+
+
+def test_a_credential_in_capitals_in_the_owners_name_is_not_their_surname() -> None:
+    """The owner ("Wren W, FAAP") is among 5d's authors. Stage 4's list
+    carries the credential, 5d's does not; that is not a cut owner."""
+    citation = 'Ash A, Wren W, Birch B, Cedar C, Daly D, Elm E, et al. A title. 2020.'
+    authors = 'Ash A, Wren W FAAP, Birch B, Cedar C, Daly D, Elm E, Fir F'
+    source = 'Ash A, Wren W FAAP, Birch B, Cedar C, Daly D, Elm E, Fir F. A title. 2020.'
+
+    assert _restore_stage5d_owner(citation, authors, source, 'Wren W, FAAP') == citation
+
+
+def test_a_given_name_5d_shortened_is_not_a_cut_owner() -> None:
+    """The owner (Juno Wren) is among 5d's authors as "Wren J"; only the
+    given name is missing. A co-author surnamed Juno later in the line must
+    not read as the owner and pull the rest of the list back in."""
+    citation = 'Ash A, Birch B, Cedar C, Daly D, Elm E, Wren J, et al. A title. 2020.'
+    source = 'Ash A, Birch B, Cedar C, Daly D, Elm E, Wren J, Juno AB, Gorse G. A title. 2020.'
+
+    assert _restore_stage5d_owner(citation, '', source, 'Juno Wren') == citation
+
+
+@pytest.mark.parametrize('authors, source, junk', [
+    ('Ash A, Network LRSN', 'Ash A; for the Lantern Research Network.', True),
+    ('Ash A, 3rd GI, Wren W', 'Ash A, Gorse GI 3rd, Wren W.', True),
+    ('Ash A, Jr, Wren W', 'Ash A, Jr, Wren W.', True),
+    ('Ash A, Sr GI, Wren W', 'Ash A, Gorse GI Sr, Wren W.', True),
+    ('Ash A, Gorse GHIJ', 'Ash A, Gorse GHIJ.', False),
+    # a three-letter initials group is never checked against the line
+    ('Ash A, Gorse GHI, Wren W', 'Ash A, Gorse G.H.I., Wren W.', False),
+    ('Ash A, Gorse GI Jr, Wren W', 'Ash A, Gorse GI Jr, Wren W.', False),
+    ('Jr AB, Wren W', 'Gorse AB Jr, Wren W.', True),
+])
+def test_prints_junk_author(authors: str, source: str, junk: bool) -> None:
+    assert _prints_junk_author(authors, source) is junk
+
+
+@pytest.mark.parametrize('citation, segment', [
+    ('Ash A, Birch B, et al. A title. 2020.', 'Ash A, Birch B, '),
+    # the "et al." is the editors', after the title
+    ('Ash A. A chapter. In: Birch B, et al., eds. 2020.', 'Ash A. A chapter. In: Birch B, et al., eds. 2020.'),
+    # the same, with no comma after the "et al."
+    ('Ash A. A chapter. In: Birch B, et al. A book. 2020.', 'Ash A. A chapter. In: Birch B, et al. A book. 2020.'),
+    # a CV's own elided list goes on after the "et al."
+    ('Ash A, et al., Wren W. A title. 2020.', 'Ash A, et al., Wren W. A title. 2020.'),
+    ('Ash A, et al.; Wren W. A title. 2020.', 'Ash A, et al.; Wren W. A title. 2020.'),
+    ('Ash A, Birch B. A title. 2020.', 'Ash A, Birch B. A title. 2020.'),
+])
+def test_stage5d_author_segment(citation: str, segment: str) -> None:
+    assert _stage5d_author_segment(citation) == segment
+
+
+
+def test_owner_words_leave_out_credentials() -> None:
+    assert _owner_words('Juno Wren PhD') == {'juno', 'wren'}

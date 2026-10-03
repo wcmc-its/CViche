@@ -293,6 +293,27 @@ _NAME_RUN = r"(?: [^\W\d_] [\w.'’-]* ,? [ \t]+ ){1,4}"
 _BORN_VALUE = r"(?: " + re.escape(PRE_LLM_PLACEHOLDER) + r" | " + _FULL_DATE_VALUE + r" )"
 _BORN_STATEMENT = _FRAGMENT_INITIAL + _NAME_RUN + _STEM_GUARD + r"born (?: [ \t]+ on )? [ \t]+ " + _BORN_VALUE
 
+# #1223 (EBYSBC, EQADVR): two family labels no row below opened, so the spouse's
+# and the grandchildren's names reached the Appendix. "Married:" names the
+# spouse; the spouse rows open only on "spouse"/"wife"/"husband", "married to"
+# and "married (". "Grandchildren" and "Great-grandchildren" end in "children",
+# but a label opens only at a word start, so the children row never saw them.
+#
+# Shape rows, not label rows, on purpose: every label row also joins
+# `_KNOWN_FIELD_LABEL_RE`, the vocabulary a home-address cut stops at part-way
+# through its value. "Home Address:<gap>12 Elm St Married: <name>" would then
+# stop at "Married:", which opens mid-fragment and so matches nothing itself:
+# the cut would shrink and the spouse's name render. As shapes they match
+# where a label would, and every cut that ran over them still does.
+_MARRIED_STEM = r"married"
+_GRANDCHILDREN_STEM = r"(?: great \s* [-–—]? \s* )* grand \s* children"
+#: (category, stem) of each label-shaped family row; the colon form is a row of
+#: the table, the dash form joins `_family_dash_matches`.
+_FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
+    (CAT_SPOUSE, _MARRIED_STEM),
+    (CAT_CHILDREN, _GRANDCHILDREN_STEM),
+)
+
 
 #: THE table. Row order is match-priority order within a scope: the engine
 #: tries every row and merges overlapping spans, keeping the category of
@@ -391,6 +412,14 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  anchored=True, render_only=True),
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_BORN_STATEMENT, render_only=True),
+    # #1223 (EBYSBC): "Married: <name>" and "Grandchildren: <names>" (see
+    # `_FAMILY_SHAPE_STEMS` for why these are shapes). Render-time only, like
+    # the family label rows: the span runs to the next hard delimiter.
+    WithholdRule(CAT_SPOUSE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_STEM_GUARD + _MARRIED_STEM + r" \s* :", anchored=True, render_only=True),
+    WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_STEM_GUARD + _GRANDCHILDREN_STEM + r" \s* :", anchored=True,
+                 render_only=True),
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
     # #1223: "Family Information:" and "Family Data:" open a family block too.
     # Render-time only, like the shape rows above: this row's span runs to the
@@ -586,6 +615,15 @@ _KNOWN_FIELD_LABEL_RE = re.compile(
         + [r"(?:" + label + r")" for label in _RENDER_SET_FIELD_LABELS]
     )
     + r")\s*:",
+    re.X | re.I,
+)
+
+#: The colon opener of a label-shaped family row (`_FAMILY_SHAPE_STEMS`). Kept
+#: out of `_KNOWN_FIELD_LABEL_RE` (see the stems for why), but the value it
+#: opens continues into the next cells like any label's
+#: (`pii_pass._extend_label_span`).
+_FAMILY_SHAPE_LABEL_RE = re.compile(
+    _STEM_GUARD + r"(?:" + "|".join(stem for _, stem in _FAMILY_SHAPE_STEMS) + r")\s*:",
     re.X | re.I,
 )
 
@@ -794,13 +832,18 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
 #: (`_FAMILY_LABEL_RE`) already opened the same paragraph, ahead of it
 #: (`_family_dash_matches`): a "Family:" block whose members are listed with a
 #: dash is family data, a title under no such block is left alone.
-#: Built from the table's own label rows, so the vocabulary has one definition.
+#: Built from the table's own label rows and the label-shaped family rows
+#: (`_FAMILY_SHAPE_STEMS`: "Grandchildren – <names>", EQADVR), so the
+#: vocabulary has one definition.
 _FAMILY_DASH_CATEGORIES = frozenset({CAT_CHILDREN, CAT_SPOUSE, CAT_FAMILY})
 _DASH_TERMINATOR = r"\s*[-–—](?=\s|$)"
 _FAMILY_DASH_PATTERNS: tuple[tuple[str, re.Pattern], ...] = tuple(
     (rule.category, re.compile(r"(?:" + str(rule.label) + r")" + _DASH_TERMINATOR, re.X | re.I))
     for rule in WITHHOLD_POLICY
     if rule.category in _FAMILY_DASH_CATEGORIES and rule.label is not None
+) + tuple(
+    (category, re.compile(_STEM_GUARD + r"(?:" + stem + r")" + _DASH_TERMINATOR, re.X | re.I))
+    for category, stem in _FAMILY_SHAPE_STEMS
 )
 _FAMILY_LABEL_RE = re.compile("|".join(
     pattern.pattern for rule, pattern in _COMPILED_POLICY

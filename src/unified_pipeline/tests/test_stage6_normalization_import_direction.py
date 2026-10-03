@@ -71,6 +71,8 @@ _IO_MODULES = frozenset({
 _DECLARED_INTERNAL_EDGES = frozenset({
     ("publication", "citation_matching"),
     ("publication", "authors"),
+    # #1259: the stage-5d owner restore reads the CV's own author run.
+    ("citation_matching", "authors"),
 })
 
 #: Dotted names that an import from inside `normalization/` may not reach.
