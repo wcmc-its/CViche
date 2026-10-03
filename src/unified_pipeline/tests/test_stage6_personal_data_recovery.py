@@ -43,6 +43,8 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
+    CAT_HOME_CONTACT,
+    PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
     _PII_FIELD_KEY_RE,
 )
@@ -1216,9 +1218,12 @@ def test_a_value_from_a_structured_address_is_not_displaced(tmp_path):
 def test_a_displaced_banner_entry_never_surfaces_a_home_lettered_number(
         tmp_path, home_line):
     """The pii pass cuts only home WORDS; a displaced entry recovered whole
-    must not print a number labelled "(h)" or "H:" (#1222)."""
+    must not print a number labelled "(h)" or "H:" (#1222). The banner names
+    its workplace ("Office:"): a banner that gives a home number beside an
+    unlabelled address gives the home address, which is withheld and never
+    displaced (#1223, the test below)."""
     text = _render(tmp_path, [
-        _a(f"1 Banner Street, Exampleton, ZZ 00000\n{home_line}",
+        _a(f"Office: 1 Banner Street, Exampleton, ZZ 00000\n{home_line}",
            {"address": "1 Banner Street, Exampleton, ZZ 00000",
             "phone": "555-0199"}, idx=0),
         _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
@@ -1227,6 +1232,130 @@ def test_a_displaced_banner_entry_never_surfaces_a_home_lettered_number(
     assert "1 Sample Way" in text
     assert "1 Banner Street" in text, "the displaced address was lost"
     assert "555-0199" not in text, "a home-lettered number was rendered"
+
+
+def _withheld_comment(tmp_path) -> str:
+    """The withheld notice's Word comment text, or "" when none was written."""
+    return "\n".join(text for author, text in _comments(tmp_path / "out.docx")
+                     if author == WITHHELD_COMMENT_AUTHOR)
+
+
+@pytest.mark.parametrize("text, phone", [
+    # the corpus shape: the labels in the text and in the stage-4 value
+    ("Example Doe 1 Plain Street Exampleton, ZZ 00000 Ph (h): 555-0198 "
+     "Ph (w): 555-0102 Email: doe@example.org", "555-0198 (h); 555-0102 (w)"),
+    # the labels in the stage-4 value only (a trailing label in the text)
+    ("Example Doe\t1 Plain Street, Exampleton, ZZ 00000\tTel: 555-0198 (h); 555-0102 (w)",
+     "555-0198 (h); 555-0102 (w)"),
+    # the labels in the text only: stage 4 kept the bare numbers
+    ("Example Doe     1 Plain Street, Exampleton, ZZ 00000     Ph (h): 555-0198     "
+     "Ph (w): 555-0102", "555-0198; 555-0102"),
+])
+def test_a_home_labelled_number_and_its_banner_address_never_fill_the_office_rows(
+        tmp_path, text, phone):
+    """#1223 (EBYSBC MRJDWE-01): a banner whose phone value holds a home-labelled
+    number and a work-labelled one, beside an unlabelled street address. The
+    whole value used to fill Office telephone, home number and "(h)" label
+    included, and the address filled Office address. The home number is
+    withheld, the work number fills Office telephone, and the address goes to
+    the (withheld) home slot."""
+    rows = _contact_rows(tmp_path, [
+        _a(text, {"name": "Example Doe", "phone": phone,
+                  "address": "1 Plain Street, Exampleton, ZZ 00000",
+                  "email": "doe@example.org"}),
+    ])
+    text = _all_text(tmp_path / "out.docx")
+    assert "555-0102" in rows["Office telephone:"]
+    assert "555-0198" not in text
+    assert "1 Plain Street" not in text
+    assert rows["Office address:"] == ""
+    assert CAT_HOME_CONTACT in _withheld_comment(tmp_path)
+
+
+def test_a_banner_that_names_its_workplace_keeps_its_address_beside_a_home_number(tmp_path):
+    """The negative control: a workplace word in the entry ("Office") keeps an
+    unlabelled address in Office address even beside a home-labelled number;
+    only the home number is withheld."""
+    rows = _contact_rows(tmp_path, [
+        _a("Office: 1 Sample Way, Exampleton, ZZ 00000\tPh (h): 555-0198\tPh (w): 555-0102",
+           {"phone": "555-0198 (h); 555-0102 (w)",
+            "address": "1 Sample Way, Exampleton, ZZ 00000"}),
+    ])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert "555-0102" in rows["Office telephone:"]
+    assert "555-0198" not in _all_text(tmp_path / "out.docx")
+
+
+def test_an_address_beside_an_unlabelled_or_work_number_still_fills_the_office_row(tmp_path):
+    """Only a HOME label moves the address: a banner with a plain or a
+    work-labelled number keeps its address in Office address, as before."""
+    rows = _contact_rows(tmp_path, [
+        _a("Example Doe 1 Plain Street Exampleton, ZZ 00000 Ph (w): 555-0102",
+           {"phone": "555-0102 (w)", "address": "1 Plain Street, Exampleton, ZZ 00000"}),
+    ])
+    assert "1 Plain Street" in rows["Office address:"]
+    assert "555-0102" in rows["Office telephone:"]
+
+
+@pytest.mark.parametrize("text", [
+    f"Born: {PRE_LLM_PLACEHOLDER}; Exampleville, Examplestan",
+    f"Born: {PRE_LLM_PLACEHOLDER}     Exampleville, Examplestan",
+])
+def test_a_place_of_birth_after_a_born_label_never_fills_office_address(tmp_path, text):
+    """#1223 (EBYSBC EQADVR-02): stage 4 lifted the place of birth after
+    "Born: [withheld];" into `address`; the birth fragment stopped at the
+    semicolon (or the column gap), so the Office address catch-all took it."""
+    rows = _contact_rows(tmp_path, [
+        _a(text, {"address": "Exampleville, Examplestan"}),
+    ])
+    assert rows["Office address:"] == ""
+    assert "Exampleville" not in _all_text(tmp_path / "out.docx")
+
+
+@pytest.mark.parametrize("text", [
+    # the continuation stops at a line break by design
+    f"Born: {PRE_LLM_PLACEHOLDER}\nExampleville, Examplestan",
+    # no colon after the birth word
+    f"Born {PRE_LLM_PLACEHOLDER}; Exampleville, Examplestan",
+    f"Place of birth\tExampleville, Examplestan",
+])
+def test_an_address_on_a_birth_line_never_fills_office_address(tmp_path, text):
+    """#1223 (EBYSBC EQADVR-02, the issue's "never fill office_address from a
+    born/birth line"): a birth word in the entry and no address or workplace
+    word, so stage 4's `address` is the place of birth. It fills no Office
+    cell, is withheld, and the entry's residual is not recovered either."""
+    rows = _contact_rows(tmp_path, [
+        _a(text, {"address": "Exampleville, Examplestan"}),
+    ])
+    assert rows["Office address:"] == ""
+    assert "Exampleville" not in _all_text(tmp_path / "out.docx")
+    assert "birth" in _withheld_comment(tmp_path)
+
+
+@pytest.mark.parametrize("text", [
+    f"Born: {PRE_LLM_PLACEHOLDER}\nOffice: 1 Sample Way, Exampleton, ZZ 00000",
+    f"Born {PRE_LLM_PLACEHOLDER}; Address: 1 Sample Way, Exampleton, ZZ 00000",
+])
+def test_a_labelled_address_beside_a_birth_line_still_fills_office_address(tmp_path, text):
+    """The negative control: an address or workplace word says the value is
+    a contact address, so the birth guard leaves it in Office address."""
+    rows = _contact_rows(tmp_path, [
+        _a(text, {"address": "1 Sample Way, Exampleton, ZZ 00000"}),
+    ])
+    assert "1 Sample Way" in rows["Office address:"]
+
+
+def test_married_and_grandchildren_lines_never_reach_the_appendix(tmp_path):
+    """#1223 (EBYSBC EQADVR-01): two A-coded family lines the Personal Data
+    block does not consume were recovered into the Appendix whole."""
+    text = _render(tmp_path, [
+        _a("Example Doe", {"name": "Example Doe"}, idx=0),
+        _a("Married: Pat Example, Ed.D.", idx=1),
+        _a("Grandchildren \u2013 Kim Example, Lee, Bob, Cy", idx=2),
+    ])
+    assert "Pat Example" not in text
+    assert "Kim Example" not in text and "Lee, Bob" not in text
+    assert PII_REDACTED_NOTICE in text
 
 
 def test_a_displaced_phone_entry_never_surfaces_a_home_lettered_number(tmp_path):

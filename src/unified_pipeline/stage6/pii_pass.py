@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
+    CAT_BIRTH,
     CAT_CHILDREN,
     CAT_DATE_OF_BIRTH,
     CAT_FAMILY,
@@ -61,6 +62,7 @@ from .normalization.pii import (  # noqa: F401
     WithheldItem,
     _BARE_EMAIL_SHAPE,
     _BARE_PHONE_SHAPE,
+    _FAMILY_SHAPE_LABEL_RE,
     _KNOWN_FIELD_LABEL_RE,
     _PII_FRAGMENT_SPLIT_RE,
     _is_bare_label_span,
@@ -511,8 +513,11 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
 #: in the Appendix. Every other row keeps its single-fragment cut: a
 #: citizenship, an office phone or a work email is a #821 "render" item that
 #: an unlabelled neighbour must not be able to take with it.
+#: A "Born:" label (CAT_BIRTH) carries on the same way as a date-of-birth one
+#: (EBYSBC, EQADVR): "Born: [withheld]; <city>, <state>" left the place of
+#: birth behind the `;`, and it filled the Office address cell.
 _CONTINUATION_CATEGORIES = frozenset({
-    CAT_DATE_OF_BIRTH, CAT_CHILDREN, CAT_SPOUSE, CAT_FAMILY, CAT_HOME_CONTACT,
+    CAT_DATE_OF_BIRTH, CAT_BIRTH, CAT_CHILDREN, CAT_SPOUSE, CAT_FAMILY, CAT_HOME_CONTACT,
 })
 
 
@@ -579,10 +584,14 @@ def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan
     the unlabelled cells that continue it and, for a children or family
     list, the list lines that go on after it (#1223). Only a label has a
     value that continues: a labelless shape ("Married (<name>)") is the
-    whole of what it matched, and the cell after it is somebody else's."""
+    whole of what it matched, and the cell after it is somebody else's. A
+    label-shaped family row ("Grandchildren:", `_FAMILY_SHAPE_LABEL_RE`) is
+    a label here."""
     span = _extend_bare_label_span(text, match.start, match.end)
+    opens_with_label = (_KNOWN_FIELD_LABEL_RE.match(text, match.start)
+                        or _FAMILY_SHAPE_LABEL_RE.match(text, match.start))
     if (scope == SCOPE_PERSONAL_AND_APPENDIX and match.category in _CONTINUATION_CATEGORIES
-            and _KNOWN_FIELD_LABEL_RE.match(text, match.start)):
+            and opens_with_label):
         end = _absorb_continuation_cells(text, span.end)
         if match.category in _LIST_LINE_CATEGORIES:
             end = _absorb_list_lines(text, end)
