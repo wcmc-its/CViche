@@ -1673,6 +1673,12 @@ def _fused_verdict(entry: _FieldsEntry, output: OutputLines,
             or _degree_year_verdict(entry, head, output))
 
 
+#: Codes the multi-record lint does not judge: offschema_fields' set, plus
+#: Personal Data named on its own, so the lint keeps skipping A's contact lines
+#: even if offschema_fields starts judging A (#1245).
+_MULTI_RECORD_SKIPPED_CODES = _OFFSCHEMA_SKIPPED_CODES | frozenset({PERSONAL_DATA_CODE})
+
+
 def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """A stage-4 entry whose text holds several records while stage 4
     returned one record and no `stage4_records` (#1243): two or more dated
@@ -1692,7 +1698,7 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
         re.sub(r"\D", "", line) for _, text in blocks for line in str(text).split("\n"))
     findings = []
     for entry in _fields_entries(stage4):
-        if (not entry.code or entry.code in _OFFSCHEMA_SKIPPED_CODES or not entry.fields
+        if (not entry.code or entry.code in _MULTI_RECORD_SKIPPED_CODES or not entry.fields
                 or entry.fields.get(STAGE4_RECORDS_KEY)):
             continue
         verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output, output_digits)
