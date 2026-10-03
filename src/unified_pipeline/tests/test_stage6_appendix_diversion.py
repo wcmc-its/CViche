@@ -847,8 +847,10 @@ def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendere
         "M1: 2 dated entries diverted to the Appendix — the generated research "
         "summary does not reproduce them and no other section renders them")
     assert left_out["evidence"] == []
+    # #1221 lowers only routine recovered A lines to INFO; a left-out record stays WARN.
+    assert left_out["severity"] == SEVERITY_WARN
 
-    without = build_appendix_diversion_warnings(written[:2], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    without =build_appendix_diversion_warnings(written[:2], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert [(w["code"], w["reason"]) for w in without] == [("M1", REASON_RENDERER_DECLINED)]
 
 
