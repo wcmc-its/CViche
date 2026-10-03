@@ -18,6 +18,7 @@ direction is one-way and must stay so.
 """
 from collections.abc import Mapping
 from types import MappingProxyType
+from typing import Any, NamedTuple
 import logging
 import re
 
@@ -177,6 +178,10 @@ def _format_date_mapping(value: Mapping, taxonomy_code: str) -> str:
                              value.get(RANGE_END_KEY) or '', taxonomy_code)
 
 
+# An end date that says the range is still running.
+_ONGOING_DATE_WORDS = frozenset({'present', 'current', 'ongoing', 'now'})
+
+
 def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
                             is_end_date: bool = False) -> str:
     """
@@ -200,7 +205,7 @@ def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
     date_str = str(date_str).strip()
 
     # Handle 'present', 'current', 'ongoing' - always return as 'Present'
-    if date_str.lower() in ('present', 'current', 'ongoing', 'now'):
+    if date_str.lower() in _ONGOING_DATE_WORDS:
         return 'Present'
 
     # Get required format for this taxonomy code
@@ -283,6 +288,112 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
     elif formatted_end:
         return formatted_end
     return ''
+
+
+# Keys outside every schema under which stage 4 files a record's second and
+# later spans (EBYSBC class E22, #1245): a list of `{start_date, end_date}`
+# periods, or a string of dates, under `additional_dates`/`additional_periods`
+# (VNUAHA 142's second interim-chair term, EQADVR 33/34's later teaching
+# years), and one more span as a start/end pair (HZGJFM 190's 1994-present
+# committee term). No schema names them, so `fan_out._RENDERED_FIELDS` (which
+# may hold schema fields only) does not either; the doctor's offschema_fields
+# lint grades them against the record's own line instead.
+EXTRA_SPAN_LIST_KEYS = ('additional_dates', 'additional_periods')
+EXTRA_SPAN_START_KEY = 'additional_period_start'
+EXTRA_SPAN_END_KEY = 'additional_period_end'
+EXTRA_SPAN_KEYS = frozenset({*EXTRA_SPAN_LIST_KEYS, EXTRA_SPAN_START_KEY,
+                             EXTRA_SPAN_END_KEY})
+
+# How the spans of one record are joined in its date cell: "2019-2020, 2021".
+DATE_SPAN_SEPARATOR = ', '
+
+# A string of extra dates is a list: "1993-12; 1995-09" or "2010, 2012".
+_EXTRA_DATE_STRING_SPLIT_RE = re.compile(r'\s*[;,]\s*')
+
+# Upper bound of a span still running ("present"), for `_span_is_covered`.
+_OPEN_END_YEAR = 10_000
+
+
+class _Span(NamedTuple):
+    """One extra span as stage 4 wrote it: a start and an optional end."""
+    start: object
+    end: object
+
+
+def _extra_spans(fields: Mapping[str, Any]) -> list[_Span]:
+    """The spans under `EXTRA_SPAN_KEYS`, in the order stage 4 wrote them."""
+    spans: list[_Span] = []
+    for key in EXTRA_SPAN_LIST_KEYS:
+        value = fields.get(key)
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, Mapping):
+                spans.append(_Span(item.get(RANGE_START_KEY) or item.get('date') or '',
+                                   item.get(RANGE_END_KEY) or ''))
+            elif isinstance(item, str):
+                spans.extend(_Span(part, '') for part in
+                             _EXTRA_DATE_STRING_SPLIT_RE.split(item) if part)
+    if fields.get(EXTRA_SPAN_START_KEY) or fields.get(EXTRA_SPAN_END_KEY):
+        spans.append(_Span(fields.get(EXTRA_SPAN_START_KEY) or '',
+                           fields.get(EXTRA_SPAN_END_KEY) or ''))
+    return spans
+
+
+def _span_years(start: object, end: object) -> tuple[int, int] | None:
+    """The first and last year a span covers, `_OPEN_END_YEAR` for a running
+    one; None when its start has no year."""
+    first = _parse_date_components(str(start or '').strip())[0]
+    if first is None:
+        return None
+    end_text = str(end or '').strip()
+    if end_text.lower() in _ONGOING_DATE_WORDS:
+        return first, _OPEN_END_YEAR
+    last = _parse_date_components(end_text)[0] if end_text else None
+    return first, max(first, last or first)
+
+
+def _span_is_covered(span: _Span, primary: tuple[int, int]) -> bool:
+    """Whether every year of `span` lies inside the record's own range: a
+    teaching row dated 1985-2005 whose extra dates are the years in between
+    (EQADVR 48) gains nothing from listing them."""
+    years = _span_years(span.start, span.end)
+    return years is not None and primary[0] <= years[0] and years[1] <= primary[1]
+
+
+def extra_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
+    """The record's other spans (`EXTRA_SPAN_KEYS`), each formatted as its
+    date column shows a range, less any inside the record's own
+    `start_date`-`end_date` range or repeating an earlier one. Empty when
+    the record has no own start year: there is no date cell to add to."""
+    primary = _span_years(fields.get(RANGE_START_KEY), fields.get(RANGE_END_KEY))
+    if primary is None:
+        return []
+    shown = [format_date_range(fields.get(RANGE_START_KEY) or '',
+                               fields.get(RANGE_END_KEY) or '', taxonomy_code)]
+    extras: list[str] = []
+    for span in _extra_spans(fields):
+        if _span_is_covered(span, primary):
+            continue
+        # A span with no end is that date alone: an extra date in a list
+        # ("2010" beside a 1978-1979 course) is one occasion, not a range
+        # still running, which `format_date_range` would make it.
+        text = (format_date_range(str(span.start or ''), str(span.end), taxonomy_code)
+                if span.end else format_date_for_section(str(span.start or ''), taxonomy_code))
+        if text and text not in shown:
+            shown.append(text)
+            extras.append(text)
+    return extras
+
+
+def with_extra_date_spans(dates: str, fields: Mapping[str, Any],
+                          taxonomy_code: str) -> str:
+    """`dates` (the record's own range, as its renderer formatted it) followed
+    by `extra_date_spans`, joined with `DATE_SPAN_SEPARATOR`: "2019-2020,
+    2021". An empty `dates` stays empty -- its renderer has its own fallback
+    for a row with no date, which an extra span alone must not pre-empt."""
+    if not dates:
+        return dates
+    return DATE_SPAN_SEPARATOR.join([dates, *extra_date_spans(fields, taxonomy_code)])
 
 
 _MONTH_NAMES = MappingProxyType({

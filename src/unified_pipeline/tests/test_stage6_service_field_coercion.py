@@ -1030,3 +1030,28 @@ def test_q2_without_a_role_whose_own_line_names_a_committee_defaults_to_member()
     """A committee listed under a generic heading is still a membership."""
     assert _q2_role_cell(hierarchy=["Professional Service"],
                          text="Fictional Clinic Network Research Committee 2014") == "Member"
+
+
+def test_q2_further_span_follows_the_first(tmp_path):
+    """EBYSBC E22 (#1245): a second board term under `additional_dates`."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_service_boards([_entry(
+        "Q2", committee_name="Fictional Board Delta", role="Member",
+        start_date="2001", end_date="2004", additional_dates="2009")])
+    rows = list(_rows_containing(gen.doc, "Fictional Board Delta"))
+    assert len(rows) == 1
+    assert rows[0][3] == "2001-2004, 2009"
+
+
+def test_q1_further_span_follows_the_first(tmp_path):
+    """EBYSBC E22 (#1245): a second officer term under `additional_periods`."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q1", organization="Fictional Org Five", role="Fictional Treasurer",
+               start_date="2001", end_date="2003",
+               additional_periods=[{"start_date": "2007", "end_date": "2009"}]),
+    ]
+    rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Org Five"))
+    assert len(rows) == 1
+    assert rows[0][2] == "2001-2003, 2007-2009"

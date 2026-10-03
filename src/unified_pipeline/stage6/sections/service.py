@@ -28,7 +28,12 @@ import re
 from collections.abc import Sequence
 from typing import Dict, List
 
-from ..formatting import _clear_table_data, _set_font, format_date_range
+from ..formatting import (
+    _clear_table_data,
+    _set_font,
+    format_date_range,
+    with_extra_date_spans,
+)
 from ..sorting import sort_entries_reverse_chronological
 from ..normalization import _cell_text, _squash
 
@@ -646,7 +651,9 @@ def _service_boards_dates_text(fields: dict, taxonomy_code: str,
     tell a bare year from an open "2020-" range on a start-only row (#946)."""
     start_date = _cell_text(fields.get('start_date') or '')
     end_date = _cell_text(fields.get('end_date') or '')
-    return format_date_range(start_date, end_date, taxonomy_code, source_text) or ''
+    return with_extra_date_spans(
+        format_date_range(start_date, end_date, taxonomy_code, source_text) or '',
+        fields, taxonomy_code)
 
 
 def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
@@ -951,7 +958,9 @@ class ServiceSection:
             # If we have at least organization or role from extraction, use that
             # The LLM extraction is more reliable than trying to parse garbled table text
             if organization or role:
-                dates = format_date_range(start_date, end_date, 'Q1', original_text)
+                dates = with_extra_date_spans(
+                    format_date_range(start_date, end_date, 'Q1', original_text),
+                    fields, 'Q1')
                 if not organization:
                     organization = _organization_left_in_text(
                         original_text, role, start_date, end_date)

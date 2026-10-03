@@ -21,7 +21,12 @@ import logging
 import re
 from typing import List
 
-from ..formatting import _clear_table_data, _set_font, format_date_range
+from ..formatting import (
+    _clear_table_data,
+    _set_font,
+    format_date_range,
+    with_extra_date_spans,
+)
 from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
@@ -173,8 +178,9 @@ class LeadershipSection:
                 fields.get('division_department'), role)
             start_date = fields.get('start_date') or ''
             end_date = fields.get('end_date') or ''
-            dates = format_date_range(start_date, end_date, taxonomy_code,
-                                      original_text) or ''
+            dates = with_extra_date_spans(
+                format_date_range(start_date, end_date, taxonomy_code, original_text) or '',
+                fields, taxonomy_code)
 
             # Check if this entry contains multiple items (newline-separated)
             lines = entry_lines(original_text)

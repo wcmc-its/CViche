@@ -1731,6 +1731,40 @@ def test_offschema_a_list_of_periods_on_any_code_is_judged():
     assert "each holds one fact" in findings[0]["message"]
 
 
+def test_offschema_a_further_span_pair_is_judged_as_a_date_on_its_row():
+    """EBYSBC E22 (HZGJFM-03): `additional_period_start` is the year of a
+    second term. With its row missing the year it is a lost date (WARN, on
+    the record's line), not a fact shown elsewhere (INFO); once the row
+    carries the span it is not reported."""
+    entry = _fields_entry("P", {
+        "committee_name": "Example Panel", "role": "Member",
+        "start_date": "1990", "end_date": "1993",
+        "additional_period_start": "2001", "additional_period_end": "present"})
+    lost = [_table(_row("Example Panel", "Member", "1990-1993")),
+            ("paragraph", "Elsewhere: 2001")]
+    findings = _graded(lost, entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_period_start")]
+    assert "its span did not reach the record's date cell" in findings[0]["message"]
+    shown = [_table(_row("Example Panel", "Member", "1990-1993, 2001-Present"))]
+    assert _graded(shown, entry) == []
+
+
+def test_offschema_a_list_of_further_periods_is_dates_not_whole_records():
+    """`additional_periods` holds `{start_date, end_date}` objects: spans of
+    the record, graded on its row, never counted as records of their own."""
+    entry = _fields_entry("O", {
+        "leadership_role": "Chair", "institution": "Example College",
+        "start_date": "2019", "end_date": "2020",
+        "additional_periods": [{"start_date": "2022", "end_date": "2023"}]})
+    findings = _graded([_table(_row("Chair", "Example College", "2019-2020"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_periods")]
+    assert "whole record" not in findings[0]["message"]
+    shown = _table(_row("Chair", "Example College", "2019-2020, 2022-2023"))
+    assert _graded([shown], entry) == []
+
+
 def test_offschema_row_found_when_its_name_is_split_across_cells():
     """The honors renderer moves an award name's tail into its own cell, and
     the document writes a typographic apostrophe stage 4 wrote plainly."""

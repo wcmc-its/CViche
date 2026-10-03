@@ -45,7 +45,12 @@ except ImportError as exc:
 
 from unified_pipeline.core.render_check import entry_fragments
 
-from ..formatting import _clear_table_data, format_date_for_section, format_date_range
+from ..formatting import (
+    _clear_table_data,
+    format_date_for_section,
+    format_date_range,
+    with_extra_date_spans,
+)
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _dates_overlap_or_match, _is_table_header_entry, _parse_date_components
 from ..resolution import _get_institution_location, _location_already_in_institution
@@ -522,7 +527,8 @@ def _position_row_cells(entry: dict,
     if superseded:
         dates = format_date_for_section(start, taxonomy_code)
     else:
-        dates = format_date_range(start, end, taxonomy_code)
+        dates = with_extra_date_spans(format_date_range(start, end, taxonomy_code),
+                                      fields, taxonomy_code)
 
     # Build cell contents with mixed normal/track-change content
     title_content = [(title, False, "")]
