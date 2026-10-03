@@ -538,10 +538,10 @@ def grant_end_year(end_date: str | None) -> int | None:
     """The year a grant's stage-4 end date names, or None when none reads.
 
     The first four-digit run, as before; failing that, a two-digit-year date
-    ("5/30/13") through the shared date parser, whose century pivot stage 4
+    ("4/15/14") through the shared date parser, whose century pivot stage 4
     uses too (EBYSBC E7: three ended grants stayed under Current because the
     rebucket found no four-digit year in their end dates). A one-digit year
-    ("8/30/1") still reads as nothing: no rule recovers a truncated date."""
+    ("7/31/1") still reads as nothing: no rule recovers a truncated date."""
     text = str(end_date or '').strip()
     year_match = END_DATE_FOUR_DIGIT_YEAR_RE.search(text)
     if year_match:

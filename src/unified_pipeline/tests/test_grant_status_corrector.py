@@ -136,7 +136,7 @@ def test_a_pending_application_with_ended_dates_stays_pending(heading):
     ['Grants', 'Under review'],
     ['GRANTS', 'GRANT APPLICATIONS AWAITING FINAL ADMINISTRATIVE APPROVAL'],
     # EBYSBC E7: an "applied" heading named fifteen applications.
-    ['GRANTS APPLIED'],
+    ['Grants Applied For'],
     ['Research', 'Grant Application'],
     ['Research', 'Grant Applications'],
     ['Proposals Submitted'],
@@ -183,7 +183,7 @@ def test_an_m2c_under_a_funded_heading_with_ended_dates_still_becomes_completed(
 
 
 @pytest.mark.parametrize('heading', [
-    ['Scholarship and Research'],
+    ['Research Program'],
     ['Grants'],
     ['Research Support', 'Applied Grants'],
     [],
@@ -191,7 +191,7 @@ def test_an_m2c_under_a_funded_heading_with_ended_dates_still_becomes_completed(
 def test_an_application_is_not_filed_as_completed_on_its_dates_alone(heading):
     """EBYSBC E7: an old application is not a completed award. With no heading
     that files it as awarded, the LLM's M2C stands, requested amount or not."""
-    entry = _grant('M2C', '1/1/2009-12/31/2009 Example Application $100,000', *heading)
+    entry = _grant('M2C', '2/1/2010-1/31/2011 Example Application $120,000', *heading)
 
     corrected = correct_grant_status(entry)
 
@@ -206,14 +206,14 @@ def test_an_application_is_not_filed_as_completed_on_its_dates_alone(heading):
     ['Past and Present Support'],
     ['Past Grants'],
     ['Previous Support'],
-    ['Grant Support', 'Prior Funding'],
+    ['Grants', 'Prior Awards'],
     ['Completed Research Support'],
     ['Funded Research'],
     ['Grants Awarded'],
 ])
 def test_an_m2c_under_an_awarded_heading_with_ended_dates_becomes_completed(heading):
     """The heading is the corroboration the dates alone lack: the grant was awarded."""
-    entry = _grant('M2C', '2015 - 2021 Example Award $1,000,000', *heading)
+    entry = _grant('M2C', '2014 - 2019 Example Award $900,000', *heading)
 
     corrected = correct_grant_status(entry)
 
@@ -224,7 +224,7 @@ def test_an_m2c_under_an_awarded_heading_with_ended_dates_becomes_completed(head
 def test_an_m2a_still_moves_to_completed_on_its_dates_alone():
     """Only an application needs the heading; a current-coded grant that ended
     is completed under any heading that is not a pending one."""
-    entry = _grant('M2A', '2015 - 2021 Example Award', 'Scholarship and Research')
+    entry = _grant('M2A', '2014 - 2019 Example Award', 'Research Program')
 
     assert correct_grant_status(entry)['taxonomy_code'] == 'M2B'
 
