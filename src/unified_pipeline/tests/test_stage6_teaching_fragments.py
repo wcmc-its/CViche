@@ -591,6 +591,25 @@ def test_single_line_original_text_uses_the_formatted_text():
                              "SENTINEL-END"]
 
 
+@pytest.mark.parametrize("formatted_text, raw_text, expected", [
+    # Class E21 (EBYSBC autopsy): a lecture on two days of one month read
+    # "March 2006 to March 2006", and a one-year course "2011-2011".
+    ("**2006-03-21 to 2006-03-23** - Fictional Lecture",
+     "Fictional Lecture, March 21 and 23, 2006", "March 2006 - Fictional Lecture"),
+    ("**2011-2011** - Fictional Course", "2011 Fictional Course",
+     "2011 - Fictional Course"),
+])
+def test_a_formatted_date_range_whose_ends_read_the_same_renders_once(
+        formatted_text, raw_text, expected):
+    """The wire, not just the helper: the render path collapses the range
+    `normalize_iso_dates_in_text` returns."""
+    assert _teaching_entry_lines({"formatted_text": formatted_text}, raw_text) == [expected]
+
+    gen = _generator("Didactic teaching", "SENTINEL-END")
+    gen._fill_teaching({"K1": [_entry("K1", raw_text, formatted_text=formatted_text)]})
+    assert _visible(gen) == ["Didactic teaching", expected, "SENTINEL-END"]
+
+
 def test_mixed_newline_tab_pipe_teaching_input_renders_one_bullet_per_line():
     """Case 26 at the render, the delimiter contract end to end. Newlines
     separate items; a tab and a pipe INSIDE a line stay inside their bullet,

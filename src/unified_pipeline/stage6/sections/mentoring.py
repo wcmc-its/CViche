@@ -13,7 +13,8 @@ The section is two layers (#739 review):
   exists because rendering the codes literally lost content (#261): an N3B
   (past) mentee whose end date says "present", or whose source text leaves its
   start year open ("2019-", "2019 - present"), is really current
-  (`_is_ongoing_mentorship`); an N3A/N3B
+  (`_is_ongoing_mentorship`), and an N3A (current) mentee whose dates
+  ended before this year is really past (`_n3a_entry_has_ended`); an N3A/N3B
   entry that names no mentee is an aggregate count, not a mentee, and renders
   as a plain line; N4 outcome narrative arrives disguised as a current mentee
   and is reclaimed for the section header. `_normalize_mentee` then resolves
@@ -33,6 +34,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 try:
@@ -115,6 +117,22 @@ _ONGOING_RANGE_END_RE = re.compile(
     r'(?<!\d)\d{4}\s*(?:[-\u2013\u2014]|\bto\b)\s*(?:present|current|now|ongoing|date)\b',
     re.IGNORECASE)
 
+#: Any open-range marker anywhere in an entry's text: a dash or "to" before
+#: present/pres/current/ongoing/date, whatever precedes it ("04-present",
+#: "2019-pres", "MM/YYYY <U+2500> current" with a box-drawing dash), or a
+#: dash after a digit that closes the line or meets stage 2's "|" cell
+#: separator ("2005 - | <next cell>"). Looser than `_ONGOING_RANGE_END_RE`
+#: on purpose, and used only to keep an N3A entry where stage 3b put it
+#: (`_n3a_entry_has_ended`): a false match leaves the entry under Current
+#: Mentees, as it rendered before, while the strict regex decides the other
+#: direction, where a false match would move a past mentee. Each shape is an
+#: N3A row whose source says it is ongoing and that would otherwise have
+#: moved to Past -- four CVs in the s7ab batch and the census corpus.
+_N3A_OPEN_MARKER_RE = re.compile(
+    r'(?:[-\u2013\u2014\u2500]|\bto\b)\s*(?:pres(?:ent)?|current|ongoing|date)\b'
+    r'|\d\s*[-\u2013\u2014\u2500]\s*(?:\||$)',
+    re.IGNORECASE | re.MULTILINE)
+
 
 @dataclass(frozen=True)
 class MenteeRecord:
@@ -143,7 +161,8 @@ class MentoringPartition:
     `current`/`past` are mentee entries (one table each); the two summary
     tuples are the aggregate lines under the same two headings; `outcomes`
     are the N4 lines under the section header. `moved_to_current` is how
-    many N3B entries the ongoing-mentorship rule reclassified.
+    many N3B entries the ongoing-mentorship rule reclassified, and
+    `moved_to_past` how many N3A entries `_n3a_entry_has_ended` did.
     """
 
     current: tuple[Mapping[str, Any], ...] = ()
@@ -152,6 +171,7 @@ class MentoringPartition:
     past_summaries: tuple[Mapping[str, Any], ...] = ()
     outcomes: tuple[Mapping[str, Any], ...] = ()
     moved_to_current: int = 0
+    moved_to_past: int = 0
 
     @property
     def mentee_count(self) -> int:
@@ -208,6 +228,30 @@ def _entry_is_ongoing(entry: Mapping[str, Any]) -> bool:
     """`_is_ongoing_mentorship` for one raw stage-4 entry."""
     return _is_ongoing_mentorship(entry.get('extracted_fields') or {},
                                   _text(entry.get('text')))
+
+
+def _n3a_entry_has_ended(entry: Mapping[str, Any], current_year: int) -> bool:
+    """True when an N3A (current) entry's own dates say the mentorship is
+    over: it is not ongoing (`_is_ongoing_mentorship`), and the last year it
+    states -- the end date's, else the start date's -- is before
+    `current_year`.
+
+    The mirror of the N3B rule. Stage 3b codes N3A for a lone past year
+    ("2015 <mentee>, dissertation") and for a closed period ("2023-2024"),
+    and every N3A row rendered under Current Mentees, a lone year as
+    "<year>-present" (EBYSBC autopsy, class E9). A year that is not before
+    `current_year` stays current: a lone year can be an expected completion
+    ("defense 2027"), and a period ending this year may not be over yet.
+    A date with no readable year says nothing, and neither does a text with
+    any open-range marker in it (`_N3A_OPEN_MARKER_RE`), so either entry
+    stays where 3b put it.
+    """
+    if _entry_is_ongoing(entry) or _N3A_OPEN_MARKER_RE.search(_text(entry.get('text'))):
+        return False
+    fields = entry.get('extracted_fields') or {}
+    last_date = _text(fields.get('end_date')).strip() or _text(fields.get('start_date')).strip()
+    last_year = _parse_date_components(last_date)[0] if last_date else None
+    return last_year is not None and last_year < current_year
 
 
 def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -327,6 +371,8 @@ def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
 
 def _partition_mentoring_entries(
     entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    current_year: int,
 ) -> MentoringPartition:
     """Decide the whole of section N without touching a document.
 
@@ -334,15 +380,19 @@ def _partition_mentoring_entries(
     off dates a summary never has, so the mentee/summary split cannot change
     its outcome; the N4 reclaim runs last because `_is_mentoring_outcome`
     matches entries the mismatch-corrector rewrote to N3A, which only the
-    summary split has isolated by then.
+    summary split has isolated by then. The reshuffle runs both ways, each
+    on the entries stage 3b coded: an N3B entry the source leaves open moves
+    to Current, an N3A entry that ended before `current_year` moves to Past.
     """
-    n3a_entries = list(entries_by_code.get('N3A', []))
-    n3b_entries = list(entries_by_code.get('N3B', []))
+    n3a_coded = list(entries_by_code.get('N3A', []))
+    n3b_coded = list(entries_by_code.get('N3B', []))
     n4_entries = list(entries_by_code.get('N4', []))
 
-    moved = [entry for entry in n3b_entries if _entry_is_ongoing(entry)]
-    n3b_entries = [entry for entry in n3b_entries if not _entry_is_ongoing(entry)]
-    n3a_entries.extend(moved)
+    moved = [entry for entry in n3b_coded if _entry_is_ongoing(entry)]
+    ended = [entry for entry in n3a_coded if _n3a_entry_has_ended(entry, current_year)]
+    n3a_entries = [entry for entry in n3a_coded
+                   if not _n3a_entry_has_ended(entry, current_year)] + moved
+    n3b_entries = [entry for entry in n3b_coded if not _entry_is_ongoing(entry)] + ended
 
     # Aggregate summaries (no mentee named) get a line, not a table.
     n3a_summaries = [e for e in n3a_entries if not _is_mentee_record(e)]
@@ -365,7 +415,16 @@ def _partition_mentoring_entries(
         past_summaries=tuple(n3b_summaries),
         outcomes=tuple(n4_entries),
         moved_to_current=len(moved),
+        moved_to_past=len(ended),
     )
+
+
+def _contains_words(text: str, words: str) -> bool:
+    """True when `words` appears in `text` as whole words, ignoring case:
+    "Fellow" is in "Transplant Fellow", "Postdoc" is not in "Postdoctoral
+    advisor" -- there the level is a different word, so it is no part of
+    what `text` already says."""
+    return re.search(rf'(?<!\w){re.escape(words)}(?!\w)', text, re.IGNORECASE) is not None
 
 
 def _infer_supervision_type(level_text: str) -> str:
@@ -395,7 +454,12 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     (#659), which a bare `.get('extracted_fields', {})` does not cover.
 
     Site/Position prefers mentee_level (degree type) combined with
-    site_position when they differ. Awards and fellowships the mentee won
+    site_position when they differ. When site_position already contains
+    mentee_level as whole words (`_contains_words`) it is the longer, more
+    specific value and renders alone: "Transplant Fellow" with level
+    "Fellow" is "Transplant Fellow", not "Fellow" (EBYSBC autopsy, class
+    E14: 12 rows on one CV lost the fellowship type). Awards and
+    fellowships the mentee won
     belong in Project/Accomplishments: the WCM template's footnote for that
     row reads "Optional: List publications, awards, grants ... arising
     directly from the mentoring activity", and stage 4 writes them to
@@ -406,10 +470,10 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
 
     mentee_level = _text(fields.get('mentee_level'))       # e.g. "PhD, MBSB"
     site_pos_raw = _text(fields.get('site_position'))      # e.g. "Thesis"
-    if mentee_level and site_pos_raw and mentee_level.lower() not in site_pos_raw.lower():
+    if mentee_level and site_pos_raw and not _contains_words(site_pos_raw, mentee_level):
         site_position = f"{mentee_level} - {site_pos_raw}"
     else:
-        site_position = mentee_level or site_pos_raw
+        site_position = site_pos_raw or mentee_level
 
     project = _text(fields.get('research_focus') or fields.get('dissertation_title'))
     mentee_awards = _text(fields.get('awards') or fields.get('funding_source')).strip()
@@ -510,6 +574,7 @@ class MentoringSection:
     def _fill_mentoring(
         self,
         entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
+        current_year: int | None = None,
     ) -> None:
         """Render section N: a table per mentee under "Current Mentees:" and
         "Past Mentees:", aggregate lines under the same headings, N4 outcome
@@ -526,7 +591,14 @@ class MentoringSection:
         template placeholder(s) stripped, same as every other section
         already strips its own empty placeholder -- the delivered document
         is a finished record, not a form (#845).
+
+        `current_year` is the year an N3A period must end before to render
+        under Past Mentees (`_n3a_entry_has_ended`). It defaults to the
+        system clock, as `_fill_research_support`'s does; pass it to make
+        the boundary reproducible.
         """
+        if current_year is None:
+            current_year = datetime.now().year
         # N1/N2 have their own template anchors and no interaction with the
         # mentee partition below -- called first so a CV with ONLY N1/N2
         # entries (no N3A/N3B/N4) still renders instead of hitting the
@@ -534,7 +606,7 @@ class MentoringSection:
         self._fill_program_leadership(entries_by_code.get('N1', []))
         self._fill_training_grants(entries_by_code.get('N2', []))
 
-        partition = _partition_mentoring_entries(entries_by_code)
+        partition = _partition_mentoring_entries(entries_by_code, current_year=current_year)
         current_anchor, past_anchor = self._mentoring_anchors()
 
         # Placeholder removal happens before the empty-partition return
@@ -557,6 +629,9 @@ class MentoringSection:
         if partition.moved_to_current:
             logger.info("  Moved %d mentees from Past to Current (end_date=present)",
                         partition.moved_to_current)
+        if partition.moved_to_past:
+            logger.info("  Moved %d mentees from Current to Past (ended before %d)",
+                        partition.moved_to_past, current_year)
 
         if current_anchor is None and past_anchor is None:
             logger.warning(

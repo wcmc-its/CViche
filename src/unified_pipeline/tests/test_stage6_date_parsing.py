@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 
 import pytest  # noqa: E402
 
+from unified_pipeline.stage6.parsing import _get_entry_date_range  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     _dates_overlap_or_match,
     _parse_date_components,
@@ -496,6 +497,33 @@ class TestDatesOverlapOrMatch:
         assert _dates_overlap_or_match(a, b) is False
 
 
+# --- #666 (EBYSBC): a record dated by one `date` field spans that date --------
+
+def _dated(date):
+    return {"extracted_fields": {"date": date}}
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"date": "2031-04-08"}, ("2031-04-08", "2031-04-08")),
+    ({"date": {"start_date": "2028", "end_date": "2030"}}, ("2028", "2030")),  # #1233 dict
+    ({"date": {"start_date": "2028"}}, ("2028", "")),
+    ({"start_date": "2028", "date": "2031"}, ("2028", "")),   # a stated range wins
+    ({"end_date": "2030", "date": "2031"}, ("", "2030")),
+    ({"date": ""}, ("", "")),
+    ({}, ("", "")),
+])
+def test_entry_date_range_reads_a_single_date(fields, expected):
+    assert _get_entry_date_range({"extracted_fields": fields}) == expected
+
+
+def test_two_sessions_dated_in_different_months_are_provably_disjoint():
+    # KDAZOM-03 shape: one teaching session, two dates in one year.
+    assert _dates_overlap_or_match(_dated("2031-04-08"), _dated("2031-02-11")) is False
+    assert _dates_overlap_or_match(_dated("2031-04-08"), _dated("2031-04")) is True
+    assert _dates_overlap_or_match(_dated("2031-04-08"), _dated("2031")) is True
+    assert _dates_overlap_or_match(_dated("Monthly"), _dated("2031-02-11")) is True
+
+
 # --- #716 review round 1: _overlap_boundary coerces non-string input --------
 
 
@@ -558,6 +586,7 @@ def test_current_date_vocabulary_is_pinned():
 from unified_pipeline.stage6.formatting.dates import (  # noqa: E402
     POINT_IN_TIME_CODES,
     format_date_range,
+    normalize_iso_dates_in_text,
 )
 
 
@@ -596,6 +625,18 @@ def test_other_codes_still_read_a_start_only_record_as_ongoing(code):
     "Quality Committee (2021 -)",                # spaced dash closed by a paren
     "2021 -  \tMember, Quality Committee",       # spaces between dash and tab
     "Member, Quality Committee, 2021-present",   # stated in words
+    "2021 –\tMember, Quality Committee",         # spaced en dash, then a tab
+    # The entry opens with the year and a spaced dash: the CV's date column
+    # saying "since 2021", whether or not the reader kept the tab after the
+    # dash (class E9, EBYSBC autopsy).
+    "2021 – Member, Quality Committee",
+    "  2021 - Member, Quality Committee",
+    # A month (and a day) written after the year with dots.
+    "2021.07 - Member, Quality Committee",
+    "2021.07.15 - Member, Quality Committee",
+    "2021.07- Member, Quality Committee",
+    "2021.07 -\tMember, Quality Committee",
+    "Member, Quality Committee, 2021.07 - present",
 ])
 def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source_text):
     assert format_date_range("2021", "", "P", source_text) == "2021-Present"
@@ -603,7 +644,10 @@ def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source
 
 @pytest.mark.parametrize("source_text", [
     "2021\tMember, Quality Committee",
-    "2021 – Member, Quality Committee",          # a column separator, not a range
+    "Quality Committee: 2021 – Member",          # a column separator, not a range
+    "Quality Committee\n2021 – Member",          # only the entry's first line opens it
+    "2021 – 2022 Member, Quality Committee",     # an opening closed range
+    "2021.07 - 2022.06 Member, Quality Committee",
     "2021-2022 Member, Quality Committee",       # a closed range
     "2021-22 Member, Quality Committee",
     "2019- Member, Quality Committee",           # a different year left open
@@ -660,8 +704,8 @@ def test_a_source_that_ends_the_year_in_present_current_or_now_keeps_present(sou
 
 @pytest.mark.parametrize("source_text", [
     "2011 President, Fictional Society",
-    "2011 - Presentation Committee, Fictional Society",
-    "2011 - Nowell Lecture Committee, Fictional Society",
+    "Fictional Society, 2011 - Presentation Committee",
+    "Fictional Society, 2011 - Nowell Lecture Committee",
     "2011 Chair, Fictional Working Group; now Professor at Fictional University",
     "Reviewer, Current Fictional Opinion, 2011",
     "2009 - present Member; 2011 Chair, Fictional Working Group",
@@ -677,6 +721,58 @@ def test_a_caller_that_passes_no_source_still_gets_present(code):
     """The rule reaches only the callers that pass the entry's text; the rest
     (positions, mentoring, clinical practice, education) are unchanged."""
     assert format_date_range("2011", "", code) == "2011-Present"
+
+
+# --- class E9 (EBYSBC autopsy): a dotted month after an open year ------------
+
+@pytest.mark.parametrize("code", ["Q4C", "Q3", "O"])
+def test_an_entry_opening_with_a_dotted_month_and_a_dash_keeps_present(code):
+    """An editorial board written "YYYY.MM - <journal>" is an open range;
+    #1330's rule read it as a lone year because the dash did not follow the
+    year directly."""
+    source_text = "2014.01 - Fictional Journal of Testing, Editorial Board"
+    assert format_date_range("2014-01", "", code, source_text) == "2014-Present"
+
+
+def test_an_entry_opening_with_a_single_digit_dotted_month_keeps_present():
+    """Some CVs write the month without a leading zero: "YYYY.M - <text>"."""
+    source_text = "2021.7 - Member, Fictional Society of Testing"
+    assert format_date_range("2021-07", "", "Q3", source_text) == "2021-Present"
+
+
+def test_a_dotted_month_closed_range_stays_the_start_year():
+    source_text = "2014.01 - 2016.12 Fictional Journal of Testing, Editorial Board"
+    assert format_date_range("2014-01", "", "Q4C", source_text) == "2014"
+
+
+# --- class E21 (EBYSBC autopsy): a range whose two ends read the same --------
+
+@pytest.mark.parametrize("text, expected", [
+    # 5c's ISO day range in one month: the day is dropped, then the range
+    # collapses instead of reading "March 2006 to March 2006".
+    ("**2006-03-21 to 2006-03-23** - Fictional lecture",
+     "**March 2006** - Fictional lecture"),
+    ("2009-01-13 to 2009-01-15 Fictional course", "January 2009 Fictional course"),
+    ("2009-01-13\u20132009-01-15 Fictional course", "January 2009 Fictional course"),
+    # 5c's one-year course.
+    ("**2011-2011** - Fictional course", "**2011** - Fictional course"),
+    ("2011 - 2011 Fictional course", "2011 Fictional course"),
+    ("2011 to 2011 Fictional course", "2011 Fictional course"),
+])
+def test_normalize_collapses_a_range_whose_ends_read_the_same(text, expected):
+    assert normalize_iso_dates_in_text(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("2006-03-21 to 2006-04-02 Fictional course", "March 2006 to April 2006 Fictional course"),
+    ("2011-2012 Fictional course", "2011-2012 Fictional course"),
+    ("Grant R01-2011-2011 renewal", "Grant R01-2011-2011 renewal"),
+    ("1990-1990s survey", "1990-1990s survey"),
+    ("2011-20110 Fictional course", "2011-20110 Fictional course"),
+    ("March 2006 to March 2007", "March 2006 to March 2007"),
+])
+def test_normalize_leaves_a_real_range_or_a_longer_token_alone(text, expected):
+    assert normalize_iso_dates_in_text(text) == expected
 
 
 # --- #1233: a {start_date, end_date} mapping is a range, never its repr -------

@@ -5,13 +5,15 @@ the source they came from and the document they landed in -- grants filed under
 the wrong funding heading, entries whose field extraction covered almost none of
 their text, taxonomy codes that vanished between classification and render,
 dedup drops that were not duplicates, records fabricated from the template's
-own scaffolding, values filed under a key no renderer reads, and years given
-the wrong century.
+own scaffolding, values filed under a key no renderer reads, years given the
+wrong century, and entries holding several records that stage 4 returned as
+one.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
 `lint_classified_unrendered` reads the output blocks, but only to decide whether
 a 3b classification survived -- the finding is about the classification.
+`lint_offschema_fields` reads them only to grade the stage-4 values it found.
 
 The thirteen constants, regexes and helpers below them are used by nothing else
 in `run_doctor.py`, so they move together and stop being module-global.
@@ -23,6 +25,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
@@ -60,12 +63,13 @@ from unified_pipeline.stage6.normalization.institutions import (
 )
 from unified_pipeline.stage6.fan_out import (
     FANNED_OUT_FROM,
+    _FORMATTED_KEYS,
     _RENDERED_FIELDS,
     _TEXT_RENDERED_CODES,
     _is_blank,
     fan_out_multi_record_entries,
 )
-from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT
+from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT, expand_two_digit_year
 from unified_pipeline.stage6.normalization.pii import (
     CAT_HOME_CONTACT,
     SCOPE_PERSONAL_AND_APPENDIX,
@@ -84,6 +88,7 @@ from ..shared import (
     _LINE_SENTINEL,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
+    TABLE_ROW_JOINER,
     _entry_pieces,
     _finding,
     _haystacks,
@@ -481,6 +486,47 @@ def _fields_rendered(entry: dict, lines: list[str], evidence: Stage4Evidence) ->
                > RENDERED_FIELDS_MAJORITY * len(values) for line in lines)
 
 
+#: A letter or digit run of a squashed rendered line.
+_LINE_RUN_RE = re.compile(r"[a-z]+|\d+")
+
+#: Entry words (5+ letters) a one-value record's line may lack and still be
+#: its rendering: one, a role or label word its section heading carries
+#: ("reviewer" under "Journal Reviewing"). Two would clear the #1092 shape,
+#: a label whose few-word detail ("Over 100 procedures performed") was lost.
+SOLE_VALUE_MAX_MISSING_TOKENS = 1
+
+
+def _sole_value_rendered(entry: dict, lines: list[str],
+                         evidence: Stage4Evidence) -> bool:
+    """Whether a record with ONE value outside its date fields -- too few for
+    `_fields_rendered` -- still rendered: a line made only of the entry's own
+    text (every letter and digit run of it is in the entry) carries the
+    value, and lacks at most `SOLE_VALUE_MAX_MISSING_TOKENS` of the entry's
+    words. The value may be one other records share: the line is this
+    entry's.
+    EBYSBC OTBUCZ Q4D 110, a role cell then a journal and its years, renders
+    as the reviewing table's "<journal> | <year>-Present" row, missing only
+    the role word "reviewer", which the section heading says; the journal is
+    also one its citations name. A label whose detail was dropped (#1092)
+    leaves two or more of the entry's words missing."""
+    record = evidence.records.get(_span(entry))
+    if not record or not record.get("extraction_success"):
+        return False
+    fields = {k: v for k, v in (record.get("extracted_fields") or {}).items()
+              if k not in UNWRITTEN_CATEGORY_FIELDS and not _DATE_NAMED_KEY_RE.search(k)}
+    values = {squash(v) for v in _nonempty_field_values(fields)
+              if not _is_date_only_text(v)} - {""}
+    if len(values) != 1:
+        return False
+    value = next(iter(values))
+    text = str(entry.get("text") or "")
+    own, tokens = squash(text), _long_word_tokens(text)
+    return any(_value_on_line(value, line)
+               and all(run in own for run in _LINE_RUN_RE.findall(line))
+               and sum(1 for t in tokens if t not in line) <= SOLE_VALUE_MAX_MISSING_TOKENS
+               for line in lines)
+
+
 def _personal_data_withheld(entry: dict) -> bool:
     """A Personal Data ('A') entry that carries a value the withhold policy
     removes at render time (date of birth, marital status, home contact):
@@ -504,10 +550,12 @@ def _classified_entry_rendered(entry: dict, haystacks: Haystack, lines: list[str
                                evidence: Stage4Evidence | None) -> bool | None:
     """`_entry_rendered`'s verdict for a stage-3b entry, widened by what stage 4
     knows: None (not judged) for a policy-withheld Personal Data entry, True
-    when its extracted field values surfaced (#890)."""
+    when its extracted field values surfaced (#890), or its one value did
+    with nothing worth a verdict missing (`_sole_value_rendered`)."""
     if _personal_data_withheld(entry):
         return None
-    if evidence is not None and _fields_rendered(entry, lines, evidence):
+    if evidence is not None and (_fields_rendered(entry, lines, evidence)
+                                 or _sole_value_rendered(entry, lines, evidence)):
         return True
     return _entry_rendered(entry.get("text"), haystacks.text, haystacks.tokens, shared)
 
@@ -945,20 +993,28 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
 
 # --------------------------------------------------------------------------
 # Field values stage 4 extracted that the document cannot show: a value filed
-# under a key no renderer reads, and a year given the wrong century. Both read
-# stage 4 only, never the docx -- the value is already wrong or unreachable
-# there, and reading the rendered text would add a match step that can only
-# lose precision (four-digit numbers below 1930 sit in citation page ranges).
+# under a key no renderer reads, and a year given the wrong century or taken
+# from somewhere other than the entry's text. All find the value in stage 4 --
+# it is already wrong or unreachable there. The year lints never read the
+# docx: matching rendered text could only lose them precision (four-digit
+# numbers below 1930 sit in citation page ranges). They do read the text a
+# stage-5 formatter wrote for the whole entry, which is what stage 6 renders in
+# place of its date fields (`_year_renders`). `offschema_fields` reads the
+# docx, when the run has one, only to grade what stage 4 showed it (#1245):
+# see `_grade_value`.
 
 
 class _FieldsEntry(NamedTuple):
-    """The four things the field lints read off one stage-4 entry, read once
+    """The five things the field lints read off one stage-4 entry, read once
     at the artifact boundary instead of by `.get()` in every helper (§8.1).
-    `fields` is empty when `extracted_fields` is absent or not an object."""
+    `fields` is empty when `extracted_fields` is absent or not an object.
+    `element_idx_end` completes the span a later stage's copy of the entry
+    is found by (`_span`)."""
     element_idx: object
     code: str
     text: str
     fields: Mapping[str, object]
+    element_idx_end: object = None
 
 
 def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
@@ -968,7 +1024,8 @@ def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
         entries.append(_FieldsEntry(
             raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
             str(raw.get("text") or ""),
-            fields if isinstance(fields, Mapping) else {}))
+            fields if isinstance(fields, Mapping) else {},
+            raw.get("element_idx_end")))
     return entries
 
 
@@ -998,35 +1055,157 @@ def _evidence_value(value: object) -> str:
 # fact lost in CYOFWJ, JNATFN and WIANVH). #817 is the field-level loss
 # measurement this is the cheap, key-set-only slice of.
 
-#: Codes the lint does not inspect. A (personal data): the #820 PII pass owns
-#: it, and quoting its values as evidence would put protected data in a report
-#: mirrored to S3. The text-rendered codes (`fan_out._TEXT_RENDERED_CODES`,
-#: which include T): their section writes the entry's text, not its fields,
-#: so a value under any key is in the document already. The codes a stage-5
-#: formatter rewrites whole from the entry's text -- teaching (5c's
-#: `formatted_text`) and publications (5d's `formatted_citation`): the
-#: off-schema keys stage 4 leaves on them (`other_id`, `journal_or_source`,
-#: a K1 `description`) travel inside that rendering. Known miss: a
-#: contribution note under S1 `notes` (PFBSNH).
-_OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_CODES
-                            | frozenset(TEACHING_CODES) | frozenset(PUBLICATION_CODES))
+#: Codes the lint does not inspect. The text-rendered codes
+#: (`fan_out._TEXT_RENDERED_CODES`, which include T): their section writes the
+#: entry's text, not its fields, so a value under any key is in the document
+#: already. The codes a stage-5 formatter rewrites whole from the entry's text
+#: -- teaching (5c's `formatted_text`) and publications (5d's
+#: `formatted_citation`): the off-schema keys stage 4 leaves on them
+#: (`other_id`, `journal_or_source`, a K1 `description`) travel inside that
+#: rendering. Known miss: a contribution note under S1 `notes` (PFBSNH).
+#: Personal Data (A) is inspected, but only against the document (see
+#: `_personal_value_withheld`).
+_OFFSCHEMA_SKIPPED_CODES = (_TEXT_RENDERED_CODES | frozenset(TEACHING_CODES)
+                            | frozenset(PUBLICATION_CODES))
 
 #: Keys stage 4's own post-processing writes onto entries whose schema may
 #: not declare them -- bookkeeping, not a value the model misfiled:
 #: `coercion.apply_regex_post_processing` sets the identifiers on S and
 #: `IDENTIFIER_TAXONOMY_CODES`, and `percent_effort` on M2*. Only what this
-#: lint can see is listed: S, N4 and the `orcid` codes A and S0 are skipped
-#: above, and `owner_name.add_target_names`' `target_name` lands only on S
-#: and on R codes that either declare it (R) or have no schema at all.
+#: lint can see is listed: S, N4 and S0 are skipped above, and
+#: `owner_name.add_target_names`' `target_name` lands only on S and on R codes
+#: that either declare it (R) or have no schema at all. The `orcid` the same
+#: pass sets on A is not listed: no section writes an A entry's ORCID, so it
+#: is lost like any other off-schema value (SJWASY in batch EBYSBC).
 _IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
 _PERCENT_EFFORT_KEY = "percent_effort"
 
+#: The one date key the schema of a code whose section writes a single date
+#: declares (H, R). A `start_date`/`end_date` range or a `dates` list on such a
+#: code renames no key the schema has, and the honors renderer reads `date`
+#: alone: H ranges filed that way rendered with an empty date cell (batch
+#: EBYSBC class E15: KDAZOM, VVRTUC, EOSAFF, OTBUCZ). Every other code's
+#: date-named keys stay out unless they hold a list (`_is_offschema_date`).
+_SINGLE_DATE_KEY = "date"
+
+#: How the rendered document bears on one off-schema value (`_grade_value`).
+#: SHOWN: on a line of its own record -- not lost, so not reported. ELSEWHERE:
+#: the document shows it, but not with its record. ABSENT: the document does
+#: not show it where it belongs. UNGRADED: no document to grade against, or
+#: a whole record, which is reported whatever the page shows (#1187).
+GRADE_SHOWN = "shown"
+GRADE_ELSEWHERE = "elsewhere"
+GRADE_ABSENT = "absent"
+GRADE_UNGRADED = "ungraded"
+
+#: The words of the WCM Personal Data table's address and telephone rows
+#: (Office address, Office telephone, Cell phone; Home address is withheld).
+#: An A value under a key carrying one as a word (`office_phone`,
+#: `street_address`, `research_address`) had a row to fill, and in batch
+#: EBYSBC those rows rendered empty (YYVHNN, ZCTARO). One under `fax`,
+#: `website` or `orcid` had no row. Nor, in effect, did one under an email
+#: key: the renderer reads every email key it knows, so an email left over
+#: is a second address of a kind whose row the first one fills
+#: (`secondary_email`, the low-severity AQAJHD-12). `_absence_is_a_loss`.
+PERSONAL_DATA_ROW_WORDS = frozenset({"address", "phone", "telephone"})
+
+#: Evidence for a Personal Data value, in place of the value itself: the
+#: document goes to S3 with the doctor report, and the #820 PII pass, not
+#: this lint, decides what of the owner's data may be shown.
+PERSONAL_VALUE_EVIDENCE = "(Personal Data value, not quoted)"
+
 
 class OffschemaValue(NamedTuple):
-    """One non-empty value under a key no renderer reads."""
+    """One non-empty value under a key no renderer reads. `records` is how
+    many whole records it holds (each object of a record list), 0 for one
+    fact; `grade` is `_grade_value`'s verdict; `warn` is whether it alone
+    makes its finding WARN -- a whole record, or `_absence_is_a_loss`."""
     element_idx: object
     value: object
-    record_shaped: bool
+    records: int
+    grade: str
+    warn: bool
+    personal: bool
+
+
+class OutputLine(NamedTuple):
+    """One rendered unit of text -- a paragraph, a table cell, a table row
+    joined across its cells (`_table_lines`), or a whole form table
+    (`_is_form_table`) -- in the forms a value is matched in: squashed, for a
+    value whole (`_value_on_line`); its letters and digits alone, in order
+    (`_alnum`), for an anchor value a renderer split across cells or
+    re-punctuated (the honors renderer moves an award name's tail into the
+    organization cell, XWNZWW); and its word set, for a value the document re-punctuates
+    (stage 5b writes a B1 `location` of "Town, Country" into the institution
+    cell as "Town City, Country": ZCTARO)."""
+    squashed: str
+    alnum: str
+    words: frozenset[str]
+
+
+class RenderedDocument(NamedTuple):
+    """What `_grade_value` reads besides the entry: the document's lines and
+    form tables (`OutputLine`); every stage-4 record's string values
+    (`_alnum`, one set per record), which say whether an anchor value is the
+    entry's alone (`_distinctive`); and the squashed values the Personal
+    Data entries hold -- the owner's own contact details, which Personal
+    Data renders."""
+    lines: tuple[OutputLine, ...]
+    record_values: tuple[frozenset[str], ...]
+    owner_values: frozenset[str]
+
+
+def _alnum(text: str) -> str:
+    """The text's letters and digits alone, lowercased, in order."""
+    return "".join(_DEDUP_TOKEN_RE.findall(norm(text)))
+
+
+def _alnum_values(fields: Mapping[str, object]) -> frozenset[str]:
+    return frozenset(filter(None, map(_alnum, _nonempty_field_values(dict(fields)))))
+
+
+def _output_line(text: str) -> OutputLine:
+    return OutputLine(squash(text), _alnum(text),
+                      frozenset(_alphanumeric_tokens(text)))
+
+
+def _is_form_table(kind: str, lines: list[str]) -> bool:
+    """A table every joined row of which is a "Label: | value" pair: one
+    record's form -- a grant, a mentee -- whose rows belong together, so a
+    value in one row is shown with the name in another (ZCTARO's N3B
+    `awards` in the Project/Accomplishments row of its mentee's table)."""
+    rows = [line for line in lines if TABLE_ROW_JOINER in line]
+    return kind == "table" and bool(rows) and all(
+        row.split(TABLE_ROW_JOINER)[0].rstrip().endswith(":") for row in rows)
+
+
+def _form_unit(lines: list[OutputLine]) -> OutputLine:
+    """A form table's lines as one unit. Joined with `_LINE_SENTINEL`, so an
+    anchor or a value still matches inside one line only -- across rows,
+    "Program" ending one and "Award source:" opening the next read as a
+    "Program Award" that is in neither (OTBUCZ). No word set: every word
+    of the form at once would show most short values somewhere in it."""
+    return OutputLine(_LINE_SENTINEL.join(line.squashed for line in lines),
+                      _LINE_SENTINEL.join(line.alnum for line in lines), frozenset())
+
+
+def _rendered_document(stage4: dict, blocks: list[tuple[str, str]] | None,
+                       ) -> RenderedDocument | None:
+    """None without the docx: every value is then UNGRADED."""
+    if blocks is None:
+        return None
+    units: list[OutputLine] = []
+    for kind, text in blocks:
+        texts = [line for line in str(text).split("\n") if line.strip()]
+        lines = [_output_line(line) for line in texts]
+        units.extend(lines)
+        if _is_form_table(kind, texts):
+            units.append(_form_unit(lines))
+    entries = _fields_entries(stage4)
+    owner = frozenset(value for entry in entries if entry.code == PERSONAL_DATA_CODE
+                      for value in map(squash, _nonempty_field_values(dict(entry.fields))))
+    return RenderedDocument(tuple(units), tuple(_alnum_values(e.fields) for e in entries),
+                            owner)
 
 
 def _declared_fields() -> dict[str, frozenset[str]]:
@@ -1079,6 +1258,16 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
     return bool(numbered and numbered.group("field") in declared)
 
 
+def _record_count(key: str, value: object, declared: frozenset[str]) -> int:
+    """Whole records under this key: every object of a record list, else one
+    for any other record shape, 0 for one fact (#1245: XELRLZ's `appointments`
+    list of three was reported as one record). A date-named key holds a date
+    of its record, never a record of its own."""
+    if _DATE_NAMED_KEY_RE.search(key) or not _is_record_shaped(key, value, declared):
+        return 0
+    return len(value) if isinstance(value, list) else 1
+
+
 def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
     """Whether any of `keys` other than a date-named one holds a value. When
     none does, the section renderers have no name, title or role to write and
@@ -1094,11 +1283,192 @@ def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
                if not _DATE_NAMED_KEY_RE.search(key))
 
 
+def _is_offschema_date(key: str, value: object, declared: frozenset[str]) -> bool:
+    """Whether a date-named key is a candidate at all. Most are left out: they
+    name a date the schema declares under another name, and the renderers
+    fall back to them (R reads `start_date` when `date` is empty). Two shapes
+    are not renames: any date key on a code whose schema declares only
+    `_SINGLE_DATE_KEY`, and a list of dates or periods on any code -- a
+    second term, which no renderer reads (batch EBYSBC: VNUAHA's O
+    `additional_dates`, BZZNRL's H `dates`)."""
+    schema_dates = {name for name in declared if _DATE_NAMED_KEY_RE.search(name)}
+    return schema_dates == {_SINGLE_DATE_KEY} or isinstance(value, list)
+
+
+def _personal_value_withheld(key: str, value: object) -> bool:
+    """A Personal Data value the withhold policy keeps out of the document
+    (date or place of birth, spouse, children, home contact, ...), asked of
+    the policy as the labelled line it would be ("place of birth: <value>"):
+    its absence is the PII pass working, not a loss (#820, #821)."""
+    label = key.replace("_", " ")
+    return bool(_pii_matches(f"{label}: {' '.join(_leaf_strings(value))}",
+                             SCOPE_PERSONAL_AND_APPENDIX))
+
+
+def _anchor_values(entry: _FieldsEntry, keys: frozenset[str]) -> list[str]:
+    """The entry's values under `keys` -- the ones its section writes -- that
+    can say which line is its own: not a date, not template scaffolding."""
+    return [leaf for key in keys if not _DATE_NAMED_KEY_RE.search(key)
+            for leaf in _leaf_strings(entry.fields.get(key))
+            if leaf.strip() and not _is_date_only_text(leaf)
+            and not _piece_in_template(squash(leaf))]
+
+
+def _carries(line: OutputLine, value: str) -> bool:
+    """Whether the line carries an anchor value: in order, letters and
+    digits alone, when it is at least `RENDERED_FIELDS_MIN_VALUE_CHARS`
+    long; as words of the line when shorter ("PhD")."""
+    anchor = _alnum(value)
+    if len(anchor) >= RENDERED_FIELDS_MIN_VALUE_CHARS:
+        return anchor in line.alnum
+    words = set(_alphanumeric_tokens(value))
+    return bool(words) and words <= line.words
+
+
+def _distinctive(value: str, entry: _FieldsEntry, document: RenderedDocument) -> bool:
+    """An anchor value at least `RENDERED_FIELDS_MIN_VALUE_CHARS` long that
+    sits inside no other stage-4 record's value. Wider than
+    `Stage4Evidence.shared_values`' equality on purpose: one of ZCTARO's N3A
+    entries has a `site_position` that sits inside its siblings' longer
+    ones ("<program>" beside "<degree>, <program> - <school>"), and their
+    rows show the very institution the entry lost."""
+    anchor = _alnum(value)
+    if len(anchor) < RENDERED_FIELDS_MIN_VALUE_CHARS:
+        return False
+    holders = sum(any(anchor in held for held in values)
+                  for values in document.record_values)
+    return holders <= int(any(anchor in held for held in _alnum_values(entry.fields)))
+
+
+def _independent_values(values: list[str]) -> list[str]:
+    """`values` less any that another of them holds (`_alnum`): a
+    `mentee_level` of "<degree>" beside a `site_position` of "<degree>
+    Program" is one piece of evidence, not two, and on ZCTARO both sit on
+    every sibling row that names the same program."""
+    forms = [_alnum(value) for value in values]
+    return [value for i, (value, form) in enumerate(zip(values, forms))
+            if not any(form in other and (form != other or j < i)
+                       for j, other in enumerate(forms) if j != i)]
+
+
+def _record_lines(entry: _FieldsEntry, keys: frozenset[str],
+                  document: RenderedDocument) -> list[OutputLine]:
+    """The entry's own lines, wherever stage 6 put them: every line carrying
+    one of its `_distinctive` anchor values; failing any, every line
+    carrying more than `RENDERED_FIELDS_MAJORITY` of its anchor values, when
+    it has at least `RENDERED_FIELDS_MIN_VALUES` (`_fields_rendered`'s
+    co-location test: ZCTARO's B1 degree and institution, each held by other
+    records too, sit together only on the degree's row). Empty when neither
+    finds a line."""
+    anchors = _anchor_values(entry, keys)
+    distinctive = [value for value in anchors if _distinctive(value, entry, document)]
+    if distinctive:
+        return [line for line in document.lines
+                if any(_carries(line, value) for value in distinctive)]
+    anchors = _independent_values(anchors)
+    if len(anchors) < RENDERED_FIELDS_MIN_VALUES:
+        return []
+    return [line for line in document.lines
+            if sum(_carries(line, value) for value in anchors)
+            > RENDERED_FIELDS_MAJORITY * len(anchors)]
+
+
+def _value_leaves(value: object) -> list[str]:
+    """The value's non-blank strings (`_leaf_strings`), or the value itself
+    written out when it holds none (a number `_leaf_strings` does not read)."""
+    return [leaf for leaf in _leaf_strings(value) if leaf.strip()] or [str(value)]
+
+
+def _value_years(value: object) -> frozenset[str]:
+    return frozenset(year for leaf in _leaf_strings(value)
+                     for year in _FOUR_DIGIT_YEAR_RE.findall(leaf))
+
+
+def _shown_on(value: object, line: OutputLine, date_key: bool) -> bool:
+    """Whether the line shows the value. A date: every four-digit year in it,
+    as a word of the line (one with none has nothing to lose). Anything
+    else: every string in it, whole (`_value_on_line`) or as all of its
+    words."""
+    if date_key:
+        return _value_years(value) <= line.words
+    return all(_value_on_line(squash(leaf), line.squashed)
+               or set(_alphanumeric_tokens(leaf)) <= line.words
+               for leaf in _value_leaves(value))
+
+
+def _grade_value(entry: _FieldsEntry, key: str, value: object, keys: frozenset[str],
+                 document: RenderedDocument) -> str | None:
+    """How the document bears on one off-schema value (`GRADE_*`), or None
+    when it cannot say. A Personal Data value's own line is any line:
+    Personal Data is one table of the owner's details. An owner's contact
+    detail on another record (a page header's email fused into an O entry,
+    MRJDWE) is SHOWN when the document shows it anywhere. A date is judged
+    only on its record's lines, since its year on any other line is a
+    coincidence: None when the record's line cannot be found."""
+    date_key = bool(_DATE_NAMED_KEY_RE.search(key))
+    personal = entry.code == PERSONAL_DATA_CODE
+    own = document.lines if personal else _record_lines(entry, keys, document)
+    if any(_shown_on(value, line, date_key) for line in own):
+        return GRADE_SHOWN
+    if date_key:
+        return GRADE_ABSENT if own else None
+    shown_anywhere = any(_shown_on(value, line, False) for line in document.lines)
+    if shown_anywhere and isinstance(value, str) and squash(value) in document.owner_values:
+        return GRADE_SHOWN
+    return GRADE_ELSEWHERE if shown_anywhere else GRADE_ABSENT
+
+
+def _absence_is_a_loss(entry: _FieldsEntry, key: str, value: object) -> bool:
+    """Whether a `GRADE_ABSENT` value is CV content the document lost (WARN)
+    rather than only a value the page does not carry (INFO). A date: yes --
+    it was judged on its own record's line. A Personal Data value: when its
+    key names a row of the Personal Data table (`PERSONAL_DATA_ROW_WORDS`).
+    Anything else: when the entry's own text states it -- at least
+    `RENDER_TOKEN_OVERLAP` of the words of each of its strings, not every
+    word, since stage 4 rewrites a date inside a value (WIANVH's F2
+    `notes`). The model's own remark on an entry (BMAMWE's N3B `note` that
+    no mentee was named) is not content of the CV."""
+    if _DATE_NAMED_KEY_RE.search(key):
+        return True
+    if entry.code == PERSONAL_DATA_CODE:
+        return bool(set(key.split("_")) & PERSONAL_DATA_ROW_WORDS)
+    text_words = set(_alphanumeric_tokens(entry.text))
+    leaves = [set(_alphanumeric_tokens(leaf)) for leaf in _value_leaves(value)]
+    return all(words and len(words & text_words) / len(words) >= RENDER_TOKEN_OVERLAP
+               for words in leaves)
+
+
+def _offschema_candidates(entry: _FieldsEntry, declared: frozenset[str],
+                          readable: frozenset[str], graded: bool) -> dict[str, object]:
+    """The entry's non-empty values under a key nothing reads: in neither
+    schema, not rendered for its code, not stage-4 bookkeeping, not a record
+    list stage 6 fans out, and -- for a date-named key -- one of
+    `_is_offschema_date`'s shapes. A date and a Personal Data value are only
+    candidates when there is a document to grade them against (`graded`):
+    without it a date is far more often a rename than a loss, and a Personal
+    Data value more often withheld than lost."""
+    if entry.code == PERSONAL_DATA_CODE and not graded:
+        return {}
+    candidates: dict[str, object] = {}
+    for key, value in entry.fields.items():
+        if key in readable or _is_blank(value):
+            continue
+        if _DATE_NAMED_KEY_RE.search(key) and not (
+                graded and _is_offschema_date(key, value, declared)):
+            continue
+        if entry.code == PERSONAL_DATA_CODE and _personal_value_withheld(key, value):
+            continue
+        candidates[key] = value
+    for key in _fanned_out_keys(entry):
+        candidates.pop(key, None)
+    return candidates
+
+
 def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset[str]],
-                      ) -> dict[str, OffschemaValue]:
-    """`{key: value}` for this entry's non-empty, non-date keys that are in
-    neither schema, not rendered for its code, not stage-4 bookkeeping, and
-    not a record list stage 6 fans out. On an entry none of whose schema or
+                      document: RenderedDocument | None) -> dict[str, OffschemaValue]:
+    """`{key: value}` for this entry's `_offschema_candidates`, each counted
+    (`_record_count`) and graded (`_grade_value`), less what the document
+    shows on its record's own line. On an entry none of whose schema or
     rendered keys holds a value other than a date, a one-fact value is left
     out, because the raw text the entry renders from usually carries it; a
     record-shaped value is always reported, because that text does not
@@ -1108,17 +1478,27 @@ def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset
     declared = declared_by_code.get(entry.code, frozenset())
     schema_keys = declared | _RENDERED_FIELDS.get(entry.code, frozenset())
     readable = schema_keys | _stage4_bookkeeping_keys(entry.code)
-    candidates = {key: value for key, value in entry.fields.items()
-                  if key not in readable and not _is_blank(value)
-                  and not _DATE_NAMED_KEY_RE.search(key)}
-    for key in _fanned_out_keys(entry):
-        candidates.pop(key, None)
-    hits = {key: OffschemaValue(entry.element_idx, value,
-                                _is_record_shaped(key, value, declared))
-            for key, value in candidates.items()}
-    renders_from_text = not _holds_a_non_date_value(entry, schema_keys)
-    return {key: hit for key, hit in hits.items()
-            if hit.record_shaped or not renders_from_text}
+    personal = entry.code == PERSONAL_DATA_CODE
+    renders_from_text = not personal and not _holds_a_non_date_value(entry, schema_keys)
+    hits: dict[str, OffschemaValue] = {}
+    for key, value in _offschema_candidates(entry, declared, readable,
+                                            document is not None).items():
+        records = _record_count(key, value, declared)
+        if records:
+            grade = GRADE_UNGRADED
+        elif renders_from_text:
+            continue
+        elif document is None:
+            grade = GRADE_UNGRADED
+        else:
+            grade = _grade_value(entry, key, value, schema_keys, document)
+        if grade in (GRADE_SHOWN, None):
+            continue
+        warn = bool(records) or (grade == GRADE_ABSENT
+                                 and _absence_is_a_loss(entry, key, value))
+        hits[key] = OffschemaValue(entry.element_idx, value, records, grade, warn,
+                                   personal)
+    return hits
 
 
 class OffschemaSummary(NamedTuple):
@@ -1129,32 +1509,60 @@ class OffschemaSummary(NamedTuple):
     evidence: list[str]
 
 
+def _one_fact_outcome(key: str, hits: list[OffschemaValue]) -> str:
+    """The message's account of one-fact values: lost without a document to
+    say otherwise, or what the document showed."""
+    absent = sum(hit.grade == GRADE_ABSENT for hit in hits)
+    if absent:
+        where = ("not on its record's line" if _DATE_NAMED_KEY_RE.search(key)
+                 else "nowhere in the document")
+        return f"{absent} of them {where}"
+    if all(hit.grade == GRADE_UNGRADED for hit in hits):
+        return "missing from the output"
+    return "the document shows it, but not with its record"
+
+
 def _offschema_summary(code: str, key: str,
                        hits: list[OffschemaValue]) -> OffschemaSummary:
-    """WARN when any value is a whole record, INFO when each is one fact."""
-    records = sum(hit.record_shaped for hit in hits)
+    """WARN when any value is a whole record or a lost fact (`OffschemaValue
+    .warn`), INFO when each is one fact the document shows elsewhere, that
+    no document graded, or whose absence `_absence_is_a_loss` discounts."""
+    records = sum(hit.records for hit in hits)
     noun = "entry" if len(hits) == 1 else "entries"
-    lost = (f"{records} {'holds' if records == 1 else 'hold'} a whole record"
-            if records else "each holds one fact of its record")
+    if records:
+        lost = (f"{records} whole record{'' if records == 1 else 's'} under it, "
+                f"missing from the output")
+    else:
+        lost = f"each holds one fact of its record, {_one_fact_outcome(key, hits)}"
     return OffschemaSummary(
-        "WARN" if records else "INFO",
+        "WARN" if any(hit.warn for hit in hits) else "INFO",
         f"{len(hits)} {code} {noun}: `{key}` is outside the {code} schema and "
-        f"no renderer reads it -- {lost}, missing from the output (#817)",
-        [f"entry {hit.element_idx}: {_evidence_value(hit.value)}"
+        f"no renderer reads it -- {lost} (#817)",
+        [f"entry {hit.element_idx}: "
+         f"{PERSONAL_VALUE_EVIDENCE if hit.personal else _evidence_value(hit.value)}"
          for hit in hits[:FIELD_EVIDENCE_MAX_VALUES]])
 
 
-def lint_offschema_fields(stage4: dict) -> list[dict]:
+def lint_offschema_fields(stage4: dict,
+                          blocks: list[tuple[str, str]] | None = None) -> list[dict]:
     """A non-empty stage-4 value under a key that is in neither field schema
     (built-in or config, any `extract` flag), not in `fan_out._RENDERED_FIELDS`
     for its code, not stage-4 bookkeeping, and not a record list fan-out
     splits: nothing reads it, so it never reaches the document. One finding
-    per (code, key); date-named keys are left out (two-thirds of the corpus's
-    off-schema keys are dates a schema names differently)."""
+    per (code, key). Date-named keys are left out unless
+    `_is_offschema_date` says otherwise (two-thirds of the corpus's off-schema
+    keys are dates a schema names differently).
+
+    `blocks` (optional: the rendered docx, `w:ins` text included) grades each
+    one-fact value (`_grade_value`): one its record's own line shows is not
+    reported, one the document shows nowhere raises the finding to WARN
+    (#1245). Without it the lint reads stage 4 alone, as before, and leaves
+    out dates and Personal Data."""
     declared_by_code = _declared_fields()
+    document = _rendered_document(stage4, blocks)
     groups: dict[tuple[str, str], list[OffschemaValue]] = {}
     for entry in _fields_entries(stage4):
-        for key, hit in _offschema_values(entry, declared_by_code).items():
+        for key, hit in _offschema_values(entry, declared_by_code, document).items():
             groups.setdefault((entry.code, key), []).append(hit)
     return [_finding("offschema_fields", *_offschema_summary(code, key, hits))
             for (code, key), hits in sorted(groups.items())]
@@ -1218,13 +1626,86 @@ def _year_in_text(year: int, text: str) -> bool:
     return re.search(rf"(?<!\d){year}", text) is not None
 
 
+#: "1985-89", "2011-2", "1993-994", "1986,88": a range or list whose later
+#: year is written as the last one to three digits of its four-digit start's.
+_RANGE_SHORTHAND_RE = re.compile(r"(?<!\d)(\d{4})\s*[-\u2013\u2014,]\s*(\d{1,3})(?!\d)")
+
+#: A two-digit year token: two digits ending a number, right after a slash
+#: (stage 4's own `_TWO_DIGIT_YEAR_PREFIX` shapes, `stage4/coercion.py`,
+#: widened to any slash: "3/14/06", "0415/08", "6//12"), an apostrophe
+#: ("'04"), a fiscal year ("FY97"), or a dot after a digit ("5.21.09").
+#: Lookbehinds, so the day of "m/d/yy" does not consume the year's prefix.
+_TWO_DIGIT_YEAR_TOKEN_RE = re.compile(
+    r"(?:(?<=/)|(?<=['\u2018\u2019])|(?<=FY)|(?<=FY )|(?<=\d\.))(\d{2})(?!\d)",
+    re.IGNORECASE)
+
+#: "64-66": a range of two two-digit years standing alone -- not a run of
+#: dash-joined numbers, where "3-24-11-26" (Mar 2024 to Nov 2026) has no
+#: year "11".
+_TWO_DIGIT_RANGE_RE = re.compile(r"(?<![\d\-/.])(\d{2})\s*[-\u2013]\s*(\d{2})(?![\d\-/])")
+
+#: A two-digit year after a season word: "(Fall Sem., 06)".
+_SEASON_TWO_DIGIT_YEAR_RE = re.compile(
+    r"\b(?:spring|summer|fall|autumn|winter)\b\D{0,8}?(\d{2})(?!\d)", re.IGNORECASE)
+
+#: A letter l or capital I that a scanned source has in place of a year's
+#: leading 1 ("l987").
+_OCR_LEADING_ONE_RE = re.compile(r"(?<![A-Za-z])[lI](?=\d{3}(?!\d))")
+
+
+def _range_shorthand_ends(text: str) -> set[int]:
+    """The end years of every range shorthand in `text`: the start's
+    leading digits, completed by the written tail, moved one decade or
+    century on when that falls before the start ("1998-02" ends 2002)."""
+    ends = set()
+    for start, tail in _RANGE_SHORTHAND_RE.findall(text):
+        unit = 10 ** len(tail)
+        end = int(start) // unit * unit + int(tail)
+        ends.add(end + unit if end < int(start) else end)
+    return ends
+
+
+def _two_digit_years(text: str) -> set[int]:
+    """Every two-digit year (0-99) `text` writes as a date token."""
+    years = {int(yy) for pattern in (_TWO_DIGIT_YEAR_TOKEN_RE, _SEASON_TWO_DIGIT_YEAR_RE)
+             for yy in pattern.findall(text)}
+    for first, second in _TWO_DIGIT_RANGE_RE.findall(text):
+        years |= {int(first), int(second)}
+    return years
+
+
+def _year_written(year: int, text: str) -> bool:
+    """The entry's text states this year in its century: in four digits
+    (`_year_in_text`), as a two-digit year token the shared century pivot
+    reads as this year, or as a range shorthand's end. "9/68" states 1968 --
+    the right century, so not implausible_year's (s7ab QZWBKQ: all 7 of its
+    hits were such dates) -- and "11/02" states 2002, never 1902."""
+    yy = year % 100
+    return (_year_in_text(year, text)
+            or (expand_two_digit_year(yy) == year and yy in _two_digit_years(text))
+            or year in _range_shorthand_ends(text))
+
+
+def _year_in_source(year: int, text: str) -> bool:
+    """The entry's text states this year in any century -- whether the
+    century is right is implausible_year's question: its four digits
+    anywhere, a scanned "l987" included, so a year fused into a longer digit
+    run on either side counts ("04/081997", "Example20232024Total"); its
+    last two digits as a two-digit year token or a stand-alone two-digit
+    range ("5/31/34" states 2034, "64-66" both years); or a range
+    shorthand's end ("2011-2")."""
+    text = _OCR_LEADING_ONE_RE.sub("1", text)
+    return (str(year) in text or year % 100 in _two_digit_years(text)
+            or year in _range_shorthand_ends(text))
+
+
 def _earliest_degree_year(entries: list[_FieldsEntry]) -> int | None:
     """The earliest plausible degree year a B1 entry both extracts and writes
     in its own text -- a degree year that is itself a wrong century, or that
     the text never states, cannot set the floor."""
     years = [year for entry in entries if entry.code == ACADEMIC_DEGREE_CODE
              for _, year in _date_field_years(entry.fields)
-             if year >= IMPLAUSIBLE_YEAR_FLOOR and _year_in_text(year, entry.text)]
+             if year >= IMPLAUSIBLE_YEAR_FLOOR and _year_written(year, entry.text)]
     return min(years, default=None)
 
 
@@ -1239,20 +1720,78 @@ def _year_floor(entries: list[_FieldsEntry]) -> YearFloor:
                      "no two-digit year resolves below it")
 
 
-def lint_implausible_year(stage4: dict) -> list[dict]:
+def _formatter_texts(stage5d: dict | None) -> dict[tuple, str]:
+    """{span: the text a stage-5 formatter wrote for the whole entry} from
+    the stage-5d artifact, stage 6's input, which also carries 5c's
+    teaching prose. A span two entries share is dropped, as in
+    `_stage4_evidence`; no artifact is no texts."""
+    entries = (stage5d or {}).get("entries", [])
+    span_counts = Counter(_span(e) for e in entries)
+    texts = {}
+    for e in entries:
+        fields = e.get("extracted_fields")
+        if not isinstance(fields, Mapping) or span_counts[_span(e)] != 1:
+            continue
+        text = " ".join(str(fields[key]) for key in _FORMATTED_KEYS if fields.get(key))
+        if text:
+            texts[_span(e)] = text
+    return texts
+
+
+def _year_renders(year: int, entry: _FieldsEntry,
+                  formatted: Mapping[tuple, str]) -> bool:
+    """Whether a stage-4 year can reach the page: not when a stage-5
+    formatter rewrote the whole entry without it, since stage 6 renders that
+    text and not the date field (EBYSBC MIFYLG 234: stage 4 wrote a 1900
+    date the text does not have, 5c wrote the text's own year, and the docx
+    shows 5c's)."""
+    text = formatted.get((entry.element_idx, entry.element_idx_end))
+    return text is None or _year_in_text(year, text)
+
+
+#: A year above this is no date a CV record can carry: no grant, term or
+#: appointment ends in the 22nd century. Fixed, not "now + N", so a run's
+#: findings do not depend on the day it is doctored (§7.4); a typo just past
+#: the current year ("2091") is not caught.
+IMPLAUSIBLE_YEAR_CEILING = 2100
+
+
+def _ceiling_finding(entry: _FieldsEntry, above: list[tuple[str, int]]) -> dict:
+    """INFO when the entry's text writes every such year -- a source typo
+    stage 4 copied faithfully, which a reviewer should still see (EBYSBC
+    VNUAHA 175: an end year mistyped by its first digit) -- WARN when stage
+    4 wrote one the text does not."""
+    typo = all(_year_in_text(year, entry.text) for _, year in above)
+    return _finding(
+        "implausible_year", "INFO" if typo else "WARN",
+        f"entry {entry.element_idx} ({entry.code}): "
+        f"{', '.join(f'{key}={year}' for key, year in above)} -- after "
+        f"{IMPLAUSIBLE_YEAR_CEILING}, no year a record can carry; "
+        + ("the entry's text writes it, a source typo" if typo
+           else "not written in the entry's text"),
+        [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]])
+
+
+def lint_implausible_year(stage4: dict, stage5d: dict | None = None) -> list[dict]:
     """A year in a stage-4 date-named field that is below the owner's floor
-    (`YearFloor`) and that the entry's own text never writes in four digits:
-    a two-digit year given the wrong century, rendered as extracted. WARN,
-    one finding per entry. Report-only: the value is not repaired. Code A is
-    skipped, since its dates are personal data, not records."""
+    (`YearFloor`) and that the entry's own text never states
+    (`_year_written`): a two-digit year given the wrong century, rendered as
+    extracted. WARN, one finding per entry. Also a year above
+    `IMPLAUSIBLE_YEAR_CEILING` (`_ceiling_finding`). A year a stage-5
+    formatter replaced is not judged (`_year_renders`; optional `stage5d`).
+    Report-only: the value is not repaired. Code A is skipped, since its
+    dates are personal data, not records."""
     entries = _fields_entries(stage4)
     floor = _year_floor(entries)
+    formatted = _formatter_texts(stage5d)
     findings = []
     for entry in entries:
         if entry.code == PERSONAL_DATA_CODE:
             continue
-        bad = [f"{key}={year}" for key, year in _date_field_years(entry.fields)
-               if year < floor.year and not _year_in_text(year, entry.text)]
+        years = [(key, year) for key, year in _date_field_years(entry.fields)
+                 if _year_renders(year, entry, formatted)]
+        bad = [f"{key}={year}" for key, year in years
+               if year < floor.year and not _year_written(year, entry.text)]
         if bad:
             findings.append(_finding(
                 "implausible_year", "WARN",
@@ -1261,4 +1800,501 @@ def lint_implausible_year(stage4: dict) -> list[dict]:
                 f"entry's text; most likely a two-digit year given the wrong "
                 f"century",
                 [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
+        above = [(key, year) for key, year in years if year > IMPLAUSIBLE_YEAR_CEILING]
+        if above:
+            findings.append(_ceiling_finding(entry, above))
+    return findings
+
+
+# --- year_not_in_source -------------------------------------------------------
+#
+# The stage-4 model sometimes writes a year the entry never states, inside the
+# plausible band implausible_year leaves alone, so it renders looking right:
+# the start year of the entry before it in the same batch (EBYSBC VVRTUC
+# 43/45: an open-ended "Month YYYY -" start), or a misread short date
+# (HFAJCC 392: an mm/dd/yy start; YYVHNN 480: an M-YY-MM-YY range). Stage
+# 4 now repairs part of this itself: the century repair (#1267) moves a 19yy
+# year whose two digits the text carries, and `repair_year_not_in_source`
+# (stage4/coercion.py, #1348) re-derives a dated year from a source date in
+# the same month, which fixes HFAJCC 392 and VVRTUC 43 on new runs. This lint
+# is the safety net for what those repairs cannot reach: bare years, M-YY-MM-
+# YY runs (YYVHNN 480), and a dated value whose month the text gives no date
+# for.
+
+#: Codes year_not_in_source does not judge: code A (personal data, as in
+#: implausible_year), and the publication codes. A citation's year renders
+#: through stage 5d's citation and stage 5's PubMed record, and on the
+#: 63-run EBYSBC farm none of the 8 publication hits was a wrong year: each
+#: was a citation split across entries (its year on the next one), a
+#: corrected source typo (a dropped or transposed digit) or a bare two-digit
+#: year.
+_YEAR_NOT_IN_SOURCE_SKIPPED_CODES = frozenset({PERSONAL_DATA_CODE, *PUBLICATION_CODES})
+
+
+def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[dict]:
+    """A year in a stage-4 date-named field, from the owner's floor up to
+    `IMPLAUSIBLE_YEAR_CEILING` (implausible_year reports the years outside
+    that band), that the entry's text does not state (`_year_in_source`):
+    stage 4 took it from somewhere else. WARN, one finding per entry.
+    Skipped: `_YEAR_NOT_IN_SOURCE_SKIPPED_CODES`, and a year a stage-5
+    formatter replaced (`_year_renders`). Report-only."""
+    entries = _fields_entries(stage4)
+    floor = _year_floor(entries)
+    formatted = _formatter_texts(stage5d)
+    findings = []
+    for entry in entries:
+        if entry.code in _YEAR_NOT_IN_SOURCE_SKIPPED_CODES:
+            continue
+        bad = [f"{key}={year}" for key, year in _date_field_years(entry.fields)
+               if floor.year <= year <= IMPLAUSIBLE_YEAR_CEILING
+               and not _year_in_source(year, entry.text)
+               and _year_renders(year, entry, formatted)]
+        if bad:
+            findings.append(_finding(
+                "year_not_in_source", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): {', '.join(bad)} -- "
+                f"the entry's text states no such year, in four digits or as "
+                f"a two-digit year; stage 4 took it from elsewhere",
+                [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- multi_record_coverage ---------------------------------------------------
+#
+# Stage 4 asks for one record per entry. An entry whose text holds several --
+# two dated roles in one society, two talks run together in one paragraph, a
+# hospital post with the concurrent faculty rank in the next cell, three
+# mentees on one line -- comes back as ONE record with no `stage4_records`,
+# and nothing renders the rest (#1243; batch EBYSBC, 2026-10-02, class E1: 19
+# verified findings on 17 CVs). `unrendered_records` cannot see it: it splits
+# an entry on newlines, and these records share a line. This lint cuts the
+# entry's text into record-shaped clauses, takes the clause the record covers
+# best as the one it stands for, and looks for every other clause in the
+# rendered document. Report-only: nothing is split or asked again.
+
+#: A clause the record does not stand for carries at least this many words
+#: or years the record lacks, and they make up at least this share of the
+#: clause's own words and years. Below either, the clause is the record's own
+#: detail (a city, a second date), not another record. Tuned on the 63-run
+#: EBYSBC/s7ab/pilot farm: a 0.5 share missed two verified losses whose second
+#: clause repeats most of the first one's words (a national term after a
+#: regional one in the same office, a second search committee in the same
+#: department).
+MULTI_RECORD_MIN_NEW = 2
+MULTI_RECORD_NEW_SHARE = 0.4
+
+#: A clause with at least this many lowercase words, and more lowercase words
+#: than capitalised ones, is a sentence about the record ("in recognition of
+#: ...", "who then went on to ..."), not a record. Titles, roles and
+#: institutions are capitalised; a short role phrase in sentence case
+#: ("Clinical skills tutor") stays below the floor.
+MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
+
+#: A year as written in a date: 1900-2099, not inside a longer number (a
+#: patent or licence number).
+_CLAUSE_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+#: The same, with a one- or two-digit end year ("1996-98", "2009-11") kept
+#: in the date rather than opening the next clause.
+_DATE_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)")
+_MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
+                  r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
+                  r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
+#: A word that belongs to a date, not to what the record is.
+_DATE_WORD_RE = re.compile(rf"^(?:{_MONTH_PATTERN}|present|current|ongoing|date|now)$",
+                           re.IGNORECASE)
+#: What may sit between two years of ONE date: "1990-1992", "March 2001 -
+#: June 2004", "1987, 1988", "2003 and 2005".
+_DATE_GAP_RE = re.compile(
+    rf"^(?:[\s,\-–—/.:()&]|\d|(?:to|through|thru|and|present|current|ongoing"
+    rf"|{_MONTH_PATTERN})\b)*$", re.IGNORECASE)
+#: A word for `_has_payload`: three or more letters.
+_PAYLOAD_WORD_RE = re.compile(r"[^\W\d_]{3,}")
+_PAYLOAD_FILLER = frozenset({"and", "the"})
+#: Where a source table cell, line or pipe-joined cell ends: one part of an
+#: entry holds one record or a run of them, never half of one.
+_STRONG_SEPARATOR_RE = re.compile(r"\t|\n|\s\|\s")
+#: The same, plus ';', for undated parts named by a title and an institution.
+_SOFT_SEPARATOR_RE = re.compile(r"\t|\n|;|\s\|\s")
+#: An aside that opens a clause: "(Chair). ...", " - (see ...".
+_PAREN_OPENING_RE = re.compile(r"^[\s\-–—,.:;]*\(")
+_PAREN_LEAD_CHARS = frozenset(",.;:-–—")
+#: An undated part names a record when it carries a role or rank and an
+#: institution: "Assistant Professor, <university> College of Medicine" beside
+#: the hospital post the record kept (TAUBPU-01). A PI named in a project's
+#: credit line is not the owner's role, so "investigator" is not a title.
+_TITLE_WORD_RE = re.compile(
+    r"\b(?:professor|instructor|lecturer|fellow|director|chief|chair(?:man|person)?"
+    r"|attending|surgeon|physician|resident|member|president|dean|head|scientist"
+    r"|consultant|officer|editor|coordinator|manager|advisor|associate|assistant)\b",
+    re.IGNORECASE)
+_INSTITUTION_WORD_RE = re.compile(
+    r"\b(?:university|college|hospital|institute|school|cent(?:er|re)|society"
+    r"|association|academy|foundation|council|committee|board|department|clinic"
+    r"|program|agency|organization)\b", re.IGNORECASE)
+#: A bracketed note ("[6 CME credits]") qualifies its record.
+_BRACKET_NOTE_RE = re.compile(r"\[[^\]]*\]")
+#: A label opening a part ("Role:", "Location:") names a field, not a value.
+_PART_LABEL_RE = re.compile(r"(?:^|[\t\n;|])\s*([^\W\d_]+(?:\s+[^\W\d_]+)?)\s*:")
+#: Words that say how the owner took part, or what happened to a record later,
+#: never which record it is: a clause whose new words are only these is the
+#: record's own detail ("Invited Speaker", "renewed <year>").
+_NOT_A_RECORD_WORDS = frozenset({
+    "invited", "speaker", "keynote", "presenter", "presented", "presentation",
+    "nominated", "selected", "recognized", "renewal", "renewed", "recertified",
+    "recertification", "expires", "expiration", "expired", "maintenance",
+    "published", "edition"})
+#: Connectives long enough to be a distinctive token ("through", "between").
+_CLAUSE_CONNECTIVES = frozenset({
+    "through", "about", "after", "before", "under", "while", "within", "which",
+    "their", "there", "these", "those", "where", "other", "since", "until",
+    "among", "between", "including", "during"})
+_PROSE_WORD_RE = re.compile(r"[^\W\d_]{4,}")
+
+#: The field a mentee code's record names its mentee in, and a person's name
+#: there: two or more capitalised words ("Jane Q. Doe", "Ana Ruiz-Lee").
+MENTEE_NAME_FIELD = "mentee_name"
+_PERSON_NAME_RE = re.compile(r"^[A-Z][\w'’.-]*(?:\s+[A-Z][\w'’.-]*)+$")
+_NAME_LIST_SEPARATOR_RE = re.compile(r";|,|\band\b|&")
+#: The field a degree record files its year under.
+DEGREE_YEAR_FIELD = "year"
+#: The field each numbered credential's record files its one number under,
+#: and such a number: five or more digits in a row.
+_IDENTIFIER_FIELDS = MappingProxyType({"F1": "license_number", "M2D": "patent_number"})
+_IDENTIFIER_NUMBER_RE = re.compile(r"\d{5,}")
+
+
+class Clause(NamedTuple):
+    """One record-shaped stretch of an entry's text and the years it writes."""
+    text: str
+    years: frozenset[str]
+
+
+class DateAnchor(NamedTuple):
+    """One written date: its span in the text and the years it holds."""
+    start: int
+    end: int
+    years: frozenset[str]
+
+
+class RecordWords(NamedTuple):
+    """The distinctive words and the years of a stage-4 record's values."""
+    words: frozenset[str]
+    years: frozenset[str]
+
+
+class UncoveredClause(NamedTuple):
+    """A clause the record does not stand for, and the words the render check
+    looks for: its words the record lacks when there are enough of them,
+    else all its words."""
+    text: str
+    years: frozenset[str]
+    words: frozenset[str]
+
+
+class OutputLines(NamedTuple):
+    """Per rendered line, its distinctive words and its years."""
+    words: list[set[str]]
+    years: list[set[str]]
+
+
+class MultiRecordVerdict(NamedTuple):
+    """One entry's severity, message and evidence, in `_finding`'s positional
+    order."""
+    severity: str
+    message: str
+    evidence: list[str]
+
+
+def _has_payload(text: str) -> bool:
+    """Whether a stretch of entry text names anything besides a date."""
+    return any(not _DATE_WORD_RE.match(word) and word.lower() not in _PAYLOAD_FILLER
+               for word in _PAYLOAD_WORD_RE.findall(text))
+
+
+def _date_anchors(text: str) -> list[DateAnchor]:
+    """Each written date of the text: a run of years joined by date-only
+    gaps. A month or day written before a year stays in the text around it;
+    `_has_payload` and `_clause_words` read past date words."""
+    anchors: list[DateAnchor] = []
+    for match in _DATE_YEAR_RE.finditer(text):
+        year = match.group(1)
+        if anchors and _DATE_GAP_RE.match(text[anchors[-1].end:match.start()]):
+            last = anchors[-1]
+            anchors[-1] = DateAnchor(last.start, match.end(), last.years | {year})
+        else:
+            anchors.append(DateAnchor(match.start(), match.end(), frozenset({year})))
+    return anchors
+
+
+def _is_parenthetical(text: str) -> bool:
+    """An aside of the clause before it: the clause opens a parenthesis that
+    never closes, or that closes with nothing after it."""
+    opening = _PAREN_OPENING_RE.match(text)
+    if not opening:
+        return False
+    close = text.find(")", opening.end())
+    return close < 0 or not _has_payload(text[close + 1:])
+
+
+def _opens_inside_parens(part: str, position: int) -> bool:
+    """Whether the words after `position` sit inside a parenthesis an earlier
+    clause opened -- "(won an award <year>, <meeting>, <city>)" is that
+    clause's aside, not a record. Punctuation, digits and closing parentheses after
+    `position` are stepped over first."""
+    depth = part.count("(", 0, position) - part.count(")", 0, position)
+    for char in part[position:]:
+        if char == ")":
+            depth -= 1
+        elif not (char.isspace() or char.isdigit() or char in _PAREN_LEAD_CHARS):
+            break
+    return depth > 0
+
+
+def _part_clauses(part: str) -> list[Clause]:
+    """One part's dated clauses. A part whose dates are not separated by any
+    words is one clause (a record with a list of dates); otherwise each date
+    takes the words after it when the part opens with a date ("<year> <talk>
+    <year> <talk>"), else the words before it ("<role>, <years> <role>,
+    <years>")."""
+    anchors = _date_anchors(part)
+    if not anchors:
+        return []
+    between = [part[a.end:b.start] for a, b in zip(anchors, anchors[1:])]
+    if not any(_has_payload(gap) for gap in between):
+        return [Clause(part, frozenset().union(*(a.years for a in anchors)))]
+    leading = not _has_payload(part[:anchors[0].start])
+    clauses = []
+    for i, anchor in enumerate(anchors):
+        if leading:
+            end = anchors[i + 1].start if i + 1 < len(anchors) else len(part)
+            text = part[anchor.start:end]
+        else:
+            text = part[anchors[i - 1].end if i else 0:anchor.end]
+        if i and (_is_parenthetical(text)
+                  or (leading and _opens_inside_parens(part, anchor.end))):
+            continue
+        clauses.append(Clause(text, anchor.years))
+    return clauses
+
+
+def _record_clauses(text: str) -> list[Clause]:
+    """The record-shaped clauses of an entry's text: its dated clauses when
+    there are two or more, else its undated parts that each name a title and
+    an institution. Fewer than two means the text reads as one record."""
+    dated = [clause for part in _STRONG_SEPARATOR_RE.split(text)
+             for clause in _part_clauses(part)]
+    if len(dated) >= 2:
+        return dated
+    return [Clause(part, frozenset(_CLAUSE_YEAR_RE.findall(part)))
+            for part in _SOFT_SEPARATOR_RE.split(text)
+            if _TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part)]
+
+
+def _clause_words(text: str) -> set[str]:
+    """A clause's distinctive words (the render lints' 5+-letter tokens) less
+    date words, connectives, a part's opening label and a bracketed note."""
+    text = _BRACKET_NOTE_RE.sub(" ", text)
+    labels = {token for match in _PART_LABEL_RE.finditer(text)
+              for token in _long_word_tokens(match.group(1))}
+    return {token for token in _long_word_tokens(text)
+            if token not in labels and token not in _CLAUSE_CONNECTIVES
+            and not _DATE_WORD_RE.match(token)}
+
+
+def _is_prose(text: str) -> bool:
+    """A sentence about a record rather than a record; see
+    MULTI_RECORD_PROSE_MIN_LOWERCASE."""
+    words = [word for word in _PROSE_WORD_RE.findall(text) if not _DATE_WORD_RE.match(word)]
+    lowercase = sum(1 for word in words if word[0].islower())
+    return (lowercase >= MULTI_RECORD_PROSE_MIN_LOWERCASE
+            and lowercase > len(words) - lowercase)
+
+
+def _record_words(fields: Mapping[str, object]) -> RecordWords:
+    leaves = _leaf_strings(fields)
+    return RecordWords(
+        frozenset(token for leaf in leaves for token in _long_word_tokens(leaf)),
+        frozenset(year for leaf in leaves for year in _CLAUSE_YEAR_RE.findall(leaf)))
+
+
+def _uncovered_clauses(clauses: list[Clause], record: RecordWords) -> list[UncoveredClause]:
+    """The clauses other than the one the record covers best that carry enough
+    of their own (see MULTI_RECORD_MIN_NEW) and are not prose."""
+    words = [_clause_words(clause.text) for clause in clauses]
+    own = max(range(len(clauses)), key=lambda i: len(words[i] & record.words))
+    uncovered = []
+    for i, clause in enumerate(clauses):
+        new_words = words[i] - record.words
+        if i == own or not new_words - _NOT_A_RECORD_WORDS:
+            continue
+        new = len(new_words) + len(clause.years - record.years)
+        if (new < MULTI_RECORD_MIN_NEW
+                or new < MULTI_RECORD_NEW_SHARE * (len(words[i]) + len(clause.years))
+                or _is_prose(clause.text)):
+            continue
+        checked = new_words if len(new_words) >= MULTI_RECORD_MIN_NEW else words[i]
+        uncovered.append(UncoveredClause(clause.text, clause.years, frozenset(checked)))
+    return uncovered
+
+
+def _output_lines(blocks: list[tuple[str, str]]) -> OutputLines:
+    lines = [line for _, text in blocks for line in str(text).split("\n") if line.strip()]
+    return OutputLines([_long_word_tokens(line) for line in lines],
+                       [set(_CLAUSE_YEAR_RE.findall(line)) for line in lines])
+
+
+def _clause_rendered(clause: UncoveredClause, output: OutputLines) -> bool:
+    """Whether one rendered line carries the clause: RENDER_TOKEN_OVERLAP of
+    its words and, for a dated clause, every year it writes -- the same words
+    beside other years are the same title held at another time, a different
+    record."""
+    return any(len(clause.words & words) >= RENDER_TOKEN_OVERLAP * len(clause.words)
+               and clause.years <= years
+               for words, years in zip(output.words, output.years))
+
+
+def _clause_evidence(clauses: list[UncoveredClause]) -> list[str]:
+    return [clause.text.strip(" \t,;.)-–—")[:FIELD_EVIDENCE_VALUE_CHARS]
+            for clause in clauses[:FIELD_EVIDENCE_MAX_VALUES]]
+
+
+def _clause_verdict(entry: _FieldsEntry, output: OutputLines) -> MultiRecordVerdict | None:
+    """WARN when a clause the record does not stand for is on no rendered
+    line, INFO when each is on one (rendered by another entry, or fused into
+    the record's row)."""
+    clauses = _record_clauses(entry.text)
+    if len(clauses) < 2:
+        return None
+    uncovered = _uncovered_clauses(clauses, _record_words(entry.fields))
+    if not uncovered:
+        return None
+    absent = [clause for clause in uncovered if not _clause_rendered(clause, output)]
+    head = (f"entry {entry.element_idx} ({entry.code}): {len(clauses)} record-shaped "
+            f"clauses, one stage-4 record")
+    if absent:
+        return MultiRecordVerdict(
+            "WARN", f"{head}; {len(absent)} other clause(s) on no line of the output (#1243)",
+            _clause_evidence(absent))
+    return MultiRecordVerdict(
+        "INFO", f"{head}; the other clause(s) are in the output (#1243)",
+        _clause_evidence(uncovered))
+
+
+def _person_names(value: object) -> list[str]:
+    """The items of a `mentee_name` value that read as a person's name."""
+    if not isinstance(value, str):
+        return []
+    return [item for item in _NAME_LIST_SEPARATOR_RE.split(value)
+            if _PERSON_NAME_RE.match(item.strip())]
+
+
+def _identifier_numbers(text: str) -> set[str]:
+    return set(_IDENTIFIER_NUMBER_RE.findall(text))
+
+
+def _fused_values_verdict(entry: _FieldsEntry, head: str,
+                          absent: list[str]) -> MultiRecordVerdict:
+    """WARN when a value the one record fuses is on no rendered line, INFO
+    when each is on one."""
+    evidence = [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]
+    if absent:
+        return MultiRecordVerdict(
+            "WARN", f"{head}; {len(absent)} on no line of the output (#1243)", evidence)
+    return MultiRecordVerdict(
+        "INFO", f"{head}; each is on a line of the output (#1243)", evidence)
+
+
+def _identifier_verdict(entry: _FieldsEntry, head: str,
+                        output_digits: str) -> MultiRecordVerdict | None:
+    """Two or more licence or patent numbers in the text of an F1/M2D entry
+    whose number field holds fewer: WARN when one is in neither the record
+    nor the document."""
+    number_field = _IDENTIFIER_FIELDS.get(entry.code)
+    if not number_field:
+        return None
+    numbers = _identifier_numbers(entry.text)
+    filed = _identifier_numbers(str(entry.fields.get(number_field) or ""))
+    if len(numbers) < 2 or len(filed) >= len(numbers):
+        return None
+    held = {n for leaf in _leaf_strings(entry.fields) for n in _identifier_numbers(leaf)}
+    lost = [n for n in numbers - held if n not in output_digits]
+    return MultiRecordVerdict(
+        "WARN" if lost else "INFO",
+        f"{head} for {len(numbers)} numbers; {len(lost)} in neither the record nor "
+        f"the output (#1243)", [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]])
+
+
+def _mentee_verdict(entry: _FieldsEntry, head: str,
+                    output: OutputLines) -> MultiRecordVerdict | None:
+    """Two or more mentees in one record's `mentee_name`. A mentee is on the
+    output when one rendered line carries RENDER_TOKEN_OVERLAP of their
+    name's 5+-letter words; a name with none cannot be checked and counts as
+    on it."""
+    names = _person_names(entry.fields.get(MENTEE_NAME_FIELD))
+    if len(names) < 2:
+        return None
+    absent = [name for name in names if not _clause_rendered(
+        UncoveredClause(name, frozenset(), frozenset(_long_word_tokens(name))), output)]
+    return _fused_values_verdict(entry, f"{head} naming {len(names)} mentees", absent)
+
+
+def _degree_year_verdict(entry: _FieldsEntry, head: str,
+                         output: OutputLines) -> MultiRecordVerdict | None:
+    """Two or more years in a degree record's `year`. A year is on the output
+    when one rendered line carries it and RENDER_TOKEN_OVERLAP of the
+    record's other words (its degree, institution, discipline)."""
+    if entry.code != ACADEMIC_DEGREE_CODE:
+        return None
+    years = sorted(set(_CLAUSE_YEAR_RE.findall(str(entry.fields.get(DEGREE_YEAR_FIELD) or ""))))
+    if len(years) < 2:
+        return None
+    words = frozenset(token for key, value in entry.fields.items() if key != DEGREE_YEAR_FIELD
+                      for leaf in _leaf_strings(value) for token in _long_word_tokens(leaf))
+    absent = [year for year in years
+              if not _clause_rendered(UncoveredClause(year, frozenset({year}), words), output)]
+    return _fused_values_verdict(entry, f"{head} for {len(years)} degree years", absent)
+
+
+def _fused_verdict(entry: _FieldsEntry, output: OutputLines,
+                   output_digits: str) -> MultiRecordVerdict | None:
+    """One record that holds several in its values: licence or patent
+    numbers, mentees, or degree years. WARN when one of them is on no line
+    of the rendered document, INFO when they render fused into the record."""
+    head = f"entry {entry.element_idx} ({entry.code}): stage 4 returned one record"
+    return (_identifier_verdict(entry, head, output_digits)
+            or _mentee_verdict(entry, head, output)
+            or _degree_year_verdict(entry, head, output))
+
+
+#: Codes the multi-record lint does not judge: offschema_fields' set, plus
+#: Personal Data named on its own, so the lint keeps skipping A's contact lines
+#: even if offschema_fields starts judging A (#1245).
+_MULTI_RECORD_SKIPPED_CODES = _OFFSCHEMA_SKIPPED_CODES | frozenset({PERSONAL_DATA_CODE})
+
+
+def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """A stage-4 entry whose text holds several records while stage 4
+    returned one record and no `stage4_records` (#1243): two or more dated
+    clauses, or undated parts that each name a title and an institution, of
+    which the record stands for one; or one record holding several mentees,
+    degree years or licence/patent numbers. One finding per entry; WARN when
+    a clause it left out, or one of the values it fused, is on no line of the
+    rendered document (track changes included), INFO otherwise. Skips the
+    codes `offschema_fields` skips (the section writes the entry's text, a
+    stage-5 formatter rewrites it whole, or it is personal data). An entry
+    stage 6's fan-out splits needs no skip of its own: fan-out splits a
+    record list only when the list's values hold every word of the entry's
+    text, so every clause is covered, and it splits `stage4_records`, which
+    are skipped above."""
+    output = _output_lines(blocks)
+    output_digits = _LINE_SENTINEL.join(
+        re.sub(r"\D", "", line) for _, text in blocks for line in str(text).split("\n"))
+    findings = []
+    for entry in _fields_entries(stage4):
+        if (not entry.code or entry.code in _MULTI_RECORD_SKIPPED_CODES or not entry.fields
+                or entry.fields.get(STAGE4_RECORDS_KEY)):
+            continue
+        verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output, output_digits)
+        if verdict:
+            findings.append(_finding("multi_record_coverage", *verdict))
     return findings

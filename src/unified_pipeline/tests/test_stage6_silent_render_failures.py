@@ -363,7 +363,9 @@ def test_mentoring_real_template_body_order():
                 'extracted_fields': {}}],
     }
 
-    gen._fill_mentoring(entries_by_code)
+    # 2022 so the two start-only N3A mentees are not judged ended
+    # (`_n3a_entry_has_ended`); this test is about body order, not dates.
+    gen._fill_mentoring(entries_by_code, current_year=2022)
 
     current = _body_after(gen.doc, "Current Mentees:", 6)
     assert current[:5] == [('p', 'Current Ph.D. Students: 2'),

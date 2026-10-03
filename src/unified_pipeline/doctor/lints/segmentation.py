@@ -25,6 +25,7 @@ from unified_pipeline.segmentation_regression import (
     find_lost_blocks,
     lint_metrics,
 )
+from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 
 from ..shared import _finding, _magnitude_severity
 
@@ -245,15 +246,31 @@ def _is_owner_name(cand: str, allowed: set[str], required: set[str]) -> bool:
         w in allowed or len(w) == 1 for w in words)
 
 
+def _contact_block_keys(stage4: dict | None) -> set[str]:
+    """`_header_key`s of every line and tab cell of the stage-4 entries coded
+    Personal Data: the contact block a CV opens with -- its title line
+    ("CURRICULUM VITAE, <name>"), the employer, the address. Stage 3b filed
+    the line as the owner's personal data, so it is not a section header
+    that segmentation missed (EBYSBC: HFAJCC's employer line and MIFYLG's
+    title line, both verified false; no verified true positive is such a
+    line)."""
+    return {_header_key(part)
+            for entry in (stage4 or {}).get("entries", [])
+            if entry.get("taxonomy_code") == PERSONAL_DATA_CODE
+            for part in re.split(r"[\n\t]", str(entry.get("text") or ""))}
+
+
 def lint_missed_headers(candidates: list[str], stage1a: dict,
                         stage2: dict, stage4: dict | None = None) -> list[dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
-    everything filed under it. The CV owner's own name (optional stage-4
-    ``cv_owner``) is document furniture, not a header (#539). A candidate
+    everything filed under it. With the optional stage 4, the CV owner's own
+    name (``cv_owner``, #539) and any other line of the Personal Data block
+    (`_contact_block_keys`) are document furniture, not headers. A candidate
     that is not ALL-CAPS reached the list through its Heading style alone and
     never sets the run's severity (`WEAK_CANDIDATE_SEVERITY`, #1232)."""
     allowed, required = _owner_name_words(stage4)
+    contact_block = _contact_block_keys(stage4)
     known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
     paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
@@ -289,7 +306,7 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
         seen.add(normed)
         if normed in titles or _key_matches_title(normed, known):
             continue
-        if _is_owner_name(cand, allowed, required):
+        if _is_owner_name(cand, allowed, required) or normed in contact_block:
             continue
         finding = _finding(
             "missed_headers", "WARN",

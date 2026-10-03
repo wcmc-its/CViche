@@ -24,6 +24,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from docx import Document
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -63,12 +66,18 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEGREE_YEAR_LEAD,
     FIELD_EVIDENCE_MAX_VALUES,
     FIELD_EVIDENCE_VALUE_CHARS,
+    IMPLAUSIBLE_YEAR_CEILING,
     IMPLAUSIBLE_YEAR_FLOOR,
+    MULTI_RECORD_MIN_NEW,
+    MULTI_RECORD_NEW_SHARE,
+    MULTI_RECORD_PROSE_MIN_LOWERCASE,
     lint_implausible_year,
+    lint_multi_record_coverage,
     lint_offschema_fields,
+    lint_year_not_in_source,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
-    _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack)
+    _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack, docx_body_blocks)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 
@@ -1197,7 +1206,7 @@ def test_offschema_record_dict_sharing_a_schema_key_is_warn():
     assert findings[0]["severity"] == "WARN"
     assert "`additional_entry`" in findings[0]["message"]
     assert "1 R entry" in findings[0]["message"]
-    assert "1 holds a whole record" in findings[0]["message"]
+    assert "1 whole record under it" in findings[0]["message"]
     assert findings[0]["evidence"] == [
         'entry 11: {"title": "Talk two", "location": "Springfield"}']
 
@@ -1234,6 +1243,7 @@ def test_offschema_scalar_is_info_and_names_the_fact():
     findings = _offschema(_anchored("B1", {"degree": "BA", "honors": "with distinction"}))
     assert [f["severity"] for f in findings] == ["INFO"]
     assert "each holds one fact" in findings[0]["message"]
+    assert "missing from the output" in findings[0]["message"]
     assert findings[0]["evidence"] == ["entry 11: with distinction"]
 
 
@@ -1324,7 +1334,7 @@ def test_offschema_record_on_an_entry_rendering_its_text_is_warn(fields):
     whole record, so the one-fact skip never covers a record-shaped value."""
     findings = _offschema(_fields_entry("I", fields))
     assert [f["severity"] for f in findings] == ["WARN"]
-    assert "1 holds a whole record" in findings[0]["message"]
+    assert "1 whole record under it" in findings[0]["message"]
 
 
 def test_offschema_entry_rendering_its_text_reports_its_record_but_not_its_fact():
@@ -1392,7 +1402,7 @@ def test_offschema_warn_when_any_value_of_the_key_is_a_record():
         _anchored("R", {"additional_entry": {"title": "Talk"}}, idx=2),
         _anchored("R", {"additional_entry": {"title": "Talk 2"}}, idx=3))
     assert [f["severity"] for f in findings] == ["WARN"]
-    assert "2 hold a whole record" in findings[0]["message"]
+    assert "2 whole records under it" in findings[0]["message"]
 
 
 def test_offschema_evidence_value_is_truncated():
@@ -1417,6 +1427,530 @@ def test_offschema_leaves_the_entry_alone():
     before = json.dumps(entry, sort_keys=True)
     _offschema(entry)
     assert json.dumps(entry, sort_keys=True) == before
+
+
+def test_offschema_record_list_counts_each_record():
+    """#1245: a list of three appointments is three records lost, not one."""
+    findings = _offschema(
+        _anchored("D1", {"appointments": [
+            {"title": "Lecturer"}, {"title": "Reader"}, {"title": "Fellow"}]}, idx=1),
+        _anchored("D1", {"appointments": [{"title": "Tutor"}]}, idx=2))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["message"].startswith("2 D1 entries: `appointments`")
+    assert "4 whole records under it" in findings[0]["message"]
+
+
+# --------------------------------------------------------------------------
+# lint_offschema_fields graded against the rendered document (#1245). Blocks
+# are the `read_docx_blocks` shape: ("p", text) or ("table", its lines joined
+# by newlines). Every name and value is invented.
+
+def _graded(blocks, *entries):
+    return lint_offschema_fields({"entries": list(entries)}, blocks)
+
+
+def _row(*cells):
+    """One table row as `_table_lines` writes it: each cell, then the row
+    joined across its cells."""
+    return [*cells, " | ".join(cells)]
+
+
+def _table(*rows):
+    return ("table", "\n".join(line for row in rows for line in row))
+
+
+def _offschema_degree(**extra):
+    return _fields_entry("B1", {"degree": "BA", "institution": "Example College",
+                                **extra}, text="BA, Example College, Townsville, Exland")
+
+
+def test_offschema_value_its_own_row_shows_is_not_reported():
+    """Stage 5b writes a B1 `location` into the institution cell, re-punctuated."""
+    entry = _offschema_degree(location="Townsville, Exland")
+    blocks = [_table(_row("BA", "Example College, Townsville City, Exland", "2001"))]
+    assert _graded(blocks, entry) == []
+    # Without the document the value is reported, as before #1245.
+    assert [f["severity"] for f in _offschema(entry)] == ["INFO"]
+
+
+def test_offschema_value_the_document_lacks_and_the_text_states_is_warn():
+    entry = _fields_entry("B1", {"degree": "BA", "institution": "Example College",
+                                 "honors": "with distinction"},
+                          text="BA, Example College, with distinction")
+    findings = _graded([_table(_row("BA", "Example College", "2001"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["entry 11: with distinction"]
+
+
+def test_offschema_a_number_no_line_shows_is_reported():
+    """A value with no string in it is matched as written, not waved
+    through as shown."""
+    entry = _fields_entry("M2C", {"title": "Example Grant", "share": 0.25},
+                          text="Example Grant, share 0.25")
+    findings = _graded([_table(_row("Title:", "Example Grant"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_offschema_a_whole_record_is_reported_even_where_its_row_shows_it():
+    """A record under an off-schema key is not graded: a second talk fused
+    onto the first one's row is still a record stage 6 never wrote as one
+    (#1187), so it stays WARN."""
+    entry = _anchored("R", {"event_name": "Example Meeting", "additional_entry": {
+        "title": "Talk two", "event_name": "Example Meeting"}})
+    blocks = [_table(_row("Talk one; Talk two", "Example Meeting", "2010"))]
+    findings = _graded(blocks, entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "1 whole record under it" in findings[0]["message"]
+
+
+def test_offschema_value_the_text_never_states_stays_info():
+    """The model's own remark on an entry is not content the CV lost."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "note": "no further detail was given"},
+                          text="Ann Pupil, summer student")
+    findings = _graded([_table(_row("Name:", "Ann Pupil"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+
+
+def test_offschema_value_the_text_states_in_other_words_is_warn():
+    """Stage 4 rewrites a date inside a value ("05/2015" as "May 2015"):
+    most of its words in the entry's text still state it."""
+    entry = _fields_entry("F2", {"certifying_board": "Example Board",
+                                 "notes": "Board recertified May 2015"},
+                          text="Example Board; Board recertified 05/2015")
+    findings = _graded([_table(_row("Example Board", "2010"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_offschema_list_value_is_a_loss_only_when_the_text_states_every_item():
+    """One item the entry's text never states (the model's own) keeps the
+    whole value INFO."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": ["Gold Ribbon", "likely a school prize"]},
+                          text="Ann Pupil; Gold Ribbon")
+    findings = _graded([_table(_row("Name:", "Ann Pupil"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_value_shown_only_with_another_record_is_info():
+    lost = _fields_entry("N3B", {"mentee_name": "Ann Pupil", "advisor": "Bea Guide"},
+                         text="Ann Pupil, advised by Bea Guide", idx=1)
+    other = _fields_entry("N3B", {"mentee_name": "Cy Pupil",
+                                  "site_position": "Lab of Bea Guide"}, idx=2)
+    blocks = [_table(_row("Name:", "Ann Pupil")),
+              _table(_row("Name:", "Cy Pupil"), _row("Site/Position:", "Lab of Bea Guide"))]
+    findings = _graded(blocks, lost, other)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "the document shows it, but not with its record" in findings[0]["message"]
+
+
+def test_offschema_a_form_table_is_one_record():
+    """A "Label: | value" table is one record's form: a value in one of its
+    rows is shown with the name in another. A table of records is not."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": "Gold Ribbon, Science Fair"},
+                          text="Ann Pupil; Gold Ribbon, Science Fair")
+    form = _table(_row("Name:", "Ann Pupil"),
+                  _row("Project/Accomplishments:", "Awards: Gold Ribbon, Science Fair"))
+    assert _graded([form], entry) == []
+    listing = _table(_row("Ann Pupil", "2001"),
+                     _row("Bo Pupil", "Gold Ribbon, Science Fair"))
+    assert [f["severity"] for f in _graded([listing], entry)] == ["INFO"]
+
+
+def test_offschema_a_form_table_matches_inside_one_row_only():
+    """Read across rows, "Delta Group" ending one and "Award detail:"
+    opening the next would carry an anchor neither row holds."""
+    entry = _fields_entry("I", {"organization": "Delta Group Award",
+                                "standing": "charter member"},
+                          text="Delta Group Award, charter member")
+    form = _table(_row("Body:", "Delta Group"), _row("Award detail:", "charter member"))
+    findings = _graded([form], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_a_form_table_shows_a_value_only_within_one_row():
+    """A form table is one unit, not one bag of words: a value whose words
+    are spread over its rows is not shown in it."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil", "awards": "Gold Ribbon"},
+                          text="Ann Pupil; Gold Ribbon")
+    form = _table(_row("Name:", "Ann Pupil"), _row("Project:", "Gold study"),
+                  _row("Award source:", "Ribbon Fund"))
+    findings = _graded([form], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+
+
+def test_offschema_an_anchor_inside_a_sibling_value_finds_no_row():
+    """A value inside another record's longer value cannot say which row is
+    this record's: the sibling's row shows the institution this one lost."""
+    lost = _fields_entry("N3A", {"site_position": "Doctoral Program",
+                                 "institution": "Lakeside University"}, idx=1)
+    sibling = _fields_entry("N3A", {
+        "site_position": "MD, Doctoral Program - Lakeside University"}, idx=2)
+    blocks = [_table(_row("Site/Position:", "MD, Doctoral Program - Lakeside University")),
+              _table(_row("Site/Position:", "Doctoral Program"))]
+    findings = _graded(blocks, lost, sibling)
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("INFO", ["entry 1: Lakeside University"])]
+
+
+def test_offschema_nested_anchor_values_count_once():
+    """A level inside the program name is the same evidence, not a second."""
+    lost = _fields_entry("N3A", {"mentee_level": "MSc", "site_position": "MSc Program",
+                                 "institution": "Lakeside University"}, idx=1)
+    sibling = _fields_entry("N3A", {
+        "site_position": "BSc, MSc Program - Lakeside University"}, idx=2)
+    blocks = [_table(_row("Site/Position:", "BSc, MSc Program - Lakeside University"))]
+    findings = _graded(blocks, lost, sibling)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_values_shared_with_other_records_find_their_row_together():
+    """Degree and institution each sit in another record too, but together
+    only on the degree's own row."""
+    degree = _fields_entry("B1", {"degree": "PhD", "institution": "Northfield University",
+                                  "location": "Northfield, Exland"}, idx=1)
+    award = _fields_entry("H", {"award_name": "Scholarship (PhD)",
+                                "granting_body": "Northfield University, Exland"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University, Northfield, Exland", "1991"),
+                     _row("MA", "Southfield University, Southfield, Exland", "1986")),
+              _table(_row("Scholarship (PhD)", "Northfield University, Exland", "1986"))]
+    assert _graded(blocks, degree, award) == []
+
+
+def test_offschema_a_row_carrying_one_shared_value_is_not_the_records():
+    """Without a distinctive value, a row is the record's only when it
+    carries a majority of the record's values: the medal's row names the
+    same university, and the honor on it is the medal's."""
+    degree = _fields_entry("B1", {"degree": "PhD", "institution": "Northfield University",
+                                  "honors": "with distinction"},
+                           text="PhD, Northfield University, with distinction", idx=1)
+    medal = _fields_entry("H", {"award_name": "Northfield University Medal",
+                                "granting_body": "Northfield University"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University", "1991")),
+              _table(_row("Northfield University Medal, with distinction",
+                          "Northfield University", "1990"))]
+    findings = _graded(blocks, degree, medal)
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("INFO", ["entry 1: with distinction"])]
+    assert "the document shows it, but not with its record" in findings[0]["message"]
+
+
+def test_offschema_template_wording_never_marks_a_records_row():
+    """A value that is the template's own wording ("Mentor") is on the
+    template's lines whatever record they belong to, so it cannot say which
+    row is this record's, even when no other record holds it."""
+    entry = _fields_entry("N2", {"role": "Mentor", "sponsor": "Example Foundation"},
+                          text="Mentor, Example Foundation")
+    other = _table(_row("Program:", "Example Foundation Scholars"),
+                   _row("Mentor:", "Dee Guide"))
+    findings = _graded([other], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "the document shows it, but not with its record" in findings[0]["message"]
+
+
+def test_offschema_a_date_under_a_non_date_key_never_marks_a_records_row():
+    """`expected_completion` is not date-named, but "May 2024" is a date:
+    another record's row that shows it is not this record's row."""
+    lost = _fields_entry("N3A", {"mentee_name": "Ann Pupil", "expected_completion": "May 2024",
+                                 "advisor": "Bea Guide"},
+                         text="Ann Pupil, advised by Bea Guide", idx=1)
+    other = _fields_entry("N3A", {"mentee_name": "Cy Pupil", "start_date": "05/2024",
+                                  "site_position": "Lab of Bea Guide"}, idx=2)
+    blocks = [_table(_row("Ann Pupil", "Doctoral student")),
+              _table(_row("Cy Pupil", "May 2024", "Lab of Bea Guide"))]
+    findings = _graded(blocks, lost, other)
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("INFO", ["entry 1: Bea Guide"])]
+
+
+def _honor(**dates):
+    return _fields_entry("H", {"award_name": "Silver Lamp Award",
+                               "granting_body": "Example Society", **dates},
+                         text="Silver Lamp Award, Example Society, 2004-2007")
+
+
+def test_offschema_single_date_code_range_its_row_lacks_is_warn():
+    """H declares `date` alone; a range under start/end renders nowhere."""
+    findings = _graded([_table(_row("Silver Lamp Award", "Example Society"))],
+                       _honor(start_date="2004", end_date="2007"))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "end_date"), ("WARN", "start_date")]
+    assert "1 of them not on its record's line" in findings[0]["message"]
+
+
+def test_offschema_single_date_code_range_its_row_shows_is_not_reported():
+    shown = _table(_row("Silver Lamp Award", "Example Society", "2004-2007"))
+    assert _graded([shown], _honor(start_date="2004", end_date="2007")) == []
+    start_only = _table(_row("Silver Lamp Award", "Example Society", "2004"))
+    findings = _graded([start_only], _honor(start_date="2004", end_date="2007"))
+    assert [f["message"].split("`")[1] for f in findings] == ["end_date"]
+
+
+def test_offschema_date_with_no_four_digit_year_is_not_reported():
+    row = _row("Silver Lamp Award", "Example Society")
+    assert _graded([_table(row)], _honor(end_date="present")) == []
+
+
+def test_offschema_date_whose_record_has_no_row_is_not_reported():
+    """Its year on some other line would be a coincidence, not its record."""
+    row = _row("Bronze Bowl", "Other Society", "2004-2007")
+    assert _graded([_table(row)], _honor(start_date="2004", end_date="2007")) == []
+
+
+def test_offschema_date_is_judged_on_its_own_row_not_on_another_records():
+    """The record's own row lacks the range; another record's row carrying
+    the same years does not show it."""
+    blocks = [_table(_row("Silver Lamp Award", "Example Society"),
+                     _row("Bronze Bowl", "Other Society", "2004-2007"))]
+    findings = _graded(blocks, _honor(start_date="2004", end_date="2007"))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "end_date"), ("WARN", "start_date")]
+
+
+def test_offschema_date_key_renaming_a_schema_date_is_not_reported():
+    """D1 declares start and end dates; its `date` is a rename a renderer
+    may read, so the lint stays out of it even with the document."""
+    entry = _fields_entry("D1", {"title": "Lecturer", "institution": "Example College",
+                                 "date": "2001"})
+    assert _graded([_table(_row("Lecturer", "Example College"))], entry) == []
+
+
+def test_offschema_a_list_of_periods_on_any_code_is_judged():
+    """A second term under `additional_dates` is not a rename of start/end."""
+    entry = _fields_entry("O", {
+        "leadership_role": "Chair", "institution": "Example College",
+        "start_date": "2019", "end_date": "2020",
+        "additional_dates": [{"start_date": "2022", "end_date": "2023"}]})
+    findings = _graded([_table(_row("Chair", "Example College", "2019-2020"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_dates")]
+    assert "each holds one fact" in findings[0]["message"]
+
+
+def test_offschema_row_found_when_its_name_is_split_across_cells():
+    """The honors renderer moves an award name's tail into its own cell, and
+    the document writes a typographic apostrophe stage 4 wrote plainly."""
+    entry = _fields_entry("H", {"award_name": "Reader's Choice Prize, First Edition",
+                                "date": "1995", "end_date": "1998"})
+    row = _row("Reader’s Choice Prize", "First Edition", "1995")
+    findings = _graded([_table(row)], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "end_date")]
+
+
+def _owner(**extra):
+    return _fields_entry("A", {"name": "Pat Owner", **extra}, idx=3)
+
+
+_PERSONAL_TABLE = _table(_row("Office address:", "1 Example Way"),
+                         _row("Work email:", "pat@example.org"))
+
+
+def test_offschema_personal_data_value_shown_anywhere_is_not_reported():
+    assert _graded([_PERSONAL_TABLE], _owner(institutional_email="pat@example.org")) == []
+
+
+def test_offschema_personal_data_list_value_shown_anywhere_is_not_reported():
+    """Every line is a Personal Data value's own, so a list of numbers the
+    document shows is shown, though no row names the owner."""
+    table = _table(_row("Office telephone:", "555-0100"))
+    assert _graded([table], _owner(office_phones=["555-0100"])) == []
+
+
+def test_offschema_personal_data_value_is_never_quoted():
+    findings = _graded([_PERSONAL_TABLE], _owner(office_phone="555-0100", fax="555-0199"))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("INFO", "fax"), ("WARN", "office_phone")]
+    assert all(f["evidence"] == ["entry 3: (Personal Data value, not quoted)"]
+               for f in findings)
+    assert "555" not in json.dumps(findings)
+
+
+def test_offschema_personal_data_entry_with_no_schema_value_is_still_judged():
+    """Personal Data is a fixed table, not a raw-text fallback: an A entry
+    whose every value is off its schema has lost them all."""
+    entry = _fields_entry("A", {"office_phone": "555-0100"}, idx=3)
+    findings = _graded([_PERSONAL_TABLE], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "office_phone")]
+
+
+@pytest.mark.parametrize("withheld", [
+    {"place_of_birth": "Exampletown"}, {"spouse_name": "Lee Owner"},
+    {"marital_status": "married"}, {"home_address": "2 Example Lane"},
+])
+def test_offschema_personal_data_the_policy_withholds_is_not_reported(withheld):
+    assert _graded([_PERSONAL_TABLE], _owner(**withheld)) == []
+
+
+def test_offschema_owner_contact_on_another_record_is_shown_by_personal_data():
+    """A page header's email fused into a record is the owner's own,
+    rendered in Personal Data -- not a fact the record lost."""
+    role = _fields_entry("O", {"leadership_role": "Chair", "institution": "Example College",
+                               "work_email": "pat@example.org"},
+                         text="Chair, Example College\tEmail: pat@example.org", idx=5)
+    blocks = [_PERSONAL_TABLE, _table(_row("Chair", "Example College", "2018"))]
+    assert _graded(blocks, _owner(email="pat@example.org"), role) == []
+    # The same address held by no Personal Data entry is only shown elsewhere.
+    assert [f["severity"] for f in _graded(blocks, _owner(), role)] == ["INFO"]
+
+
+def test_offschema_date_list_is_shown_only_when_its_row_shows_every_year():
+    """An H `dates` of two years whose row shows one of them has lost the
+    other: one year on the row is not the value shown."""
+    entry = _fields_entry("H", {"award_name": "Silver Lamp Award",
+                                "granting_body": "Example Society",
+                                "dates": ["2019", "2021"]},
+                          text="Silver Lamp Award, Example Society, 2019, 2021")
+    one_year = _table(_row("Silver Lamp Award", "Example Society", "2021"))
+    findings = _graded([one_year], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "dates")]
+    both = _table(_row("Silver Lamp Award", "Example Society", "2019, 2021"))
+    assert _graded([both], entry) == []
+
+
+def test_offschema_value_the_text_states_only_in_part_stays_info():
+    """Sharing some words with the entry's text (the mentee's name) is not
+    stating the value: below `RENDER_TOKEN_OVERLAP` it stays INFO."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "note": "Ann Pupil later left the program"},
+                          text="Ann Pupil, summer student")
+    findings = _graded([_table(_row("Name:", "Ann Pupil"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("block", [
+    _table(_row("Ann Pupil", "2001"), _row("Awards:", "Gold Ribbon")),
+    ("p", "Name: | Ann Pupil\nAwards: | Gold Ribbon"),
+], ids=["table-with-an-unlabelled-row", "paragraph"])
+def test_offschema_only_a_wholly_labelled_table_is_a_form(block):
+    """One labelled row does not make a table one record's form, and a
+    paragraph is never one: the value's row is not the name's."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil", "awards": "Gold Ribbon"},
+                          text="Ann Pupil; Gold Ribbon")
+    findings = _graded([block], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "the document shows it, but not with its record" in findings[0]["message"]
+
+
+def test_offschema_date_key_on_a_code_declaring_no_date_is_not_reported():
+    """Personal Data declares no date at all: a date key there is not the
+    single-date shape `_is_offschema_date` admits."""
+    assert _graded([_PERSONAL_TABLE], _owner(start_date="2004")) == []
+
+
+def test_offschema_a_date_value_never_marks_a_records_row():
+    """A date-named key's value, even one with words in it, is not an anchor:
+    the row it sits on need not be the record's."""
+    entry = _fields_entry("H", {"award_name": "Silver Lamp Award",
+                                "date": "Founders Day 2004",
+                                "citation": "for long service"},
+                          text="Silver Lamp Award, Founders Day 2004, for long service")
+    blocks = [_table(_row("Silver Lamp Award", "Example Society")),
+              _table(_row("Founders Day 2004", "for long service"))]
+    findings = _graded(blocks, entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def _degree_beside_an_award(degree, institution="Lakeside College", **extra):
+    degree_entry = _fields_entry("B1", {"degree": degree, "institution": institution,
+                                        "honors": "with honors", **extra},
+                                 text=f"{degree}, Lakeside College, with honors", idx=1)
+    award = _fields_entry("H", {"award_name": "Lakeside Prize",
+                                "granting_body": "Lakeside College"}, idx=2)
+    return degree_entry, award
+
+
+@pytest.mark.parametrize("degree, other_row", [
+    ("MS Ed", ("Lakeside College", "Rams Edge", "with honors")),
+    ("MS Ed", ("Lakeside College", "Ed Hall", "with honors")),
+    ("MPhil", ("MPhil prize", "with honors")),
+], ids=["short-anchor-inside-a-word", "short-anchor-one-word-of-two",
+        "short-anchor-alone"])
+def test_offschema_a_short_anchor_marks_a_row_only_as_all_its_words(degree, other_row):
+    """A short anchor ("MS Ed") is carried only as whole words, all of them,
+    and is never distinctive alone: a row with "Rams Edge", "Ed Hall" or
+    another "MPhil" is not the degree's row."""
+    blocks = [_table(_row(degree, "Lakeside College", "2001")), _table(_row(*other_row))]
+    findings = _graded(blocks, *_degree_beside_an_award(degree))
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("INFO", ["entry 1: with honors"])]
+
+
+def test_offschema_an_anchor_only_its_object_holds_is_not_distinctive():
+    """An institution written as an object is not among the record's own
+    string values, so another record holding it makes it shared."""
+    blocks = [_table(_row("BA", "Lakeside College", "2001")),
+              _table(_row("Lakeside Prize", "Lakeside College, with honors"))]
+    findings = _graded(blocks, *_degree_beside_an_award(
+        "BA", institution={"name": "Lakeside College"}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_an_anchor_under_two_keys_still_counts_once():
+    """The same value under two keys is one anchor, not none."""
+    degree = _fields_entry("B1", {"degree": "PhD", "discipline": "PhD",
+                                  "institution": "Northfield University",
+                                  "honors": "with distinction"}, idx=1)
+    medal = _fields_entry("H", {"award_name": "Northfield Medal",
+                                "granting_body": "Northfield University"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University, with distinction", "1991")),
+              _table(_row("Northfield Medal", "Northfield University"))]
+    assert _graded(blocks, degree, medal) == []
+
+
+def test_offschema_a_row_carrying_most_shared_anchors_is_the_records():
+    """Two of three shared anchors is a majority: the row is the record's."""
+    degree = _fields_entry("B1", {"degree": "PhD", "institution": "Northfield University",
+                                  "advisor": "Bea Guide", "honors": "with distinction"},
+                           idx=1)
+    medal = _fields_entry("H", {"award_name": "Northfield Medal",
+                                "granting_body": "Northfield University",
+                                "description": "nominated by Bea Guide"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University, with distinction", "1991")),
+              _table(_row("Northfield Medal", "Northfield University"))]
+    assert _graded(blocks, degree, medal) == []
+
+
+def test_offschema_list_value_is_shown_only_when_its_row_shows_every_item():
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": ["Gold Ribbon", "Blue Medal"]},
+                          text="Ann Pupil; Gold Ribbon; Blue Medal")
+    findings = _graded([_table(_row("Ann Pupil", "Gold Ribbon"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_offschema_a_string_with_no_words_is_never_stated_by_the_text():
+    """A value with no letters or digits in one of its strings is never
+    WARN: the entry's text cannot be said to state it."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": ["Gold Ribbon", "\u2014"]},
+                          text="Ann Pupil; Gold Ribbon")
+    findings = _graded([_table(_row("Ann Pupil", "2001"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_a_rendered_field_is_an_anchor(monkeypatch):
+    """A key only `fan_out._RENDERED_FIELDS` names still writes the
+    record's row, so it finds that row."""
+    monkeypatch.setattr(extraction_lints, "_RENDERED_FIELDS",
+                        {"I": frozenset({"chapter"})})
+    entry = _fields_entry("I", {"chapter": "Delta Chapter Lodge",
+                                "standing": "charter member"},
+                          text="Delta Chapter Lodge, charter member")
+    assert _graded([_table(_row("Delta Chapter Lodge", "charter member"))], entry) == []
+
+
+def test_offschema_constants_are_pinned():
+    assert extraction_lints.PERSONAL_DATA_ROW_WORDS == frozenset(
+        {"address", "phone", "telephone"})
+    assert extraction_lints._SINGLE_DATE_KEY == "date"
 
 
 # ==========================================================================
@@ -1485,8 +2019,8 @@ def _degree(year, text=None, code="B1"):
 
 def test_implausible_year_floor_rises_to_ten_years_before_the_earliest_degree():
     floor = 1990 - DEGREE_YEAR_LEAD
-    old = _fields_entry("H", {"date": str(floor - 1)}, text="Prize '79")
-    edge = _fields_entry("H", {"date": str(floor)}, text="Prize '80")
+    old = _fields_entry("H", {"date": str(floor - 1)}, text="Example prize")
+    edge = _fields_entry("H", {"date": str(floor)}, text="Example prize")
     findings = _implausible(_degree("1995"), _degree("1990"), old, edge)
     assert len(findings) == 1
     assert f"date={floor - 1}" in findings[0]["message"]
@@ -1494,7 +2028,7 @@ def test_implausible_year_floor_rises_to_ten_years_before_the_earliest_degree():
 
 
 @pytest.mark.parametrize("degree", [
-    _degree("1990", text="MD, Example University '90"),   # degree year not written
+    _degree("1990", text="MD, Example University"),       # degree year not written
     _degree("1990", code="B2"),                           # not an academic degree
     _degree("1925"),                                      # degree itself pre-floor
 ])
@@ -1529,7 +2063,7 @@ def test_implausible_year_a_pre_floor_degree_year_does_not_mask_a_later_one():
     """A degree year that is itself a wrong century is not the earliest
     degree: the next written B1 year sets the floor."""
     findings = _implausible(_degree("1925"), _degree("1990"),
-                            _fields_entry("H", {"date": "1975"}, text="Prize '75"))
+                            _fields_entry("H", {"date": "1975"}, text="Example prize"))
     assert len(findings) == 1
     assert "earliest degree year, 1990" in findings[0]["message"]
 
@@ -1541,10 +2075,757 @@ def test_implausible_year_degree_floor_never_drops_below_the_fixed_floor():
     assert f"before {IMPLAUSIBLE_YEAR_FLOOR}" in findings[0]["message"]
 
 
+def test_implausible_year_a_two_digit_year_in_its_pivot_century_is_stated():
+    """s7ab QZWBKQ's shape: a CV writing every date as m/yy. "9/68" read as
+    1968 is the right century, and a B1 "5/72" sets the degree floor (a
+    Ph.D. year written in four digits used to set it alone, decades late)."""
+    findings = _implausible(
+        _fields_entry("B1", {"dates_attended": {"start_date": "1968-09", "end_date": "1972-05"}},
+                      text="9/68-5/72 Example College; B.A."),
+        _fields_entry("B1", {"dates_attended": {"start_date": "1995-08", "end_date": "1999-05"}},
+                      text="8/1995-5/1999 Example Institute; Ph.D."),
+        _fields_entry("C", {"start_date": "1978", "end_date": "1979"},
+                      text="7/78-6/79 Internship, Example Hospital"))
+    assert findings == []
+
+
+def test_implausible_year_degree_floor_reads_a_two_digit_degree_year():
+    """The B.A. "9/68" sets the floor (1958), not the four-digit Ph.D. year
+    alone (1990): an undated 1975 is above the floor, so it is no wrong
+    century -- year_not_in_source reports it instead."""
+    entries = [
+        _fields_entry("B1", {"dates_attended": {"start_date": "1968-09", "end_date": "1972-05"}},
+                      text="9/68-5/72 Example College; B.A."),
+        _fields_entry("B1", {"year": "2000"}, text="Ph.D., Example Institute, 2000"),
+        _fields_entry("H", {"date": "1975"}, text="Example prize", idx=60)]
+    assert _implausible(*entries) == []
+    assert len(lint_year_not_in_source({"entries": entries})) == 1
+
+
+def test_implausible_year_a_range_shorthand_end_is_written():
+    """"1975-79" writes 1979, below a 1990 degree's floor: not a wrong
+    century."""
+    findings = _implausible(_degree("1990"), _fields_entry(
+        "P", {"start_date": "1975", "end_date": "1979"}, text="Example committee 1975-79"))
+    assert findings == []
+
+
+def test_implausible_year_judges_the_date_a_formatter_rendered():
+    """EBYSBC MIFYLG 234's shape: stage 4 wrote 1900 for a written-out date;
+    5c's text, which stage 6 renders instead of the field, has the text's
+    year. Judged only when the formatter's text drops the stage-4 year."""
+    entry = _fields_entry("K4", {"date": "1900-03-03"},
+                          text="12. Example lecture to fellows, March 3, 2014.", idx=34)
+    entry["element_idx_end"] = 35
+
+    def stage5d(formatted):
+        return {"entries": [{"element_idx_start": 34, "element_idx_end": 35,
+                             "extracted_fields": {"formatted_text": formatted}}]}
+    assert len(lint_implausible_year({"entries": [entry]})) == 1
+    assert lint_implausible_year({"entries": [entry]},
+                                 stage5d("**2014-03-03** - Example lecture")) == []
+    assert len(lint_implausible_year({"entries": [entry]},
+                                     stage5d("**1900-03-03** - Example lecture"))) == 1
+    # A span two 5d entries share says nothing about which one this is.
+    shared = stage5d("**2014-03-03** - Example lecture")
+    shared["entries"] *= 2
+    assert len(lint_implausible_year({"entries": [entry]}, shared)) == 1
+
+
+def test_implausible_year_ceiling_is_info_for_a_source_typo_warn_otherwise():
+    """EBYSBC VNUAHA 175's shape: the source itself mistypes the end year.
+    Stage 4 copied it faithfully; a reviewer should still see it."""
+    assert IMPLAUSIBLE_YEAR_CEILING == 2100
+    typo = _implausible(_fields_entry("P", {"start_date": "2013", "end_date": "7013"},
+                                      text="Example committee, 2013-7013", idx=175))
+    assert len(typo) == 1 and typo[0]["severity"] == "INFO"
+    assert "entry 175 (P): end_date=7013 -- after 2100" in typo[0]["message"]
+    made_up = _implausible(_fields_entry("P", {"end_date": "2201"},
+                                         text="Example committee, 2010-2012"))
+    assert len(made_up) == 1 and made_up[0]["severity"] == "WARN"
+    assert _implausible(_fields_entry("P", {"end_date": "2100"}, text="until 2100")) == []
+
+
 def test_implausible_year_leaves_the_value_alone():
     entry = _fields_entry("R", {"date": "1902-11"}, text="11/02")
     _implausible(entry)
     assert entry["extracted_fields"] == {"date": "1902-11"}
+
+
+# ==========================================================================
+# lint_multi_record_coverage: an entry holding several records that stage 4
+# returned as one (#1243). Every name, place and value below is invented.
+
+_TWO_ROLES = ("Lecturer, Northfield University School of Medicine, 2001-2005 "
+              "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008")
+_FIRST_ROLE = {"title": "Lecturer", "institution": "Northfield University School of Medicine",
+               "start_date": "2001", "end_date": "2005"}
+_FIRST_ROLE_ROW = "Lecturer | Northfield University School of Medicine | 2001-2005"
+
+
+def _multi_record(text, fields, code="D1", lines=(_FIRST_ROLE_ROW,)):
+    entry = {"taxonomy_code": code, "element_idx_start": 7, "text": text,
+             "extracted_fields": fields}
+    return lint_multi_record_coverage({"entries": [entry]}, [("p", line) for line in lines])
+
+
+def test_multi_record_second_dated_clause_absent_is_warn():
+    findings = _multi_record(_TWO_ROLES, _FIRST_ROLE)
+    assert findings == [{
+        "lint": "multi_record_coverage", "severity": "WARN",
+        "message": "entry 7 (D1): 2 record-shaped clauses, one stage-4 record; "
+                   "1 other clause(s) on no line of the output (#1243)",
+        "evidence": ["Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"],
+        "status": "ran", "reason": ""}]
+
+
+def test_multi_record_second_clause_on_a_rendered_line_is_info():
+    findings = _multi_record(_TWO_ROLES, _FIRST_ROLE, lines=(
+        _FIRST_ROLE_ROW,
+        "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2006-2008"))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert findings[0]["message"].endswith("the other clause(s) are in the output (#1243)")
+    assert findings[0]["evidence"] == [
+        "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"]
+
+
+@pytest.mark.parametrize("lines", [
+    # the clause's words on one line, its years on another
+    (_FIRST_ROLE_ROW, "Visiting Instructor of Pathology | Lakeside Hospital Institute",
+     "Term 2006-2008"),
+    # the same, as two rows of one table block
+    (_FIRST_ROLE_ROW,
+     "Visiting Instructor of Pathology\tLakeside Hospital Institute\nTerm 2006-2008"),
+    # a year inside a longer number is not that year
+    (_FIRST_ROLE_ROW,
+     "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2008 | Room 120064"),
+    # a year with a digit before it, or after it, is not that year
+    (_FIRST_ROLE_ROW,
+     "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2008 | Room 12006"),
+    (_FIRST_ROLE_ROW,
+     "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2008 | Room 20061"),
+])
+def test_multi_record_one_line_must_carry_the_clause_words_and_years(lines):
+    """The render check reads line by line, a table block's rows included:
+    words on one line and years on another are not one rendered record."""
+    findings = _multi_record(_TWO_ROLES, _FIRST_ROLE, lines=lines)
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_multi_record_through_joins_two_years_into_one_date():
+    text = ("Lecturer, Northfield University School of Medicine, 2001 through 2005\t"
+            "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008")
+    findings = _multi_record(text, {
+        "title": "Visiting Instructor of Pathology", "institution": "Lakeside Hospital Institute",
+        "start_date": "2006", "end_date": "2008"}, lines=(
+        "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2006-2008",))
+    assert findings[0]["message"].startswith("entry 7 (D1): 2 record-shaped clauses")
+    assert findings[0]["evidence"] == [
+        "Lecturer, Northfield University School of Medicine, 2001 through 2005"]
+
+
+@pytest.mark.parametrize("prefix", ["", "June ", "July ", "The "])
+def test_multi_record_a_part_opening_with_a_date_gives_each_date_the_words_after_it(prefix):
+    """A month or a filler word before the first year still opens the part
+    with a date."""
+    text = f"{prefix}2013 Example Workshop, Lakeport; June 2014 Sample Seminar, Riverton"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2013"},
+        code="R", lines=())
+    assert findings[0]["evidence"] == ["2014 Sample Seminar, Riverton"]
+
+
+@pytest.mark.parametrize("closing", [")", ".)", " )", ", 2)"])
+def test_multi_record_a_year_that_closes_an_aside_leaves_it(closing):
+    """'(Poster Prize 2012.)': the words after the closing parenthesis are
+    outside the aside, so they are a clause of their own."""
+    text = (f"2011 Example Workshop, Lakeport (Poster Prize 2012{closing} "
+            "Sample Seminar on Wound Care, Riverton")
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2011"},
+        code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+@pytest.mark.parametrize("separator", ["\n", "\t", " | "])
+def test_multi_record_each_strongly_separated_part_reads_its_own_layout(separator):
+    """A line, cell or pipe-joined cell ends a part: a part that opens with a
+    date gives it the words after it even when the part before it put its
+    date last."""
+    text = f"Example Workshop, Lakeport, 2005{separator}2006 Sample Seminar, Riverton"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2005"},
+        code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["2006 Sample Seminar, Riverton"]
+
+
+def test_multi_record_a_three_letter_word_before_the_first_date_is_a_payload():
+    """'Art Lab, <years>; <committee>, <years>' puts each date after its
+    record: a three-letter name before the first date is words, not a date
+    prefix."""
+    text = "Art Lab, 2001-2003; Sample Seminar Committee, Riverton, 2004-2006"
+    findings = _multi_record(text, {
+        "committee_name": "Art Lab", "start_date": "2001", "end_date": "2003"},
+        code="P", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["Sample Seminar Committee, Riverton, 2004-2006"]
+
+
+def test_multi_record_an_open_parenthesis_after_a_late_date_is_no_aside():
+    """Only a part that opens with a date reads a parenthesis left open after
+    a later date as that clause's aside; a part that puts its dates last
+    keeps the clause before the date."""
+    text = ("Lecturer (Northfield University School of Medicine, 2001-2005), "
+            "Visiting Instructor of Pathology (Lakeside Hospital Institute, 2006-2008; adjunct)")
+    findings = _multi_record(text, _FIRST_ROLE, lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "2 record-shaped clauses" in findings[0]["message"]
+
+
+def test_multi_record_the_record_s_own_clause_is_never_reported():
+    """The clause the record stands for is skipped even when it carries
+    words the record lacks."""
+    findings = _multi_record(_TWO_ROLES, {
+        "title": "Lecturer", "institution": "Northfield", "start_date": "2001",
+        "end_date": "2005"}, lines=())
+    assert "1 other clause(s)" in findings[0]["message"]
+    assert findings[0]["evidence"] == [
+        "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"]
+
+
+@pytest.mark.parametrize("talk", [
+    "2014 Lecture on wound healing outcomes",
+    # a date word is not a lowercase word
+    "2014 Seminar on wound healing outcomes, ongoing",
+])
+def test_multi_record_a_short_lowercase_clause_is_not_prose(talk):
+    """Three lowercase 4+-letter words, and short words like 'on', are below
+    MULTI_RECORD_PROSE_MIN_LOWERCASE: a talk title in sentence case is a
+    record."""
+    text = f"2013 Example Workshop, Lakeport\t{talk}"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2013"},
+        code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == [talk]
+
+
+def test_multi_record_the_first_clause_is_never_an_aside():
+    """An aside qualifies the clause before it; the first clause has none."""
+    text = "(2010 Example Workshop, Lakeport) 2011 Sample Seminar, Riverton"
+    findings = _multi_record(text, {
+        "title": "Sample Seminar", "location": "Riverton", "date": "2011"},
+        code="R", lines=())
+    assert findings[0]["evidence"] == ["2010 Example Workshop, Lakeport"]
+
+
+def test_multi_record_a_sentence_case_title_in_a_capitalised_clause_is_not_prose():
+    """Four lowercase words are not a sentence when capitalised ones
+    outnumber them."""
+    text = ("2013 Example Workshop, Lakeport\t"
+            "2014 Northfield Surgical Society Annual Meeting, Riverton: wound repair after burns")
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2013"},
+        code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_multi_record_clause_verdict_comes_before_the_fused_values():
+    """An entry with two dated clauses and two mentees gets the clause
+    finding, which names what is missing."""
+    text = ("2015-2017 Ada Quill, Resident, Lakeside Hospital\t"
+            "2018-2020 Bo Renner, Fellow, Northfield University")
+    findings = _multi_record(text, {
+        "mentee_name": "Ada Quill and Bo Renner", "site_position": "Lakeside Hospital",
+        "start_date": "2015", "end_date": "2017"}, code="N3B", lines=())
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith("entry 7 (N3B): 2 record-shaped clauses")
+
+
+def test_multi_record_same_words_beside_other_years_do_not_vouch():
+    """The same title held at another time is a different record."""
+    findings = _multi_record(_TWO_ROLES, _FIRST_ROLE, lines=(
+        _FIRST_ROLE_ROW,
+        "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2011-2014"))
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_multi_record_the_record_may_stand_for_any_clause():
+    """Stage 4 kept the second role; the first is the one left out."""
+    findings = _multi_record(_TWO_ROLES, {
+        "title": "Visiting Instructor of Pathology", "institution": "Lakeside Hospital Institute",
+        "start_date": "2006", "end_date": "2008"}, lines=(
+        "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2006-2008",))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["Lecturer, Northfield University School of Medicine, 2001-2005"]
+
+
+def test_multi_record_render_check_looks_for_the_words_the_record_lacks():
+    """A line carrying the clause's shared words (its institution) and a
+    word or two of its own does not render the left-out role."""
+    text = ("Lecturer, Northfield University School of Medicine, 2001-2005\t"
+            "Visiting Instructor of Pathology, Northfield University School of Medicine, 2006-2008")
+    findings = _multi_record(text, _FIRST_ROLE, lines=(
+        _FIRST_ROLE_ROW,
+        "Pathology Seminar | Northfield University School of Medicine | 2006-2008"))
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_multi_record_dates_with_no_words_between_them_stay_one_clause():
+    """'2006; 2008' are two years of one role: both must be on the line."""
+    text = ("Lecturer, Northfield University School of Medicine, 2001-2005\t"
+            "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006; 2008")
+    findings = _multi_record(text, _FIRST_ROLE, lines=(
+        _FIRST_ROLE_ROW, "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2006"))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "2 record-shaped clauses" in findings[0]["message"]
+
+
+def test_multi_record_and_joins_two_years_into_one_date():
+    """'2003 and 2005' is one date of one workshop, not a clause of its own."""
+    text = "2003 and 2005 Example Workshop, Lakeport; 2006 Sample Seminar, Riverton"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2003; 2005"},
+        code="R", lines=())
+    assert findings[0]["message"].startswith("entry 7 (R): 2 record-shaped clauses")
+    assert findings[0]["evidence"] == ["2006 Sample Seminar, Riverton"]
+
+
+def test_multi_record_two_digit_end_year_stays_in_its_date():
+    """'1991-93' is one date: its '93' does not open the next clause."""
+    text = ("Junior Delegate, Planning Council, 1991-93; "
+            "Senior Delegate, Curriculum Board, 1993-95")
+    findings = _multi_record(text, {
+        "role": "Junior Delegate", "committee_name": "Planning Council",
+        "start_date": "1991", "end_date": "1993"}, code="P", lines=())
+    assert findings[0]["evidence"] == ["Senior Delegate, Curriculum Board, 1993-95"]
+
+
+def test_multi_record_reads_track_changed_insertions():
+    """The clause the record left out, rendered as a tracked insertion, is in
+    the output: the lint reads the doctor's own docx view, which includes
+    `w:ins` text."""
+    doc = Document()
+    doc.add_paragraph(_FIRST_ROLE_ROW)
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="1" w:author="a" w:date="2026-10-02T00:00:00Z">'
+        '<w:r><w:t>Visiting Instructor of Pathology, Lakeside Hospital Institute, '
+        '2006-2008</w:t></w:r></w:ins>'))
+    entry = {"taxonomy_code": "D1", "element_idx_start": 7, "text": _TWO_ROLES,
+             "extracted_fields": _FIRST_ROLE}
+    findings = lint_multi_record_coverage({"entries": [entry]}, docx_body_blocks(doc))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_multi_record_year_led_clauses_take_the_words_after_their_year():
+    text = ("2013 Society of Example Medicine, Session chair, Riverton "
+            "2013 Academy of Sample Surgery, Grand rounds on wound healing, Lakeport")
+    findings = _multi_record(text, {
+        "event_name": "Society of Example Medicine", "role": "Session chair",
+        "location": "Riverton", "date": "2013"}, code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == [
+        "2013 Academy of Sample Surgery, Grand rounds on wound healing, Lakeport"]
+
+
+def test_multi_record_evidence_is_capped_and_truncated():
+    talks = " ".join((
+        "2013 Alder Grove Workshop, Lakeport", "2013 Birch Hollow Seminar, Riverton",
+        "2013 Cedar Ridge Colloquium, Northfield", "2013 Douglas Fjord Lecture, Eastvale",
+        "2013 Elmwood Basin Symposium, Westbrook"))
+    findings = _multi_record(talks, {
+        "title": "Alder Grove Workshop", "location": "Lakeport", "date": "2013"},
+        code="R", lines=())
+    assert "4 other clause(s)" in findings[0]["message"]
+    assert len(findings[0]["evidence"]) == FIELD_EVIDENCE_MAX_VALUES
+    long_clause = "2013 " + "Wordy " * 40 + "Symposium"
+    findings = _multi_record(f"2015 Short Talk, Lakeport {long_clause}", {
+        "title": "Short Talk", "location": "Lakeport", "date": "2015"}, code="R", lines=())
+    assert len(findings[0]["evidence"][0]) == FIELD_EVIDENCE_VALUE_CHARS
+
+
+@pytest.mark.parametrize("separator", ["\t", "; "])
+def test_multi_record_undated_title_and_institution_parts(separator):
+    """A hospital post with the concurrent faculty rank in the next cell, one
+    date range for both (the TAUBPU-01 shape)."""
+    text = (f"2009-2013 Attending Surgeon, Lakeside Hospital, Riverton{separator}"
+            "Assistant Professor, Northfield University College of Medicine")
+    findings = _multi_record(text, {
+        "title": "Attending Surgeon", "institution": "Lakeside Hospital, Riverton",
+        "start_date": "2009", "end_date": "2013"}, code="D2",
+        lines=("Attending Surgeon | Lakeside Hospital, Riverton | 2009-2013",))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == [
+        "Assistant Professor, Northfield University College of Medicine"]
+
+
+@pytest.mark.parametrize("second_part", [
+    "Assistant Professor of Surgery",  # a title, no institution
+    "Northfield University College of Medicine",  # an institution, no title
+    # a PI named in a credit line is not the owner's role
+    "Principal Investigator, Northfield University Research Institute",
+])
+def test_multi_record_an_undated_part_needs_a_title_and_an_institution(second_part):
+    text = f"Attending Surgeon, Lakeside Hospital, Riverton\t{second_part}"
+    assert _multi_record(text, {
+        "title": "Attending Surgeon", "institution": "Lakeside Hospital, Riverton"},
+        code="D2", lines=()) == []
+
+
+def test_multi_record_new_years_count_toward_the_minimum():
+    """One new word and one new year: a nationwide term after a regional one."""
+    text = ("Society of Example Medicine\tTreasurer (Western Region), 2002-2004\t"
+            "Treasurer (Nationwide), 2004-2008")
+    findings = _multi_record(text, {
+        "role": "Treasurer (Western Region)", "organization": "Society of Example Medicine",
+        "start_date": "2002", "end_date": "2004"}, code="Q1", lines=(
+        "Treasurer (Western Region) | Society of Example Medicine | 2002-2004",))
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_multi_record_a_clause_with_one_new_word_is_checked_by_all_its_words():
+    """A line carrying only the clause's one new word, beside its years, does
+    not render it: with fewer than MULTI_RECORD_MIN_NEW new words the render
+    check looks for all of them."""
+    text = ("Society of Example Medicine\tTreasurer (Western Region), 2002-2004\t"
+            "Treasurer (Nationwide), 2004-2008")
+    findings = _multi_record(text, {
+        "role": "Treasurer (Western Region)", "organization": "Society of Example Medicine",
+        "start_date": "2002", "end_date": "2004"}, code="Q1", lines=(
+        "Treasurer (Western Region) | Society of Example Medicine | 2002-2004",
+        "Nationwide Board | 2004-2008"))
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+@pytest.mark.parametrize("text, fields", [
+    # only new years: the same role held again is not reported
+    ("Member, Library Committee, 2014-2015\tMember, Library Committee, 2009-2010",
+     {"role": "Member", "committee_name": "Library Committee",
+      "start_date": "2014", "end_date": "2015"}),
+    # one new word and one new year out of six: below MULTI_RECORD_NEW_SHARE
+    ("Imaging Search Committee, Department of Radiology Science, 2012-2013\t"
+     "Genetics Search Committee, Department of Radiology Science, 2011",
+     {"committee_name": "Imaging Search Committee",
+      "institution": "Department of Radiology Science", "start_date": "2012",
+      "end_date": "2013"}),
+    # the record holds both clauses' words
+    ("Member, Society of Example Medicine, 2001-2003; Chair, Society of Example Medicine, "
+     "2004-2006", {"role": "Member; Chair", "organization": "Society of Example Medicine",
+                   "start_date": "2001", "end_date": "2006"}),
+    # several years of one record: dates with no words between them
+    ("Visiting Professor, Northfield University, 2013 and 2015, 2017",
+     {"title": "Visiting Professor", "institution": "Northfield University",
+      "start_date": "2013"}),
+    # the same role again: its only new words are date words
+    ("Member, Society of Example Medicine, 2001-2005\t"
+     "Member, Society of Example Medicine, January 2006 - present",
+     {"role": "Member", "committee_name": "Society of Example Medicine",
+      "start_date": "2001", "end_date": "2005"}),
+    # one new word and no new year: below MULTI_RECORD_MIN_NEW
+    ("Member, Society of Example Medicine, 2005\tFellow, 2005",
+     {"role": "Member", "committee_name": "Society of Example Medicine", "start_date": "2005"}),
+    # a connective is not a distinctive word
+    ("Mentor, Northfield University, 2019\tMentor through Lakeside, 2019",
+     {"role": "Mentor", "committee_name": "Northfield University", "start_date": "2019"}),
+    # an open end ("ongoing", "present") is a date word, not a new word
+    ("Treasurer, Example Society, 2001-2005\tTreasurer, 2006 - ongoing",
+     {"role": "Treasurer", "organization": "Example Society", "start_date": "2001",
+      "end_date": "2005"}),
+    ("Treasurer, Example Society, 2001-2005\t2006 - present Treasurer",
+     {"role": "Treasurer", "organization": "Example Society", "start_date": "2001",
+      "end_date": "2005"}),
+    # two new words out of four words and two years: the years count toward
+    # MULTI_RECORD_NEW_SHARE's denominator
+    ("Member, Library Committee, 2014-2015\tSenior Chair, Library Committee, 2014-2015",
+     {"role": "Member", "committee_name": "Library Committee", "start_date": "2014",
+      "end_date": "2015"}),
+    # a year inside a longer number is no date
+    ("Lecturer, Northfield University School of Medicine, 2001-2005, Suite 42019",
+     {"title": "Lecturer", "institution": "Northfield University School of Medicine",
+      "start_date": "2001", "end_date": "2005"}),
+])
+def test_multi_record_silent_when_the_other_clause_is_no_new_record(text, fields):
+    assert _multi_record(text, fields, code="P", lines=()) == []
+
+
+@pytest.mark.parametrize("text, fields, code", [
+    # an aside that never closes inside its clause
+    ("Residency in Family Medicine, Northfield University 2004-2007 "
+     "(on the combined track, ended 2008)",
+     {"training_type": "Residency", "specialty": "Family Medicine",
+      "institution": "Northfield University", "start_date": "2004", "end_date": "2007"}, "C"),
+    # an aside an earlier clause opened, after a year-led clause
+    ("2010-2013 Bo Renner, Resident, Lakeside Hospital (won the Example Award 2012, "
+     "Annual Meeting, Lakeport).",
+     {"mentee_name": "Bo Renner", "site_position": "Lakeside Hospital",
+      "mentee_level": "Resident", "start_date": "2010", "end_date": "2013"}, "N3B"),
+    # a sentence about the record
+    ("2014 Example Leadership Award, Lakeside Clinic\tgiven for steady dedication and "
+     "service to the clinic and its patients over many years 2001-2014",
+     {"award_name": "Example Leadership Award", "granting_body": "Lakeside Clinic",
+      "date": "2014"}, "H"),
+    # how the owner took part, not another record
+    ("Invited Speaker, 2019\tExample Symposium on Wound Healing, Lakeport, 2019",
+     {"title": "Wound Healing", "event_name": "Example Symposium on Wound Healing",
+      "location": "Lakeport", "date": "2019"}, "R"),
+    # an aside that closes with nothing but a year after it
+    ("Member, Example Society, 2001-2005 (Section on Rural Practice) 2003",
+     {"role": "Member", "organization": "Example Society", "start_date": "2001",
+      "end_date": "2005"}, "I"),
+    # a bracketed note on the record
+    ("2011 Wound Care Update, Example Institute, Lakeport\t"
+     "June 2011. [6.5 continuing education credits]",
+     {"title": "Wound Care Update", "event_name": "Example Institute",
+      "location": "Lakeport", "date": "2011"}, "R"),
+    # a part's opening label names a field, not a value
+    ("Fellow, Society of Example Medicine, 2010-2014\t"
+     "Committees: Society of Example Medicine, 2012",
+     {"membership_type": "Fellow", "organization": "Society of Example Medicine",
+      "start_date": "2010", "end_date": "2014"}, "I"),
+])
+def test_multi_record_silent_on_a_clause_that_is_the_records_own_detail(text, fields, code):
+    assert _multi_record(text, fields, code=code, lines=()) == []
+
+
+@pytest.mark.parametrize("code", ["S1", "K1", "T", "A", "J", "N4"])
+def test_multi_record_skips_the_codes_offschema_skips(code):
+    assert _multi_record(_TWO_ROLES, _FIRST_ROLE, code=code) == []
+
+
+def test_multi_record_skips_an_entry_stage4_returned_several_records_for():
+    """Stage 4 returned two records, so this is not the one-record shape, even
+    where its second record holds fewer of the text's words than the text."""
+    fields = {**_FIRST_ROLE, STAGE4_RECORDS_KEY: [
+        {"title": "Visiting Instructor"}, dict(_FIRST_ROLE)]}
+    assert _multi_record(_TWO_ROLES, fields) == []
+
+
+def test_multi_record_is_silent_on_a_record_list_fan_out_splits():
+    """Fan-out splits a list only when its values hold every word of the
+    text, so every clause is covered and the lint needs no fan-out skip."""
+    entry_fields = {"committee_name": "Alpha Board", "committees": [
+        {"committee_name": "Alpha Board", "role": "Chair"},
+        {"committee_name": "Beta Panel", "role": "Member"}]}
+    text = "Alpha Board Chair 2001-2003\tBeta Panel Member 2004-2006"
+    assert _multi_record(text, entry_fields, code="P", lines=()) == []
+
+
+@pytest.mark.parametrize("names", [
+    "Ada Quill; Bo Renner; Cy Tamsin",
+    "Ada Quill, Bo Renner and Cy Tamsin",
+])
+@pytest.mark.parametrize("lines, severity, tail", [
+    # every mentee is on a line: fused into the record's row
+    (("Ada Quill, Bo Renner, Cy Tamsin | Resident | 2021",),
+     "INFO", "each is on a line of the output"),
+    # the third mentee is on no line
+    (("Ada Quill, Bo Renner | Resident | 2021",), "WARN", "1 on no line of the output"),
+])
+def test_multi_record_several_mentees_in_one_record(names, lines, severity, tail):
+    findings = _multi_record(f"Cohort of 2021: {names}", {
+        "mentee_name": names, "start_date": "2021"}, code="N3B", lines=lines)
+    assert [f["severity"] for f in findings] == [severity]
+    assert findings[0]["message"] == (
+        f"entry 7 (N3B): stage 4 returned one record naming 3 mentees; {tail} (#1243)")
+
+
+def test_multi_record_a_mentee_name_with_no_long_word_counts_as_on_the_output():
+    """A name with no 5+-letter word cannot be looked for on a line."""
+    findings = _multi_record("Cohort of 2021: Al Fox and Ed Roe", {
+        "mentee_name": "Al Fox and Ed Roe", "start_date": "2021"}, code="N3B",
+        lines=("Residents | 2021",))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_multi_record_a_mentee_name_that_is_not_a_string_is_skipped():
+    assert _multi_record("2021 Ada Quill and Bo Renner", {
+        "mentee_name": ["Ada Quill", "Bo Renner"], "start_date": "2021"},
+        code="N3B", lines=()) == []
+
+
+@pytest.mark.parametrize("names", ["Ada Quill", "Quill, Ada", "Ada Quill, PhD"])
+def test_multi_record_one_mentee_is_silent(names):
+    assert _multi_record(f"2021 {names}", {"mentee_name": names, "start_date": "2021"},
+                         code="N3B", lines=()) == []
+
+
+@pytest.mark.parametrize("lines, severity, tail", [
+    # both years on the record's row
+    (("Ph.D., Master of Arts | Northfield University | 1999; 1995",),
+     "INFO", "each is on a line of the output"),
+    # 1995 only on a line that is not the record's
+    (("Ph.D., Master of Arts | Northfield University | 1999", "Example Lecture Series, 1995"),
+     "WARN", "1 on no line of the output"),
+])
+def test_multi_record_two_degree_years_in_one_record(lines, severity, tail):
+    text = "Doctoral Program: Northfield University\tDegree: Ph.D., 1999; Master of Arts, 1995"
+    findings = _multi_record(text, {
+        "degree": "Ph.D., Master of Arts", "institution": "Northfield University",
+        "year": "1999; 1995"}, code="B1", lines=lines)
+    assert [f["severity"] for f in findings] == [severity]
+    assert findings[0]["message"] == (
+        f"entry 7 (B1): stage 4 returned one record for 2 degree years; {tail} (#1243)")
+
+
+@pytest.mark.parametrize("code, fields", [
+    # one degree year
+    ("B1", {"degree": "Ph.D.", "institution": "Northfield University", "year": "1999"}),
+    # two years in `year` outside a degree record
+    ("H", {"award_name": "Example Teaching Award", "granting_body": "Lakeside Clinic",
+           "year": "2001; 2003"}),
+])
+def test_multi_record_degree_years_need_two_years_in_a_degree_record(code, fields):
+    text = "Example Teaching Award, Lakeside Clinic, 2001, 2003" if code == "H" else (
+        "Doctor of Philosophy, Northfield University, 1999")
+    assert _multi_record(text, fields, code=code, lines=()) == []
+
+
+_TWO_LICENCES = "Northland, Pharmacist 12-3-45678\nSouthland, Pharmacist 098765"
+
+
+@pytest.mark.parametrize("fields, lines, severity, lost", [
+    ({"state_country": "Northland", "license_number": "12-3-45678"},
+     ("Northland | 12-3-45678",), "WARN", 1),
+    ({"state_country": "Northland", "license_number": "12-3-45678"},
+     ("Northland | 12-3-45678", "Southland | 098765"), "INFO", 0),
+    ({"state_country": "Northland; Southland", "license_number": "12-3-45678",
+      "notes": "also 098765"}, (), "INFO", 0),
+    # a number split over two lines is on neither
+    ({"state_country": "Northland", "license_number": "12-3-45678"},
+     ("Northland | 12-3-45678", "Suite 09", "8765 Example Road"), "WARN", 1),
+    # the same, as rows of one table block
+    ({"state_country": "Northland", "license_number": "12-3-45678"},
+     ("Northland | 12-3-45678\nSuite 09\n8765 Example Road",), "WARN", 1),
+])
+def test_multi_record_two_licence_numbers_in_one_record(fields, lines, severity, lost):
+    findings = _multi_record(_TWO_LICENCES, fields, code="F1", lines=lines)
+    assert [f["severity"] for f in findings] == [severity]
+    assert f"for 2 numbers; {lost} in neither the record nor the output" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("lines, severity, lost", [
+    (("Example Valve | 1234567",), "WARN", 1),
+    (("Example Valve | 1234567", "Example Valve, second filing | 7654321"), "INFO", 0),
+])
+def test_multi_record_two_patent_numbers_in_one_record(lines, severity, lost):
+    findings = _multi_record("Example Valve 1234567; Example Valve 7654321", {
+        "title": "Example Valve", "patent_number": "1234567"}, code="M2D", lines=lines)
+    assert [f["severity"] for f in findings] == [severity]
+    assert f"for 2 numbers; {lost} in neither the record nor the output" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text, fields, code", [
+    # one number
+    ("Northland, Pharmacist 12-3-45678",
+     {"state_country": "Northland", "license_number": "12-3-45678"}, "F1"),
+    # one number, filed nowhere: a field loss, not a second record
+    ("Northland, Pharmacist 12-3-45678", {"state_country": "Northland"}, "F1"),
+    # one number beside years: a year is not an identifier
+    ("Northland, Pharmacist 12-3-45678, 2004-2010",
+     {"state_country": "Northland", "license_number": "12-3-45678",
+      "issue_date": "2004", "expiration_date": "2010"}, "F1"),
+    # the number field holds both
+    (_TWO_LICENCES, {"state_country": "Northland; Southland",
+                     "license_number": "12-3-45678; 098765"}, "F1"),
+    # two long numbers on a code with no number field (a grant and its total)
+    ("Example Outcomes Study, R01 CA123456, Example Agency, total costs 250000",
+     {"grant_number": "R01 CA123456", "title": "Example Outcomes Study",
+      "agency": "Example Agency", "total_costs": "250000"}, "M2B"),
+])
+def test_multi_record_licence_numbers_silent_when_not_several_records(text, fields, code):
+    assert _multi_record(text, fields, code=code, lines=()) == []
+
+
+def test_multi_record_constants_are_pinned():
+    assert (MULTI_RECORD_MIN_NEW, MULTI_RECORD_NEW_SHARE,
+            MULTI_RECORD_PROSE_MIN_LOWERCASE) == (2, 0.4, 4)
+
+# ==========================================================================
+# lint_year_not_in_source: a plausible year the entry's text never states.
+
+def _not_in_source(*entries, stage5d=None):
+    return lint_year_not_in_source({"entries": list(entries)}, stage5d)
+
+
+@pytest.mark.parametrize("code, fields, text, flagged", [
+    # EBYSBC HFAJCC 392's shape: an mm/dd/yy start read as another year.
+    ("M2A", {"start_date": "1997-04-01", "end_date": "2024-03-31"},
+     "Example Agency (PI) 04/01/19 \u2013 03/31/24 Example aims", "start_date=1997"),
+    # EBYSBC VVRTUC 43's: the year of the entry before it in the batch.
+    ("D1", {"start_date": "1981-03", "end_date": "current"},
+     "Example Professor (current) March 2012 -", "start_date=1981"),
+    # EBYSBC YYVHNN 480's: "3-24-11-26" is Mar 2024 to Nov 2026; no 2011.
+    # The start year is the target. No year is read out of a dash-joined
+    # run of numbers, so the right end year, written "26", is listed too.
+    ("M2B", {"start_date": "2011-03-24", "end_date": "2026"},
+     "Co-I Example contract 10% 3-24-11-26 $1.000", "start_date=2011, end_date=2026"),
+])
+def test_year_not_in_source_fires_on_a_year_the_text_never_states(code, fields, text, flagged):
+    findings = _not_in_source(_fields_entry(code, fields, text=text, idx=43))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "year_not_in_source"
+    assert findings[0]["severity"] == "WARN"
+    assert findings[0]["message"].startswith(f"entry 43 ({code}): {flagged} -- ")
+    assert findings[0]["evidence"] == [text[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+@pytest.mark.parametrize("fields, text", [
+    ({"start_date": "2005"}, "Example course, 2005"),                 # four digits
+    ({"start_date": "1997-04"}, "Example review 04/081997"),          # fused on the left
+    ({"end_date": "2024"}, "Example 20232024Total"),                  # fused table cells
+    ({"start_date": "1987"}, "Example board l987"),                   # scanned l for 1
+    ({"end_date": "2034-05-31"}, "Example grant 6/1/29\u20135/31/34"),  # any century
+    ({"start_date": "2006-03-14"}, "Example lecture 3/14/06"),
+    ({"start_date": "2008"}, "Example award 0415/08"),
+    ({"start_date": "2012-06"}, "Example talk 6//12"),
+    ({"start_date": "2004"}, "Example talk, June '04"),
+    ({"start_date": "1997", "end_date": "1997"}, "Example award FY97 $1000"),
+    ({"date": "2009-05-21"}, "Example interview 5.21.09"),
+    ({"start_date": "1964", "end_date": "1966"}, "Example mentee 64-66"),
+    ({"start_date": "2011", "end_date": "2012"}, "Example committee 2011-2"),
+    ({"start_date": "1985", "end_date": "1989"}, "Example committee 1985-89"),
+    ({"start_date": "1993", "end_date": "1994"}, "Example committee 1993-994"),
+    ({"start_date": "1998", "end_date": "2002"}, "Example committee 1998-02"),
+    ({"start_date": "1986", "end_date": "1988"}, "1986,88 Example reviewer"),
+    ({"start_date": "2006"}, "EXM 1234 Example seminar (Fall Sem., 06)"),
+    ({"title": "1973"}, "Example title"),                             # not a date key
+])
+def test_year_not_in_source_silent_when_the_text_states_the_year(fields, text):
+    assert _not_in_source(_fields_entry("C", fields, text=text)) == []
+
+
+def test_year_not_in_source_skips_personal_data_and_publications():
+    """Code A is personal data. A citation's year renders through 5d and
+    PubMed; on the farm each publication hit was a split citation or a
+    corrected typo, never a wrong year."""
+    for code in ("A", "S1", "S8"):
+        assert _not_in_source(_fields_entry(code, {"year": "2007"}, text="Example")) == []
+
+
+def test_year_not_in_source_leaves_the_floor_and_ceiling_to_implausible_year():
+    """One defect, one lint: a year below the owner's floor or above the
+    ceiling is implausible_year's, so it is not reported twice."""
+    below = _fields_entry("R", {"date": "1902-11"}, text="Example talk 11/02")
+    above = _fields_entry("R", {"date": "2201"}, text="Example talk")
+    assert _not_in_source(below, above) == []
+    assert len(_implausible(below, above)) == 2
+
+
+def test_year_not_in_source_skips_a_year_a_formatter_replaced():
+    entry = _fields_entry("K1", {"start_date": "2016"}, text="Example course 2017-2019", idx=8)
+    entry["element_idx_end"] = 8
+    stage5d = {"entries": [{"element_idx_start": 8, "element_idx_end": 8,
+                            "extracted_fields": {"formatted_text": "2017-2019 Example course"}}]}
+    assert len(_not_in_source(entry)) == 1
+    assert _not_in_source(entry, stage5d=stage5d) == []
+
+
+def test_year_not_in_source_leaves_the_value_alone():
+    entry = _fields_entry("D1", {"start_date": "1981-03"}, text="March 2012 -")
+    before = json.dumps(entry, sort_keys=True)
+    _not_in_source(entry)
+    assert json.dumps(entry, sort_keys=True) == before
 
 
 if __name__ == "__main__":
