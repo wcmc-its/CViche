@@ -20,7 +20,7 @@ from app.schemas import (
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency, run_queue
-from app.auth import get_current_user, require_admin, visible_cost
+from app.auth import can_view_all_runs, get_current_user, require_view_all_runs, visible_cost
 from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
 from app.services.run_service import (
     check_run_access, claim_run_as_running, _materialize_input_if_missing,
@@ -207,9 +207,9 @@ def get_run_filter_options(
     input_format: str | None = Query(None),
     status: str | None = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_view_all_runs),
 ) -> RunFilterOptions:
-    """Options and run counts for the admin runs filters (scope=all, admin only).
+    """Options and run counts for the runs filters (scope=all, admin or staff).
 
     Each facet's counts apply the other filters but not its own."""
     if scope != RunScope.ALL:
@@ -240,7 +240,7 @@ def _run_summary(current_user: User, run: Run, all_scope: bool,
         cv_owner_name=run.cv_owner_name,
         submission_type=run.submission_type,
         run_by=run_by_summary(run.user) if all_scope else None,
-        # Score columns are admin-only, like cost: never on scope=mine.
+        # Score columns need scope=all (admin or staff): never on scope=mine.
         quality_score=run.quality_score if all_scope else None,
         quality_band=run.quality_band if all_scope else None,
         quality_cap=run.quality_cap if all_scope else None,
@@ -281,13 +281,13 @@ async def list_runs(
 ):
     """List pipeline runs, most recent first.
 
-    scope=mine (default): the current user's runs. scope=all (admin only): every
+    scope=mine (default): the current user's runs. scope=all (admin or staff): every
     user's runs, optionally filtered by run_by (user id, "self" or "on_behalf"), faculty (the
     CV owner's name) and department (the running user's ED department); those
     three, and ``input_format`` ("wcm" = written in the WCM CV template, "other",
     "unknown" = not classified), are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
     feedback, "needed" = complete with none) and ``status`` ("running" = queued or
-    running, "failed" = failed; "red" = score band RED, admin only: 403 under scope=mine) apply in both
+    running, "failed" = failed; "red" = score band RED, scope=all only: 403 under scope=mine) apply in both
     scopes. Every run
     carries a ``feedback`` summary; scope=all adds the reviewer list.
     ``batch_id`` (#1114) narrows either scope to one batch's runs; every row
@@ -295,7 +295,7 @@ async def list_runs(
     """
     all_scope = scope == RunScope.ALL
     if all_scope:
-        require_admin(current_user)
+        require_view_all_runs(current_user)
         query = filtered_runs_query(
             db, parse_run_filters(run_by, faculty, department, feedback, input_format, status))
     else:
@@ -334,6 +334,7 @@ async def get_run_status(
     # lazy="raise_on_sql", so it must be loaded explicitly before access).
     run = check_run_access(
         run_id, current_user, db, eager=(selectinload(Run.steps), selectinload(Run.user)),
+        read_only=True,
     )
 
     step_summaries = [
@@ -369,7 +370,7 @@ async def get_run_status(
         estimated_duration_seconds=run.estimated_duration_seconds,
         error_message=run.error_message,
         cv_owner_name=run.cv_owner_name,
-        run_by=run_by_summary(run.user) if current_user.role == "admin" else None,
+        run_by=run_by_summary(run.user) if can_view_all_runs(current_user) else None,
         scanned_pages=run.scanned_page_numbers,
         steps=step_summaries
     )
@@ -816,15 +817,15 @@ def retry_step(
 def get_run_quality(
     run_id: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    viewer: User = Depends(require_view_all_runs),
 ) -> RunQualityReport:
-    """Quality score breakdown and run-doctor findings for one run (admin only).
+    """Quality score breakdown and run-doctor findings for one run (admin or staff).
 
     Either part is null when its artifact was never stored. Sync def so the
     blocking storage reads run off the event loop. The path is not
     /run/{run_id}/quality, which is the extraction data-quality report below.
     """
-    check_run_access(run_id, admin, db)
+    check_run_access(run_id, viewer, db, read_only=True)
     return build_run_quality_report(
         run_id,
         quality_score_service.get_cached_score(run_id),
@@ -840,9 +841,9 @@ def get_run_review_note(
 ) -> RunReviewNote:
     """Whether the run's owner should see the "may need cleanup" note.
 
-    Open to the run's owner and admins; answers a bool and never the score.
+    Open to the run's owner, admins and staff; answers a bool and never the score.
     """
-    run = check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db, read_only=True)
     cols = quality_score_service.ScoreColumns(
         run.quality_score, run.quality_band, run.quality_cap)
     if cols.quality_score is None:
@@ -871,7 +872,7 @@ async def get_data_quality(
     """
     import json
 
-    run = check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db, read_only=True)
 
     # Get output directory for this run
     outputs_dir = _OUTPUTS_ROOT / run_id

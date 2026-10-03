@@ -48,6 +48,7 @@ ed:
   enabled: false  # Toggle ED group check independently of SAML mode
   access_group: ""  # DN of access group, e.g., "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
   admin_group: ""   # DN of admin group, e.g., "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+  staff_group: ""   # DN of read-only staff group, e.g., "cn=ITS:Library:CViche/staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu". Empty = nobody is staff; admin wins if a user is in both.
   contact_name: ""  # Name shown in access denial message
   contact_email: "" # Email shown in access denial message
 

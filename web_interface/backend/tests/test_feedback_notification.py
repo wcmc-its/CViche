@@ -89,6 +89,37 @@ def test_submit_feedback_succeeds_even_if_notification_raises(client, db, monkey
     assert db.query(Feedback).filter(Feedback.run_id == _RUN_ID).count() == 1
 
 
+def _staff(db):
+    from app.models import User
+
+    staff = User(email="staff@example.com", display_name="Staff User", role="staff")
+    db.add(staff)
+    db.commit()
+    db.refresh(staff)
+    return staff
+
+
+def test_staff_can_read_but_not_submit_feedback_on_another_users_run(client, db, monkeypatch):
+    """Staff is read-only: GET passes check_run_access(read_only=True), POST
+    stays owner-or-admin and 403s with nothing written or notified."""
+    _seed_run(db)
+    staff = _staff(db)
+    notify = Mock()
+    monkeypatch.setattr("app.services.notifications.notify_feedback_submitted", notify)
+
+    with _as_user(staff):
+        read = client.get(f"/api/run/{_RUN_ID}/feedback")
+        read_all = client.get(f"/api/run/{_RUN_ID}/feedback/all")
+        write = client.post(f"/api/run/{_RUN_ID}/feedback", json=_VALID_BODY)
+
+    assert read.status_code == 200
+    assert read_all.status_code == 200
+    assert write.status_code == 403
+    notify.assert_not_called()
+    from app.models import Feedback
+    assert db.query(Feedback).filter(Feedback.run_id == _RUN_ID).count() == 0
+
+
 def _add_feedback(db, user, at, **overrides):
     from app.models import Feedback
 

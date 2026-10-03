@@ -132,7 +132,7 @@ def _authorize_stream(cookie_value: str | None, run_id: str) -> _StreamAuth:
     db = SessionLocal()
     try:
         user, _identity = authenticate_session_cookie(cookie_value, db, touch_idle=True)
-        check_run_access(run_id, user, db)
+        check_run_access(run_id, user, db, read_only=True)
         return _StreamAuth(ok=True, close_code=_NO_CLOSE_CODE, reason="", user_id=user.id,
                            hide_cost=not can_see_cost(user))
     except HTTPException as exc:
