@@ -325,6 +325,53 @@ def test_a_list_naming_years_the_record_does_not_have_stays_a_list():
         "Pretend Teaching Prize"]
 
 
+def test_a_list_sharing_one_year_on_its_own_line_keeps_every_award():
+    """The years-on-their-own-lines shape (#229): one bare year, before or
+    after the awards, can be every award's. Every date the text names is
+    the record's and stage 4's award line is undated, so without the
+    date-cell guard this read as one award and lost the other line."""
+    for text in ("2015\nPretend Medal\nImaginary Prize",
+                 "Pretend Medal\nImaginary Prize\n2015"):
+        rows = _render_honors([_h_entry(
+            text, award_name="Imaginary Prize", date="2015")])
+        assert [row[0] for row in rows] == ["Pretend Medal", "Imaginary Prize"]
+        assert [row[2] for row in rows] == ["2015", "2015"]
+
+
+def test_a_list_with_a_row_dated_in_its_own_column_keeps_every_award():
+    """A tab- or '|'-joined row whose last cell is its date is an award with
+    its own date column (the module's delimiter contract), not a
+    continuation line of stage 4's award."""
+    for text in ("Pretend Medal\t2015\nImaginary Prize",
+                 "Pretend Medal | 2015\nImaginary Prize"):
+        rows = _render_honors([_h_entry(
+            text, award_name="Imaginary Prize", date="2015")])
+        assert [row[0] for row in rows] == ["Pretend Medal", "Imaginary Prize"]
+
+
+def test_a_pipe_cell_that_is_not_a_date_does_not_keep_one_award_split():
+    """A '|' shape the parser does not recognise (a leading date) hands its
+    second cell over as a "year". That cell is a note, not a date cell, so
+    the award, its note and its citation line stay one row."""
+    rows = _render_honors([_h_entry(
+        "2012 | Pretend supervisor of the winning entry\n"
+        "Pretend Poster Prize, Imaginary Congress\n"
+        "Doe J, Roe R. A Made-up Study. Imaginary Congress 2012",
+        award_name="Pretend Poster Prize",
+        granting_body="Imaginary Congress", date="2012")])
+    assert rows == [["Pretend Poster Prize", "Imaginary Congress", "2012"]]
+
+
+def test_an_entry_with_no_extracted_award_is_never_read_as_one_award():
+    """With no stage-4 award there is no line to tie the others to: the
+    one-award reading would put the whole raw text, newline and all, into
+    one name cell."""
+    rows = _render_honors([_h_entry(
+        "Pretend Medal\nImaginary Prize 2015", award_name=None, date="2015")])
+    assert [row[0] for row in rows] == ["Pretend Medal", "Imaginary Prize"]
+    assert rows[1][2] == "2015"
+
+
 def test_a_fanned_out_child_is_one_row_with_its_own_dates():
     """ZCTARO-04: fan-out gives the first record the built line "Award | Org |
     YYYY-MM | YYYY-MM", which the '|' parser split into four rows, and the

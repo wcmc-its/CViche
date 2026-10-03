@@ -736,6 +736,16 @@ def _names_award(line: str, award_name: str) -> bool:
     return bool(award_words) and award_words <= _words(line)
 
 
+def _has_date_cell(line: str) -> bool:
+    """Whether `_parse_honor_lines` reads a date cell in this one part: a
+    bare year, a tab-joined row whose last cell is a bare year, or a '|' row
+    with a date column. The same parse, so the two cannot disagree on what
+    a date cell is; a '|' shape the parser does not recognise yields its
+    second cell as a "year", which counts only when it is a date."""
+    _, cells = _parse_honor_lines([line])
+    return any(_is_date_column(cell) for cell in cells)
+
+
 def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
                              date: str) -> bool:
     """Whether an entry's several lines are ONE award, the one stage 4
@@ -749,6 +759,8 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
     4 assembled the name from several lines.
 
     Anything else is left to the multi-award reading, as before:
+    - an entry with no stage-4 award has no line to tie the others to, and
+      the one-award reading would put the whole raw text in one name cell;
     - a list of awards names several dates (ZDCXIV-03's one award won in
       three years; VYICGW 50's two awards, each with its own year);
     - a list that names no date has nothing to tie a line to the record;
@@ -756,9 +768,22 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
       in which stage 4 extracted that one award (RKJGSG 63.1 in the 61-CV
       farm: twelve awards, the last alone dated). `_names_award` is on
       words, so a curly quote or a double space in the source does not hide
-      the award's line and collapse such a list.
+      the award's line and collapse such a list;
+    - a list with a line the delimiter contract reads as a date cell
+      (`_has_date_cell`). A bare year can be every award's, and a tab or
+      '|' date column is its own row's: "YYYY\\nAward A\\nAward B",
+      "Award A\\nAward B\\nYYYY", "Award A\\tYYYY\\nAward B" and
+      "Award A | YYYY\\nAward B" each lost every award but stage 4's when
+      read as one award.
+
+    A date written in free text on a line that does not name stage 4's
+    award ("Award A\\nAward B - YYYY") still reads as one award: that is
+    the "Award" / "Organization - date" shape this function exists for, and
+    nothing in the text tells the two apart.
     """
     if not award_name:
+        return False
+    if any(_has_date_cell(line) for line in lines):
         return False
     text_years = _start_years('\n'.join(lines))
     if not text_years or not text_years <= _start_years(date):
