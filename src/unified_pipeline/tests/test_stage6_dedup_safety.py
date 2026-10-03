@@ -1963,9 +1963,27 @@ def test_identical_5d_citations_of_split_halves_are_one_paper():
       "year": 1975, "volume": "293"},
      {"authors": "Quill A", "title": "Allegiance among sprocket makers", "journal": "N Toy J",
       "year": 1975, "volume": "292"}),
+    # Two papers in one volume: title, journal, year, volume and first author
+    # agree, the pages do not (farm: RGUNJV, XWNZWW).
+    ({"authors": "Quill A, Pike S", "title": "Gadget signals in widget fatigue",
+      "journal": "Toy Pain Society", "year": 2013, "volume": "14", "pages": "S21"},
+     {"authors": "Quill A, Brandt B", "title": "Gadget signals in widget fatigue",
+      "journal": "Toy Pain Society", "year": 2013, "volume": "14", "pages": "S88"}),
+    # Two protocol reports under one DOI that differ by a patient group: the
+    # titles share 5 of 7 significant words (Jaccard 0.71, under 0.8).
+    ({"doi": "10.9999/supp.2", "title": "Widget protocol report for toy cohort adults",
+      "year": 2021},
+     {"doi": "10.9999/supp.2", "title": "Widget protocol report for toy cohort children",
+      "year": 2021}),
     # Same PMID typed on two different papers.
     ({"pmid": "30000001", "title": "Gizmo outcomes", "year": 2018},
      {"pmid": "30000001", "title": "Unrelated widget trial", "year": 2018}),
+    # One DOI and title under two PMIDs: two records in PubMed.
+    ({"doi": "10.9999/rep.2", "pmid": "30000001", "title": "Widget registry update", "year": 2018},
+     {"doi": "10.9999/rep.2", "pmid": "30000002", "title": "Widget registry update", "year": 2018}),
+    # One PMID and title under two DOIs.
+    ({"pmid": "30000003", "doi": "10.9999/rep.3", "title": "Widget registry update", "year": 2018},
+     {"pmid": "30000003", "doi": "10.9999/rep.4", "title": "Widget registry update", "year": 2018}),
     # One DOI and title in two years: an annual report re-issued.
     ({"doi": "10.9999/rep.1", "title": "Annual widget report", "year": 2018},
      {"doi": "10.9999/rep.1", "title": "Annual widget report", "year": 2019}),
@@ -2044,3 +2062,13 @@ def test_a_fanned_out_record_is_left_to_the_similarity_loop():
     b = _pub("Another line, unlike the first one.", pmid="31234567", title="Gizmo outcomes")
     b[FANNED_OUT_FROM] = {'key': 'records', 'index': 1, 'count': 2}
     assert deduplicate_entries([a, b], code="S1") == [a, b]
+
+
+def test_the_enriched_copy_is_kept_even_when_it_fills_fewer_fields():
+    # Farm: BMAMWE. The unenriched copy fills more fields and has the longer
+    # source line, but the PubMed-enriched copy is the one kept.
+    plain = _pub("Quill A, Brandt B. Gizmo outcomes. J Imag Stud. 2019;4:1-9. Wrote the study.",
+                 pmid="31234567", authors="Quill A, Brandt B", title="Gizmo outcomes",
+                 journal="J Imag Stud", year=2019, volume="4", pages="1-9")
+    enriched = _enriched("Gizmo outcomes.", "31234567", "Gizmo outcomes.")
+    assert deduplicate_entries([plain, enriched], code="S1") == [enriched]
