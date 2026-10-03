@@ -2,7 +2,8 @@
 
 Covers the full reader surface *not* already exercised by
 test_docx_structure_extractor_tracked_changes.py: get_paragraph_text (plain
-multi-run join; a text box's mc:Choice/mc:Fallback copies read once, #1236), get_cell_text (multi-paragraph join), extract_paragraph_metadata
+multi-run join; a text box's mc:Choice/mc:Fallback copies read once, #1236;
+w:noBreakHyphen read as '-', w:softHyphen as ''), get_cell_text (multi-paragraph join), extract_paragraph_metadata
 (style/outline, bold-representative, italic/underline/size, alignment, indent,
 list numbering), _is_date_column, split_merged_cells_in_row (no-split /
 double-newline / aligned-line / date-column-padding branches),
@@ -90,6 +91,52 @@ def test_get_paragraph_text_tab_and_break_together():
     para.add_run("c")
 
     assert get_paragraph_text(para) == "a b\nc"
+
+
+def _add_hyphenated_word(para, head, hyphen_tag, tail):
+    """`head`, then a run holding only a `<w:noBreakHyphen/>` or
+    `<w:softHyphen/>` element, then `tail` -- the shape Word writes for a
+    non-breaking or optional hyphen: no '-' character in any w:t."""
+    para.add_run(head)
+    para.add_run()._r.append(parse_xml(f'<w:{hyphen_tag} {nsdecls("w")}/>'))
+    para.add_run(tail)
+
+
+def test_get_paragraph_text_reads_a_non_breaking_hyphen_as_a_hyphen():
+    doc = Document()
+    para = doc.add_paragraph()
+    _add_hyphenated_word(para, "PEER", "noBreakHyphen", "REVIEWED")
+
+    assert get_paragraph_text(para) == "PEER-REVIEWED"
+
+
+def test_get_paragraph_text_reads_a_soft_hyphen_as_nothing():
+    doc = Document()
+    para = doc.add_paragraph()
+    _add_hyphenated_word(para, "Inter", "softHyphen", "disciplinary")
+
+    assert get_paragraph_text(para) == "Interdisciplinary"
+
+
+def test_extract_unified_elements_keeps_a_non_breaking_hyphen_in_paragraphs_and_cells(tmp_path):
+    # The wire: the stage 1a element stream, for a body paragraph and a
+    # two-column table cell (read through get_cell_text).
+    doc = Document()
+    _add_hyphenated_word(doc.add_paragraph(), "Synthetic Testname", "noBreakHyphen", "Example, MD")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "2021"
+    table.cell(0, 1).text = "Another Award"
+    table.cell(1, 0).text = "2022"
+    _add_hyphenated_word(table.cell(1, 1).paragraphs[0], "President", "noBreakHyphen", "Elect")
+    path = tmp_path / "no_break_hyphen.docx"
+    doc.save(str(path))
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["text"] for e in elements] == [
+        "Synthetic Testname-Example, MD",
+        "2021 | Another Award\n2022 | President-Elect",
+    ]
 
 
 def test_get_cell_text_joins_multiple_paragraphs():

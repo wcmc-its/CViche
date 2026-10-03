@@ -18,9 +18,13 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
 from docx import Document  # noqa: E402
+from docx.oxml import parse_xml  # noqa: E402
+from docx.oxml.ns import nsdecls  # noqa: E402
 
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: E402
+    _shape_hits,
     lint_protected_data_in_output,
 )
 from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
@@ -595,3 +599,209 @@ def test_score_protected_data_reads_the_same_blocks_as_the_doctor(tmp_path):
         read_docx_blocks(str(tmp_path / f"{_UID}_wcm.docx"))))
     assert doctor_hits >= 1
     assert f"protected_data_hits={doctor_hits}" in detail
+
+
+# --------------------------------------------------------------------------
+# #1223 (EBYSBC class E2): the independent check. The scan above calls the
+# withhold's own matcher, so it was blind to every shape the withhold missed.
+# These fixtures copy the SHAPES of the missed leaks (label, separator,
+# spacing) with invented values. Lint-level tests assert COUNTS, which hold
+# whether or not `pii.py` later learns a shape (a span the matcher scan
+# reports is never reported again by the independent shapes); the category
+# each shape names is asserted on `_shape_hits`, which never calls `pii.py`.
+# --------------------------------------------------------------------------
+
+def _shape_categories(text: str) -> list[str]:
+    return [category for category, _ in _shape_hits(text, [])]
+
+
+def test_1223_family_rows_recovered_into_the_appendix_are_findings():
+    """EQADVR-01's shapes: a "Married:" colon row naming the spouse, and a
+    grandchildren row whose label ends in a spaced en dash."""
+    married, grandchildren = "Married: Pat Example Lee, Esq.", "Grandchildren \u2013 Ann Beth, Cy, Dee, Eli, Fay"
+    assert _shape_categories(married) == ["marital status"]
+    assert _shape_categories(grandchildren) == ["family"]
+    appendix = [_p("T. APPENDIX"), _p('From "TEACHING":'), _p(married), _p(grandchildren),
+                _p(f"[{PII_REDACTED_NOTICE}]")]
+    findings = lint_protected_data_in_output(appendix)
+    assert len(findings) == 2
+    assert all(f["severity"] == "ERROR" for f in findings)
+    assert all("Pat" not in f["message"] and "Ann" not in f["message"] for f in findings)
+
+
+def test_1223_a_home_labelled_number_in_the_office_telephone_cell_is_one_finding():
+    """MRJDWE-01's shape: an "(h)" tag after a number in a Personal Data cell.
+    The table block repeats the cell in its joined-row line; one leak is one
+    finding, and the "(w)" number beside it is not a finding."""
+    personal = [_p("PERSONAL DATA"),
+                _t("Office address:\n12 Example Road, Sample City, ST 00000\n"
+                   "Office address: | 12 Example Road, Sample City, ST 00000\n"
+                   "Office telephone:\n555-201-0123 (h); 555-201-0456 (w)\n"
+                   "Office telephone: | 555-201-0123 (h); 555-201-0456 (w)\n"
+                   "Home address:\nCell phone:\nPersonal email:"),
+                _p("EDUCATION")]
+    findings = lint_protected_data_in_output(personal)
+    assert len(findings) == 1
+    assert "(home address / phone)" in findings[0]["message"]
+    assert "555" not in findings[0]["message"]
+    office_only = [_p("PERSONAL DATA"), _t("Office telephone:\n555-201-0456 (w)"), _p("EDUCATION")]
+    assert lint_protected_data_in_output(office_only) == []
+
+
+def test_1223_home_labels_before_or_after_a_phone_or_street_address():
+    for text in ("TELEPHONE: (555) 201-0123 (work) (555) 201-0456 (FAX) (555) 201-0789 (home)",
+                 "\u2022 Home Phone:        555-201-0999",
+                 "(H) 555.201.0999",
+                 "Phone: 555-201-0123 home, 555-201-0456 office",
+                 "Residence: 48 Sample Hill Road, Example Town",
+                 "12 Example Circle (home)"):
+        assert _shape_categories(text) == ["home address / phone"], text
+
+
+def test_1223_child_counts_names_and_birth_lines_are_shapes():
+    """MQSUIC-12's shape (a small head count ending its fragment, invented
+    values here), names or dates after a family label, and birth labels
+    followed by a date or a place -- at one start, the longer reading wins."""
+    assert _shape_categories("Nationality: Sampleland: ; three children") == ["children / dependents"]
+    assert _shape_categories("Caring for my 3 sons.") == ["children / dependents"]
+    assert _shape_categories("Children- Kim (2/2011), Lee (5/2013)") == ["children / dependents"]
+    assert _shape_categories("Daughter (1990)") == ["children / dependents"]
+    assert _shape_categories("Wife - Pat Example") == ["spouse"]
+    assert _shape_categories("married to Pat Example in 1990") == ["marital status"]
+    assert _shape_categories("Great-grandchildren: 4") == ["family"]
+    assert _shape_categories("Born: March 3, 1950") == ["date of birth"]
+    assert _shape_categories("born in 1950") == ["date of birth"]
+    assert _shape_categories("DOB 01/02/1970") == ["date of birth"]
+    assert _shape_categories("Place of birth: Sampletown, Ohio") == ["place of birth"]
+    assert _shape_categories("Born in Sampletown") == ["place of birth"]
+    appendix = [_p("T. APPENDIX"), _p("Nationality: Sampleland: ; three children")]
+    assert len(lint_protected_data_in_output(appendix)) == 1
+
+
+def test_1223_titles_institutions_and_research_text_are_not_findings():
+    """The negative controls the shapes were tuned on: none carries a family,
+    birth or home VALUE after its keyword."""
+    clean = ["1. Example Children\u2019s Hospital, Sample City",
+             "Example Children's Clinic, Sample Division",
+             "Children - A Review of the Literature",
+             "Children - The Forgotten Patients",
+             "Introduction to Neurology. New York: Example Press & Sons: Hoboken",
+             "Five children with asthma were enrolled in the pilot",
+             "A cohort of 40 children.",
+             "Second Born Sample Stories. Example Magazine. 2011 Mar.",
+             "An example study of very low birth weight infants",
+             "2012-2013 - Scholar in Residence, Example High School",
+             "Child-Parent Psychotherapy: A Sample Program",
+             "Children-Centered Practice in Sample Clinics",
+             "Son-in-law: none listed",
+             "Office telephone: 555-201-0456 (w)",
+             "Home Health Care, Sample County",
+             "Married couples (n=40)",
+             f"[{PII_REDACTED_NOTICE}]"]
+    for text in clean:
+        assert _shape_hits(text, []) == [], text
+    assert lint_protected_data_in_output([_p("T. APPENDIX")] + [_p(t) for t in clean]) == []
+
+
+def test_1223_the_independent_shapes_read_only_the_personal_data_block_and_the_appendix():
+    body = [_p("HONORS"), _p("Grandchildren \u2013 Ann Beth, Cy"),
+            _p("BIBLIOGRAPHY"), _p("Contact: 555-201-0789 (home)")]
+    assert lint_protected_data_in_output(body) == []
+
+
+def test_1223_a_span_the_matcher_scan_reported_is_not_reported_twice():
+    """`Husband:` is a label the withhold's matcher knows; the independent
+    shape matches the same text and must not add a second finding."""
+    assert _shape_categories("Husband: Pat Example") == ["spouse"]
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p("Husband: Pat Example")])
+    assert len(findings) == 1
+    assert "does not recognise" not in findings[0]["message"]
+
+
+def test_1223_a_tracked_deletion_is_scanned_too():
+    """A value struck through as a tracked deletion is still in the file and
+    on the page in Word's markup view."""
+    blocks = [_p("T. APPENDIX"), _p("Family")]
+    deleted = [_p(""), _p("Grandchildren \u2013 Ann Beth, Cy")]
+    assert lint_protected_data_in_output(blocks) == []
+    findings = lint_protected_data_in_output(blocks, deleted)
+    assert len(findings) == 1
+    assert "tracked deletion" in findings[0]["message"]
+    # the same value both struck through and re-inserted is one leak
+    both = [_p("T. APPENDIX"), _p("Grandchildren \u2013 Ann Beth, Cy")]
+    assert len(lint_protected_data_in_output(both, deleted)) == 1
+
+
+def test_1223_stage_4_locates_the_entry_and_never_changes_the_count():
+    """The evidence names the source entry index (what the autopsy labels and
+    the harness match on); without stage 4 the same findings are unlocated."""
+    appendix = [_p("T. APPENDIX"), _p("Married: Pat Example Lee, Esq."),
+                _p("Grandchildren \u2013 Ann Beth, Cy, Dee")]
+    stage_4 = {"entries": [
+        {"element_idx_start": 3, "text": "Born: [withheld]; Sampletown, Ohio"},
+        {"element_idx_start": 4, "text": "Married:  Pat Example Lee, Esq."},
+        {"element_idx_start": 6, "text": "Grandchildren - Ann Beth, Cy, Dee"},
+        {"element_idx_start": 9, "text": None}]}
+    located = lint_protected_data_in_output(appendix, None, stage_4)
+    assert [f["evidence"] for f in located] == [["entry 4"], ["entry 6"]]
+    unlocated = lint_protected_data_in_output(appendix)
+    assert [f["evidence"] for f in unlocated] == [[], []]
+    assert [f["message"] for f in located] == [f["message"] for f in unlocated]
+
+
+def test_1223_locating_needs_a_distinctive_value_and_tolerates_a_tail_edit():
+    """A two-letter value is in too many entries to name one; a long value is
+    matched on its head, so a renderer's edit at its tail keeps the entry;
+    at most three entries are named."""
+    long_rendered = "Grandchildren \u2013 Annabelle Beth, Cyrus Dee, Eliza Fay, Gideon Hart, Ivy Kay"
+    long_source = "Grandchildren: Annabelle Beth, Cyrus Dee, Eliza Fay, Gideon Hart, Ivy K."
+    stage_4 = {"entries": [{"element_idx_start": 2, "text": "Grandchildren - Bo"},
+                           {"element_idx_start": 7, "text": long_source}]}
+    short = [_p("T. APPENDIX"), _p("Grandchildren \u2013 Bo")]
+    assert [f["evidence"] for f in lint_protected_data_in_output(short, None, stage_4)] == [[]]
+    edited = [_p("T. APPENDIX"), _p(long_rendered)]
+    assert [f["evidence"] for f in lint_protected_data_in_output(edited, None, stage_4)] == [["entry 7"]]
+    many = {"entries": [{"element_idx_start": i, "text": long_source} for i in range(5)]}
+    assert [f["evidence"] for f in lint_protected_data_in_output(edited, None, many)] == [
+        ["entry 0", "entry 1", "entry 2"]]
+
+
+def test_1223_a_misaligned_deleted_view_fails_loudly():
+    with pytest.raises(ValueError):
+        lint_protected_data_in_output([_p("T. APPENDIX"), _p("x")], [_p("")])
+
+
+def _write_docx_with_deletion(path: Path, kept: list[str], deleted: str) -> None:
+    doc = Document()
+    for text in kept:
+        doc.add_paragraph(text)
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:del {nsdecls("w")} w:id="1" w:author="a" w:date="2026-07-25T00:00:00Z">'
+        f'<w:r><w:delText>{deleted}</w:delText></w:r></w:del>'))
+    doc.save(str(path))
+
+
+def test_1223_run_doctor_and_the_scorer_read_the_deleted_view_and_agree(tmp_path):
+    """Wiring: run_doctor hands the lint the deleted view and stage 4 (the
+    finding is located), and `score_protected_data` counts the same hit."""
+    import json
+    deleted = "Grandchildren \u2013 Ann Beth, Cy, Dee"
+    out_dir = tmp_path / "stage_6_wcm_documents"
+    out_dir.mkdir()
+    _write_docx_with_deletion(out_dir / f"{_UID}_wcm.docx", ["T. APPENDIX"], deleted)
+    stage4 = tmp_path / "stage_4_field_extraction"
+    stage4.mkdir()
+    (stage4 / f"{_UID}_fields.json").write_text(json.dumps({
+        "document_uid": _UID, "cv_owner": {"full_name": "Sam Sample"},
+        "entries": [{"element_idx_start": 5, "text": deleted}]}))
+    payload = run_doctor(tmp_path, _UID, source=None)
+    hits = [f for f in payload["findings"] if f["lint"] == "protected_data_in_output"]
+    assert len(hits) == 1
+    assert hits[0]["evidence"] == ["entry 5"]
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    _write_docx_with_deletion(flat / f"{_UID}_wcm.docx", ["T. APPENDIX"], deleted)
+    fraction, detail, cap = score_protected_data(flat)
+    assert cap == PROTECTED_DATA_CAP
+    assert "protected_data_hits=1" in detail

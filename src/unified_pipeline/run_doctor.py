@@ -694,12 +694,13 @@ def iter_header_candidates(docx_path: str) -> list[str]:
 # Re-exported by name above for the five files that import them from here.
 
 
-def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
+def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> List[Tuple[str, str]]:
     """Body-order blocks of a docx: ("p", text) per paragraph, ("table",
     _table_lines joined by newlines) per table. Grants render as one Word
-    table per grant, so any output check must read tables AND paragraphs."""
+    table per grant, so any output check must read tables AND paragraphs.
+    ``deleted=True``: the tracked-deletion view (`docx_body_blocks`)."""
     Document = _get_docx_document()
-    return docx_body_blocks(Document(docx_path))
+    return docx_body_blocks(Document(docx_path), deleted=deleted)
 
 
 def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
@@ -982,6 +983,7 @@ _VIEW_LABELS = {
     "stage_5b": "stage_5b",
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
+    "deleted_blocks": "stage_6_docx",
     "table_rows": "stage_6_docx",
 }
 
@@ -1018,7 +1020,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_shape", lint_table_shape, ("table_rows",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
     LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
-    LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
+    LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",),
+             optional=("deleted_blocks", "stage_4")),
     LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),
     LintSpec("wrong_start_date", lint_wrong_start_date, ("stage_4",)),
     # Last row, not beside `segmentation`: this order breaks the sweep's
@@ -1219,6 +1222,9 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
                            if source_path else None)
     views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                        if paths["stage_6_docx"] else None)
+    views["deleted_blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"]), deleted=True),
+                                    "stage_6_docx", _note)
+                               if paths["stage_6_docx"] else None)
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
 
