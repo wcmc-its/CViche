@@ -744,6 +744,21 @@ def test_dedup_drops_reports_warn_and_info_together():
     assert [f["severity"] for f in result] == ["WARN", "INFO"]
 
 
+def test_dedup_drops_record_rule_drop_skips_the_coverage_warn_not_the_name_info():
+    """A stage-6 record-rule drop matched on fields: its low text coverage
+    is not evidence, but a dropped name absent from the page still is."""
+    header = {"code": "D1", "metric": "record=undated_appointment",
+              "dropped_text": "Title: Associate Professor",
+              "kept_text": "2031-present Associate Prof., Dept. of Widgets"}
+    assert lint_dedup_drops({"dedup_decisions": [header]}, [("p", "x")]) == []
+    named = dict(header, dropped_fields={"title": "Associate Professor"},
+                 kept_fields={"title": "Associate Prof."})
+    result = lint_dedup_drops({"dedup_decisions": [named]}, [("p", "Associate Prof.")])
+    assert [f["severity"] for f in result] == ["INFO"]
+    text_drop = dict(header, metric="containment=0.80")
+    assert [f["severity"] for f in lint_dedup_drops({"dedup_decisions": [text_drop]})] == ["WARN"]
+
+
 def test_alphanumeric_tokens_unicode_diaeresis_folds_to_one_token():
     # #541: _norm folds combining marks and _DEDUP_TOKEN_RE is Unicode-aware,
     # so "müller" is one token (it used to split into "m" + "ller").
