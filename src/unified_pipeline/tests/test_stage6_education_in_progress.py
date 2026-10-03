@@ -299,6 +299,46 @@ class TestRawTextYearFallback:
         assert _cell_ins_parts(row.cells[3]) == [("2015", "Text Extraction")]
 
 
+class TestYearAwardedNeedsANamedDegree:
+    """EBYSBC E33 (#1245): a row that names no degree (schooling, a year of
+    study, a major alone) took its Year Awarded from the end of the
+    attendance range, asserting an award the CV never states. The two
+    inferred fallbacks now apply only when a degree is named; a stated
+    `year_awarded`/`year` still renders either way."""
+
+    def _row(self, fields, text="Example line"):
+        gen = _generator()
+        gen._fill_education([{"text": text, "extracted_fields": fields}])
+        return _first_data_row(gen)
+
+    def test_a_degreeless_row_has_no_year_awarded_from_its_attendance_end(self):
+        row = self._row({
+            "degree": None, "major": "Liberal Arts", "institution": "Example College",
+            "dates_attended": {"start_date": "1984", "end_date": "1985"},
+        })
+        assert row.cells[2].text != ""
+        assert row.cells[3].text == ""
+        assert _cell_ins_parts(row.cells[3]) == []
+
+    def test_a_degreeless_row_has_no_year_awarded_from_raw_text(self):
+        row = self._row({"degree": None, "institution": "Example Academy"},
+                        text="Example Academy, December 1961")
+        assert row.cells[3].text == ""
+        assert _cell_ins_parts(row.cells[3]) == []
+
+    def test_a_named_degree_still_falls_back_to_its_attendance_end(self):
+        row = self._row({
+            "degree": "BA", "institution": "Example College",
+            "dates_attended": {"start_date": "1984", "end_date": "1988"},
+        })
+        assert row.cells[3].text == "1988"
+
+    def test_a_stated_year_renders_without_a_degree(self):
+        row = self._row({"degree": None, "major": "Example Studies",
+                         "institution": "Example College", "year": "1990"})
+        assert row.cells[3].text == "1990"
+
+
 class TestInstitutionLocationEnrichment:
     """Institution-location enrichment (review thread 3914996508 item 3):
     an enriched location is appended and tracked as "Institution

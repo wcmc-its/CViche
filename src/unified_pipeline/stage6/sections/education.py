@@ -135,6 +135,28 @@ def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
     return '' if text.strip() == str(year_awarded or '').strip() else text
 
 
+def _year_awarded(fields: Mapping, end: object, raw_text: str, *, degree_named: bool) -> tuple[object, bool]:
+    """The Year Awarded value before formatting, and whether it was recovered
+    from raw text (shown as a "Text Extraction" insertion).
+
+    Stage 4's `year_awarded`/`year` always win. The two fallbacks -- the end
+    of the attendance range, then a year found in the raw text -- infer an
+    award, so they apply only when the row names a degree. A row with no
+    degree (schooling, a year of study, a major alone) has nothing that was
+    awarded, and filling the column from its attendance end asserted a degree
+    year the CV never states (EBYSBC E33: HZGJFM-06, ZDCXIV-08).
+    """
+    stated = fields.get('year_awarded') or fields.get('year')
+    if stated or not degree_named:
+        return stated or '', False
+    if end:
+        return end, False
+    extracted_year = _extract_year_from_text(raw_text) if raw_text else None
+    if extracted_year:
+        return extracted_year, True
+    return '', False
+
+
 class EducationSection:
     """Section B1 writers, mixed into `WCMTemplateGenerator`."""
 
@@ -260,16 +282,9 @@ class EducationSection:
                 dates = format_date_range(start, end, 'B1')
             else:
                 dates = ''
-            # Year awarded - try to extract from raw text if missing
-            year_awarded = fields.get('year_awarded') or fields.get('year') or end or ''
-            year_is_enriched = False
-
-            # If year_awarded is still empty, try to extract from raw text
-            if not year_awarded and raw_text:
-                extracted_year = _extract_year_from_text(raw_text)
-                if extracted_year:
-                    year_awarded = extracted_year
-                    year_is_enriched = True  # Mark as enriched since we extracted it
+            year_awarded, year_is_enriched = _year_awarded(
+                fields, end, raw_text, degree_named=bool(_field_text(fields.get('degree')).strip()),
+            )
 
             # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy
             if year_awarded:
