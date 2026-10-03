@@ -795,6 +795,14 @@ _QUARANTINE_MARKER_INVALID_CODE = "invalid_taxonomy_code"
 REASON_T_VALIDATION_RECODED = "t_validation_recoded"
 _T_VALIDATION_MARKER_KEY = "t_validation_applied"
 
+# A dated M1 record (a position, a project) that a rendered, generated research
+# summary does not reproduce and no other section renders, so `generate()` sends
+# it here (AUTOPSY-EBYSBC-batch-2026-10-02 class E27: CMTQDR 122, XWNZWW 184).
+# No other route brings an M1 entry to the Appendix while the summary rendered,
+# which is how `build_appendix_diversion_warnings` tells this reason from
+# REASON_RENDERER_DECLINED.
+REASON_M1_RECORD_NOT_IN_SUMMARY = "m1_record_not_in_summary"
+
 # E, G and J -- the three passthrough sections. None of the three is in
 # `RENDER_ROUTED_CODES` (they have no taxonomy-code dispatch of their own --
 # the passthrough writers select by source hierarchy, not code), so an
@@ -890,6 +898,8 @@ def _diversion_message(code: str, count: int, reason: str,
       section name (`_diversion_message` has no `label`, only `code`).
     - REASON_T_VALIDATION_RECODED (and REASON_INVALID_CODE): stage 3b's
       recode named as the cause, checked before any routing-based reason.
+    - REASON_M1_RECORD_NOT_IN_SUMMARY: a dated record the generated research
+      summary left out (E27), likewise checked before the routing-based ones.
     - Everything else (REASON_NO_RENDER_ROUTE, and REASON_RENDERER_DECLINED
       for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
@@ -903,6 +913,11 @@ def _diversion_message(code: str, count: int, reason: str,
         return (f"{code}: {count} {noun} diverted to the Appendix — stage 3b "
                 f"T-validation recoded {'it' if count == 1 else 'them'} from T "
                 f"to {code}, which only the research summary renders")
+    if reason == REASON_M1_RECORD_NOT_IN_SUMMARY:
+        pronoun = 'it' if count == 1 else 'them'
+        return (f"{code}: {count} dated {noun} diverted to the Appendix — the "
+                f"generated research summary does not reproduce {pronoun} and no "
+                f"other section renders {pronoun}")
     if reason == REASON_RECOVERED_UNRENDERED:
         verb = _plural_was(count)
         return (f"{code}: {count} {noun} classified {code} {verb} not "
@@ -981,6 +996,8 @@ def build_appendix_diversion_warnings(
     render_routed_codes: frozenset[str],
     passthrough_codes: frozenset[str],
     owner_tokens: OwnerTokens = OwnerTokens(),
+    *,
+    summary_rendered: bool = False,
 ) -> list[AppendixDiversionWarning]:
     """One `appendix_diversion` warning per (taxonomy code, reason) pair
     actually present in the Appendix (#531, #531-R2 finding F1). Two input
@@ -1012,6 +1029,12 @@ def build_appendix_diversion_warnings(
     peer) imports both modules' constants and passes them down, the same
     way it already does for `render_routed_codes`.
 
+    *summary_rendered* is whether `generate()` placed the research summary.
+    When it did, M1 stays routed, so an M1 entry in *written* that stage 3b's
+    T-validation did not recode is a dated record the summary left out
+    (REASON_M1_RECORD_NOT_IN_SUMMARY); when it did not, every M1 entry is
+    there because no summary rendered (REASON_RENDERER_DECLINED).
+
     Sorted by (code, reason) so the sidecar is deterministic and, when one
     code has entries in both streams (e.g. some T lines numbered, others
     bulleted), its two warnings are adjacent. An entry/code with no
@@ -1026,6 +1049,8 @@ def build_appendix_diversion_warnings(
             reason = REASON_INVALID_CODE
         elif is_t_validation_recoded_m1(entry):
             reason = REASON_T_VALIDATION_RECODED
+        elif code == _RESEARCH_SUMMARY_CODE and summary_rendered:
+            reason = REASON_M1_RECORD_NOT_IN_SUMMARY
         else:
             reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
         counts[(code, reason)] += 1
