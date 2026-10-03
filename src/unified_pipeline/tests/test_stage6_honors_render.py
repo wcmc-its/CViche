@@ -262,6 +262,28 @@ def test_each_line_of_one_award_won_in_several_years_keeps_its_own_year():
     ]
 
 
+def test_a_line_keeps_its_own_trailing_year_or_date_column():
+    """The same rule for the other two ways a line dates itself: a trailing
+    year (`_split_award_year`) and a '|' date column (the parsed cell)."""
+    for text in ("Made-up Faculty Award, 2019\nMade-up Faculty Award, 2018",
+                 "Made-up Faculty Award | 2019\nMade-up Faculty Award | 2018"):
+        rows = _render_honors([_h_entry(
+            text, award_name="Made-up Faculty Award", date="2019",
+            additional_dates="2018")])
+        assert [row[2] for row in rows] == ["2019", "2018"], text
+
+
+def test_the_granting_body_line_is_matched_whatever_its_case_or_full_stop():
+    rows = _render_honors([_h_entry(
+        "FICTIONAL COLLEGE OF PRETEND STUDIES.\n"
+        "Made-up Faculty Award — 06/11/2019\n"
+        "Made-up Faculty Award — 05/14/2018",
+        award_name="Made-up Faculty Award",
+        granting_body="Fictional College of Pretend Studies",
+        date="2019-06-11", additional_dates="2018-05-14")])
+    assert [row[0] for row in rows] == ["Made-up Faculty Award"] * 2
+
+
 def test_one_award_written_over_several_lines_is_one_row():
     """ZDCXIV-02: "Award", then "Organization — date", or a poster title and
     its authors above the dated line, rendered one row per line."""
