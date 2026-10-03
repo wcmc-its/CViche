@@ -2851,6 +2851,8 @@ def test_field_lint_prevalence_is_the_measured_wave1_fraction():
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["offschema_fields"] == round(37 / 163, 3)
     assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
+    # #1243: the farm's 126 census CVs; its 37 IPXFBA artifacts are gone.
+    assert LINT_PREVALENCE["multi_record_coverage"] == round(64 / 126, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

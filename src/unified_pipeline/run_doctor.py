@@ -153,8 +153,8 @@ Lints, ranked by the severity of the failure class they catch:
                           one record holding several mentees, degree years or
                           licence/patent numbers (#1243: TAUBPU's concurrent
                           faculty rank, VNUAHA's paragraphs of 2-3 roles).
-                          WARN when a left-out clause is on no rendered line,
-                          INFO otherwise
+                          WARN when a left-out clause, mentee, degree year or
+                          number is on no rendered line, INFO otherwise
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -539,11 +539,14 @@ LINT_PREVALENCE = {
     # and both should fall toward zero as the renderers are fixed.
     "python_repr_in_output": 0.061,
     "llm_refusal_in_output": 0.006,
-    # #1243: 38 of the 63 autopsied runs (EBYSBC 40, s7ab 10, pilot 13; stage-6
-    # docx rendered by origin/dev c3d87c5f, 2026-10-02), 35 of them at WARN.
-    # The autopsies found the class it reports on 17 of EBYSBC's 40 CVs, so
-    # it is common rather than surprising.
-    "multi_record_coverage": 0.603,
+    # #1243: 64 of the 126 census CVs of the wave-1 stage-4 farm the two rows
+    # above were measured on, one fire per CV at any severity (firing reads
+    # stage 4 only; the docx sets severity), measured 2026-10-02. The farm's
+    # 37 IPXFBA artifacts are no longer on disk, so the denominator is 126,
+    # not 163. On the 63 autopsied runs (EBYSBC 40, s7ab 10, pilot 13) it is
+    # 38/63, 35 at WARN; the autopsies found the class it reports on 17 of
+    # EBYSBC's 40 CVs, so it is common rather than surprising.
+    "multi_record_coverage": 0.508,
 }
 
 

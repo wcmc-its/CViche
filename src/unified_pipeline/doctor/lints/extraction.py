@@ -1587,46 +1587,90 @@ def _clause_verdict(entry: _FieldsEntry, output: OutputLines) -> MultiRecordVerd
         _clause_evidence(uncovered))
 
 
-def _person_names(value: object) -> int:
+def _person_names(value: object) -> list[str]:
+    """The items of a `mentee_name` value that read as a person's name."""
     if not isinstance(value, str):
-        return 0
-    return sum(1 for item in _NAME_LIST_SEPARATOR_RE.split(value)
-               if _PERSON_NAME_RE.match(item.strip()))
+        return []
+    return [item for item in _NAME_LIST_SEPARATOR_RE.split(value)
+            if _PERSON_NAME_RE.match(item.strip())]
 
 
 def _identifier_numbers(text: str) -> set[str]:
     return set(_IDENTIFIER_NUMBER_RE.findall(text))
 
 
-def _fused_verdict(entry: _FieldsEntry, output_digits: str) -> MultiRecordVerdict | None:
-    """One record that holds several in its values: two or more licence or
-    patent numbers in the text when the number field holds fewer (WARN when
-    one is in neither the record nor the document), two or more mentees in
-    `mentee_name`, or two or more years in a degree's `year` (INFO: they
-    render, fused into one row)."""
-    head = f"entry {entry.element_idx} ({entry.code}): stage 4 returned one record"
+def _fused_values_verdict(entry: _FieldsEntry, head: str,
+                          absent: list[str]) -> MultiRecordVerdict:
+    """WARN when a value the one record fuses is on no rendered line, INFO
+    when each is on one."""
     evidence = [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]
+    if absent:
+        return MultiRecordVerdict(
+            "WARN", f"{head}; {len(absent)} on no line of the output (#1243)", evidence)
+    return MultiRecordVerdict(
+        "INFO", f"{head}; each is on a line of the output (#1243)", evidence)
+
+
+def _identifier_verdict(entry: _FieldsEntry, head: str,
+                        output_digits: str) -> MultiRecordVerdict | None:
+    """Two or more licence or patent numbers in the text of an F1/M2D entry
+    whose number field holds fewer: WARN when one is in neither the record
+    nor the document."""
     number_field = _IDENTIFIER_FIELDS.get(entry.code)
-    numbers = _identifier_numbers(entry.text) if number_field else set()
-    filed = _identifier_numbers(str(entry.fields.get(number_field) or "")) if number_field else set()
-    if len(numbers) >= 2 and len(filed) < len(numbers):
-        held = {n for leaf in _leaf_strings(entry.fields) for n in _identifier_numbers(leaf)}
-        lost = [n for n in numbers - held if n not in output_digits]
-        return MultiRecordVerdict(
-            "WARN" if lost else "INFO",
-            f"{head} for {len(numbers)} numbers; {len(lost)} in neither the record nor "
-            f"the output (#1243)", evidence)
-    mentees = _person_names(entry.fields.get(MENTEE_NAME_FIELD))
-    if mentees >= 2:
-        return MultiRecordVerdict(
-            "INFO", f"{head} naming {mentees} mentees, rendered as one row (#1243)", evidence)
-    degree_years = (set(_CLAUSE_YEAR_RE.findall(str(entry.fields.get(DEGREE_YEAR_FIELD) or "")))
-                    if entry.code == ACADEMIC_DEGREE_CODE else set())
-    if len(degree_years) >= 2:
-        return MultiRecordVerdict(
-            "INFO", f"{head} for {len(degree_years)} degree years, rendered as one row (#1243)",
-            evidence)
-    return None
+    if not number_field:
+        return None
+    numbers = _identifier_numbers(entry.text)
+    filed = _identifier_numbers(str(entry.fields.get(number_field) or ""))
+    if len(numbers) < 2 or len(filed) >= len(numbers):
+        return None
+    held = {n for leaf in _leaf_strings(entry.fields) for n in _identifier_numbers(leaf)}
+    lost = [n for n in numbers - held if n not in output_digits]
+    return MultiRecordVerdict(
+        "WARN" if lost else "INFO",
+        f"{head} for {len(numbers)} numbers; {len(lost)} in neither the record nor "
+        f"the output (#1243)", [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]])
+
+
+def _mentee_verdict(entry: _FieldsEntry, head: str,
+                    output: OutputLines) -> MultiRecordVerdict | None:
+    """Two or more mentees in one record's `mentee_name`. A mentee is on the
+    output when one rendered line carries RENDER_TOKEN_OVERLAP of their
+    name's 5+-letter words; a name with none cannot be checked and counts as
+    on it."""
+    names = _person_names(entry.fields.get(MENTEE_NAME_FIELD))
+    if len(names) < 2:
+        return None
+    absent = [name for name in names if not _clause_rendered(
+        UncoveredClause(name, frozenset(), frozenset(_long_word_tokens(name))), output)]
+    return _fused_values_verdict(entry, f"{head} naming {len(names)} mentees", absent)
+
+
+def _degree_year_verdict(entry: _FieldsEntry, head: str,
+                         output: OutputLines) -> MultiRecordVerdict | None:
+    """Two or more years in a degree record's `year`. A year is on the output
+    when one rendered line carries it and RENDER_TOKEN_OVERLAP of the
+    record's other words (its degree, institution, discipline)."""
+    if entry.code != ACADEMIC_DEGREE_CODE:
+        return None
+    years = sorted(set(_CLAUSE_YEAR_RE.findall(str(entry.fields.get(DEGREE_YEAR_FIELD) or ""))))
+    if len(years) < 2:
+        return None
+    words = frozenset(token for key, value in entry.fields.items() if key != DEGREE_YEAR_FIELD
+                      for leaf in _leaf_strings(value) for token in _long_word_tokens(leaf))
+    absent = [year for year in years
+              if not _clause_rendered(UncoveredClause(year, frozenset({year}), words), output)]
+    return _fused_values_verdict(entry, f"{head} for {len(years)} degree years", absent)
+
+
+def _fused_verdict(entry: _FieldsEntry, output: OutputLines,
+                   output_digits: str) -> MultiRecordVerdict | None:
+    """One record that holds several in its values: licence or patent
+    numbers, mentees, or degree years. WARN when one of them is on no line
+    of the rendered document, INFO when they render fused into the record."""
+    head = f"entry {entry.element_idx} ({entry.code}): stage 4 returned one record"
+    return (_identifier_verdict(entry, head, output_digits)
+            or _mentee_verdict(entry, head, output)
+            or _degree_year_verdict(entry, head, output))
 
 
 def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
@@ -1635,13 +1679,14 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
     clauses, or undated parts that each name a title and an institution, of
     which the record stands for one; or one record holding several mentees,
     degree years or licence/patent numbers. One finding per entry; WARN when
-    a record it left out is on no line of the rendered document (track
-    changes included), INFO otherwise. Skips the codes `offschema_fields`
-    skips (the section writes the entry's text, a stage-5 formatter rewrites
-    it whole, or it is personal data). An entry stage 6's fan-out splits
-    needs no skip of its own: fan-out splits a record list only when the
-    list's values hold every word of the entry's text, so every clause is
-    covered, and it splits `stage4_records`, which are skipped above."""
+    a clause it left out, or one of the values it fused, is on no line of the
+    rendered document (track changes included), INFO otherwise. Skips the
+    codes `offschema_fields` skips (the section writes the entry's text, a
+    stage-5 formatter rewrites it whole, or it is personal data). An entry
+    stage 6's fan-out splits needs no skip of its own: fan-out splits a
+    record list only when the list's values hold every word of the entry's
+    text, so every clause is covered, and it splits `stage4_records`, which
+    are skipped above."""
     output = _output_lines(blocks)
     output_digits = _LINE_SENTINEL.join(
         re.sub(r"\D", "", line) for _, text in blocks for line in str(text).split("\n"))
@@ -1650,7 +1695,7 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
         if (not entry.code or entry.code in _OFFSCHEMA_SKIPPED_CODES or not entry.fields
                 or entry.fields.get(STAGE4_RECORDS_KEY)):
             continue
-        verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output_digits)
+        verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output, output_digits)
         if verdict:
             findings.append(_finding("multi_record_coverage", *verdict))
     return findings
