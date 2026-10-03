@@ -359,6 +359,22 @@ def test_partition_moves_an_ended_current_mentee_to_past(fields):
     assert partition.moved_to_current == 0
 
 
+@pytest.mark.parametrize("text", [
+    "2015 Ada Lovelace, MD thesis; now Assistant Professor",
+    "Ada Lovelace, summer student 2015. Current position: Resident",
+    "Ada Lovelace, MD 2015; Fellow - now Assistant Professor",
+    "2015 \u2013 2016 Ada Lovelace, postdoctoral fellow",
+])
+def test_partition_moves_an_ended_current_mentee_whatever_its_text_says_about_the_mentee(text):
+    """"now ..." and "Current position" describe the mentee, not the
+    mentoring, and a closed range is not an open marker."""
+    entry = _mentee('N3A', 'Ada Lovelace', start_date='2015')
+    entry['text'] = text
+    partition = _partition_mentoring_entries({'N3A': [entry]}, current_year=_CURRENT_YEAR)
+    assert partition.past == (entry,)
+    assert partition.moved_to_past == 1
+
+
 @pytest.mark.parametrize("fields", [
     {'start_date': str(_CURRENT_YEAR)},                     # this year: may still run
     {'start_date': '2025', 'end_date': str(_CURRENT_YEAR)},
@@ -385,8 +401,13 @@ def test_partition_keeps_a_current_mentee_that_has_not_ended(fields):
     # after the dash lost by the reader.
     ('2015', "2015 \u2013 Ada Lovelace, PhD student"),
     ('2015-03', "2015.03 \u2013 Ada Lovelace, PhD student"),
-    # A box-drawing line as the dash.
+    # Open-range markers the strict ongoing check does not read: a
+    # box-drawing dash, a two-digit year, "pres", a dash before stage 2's
+    # cell separator, and a later period left open.
     ('2015-03', "Ada Lovelace, PhD student 03/2015 \u2500 current"),
+    ('2004', "Faculty advisor for the chief resident 04-present (Ada Lovelace)"),
+    ('2015', "2015-2016 Ada Lovelace, intern\t2016-pres PhD student"),
+    ('2015', "Ada Lovelace | PhD student | 2015 \u2013 | Fictional Institute"),
 ])
 def test_partition_keeps_a_current_mentee_whose_source_leaves_the_year_open(start_date, text):
     entry = _mentee('N3A', 'Ada Lovelace', start_date=start_date)

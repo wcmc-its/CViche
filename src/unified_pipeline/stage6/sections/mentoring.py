@@ -112,13 +112,26 @@ _ONGOING_END_WORDS = frozenset({'ongoing', 'current', 'now'})
 #: "2019-present", "2019 - Current", "2019 to date". Anchored on the year
 #: because a mentee row routinely says "now Assistant Professor at ..." or
 #: "Current position: ..." about the MENTEE, which says nothing about whether
-#: the mentoring is still going on. The dash may also be the box-drawing
-#: line U+2500: a CV in the s7ab batch writes its current trainees
-#: "MM/YYYY <U+2500> current", and they would otherwise move to Past once
-#: N3A rows are checked too (`_n3a_entry_has_ended`).
+#: the mentoring is still going on.
 _ONGOING_RANGE_END_RE = re.compile(
-    r'(?<!\d)\d{4}\s*(?:[-\u2013\u2014\u2500]|\bto\b)\s*(?:present|current|now|ongoing|date)\b',
+    r'(?<!\d)\d{4}\s*(?:[-\u2013\u2014]|\bto\b)\s*(?:present|current|now|ongoing|date)\b',
     re.IGNORECASE)
+
+#: Any open-range marker anywhere in an entry's text: a dash or "to" before
+#: present/pres/current/ongoing/date, whatever precedes it ("04-present",
+#: "2019-pres", "MM/YYYY <U+2500> current" with a box-drawing dash), or a
+#: dash after a digit that closes the line or meets stage 2's "|" cell
+#: separator ("2005 - | <next cell>"). Looser than `_ONGOING_RANGE_END_RE`
+#: on purpose, and used only to keep an N3A entry where stage 3b put it
+#: (`_n3a_entry_has_ended`): a false match leaves the entry under Current
+#: Mentees, as it rendered before, while the strict regex decides the other
+#: direction, where a false match would move a past mentee. Each shape is an
+#: N3A row whose source says it is ongoing and that would otherwise have
+#: moved to Past -- four CVs in the s7ab batch and the census corpus.
+_N3A_OPEN_MARKER_RE = re.compile(
+    r'(?:[-\u2013\u2014\u2500]|\bto\b)\s*(?:pres(?:ent)?|current|ongoing|date)\b'
+    r'|\d\s*[-\u2013\u2014\u2500]\s*(?:\||$)',
+    re.IGNORECASE | re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -229,10 +242,11 @@ def _n3a_entry_has_ended(entry: Mapping[str, Any], current_year: int) -> bool:
     "<year>-present" (EBYSBC autopsy, class E9). A year that is not before
     `current_year` stays current: a lone year can be an expected completion
     ("defense 2027"), and a period ending this year may not be over yet.
-    A date with no readable year says nothing, so the entry stays where 3b
-    put it.
+    A date with no readable year says nothing, and neither does a text with
+    any open-range marker in it (`_N3A_OPEN_MARKER_RE`), so either entry
+    stays where 3b put it.
     """
-    if _entry_is_ongoing(entry):
+    if _entry_is_ongoing(entry) or _N3A_OPEN_MARKER_RE.search(_text(entry.get('text'))):
         return False
     fields = entry.get('extracted_fields') or {}
     last_date = _text(fields.get('end_date')).strip() or _text(fields.get('start_date')).strip()
