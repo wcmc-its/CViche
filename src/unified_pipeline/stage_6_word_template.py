@@ -652,20 +652,40 @@ def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
 _SUMMARY_METHOD_VERBATIM_M1 = "existing_content"
 
 
-def _recoded_m1_appendix_entries(entries_by_code: dict[str, list[dict]],
-                                 mapped_codes: set[str],
-                                 research_summary_data: dict | None) -> list[dict]:
-    """M1 entries stage 3b's T-validation recoded from T, bound for the
-    Appendix because the rendered research summary paraphrases M1 and so
-    carries none of them (AUTOPSY-s7ab-batch-2026-10-02 class 11). Empty when
-    M1 is already unmapped -- every M1 entry then reaches the Appendix through
+# The M1 fields that hold research-statement prose (field_schemas_v1.1.json M1:
+# `narrative`, and the optional `description` and `research_area`). Any other
+# populated field -- a date, a title, a role, an institution -- marks a record
+# rather than prose a summary can restate (AUTOPSY-EBYSBC-batch-2026-10-02 E27).
+_M1_PROSE_FIELDS = frozenset({'narrative', 'description', 'research_area'})
+
+
+def _summary_paraphrases_m1(mapped_codes: set[str], research_summary_data: dict | None) -> bool:
+    """True when the research summary rendered and is not the M1 text verbatim,
+    so M1 entries reach the page only through its paraphrase. False when M1 is
+    already unmapped -- every M1 entry then reaches the Appendix through
     `generate()`'s unmapped-code loop -- or when the summary is the M1 text verbatim."""
     if 'M1' not in mapped_codes:
-        return []
+        return False
     summary_info = (research_summary_data or {}).get('research_summary') or {}
-    if summary_info.get('generation_method') == _SUMMARY_METHOD_VERBATIM_M1:
-        return []
-    return [e for e in entries_by_code.get('M1', []) if is_t_validation_recoded_m1(e)]
+    return summary_info.get('generation_method') != _SUMMARY_METHOD_VERBATIM_M1
+
+
+def _is_m1_record(entry: Mapping[str, Any]) -> bool:
+    """True when an M1 entry is a dated record (a position, a project) rather
+    than research-statement prose: stage 4 extracted a populated field outside
+    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184)."""
+    fields = entry.get('extracted_fields') or {}
+    return any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+
+
+def _paragraph_text(paragraph: Paragraph, include_tracked_insertions: bool) -> str:
+    """`paragraph.text`, or with *include_tracked_insertions* the runs inside a
+    w:ins too, in document order. python-docx reads only a paragraph's direct
+    runs and hyperlinks, so it skips the tracked insertions stage 6 writes the
+    research summary and enriched citations as."""
+    if not include_tracked_insertions:
+        return paragraph.text
+    return "".join(element.text for element in paragraph._p.xpath("w:r | w:hyperlink | w:ins/w:r"))
 
 
 # Rendered fields that nearly every record family carries -- when, where, in
@@ -838,7 +858,7 @@ def _record_reroute(decisions: list[RerouteDecision] | None, entry: Mapping[str,
 
 
 def _merge_appendix_diversion_warnings(
-    issues: list[dict], written: list[UnmappedEntry], recovered: list[str],
+    issues: list[dict], written: list[UnmappedEntry], recovered: list[str], summary_rendered: bool,
 ) -> list[dict]:
     """Append #531/#531-R2 per-(code, reason) Appendix-diversion warnings
     (from what `_fill_appendix`/`_add_remaining_to_appendix` report they
@@ -847,11 +867,12 @@ def _merge_appendix_diversion_warnings(
     letting `appendix.py` import it from `passthrough.py` directly -- both
     are `stage6/sections/*` peers (CODING_STANDARDS.md 1.3, `[gate]`); this
     module is not a peer of either and is free to import both (#531-R3
-    task 4)."""
+    task 4). *summary_rendered* is whether the research summary rendered,
+    which decides why an M1 entry is in the Appendix (E27)."""
     if not written and not recovered:
         return issues
     return issues + build_appendix_diversion_warnings(
-        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES, summary_rendered=summary_rendered)
 
 
 def _log_validation_warnings(all_warnings: list[dict]) -> None:
@@ -1453,6 +1474,33 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         return [e for e in entries
                 if not recovered_row_already_rendered(e, rendered_lines)]
 
+    def _m1_appendix_entries(self, entries_by_code: dict[str, list[dict]], mapped_codes: set[str],
+                             research_summary_data: dict | None) -> list[dict]:
+        """M1 entries a rendered research summary leaves off the page, bound for
+        the Appendix in source order. Empty unless `_summary_paraphrases_m1`.
+
+        Two kinds. Every entry stage 3b's T-validation recoded from T
+        (AUTOPSY-s7ab-batch-2026-10-02 class 11). And every dated record
+        (`_is_m1_record`) that no part of the document rendered so far carries,
+        the summary paragraph included (AUTOPSY-EBYSBC-batch-2026-10-02 E27: a
+        generated summary that never mentions a position or a project). The
+        render check is the #221 recovery pass's `_record_rendered`: a record
+        any line or cell of which surfaces, verbatim or by token overlap with
+        one output line, stays out, and so does one too short to verify, so
+        the Appendix never repeats what the reader already sees. Prose M1
+        entries are what the summary restates; they stay out too.
+        """
+        m1_entries = entries_by_code.get('M1', [])
+        if not m1_entries or not _summary_paraphrases_m1(mapped_codes, research_summary_data):
+            return []
+        lines = self._rendered_output_lines(exclude_instruction_box=True, include_tracked_insertions=True)
+        haystack = "\x00".join(_squash(line) for line in lines)
+        line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in lines]
+        return [entry for entry in m1_entries
+                if is_t_validation_recoded_m1(entry)
+                or (_is_m1_record(entry)
+                    and _record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None, discover_original_doc: bool = True) -> str:
         """
@@ -1582,10 +1630,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # summary, or the template lacks a RESEARCH ACTIVITIES header), the M1
         # entries would otherwise render nowhere AND be excluded from the appendix
         # by being 'mapped' — a silent content loss (#317, C0ZGFW). Route them to
-        # the appendix safety net instead; when it rendered, only T-validation's M1 recodes go.
+        # the appendix safety net instead; when it rendered, only the M1 entries it leaves out go.
         if not research_summary_rendered:
             mapped_codes.discard('M1')
-        unmapped_entries = _recoded_m1_appendix_entries(entries_by_code, mapped_codes, research_summary_data)
+        unmapped_entries = self._m1_appendix_entries(entries_by_code, mapped_codes, research_summary_data)
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
@@ -1650,7 +1698,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
         # own docstring for what it merges and why.
         validation_issues = _merge_appendix_diversion_warnings(
-            validation_issues, written_appendix_entries, recovered_appendix_codes)
+            validation_issues, written_appendix_entries, recovered_appendix_codes, research_summary_rendered)
 
         all_warnings = self._section_failures + validation_issues + self._llm_fallback_warnings()
         _log_validation_warnings(all_warnings)
@@ -3152,7 +3200,8 @@ Now analyze the text above:"""
 
         return [code for _, code, _ in remaining]
 
-    def _rendered_output_lines(self, *, exclude_instruction_box: bool = False) -> list[str]:
+    def _rendered_output_lines(self, *, exclude_instruction_box: bool = False,
+                               include_tracked_insertions: bool = False) -> list[str]:
         """Every rendered text line of the in-memory document: body paragraphs
         plus table cells. Two render-time divergences from run_doctor's
         read_docx_blocks (which walks only top-level tables, cell by cell):
@@ -3179,6 +3228,12 @@ Now analyze the text above:"""
         (`_recover_unrendered_records`) loses nothing by leaving box text in
         the haystack, and changing that caller's matching behaviour is a
         separate, unaudited concern outside this flag's purpose.
+
+        `include_tracked_insertions`: read text inside w:ins as well
+        (`_paragraph_text`). The research summary and enriched citations are
+        written as tracked insertions, so a caller asking whether the reader
+        already sees a record must opt in (`_m1_appendix_entries`). Default
+        off, which leaves every other caller's lines unchanged.
         """
         lines: list[str] = []
 
@@ -3191,16 +3246,18 @@ Now analyze the text above:"""
             for row in tbl.rows:
                 cell_texts = []
                 for cell in row.cells:
-                    if cell.text.strip():
-                        cell_texts.append(cell.text)
-                        add(cell.text)
+                    cell_text = '\n'.join(_paragraph_text(p, include_tracked_insertions)
+                                          for p in cell.paragraphs)
+                    if cell_text.strip():
+                        cell_texts.append(cell_text)
+                        add(cell_text)
                     for nested in cell.tables:
                         walk_table(nested)
                 if len(cell_texts) > 1:
                     add(' | '.join(' '.join(t.split()) for t in cell_texts))
 
         for para in self.doc.paragraphs:
-            add(para.text)
+            add(_paragraph_text(para, include_tracked_insertions))
         for tbl in self.doc.tables:
             if exclude_instruction_box and self._is_instruction_box_table(tbl):
                 continue
