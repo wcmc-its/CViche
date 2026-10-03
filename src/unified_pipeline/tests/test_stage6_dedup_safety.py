@@ -1613,6 +1613,8 @@ def test_a_course_part_is_kept_when_another_entry_names_the_longer_part():
     ("Widget care, part 2.", {"2"}),
     ("Widget Care Parts I and II", {"1", "2"}),
     ("Widget Care Part 03", {"3"}),
+    ("Widget Care Part V", {"5"}),        # numerals past iv map too
+    ("Widget Care Part VIII", {"8"}),
     ("a particular widget, department 2, partly", set()),
 ])
 def test_part_numbers(text, parts):
@@ -1677,6 +1679,7 @@ def test_an_appointment_of_another_rank_is_kept():
     ("P", "committee_name", "Widget Safety Committee", "Executive Widget Safety Committee"),
     ("O", "leadership_role", "Division Chief", "Co-Division Chief"),
     ("Q1", "role", "President", "Vice President"),
+    ("D1", "title", "Chair, Widget Medicine", "Interim Chair, Widget Medicine"),
 ])
 def test_another_rank_or_body_is_another_record(code, key, dropped_value, kept_value):
     assert _different_rank(code, {key: dropped_value}, {key: kept_value}) == dropped_value
@@ -1695,6 +1698,14 @@ def test_another_rank_or_body_is_another_record(code, key, dropped_value, kept_v
 ])
 def test_the_same_rank_or_no_rank_is_not_another_record(code, dropped_fields, kept_fields):
     assert _different_rank(code, dropped_fields, kept_fields) is None
+
+
+def test_a_committee_role_of_another_rank_is_another_record():
+    # P ranks by role too: the chair and the vice chair of one committee.
+    dropped = {"committee_name": "Widget Safety Committee", "role": "Chair"}
+    kept = {"committee_name": "Widget Safety Committee", "role": "Vice Chair"}
+    assert _different_rank("P", dropped, kept) == "Widget Safety Committee"
+    assert _different_rank("P", dropped, dict(kept, role="Chair")) is None
 
 
 def test_a_committee_of_a_center_is_not_the_center():
@@ -1838,6 +1849,14 @@ def test_a_group_line_over_the_dropped_row_alone_does_not_refuse_the_drop():
     employer = _row("K4", 5, "Acme University School of Widgets (2031 to present)")
     dropped = _row("K4", 6, "Gizmo Repair Widget Rounds (weekly)")
     assert not _kept_both("K4", dropped, kept, employer)
+
+
+def test_a_pair_whose_own_rows_have_group_line_shape_is_still_deduplicated():
+    # Only a line strictly between the two rows is a group line over them:
+    # the rows themselves read as a name and a year range.
+    kept = _row("K4", 2, "Gizmo Repair Widget Rounds (2028-2031)")
+    dropped = _row("K4", 6, "Gizmo Repair Widget Rounds (2028-2031)")
+    assert not _kept_both("K4", dropped, kept)
 
 
 def test_one_activity_under_two_year_lines_is_two_records():
