@@ -52,6 +52,12 @@ from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
+from unified_pipeline.stage6.sections.patents import (  # noqa: E402
+    DESCRIPTION_LABEL,
+    _build_patent_rows,
+    _normalize_patent,
+    _renderable_patents,
+)
 from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     MenteeRecord,
     N1_HEADING,
@@ -943,6 +949,41 @@ def test_patents_real_template_body_order():
     assert len(gen.doc.tables) == template_tables + 2
     assert gen.stats['tables_populated'] == 2
     assert gen.stats.get('tables_misplaced', 0) == 0
+
+
+# --- patents: stage 4's off-schema notes (#817, EBYSBC E14) -----------------------
+
+_LICENCE_LINE = 'Exclusive licensee of Kestrel Widgets LLC, agreement No. 12-345'
+
+
+def test_a_note_copied_from_the_source_renders_as_the_description():
+    """A record stage 4 reduced to `notes` alone (a licence line under the
+    patents) was skipped as sparse: the whole line was lost."""
+    patents = _renderable_patents([_patent(_LICENCE_LINE, title=None, notes=_LICENCE_LINE)])
+    assert [_build_patent_rows(p) for p in patents] == [((DESCRIPTION_LABEL, _LICENCE_LINE),)]
+
+
+def test_a_note_follows_the_narrative_in_the_description():
+    narrative = 'A widget that folds itself in half'
+    patent = _normalize_patent(_patent(f'{narrative}. {_LICENCE_LINE}', title='Widget A',
+                                       narrative=narrative, notes=_LICENCE_LINE))
+    assert dict(_build_patent_rows(patent))[DESCRIPTION_LABEL] == f'{narrative} {_LICENCE_LINE}'
+    repeat = _normalize_patent(_patent(_LICENCE_LINE, title='Widget A',
+                                       narrative=_LICENCE_LINE, notes=_LICENCE_LINE.upper()))
+    assert dict(_build_patent_rows(repeat))[DESCRIPTION_LABEL] == _LICENCE_LINE
+
+
+@pytest.mark.parametrize('notes', [
+    'Entry contains one licence agreement, not a patent',  # stage 4's own remark
+    'licence agreement',  # in the text, but too short to be a description
+    None, '', '   ',
+])
+def test_a_note_that_is_not_a_substantive_source_line_is_dropped(notes):
+    assert _renderable_patents([_patent(_LICENCE_LINE, notes=notes)]) == ()
+
+
+def test_a_narrative_alone_still_does_not_make_a_patent_renderable():
+    assert _renderable_patents([_patent('x', narrative='A widget that folds itself in half')]) == ()
 
 
 # --- postdoc training: missing template structure --------------------------------

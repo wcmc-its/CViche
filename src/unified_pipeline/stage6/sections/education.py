@@ -24,7 +24,8 @@ STRING `dates_attended` is written as stage 4 gave it (#1187).
 
 The degree cell is "Degree, field of study" as the template asks: `major` /
 `field_of_study`, then stage 4's `discipline`, each only when the text so far
-does not already hold it (#1187).
+does not already hold it (#1187). Stage 4's off-schema `honors` follows in
+parentheses, under the same rule (#817).
 
 `_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_PATTERN` vocabulary are
 here because a year in the "Year Awarded" column asserts the degree was
@@ -120,6 +121,31 @@ def _with_discipline(degree: str, fields: Mapping) -> str:
     if not discipline or _already_in(discipline, degree):
         return degree
     return f"{degree}, {discipline}" if degree else discipline
+
+
+# Stage 4 keeps a degree's Latin honors and honor societies under `honors`, a
+# key the B1 schema does not define, and no column read it: the honors reached
+# neither Education nor Honors (EBYSBC E14, VVRTUC-02).
+HONORS_KEY = 'honors'
+
+
+def _honors_text(fields: Mapping) -> str:
+    """Stage 4's off-schema B1 `honors`, as one string: a string as given, a
+    list of strings comma-joined. Anything else yields ''."""
+    value = fields.get(HONORS_KEY)
+    if isinstance(value, list):
+        value = ', '.join(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return value.strip() if isinstance(value, str) else ''
+
+
+def _with_honors(degree: str, fields: Mapping) -> str:
+    """The degree cell with the degree's honors after it in parentheses
+    ("AB (summa cum laude)"), so they read as a distinction of that degree and
+    not as a field of study. Never repeated when the cell already holds them."""
+    honors = _honors_text(fields)
+    if not honors or _already_in(honors, degree):
+        return degree
+    return f"{degree} ({honors})" if degree else honors
 
 
 def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
@@ -258,7 +284,7 @@ class EducationSection:
 
             # After the skip test above: a discipline alone must not create a
             # row that was skipped before.
-            degree = _with_discipline(degree, fields)
+            degree = _with_honors(_with_discipline(degree, fields), fields)
 
             # Location from enrichment
             location, location_is_enriched = _get_institution_location(entry)
