@@ -24,6 +24,7 @@ from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
+from .fragment_guard import t_recode_refusal
 from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
@@ -695,6 +696,9 @@ Respond with a JSON array of objects, one per entry:
                 continue
 
             raw_new_code = live_taxonomy_code(reclass.get("new_code")) or "T"
+            reasoning = reclass.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                reasoning = ""
             # isinstance-guard before the set membership check: `new_code` is
             # untrusted LLM output and could be any JSON type, which would
             # raise TypeError: unhashable type on `in valid_codes` instead of
@@ -715,12 +719,14 @@ Respond with a JSON array of objects, one per entry:
                 )
                 new_code = "T"
                 kept_t_tag = f"T-validation: {raw_new_code} not allowed, kept T"
+            elif refusal := t_recode_refusal(
+                    _entry_text(updated_entries[entry_idx]), raw_new_code, reasoning):
+                # A date tail or an employer sub-heading is not a record (#986, #985).
+                new_code = "T"
+                kept_t_tag = f"T-validation: {raw_new_code} refused, {refusal}, kept T"
             else:
                 new_code = raw_new_code
             confidence = _normalize_confidence(reclass.get("confidence"), 0.5)
-            reasoning = reclass.get("reasoning", "")
-            if not isinstance(reasoning, str):
-                reasoning = ""
 
             old_code = updated_entries[entry_idx].get("taxonomy_code")
             if old_code == "T" and new_code != "T":

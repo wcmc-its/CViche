@@ -329,6 +329,32 @@ def test_m1_proposal_keeps_t_with_a_distinct_tag(monkeypatch):
     assert stats["t_entries_reclassified"] == 1
 
 
+def test_fragment_recode_keeps_t_and_a_content_recode_still_applies(monkeypatch):
+    """EBYSBC E29/E8 (#986, #985): a date tail and an employer sub-heading the
+    model's own reasoning calls a fragment stay T with a refusal tag; a
+    content-bearing line in the same response is still recoded."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
+        "content": json.dumps([
+            {"entry_index": 0, "new_code": "H", "confidence": 0.8, "reasoning": "Date fragment"},
+            {"entry_index": 1, "new_code": "S1", "confidence": 0.8,
+             "reasoning": "Institution fragment under Committees"},
+            {"entry_index": 2, "new_code": "H", "confidence": 0.9, "reasoning": "Named prize"},
+        ])
+    })
+
+    updated, stats = classify.validate_t_classifications(
+        [_t_entry("1971- 1972."), _t_entry("Example University"),
+         _t_entry("Exampleton Prize for Teaching, Example Society")], _taxonomy())
+
+    assert [e["taxonomy_code"] for e in updated] == ["T", "T", "H"]
+    assert updated[0]["classification_reasoning"] == (
+        "[T-validation: H refused, no content words, kept T] Date fragment")
+    assert updated[1]["classification_reasoning"].startswith(
+        "[T-validation: S1 refused, reasoning calls it a fragment or header, kept T]")
+    assert updated[0]["t_validation_applied"] is True
+    assert stats["t_entries_reclassified"] == 1
+
+
 def test_llm_outage_propagates_instead_of_returning_entries_unchanged(monkeypatch):
     """A provider outage past the budget fails the run (#810); only other
     errors fall back to returning the entries unchanged."""
