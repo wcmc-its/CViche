@@ -101,8 +101,12 @@ Lints, ranked by the severity of the failure class they catch:
                           stage-4 bookkeeping, and not a record list fan-out
                           splits -- no renderer reads it, so it never reaches
                           the document (TXTATQ's `organization_2`: 6
-                          memberships); WARN for a whole record, INFO for one
-                          fact (#817)
+                          memberships). With the docx, a fact its record's
+                          own line shows is dropped, and dates on single-date
+                          codes (H, R) and Personal Data values are judged
+                          too; WARN for whole records (counted per list item)
+                          and for a fact the document lost, INFO otherwise
+                          (#817, #1245)
 
 14g. implausible_year     a stage-4 date-named field whose year is below
                           1930 (or 10 years before the owner's earliest
@@ -1026,7 +1030,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
-    LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",)),
+    LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",),
+             optional=("blocks",)),
     LintSpec("implausible_year", lint_implausible_year, ("stage_4",)),
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),

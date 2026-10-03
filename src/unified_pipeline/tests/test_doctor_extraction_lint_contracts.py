@@ -1197,7 +1197,7 @@ def test_offschema_record_dict_sharing_a_schema_key_is_warn():
     assert findings[0]["severity"] == "WARN"
     assert "`additional_entry`" in findings[0]["message"]
     assert "1 R entry" in findings[0]["message"]
-    assert "1 holds a whole record" in findings[0]["message"]
+    assert "1 whole record under it" in findings[0]["message"]
     assert findings[0]["evidence"] == [
         'entry 11: {"title": "Talk two", "location": "Springfield"}']
 
@@ -1324,7 +1324,7 @@ def test_offschema_record_on_an_entry_rendering_its_text_is_warn(fields):
     whole record, so the one-fact skip never covers a record-shaped value."""
     findings = _offschema(_fields_entry("I", fields))
     assert [f["severity"] for f in findings] == ["WARN"]
-    assert "1 holds a whole record" in findings[0]["message"]
+    assert "1 whole record under it" in findings[0]["message"]
 
 
 def test_offschema_entry_rendering_its_text_reports_its_record_but_not_its_fact():
@@ -1392,7 +1392,7 @@ def test_offschema_warn_when_any_value_of_the_key_is_a_record():
         _anchored("R", {"additional_entry": {"title": "Talk"}}, idx=2),
         _anchored("R", {"additional_entry": {"title": "Talk 2"}}, idx=3))
     assert [f["severity"] for f in findings] == ["WARN"]
-    assert "2 hold a whole record" in findings[0]["message"]
+    assert "2 whole records under it" in findings[0]["message"]
 
 
 def test_offschema_evidence_value_is_truncated():
@@ -1417,6 +1417,275 @@ def test_offschema_leaves_the_entry_alone():
     before = json.dumps(entry, sort_keys=True)
     _offschema(entry)
     assert json.dumps(entry, sort_keys=True) == before
+
+
+def test_offschema_record_list_counts_each_record():
+    """#1245: a list of three appointments is three records lost, not one."""
+    findings = _offschema(
+        _anchored("D1", {"appointments": [
+            {"title": "Lecturer"}, {"title": "Reader"}, {"title": "Fellow"}]}, idx=1),
+        _anchored("D1", {"appointments": [{"title": "Tutor"}]}, idx=2))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["message"].startswith("2 D1 entries: `appointments`")
+    assert "4 whole records under it" in findings[0]["message"]
+
+
+# --------------------------------------------------------------------------
+# lint_offschema_fields graded against the rendered document (#1245). Blocks
+# are the `read_docx_blocks` shape: ("p", text) or ("table", its lines joined
+# by newlines). Every name and value is invented.
+
+def _graded(blocks, *entries):
+    return lint_offschema_fields({"entries": list(entries)}, blocks)
+
+
+def _row(*cells):
+    """One table row as `_table_lines` writes it: each cell, then the row
+    joined across its cells."""
+    return [*cells, " | ".join(cells)]
+
+
+def _table(*rows):
+    return ("table", "\n".join(line for row in rows for line in row))
+
+
+def _offschema_degree(**extra):
+    return _fields_entry("B1", {"degree": "BA", "institution": "Example College",
+                                **extra}, text="BA, Example College, Townsville, Exland")
+
+
+def test_offschema_value_its_own_row_shows_is_not_reported():
+    """Stage 5b writes a B1 `location` into the institution cell, re-punctuated."""
+    entry = _offschema_degree(location="Townsville, Exland")
+    blocks = [_table(_row("BA", "Example College, Townsville City, Exland", "2001"))]
+    assert _graded(blocks, entry) == []
+    # Without the document the value is reported, as before #1245.
+    assert [f["severity"] for f in _offschema(entry)] == ["INFO"]
+
+
+def test_offschema_value_the_document_lacks_and_the_text_states_is_warn():
+    entry = _fields_entry("B1", {"degree": "BA", "institution": "Example College",
+                                 "honors": "with distinction"},
+                          text="BA, Example College, with distinction")
+    findings = _graded([_table(_row("BA", "Example College", "2001"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["entry 11: with distinction"]
+
+
+def test_offschema_a_number_no_line_shows_is_reported():
+    """A value with no string in it is matched as written, not waved
+    through as shown."""
+    entry = _fields_entry("M2C", {"title": "Example Grant", "share": 0.25},
+                          text="Example Grant, share 0.25")
+    findings = _graded([_table(_row("Title:", "Example Grant"))], entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_offschema_value_the_text_never_states_stays_info():
+    """The model's own remark on an entry is not content the CV lost."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "note": "no further detail was given"},
+                          text="Ann Pupil, summer student")
+    findings = _graded([_table(_row("Name:", "Ann Pupil"))], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "1 of them nowhere in the document" in findings[0]["message"]
+
+
+def test_offschema_value_shown_only_with_another_record_is_info():
+    lost = _fields_entry("N3B", {"mentee_name": "Ann Pupil", "advisor": "Bea Guide"},
+                         text="Ann Pupil, advised by Bea Guide", idx=1)
+    other = _fields_entry("N3B", {"mentee_name": "Cy Pupil",
+                                  "site_position": "Lab of Bea Guide"}, idx=2)
+    blocks = [_table(_row("Name:", "Ann Pupil")),
+              _table(_row("Name:", "Cy Pupil"), _row("Site/Position:", "Lab of Bea Guide"))]
+    findings = _graded(blocks, lost, other)
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "the document shows it, but not with its record" in findings[0]["message"]
+
+
+def test_offschema_a_form_table_is_one_record():
+    """A "Label: | value" table is one record's form: a value in one of its
+    rows is shown with the name in another. A table of records is not."""
+    entry = _fields_entry("N3B", {"mentee_name": "Ann Pupil",
+                                  "awards": "Gold Ribbon, Science Fair"},
+                          text="Ann Pupil; Gold Ribbon, Science Fair")
+    form = _table(_row("Name:", "Ann Pupil"),
+                  _row("Project/Accomplishments:", "Awards: Gold Ribbon, Science Fair"))
+    assert _graded([form], entry) == []
+    listing = _table(_row("Ann Pupil", "2001"),
+                     _row("Bo Pupil", "Gold Ribbon, Science Fair"))
+    assert [f["severity"] for f in _graded([listing], entry)] == ["INFO"]
+
+
+def test_offschema_a_form_table_matches_inside_one_row_only():
+    """Read across rows, "Delta Group" ending one and "Award detail:"
+    opening the next would carry an anchor neither row holds."""
+    entry = _fields_entry("I", {"organization": "Delta Group Award",
+                                "standing": "charter member"},
+                          text="Delta Group Award, charter member")
+    form = _table(_row("Body:", "Delta Group"), _row("Award detail:", "charter member"))
+    findings = _graded([form], entry)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_an_anchor_inside_a_sibling_value_finds_no_row():
+    """A value inside another record's longer value cannot say which row is
+    this record's: the sibling's row shows the institution this one lost."""
+    lost = _fields_entry("N3A", {"site_position": "Doctoral Program",
+                                 "institution": "Lakeside University"}, idx=1)
+    sibling = _fields_entry("N3A", {
+        "site_position": "MD, Doctoral Program - Lakeside University"}, idx=2)
+    blocks = [_table(_row("Site/Position:", "MD, Doctoral Program - Lakeside University")),
+              _table(_row("Site/Position:", "Doctoral Program"))]
+    findings = _graded(blocks, lost, sibling)
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("INFO", ["entry 1: Lakeside University"])]
+
+
+def test_offschema_nested_anchor_values_count_once():
+    """A level inside the program name is the same evidence, not a second."""
+    lost = _fields_entry("N3A", {"mentee_level": "MSc", "site_position": "MSc Program",
+                                 "institution": "Lakeside University"}, idx=1)
+    sibling = _fields_entry("N3A", {
+        "site_position": "BSc, MSc Program - Lakeside University"}, idx=2)
+    blocks = [_table(_row("Site/Position:", "BSc, MSc Program - Lakeside University"))]
+    findings = _graded(blocks, lost, sibling)
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_values_shared_with_other_records_find_their_row_together():
+    """Degree and institution each sit in another record too, but together
+    only on the degree's own row."""
+    degree = _fields_entry("B1", {"degree": "PhD", "institution": "Northfield University",
+                                  "location": "Northfield, Exland"}, idx=1)
+    award = _fields_entry("H", {"award_name": "Scholarship (PhD)",
+                                "granting_body": "Northfield University, Exland"}, idx=2)
+    blocks = [_table(_row("PhD", "Northfield University, Northfield, Exland", "1991"),
+                     _row("MA", "Southfield University, Southfield, Exland", "1986")),
+              _table(_row("Scholarship (PhD)", "Northfield University, Exland", "1986"))]
+    assert _graded(blocks, degree, award) == []
+
+
+def _honor(**dates):
+    return _fields_entry("H", {"award_name": "Silver Lamp Award",
+                               "granting_body": "Example Society", **dates},
+                         text="Silver Lamp Award, Example Society, 2004-2007")
+
+
+def test_offschema_single_date_code_range_its_row_lacks_is_warn():
+    """H declares `date` alone; a range under start/end renders nowhere."""
+    findings = _graded([_table(_row("Silver Lamp Award", "Example Society"))],
+                       _honor(start_date="2004", end_date="2007"))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "end_date"), ("WARN", "start_date")]
+    assert "1 of them not on its record's line" in findings[0]["message"]
+
+
+def test_offschema_single_date_code_range_its_row_shows_is_not_reported():
+    shown = _table(_row("Silver Lamp Award", "Example Society", "2004-2007"))
+    assert _graded([shown], _honor(start_date="2004", end_date="2007")) == []
+    start_only = _table(_row("Silver Lamp Award", "Example Society", "2004"))
+    findings = _graded([start_only], _honor(start_date="2004", end_date="2007"))
+    assert [f["message"].split("`")[1] for f in findings] == ["end_date"]
+
+
+def test_offschema_date_with_no_four_digit_year_is_not_reported():
+    row = _row("Silver Lamp Award", "Example Society")
+    assert _graded([_table(row)], _honor(end_date="present")) == []
+
+
+def test_offschema_date_whose_record_has_no_row_is_not_reported():
+    """Its year on some other line would be a coincidence, not its record."""
+    row = _row("Bronze Bowl", "Other Society", "2004-2007")
+    assert _graded([_table(row)], _honor(start_date="2004", end_date="2007")) == []
+
+
+def test_offschema_date_key_renaming_a_schema_date_is_not_reported():
+    """D1 declares start and end dates; its `date` is a rename a renderer
+    may read, so the lint stays out of it even with the document."""
+    entry = _fields_entry("D1", {"title": "Lecturer", "institution": "Example College",
+                                 "date": "2001"})
+    assert _graded([_table(_row("Lecturer", "Example College"))], entry) == []
+
+
+def test_offschema_a_list_of_periods_on_any_code_is_judged():
+    """A second term under `additional_dates` is not a rename of start/end."""
+    entry = _fields_entry("O", {
+        "leadership_role": "Chair", "institution": "Example College",
+        "start_date": "2019", "end_date": "2020",
+        "additional_dates": [{"start_date": "2022", "end_date": "2023"}]})
+    findings = _graded([_table(_row("Chair", "Example College", "2019-2020"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_dates")]
+    assert "each holds one fact" in findings[0]["message"]
+
+
+def test_offschema_row_found_when_its_name_is_split_across_cells():
+    """The honors renderer moves an award name's tail into its own cell, and
+    the document writes a typographic apostrophe stage 4 wrote plainly."""
+    entry = _fields_entry("H", {"award_name": "Reader's Choice Prize, First Edition",
+                                "date": "1995", "end_date": "1998"})
+    row = _row("Reader’s Choice Prize", "First Edition", "1995")
+    findings = _graded([_table(row)], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "end_date")]
+
+
+def _owner(**extra):
+    return _fields_entry("A", {"name": "Pat Owner", **extra}, idx=3)
+
+
+_PERSONAL_TABLE = _table(_row("Office address:", "1 Example Way"),
+                         _row("Work email:", "pat@example.org"))
+
+
+def test_offschema_personal_data_value_shown_anywhere_is_not_reported():
+    assert _graded([_PERSONAL_TABLE], _owner(institutional_email="pat@example.org")) == []
+
+
+def test_offschema_personal_data_value_is_never_quoted():
+    findings = _graded([_PERSONAL_TABLE], _owner(office_phone="555-0100", fax="555-0199"))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("INFO", "fax"), ("WARN", "office_phone")]
+    assert all(f["evidence"] == ["entry 3: (Personal Data value, not quoted)"]
+               for f in findings)
+    assert "555" not in json.dumps(findings)
+
+
+def test_offschema_personal_data_entry_with_no_schema_value_is_still_judged():
+    """Personal Data is a fixed table, not a raw-text fallback: an A entry
+    whose every value is off its schema has lost them all."""
+    entry = _fields_entry("A", {"office_phone": "555-0100"}, idx=3)
+    findings = _graded([_PERSONAL_TABLE], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "office_phone")]
+
+
+@pytest.mark.parametrize("withheld", [
+    {"place_of_birth": "Exampletown"}, {"spouse_name": "Lee Owner"},
+    {"marital_status": "married"}, {"home_address": "2 Example Lane"},
+])
+def test_offschema_personal_data_the_policy_withholds_is_not_reported(withheld):
+    assert _graded([_PERSONAL_TABLE], _owner(**withheld)) == []
+
+
+def test_offschema_owner_contact_on_another_record_is_shown_by_personal_data():
+    """A page header's email fused into a record is the owner's own,
+    rendered in Personal Data -- not a fact the record lost."""
+    role = _fields_entry("O", {"leadership_role": "Chair", "institution": "Example College",
+                               "work_email": "pat@example.org"},
+                         text="Chair, Example College\tEmail: pat@example.org", idx=5)
+    blocks = [_PERSONAL_TABLE, _table(_row("Chair", "Example College", "2018"))]
+    assert _graded(blocks, _owner(email="pat@example.org"), role) == []
+    # The same address held by no Personal Data entry is only shown elsewhere.
+    assert [f["severity"] for f in _graded(blocks, _owner(), role)] == ["INFO"]
+
+
+def test_offschema_constants_are_pinned():
+    assert extraction_lints.PERSONAL_DATA_ROW_WORDS == frozenset(
+        {"address", "phone", "telephone"})
+    assert extraction_lints._SINGLE_DATE_KEY == "date"
 
 
 # ==========================================================================

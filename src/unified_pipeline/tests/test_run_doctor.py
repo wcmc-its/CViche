@@ -2826,6 +2826,29 @@ def test_run_doctor_wires_offschema_fields_through_to_the_verdict(tmp_path):
     assert hits[0]["evidence"] == ["entry 97: Society B"]
 
 
+def test_run_doctor_hands_offschema_fields_the_rendered_document(tmp_path):
+    """The LINT_REGISTRY row must also hand the lint the docx (#1245): a value
+    its record's own rendered line shows is then not reported, where stage 4
+    alone would report it. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "B1", "element_type": "paragraph",
+        "element_idx_start": 98, "text": "BA, Example College, Townsville",
+        "extracted_fields": {"degree": "BA", "institution": "Example College",
+                             "location": "Townsville"}})
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_paragraph("BA, Example College, Townsville")
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    assert [f for f in payload["findings"] if f["lint"] == "offschema_fields"] == []
+
+
 def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
     """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
     root = _build_clean_run(tmp_path)
