@@ -981,6 +981,15 @@ def test_run_stage_5d_drops_a_citation_that_was_only_a_placeholder(tmp_path, mon
     assert fields == {}
 
 
+def test_run_stage_5d_closes_the_gap_a_mid_citation_placeholder_leaves(tmp_path, monkeypatch):
+    # Cutting the title out of the middle leaves ". ."; one period remains.
+    fields = _run_5d_on_one_reply(
+        tmp_path, monkeypatch, "Quill A. J Imag Stud. 2019.",
+        {"title": "[Title not provided]",
+         "formatted_citation": "Quill A. [Title not provided]. J Imag Stud. 2019."})
+    assert fields["formatted_citation"] == "Quill A. J Imag Stud. 2019."
+
+
 def test_run_stage_5d_keeps_a_bracketed_title_the_source_carries(tmp_path, monkeypatch):
     fields = _run_5d_on_one_reply(
         tmp_path, monkeypatch, "Quill A. [Erratum]. J Imag Stud. 2019.",

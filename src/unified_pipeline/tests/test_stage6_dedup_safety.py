@@ -2072,3 +2072,87 @@ def test_the_enriched_copy_is_kept_even_when_it_fills_fewer_fields():
                  journal="J Imag Stud", year=2019, volume="4", pages="1-9")
     enriched = _enriched("Gizmo outcomes.", "31234567", "Gizmo outcomes.")
     assert deduplicate_entries([plain, enriched], code="S1") == [enriched]
+
+
+def test_one_year_in_two_forms_is_one_paper():
+    # Farm: AKPQEB 214/247, RGUNJV 469/485. One copy states the year alone,
+    # the other a full date; both name the same year.
+    a = _pub("Quill A. Spinning tops at dusk. Toy Society Annual Meeting. Invited talk.",
+             authors="Quill A", title="Spinning tops at dusk", journal="Toy Society Annual Meeting",
+             year="2018")
+    b = _pub("Gave it again on request for the regional chapter, same slides.",
+             authors="Quill A", title="Spinning tops at dusk", journal="Toy Society Annual Meeting",
+             year="2018-10")
+    decisions = []
+    assert len(deduplicate_entries([a, b], decisions=decisions, code="S3")) == 1
+    assert decisions[0]["metric"] == "citation_title_journal_year"
+
+
+def test_a_chapter_matches_on_its_book_title():
+    # A chapter has no journal: its book title is the venue in the key.
+    a = _pub("Quill A. Gears of the old toy shop. In: Handbook of Gizmos. Toy Press; 2015.",
+             title="Gears of the old toy shop", book_title="Handbook of Gizmos", year=2015)
+    b = _pub("Listed again under invited chapters, second printing noted.",
+             title="Gears of the old toy shop", book_title="Handbook of Gizmos", year=2015)
+    decisions = []
+    assert len(deduplicate_entries([a, b], decisions=decisions, code="S5")) == 1
+    assert decisions[0]["metric"] == "citation_title_journal_year"
+
+
+@pytest.mark.parametrize("first, second", [
+    # No year on either copy: title + journal alone is not an identity.
+    ({"title": "Gadget signals in widget fatigue", "journal": "Toy Pain Society"},
+     {"title": "Gadget signals in widget fatigue", "journal": "Toy Pain Society"}),
+    # A year on one copy only.
+    ({"title": "Gadget signals in widget fatigue", "journal": "Toy Pain Society", "year": 2013},
+     {"title": "Gadget signals in widget fatigue", "journal": "Toy Pain Society"}),
+    # A DOI value that is not DOI-shaped names no paper.
+    ({"doi": "N/A", "year": 2020}, {"doi": "N/A", "year": 2020}),
+    # A PMID shorter than an identifier names no paper.
+    ({"pmid": "12", "year": 2020}, {"pmid": "12", "year": 2020}),
+])
+def test_no_identity_key_keeps_both(first, second):
+    a = _pub("Talk on gizmos at the Toy Society.", **first)
+    b = _pub("Completely different words entirely here.", **second)
+    decisions = []
+    assert deduplicate_entries([a, b], decisions=decisions, code="S8") == [a, b]
+    assert not [x for x in decisions if x["metric"].startswith("citation_")]
+
+
+def test_a_cv_title_typo_still_agrees_on_a_shared_pmid():
+    # Ten significant words, one misspelled: Jaccard 9/11 = 0.82, over 0.8.
+    a = _pub("Talk on gizmos at the Toy Society.", pmid="31234567",
+             title="Gizmo outcomes across seven northern regional winter toy clinics measured yearly")
+    b = _pub("Completely different words entirely here.", pmid="31234567",
+             title="Gizmo outcomes across seven northern regional winter toy clinnics measured yearly")
+    assert len(deduplicate_entries([a, b], code="S1")) == 1
+
+
+def test_two_cv_chapter_titles_under_one_pubmed_record_keep_both():
+    # Like AQCLHS-02, for chapters: the CV's own title is its chapter_title.
+    first = _enriched("Quill A. Yields of a gadget club. 2020.", "32800001",
+                      "Yields of a gadget club.", chapter_title="Yields of a gadget club", year=2020)
+    second = _enriched("Quill A. Two routes into a sprocket club. 2020.", "32800001",
+                       "Yields of a gadget club.", chapter_title="Two routes into a sprocket club",
+                       year=2020)
+    assert deduplicate_entries([first, second], code="S5") == [first, second]
+
+
+def test_the_copy_filling_more_fields_is_kept_over_the_longer_line():
+    # Neither copy is enriched: field count decides before source length.
+    full = _pub("Quill A. Gizmo outcomes. J Imag Stud. 2019;4:1-9.", pmid="31234567",
+                authors="Quill A", title="Gizmo outcomes", journal="J Imag Stud", year=2019,
+                volume="4", pages="1-9")
+    thin = _pub("Gizmo outcomes, a much longer line that names no venue or volume at all here.",
+                pmid="31234567", title="Gizmo outcomes")
+    assert deduplicate_entries([thin, full], code="S1") == [full]
+
+
+def test_an_identity_drop_is_recorded_in_dropped_ids():
+    # The caller's dropped_ids keeps a dropped copy from vouching for a later drop.
+    a = _enriched("Quill A. Gizmo outcomes. J Imag Stud. 2018;3:5-6.", "30000001",
+                  "Gizmo outcomes.", year=2018, journal="J Imag Stud")
+    tail = _enriched("27. PubMed PMID: 30000001.", "30000001", "Gizmo outcomes.")
+    dropped_ids = set()
+    assert deduplicate_entries([a, tail], code="S1", dropped_ids=dropped_ids) == [a]
+    assert dropped_ids == {id(tail)}
