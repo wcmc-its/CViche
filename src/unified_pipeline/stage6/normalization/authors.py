@@ -302,3 +302,344 @@ def _join_spaced_initials(authors: str) -> str:
     reads only joined initials, and turned "Maahs, D M" into "Maahs M, D"
     (#1259, stage-4 author lists on JFBPNC)."""
     return _SPACED_INITIAL_RE.sub(r"\1", authors)
+
+
+# ---------------------------------------------------------------------------
+# A CV's own author run, read back from the source line (#1259)
+# ---------------------------------------------------------------------------
+#
+# Stage 6 gives the CV owner back to a citation stage 5d cut to "first 6,
+# et al.". Stage 4's `authors` is the first choice, but on the EBYSBC batch it
+# was too damaged to print on 20 owner-cut citations in 14 CVs (lone
+# initials, inverted names, a "Jr" or a given name as its own item, a lost
+# hyphen) and printed junk on three more (a consortium credit and an
+# affiliation read as authors). The CV's own line still holds the run, in
+# whatever spelling that CV uses. The functions below read it back one author
+# at a time and accept only these shapes; anything else ends the run, so a
+# title word, a group credit or an affiliation is never printed as an author:
+#
+#     Surname Initials [Suffix]    "Wren C", "Quill W.C.", "Rowan ID 3rd"
+#     Surname, Initials            "Sorrel, M.H.", "Tansy, .S" (a stray period)
+#     Initials Surname [Suffix]    "J. Umber", "J.R. Vetch Jr."
+#     Given Initial Surname        "Opal V. Yarrow"     given-name-first
+#     Given Surname Credential     "Juno Zinnia MD"     runs only
+
+#: What separates two authors in a CV's author run: a comma or semicolon, one
+#: followed by "and"/"&", or a bare "and"/"&".
+_SOURCE_AUTHOR_SEPARATOR_RE = re.compile(
+    r"\s*(?:[,;]\s*(?:and|&)\s+|[,;]|\s+(?:and|&)\s+)\s*")
+
+#: Words that open a surname rather than end a given name ("van den Wren",
+#: "de Quill", "Van Rowan"). Compared casefolded.
+_SURNAME_PARTICLES = frozenset({
+    'van', 'von', 'de', 'den', 'der', 'del', 'della', 'da', 'di', 'du',
+    'la', 'le', 'ten', 'ter', 'dos', 'das',
+})
+
+#: Degrees a given-name-first run prints after a surname ("Juno Zinnia MD").
+#: Compared casefolded, without a trailing period.
+_AUTHOR_CREDENTIALS = frozenset({
+    'md', 'phd', 'ma', 'ba', 'bs', 'bsc', 'ms', 'msc', 'mph', 'med', 'rn',
+    'do', 'pharmd', 'mba', 'msn', 'np', 'mbbs', 'dds', 'dmd', 'drph', 'mhs',
+})
+
+#: An ordinal suffix ("Rowan ID 3rd"). `_AUTHOR_SUFFIX_RE` does not name
+#: these, and widening it would also move `_normalize_author_names`, which
+#: every parts-built citation goes through.
+_ORDINAL_SUFFIX_RE = re.compile(r"^[2-9](?:nd|rd|th)$")
+
+#: A two-letter abbreviated initial, capital then small, with its period
+#: ("Th."). Without the period a two-letter word is a short name ("Bo").
+_ABBREVIATED_INITIAL_RE = re.compile(r"^[A-Z][a-z]\.$")
+
+#: The most source tokens one author takes ("Opal B. C. van den Wren").
+_MAX_AUTHOR_TOKENS = 6
+
+#: A word of an author run: what the CV prints between spaces, less the
+#: co-first and corresponding-author marks ("Wren JA*", "Wren JA∗" with the
+#: asterisk operator, daggers).
+_AUTHOR_TOKEN_RE = re.compile(r"[^\s*\u2217†‡]+")
+
+#: The most tokens a bare surname's given name and initials take after its
+#: comma ("Quill, Opal J.", "Sorrel, H.-P.").
+_MAX_TRAILER_TOKENS = 3
+
+#: What opens a title or a note rather than an author: a quote or a bracket.
+_RUN_BREAK_OPENERS = '“"(['
+#: A line break or one of those, anywhere in a piece of the run.
+_RUN_BREAK_RE = re.compile(r"\n|[" + re.escape(_RUN_BREAK_OPENERS) + "]")
+#: A period or colon that ends a sentence rather than an initial's period.
+_SENTENCE_END_RE = re.compile(r"[.:](?:\s|$)")
+
+#: A group author inside a run ("The Lantern Study Group"): kept as the CV
+#: prints it, because the run goes on to name more people, the owner among
+#: them. One that closes the run ("...; for the X Network. Title") holds the
+#: end of a sentence, and is not printed.
+_GROUP_AUTHOR_RE = re.compile(
+    r"\b(?:Group|Consortium|Network|Investigators|Collaborative|Collaboration"
+    r"|Committee|Team|Trialists|Alliance)\b")
+
+#: The shortest anchor surname matched at one edit's distance: 5d corrects a
+#: co-author's spelling ("Rowen" in the CV, "Rowan" in the citation).
+_ANCHOR_FUZZY_MIN_LEN = 5
+
+#: Horizontal whitespace inside a run ("Wren      D."), the no-break space
+#: included. Line breaks are kept: one ends the run.
+_INLINE_SPACE_RE = re.compile(r"[ \t\u00a0]+")
+
+
+def _run_ended_in(piece: str) -> bool:
+    """Whether a piece that holds one author also holds the end of the run: a
+    line break, a quote or a bracket, or a lower-case word no surname carries
+    ("Zinnia MD. Tracking in a trial"). Particles ("van") and camel-cased
+    names ("deVetch") are a surname's own."""
+    if _RUN_BREAK_RE.search(piece):
+        return True
+    return any(word.islower() and word not in _SURNAME_PARTICLES
+               for word in re.findall(r"[^\W\d_]+", piece))
+
+
+def _is_initials_token(token: str) -> bool:
+    """'JA', 'W.C.', 'H.-P.', 'S.', 'Th.': `_looks_like_initials` once the
+    abbreviating periods are gone, or one abbreviated two-letter initial."""
+    return (_looks_like_initials(token.replace('.', ''))
+            or bool(_ABBREVIATED_INITIAL_RE.match(token)))
+
+
+def _is_suffix_token(token: str) -> bool:
+    return bool(_AUTHOR_SUFFIX_RE.match(token) or _ORDINAL_SUFFIX_RE.match(token))
+
+
+def _is_name_token(token: str) -> bool:
+    """A surname or given-name word: capitalised ("O'Wren", "Quill-Rowan") or
+    camel-cased ("deVetch"), and not an initials group or a suffix."""
+    core = re.sub(r"['’-]", '', token)
+    if not core.isalpha() or _is_initials_token(token) or _is_suffix_token(token):
+        return False
+    return core[0].isupper() or any(c.isupper() for c in core[1:])
+
+
+def _surname_at(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """Leading particles plus one name word, and the tokens after them."""
+    i = 0
+    while i < len(tokens) and tokens[i].casefold() in _SURNAME_PARTICLES:
+        i += 1
+    if i < len(tokens) and _is_name_token(tokens[i]):
+        return ' '.join(tokens[:i + 1]), tokens[i + 1:]
+    return None
+
+
+def _initials_of(tokens: list[str]) -> str | None:
+    """Consecutive initials tokens as one Vancouver group ("S. R." -> "SR")."""
+    if not tokens or not all(_is_initials_token(t) for t in tokens):
+        return None
+    return ''.join(t.replace('.', '').replace('-', '') for t in tokens).upper()
+
+
+def _given_first_author(tokens: list[str]) -> str | None:
+    """"Opal V. Yarrow" -> "Yarrow OV", "Juno Zinnia MD" -> "Zinnia J". Needs
+    a middle initial or a credential: "Juno Zinnia" alone reads either way."""
+    if not tokens or not _is_name_token(tokens[0]):
+        return None
+    surname_start = 1
+    while surname_start < len(tokens) and _is_initials_token(tokens[surname_start]):
+        surname_start += 1
+    middle = _initials_of(tokens[1:surname_start]) or ''
+    split = _surname_at(tokens[surname_start:])
+    if split is None or not (middle or split[1]):
+        return None
+    if not all(t.rstrip('.').casefold() in _AUTHOR_CREDENTIALS for t in split[1]):
+        return None
+    return f"{split[0]} {tokens[0][0].upper()}{middle}"
+
+
+def _vancouver_author(tokens: list[str], given_first: bool) -> str | None:
+    """One author's source words as "Surname Initials[ Suffix]", or None when
+    they are not one of the shapes listed above this section."""
+    suffix = ''
+    if len(tokens) > 1 and _is_suffix_token(tokens[-1]):
+        suffix, tokens = f" {tokens[-1].rstrip('.')}", tokens[:-1]
+    surname_first = _surname_at(tokens)
+    if surname_first is not None and _initials_of(surname_first[1]):
+        return f"{surname_first[0]} {_initials_of(surname_first[1])}{suffix}"
+    name_start = next((i for i, t in enumerate(tokens) if not _is_initials_token(t)), 0)
+    initials_first = _surname_at(tokens[name_start:])
+    if (name_start and _initials_of(tokens[:name_start])
+            and initials_first is not None and not initials_first[1]):
+        return f"{initials_first[0]} {_initials_of(tokens[:name_start])}{suffix}"
+    if given_first and not suffix:
+        return _given_first_author(tokens)
+    return None
+
+
+def _item_words(tokens: list[str]) -> list[str]:
+    """An author's words as printed, less the colon or period that closed the
+    run ("Wren AB:", "Juno Zinnia."). An initial keeps its own period, which
+    is all that marks "Th." as one."""
+    words = list(tokens)
+    if words:
+        last = words[-1].rstrip(':')
+        words[-1] = last if _is_initials_token(last) else last.rstrip('.')
+    return [w for w in words if w]
+
+
+def _closes_run(piece: str, tokens: list[re.Match[str]], n: int) -> bool:
+    """Whether the run ends after the first `n` tokens of a piece: the n-th
+    ends in a period or colon, or a line break, quote or bracket follows."""
+    if tokens[n - 1].group().endswith(('.', ':')):
+        return True
+    gap = piece[tokens[n - 1].end():tokens[n].start()]
+    return '\n' in gap or tokens[n].group()[0] in _RUN_BREAK_OPENERS
+
+
+def _leading_author(
+    piece: str, open_surname: list[str], given_first: bool,
+) -> tuple[str | None, bool]:
+    """The author a piece of the run starts with, and whether the run ends
+    after it. `open_surname` is a bare surname this piece's initials complete
+    ("Sorrel" then "M.H."). The whole piece is tried first, then the
+    longest prefix that closes the run -- longest, so that "Opal V. Yarrow."
+    is not read as "Opal V"."""
+    tokens = list(_AUTHOR_TOKEN_RE.finditer(piece))
+    words = [t.group() for t in tokens]
+    whole = _vancouver_author(open_surname + _item_words(words), given_first)
+    if whole is not None:
+        return whole, False
+    for n in range(min(len(tokens) - 1, _MAX_AUTHOR_TOKENS), 0, -1):
+        if _closes_run(piece, tokens, n):
+            author = _vancouver_author(open_surname + _item_words(words[:n]), given_first)
+            if author is not None:
+                return author, True
+    return None, False
+
+
+def _group_author(piece: str) -> str | None:
+    """A group author inside the run, as the CV prints it, or None when the
+    piece names no group or also holds the end of a sentence."""
+    if (_GROUP_AUTHOR_RE.search(piece) and not _SENTENCE_END_RE.search(piece)
+            and not _RUN_BREAK_RE.search(piece)):
+        return ' '.join(piece.split())
+    return None
+
+
+def _authors_in_run(pieces: list[str], given_first: bool) -> tuple[list[str], bool] | None:
+    """Read authors off the run's pieces until one is not an author. Returns
+    them and whether the run says "et al.", or None when a bare surname is
+    left with no initials to complete it."""
+    authors: list[str] = []
+    open_surname: list[str] = []
+    for piece in pieces:
+        words = _item_words(_AUTHOR_TOKEN_RE.findall(piece))
+        if not words:
+            continue
+        if piece.casefold().startswith('et al'):
+            return None if open_surname else (authors, True)
+        if authors and not open_surname and len(words) == 1 and _is_suffix_token(words[0]):
+            authors[-1] = f"{authors[-1]} {words[0].rstrip('.')}"
+            continue
+        bare = _surname_at(words)
+        if not open_surname and bare is not None and not bare[1]:
+            open_surname = words
+            continue
+        if open_surname and _vancouver_author(words, given_first) is not None:
+            break  # "Lantern, D. Wren": a whole author, so nothing completes the bare word
+        author, run_ends = _leading_author(piece, open_surname, given_first)
+        if author is None and not open_surname:
+            author = _group_author(piece)
+        if author is None and _initials_of(words) is not None:
+            return None  # initials with no surname to finish: the pairs are misaligned
+        if author is None:
+            break
+        authors.append(author)
+        open_surname = []
+        if run_ends:
+            break
+    return None if open_surname else (authors, False)
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """One substitution, insertion or deletion turns `a` into `b`."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    return a[i:] == b[i + 1:] or (len(a) == len(b) and a[i + 1:] == b[i + 1:])
+
+
+def _letters(word: str) -> str:
+    """A word's letters only, casefolded ("Quill-Rowan" -> "quillrowan")."""
+    return ''.join(c for c in word if c.isalpha()).casefold()
+
+
+def _anchor_in_source(source_text: str, surname: str, occurrence: int) -> re.Match[str] | None:
+    """The `occurrence`-th word of the source line that is `surname`, compared
+    by `_letters` ("Quill-Rowan" is "QuillRowan"); one edit apart when no
+    word matches exactly and the surname is long enough to trust that."""
+    key = _letters(surname)
+    words = list(re.finditer(r"[^\W\d_][\w'’-]*", source_text))
+    matches = [w for w in words if _letters(w.group()) == key]
+    if not matches and len(key) >= _ANCHOR_FUZZY_MIN_LEN:
+        matches = [w for w in words if _one_edit_apart(_letters(w.group()), key)]
+    return matches[occurrence - 1] if len(matches) >= occurrence else None
+
+
+def _last_surname_word(author: str) -> str:
+    """A Vancouver author's last surname word ("van den Wren PA" -> "Wren",
+    "Vetch JR Jr" -> "Vetch")."""
+    words = author.split()
+    while len(words) > 1 and (_is_initials_token(words[-1]) or _is_suffix_token(words[-1])):
+        words.pop()
+    return words[-1] if words else ''
+
+
+def _is_anchor_trailer(piece: str) -> bool:
+    """A piece that only finishes the author before it: its initials or its
+    suffix printed after a comma ("Sorrel, J", "Wren AB, Jr")."""
+    words = _item_words(_AUTHOR_TOKEN_RE.findall(piece))
+    return bool(words) and (_initials_of(words) is not None
+                            or (len(words) == 1 and _is_suffix_token(words[0])))
+
+
+def _source_authors_after(
+    source_text: str, kept: list[str],
+) -> tuple[list[str], bool] | None:
+    """The authors a CV's source line lists after the last of `kept` (the
+    authors stage 5d kept, in its own spelling), each as "Surname Initials",
+    and whether the line's run ends in "et al." (#1259). None when that
+    author cannot be found in the line, or the run leaves a bare surname.
+
+    The anchor is the last kept author's surname, at the same occurrence it
+    has among the kept ("Elm EC, Elm M" anchors on the second "Elm"). Its
+    item runs to the next separator, plus the piece after a bare surname
+    ("Sorrel, J", "Quill, Opal J.") and any piece that only repeats initials
+    or adds a suffix. The run reads given-name-first only when a name word
+    came before the anchor's surname and no initials follow it ("Juno
+    Zinnia MD", not the two-word surname of "Quill Rowan M")."""
+    surname = _last_surname_word(kept[-1]) if kept else ''
+    if not surname:
+        return None
+    occurrence = sum(1 for author in kept if _last_surname_word(author) == surname)
+    anchor = _anchor_in_source(source_text, surname, occurrence)
+    if anchor is None:
+        return None
+    item_head = [t for t in _SOURCE_AUTHOR_SEPARATOR_RE.split(source_text[:anchor.start()])[-1].split()
+                 if t.casefold() not in _SURNAME_PARTICLES]
+    pieces = _SOURCE_AUTHOR_SEPARATOR_RE.split(
+        _INLINE_SPACE_RE.sub(' ', source_text[anchor.start():]))
+    anchor_words = _item_words(_AUTHOR_TOKEN_RE.findall(pieces[0]))
+    if len(anchor_words) > _MAX_AUTHOR_TOKENS or _run_ended_in(pieces[0]):
+        return [], False
+    following = pieces[1:]
+    if not item_head and len(anchor_words) == 1 and following:
+        # A bare surname: its initials or given name follow ("Quill, Opal J.").
+        trailer = following.pop(0)
+        if len(_AUTHOR_TOKEN_RE.findall(trailer)) > _MAX_TRAILER_TOKENS or _run_ended_in(trailer):
+            return [], False
+    while following and _is_anchor_trailer(following[0]):
+        following = following[1:]
+    given_first = (any(_is_name_token(t) for t in item_head)
+                   and not any(_is_initials_token(w) for w in anchor_words[1:]))
+    return _authors_in_run(following, given_first)

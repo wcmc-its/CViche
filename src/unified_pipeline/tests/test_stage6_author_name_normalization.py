@@ -42,6 +42,7 @@ from unified_pipeline.stage6.normalization.authors import (  # noqa: E402
     _looks_like_initials,
     _parse_author_fallback,
     _parse_surname_initial_pairs,
+    _source_authors_after,
 )
 
 
@@ -651,3 +652,124 @@ def test_four_is_are_not_a_recognised_suffix_but_pass_as_initials_shaped() -> No
     `_looks_like_initials` accepts it and it is folded in as initials, the
     same misclassification 'V' gets above."""
     assert _cite('Smith, IIII, Jones, JA') == '1. Smith IIII, Jones JA. A Study.'
+
+
+# ---------------------------------------------------------------------------
+# #1259: a CV's own author run, read back after the authors stage 5d kept.
+# Every name below is invented; the shapes are the corpus's.
+# ---------------------------------------------------------------------------
+
+_KEPT = ['Ash A', 'Birch B', 'Cedar C', 'Daly D', 'Elm E', 'Fir F']
+_LEAD = 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F'
+
+
+@pytest.mark.parametrize('case, source, kept, expected', [
+    ('Vancouver, semicolons and co-first marks',
+     '1. Ash A*; Birch B*; Cedar C; Daly D; Elm E; Fir F; Gorse S\u2217; Holly CC†; Wren TM. A title. J Wood 2011',
+     _KEPT, (['Gorse S', 'Holly CC', 'Wren TM'], False)),
+    ('"Surname, Initials" pairs, "and", a colon closing the run',
+     'Ash, A., Birch, B., Cedar, C., Daly, D., Elm, E., Fir, H.-P., Gorse, D., and Wren, M.H.: A title. J Wood.',
+     _KEPT, (['Gorse D', 'Wren MH'], False)),
+    ('initials first, a quoted title',
+     'A. Ash, B. Birch, C. Cedar, D. Daly, E. Elm, F. Fir, J.R. Vetch Jr., S. Wren, “A title,” J Wood.',
+     _KEPT, (['Vetch JR Jr', 'Wren S'], False)),
+    ('given name first, a credential',
+     'Ann Ash MA, Bo Birch BA, Cy Cedar MD, Di Daly MD, Ed Elm MD, Kim Fir MEd, Juno Wren MD. A title. Venue.',
+     ['Ash A', 'Birch B', 'Cedar C', 'Daly D', 'Elm E', 'Fir K'], (['Wren J'], False)),
+    ('given name first, an affiliation after the run is not an author',
+     'Ann A. Ash, Bo B. Birch, Cy C. Cedar, Di D. Daly, Ed E. Elm, Fay Fir, Opal V. Yarrow, '
+     'Juno R. Wren, Lantern University School of Medicine, Springfield, ST. A title. Venue.',
+     ['Ash AA', 'Birch BB', 'Cedar CC', 'Daly DD', 'Elm EE', 'Fir F'], (['Yarrow OV', 'Wren JR'], False)),
+    ('a suffix as its own item, an ordinal suffix, a bare "and"',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse MH, Jr, Rowan ID 3rd, Wren I and Holly SI. A title.',
+     _KEPT, (['Gorse MH Jr', 'Rowan ID 3rd', 'Wren I', 'Holly SI'], False)),
+    ('the anchor\'s own suffix after a comma is skipped',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Jr ., Wren R, “A title.”',
+     _KEPT[:5] + ['Fir F Jr'], (['Wren R'], False)),
+    ('an abbreviated initial, an initial whose period also closes the run',
+     _LEAD + ', Quill Th., Wren A., and Holly T.. A title.',
+     _KEPT, (['Quill TH', 'Wren A', 'Holly T'], False)),
+    ('5d corrected the anchor\'s spelling',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Rowen MR, Wren D, Holly L. A title.',
+     _KEPT[:5] + ['Rowan MR'], (['Wren D', 'Holly L'], False)),
+    ('5d restored the anchor\'s hyphens',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, QuillRowanSorrel P, Wren T.\nVenue 2022',
+     _KEPT[:5] + ['Quill-Rowan-Sorrel P'], (['Wren T'], False)),
+    ('a surname the kept list repeats anchors on its own occurrence',
+     'Ash A, Birch B, Cedar C, Daly D, Elm EC, Elm M, Wren B. A title.',
+     ['Ash A', 'Birch B', 'Cedar C', 'Daly D', 'Elm EC', 'Elm M'], (['Wren B'], False)),
+    ('a group author inside the run is kept as printed',
+     _LEAD + ', The Lantern Study Group, Gorse C, Wren AW. A title.',
+     _KEPT, (['The Lantern Study Group', 'Gorse C', 'Wren AW'], False)),
+    ('a group credit that closes the run is not an author',
+     _LEAD + ', Wren RD; for the Lantern Research Network. A title.',
+     _KEPT, (['Wren RD'], False)),
+    ('the line says "et al."',
+     _LEAD + ', Wren W, et al. A title.',
+     _KEPT, (['Wren W'], True)),
+    ('a bare-surname anchor takes its given name from the next piece',
+     'Ash, A., Birch, B., Cedar, C., Daly, D., Elm, E., Fir, Opal J., & Wren, M. (2010). A title.',
+     _KEPT, (['Wren M'], False)),
+    ('a two-word surname does not make the run given-name-first',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Quill Rowan M, Wren C, Gorse ER. Computer-aided, a trial.',
+     _KEPT[:5] + ['Quill Rowan M'], (['Wren C', 'Gorse ER'], False)),
+    ('a line break after the title, the run on the next line',
+     'A title.\nAsh A, Birch B, Cedar C, Daly D, Elm E, Fir F, Wren TM, Holly J.\nJ Wood. 2022',
+     _KEPT, (['Wren TM', 'Holly J'], False)),
+    ('the run ended at the anchor',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F. Results in a trial, Wren W, Holly H.',
+     _KEPT, ([], False)),
+    ('the run ended at the anchor, at a bracket',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F (2010) Title Case Words, Wren W.',
+     _KEPT, ([], False)),
+    ('the run ended in the piece after a bare-surname anchor',
+     'Ash, A., Birch, B., Cedar, C., Daly, D., Elm, E., Fir, F. Results in a trial, Wren, W.',
+     _KEPT, ([], False)),
+    ('the run ended inside a piece: the pieces after it are not read',
+     _LEAD + ', Wren W. A title, Gorse G, Holly H.',
+     _KEPT, (['Wren W'], False)),
+    ('a line break with no period ends the run',
+     _LEAD + ', Wren TM\nJ Wood 2022', _KEPT, (['Wren TM'], False)),
+    ('a quote with no period ends the run',
+     _LEAD + ', Wren S “A title,” J Wood.', _KEPT, (['Wren S'], False)),
+    ('given name first, the last author closes the run with a period',
+     'Ann A. Ash, Bo B. Birch, Cy C. Cedar, Di D. Daly, Ed E. Elm, Fay Fir, Opal V. Yarrow. A title.',
+     ['Ash AA', 'Birch BB', 'Cedar CC', 'Daly DD', 'Elm EE', 'Fir F'], (['Yarrow OV'], False)),
+    ('given name first, a name with no middle initial or credential reads either way',
+     'Ann A. Ash, Bo B. Birch, Cy C. Cedar, Di D. Daly, Ed E. Elm, Fay Fir, Juno Wren, Opal V. Yarrow.',
+     ['Ash AA', 'Birch BB', 'Cedar CC', 'Daly DD', 'Elm EE', 'Fir F'], ([], False)),
+    ('surname particles and a camel-cased surname',
+     _LEAD + ', van den Gorse PA, deVetch R, Wren W. A title.',
+     _KEPT, (['van den Gorse PA', 'deVetch R', 'Wren W'], False)),
+    ('a stray period before an initial',
+     _LEAD + ', Gorse, G., and Wren, .S. A title.', _KEPT, (['Gorse G', 'Wren S'], False)),
+    ('a suffix standing first is not an author',
+     _LEAD + ', Jr AB, Wren W.', _KEPT, ([], False)),
+    ('a group name running into a quoted title is not an author',
+     _LEAD + ', The Lantern Group “A Title,” Wren W.', _KEPT, ([], False)),
+    ('the anchor\'s piece runs on past what one author can hold',
+     'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F Title Case Words Here Now, Wren W.',
+     _KEPT, ([], False)),
+    ('the piece after a bare-surname anchor runs on past its given name',
+     'Ash, A., Birch, B., Cedar, C., Daly, D., Elm, E., Fir, F. Title Case Words, Wren, W.',
+     _KEPT, ([], False)),
+    ('given name first, an item that does not start with a name',
+     'Ann A. Ash, Bo B. Birch, Cy C. Cedar, Di D. Daly, Ed E. Elm, Fay Fir, the Yarrow MD.',
+     ['Ash AA', 'Birch BB', 'Cedar CC', 'Daly DD', 'Elm EE', 'Fir F'], ([], False)),
+])
+def test_source_authors_after_reads_the_run_after_the_kept_authors(
+    case: str, source: str, kept: list[str], expected: tuple[list[str], bool],
+) -> None:
+    assert _source_authors_after(source, kept) == expected, case
+
+
+@pytest.mark.parametrize('case, source', [
+    ('the anchor is not in the line', 'Gorse G, Holly H, Wren W. A title.'),
+    ('initials with no surname to finish: the pairs are misaligned',
+     _LEAD + ', Gorse B, S.J., Wren C. A title.'),
+    ('a bare word is followed by a whole author, so nothing completes it',
+     _LEAD + ', Lantern, D. Wren, Holly H. A title.'),
+])
+def test_source_authors_after_declines(case: str, source: str) -> None:
+    assert _source_authors_after(source, _KEPT) is None, case
+

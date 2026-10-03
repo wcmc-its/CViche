@@ -18,12 +18,17 @@ its own text omitted -- so the dependency runs `publication` ->
 
     _value_referenced                is this value already present in this text?
     _append_missing_stage5d_values   top a stage-5d citation up with what it omits
+    _restore_stage5d_owner           give back the CV owner 5d's "et al." cut (#1259)
 
-Both take text and return text. Neither reads an entry, a field dict or any
+All take text and return text. None reads an entry, a field dict or any
 pipeline key: the caller resolves those first (that is `publication.py`'s
 job), which is why there is not an `isinstance` check anywhere in this file.
+The owner restore reads author names, which `authors.py` owns, so this
+module imports that one and nothing else in the package.
 """
 import re
+
+from .authors import _join_spaced_initials, _normalize_author_names, _source_authors_after
 
 # #481: a value is treated as already present in an LLM-formatted citation
 # once any of its own significant words shows up there -- not the whole
@@ -131,20 +136,104 @@ _LONE_INITIALS_RE = re.compile(r"(?:^|,\s*)[A-Z]{1,3}\s*(?:,|$)")
 _NAME_WORD_RE = re.compile(r"[^\W\d_][\w'-]{2,}")
 _NOT_A_SURNAME = frozenset({"phd", "jr", "sr", "msc", "mph", "facp", "frcp"})
 
+#: Marks of a stage-4 author no person carries, which the restore must not
+#: print (QITQWH 269/283, HTNNHG 75 on the EBYSBC batch). An all-capitals
+#: word of four or more letters the CV's own line does not hold: a
+#: consortium credit or an affiliation squeezed into the shape "Network
+#: WXYZ". A real four-letter initials group is in the line as printed.
+_ALL_CAPS_WORD_RE = re.compile(r"\b[A-Z]{4,}\b")
+#: And a suffix standing first in an item ("3rd AB", ", Jr, ").
+_SUFFIX_FIRST_RE = re.compile(r"(?:^|,\s*)(?:Jr|Sr|II|III|IV|[2-9](?:nd|rd|th))\b")
+
+
+def _prints_junk_author(authors: str, source_text: str) -> bool:
+    """Whether a normalized stage-4 list holds an author no person carries."""
+    source_words = set(re.findall(r"\w+", source_text))
+    return bool(_SUFFIX_FIRST_RE.search(authors)) or any(
+        word not in source_words for word in _ALL_CAPS_WORD_RE.findall(authors))
+
+
+def _owner_words(target_name: str) -> set[str]:
+    """The words of `target_name` that can be the owner's surname, casefolded."""
+    return {w.casefold() for w in _NAME_WORD_RE.findall(target_name)
+            if not w.isupper() and w.casefold() not in _NOT_A_SURNAME}
+
+
+def _names(word: str, text: str) -> bool:
+    """Whether `text` holds `word` (casefolded) as a whole word."""
+    return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text.casefold()))
+
+
+def _stage5d_author_segment(formatted_citation: str) -> str:
+    """What a 5d citation lists as authors: everything before an "et al."
+    that closes the list (no period ahead of it, no comma after it), else
+    the whole citation. ZGBCIT 348 named the owner only in a "Presented by"
+    note after the title, so a test over the whole citation called the owner
+    present (#1259). "Ash A, et al., Gorse G, et al., Holly H." is a CV's own
+    elided list, and its owner is in it."""
+    match = _ET_AL_RE.search(formatted_citation)
+    if match and "." not in formatted_citation[:match.start()] \
+            and not formatted_citation[match.end():].lstrip().startswith((",", ";")):
+        return formatted_citation[:match.start()]
+    return formatted_citation
+
 
 def _stage5d_cut_owner(formatted_citation: str, authors: str, target_name: str) -> bool:
     """Whether stage 5d's citation lost the CV owner's name (#1259): a word
-    of `target_name` that stage 4's raw `authors` names is not in the
-    citation. Only such a citation gets its author list back: across the
-    163-CV wave-1 farm, restoring every cut list rewrote 1,117 lines from
-    stage-4 lists that are often damaged ("de Groot M" -> "Groot D M", role
-    labels as authors), and lost the owner from 10 of them."""
-    words = {w.casefold() for w in _NAME_WORD_RE.findall(target_name)
-             if not w.isupper() and w.casefold() not in _NOT_A_SURNAME}
+    of `target_name` that `authors` (stage 4's list, or the source line)
+    names is not among the citation's authors. Only such a citation gets its
+    author list back: across the 163-CV wave-1 farm, restoring every cut
+    list rewrote 1,117 lines from stage-4 lists that are often damaged ("de
+    Groot M" -> "Groot D M", role labels as authors), and lost the owner from
+    10 of them."""
+    segment = _stage5d_author_segment(formatted_citation)
+    return any(_names(w, authors) and not _names(w, segment)
+               for w in _owner_words(target_name))
 
-    def names(word: str, text: str) -> bool:
-        return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text.casefold()))
-    return any(names(w, authors) and not names(w, formatted_citation) for w in words)
+
+def _restore_stage5d_owner(
+    formatted_citation: str, authors: str, source_text: str, target_name: str,
+) -> str:
+    """`formatted_citation` with the CV owner back in its author list, when
+    stage 5d's "first 6, et al." cut them out (#1259); otherwise unchanged.
+
+    Stage 4's list (`authors`) is printed whole when it is intact -- the
+    restore PR #1292 shipped, unchanged. When it is damaged or holds junk,
+    the CV's own line (`source_text`) supplies the authors after the ones 5d
+    kept, read back one at a time; the kept ones keep 5d's spelling."""
+    if _stage5d_cut_owner(formatted_citation, authors, target_name):
+        source_list = _normalize_author_names(_join_spaced_initials(authors))
+        if not _prints_junk_author(source_list, source_text):
+            restored = _restore_stage5d_authors(formatted_citation, source_list)
+            if restored != formatted_citation:
+                return restored
+    if _stage5d_cut_owner(formatted_citation, source_text, target_name):
+        return _extend_from_source_line(formatted_citation, source_text, target_name)
+    return formatted_citation
+
+
+def _extend_from_source_line(formatted_citation: str, source_text: str, target_name: str) -> str:
+    """5d's kept authors, then the ones the CV's line lists after them, then
+    "et al." only if the line says it. Unchanged unless that run names the
+    owner, and 5d's authors name no word of `target_name` (a given name
+    5d shortened to an initial is not a cut owner). A run that meets a
+    non-author (a group credit closing it, an affiliation, the title) stops
+    there."""
+    segment = _stage5d_author_segment(formatted_citation)
+    owner = _owner_words(target_name)
+    if segment == formatted_citation or any(_names(w, segment) for w in owner):
+        return formatted_citation
+    kept = [a.strip() for a in segment.split(",") if a.strip()]
+    run = _source_authors_after(source_text, kept)
+    if run is None:
+        return formatted_citation
+    following, et_al = run
+    if not any(_names(w, author) for author in following for w in owner):
+        return formatted_citation
+    rest = formatted_citation[len(segment):]
+    rest = rest[_ET_AL_RE.match(rest).end():].lstrip(" .")
+    tail = ", et al" if et_al else ""
+    return f"{', '.join(kept + following)}{tail}. {rest}"
 
 
 def _restore_stage5d_authors(formatted_citation: str, authors: str) -> str:
@@ -181,6 +270,7 @@ def _same_list_start(cut_segment: str, authors: str) -> bool:
     """Whether the source list starts with the authors 5d kept, by surname.
     On the wave-1 farm a source list that disagreed was a damaged one: a
     misspelled owner ("Yianoutsos" for 5d's "Yiannoutsos") and a consortium
-    name run together, both of which the restore would have printed."""
+    name run together, both of which the restore would have printed. Such a
+    list is not printed; `_extend_from_source_line` reads the CV's line instead."""
     kept = _surnames(cut_segment)
     return bool(kept) and _surnames(authors)[:len(kept)] == kept
