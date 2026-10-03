@@ -1300,3 +1300,104 @@ def test_superseded_rank_rows_reads_the_records_it_is_given():
     before = copy.deepcopy(records)
     assert _superseded_rank_rows(records) == {1}
     assert records == before
+
+
+# --- #1342 (decision 2026-10-02): the source-open-marker rule on D rows -----
+# A start-only D row renders "<start>-Present" only when its own text leaves
+# the start year open; the CV's latest D1 row (no later D1 start year) keeps
+# "-Present" without one. Superseded rungs (#946) still render the bare start.
+
+from unified_pipeline.stage6.sections.positions import _latest_rank_rows  # noqa: E402
+
+
+def _texted_entry(idx, title, start, text, code="D2", end=""):
+    entry = _rank_entry(idx, title, start, end, code=code)
+    entry["text"] = text
+    return entry
+
+
+@pytest.mark.parametrize("code", ["D2", "D3"])
+@pytest.mark.parametrize("text, dates", [
+    ("Visiting Fellow | Quexley Institute | 2014", "2014"),
+    ("Visiting Fellow | Quexley Institute | 2014 -", "2014-Present"),
+    ("Visiting Fellow | Quexley Institute | 2014-", "2014-Present"),
+    ("Visiting Fellow | Quexley Institute | 2014 - present", "2014-Present"),
+    ("Visiting Fellow | Quexley Institute | 2014 to current", "2014-Present"),
+])
+def test_a_start_only_d2_d3_row_is_open_only_when_its_text_says_so(code, text, dates):
+    rows = _render_positions([_texted_entry(1, "Visiting Fellow", "2014", text, code=code)],
+                             code=code)
+    assert [row[2] for row in rows] == [dates]
+
+
+def test_only_the_latest_d1_row_keeps_present_without_a_marker():
+    rows = _render_positions([
+        _texted_entry(1, "Vice Chair for Quality", "2021", "Vice Chair for Quality, 2021", code="D1"),
+        _texted_entry(2, "Postdoctoral Associate", "2009", "Postdoctoral Associate, 2009", code="D1"),
+        _texted_entry(3, "Clinical Lecturer", "2012", "Clinical Lecturer, 2012 -", code="D1"),
+    ], code="D1")
+    assert _dates_by_title(rows) == {
+        "Vice Chair for Quality": "2021-Present",
+        "Postdoctoral Associate": "2009",
+        "Clinical Lecturer": "2012-Present",
+    }
+
+
+def test_a_d1_row_opened_with_a_two_digit_year_keeps_present():
+    rows = _render_positions([
+        _texted_entry(1, "Section Chief", "2015", "Section Chief, 2015", code="D1"),
+        _texted_entry(2, "Attending Physician", "2004-06-01",
+                      "Attending Physician, Quexley Hospital 6/01/04-", code="D1"),
+    ], code="D1")
+    assert _dates_by_title(rows)["Attending Physician"] == "06/04-Present"
+
+
+def test_rows_tied_on_the_latest_d1_year_all_keep_present():
+    rows = _render_positions([
+        _texted_entry(1, "Assistant Professor of Medicine", "2020", "Assistant Professor, 2020", code="D1"),
+        _texted_entry(2, "Program Director", "2020", "Program Director, 2020", code="D1"),
+    ], code="D1")
+    assert [row[2] for row in rows] == ["2020-Present", "2020-Present"]
+
+
+def test_a_later_ended_d1_row_takes_the_exception_from_an_earlier_one():
+    rows = _render_positions([
+        _texted_entry(1, "Associate Director", "2018", "Associate Director, 2018-2022",
+                      code="D1", end="2022"),
+        _texted_entry(2, "Research Scientist", "2015", "Research Scientist, 2015", code="D1"),
+    ], code="D1")
+    assert _dates_by_title(rows)["Research Scientist"] == "2015"
+
+
+def test_a_superseded_rung_stays_bare_even_with_an_open_marker():
+    rows = _render_positions([
+        _texted_entry(1, "Associate Professor of Surgery", "2019", "Associate Professor, 2019 -", code="D1"),
+        _texted_entry(2, "Assistant Professor of Surgery", "2013", "Assistant Professor, 2013 -", code="D1"),
+    ], code="D1")
+    assert _dates_by_title(rows) == {
+        "Associate Professor of Surgery": "2019-Present",
+        "Assistant Professor of Surgery": "2013",
+    }
+
+
+def test_the_generic_table_takes_the_latest_rank_from_d1_rows_only():
+    gen, table = _positions_generator(GENERIC_TABLE_ANCHOR)
+    gen._fill_positions({
+        "D1": [_texted_entry(1, "Lecturer in Biology", "2016", "Lecturer, 2016", code="D1")],
+        "D3": [_texted_entry(2, "Consultant", "2023", "Consultant, 2023", code="D3")],
+    })
+    assert _dates_by_title(_rendered_rows(table)) == {
+        "Lecturer in Biology": "2016-Present",
+        "Consultant": "2023",
+    }
+
+
+def test_latest_rank_rows_reads_d1_start_years_only():
+    records = [_rank_entry(1, "Fellow", "2019"),
+               _rank_entry(2, "Consultant", "2024", code="D3"),
+               _rank_entry(3, "Lecturer", ""),
+               _rank_entry(4, "Instructor", "2019-09")]
+    before = copy.deepcopy(records)
+    assert _latest_rank_rows(records) == {0, 3}
+    assert records == before
+    assert _latest_rank_rows([_rank_entry(1, "Lecturer", "")]) == set()
