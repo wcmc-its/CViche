@@ -239,9 +239,13 @@ OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 # The first four-digit run in an end date: the year both date rebuckets have
 # always read ("2016-10-21", "June 2015", "2015-16").
 END_DATE_FOUR_DIGIT_YEAR_RE = re.compile(r'(\d{4})')
-# A nonzero digit: what makes a `total_funding` value an amount rather than an
-# empty "$" or a placeholder.
-AMOUNT_DIGIT_RE = re.compile(r'[1-9]')
+# A grant's end date lies at most this many years after the current year: the
+# horizon that picks the century of a two-digit end year ("6/30/31" is 2031,
+# "6/30/95" is 1995). Grant end dates run into the future, so the shared
+# past-leaning pivot (core/two_digit_year.py) misreads them (EBYSBC E7).
+GRANT_END_YEAR_HORIZON = 10
+# mm/dd/yy or mm-dd-yy: an end date whose year is two digits.
+TWO_DIGIT_YEAR_DATE_RE = re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{2})')
 
 # The goals phrase in a grant's own text or in a goals row of its own (#958),
 # and four measured wording variants (#829): the WCM label "(Optional - The
@@ -538,34 +542,28 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
     return messages
 
 
-def grant_end_year(end_date: str | None) -> int | None:
+def grant_end_year(end_date: str | None, current_year: int) -> int | None:
     """The year a grant's stage-4 end date names, or None when none reads.
 
-    The first four-digit run, as before; failing that, a two-digit-year date
-    ("4/15/14") through the shared date parser, whose century pivot stage 4
-    uses too (EBYSBC E7: three ended grants stayed under Current because the
-    rebucket found no four-digit year in their end dates). A one-digit year
-    ("7/31/1") still reads as nothing: no rule recovers a truncated date."""
+    The first four-digit run, as before; failing that, a valid mm/dd/yy date
+    (EBYSBC E7: three ended grants stayed under Current because the rebucket
+    found no four-digit year in their end dates). Its century is read against
+    `current_year`, not the shared past-leaning pivot: a grant's end date can
+    lie in the future, so yy is 20yy up to `GRANT_END_YEAR_HORIZON` years past
+    `current_year`, else 19yy. A one-digit year ("7/31/1") still reads as
+    nothing: no rule recovers a truncated date."""
     text = str(end_date or '').strip()
     year_match = END_DATE_FOUR_DIGIT_YEAR_RE.search(text)
     if year_match:
         return int(year_match.group(1))
-    return _parse_date_components(text)[0]
+    two_digit = TWO_DIGIT_YEAR_DATE_RE.fullmatch(text)
+    if not two_digit or _parse_date_components(text)[0] is None:
+        return None
+    year = 2000 + int(two_digit.group(1))
+    return year if year <= current_year + GRANT_END_YEAR_HORIZON else year - 100
 
 
-def grant_is_awarded_and_ended(fields: GrantFields, current_year: int) -> bool:
-    """Whether a grant carries an awarded total (`total_funding`, the M2A/M2B
-    schema's field; a pending grant's amount is `total_funding_requested`) and
-    an end year before `current_year`. Such a grant is no longer awaiting a
-    decision, whatever a pending word in its status says (EBYSBC E7)."""
-    end_year = grant_end_year(fields.get('end_date'))
-    has_award = bool(AMOUNT_DIGIT_RE.search(str(fields.get('total_funding') or '')))
-    return has_award and end_year is not None and end_year < current_year
-
-
-def explicit_status_target(
-    entry: dict, current_year: int
-) -> tuple[str | None, str | None]:
+def explicit_status_target(entry: dict) -> tuple[str | None, str | None]:
     """The bucket a grant's own words put it in: its status field, or, when the
     status names no bucket (absent, or a word the vocabulary does not know, like
     "withdrawn", "Funded", "NCE"), the heading the CV filed it under (#981, #982).
@@ -574,33 +572,23 @@ def explicit_status_target(
     the grant's own word, and #210 ruled an explicit status beats other signals.
     The hazard that argues for the heading ("Review completed" under a Pending
     heading filing the grant Completed) is closed in the vocabulary instead: a
-    "completed" that follows "review" or "visit" names no bucket.
-
-    A pending status on a grant with an awarded total whose period closed
-    before `current_year` names no bucket either (EBYSBC E7), so the heading
-    decides. Only the status gets this exception, not the heading: an amount
-    under a pending heading is a requested budget (#981)."""
+    "completed" that follows "review" or "visit" names no bucket."""
     fields = cast(GrantFields, entry.get('extracted_fields') or {})
     heading_target = grant_heading_rebucket_target(entry.get('hierarchy') or [])
-    status_target = grant_status_rebucket_target(
-        str(fields.get('status') or ''),
-        awarded_and_ended=grant_is_awarded_and_ended(fields, current_year))
+    status_target = grant_status_rebucket_target(str(fields.get('status') or ''))
     if not status_target[0]:
         return heading_target
     return status_target
 
 
 def rebucket_grants_by_status(
-    m2a_entries: list[dict], m2b_entries: list[dict], m2c_entries: list[dict],
-    current_year: int,
+    m2a_entries: list[dict], m2b_entries: list[dict], m2c_entries: list[dict]
 ) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     """Move grants between buckets on their own extracted status text (#210).
 
     An explicit "Under review" / "Not funded" beats date inference, which is why
     this runs before `reclassify_past_m2a_grants`. Returns the three buckets in
     M2A/M2B/M2C order plus the verbose lines; the inputs are left as they were.
-    `current_year` is what `explicit_status_target` judges a closed project
-    period against.
 
     Raises:
         UnsupportedRebucketTargetError: the status rule named a bucket outside
@@ -616,7 +604,7 @@ def rebucket_grants_by_status(
     for source_code, source_list in (('M2A', current), ('M2B', completed)):
         for position, entry in enumerate(list(source_list)):
             fields = cast(GrantFields, entry.get('extracted_fields') or {})
-            target, note = explicit_status_target(entry, current_year)
+            target, note = explicit_status_target(entry)
             if not target or target == source_code:
                 continue
             title = str(fields.get('title') or 'Unknown')
@@ -658,7 +646,7 @@ def reclassify_past_m2a_grants(
 
         # Parse end date to check if it's in the past
         if end_date and end_date.lower() not in OPEN_ENDED_END_DATES:
-            end_year = grant_end_year(end_date)
+            end_year = grant_end_year(end_date, current_year)
             if end_year is not None and end_year < current_year:
                 # This grant has ended - reclassify to M2B
                 entries_to_move.append((entry, end_date, end_year))
@@ -700,10 +688,10 @@ def promote_open_ended_m2b_grants(
         end_date = str(fields.get('end_date') or '').strip()
         if not end_date or 'reclassification_note' in entry:
             continue
-        if explicit_status_target(entry, current_year)[0] or grant_heading_is_past(
+        if explicit_status_target(entry)[0] or grant_heading_is_past(
                 entry.get('hierarchy') or []):
             continue
-        end_year = grant_end_year(end_date)
+        end_year = grant_end_year(end_date, current_year)
         if end_date.lower() in OPEN_ENDED_END_DATES:
             running = True
         else:
@@ -1183,7 +1171,7 @@ class ResearchSupportSection:
             _print_verbose(apply_effort_to_grants(entries, effort_lookup), self.verbose)
 
         m2a_entries, m2b_entries, m2c_entries, messages = rebucket_grants_by_status(
-            m2a_entries, m2b_entries, m2c_entries, current_year)
+            m2a_entries, m2b_entries, m2c_entries)
         _print_verbose(messages, self.verbose)
 
         m2a_entries, m2b_entries, messages = reclassify_past_m2a_grants(

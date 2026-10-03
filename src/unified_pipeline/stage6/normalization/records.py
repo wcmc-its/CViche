@@ -149,7 +149,7 @@ def grant_status_is_empty_section_label(status: str | None) -> bool:
 
 
 def grant_status_rebucket_target(
-    status: str, label: str = 'Status', *, awarded_and_ended: bool = False
+    status: str, label: str = 'Status'
 ) -> Tuple[Optional[str], Optional[str]]:
     """Map a grant's extracted status string to the funding bucket it belongs
     in (#210). Returns (target_code, reclassification_note); (None, None)
@@ -162,11 +162,6 @@ def grant_status_rebucket_target(
     dates say; "Not funded" is kept under Pending with a review comment
     rather than silently dropped. An empty-section label ("PENDING - none")
     is no status at all (`grant_status_is_empty_section_label`).
-
-    `awarded_and_ended` is the caller's word that the grant carries an awarded
-    total and its project period closed before this year. Such a grant is not
-    awaiting a decision, so a pending word names no bucket for it (EBYSBC E7).
-    A not-funded word still does: it says the total was never awarded.
     """
     status = (status or '').strip()
     if not status or grant_status_is_empty_section_label(status):
@@ -178,8 +173,6 @@ def grant_status_rebucket_target(
             "dropped; confirm whether to keep this entry on the CV"
         )
     if 'award' not in lowered and _PENDING_STATUS_RE.search(lowered):
-        if awarded_and_ended:
-            return None, None
         return 'M2C', f"Reclassified to Pending (M2C): {label.lower()} is '{status}'"
     if _COMPLETED_STATUS_RE.search(lowered):
         return 'M2B', f"Reclassified to Completed (M2B): {label.lower()} is '{status}'"
