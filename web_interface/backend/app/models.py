@@ -32,6 +32,20 @@ class RunState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class UserRole(StrEnum):
+    """Canonical ``users.role`` vocabulary, same pattern as ``RunState``.
+
+    STAFF is read-only elevated access: every run
+    and its pipeline detail, but no cost and no admin writes (see
+    ``can_view_all_runs``, after ``User``). Used on the lines the staff role adds or
+    changes; existing "admin"/"user" literals elsewhere are left as they are
+    (no drive-by conversions, CODING STANDARDS section 8.1).
+    """
+    USER = "user"
+    STAFF = "staff"
+    ADMIN = "admin"
+
+
 # ==========================
 # Authentication Models
 # ==========================
@@ -47,7 +61,9 @@ class User(Base):
     cwid = Column(String(20), unique=True, nullable=True, index=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
     display_name = Column(String(255), nullable=False)
-    role = Column(String(20), nullable=False, default="user")  # "user" or "admin"
+    # A UserRole value: "user", "staff" or "admin". A plain String with no
+    # Enum type or CHECK constraint, so adding a role needs no migration.
+    role = Column(String(20), nullable=False, default=UserRole.USER)
     status = Column(String(20), nullable=False, default="active")  # "active" or "disabled"
     daily_limit = Column(Integer, nullable=True)
     monthly_limit = Column(Integer, nullable=True)
@@ -70,6 +86,21 @@ class User(Base):
     runs = relationship("Run", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
     consents = relationship("Consent", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
     feedback = relationship("Feedback", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
+
+
+def can_view_all_runs(user: User) -> bool:
+    """Read-only access to every user's runs: the runs list, run detail, "Run
+    by", run quality, batches, pipeline logs/prompts/stage JSON, and feedback
+    insights.
+
+    Admin or staff. Grants READS only -- every write
+    (admin config, user management, deleting feedback or runs, acting on
+    another user's run) stays behind require_admin or ownership, and cost stays
+    behind can_see_cost. Lives here, not in app.auth, so services the worker
+    imports (run_service, batch_service) need not import app.auth, which reads
+    CVICHE_SESSION_SECRET at import (see services/ed_access.py).
+    """
+    return user.role in (UserRole.ADMIN, UserRole.STAFF)
 
 
 class Consent(Base):

@@ -4,6 +4,7 @@ import type { FeedbackData, AggregatedScores } from '../types'
 import { exportFeedbackCsv, deleteFeedback } from '../api/admin'
 import { adminRoutes } from '../api/routes'
 import DeleteFeedbackModal from './DeleteFeedbackModal'
+import { useIsAdmin } from '../contexts/AuthContext'
 
 const EFFORT_LABELS: Record<string, string> = {
   '< 5 minutes': '< 5 min',
@@ -159,6 +160,8 @@ function parseCSVLine(line: string): string[] {
 }
 
 export default function AdminFeedbackInsights() {
+  // Staff read Feedback Insights; deleting a submission stays admin-only.
+  const isAdmin = useIsAdmin()
   const [feedback, setFeedback] = useState<FeedbackData[]>([])
   const [loading, setLoading] = useState(true)
   // Row queued for deletion (drives the confirmation modal). Null when closed.
@@ -362,17 +365,19 @@ export default function AdminFeedbackInsights() {
                   )}
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  setDeleteError(null)
-                  setPendingDelete(f)
-                }}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-                aria-label={`Delete feedback for run ${f.run_id}`}
-              >
-                <Trash2 className="h-4 w-4" aria-hidden="true" />
-                Delete
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    setDeleteError(null)
+                    setPendingDelete(f)
+                  }}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                  aria-label={`Delete feedback for run ${f.run_id}`}
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  Delete
+                </button>
+              )}
             </li>
           ))}
         </ul>

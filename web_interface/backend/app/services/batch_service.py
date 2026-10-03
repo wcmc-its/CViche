@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.errors import not_found
-from app.models import BatchSource, Run, RunBatch, RunState, User
+from app.models import BatchSource, Run, RunBatch, RunState, User, can_view_all_runs
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
     BatchDetail, BatchRunRow, BatchStatusCounts, BatchSummary, QueueLane, QueueOverview,
@@ -107,13 +107,15 @@ def create_batch(
 
 
 def can_see_batch(user: User, batch: RunBatch) -> bool:
-    return user.role == "admin" or batch.user_id == user.id
+    """The submitter, or anyone who may read every run (admin or staff)."""
+    return can_view_all_runs(user) or batch.user_id == user.id
 
 
 def get_visible_batch(db: Session, batch_id: str, user: User) -> RunBatch:
     """The batch, if ``user`` may see it. 404 both when it does not exist and
     when it belongs to someone else (the approved policy: a batch is visible
-    to its submitter and admins only, and its existence is not disclosed)."""
+    to its submitter, admins and read-only staff only, and its existence is
+    not disclosed)."""
     batch = db.get(RunBatch, batch_id)
     if batch is None or not can_see_batch(user, batch):
         raise not_found("Batch not found")
@@ -161,10 +163,10 @@ def _summary(batch: RunBatch, submitter: User | None, run_count: int) -> BatchSu
 
 
 def list_batches(db: Session, user: User) -> list[BatchSummary]:
-    """Every batch ``user`` may see (their own; all of them for an admin),
-    newest first."""
+    """Every batch ``user`` may see (their own; all of them for an admin or
+    staff), newest first."""
     query = db.query(RunBatch)
-    if user.role != "admin":
+    if not can_view_all_runs(user):
         query = query.filter(RunBatch.user_id == user.id)
     batches = query.order_by(RunBatch.created_at.desc(), RunBatch.id).all()
     counts = _run_counts(db, [batch.id for batch in batches])
@@ -211,14 +213,15 @@ def _queue_position(run: Run, queue_times: list[datetime]) -> int | None:
 
 def batch_detail(db: Session, batch: RunBatch, viewer: User) -> BatchDetail:
     """The batch view: header, status counts, and one row per run in upload
-    order. ``quality_score`` is shown to admins only."""
+    order. ``quality_score`` is shown to admins and staff only, as on the
+    all-runs list."""
     runs = (
         db.query(Run).filter(Run.batch_id == batch.id)
         .order_by(Run.created_at, Run.id)
         .all()
     )
     queue_times = _queued_at_in_batch_queue(db) if any(r.status == RunState.QUEUED for r in runs) else []
-    show_score = viewer.role == "admin"
+    show_score = can_view_all_runs(viewer)
     rows = [
         BatchRunRow(
             run_id=run.id,

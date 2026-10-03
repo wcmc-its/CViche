@@ -70,9 +70,9 @@ function activeChips(filters: RunFilters, runByLabel: string) {
 
 interface StatusPillsProps {
   controls: RunFilterControls
-  /** The pill counts: filter-options' for admins, the caller's own for members; null until loaded. */
+  /** The pill counts: filter-options' for admins and staff, the caller's own for members; null until loaded. */
   counts: StatusFilterCounts | null
-  isAdmin: boolean
+  allRunsView: boolean
 }
 
 /** Width of the right-edge fade, in px. */
@@ -98,7 +98,7 @@ function useMoreToRight(ref: React.RefObject<HTMLDivElement | null>): boolean {
 
 /** The single-select status pills above the table. Never wrap: they scroll sideways on a narrow
  *  screen, with a fade at the right edge while more are hidden. */
-export function StatusPills({ controls, counts, isAdmin }: StatusPillsProps) {
+export function StatusPills({ controls, counts, allRunsView }: StatusPillsProps) {
   const active = activeStatusPill(controls.filters)
   const rowRef = useRef<HTMLDivElement>(null)
   const more = useMoreToRight(rowRef)
@@ -111,7 +111,7 @@ export function StatusPills({ controls, counts, isAdmin }: StatusPillsProps) {
       style={{ maskImage: mask, WebkitMaskImage: mask }}
       className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1"
     >
-      {STATUS_PILLS.filter((pill) => isAdmin || !pill.adminOnly).map((pill) => {
+      {STATUS_PILLS.filter((pill) => allRunsView || !pill.adminOnly).map((pill) => {
         const on = pill.id === active
         const count = counts?.[pill.id]
         return (

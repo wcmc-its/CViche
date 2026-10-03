@@ -2,8 +2,8 @@
 app/services/batch_service.py, through the real router.
 
 POST /batches (size cap, quota pre-check in check_rate_limit's 429 shape, the
-Teams card), GET /batches and GET /batches/{id} (visibility: submitter and
-admins only, 404 for anyone else), and GET /queue (per-queue live workers,
+Teams card), GET /batches and GET /batches/{id} (visibility: submitter,
+admins and read-only staff only, 404 for anyone else), and GET /queue (per-queue live workers,
 waiting runs and wait estimate). Names in fixtures are invented.
 """
 import re
@@ -224,10 +224,12 @@ def test_create_batch_reraises_a_foreign_key_violation_at_once(db, monkeypatch):
 
 # --- GET /batches and GET /batches/{id}: visibility ---------------------------
 
-def test_list_batches_shows_a_user_only_their_own_and_an_admin_all(client, db, seed_simple_mode):
+@pytest.mark.parametrize("viewer_role", ["admin", "staff"])
+def test_list_batches_shows_a_user_only_their_own_and_an_admin_or_staff_all(
+        client, db, seed_simple_mode, viewer_role):
     pat = _make_user(db)
     sam = _make_user(db, email="sam@example.com")
-    admin = _make_user(db, email="admin@example.com", role="admin")
+    admin = _make_user(db, email="viewer@example.com", role=viewer_role)
     _batch(db, pat, "PATBAT", files_submitted=2, created_at=T0)
     _batch(db, sam, "SAMBAT", files_submitted=5, created_at=T0 + timedelta(hours=1))
     _run(db, "PATRUN", pat, batch_id="PATBAT")
@@ -243,12 +245,13 @@ def test_list_batches_shows_a_user_only_their_own_and_an_admin_all(client, db, s
     assert [b["id"] for b in every] == ["SAMBAT", "PATBAT"], "newest first"
 
 
-@pytest.mark.parametrize("viewer, status", [("owner", 200), ("admin", 200), ("other", 404)])
-def test_batch_view_is_visible_to_its_submitter_and_admins_only(client, db, seed_simple_mode, viewer, status):
+@pytest.mark.parametrize("viewer, status", [("owner", 200), ("admin", 200), ("staff", 200), ("other", 404)])
+def test_batch_view_is_visible_to_its_submitter_admins_and_staff_only(client, db, seed_simple_mode, viewer, status):
     owner = _make_user(db)
     users = {
         "owner": owner,
         "admin": _make_user(db, email="admin@example.com", role="admin"),
+        "staff": _make_user(db, email="staff@example.com", role="staff"),
         "other": _make_user(db, email="sam@example.com"),
     }
     _batch(db, owner)
@@ -300,8 +303,8 @@ def test_batch_view_counts_a_created_but_unstarted_run(client, db, seed_simple_m
     assert sum(body["status_counts"].values()) == body["run_count"] == 2
 
 
-@pytest.mark.parametrize("role, expected", [("admin", 87), ("user", None)])
-def test_batch_view_score_is_admin_only(client, db, seed_simple_mode, role, expected):
+@pytest.mark.parametrize("role, expected", [("admin", 87), ("staff", 87), ("user", None)])
+def test_batch_view_score_is_admin_or_staff_only(client, db, seed_simple_mode, role, expected):
     owner = _make_user(db, role=role)
     _batch(db, owner)
     _run(db, "SCORED", owner, batch_id="BATCHA", quality_score=87)

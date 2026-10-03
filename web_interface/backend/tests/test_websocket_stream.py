@@ -220,6 +220,20 @@ def test_another_users_run_closes_4003(client, db, seed_simple_mode, idle_store)
     assert exc.reason == "Access denied"
 
 
+def test_staff_streams_another_users_run_without_cost(client, db, seed_simple_mode, idle_store):
+    """Staff (read-only) may watch any run's log stream; cost stays admin-only."""
+    owner = _make_user(db, email="owner-s@example.com")
+    staff = _make_user(db, email="staff@example.com", role="staff")
+    _make_run(db, "STAFF1", owner.id, status="complete", total_cost=1.25, total_tokens=42)
+    _authenticate(client, db, staff)
+
+    with _connect(client, "STAFF1", headers={"origin": _ALLOWED_ORIGIN}) as ws:
+        message = ws.receive_json()
+
+    assert message["event"] == "RUN_COMPLETE"
+    assert message.get("total_cost") is None
+
+
 def test_store_outage_at_upgrade_closes_1013(client, db, seed_simple_mode, monkeypatch):
     """The store is configured but unreachable: we cannot tell whether the
     session is valid, so the socket is refused with "try again later" (1013),
