@@ -540,8 +540,8 @@ LINT_PREVALENCE = {
     "python_repr_in_output": 0.061,
     "llm_refusal_in_output": 0.006,
     # date_cell_shape (EBYSBC E9/E21): 28 of the 63 runs of the EBYSBC/s7ab/
-    # pilot farm fire at any severity (9 at WARN), as rendered by origin/dev
-    # c3d87c5f, measured 2026-10-02. That render still has the defects: raw
+    # pilot farm fire at any severity (8 at WARN), as rendered by origin/dev
+    # 2dd78920, measured 2026-10-03. That render still has the defects: raw
     # mentee periods and same-year ranges are most of it, and the rate should
     # fall as the date fixes ship. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.444,

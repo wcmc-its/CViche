@@ -1546,12 +1546,13 @@ def test_date_cell_shape_warns_on_an_open_range_the_source_never_states():
     assert findings[0]["message"].startswith("entry 12 (P): open_range:")
 
 
-def test_date_cell_shape_does_not_tie_a_date_to_an_entry_by_function_words():
-    """The row and the entry share one real word; "of" and "the" must not
+@pytest.mark.parametrize("word", ["and", "the", "for", "with", "from"])
+def test_date_cell_shape_does_not_tie_a_date_to_an_entry_by_function_words(word):
+    """The row and the entry share one real word; a function word must not
     make up the second, or the row is read as an entry it is not."""
-    stage4 = {"entries": [_dated4("Head of the Example Unit, 2015", "P", "2015",
+    stage4 = {"entries": [_dated4(f"Head {word} Example Unit, 2015", "P", "2015",
                                   "present", idx=12)]}
-    rows = [[["Chair of the Example Board", "2015-Present"]]]
+    rows = [[[f"Chair {word} Example Board", "2015-Present"]]]
     assert lint_date_cell_shape(stage4, rows, []) == []
 
 
@@ -1572,6 +1573,10 @@ def test_date_cell_shape_does_not_tie_a_date_to_an_entry_by_function_words():
     "Example Widget Committee, member, 2015.04- chair",
     "2015.04 - Example Widget Committee, member",
     "Example Widget Committee, member (2015 - )",
+    # "YYYY -<tab>" in the middle of a line: the reader's tab after a dash
+    # with no end year, read by the marker's second branch, not the
+    # line-opening one.
+    "Example Widget Committee, member, 2015 -\tSample College",
     # A later line of the entry that opens "YYYY - <text>".
     "Example Widget Committee\n2015 - member of the board",
 ])
@@ -1603,6 +1608,39 @@ def test_date_cell_shape_does_not_read_a_closed_range_as_a_trailing_dash():
     findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
     assert [(f["severity"], f["evidence"]) for f in findings] == [
         ("WARN", ["2015-Present"])]
+
+
+def test_date_cell_shape_does_not_read_a_year_inside_a_longer_number_as_a_dash():
+    """A reference number that ends in a year-like run and a dash
+    ("12015-") is not a year with a trailing dash, so the row is still
+    reported."""
+    stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015, "
+                                  "ref 12015-", "P", "2015", "present", idx=12)]}
+    findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("WARN", ["2015-Present"])]
+
+
+def test_date_cell_shape_reads_the_dash_marker_in_the_entry_text_only():
+    """A heading that opens with a year ("2015 - Committee Service") groups
+    entries by year; it does not say a row is still open. The words of the
+    heading are read for a marker, its dash is not."""
+    stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015", "P",
+                                  "2015", "present", idx=12,
+                                  heading="2015 - Committee Service")]}
+    findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("WARN", ["2015-Present"])]
+
+
+@pytest.mark.parametrize("number", ["12015", "20151"])
+def test_date_cell_shape_reads_entry_years_only_as_whole_four_digit_numbers(number):
+    """An entry is indexed under a year only where four digits stand alone:
+    a reference number that contains "2015" does not make it a 2015 entry,
+    so the row ties to nothing and an untied open range is not reported."""
+    stage4 = {"entries": [_dated4(f"Example Widget Committee, member, ref {number}",
+                                  "P", None, "present", idx=12)]}
+    assert lint_date_cell_shape(stage4, [_COMMITTEE_ROW], []) == []
 
 
 @pytest.mark.parametrize("code", ["D1", "D2", "D3", "I"])
@@ -1682,6 +1720,9 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     ("2004-10-07-2004-10-07", ["raw_value", "same_ends"]),
     ("2003-2005-09", ["raw_value"]),
     ("2015-ongoing", ["open_range"]),
+    ("2015-current", ["open_range"]),
+    ("Sept 2008 - Sept 2008", ["same_ends"]),
+    ("2009-summer", ["raw_value"]),
     ("2013\u20132013", ["same_ends"]),
     ("Oct. 2008 - Oct. 2008", ["same_ends"]),
     ("05/01/2008-05/01/2008", ["same_ends"]),
@@ -1750,17 +1791,18 @@ def test_date_cell_shape_ties_each_row_of_a_record_table_to_its_own_entry():
         ("entry 2 (N3B)", "WARN", ["2014-Present"])]
 
 
-def test_date_cell_shape_keeps_label_words_out_of_a_record_table_context():
+@pytest.mark.parametrize("colon", [":", ": "])
+def test_date_cell_shape_keeps_label_words_out_of_a_record_table_context(colon):
     """In a label/value table the labels ("Mentoring Period:") are the same
     in every record, so they must not tie the date to an entry that merely
-    uses those words."""
+    uses those words. A label is read with or without trailing space."""
     stage4 = {"entries": [
         _dated4("Mentoring period, Zephyr Hall, 2019", "N3B", "2019", None,
                 idx=1),
         _dated4("Zephyr Quillon, doctoral student, 2019", "N3B", "2019", None,
                 idx=2)]}
-    rows = [[["Mentee Name:", "Zephyr Quillon"],
-             ["Mentoring Period:", "2019-2019"]]]
+    rows = [[[f"Mentee Name{colon}", "Zephyr Quillon"],
+             [f"Mentoring Period{colon}", "2019-2019"]]]
     findings = lint_date_cell_shape(stage4, rows, [])
     assert [f["message"].split(": ")[0] for f in findings] == ["entry 2 (N3B)"]
 
@@ -1828,16 +1870,33 @@ def test_date_cell_shape_reads_a_date_that_opens_a_paragraph():
     ("\u2022 2013-2013 - Lecture on example topics, Example Medical School",
      "2013-2013"),
     ("2013-2013: Lecture on example topics, Example Medical School", "2013-2013"),
+    ("2013-2013, Lecture on example topics, Example Medical School", "2013-2013"),
+    ("2013-2013\tLecture on example topics, Example Medical School", "2013-2013"),
     ("oct 2013 to oct 2013 - Lecture on example topics, Example Medical School",
      "oct 2013 to oct 2013"),
 ])
 def test_date_cell_shape_reads_each_dated_paragraph_shape(line, rendered):
-    """A bullet before the date, a colon after it, and a lowercase month."""
+    """A bullet before the date; a colon, comma or tab after it; and a
+    lowercase month."""
     stage4 = {"entries": [_dated4("Lecture on example topics, Example Medical "
                                   "School, 2013", "K1", "2013", "2013", idx=7)]}
     findings = lint_date_cell_shape(stage4, [], [("p", line)])
     assert [(f["message"].split(": ")[0], f["evidence"]) for f in findings] == [
         ("entry 7 (K1)", [rendered])]
+
+
+def test_date_cell_shape_does_not_tie_a_paragraph_by_the_words_of_its_own_date():
+    """A paragraph's context is the text after its date: the month word of
+    the date itself would tie it to whichever entry also names the month."""
+    stage4 = {"entries": [
+        _dated4("Example seminar, Sample College, October 2008", "K1",
+                "2008-10", "2008-10", idx=7),
+        _dated4("Example seminar, Other College, 2008", "K1", "2008", "2008",
+                idx=8)]}
+    blocks = [("p", "October 2008 to October 2008 - Example seminar")]
+    findings = lint_date_cell_shape(stage4, [], blocks)
+    assert [(f["message"].split(": ")[0], f["evidence"]) for f in findings] == [
+        ("same_ends", ["October 2008 to October 2008"])]
 
 
 def test_date_cell_shape_reads_a_paragraph_that_is_only_a_date():
@@ -1849,11 +1908,13 @@ def test_date_cell_shape_reads_a_paragraph_that_is_only_a_date():
 
 
 def test_date_cell_shape_quotes_untied_dates_up_to_the_limit():
-    cells = ["2013-2013", "2014-2014", "2015-2015", "2016-2016"]
+    """The count is every untied date; the evidence quotes each distinct
+    one once, up to the limit."""
+    cells = ["2013-2013", "2013-2013", "2014-2014", "2015-2015", "2016-2016"]
     findings = lint_date_cell_shape({"entries": []}, [[[c] for c in cells]], [])
     assert [(f["message"].split(": ")[:2], f["evidence"]) for f in findings] == [
-        (["same_ends", "4 rendered date(s) tied to no stage-4 entry"],
-         cells[:3])]
+        (["same_ends", "5 rendered date(s) tied to no stage-4 entry"],
+         ["2013-2013", "2014-2014", "2015-2015"])]
 
 
 def test_date_cell_shape_skips_the_appendix():
