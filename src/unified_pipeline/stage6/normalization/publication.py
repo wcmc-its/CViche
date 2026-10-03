@@ -45,12 +45,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
 
-from .citation_matching import (
-    _append_missing_stage5d_values,
-    _restore_stage5d_authors,
-    _stage5d_cut_owner,
-)
-from .authors import _join_spaced_initials, _normalize_author_names
+from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_owner
+from .authors import _normalize_author_names
 
 #: The value `extracted_fields['formatting_source']` carries when stage 5d's
 #: LLM wrote `formatted_citation`. It is the only source the renderer trusts
@@ -187,11 +183,13 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     """Read one raw bibliography entry and return the record a renderer prints.
 
     `entry` is raw stage-4/stage-5 JSON and carries more than this reads
-    (`enrichment_status`, `text`, `classification_reasoning`, the taxonomy
-    code), which is why it is annotated as the mapping it is rather than a
-    TypedDict that would describe only part of it. The three keys taken here
-    are `extracted_fields` (`PublicationFields`), `enrichment_data`
-    (`PubMedEnrichment`) and `enriched_fields`.
+    (`enrichment_status`, `classification_reasoning`, the taxonomy code),
+    which is why it is annotated as the mapping it is rather than a
+    TypedDict that would describe only part of it. The keys taken here are
+    `extracted_fields` (`PublicationFields`), `enrichment_data`
+    (`PubMedEnrichment`), `enriched_fields`, and `text` -- the CV's own
+    line, which the stage-5d owner restore reads when stage 4's author list
+    is damaged (#1259), coerced by `_text` like any other value.
 
     Each is guarded with `or` and then a type check, not with a `.get`
     default (#659): a default only applies when the key is *absent*, so an
@@ -238,11 +236,10 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     formatted_citation = _text(fields.get('formatted_citation'))
     if formatted_citation and fields.get('formatting_source') == _STAGE_5D_FORMATTING_SOURCE:
         # 5d's "first 6, et al." rule cut the CV owner from their own
-        # citations; stage 4 kept the whole list (#1259).
-        raw_authors = _text(fields.get('authors'))
-        if _stage5d_cut_owner(formatted_citation, raw_authors, _text(fields.get('target_name'))):
-            formatted_citation = _restore_stage5d_authors(
-                formatted_citation, _normalize_author_names(_join_spaced_initials(raw_authors)))
+        # citations; stage 4's list or the CV's own line still has them (#1259).
+        formatted_citation = _restore_stage5d_owner(
+            formatted_citation, _text(fields.get('authors')), _text(entry.get('text')),
+            _text(fields.get('target_name')))
         formatted_citation = _append_missing_stage5d_values(
             formatted_citation, editors, publisher)
     else:
