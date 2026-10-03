@@ -1312,6 +1312,39 @@ def test_a_place_of_birth_after_a_born_label_never_fills_office_address(tmp_path
     assert "Exampleville" not in _all_text(tmp_path / "out.docx")
 
 
+@pytest.mark.parametrize("text", [
+    # the continuation stops at a line break by design
+    f"Born: {PRE_LLM_PLACEHOLDER}\nExampleville, Examplestan",
+    # no colon after the birth word
+    f"Born {PRE_LLM_PLACEHOLDER}; Exampleville, Examplestan",
+    f"Place of birth\tExampleville, Examplestan",
+])
+def test_an_address_on_a_birth_line_never_fills_office_address(tmp_path, text):
+    """#1223 (EBYSBC EQADVR-02, the issue's "never fill office_address from a
+    born/birth line"): a birth word in the entry and no address or workplace
+    word, so stage 4's `address` is the place of birth. It fills no Office
+    cell, is withheld, and the entry's residual is not recovered either."""
+    rows = _contact_rows(tmp_path, [
+        _a(text, {"address": "Exampleville, Examplestan"}),
+    ])
+    assert rows["Office address:"] == ""
+    assert "Exampleville" not in _all_text(tmp_path / "out.docx")
+    assert "birth" in _withheld_comment(tmp_path)
+
+
+@pytest.mark.parametrize("text", [
+    f"Born: {PRE_LLM_PLACEHOLDER}\nOffice: 1 Sample Way, Exampleton, ZZ 00000",
+    f"Born {PRE_LLM_PLACEHOLDER}; Address: 1 Sample Way, Exampleton, ZZ 00000",
+])
+def test_a_labelled_address_beside_a_birth_line_still_fills_office_address(tmp_path, text):
+    """The negative control: an address or workplace word says the value is
+    a contact address, so the birth guard leaves it in Office address."""
+    rows = _contact_rows(tmp_path, [
+        _a(text, {"address": "1 Sample Way, Exampleton, ZZ 00000"}),
+    ])
+    assert "1 Sample Way" in rows["Office address:"]
+
+
 def test_married_and_grandchildren_lines_never_reach_the_appendix(tmp_path):
     """#1223 (EBYSBC EQADVR-01): two A-coded family lines the Personal Data
     block does not consume were recovered into the Appendix whole."""

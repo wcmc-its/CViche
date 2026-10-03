@@ -95,6 +95,7 @@ from .pii import (  # noqa: F401
     _PII_FRAGMENT_SPLIT_RE,
     CAT_DEA,
     CAT_HOME_CONTACT,
+    CAT_PLACE_OF_BIRTH,
     WithheldItem,
     _squash,
     _pii_fragments,
