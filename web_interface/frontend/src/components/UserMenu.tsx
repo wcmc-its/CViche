@@ -93,7 +93,9 @@ export default function UserMenu({ className }: UserMenuProps) {
         )}
         <span className="leading-tight">
           <span className="block text-sm font-medium text-gray-900">{user.display_name}</span>
-          <span className="block text-xs text-gray-500">{user.role === 'admin' ? 'Admin' : 'Member'}</span>
+          <span className="block text-xs text-gray-500">
+            {user.role === 'admin' ? 'Admin' : user.role === 'staff' ? 'Staff' : 'Member'}
+          </span>
         </span>
       </button>
 

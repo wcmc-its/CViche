@@ -77,7 +77,8 @@ When enabled, CViche checks Enterprise Directory group membership at login via L
 
 - **Access group:** Users must be a member of this group to access CViche. Users not in the group are denied at login.
 - **Admin group:** Users in this group receive the admin role. Admin group membership does not grant access by itself -- users must also be in the access group.
-- Group DNs are configured in `auth_config.yaml` under `ed.access_group` and `ed.admin_group` (e.g., `cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu`).
+- **Staff group (optional):** Users in this group receive the read-only `staff` role: every user's runs, run quality, pipeline logs and feedback insights, but no cost, settings, user management or deletes. Like admin, it does not grant access by itself, and admin wins for a user in both. Unset means nobody is staff.
+- Group DNs are configured in `auth_config.yaml` under `ed.access_group`, `ed.admin_group` and the optional read-only `ed.staff_group` (e.g., `cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu`).
 - LDAP connection requires the following environment variables on the CViche server: `ED_LDAP_URL`, `ED_LDAP_BIND_DN`, `ED_LDAP_BIND_PASSWORD`.
 
 Group membership is re-checked on each request using a cache with a 5-minute TTL. If the Enterprise Directory is temporarily unavailable, CViche uses the last-known result for up to 30 minutes before denying access.

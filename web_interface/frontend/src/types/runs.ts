@@ -32,7 +32,7 @@ export interface RunStatus {
   steps: StepSummary[]
 }
 
-/** Who ran a run; only sent by GET /api/runs?scope=all (admin). */
+/** Who ran a run; only sent by GET /api/runs?scope=all (admin or staff). */
 export interface RunBy {
   id: number
   display_name: string
@@ -169,13 +169,13 @@ export interface RunReviewNote {
 export type RunListScope = 'mine' | 'all'
 
 /** Query params for GET /api/runs and /api/runs/filter-options. The filters are
- *  honoured only with scope 'all' (admin); `run_by` is a user id or 'self'. */
+ *  honoured only with scope 'all' (admin or staff); `run_by` is a user id or 'self'. */
 export type RunFeedbackFilter = 'given' | 'needed'
 
 /** Whether the uploaded CV was written in the WCM CV template; 'unknown' = not classified. */
 export type RunInputFormatFilter = 'wcm' | 'other' | 'unknown'
 
-/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'red' = score band RED (admin only: 403 under scope 'mine'). */
+/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'red' = score band RED (scope 'all' only: 403 under scope 'mine'). */
 export type RunStatusFilter = 'running' | 'failed' | 'red'
 
 export interface RunListParams {

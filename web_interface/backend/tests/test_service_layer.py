@@ -924,16 +924,18 @@ class TestAdminCsvExportStreaming:
     """#128: the export streams from a generator in bounded chunks instead of
     buffering the whole table; the bytes are unchanged."""
 
-    def _get(self, client, export_type):
+    def _get(self, client, export_type, role="admin"):
         from app.main import app
-        from app.auth import require_admin
+        from app.auth import get_current_user
 
-        app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
-            email="admin@example.com", role="admin")
+        # Override the session, not the role gate, so the route's real
+        # require_view_all_runs dependency and its staff export check both run.
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+            email=f"{role}@example.com", role=role)
         try:
             return client.get(f"/api/admin/export/{export_type}")
         finally:
-            app.dependency_overrides.pop(require_admin, None)
+            app.dependency_overrides.pop(get_current_user, None)
 
     @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
     def test_output_identical_to_pre_streaming_behavior(self, client, db, export_type, monkeypatch):
@@ -958,7 +960,8 @@ class TestAdminCsvExportStreaming:
 
         async def collect():
             resp = await admin_routes.export_csv(
-                export_type, db=db, admin=SimpleNamespace(email="admin@example.com"))
+                export_type, db=db,
+                viewer=SimpleNamespace(email="admin@example.com", role="admin"))
             return [c async for c in resp.body_iterator]
 
         chunks = asyncio.run(collect())
@@ -966,6 +969,31 @@ class TestAdminCsvExportStreaming:
         assert len(chunks) > 1
         assert "".join(c if isinstance(c, str) else c.decode() for c in chunks) \
             == _EXPECTED_EXPORTS[export_type]
+
+    def test_staff_can_export_feedback_for_feedback_insights(self, client, db):
+        _seed_export_fixture(db)
+
+        resp = self._get(client, "feedback", role="staff")
+
+        assert resp.status_code == 200
+        assert resp.content.decode("utf-8") == _EXPECTED_EXPORTS["feedback"]
+
+    @pytest.mark.parametrize("export_type", ["runs", "users", "consent"])
+    def test_staff_is_forbidden_every_other_export(self, client, db, export_type):
+        """runs carries total_cost (admin-only, #1111); users and consent are
+        user-management data. Staff is read-only insight, not either."""
+        _seed_export_fixture(db)
+
+        resp = self._get(client, export_type, role="staff")
+
+        assert resp.status_code == 403
+
+    def test_plain_user_is_forbidden_the_feedback_export(self, client, db):
+        _seed_export_fixture(db)
+
+        resp = self._get(client, "feedback", role="user")
+
+        assert resp.status_code == 403
 
     def test_rows_are_fetched_in_bounded_batches_not_all_at_once(self, db, monkeypatch):
         """The query must carry yield_per, otherwise .all()-style hydration of

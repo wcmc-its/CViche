@@ -15,12 +15,12 @@ const run = (over: Partial<RunSummary>): RunSummary => ({
 const onSelectRun = vi.fn()
 const onOpenBatch = vi.fn()
 
-function renderTable(runs: RunSummary[], older: RunSummary[] = [], isAdmin = false) {
+function renderTable(runs: RunSummary[], older: RunSummary[] = [], allRunsView = false) {
   render(
     <MemoryRouter>
       <RunTable
         groups={runs.map((r) => ({ key: r.run_id, owner: r.cv_owner_name ?? null, latest: r, older }))}
-        isAdmin={isAdmin}
+        allRunsView={allRunsView}
         showCost={false}
         currentUserId={7}
         sortField="started_at"
@@ -95,13 +95,13 @@ describe('RunTable batch tag', () => {
 
 describe('RunTable phone cards', () => {
   const onFilter = vi.fn()
-  const renderCards = (runs: RunSummary[], older: RunSummary[] = [], isAdmin = true) => {
+  const renderCards = (runs: RunSummary[], older: RunSummary[] = [], allRunsView = true) => {
     mockViewport(639)
     render(
       <MemoryRouter>
         <RunTable
           groups={runs.map((r) => ({ key: r.run_id, owner: r.cv_owner_name ?? null, latest: r, older }))}
-          isAdmin={isAdmin} showCost={false} currentUserId={7} sortField="started_at" sortDir="desc"
+          allRunsView={allRunsView} showCost={false} currentUserId={7} sortField="started_at" sortDir="desc"
           onSort={vi.fn()} onSelectRun={onSelectRun} onFilter={onFilter} onOpenBatch={onOpenBatch}
         />
       </MemoryRouter>,

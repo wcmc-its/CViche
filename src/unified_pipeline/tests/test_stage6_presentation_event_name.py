@@ -138,13 +138,86 @@ def _cells(**fields):
     raise AssertionError("row not rendered")
 
 
-def test_empty_title_keeps_the_raw_text_and_shows_the_role():
-    """The LLM emptied title but filled role: the raw entry text must still
-    render as the Title (it holds the talk title) and the role must appear."""
+def test_empty_title_keeps_the_rest_of_the_raw_text_and_shows_the_role():
+    """The LLM emptied title but filled role: what the source line says beyond
+    role, venue and year may be the talk title (#475), so it still renders --
+    without the leading year the Dates cell shows (EBYSBC E23)."""
     cells = _cells(title="", role="Visiting Professor",
                    location="Northgate Institute, Springfield")
-    assert cells[0] == "2022\t* raw source line, Springfield"
+    assert cells[0] == "* raw source line, Springfield"
     assert cells[1] == "Visiting Professor, Northgate Institute, Springfield"
+
+
+def _untitled_row(text, **fields):
+    """Render one title-less R entry and return its cells."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None
+    gen._fill_presentations(
+        [{"taxonomy_code": "R", "text": text, "extracted_fields": fields}])
+    for table in gen.doc.tables:
+        for row in table.rows:
+            cells = [c.text for c in row.cells]
+            if cells[-1] and cells[-1] == fields["date"][:4]:
+                return cells
+    raise AssertionError("row not rendered")
+
+
+def test_untitled_talk_with_event_name_is_titled_by_the_event_not_the_source_line():
+    """EBYSBC MRJDWE-08: a numbered 'N. YYYY. <series>. <venue>' line filled the
+    Title cell, repeating the venue and year of the next two cells."""
+    cells = _untitled_row("4. 2018. Zorblax Seminar series. Northgate Diabetes Center",
+                          date="2018", event_name="Zorblax Seminar series",
+                          location="Northgate Diabetes Center")
+    assert cells == ["Zorblax Seminar series", "Northgate Diabetes Center", "2018"]
+
+
+def test_untitled_talk_is_titled_by_role_and_event_name():
+    cells = _untitled_row("2021 Fern Graduate Program, Annual Retreat Presenter, CO",
+                          date="2021", role="Presenter",
+                          event_name="Fern Graduate Program, Annual Retreat", location="CO")
+    assert cells == ["Presenter, Fern Graduate Program, Annual Retreat", "CO", "2021"]
+
+
+def test_untitled_talk_with_role_only_drops_venue_and_trailing_date():
+    cells = _untitled_row("Visiting Professor, Northgate School\t  March  1976",
+                          date="1976-03", role="Visiting Professor",
+                          location="Northgate School")
+    assert cells == ["Visiting Professor", "Northgate School", "1976"]
+
+
+def test_untitled_talk_drops_the_leading_year_and_the_venue_from_the_source_line():
+    """EBYSBC GJXIWD-04: '<year> Invited Speaker - <program>, <venue>' with no
+    role field -- the year and venue already fill their own cells."""
+    cells = _untitled_row("2019 Invited Speaker - Zorblax Program, Northgate University, CO",
+                          date="2019", event_name="Zorblax Program",
+                          location="Northgate University, CO")
+    assert cells == ["Invited Speaker - Zorblax Program", "Northgate University, CO", "2019"]
+
+
+def test_untitled_talk_with_only_a_venue_leaves_the_title_blank():
+    """EBYSBC RNKYST-06: the line is year and venue only; both have cells."""
+    cells = _untitled_row("2003: Northgate University", date="2003",
+                          location="Northgate University")
+    assert cells == ["", "Northgate University", "2003"]
+
+
+def test_leading_year_is_kept_when_the_dates_cell_does_not_show_it():
+    """No date field: the year in the line is the only place the year renders."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None
+    gen._fill_presentations([{"taxonomy_code": "R",
+                              "text": "2010 Northgate School: Widget Studies",
+                              "extracted_fields": {}}])
+    firsts = [row.cells[0].text for table in gen.doc.tables for row in table.rows]
+    assert "2010 Northgate School: Widget Studies" in firsts
+
+
+def test_venue_is_removed_only_as_a_whole_word():
+    """A two-letter state venue must not cut into a word that starts with it."""
+    cells = _untitled_row("2020 Colloquium on Copper Widgets, CO", date="2020", location="CO")
+    assert cells == ["Colloquium on Copper Widgets", "CO", "2020"]
 
 
 def test_role_is_stripped_before_it_is_rendered():
@@ -195,3 +268,43 @@ def test_a_dict_dated_row_sorts_into_date_order_not_to_the_bottom():
         for i, date in enumerate(dates)])
     rows = [[c.text for c in row.cells] for table in gen.doc.tables for row in table.rows]
     assert [r[-1] for r in rows if r[0].startswith("Example Talk")] == ["2021", "2020", "2019"]
+
+
+def test_untitled_talk_drops_a_closing_date_with_its_weekday_and_no_stranded_stop():
+    cells = _untitled_row("Zorblax Network Conference, Springfield, ZZ. Saturday July 24, 2010.",
+                          date="2010", location="Springfield, ZZ")
+    assert cells == ["Zorblax Network Conference", "Springfield, ZZ", "2010"]
+
+
+def test_untitled_talk_leaves_no_stranded_full_stop_after_the_venue():
+    cells = _untitled_row("2020 Invited Speaker, Fern Center, Online.", date="2020",
+                          location="Fern Center, Online")
+    assert cells == ["Invited Speaker", "Fern Center, Online", "2020"]
+
+
+def test_closing_date_is_kept_when_the_dates_cell_shows_another_year():
+    cells = _untitled_row("Zorblax Lecture, Fern Hall, March 1999", date="2001",
+                          location="Fern Hall")
+    assert cells[0] == "Zorblax Lecture, March 1999"
+
+
+def test_venue_inside_a_phrase_is_kept():
+    """Cutting the venue out of 'hosted by <venue>' would leave the phrase
+    dangling; only a venue set off as its own segment is removed."""
+    cells = _untitled_row("2020 Fern Symposium hosted by Northgate University (online)",
+                          date="2020", location="Northgate University")
+    assert cells[0] == "Fern Symposium hosted by Northgate University (online)"
+
+
+def test_list_number_is_dropped_from_a_kept_source_line():
+    cells = _untitled_row("(7) Zorblax workshop talk, Northgate Hall", date="1990",
+                          location="Northgate Hall")
+    assert cells[0] == "Zorblax workshop talk"
+
+
+def test_joining_words_alone_do_not_keep_the_source_line():
+    """'at' is all that is left once role and venue are out: the role alone
+    is the title, not a line that repeats the venue."""
+    cells = _untitled_row("2015 Invited Speaker at Northgate University", date="2015",
+                          role="Invited Speaker", location="Northgate University")
+    assert cells == ["Invited Speaker", "Northgate University", "2015"]

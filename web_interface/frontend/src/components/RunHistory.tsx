@@ -5,7 +5,7 @@ import { listBatches } from '../api/batches'
 import type { BatchSummary, RunFilterOptions, RunSummary, StatusFilterCounts } from '../types'
 import { NARROW_FILTERS_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import ErrorBanner from './ErrorBanner'
-import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
+import { useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
 import { ActiveFilterChips, FiltersPanel, RunFilterCombos, StatusPills } from './runs/RunFilterBar'
 import { countPanelFilters, hasActiveFilters, toListParams, toMemberListParams, useBatchFilter, useRunFilters } from './runs/runFilters'
@@ -70,10 +70,10 @@ function useBatches(onError: (message: string) => void): BatchSummary[] {
 }
 
 interface FilterRowProps {
-  isAdmin: boolean
+  allRunsView: boolean
   controls: RunFilterControls
   options: RunFilterOptions | null
-  /** Status pill counts: the filter-options' for admins, the caller's own for members. */
+  /** Status pill counts: the filter-options' for admins and staff, the caller's own for members. */
   statusCounts: StatusFilterCounts | null
   runs: RunSummary[]
   currentUserId: number | undefined
@@ -83,11 +83,11 @@ interface FilterRowProps {
   setBatch: (batchId: string) => void
 }
 
-/** The status pills, the filter combos (admin filters, then Batch for anyone with a batch) and the active chips.
+/** The status pills, the filter combos (all-runs filters, then Batch for anyone with a batch) and the active chips.
  *  The pills are hidden in a batch view, which they do not filter. */
-function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, statusCounts, ...bar }: FilterRowProps) {
+function RunFilterRow({ allRunsView, batches, batchId, setBatch, currentUserEmail, statusCounts, ...bar }: FilterRowProps) {
   const narrow = useMediaQuery(NARROW_FILTERS_QUERY)
-  const inPanel = isAdmin && narrow
+  const inPanel = allRunsView && narrow
   const batchCombo = (batches.length > 0 || batchId) && (
     <BatchFilterCombo batches={batches} batchId={batchId} currentUserId={bar.currentUserId} onPick={setBatch} fullWidth={inPanel} />
   )
@@ -95,14 +95,14 @@ function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, s
   const batchChip = batchId ? { value: selected ? batchLabel(selected) : batchId, onRemove: () => setBatch('') } : undefined
   return (
     <div className="mt-6">
-      {!batchId && <StatusPills controls={bar.controls} counts={statusCounts} isAdmin={isAdmin} />}
-      {(isAdmin || batchCombo) && (
+      {!batchId && <StatusPills controls={bar.controls} counts={statusCounts} allRunsView={allRunsView} />}
+      {(allRunsView || batchCombo) && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {inPanel ? (
             <FiltersPanel activeCount={countPanelFilters(bar.controls.filters, batchId)}>
               <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} stacked />
             </FiltersPanel>
-          ) : isAdmin
+          ) : allRunsView
             ? <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} />
             : <div className="flex flex-wrap gap-2 sm:ml-auto">{batchCombo}</div>}
         </div>
@@ -114,11 +114,12 @@ function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, s
 
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const { user } = useAuth()
-  const isAdmin = user?.role === 'admin'
+  // Admin or staff: the all-runs view (scope=all, filters, Run by, Score).
+  const allRunsView = useCanViewAllRuns()
   const showCost = useCanSeeCost()
-  const controls = useRunFilters(isAdmin)
+  const controls = useRunFilters(allRunsView)
   const { filters } = controls
-  const listParams = useMemo(() => (isAdmin ? toListParams(filters) : toMemberListParams(filters)), [isAdmin, filters])
+  const listParams = useMemo(() => (allRunsView ? toListParams(filters) : toMemberListParams(filters)), [allRunsView, filters])
   const filterKey = JSON.stringify(listParams ?? {})
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -157,7 +158,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   }, [listParams])
 
   useEffect(() => {
-    if (!isAdmin) return
+    if (!allRunsView) return
     let cancelled = false
     getRunFilterOptions(toListParams(filters))
       .then((data) => { if (!cancelled) setFilterOptions(data) })
@@ -166,17 +167,17 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
         if (!cancelled) setError('Unable to load the filter lists. Please refresh the page to try again.')
       })
     return () => { cancelled = true }
-  }, [isAdmin, filters])
+  }, [allRunsView, filters])
 
   // Members have no filter-options: their pill counts come from their own runs only.
   useEffect(() => {
-    if (isAdmin) return
+    if (allRunsView) return
     let cancelled = false
     getMyStatusCounts()
       .then((data) => { if (!cancelled) setMyCounts(data) })
       .catch((err) => { console.error('Error fetching status counts:', err) })
     return () => { cancelled = true }
-  }, [isAdmin, filterKey])
+  }, [allRunsView, filterKey])
 
   useEffect(() => {
     fetchRuns(currentPage * PAGE_SIZE).then(() => {
@@ -197,7 +198,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   // Grouping is per loaded page: reruns of the same faculty member that fall on
   // another page are not merged into this page's group.
-  const groups = groupRuns(runs).sort((a, b) => compareGroupsDir(a, b, sortField, sortDir, user?.user_id, isAdmin))
+  const groups = groupRuns(runs).sort((a, b) => compareGroupsDir(a, b, sortField, sortDir, user?.user_id, allRunsView))
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const startIndex = currentPage * PAGE_SIZE
@@ -212,7 +213,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     )
   }
 
-  const filterBarProps = { controls, options: filterOptions, statusCounts: isAdmin ? filterOptions?.status ?? null : myCounts, runs, currentUserId: user?.user_id }
+  const filterBarProps = { controls, options: filterOptions, statusCounts: allRunsView ? filterOptions?.status ?? null : myCounts, runs, currentUserId: user?.user_id }
 
   if (runs.length === 0 && !error && !hasActiveFilters(controls.filters) && !batchId) {
     return (
@@ -230,14 +231,14 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     <>
       <RunFilterRow
         {...filterBarProps}
-        isAdmin={isAdmin}
+        allRunsView={allRunsView}
         currentUserEmail={user?.email}
         batches={batches}
         batchId={batchId}
         setBatch={setBatch}
       />
       {batchId ? (
-        <BatchView batchId={batchId} isAdmin={isAdmin} currentUserId={user?.user_id} onSelectRun={onSelectRun} />
+        <BatchView batchId={batchId} allRunsView={allRunsView} currentUserId={user?.user_id} onSelectRun={onSelectRun} />
       ) : (
         <section ref={containerRef} aria-label="Previous runs" className="mt-4 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] overflow-hidden">
 
@@ -255,7 +256,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
             <>
               <RunTable
                 groups={groups}
-                isAdmin={isAdmin}
+                allRunsView={allRunsView}
                 showCost={showCost}
                 currentUserId={user?.user_id}
                 sortField={sortField}
