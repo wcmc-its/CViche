@@ -36,13 +36,18 @@ _OPEN_PERIOD = re.compile(r"present|current|ongoing", re.I)
 _CLOSED_RANGE = re.compile(r"\b(19|20)\d{2}\s*[-–]\s*(19|20)\d{2}\b")
 
 _BOARD = re.compile(
-    r"american board of|full name of board|certificate\s*#|board eligible",
+    r"american board of|national board of|full name of board|certificate\s*#|board eligible",
     re.I,
 )
+# A specialty board's own abbreviation leading the line ("ABIM, Cardiovascular
+# Disease 1995"), matched case-sensitively so ordinary words never read as one.
+# Only at the head: a residency row that names the board later on stays a residency
+# (#312, EBYSBC E11).
+_BOARD_ABBREV = re.compile(r"^[^A-Za-z]*AB[A-Z]{1,4}\b")
 # A board-certification shape beyond the board's name (#1235): a certification
 # word, or a board name plus a year outside an awards/honors/committee/
 # membership context.
-_BOARD_NAME = re.compile(r"american board of", re.I)
+_BOARD_NAME = re.compile(r"american board of|national board of", re.I)
 _BOARD_CERT_WORD = re.compile(
     r"board[\s-]*(?:certif|eligible)|\bdiplomat(?:e|s|es)?\b|re-?certif|\bcertifi(?:ed|cation)\b"
     r"|certificate\s*(?:#|no\b|number)",
@@ -52,7 +57,7 @@ _YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
 _NON_CERT_HIERARCHY = re.compile(
     r"award|honou?r|committee|member|societ|organi[sz]ation", re.I
 )
-_NON_CERT_TEXT = re.compile(r"\b(?:awards?|prizes?|committees?)\b", re.I)
+_NON_CERT_TEXT = re.compile(r"\b(?:awards?|prizes?|committees?|courses?|review)\b", re.I)
 _LICENSURE = re.compile(
     r"\b(dea|npi)\s*number\b|license\s*number|\blicensure\b|medical\s+license",
     re.I,
@@ -61,18 +66,19 @@ _LICENSURE = re.compile(
 # Only override these known-wrong source codes (never touch a confident,
 # already-plausible classification).
 _MENTEE_FROM = {"K1", "K2", "K3", "K4", "K5", "T", "N4"}
-_BOARD_FROM = {"I", "H", "C", "T"}
+_BOARD_FROM = {"I", "H", "C", "T", "B2"}
 _LICENSE_FROM = {"I", "H", "C", "T", "A", "F2"}
 
 
 def _is_board_certification(entry: dict) -> bool:
     """True when the entry has a board-certification shape, not just a board name."""
     text = entry.get("text", "") or ""
-    if not _BOARD.search(text):
+    named = bool(_BOARD_NAME.search(text) or _BOARD_ABBREV.search(text))
+    if not (named or _BOARD.search(text)):
         return False
     # WCM table labels / "board eligible" / certificate # with data (any digit);
     # the empty table-header row has no digit and is not promoted.
-    if not _BOARD_NAME.search(text):
+    if not named:
         return bool(re.search(r"\d", text))
     if _NON_CERT_TEXT.search(text):
         return False

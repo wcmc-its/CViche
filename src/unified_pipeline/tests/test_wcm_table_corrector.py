@@ -65,3 +65,35 @@ def test_board_name_alone_or_award_context_is_not_flipped(text, hierarchy, code)
 
 def test_empty_table_header_row_is_not_promoted():
     assert _code_after("Full Name of Board  Certificate #", ["Certifications"]) == "I"
+
+
+# --- #312 (EBYSBC E11): board abbreviations, the national board, and B2 rows ---
+
+@pytest.mark.parametrize(
+    "text,hierarchy,code",
+    [
+        ("ABIM, Example Subspecialty, 2031, 2041", ["Experience"], "I"),
+        ("ABXY, Example Subspecialty, 2031", ["Experience"], "I"),
+        ("Certifications: Diplomate, National Board of Example Examiners, 2031", ["Experience"], "I"),
+        ("2031 American Board of Example Medicine", ["Educational History"], "B2"),
+    ],
+)
+def test_board_abbreviation_national_board_and_b2_rows_become_f2(text, hierarchy, code):
+    assert _code_after(text, hierarchy, code) == "F2"
+
+
+@pytest.mark.parametrize(
+    "text,hierarchy,code",
+    [
+        ("Example Residency Program, 2031-2033, ABIM short-track pathway", ["Training"], "C"),
+        ("Abim Example Society, 2031", ["Memberships"], "I"),
+        ("2031 American Board of Example Medicine review course", ["Courses"], "B2"),
+        ("ABIM Example Award, 2031", ["Honors"], "H"),
+        # The abbreviation is matched case-sensitively: an ordinary word is no board.
+        ("About Example Topics, 2031", ["Experience"], "I"),
+        # A board-review row is not a certification, course word or not.
+        ("2031 American Board of Example Medicine item review panel", ["Educational History"], "B2"),
+    ],
+)
+def test_board_abbreviation_mid_line_or_in_award_context_is_not_flipped(text, hierarchy, code):
+    assert _code_after(text, hierarchy, code) == code

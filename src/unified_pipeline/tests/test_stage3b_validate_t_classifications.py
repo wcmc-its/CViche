@@ -344,3 +344,59 @@ def test_llm_outage_propagates_instead_of_returning_entries_unchanged(monkeypatc
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Notes are never offered for reclassification (#312, EBYSBC E11)
+# ---------------------------------------------------------------------------
+
+def _indexed(idx, text, code="T", **extra):
+    return {"element_idx_start": idx, "text": text, "hierarchy": ["OTHER"], "taxonomy_code": code, **extra}
+
+
+def _reclassify_everything_to_h(monkeypatch, seen):
+    def fake(**kw):
+        seen.append(kw["messages"][1]["content"])
+        return _llm_response(None) | {"content": json.dumps([
+            {"entry_index": i, "new_code": "H", "confidence": 0.9, "reasoning": "honor"} for i in range(10)
+        ])}
+    monkeypatch.setattr(classify, "call_llm", fake)
+
+
+def test_bare_url_pointer_line_and_running_header_stay_t_unasked(monkeypatch):
+    entries = [
+        _indexed(0, "Jane Example, MD", code="A"),
+        _indexed(5, "http://example.org/program.html"),
+        _indexed(6, "Mentoring Prizes - see section 7"),
+        _indexed(7, "Jane Example, MD"),
+        _indexed(8, "2031 Example Prize for teaching"),
+    ]
+    seen = []
+    _reclassify_everything_to_h(monkeypatch, seen)
+
+    updated, stats = classify.validate_t_classifications(entries, _taxonomy(("A", "H", "T")))
+
+    assert stats["t_entries_reviewed"] == 1
+    assert [e["taxonomy_code"] for e in updated] == ["A", "T", "T", "T", "H"]
+    assert "example.org" not in seen[0] and "see section" not in seen[0]
+
+
+def test_a_t_set_by_the_header_pin_is_not_offered(monkeypatch):
+    entries = [_indexed(0, "Opening line", code="A"),
+               _indexed(3, "Wrote an invited example article (see publication #12).", pre_pin_code="S2")]
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: pytest.fail("no T entry should reach the LLM"))
+
+    updated, stats = classify.validate_t_classifications(entries, _taxonomy(("A", "H", "T", "S2")))
+
+    assert stats["t_entries_reviewed"] == 0
+    assert updated[1]["taxonomy_code"] == "T"
+
+
+def test_the_opening_line_itself_is_still_reviewed(monkeypatch):
+    entries = [_indexed(0, "Jane Example, MD"), _indexed(4, "2031 Example Prize")]
+    seen = []
+    _reclassify_everything_to_h(monkeypatch, seen)
+
+    _updated, stats = classify.validate_t_classifications(entries, _taxonomy(("H", "T")))
+
+    assert stats["t_entries_reviewed"] == 2

@@ -24,6 +24,7 @@ from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
+from .header_pin import is_note_not_record
 from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
@@ -590,6 +591,14 @@ def _parse_t_validation_response(content: str) -> list:
     return reclassifications
 
 
+def _opening_line(entries: list[dict]) -> tuple[dict | None, str | None]:
+    """The CV's first entry (lowest element index) and its text, or (None, None)."""
+    if not entries:
+        return None, None
+    first = min(entries, key=lambda e: _safe_float(e.get("element_idx_start"), float("inf")))
+    return first, first.get("text")
+
+
 def validate_t_classifications(
     entries: list[dict],
     taxonomy: dict
@@ -615,7 +624,15 @@ def validate_t_classifications(
     # Find entries classified as exactly "T" (miscellaneous)
     # NOTE: We only review "T", not T-family codes like T1 (Community Engagement)
     # which are valid specific classifications
-    t_entries = [(i, e) for i, e in enumerate(entries) if e.get("taxonomy_code") == "T"]
+    # A T the header pin set is final, and a bare URL, a pointer-only line or the
+    # repeated running header is a note, not a record: neither is offered for
+    # reclassification (#312, EBYSBC E11).
+    opening_entry, opening_line = _opening_line(entries)
+    t_entries = [
+        (i, e) for i, e in enumerate(entries)
+        if e.get("taxonomy_code") == "T" and "pre_pin_code" not in e and not (
+            e is not opening_entry and is_note_not_record(e.get("text", ""), opening_line))
+    ]
 
     if not t_entries:
         return entries, {"t_entries_reviewed": 0, "t_entries_reclassified": 0, "cost": 0.0}
@@ -680,6 +697,9 @@ Respond with a JSON array of objects, one per entry:
 
         reclassified_count = 0
         malformed = 0
+        # Only an entry the prompt offered may be moved: the model never saw the
+        # notes kept back above, so an index naming one is not an answer about it.
+        offered_indices = {i for i, _ in t_entries}
         for reclass in reclassifications:
             if not isinstance(reclass, dict):
                 malformed += 1
@@ -690,7 +710,7 @@ Respond with a JSON array of objects, one per entry:
             # boolean entry_index must be excluded explicitly or it would
             # pass this check and index entries[True]/entries[False].
             if (not isinstance(entry_idx, int) or isinstance(entry_idx, bool)
-                    or not (0 <= entry_idx < len(updated_entries))):
+                    or entry_idx not in offered_indices):
                 malformed += 1
                 continue
 
