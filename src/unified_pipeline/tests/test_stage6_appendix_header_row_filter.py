@@ -1352,7 +1352,7 @@ def test_single_spaced_column_header_rows_are_dropped_with_both_signals(text, se
     "Sample Grant Title Example Funder 2019",  # a digit means data
     "Example Society, Member",  # sentence punctuation
     "Sample Site",  # two words
-    "Member of the example society",  # fewer than three capitalised words
+    "Member of the Guild",  # fewer than three capitalised words
     "Example Lecture Series hosted Sample Speakers",  # a lowercase word that is no connector
 ])
 def test_label_run_shape_keeps_data_and_prose(text):
