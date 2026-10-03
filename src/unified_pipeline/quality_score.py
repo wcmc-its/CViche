@@ -821,12 +821,14 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     question that gate already caps.
 
     The findings are run_doctor's own `protected_data_in_output` lint over
-    the same body-order blocks (#825: one scan, not two that drift).
+    the same body-order blocks and their tracked-deletion view (#825: one
+    scan, not two that drift; #1223: the deletions are scanned too).
     """
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
         return 0.5, reason, None
-    hits = len(lint_protected_data_in_output(docx_body_blocks(doc)))
+    hits = len(lint_protected_data_in_output(docx_body_blocks(doc),
+                                             docx_body_blocks(doc, deleted=True)))
     if hits:
         return 1.0, f"protected_data_hits={hits}; hard-fail cap={PROTECTED_DATA_CAP}", PROTECTED_DATA_CAP
     return 0.0, "protected_data_hits=0", None
