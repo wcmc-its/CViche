@@ -303,6 +303,26 @@ def test_a_grant_without_the_pending_fields_gets_neither_row():
     assert research_support.SUBMISSION_DATE_LABEL not in cells
 
 
+@pytest.mark.parametrize('code', ['M2A', 'M2B', 'M2C'])
+def test_the_owners_share_of_the_award_gets_its_own_row(code):
+    """#817 (EBYSBC E14): stage 4 keeps the owner's part of an award under the
+    off-schema `share_total`, which no row read. It renders under its own
+    label, never as the annual direct costs."""
+    fields = {'agency': 'NIH', 'title': 'Shared Kestrel Project',
+              'total_funding': '900000', 'share_total': '$120,500'}
+    cells = _cells(_generator()._create_grant_table(fields, code))
+    assert cells[research_support.SHARE_LABEL] == '$120,500'
+    assert cells[research_support.TOTAL_AWARD_LABEL] == '$900,000'
+    assert research_support.ANNUAL_COSTS_LABEL not in cells
+
+
+@pytest.mark.parametrize('share', [None, '', '   ', False])
+def test_a_grant_without_a_share_gets_no_share_row(share):
+    cells = _cells(_generator()._create_grant_table(
+        {'agency': 'NIH', 'title': 'Shared Kestrel Project', 'share_total': share}, 'M2C'))
+    assert research_support.SHARE_LABEL not in cells
+
+
 def test_grant_number_alone_becomes_the_award_source_when_there_is_no_agency():
     """With no agency at all the identifier is the whole Award Source value."""
     fields = {'grant_number': 'R01 CA123456', 'title': 'Cancer Immunology Project'}
@@ -2351,7 +2371,7 @@ def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
 def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     """The other direction: a declared key no reader wants is dead contract.
 
-    All 29 keys, `status` included, are reached through a `fields.get(...)` in
+    All 30 keys, `status` included, are reached through a `fields.get(...)` in
     this module -- `status` from the bucket rules rather than from a rendered
     row. A key left on the record type after its reader is deleted would go on
     suppressing that key's line in the unconsumed-fields diagnostic, silently.
@@ -2359,7 +2379,7 @@ def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
 
     assert declared_but_unread == set(), sorted(declared_but_unread)
-    assert len(research_support.CONSUMED_GRANT_FIELDS) == 29
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 30
 
 
 # --- #291: clinical trials render in the grant block ------------------------------

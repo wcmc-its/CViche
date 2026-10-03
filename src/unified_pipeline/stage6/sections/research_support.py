@@ -150,6 +150,10 @@ class GrantFields(TypedDict, total=False):
     # M2C's schema spells a pending grant's amount and date these two ways (#1299).
     total_funding_requested: str | int | float | None
     submission_date: str | None
+    # The CV owner's part of the award where the source table gives one beside
+    # the total. Not an M2 schema field: stage 4 writes it under this key on
+    # its own (#817, EBYSBC E14 YYVHNN-05).
+    share_total: str | int | float | None
     pi_name: str | None
     principal_investigator: str | None
     date: str | None
@@ -1018,6 +1022,9 @@ CO_INVESTIGATORS_LABEL = 'Co-Investigators:'
 # rather than "Total award:" (#1299, the #982 rule).
 TOTAL_REQUESTED_LABEL = 'Total requested:'
 SUBMISSION_DATE_LABEL = 'Submitted:'
+# The owner's part of the award (`share_total`), beside the total and never
+# under "Annual direct costs:", which is a different quantity (#817).
+SHARE_LABEL = 'Your share of award:'
 
 
 def _optional_grant_rows(
@@ -1033,7 +1040,7 @@ def _optional_grant_rows(
 
     Total requested and Submitted (#1299) carry the two M2C schema fields
     nothing else reads: a pending grant's requested amount and its submission
-    date.
+    date. Your share of award (#817) carries the off-schema `share_total`.
 
     Status and Notes (#982) keep a grant's own status word and labelled remark
     ("Update: withdrawn"), which reached no cell before. Major project goals
@@ -1050,6 +1057,9 @@ def _optional_grant_rows(
     requested = _format_currency(fields.get('total_funding_requested'))
     if requested:
         rows.append((TOTAL_REQUESTED_LABEL, requested))
+    share = _format_currency(fields.get('share_total'))
+    if share:
+        rows.append((SHARE_LABEL, share))
     submitted = format_date_for_section(fields.get('submission_date') or '', 'M2C')
     if submitted:
         rows.append((SUBMISSION_DATE_LABEL, submitted))
