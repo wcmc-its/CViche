@@ -96,14 +96,22 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     # w:tab -> tab_char (space by default) on purpose: a literal tab would trip the
     # mega-entry record heuristic downstream. The walk also descends into
     # smartTag/hyperlink/sdt/ins.
+    # w:noBreakHyphen is a hyphen stored as its own run element, not as a '-'
+    # inside w:t; skipping it fused the words around it ('PEER-REVIEWED' read
+    # 'PEERREVIEWED', a hyphenated surname lost its hyphen). It reads as '-',
+    # as python-docx's Run.text reads it. w:softHyphen is only a permitted
+    # break point, so it is not walked and reads as ''.
     WT, WBR, WCR, WTAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
+    WNBH = qn('w:noBreakHyphen')
     parts = []
-    for node in _iter_text_nodes(para._p, (WT, WBR, WCR, WTAB)):
+    for node in _iter_text_nodes(para._p, (WT, WBR, WCR, WTAB, WNBH)):
         if node.tag == WT:
             if node.text:
                 parts.append(node.text)
         elif node.tag == WTAB:
             parts.append(tab_char)
+        elif node.tag == WNBH:
+            parts.append('-')
         else:  # w:br / w:cr -> line break
             parts.append('\n')
     return ''.join(parts)
@@ -1708,20 +1716,24 @@ class OwnerSideChannel(TypedDict):
 
 def _side_channel_paragraph_text(p_elem: CT_P) -> str:
     """Text of a raw `<w:p>` lxml element, same tag walk as `get_paragraph_text`
-    (w:t / w:br / w:cr -> newline / w:tab -> space), but operating directly on
-    the element rather than a python-docx `Paragraph` wrapper -- sdt-nested
-    paragraphs have no such wrapper (python-docx has no `w:sdt` API; see the
-    module-level note in `get_paragraph_text`'s docstring)."""
+    (w:t / w:br / w:cr -> newline / w:tab -> space / w:noBreakHyphen -> '-'),
+    but operating directly on the element rather than a python-docx
+    `Paragraph` wrapper -- sdt-nested paragraphs have no such wrapper
+    (python-docx has no `w:sdt` API; see the module-level note in
+    `get_paragraph_text`'s docstring)."""
     from docx.oxml.ns import qn
 
     wt, wbr, wcr, wtab = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
+    wnbh = qn('w:noBreakHyphen')
     parts = []
-    for node in p_elem.iter(wt, wbr, wcr, wtab):
+    for node in p_elem.iter(wt, wbr, wcr, wtab, wnbh):
         if node.tag == wt:
             if node.text:
                 parts.append(node.text)
         elif node.tag == wtab:
             parts.append(' ')
+        elif node.tag == wnbh:
+            parts.append('-')
         else:  # w:br / w:cr -> line break
             parts.append('\n')
     return ''.join(parts)
