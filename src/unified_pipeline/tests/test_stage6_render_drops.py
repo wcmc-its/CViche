@@ -22,12 +22,16 @@ from unified_pipeline.stage6.parsing import (
     _is_mentoring_outcome,
     _is_orphan_fragment,
 )
+from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 from unified_pipeline.stage_6_word_template import (
+    _REROUTE_ANCHOR_OVERRIDES,
+    _SAME_FAMILY_KIND_FIELDS,
     _TAXONOMY_WARNED_CONFUSIONS,
     REROUTE_ACCEPTED_CROSS_FAMILY,
     REROUTE_ACCEPTED_SAME_FAMILY,
     REROUTE_CHECK,
     REROUTE_REFUSED_FIELDS,
+    REROUTE_REFUSED_MENTEE,
     WCMTemplateGenerator,
 )
 
@@ -297,6 +301,102 @@ def test_every_reroute_is_logged_without_entry_text() -> None:
     assert REROUTE_ACCEPTED_SAME_FAMILY.replace("_", " ") in records[0]["message"]
     dumped = json.dumps(records)
     assert "Doe" not in dumped and "Pat Example" not in dumped
+
+
+# --- EBYSBC class E18: an accepted reroute still misplaced the record ---------
+# A target's anchor was any rendered, non-generic field, so a shared
+# `institution` made a trainee the owner's degree row, a talk's `title` made it
+# an appointment, and an `organization` made a membership a leadership row.
+# Synthetic records, invented values.
+
+def _gen_and_code(entry: dict) -> tuple[WCMTemplateGenerator, str]:
+    gen = WCMTemplateGenerator(verbose=False)
+    [code] = gen._group_entries_by_code([entry])
+    return gen, code
+
+
+def test_mentee_is_never_rerouted_to_an_owner_record() -> None:
+    # Fields that would fit each target: a mentee is still someone else.
+    fits = {"B1": {"degree": "PhD", "institution": "Example U"},
+            "C": {"institution": "Example Hospital", "training_type": "Fellowship"},
+            "D1": {"institution": "Example U", "title": "Research Fellow"}}
+    for mentee_code in ("N3", "N3A", "N3B"):
+        for target, fields in fits.items():
+            entry = _fielded(mentee_code, [target], {**_MENTEE, **fields}, idx=81)
+            gen, code = _gen_and_code(entry)
+            assert code == mentee_code, (mentee_code, target)
+            assert "taxonomy_code_original" not in entry
+            [record] = _reroute_records(gen)
+            assert REROUTE_REFUSED_MENTEE.replace("_", " ") in record["message"]
+            assert (record["severity"], record["evidence"]) == ("INFO", ["element_idx_start 81"])
+
+
+def test_degree_target_needs_a_degree() -> None:
+    # A shared `institution` says nothing about a degree.
+    training = _fielded("C", ["B1"], {"institution": "Example Hospital", "role": "Resident",
+                                      "start_date": "2001"})
+    assert _gen_and_code(training)[1] == "C"
+    degree = _fielded("C", ["B1"], {"institution": "Example U", "degree": "MPH"})
+    assert _gen_and_code(degree)[1] == "B1"
+
+
+def test_position_target_needs_an_institution_and_a_title() -> None:
+    for target in ("D1", "D2"):
+        talk = _fielded("S8", [target], {"title": "A synthetic talk",
+                                         "conference_name": "Meeting X", "year": "2020"})
+        program = _fielded("B2", [target], {"program_name": "Program X",
+                                            "institution": "Society X", "start_date": "1999"})
+        unit = _fielded("G", [target], {"organization": "Center X", "department": "Department X"})
+        for entry in (talk, program, unit):
+            assigned = entry["hierarchy_mismatch_detail"]["assigned_code"]
+            assert _gen_and_code(entry)[1] == assigned, (target, assigned)
+        position = _fielded("G", [target], {"title": "Instructor", "institution": "Example U"})
+        assert _gen_and_code(position)[1] == target
+    # D3 writes `organization`, not `institution`.
+    for fields, expected in (({"title": "Analyst", "organization": "Firm X"}, "D3"),
+                             ({"title": "Analyst", "institution": "Firm X"}, "G"),
+                             ({"organization": "Firm X", "department": "Unit X"}, "G")):
+        assert _gen_and_code(_fielded("G", ["D3"], fields))[1] == expected, fields
+
+
+def test_leadership_target_needs_an_organization_and_a_role() -> None:
+    # A membership type is not a role Q1 writes; a role with no organization
+    # is a course or committee line.
+    affiliate = _fielded("I", ["Q1"], {"organization": "Society X", "membership_type": "Affiliate",
+                                       "start_date": "2020"})
+    lecturer = _fielded("K3", ["Q1"], {"role": "Lecturer", "start_date": "2005"})
+    for entry in (affiliate, lecturer):
+        assert _gen_and_code(entry)[1] == entry["hierarchy_mismatch_detail"]["assigned_code"]
+    president = _fielded("I", ["Q1"], {"organization": "Society X", "role": "President"})
+    assert _gen_and_code(president)[1] == "Q1"
+
+
+def test_chapter_is_not_rerouted_to_articles_by_its_heading() -> None:
+    # Same family, high confidence: the book, its editors or its publisher make
+    # it a chapter, and S1 writes none of them.
+    for book_field in ("book_title", "editors", "publisher"):
+        chapter = _fielded("S4", ["S1"], {"authors": "Doe J", "chapter_title": "Chapter X",
+                                          book_field: "Value X", "year": "2008"},
+                           idx=159, confidence=0.9)
+        gen, code = _gen_and_code(chapter)
+        assert code == "S4", book_field
+        [record] = _reroute_records(gen)
+        assert "S4->S1" in record["message"] and record["severity"] == "INFO"
+        assert REROUTE_REFUSED_FIELDS.replace("_", " ") in record["message"]
+    article = _fielded("S4", ["S1"], {"authors": "Doe J", "chapter_title": "Paper X",
+                                      "year": "2008", "editors": " "}, confidence=0.9)
+    assert _gen_and_code(article)[1] == "S1"
+
+
+def test_anchor_and_kind_fields_are_what_the_renderers_write() -> None:
+    # An anchor the target does not write would accept a record that renders
+    # without it; a kind field the target DOES write loses nothing on the move.
+    for target, groups in _REROUTE_ANCHOR_OVERRIDES.items():
+        for group in groups:
+            assert group and group <= _RENDERED_FIELDS[target], (target, group)
+    for (assigned, target), kind in _SAME_FAMILY_KIND_FIELDS.items():
+        assert assigned[0] == target[0], (assigned, target)
+        assert kind <= _RENDERED_FIELDS[assigned] and not kind & _RENDERED_FIELDS[target]
 
 
 # --- #983: multi-record entries fan out before the PII pass and dedup --------
