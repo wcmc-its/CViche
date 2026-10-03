@@ -859,3 +859,35 @@ def test_rendered_output_lines_excludes_instruction_box_only_when_asked():
     assert not any(box_phrase in ln.lower() for ln in excluded_lines)
     # Real content (the personal-data table) is unaffected either way.
     assert any("work email" in ln.lower() for ln in excluded_lines)
+
+
+def _append_tracked_insertion(paragraph, text: str) -> None:
+    """A w:ins run, the shape `_add_track_change_insertion` writes."""
+    ins = paragraph._p.makeelement(qn("w:ins"), {qn("w:id"): "1", qn("w:author"): "Test"})
+    run = ins.makeelement(qn("w:r"), {})
+    t = run.makeelement(qn("w:t"), {})
+    t.text = text
+    run.append(t)
+    ins.append(run)
+    paragraph._p.append(ins)
+
+
+def test_rendered_output_lines_reads_tracked_insertions_only_when_asked():
+    """python-docx's `paragraph.text` skips w:ins runs, which is how the
+    research summary and enriched citations are written (E27). A caller that
+    opts in sees them in body paragraphs and table cells; the default is
+    unchanged for every other caller."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    body_para = gen.doc.add_paragraph("Plain lead ")
+    _append_tracked_insertion(body_para, "Inserted body words")
+    cell_para = gen.doc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]
+    _append_tracked_insertion(cell_para, "Inserted cell words")
+
+    default_lines = gen._rendered_output_lines()
+    tracked_lines = gen._rendered_output_lines(include_tracked_insertions=True)
+
+    assert "Plain lead " in default_lines
+    assert not any("Inserted" in ln for ln in default_lines)
+    assert "Plain lead Inserted body words" in tracked_lines
+    assert "Inserted cell words" in tracked_lines
