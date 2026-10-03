@@ -363,6 +363,17 @@ LINT_COPY = {
         "research summary when stage 4.5 fails.",
         "Check the named part of the document. Rerun the CV, and send the run to the CViche team if "
         "it fails again."),
+    "owner_missing_from_citation": LintCopy(
+        "Owner's name missing from own citation",
+        "The source CV names the faculty member on a publication (as an author, a group member or "
+        "a co-presenter), but its citation in the document does not, usually because the author "
+        "list was cut to the first six names and \"et al.\".",
+        "Copy the full author list, with the faculty member's name, from the source CV."),
+    "etal_added": LintCopy(
+        "Co-authors cut to \"et al.\"",
+        "A citation lists its first authors and then \"et al.\", although the source CV lists "
+        "every author.",
+        "Copy the full author list from the source CV."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
