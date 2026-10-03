@@ -986,3 +986,210 @@ def test_title_search_ignores_a_preprint_record(tmp_path, monkeypatch):
     xml = _published_xml(pubtypes=('Preprint', 'Journal Article'))
     result, _, _ = _run_stage5(tmp_path, monkeypatch, _inpress_entry(), _found(xml))
     assert 'enrichment_data' not in result and 'in_press_note' not in result
+
+
+# ------------------- EBYSBC E19: wrong text written into accepted citations
+
+PAPER_PMID, NOTICE_PMID = '23456789', '34567890'
+
+
+def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',)):
+    """One PubmedArticle; `title` is raw XML, so it may hold inline markup."""
+    names = ''.join(f'<Author><LastName>{a.rsplit(" ", 1)[0]}</LastName>'
+                    f'<Initials>{a.rsplit(" ", 1)[1]}</Initials></Author>' for a in authors)
+    types = ''.join(f'<PublicationType>{t}</PublicationType>' for t in pubtypes)
+    return (f'<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>'
+            f'<Journal><JournalIssue><PubDate><Year>2025</Year></PubDate></JournalIssue>'
+            f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>'
+            f'<AuthorList>{names}</AuthorList><PublicationTypeList>{types}</PublicationTypeList>'
+            f'</Article></MedlineCitation></PubmedArticle>')
+
+
+def _article_set(*articles):
+    return FakeResponse(200, content=f'<PubmedArticleSet>{"".join(articles)}</PubmedArticleSet>'.encode())
+
+
+def _hits(*pmids):
+    return FakeResponse(200, json_data={'esearchresult': {'idlist': list(pmids)}})
+
+
+def _run_entries(tmp_path, monkeypatch, entries, responses):
+    enricher, session, _ = _make(monkeypatch, responses)
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': entries}))
+    return enricher.enrich_stage4_output(str(path))['entries'], session, enricher
+
+
+def test_article_title_keeps_the_text_inside_inline_markup(monkeypatch):
+    # QNZADH, AKPQEB (dev-242): `.text` stopped at <i>, so the stored title
+    # was "Control of " and stage 6 printed it in place of the CV's.
+    title = 'Control of <i>Fooella</i> growth by Ca<sup>2+</sup> in <b>vitro</b>'
+    enricher, _, _ = _make(monkeypatch, [_article_set(_article(PMID, title))])
+    record = enricher._fetch_pubmed_batch([PMID])[PMID]
+    assert record['title'] == 'Control of Fooella growth by Ca2+ in vitro'
+
+
+@pytest.mark.parametrize('notice', ['Published Erratum', 'Retraction Notice', 'Expression of Concern'])
+def test_title_search_takes_the_paper_not_a_notice_about_it(tmp_path, monkeypatch, notice):
+    # QNZADH (dev-242): an "accepted" article was matched to its erratum,
+    # whose title is the paper's with "Correction:" in front.
+    notice_record = _article(NOTICE_PMID, f'Correction: {INPRESS_TITLE}', pubtypes=(notice,))
+    paper = _article(PAPER_PMID, INPRESS_TITLE)
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_inpress_entry()], [
+        _hits(NOTICE_PMID, PAPER_PMID), _article_set(notice_record, paper)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_data']['pubmed_pmid'] == PAPER_PMID
+
+
+def test_title_search_with_only_an_erratum_leaves_the_entry_unmatched(tmp_path, monkeypatch):
+    notice_record = _article(NOTICE_PMID, f'Correction: {INPRESS_TITLE}', pubtypes=('Published Erratum',))
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_inpress_entry()], [
+        _hits(NOTICE_PMID), _article_set(notice_record)])
+    assert 'enrichment_data' not in result and 'in_press_note' not in result
+
+
+def test_title_search_still_matches_an_editorial_typed_comment(tmp_path, monkeypatch):
+    # An editorial is typed Comment; both Comment-typed title-search matches in
+    # the EBYSBC farm were the CV's own editorial, so Comment is not a notice.
+    editorial = _article(PAPER_PMID, INPRESS_TITLE, pubtypes=('Editorial', 'Comment'))
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_inpress_entry()], [
+        _hits(PAPER_PMID), _article_set(editorial)])
+    assert result['enrichment_data']['pubmed_pmid'] == PAPER_PMID
+
+
+# One DOI printed on two papers (AQCLHS, dev-242): the PubMed record is the
+# first paper's, and the second paper's title shares 2 of its 5 words (0.4).
+SHARED_TITLE = 'Heron migration along the northern coast in spring'
+OTHER_PAPER_TITLE = 'Heron migration counts in a southern wetland'
+
+
+def _paper_entry(title, idx, doi=DOI):
+    return {'element_idx_start': idx, 'taxonomy_code': 'S1', 'text': f'Garcia M. {title}.',
+            'extracted_fields': {'title': title, 'authors': 'Garcia M', 'doi': doi}}
+
+
+def _doi_found():
+    return [_hits(PAPER_PMID), _article_set(_article(PAPER_PMID, SHARED_TITLE))]
+
+
+@pytest.mark.parametrize('order', [(0, 1), (1, 0)])
+def test_shared_pmid_stays_with_the_paper_it_names(tmp_path, monkeypatch, order):
+    pair = [_paper_entry(SHARED_TITLE, 10), _paper_entry(OTHER_PAPER_TITLE, 11)]
+    entries = [pair[i] for i in order]
+    results, _, enricher = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    by_idx = {r['element_idx_start']: r for r in results}
+    assert by_idx[10]['enrichment_status'] == 'enriched'
+    other = by_idx[11]
+    assert other['enrichment_status'] == 'title_check_failed'
+    assert other['enrichment_rejected'] == {
+        'source': 'doi_search', 'pubmed_pmid': PAPER_PMID, 'pubmed_title': SHARED_TITLE,
+        'title_word_overlap': 0.4, 'shared_pmid_with': 10}
+    # Back on its own CV fields: nothing PubMed merged in survives.
+    assert other['extracted_fields'] == _paper_entry(OTHER_PAPER_TITLE, 11)['extracted_fields']
+    assert not {'enrichment_data', 'enrichment_source', 'enriched_fields'} & other.keys()
+    assert (enricher.stats['enriched'], enricher.stats['title_mismatches'],
+            enricher.stats['failed_lookups']) == (1, 1, 1)
+
+
+def test_one_pmcid_cited_for_two_papers_stays_with_the_paper_it_names(tmp_path, monkeypatch):
+    # #1219's CHXRBM case: one PMCID given for two papers that share topic words.
+    entries = [dict(_paper_entry(t, i), extracted_fields={'title': t, 'pmcid': PMCID})
+               for t, i in ((OTHER_PAPER_TITLE, 11), (SHARED_TITLE, 10))]
+    results, _, _ = _run_entries(tmp_path, monkeypatch, entries, [
+        FakeResponse(200, json_data={'records': [{'pmcid': PMCID, 'pmid': PAPER_PMID}]}),
+        _article_set(_article(PAPER_PMID, SHARED_TITLE))])
+    assert [r['enrichment_status'] for r in results] == ['title_check_failed', 'enriched']
+    assert 'pmid' not in results[0]['extracted_fields']
+
+
+@pytest.mark.parametrize('second_title, status', [
+    ('Heron migration along northern beaches', 'enriched'),  # 4 of 5 words: 0.8
+    ('Heron migration along wetlands', 'title_check_failed'),  # 3 of 4: 0.75
+])
+def test_second_holder_keeps_a_shared_pmid_only_as_the_same_paper(tmp_path, monkeypatch,
+                                                                   second_title, status):
+    # From MIN_TITLE_SEARCH_OVERLAP up it is the same paper listed twice (a CV
+    # listing a paper in two sections, retitled slightly).
+    entries = [_paper_entry(SHARED_TITLE, 10), _paper_entry(second_title, 11)]
+    results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == ['enriched', status]
+
+
+def test_untitled_entry_sharing_a_pmid_is_left_alone(tmp_path, monkeypatch):
+    untitled = _paper_entry('', 11)
+    results, _, _ = _run_entries(tmp_path, monkeypatch, [_paper_entry(SHARED_TITLE, 10), untitled],
+                                 _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == ['enriched', 'enriched']
+
+
+def test_a_pmid_held_in_another_document_is_not_shared(tmp_path, monkeypatch):
+    # One enricher, two documents: the first document's better match must not
+    # release the second document's entry (and must not be edited by it).
+    enricher, _, _ = _make(monkeypatch, _doi_found() * 2)
+    outputs = []
+    for title in (SHARED_TITLE, OTHER_PAPER_TITLE):
+        path = tmp_path / 's4.json'
+        path.write_text(json.dumps({'document_uid': 'x', 'entries': [_paper_entry(title, 10)]}))
+        outputs.append(enricher.enrich_stage4_output(str(path))['entries'][0])
+    assert [e['enrichment_status'] for e in outputs] == ['enriched', 'enriched']
+
+
+def test_equal_weak_matches_both_keep_a_shared_pmid():
+    # Two holders at the same overlap: nothing tells which paper it names.
+    enricher = PubMedEnricher(verbose=False)
+    record = {'pmid': PAPER_PMID, 'title': SHARED_TITLE, 'vernacular_title': '', 'authors': []}
+    entries = [_paper_entry(OTHER_PAPER_TITLE, i) for i in (10, 11)]
+    for entry in entries:
+        assert enricher._accept_record(entry, record, 'doi_search')
+    enricher._release_weaker_shared_pmids()
+    assert [e['enrichment_status'] for e in entries] == ['enriched', 'enriched']
+
+
+# OIYKZE (dev-242): PubMed's list for the owner's paper held the first ten of
+# 20+ names, and the owner, sixteenth in the CV, rendered nowhere.
+CV_AUTHORS = 'Abel A, Brandt B, Cole C, Quill JA, Wren D'
+
+
+def test_pubmed_list_cut_before_the_owner_is_detected():
+    assert stage5.pubmed_list_drops_the_owner(CV_AUTHORS, 'Quill JA', ['Abel A', 'Brandt B', 'Cole C'])
+    # "Last, F" CV lists and a list-typed authors field.
+    assert stage5.pubmed_list_drops_the_owner(
+        ['Abel, A', 'Brandt, B', 'Quill, J. A.'], 'Quill, J. A.', ['Abel A', 'Brandt B'])
+
+
+def test_pubmed_list_naming_the_owner_or_another_name_is_kept():
+    assert not stage5.pubmed_list_drops_the_owner(CV_AUTHORS, 'Quill JA', ['Abel A', 'Quill J'])
+    # A name the CV lacks: another spelling or another record, not a cut.
+    assert not stage5.pubmed_list_drops_the_owner(CV_AUTHORS, 'Quill JA', ['Abel A', 'Quille J'])
+    assert not stage5.pubmed_list_drops_the_owner(CV_AUTHORS, '', ['Abel A'])
+    # A CV list that does not name the owner either has nothing to restore.
+    assert not stage5.pubmed_list_drops_the_owner('Abel A, Brandt B', 'Quill JA', ['Abel A'])
+    assert not stage5.pubmed_list_drops_the_owner(CV_AUTHORS, 'Quill JA', [])
+
+
+def test_owner_initials_are_not_read_as_a_surname():
+    # "JA" is Quill's initials, not the coauthor surnamed Ja.
+    assert stage5.pubmed_list_drops_the_owner('Ja K, Quill JA', 'Quill JA', ['Ja K'])
+
+
+def _owner_entry():
+    return {'taxonomy_code': 'S1', 'text': f'{CV_AUTHORS}. {INPRESS_TITLE}.',
+            'extracted_fields': {'title': INPRESS_TITLE, 'authors': CV_AUTHORS,
+                                 'target_name': 'Quill JA', 'pmid': PMID}}
+
+
+def test_cv_author_list_renders_when_pubmed_cut_the_owner(monkeypatch):
+    xml = _article_set(_article(PMID, INPRESS_TITLE, authors=('Abel A', 'Brandt B', 'Cole C')))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_owner_entry(), PMID)])
+    data = result['enrichment_data']
+    assert data['pubmed_authors'] is None  # stage 6 falls back to the CV's list
+    assert data['pubmed_authors_without_owner'] == 'Abel A, Brandt B, Cole C'
+
+
+def test_pubmed_author_list_naming_the_owner_still_renders(monkeypatch):
+    xml = _article_set(_article(PMID, INPRESS_TITLE, authors=('Abel A', 'Quill JA')))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_owner_entry(), PMID)])
+    assert result['enrichment_data']['pubmed_authors'] == 'Abel A, Quill JA'
+    assert 'pubmed_authors_without_owner' not in result['enrichment_data']

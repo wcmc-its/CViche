@@ -21,6 +21,7 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
+import copy
 import os
 import sys
 import json
@@ -31,7 +32,7 @@ import unicodedata
 import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from datetime import datetime
 
 from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
@@ -80,6 +81,8 @@ PMCID_PATH_FAILURES = ('pmcid_conversion_failed', 'title_check_failed')
 # content words such as "DNA" and "HIV". Preventive, no incident: a stopword
 # proxy, not a measured value.
 _MIN_TITLE_WORD_LEN = 3
+# Surnames as short as "Li" and "Wu" are names.
+_MIN_SURNAME_WORD_LEN = 2
 
 
 # A CV entry the author called "in press" or "accepted" that has no
@@ -92,6 +95,14 @@ MIN_TITLE_SEARCH_OVERLAP = 0.8
 MIN_TITLE_SEARCH_WORDS = 4
 TITLE_SEARCH_MAX_HITS = 3
 PREPRINT_PUBTYPE = 'Preprint'
+# A title search can also return a notice about the paper, whose title is the
+# paper's own with "Correction:" in front (QNZADH, dev-242: an "accepted"
+# article was cited as its Published Erratum). None of these is ever what a CV
+# lists as in press. 'Comment' is not one of them: an editorial or commentary
+# is typed Comment, and both Comment-typed title-search matches in the
+# 63-run EBYSBC farm (2026-10-02) were the CV's own editorial.
+NOTICE_PUBTYPES = frozenset({'Published Erratum', 'Retraction Notice', 'Expression of Concern'})
+TITLE_SEARCH_EXCLUDED_PUBTYPES = NOTICE_PUBTYPES | {PREPRINT_PUBTYPE}
 # A paper in press is published within a couple of years of the year the CV
 # gives it. Of the 87 corpus matches (2026-10-02) with a CV year, 64 were 0-2
 # years later; the one at 4 years was a different paper by the same group
@@ -189,6 +200,27 @@ def shares_an_author(cv_authors: str | list[str] | None, pubmed_authors: list[st
     return any(_folded_words(a.rsplit(' ', 1)[0], 2) & cv_words for a in pubmed_authors)
 
 
+def pubmed_list_drops_the_owner(cv_authors: str | list[str] | None, target_name: str | None,
+                                pubmed_authors: list[str]) -> bool:
+    """Whether PubMed's author list is the CV's list with the owner cut out:
+    the CV's list names the owner (stage 4's `target_name`), PubMed's does
+    not, and every surname PubMed gives is in the CV's list (OIYKZE, dev-242:
+    the CV names 20+ authors with the owner sixteenth; the DOI's PubMed record
+    holds the first ten). A PubMed list with a name the CV lacks is another
+    spelling or another record, not a cut, and stays. Initials ("JA", "B.")
+    are not the owner's name, so all-uppercase words of `target_name` are
+    dropped. A list-typed `cv_authors` is read through its str(), which
+    keeps every name's words."""
+    name = ' '.join(w for w in str(target_name or '').split() if not w.isupper())
+    owner = _folded_words(name, _MIN_SURNAME_WORD_LEN)
+    cv_words = _folded_words(str(cv_authors or ''), _MIN_SURNAME_WORD_LEN)
+    surnames = [s for s in (_folded_words(a.rsplit(' ', 1)[0], _MIN_SURNAME_WORD_LEN)
+                            for a in pubmed_authors) if s]
+    return bool(owner & cv_words and surnames
+                and all(s <= cv_words for s in surnames)
+                and not any(owner & s for s in surnames))
+
+
 def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | None) -> bool:
     """False only when both years are known and PubMed's falls outside
     IN_PRESS_YEAR_WINDOW of the CV's."""
@@ -241,6 +273,18 @@ def _sanitize_error(error: Any) -> str:
     return re.sub(r'api_key=[^&\s]+', 'api_key=***', str(error))
 
 
+class _Acceptance(NamedTuple):
+    """One accepted record, kept until every lookup path has run so that an
+    entry sharing its PMID with a better-matching entry can be restored to
+    `before`, its state before the record was merged in."""
+    entry: dict
+    before: dict
+    pmid: str
+    pubmed_title: str
+    source: str
+    overlap: float | None
+
+
 class PubMedEnricher:
     """
     Enriches CV publication entries with PubMed data.
@@ -283,6 +327,9 @@ class PubMedEnricher:
         # (operation, status/exception) classes already logged at ERROR this run
         self._logged_failure_classes = set()
 
+        # This document's accepted records, for _release_weaker_shared_pmids
+        self._acceptances: list[_Acceptance] = []
+
     def enrich_stage4_output(self, stage4_path: str) -> dict[str, Any]:
         """
         Main entry point: Enrich a Stage 4 output file.
@@ -300,6 +347,7 @@ class PubMedEnricher:
         document_uid = stage4_data.get('document_uid', 'unknown')
         entries = stage4_data.get('entries', [])
         cv_owner = stage4_data.get('cv_owner')  # Pass through from Stage 4
+        self._acceptances = []
 
         if self.verbose:
             logger.info(f"\n{'='*60}")
@@ -380,6 +428,10 @@ class PubMedEnricher:
         for entry in no_id:
             entry['enrichment_status'] = 'no_identifier'
             enriched_entries.append(entry)
+
+        # 4b. One PMID accepted for two entries: only the paper it names keeps it.
+        # Before step 5, whose duplicate check reads the PMIDs entries hold.
+        self._release_weaker_shared_pmids()
 
         # 5. "In press" entries: title search, then record what PubMed shows
         self._resolve_in_press(pub_entries)
@@ -660,9 +712,11 @@ class PubMedEnricher:
         records = self._fetch_pubmed_batch(pmids) if pmids else {}
         # A preprint is the paper's earlier version, never what "in press"
         # names (QZWBKQ, dev-239: an "Appl Environ Microbiol, in press" entry
-        # matched its bioRxiv record, PubMed type Preprint).
+        # matched its bioRxiv record, PubMed type Preprint); an erratum is a
+        # notice about the paper (QNZADH, dev-242).
         scored = [(title_word_overlap(title, [r['title'], r['vernacular_title']]) or 0, r)
-                  for r in records.values() if PREPRINT_PUBTYPE not in r['publication_types']]
+                  for r in records.values()
+                  if not TITLE_SEARCH_EXCLUDED_PUBTYPES.intersection(r['publication_types'])]
         if not scored:
             return
         overlap, best = max(scored, key=lambda pair: pair[0])
@@ -888,9 +942,11 @@ class PubMedEnricher:
                 return None, None
             pmid = pmid_elem.text.strip()
 
-            # Title
+            # Title. itertext(), not .text: .text stops at the first inline
+            # element, so "Control of <i>Gene</i> ..." was stored as
+            # "Control of " (QNZADH, AKPQEB, dev-242).
             title_elem = article.find('.//ArticleTitle')
-            title = title_elem.text if title_elem is not None and title_elem.text else ''
+            title = ''.join(title_elem.itertext()) if title_elem is not None else ''
             vernacular_elem = article.find('.//VernacularTitle')
             vernacular_title = ''.join(vernacular_elem.itertext()) if vernacular_elem is not None else ''
 
@@ -1056,21 +1112,66 @@ class PubMedEnricher:
             [pubmed_record.get('title') or '', pubmed_record.get('vernacular_title') or ''],
         )
         if overlap is not None and overlap < MIN_TITLE_WORD_OVERLAP:
-            entry['enrichment_status'] = 'title_check_failed'
-            entry['enrichment_rejected'] = {
-                'source': source,
-                'pubmed_pmid': pubmed_record.get('pmid'),
-                'pubmed_title': pubmed_record.get('title'),
-                'title_word_overlap': round(overlap, 2),
-            }
-            self.stats['title_mismatches'] += 1
-            self.stats['failed_lookups'] += 1
+            self._reject_record(entry, source, pubmed_record.get('pmid'),
+                                pubmed_record.get('title'), overlap)
             return False
+        self._acceptances.append(_Acceptance(
+            entry, copy.deepcopy(entry), pubmed_record.get('pmid'),
+            pubmed_record.get('title'), source, overlap))
         self._merge_pubmed_data(entry, pubmed_record)
         entry['enrichment_status'] = 'enriched'
         entry['enrichment_source'] = source
         self.stats['enriched'] += 1
         return True
+
+    def _reject_record(self, entry: dict, source: str, pmid: str | None,
+                       pubmed_title: str | None, overlap: float,
+                       shared_pmid_with: int | None = None) -> None:
+        """Leave the entry on its CV-extracted fields, with the record it
+        refused kept under `enrichment_rejected` for audit. A refusal because
+        another entry matches the record better names that entry's
+        element_idx_start."""
+        entry['enrichment_status'] = 'title_check_failed'
+        entry['enrichment_rejected'] = {
+            'source': source,
+            'pubmed_pmid': pmid,
+            'pubmed_title': pubmed_title,
+            'title_word_overlap': round(overlap, 2),
+        }
+        if shared_pmid_with is not None:
+            entry['enrichment_rejected']['shared_pmid_with'] = shared_pmid_with
+        self.stats['title_mismatches'] += 1
+        self.stats['failed_lookups'] += 1
+
+    def _release_weaker_shared_pmids(self) -> None:
+        """When one PMID was accepted for several entries, the entry whose
+        title matches it best keeps it, and so does any other whose title
+        clears MIN_TITLE_SEARCH_OVERLAP (the same paper listed twice). Any
+        other holder is a different paper that cleared the ID paths' looser
+        MIN_TITLE_WORD_OVERLAP on shared topic words, and is put back as it
+        was before the record was merged (AQCLHS, dev-242: a CV gave two
+        consecutive papers one DOI, and the second, at 0.43, was replaced by
+        a copy of the first). Order-independent, so it runs once every ID
+        path is done. An untitled entry has no overlap to compare and is
+        left alone."""
+        holders: dict[str, list[_Acceptance]] = {}
+        for accepted in self._acceptances:
+            if accepted.overlap is not None and accepted.entry.get('enrichment_status') == 'enriched':
+                holders.setdefault(accepted.pmid, []).append(accepted)
+        for group in holders.values():
+            best = max(group, key=lambda accepted: accepted.overlap)
+            for accepted in group:
+                if accepted.overlap < min(best.overlap, MIN_TITLE_SEARCH_OVERLAP):
+                    self._restore_and_reject(accepted, best)
+
+    def _restore_and_reject(self, accepted: _Acceptance, keeper: _Acceptance) -> None:
+        entry = accepted.entry
+        entry.clear()
+        entry.update(accepted.before)
+        self.stats['enriched'] -= 1
+        self._reject_record(entry, accepted.source, accepted.pmid, accepted.pubmed_title,
+                            accepted.overlap,
+                            shared_pmid_with=keeper.entry.get('element_idx_start'))
 
     def _merge_pubmed_data(self, entry: dict, pubmed_record: dict):
         """
@@ -1099,6 +1200,15 @@ class PubMedEnricher:
             'publication_types': pubmed_record.get('publication_types', []),
             'mesh_terms': pubmed_record.get('mesh_terms', [])
         }
+
+        # Stage 6 renders pubmed_authors in place of the CV's list, so a
+        # PubMed list that cut the owner out is withheld and the CV's list
+        # renders; PubMed's is kept beside it for audit.
+        if pubmed_list_drops_the_owner(fields.get('authors'), fields.get('target_name'),
+                                       pubmed_record.get('authors') or []):
+            enrichment = entry['enrichment_data']
+            enrichment['pubmed_authors_without_owner'] = enrichment['pubmed_authors']
+            enrichment['pubmed_authors'] = None
 
         # Fill in missing identifier fields
         if not fields.get('pmid') and pubmed_record.get('pmid'):
