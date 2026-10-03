@@ -50,7 +50,7 @@ HONOR_MIN_NAME_WORDS = 4
 # Medicine") must be more than one word: "Surgery" sits inside every surgical
 # specialty.
 TRAINING_MIN_SPECIALTY_WORDS = 2
-# The longest bare acronym read as an institution of unknown expansion ("LPCHS").
+# The longest bare acronym read as an institution of unknown expansion ("NGCH").
 INSTITUTION_ACRONYM_MAX_CHARS = 8
 
 # Words every institution name shares; two names agreeing only on these are
