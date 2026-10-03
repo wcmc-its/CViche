@@ -528,3 +528,60 @@ def test_no_entries_with_a_foreign_table_is_left_alone():
     rows = [[c.text for c in r.cells] for r in table.rows[1:]]
     assert rows == [["foreign stale row", ""]]
     assert gen.stats['tables_populated'] == 0
+
+
+# --- EBYSBC E14: the licence type and status have no column of their own ------
+
+def _one_license(**fields):
+    base = {"state_country": "Wrenshire", "license_number": "77001",
+            "expiration_date": "2015-06-30"}
+    base.update(fields)
+    return [{"text": "Wrenshire licence 77001", "extracted_fields": base}]
+
+
+def test_status_follows_the_last_registration_date():
+    """SEKQUI-07: a relinquished licence read as one that simply lapsed."""
+    (record,) = _resolve_licensure(_one_license(status="voluntarily surrendered")).licenses
+    assert record.last_registration_date == "06/30/2015 (voluntarily surrendered)"
+    assert record.state == "Wrenshire"
+
+
+def test_status_alone_when_there_is_no_date():
+    (record,) = _resolve_licensure(_one_license(status="Inactive", expiration_date="")).licenses
+    assert record.last_registration_date == "Inactive"
+
+
+def test_license_type_follows_the_state():
+    """MYNQRA 56: a row with a country and a year said nothing about what
+    the licence was."""
+    (record,) = _resolve_licensure(_one_license(license_type="Pilot certificate")).licenses
+    assert record.state == "Wrenshire (Pilot certificate)"
+    assert record.number == "77001"
+
+
+def test_a_type_the_row_already_states_is_not_repeated():
+    (record,) = _resolve_licensure(
+        _one_license(state_country="Wrenshire Medical License", license_type="medical license")).licenses
+    assert record.state == "Wrenshire Medical License"
+
+
+def test_a_blank_or_non_scalar_status_or_type_adds_nothing():
+    for blank in ("", "   ", None, [], {}, ["Active"], True):
+        (record,) = _resolve_licensure(_one_license(status=blank, license_type=blank)).licenses
+        assert (record.state, record.last_registration_date) == ("Wrenshire", "06/30/2015"), blank
+
+
+def test_status_and_type_reach_the_document(tmp_path):
+    import json
+
+    entry = {"taxonomy_code": "F1", "element_idx_start": 0, "text": "Wrenshire licence 77001",
+             "extracted_fields": {"state_country": "Wrenshire", "license_number": "77001",
+                                  "expiration_date": "2015-06-30", "status": "Lapsed by request",
+                                  "license_type": "Pilot certificate"}}
+    source, target = tmp_path / "in.json", tmp_path / "out.docx"
+    source.write_text(json.dumps({"document_uid": "TESTAA", "entries": [entry]}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    rows = [[c.text for c in row.cells] for table in Document(str(target)).tables
+            for row in table.rows if row.cells and "77001" in row.cells[min(1, len(row.cells) - 1)].text]
+    assert rows and rows[0][0] == "Wrenshire (Pilot certificate)"
+    assert rows[0][-1] == "06/30/2015 (Lapsed by request)"

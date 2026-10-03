@@ -123,6 +123,46 @@ def test_either_value_alone_renders_as_it_is():
     assert _mentee(site_position="Fictional Fellow")["Site/Position:"] == "Fictional Fellow"
 
 
+# --- an institution or advisor under an off-schema key joins Site/Position ------
+# (class E14, EBYSBC HFAJCC-09 / ZCTARO-07: no renderer read either key)
+
+def test_an_off_schema_institution_joins_site_position():
+    rows = _mentee(mentee_level="BSc", site_position="Summer Project",
+                   institution="Fictional Lakeside University")
+    assert rows["Site/Position:"] == "BSc - Summer Project, Fictional Lakeside University"
+
+
+def test_an_institution_alone_fills_site_position():
+    assert _mentee(institution="Fictional Lakeside University")["Site/Position:"] == (
+        "Fictional Lakeside University")
+
+
+def test_an_off_schema_advisor_joins_site_position_with_its_label():
+    rows = _mentee(site_position="Fictional Biology", advisor="Dana Quill")
+    assert rows["Site/Position:"] == "Fictional Biology, Advisor: Dana Quill"
+    rows = _mentee(site_position="Fictional Biology", advisors=["Dana Quill", "Lee Marsh"])
+    assert rows["Site/Position:"] == "Fictional Biology, Advisors: Dana Quill; Lee Marsh"
+
+
+def test_institution_then_advisor_in_that_order():
+    rows = _mentee(site_position="Fictional Biology", advisor="Dana Quill",
+                   institution="Fictional Lakeside University")
+    assert rows["Site/Position:"] == (
+        "Fictional Biology, Fictional Lakeside University, Advisor: Dana Quill")
+
+
+def test_a_value_site_position_already_holds_is_not_repeated():
+    rows = _mentee(site_position="Fictional Biology, Advisor: Dana Quill", advisor="dana quill",
+                   institution="Fictional Biology")
+    assert rows["Site/Position:"] == "Fictional Biology, Advisor: Dana Quill"
+
+
+def test_a_blank_or_non_text_extra_adds_nothing():
+    for blank in ("", "   ", None, {"name": "Dana Quill"}, [], [None, ""], 7):
+        rows = _mentee(site_position="Fictional Biology", advisor=blank, institution=blank)
+        assert rows["Site/Position:"] == "Fictional Biology", blank
+
+
 # --- the mentee's awards ride in Project/Accomplishments ------------------------
 
 def test_mentee_awards_are_appended_to_project_accomplishments():
