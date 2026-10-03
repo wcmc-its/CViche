@@ -2746,14 +2746,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (36), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (37), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 34
+    assert len(payload["findings"]) == 35
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -3269,6 +3269,8 @@ def test_field_lint_prevalence_is_the_measured_wave1_fraction():
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["offschema_fields"] == round(37 / 163, 3)
     assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
+    # #1243: the farm's 126 census CVs; its 37 IPXFBA artifacts are gone.
+    assert LINT_PREVALENCE["multi_record_coverage"] == round(64 / 126, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
