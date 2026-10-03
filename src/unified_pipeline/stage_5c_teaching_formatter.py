@@ -22,12 +22,18 @@ Date: 2025-12-02
 import os
 import sys
 import json
+import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+
+logger = logging.getLogger(__name__)
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5c_teaching_formatted"
@@ -148,9 +154,67 @@ Now format the following raw content:
 RAW_CV>>>'''
 
 
+# The id prefix this module gives every line it sends (`[EC-0001]`). The
+# parser strips EVERY tag of this shape from a reply line, not only the
+# leading one: the model sometimes repeats it (`[EC-0021] [EC-0021] ...`),
+# and a tag left in the text renders on the page.
+ENTRY_ID_PREFIX = 'EC'
+_ENTRY_ID_TAG = re.compile(rf'\[{ENTRY_ID_PREFIX}-\d+\]\s*')
+
+# Stage 4 keeps every record of a multi-record entry under STAGE4_RECORDS_KEY
+# once the reply held this many (see stage4/schemas.py).
+_MIN_STAGE4_RECORDS = 2
+
+
+def entry_records(entry: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The records one entry stands for, each of which gets its own id.
+
+    An entry stage 4 kept as 2+ records (`stage4_records`) is one record per
+    item, in stage 4's order; any other entry is the one record its
+    `extracted_fields` hold. One id per entry used to let a fused entry's
+    second line take the NEXT entry's id, shifting every later id by one, and
+    dropped every record but the last from the formatted text (E20).
+    """
+    fields = entry.get('extracted_fields') or {}
+    records = fields.get(STAGE4_RECORDS_KEY)
+    if (isinstance(records, list) and len(records) >= _MIN_STAGE4_RECORDS
+            and all(isinstance(r, Mapping) and r for r in records)):
+        return records
+    return [fields]
+
+
+def _record_parts(fields: Mapping[str, Any]) -> list[str]:
+    """The structured fields of one record, in the order the prompt sends them."""
+    parts = []
+    start_date = fields.get('start_date', '')
+    end_date = fields.get('end_date', '')
+    if start_date or end_date:
+        date_str = f"{start_date or ''}-{end_date or ''}".strip('-')
+        if date_str:
+            parts.append(date_str)
+
+    course_code = fields.get('course_code', '')
+    course_title = fields.get('course_title', '')
+    if course_code and course_title:
+        parts.append(f"{course_code}: {course_title}")
+    elif course_title:
+        parts.append(course_title)
+    elif course_code:
+        parts.append(course_code)
+
+    for key in ('role', 'institution', 'audience'):
+        if fields.get(key):
+            parts.append(fields[key])
+    return parts
+
+
 def build_raw_content(entries_by_k_code: dict[str, list[dict]]) -> tuple[str, dict[str, dict]]:
     """
     Build raw content string for LLM prompt and a mapping of entry IDs to entries.
+
+    Every record of an entry (`entry_records`) gets its own id; the ids of one
+    entry are consecutive and all map to that entry. The entry's original text
+    follows its last record's line when it differs from what the fields say.
 
     Returns:
         Tuple of (raw_content_string, id_to_entry_mapping)
@@ -169,62 +233,19 @@ def build_raw_content(entries_by_k_code: dict[str, list[dict]]) -> tuple[str, di
         lines.append(f"\n## {subsection_label}\n")
 
         for entry in entries:
-            entry_counter += 1
-            entry_id = f"EC-{entry_counter:04d}"
-
-            # Store mapping
-            id_to_entry[entry_id] = entry
-
-            # Build raw text from entry
-            fields = entry.get('extracted_fields', {}) or {}
             raw_text = entry.get('text', '')
-
-            # Include structured field info if available
-            parts = []
-
-            # Dates
-            start_date = fields.get('start_date', '')
-            end_date = fields.get('end_date', '')
-            if start_date or end_date:
-                date_str = f"{start_date or ''}-{end_date or ''}".strip('-')
-                if date_str:
-                    parts.append(date_str)
-
-            # Course info
-            course_code = fields.get('course_code', '')
-            course_title = fields.get('course_title', '')
-            if course_code and course_title:
-                parts.append(f"{course_code}: {course_title}")
-            elif course_title:
-                parts.append(course_title)
-            elif course_code:
-                parts.append(course_code)
-
-            # Role
-            role = fields.get('role', '')
-            if role:
-                parts.append(role)
-
-            # Institution
-            institution = fields.get('institution', '')
-            if institution:
-                parts.append(institution)
-
-            # Audience
-            audience = fields.get('audience', '')
-            if audience:
-                parts.append(audience)
-
-            # Fall back to raw text if no structured fields
-            if not parts:
-                entry_text = raw_text
-            else:
-                entry_text = ' | '.join(parts)
-                # Include original text as context if different
-                if raw_text and raw_text.strip() != entry_text.strip():
+            record_texts = [' | '.join(_record_parts(record)) for record in entry_records(entry)]
+            for i, record_text in enumerate(record_texts):
+                entry_counter += 1
+                entry_id = f"{ENTRY_ID_PREFIX}-{entry_counter:04d}"
+                id_to_entry[entry_id] = entry
+                # Fall back to raw text if no structured fields
+                entry_text = record_text or raw_text
+                # Include original text as context if different, once per entry
+                is_last = i == len(record_texts) - 1
+                if is_last and record_text and raw_text and raw_text.strip() != record_text.strip():
                     entry_text = f"{entry_text}\n  Original: {raw_text}"
-
-            lines.append(f"[{entry_id}] {entry_text}")
+                lines.append(f"[{entry_id}] {entry_text}")
 
     return '\n'.join(lines), id_to_entry
 
@@ -232,6 +253,8 @@ def build_raw_content(entries_by_k_code: dict[str, list[dict]]) -> tuple[str, di
 def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str, str]:
     """
     Parse LLM formatted output and extract formatted text per entry ID.
+
+    Every `[EC-NNNN]` tag left in a line's content (a repeated id) is removed.
 
     Returns:
         Dict mapping entry_id -> formatted_text
@@ -245,12 +268,212 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str,
     matches = re.findall(pattern, llm_output, re.DOTALL)
 
     for entry_id, content in matches:
-        # Clean up the content
-        content = content.strip()
         # Handle sub-bullets (preserve them as part of the content)
-        id_to_formatted[entry_id] = content
+        id_to_formatted[entry_id] = _ENTRY_ID_TAG.sub('', content).strip()
 
     return id_to_formatted
+
+
+# ---------------------------------------------------------------------------
+# Post-check (E20): a formatted line that misstates its record is not used.
+# The entry then renders as it would without stage 5c (stage 6's raw-line or
+# field rendering), which is the stage-4 content unrewritten.
+# ---------------------------------------------------------------------------
+
+# The fields a record's dates are kept in, across the K schemas.
+_DATE_FIELDS = ('start_date', 'end_date', 'date', 'date_start', 'date_end')
+# Stage 4's per-activity list on a K4/K5 entry (one dict per dated talk).
+_ACTIVITIES_KEY = 'activities'
+_ACTIVITY_TITLE = 'activity_title'
+_ACTIVITY_DATE = 'date'
+
+_YEAR = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+_MONTHS = ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec')
+# One date as written in a line: `8/2008`, `Aug 2008` / `August, 2008`,
+# `2008-08`, or a bare year. Longest forms first, so `8/2008` is one token.
+_DATE_TOKEN = re.compile(
+    r'(?<!\d)(?P<num_month>1[0-2]|0?[1-9])/(?P<y1>(?:19|20)\d{2})(?!\d)'
+    r'|\b(?P<name_month>' + '|'.join(_MONTHS) + r')[a-z]*\.?,?\s+(?P<y2>(?:19|20)\d{2})(?!\d)'
+    r'|(?<!\d)(?P<y3>(?:19|20)\d{2})-(?P<iso_month>0[1-9]|1[0-2])(?!\d)'
+    r'|(?<!\d)(?P<y4>(?:19|20)\d{2})(?!\d)',
+    re.IGNORECASE)
+
+# The roles the prompt's templates hand the model for a talk or a course
+# (Template D's "Role: Attendee/Participant", and the speaker it presumes),
+# each mapped to what the record's own text or fields must hold for the role
+# to be the record's. Each says WHO did the activity, so a wrong one turns a
+# talk given into one attended, or the reverse: 'Presenter' on DPEHSZ's
+# untitled-role talks and 'Attendee' on a workshop OIYKZE's owner gave.
+# `present` alone is not evidence: it is the open end of a date range.
+_ROLE_EVIDENCE = {
+    'attendee': r'\battend',
+    'participant': r'\bparticip',
+    'presenter': r'(?:\b|co-?)present(?:er|ed|ing|ation)',
+}
+_ROLE_WORD = re.compile(r'\b(' + '|'.join(_ROLE_EVIDENCE) + r')s?\b', re.IGNORECASE)
+# A sub-bullet echoing the `Original:` context line build_raw_content sends.
+_ORIGINAL_ECHO = re.compile(r'(?im)^\s*(?:[-*]\s*)?original\s*:')
+_MARKDOWN = re.compile(r'[*_`]')
+_QUOTES = str.maketrans({'\u201c': '"', '\u201d': '"', '\u2018': "'", '\u2019': "'"})
+
+
+def _normalized(text: str) -> str:
+    """Lower case, straight quotes, no markdown, single spaces."""
+    return ' '.join(_MARKDOWN.sub('', str(text).translate(_QUOTES)).lower().split())
+
+
+def _strings(value: object) -> list[str]:
+    """Every string inside a field value (lists and dicts walked)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _record_dates(record: Mapping[str, Any]) -> list[str]:
+    """The record's date values, its activities' dates included."""
+    dates = [str(record[k]) for k in _DATE_FIELDS if record.get(k)]
+    activities = record.get(_ACTIVITIES_KEY)
+    if isinstance(activities, list):
+        dates += [str(a[_ACTIVITY_DATE]) for a in activities
+                  if isinstance(a, Mapping) and a.get(_ACTIVITY_DATE)]
+    return dates
+
+
+_YEAR_RANGE = re.compile(r'(?<!\d)((?:19|20)\d{2})\s*[-\u2013\u2014]\s*((?:19|20)\d{2})(?!\d)')
+
+
+def _years_shown(text: str) -> set[str]:
+    """Every year `text` names, with the years inside a `1986-1989` range:
+    a range stands for the years it spans."""
+    years = set(_YEAR.findall(text))
+    for start, end in _YEAR_RANGE.findall(text):
+        years.update(str(y) for y in range(int(start), int(end) + 1))
+    return years
+
+
+def _date_key(match: re.Match[str]) -> tuple[str, int | None]:
+    """(year, month or None) of one `_DATE_TOKEN` match."""
+    year = match['y1'] or match['y2'] or match['y3'] or match['y4']
+    if match['num_month']:
+        return year, int(match['num_month'])
+    if match['name_month']:
+        return year, _MONTHS.index(match['name_month'][:3].lower()) + 1
+    if match['iso_month']:
+        return year, int(match['iso_month'])
+    return year, None
+
+
+def _activities(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The record's dated, titled activities: its `activities` list, or the
+    record itself when it carries one title and one date."""
+    items = record.get(_ACTIVITIES_KEY)
+    if not isinstance(items, list):
+        items = [record]
+    return [a for a in items if isinstance(a, Mapping)
+            and isinstance(a.get(_ACTIVITY_TITLE), str) and a.get(_ACTIVITY_TITLE).strip()
+            and a.get(_ACTIVITY_DATE)]
+
+
+def _date_beside_title(line: str, activity: Mapping[str, Any]) -> bool:
+    """False when the line holds the activity's title and a date of its own
+    but another date sits between them (`8/2008, 9/2008 - "A"; "B"`). A
+    title the model reworded is not found and not judged."""
+    title = _normalized(activity[_ACTIVITY_TITLE])
+    start = line.find(title)
+    if start < 0:
+        return True
+    end = start + len(title)
+    wanted = [_date_key(m) for m in _DATE_TOKEN.finditer(str(activity[_ACTIVITY_DATE]))]
+    tokens = [(m.start(), m.end(), _date_key(m)) for m in _DATE_TOKEN.finditer(line)]
+
+    def matches(key: tuple[str, int | None]) -> bool:
+        return any(key[0] == w[0] and (key[1] is None or w[1] is None or key[1] == w[1])
+                   for w in wanted)
+
+    for t_start, t_end, key in tokens:
+        if not matches(key):
+            continue
+        lo, hi = (t_end, start) if t_end <= start else (end, t_start)
+        if not any(lo <= o_start and o_end <= hi and not matches(o_key)
+                   for o_start, o_end, o_key in tokens):
+            return True
+    return not any(matches(key) for _, _, key in tokens)
+
+
+def postcheck_line(line: str, record: Mapping[str, Any], entry_text: str) -> str | None:
+    """Why stage 5c's `line` for `record` must not be used, or None.
+
+    Deterministic; `entry_text` is the entry's source text. Rejects a line
+    that echoes the `Original:` context line, drops a year the record's date
+    fields hold (XWNZWW-06), holds a year neither the record nor the source
+    text holds (a line shifted onto the wrong id, EQGGRB-06), separates an
+    activity's date from its title (DPEHSZ-02), or names a role the record
+    and its source text do not (DPEHSZ-02, OIYKZE-03).
+    """
+    if _ORIGINAL_ECHO.search(line):
+        return 'original_echo'
+    text = _normalized(line)
+    source_text = _normalized(entry_text or '')
+    shown = _years_shown(text)
+    for year in sorted({y for d in _record_dates(record) for y in _YEAR.findall(d)}):
+        # A year stage 4 read that the source does not hold (a misparsed
+        # `1900`, a two-digit `79`) is not one the line can be held to.
+        if year in source_text and year not in shown:
+            return f'year_missing:{year}'
+    source = _normalized(' '.join([entry_text or '', *_strings(record)]))
+    for year in _YEAR.findall(text):
+        if year not in source:
+            return f'year_not_in_source:{year}'
+    for activity in _activities(record):
+        if not _date_beside_title(text, activity):
+            return 'date_not_beside_title'
+    for match in _ROLE_WORD.finditer(text):
+        if not re.search(_ROLE_EVIDENCE[match[1].lower()], source):
+            return f'role_invented:{match[1].lower()}'
+    return None
+
+
+# `accepted_formatted_text`'s reason prefix for an id the reply did not hold:
+# not a rejection, the entry was simply not formatted (as before E20).
+_MISSING = 'missing:'
+
+
+def _ids_by_entry(id_to_entry: Mapping[str, dict]) -> list[tuple[dict, list[str]]]:
+    """`(entry, its ids in order)` per entry, in id order. An entry's ids
+    are consecutive (`build_raw_content`), so a change of entry starts a group."""
+    groups: list[tuple[dict, list[str]]] = []
+    for entry_id, entry in id_to_entry.items():
+        if groups and groups[-1][0] is entry:
+            groups[-1][1].append(entry_id)
+        else:
+            groups.append((entry, [entry_id]))
+    return groups
+
+
+def accepted_formatted_text(entry: Mapping[str, Any], entry_ids: list[str],
+                            id_to_formatted: Mapping[str, str]) -> tuple[str | None, str | None]:
+    """`(formatted_text, None)` for an entry whose every record's line came
+    back and passes `postcheck_line`, else `(None, reason)`.
+
+    The lines of a multi-record entry are joined one per line, in record
+    order. One missing or rejected line rejects the entry: stage 6 then
+    renders all its records from stage 4 rather than some formatted and the
+    rest lost.
+    """
+    lines = []
+    for entry_id, record in zip(entry_ids, entry_records(entry)):
+        line = id_to_formatted.get(entry_id)
+        if not line:
+            return None, f'{_MISSING}{entry_id}'
+        reason = postcheck_line(line, record, entry.get('text', '') or '')
+        if reason:
+            return None, f'{entry_id}:{reason}'
+        lines.append(line)
+    return '\n'.join(lines), None
 
 
 def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
@@ -362,6 +585,7 @@ def run_stage_5c(input_path: str, output_path: str = None,
     # Copy all data forward and update K-code entries with formatting
     # Each stage output is self-contained with complete state
     entries_formatted_count = 0
+    rejected: list[dict[str, Any]] = []
     total_cost = 0.0
 
     # llm_result['cost'] is the per-provider, per-model cost from
@@ -378,16 +602,24 @@ def run_stage_5c(input_path: str, output_path: str = None,
             print(f"  Parsed {len(id_to_formatted)} formatted entries from LLM output")
 
         # Update K-code entries in place with formatted text
-        for entry_id, entry in id_to_entry.items():
-            if entry_id in id_to_formatted:
-                formatted_text = id_to_formatted[entry_id]
+        for entry, entry_ids in _ids_by_entry(id_to_entry):
+            formatted_text, reason = accepted_formatted_text(entry, entry_ids, id_to_formatted)
+            if formatted_text is None:
+                if not reason.startswith(_MISSING):
+                    rejected.append({'element_idx_start': entry.get('element_idx_start'),
+                                     'taxonomy_code': entry.get('taxonomy_code'),
+                                     'reason': reason})
+                continue
 
-                # Store formatted text in extracted_fields
-                if 'extracted_fields' not in entry:
-                    entry['extracted_fields'] = {}
-                entry['extracted_fields']['formatted_text'] = formatted_text
-                entry['extracted_fields']['formatting_source'] = 'stage_5c_llm'
-                entries_formatted_count += 1
+            # Store formatted text in extracted_fields
+            if 'extracted_fields' not in entry:
+                entry['extracted_fields'] = {}
+            entry['extracted_fields']['formatted_text'] = formatted_text
+            entry['extracted_fields']['formatting_source'] = 'stage_5c_llm'
+            entries_formatted_count += 1
+        for item in rejected:
+            logger.warning("stage 5c line rejected, entry renders unformatted: %s %s (%s)",
+                           item['taxonomy_code'], item['element_idx_start'], item['reason'])
     else:
         if verbose:
             print("  LLM formatting not available, keeping original text")
@@ -399,6 +631,9 @@ def run_stage_5c(input_path: str, output_path: str = None,
         'input_file': input_path,
         'k_entries_processed': total_k_entries,
         'entries_formatted': entries_formatted_count,
+        # Entries whose formatted line failed `postcheck_line` (E20); each
+        # renders from its stage-4 fields and text instead.
+        'entries_rejected': rejected,
         'model': usage.get('model') if usage else None,
         'timestamp': datetime.now().isoformat(),
         'total_cost': total_cost,

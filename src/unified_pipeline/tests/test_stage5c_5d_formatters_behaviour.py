@@ -338,6 +338,167 @@ def test_run_stage_5c_quiet_mode_still_formats_correctly(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# stage_5c: one id per stage-4 record, every id tag stripped, post-check (E20)
+# ---------------------------------------------------------------------------
+
+def _two_record_entry() -> dict:
+    """A K2 entry stage 4 kept as two records of one role (invented values)."""
+    first = {"teaching_role": "Simulation Lab Leader", "start_date": "1981", "end_date": "1990"}
+    last = {"teaching_role": "Simulation Lab Leader", "start_date": "1995", "end_date": "2001"}
+    return {
+        "taxonomy_code": "K2",
+        "text": "Simulation Lab Leader 1981-1990, 1995-2001",
+        "extracted_fields": {**last, "stage4_records": [first, last]},
+    }
+
+
+def test_5c_build_raw_content_gives_each_stage4_record_its_own_id():
+    # One id per entry let the model's second line for a fused entry take the
+    # NEXT entry's id, shifting every later id (EQGGRB-06).
+    later = {"text": "Grand rounds 2003", "extracted_fields": {"start_date": "2003"}}
+    raw, id_map = s5c.build_raw_content({"K2": [_two_record_entry(), later]})
+    assert list(id_map) == ["EC-0001", "EC-0002", "EC-0003"]
+    assert id_map["EC-0001"] is id_map["EC-0002"]
+    assert id_map["EC-0003"] is later
+    assert "[EC-0001] 1981-1990" in raw
+    assert "[EC-0002] 1995-2001" in raw
+    # The entry's own text is sent once, after its last record.
+    assert raw.count("Original: Simulation Lab Leader") == 1
+    assert raw.index("[EC-0002]") < raw.index("Original: Simulation Lab Leader")
+
+
+def test_5c_entry_records_is_the_fields_for_a_single_record_entry():
+    entry = {"text": "t", "extracted_fields": {"role": "Tutor", "stage4_records": [{"role": "Tutor"}]}}
+    assert s5c.entry_records(entry) == [entry["extracted_fields"]]
+
+
+def test_5c_parse_llm_output_strips_every_repeated_id_tag():
+    parsed = s5c.parse_llm_output("- [EC-0021] [EC-0021] Board prep course (1990, 1994)\n", {})
+    assert parsed["EC-0021"] == "Board prep course (1990, 1994)"
+
+
+def test_5c_postcheck_accepts_a_faithful_line():
+    record = {"activity_title": "Pond Ecology", "role": "Lecturer", "date": "2012-05"}
+    line = '**5/2012** - Lecturer, "Pond Ecology" (residents)'
+    assert s5c.postcheck_line(line, record, '5/2012 "Pond Ecology" lecture to residents') is None
+
+
+def test_5c_postcheck_rejects_an_original_echo_line():
+    line = 'Workshop - "Rope Knots"\n  - Original: Doe, J. (2015). Rope knots. Workshop.'
+    assert s5c.postcheck_line(line, {"date": "2015"}, "Doe, J. (2015). Rope knots. Workshop.") \
+        == "original_echo"
+
+
+def test_5c_postcheck_rejects_a_line_that_drops_a_record_year():
+    # XWNZWW-06: stage 4 held the year, the formatted line did not.
+    record = {"activity_title": "Supper Club", "role": "Participant", "date": "2004"}
+    assert s5c.postcheck_line('Participant, "Supper Club"', record, "Participant in Supper Club 2004") \
+        == "year_missing:2004"
+
+
+def test_5c_postcheck_a_year_range_covers_the_years_inside_it():
+    record = {"activity_title": "Science Camp", "date": "1986, 1987, 1988"}
+    line = '**1986-1988** - "Science Camp" (high school students)'
+    assert s5c.postcheck_line(line, record, '"Science Camp", 1986, 1987 and 1988') is None
+
+
+def test_5c_postcheck_ignores_a_record_year_the_source_does_not_hold():
+    # Stage 4 misread the year (1900); the line carries the source's year.
+    record = {"activity_title": "Fern Taxonomy", "role": "Lecturer", "date": "1900-03-02"}
+    line = '**2016-03-02** - Lecturer, "Fern Taxonomy"'
+    assert s5c.postcheck_line(line, record, '"Fern Taxonomy." Lecturer, March 2, 2016.') is None
+
+
+def test_5c_postcheck_rejects_a_year_neither_record_nor_source_holds():
+    # EQGGRB-06: the line meant for another entry carried its range.
+    record = {"activity_title": "Valve Symposium", "role": "Course Director", "date": "2018"}
+    line = "**2016-2018** - **Course Director**, Valve Symposium"
+    assert s5c.postcheck_line(line, record, "2018 Valve Symposium (Course Director)") \
+        == "year_not_in_source:2016"
+
+
+def test_5c_postcheck_rejects_dates_separated_from_their_titles():
+    # DPEHSZ-02: a date list in front of a title list loses the pairing.
+    record = {"activities": [
+        {"activity_title": "Lichen Basics", "date": "2007-03"},
+        {"activity_title": "Moss Survey", "date": "2007-04"},
+    ]}
+    source = '3/2007 "Lichen Basics" (to residents) 4/2007 "Moss Survey" (to residents)'
+    merged = '**3/2007, 4/2007** - "Lichen Basics"; "Moss Survey" (residents)'
+    paired = '**3/2007** "Lichen Basics"; **4/2007** "Moss Survey" (residents)'
+    assert s5c.postcheck_line(merged, record, source) == "date_not_beside_title"
+    assert s5c.postcheck_line(paired, record, source) is None
+
+
+def test_5c_postcheck_rejects_a_role_the_record_does_not_state():
+    # OIYKZE-03 / DPEHSZ-02: 'Attendee' and 'Presenter' with no stage-4 role.
+    record = {"activity_title": "Rope Knots", "role": None, "date": "2015"}
+    assert s5c.postcheck_line('**2015** - Attendee, "Rope Knots"', record, '2015 "Rope Knots" workshop') \
+        == "role_invented:attendee"
+    assert s5c.postcheck_line('**2015** - Presenter, "Rope Knots"', record, '2015 "Rope Knots" workshop') \
+        == "role_invented:presenter"
+
+
+def test_5c_postcheck_accepts_a_role_the_source_states():
+    record = {"activity_title": "Tide Pools", "role": None, "date": "2005-10"}
+    source = '"Tide Pools", copresented with a colleague, Oct. 2005'
+    assert s5c.postcheck_line('**2005-10** - Co-presenter, "Tide Pools"', record, source) is None
+
+
+def test_5c_postcheck_present_in_a_date_range_is_not_a_presenter():
+    record = {"activity_title": "Harbor Seminar", "role": None, "start_date": "2009", "end_date": "present"}
+    line = "**2009-present** - Presenter, Harbor Seminar"
+    assert s5c.postcheck_line(line, record, "Harbor Seminar 2009-present") == "role_invented:presenter"
+
+
+def _run_5c(tmp_path, monkeypatch, entries, reply):
+    input_path = _write_json(tmp_path / "in.json", {"document_uid": "E20X", "entries": entries})
+    output_path = str(tmp_path / "out.json")
+    monkeypatch.setattr(s5c, "call_llm", lambda **kw: _llm_result(reply))
+    s5c.run_stage_5c(input_path, output_path=output_path, verbose=False)
+    with open(output_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_run_stage_5c_formats_every_record_of_a_multi_record_entry(tmp_path, monkeypatch):
+    # EQADVR-04: the first record's tenure used to be dropped.
+    reply = ("- [EC-0001] **1981-1990** - Simulation Lab Leader\n"
+             "- [EC-0002] **1995-2001** - Simulation Lab Leader\n")
+    out = _run_5c(tmp_path, monkeypatch, [_two_record_entry()], reply)
+    fields = out["entries"][0]["extracted_fields"]
+    assert fields["formatted_text"] == \
+        "**1981-1990** - Simulation Lab Leader\n**1995-2001** - Simulation Lab Leader"
+    assert out["stage_5c"]["entries_rejected"] == []
+
+
+def test_run_stage_5c_multi_record_entry_missing_a_line_is_left_unformatted(tmp_path, monkeypatch):
+    out = _run_5c(tmp_path, monkeypatch, [_two_record_entry()],
+                  "- [EC-0002] **1995-2001** - Simulation Lab Leader\n")
+    assert "formatted_text" not in out["entries"][0]["extracted_fields"]
+    # A line the reply did not hold is not a post-check rejection.
+    assert out["stage_5c"]["entries_rejected"] == []
+    assert out["stage_5c"]["entries_formatted"] == 0
+
+
+def test_run_stage_5c_rejected_line_falls_back_and_is_recorded(tmp_path, monkeypatch):
+    entries = [
+        {"taxonomy_code": "K4", "element_idx_start": 7, "text": "Participant in Supper Club 2004",
+         "extracted_fields": {"activity_title": "Supper Club", "role": "Participant", "date": "2004"}},
+        {"taxonomy_code": "K4", "element_idx_start": 9, "text": "2006 Kite Building Day",
+         "extracted_fields": {"activity_title": "Kite Building Day", "date": "2006"}},
+    ]
+    reply = ('- [EC-0001] Participant, "Supper Club"\n'
+             "- [EC-0002] **2006** - Kite Building Day\n")
+    out = _run_5c(tmp_path, monkeypatch, entries, reply)
+    assert "formatted_text" not in out["entries"][0]["extracted_fields"]
+    assert "formatting_source" not in out["entries"][0]["extracted_fields"]
+    assert out["entries"][1]["extracted_fields"]["formatted_text"] == "**2006** - Kite Building Day"
+    assert out["stage_5c"]["entries_formatted"] == 1
+    assert out["stage_5c"]["entries_rejected"] == [
+        {"element_idx_start": 7, "taxonomy_code": "K4", "reason": "EC-0001:year_missing:2004"}]
+
+
+# ---------------------------------------------------------------------------
 # stage_5d: build_raw_content
 # ---------------------------------------------------------------------------
 
