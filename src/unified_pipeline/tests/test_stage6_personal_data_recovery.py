@@ -1377,3 +1377,45 @@ def test_a_cell_label_written_straight_before_a_number_without_punctuation(tmp_p
            {"phone": "555-0100, 555-0101"}),
     ])
     assert rows["Cell phone:"] != ""
+
+
+# --------------------------------------------------------------------------
+# #1221 (EBYSBC E24): the owner's own banner is not a recovered orphan
+# --------------------------------------------------------------------------
+
+_SAMPLE_OWNER = {"first_name": "Jane", "middle_name": "Q.", "last_name": "Sample",
+                 "full_name_with_credentials": "Jane Q. Sample, MD"}
+_BANNER_ORPHANS = (
+    "Name Jane Q. Sample, MD",  # a label the cover writes with a colon
+    "SEQ CHAPTER \\h \\r 1: JANE Q SAMPLE, M.D.",  # a Word field code before the name
+    "Jane Q. Sample, MD 1",  # a running header with its page number
+    "Curriculum Vitae: Jane Q. Sample, MD",
+)
+
+
+def _list_item_texts_after(tmp_path, entries, cv_owner) -> set[str]:
+    """The Appendix bullets of a real render with recovery on."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    payload = {"document_uid": "TESTPD", "entries": entries}
+    if cv_owner:
+        payload["cv_owner"] = cv_owner
+    ip.write_text(json.dumps(payload))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    return _list_item_texts(op)
+
+
+def test_owner_banner_and_running_header_are_not_recovered(tmp_path):
+    entries = [_a(text, idx=i) for i, text in enumerate(_BANNER_ORPHANS)]
+    entries.append(_a("Foreign Languages: Spanish, French", idx=9))
+    items = _list_item_texts_after(tmp_path, entries, _SAMPLE_OWNER)
+    assert "Foreign Languages: Spanish, French" in items
+    assert not set(_BANNER_ORPHANS) & items
+
+
+def test_owner_banner_needs_the_cv_owner_to_be_recognised(tmp_path):
+    # Without the owner's name the banner is ordinary text and still recovered,
+    # so the recovery pass is reading the render's own cv_owner.
+    items = _list_item_texts_after(tmp_path, [_a("Name Jane Q. Sample, MD")], None)
+    assert "Name Jane Q. Sample, MD" in items
