@@ -50,6 +50,7 @@ unambiguous, independent of why the row came up short.
 """
 import logging
 import re
+from datetime import datetime
 from typing import Literal
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
@@ -199,20 +200,25 @@ def _board_cell_text(fields: dict) -> str:
     return board
 
 
-def _format_certification_date_str(fields: dict) -> str:
+def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
     """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
     entry's structured fields.
 
-    Prefers `start_date`/`end_date`; falls back to `year_certified`/
-    `recertification_date` when those are absent. Either may be a
-    `{start_date, end_date}` range, which renders as that range (#1233), the
-    same as the equivalent "2008-2018" string always did. Factored out so the
-    single-certification path and `_parse_and_add_multiple_certifications`'s
-    structured-fallback (HARD SAFETY NET, see that function) build the same
-    string the same way instead of two copies drifting apart.
+    Prefers `start_date`/`end_date`; falls back to `year_certified` for the
+    start. Either may be a `{start_date, end_date}` range, which renders as
+    that range (#1233), the same as the equivalent "2008-2018" string always
+    did. Factored out so the single-certification path and
+    `_parse_and_add_multiple_certifications`'s structured-fallback (HARD
+    SAFETY NET, see that function) build the same string the same way instead
+    of two copies drifting apart.
+
+    `recertification_date` is never the end of the range (EBYSBC E33, #1245)
+    unless the entry's `source_text` writes the two years as one range: see
+    `_with_recertification`.
     """
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
-    end_date = fields.get('end_date') or fields.get('recertification_date') or ''
+    end_date = fields.get('end_date') or ''
+    recertification_date = fields.get('recertification_date') or ''
 
     start_fmt = format_date_for_section(start_date, 'F2') if start_date else ''
     end_fmt = format_date_for_section(end_date, 'F2') if end_date else ''
@@ -223,11 +229,68 @@ def _format_certification_date_str(fields: dict) -> str:
         if end_fmt != start_fmt:
             return f"{start_fmt}-{end_fmt}"
         return start_fmt
+    if start_fmt and recertification_date:
+        recert_fmt = format_date_for_section(recertification_date, 'F2')
+        return _with_recertification(start_fmt, recert_fmt, source_text)
     if start_fmt:
         return start_fmt
     if end_fmt:
         return end_fmt
+    if recertification_date:
+        return format_date_for_section(recertification_date, 'F2')
     return ''
+
+
+# A recertification value that is a single bare year, e.g. "2017".
+_SINGLE_YEAR_RE = re.compile(r'\d{4}')
+# What may join the two years of a range the CV writes itself: "2013-2023",
+# "2014 - 2024", "2000/2003".
+_STATED_RANGE_JOINER = r'\s*[-\u2013\u2014/]\s*'
+
+
+def _cv_states_the_range(start_fmt: str, recert_fmt: str, source_text: str) -> bool:
+    """True when the source line itself writes "<start>-<recert>" as one
+    range, so the range is the CV's own wording, not a derived one."""
+    if not source_text or not _SINGLE_YEAR_RE.fullmatch(recert_fmt):
+        return False
+    pattern = rf'\b{re.escape(start_fmt)}{_STATED_RANGE_JOINER}{recert_fmt}\b'
+    return re.search(pattern, str(source_text)) is not None
+
+
+def _with_recertification(
+    start_fmt: str, recert_fmt: str, source_text: str = '', current_year: int | None = None,
+) -> str:
+    """The Dates cell for a certification with a recertification value and
+    no stated end.
+
+    A CV line "certified 2005, recertified 2015" used to render "2005-2015",
+    which reads as a certification that lapsed in 2015 (EBYSBC E33: BZZNRL-07,
+    RVROVQ-06). The recertification year is an event, not an end, so it is
+    named as one: "2005 (recertified 2015)". Three cases keep a range, because
+    there the value IS an end: "Present"/"ongoing" ("2005-Present"); a
+    single year after the current one, which can only be an expiry or a
+    renewal-due date ("2008-2030": valid through 2030); and a range the source
+    line writes itself ("2013-2023"), where stage 4 put the range's end in
+    `recertification_date`. Free text that is not a date ("not required") is
+    labelled rather than glued on as a range end.
+
+    `current_year` defaults to the run's clock (§7.4): the expiry reading
+    is the one output here that the date can move, and a test pins it by
+    passing the year.
+    """
+    if current_year is None:
+        current_year = datetime.now().year
+    if not recert_fmt or recert_fmt == start_fmt:
+        return start_fmt
+    if recert_fmt.lower() == 'present':
+        return f"{start_fmt}-Present"
+    if _SINGLE_YEAR_RE.fullmatch(recert_fmt) and int(recert_fmt) > current_year:
+        return f"{start_fmt}-{recert_fmt}"
+    if _cv_states_the_range(start_fmt, recert_fmt, source_text):
+        return f"{start_fmt}-{recert_fmt}"
+    if recert_fmt[0].isdigit():
+        return f"{start_fmt} (recertified {recert_fmt})"
+    return f"{start_fmt} (recertification: {recert_fmt})"
 
 
 def _is_reconstruction_confident(
@@ -254,7 +317,7 @@ def _is_reconstruction_confident(
 
 
 def _backfill_missing_fields_from_structured(
-    rows: list[tuple], fields: dict, structured_cert: str,
+    rows: list[tuple], fields: dict, structured_cert: str, source_text: str = '',
 ) -> list[tuple]:
     """Fill a blank certificate number or date in a reparsed row from the
     entry's own structured fields, when it is unambiguous to do so.
@@ -290,7 +353,7 @@ def _backfill_missing_fields_from_structured(
     cert_candidate = cert_candidates[0] if len(cert_candidates) == 1 else ''
     year_candidates = _split_multi(fields.get('year_certified', ''))
     date_candidate = (
-        _format_certification_date_str(fields) if len(year_candidates) <= 1 else ''
+        _format_certification_date_str(fields, source_text) if len(year_candidates) <= 1 else ''
     )
 
     if len(rows) != 1:
@@ -575,7 +638,7 @@ class BoardCertificationSection:
                     self._parse_and_add_multiple_certifications(table, original_text, entry)
                 else:
                     # Single certification - format dates as yyyy-yyyy per WCM template
-                    date_str = _format_certification_date_str(fields)
+                    date_str = _format_certification_date_str(fields, original_text)
                     self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
                 # No structured fields - try to parse from text
@@ -619,7 +682,7 @@ class BoardCertificationSection:
             )
             self._add_board_cert_row(
                 table, _board_cell_text(fields), structured_cert,
-                _format_certification_date_str(fields),
+                _format_certification_date_str(fields, text),
             )
 
         if not text:
@@ -680,7 +743,7 @@ class BoardCertificationSection:
         # that all-or-nothing check runs. See
         # _backfill_missing_fields_from_structured for what "unambiguous"
         # means and why multi-row entries are excluded.
-        rows = _backfill_missing_fields_from_structured(rows, fields, structured_cert)
+        rows = _backfill_missing_fields_from_structured(rows, fields, structured_cert, text)
 
         # HARD SAFETY NET, continued: a reparse that recovered no
         # certificate number and no year anywhere is strictly worse than
