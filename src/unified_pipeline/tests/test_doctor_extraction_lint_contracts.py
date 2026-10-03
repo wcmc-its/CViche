@@ -1601,6 +1601,11 @@ def test_multi_record_second_clause_on_a_rendered_line_is_info():
     # a year inside a longer number is not that year
     (_FIRST_ROLE_ROW,
      "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2008 | Room 120064"),
+    # a year with a digit before it, or after it, is not that year
+    (_FIRST_ROLE_ROW,
+     "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2008 | Room 12006"),
+    (_FIRST_ROLE_ROW,
+     "Visiting Instructor of Pathology | Lakeside Hospital Institute | 2008 | Room 20061"),
 ])
 def test_multi_record_one_line_must_carry_the_clause_words_and_years(lines):
     """The render check reads line by line, a table block's rows included:
@@ -1621,7 +1626,7 @@ def test_multi_record_through_joins_two_years_into_one_date():
         "Lecturer, Northfield University School of Medicine, 2001 through 2005"]
 
 
-@pytest.mark.parametrize("prefix", ["", "June ", "The "])
+@pytest.mark.parametrize("prefix", ["", "June ", "July ", "The "])
 def test_multi_record_a_part_opening_with_a_date_gives_each_date_the_words_after_it(prefix):
     """A month or a filler word before the first year still opens the part
     with a date."""
@@ -1632,7 +1637,7 @@ def test_multi_record_a_part_opening_with_a_date_gives_each_date_the_words_after
     assert findings[0]["evidence"] == ["2014 Sample Seminar, Riverton"]
 
 
-@pytest.mark.parametrize("closing", [")", ".)", " )"])
+@pytest.mark.parametrize("closing", [")", ".)", " )", ", 2)"])
 def test_multi_record_a_year_that_closes_an_aside_leaves_it(closing):
     """'(Poster Prize 2012.)': the words after the closing parenthesis are
     outside the aside, so they are a clause of their own."""
@@ -1642,6 +1647,70 @@ def test_multi_record_a_year_that_closes_an_aside_leaves_it(closing):
         "title": "Example Workshop", "location": "Lakeport", "date": "2011"},
         code="R", lines=())
     assert [f["severity"] for f in findings] == ["WARN"]
+
+
+@pytest.mark.parametrize("separator", ["\n", "\t", " | "])
+def test_multi_record_each_strongly_separated_part_reads_its_own_layout(separator):
+    """A line, cell or pipe-joined cell ends a part: a part that opens with a
+    date gives it the words after it even when the part before it put its
+    date last."""
+    text = f"Example Workshop, Lakeport, 2005{separator}2006 Sample Seminar, Riverton"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2005"},
+        code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["2006 Sample Seminar, Riverton"]
+
+
+def test_multi_record_a_three_letter_word_before_the_first_date_is_a_payload():
+    """'Art Lab, <years>; <committee>, <years>' puts each date after its
+    record: a three-letter name before the first date is words, not a date
+    prefix."""
+    text = "Art Lab, 2001-2003; Sample Seminar Committee, Riverton, 2004-2006"
+    findings = _multi_record(text, {
+        "committee_name": "Art Lab", "start_date": "2001", "end_date": "2003"},
+        code="P", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["Sample Seminar Committee, Riverton, 2004-2006"]
+
+
+def test_multi_record_an_open_parenthesis_after_a_late_date_is_no_aside():
+    """Only a part that opens with a date reads a parenthesis left open after
+    a later date as that clause's aside; a part that puts its dates last
+    keeps the clause before the date."""
+    text = ("Lecturer (Northfield University School of Medicine, 2001-2005), "
+            "Visiting Instructor of Pathology (Lakeside Hospital Institute, 2006-2008; adjunct)")
+    findings = _multi_record(text, _FIRST_ROLE, lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "2 record-shaped clauses" in findings[0]["message"]
+
+
+def test_multi_record_the_record_s_own_clause_is_never_reported():
+    """The clause the record stands for is skipped even when it carries
+    words the record lacks."""
+    findings = _multi_record(_TWO_ROLES, {
+        "title": "Lecturer", "institution": "Northfield", "start_date": "2001",
+        "end_date": "2005"}, lines=())
+    assert "1 other clause(s)" in findings[0]["message"]
+    assert findings[0]["evidence"] == [
+        "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"]
+
+
+@pytest.mark.parametrize("talk", [
+    "2014 Lecture on wound healing outcomes",
+    # a date word is not a lowercase word
+    "2014 Seminar on wound healing outcomes, ongoing",
+])
+def test_multi_record_a_short_lowercase_clause_is_not_prose(talk):
+    """Three lowercase 4+-letter words, and short words like 'on', are below
+    MULTI_RECORD_PROSE_MIN_LOWERCASE: a talk title in sentence case is a
+    record."""
+    text = f"2013 Example Workshop, Lakeport\t{talk}"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2013"},
+        code="R", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == [talk]
 
 
 def test_multi_record_the_first_clause_is_never_an_aside():
@@ -1715,6 +1784,16 @@ def test_multi_record_dates_with_no_words_between_them_stay_one_clause():
     assert "2 record-shaped clauses" in findings[0]["message"]
 
 
+def test_multi_record_and_joins_two_years_into_one_date():
+    """'2003 and 2005' is one date of one workshop, not a clause of its own."""
+    text = "2003 and 2005 Example Workshop, Lakeport; 2006 Sample Seminar, Riverton"
+    findings = _multi_record(text, {
+        "title": "Example Workshop", "location": "Lakeport", "date": "2003; 2005"},
+        code="R", lines=())
+    assert findings[0]["message"].startswith("entry 7 (R): 2 record-shaped clauses")
+    assert findings[0]["evidence"] == ["2006 Sample Seminar, Riverton"]
+
+
 def test_multi_record_two_digit_end_year_stays_in_its_date():
     """'1991-93' is one date: its '93' does not open the next clause."""
     text = ("Junior Delegate, Planning Council, 1991-93; "
@@ -1786,6 +1865,8 @@ def test_multi_record_undated_title_and_institution_parts(separator):
 @pytest.mark.parametrize("second_part", [
     "Assistant Professor of Surgery",  # a title, no institution
     "Northfield University College of Medicine",  # an institution, no title
+    # a PI named in a credit line is not the owner's role
+    "Principal Investigator, Northfield University Research Institute",
 ])
 def test_multi_record_an_undated_part_needs_a_title_and_an_institution(second_part):
     text = f"Attending Surgeon, Lakeside Hospital, Riverton\t{second_part}"
@@ -1853,6 +1934,18 @@ def test_multi_record_a_clause_with_one_new_word_is_checked_by_all_its_words():
     ("Treasurer, Example Society, 2001-2005\tTreasurer, 2006 - ongoing",
      {"role": "Treasurer", "organization": "Example Society", "start_date": "2001",
       "end_date": "2005"}),
+    ("Treasurer, Example Society, 2001-2005\t2006 - present Treasurer",
+     {"role": "Treasurer", "organization": "Example Society", "start_date": "2001",
+      "end_date": "2005"}),
+    # two new words out of four words and two years: the years count toward
+    # MULTI_RECORD_NEW_SHARE's denominator
+    ("Member, Library Committee, 2014-2015\tSenior Chair, Library Committee, 2014-2015",
+     {"role": "Member", "committee_name": "Library Committee", "start_date": "2014",
+      "end_date": "2015"}),
+    # a year inside a longer number is no date
+    ("Lecturer, Northfield University School of Medicine, 2001-2005, Suite 42019",
+     {"title": "Lecturer", "institution": "Northfield University School of Medicine",
+      "start_date": "2001", "end_date": "2005"}),
 ])
 def test_multi_record_silent_when_the_other_clause_is_no_new_record(text, fields):
     assert _multi_record(text, fields, code="P", lines=()) == []
@@ -1947,6 +2040,12 @@ def test_multi_record_a_mentee_name_with_no_long_word_counts_as_on_the_output():
     assert [f["severity"] for f in findings] == ["INFO"]
 
 
+def test_multi_record_a_mentee_name_that_is_not_a_string_is_skipped():
+    assert _multi_record("2021 Ada Quill and Bo Renner", {
+        "mentee_name": ["Ada Quill", "Bo Renner"], "start_date": "2021"},
+        code="N3B", lines=()) == []
+
+
 @pytest.mark.parametrize("names", ["Ada Quill", "Quill, Ada", "Ada Quill, PhD"])
 def test_multi_record_one_mentee_is_silent(names):
     assert _multi_record(f"2021 {names}", {"mentee_name": names, "start_date": "2021"},
@@ -1997,9 +2096,23 @@ _TWO_LICENCES = "Northland, Pharmacist 12-3-45678\nSouthland, Pharmacist 098765"
     # a number split over two lines is on neither
     ({"state_country": "Northland", "license_number": "12-3-45678"},
      ("Northland | 12-3-45678", "Suite 09", "8765 Example Road"), "WARN", 1),
+    # the same, as rows of one table block
+    ({"state_country": "Northland", "license_number": "12-3-45678"},
+     ("Northland | 12-3-45678\nSuite 09\n8765 Example Road",), "WARN", 1),
 ])
 def test_multi_record_two_licence_numbers_in_one_record(fields, lines, severity, lost):
     findings = _multi_record(_TWO_LICENCES, fields, code="F1", lines=lines)
+    assert [f["severity"] for f in findings] == [severity]
+    assert f"for 2 numbers; {lost} in neither the record nor the output" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("lines, severity, lost", [
+    (("Example Valve | 1234567",), "WARN", 1),
+    (("Example Valve | 1234567", "Example Valve, second filing | 7654321"), "INFO", 0),
+])
+def test_multi_record_two_patent_numbers_in_one_record(lines, severity, lost):
+    findings = _multi_record("Example Valve 1234567; Example Valve 7654321", {
+        "title": "Example Valve", "patent_number": "1234567"}, code="M2D", lines=lines)
     assert [f["severity"] for f in findings] == [severity]
     assert f"for 2 numbers; {lost} in neither the record nor the output" in findings[0]["message"]
 
