@@ -1456,8 +1456,13 @@ def lint_implausible_year(stage4: dict, stage5d: dict | None = None) -> list[dic
 # the start year of the entry before it in the same batch (EBYSBC VVRTUC
 # 43/45: an open-ended "Month YYYY -" start), or a misread short date
 # (HFAJCC 392: an mm/dd/yy start; YYVHNN 480: an M-YY-MM-YY range). Stage
-# 4's own century repair (#1267) moves only a 19yy year whose two digits the
-# text carries, so it fixes none of these.
+# 4 now repairs part of this itself: the century repair (#1267) moves a 19yy
+# year whose two digits the text carries, and `repair_year_not_in_source`
+# (stage4/coercion.py, #1348) re-derives a dated year from a source date in
+# the same month, which fixes HFAJCC 392 and VVRTUC 43 on new runs. This lint
+# is the safety net for what those repairs cannot reach: bare years, M-YY-MM-
+# YY runs (YYVHNN 480), and a dated value whose month the text gives no date
+# for.
 
 #: Codes year_not_in_source does not judge: code A (personal data, as in
 #: implausible_year), and the publication codes. A citation's year renders

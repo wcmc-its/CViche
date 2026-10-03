@@ -161,7 +161,11 @@ Lints, ranked by the severity of the failure class they catch:
                           (VVRTUC: two appointments given the start year of
                           the entry before them; HFAJCC: an mm/dd/yy start
                           read as a year the text lacks); WARN. Publication
-                          codes are not judged
+                          codes are not judged. Since #1348 stage 4 re-derives
+                          a dated year from a same-month source date (both
+                          examples above), so this catches what that repair
+                          cannot: bare years, M-YY-MM-YY runs, and a month the
+                          text gives no date for
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -540,7 +544,9 @@ LINT_PREVALENCE = {
     "stage_failure_recorded": 0.001,
     # 11 of the 63 runs of the EBYSBC/s7ab/pilot farm (scripts/doctor_gate.py
     # over origin/dev c3d87c5f renders, 2026-10-02), one fire per CV at any
-    # severity; another small mixed corpus, as for duplicate_records.
+    # severity; another small mixed corpus, as for duplicate_records. That
+    # stage-4 output predates #1348's year_not_in_source repair in stage 4,
+    # so this overstates the rate on runs built after it.
     "year_not_in_source": 0.175,
     # python_repr_in_output and llm_refusal_in_output (#1233, #1224): fire
     # counts on the 163 stage-6 renders of the 2026-10 wave-1 corpus (126
