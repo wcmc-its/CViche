@@ -1696,6 +1696,42 @@ def test_citation_pairing_reads_only_the_bibliography_and_needs_four_tokens():
                   f"layer counting. Synth Limnol. 2004;3:1-9.")
     assert lint_owner_missing_from_citation(stage4, _bibliography(other)) == []
     assert lint_owner_missing_from_citation(stage4, _bibliography(same_group)) == []
+    # The floor is four shared tokens exactly: an author list cut after three
+    # names is wholly the source's but does not pair; cut after four, it does.
+    three = "Ashdown A, Brimley B, Corwen C, et al."
+    four = "Ashdown A, Brimley B, Corwen C, Dunmore D, et al."
+    assert lint_owner_missing_from_citation(stage4, _bibliography(three)) == []
+    assert [f["message"].split(":")[0] for f in lint_owner_missing_from_citation(
+        stage4, _bibliography(four))] == ["entry 7 (S1)"]
+
+
+def test_citation_pairing_folds_case_and_accents():
+    # RNKYST 374 / ZDCXIV 65 shape: a PubMed rebuild prints the title in
+    # sentence case and the names without their accents, so the line shares
+    # few tokens with the source as written; it is still that entry's line.
+    authors = "Áshdöwn A, Brímley B, Córwen C, Dunmore D, Elsworth E, Fenwick F, Garrow G, Thornquist R"
+    source = f"{authors}. {_CITE_TITLE.upper()}. {_CITE_TRAILER}"
+    stage4 = _cite_run(_publication(374, source, authors=authors))
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 374 (S1)"]
+
+
+def test_owner_missing_judges_a_three_letter_surname():
+    # ZCTARO-08: the shortest surname the lint judges is three letters.
+    authors = f"{_CITE_KEPT}, Garrow G, Orr R"
+    stage4 = _cite_run(_publication(804, _source(authors=authors), authors=authors),
+                       owner={"last_name": "Orr"})
+    findings = lint_owner_missing_from_citation(stage4, _bibliography(_CUT_LINE))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 804 (S1)"]
+
+
+def test_citation_pairing_keeps_an_entry_on_its_best_line():
+    # One entry, two lines over both thresholds: its full line and a cut
+    # copy (MQSUIC 382 shape). It keeps the full line, which names the owner,
+    # and is not re-paired with the worse one.
+    stage4 = _cite_run(_publication(382, _source(), authors=_CITE_ALL))
+    assert lint_owner_missing_from_citation(
+        stage4, _bibliography(_FULL_LINE, _CUT_LINE)) == []
 
 
 def test_citation_pairing_does_not_count_initials_or_one_digit_numbers():
