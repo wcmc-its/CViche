@@ -18,6 +18,7 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 | id | date | doctor code | runs scored | labels | issue |
 |---|---|---|---|---|---|
 | M1 | 2026-10-02 | origin/dev `c3d87c5f`, over the base render of the same SHA | 62 of the 63-run farm: EBYSBC 40, s7ab 10, pilot 12 (the 13th pilot run has no verified autopsy) | 516 verified findings (EBYSBC 312, s7ab 112, pilot 92), 487 of them carrying an entry index; 186 EBYSBC verdicts | #819 |
+| M3 | 2026-10-04 | origin/dev `fb466a0f`, over the base render of the same SHA (`doctor_gate.py`: 63 runs, 1,275 findings) | 62 of 63, as M1 | as M1 | #822 |
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -57,6 +58,21 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `wrong_start_date` | 9 | 1 | 0 / 1 / 1 | 0 / 2 (0%) | 8 / 9 (89%) | 7 | M1 |
 
 No hits on M1's 62 runs: `bucket_status`, `dead_sections`, `invented_records`, `llm_refusal_in_output`, `no_output`, `owner_contact_missing`, `pipeline_errors_present`, `protected_data_in_output`, `python_repr_in_output`, `segmentation`, `stage3b_fallback_ratio`, `stage3b_second_pass_error`, `stage_failure_recorded`, `table_lost`, `under_extraction`, `unrendered_records`.
+
+## Score cap inputs (M3)
+
+The quality score caps a run at 84 on four more lints only while this table records the cap's own findings at 80% precision or more on 20 or more of them (Paul's decision on #822, 2026-10-02). Each row measures the subset of the lint's findings that would cap, not the whole lint. **matched** is M1's index match; every unmatched hit was hand-checked against the rendered docx (`w:ins` text included) and the stage-4 entry. A partial is a real defect other than the one the cap claims, and counts against precision.
+
+| cap input | caps when | hits | matched | hand-checked: TP / partial / FP | precision | caps? |
+|---|---|---|---|---|---|---|
+| `owner_missing_from_citation` | 3 or more on a run | 29 | 13 | 14 / 1 / 1 of 16 | 27 / 29 (93%) | yes |
+| `multi_record_coverage`, WARN with 2 or more clauses or values on no line | 1 or more | 20 | 14, of which 3 are `field_lost`, hand-checked: 1 TP, 2 partial | 2 / 1 / 3 of 6 | 14 / 20 (70%) | no |
+| `offschema_fields`, record-shaped WARN | 1 or more | 8 | 6 | 1 / 0 / 1 of 2 (the other was rendered fused into raw text) | 7 / 8, n under 20 | no |
+| `dedup_drops` | 1 or more lossy | 13 (6 WARN), 17 drops | names text | of the 17 drops, 7 have their text on one rendered line at 0.9 or more of its words; EBYSBC verdicts 2 / 2 / 4 of 8 | n under 20 | no |
+
+`owner_missing_from_citation`'s partial is a data-safety-board credit dropped from a trial citation, and its false positive a co-presented talk whose rendered line names only the other presenter. Its 13 matched hits sit on verified findings of the owner-dropped classes (EBYSBC E13 and E32, and s7ab-8). The unmatched 14 are owner credits the autopsies did not list one by one: six cut by "et al.", and eight study-group or collaborator credits ("including ...") the rendered line leaves out.
+
+`multi_record_coverage`'s false positives are one record's own detail split across two source lines (a meeting's name and its venue, twice on one run) and a mentee list the docx renders on one line; its partials lose a mentee's career detail, one of two committee roles, or mentees' years while their names render.
 
 ## Recall (M1)
 
