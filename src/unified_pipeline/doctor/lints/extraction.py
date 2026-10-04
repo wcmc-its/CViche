@@ -58,6 +58,7 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
+from unified_pipeline.stage6.formatting.dates import EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS
 from unified_pipeline.stage6.normalization.institutions import (
     _get_cleaned_institution_name,
 )
@@ -1042,6 +1043,16 @@ def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
 #: underscore-separated word, so `candidate_name` is not a date key.
 _DATE_NAMED_KEY_RE = re.compile(r"(?:^|_)(?:dates?|years?)(?:_|$)")
 
+
+def _is_date_key(key: str) -> bool:
+    """A date-named key (`_DATE_NAMED_KEY_RE`), or one stage 6 writes into a
+    record's date cell as a further span (`EXTRA_SPAN_KEYS`): its value is a
+    date of its record, never a record or a fact of its own -- even
+    `additional_periods`, a list of `{start_date, end_date}` objects that
+    would otherwise read as whole records (EBYSBC E22, #1245)."""
+    return bool(_DATE_NAMED_KEY_RE.search(key)) or key in EXTRA_SPAN_KEYS
+
+
 #: Characters of one value, and values per finding, quoted as evidence.
 FIELD_EVIDENCE_VALUE_CHARS = 100
 FIELD_EVIDENCE_MAX_VALUES = 3
@@ -1270,7 +1281,7 @@ def _record_count(key: str, value: object, declared: frozenset[str]) -> int:
     for any other record shape, 0 for one fact (#1245: XELRLZ's `appointments`
     list of three was reported as one record). A date-named key holds a date
     of its record, never a record of its own."""
-    if _DATE_NAMED_KEY_RE.search(key) or not _is_record_shaped(key, value, declared):
+    if _is_date_key(key) or not _is_record_shaped(key, value, declared):
         return 0
     return len(value) if isinstance(value, list) else 1
 
@@ -1297,7 +1308,13 @@ def _is_offschema_date(key: str, value: object, declared: frozenset[str]) -> boo
     are not renames: any date key on a code whose schema declares only
     `_SINGLE_DATE_KEY`, and a list of dates or periods on any code -- a
     second term, which no renderer reads (batch EBYSBC: VNUAHA's O
-    `additional_dates`, BZZNRL's H `dates`)."""
+    `additional_dates`, BZZNRL's H `dates`). A key stage 6 writes as a
+    record's further span (`EXTRA_SPAN_KEYS`, EBYSBC E22) is always one,
+    whatever its shape: HZGJFM's P `additional_period_start` is a string,
+    and the section now renders it, so a span is reported exactly when its
+    years are not on its record's line."""
+    if key in EXTRA_SPAN_KEYS:
+        return True
     schema_dates = {name for name in declared if _DATE_NAMED_KEY_RE.search(name)}
     return schema_dates == {_SINGLE_DATE_KEY} or isinstance(value, list)
 
@@ -1412,7 +1429,7 @@ def _grade_value(entry: _FieldsEntry, key: str, value: object, keys: frozenset[s
     MRJDWE) is SHOWN when the document shows it anywhere. A date is judged
     only on its record's lines, since its year on any other line is a
     coincidence: None when the record's line cannot be found."""
-    date_key = bool(_DATE_NAMED_KEY_RE.search(key))
+    date_key = _is_date_key(key)
     personal = entry.code == PERSONAL_DATA_CODE
     own = document.lines if personal else _record_lines(entry, keys, document)
     if any(_shown_on(value, line, date_key) for line in own):
@@ -1435,7 +1452,7 @@ def _absence_is_a_loss(entry: _FieldsEntry, key: str, value: object) -> bool:
     word, since stage 4 rewrites a date inside a value (WIANVH's F2
     `notes`). The model's own remark on an entry (BMAMWE's N3B `note` that
     no mentee was named) is not content of the CV."""
-    if _DATE_NAMED_KEY_RE.search(key):
+    if _is_date_key(key):
         return True
     if entry.code == PERSONAL_DATA_CODE:
         return bool(set(key.split("_")) & PERSONAL_DATA_ROW_WORDS)
@@ -1460,7 +1477,7 @@ def _offschema_candidates(entry: _FieldsEntry, declared: frozenset[str],
     for key, value in entry.fields.items():
         if key in readable or _is_blank(value):
             continue
-        if _DATE_NAMED_KEY_RE.search(key) and not (
+        if _is_date_key(key) and not (
                 graded and _is_offschema_date(key, value, declared)):
             continue
         if entry.code == PERSONAL_DATA_CODE and _personal_value_withheld(key, value):
@@ -1516,12 +1533,27 @@ class OffschemaSummary(NamedTuple):
     evidence: list[str]
 
 
+#: Why an off-schema value is unwritten: no renderer reads its key, or -- for
+#: a further span (`EXTRA_SPAN_KEYS`) on a code whose date cell reads it
+#: (`EXTRA_SPAN_CODES`) -- the span still did not reach its record's date
+#: cell (EBYSBC E22). On any other code (ZDCXIV's H `additional_dates`) the
+#: key is unread like any other.
+_UNREAD_KEY = "no renderer reads it"
+_UNREAD_SPAN = "its span did not reach the record's date cell"
+
+
+def _unwritten_reason(code: str, key: str) -> str:
+    """`_UNREAD_SPAN` for a span key on a code whose date cell reads it,
+    `_UNREAD_KEY` otherwise."""
+    return _UNREAD_SPAN if key in EXTRA_SPAN_KEYS and code in EXTRA_SPAN_CODES else _UNREAD_KEY
+
+
 def _one_fact_outcome(key: str, hits: list[OffschemaValue]) -> str:
     """The message's account of one-fact values: lost without a document to
     say otherwise, or what the document showed."""
     absent = sum(hit.grade == GRADE_ABSENT for hit in hits)
     if absent:
-        where = ("not on its record's line" if _DATE_NAMED_KEY_RE.search(key)
+        where = ("not on its record's line" if _is_date_key(key)
                  else "nowhere in the document")
         return f"{absent} of them {where}"
     if all(hit.grade == GRADE_UNGRADED for hit in hits):
@@ -1544,7 +1576,7 @@ def _offschema_summary(code: str, key: str,
     return OffschemaSummary(
         "WARN" if any(hit.warn for hit in hits) else "INFO",
         f"{len(hits)} {code} {noun}: `{key}` is outside the {code} schema and "
-        f"no renderer reads it -- {lost} (#817)",
+        f"{_unwritten_reason(code, key)} -- {lost} (#817)",
         [f"entry {hit.element_idx}: "
          f"{PERSONAL_VALUE_EVIDENCE if hit.personal else _evidence_value(hit.value)}"
          for hit in hits[:FIELD_EVIDENCE_MAX_VALUES]])
