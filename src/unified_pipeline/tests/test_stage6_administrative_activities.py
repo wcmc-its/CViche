@@ -678,3 +678,19 @@ class TestRawFallbackIsNotTruncated:
         assert len(text.strip()) > 150
         rows = _rows({"text": text.strip(), "extracted_fields": {}, "taxonomy_code": "P"})
         assert rows == [(text.strip(), "", "")]
+
+
+class TestFurtherSpanReachesTheDateCell:
+    """EBYSBC E22 (#1245): a committee term stage 4 filed under
+    `additional_period_start`/`additional_period_end` rendered nowhere."""
+
+    def test_the_second_term_follows_the_first(self):
+        entry = {"text": "Fictional Review Committee, Member, 1990-1993, 2001-present",
+                 "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Fictional Review Committee",
+                                      "role": "Member", "start_date": "1990",
+                                      "end_date": "1993",
+                                      "additional_period_start": "2001",
+                                      "additional_period_end": "present"}}
+        assert _rows(entry) == [("Fictional Review Committee", "Member",
+                                 "1990-1993, 2001-Present")]

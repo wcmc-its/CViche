@@ -582,3 +582,15 @@ class TestStartOnlyLeadershipDatesReadTheSource:
         table = gen._find_table_after_paragraph(section_idx)
         data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
         assert [row[-1] for row in data_rows] == [expected]
+
+
+class TestFurtherSpansReachTheDateCell:
+    """EBYSBC E22 (#1245): a second term stage 4 filed under
+    `additional_dates` rendered nowhere; the date cell now lists it."""
+
+    def test_a_second_term_follows_the_first(self):
+        rows = _o_rows(_o_entry(leadership_role="Interim Chair",
+                                institution="Quuxville General Hospital",
+                                additional_dates=[{"start_date": "2020", "end_date": "2021"}]))
+        assert rows == [("Interim Chair", "Quuxville General Hospital",
+                         f"{_O_DATES}, 2020-2021")]

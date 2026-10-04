@@ -1600,6 +1600,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # instance can render more than once, and a failure from a prior
         # render must never leak into this one's sidecar.
         self._section_failures, self._failed_section_codes, self._declined_grant_entries = [], set(), []
+        # An A entry's ORCID iD for the S0 renderer, set by _fill_personal_data (#817).
+        self._a_researcher_profiles = []
 
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
@@ -1662,7 +1664,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # (label, codes, callable), SAME order as the flat dispatch this
         # replaced (order pinned by test_stage6_section_boundary.py); codes are dropped from mapped_codes on failure (#842).
         section_dispatch: list[tuple[str, frozenset[str], Callable[[], Any]]] = [
-            ('researcher_profiles', frozenset({'S0'}), lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
+            ('researcher_profiles', frozenset({'S0'}), lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []) + self._a_researcher_profiles)),  # S0 section for ORCID, etc.; plus an A entry's ORCID (#817)
             ('education', frozenset({'B1'}), lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
             ('other_education', frozenset({'B2'}), lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
             ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries)),

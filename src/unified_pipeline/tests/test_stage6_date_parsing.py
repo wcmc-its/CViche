@@ -637,6 +637,9 @@ def test_other_codes_still_read_a_start_only_record_as_ongoing(code):
     "2021.07- Member, Quality Committee",
     "2021.07 -\tMember, Quality Committee",
     "Member, Quality Committee, 2021.07 - present",
+    # A two-digit year after a slashed month, or month and day.
+    "Member, Quality Committee 6/01/21-",
+    "11/21- Member, Quality Committee",
 ])
 def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source_text):
     assert format_date_range("2021", "", "P", source_text) == "2021-Present"
@@ -652,6 +655,10 @@ def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source
     "2021-22 Member, Quality Committee",
     "2019- Member, Quality Committee",           # a different year left open
     "12021- Quality Committee",                  # not the year, part of a number
+    "3/21/2022- Member, Quality Committee",      # 21 is the day, not the year
+    "6/01/21 Member, Quality Committee",         # a slashed date with no dash
+    "2019/06/21- Member, Quality Committee",     # 21 is a day after a year
+    "11/2021-22 Member, Quality Committee",      # a closed range
 ])
 def test_point_in_time_bare_year_when_the_source_does_not_leave_it_open(source_text):
     assert format_date_range("2021", "", "P", source_text) == "2021"
@@ -871,3 +878,95 @@ def test_a_mapping_dated_entry_sorts_among_string_dated_entries():
     ]
     ordered = [e["extracted_fields"]["label"] for e in sort_entries_reverse_chronological(entries)]
     assert ordered == ["newest-mapping", "newer-string", "oldest-string"]
+
+
+# --- EBYSBC E22 (#1245): a record's further spans in its date cell ----------
+
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    extra_date_spans,
+    with_extra_date_spans,
+)
+
+
+def _spans(**fields):
+    return {"start_date": "2019", "end_date": "2020", **fields}
+
+
+def test_a_list_of_periods_adds_each_span():
+    fields = _spans(additional_periods=[{"start_date": "2021-01", "end_date": "2021-12"},
+                                        {"start_date": "2023", "end_date": "2025"}])
+    assert extra_date_spans(fields, "O") == ["2021", "2023-2025"]
+
+
+def test_a_start_end_pair_adds_one_span_and_reads_present():
+    fields = _spans(additional_period_start="2022", additional_period_end="present")
+    assert with_extra_date_spans("2019-2020", fields, "P") == "2019-2020, 2022-Present"
+
+
+def test_a_string_of_dates_adds_each_date_alone_never_an_open_range():
+    fields = _spans(additional_dates="2024; 2026")
+    assert extra_date_spans(fields, "O") == ["2024", "2026"]
+
+
+def test_a_span_inside_the_records_own_range_adds_nothing():
+    fields = {"start_date": "2010", "end_date": "2020",
+              "additional_dates": "2011; 2015", "additional_periods": [
+                  {"start_date": "2012", "end_date": "2014"}]}
+    assert extra_date_spans(fields, "K1") == []
+
+
+def test_a_span_repeating_an_earlier_one_is_written_once():
+    fields = _spans(additional_dates=[{"start_date": "2022"}, {"start_date": "2022"}])
+    assert extra_date_spans(fields, "O") == ["2022"]
+
+
+def test_a_span_reading_as_the_records_own_range_is_not_repeated():
+    """A record with no end shows "2019-Present"; a further span 2019-present
+    reaches past its own year (so it is not covered) but reads the same, and
+    the cell must not say it twice."""
+    fields = {"start_date": "2019", "additional_period_start": "2019",
+              "additional_period_end": "present"}
+    assert extra_date_spans(fields, "O") == []
+
+
+def test_a_mm_yy_code_formats_the_span_as_its_own_range():
+    fields = {"start_date": "2010-03", "end_date": "2012-06",
+              "additional_dates": [{"start_date": "2014-09", "end_date": "2015-01"}]}
+    assert with_extra_date_spans("03/10-06/12", fields, "D1") == "03/10-06/12, 09/14-01/15"
+
+
+def test_no_own_start_year_and_an_empty_cell_take_no_span():
+    assert extra_date_spans({"additional_dates": "2022"}, "O") == []
+    assert with_extra_date_spans("", _spans(additional_dates="2022"), "O") == ""
+
+
+def test_a_record_without_extra_spans_keeps_its_cell_unchanged():
+    assert with_extra_date_spans("2019-2020", _spans(), "O") == "2019-2020"
+
+
+def test_a_span_inside_a_running_range_adds_nothing():
+    fields = {"start_date": "2010", "end_date": "present",
+              "additional_period_start": "2015", "additional_period_end": "2016"}
+    assert extra_date_spans(fields, "O") == []
+
+
+def test_a_span_starting_before_the_records_own_range_is_written():
+    """Only a span wholly inside the record's range is dropped: one that
+    opens before the record's start year still adds years the row lacks."""
+    fields = {"start_date": "2010", "end_date": "2020",
+              "additional_periods": [{"start_date": "2005", "end_date": "2012"}]}
+    assert extra_date_spans(fields, "O") == ["2005-2012"]
+
+
+def test_a_period_written_under_date_is_read_as_its_start():
+    fields = _spans(additional_periods=[{"date": "2022"}])
+    assert extra_date_spans(fields, "O") == ["2022"]
+
+
+def test_a_reversed_span_after_the_records_range_is_not_taken_as_covered():
+    """A span whose end year precedes its start covers its start year only:
+    2025 lies outside 2010-2020, so the span is written, not hidden as if
+    it ended inside the range."""
+    fields = {"start_date": "2010", "end_date": "2020",
+              "additional_period_start": "2025", "additional_period_end": "2015"}
+    assert len(extra_date_spans(fields, "O")) == 1
