@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { AlertCircle, Info, Lock, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { getRunQuality, getRunReviewNote } from '../api/runs'
-import type { DoctorFindingGroup, DoctorSeverity, QualityDimension, QualityGate, RunDoctorReport, RunQualityReport, ScoreRowWording } from '../types'
+import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, QualityDimension, QualityGate, RunDoctorReport, RunQualityReport, ScoreRowWording } from '../types'
 import { BAND_STYLE } from './runs/runQuality'
 
 const CARD = 'flex flex-col bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6'
@@ -252,6 +252,40 @@ function QualityScoreSection({ report }: { report: RunQualityReport }) {
   )
 }
 
+function InstanceItem({ instance }: { instance: DoctorFindingInstance }) {
+  return (
+    <li className="flex min-w-0 flex-col gap-1">
+      <span className="[overflow-wrap:anywhere]">
+        {instance.section && <strong className="font-semibold text-gray-900">{instance.section}: </strong>}
+        {instance.detail}
+      </span>
+      {instance.quotes.map((quote, i) => (
+        <q key={i} className="block border-l-2 border-sand-300 pl-2.5 text-gray-600 [overflow-wrap:anywhere] before:content-none after:content-none">{quote}</q>
+      ))}
+    </li>
+  )
+}
+
+/** Where each instance of a finding is: its CV section, what the doctor saw,
+ *  and the text it quotes. Collapsed, so a long list never buries the rows. */
+function FindingInstances({ finding }: { finding: DoctorFindingGroup }) {
+  const shown = finding.instances.length
+  if (shown === 0) return null
+  return (
+    <details className="mt-1 text-[13px] text-gray-700">
+      <summary className="cursor-pointer select-none text-primary-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500">
+        {shown === 1 ? 'Where' : `Where (${shown})`}
+      </summary>
+      <ul className="mt-2 mb-0 flex list-none flex-col gap-2.5 pl-0">
+        {finding.instances.map((instance, i) => <InstanceItem key={i} instance={instance} />)}
+      </ul>
+      {finding.count > shown && (
+        <p className="mt-2 mb-0 text-xs text-gray-500">Showing the first {shown} of {finding.count}.</p>
+      )}
+    </details>
+  )
+}
+
 function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup; capValue: number | null; style: SeverityStyle }) {
   const tied = finding.caps_score
   const { Icon } = style
@@ -278,6 +312,7 @@ function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup;
         {finding.prevalence != null && (
           <span className="text-xs text-gray-400">Seen on {seenOn(finding.prevalence)} of runs</span>
         )}
+        <FindingInstances finding={finding} />
       </div>
       <span className="whitespace-nowrap text-[13px] text-gray-500">{finding.count === 1 ? 'Once' : `${finding.count} times`}</span>
     </div>

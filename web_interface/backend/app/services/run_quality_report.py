@@ -10,8 +10,8 @@ import re
 from dataclasses import dataclass
 
 from app.schemas import (
-    DoctorFindingGroup, DoctorSeverityCounts, QualityDimension, QualityGate, RunDoctorReport,
-    RunQualityReport,
+    DoctorFindingGroup, DoctorFindingInstance, DoctorSeverityCounts, QualityDimension, QualityGate,
+    RunDoctorReport, RunQualityReport,
 )
 from app.services import quality_score_service as qss
 from app.services.quality_score_service import DimensionPoints, ScoreColumns, ScoreSnapshot
@@ -19,6 +19,7 @@ from app.services.quality_score_service import DimensionPoints, ScoreColumns, Sc
 from unified_pipeline import quality_score as scorer  # noqa: E402  (path set by quality_score_service)
 from unified_pipeline.doctor.shared import STATUS_RAN  # noqa: E402
 from unified_pipeline.run_doctor import LINT_PREVALENCE, SEVERITY_ORDER, rank_lints  # noqa: E402
+from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
 
 BAND_MEANINGS = {
     qss.BAND_GREEN: "Ship",
@@ -480,27 +481,63 @@ def columns_need_cleanup(cols: ScoreColumns) -> bool:
     return cols.quality_band != qss.BAND_GREEN or cols.quality_cap is not None
 
 
+#: Instances listed per lint row. A lint can fire hundreds of times on one CV
+#: (output_hygiene); the row's count still says how many there were.
+MAX_INSTANCES_SHOWN = 25
+
+# ponytail: the section is read off the doctor's own message prefix ("entry 42
+# (D1): ..." or "taxonomy code D1: ..."), not a structured field, so it also
+# works on every doctor report already stored. A lint that words its location
+# another way (protected_data_in_output says "found in <section>" inside its
+# message) shows no section, only its detail. Upgrade path: give `_finding`
+# a `code` field, read it here first, and keep this regex for old reports.
+_LOCATION_PREFIX_RE = re.compile(
+    r"^(?:entry [^\s:]+ \((?P<entry_code>[A-Z][A-Z0-9]*)\)|taxonomy code (?P<code>[A-Z][A-Z0-9]*)):\s*")
+# The doctor's issue references, "(#1243)": meaningful to developers, noise on the run page.
+_ISSUE_REF_RE = re.compile(r"\s*\(#\d+\)")
+
+
+def _instance(finding: dict) -> DoctorFindingInstance:
+    """One finding as the run page lists it: the CV section its taxonomy code
+    names, the message without that prefix, and its quoted evidence."""
+    message = str(finding.get("message") or finding["lint"])
+    section = None
+    match = _LOCATION_PREFIX_RE.match(message)
+    if match:
+        code = match.group("entry_code") or match.group("code")
+        section = TAXONOMY_LABELS.get(code)
+        if section is not None:
+            message = message[match.end():]
+    evidence = finding.get("evidence")
+    quotes = [str(q) for q in evidence if str(q).strip()] if isinstance(evidence, list) else []
+    return DoctorFindingInstance(
+        severity=finding["severity"], section=section,
+        detail=_ISSUE_REF_RE.sub("", message).strip(), quotes=quotes)
+
+
+def _shown_instances(findings: list[dict]) -> list[DoctorFindingInstance]:
+    """One lint's findings, worst first and otherwise in report order, capped."""
+    ordered = sorted(findings, key=lambda f: _SEVERITY_RANK[f["severity"]])  # stable: keeps report order
+    return [_instance(f) for f in ordered[:MAX_INSTANCES_SHOWN]]
+
+
 def _doctor_groups(findings: list[dict], cap_lint: str | None) -> list[DoctorFindingGroup]:
     """Collapse the ran findings to one row per lint, rarest lint first."""
-    counts: dict[str, int] = {}
-    worst: dict[str, str] = {}
-    first_message: dict[str, str] = {}
+    by_lint: dict[str, list[dict]] = {}
     for f in findings:
-        lint, severity = f["lint"], f["severity"]
-        counts[lint] = counts.get(lint, 0) + 1
-        if lint not in worst or _SEVERITY_RANK[severity] < _SEVERITY_RANK[worst[lint]]:
-            worst[lint] = severity
-        first_message.setdefault(lint, f.get("message") or lint)
+        by_lint.setdefault(f["lint"], []).append(f)
     groups = []
-    for lint, count in rank_lints(counts):
+    for lint, count in rank_lints({lint: len(fs) for lint, fs in by_lint.items()}):
         copy = LINT_COPY.get(lint)
+        instances = _shown_instances(by_lint[lint])
         groups.append(DoctorFindingGroup(
-            lint=lint, severity=worst[lint],
-            message=copy.explanation if copy else first_message[lint],
+            lint=lint, severity=instances[0].severity,  # worst first, so the row's worst
+            message=copy.explanation if copy else by_lint[lint][0].get("message") or lint,
             title=copy.title if copy else None,
             what_to_do=copy.what_to_do if copy else None,
             count=count, prevalence=LINT_PREVALENCE.get(lint),
             caps_score=lint == cap_lint,
+            instances=instances,
         ))
     return groups
 

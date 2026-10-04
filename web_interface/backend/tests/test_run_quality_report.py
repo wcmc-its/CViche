@@ -318,6 +318,63 @@ def test_summarize_doctor_none_for_a_non_report(payload):
     assert rqr.summarize_doctor(payload) is None
 
 
+def test_doctor_instance_names_the_section_and_quotes_the_real_lints_evidence():
+    """#1388: "Several records read as one" said "compare the quoted entry" and
+    showed no quote. Runs the real lint, so a reworded "entry N (CODE):" prefix
+    fails here instead of silently dropping the section."""
+    from unified_pipeline.doctor.lints.extraction import lint_multi_record_coverage
+
+    entry = {"taxonomy_code": "D1", "element_idx_start": 7, "extracted_fields": {
+                 "title": "Lecturer", "institution": "Northfield University School of Medicine",
+                 "start_date": "2001", "end_date": "2005"},
+             "text": "Lecturer, Northfield University School of Medicine, 2001-2005 "
+                     "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"}
+    findings = lint_multi_record_coverage(
+        {"entries": [entry]}, [("p", "Lecturer | Northfield University School of Medicine | 2001-2005")])
+
+    [instance] = rqr.summarize_doctor({"findings": findings}).findings[0].instances
+
+    assert instance.model_dump() == {
+        "severity": "WARN", "section": "Academic Appointments",
+        "detail": "2 record-shaped clauses, one stage-4 record; 1 other clause(s) on no line of the output",
+        "quotes": ["Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"]}
+
+
+@pytest.mark.parametrize("message, section, detail", [
+    ("taxonomy code M2A: none of its 3 classified entries appear in the output document",
+     "Current Research Funding", "none of its 3 classified entries appear in the output document"),
+    # An unknown code is not a section: the message keeps its prefix rather than lose it.
+    ("entry 4 (ZZ9): one record", None, "entry 4 (ZZ9): one record"),
+    ("entry 4: status 'completed' implies M2B (#561)", None, "entry 4: status 'completed' implies M2B"),
+    ("protected personal data (date of birth) found in Personal Data",
+     None, "protected personal data (date of birth) found in Personal Data"),
+])
+def test_doctor_instance_section_comes_only_from_a_known_taxonomy_code(message, section, detail):
+    [instance] = rqr.summarize_doctor({"findings": [_finding("segmentation", message=message)]}).findings[0].instances
+    assert (instance.section, instance.detail) == (section, detail)
+
+
+def test_doctor_instances_list_the_worst_first_and_cap_the_list_but_not_the_count():
+    infos = [_finding("output_hygiene", "INFO", message=f"info {i}") for i in range(rqr.MAX_INSTANCES_SHOWN)]
+    findings = [*infos, _finding("output_hygiene", "WARN", message="the warning")]
+
+    group = rqr.summarize_doctor({"findings": findings}).findings[0]
+
+    assert group.count == rqr.MAX_INSTANCES_SHOWN + 1
+    assert len(group.instances) == rqr.MAX_INSTANCES_SHOWN
+    assert [i.detail for i in group.instances[:3]] == ["the warning", "info 0", "info 1"]
+    assert group.severity == "WARN"
+
+
+def test_doctor_instance_quotes_skip_blank_and_non_list_evidence():
+    report = rqr.summarize_doctor({"findings": [
+        {**_finding("table_shape"), "evidence": ["  ", "kept", 3]},
+        {**_finding("pipe_leaks"), "evidence": "not a list"},
+    ]})
+    assert {g.lint: g.instances[0].quotes for g in report.findings} == {
+        "table_shape": ["kept", "3"], "pipe_leaks": []}
+
+
 def test_report_for_a_capped_run_ties_the_cap_lint_to_its_finding():
     doctor = {"findings": [_finding("owner_contact_missing", "ERROR"), _finding("table_shape", "INFO")]}
 

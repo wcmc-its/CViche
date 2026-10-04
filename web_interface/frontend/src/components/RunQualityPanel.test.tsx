@@ -74,7 +74,7 @@ describe('RunQualitySections', () => {
       ...SCORED, cap: 25, cap_reason: 'owner name missing', cap_lint: lint,
       doctor: {
         counts: { error: 1, warn: 0, info: 0 }, not_run: 0,
-        findings: [{ lint, severity: 'ERROR', message: 'No name', title: 'Owner name not found', what_to_do: 'Rerun.', count: 1, prevalence: null, caps_score: true }],
+        findings: [{ lint, severity: 'ERROR', message: 'No name', title: 'Owner name not found', what_to_do: 'Rerun.', count: 1, prevalence: null, caps_score: true, instances: [] }],
       },
     })
     const { container } = render(<RunQualitySections runId="ABCDEF" />)
@@ -85,7 +85,7 @@ describe('RunQualitySections', () => {
   })
 
   it('shows a finding as title, what to do, and Once / N times', async () => {
-    const finding = { severity: 'WARN' as const, message: 'm', what_to_do: 'Delete the repeat.', prevalence: 0.12, caps_score: false }
+    const finding = { severity: 'WARN' as const, message: 'm', what_to_do: 'Delete the repeat.', prevalence: 0.12, caps_score: false, instances: [] }
     vi.mocked(getRunQuality).mockResolvedValue({
       ...SCORED,
       doctor: {
@@ -104,6 +104,30 @@ describe('RunQualitySections', () => {
     expect(screen.getByText('3 times')).toBeTruthy()
     expect(screen.getByText('pipe_leaks')).toBeTruthy()
     expect(screen.getAllByText('Seen on 12% of runs')).toHaveLength(2)
+  })
+
+  it('lists where each instance is, its section and quoted text, and says when the list is cut short', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      doctor: {
+        counts: { error: 0, warn: 1, info: 0 }, not_run: 0,
+        findings: [{
+          lint: 'multi_record_coverage', severity: 'WARN', message: 'm', title: 'Several records read as one',
+          what_to_do: 'Add each missing record.', count: 30, prevalence: null, caps_score: false,
+          instances: [
+            { severity: 'WARN', section: 'Academic Appointments', detail: '1 other clause(s) on no line of the output', quotes: ['Associate Professor of Medicine, 2016-2022'] },
+            { severity: 'INFO', section: null, detail: 'no section named', quotes: [] },
+          ],
+        }],
+      },
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.getByText('Where (2)').closest('details')!.open).toBe(false)
+    expect(screen.getByText('Academic Appointments:')).toBeTruthy()
+    expect(screen.getByText('Associate Professor of Medicine, 2016-2022').tagName).toBe('Q')
+    expect(screen.getByText('no section named')).toBeTruthy()
+    expect(screen.getByText('Showing the first 2 of 30.')).toBeTruthy()
   })
 
   it('opens a row card on focus and lists a fired gate with its cap', async () => {
