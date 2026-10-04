@@ -36,6 +36,11 @@ original_doc_path parameter and forwards it to generate(), and both drivers
 pass the resolved source path the same way (#550), so a delta this flag
 surfaces is a delta a real CV render produces too.
 
+--repair renders as a driver does with CVICHE_RUN_REPAIR=1 (#1389): it passes
+repair_protected_data=True to run_stage6(), which writes <uid>_repairs.json
+beside each docx. Off by default, and when off the keyword is not passed at
+all, so the gate still renders an arm whose run_stage6() predates it.
+
 A requested uid (positional or --uids-file) that matches no artifact fails the
 run non-zero. --uids-file lines lose only their line terminator: trailing
 spaces are part of real uids.
@@ -139,6 +144,8 @@ def _parse_args(argv):
                         help="file with one uid per line, instead of positional uids")
     parser.add_argument("--source-dir", type=Path, default=None,
                         help="directory holding <uid>*.docx (see docstring)")
+    parser.add_argument("--repair", action="store_true",
+                        help="run stage 6's protected-data repair (see docstring)")
     args = parser.parse_args(argv)
     if not (args.arm_outputs / "stage_4_field_extraction").is_dir():
         parser.error(f"no stage_4_field_extraction under {args.arm_outputs} -- point this at "
@@ -305,7 +312,7 @@ def _llm_disabled(s6):
             s6.call_llm = original
 
 
-def _render_uid(s6, src: Path, dest: Path, source_path) -> dict:
+def _render_uid(s6, src: Path, dest: Path, source_path, repair: bool = False) -> dict:
     """Render one uid and return its _render_index entry.
 
     All four outcomes a uid can have are decided here -- crashed, returned
@@ -319,10 +326,12 @@ def _render_uid(s6, src: Path, dest: Path, source_path) -> dict:
     # whichever uid hit it, losing every later uid and the index with them --
     # which is the reused-dir failure of defect 1 wearing a different hat. A
     # uid is allowed to fail. A run is not allowed to disappear.
+    # Only when asked: an arm whose run_stage6 predates #1389 rejects the keyword.
+    repair_kwargs = {"repair_protected_data": True} if repair else {}
     try:
         s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False,
                       original_doc_path=str(source_path) if source_path else None,
-                      discover_original_doc=False)
+                      discover_original_doc=False, **repair_kwargs)
         # A renderer that returns without raising and without writing the
         # output file is not a successful render -- "no exception" is not
         # "rendered" (review on #589, same fail-closed guarantee this
@@ -338,7 +347,7 @@ def _render_uid(s6, src: Path, dest: Path, source_path) -> dict:
     return {"input": src.name}
 
 
-def _render_all(s6, arm_outputs: Path, out: Path, source_dir, uids) -> dict:
+def _render_all(s6, arm_outputs: Path, out: Path, source_dir, uids, repair: bool = False) -> dict:
     """Render every uid in order into the index dict.
 
     A uid with no resolvable input artifact is recorded and skipped without a
@@ -353,7 +362,7 @@ def _render_all(s6, arm_outputs: Path, out: Path, source_dir, uids) -> dict:
                 results[uid] = {"error": "no input artifact"}
                 continue
             source_path = _resolve_source_docx(source_dir, uid) if source_dir is not None else None
-            results[uid] = _render_uid(s6, src, out / f"{uid}_wcm.docx", source_path)
+            results[uid] = _render_uid(s6, src, out / f"{uid}_wcm.docx", source_path, repair)
             if source_dir is not None and "error" not in results[uid]:
                 # One-line notice either way -- which docx (if any)
                 # backed the fallback write-back for this uid, so a uid
@@ -400,7 +409,7 @@ def main(argv=None):
         print("no uids to render -- empty arm", file=sys.stderr)
         return 1
 
-    results = _render_all(s6, arm_outputs, out, source_dir, uids)
+    results = _render_all(s6, arm_outputs, out, source_dir, uids, args.repair)
     _write_render_index(out, results)
     bad = sorted(u for u, r in results.items() if "error" in r)
     print(f"\nrendered={len(results) - len(bad)} failed={len(bad)}")

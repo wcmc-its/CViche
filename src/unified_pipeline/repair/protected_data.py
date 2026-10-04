@@ -53,7 +53,14 @@ from unified_pipeline.doctor.lints.protected_data import (
     lint_protected_data_in_output,
 )
 from unified_pipeline.doctor.shared import docx_body_blocks
-from unified_pipeline.stage6.normalization.pii import CAT_DEA, CAT_HOME_CONTACT, _pii_matches
+from unified_pipeline.stage6.normalization.pii import (
+    CAT_CHILDREN,
+    CAT_DEA,
+    CAT_FAMILY,
+    CAT_HOME_CONTACT,
+    _pii_matches,
+)
+from unified_pipeline.stage6.normalization.records import _is_citation_shaped
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE, WITHHELD_COMMENT_AUTHOR
 
 if TYPE_CHECKING:
@@ -80,6 +87,21 @@ REPAIR_COMMENT_TEMPLATE = (
 #: A paragraph with only these left after a cut held nothing but the leak.
 _RESIDUE_RE = re.compile(r"[\s,;:|•·*–—-]*")
 _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
+
+#: Words a paragraph must keep, once every independent-shape span is taken
+#: out, before its citation shape counts as a title rather than a personal
+#: line ("Born in <Place>, 1960." keeps ", 1960."). Over the #1392 review
+#: renders the shortest such title kept 7 words; no real leak was citation-shaped.
+TITLE_MIN_WORDS = 6
+_WORD_RE = re.compile(r"[^\W\d_]{2,}")
+#: A capitalised word directly before a capitalised label: "Foster Children -
+#: <Title>", "Treating Children: <Subtitle>" -- a title-case phrase, not a
+#: label opening its own line ("Children: ...", "Grandchildren – ...").
+_TITLE_WORD_BEFORE_RE = re.compile(r"\b[A-Z][\w'’-]*[ \t]+$")
+#: The categories whose label the review corpus found inside title-case talk
+#: and paper titles; a spouse or birth label there was not seen, so those are
+#: not gated on the phrase (only on `_is_title_text`).
+_TITLE_LABEL_CATEGORIES = frozenset({CAT_CHILDREN, CAT_FAMILY})
 
 
 class _Leak(NamedTuple):
@@ -130,8 +152,7 @@ def _leaks(text: str, section: str | None, dea_label_in_block: bool) -> list[_Le
              if not (m.category == CAT_HOME_CONTACT
                      and _HOME_CONTACT_LABEL_ONLY_RE.match(text[m.start:m.end]))]
     if section in (_PERSONAL_DATA_SECTION, _APPENDIX_SECTION):
-        leaks += [_Leak(m.start(), m.end(), category)
-                  for pattern, category in _INDEPENDENT_SHAPES for m in pattern.finditer(text)]
+        leaks += _independent_leaks(text, section)
     if section == _PERSONAL_DATA_SECTION:
         leaks += [_Leak(m.start(), m.end(), BARE_DATE_CATEGORY) for m in _BARE_DATE_RE.finditer(text)]
     if _is_licensure_section(section):
@@ -140,6 +161,38 @@ def _leaks(text: str, section: str | None, dea_label_in_block: bool) -> list[_Le
         probe = _DEA_VALUE_RE if dea_label_in_block else _DEA_NUMBER_VALUE_RE
         leaks += [_Leak(m.start(), m.end(), CAT_DEA) for m in probe.finditer(text)]
     return leaks
+
+
+def _is_title_text(text: str, shapes: list[_Leak]) -> bool:
+    """Whether a paragraph reads as a citation or title once the shape spans
+    are out of it: stage 6's own citation shape (`_is_citation_shaped`: a
+    year and a closing period) over a residue of `TITLE_MIN_WORDS` words."""
+    residue = "".join(ch for i, ch in enumerate(text) if not any(s.start <= i < s.end for s in shapes))
+    return _is_citation_shaped(residue.strip()) and len(_WORD_RE.findall(residue)) >= TITLE_MIN_WORDS
+
+
+def _in_title_case_phrase(text: str, leak: _Leak) -> bool:
+    """Whether a child or family label, capitalised, continues a title-case phrase."""
+    return (leak.category in _TITLE_LABEL_CATEGORIES and text[leak.start:leak.start + 1].isupper()
+            and bool(_TITLE_WORD_BEFORE_RE.search(text[:leak.start])))
+
+
+def _independent_leaks(text: str, section: str | None) -> list[_Leak]:
+    """The lint's independent shapes in one paragraph, less those in title
+    text (#1392 review). Those shapes false-match publication and talk titles
+    ("...in Children: <Subtitle>", "...born in <Place>, 1989-1993") that the
+    Appendix carries verbatim; a cut there would silently delete real CV
+    content, so the hit stays a finding (`remaining`) for a person to read.
+    A home phone or street address is never title text, so it is always cut.
+    The Personal Data block holds no titles, so it is not gated."""
+    shapes = [_Leak(m.start(), m.end(), category)
+              for pattern, category in _INDEPENDENT_SHAPES for m in pattern.finditer(text)]
+    if section != _APPENDIX_SECTION:
+        return shapes
+    title = _is_title_text(text, shapes)
+    return [leak for leak in shapes
+            if leak.category == CAT_HOME_CONTACT
+            or not (title or _in_title_case_phrase(text, leak))]
 
 
 def _deleted_leaks(text: str) -> list[_Leak]:
@@ -198,6 +251,7 @@ def _cut(p_el: BaseOxmlElement, spans: list[_Leak]) -> None:
     """Remove the spans from a paragraph's `w:t` nodes, wherever the runs
     split them."""
     offset = 0
+    cut = False
     for node in _text_nodes(p_el, "w:t"):
         text = node.text or ""
         node_start, node_end = offset, offset + len(text)
@@ -206,6 +260,19 @@ def _cut(p_el: BaseOxmlElement, spans: list[_Leak]) -> None:
                 if not any(s.start <= i < s.end for s in spans)]
         if len(kept) != len(text):
             _set_text(node, _MULTI_SPACE_RE.sub(" ", "".join(kept)))
+            cut = True
+    if cut:
+        _trim_trailing_space(p_el)
+
+
+def _trim_trailing_space(p_el: BaseOxmlElement) -> None:
+    """Drop the whitespace a cut at the end of the paragraph left behind
+    ("(FAX) "), across however many trailing `w:t` nodes hold it."""
+    for node in reversed(_text_nodes(p_el, "w:t")):
+        text = node.text or ""
+        _set_text(node, text.rstrip())
+        if text.strip():
+            return
 
 
 def _drop_deleted(p_el: BaseOxmlElement, spans: list[_Leak]) -> None:

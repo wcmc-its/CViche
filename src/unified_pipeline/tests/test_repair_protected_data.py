@@ -129,7 +129,7 @@ def test_a_cut_leaves_the_rest_of_its_paragraph_and_no_dangling_separator(tmp_pa
     repair.repair_protected_data(docx_path)
     texts = [p.text for p in Document(str(docx_path)).paragraphs]
     assert "1. Hobbies include sailing" in texts or "Hobbies include sailing" in texts
-    assert "Travel " in texts and "Note " in texts
+    assert "Travel" in texts and "Note " in texts  # a cut at the end leaves no trailing space
 
 
 def test_a_body_paragraph_that_was_only_the_leak_carries_the_withheld_notice(tmp_path):
@@ -239,3 +239,66 @@ def test_the_repair_package_imports_only_in_its_written_direction():
             elif isinstance(node, ast.Import):
                 targets.update(alias.name for alias in node.names)
     assert not [t for t in targets for bad in _FORBIDDEN_IMPORTS if t == bad or t.startswith(bad + ".")]
+
+
+#: Invented title text carrying the lint's independent shapes (#1392 review):
+#: a citation subtitle, a cohort "born in <Place>, <years>", a talk title.
+_TITLE_TEXTS = (
+    "Doe J, Roe R. Anxiety in Children: Case Illustration and Systematic Review. "
+    "J Invented Pediatr. 2019;12(3):45-67.",
+    "Roe R, Doe J. Outcomes among veterans born in Springfield, 1989-1993. "
+    "Invented Med J. 2021;4:1-9.",
+    "Foster Children - Placement Stability and Wellbeing",
+)
+
+
+@pytest.mark.parametrize("text", _TITLE_TEXTS)
+def test_an_independent_shape_in_appendix_title_text_is_not_cut(text):
+    assert repair._leaks(text, "appendix", dea_label_in_block=False) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Married: Pat Example, MD", "Grandchildren – Ann, Bea, Cy", "Citizenship: USA; three children",
+    "Born in Springfield, 1970.", "212-555-0199 (home)",
+    "Caring for my three children, including 5 years at home 2001-2006"])
+def test_a_personal_line_in_the_appendix_is_still_cut(text):
+    assert repair._leaks(text, "appendix", dea_label_in_block=False)
+
+
+def test_title_text_in_the_appendix_stays_a_finding_and_is_left_whole(tmp_path):
+    docx_path = _render(tmp_path)
+    doc = Document(str(docx_path))
+    anchor = next(p for p in doc.paragraphs if "sailing" in p.text)
+    for text in _TITLE_TEXTS:
+        anchor = _paragraph_after(anchor, f"<w:r><w:t>{text}</w:t></w:r>")
+    doc.save(str(docx_path))
+    found = len(_findings(docx_path))
+    assert found == len(_TITLE_TEXTS)
+
+    result = repair.repair_protected_data(docx_path)
+
+    assert (result.found, result.removals, result.remaining) == (found, [], found)
+    texts = [p.text for p in Document(str(docx_path)).paragraphs]
+    assert [t for t in _TITLE_TEXTS if t not in texts] == []
+
+
+def test_a_cut_at_the_end_of_a_paragraph_leaves_no_trailing_space(tmp_path):
+    docx_path = _render(tmp_path)
+    doc = Document(str(docx_path))
+    sailing = next(p for p in doc.paragraphs if "sailing" in p.text)
+    _paragraph_after(sailing, '<w:r><w:t xml:space="preserve">Telephone: 212-555-0100 (work) </w:t></w:r>'
+                              "<w:r><w:t>212-555-0199 (home)</w:t></w:r>")
+    doc.save(str(docx_path))
+
+    repair.repair_protected_data(docx_path)
+
+    phone = next(p.text for p in Document(str(docx_path)).paragraphs if p.text.startswith("Telephone"))
+    assert phone == "Telephone: 212-555-0100 (work)"
+
+
+def test_the_title_gate_is_the_appendix_s_only():
+    """The Personal Data block holds no titles: a long citation-shaped line
+    there is still cut."""
+    text = "Children: Ann and Bea. The family moved to Springfield in 1975 and later to Rivertown."
+    assert repair._independent_leaks(text, "appendix") == []
+    assert repair._independent_leaks(text, "personal data")

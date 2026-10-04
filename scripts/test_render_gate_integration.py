@@ -72,7 +72,9 @@ def _make_stub(render):
     def run_stage6(input_path, output_path=None, verbose=True, original_doc_path=None, **kw):
         stub.calls.append({"input_path": input_path, "output_path": output_path,
                            "original_doc_path": original_doc_path,
-                           "discover_original_doc": kw.get("discover_original_doc")})
+                           "discover_original_doc": kw.get("discover_original_doc"),
+                           "repair_passed": "repair_protected_data" in kw,
+                           "repair_protected_data": kw.get("repair_protected_data")})
         return render(stub, input_path, output_path, original_doc_path)
 
     def WCMTemplateGenerator(*a, **kw):
@@ -251,6 +253,20 @@ def test_the_resolved_source_docx_is_forwarded_as_original_doc_path():
         assert code == 0
         assert stub.calls[0]["original_doc_path"] == str(sources / "u1_cv.docx")
         assert _index(out)["u1"]["source_docx"] == "u1_cv.docx"
+
+
+def test_repair_is_passed_to_run_stage6_only_with_the_flag():
+    # #1389: --repair renders as CVICHE_RUN_REPAIR=1 does; without it the
+    # keyword is not passed, so an arm whose run_stage6 predates it renders.
+    for argv_tail, passed in (([], False), (["--repair"], True)):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arm, out = _make_arm(root, ["u1"]), root / "out"
+            with _stage6(_make_stub(_renders_a_good_docx)) as stub:
+                code, _ = _run_main([str(arm), str(out), *argv_tail])
+            assert code == 0
+            assert stub.calls[0]["repair_passed"] is passed
+            assert stub.calls[0]["repair_protected_data"] is (True if passed else None)
 
 
 def test_a_uid_with_no_source_docx_still_renders_and_says_so():
@@ -481,6 +497,7 @@ if __name__ == "__main__":
     test_stale_output_from_a_previous_arm_is_removed()
     test_the_render_index_records_every_uid()
     test_the_resolved_source_docx_is_forwarded_as_original_doc_path()
+    test_repair_is_passed_to_run_stage6_only_with_the_flag()
     test_a_uid_with_no_source_docx_still_renders_and_says_so()
     test_one_uid_failing_does_not_stop_the_others()
     test_a_uid_whose_output_validation_raises_does_not_kill_the_run()
