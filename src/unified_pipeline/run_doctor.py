@@ -200,6 +200,13 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
+14r. junk_or_header_row   a stage-4 entry that is no record of its own,
+                          rendered as one: a group header (an institution or
+                          organization alone, dated only under teaching), a
+                          lead-in label ending in ':', a date fragment with
+                          no words ('47.', '1997-'), or an undated D1 above
+                          or below the dated appointments repeating one of
+                          their titles (EBYSBC E8, E10, E29); WARN
 14r. teaching_postcheck   a teaching line stage 5c wrote, and stage 6
                           renders, that misstates its stage-4 record: 5c's
                           own post-check (#1349) re-applied -- a date apart
@@ -283,6 +290,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.doctor.precision import precision_payload
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
 from unified_pipeline.quality_score import stage3b_fallback_ratios
 from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
@@ -392,6 +400,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_etal_added,
+    lint_junk_or_header_row,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_owner_missing_from_citation,
@@ -507,6 +516,7 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "junk_or_header_row",
     "teaching_postcheck",
     "contact_slot_lost",
     "owner_contact_missing",
@@ -643,6 +653,10 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # junk_or_header_row (EBYSBC E8/E10/E29): 23 of the 63 runs of the
+    # EBYSBC/s7ab/pilot farm fire, as rendered by origin/dev fb466a0f,
+    # measured 2026-10-04. Same mixed-corpus caveat as above.
+    "junk_or_header_row": 0.365,
     # teaching_postcheck (EBYSBC E20): 17 of the 63 runs of the EBYSBC/s7ab/
     # pilot farm fire at any severity (10 at WARN), on origin/dev fb466a0f,
     # measured 2026-10-04. Their stage-5c output predates #1349's post-check,
@@ -1179,6 +1193,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("junk_or_header_row", lint_junk_or_header_row, ("stage_4", "table_rows"),
+             optional=("blocks",)),
     LintSpec("teaching_postcheck", lint_teaching_postcheck, ("stage_5d",)),
     LintSpec("contact_slot_lost", lint_contact_slot_lost, ("stage_4", "table_rows")),
 )
@@ -1405,6 +1421,9 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
         "counts": counts,
         "worst_severity": worst,
         "metrics": metrics,
+        # Each fired lint's hand-checked precision from doctor/PRECISION.md
+        # (#819): doctor.tsv and the Teams card print it next to the lint name.
+        "lint_precision": precision_payload(f["lint"] for f in findings),
     }
 
 

@@ -303,6 +303,60 @@ def test_payload_includes_doctor_summary(monkeypatch):
     assert facts["Doctor"] == "3 findings (top: segmentation)"
 
 
+def test_payload_doctor_top_lint_carries_its_precision(monkeypatch):
+    """#819: the top lint is shown with its PRECISION.md precision."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {
+        "counts": {"ERROR": 0, "WARN": 2},
+        "findings": [{"lint": "missed_headers", "severity": "WARN"},
+                     {"lint": "table_shape", "severity": "WARN"}],
+        "lint_precision": {"missed_headers": {"precision": 0.5, "judged": 8, "label": "p~0.50 n=8"},
+                           "table_shape": {"precision": 0.17, "judged": 6, "label": "p~0.17 n=6"}},
+    }
+
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
+
+    assert facts["Doctor"] == "2 findings (top: missed_headers, p~0.50 n=8)"
+
+
+def test_payload_doctor_top_lint_unmeasured(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {
+        "counts": {"ERROR": 1},
+        "findings": [{"lint": "no_output", "severity": "ERROR"}],
+        "lint_precision": {"no_output": {"precision": None, "judged": 0, "label": "p unmeasured"}},
+    }
+
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
+
+    assert facts["Doctor"] == "1 findings (top: no_output, p unmeasured)"
+
+
+@pytest.mark.parametrize("lint_precision", [
+    None, "garbled", {"no_output": "garbled"}, {"no_output": {"label": 7}}, {"other": {"label": "x"}},
+])
+def test_payload_doctor_precision_missing_or_malformed_is_left_off(monkeypatch, lint_precision):
+    """A report from before #819, or a garbled block, still gives the Doctor
+    line, just without a precision label."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {"counts": {"ERROR": 1}, "findings": [{"lint": "no_output", "severity": "ERROR"}],
+              "lint_precision": lint_precision}
+
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
+
+    assert facts["Doctor"] == "1 findings (top: no_output)"
+
+
+def test_payload_doctor_precision_label_is_sanitised(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {"counts": {"ERROR": 1}, "findings": [{"lint": "no_output", "severity": "ERROR"}],
+              "lint_precision": {"no_output": {"label": "p~0.50\x07 n=8"}}}
+
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
+
+    assert "\x07" not in facts["Doctor"]
+
+
 def test_payload_doctor_reports_zero_findings_when_clean(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
     doctor = {"counts": {"ERROR": 0, "WARN": 0, "INFO": 7}, "findings": []}
