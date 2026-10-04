@@ -402,6 +402,22 @@ LINT_COPY = {
         "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
         "same, such as 2013-2013.",
         "Correct the date from the source CV."),
+    "junk_or_header_row": LintCopy(
+        "Heading printed as a record",
+        "A line that only introduces the records below it (an institution, a label ending in a "
+        "colon, a stray date) or repeats a dated appointment prints as a record of its own.",
+        "Delete the quoted row, and give the records under it the institution or dates it carried."),
+    "teaching_postcheck": LintCopy(
+        "Teaching line reworded wrongly",
+        "A rewritten teaching line no longer matches the CV: a date sits apart from its title, a "
+        "year is missing or wrong, a role was added, one of several records was left out, or a raw "
+        "copy of the source was printed under it.",
+        "Compare the quoted line with the source CV and correct it in Word."),
+    "contact_slot_lost": LintCopy(
+        "Office contact missing",
+        "An office phone number or office address in the CV is not in the Office row of Personal "
+        "Data: it is in another row, such as Cell phone, or nowhere in the document.",
+        "Copy the office phone or address from the source CV into its Office row."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "

@@ -200,14 +200,36 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
-14r. grant_boundary       a grant list stage 2 cut one line or row off
+14r. junk_or_header_row   a stage-4 entry that is no record of its own,
+                          rendered as one: a group header (an institution or
+                          organization alone, dated only under teaching), a
+                          lead-in label ending in ':', a date fragment with
+                          no words ('47.', '1997-'), or an undated D1 above
+                          or below the dated appointments repeating one of
+                          their titles (EBYSBC E8, E10, E29); WARN
+14r. teaching_postcheck   a teaching line stage 5c wrote, and stage 6
+                          renders, that misstates its stage-4 record: 5c's
+                          own post-check (#1349) re-applied -- a date apart
+                          from its title, a year dropped or not in the
+                          source, an echoed 'Original:' line, a role nothing
+                          names -- plus a record of a multi-record entry
+                          left out and an id tag left in (EBYSBC E20). WARN;
+                          INFO when the only reason is a role, and INFO for
+                          each line 5c's post-check rejected
+14s. contact_slot_lost    an office phone or office address stage 4
+                          extracted for Personal Data (off-schema contact
+                          keys included) that the rendered Office telephone
+                          or Office address row does not show: routed to
+                          another row, withheld as home, or read by nothing
+                          (EBYSBC E25, #1222); WARN
+14t. grant_boundary       a grant list stage 2 cut one line or row off
                           (#1226, EBYSBC E5): two neighbours splitting one
                           record (sponsor or number in one, title in the
                           other), an entry whose first line is a PI or effort
                           line, an entry opening with a label its siblings
                           carry mid-record, or a stray tail or title. WARN.
                           Reads stage 4 only
-14s. grant_bucket         a grant rendered in a funding subsection its own
+14u. grant_bucket         a grant rendered in a funding subsection its own
                           record contradicts (#1343, EBYSBC E7): Current or
                           Past under a heading that files applications
                           (ZDCXIV), or Current with an end date before this
@@ -393,6 +415,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_etal_added,
+    lint_junk_or_header_row,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_owner_missing_from_citation,
@@ -422,6 +445,12 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_stage4_group_failures,
     lint_llm_fallback_served,
     lint_stage_failure_recorded,
+)
+from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
+    lint_teaching_postcheck,
+)
+from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
+    lint_contact_slot_lost,
 )
 
 
@@ -502,6 +531,9 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "junk_or_header_row",
+    "teaching_postcheck",
+    "contact_slot_lost",
     "grant_boundary",
     "grant_bucket",
     "owner_contact_missing",
@@ -638,6 +670,20 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # junk_or_header_row (EBYSBC E8/E10/E29): 23 of the 63 runs of the
+    # EBYSBC/s7ab/pilot farm fire, as rendered by origin/dev fb466a0f,
+    # measured 2026-10-04. Same mixed-corpus caveat as above.
+    "junk_or_header_row": 0.365,
+    # teaching_postcheck (EBYSBC E20): 17 of the 63 runs of the EBYSBC/s7ab/
+    # pilot farm fire at any severity (10 at WARN), on origin/dev fb466a0f,
+    # measured 2026-10-04. Their stage-5c output predates #1349's post-check,
+    # which now rejects these lines, so the rate should fall toward the
+    # rejections it reports at INFO. Same mixed-corpus caveat as above.
+    "teaching_postcheck": 0.270,
+    # contact_slot_lost (EBYSBC E25): 1 of the same 63 runs on fb466a0f's
+    # render, after #1381 fixed the contact routing; 9 of 63 on the dev-242
+    # documents the autopsy read. Same mixed-corpus caveat as above.
+    "contact_slot_lost": 0.016,
     # grant_boundary and grant_bucket (EBYSBC E5/E7): 11 and 2 of the 63 runs
     # of the same farm, as rendered by origin/dev fb466a0f, measured
     # 2026-10-04. Same mixed-corpus caveat as above.
@@ -1169,6 +1215,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("junk_or_header_row", lint_junk_or_header_row, ("stage_4", "table_rows"),
+             optional=("blocks",)),
+    LintSpec("teaching_postcheck", lint_teaching_postcheck, ("stage_5d",)),
+    LintSpec("contact_slot_lost", lint_contact_slot_lost, ("stage_4", "table_rows")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
 )

@@ -153,9 +153,9 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 41, (
+    assert len(known) == 44, (
         f"KNOWN_LINTS changed size ({len(known)}, was 27 -- this change added "
-        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded; #1259 then added owner_missing_from_citation and etal_added; #1243 then added multi_record_coverage; #819 then added year_not_in_source; EBYSBC E9/E21 then added date_cell_shape; EBYSBC E5/E7 then added grant_boundary and grant_bucket). That is fine if a lint was genuinely added or "
+        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded; #1259 then added owner_missing_from_citation and etal_added; #1243 then added multi_record_coverage; #819 then added year_not_in_source; EBYSBC E9/E21 then added date_cell_shape; EBYSBC E8/E10/E29 then added junk_or_header_row; EBYSBC E20/E25 then added teaching_postcheck and contact_slot_lost; EBYSBC E5/E7 then added grant_boundary and grant_bucket). That is fine if a lint was genuinely added or "
         f"removed -- update this count and say so in the commit message."
     )
 
@@ -274,7 +274,8 @@ def test_known_lints_literal_expected_order():
         "python_repr_in_output", "llm_refusal_in_output",
         "llm_fallback_served", "stage_failure_recorded",
         "owner_missing_from_citation", "etal_added", "multi_record_coverage",
-        "year_not_in_source", "date_cell_shape",
+        "year_not_in_source", "date_cell_shape", "junk_or_header_row",
+        "teaching_postcheck", "contact_slot_lost",
         "grant_boundary", "grant_bucket",
         "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
