@@ -823,6 +823,17 @@ def test_dedup_drops_evidence_names_the_dropped_entry_from_stage_5d():
     assert result[0]["evidence"][0].startswith("entry 12: K4 (")
 
 
+def test_dedup_drops_evidence_names_the_entry_by_its_formatted_citation():
+    """A citation's dropped text is its stage-5d formatted_citation, not its
+    raw text."""
+    decision = _drop("3/2031 Example grand rounds talk", "9/2031 Example grand rounds talk, 3")
+    stage_5d = {"entries": [
+        {"element_idx_start": 12, "taxonomy_code": "K4", "text": "raw source line 12",
+         "extracted_fields": {"formatted_citation": "3/2031 Example grand rounds talk"}}]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, stage_5d)
+    assert result[0]["evidence"][0].startswith("entry 12: K4 (")
+
+
 def test_dedup_drops_evidence_names_no_entry_when_two_carry_the_text():
     decision = _drop("3/2031 Example grand rounds talk", "9/2031 Example grand rounds talk, 3")
     twin = {"taxonomy_code": "K4", "text": "3/2031 Example grand rounds talk",

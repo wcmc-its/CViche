@@ -767,6 +767,59 @@ def test_record_rule_and_block_rule_count_one_duplicate_once():
     assert len(findings[0]["evidence"]) == 1
 
 
+def test_record_rule_quiet_on_one_title_under_two_citation_codes():
+    """An S1 and an S2 sharing a title are two record kinds, not one record
+    listed twice, even where the title renders once per entry and once more."""
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {_TITLE_X}. Review, 2020."),
+              ("p", f"3. {_TITLE_X}. Reprint, 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, code="S1"),
+                            _cite_entry(11, _TITLE_X, code="S2")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_ignores_a_title_shorter_than_the_minimum():
+    short = "Synthetic short title"
+    assert len(short) < DUPLICATE_RECORD_TITLE_MIN_CHARS
+    blocks = [("p", f"1. {short}. Journal one. 2020."), ("p", f"7. {short}. Journal two. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, short), _cite_entry(11, short)]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_evidence_is_capped_at_five_but_counts_every_pair():
+    titles = [f"{_TITLE_X} variant number {n}" for n in range(6)]
+    blocks = [("p", f"{i}. {t}. 2020.") for i, t in enumerate(titles + titles, 1)]
+    stage_5d = {"entries": [_cite_entry(10 + n, t) for n, t in enumerate(titles)]
+                + [_cite_entry(50 + n, t) for n, t in enumerate(titles)]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert findings[0]["message"].startswith("6 duplicated record(s)")
+    assert len(findings[0]["evidence"]) == 5
+
+
+def test_record_rule_quiet_on_a_grant_and_a_citation_sharing_a_title():
+    """A grant first in the entry order must not pair with an article that
+    carries its title, however often the title renders."""
+    blocks = [_grant_table(_TITLE_X), _grant_table(_TITLE_X), ("p", f"1. {_TITLE_X}. 2021.")]
+    stage_5d = {"entries": [_grant_entry(1, "M2A", _TITLE_X, start="2021"),
+                            _cite_entry(2, _TITLE_X, year="2021")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_ignores_a_pmid_too_short_to_be_one():
+    """A page number read as a PMID names no record: an untitled copy that
+    shares only it is not paired."""
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {_TITLE_X}. 2020;12:345.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, pmid="345"),
+                            _cite_entry(11, None, pmid="345")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_counts_only_enumerated_paragraphs_for_a_citation():
+    """A heading or prose paragraph carrying the title is not a rendering."""
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"Selected work: {_TITLE_X}.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X), _cite_entry(11, _TITLE_X)]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
 def test_run_doctor_wires_stage_5d_into_duplicate_records(tmp_path):
     """`stage_5d` is an optional view: drop the registry wiring and the
     record rule goes silently dead while the block rule still runs."""

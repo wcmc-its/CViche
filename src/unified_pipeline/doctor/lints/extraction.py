@@ -781,7 +781,8 @@ def _unrendered_identity(decision: Mapping, rendered_items: set[str]) -> str | N
 
 
 # A Roman numeral standing on its own tells two records of one series apart
-# ("TEACH II" beside "TEACH III", "Infectious Diseases I" beside "... II")
+# ("Example Seminar II" beside "Example Seminar III", "Sample Course I"
+# beside "Sample Course II")
 # where no "Part" or "Phase" word precedes it, so stage 6's `_part_numbers`
 # and `_trial_phases` cannot read it (EBYSBC E4: OIYKZE-01). Upper case only,
 # and V and X never alone: a citation's author initials are single capitals.
