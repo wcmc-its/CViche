@@ -6,8 +6,9 @@ the wrong funding heading, entries whose field extraction covered almost none of
 their text, taxonomy codes that vanished between classification and render,
 dedup drops that were not duplicates, records fabricated from the template's
 own scaffolding, values filed under a key no renderer reads, years given the
-wrong century, and entries holding several records that stage 4 returned as
-one.
+wrong century, entries holding several records that stage 4 returned as
+one, grant lists cut into records at the wrong line, and grants filed under a
+funding heading their own record contradicts.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -25,10 +26,15 @@ import json
 import re
 from collections import Counter
 from collections.abc import Mapping
+from datetime import datetime
 from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
+from unified_pipeline.core.validators.grant_status_corrector import (
+    _AWARDED_HEADING_RE,
+    _PENDING_HEADING_RE,
+)
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
@@ -78,6 +84,7 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
+from unified_pipeline.stage6.sections.research_support import grant_end_year
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -2336,4 +2343,280 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
         verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output, output_digits)
         if verdict:
             findings.append(_finding("multi_record_coverage", *verdict))
+    return findings
+
+
+# --- grant_boundary ----------------------------------------------------------
+#
+# Stage 2 cuts a grant list into records, and a cut one line or row off makes
+# every grant after it carry the next grant's title, or the PI, effort and
+# period of the grant before it (#1226; batch EBYSBC, 2026-10-02, class E5: 11
+# CVs). Each record still extracts and renders, so no loss lint sees it. The
+# shapes below are what the cut leaves in the stage-4 entries of one grant
+# list. Report-only: nothing is re-cut.
+
+#: The codes stage 6 renders as grants, in the funding subsections' order.
+GRANT_CODES = tuple(code for code, _title in _FUNDING_SECTIONS)
+#: A label opening an entry's first line or cell ("Agency:", "Grant Title:",
+#: "P.I.:", "% Effort:"), and the same label anywhere a line or cell starts.
+_GRANT_LABEL = r"[\s*]*([A-Za-z%][A-Za-z.%#/ ]{0,24}?)\s*:"
+_GRANT_HEAD_LABEL_RE = re.compile(rf"^{_GRANT_LABEL}")
+_GRANT_LINE_LABEL_RE = re.compile(rf"(?:^|\t|\n|\s\|\s){_GRANT_LABEL}")
+#: Labels that name a grant's people or effort. A grant record opens with its
+#: sponsor, number, title or dates; an entry whose first line is one of these
+#: holds the tail of the record before it (EBYSBC CXRYCF, CTWLTR).
+GRANT_PERSONNEL_LABELS = frozenset({
+    "pi", "p.i.", "pi name", "personnel", "percent effort", "% effort", "effort"})
+#: The fields that name a grant's sponsor, its title, and its period.
+GRANT_SOURCE_FIELDS = ("agency", "grant_number")
+GRANT_TITLE_FIELD = "title"
+GRANT_DATE_FIELDS = ("start_date", "end_date")
+#: The fields that hold a record's detail rather than name it.
+GRANT_DETAIL_FIELDS = ("pi_name", "pi_role", "percent_effort", *GRANT_DATE_FIELDS,
+                       "total_funding", "total_funding_requested")
+#: A grant list's record shape is its first entry's opening label, carried by
+#: at least GRANT_HEAD_LABEL_MIN_COUNT entries and GRANT_HEAD_LABEL_MIN_SHARE
+#: of the list. A list this long can end in a title its record lost. On the 63-run EBYSBC/s7ab/pilot
+#: farm a drifted list keeps under half its entries on the first label (ZCTARO:
+#: 12 of 26), so the share is a third.
+GRANT_LIST_MIN_ENTRIES = 3
+GRANT_HEAD_LABEL_MIN_COUNT = 2
+GRANT_HEAD_LABEL_MIN_SHARE = 1 / 3
+#: An entry after the first of its list that names no sponsor, number or title
+#: is a record's stray tail when it carries this many words (a description
+#: paragraph) or this many detail fields; shorter, it is a year or a
+#: sub-heading line ("Funded Training Grants").
+GRANT_ORPHAN_MIN_WORDS = 12
+GRANT_ORPHAN_MIN_DETAIL_FIELDS = 2
+
+
+class GrantEntry(NamedTuple):
+    """One stage-4 grant entry as the boundary lint reads it: its first
+    line's label (lowercased, '' when it opens with none) and every label
+    that starts one of its lines or cells."""
+    element_idx: object
+    code: str
+    text: str
+    fields: Mapping[str, object]
+    head_label: str
+    line_labels: frozenset[str]
+
+
+def _grant_label(label: str) -> str:
+    return " ".join(label.lower().split())
+
+
+def _grant_entry(raw: dict) -> GrantEntry:
+    text = str(raw.get("text") or "")
+    fields = raw.get("extracted_fields")
+    head = _GRANT_HEAD_LABEL_RE.match(_STRONG_SEPARATOR_RE.split(text.strip())[0])
+    return GrantEntry(
+        raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
+        fields if isinstance(fields, Mapping) else {},
+        _grant_label(head.group(1)) if head else "",
+        frozenset(_grant_label(m.group(1)) for m in _GRANT_LINE_LABEL_RE.finditer(text)))
+
+
+def _grant_lists(stage4: dict) -> list[list[GrantEntry]]:
+    """Runs of consecutive grant entries filed under one heading: the lists
+    stage 2 cut into records."""
+    lists: list[list[GrantEntry]] = []
+    heading = None
+    for raw in stage4.get("entries", []):
+        if raw.get("taxonomy_code") not in GRANT_CODES:
+            heading = None
+            continue
+        this = tuple(raw.get("hierarchy") or [])
+        if heading is None or this != heading:
+            lists.append([])
+        heading = this
+        lists[-1].append(_grant_entry(raw))
+    return lists
+
+
+def _filled(fields: Mapping[str, object], keys: tuple[str, ...] | str) -> bool:
+    keys = (keys,) if isinstance(keys, str) else keys
+    return any(fields.get(key) not in (None, "", [], {}) for key in keys)
+
+
+def _source_half(fields: Mapping[str, object]) -> bool:
+    """A sponsor or number with no title and no period: half a record."""
+    return (_filled(fields, GRANT_SOURCE_FIELDS) and not _filled(fields, GRANT_TITLE_FIELD)
+            and not _filled(fields, GRANT_DATE_FIELDS))
+
+
+def _title_half(fields: Mapping[str, object]) -> bool:
+    return _filled(fields, GRANT_TITLE_FIELD) and not _filled(fields, "agency")
+
+
+def _split_pairs(grants: list[GrantEntry]) -> dict[int, str]:
+    """Two neighbours, one holding a sponsor or number with no title or
+    period, the other a title with no sponsor: one record cut in two."""
+    reasons = {}
+    for i, (first, second) in enumerate(zip(grants, grants[1:])):
+        if ((_source_half(first.fields) and _title_half(second.fields))
+                or (_title_half(first.fields) and _source_half(second.fields))):
+            reasons[i] = (f"it and entry {second.element_idx} split one record: one has "
+                          f"the sponsor or number, the other the title")
+    return reasons
+
+
+def _personnel_heads(grants: list[GrantEntry]) -> dict[int, str]:
+    return {i: f"its first line is the '{grant.head_label}' line, which closes a record"
+            for i, grant in enumerate(grants) if grant.head_label in GRANT_PERSONNEL_LABELS}
+
+
+def _head_label_drift(grants: list[GrantEntry]) -> dict[int, str]:
+    """In a list whose records open with the first entry's label, an entry
+    that opens instead with a label those records carry mid-record."""
+    first = grants[0].head_label
+    if not first:
+        return {}
+    opening = [grant for grant in grants if grant.head_label == first]
+    if len(opening) < max(GRANT_HEAD_LABEL_MIN_COUNT, GRANT_HEAD_LABEL_MIN_SHARE * len(grants)):
+        return {}
+    inner = frozenset().union(*(grant.line_labels for grant in opening)) - {first}
+    return {i: (f"its records open with '{first}:', this entry with '{grant.head_label}:', "
+                f"a label from inside them")
+            for i, grant in enumerate(grants) if grant.head_label in inner}
+
+
+def _orphans(grants: list[GrantEntry]) -> dict[int, str]:
+    """An entry after the first that names no sponsor, number or title but
+    carries a record's detail; and a list's last entry, when it holds only a
+    title while its siblings name a sponsor, number or period: the title its
+    record lost."""
+    reasons = {}
+    for i, grant in enumerate(grants[1:], start=1):
+        if _filled(grant.fields, (*GRANT_SOURCE_FIELDS, GRANT_TITLE_FIELD)):
+            continue
+        details = sum(_filled(grant.fields, key) for key in GRANT_DETAIL_FIELDS)
+        if (len(grant.text.split()) >= GRANT_ORPHAN_MIN_WORDS
+                or details >= GRANT_ORPHAN_MIN_DETAIL_FIELDS):
+            reasons[i] = "it names no sponsor, number or title: another record's tail"
+    last = grants[-1]
+    if (len(grants) >= GRANT_LIST_MIN_ENTRIES
+            and {key for key in last.fields if _filled(last.fields, key)} == {GRANT_TITLE_FIELD}
+            and any(_filled(grant.fields, (*GRANT_SOURCE_FIELDS, *GRANT_DATE_FIELDS))
+                    for grant in grants[:-1])):
+        reasons.setdefault(len(grants) - 1,
+                           "the list's last entry holds only a title, which its record lost")
+    return reasons
+
+
+def lint_grant_boundary(stage4: dict) -> list[dict]:
+    """A grant list stage 2 cut one line or row off (#1226; EBYSBC class E5):
+    neighbours that split one record between them (`_split_pairs`), an entry
+    whose first line is a PI or effort line (`_personnel_heads`), an entry
+    opening with a label its siblings carry mid-record (`_head_label_drift`),
+    or a stray tail or title (`_orphans`). WARN, one finding per entry,
+    naming every shape it shows. Reads stage 4 only: the grants render, with
+    each other's values. Not judged: a list cut at a stage-2 batch boundary
+    as such, since stage 2 records no batch cuts."""
+    findings = []
+    for grants in _grant_lists(stage4):
+        reasons: dict[int, list[str]] = {}
+        for shape in (_split_pairs, _personnel_heads, _head_label_drift, _orphans):
+            for i, reason in shape(grants).items():
+                reasons.setdefault(i, []).append(reason)
+        for i in sorted(reasons):
+            grant = grants[i]
+            findings.append(_finding(
+                "grant_boundary", "WARN",
+                f"entry {grant.element_idx} ({grant.code}): grant record boundary off -- "
+                f"{'; '.join(reasons[i])} (#1226)",
+                [grant.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- grant_bucket ------------------------------------------------------------
+#
+# Stage 6 files a grant under Current, Past (Completed) or Pending from its
+# code, status, heading and end date (`research_support.py`). Two filings
+# still contradict the grant's own record (#1343; EBYSBC class E7): an
+# application under a heading that says so, rendered as an award (ZDCXIV: 15
+# grants under an "applied" heading), and a Current grant whose end date stage
+# 6 cannot read but that ended (KYOPUV 589: a one-digit end year).
+# `lint_bucket_status` judges the status field; this judges the heading and
+# the end date. Report-only.
+
+#: Codes rendered as awards: an application filed under one is credited as a
+#: grant the CV says was only applied for.
+_AWARD_BUCKETS = frozenset({"M2A", "M2B"})
+_CURRENT_BUCKET, _PAST_BUCKET, _PENDING_BUCKET = GRANT_CODES
+#: A trailing one- or two-digit year after a date separator ("8/30/1"),
+#: which `grant_end_year` does not read.
+_SHORT_END_YEAR_RE = re.compile(r"[-/.](\d{1,2})\s*$")
+#: "Not funded" names an application, so its "funded" is no award word.
+_NOT_FUNDED_RE = re.compile(r"\b(?:not|non)[\s-]?funded\b")
+
+
+def _application_heading(hierarchy: list[str]) -> bool:
+    """The heading names applications and names no award bucket -- 3b's
+    own vocabulary (`grant_status_corrector`), so the two cannot drift."""
+    heading = " > ".join(hierarchy).lower()
+    return (bool(_PENDING_HEADING_RE.search(heading))
+            and not _AWARDED_HEADING_RE.search(_NOT_FUNDED_RE.sub(" ", heading)))
+
+
+def _short_end_year(end_date: str, start_date: str, current_year: int) -> int | None:
+    """A truncated end year read as the first year at or after the start year
+    that ends in its digits ("9/1/07" to "8/30/1" is 2011); None without a
+    start year."""
+    short = _SHORT_END_YEAR_RE.search(end_date)
+    start = grant_end_year(start_date, current_year)
+    if not short or start is None:
+        return None
+    modulus = 10 ** len(short.group(1))
+    year = start - start % modulus + int(short.group(1))
+    return year if year >= start else year + modulus
+
+
+def _ended_year(fields: Mapping[str, object], current_year: int) -> int | None:
+    """The year a grant's end date names, when it is before `current_year`."""
+    end_date = str(fields.get("end_date") or "").strip()
+    year = grant_end_year(end_date, current_year)
+    if year is None:
+        year = _short_end_year(end_date, str(fields.get("start_date") or ""), current_year)
+    return year if year is not None and year < current_year else None
+
+
+def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int) -> str | None:
+    hierarchy = [str(level) for level in entry.get("hierarchy") or []]
+    if (buckets & _AWARD_BUCKETS and _PENDING_BUCKET not in buckets
+            and _application_heading(hierarchy)):
+        return (f"rendered as an award ({'/'.join(sorted(buckets))}) under the heading "
+                f"'{hierarchy[-1]}', which files applications")
+    fields = entry.get("extracted_fields")
+    ended = _ended_year(fields if isinstance(fields, Mapping) else {}, current_year)
+    if _CURRENT_BUCKET in buckets and _PAST_BUCKET not in buckets and ended is not None:
+        return f"rendered under Current, but its end date reads as {ended}, before {current_year}"
+    return None
+
+
+def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
+                      current_year: int | None = None) -> list[dict]:
+    """A grant rendered in a funding subsection its own record contradicts
+    (#1343): an award subsection (Current or Past) under a heading that
+    files applications, or Current with an end date before `current_year`,
+    a truncated end year read against the start year. WARN, one finding per
+    grant; a grant too short to locate in the document is not judged.
+    `current_year` defaults to this year, as stage 6's own rebucket does, so
+    re-doctoring an old render can newly flag a grant that ended since."""
+    year = current_year if current_year is not None else datetime.now().year
+    rendered = _funding_haystacks(blocks)
+    shared = _shared_entry_pieces(stage4.get("entries", []))
+    findings = []
+    for entry in stage4.get("entries", []):
+        if entry.get("taxonomy_code") not in GRANT_CODES:
+            continue
+        buckets = {bucket for bucket, hay in rendered.items()
+                   if _entry_rendered(entry.get("text"), hay.text, hay.tokens, shared)}
+        reason = _bucket_contradiction(entry, buckets, year)
+        if reason:
+            findings.append(_finding(
+                "grant_bucket", "WARN",
+                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+                f"{reason} (#1343)",
+                [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

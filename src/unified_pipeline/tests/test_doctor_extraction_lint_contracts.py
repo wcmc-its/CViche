@@ -76,6 +76,12 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_offschema_fields,
     lint_year_not_in_source,
 )
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    GRANT_ORPHAN_MIN_WORDS,
+    _short_end_year,
+    lint_grant_boundary,
+    lint_grant_bucket,
+)
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack, docx_body_blocks)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
@@ -2902,6 +2908,303 @@ def test_year_not_in_source_leaves_the_value_alone():
     before = json.dumps(entry, sort_keys=True)
     _not_in_source(entry)
     assert json.dumps(entry, sort_keys=True) == before
+
+
+# ==========================================================================
+# grant_boundary (#1226, EBYSBC E5) -- a grant list cut one line or row off.
+# Invented grants; no corpus text.
+
+_GRANT_HEADING = ["Research Support", "Past"]
+
+
+def _grant(idx, text, heading=_GRANT_HEADING, code="M2B", **fields):
+    return {"element_idx_start": idx, "taxonomy_code": code, "hierarchy": list(heading),
+            "text": text, "extracted_fields": fields}
+
+
+def _boundary(*entries):
+    return lint_grant_boundary({"entries": list(entries)})
+
+
+def _flagged(findings):
+    return [int(f["message"].split()[1]) for f in findings]
+
+
+_WHOLE_GRANT = dict(agency="Example Fund", grant_number="R01 XX000001",
+                    title="Study of example things", start_date="2001", end_date="2004")
+
+
+def test_grant_boundary_is_silent_on_whole_records():
+    assert _boundary(
+        _grant(10, "Agency: Example Fund\tGrant Title: Study one\tPI: A. Person", **_WHOLE_GRANT),
+        _grant(12, "Agency: Other Fund\tGrant Title: Study two\tPI: A. Person", **_WHOLE_GRANT),
+        _grant(14, "Agency: Third Fund\tGrant Title: Study three\tPI: A. Person", **_WHOLE_GRANT),
+    ) == []
+
+
+def test_grant_boundary_flags_a_record_split_between_two_neighbours():
+    findings = _boundary(
+        _grant(20, "Agency: Example Fund\tI.D.# Fellowship", agency="Example Fund",
+               grant_number="Fellowship"),
+        _grant(22, "Title: Study of example things\tP.I.: A. Person\t2001-2004",
+               title="Study of example things", pi_name="A. Person", start_date="2001"))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("grant_boundary", "WARN")]
+    assert findings[0]["message"].startswith("entry 20 (M2B):")
+    assert "entry 22" in findings[0]["message"]
+
+
+def test_grant_boundary_reads_the_split_in_either_order():
+    findings = _boundary(
+        _grant(30, "Study of example things", title="Study of example things"),
+        _grant(31, "Example Fund (R01 XX000001)", agency="Example Fund",
+               grant_number="R01 XX000001"))
+    assert _flagged(findings) == [30]
+
+
+def test_grant_boundary_does_not_pair_a_sponsor_line_that_carries_its_period():
+    """A one-line record with a sponsor and dates but no title (a fellowship)
+    next to a titled one with no sponsor is two whole records."""
+    assert _boundary(
+        _grant(40, "Example Training Program (1978-84)", title="Example Training Program",
+               start_date="1978", end_date="1984"),
+        _grant(41, "Graduate Fellow, Example Foundation (1976-78)", agency="Example Foundation",
+               start_date="1976", end_date="1978")) == []
+
+
+@pytest.mark.parametrize("opening", ["PI: A. Person", "P.I.: A. Person", "PI Name: A. Person",
+                                     "Personnel: A. Person", "Percent Effort: 5%",
+                                     "% Effort: 5%"])
+def test_grant_boundary_flags_an_entry_opening_with_a_personnel_line(opening):
+    findings = _boundary(_grant(50, f"{opening}\t2001-2004\tExample Fund\tStudy",
+                                **_WHOLE_GRANT))
+    assert _flagged(findings) == [50]
+    assert "closes a record" in findings[0]["message"]
+
+
+def test_grant_boundary_reads_a_personnel_line_only_at_the_start():
+    assert _boundary(_grant(55, "Example Fund\tStudy\tPI: A. Person\t2001-2004",
+                            **_WHOLE_GRANT)) == []
+
+
+def _labelled(idx, opening="Agency", **fields):
+    fields = fields or _WHOLE_GRANT
+    order = {"Agency": "Agency: Example Fund\tGrant Title: Study\tAmount: $10",
+             "Grant Title": "Grant Title: Study\tAmount: $10\tAgency: Next Fund",
+             "Industry grant": "Industry grant: Example Co\tGrant Title: Study"}
+    return _grant(idx, order[opening], **fields)
+
+
+def test_grant_boundary_flags_an_entry_opening_with_a_label_its_siblings_carry_inside():
+    findings = _boundary(_labelled(60), _labelled(62), _labelled(64, "Grant Title"),
+                         _labelled(66, "Grant Title"))
+    assert _flagged(findings) == [64, 66]
+    assert "'agency:'" in findings[0]["message"] and "'grant title:'" in findings[0]["message"]
+
+
+def test_grant_boundary_spares_a_record_opening_with_a_label_of_its_own():
+    """A different kind of record (an industry grant) opens with a label the
+    list's records never carry inside: its own record head, not a drift."""
+    assert _boundary(_labelled(70), _labelled(72), _labelled(74, "Industry grant")) == []
+
+
+def test_grant_boundary_needs_the_first_label_to_be_the_lists_shape():
+    """One entry opening with the first label is not a record shape."""
+    assert _boundary(_labelled(80), _labelled(82, "Grant Title"), _labelled(84, "Grant Title"),
+                     _labelled(86, "Grant Title")) == []
+
+
+def test_grant_boundary_reads_a_label_shape_only_from_a_labelled_first_entry():
+    """Unlabelled records give no opening label to drift from: as measured
+    on the farm, only a labelled list is judged by its labels."""
+    plain = "Example Fund\tStudy of things\tRole: Lead"
+    assert _boundary(_grant(94, plain, **_WHOLE_GRANT), _grant(95, plain, **_WHOLE_GRANT),
+                     _grant(96, plain, **_WHOLE_GRANT),
+                     _grant(97, "Role: Lead\tExample Fund\tStudy", **_WHOLE_GRANT)) == []
+
+
+def test_grant_boundary_needs_three_entries_for_a_label_shape():
+    assert _boundary(_labelled(90), _labelled(92, "Grant Title")) == []
+
+
+def test_grant_boundary_flags_a_stray_description_after_the_first_entry():
+    words = " ".join(["word"] * GRANT_ORPHAN_MIN_WORDS)
+    findings = _boundary(_grant(100, "Example Fund\tStudy\t2001-2004", **_WHOLE_GRANT),
+                         _grant(102, words, pi_role="PI"),
+                         _grant(104, "Other Fund\tStudy\t2005-2008", **_WHOLE_GRANT))
+    assert _flagged(findings) == [102]
+    assert "tail" in findings[0]["message"]
+
+
+def test_grant_boundary_flags_a_stray_tail_of_detail_fields():
+    findings = _boundary(_grant(110, "Example Fund\tStudy", **_WHOLE_GRANT),
+                         _grant(112, "A. Person\t2001-2004", pi_name="A. Person",
+                                start_date="2001"),
+                         _grant(114, "Other Fund\tStudy", **_WHOLE_GRANT))
+    assert _flagged(findings) == [112]
+
+
+def test_grant_boundary_spares_a_short_subheading_and_the_first_entry():
+    """A year or sub-heading line inside a list, or a list that opens with
+    one, is not another record's tail."""
+    words = " ".join(["word"] * GRANT_ORPHAN_MIN_WORDS)
+    assert _boundary(_grant(120, words, pi_role="PI"),
+                     _grant(122, "Example Fund\tStudy", **_WHOLE_GRANT),
+                     _grant(124, "2002"),
+                     _grant(126, "Funded Training Grants", status="Funded"),
+                     _grant(128, "Other Fund\tStudy", **_WHOLE_GRANT)) == []
+
+
+def test_grant_boundary_flags_a_lone_title_closing_a_list():
+    findings = _boundary(_grant(130, "Example Fund\tStudy", **_WHOLE_GRANT),
+                         _grant(132, "Other Fund\tStudy", **_WHOLE_GRANT),
+                         _grant(134, "A study title alone", title="A study title alone"))
+    assert _flagged(findings) == [134]
+    assert "only a title" in findings[0]["message"]
+
+
+def test_grant_boundary_spares_a_closing_title_when_no_sibling_holds_more():
+    """A list whose every entry extracted only a title is a list of titles,
+    not one record that lost its title."""
+    assert _boundary(*(_grant(idx, f"Study {idx}", title=f"Study {idx}")
+                       for idx in (135, 136, 137))) == []
+
+
+def test_grant_boundary_needs_three_entries_for_a_closing_title():
+    assert _boundary(_grant(138, "Example Fund\tStudy", **_WHOLE_GRANT),
+                     _grant(139, "A study title alone", title="A study title alone")) == []
+
+
+def test_grant_boundary_spares_a_lone_title_inside_a_list():
+    assert _boundary(_grant(140, "Example Fund\tStudy", **_WHOLE_GRANT),
+                     _grant(142, "Proposals at an example school",
+                            title="Proposals at an example school"),
+                     _grant(144, "Other Fund\tStudy", **_WHOLE_GRANT)) == []
+
+
+def test_grant_boundary_judges_each_list_on_its_own():
+    """A heading change or a non-grant entry closes a list: halves on either
+    side of it are not paired."""
+    source = dict(agency="Example Fund", grant_number="R01 XX000001")
+    title = dict(title="Study of example things")
+    assert _boundary(_grant(150, "Example Fund R01", **source),
+                     _grant(152, "Study of example things", ["Research Support", "Current"],
+                            code="M2A", **title)) == []
+    assert _boundary(_grant(160, "Example Fund R01", **source),
+                     {"element_idx_start": 161, "taxonomy_code": "S1", "text": "A paper",
+                      "extracted_fields": {}},
+                     _grant(162, "Study of example things", **title)) == []
+
+
+def test_grant_boundary_reports_an_entry_once_with_every_shape():
+    findings = _boundary(_labelled(170), _labelled(172),
+                         _grant(174, "PI Name: A. Person\tAmount: $10", pi_name="A. Person",
+                                total_funding="$10"))
+    assert _flagged(findings) == [174]
+    assert "closes a record" in findings[0]["message"] and "tail" in findings[0]["message"]
+
+
+def test_grant_boundary_ignores_non_grant_codes():
+    assert _boundary(_grant(180, "PI: A. Person\tStudy", code="D1")) == []
+
+
+# ==========================================================================
+# grant_bucket (#1343, EBYSBC E7) -- a grant filed in a subsection its own
+# record contradicts.
+
+_BUCKET_TEXT = "Example Research Foundation Study of Example Longevity Measures Program"
+
+
+def _bucket(heading, rendered_under, year=2026, code="M2B", **fields):
+    entry = _grant(200, _BUCKET_TEXT, heading, code=code, **fields)
+    return lint_grant_bucket({"entries": [entry]}, _blocks_under(rendered_under, _BUCKET_TEXT),
+                             current_year=year)
+
+
+@pytest.mark.parametrize("heading", [["Grants Applied"], ["Grant Applications"],
+                                     ["Research", "Proposals Submitted"], ["Not Funded"],
+                                     ["Submitted But Not Funded Research Grants"]])
+@pytest.mark.parametrize("rendered_under", ["M2A", "M2B"])
+def test_grant_bucket_flags_an_application_rendered_as_an_award(heading, rendered_under):
+    findings = _bucket(heading, rendered_under)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("grant_bucket", "WARN")]
+    assert findings[0]["message"].startswith("entry 200 (M2B):")
+    assert heading[-1] in findings[0]["message"]
+
+
+def test_grant_bucket_spares_an_application_rendered_under_pending():
+    assert _bucket(["Grants Applied"], "M2C") == []
+
+
+@pytest.mark.parametrize("heading", [["Current and Pending Support"], ["Funded Grants"],
+                                     ["Research Support"]])
+def test_grant_bucket_spares_a_heading_that_also_files_awards_or_is_silent(heading):
+    assert _bucket(heading, "M2B") == []
+
+
+def test_grant_bucket_spares_an_application_also_rendered_under_pending():
+    entry = _grant(205, _BUCKET_TEXT, ["Grants Applied"])
+    blocks = _blocks_under("M2B", _BUCKET_TEXT) + _blocks_under("M2C", _BUCKET_TEXT)
+    assert lint_grant_bucket({"entries": [entry]}, blocks, current_year=2026) == []
+
+
+def test_grant_bucket_spares_a_grant_it_cannot_locate():
+    entry = _grant(210, _BUCKET_TEXT, ["Grants Applied"])
+    assert lint_grant_bucket({"entries": [entry]}, [], current_year=2026) == []
+
+
+@pytest.mark.parametrize("start, end, ended", [
+    ("9/1/07", "8/30/1", 2011),     # a one-digit year past the start year's own
+    ("7/1/08", "6/30/9", 2009),
+    ("2015-01", "12/31/25", 2025),  # stage 6's own reading, still Current
+    ("2010", "June 2019", 2019),
+])
+def test_grant_bucket_flags_a_current_grant_whose_end_date_reads_past(start, end, ended):
+    findings = _bucket(["Research Support", "Ongoing"], "M2A", code="M2A",
+                       start_date=start, end_date=end)
+    assert len(findings) == 1
+    assert f"reads as {ended}, before 2026" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("start, end", [
+    ("", "8/30/1"),             # no start year to read a truncated year against
+    ("9/1/07", "Present"),
+    ("9/1/07", ""),
+    ("2020", "6/30/28"),        # ends in the future
+    ("9/1/24", "8/30/6"),       # truncated, but 2026 is not before this year
+])
+def test_grant_bucket_spares_a_current_grant_not_known_to_have_ended(start, end):
+    assert _bucket(["Research Support", "Ongoing"], "M2A", code="M2A",
+                   start_date=start, end_date=end) == []
+
+
+def test_grant_bucket_spares_an_ended_grant_rendered_under_past():
+    assert _bucket(["Research Support", "Ongoing"], "M2B", code="M2A",
+                   start_date="9/1/07", end_date="8/30/1") == []
+
+
+@pytest.mark.parametrize("rendered_under", [("M2C",), ("M2A", "M2B")])
+def test_grant_bucket_judges_an_ended_grant_only_when_current_alone(rendered_under):
+    """An ended grant under Pending is bucket_status's question, and one
+    also rendered under Past is filed there too."""
+    entry = _grant(220, _BUCKET_TEXT, ["Ongoing"], code="M2A",
+                   start_date="9/1/07", end_date="8/30/1")
+    blocks = [block for code in rendered_under for block in _blocks_under(code, _BUCKET_TEXT)]
+    assert lint_grant_bucket({"entries": [entry]}, blocks, current_year=2026) == []
+
+
+def test_grant_bucket_judges_the_end_date_against_the_year_it_is_given():
+    fields = dict(start_date="2015-01", end_date="12/31/25")
+    assert len(_bucket(["Ongoing"], "M2A", year=2026, code="M2A", **fields)) == 1
+    assert _bucket(["Ongoing"], "M2A", year=2025, code="M2A", **fields) == []
+
+
+@pytest.mark.parametrize("end, start, expected", [
+    ("8/30/1", "9/1/07", 2011), ("5/30/13", "5/1/08", 2013), ("6/30/0", "2010", 2010),
+    ("2/28/05", "1999", 2005), ("8/30", "2001", 2030), ("", "2001", None),
+    ("8/30/1", "", None),
+])
+def test_short_end_year(end, start, expected):
+    assert _short_end_year(end, start, 2026) == expected
 
 
 if __name__ == "__main__":

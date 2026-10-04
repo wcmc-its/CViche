@@ -200,6 +200,19 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
+14r. grant_boundary       a grant list stage 2 cut one line or row off
+                          (#1226, EBYSBC E5): two neighbours splitting one
+                          record (sponsor or number in one, title in the
+                          other), an entry whose first line is a PI or effort
+                          line, an entry opening with a label its siblings
+                          carry mid-record, or a stray tail or title. WARN.
+                          Reads stage 4 only
+14s. grant_bucket         a grant rendered in a funding subsection its own
+                          record contradicts (#1343, EBYSBC E7): Current or
+                          Past under a heading that files applications
+                          (ZDCXIV), or Current with an end date before this
+                          year, a truncated end year read against the start
+                          year (KYOPUV 589). WARN
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -333,6 +346,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_wrong_start_date,
     lint_year_not_in_source,
     unrouted_code_counts,
+    lint_grant_boundary,
+    lint_grant_bucket,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -486,6 +501,8 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "grant_boundary",
+    "grant_bucket",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -620,6 +637,11 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # grant_boundary and grant_bucket (EBYSBC E5/E7): 11 and 2 of the 63 runs
+    # of the same farm, as rendered by origin/dev fb466a0f, measured
+    # 2026-10-04. Same mixed-corpus caveat as above.
+    "grant_boundary": 0.175,
+    "grant_bucket": 0.032,
 }
 
 
@@ -1146,6 +1168,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
+    LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
 )
 
 

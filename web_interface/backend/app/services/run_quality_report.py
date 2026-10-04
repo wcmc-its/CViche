@@ -405,6 +405,16 @@ LINT_COPY = {
         "No document produced",
         "The run got as far as field extraction but wrote neither a Word document nor its render report.",
         "Rerun the CV."),
+    "grant_boundary": LintCopy(
+        "Grant details shifted between grants",
+        "A grant's lines were split at the wrong place, so a grant may show another grant's title, "
+        "principal investigator, effort or dates, or appear as two partial grants.",
+        "Compare each flagged grant with the source CV and move the details back to the right grant."),
+    "grant_bucket": LintCopy(
+        "Grant under the wrong funding heading",
+        "A grant is listed as current or completed funding although the CV files it as an "
+        "application, or is listed as current although its end date has passed.",
+        "Move the grant to the funding heading the source CV gives it."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
