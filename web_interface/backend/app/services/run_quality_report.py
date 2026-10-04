@@ -385,6 +385,12 @@ LINT_COPY = {
         "A date field holds a year the entry's text never states, in four digits or in two, so it "
         "came from somewhere else, often the entry before it, and may be wrong.",
         "Check the date against the source and correct it."),
+    "date_cell_shape": LintCopy(
+        "Date reads wrong",
+        "A date prints in a form the CV does not use: a range ending in Present that the CV never "
+        "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
+        "same, such as 2013-2013.",
+        "Correct the date from the source CV."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
