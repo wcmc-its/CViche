@@ -757,6 +757,10 @@ def test_a_labelled_form_line_is_never_echoed_as_the_employer():
         assert _institution_from_raw_text(text) == "", f"accepted {text!r}"
     assert (_institution_from_raw_text("Staff Physician\tHospital: Quexley Infirmary, Norvale, ZQ")
             == "Quexley Infirmary, Norvale, ZQ")
+    # A colon after a comma or a digit does not end a label: the fragment is kept whole.
+    for text in ("Staff Physician\tQuexley Infirmary, Unit: West, Norvale, ZQ",
+                 "Staff Physician\tBuilding 4: Quexley Infirmary, Norvale, ZQ"):
+        assert _institution_from_raw_text(text) == text.split("\t")[1], f"lost {text!r}"
 
 
 def test_merge_needs_employer_evidence_not_adjacency():

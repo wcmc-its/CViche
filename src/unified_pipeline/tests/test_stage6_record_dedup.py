@@ -59,6 +59,16 @@ def test_a_grant_in_two_m2_codes_keeps_the_fuller_copy() -> None:
     assert decisions[0]["dropped_text"] == sparse["text"]
 
 
+def test_empty_fields_do_not_count_towards_the_fuller_copy() -> None:
+    """A copy with many keys left None, '', [] or {} is still the sparse one."""
+    sparse = _grant("M2A", 10, grant_number=None, total_funding="", co_investigators=[],
+                    percent_effort={}, notes=None)
+    full = _grant("M2B", 50, total_funding="$100,000", percent_effort="5%")
+    grouped, decisions, _ = _run([sparse, full])
+    assert grouped["M2A"] == [] and grouped["M2B"] == [full]
+    assert (decisions[0]["code"], decisions[0]["kept_code"]) == ("M2A", "M2B")
+
+
 @pytest.mark.parametrize("change", [
     {"start_date": "2032"},                        # another year: a renewal
     {"title": "Widget Flux in Quenby Cells II"},   # another title
@@ -129,6 +139,16 @@ def test_two_grant_numbers_stay_and_a_same_code_pair_is_left_to_text_dedup() -> 
     assert _indexes(grouped) == [10, 50]
 
 
+
+@pytest.mark.parametrize("numbers", [
+    ("R01 AB-123", "r01ab123"),   # one number written two ways
+    ("R01 1111", None),           # a number on one copy only
+])
+def test_grant_numbers_that_agree_or_are_missing_on_one_side_still_pair(numbers: tuple) -> None:
+    grouped, decisions, _ = _run([_grant("M2A", 10, grant_number=numbers[0]),
+                                  _grant("M2B", 50, grant_number=numbers[1])])
+    assert len(_indexes(grouped)) == 1 and decisions[0]["metric"] == "record=grant_family"
+
 # Honors: one award listed under two headings, one name a run of the other's (EOSAFF-06).
 
 def _honor(idx: int, name: str, date: str) -> dict:
@@ -154,6 +174,12 @@ def test_an_award_of_another_date_or_name_stays(short_name: str, short_date: str
     grouped, _, _ = _run([long, _honor(9, short_name, short_date)])
     assert _indexes(grouped) == [5, 9]
 
+
+def test_a_four_word_award_name_inside_the_other_drops() -> None:
+    long = _honor(5, "Quenby Civic Widget Award for Service", "2031")
+    short = _honor(9, "Quenby Civic Widget Award", "2031")
+    grouped, _, _ = _run([long, short])
+    assert grouped["H"] == [long]
 
 def test_awards_with_no_date_stay() -> None:
     """One award won in two periods may reach stage 6 with an empty date on
@@ -352,10 +378,22 @@ def test_a_short_word_keeps_its_final_s() -> None:
     assert _indexes(grouped) == [8, 23]
 
 
+def test_an_undated_title_piece_with_no_words_is_held_nowhere() -> None:
+    dated = _appointment(23, "Professor of Widgetry", "Norvale University", "2031", "present")
+    grouped, _, _ = _run([_appointment(8, "Professor; --"), dated])
+    assert _indexes(grouped) == [8, 23]
+
 def test_an_undated_row_is_not_held_by_a_past_row() -> None:
     dated = _appointment(23, "Associate Professor of Widgetry", "Norvale University", "2031", "2035")
     grouped, _, _ = _run([_appointment(8, "Associate Professor"), dated])
     assert _indexes(grouped) == [8, 23]
+
+
+@pytest.mark.parametrize("title", ["", " ; ", ";"])
+def test_an_undated_row_with_no_title_stays_and_does_not_raise(title: str) -> None:
+    dated = _appointment(23, "Associate Professor of Widgetry", "Norvale University", "2031", "present")
+    grouped, decisions, _ = _run([_appointment(8, title, "Norvale University"), dated])
+    assert _indexes(grouped) == [8, 23] and decisions == []
 
 
 def test_stage6_dedup_runs_the_record_rules_and_records_the_drop() -> None:
