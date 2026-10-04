@@ -1,41 +1,52 @@
 """The CV owner's surname as this bibliography actually spells it (#1393).
 
 Stage 6 bolds the owner by exact, whole-token match on `target_name` or
-`cv_owner.last_name`. When the citations spell the owner some other way -- a
-dropped accent (`Muller` for `Müller`), half of a compound surname (`Lopez`
-for `Garcia-Lopez`), a married name added (`Jones-Patel` for `Patel`), a typo
-(`Wendee` for `Wende`) -- nothing is bolded. This module finds the most
-plausible spelling instead.
+`cv_owner.last_name`. Those come from stage 4, which is not ground truth: for
+a compound surname it can keep one half (`Garza` for `Garza Ruiz`), store a
+given name as the surname, or hold a married name the papers never use. And
+the citations themselves vary: a dropped accent (`Muller` for `Müller`), half
+of a compound, a married name added, a typo.
 
-It is decided once per CV, over every citation the exact match missed, not per
-citation: the owner is an author on nearly every paper in their own CV, so the
-spelling that recurs across those citations and looks like the owner's name is
-the owner. A co-author with a similar name appears in too few of them to win.
+So the owner's spellings are read from the bibliography itself, once per CV:
 
-Two steps:
+- parse: each citation's author segment is split into authors, each a surname
+  (as written, particles and compound halves kept) and a first initial.
+- candidates: the surnames of authors whose initial is the owner's, counted
+  over the WHOLE bibliography. The owner is on nearly every paper in their own
+  CV; a co-author with the same initial and a related surname is not.
+- relation: a candidate is the owner when it shares a name part with a
+  stage-4 surname, is a close spelling of one (character-trigram TF-IDF, same
+  first letter), or shares a part with a candidate already accepted. When
+  stage 4's surname names almost no citation, the one dominant candidate
+  replaces it.
 
-- regex: each citation's author segment is split into author tokens, and the
-  surname-shaped words (not initials, particles or markers) are the candidates.
-- TF-IDF: each candidate is scored by cosine similarity of character-trigram
-  TF-IDF vectors against the owner's name keys, accents and punctuation folded
-  away. IDF is fit on every candidate surname in the bibliography, so
-  trigrams many co-authors share ("son", "er") count for less than the ones
-  that distinguish a name.
+Every accepted spelling is returned, with the owner's initials and the name
+parts, so the bibliography bolds an alias only on an author whose initials
+fit, and can widen a half-matched spaced compound to the whole surname.
 
-Pure: citations in, one surname spelling (or '') out.
+Pure: citations in, an `OwnerAlias` out.
 """
 import math
 import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 
-# ponytail: thresholds set on hand-built name pairs (accent, compound half,
-# one-letter typo vs Anderson/Henderson-style near misses), not measured on the
-# corpus. Revisit with a batch comparing fuzzy bolds to the citation count.
+# ponytail: set on hand-built name pairs (accent, compound half, one-letter
+# typo vs Anderson/Henderson-style near misses) and checked against the
+# corpus render A/B, not tuned on it.
 MIN_SIMILARITY = 0.6
-# A candidate must appear in more than this share of the unmatched citations.
-MIN_COVERAGE = 0.5
+# A candidate must be an initial-compatible author in at least this share of
+# all citations, and in at least MIN_ALIAS_CITATIONS of them. The initials
+# gate is what keeps co-authors out; the count only stops one stray citation
+# deciding the owner's name.
+MIN_COVERAGE = 0.3
+MIN_ALIAS_CITATIONS = 2
+# Stage 4's surname is replaced outright only when it names fewer than this
+# share of the citations and one candidate covers at least MIN_REPLACEMENT.
+MAX_STAGE4_SHARE = 0.5
+MIN_REPLACEMENT = 0.5
 
 _NGRAM = 3
 # The author segment ends at the first sentence break that opens a quote or a
@@ -47,12 +58,14 @@ _LEADING_NUMBER = re.compile(r"^\s*\d+[.)]\s*")
 _AUTHOR_SEPARATOR = re.compile(r"[,;&]|\band\b|\bet al\b", re.IGNORECASE)
 _MARKERS = re.compile(r"[*†‡§¶#^\d]+")
 _INITIALS = re.compile(r"^(?:[A-Z]\.?){1,3}$")
+# "M.E." or "M. E." written as separate words still reads as initials.
 _PARTICLES = frozenset((
     "van", "von", "der", "den", "de", "la", "le", "da", "di", "del", "della",
     "du", "dos", "das", "do", "bin", "ibn", "al", "el", "ter", "ten", "zu", "st",
 ))
 # An author token longer than this is a title fragment, not a name.
-_MAX_AUTHOR_WORDS = 4
+_MAX_AUTHOR_WORDS = 5
+_HYPHENS = r"\-‐‑–"
 
 
 def fold_name(name: str) -> str:
@@ -61,45 +74,87 @@ def fold_name(name: str) -> str:
     return "".join(ch for ch in decomposed.lower() if ch.isalpha() and ch.isascii())
 
 
-_HYPHENS = r"\-‐‑–"
+def name_parts(name: str) -> set[str]:
+    """Folded hyphen/space parts of a surname, particles left out unless the
+    surname is nothing else ("de la Cruz" -> {cruz}, "Das" -> {das})."""
+    parts = [p for p in (fold_name(w) for w in re.split(rf"[\s{_HYPHENS}]+", name)) if len(p) > 1]
+    named = {p for p in parts if p not in _PARTICLES}
+    return named or set(parts)
 
 
-def _name_parts(name: str, separators: str) -> list[str]:
-    """Folded parts of a name, of two or more letters each."""
-    return [p for p in (fold_name(w) for w in re.split(f"[{separators}]+", name)) if len(p) > 1]
+@dataclass(frozen=True)
+class Author:
+    """One author of a citation: the surname as written, and the first
+    initial (upper case, '' when the citation gives none)."""
+    surname: str
+    initial: str
 
 
-def _author_segment(citation: str) -> str:
+@dataclass(frozen=True)
+class OwnerAlias:
+    """The owner's surname spellings in this bibliography, most frequent
+    first, the initials an alias match must carry, and every folded name part
+    of those spellings (for widening a half-matched compound)."""
+    surnames: tuple[str, ...] = ()
+    initials: frozenset[str] = frozenset()
+    parts: frozenset[str] = field(default_factory=frozenset)
+
+
+def author_segment(citation: str) -> str:
+    """The citation's author list: from after any leading number to the title."""
     text = _LEADING_NUMBER.sub("", citation)
     end = _AUTHOR_SEGMENT_END.search(text)
     return text[:end.start()] if end else text
 
 
-def candidate_surnames(citation: str) -> list[str]:
-    """Surname-shaped words in the citation's author list, as written.
+def _is_initials(word: str) -> bool:
+    return bool(_INITIALS.match(word))
 
-    A word is a candidate when it starts with a capital, is not one to three
-    initials, and is not a particle. Adjacent candidate words in one author
-    are also offered joined ("Mac Donald"). An author token with a lower-case
-    word that is not a particle is a title fragment and contributes nothing.
-    """
-    found: list[str] = []
-    for token in _AUTHOR_SEPARATOR.split(_author_segment(citation)):
-        words = _MARKERS.sub("", token).split()
-        if not words or len(words) > _MAX_AUTHOR_WORDS:
+
+def _author_words(token: str) -> list[str] | None:
+    """The name words of one author token, or None for a title fragment."""
+    words = _MARKERS.sub("", token).split()
+    if not words or len(words) > _MAX_AUTHOR_WORDS:
+        return None
+    if any(w[0].islower() and w.lower().strip(".") not in _PARTICLES for w in words):
+        return None
+    return words
+
+
+def _split_author(words: list[str]) -> Author | None:
+    """Surname and initial of an author written "Garza Ruiz M", "M. E.
+    Wende", "Ana Garza Ruiz" or "Michael E. Wende"."""
+    flags = [_is_initials(w) for w in words]
+    if all(flags):
+        return None
+    if flags[-1]:
+        cut = len(flags) - flags[::-1].index(False)
+        return Author(" ".join(words[:cut]), words[cut][0])
+    if flags[0]:
+        return Author(" ".join(w for w in words if not _is_initials(w)), words[0][0])
+    if len(words) == 1:
+        return Author(words[0].strip("."), '')
+    last_initial = max((i for i, f in enumerate(flags) if f), default=0)
+    return Author(" ".join(words[last_initial + 1:]), words[0][0].upper())
+
+
+def parse_authors(citation: str) -> list[Author]:
+    """The authors of a citation. A comma form ("Wende, M. E.") puts the
+    initials in the next token, which is folded back into the surname."""
+    tokens = [_author_words(t) for t in _AUTHOR_SEPARATOR.split(author_segment(citation))]
+    authors: list[Author] = []
+    for i, words in enumerate(tokens):
+        if words is None or all(_is_initials(w) for w in words):
             continue
-        if any(w[0].islower() and w.lower() not in _PARTICLES for w in words):
-            continue
-        run: list[str] = []
-        for word in [w.strip(".") for w in words] + [""]:
-            if len(fold_name(word)) < 2 or _INITIALS.match(word) or word.lower() in _PARTICLES:
-                if len(run) > 1:
-                    found.append(" ".join(run))
-                run = []
-                continue
-            found.append(word)
-            run.append(word)
-    return found
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if following and all(_is_initials(w) for w in following) \
+                and not any(_is_initials(w) for w in words):
+            author = Author(" ".join(words), following[0][0])
+        else:
+            author = _split_author(words)
+        if author and len(fold_name(author.surname)) > 1:
+            authors.append(author)
+    return authors
 
 
 def _trigrams(key: str) -> Counter[str]:
@@ -129,69 +184,113 @@ class _TfIdf:
         return dot / norm if norm else 0.0
 
 
-def _owner_keys(owner_names: Iterable[str]) -> set[str]:
-    """Each owner surname folded whole, plus each of its hyphen or space
-    parts ("García López" -> garcialopez, garcia, lopez)."""
-    keys: set[str] = set()
-    for name in owner_names:
-        if not name or not name.strip():
-            continue
-        whole = fold_name(name)
-        if len(whole) > 1:
-            keys.add(whole)
-        keys.update(_name_parts(name, rf"\s{_HYPHENS}"))
-    return keys
+def _keys(name: str) -> set[str]:
+    """A surname folded whole, plus its parts."""
+    whole = fold_name(name)
+    return ({whole} if len(whole) > 1 else set()) | name_parts(name)
 
 
-def _score(tfidf: _TfIdf, candidate: str, owner_keys: set[str]) -> float:
-    """Best similarity between the candidate (whole, or a hyphen part) and
-    an owner key that starts with the same letter. A different first letter
-    is never the owner: that gate is what keeps Henderson off an Anderson CV.
-    A space-joined candidate scores whole only, so "Michael Wendee" never
-    ties with "Wendee"."""
-    cand_keys = {fold_name(candidate), *_name_parts(candidate, _HYPHENS)}
-    if " " in candidate:
-        cand_keys = {fold_name(candidate)}
-    return max((tfidf.similarity(c, o) for c in cand_keys for o in owner_keys
-                if c and o and c[0] == o[0]), default=0.0)
+def _owner_initials(given_initials: Iterable[str], surnames: Sequence[str],
+                    per_citation: list[list[Author]]) -> frozenset[str]:
+    """The owner's first initials: the given ones (stage-4 first name,
+    target_name initials); else those of authors spelled exactly like a
+    stage-4 surname; else, for a stage-4 surname no author carries (a given
+    name stored as the surname), its own first letter."""
+    initials = frozenset(i.upper() for i in given_initials if i)
+    if initials:
+        return initials
+    wanted = {fold_name(s) for s in surnames} - {''}
+    seen = {a.initial for authors in per_citation for a in authors
+            if a.initial and fold_name(a.surname) in wanted}
+    if seen:
+        return frozenset(seen)
+    carried = {fold_name(a.surname) for authors in per_citation for a in authors}
+    return frozenset(fold_name(s)[0].upper() for s in surnames if fold_name(s)
+                     and fold_name(s) not in carried)
 
 
-def infer_owner_alias(unmatched_citations: Sequence[str], owner_names: Iterable[str]) -> str:
-    """The owner's surname as the unmatched citations spell it, or ''.
+def _related(tfidf: _TfIdf, candidate: str, owner_keys: set[str]) -> bool:
+    """A shared folded part, or a close spelling with the same first letter.
+    A different first letter is never a fuzzy match: that gate keeps
+    Henderson off an Anderson CV."""
+    cand_keys = _keys(candidate)
+    if cand_keys & owner_keys:
+        return True
+    return any(c[0] == o[0] and tfidf.similarity(c, o) >= MIN_SIMILARITY
+               for c in cand_keys for o in owner_keys)
 
-    `unmatched_citations` are the citations in which no exact owner name was
-    found; `owner_names` are the names the exact match tried (`target_name`
-    surnames, `cv_owner.last_name`) -- surnames, not full names, or a
-    first name becomes a key. Returns the candidate, as written in the
-    citations, with the highest similarity to an owner key, provided it
-    reaches `MIN_SIMILARITY` and appears in more than `MIN_COVERAGE` of the
-    unmatched citations. Ties go to the more frequent spelling, then the
-    alphabetically first, so the result is deterministic.
+
+@dataclass
+class _Candidates:
+    """Initial-compatible author surnames: citations covered per folded key,
+    and the most frequent spelling of each."""
+    coverage: Counter[str]
+    spelling: dict[str, str]
+
+    @classmethod
+    def count(cls, per_citation: list[list[Author]], initials: frozenset[str]) -> _Candidates:
+        coverage: Counter[str] = Counter()
+        spellings: dict[str, Counter[str]] = {}
+        for authors in per_citation:
+            fitting = [a.surname for a in authors if a.initial in initials]
+            for surname in fitting:
+                spellings.setdefault(fold_name(surname), Counter())[surname] += 1
+            coverage.update({fold_name(s) for s in fitting})
+        spelling = {k: sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+                    for k, c in spellings.items()}
+        return cls(coverage, spelling)
+
+    def ranked(self, needed: int) -> list[str]:
+        """Folded keys reaching `needed` citations, most covered first."""
+        return sorted((k for k, n in self.coverage.items() if n >= needed),
+                      key=lambda k: (-self.coverage[k], k))
+
+
+def _accept(tfidf: _TfIdf, ranked: list[str], spelling: dict[str, str],
+            owner_keys: set[str]) -> list[str]:
+    """Keys related to a stage-4 surname, then, until nothing changes, to an
+    accepted candidate by a shared part."""
+    accepted = [k for k in ranked if _related(tfidf, spelling[k], owner_keys)]
+    grown = True
+    while grown:
+        parts = set().union(*(_keys(spelling[k]) for k in accepted))
+        extra = [k for k in ranked if k not in accepted and _keys(spelling[k]) & parts]
+        accepted += extra
+        grown = bool(extra)
+    return sorted(accepted, key=ranked.index)
+
+
+def _stage4_share(per_citation: list[list[Author]], surnames: Sequence[str]) -> float:
+    """Share of citations with an author whose surname, or a part of it, is
+    a stage-4 surname."""
+    wanted = {fold_name(s) for s in surnames} - {''}
+    hits = sum(1 for authors in per_citation
+               if any(_keys(a.surname) & wanted for a in authors))
+    return hits / len(per_citation)
+
+
+def infer_owner_alias(citations: Sequence[str], surnames: Iterable[str],
+                      given_initials: Iterable[str] = ()) -> OwnerAlias:
+    """The owner's spellings in this bibliography (see the module docstring).
+
+    `surnames` are stage 4's (`cv_owner.last_name`, each `target_name`
+    surname); `given_initials` the owner's first initials stage 4 knows
+    (first name, full name, `target_name` initials). Returns an empty
+    `OwnerAlias` when nothing qualifies.
     """
-    owner_keys = _owner_keys(owner_names)
-    if not unmatched_citations or not owner_keys:
-        return ''
-    per_citation = [candidate_surnames(c) for c in unmatched_citations]
-    tfidf = _TfIdf(fold_name(w) for words in per_citation for w in words)
-
-    coverage: Counter[str] = Counter()
-    spellings: dict[str, Counter[str]] = {}
-    for words in per_citation:
-        for word in words:
-            spellings.setdefault(fold_name(word), Counter())[word] += 1
-        coverage.update({fold_name(w) for w in words})
-
-    needed = math.floor(MIN_COVERAGE * len(unmatched_citations)) + 1
-    best: tuple[float, int, str] | None = None
-    for key, seen in coverage.items():
-        if seen < needed:
-            continue
-        spelling = sorted(spellings[key].items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-        score = _score(tfidf, spelling, owner_keys)
-        if score < MIN_SIMILARITY:
-            continue
-        rank = (score, seen, spelling)
-        if best is None or (rank[0], rank[1]) > (best[0], best[1]) or \
-                ((rank[0], rank[1]) == (best[0], best[1]) and spelling < best[2]):
-            best = rank
-    return best[2] if best else ''
+    stage4 = [s for s in surnames if s and s.strip()]
+    per_citation = [parse_authors(c) for c in citations]
+    initials = _owner_initials(given_initials, stage4, per_citation)
+    if not per_citation or not initials:
+        return OwnerAlias()
+    candidates = _Candidates.count(per_citation, initials)
+    needed = max(MIN_ALIAS_CITATIONS, math.ceil(MIN_COVERAGE * len(per_citation)))
+    ranked = candidates.ranked(needed)
+    tfidf = _TfIdf(fold_name(a.surname) for authors in per_citation for a in authors)
+    owner_keys = set().union(*(_keys(s) for s in stage4))
+    accepted = _accept(tfidf, ranked, candidates.spelling, owner_keys)
+    if not accepted and ranked and _stage4_share(per_citation, stage4) < MAX_STAGE4_SHARE \
+            and candidates.coverage[ranked[0]] >= MIN_REPLACEMENT * len(per_citation):
+        accepted = _accept(tfidf, ranked, candidates.spelling, _keys(candidates.spelling[ranked[0]]))
+    spellings = tuple(candidates.spelling[k] for k in accepted)
+    return OwnerAlias(spellings, initials, frozenset().union(*(name_parts(s) for s in spellings)))

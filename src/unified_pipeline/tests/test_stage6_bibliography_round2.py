@@ -59,6 +59,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 import unified_pipeline.stage6.sections.bibliography as bibliography  # noqa: E402
+from unified_pipeline.stage6.normalization.owner_alias import OwnerAlias  # noqa: E402
 
 # The font-derivation test below calls `importlib.reload(bibliography)`.
 # Reload re-executes the module in its OWN namespace, so module-level
@@ -1039,9 +1040,16 @@ def test_untitled_undated_entries_are_declined_not_numbered():
     ("Tarn-Ellery, K.", "Tarn-Ellery"),
     ("Pell-Rowan FM", "Pell-Rowan"),
     (", Wende", ", Wende"),
+    # A bare trailing comma is not the "Surname, Given" form.
+    ("Wende Michael,", "Wende Michael,"),
 ])
 def test_target_surname_takes_the_part_before_a_comma(target_name, surname):
     assert bibliography._target_surname(target_name) == surname
+
+
+def test_citation_author_split_trailing_comma_target_bolds_the_surname_only():
+    citation = "Doe Jane, Wende Michael. A study of mice. J Med. 2020;1:1-2."
+    assert bibliography._citation_author_split(citation, "Wende Michael,", "Wende")[1] == "Wende"
 
 
 def test_citation_author_split_full_name_target_finds_the_surname():
@@ -1049,46 +1057,151 @@ def test_citation_author_split_full_name_target_finds_the_surname():
     assert bibliography._citation_author_split(citation, "Wende, Michael E.", "")[1] == "Wende ME"
 
 
+def _alias(*surnames, initials="M", parts=()):
+    return OwnerAlias(tuple(surnames), frozenset(initials), frozenset(parts))
+
+
 def test_citation_author_split_owner_alias_is_the_last_resort():
     citation = "Smith J, Wendee ME" + _TAIL
     assert bibliography._citation_author_split(citation, None, "Wende")[1] == ""
-    assert bibliography._citation_author_split(citation, None, "Wende", "Wendee")[1] == "Wendee ME"
+    assert bibliography._citation_author_split(citation, None, "Wende", _alias("Wendee"))[1] == "Wendee ME"
     # An exact owner match wins over the alias.
     citation = "Wendee A, Wende ME" + _TAIL
-    assert bibliography._citation_author_split(citation, None, "Wende", "Wendee")[1] == "Wende ME"
+    assert bibliography._citation_author_split(citation, None, "Wende", _alias("Wendee"))[1] == "Wende ME"
+
+
+@pytest.mark.parametrize("citation, alias, bolded", [
+    # A co-author sharing one half of the owner's compound, with another
+    # initial, is never bolded; the owner later in the list is (shapes h, q, r).
+    ("Garza J, Ruiz M" + _TAIL, _alias("Garza", "Ruiz"), "Ruiz M"),
+    ("Doe J, Ruiz J, Lee K" + _TAIL, _alias("Garza-Ruiz", "Ruiz"), ""),
+    ("Doe J, Garza-Ruiz J" + _TAIL, _alias("Garza-Ruiz"), ""),
+    ("Doe J, Garza P" + _TAIL, _alias("Garza"), ""),
+    # The comma form and a given name before the surname carry the initial.
+    ("Doe, J., Ruiz, M. A study. J Things. 2020.", _alias("Ruiz"), "Ruiz"),
+    ("John Doe, Mateo Ruiz" + _TAIL, _alias("Ruiz"), "Ruiz"),
+    ("John Doe, Pablo Ruiz" + _TAIL, _alias("Ruiz"), ""),
+    # No initial at all is not the owner's.
+    ("Doe J, Ruiz" + _TAIL, _alias("Ruiz"), ""),
+    # An alias is matched in the author list only, never in the title.
+    ("Doe J, Lee K. On the Ruiz M strain in mice. 2020.", _alias("Ruiz"), ""),
+])
+def test_citation_author_split_alias_needs_the_owner_initial(citation, alias, bolded):
+    before, bold, after = bibliography._citation_author_split(citation, None, "", alias)
+    assert bold == bolded
+    assert before + bold + after == citation
+
+
+@pytest.mark.parametrize("citation, owner, alias, bolded", [
+    # Stage 4 holds one half of a spaced compound: the whole compound bolds,
+    # from either half (shapes b, e).
+    ("Doe J, Garza Ruiz M" + _TAIL, "Garza", _alias("Garza Ruiz", parts={"garza", "ruiz"}),
+     "Garza Ruiz M"),
+    ("Doe J, Garza Ruiz M" + _TAIL, "Ruiz", _alias("Garza Ruiz", parts={"garza", "ruiz"}),
+     "Garza Ruiz M"),
+    ("Ana Garza Ruiz, John Doe" + _TAIL, "Ruiz", _alias("Garza Ruiz", initials="A",
+                                                      parts={"garza", "ruiz"}), "Garza Ruiz"),
+    # A word that is not an owner part is not taken.
+    ("Doe J, Garza Lopez M" + _TAIL, "Garza", _alias("Garza Ruiz", parts={"garza", "ruiz"}),
+     "Garza"),
+    # Separate authors are never joined.
+    ("Garza M, Ruiz P" + _TAIL, "Garza", _alias("Garza Ruiz", parts={"garza", "ruiz"}), "Garza M"),
+    # The whole-token rule still holds with parts known.
+    ("Smith J, Alvarez-Diaz M" + _TAIL, "Diaz", _alias(parts={"diaz"}), ""),
+])
+def test_citation_author_split_widens_a_spaced_compound(citation, owner, alias, bolded):
+    before, bold, after = bibliography._citation_author_split(citation, None, owner, alias)
+    assert bold == bolded
+    assert before + bold + after == citation
+
+
+@pytest.mark.parametrize("name, initial", [
+    ("Wende, Michael E.", "M"),
+    ("Eil R", "R"),
+    ("Michael E. Wende", "M"),
+    ("Wende", ""),
+    ("", ""),
+])
+def test_name_initial(name, initial):
+    assert bibliography._name_initial(name) == initial
+
+
+def _fill(entries, cv_owner, track_changes=False):
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=track_changes)
+    gen.doc = Document(gen.template_path)
+    gen._fill_bibliography({"S1": entries}, cv_owner=cv_owner)
+    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    paras = gen.doc.paragraphs[header_idx + 2:header_idx + 2 + len(entries)]
+    return gen, [[r.text for r in p.runs if r.bold is True] for p in paras]
 
 
 def test_fill_bibliography_bolds_the_plausible_owner_spelling():
     exact = _citation_entry("Wende ME, Roe B. A study. J Med. 2021;1:1-2.", None, 2021)
-    typo = _citation_entry("Roe B, Wendee ME. Another study. J Med. 2020;1:1-2.", None, 2020)
-    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
-    gen.doc = Document(gen.template_path)
-
-    gen._fill_bibliography({"S1": [exact, typo]}, cv_owner={"last_name": "Wende"})
-
-    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
-    paras = gen.doc.paragraphs[header_idx + 2:header_idx + 4]
-    assert [[r.text for r in p.runs if r.bold is True] for p in paras] == [["Wende ME"], ["Wendee ME"]]
-    assert gen.stats["target_names_bolded"] == 2
+    typos = [_citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+             for n in range(2)]
+    gen, bolds = _fill([exact, *typos], {"last_name": "Wende", "first_name": "Michael"})
+    assert bolds == [["Wende ME"], ["Wendee ME"], ["Wendee ME"]]
+    assert gen.stats["target_names_bolded"] == 3
 
 
 def test_fill_bibliography_alias_reaches_the_tracked_writer():
-    typo = _citation_entry("Roe B, Wendee ME. Another study. J Med. 2020;1:1-2.", None, 2020)
-    typo["enrichment_status"] = "enriched"
-    typo["text"] = "Roe B, Wendee ME. Another study."
+    typos = []
+    for n in range(2):
+        typo = _citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+        typo["enrichment_status"] = "enriched"
+        typo["text"] = f"Roe B, Wendee ME. A study of mice {n}."
+        typos.append(typo)
     gen = WCMTemplateGenerator(verbose=False, emit_track_changes=True)
     gen.doc = Document(gen.template_path)
 
-    gen._fill_bibliography({"S1": [typo]}, cv_owner={"last_name": "Wende"})
+    gen._fill_bibliography({"S1": typos}, cv_owner={"last_name": "Wende", "first_name": "Michael"})
 
-    assert gen.stats["target_names_bolded"] == 1
+    assert gen.stats["target_names_bolded"] == 2
 
 
 def test_fill_bibliography_leaves_an_unrelated_coauthor_unbolded():
     entry = _citation_entry("Roe B, Henderson P. A study. J Med. 2020;1:1-2.", None, 2020)
-    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
-    gen.doc = Document(gen.template_path)
-
-    gen._fill_bibliography({"S1": [entry]}, cv_owner={"last_name": "Anderson"})
-
+    gen, _ = _fill([entry], {"last_name": "Anderson"})
     assert gen.stats["target_names_bolded"] == 0
+    # Recurring, with the owner's initial, on a CV whose papers name the owner.
+    entries = [_citation_entry(f"Roe B, {name} P. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+               for n, name in enumerate(["Henderson", "Henderson", "Anderson", "Anderson"])]
+    _, bolds = _fill(entries, {"last_name": "Anderson", "first_name": "Paula"})
+    assert bolds == [[], [], ["Anderson P"], ["Anderson P"]]
+
+
+def test_fill_bibliography_bolds_the_whole_compound_on_both_writers():
+    # Stage 4 kept one half of a spaced compound (shape b); plain and tracked
+    # writers bold the same whole surname.
+    body = "Doe J, Garza Ruiz M. A study of mice {}. J Med. 2020;1:1-2."
+    entries = [_citation_entry(body.format(n), None, 2020) for n in range(3)]
+    _, plain = _fill(entries, {"last_name": "Garza", "first_name": "Maria"})
+    assert plain == [["Garza Ruiz M"]] * 3
+    for entry in entries:
+        entry["enrichment_status"] = "enriched"
+        entry["text"] = "old text"
+    gen, _ = _fill(entries, {"last_name": "Garza", "first_name": "Maria"}, track_changes=True)
+    tracked = [
+        "".join(r.find(qn("w:t")).text for r in ins.findall(qn("w:r"))
+                if r.find(qn("w:rPr")) is not None and r.find(qn("w:rPr")).find(qn("w:b")) is not None)
+        for ins in gen.doc.element.body.iter(qn("w:ins"))]
+    assert tracked.count("Garza Ruiz M") == 3
+
+
+def test_fill_bibliography_recovers_the_surname_stage4_got_wrong():
+    # Stage 4 stored the given name as the surname; the papers use another
+    # (shape l), and a co-author shares the owner's surname but not the
+    # initial (shape r): only the owner bolds.
+    entries = [_citation_entry(f"Ruiz M, Doe J. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+               for n in range(3)]
+    entries.append(_citation_entry("Doe J, Ruiz P. A study of mice 9. J Med. 2020;1:1-2.", None, 2020))
+    _, bolds = _fill(entries, {"last_name": "Mateo"})
+    assert bolds == [["Ruiz M"]] * 3 + [[]]
+
+
+def test_fill_bibliography_bolds_two_forms_of_one_compound():
+    # The owner publishes under each half of the compound (shape g).
+    entries = [_citation_entry(f"{name} M, Doe J. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+               for n, name in enumerate(["Garza", "Garza", "Ruiz", "Ruiz"])]
+    _, bolds = _fill(entries, {"last_name": "Garza-Ruiz", "first_name": "Maria"})
+    assert bolds == [["Garza M"], ["Garza M"], ["Ruiz M"], ["Ruiz M"]]

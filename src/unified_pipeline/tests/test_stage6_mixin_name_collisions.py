@@ -211,7 +211,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Other Educational Experiences: expected a %d-column table, found %d columns; %d entries not rendered': 'warning',
     'Other Educational Experiences: section heading not found in template; %d entries not rendered': 'warning',
     'Other Educational Experiences: table not found after section heading; %d entries not rendered': 'warning',
-    'Owner not named exactly in %d citation(s); bolding plausible spelling %r': 'info',
+    'Owner surname read from the bibliography as %r (stage 4 last name %r)': 'info',
     'Patents & Inventions: removed %d previously rendered patent tables before rendering again': 'info',
     'Patents & Inventions: section heading not found in template; %d entries not rendered': 'warning',
     'Patents & Inventions: skipped %d sparse entries (no title or patent number)': 'info',
