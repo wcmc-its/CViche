@@ -1772,3 +1772,90 @@ def test_a_home_word_in_a_protected_fragment_does_not_route_an_office_part_numbe
     entry["_pii_fragments"] = ["Home phone: 555-555-0199"]
     rows = _contact_rows(tmp_path, [entry])
     assert rows["Office telephone:"] == "555-555-0101"
+
+
+@pytest.mark.parametrize("place", [
+    "Example Hospital, Exampleton, New York",
+    "Example Medical Center, Exampleton, Examplestan",
+])
+def test_an_address_set_aside_beside_a_phone_still_reaches_the_document(tmp_path, place):
+    """A no-street address set aside as a department is left to the
+    Appendix recovery; the phone on the same entry filling its row must not
+    make the entry count as consumed, or the address renders nowhere."""
+    rows = _contact_rows(tmp_path, [
+        _a(f"{place}\tPhone: 212-555-0100", {"address": place, "phone": "212-555-0100"}),
+    ])
+    assert rows["Office telephone:"] == "212-555-0100"
+    text = _all_text(tmp_path / "out.docx")
+    assert text.count(place) == 1
+    assert text.count("212-555-0100") == 1
+
+
+@pytest.mark.parametrize("lines, address", [
+    ("100 Sample Avenue\tExample Bldg\tExampleton 00000",
+     "100 Sample Avenue\nExample Bldg\nExampleton 00000"),
+    ("100 Sample Avenue\tExampleton\tExample Bldg 00000-1234",
+     "100 Sample Avenue\nExampleton\nExample Bldg 00000-1234"),
+])
+def test_street_address_in_takes_a_city_line_known_only_by_its_zip(lines, address):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._street_address_in(lines) == address
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("primary department: department of example studies", True),
+    ("department: department of example studies", True),
+    ("our primary department: department of example studies", False),
+])
+def test_holds_only_a_label_and_allows_a_label_of_at_most_two_words(text, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._holds_only_a_label_and("department of example studies", text) is expected
+
+
+def test_an_address_left_for_recovery_beside_an_orcid_still_reaches_the_document(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Example Institute, Exampleton, Examplestan\tORCID: 0000-0002-1825-0097",
+           {"address": "Example Institute, Exampleton, Examplestan", "orcid": "0000-0002-1825-0097"}),
+    ])
+    assert rows["Office address:"] == ""
+    assert "Example Institute, Exampleton, Examplestan" in _all_text(tmp_path / "out.docx")
+
+
+@pytest.mark.parametrize("text, names, expected", [
+    ("Example Institute\tPhone: 555-0100\tExample Unit", ["EXAMPLE INSTITUTE"], "Example Institute"),
+    ("Example Institute\tExample Unit", ["Example Institute", "Example Unit"],
+     "Example Institute\nExample Unit"),
+    ("Phone: 555-0100", ["Example Institute"], "Example Institute"),
+])
+def test_lines_naming_keeps_only_the_lines_that_hold_a_name(text, names, expected):
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._lines_naming(text, names) == expected
+
+
+def test_two_a_entries_with_the_same_orcid_make_one_profile(tmp_path):
+    """The second A entry's iD is matched against the first one's profile,
+    not only against S0 entries; a later stage-6 dedup would otherwise be
+    the only thing keeping it off the page twice."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": [
+        _a("Phone: 555-555-0101\tID 0000-0002-1825-0097",
+           {"phone": "555-555-0101", "orcid": "0000-0002-1825-0097"}, idx=0),
+        _a("Email: jdoe@example.edu\tID 0000-0002-1825-0097",
+           {"email": "jdoe@example.edu", "orcid": "https://orcid.org/0000-0002-1825-0097"}, idx=1),
+    ]}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    assert len(gen._a_researcher_profiles) == 1
+
+
+def test_street_address_in_stops_at_the_first_city_line():
+    from unified_pipeline.stage6.sections import personal_data
+    assert personal_data._street_address_in(
+        "100 Sample Avenue\tExampleton, ZZ 00000\tOtherton, ZZ 00001") == "100 Sample Avenue\nExampleton, ZZ 00000"
+
+
+def test_a_number_too_short_to_pair_routes_by_the_whole_text():
+    from unified_pipeline.stage6.sections import personal_data
+    text = "home: 9 private lane 555-0112\toffice: 1 sample way"
+    assert personal_data._phone_text_for_routing("12", text) is text

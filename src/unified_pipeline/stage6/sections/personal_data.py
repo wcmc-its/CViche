@@ -59,6 +59,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, NamedTuple
@@ -574,41 +575,79 @@ class _AddressContext(NamedTuple):
     other_entries_text: str = ''
 
 
+class _AddressFate(Enum):
+    """What `_route_address` did with an address that filled no slot."""
+    #: Filled a slot, or was routed as before (#442): the slot tuple decides.
+    ROUTED = 'routed'
+    #: Rendered or recorded elsewhere: the entry counts as consumed.
+    SET_ASIDE = 'set_aside'
+    #: Rendered nowhere: the entry must reach the Appendix recovery even
+    #: when its phone or email filled a row (#1222).
+    LEFT_FOR_RECOVERY = 'left_for_recovery'
+
+
 def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str | None,
                    office_address: str | None, address_rank: _SlotRank,
-                   withheld: list[WithheldItem]) -> tuple[str | None, str | None, bool]:
-    """(home_address, office_address, set_aside) after routing one
+                   withheld: list[WithheldItem]) -> tuple[str | None, str | None, _AddressFate]:
+    """(home_address, office_address, fate) after routing one
     entry's stage-4 `address`; lifted out of `_fill_personal_data` (#1223).
 
     A dict that names its own halves fills both slots from them instead of
     forcing the whole thing into whichever one the raw text happened to label
     (#442); a dict that names no slot is one address and is routed by the
     raw text, same as a string. A place of birth fills no slot: it is
-    recorded on `withheld`, and the True third value makes the caller count
+    recorded on `withheld`, and SET_ASIDE makes the caller count
     the entry consumed, since the recovery pass would render its residual,
     the place (#1223, EBYSBC EQADVR-02). A value with no street, number or
     state (`_names_a_street_or_number`) is a department or school name, not
     an address, and fills no slot either (#1222, EBYSBC RVROVQ-04). When a
     non-A entry's text carries the same name and the line holds nothing
-    else but a label, a record of its own renders it and the True third
-    value keeps the header line out of the Appendix; otherwise the entry is
-    left to the Appendix recovery, as a displaced banner address is."""
+    else but a label, a record of its own renders it and SET_ASIDE keeps
+    the header line out of the Appendix; otherwise LEFT_FOR_RECOVERY hands
+    the entry to the Appendix recovery, as a displaced banner address is,
+    even when another of its values filled a row."""
     if _labels_its_own_address_slots(address):
         return (home_address or _address_cell_text(address, 'home'),
-                office_address or _address_cell_text(address, 'office'), False)
+                office_address or _address_cell_text(address, 'office'), _AddressFate.ROUTED)
     if _address_is_home(ctx.text, ctx.pii_fragments, ctx.phone):
-        return home_address or _address_cell_text(address, 'home'), office_address, False
+        return home_address or _address_cell_text(address, 'home'), office_address, _AddressFate.ROUTED
     if _address_is_birthplace(ctx.text, ctx.pii_fragments):
         withheld.append(WithheldItem(CAT_PLACE_OF_BIRTH, _PERSONAL_DATA_SECTION_LABEL, None))
-        return home_address, office_address, True
+        return home_address, office_address, _AddressFate.SET_ASIDE
     office_text = _address_cell_text(address, 'office')
     if not _names_a_street_or_number(office_text):
         name = office_text.lower()
+        carried = name in ctx.other_entries_text and _holds_only_a_label_and(name, ctx.text)
         return (home_address, office_address,
-                name in ctx.other_entries_text and _holds_only_a_label_and(name, ctx.text))
+                _AddressFate.SET_ASIDE if carried else _AddressFate.LEFT_FOR_RECOVERY)
     if any(word in ctx.text for word in _WORK_PLACE_WORDS) or not office_address:
         office_address = address_rank.offer(office_address, address, ctx.entry)
-    return home_address, office_address, False
+    return home_address, office_address, _AddressFate.ROUTED
+
+
+def _entry_for_recovery(entry: dict, address_fates: list[tuple[_AddressFate, str]],
+                        rendered: bool) -> dict | None:
+    """What of `entry` the post-render recovery pass must place, or None.
+
+    `rendered` says another of its values (a slot, an ORCID) reached the
+    document. With nothing rendered and no address set aside, the whole
+    entry is unconsumed. An address left for recovery renders nowhere else,
+    so when something else of the entry did render, only the lines naming
+    that address go to the pass (#1222)."""
+    fates = {fate for fate, _ in address_fates}
+    if not rendered and _AddressFate.SET_ASIDE not in fates:
+        return entry
+    left = [name for fate, name in address_fates if fate is _AddressFate.LEFT_FOR_RECOVERY]
+    return {**entry, 'text': _lines_naming(entry.get('text', ''), left)} if left else None
+
+
+def _lines_naming(text: str, names: list[str]) -> str:
+    """The tab- or newline-separated lines of `text` that hold one of
+    `names` (case-insensitive), or the names themselves when no line does."""
+    wanted = [name.lower() for name in names if name]
+    lines = [line.strip() for line in re.split(r'[\t\n]', text)
+             if any(name in line.lower() for name in wanted)]
+    return '\n'.join(lines or [name for name in names if name])
 
 
 #: What may sit beside a department name on a line that is set aside: a
@@ -1296,7 +1335,7 @@ class PersonalDataSection:
             text = entry.get('text', '').lower()
             slots_before = (work_email, personal_email, office_phone,
                             cell_phone, office_address, home_address)
-            address_set_aside = False
+            address_fates: list[tuple[_AddressFate, str]] = []
 
             # Values stage 4 lifted out of a protected-personal-data fragment
             # are not contact details and must not reach the template. web07's
@@ -1339,11 +1378,11 @@ class PersonalDataSection:
 
             # Classify address by type, each half of a "Home: ...; Office: ..." on its own
             for address, address_text in _address_halves(extracted_address or offschema.address, text):
-                home_address, office_address, set_aside = _route_address(
+                home_address, office_address, fate = _route_address(
                     address, _AddressContext(address_text, pii_fragments, fields.get('phone'), entry,
                                              other_entries_text),
                     home_address, office_address, address_rank, self._pii_result.withheld)
-                address_set_aside = address_set_aside or set_aside
+                address_fates.append((fate, _address_cell_text(address, 'office') or ''))
             orcid = _orcid_of(fields, pii_fragments)
             profile = _orcid_profile_entry(orcid, s0_text) if orcid else None
             if profile:
@@ -1368,9 +1407,11 @@ class PersonalDataSection:
             # that sets only home_phone reaches the document nowhere and is
             # genuinely unconsumed. Two corpus entries are in exactly that
             # state.
-            if not address_set_aside and not orcid and (work_email, personal_email, office_phone, cell_phone,
-                                            office_address, home_address) == slots_before:
-                unconsumed.append(entry)
+            recovered = _entry_for_recovery(entry, address_fates, bool(orcid) or (
+                work_email, personal_email, office_phone, cell_phone,
+                office_address, home_address) != slots_before)
+            if recovered is not None:
+                unconsumed.append(recovered)
 
         # Handed to the post-render recovery pass, which is the only point at
         # which "did this content reach the document?" can actually be asked.
