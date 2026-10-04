@@ -68,11 +68,17 @@ CellContent = list[tuple[str, bool, str]]
 POSITION_TAXONOMY_CODES = ('D1', 'D2', 'D3')
 ACADEMIC_APPOINTMENT_CODE, HOSPITAL_APPOINTMENT_CODE, OTHER_POSITION_CODE = POSITION_TAXONOMY_CODES
 
+# A start-only D row renders "<start>-Present" only when its source text
+# leaves that year open ("2019 -", "2019 - present"), else the bare start
+# (#1342, decision 2026-10-02, superseding #946's 2026-09-24 one). The CV's
+# latest D1 row -- no later D1 row by start year -- is the faculty member's
+# current rank and keeps "-Present" without a marker (`_latest_rank_rows`).
+#
 # #946: the academic-rank ladder the decision on the issue names, lowest
 # first -- Instructor -> Assistant Professor -> Associate Professor ->
-# Professor. A start-only D1 row renders "<start>-Present" unless a higher
-# rung in the same table starts the same year or later; then it renders the
-# bare start (`_superseded_rank_rows`). The word before "professor" -- or
+# Professor. A start-only D1 row renders the bare start, marker or not, when
+# a higher rung in the same table starts the same year or later
+# (`_superseded_rank_rows`). The word before "professor" -- or
 # before a "clinical"/"research" qualifier in front of it -- picks the rung,
 # so "Asst.", "Assoc." and "Assistant Clinical Professor" are not read as
 # full Professor. "Associate Dean and Professor" is a Professor.
@@ -461,7 +467,7 @@ def _superseded_rank_rows(records: list[dict]) -> set[int]:
             continue
         fields = record.get('extracted_fields', {}) or {}
         rank = _academic_rank(str(fields.get('title') or ''))
-        start_year = _parse_date_components(str(fields.get('start_date') or ''))[0]
+        start_year = _start_year(record)
         if rank is not None and start_year is not None:
             ranked.append((index, rank, start_year, bool(fields.get('end_date'))))
     return {index for index, rank, start_year, has_end in ranked
@@ -469,8 +475,29 @@ def _superseded_rank_rows(records: list[dict]) -> set[int]:
                                    for _, other_rank, other_start, _ in ranked)}
 
 
-def _position_row_cells(entry: dict,
-                        superseded: bool = False) -> tuple[CellContent, CellContent, CellContent]:
+def _start_year(record: dict) -> int | None:
+    """The year of a record's start date, None when it has none."""
+    fields = record.get('extracted_fields', {}) or {}
+    return _parse_date_components(str(fields.get('start_date') or ''))[0]
+
+
+def _latest_rank_rows(records: list[dict]) -> set[int]:
+    """Indexes of the D1 records in one table that hold the latest D1 start
+    year: the CV's current rank, whose start-only date keeps "-Present"
+    without an open marker (#1342, decision 2026-10-02). Rows tied on that
+    year are all kept, the same reading as the doctor's date_cell_shape
+    lint (`DATE_CELL_LATEST_RANK_CODE`)."""
+    years = {index: _start_year(record) for index, record in enumerate(records)
+             if record.get('taxonomy_code') == ACADEMIC_APPOINTMENT_CODE}
+    known = [year for year in years.values() if year is not None]
+    if not known:
+        return set()
+    latest = max(known)
+    return {index for index, year in years.items() if year == latest}
+
+
+def _position_row_cells(entry: dict, superseded: bool = False,
+                        latest_rank: bool = False) -> tuple[CellContent, CellContent, CellContent]:
     """The Title / Institution / Dates cell contents of one position row.
 
     Split out of `_add_position_row` so that the decision to render a record
@@ -482,7 +509,9 @@ def _position_row_cells(entry: dict,
     Each cell is the `(text, is_track_change, reason)` run list that
     `_add_table_row_with_mixed_content` takes. Reads the record only.
     `superseded` renders a start-only date as the bare start
-    (`_superseded_rank_rows`, #946).
+    (`_superseded_rank_rows`, #946). Otherwise a start-only date renders
+    "<start>-Present" when `latest_rank` is set (`_latest_rank_rows`) or the
+    entry's text leaves the start year open, else the bare start (#1342).
     """
     fields = entry.get('extracted_fields', {}) or {}
 
@@ -526,9 +555,14 @@ def _position_row_cells(entry: dict,
     end = fields.get('end_date', '')
     if superseded:
         dates = format_date_for_section(start, taxonomy_code)
-    else:
+    elif latest_rank:
         dates = with_extra_date_spans(format_date_range(start, end, taxonomy_code),
                                       fields, taxonomy_code)
+    else:
+        dates = with_extra_date_spans(
+            format_date_range(start, end, taxonomy_code,
+                              source_text=entry.get('text', '') or ''),
+            fields, taxonomy_code)
 
     # Build cell contents with mixed normal/track-change content
     title_content = [(title, False, "")]
@@ -1033,14 +1067,18 @@ class PositionsSection:
 
     def _add_position_rows(self, table: Table, entries: list[dict]) -> None:
         """Render a table's normalized position records, one row each, with
-        the rank-ladder dates of `_superseded_rank_rows` decided over the
-        whole table (#946)."""
+        the rank-ladder dates of `_superseded_rank_rows` (#946) and the
+        latest D1 rank of `_latest_rank_rows` (#1342) decided over the whole
+        table."""
         positions = self._normalized_positions(entries)
         superseded = _superseded_rank_rows(positions)
+        latest_rank = _latest_rank_rows(positions)
         for index, position in enumerate(positions):
-            self._add_position_row(table, position, superseded=index in superseded)
+            self._add_position_row(table, position, superseded=index in superseded,
+                                   latest_rank=index in latest_rank)
 
-    def _add_position_row(self, table: Table, entry: dict, superseded: bool = False) -> None:
+    def _add_position_row(self, table: Table, entry: dict, superseded: bool = False,
+                          latest_rank: bool = False) -> None:
         """Render one normalized position record as one table row.
 
         Renders unconditionally: every record `_normalized_positions` yields
@@ -1049,6 +1087,6 @@ class PositionsSection:
         """
         self._add_table_row_with_mixed_content(
             table,
-            list(_position_row_cells(entry, superseded)),
+            list(_position_row_cells(entry, superseded, latest_rank)),
             entry=entry
             )
