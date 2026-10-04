@@ -135,6 +135,20 @@ def _us_state(token: str) -> str:
     return ''
 
 
+_US_COUNTRY_CODE = 'US'
+
+
+def _names_a_foreign_country(enrichment: Mapping) -> bool:
+    """True when stage 5b names a country and its code says it is not the
+    US. Both are required: a country name with no code cannot be told from
+    "United States" spelt some other way, and a US location drops its
+    country by design (#698)."""
+    country, code = enrichment.get('country'), enrichment.get('country_code')
+    return (isinstance(country, str) and bool(country.strip())
+            and isinstance(code, str) and bool(code.strip())
+            and code.strip().upper() != _US_COUNTRY_CODE)
+
+
 def _get_institution_location(entry: dict) -> tuple[str, bool]:
     """Get formatted location string from institution enrichment data.
 
@@ -223,6 +237,12 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
                 country = enrichment.get('country', '')
                 location = f"{city}, {country}" if country else f"{city}, {state}"
                 as_stated = (location,)
+        elif city and _names_a_foreign_country(enrichment):
+            # No state, but a non-US country: "Cambridge, United Kingdom",
+            # not "Cambridge" alone, which the reader takes for a US town
+            # (#698; EBYSBC GJXIWD-05 lost the country on three rows).
+            location = f"{city}, {enrichment['country'].strip()}"
+            as_stated = (location,)
         elif city:
             location, as_stated = city, (city,)
         else:

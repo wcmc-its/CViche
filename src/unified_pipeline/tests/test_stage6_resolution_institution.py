@@ -254,4 +254,39 @@ def test_a_lookup_sharing_a_distinctive_word_keeps_its_location():
              "institution_enrichment": {"official_name": "Kestrel Harbor University",
                                         "city": "Lille", "country": "France",
                                         "country_code": "FR"}}
-    assert _get_institution_location(entry) == ("Lille", True)
+    assert _get_institution_location(entry) == ("Lille, France", True)
+
+
+def _city_only(country, country_code, text="Kestrel Harbor University"):
+    return {"text": text,
+            "extracted_fields": {"institution": "Kestrel Harbor University"},
+            "institution_enrichment": {"cleaned_name": "Kestrel Harbor University",
+                                       "city": "Wrenford", "state": "",
+                                       "country": country, "country_code": country_code}}
+
+
+def test_a_non_us_city_with_no_state_keeps_its_country():
+    """#698, EBYSBC GJXIWD-05: a UK university with a city and no state
+    rendered '<university>, <city>' -- the country was used only beside a
+    state, so the reader took the city for a US town."""
+    assert _get_institution_location(_city_only("United Kingdom", "GB")) == (
+        "Wrenford, United Kingdom", True)
+
+
+def test_a_non_us_city_and_country_the_source_states_is_no_enrichment():
+    entry = _city_only("United Kingdom", "gb",
+                       text="Kestrel Harbor University, Wrenford, United Kingdom")
+    assert _get_institution_location(entry) == ("Wrenford, United Kingdom", False)
+
+
+@pytest.mark.parametrize("country,country_code", [
+    ("United States", "US"),   # a US location drops its country by design
+    ("United States", "us"),
+    ("United Kingdom", ""),    # no code: cannot tell it is not the US
+    ("United Kingdom", None),
+    ("", "GB"),                # no country name to write
+    ("   ", "GB"),
+    (None, "GB"),
+])
+def test_a_city_only_location_without_a_foreign_country_stays_the_city(country, country_code):
+    assert _get_institution_location(_city_only(country, country_code)) == ("Wrenford", True)

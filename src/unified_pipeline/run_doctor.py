@@ -190,6 +190,16 @@ Lints, ranked by the severity of the failure class they catch:
                           examples above), so this catches what that repair
                           cannot: bare years, M-YY-MM-YY runs, and a month the
                           text gives no date for
+14p. date_cell_shape      a rendered date that reads wrong, in a table's date
+                          cell or at the start of a body paragraph, tied back
+                          to the stage-4 entry it renders: "<start>-Present"
+                          when the entry's text has no open marker (WARN; I
+                          memberships and the CV's latest D1 rank keep it by
+                          decision, #1342 2026-10-02), a raw
+                          stored value "2003-04-2005-09" or "2009-Summer", or
+                          a range whose ends are equal "2013-2013" (both
+                          INFO). Before it, the 24 verified findings of
+                          EBYSBC classes E9 and E21 had no doctor finding
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -361,6 +371,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _record_rendered,
     appendix_entry_count,
     honors_table_totals,
+    lint_date_cell_shape,
     lint_dead_sections,
     lint_date_only_lines,
     lint_duplicate_passages,
@@ -474,6 +485,7 @@ KNOWN_LINTS = (
     "etal_added",
     "multi_record_coverage",
     "year_not_in_source",
+    "date_cell_shape",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -601,6 +613,13 @@ LINT_PREVALENCE = {
     # 38/63, 35 at WARN; the autopsies found the class it reports on 17 of
     # EBYSBC's 40 CVs, so it is common rather than surprising.
     "multi_record_coverage": 0.508,
+    # date_cell_shape (EBYSBC E9/E21): 19 of the 63 runs of the EBYSBC/s7ab/
+    # pilot farm fire at any severity (18 at WARN), as rendered by origin/dev
+    # 8a0a5445, measured 2026-10-03. #1368's stage-6 date fixes removed most
+    # raw and same-ended dates; open D2/D3 and earlier-D1 rows, which stage 6
+    # still prints '-Present' under the 2026-10-02 decision on #1342, are
+    # most of what is left. Same mixed-corpus caveat as above.
+    "date_cell_shape": 0.302,
 }
 
 
@@ -1123,6 +1142,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("multi_record_coverage", lint_multi_record_coverage, ("stage_4", "blocks")),
     LintSpec("year_not_in_source", lint_year_not_in_source, ("stage_4",),
              optional=("stage_5d",)),
+    # `blocks` reads the same docx as `table_rows`, so it is gated by that
+    # view's row; a row may name each artifact only once.
+    LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
+             optional=("blocks",)),
 )
 
 
