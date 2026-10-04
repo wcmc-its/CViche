@@ -747,6 +747,13 @@ def test_an_email_renders_in_the_row_its_domain_key_and_label_choose(
     ("212-555-0142", "contact 212-555-0142 (home)", None),
     # a dict holding two numbers pairs with neither
     ({"cell": "212-555-0142", "office": "917-555-0100"}, "(c) 212-555-0142", None),
+    # #1222 (EBYSBC EQGGRB-04): in a run whose numbers all carry a trailing
+    # label, "(cell)" labels the number before it
+    ("212-555-0142", "tel: 212-555-0142 (cell)\t917-555-0100 (office)",
+     personal_data_module._PHONE_LABEL_CELL),
+    ("917-555-0100", "tel: 212-555-0142 (cell)\t917-555-0100 (office)", None),
+    # ... and "(cell):" with a colon is not a label for the number before it
+    ("917-555-0100", "(office): 917-555-0100\t(cell): 212-555-0142", None),
 ])
 def test_nearest_phone_label_pairs_only_the_extracted_number(phone, text, expected):
     parsed = personal_data_module._PhoneNumber.parse(phone)
