@@ -78,6 +78,7 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
+from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
     grant_status_rebucket_target,
@@ -781,7 +782,12 @@ def lint_dedup_drops(report: Dict,
     the two entries carry different names and the dropped name is on the page
     as no cell of its own. Whichever guard let stage 6 approve the drop, the
     name it dropped is absent from the output. A duplicate reworded by the kept
-    entry also lands here, so it stays INFO."""
+    entry also lands here, so it stays INFO.
+
+    A record-rule drop (`stage6/record_dedup.py`, metric
+    `RECORD_RULE_METRIC_PREFIX`) matched the two records on their fields, not
+    their text: a header line beside a table row shares few words with it by
+    construction, so it skips the WARN and takes only the INFO name test."""
     suspect = []
     named_apart = []
     rendered_items = _rendered_item_set(blocks) if blocks is not None else None
@@ -793,7 +799,8 @@ def lint_dedup_drops(report: Dict,
         coverage = sum((dropped & kept).values()) / sum(dropped.values())
         pair = (f"dropped '{d.get('dropped_text', '')[:80]}' "
                 f"vs kept '{d.get('kept_text', '')[:80]}'")
-        if coverage < DEDUP_SAFE_CONTAINMENT:
+        field_matched = str(d.get("metric", "")).startswith(RECORD_RULE_METRIC_PREFIX)
+        if coverage < DEDUP_SAFE_CONTAINMENT and not field_matched:
             suspect.append(f"{d.get('code', '?')} ({d.get('metric', '?')}, "
                            f"{coverage:.0%} covered by kept): {pair}")
         elif rendered_items is not None and _unrendered_identity(d, rendered_items):

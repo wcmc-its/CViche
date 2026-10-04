@@ -148,6 +148,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     deduplicate_entries,
     recovered_row_already_rendered,
 )
+from unified_pipeline.stage6.record_dedup import deduplicate_record_groups
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     RECORD_DATE_LINE_MIN_CHARS,
     RENDER_PIECE_MIN_CHARS,
@@ -1471,6 +1472,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             removed = before - len(entries_by_code[code])
             if removed > 0:
                 total_deduped += removed
+        total_deduped += deduplicate_record_groups(entries_by_code, dedup_decisions,
+                                                   dropped_ids)
         if self.verbose and total_deduped > 0:
             logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
 
