@@ -13,11 +13,19 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 - **Evidence cap.** The doctor prints at most 3 evidence items per finding: the stage-6 re-emit in `doctor/lints/render.py` slices to 3, and `offschema_fields` keeps `FIELD_EVIDENCE_MAX_VALUES = 3` (`doctor/lints/extraction.py`). The scorer reads only the indices a finding prints. A finding about more entries is matched on the 3 it lists, so on the reroute rows and `offschema_fields`, matched and caught can undercount, and they depend on which 3 entries come first. On M1 the cap hides 85 of 206 reroute indices (in 11 of 72 findings) and 19 of 89 `offschema_fields` indices (in 5 of 47 findings). M1's doctor was re-run once with both caps lifted, in a scratch copy that is not committed: no matched, caught or recall number changed. Only the reroute rows' unmatched-index lists grew, `reroute_refused` from 57 to 92 indices and `reroute_same_family` from 16 to 46. Another arm can differ, so a lint PR on one of these rows says how many of its findings hit the cap.
 - `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `scripts/doctor_vs_autopsy.py` (`_STAGE6_SHAPES`).
 
+## Who reads this file
+
+`doctor/precision.py` parses the per-lint table below at run time, so keep its shape: the first table under the "Per-lint precision" heading, a `lint` column of backticked keys (a `stage6_render_warnings` shape row adds `: ` and the backticked shape), and a `TP / judged` column of `<tp> / <judged>` or `none`. Columns are found by header name. Shape rows are pooled into their lint key, because a finding carries the key. A lint listed twice keeps its first row. What it feeds:
+
+- Each run's doctor report gets a `lint_precision` block, and the top lints in `doctor.tsv` and the lint on the Teams card's Doctor line carry `p~0.50 n=8` (TP / judged, and judged), or `p unmeasured`.
+- #813's remediation gate, `precision.remediation_allowed`: a lint may drive a section retry only if it is one of #813's LLM-judgement lints (`missed_headers`, `segmentation`, `under_extraction`) with a TP / judged of at least 80% on at least 20 judged findings. On M1, none qualifies.
+
 ## Measurements
 
 | id | date | doctor code | runs scored | labels | issue |
 |---|---|---|---|---|---|
 | M1 | 2026-10-02 | origin/dev `c3d87c5f`, over the base render of the same SHA | 62 of the 63-run farm: EBYSBC 40, s7ab 10, pilot 12 (the 13th pilot run has no verified autopsy) | 516 verified findings (EBYSBC 312, s7ab 112, pilot 92), 487 of them carrying an entry index; 186 EBYSBC verdicts | #819 |
+| M3 | 2026-10-04 | origin/dev `fb466a0f`, over the base render of the same SHA (`doctor_gate.py`: 63 runs, 1,275 findings) | 62 of 63, as M1 | as M1 | #822 |
 | W3B-GR | 2026-10-04 | origin/dev `fb466a0f` plus `grant_boundary` and `grant_bucket`, over the base render of `fb466a0f` | 62 of the 63-run farm, as M1 | as M1 | #1226, #1343 |
 
 W3B-GR added `grant_boundary` and `grant_bucket` and changed no other lint's findings on any run. Every unmatched hit was hand-read against the stage-4 grant list and the source document's line order. `grant_boundary`: of its 18 unmatched hits, 13 are one ZCTARO list whose records open with Source and whose stage-2 cut slipped one line from entry 304 on, so each later grant carries the next grant's title; 2 (VGHNZD 1496, 1504) are the drift verified finding VGHNZD-01 describes, which names only 1488 by index; 1 (VGHNZD 1546) opens with a title whose sponsor line sits in the entry before; 1 (SDEBQJ 291) opens with the PI and end-date line of the grant before it. The 18th (RXYBVF 502) is doubtful: the source holds that title alone after the last numbered grant, so no record visibly lost it; it is counted as a false positive. 44 of 45 (98%). `grant_bucket`: all 16 hits match a verified finding (ZDCXIV-01, 15 grants; KYOPUV-05, entry 589). The shapes were written from these same 63 runs, so the precision is in-sample.
@@ -62,6 +70,22 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `wrong_start_date` | 9 | 1 | 0 / 1 / 1 | 0 / 2 (0%) | 8 / 9 (89%) | 7 | M1 |
 
 No hits on M1's 62 runs: `bucket_status`, `dead_sections`, `invented_records`, `llm_refusal_in_output`, `no_output`, `owner_contact_missing`, `pipeline_errors_present`, `protected_data_in_output`, `python_repr_in_output`, `segmentation`, `stage3b_fallback_ratio`, `stage3b_second_pass_error`, `stage_failure_recorded`, `table_lost`, `under_extraction`, `unrendered_records`.
+
+## Score cap inputs (M3)
+
+The quality score caps a run at 84 on four more lints only while this table records the cap's own findings at 80% precision or more on 20 or more of them (Paul's decision on #822, 2026-10-02). Each row measures the subset of the lint's findings that would cap, not the whole lint. **matched** is M1's index match; every unmatched hit was hand-checked against the rendered docx (`w:ins` text included) and the stage-4 entry. A partial is a real defect other than the one the cap claims, and counts against precision.
+
+| cap input | caps when | hits | matched | hand-checked: TP / partial / FP | precision | caps? |
+|---|---|---|---|---|---|---|
+| `owner_missing_from_citation`, the hits on runs with 3 or more (XWNZWW 10, BMHBJZ 6, BMAMWE 4, NJIKGI 3) | 3 or more on a run | 23 | 11 | 12 / 0 / 0 of 12 | 23 / 23 (100%) | yes |
+| `owner_missing_from_citation`, lint-wide (for reference; 6 of these hits sit on runs with 1 hit and never cap) | | 29 | 13 | 14 / 1 / 1 of 16 | 27 / 29 (93%) | |
+| `multi_record_coverage`, WARN with 2 or more clauses or values on no line | 1 or more | 20 | 14, of which 3 are `field_lost`, hand-checked: 1 TP, 2 partial | 2 / 1 / 3 of 6 | 14 / 20 (70%) | no |
+| `offschema_fields`, record-shaped WARN | 1 or more | 8 | 6 | 1 / 0 / 1 of 2 (the other was rendered fused into raw text) | 7 / 8, n under 20 | no |
+| `dedup_drops` | 1 or more lossy | 13 (6 WARN), 17 drops | names text | of the 17 drops, 7 have their text on one rendered line at 0.9 or more of its words; EBYSBC verdicts 2 / 2 / 4 of 8 | n under 20 | no |
+
+`owner_missing_from_citation`'s partial is a data-safety-board credit dropped from a trial citation, and its false positive a co-presented talk whose rendered line names only the other presenter. Both sit on runs with a single hit, so neither caps. Its 13 matched hits sit on verified findings of the owner-dropped classes (EBYSBC E13 and E32, and s7ab-8); 11 of them are on the capping runs. The unmatched 14 true positives are owner credits the autopsies did not list one by one: eight cut by "et al.", and six study-group or collaborator credits ("including ...") the rendered line leaves out. The doctor reports 30 hits; the 30th is on QFJSXR, the one run with no autopsy labels, so the harness does not score it, and with 1 hit it never caps.
+
+`multi_record_coverage`'s false positives are one record's own detail split across two source lines (a meeting's name and its venue, twice on one run) and a mentee list the docx renders on one line; its partials lose a mentee's career detail, one of two committee roles, or mentees' years while their names render.
 
 ## Recall (M1)
 

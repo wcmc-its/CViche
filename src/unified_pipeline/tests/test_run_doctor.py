@@ -3736,7 +3736,9 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     payload = run_doctor(root, _UID)
     assert set(payload) == {"document_uid", "root", "artifacts", "findings",
-                            "counts", "worst_severity", "metrics"}
+                            "counts", "worst_severity", "metrics", "lint_precision"}
+    # #819: one lint_precision entry per lint key that fired, no more.
+    assert set(payload["lint_precision"]) == {f["lint"] for f in payload["findings"]}
     assert all(v is not None for v in payload["artifacts"].values())
     assert not any("skipped" in f["message"] for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
