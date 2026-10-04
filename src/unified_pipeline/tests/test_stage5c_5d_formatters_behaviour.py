@@ -1512,3 +1512,22 @@ def test_5d_llm_outage_fails_the_stage_while_other_errors_still_degrade(tmp_path
 
     monkeypatch.setattr(s5d, "call_llm", lambda **kw: (_ for _ in ()).throw(RuntimeError("connection reset")))
     assert s5d.call_llm_formatter("raw") == (None, None)
+
+
+def test_apply_formatted_fields_cuts_a_placeholder_whose_title_ends_in_a_period():
+    # The reply's title carries a trailing period the citation does not.
+    entry = {"text": "Quill A. J Imag Stud. 2019.", "extracted_fields": {}}
+    reply = {"title": "[Title not provided].",
+             "formatted_citation": "Quill A. [Title not provided], J Imag Stud, 2019."}
+    assert s5d.apply_formatted_fields(entry, reply) is True
+    assert "[" not in entry["extracted_fields"]["formatted_citation"]
+    assert "title" not in entry["extracted_fields"]
+
+
+def test_apply_formatted_fields_leaves_the_reply_unchanged():
+    # The caller's reply dict is read, never edited.
+    entry = {"text": "Ruritania.", "extracted_fields": {}}
+    reply = {"title": "[Title not available]", "formatted_citation": "[Title not available]."}
+    snapshot = dict(reply)
+    assert s5d.apply_formatted_fields(entry, reply) is False
+    assert reply == snapshot

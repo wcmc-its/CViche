@@ -2156,3 +2156,46 @@ def test_an_identity_drop_is_recorded_in_dropped_ids():
     dropped_ids = set()
     assert deduplicate_entries([a, tail], code="S1", dropped_ids=dropped_ids) == [a]
     assert dropped_ids == {id(tail)}
+
+
+def test_a_superseded_in_press_copy_never_displaces_the_published_copy():
+    # Farm: BMAMWE. Stage 5 marked the CV's "epub ahead of print" listing
+    # in_press_superseded; stage 6 renders it only as a tracked deletion of
+    # the published copy. The superseded copy is enriched and so would win
+    # on fullness, but keeping it over the published copy loses the paper
+    # once the deletion is accepted. Both reach the renderer.
+    published = _pub("Quill A, Brandt B. Gizmo outcomes. J Imag Stud. 2019;4:1-9.",
+                     pmid="31234567", authors="Quill A, Brandt B", title="Gizmo outcomes",
+                     journal="J Imag Stud", year=2019, volume="4", pages="1-9")
+    superseded = _enriched("Quill A, Brandt B. Gizmo outcomes. J Imag Stud. Epub ahead of print.",
+                           "31234567", "Gizmo outcomes.", title="Gizmo outcomes", year=2019)
+    superseded["in_press_superseded"] = True
+    for order in ([published, superseded], [superseded, published]):
+        kept = deduplicate_entries(list(order), code="S1")
+        assert any(entry is published for entry in kept)
+
+
+def test_a_superseded_copy_does_not_vouch_for_dropping_a_published_duplicate():
+    # Two published listings plus a superseded one: the published pair still
+    # dedups by PMID to one copy, and the superseded copy is not the keeper.
+    first = _pub("Quill A, Brandt B. Gizmo outcomes. J Imag Stud. 2019;4:1-9. Wrote it.",
+                 pmid="31234567", authors="Quill A, Brandt B", title="Gizmo outcomes",
+                 journal="J Imag Stud", year=2019, volume="4", pages="1-9")
+    second = _pub("Quill A, Brandt B. Gizmo outcomes. J Imag Stud. 2019.",
+                  pmid="31234567", title="Gizmo outcomes", year=2019)
+    superseded = _enriched("Gizmo outcomes. Epub ahead of print.", "31234567", "Gizmo outcomes.")
+    superseded["in_press_superseded"] = True
+    kept = deduplicate_entries([superseded, second, first], code="S1")
+    assert any(entry is first for entry in kept)
+    assert not any(entry is second for entry in kept)
+
+
+def test_an_identity_drop_records_both_copies_name_fields():
+    # The doctor's dedup_drops lint reads dropped_fields and kept_fields.
+    a = _pub("Quill A. Gizmo outcomes. Toy Press. 2019.", pmid="31234567",
+             title="Gizmo outcomes", journal_name="Toy Press", year=2019, authors="Quill A")
+    b = _pub("Gizmo outcomes.", pmid="31234567", title="Gizmo outcomes")
+    decisions = []
+    assert deduplicate_entries([a, b], decisions=decisions, code="S3") == [a]
+    assert decisions[0]["dropped_fields"] == {"title": "Gizmo outcomes"}
+    assert decisions[0]["kept_fields"] == {"journal_name": "Toy Press", "title": "Gizmo outcomes"}

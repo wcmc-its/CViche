@@ -1304,12 +1304,15 @@ def _drop_citation_copies(entries: list[dict], code: str | None,
     and `_citations_conflict` finds nothing apart. The fuller copy
     (`_citation_fullness`) is kept wherever it sits; the section sorts by
     year, so position does not matter. A fanned-out record (#983) is left to
-    the similarity loop's own rule."""
+    the similarity loop's own rule, and so is an in-press listing stage 5
+    superseded: stage 6 renders it as a tracked deletion of the published
+    copy it names, so keeping it over that copy would lose the paper once the
+    deletion is accepted (BMAMWE)."""
     kept_by_key: dict[tuple[str, str], int] = {}
     pubs = [resolve_publication(entry) for entry in entries]
     dropped: set[int] = set()
     for index, entry in enumerate(entries):
-        if entry.get(FANNED_OUT_FROM):
+        if entry.get(FANNED_OUT_FROM) or entry.get('in_press_superseded') is True:
             continue
         keys = _citation_identity_keys(entry, pubs[index])
         match = next(((key, kept_by_key[key]) for key in sorted(keys)
