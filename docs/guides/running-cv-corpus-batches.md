@@ -143,7 +143,9 @@ scripts/run_corpus_batch.sh --doctor data/sample_cvs/word/web_harvest 25
 ```
 
 Per CV it writes a row to `_batch_runs/doctor.tsv` (`date sha cv worst ERROR WARN INFO top_lints`)
-and the full findings to `_batch_runs/doctor/<cv>.json`. No LLM cost — the doctor is deterministic
+and the full findings to `_batch_runs/doctor/<cv>.json`. Each `top_lints` item reads `lint:count (p~0.50 n=8)`:
+the lint's hand-checked precision and sample size from `src/unified_pipeline/doctor/PRECISION.md`, or
+`(p unmeasured)` (#819). No LLM cost — the doctor is deterministic
 lints over the stage_* artifacts. Findings are WARN/INFO detection lints (missed_headers,
 classified_unrendered, output_hygiene, dedup_drops, …); an ERROR means a crash- or critical-loss
 class worth stopping for. To doctor a run outside the batch loop:
