@@ -35,3 +35,14 @@ def test_norm_leaves_typographic_apostrophes_alone():
     every coverage and render metric built on it (#1232)."""
     assert text_norm.norm("O\u2019Neil") == "o\u2019neil"
 
+
+
+def test_is_placeholder_title_flags_only_brackets_the_source_lacks():
+    """#446: the 5d LLM wrote "[Title not provided]" where the source had no
+    title; a bracketed value the CV itself carries is its own text."""
+    assert text_norm.is_placeholder_title("[Title not provided]", "Quill A, Brandt B,")
+    assert text_norm.is_placeholder_title(" [Title not available]. ", "Ruritania.")
+    assert not text_norm.is_placeholder_title("[Erratum]", "Quill A. [Erratum]. J Imag Stud.")
+    assert not text_norm.is_placeholder_title("A study [of things]", "")
+    assert not text_norm.is_placeholder_title("A study of things", "")
+    assert not text_norm.is_placeholder_title(None, "")

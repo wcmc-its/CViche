@@ -54,8 +54,11 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from unified_pipeline.core.text_norm import is_placeholder_title
+
 from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries
+from ..normalization.publication import resolve_publication
 from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
 from ..sorting import sort_entries_reverse_chronological
 
@@ -288,6 +291,16 @@ def _citation_author_split(citation: str, target_name: str | None,
     return citation[:start], citation[start:end], citation[end:]
 
 
+def _lacks_title_and_year(entry: dict) -> bool:
+    """True when the entry has neither a year nor a title, a 5d bracketed
+    placeholder counting as none (#446: EBYSBC HFAJCC-05, XWNZWW-02, and the
+    author-only split heads of NDXXAD-02). Numbered as a citation it reads as
+    a paper that does not exist."""
+    pub = resolve_publication(entry)
+    return not pub.year and (not pub.title.strip()
+                             or is_placeholder_title(pub.title, entry.get('text') or ''))
+
+
 def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
     """The CV owner's surname as the citations spell it, from the document uid.
 
@@ -323,11 +336,13 @@ class BibliographySection:
         """
         return _CONTROL_CHAR_PATTERN.sub('', text)
 
-    def _fill_bibliography(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict, document_uid: str = ''):
+    def _fill_bibliography(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict,
+                           document_uid: str = '') -> list[dict]:
         """Fill bibliography section with formatted citations.
 
         Uses the official WCM template section headers and restarts numbering
-        within each subsection.
+        within each subsection. Returns the entries it declined as no citation
+        (`_lacks_title_and_year`, #446), for `generate()` to send to the Appendix.
         """
         # Map taxonomy codes to WCM template section header text
         # These must match the exact text in the official WCM template
@@ -360,6 +375,7 @@ class BibliographySection:
 
         logger.info("Filling Bibliography (%d publications)...", total_pubs)
 
+        declined: list[dict] = []
         # Process each publication type
         for code in pub_codes:
             pubs = entries_by_code.get(code, [])
@@ -408,6 +424,11 @@ class BibliographySection:
 
             citation_num = 0
             for pub in pubs_sorted:
+                if _lacks_title_and_year(pub):
+                    # #446: a split head, a section label or a 5d placeholder,
+                    # not a citation; the Appendix keeps it, with a warning.
+                    declined.append(pub)
+                    continue
                 enrichment = _CitationEnrichment.from_raw(pub)
                 if enrichment.in_press_superseded:
                     # Takes no citation number: accepting the deletion leaves none.
@@ -453,6 +474,7 @@ class BibliographySection:
                 self._add_entry_comments(para, pub)
 
                 self.stats['entries_inserted'] += 1
+        return declined
 
     def _insert_superseded_citation(self, insert_paragraph: Callable[[], Paragraph],
                                     enrichment: _CitationEnrichment) -> None:

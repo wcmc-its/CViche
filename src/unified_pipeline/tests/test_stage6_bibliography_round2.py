@@ -1002,3 +1002,30 @@ def test_superseded_in_press_citation_is_absent_with_track_changes_off():
     assert all("A study" not in p.text for p in gen.doc.paragraphs)
     assert gen._comments == []
     assert len(gen.doc.paragraphs) - before <= 1  # at most the section's leading blank line
+
+
+# --- #446: an entry with no title and no year is not a citation ---
+
+
+def test_untitled_undated_entries_are_declined_not_numbered():
+    # EBYSBC NDXXAD-02 (an author-only split head) and HFAJCC-05 (a 5d
+    # placeholder title): neither is numbered; both wait for the Appendix.
+    gen = _generator()
+    head = {"text": "Quill A, Brandt B,", "extracted_fields": {
+        "formatted_citation": "Quill A, Brandt B, et al.", "formatting_source": "stage_5d_llm"}}
+    placeholder = {"text": "Ostrow C, Vance D,", "extracted_fields": {
+        "title": "[Title not provided]",
+        "formatted_citation": "Ostrow C, Vance D. [Title not provided].",
+        "formatting_source": "stage_5d_llm"}}
+    undated = _citation_entry("Gamma C. Undated study. J3.", "Gamma C", None)
+    undated["extracted_fields"]["title"] = "Undated study"
+    untitled = _citation_entry("Delta D. J4. 2021.", "Delta D", 2021)
+
+    declined = gen._fill_bibliography({"S1": [head, placeholder, undated, untitled]},
+                                      cv_owner={}, document_uid="")
+
+    assert declined == [head, placeholder]
+    header_idx = gen._find_paragraph_with_text("Peer-reviewed Research Articles:")
+    following = [p.text for p in gen.doc.paragraphs[header_idx:header_idx + 5]]
+    assert following[2:4] == ["1. Delta D. J4. 2021.", "2. Gamma C. Undated study. J3."]
+    assert not any("Quill" in t or "Ostrow" in t for t in following)

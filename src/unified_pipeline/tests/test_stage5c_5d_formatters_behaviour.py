@@ -941,6 +941,63 @@ def test_run_stage_5d_does_not_overwrite_an_existing_non_empty_field(tmp_path, m
     assert "formatting_source" not in fields
 
 
+def _run_5d_on_one_reply(tmp_path, monkeypatch, text, reply):
+    """Run stage 5d over one S1 entry whose LLM reply is `reply`; return its fields."""
+    input_path = _write_json(tmp_path / "in.json", {
+        "document_uid": "PLACEHOLD",
+        "entries": [{"taxonomy_code": "S1", "text": text,
+                     "enrichment_status": "no_identifier", "extracted_fields": {}}],
+    })
+    output_path = str(tmp_path / "out.json")
+    monkeypatch.setattr(s5d, "call_llm",
+                        lambda **kw: _llm_result(json.dumps({"CIT-0001": reply})))
+    s5d.run_stage_5d(input_path, output_path=output_path, verbose=False)
+    with open(output_path, encoding="utf-8") as f:
+        return json.load(f)["entries"][0]["extracted_fields"]
+
+
+def test_run_stage_5d_never_writes_a_placeholder_title(tmp_path, monkeypatch):
+    # #446 (EBYSBC HFAJCC-05): the source lost everything after the author
+    # list; the LLM invented "[Title not provided]" for title and citation.
+    fields = _run_5d_on_one_reply(
+        tmp_path, monkeypatch, "Quill A, Brandt B, Ostrow C,",
+        {"authors": "Quill A, Brandt B, Ostrow C", "title": "[Title not provided]",
+         "formatted_citation": "Quill A, Brandt B, Ostrow C. [Title not provided]."})
+    assert "title" not in fields
+    assert fields["formatted_citation"] == "Quill A, Brandt B, Ostrow C."
+    assert fields["authors"] == "Quill A, Brandt B, Ostrow C"
+
+
+def test_run_stage_5d_drops_a_citation_that_was_only_a_placeholder(tmp_path, monkeypatch):
+    # #446 (EBYSBC XWNZWW-02): a split-off place name; the placeholder leads.
+    fields = _run_5d_on_one_reply(
+        tmp_path, monkeypatch, "Ruritania.",
+        {"title": "[Title not available]", "formatted_citation": "[Title not available]. Ruritania."})
+    assert "title" not in fields
+    assert fields["formatted_citation"] == "Ruritania."
+    fields = _run_5d_on_one_reply(
+        tmp_path, monkeypatch, "Ruritania.",
+        {"title": "[Title not available]", "formatted_citation": "[Title not available]."})
+    assert fields == {}
+
+
+def test_run_stage_5d_closes_the_gap_a_mid_citation_placeholder_leaves(tmp_path, monkeypatch):
+    # Cutting the title out of the middle leaves ". ."; one period remains.
+    fields = _run_5d_on_one_reply(
+        tmp_path, monkeypatch, "Quill A. J Imag Stud. 2019.",
+        {"title": "[Title not provided]",
+         "formatted_citation": "Quill A. [Title not provided]. J Imag Stud. 2019."})
+    assert fields["formatted_citation"] == "Quill A. J Imag Stud. 2019."
+
+
+def test_run_stage_5d_keeps_a_bracketed_title_the_source_carries(tmp_path, monkeypatch):
+    fields = _run_5d_on_one_reply(
+        tmp_path, monkeypatch, "Quill A. [Erratum]. J Imag Stud. 2019.",
+        {"title": "[Erratum]", "formatted_citation": "Quill A. [Erratum]. J Imag Stud. 2019."})
+    assert fields["title"] == "[Erratum]"
+    assert fields["formatted_citation"] == "Quill A. [Erratum]. J Imag Stud. 2019."
+
+
 def test_run_stage_5d_processes_multiple_batches_independently(tmp_path, monkeypatch):
     # batch_size=1 forces two separate call_llm_formatter calls; each batch
     # renumbers its own single entry as CIT-0001, so the fake must key off
@@ -1455,3 +1512,22 @@ def test_5d_llm_outage_fails_the_stage_while_other_errors_still_degrade(tmp_path
 
     monkeypatch.setattr(s5d, "call_llm", lambda **kw: (_ for _ in ()).throw(RuntimeError("connection reset")))
     assert s5d.call_llm_formatter("raw") == (None, None)
+
+
+def test_apply_formatted_fields_cuts_a_placeholder_whose_title_ends_in_a_period():
+    # The reply's title carries a trailing period the citation does not.
+    entry = {"text": "Quill A. J Imag Stud. 2019.", "extracted_fields": {}}
+    reply = {"title": "[Title not provided].",
+             "formatted_citation": "Quill A. [Title not provided], J Imag Stud, 2019."}
+    assert s5d.apply_formatted_fields(entry, reply) is True
+    assert "[" not in entry["extracted_fields"]["formatted_citation"]
+    assert "title" not in entry["extracted_fields"]
+
+
+def test_apply_formatted_fields_leaves_the_reply_unchanged():
+    # The caller's reply dict is read, never edited.
+    entry = {"text": "Ruritania.", "extracted_fields": {}}
+    reply = {"title": "[Title not available]", "formatted_citation": "[Title not available]."}
+    snapshot = dict(reply)
+    assert s5d.apply_formatted_fields(entry, reply) is False
+    assert reply == snapshot

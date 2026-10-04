@@ -57,3 +57,18 @@ def squash(text: str) -> str:
 def looks_like_record(line: str) -> bool:
     line = line.strip()
     return len(line) > 60 and (" | " in line or "\t" in line)
+
+
+#: A whole value in square brackets: "[Title not provided]".
+_BRACKETED_RE = re.compile(r"\[[^\[\]]*\]")
+
+
+def is_placeholder_title(title: object, source_text: str) -> bool:
+    """True when `title` is a bracketed placeholder an LLM wrote in place of a
+    title the source lacks ("[Title not provided]", "[Title not available]",
+    #446: EBYSBC HFAJCC-05, XWNZWW-02). A bracketed value the source itself
+    carries ("[AUC]") is the CV's own text, not a placeholder."""
+    if not isinstance(title, str):
+        return False
+    value = title.strip().rstrip(".").strip()
+    return bool(_BRACKETED_RE.fullmatch(value)) and norm(value) not in norm(source_text)
