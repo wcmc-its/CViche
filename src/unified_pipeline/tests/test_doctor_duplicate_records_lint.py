@@ -691,6 +691,23 @@ def test_record_rule_pairs_a_shared_doi_when_one_copy_has_no_title():
     assert findings[0]["evidence"][0].startswith("entry 10 repeats as entry 13 (S1/S1, same doi:10.1000/x1)")
 
 
+def test_record_rule_pairs_one_book_listed_twice():
+    blocks = [("p", f"1. {_TITLE_X}. Example Press, 2020."), ("p", f"7. {_TITLE_X}. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, code="S3"),
+                            _cite_entry(16, _TITLE_X, code="S3")]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert findings[0]["evidence"][0].startswith("entry 10 repeats as entry 16 (S3/S3, same title)")
+
+
+def test_record_rule_ignores_a_doi_field_that_is_not_a_doi():
+    """A placeholder such as "n/a" in two entries' doi fields names no record."""
+    blocks = [("p", f"1. {_TITLE_X}. 2020. Example Journal."),
+              ("p", f"9. {_TITLE_X}. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, doi="n/a"),
+                            _cite_entry(13, None, year=None, doi="N/A")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
 def test_record_rule_pairs_a_shared_pmid_with_a_typo_in_one_title():
     typo = _TITLE_X.replace("repeated", "repaeted")
     blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {typo}. 2020.")]
@@ -742,6 +759,26 @@ def test_record_rule_quiet_on_two_grants_sharing_a_title(field, first, second):
     stage_5d = {"entries": [_grant_entry(1, "M2B", _TITLE_X, **{field: first}),
                             _grant_entry(2, "M2B", _TITLE_X, **{field: second})]}
     assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_quiet_on_two_grants_of_one_year_under_different_titles():
+    """Two grants starting the same year with nothing that conflicts are two
+    grants when their titles differ, each rendered once in its own table."""
+    blocks = [_grant_table(_TITLE_X), _grant_table(_TITLE_Y)]
+    stage_5d = {"entries": [_grant_entry(1, "M2A", _TITLE_X),
+                            _grant_entry(2, "M2B", _TITLE_Y)]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_pairs_a_current_and_a_completed_grant():
+    """M2C belongs to the grant group too: a grant listed as pending (M2A)
+    and again under another funding code (M2C) is one record."""
+    blocks = [_grant_table(_TITLE_X, "Pending"), _grant_table(_TITLE_X, "Other")]
+    stage_5d = {"entries": [_grant_entry(5, "M2A", _TITLE_X),
+                            _grant_entry(6, "M2C", _TITLE_X)]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert findings[0]["evidence"][0].startswith(
+        "entry 5 repeats as entry 6 (M2A/M2C, same title, year)")
 
 
 def test_record_rule_grant_without_a_start_year_is_not_paired():

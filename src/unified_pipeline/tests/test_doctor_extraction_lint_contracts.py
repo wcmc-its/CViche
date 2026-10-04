@@ -775,6 +775,7 @@ def test_dedup_drops_quiet_when_the_kept_entry_carries_the_date():
     ("Example Series Part I, noon talk", "Example Series Part II, noon talk", "part 1"),
     ("Example Program II", "Example Program III", "numeral II"),
     ("Example Course I\tExample Society", "Example Course II\tExample Society", "numeral I"),
+    ("Example trial, Phase II", "Example trial, Phase III", "phase 2"),
 ])
 def test_occasion_apart_reads_parts_and_numerals(dropped, kept, reason):
     assert extraction_lints._occasion_apart(dropped, kept) == f"{reason} the kept entry lacks"
