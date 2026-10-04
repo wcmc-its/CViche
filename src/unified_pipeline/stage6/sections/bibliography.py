@@ -34,7 +34,9 @@ over two different substrates:
 
 Author bolding targets `target_name` from `_format_citation`, falling back to
 the CV owner's last name -- taken from `cv_owner`, or recovered from the
-document uid when the pipeline never resolved an owner.
+document uid when the pipeline never resolved an owner -- and last to the
+plausible spelling `normalization/owner_alias.py` infers from the citations
+none of those names matched (#1393).
 """
 import inspect
 import logging
@@ -58,6 +60,7 @@ from unified_pipeline.core.text_norm import is_placeholder_title
 
 from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries
+from ..normalization.owner_alias import infer_owner_alias
 from ..normalization.publication import resolve_publication
 from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
 from ..sorting import sort_entries_reverse_chronological
@@ -231,7 +234,12 @@ def _target_surname(target_name: str) -> str:
     """`target_name` without its trailing capital initials ("Pell-Rowan FM"
     -> "Pell-Rowan", "Tarn-Ellery, K." -> "Tarn-Ellery"), or unchanged
     when it does not end in some. Stage 4 records the initials it saw in one
-    citation form; another form of the same author may carry more or fewer."""
+    citation form; another form of the same author may carry more or fewer.
+    A "Surname, Given" form keeps what precedes the comma ("Wende, Michael
+    E." -> "Wende", #1393)."""
+    surname, comma, _ = target_name.partition(",")
+    if comma and surname.strip():
+        return surname.strip()
     parts = re.split(r"[\s,]+", target_name.strip())
     initials = parts[-1].rstrip(".")
     if len(parts) > 1 and 0 < len(initials) <= _MAX_INITIALS \
@@ -252,7 +260,8 @@ def _looks_like_author_name(target_name: str | None) -> bool:
 
 
 def _citation_author_split(citation: str, target_name: str | None,
-                           cv_owner_last_name: str) -> tuple[str, str, str]:
+                           cv_owner_last_name: str,
+                           owner_alias: str = '') -> tuple[str, str, str]:
     """Split a citation around the author name that should render bold.
 
     The one home for the author-matching rule shared by the plain and the
@@ -268,7 +277,9 @@ def _citation_author_split(citation: str, target_name: str | None,
 
     Prefers `target_name` when it appears in the citation as written; then
     tries its surname alone, so "Quill J" still finds "Quill JD"; otherwise
-    falls back to `cv_owner_last_name`. A `target_name` shaped like a title
+    falls back to `cv_owner_last_name`, and last to `owner_alias`, the
+    plausible spelling `_infer_bibliography_owner_alias` found when the exact
+    names miss (#1393). A `target_name` shaped like a title
     (a colon, or more than `_MAX_TARGET_NAME_TOKENS` words) is skipped. A surname match takes trailing capital
     initials, e.g. "Wende ME", "Wende M", and any leading particles ("de la
     Cruz M"). The comma form ("Wende, M") bolds only the surname, pinned by
@@ -285,6 +296,8 @@ def _citation_author_split(citation: str, target_name: str | None,
         span = _find_surname_span(citation, _target_surname(target_name))
     if span is None and cv_owner_last_name:
         span = _find_surname_span(citation, cv_owner_last_name)
+    if span is None and owner_alias:
+        span = _find_surname_span(citation, owner_alias)
     if span is None:
         return citation, '', ''
     start, end = span
@@ -316,6 +329,29 @@ def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
     if not raw or any(_find_surname_span(c, raw) for c in citations):
         return raw
     return _strip_appended_initials(raw)
+
+
+def _infer_bibliography_owner_alias(publications: list[dict], cv_owner_last_name: str) -> str:
+    """The owner's surname as the citations spell it, when some citations
+    name the owner in no form the exact match knows (#1393), else ''.
+
+    Only the citations with no exact match are searched, against every name
+    the exact match tried, so a CV whose citations all bold already is left
+    exactly as it was.
+    """
+    unmatched: list[str] = []
+    surnames = {cv_owner_last_name}
+    for pub in publications:
+        citation, target_name, _ = _format_citation(pub, 0)
+        if _looks_like_author_name(target_name):
+            surnames.add(_target_surname(target_name))
+        if not _citation_author_split(citation, target_name, cv_owner_last_name)[1]:
+            unmatched.append(citation)
+    alias = infer_owner_alias(unmatched, surnames)
+    if alias:
+        logger.info("Owner not named exactly in %d citation(s); bolding plausible spelling %r",
+                    len(unmatched), alias)
+    return alias
 
 
 class BibliographySection:
@@ -369,6 +405,10 @@ class BibliographySection:
             cv_owner_last_name = _resolve_uid_owner_surname(
                 document_uid,
                 [pub for code in pub_codes for pub in entries_by_code.get(code, [])])
+
+        owner_alias = _infer_bibliography_owner_alias(
+            [pub for code in pub_codes for pub in entries_by_code.get(code, [])],
+            cv_owner_last_name)
 
         # Count total publications
         total_pubs = sum(len(entries_by_code.get(code, [])) for code in pub_codes)
@@ -450,11 +490,12 @@ class BibliographySection:
                     # Then add the insertion (enriched citation) with bold author
                     self._add_citation_with_bold_author_as_insertion(
                         para, citation_text, target_name, cv_owner_last_name,
-                        author="PubMed Enrichment"
+                        author="PubMed Enrichment", owner_alias=owner_alias
                     )
                 else:
                     # No enrichment - add citation normally with target name bolded
-                    self._add_citation_with_bold_author(para, citation_text, target_name, cv_owner_last_name)
+                    self._add_citation_with_bold_author(para, citation_text, target_name,
+                                                        cv_owner_last_name, owner_alias)
 
                 # Add comment explaining enrichment (no inline text)
                 if enriched_fields:
@@ -489,11 +530,13 @@ class BibliographySection:
         self._add_word_comment(para, enrichment.in_press_note,
                                author="PubMed Enrichment", always=True)
 
-    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None, cv_owner_last_name: str = '') -> None:
+    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None,
+                                       cv_owner_last_name: str = '', owner_alias: str = '') -> None:
         """
         Add citation text to paragraph, bolding the target author name.
 
-        If target_name is not found, falls back to searching for cv_owner_last_name.
+        If target_name is not found, falls back to searching for
+        cv_owner_last_name, then owner_alias.
         """
         para.clear()
 
@@ -510,7 +553,7 @@ class BibliographySection:
             target_name = self._sanitize_run_text(target_name)
 
         before, name_to_bold, after = _citation_author_split(
-            citation, target_name, cv_owner_last_name)
+            citation, target_name, cv_owner_last_name, owner_alias)
 
         if name_to_bold:
             # Add before (normal)
@@ -534,7 +577,8 @@ class BibliographySection:
 
     def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
                                                      target_name: str | None, cv_owner_last_name: str = '',
-                                                     author: str = "PubMed Enrichment") -> None:
+                                                     author: str = "PubMed Enrichment",
+                                                     owner_alias: str = '') -> None:
         """
         Add citation as a track change insertion, bolding the target author name.
 
@@ -551,7 +595,8 @@ class BibliographySection:
         # Issue #153: when track changes are disabled, render the citation as a
         # plain (non-tracked) paragraph with the target author bolded.
         if not self.emit_track_changes:
-            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
+            self._add_citation_with_bold_author(para, citation, target_name,
+                                                cv_owner_last_name, owner_alias)
             return
         try:
             revision_id = str(self._revision_id)
@@ -564,7 +609,7 @@ class BibliographySection:
             ins.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
 
             before, name_to_bold, after = _citation_author_split(
-                citation, target_name, cv_owner_last_name)
+                citation, target_name, cv_owner_last_name, owner_alias)
 
             def create_run_element(text: str, bold: bool = False) -> Any:
                 """Create a w:r element with text and optional bold."""
@@ -624,4 +669,5 @@ class BibliographySection:
         except Exception as e:
             logger.warning("Could not add citation as insertion: %s", e)
             # Fall back to normal citation
-            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
+            self._add_citation_with_bold_author(para, citation, target_name,
+                                                cv_owner_last_name, owner_alias)

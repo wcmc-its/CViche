@@ -1029,3 +1029,66 @@ def test_untitled_undated_entries_are_declined_not_numbered():
     following = [p.text for p in gen.doc.paragraphs[header_idx:header_idx + 5]]
     assert following[2:4] == ["1. Delta D. J4. 2021.", "2. Gamma C. Undated study. J3."]
     assert not any("Quill" in t or "Ostrow" in t for t in following)
+
+
+# --- #1393: bold a plausible spelling when no exact owner name matches ------
+
+
+@pytest.mark.parametrize("target_name, surname", [
+    ("Wende, Michael E.", "Wende"),
+    ("Tarn-Ellery, K.", "Tarn-Ellery"),
+    ("Pell-Rowan FM", "Pell-Rowan"),
+    (", Wende", ", Wende"),
+])
+def test_target_surname_takes_the_part_before_a_comma(target_name, surname):
+    assert bibliography._target_surname(target_name) == surname
+
+
+def test_citation_author_split_full_name_target_finds_the_surname():
+    citation = "Smith J, Wende ME" + _TAIL
+    assert bibliography._citation_author_split(citation, "Wende, Michael E.", "")[1] == "Wende ME"
+
+
+def test_citation_author_split_owner_alias_is_the_last_resort():
+    citation = "Smith J, Wendee ME" + _TAIL
+    assert bibliography._citation_author_split(citation, None, "Wende")[1] == ""
+    assert bibliography._citation_author_split(citation, None, "Wende", "Wendee")[1] == "Wendee ME"
+    # An exact owner match wins over the alias.
+    citation = "Wendee A, Wende ME" + _TAIL
+    assert bibliography._citation_author_split(citation, None, "Wende", "Wendee")[1] == "Wende ME"
+
+
+def test_fill_bibliography_bolds_the_plausible_owner_spelling():
+    exact = _citation_entry("Wende ME, Roe B. A study. J Med. 2021;1:1-2.", None, 2021)
+    typo = _citation_entry("Roe B, Wendee ME. Another study. J Med. 2020;1:1-2.", None, 2020)
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_bibliography({"S1": [exact, typo]}, cv_owner={"last_name": "Wende"})
+
+    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    paras = gen.doc.paragraphs[header_idx + 2:header_idx + 4]
+    assert [[r.text for r in p.runs if r.bold is True] for p in paras] == [["Wende ME"], ["Wendee ME"]]
+    assert gen.stats["target_names_bolded"] == 2
+
+
+def test_fill_bibliography_alias_reaches_the_tracked_writer():
+    typo = _citation_entry("Roe B, Wendee ME. Another study. J Med. 2020;1:1-2.", None, 2020)
+    typo["enrichment_status"] = "enriched"
+    typo["text"] = "Roe B, Wendee ME. Another study."
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=True)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_bibliography({"S1": [typo]}, cv_owner={"last_name": "Wende"})
+
+    assert gen.stats["target_names_bolded"] == 1
+
+
+def test_fill_bibliography_leaves_an_unrelated_coauthor_unbolded():
+    entry = _citation_entry("Roe B, Henderson P. A study. J Med. 2020;1:1-2.", None, 2020)
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={"last_name": "Anderson"})
+
+    assert gen.stats["target_names_bolded"] == 0

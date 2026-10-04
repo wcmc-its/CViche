@@ -26,6 +26,8 @@ a change to the other.
     citation_matching.py
                      does this citation's text already say that value?
     publication.py   a raw publication entry in, one resolved record out
+    owner_alias.py   a bibliography's citations in, the owner's surname as they
+                     spell it out (#1393)
 
 The first six were one module, `text.py`, until they were split apart. "Value
 in, cleaner value out" is a shared signature, not a shared reason to change: an
