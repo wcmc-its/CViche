@@ -65,12 +65,13 @@ The quality score caps a run at 84 on four more lints only while this table reco
 
 | cap input | caps when | hits | matched | hand-checked: TP / partial / FP | precision | caps? |
 |---|---|---|---|---|---|---|
-| `owner_missing_from_citation` | 3 or more on a run | 29 | 13 | 14 / 1 / 1 of 16 | 27 / 29 (93%) | yes |
+| `owner_missing_from_citation`, the hits on runs with 3 or more (XWNZWW 10, BMHBJZ 6, BMAMWE 4, NJIKGI 3) | 3 or more on a run | 23 | 11 | 12 / 0 / 0 of 12 | 23 / 23 (100%) | yes |
+| `owner_missing_from_citation`, lint-wide (for reference; 6 of these hits sit on runs with 1 hit and never cap) | | 29 | 13 | 14 / 1 / 1 of 16 | 27 / 29 (93%) | |
 | `multi_record_coverage`, WARN with 2 or more clauses or values on no line | 1 or more | 20 | 14, of which 3 are `field_lost`, hand-checked: 1 TP, 2 partial | 2 / 1 / 3 of 6 | 14 / 20 (70%) | no |
 | `offschema_fields`, record-shaped WARN | 1 or more | 8 | 6 | 1 / 0 / 1 of 2 (the other was rendered fused into raw text) | 7 / 8, n under 20 | no |
 | `dedup_drops` | 1 or more lossy | 13 (6 WARN), 17 drops | names text | of the 17 drops, 7 have their text on one rendered line at 0.9 or more of its words; EBYSBC verdicts 2 / 2 / 4 of 8 | n under 20 | no |
 
-`owner_missing_from_citation`'s partial is a data-safety-board credit dropped from a trial citation, and its false positive a co-presented talk whose rendered line names only the other presenter. Its 13 matched hits sit on verified findings of the owner-dropped classes (EBYSBC E13 and E32, and s7ab-8). The unmatched 14 are owner credits the autopsies did not list one by one: six cut by "et al.", and eight study-group or collaborator credits ("including ...") the rendered line leaves out.
+`owner_missing_from_citation`'s partial is a data-safety-board credit dropped from a trial citation, and its false positive a co-presented talk whose rendered line names only the other presenter. Both sit on runs with a single hit, so neither caps. Its 13 matched hits sit on verified findings of the owner-dropped classes (EBYSBC E13 and E32, and s7ab-8); 11 of them are on the capping runs. The unmatched 14 true positives are owner credits the autopsies did not list one by one: eight cut by "et al.", and six study-group or collaborator credits ("including ...") the rendered line leaves out. The doctor reports 30 hits; the 30th is on QFJSXR, the one run with no autopsy labels, so the harness does not score it, and with 1 hit it never caps.
 
 `multi_record_coverage`'s false positives are one record's own detail split across two source lines (a meeting's name and its venue, twice on one run) and a mentee list the docx renders on one line; its partials lose a mentee's career detail, one of two committee roles, or mentees' years while their names render.
 
