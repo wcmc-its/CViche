@@ -13,6 +13,13 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 - **Evidence cap.** The doctor prints at most 3 evidence items per finding: the stage-6 re-emit in `doctor/lints/render.py` slices to 3, and `offschema_fields` keeps `FIELD_EVIDENCE_MAX_VALUES = 3` (`doctor/lints/extraction.py`). The scorer reads only the indices a finding prints. A finding about more entries is matched on the 3 it lists, so on the reroute rows and `offschema_fields`, matched and caught can undercount, and they depend on which 3 entries come first. On M1 the cap hides 85 of 206 reroute indices (in 11 of 72 findings) and 19 of 89 `offschema_fields` indices (in 5 of 47 findings). M1's doctor was re-run once with both caps lifted, in a scratch copy that is not committed: no matched, caught or recall number changed. Only the reroute rows' unmatched-index lists grew, `reroute_refused` from 57 to 92 indices and `reroute_same_family` from 16 to 46. Another arm can differ, so a lint PR on one of these rows says how many of its findings hit the cap.
 - `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `scripts/doctor_vs_autopsy.py` (`_STAGE6_SHAPES`).
 
+## Who reads this file
+
+`doctor/precision.py` parses the per-lint table below at run time, so keep its shape: the first table under the "Per-lint precision" heading, a `lint` column of backticked keys (a `stage6_render_warnings` shape row adds `: ` and the backticked shape), and a `TP / judged` column of `<tp> / <judged>` or `none`. Columns are found by header name. Shape rows are pooled into their lint key, because a finding carries the key. A lint listed twice keeps its first row. What it feeds:
+
+- Each run's doctor report gets a `lint_precision` block, and the top lints in `doctor.tsv` and the lint on the Teams card's Doctor line carry `p~0.50 n=8` (TP / judged, and judged), or `p unmeasured`.
+- #813's remediation gate, `precision.remediation_allowed`: a lint may drive a section retry only if it is one of #813's LLM-judgement lints (`missed_headers`, `segmentation`, `under_extraction`) with a TP / judged of at least 80% on at least 20 judged findings. On M1, none qualifies.
+
 ## Measurements
 
 | id | date | doctor code | runs scored | labels | issue |

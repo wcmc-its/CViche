@@ -268,6 +268,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.doctor.precision import precision_payload
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
 from unified_pipeline.quality_score import stage3b_fallback_ratios
 from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
@@ -1370,6 +1371,9 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
         "counts": counts,
         "worst_severity": worst,
         "metrics": metrics,
+        # Each fired lint's hand-checked precision from doctor/PRECISION.md
+        # (#819): doctor.tsv and the Teams card print it next to the lint name.
+        "lint_precision": precision_payload(f["lint"] for f in findings),
     }
 
 
