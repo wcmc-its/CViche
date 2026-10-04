@@ -60,6 +60,7 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on, repairs_report_path
 from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
@@ -1473,6 +1474,10 @@ class PipelineOrchestrator:
         strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
         return emit_track_changes, emit_comments, strip_template_instructions
 
+    def _repair_protected_data(self) -> bool:
+        """Whether stage 6 repairs protected data (#1389): off unless CVICHE_RUN_REPAIR=1."""
+        return repair_flag_on(get_config("repair", REPAIR_FLAG_ENV, default="0")[0])
+
     async def _execute_stage_logic(self, stage_id: str, cv_path: str) -> dict[str, Any]:
         """Execute a specific pipeline stage."""
         output_paths = self._get_output_paths()
@@ -1825,16 +1830,16 @@ class PipelineOrchestrator:
                     # SAMPLE_CV_DIR auto-discovery that happened to find
                     # _copy_to_pipeline_input's copy by uid and CWD.
                     original_doc_path=cv_path,
+                    repair_protected_data=self._repair_protected_data(),
                 )
 
                 self.stage_outputs['6'] = stage6_output_path
                 output_files.append(stage6_output_path)
-                # Render-warnings sidecar (#227/#228): persist alongside the
-                # docx so the doctor's inputs stay reconstructable off-pod.
-                sidecar = Path(stage6_output_path).with_name(
-                    f"{self.document_uid}_render_warnings.json")
-                if sidecar.is_file():
-                    output_files.append(str(sidecar))
+                # Render-warnings (#227/#228) and repair (#1389) sidecars persist with the docx.
+                for sidecar in (Path(stage6_output_path).with_name(f"{self.document_uid}_render_warnings.json"),
+                                repairs_report_path(stage6_output_path)):
+                    if sidecar.is_file():
+                        output_files.append(str(sidecar))
 
                 # Track LLM cost for stage 6 (geographic scope + appendix reclassification)
                 cost = await self._track_llm_cost(step_number, stage6_usage.cost, stage6_usage.token_totals())
