@@ -27,6 +27,7 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 | M1 | 2026-10-02 | origin/dev `c3d87c5f`, over the base render of the same SHA | 62 of the 63-run farm: EBYSBC 40, s7ab 10, pilot 12 (the 13th pilot run has no verified autopsy) | 516 verified findings (EBYSBC 312, s7ab 112, pilot 92), 487 of them carrying an entry index; 186 EBYSBC verdicts | #819 |
 | M3 | 2026-10-04 | origin/dev `fb466a0f`, over the base render of the same SHA (`doctor_gate.py`: 63 runs, 1,275 findings) | 62 of 63, as M1 | as M1 | #822 |
 | M2-junk | 2026-10-04 | origin/dev `fb466a0f` plus the `junk_or_header_row` lint, over the base render of `fb466a0f` | 62 of the 63-run farm, as M1 | as M1 | #985, #986, #1222 |
+| M3b-5c | 2026-10-04 | `feat/ebysbc-doctor-5c-and-contact` on origin/dev `fb466a0f`, over the base render of `fb466a0f` | as M1 | as M1 | #1345, #1222 |
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -35,6 +36,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
 |---|---|---|---|---|---|---|---|
 | `classified_unrendered` | 1 | 0 | 0 / 0 / 1 | 0 / 1 (0%) | names text | 0 | M1 |
+| `contact_slot_lost` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | 1 / 1 (100%) | 1 | M3b-5c |
 | `date_only_lines` | 2 | 0 | none | none | names text | 0 | M1 |
 | `dedup_drops` | 12 | 10 | 2 / 2 / 4 | 2 / 8 (25%) | names text | 0 | M1 |
 | `duplicate_passages` | 1 | 1 | none | none | names text | 0 | M1 |
@@ -64,6 +66,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `stage6_render_warnings`: `semicolon_fused_bullets` | 4 | 4 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
 | `table_shape` | 12 | 0 | 1 / 2 / 3 | 1 / 6 (17%) | names text | 0 | M1 |
 | `taxonomy_code_coverage` | 3 | 0 | none | none | names text | 0 | M1 |
+| `teaching_postcheck` | 105 | 42 | 86 / 3 / 16 | 86 / 105 (82%) | 51 / 105 (49%) | 11 | M3b-5c |
 | `wrong_start_date` | 9 | 1 | 0 / 1 / 1 | 0 / 2 (0%) | 8 / 9 (89%) | 7 | M1 |
 
 M2-junk added `junk_or_header_row` and changed no other lint's findings on any run. All 104 hits were hand-read against the stage-4 entry and the rendered row: the 39 unmatched are 38 group headers, lead-in labels, date fragments or banner titles printed as records, and 1 partly so (a banner title rendered with a date); of the 65 matched, 64 are and 1 is partly so (a header row that also shows a role). 102 of 104 (98%). The shapes were tuned on this farm, so the next batch is the first out-of-sample check.
@@ -172,3 +175,5 @@ These come from before this ledger. They are quoted as recorded, on the batch an
 | 2026-10-02 | `date_only_lines` | 1 of 1 | pilot | same |
 | 2026-10-02 | all lints (recall) | 12 of 92 verified loss records; 1 of 19 whole-record losses | pilot | same |
 | 2026-10-02 | `field_loss` (draft, not shipped) | 20 of 112 (18%) | 118 farm CVs and 20 production runs | #819 comment, 2026-10-02; #817 |
+| 2026-10-04 | `teaching_postcheck`, every hit (M3b-5c) | WARN: 39 of 42 real, 3 partly (a 5c line stage 6 dedup then dropped); INFO (role only): 47 of 63 real, 16 a role the entry implies (talks to residents read as Presenter) | the 63-run farm, origin/dev `fb466a0f` | PR body, `feat/ebysbc-doctor-5c-and-contact` |
+| 2026-10-04 | `contact_slot_lost`, every hit | 1 of 1 on the `fb466a0f` render; 9 of 9 on the dev-242 documents the EBYSBC autopsy read | the 63-run farm | same |
