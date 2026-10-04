@@ -1299,8 +1299,12 @@ def test_enrichment_pubtype_mismatch_warns_on_a_notice_accepted_for_a_paper(pubt
     assert pubtype in findings[0]["message"]
 
 
-def test_enrichment_pubtype_mismatch_reads_a_notice_title_without_the_type():
-    entry = _accepted(257, "Author Correction: A synthetic study of tidal sediment cores.")
+@pytest.mark.parametrize("opening", ["Author Correction", "Correction", "Erratum",
+                                     "Retraction", "Corrigendum", "Expression of concern"])
+def test_enrichment_pubtype_mismatch_reads_a_notice_title_without_the_type(opening):
+    """Each notice opening the title regex names, on a record typed only as
+    a Journal Article, so the title alone decides."""
+    entry = _accepted(257, f"{opening}: A synthetic study of tidal sediment cores.")
     findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
     assert [f["lint"] for f in findings] == ["enrichment_pubtype_mismatch"]
 
@@ -1320,6 +1324,11 @@ def test_enrichment_pubtype_mismatch_quiet_when_the_cv_lists_the_notice(cv_title
     # the notice is named only in the extracted title, not in the entry text
     ("Vandermeer Q. J Synth Geol. 2031;4:10.", "Corrigendum to a synthetic study of tidal cores"),
     ("Vandermeer Q. Retraction: tidal cores. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    # each remaining word the CV-side regex names, alone in the entry text
+    ("Vandermeer Q. Tidal cores (retracted). J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Tidal cores, errata. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Expression of concern: tidal cores. J Synth Geol. 2031;4:10.",
+     "Tidal cores"),
 ])
 def test_enrichment_pubtype_mismatch_reads_both_cv_text_and_cv_title(text, cv_title):
     entry = _accepted(272, "A synthetic study of tidal cores.", cv_title=cv_title,
@@ -1339,6 +1348,22 @@ def test_enrichment_lints_skip_an_accepted_entry_with_malformed_enrichment_data(
     stage5e = {"entries": [entry]}
     assert lint_pubmed_title_truncated(stage5e) == []
     assert lint_enrichment_pubtype_mismatch(stage5e) == []
+
+
+def test_enrichment_lints_tolerate_non_dict_extracted_fields():
+    """A truthy non-dict `extracted_fields` (a list) is read as no CV title,
+    not dereferenced: both lints still report the record."""
+    cut = _accepted(11, "Sediment transport in ")
+    notice = _accepted(12, "A synthetic study of tidal cores.", pubtypes=("Published Erratum",),
+                       text="Vandermeer Q. Tidal cores. J Synth Geol. 2031;4:10.")
+    for entry in (cut, notice):
+        entry["extracted_fields"] = ["not", "a", "dict"]
+    stage5e = {"entries": [cut, notice]}
+    truncated = lint_pubmed_title_truncated(stage5e)
+    assert [f["lint"] for f in truncated] == ["pubmed_title_truncated"]
+    assert "the CV's title: 0 chars" in truncated[0]["evidence"][0]
+    assert [f["lint"] for f in lint_enrichment_pubtype_mismatch(stage5e)] == [
+        "enrichment_pubtype_mismatch"]
 
 
 @pytest.mark.parametrize("pubtypes", [("Letter", "Comment"), ("Editorial", "Comment"),
