@@ -246,6 +246,11 @@ def _leaves(doc: DocumentType) -> Iterator[_Leaf]:
     """Every body paragraph and table-cell paragraph, with the section and
     gates of the block the lint reads it in. A block holding the withheld
     notice is skipped, as the lint skips it."""
+    # ponytail: the lint also reads each table row JOINED ("label | value",
+    # `doctor.shared._table_lines`); a hit that exists only across that joint
+    # is never seen here, and stays in `remaining` rather than being cut. Not
+    # observed in the trial renders. If the corpus shows it, map joined-row
+    # spans back to their cells instead of guessing a whole cell.
     blocks = docx_body_blocks(doc)
     sections = _block_sections(blocks)
     children = [c for c in doc.element.body.iterchildren() if c.tag in (qn("w:p"), qn("w:tbl"))]
