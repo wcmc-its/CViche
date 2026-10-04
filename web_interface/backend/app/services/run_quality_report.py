@@ -53,6 +53,9 @@ _CAP_SOURCE_BY_SCORER = {
         "several records were fused into one entry", "segmentation"),
     scorer.score_lost_source_table: CapSource(
         "a source table never reached the output", "table_lost"),
+    scorer.score_owner_missing_from_citation: CapSource(
+        "the CV owner was cut from several of their own citations",
+        "owner_missing_from_citation"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
     scorer.score_llm_fallback_served: CapSource(
@@ -121,7 +124,8 @@ _ROW_COPY_BY_SCORER = {
         "No stray formatting",
         "Counts raw tab characters in the text and table cells, and body paragraphs that still contain "
         "the template's own instruction wording, such as \"please provide\", \"list here\" or \"(optional)\".",
-        "Roughly 20 stray tabs or 15 leftover instructions lose all the points.",
+        "Stray tabs cost at most 3 points, reached at 10 tabs. Each 15 leftover instructions cost "
+        "about 4 points, up to all of them.",
         "Search the document for stray tab gaps and leftover instruction text, then delete them."),
     scorer.score_field_sparseness: RowCopy(
         "Entry details captured",
@@ -179,6 +183,13 @@ _ROW_COPY_BY_SCORER = {
         "reached the document.",
         "Caps the score at 84 on any under_extraction finding.",
         "Compare the entry with the source and add the missing records."),
+    scorer.score_owner_missing_from_citation: RowCopy(
+        "Owner named on their own citations",
+        "Reads each publication's line in the document and checks that it names the faculty member "
+        "whenever the source CV credits them, including as a member of a study group.",
+        "Caps the score at 84 when 3 or more citations leave the faculty member out.",
+        "Restore the faculty member's name in the citations named in the owner_missing_from_citation "
+        "finding."),
     scorer.score_llm_fallback_served: RowCopy(
         "Usual AI model used throughout",
         "Checks whether the AI service's content filter blocked the usual model on part of this CV, "
@@ -392,6 +403,22 @@ LINT_COPY = {
         "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
         "same, such as 2013-2013.",
         "Correct the date from the source CV."),
+    "junk_or_header_row": LintCopy(
+        "Heading printed as a record",
+        "A line that only introduces the records below it (an institution, a label ending in a "
+        "colon, a stray date) or repeats a dated appointment prints as a record of its own.",
+        "Delete the quoted row, and give the records under it the institution or dates it carried."),
+    "teaching_postcheck": LintCopy(
+        "Teaching line reworded wrongly",
+        "A rewritten teaching line no longer matches the CV: a date sits apart from its title, a "
+        "year is missing or wrong, a role was added, one of several records was left out, or a raw "
+        "copy of the source was printed under it.",
+        "Compare the quoted line with the source CV and correct it in Word."),
+    "contact_slot_lost": LintCopy(
+        "Office contact missing",
+        "An office phone number or office address in the CV is not in the Office row of Personal "
+        "Data: it is in another row, such as Cell phone, or nowhere in the document.",
+        "Copy the office phone or address from the source CV into its Office row."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
