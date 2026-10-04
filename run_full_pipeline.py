@@ -942,7 +942,9 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
     usage = LlmUsage()
     output_path = run_stage6(input_path=input_path, verbose=True,
                              original_doc_path=str(ctx.cv_path), llm_usage=usage,
-                             # #1389: the web driver reads the same switch; off unless "1".
+                             # #1389: off unless "1". The env var only: the web driver's
+                             # get_config also reads auth_config.yaml's "repair" section,
+                             # and that loader is backend code this CLI does not import.
                              repair_protected_data=repair_flag_on(os.environ.get(REPAIR_FLAG_ENV)))
     logger.info("")
     logger.info("Stage 6 Complete")
