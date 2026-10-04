@@ -11,6 +11,7 @@ neither.
 """
 import functools
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, NamedTuple
 
 from unified_pipeline.core.text_norm import norm, squash
@@ -247,3 +248,32 @@ def docx_body_blocks(doc: DocumentType, *, deleted: bool = False) -> list[tuple[
         elif child.tag == qn("w:tbl"):
             blocks.append(("table", "\n".join(_table_lines(Table(child, doc), deleted=deleted))))
     return blocks
+
+
+class _FieldsEntry(NamedTuple):
+    """The five things the field lints read off one stage-4 (or later) entry,
+    read once at the artifact boundary instead of by `.get()` in every helper
+    (§8.1).
+    `fields` is empty when `extracted_fields` is absent or not an object.
+    `element_idx_end` completes the span a later stage's copy of the entry
+    is found by (`_span`)."""
+    element_idx: object
+    code: str
+    text: str
+    fields: Mapping[str, object]
+    element_idx_end: object = None
+
+
+def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
+    """One `_FieldsEntry` per entry of a stage-4 or later artifact. Here, not
+    in `lints/extraction.py`, so `lints/render.py` reads entries the same way
+    without one lint module importing another."""
+    entries = []
+    for raw in stage4.get("entries", []):
+        fields = raw.get("extracted_fields")
+        entries.append(_FieldsEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
+            str(raw.get("text") or ""),
+            fields if isinstance(fields, Mapping) else {},
+            raw.get("element_idx_end")))
+    return entries

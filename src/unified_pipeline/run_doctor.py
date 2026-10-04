@@ -52,9 +52,11 @@ Lints, ranked by the severity of the failure class they catch:
                           near-fully contained in the kept entry — at loose
                           thresholds these are distinct records lost, not
                           duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real);
-                          plus an INFO finding for a fully-covered drop whose
-                          extracted name differs from the kept entry's and is
-                          on the page as no cell of its own (#666)
+                          or that names a month, day, part or numeral the
+                          kept entry lacks (#666, EBYSBC E4); plus an INFO
+                          finding for a fully-covered drop whose extracted
+                          name differs from the kept entry's by a rank word
+                          or is on the page as no cell of its own (#666)
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
                           the faculty-facing document (#208 costs) — and
@@ -75,7 +77,10 @@ Lints, ranked by the severity of the failure class they catch:
                           normalized body repeats at a different list
                           position within the same output section — the
                           ONE-block shape duplicate_passages cannot see by
-                          construction (#446)
+                          construction (#446); with stage 5d, also two
+                          entries naming one article (title, PMID, DOI) or
+                          one grant across M2A/M2B/M2C, rendered twice at
+                          any distance (EBYSBC E16/E28)
 14b. invented_records     a rendered stage-4 record built entirely from the
                           WCM template's own field labels rather than real
                           content (the F2 board-certification header row
@@ -1111,12 +1116,13 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
     LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",),
-             optional=("blocks",)),
+             optional=("blocks", "stage_5d")),
     LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
     LintSpec("table_shape", lint_table_shape, ("table_rows",),
              optional=("stage_4",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
-    LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
+    LintSpec("duplicate_records", lint_duplicate_records, ("blocks",),
+             optional=("stage_5d",)),
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",),
              optional=("deleted_blocks", "stage_4")),
     LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),

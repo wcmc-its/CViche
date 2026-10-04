@@ -39,6 +39,7 @@ from ..shared import (
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
     _entry_pieces,
+    _fields_entries,
     _finding,
     _haystacks,
     _long_word_tokens,
@@ -1291,21 +1292,10 @@ DUPLICATE_RECORD_MIN_CHARS = 20
 DUPLICATE_RECORD_WARN_COUNT = 1
 
 
-def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
-    """A single numbered/bulleted paragraph block whose normalized body
-    repeats at a different list position within DUPLICATE_RECORD_WINDOW
-    enumerated blocks of its first occurrence, in the SAME output section
-    (#446) -- the shape duplicate_passages cannot see because it requires
-    >=2 consecutive repeated blocks, and 55.2% of substantive records in the
-    corpus occupy exactly one.
-
-    Section scope is tracked with `_output_section_header`; the match state
-    is reset on every section change, so a publication legitimately listed
-    under two different headings never fires -- that is the same record two
-    sections chose to carry, not a duplicate. A blank spacer paragraph does
-    not match the enumerator prefix, so it is skipped rather than consuming a
-    window slot or breaking one, same as `lint_duplicate_passages`.
-    """
+def _duplicate_block_pairs(blocks: list[tuple[str, str]]) -> list[tuple[int, int]]:
+    """(first, second) block indices of every enumerated paragraph whose
+    normalized body repeats within DUPLICATE_RECORD_WINDOW enumerated blocks,
+    in the same output section (`lint_duplicate_records`)."""
     current_section: str | None = None
     recent: list[tuple[str, int, int]] = []  # (key, enum_index, block_index)
     enum_index = 0
@@ -1330,17 +1320,208 @@ def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
         if match is not None:
             pairs.append((match[2], i))
         recent.append((key, enum_index, i))
+    return pairs
 
-    if len(pairs) < DUPLICATE_RECORD_WARN_COUNT:
+
+# The record-identity half of duplicate_records (EBYSBC E16/E28: SJWASY-01,
+# NDXXAD-02, AKPQEB-04). The block rule above sees only a byte-identical body
+# a few list numbers away; a CV that lists one article twice in different
+# words ("Conn Med" beside "Connecticut Medicine", a one-letter title typo),
+# far apart, or one grant under two funding codes, renders it twice past it.
+# Entries are paired on what names the record:
+#   - an article, review or book (`_DUPLICATE_CITATION_CODES`, same code):
+#     the same title, or a shared PMID or DOI with near the same title words
+#     or a shared PMID or DOI where one copy has no title (a citation's tail
+#     enriched by its PMID into a second full copy, NDXXAD-02). A shared PMID
+#     under two different titles is a stage-5 lookup error, not a duplicate
+#     (measured 7 such pairs on the 63-run farm, 0 duplicates).
+#     Presentations and abstracts (S4, S8) repeat a title by design: one talk
+#     given at several meetings, one abstract per meeting.
+#   - a grant (`_DUPLICATE_GRANT_CODES`, ANY of the three codes, so a grant
+#     listed as current and as past is one group): the same title and start
+#     year, and no funder, grant number or PI that differs. A renewal keeps
+#     the title under another start year; three "Administrative Supplement"s
+#     to three parent grants, or one training grant's two trainees, share a
+#     title and year but not a grant number or PI (measured on the farm).
+# Two years that differ are two records, even a year apart: on the farm that
+# cut 4 true pairs (an e-pub year beside the print year) and 3 false ones (a
+# reprint, a series' yearly review, an abstract and its paper), the trade
+# that keeps the rule above 80% precision. A pair fires only when the title
+# renders in two blocks of the right kind: a copy stage 6 dedup dropped is
+# not a duplicate on the page.
+_DUPLICATE_CITATION_CODES = frozenset({"S1", "S2", "S3"})
+_DUPLICATE_GRANT_CODES = frozenset({"M2A", "M2B", "M2C"})
+DUPLICATE_RECORD_TITLE_MIN_CHARS = 30
+DUPLICATE_RECORD_ID_TITLE_OVERLAP = 0.8
+_RECORD_PMID_MIN_DIGITS = 5
+_DOI_PREFIX_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
+_YEAR_IN_VALUE_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+class _RecordIdentity(NamedTuple):
+    """What names one stage-5d entry as a record, read once."""
+    element_idx: object
+    code: str
+    title: str          # `_passage_key` of the title
+    year: int | None
+    ids: frozenset[str]  # "pmid:..." / "doi:..."
+    # Grants only, each a `_passage_key`; empty when the entry fills none.
+    funder: str
+    grant_number: str
+    pi: str
+
+
+def _value_year(value: object) -> int | None:
+    match = _YEAR_IN_VALUE_RE.search(str(value or ""))
+    return int(match.group()) if match else None
+
+
+def _record_ids(fields: Mapping) -> frozenset[str]:
+    ids = set()
+    pmid = re.sub(r"\D", "", str(fields.get("pmid") or ""))
+    if len(pmid) >= _RECORD_PMID_MIN_DIGITS:
+        ids.add(f"pmid:{pmid}")
+    doi = _DOI_PREFIX_RE.sub("", str(fields.get("doi") or "").strip()).lower()
+    if doi.startswith("10."):
+        ids.add(f"doi:{doi}")
+    return frozenset(ids)
+
+
+def _record_identities(stage_5d: Mapping) -> list[_RecordIdentity]:
+    identities = []
+    for entry in _fields_entries(stage_5d):
+        if entry.code not in _DUPLICATE_CITATION_CODES | _DUPLICATE_GRANT_CODES:
+            continue
+        grant = entry.code in _DUPLICATE_GRANT_CODES
+        title = _passage_key(entry.fields.get("title") or "")
+        if len(title) < DUPLICATE_RECORD_TITLE_MIN_CHARS:
+            title = ""
+        ids = frozenset() if grant else _record_ids(entry.fields)
+        if not title and not ids:
+            continue
+
+        def grant_key(name: str) -> str:
+            return _passage_key(entry.fields.get(name) or "") if grant else ""
+        identities.append(_RecordIdentity(
+            entry.element_idx, entry.code, title,
+            _value_year(entry.fields.get("start_date" if grant else "year")),
+            ids, grant_key("agency"), grant_key("grant_number"), grant_key("pi_name")))
+    return identities
+
+
+def _title_overlap(a: str, b: str) -> float:
+    words_a, words_b = set(a.split()), set(b.split())
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _same_grant(a: _RecordIdentity, b: _RecordIdentity) -> str | None:
+    if b.code not in _DUPLICATE_GRANT_CODES or a.title != b.title \
+            or a.year is None or a.year != b.year:
+        return None
+    if any(x and y and x != y for x, y in ((a.funder, b.funder),
+                                           (a.grant_number, b.grant_number),
+                                           (a.pi, b.pi))):
+        return None
+    return "title, year"
+
+
+def _same_record(a: _RecordIdentity, b: _RecordIdentity) -> str | None:
+    """What makes two entries one record ("title", "pmid:...", ...), or None."""
+    if a.code in _DUPLICATE_GRANT_CODES:
+        return _same_grant(a, b)
+    if a.code != b.code or (a.year is not None and b.year is not None and a.year != b.year):
+        return None
+    if a.title and a.title == b.title:
+        return "title"
+    shared = sorted(a.ids & b.ids)
+    if shared and (not a.title or not b.title
+                   or _title_overlap(a.title, b.title) >= DUPLICATE_RECORD_ID_TITLE_OVERLAP):
+        return shared[0]
+    return None
+
+
+def _title_blocks(title: str, code: str, blocks: list[tuple[str, str]],
+                  keys: list[str]) -> set[int]:
+    """Blocks a record of `code` with `title` renders as: an enumerated
+    paragraph for a citation, a table for a grant."""
+    if not title:
+        return set()
+    kind = "table" if code in _DUPLICATE_GRANT_CODES else "p"
+    return {i for i, (block_kind, text) in enumerate(blocks)
+            if block_kind == kind and title in keys[i]
+            and (kind == "table" or _PASSAGE_ENUMERATOR_RE.match(str(text or "")))}
+
+
+def _duplicate_entry_pairs(blocks: list[tuple[str, str]], stage_5d: Mapping
+                           ) -> list[tuple[_RecordIdentity, _RecordIdentity, str, set[int]]]:
+    """(first, second, why, rendered blocks) for each pair of entries naming
+    one record whose title renders in at least two blocks. A title other
+    entries of other codes also carry (an abstract of the article) must render
+    once more for each of them."""
+    identities = _record_identities(stage_5d)
+    keys = [_passage_key(text) for _kind, text in blocks]
+    title_codes = Counter((_passage_key(entry.fields.get("title") or ""), entry.code)
+                          for entry in _fields_entries(stage_5d))
+    pairs = []
+    for i, first in enumerate(identities):
+        for second in identities[i + 1:]:
+            why = _same_record(first, second)
+            if why is None:
+                continue
+            rendered = (_title_blocks(first.title, first.code, blocks, keys)
+                        | _title_blocks(second.title, second.code, blocks, keys))
+            family = (_DUPLICATE_GRANT_CODES if first.code in _DUPLICATE_GRANT_CODES
+                      else {first.code})
+            others = sum(count for (title, code), count in title_codes.items()
+                         if title and title in (first.title, second.title)
+                         and code not in family)
+            if len(rendered) >= 2 + others:
+                pairs.append((first, second, why, rendered))
+    return pairs
+
+
+def lint_duplicate_records(blocks: list[tuple[str, str]],
+                           stage_5d: Mapping | None = None) -> list[dict]:
+    """One record rendered twice.
+
+    Block rule (#446): a single numbered/bulleted paragraph block whose
+    normalized body repeats at a different list position within
+    DUPLICATE_RECORD_WINDOW enumerated blocks of its first occurrence, in the
+    SAME output section -- the shape duplicate_passages cannot see because it
+    requires >=2 consecutive repeated blocks, and 55.2% of substantive records
+    in the corpus occupy exactly one. Section scope is tracked with
+    `_output_section_header`; the match state is reset on every section
+    change, so a publication legitimately listed under two different headings
+    never fires. A blank spacer paragraph does not match the enumerator
+    prefix, so it is skipped rather than consuming a window slot or breaking
+    one, same as `lint_duplicate_passages`.
+
+    Record rule (EBYSBC E16/E28, needs `stage_5d`): two entries naming one
+    record by title, PMID or DOI, or one grant under two funding codes, at
+    any distance (`_duplicate_entry_pairs`). Its evidence leads with the
+    entry index; a block pair both of whose blocks a record pair already
+    names is not counted twice.
+    """
+    entry_pairs = _duplicate_entry_pairs(blocks, stage_5d) if stage_5d else []
+    named_blocks = set().union(*(rendered for *_rest, rendered in entry_pairs))
+    block_pairs = [(first, second) for first, second in _duplicate_block_pairs(blocks)
+                   if not {first, second} <= named_blocks]
+    count = len(entry_pairs) + len(block_pairs)
+    if count < DUPLICATE_RECORD_WARN_COUNT:
         return []
 
-    evidence = [f"block {first} repeats at {second}: "
-                f"{str(blocks[first][1])[:100]}" for first, second in pairs[:5]]
+    evidence = [f"entry {first.element_idx} repeats as entry {second.element_idx} "
+                f"({first.code}/{second.code}, same {why}): "
+                f"{(first.title or second.title)[:80]}"
+                for first, second, why, _rendered in entry_pairs]
+    evidence += [f"block {first} repeats at {second}: "
+                 f"{str(blocks[first][1])[:100]}" for first, second in block_pairs]
     return [_finding(
         "duplicate_records", "WARN",
-        f"{len(pairs)} duplicated record(s) — the same enumerated entry "
-        f"appears twice within the same output section",
-        evidence)]
+        f"{count} duplicated record(s) — the same entry appears twice: one "
+        f"enumerated entry within the same output section, or one article or "
+        f"grant listed twice",
+        evidence[:5])]
 
 
 # A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -

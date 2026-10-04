@@ -14,6 +14,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_doctor_duplicate_records_lint.py -p no:cacheprovider
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -28,7 +29,9 @@ from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls  # noqa: E402
 
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    DUPLICATE_RECORD_ID_TITLE_OVERLAP,
     DUPLICATE_RECORD_MIN_CHARS,
+    DUPLICATE_RECORD_TITLE_MIN_CHARS,
     DUPLICATE_RECORD_WINDOW,
     RENDER_UBIQUITOUS_MIN_LINES,
     _record_lines,
@@ -609,6 +612,182 @@ def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path
     assert "skipped" in skipped[0]["message"]
     assert empty_payload["counts"]["WARN"] == 0
     assert empty_payload["worst_severity"] == "INFO"
+
+
+# --- record rule (EBYSBC E16/E28): two entries naming one record ----------
+#
+# Synthetic entries and titles only. The block rule above needs a
+# byte-identical body a few list numbers away; these pairs differ in wording,
+# sit far apart, or are one grant under two funding codes.
+
+_TITLE_X = "A synthetic study of repeated listings in generated documents"
+_TITLE_Y = "An unrelated synthetic report on something else entirely"
+
+
+def _cite_entry(idx, title, code="S1", year="2020", **fields):
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": f"text {idx}",
+            "extracted_fields": {"title": title, "year": year, **fields}}
+
+
+def _grant_entry(idx, code, title, start="2021-01", **fields):
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": f"text {idx}",
+            "extracted_fields": {"title": title, "start_date": start, **fields}}
+
+
+def _filler(n):
+    return [("p", f"{i}. Filler citation number {i} about an unrelated topic, 2001.")
+            for i in range(n)]
+
+
+def test_record_rule_thresholds_are_pinned():
+    assert DUPLICATE_RECORD_TITLE_MIN_CHARS == 30
+    assert DUPLICATE_RECORD_ID_TITLE_OVERLAP == 0.8
+
+
+def test_record_rule_flags_one_article_reworded_far_apart():
+    """The block rule misses this pair twice over: the bodies differ (journal
+    abbreviated) and they are 12 list numbers apart."""
+    blocks = ([("p", f"3. Doe A. {_TITLE_X}. Journal of Examples. 2020;1:1-2.")]
+              + _filler(12)
+              + [("p", f"16. Doe A. {_TITLE_X}. J Ex. 2020;1:1.")])
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X), _cite_entry(40, _TITLE_X + ".")]}
+    assert lint_duplicate_records(blocks) == []
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert len(findings) == 1 and findings[0]["severity"] == "WARN"
+    assert findings[0]["evidence"][0].startswith("entry 10 repeats as entry 40 (S1/S1, same title)")
+
+
+@pytest.mark.parametrize("second", [
+    _cite_entry(40, _TITLE_X, year="2021"),        # another year: an edition, a reprint
+    _cite_entry(40, _TITLE_X, code="S8"),          # another code
+])
+def test_record_rule_quiet_on_another_year_or_code(second):
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {_TITLE_X}. 2021.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X), second]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_quiet_on_talks_given_at_several_meetings():
+    blocks = [("p", f"1. {_TITLE_X}. Meeting one."), ("p", f"2. {_TITLE_X}. Meeting two.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, code="S8"),
+                            _cite_entry(11, _TITLE_X, code="S8")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_shared_pmid_under_two_titles_is_a_lookup_error_not_a_duplicate():
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {_TITLE_Y}. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, pmid="12345678"),
+                            _cite_entry(11, _TITLE_Y, pmid="12345678")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_pairs_a_shared_doi_when_one_copy_has_no_title():
+    """A citation tail enriched by its identifier into a second full copy."""
+    blocks = [("p", f"1. {_TITLE_X}. 2020. doi:10.1000/x1"),
+              ("p", f"9. {_TITLE_X}. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, doi="10.1000/X1"),
+                            _cite_entry(13, None, year=None, doi="https://doi.org/10.1000/x1")]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert findings[0]["evidence"][0].startswith("entry 10 repeats as entry 13 (S1/S1, same doi:10.1000/x1)")
+
+
+def test_record_rule_pairs_a_shared_pmid_with_a_typo_in_one_title():
+    typo = _TITLE_X.replace("repeated", "repaeted")
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {typo}. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, pmid="PMID: 12345678"),
+                            _cite_entry(11, typo, pmid="12345678")]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert "same pmid:12345678" in findings[0]["evidence"][0]
+
+
+def test_record_rule_quiet_when_stage6_dropped_one_copy():
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {_TITLE_Y}. 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X), _cite_entry(11, _TITLE_X)]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_counts_an_abstract_of_the_article_as_its_own_rendering():
+    """An S4 abstract carrying the article's title renders it once more: two
+    renderings are the article once and its abstract once, not a duplicate."""
+    blocks = [("p", f"1. {_TITLE_X}. 2020."), ("p", f"2. {_TITLE_X}. Abstract, 2020.")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X), _cite_entry(11, _TITLE_X),
+                            _cite_entry(12, _TITLE_X, code="S4")]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+    blocks.append(("p", f"3. {_TITLE_X}. 2020."))
+    assert len(lint_duplicate_records(blocks, stage_5d)) == 1
+
+
+def _grant_table(title, extra=""):
+    return ("table", f"Project title:\n{title}\n{extra}")
+
+
+def test_record_rule_flags_one_grant_under_two_funding_codes():
+    blocks = [_grant_table(_TITLE_X, "Current"), _grant_table(_TITLE_X, "Past")]
+    stage_5d = {"entries": [_grant_entry(27, "M2A", _TITLE_X, agency="Agency A"),
+                            _grant_entry(127, "M2B", _TITLE_X, start="2021",
+                                         agency="Agency A", grant_number="R01 1234")]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert findings[0]["evidence"][0].startswith(
+        "entry 27 repeats as entry 127 (M2A/M2B, same title, year)")
+
+
+@pytest.mark.parametrize("field, first, second", [
+    ("grant_number", "R01 1111", "P01 2222"),   # one supplement per parent grant
+    ("pi_name", "Trainee One", "Trainee Two"),   # one training grant, two trainees
+    ("agency", "Agency A", "Agency B"),
+    ("start_date", "2021", "2018"),             # a renewal
+])
+def test_record_rule_quiet_on_two_grants_sharing_a_title(field, first, second):
+    blocks = [_grant_table(_TITLE_X), _grant_table(_TITLE_X)]
+    stage_5d = {"entries": [_grant_entry(1, "M2B", _TITLE_X, **{field: first}),
+                            _grant_entry(2, "M2B", _TITLE_X, **{field: second})]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_grant_without_a_start_year_is_not_paired():
+    blocks = [_grant_table(_TITLE_X), _grant_table(_TITLE_X)]
+    stage_5d = {"entries": [_grant_entry(1, "M2B", _TITLE_X, start=None),
+                            _grant_entry(2, "M2C", _TITLE_X, start=None)]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_grant_needs_two_tables_not_paragraphs():
+    blocks = [_grant_table(_TITLE_X), ("p", f"1. {_TITLE_X}, 2021.")]
+    stage_5d = {"entries": [_grant_entry(1, "M2A", _TITLE_X),
+                            _grant_entry(2, "M2B", _TITLE_X)]}
+    assert lint_duplicate_records(blocks, stage_5d) == []
+
+
+def test_record_rule_and_block_rule_count_one_duplicate_once():
+    body = f"Doe A. {_TITLE_X}. Journal of Examples. 2020;1:1-2."
+    blocks = [("p", "D. PUBLICATIONS"), ("p", f"1. {body}"), ("p", f"2. {body}")]
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X), _cite_entry(11, _TITLE_X)]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert findings[0]["message"].startswith("1 duplicated record(s)")
+    assert len(findings[0]["evidence"]) == 1
+
+
+def test_run_doctor_wires_stage_5d_into_duplicate_records(tmp_path):
+    """`stage_5d` is an optional view: drop the registry wiring and the
+    record rule goes silently dead while the block rule still runs."""
+    root = tmp_path / "outputs"
+    doc = Document()
+    doc.add_paragraph("D. PUBLICATIONS")
+    doc.add_paragraph(f"1. Doe A. {_TITLE_X}. Journal of Examples. 2020.")
+    for i in range(10):
+        doc.add_paragraph(f"{i + 2}. Filler citation {i} on an unrelated topic, 2001.")
+    doc.add_paragraph(f"12. Doe A. {_TITLE_X}. J Ex. 2020.")
+    out_dir = root / "stage_6_wcm_documents"
+    out_dir.mkdir(parents=True)
+    doc.save(out_dir / "DUPTST_cv_wcm.docx")
+    s5d_dir = root / "stage_5d_citation_formatted"
+    s5d_dir.mkdir()
+    (s5d_dir / "DUPTST_cv_citation_formatted.json").write_text(json.dumps(
+        {"entries": [_cite_entry(5, _TITLE_X), _cite_entry(50, _TITLE_X)]}))
+    fired = [f for f in run_doctor(root, "DUPTST")["findings"]
+             if f["lint"] == "duplicate_records"]
+    assert len(fired) == 1
+    assert fired[0]["evidence"][0].startswith("entry 5 repeats as entry 50")
 
 
 # --- #446 review T1.6 (#746): what counts as a record line in lint 8 --------
