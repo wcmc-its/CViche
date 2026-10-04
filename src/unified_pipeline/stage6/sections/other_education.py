@@ -67,6 +67,10 @@ B2_SECTION_HEADINGS = ("OTHER EDUCATIONAL", "SPECIAL TRAINING", "ADDITIONAL TRAI
 # template with a different grid would put content in the wrong column.
 B2_TABLE_COLUMNS = 3
 
+# A B1 row stage 6 moves here (a degree-less pre-collegiate school, EBYSBC
+# E33) keeps B1's nested `dates_attended: {start_date, end_date}` dates.
+B1_DATES_ATTENDED_KEY = 'dates_attended'
+
 # A stage-4 institution value that means "none extracted", not an institution.
 MISSING_INSTITUTION_SENTINEL = 'none'
 
@@ -104,7 +108,8 @@ class OtherEducationRecord:
 
 def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bool]:
     """(formatted dates, came-from-raw-text) by the three-step precedence:
-    a start/end range, then a single year field (year, then year_awarded),
+    a start/end range (B1's nested `dates_attended` when the flat keys are
+    empty), then a single year field (year, then year_awarded),
     then a year recovered from the entry text. Each step wins outright when
     it has anything at all, so a start date beats a year beats the text.
 
@@ -114,6 +119,10 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bo
     """
     start = fields.get('start_date', '')
     end = fields.get('end_date', '')
+    attended = fields.get(B1_DATES_ATTENDED_KEY)
+    if not (start or end) and isinstance(attended, Mapping):
+        start = attended.get('start_date') or ''
+        end = attended.get('end_date') or ''
     if start or end:
         return format_date_range(start, end, B2_TAXONOMY_CODE, raw_text), False
     year = fields.get('year', '') or fields.get('year_awarded', '')
