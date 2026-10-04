@@ -268,6 +268,14 @@ def test_segmentation_collapse_counts_an_entry_on_the_synthetic_end_bound():
     assert "2 of 3 entries in synthetic sections" in findings[0]["message"]
 
 
+def test_segmentation_collapse_counts_an_entry_on_the_synthetic_start_bound():
+    # Section bounds are inclusive at the start too: an entry at
+    # element_idx_start is inside (DPEHSZ's first entry sits on it).
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(0, 5, 11))
+    assert "2 of 3 entries in synthetic sections" in findings[0]["message"]
+
+
 def test_segmentation_collapse_names_the_synthetic_section_holding_the_most():
     stage1b = _stage1b(placed=0, unplaced=2, synthetic_end=4)
     stage1b["section_boundaries"].append(

@@ -48,6 +48,18 @@ def test_training_row_filed_as_appointment_is_flagged():
     assert findings[0]["evidence"][0].startswith("entry 14 (D3): ")
 
 
+def test_a_ranked_training_title_filed_as_appointment_is_flagged():
+    """QITQWH-02, RNKYST-04: 'Chief Resident' and 'Senior Resident' rows are
+    training too; the rank word before the title must not hide them."""
+    findings = _run(
+        _entry("2003-2004 Chief Resident, Internal Medicine, Invented General Hospital", "D3",
+               "Appointments", idx=14),
+        _entry("2002-2003 Senior Resident, Internal Medicine, Invented General Hospital", "D3",
+               "Appointments", idx=15))
+    assert _shapes(findings) == ["training_as_appointment"]
+    assert "2 entries under 'Appointments'" in findings[0]["message"]
+
+
 def test_training_row_coded_as_training_and_a_faculty_title_are_quiet():
     assert _run(
         _entry("2001-2004 Resident, Internal Medicine, Invented General Hospital", "C",
