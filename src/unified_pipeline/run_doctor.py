@@ -200,6 +200,13 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
+14r. junk_or_header_row   a stage-4 entry that is no record of its own,
+                          rendered as one: a group header (an institution or
+                          organization alone, dated only under teaching), a
+                          lead-in label ending in ':', a date fragment with
+                          no words ('47.', '1997-'), or an undated D1 above
+                          or below the dated appointments repeating one of
+                          their titles (EBYSBC E8, E10, E29); WARN
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -378,6 +385,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_etal_added,
+    lint_junk_or_header_row,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_owner_missing_from_citation,
@@ -487,6 +495,7 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "junk_or_header_row",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -621,6 +630,10 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # junk_or_header_row (EBYSBC E8/E10/E29): 23 of the 63 runs of the
+    # EBYSBC/s7ab/pilot farm fire, as rendered by origin/dev fb466a0f,
+    # measured 2026-10-04. Same mixed-corpus caveat as above.
+    "junk_or_header_row": 0.365,
 }
 
 
@@ -1146,6 +1159,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, so it is gated by that
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
+             optional=("blocks",)),
+    LintSpec("junk_or_header_row", lint_junk_or_header_row, ("stage_4", "table_rows"),
              optional=("blocks",)),
 )
 

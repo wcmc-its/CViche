@@ -402,6 +402,11 @@ LINT_COPY = {
         "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
         "same, such as 2013-2013.",
         "Correct the date from the source CV."),
+    "junk_or_header_row": LintCopy(
+        "Heading printed as a record",
+        "A line that only introduces the records below it (an institution, a label ending in a "
+        "colon, a stray date) or repeats a dated appointment prints as a record of its own.",
+        "Delete the quoted row, and give the records under it the institution or dates it carried."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
