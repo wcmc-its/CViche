@@ -808,7 +808,8 @@ class DoctorFindingInstance(BaseModel):
     severity: DoctorSeverity
     section: str | None = None  # CV section name; None when the finding names no taxonomy code
     detail: str  # the doctor's own message, its entry/code prefix and issue refs removed
-    quotes: list[str] = []  # the doctor's evidence: the source or output text it points at
+    quotes: list[str] = []  # text the doctor quotes from the CV or output; "\u2026" where it was cut
+    notes: list[str] = []  # the doctor's own locators ("row 3: ...", "entry 16"), not CV text
 
 
 class DoctorFindingGroup(BaseModel):

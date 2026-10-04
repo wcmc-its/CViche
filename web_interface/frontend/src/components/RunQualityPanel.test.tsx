@@ -115,8 +115,8 @@ describe('RunQualitySections', () => {
           lint: 'multi_record_coverage', severity: 'WARN', message: 'm', title: 'Several records read as one',
           what_to_do: 'Add each missing record.', count: 30, prevalence: null, caps_score: false,
           instances: [
-            { severity: 'WARN', section: 'Academic Appointments', detail: '1 other clause(s) on no line of the output', quotes: ['Associate Professor of Medicine, 2016-2022'] },
-            { severity: 'INFO', section: null, detail: 'no section named', quotes: [] },
+            { severity: 'WARN', section: 'Academic Appointments', detail: '1 other clause(s) on no line of the output', quotes: ['Associate Professor of Medicine, 2016-2022'], notes: [] },
+            { severity: 'INFO', section: null, detail: 'no section named', quotes: [], notes: ['row 3: empty date'] },
           ],
         }],
       },
@@ -127,6 +127,8 @@ describe('RunQualitySections', () => {
     expect(screen.getByText('Academic Appointments:')).toBeTruthy()
     expect(screen.getByText('Associate Professor of Medicine, 2016-2022').tagName).toBe('Q')
     expect(screen.getByText('no section named')).toBeTruthy()
+    // The doctor's own locator is plain text, not styled as a CV quote.
+    expect(screen.getByText('row 3: empty date').tagName).toBe('SPAN')
     expect(screen.getByText('Showing the first 2 of 30.')).toBeTruthy()
   })
 

@@ -119,8 +119,10 @@ export interface DoctorFindingInstance {
   section: string | null
   /** The doctor's own message, its entry/code prefix and issue refs removed. */
   detail: string
-  /** The source or output text the finding points at. */
+  /** Text the doctor quotes from the CV or output; ends in "…" where the doctor cut it. */
   quotes: string[]
+  /** The doctor's own locators ("row 3: ...", "entry 16"), not CV text. */
+  notes: string[]
 }
 
 export interface DoctorFindingGroup {

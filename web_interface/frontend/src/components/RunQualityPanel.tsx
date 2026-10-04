@@ -260,7 +260,10 @@ function InstanceItem({ instance }: { instance: DoctorFindingInstance }) {
         {instance.detail}
       </span>
       {instance.quotes.map((quote, i) => (
-        <q key={i} className="block border-l-2 border-sand-300 pl-2.5 text-gray-600 [overflow-wrap:anywhere] before:content-none after:content-none">{quote}</q>
+        <q key={i} className="block whitespace-pre-wrap border-l-2 border-sand-300 pl-2.5 text-gray-600 [overflow-wrap:anywhere] before:content-none after:content-none">{quote}</q>
+      ))}
+      {instance.notes.map((note, i) => (
+        <span key={i} className="whitespace-pre-wrap text-xs text-gray-500 [overflow-wrap:anywhere]">{note}</span>
       ))}
     </li>
   )
