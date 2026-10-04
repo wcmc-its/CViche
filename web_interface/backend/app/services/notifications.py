@@ -364,6 +364,9 @@ class DoctorSummary(TypedDict, total=False):
 
     counts: dict[str, int]
     findings: list[DoctorFinding]
+    # {lint: {"label": "p~0.50 n=8", "precision", "judged", ...}} from
+    # doctor/PRECISION.md (#819). Absent on a report written before #819.
+    lint_precision: dict[str, dict]
 
 
 def build_started_payload(facts: RunFacts, submitter: str | None = None) -> dict:
@@ -408,6 +411,16 @@ def build_batch_submitted_payload(batch: BatchFacts, submitter: str | None = Non
     )
 
 
+def _lint_precision_label(lint_precision: object, lint: str) -> str | None:
+    """The report's precision label for `lint` (#819), or None when the report
+    has no `lint_precision` block (written before #819) or no usable label."""
+    if not isinstance(lint_precision, dict):
+        return None
+    entry = lint_precision.get(lint)
+    label = entry.get("label") if isinstance(entry, dict) else None
+    return label if isinstance(label, str) and label else None
+
+
 def _doctor_text(doctor_report: DoctorSummary | None) -> str | None:
     """One-line summary of the run-doctor report, or None to omit the line.
 
@@ -417,7 +430,10 @@ def _doctor_text(doctor_report: DoctorSummary | None) -> str | None:
     (src/unified_pipeline/doctor/shared.py._finding), not enforced here, so
     it is run through _card_text before going on the card -- like any other
     string this module doesn't fully control the shape of (#782 review,
-    r3968154302 / D8 point 3).
+    r3968154302 / D8 point 3). The top lint carries its hand-checked
+    precision from doctor/PRECISION.md when the report has a
+    `lint_precision` block (#819), so a reader weights the count by trust:
+    "12 findings (top: missed_headers, p~0.50 n=8)".
     """
     if not isinstance(doctor_report, dict):
         return None
@@ -432,9 +448,13 @@ def _doctor_text(doctor_report: DoctorSummary | None) -> str | None:
              if f.get("severity") == severity and f.get("lint")),
             None,
         )
-        if top:
-            top = _card_text(str(top), _FACT_MAX_CHARS)
-        return f"{total} findings (top: {top})" if top else f"{total} findings"
+        if not top:
+            return f"{total} findings"
+        label = _card_text(str(top), _FACT_MAX_CHARS)
+        precision = _lint_precision_label(doctor_report.get("lint_precision"), top)
+        if precision:
+            label += f", {_card_text(precision, _FACT_MAX_CHARS)}"
+        return f"{total} findings (top: {label})"
     except (TypeError, ValueError, AttributeError, OverflowError):
         # A malformed report must cost only its own line, never the card --
         # but it should still be visible, not a silent drop (CODING STANDARDS
