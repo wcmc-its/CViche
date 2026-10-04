@@ -391,6 +391,17 @@ LINT_COPY = {
         "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
         "same, such as 2013-2013.",
         "Correct the date from the source CV."),
+    "pubmed_title_truncated": LintCopy(
+        "PubMed title cut short",
+        "A citation's title was replaced with PubMed's, and PubMed's title stops mid-phrase, "
+        "usually just before an italic gene or organism name, so the citation's title is "
+        "incomplete.",
+        "Restore the full title from the source CV."),
+    "enrichment_pubtype_mismatch": LintCopy(
+        "Citation replaced with a correction notice",
+        "A citation was matched to a PubMed correction, retraction or concern notice about the "
+        "paper rather than the paper itself, so it shows the notice's title, authors and pages.",
+        "Restore the paper's own citation from the source CV."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "

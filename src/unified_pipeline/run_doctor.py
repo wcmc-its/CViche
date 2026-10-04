@@ -200,6 +200,19 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
+14r. pubmed_title_truncated a PubMed title stage 5 accepted that ends with no
+                          terminal punctuation: read with `.text` before
+                          #1358, it stopped at the first inline element (an
+                          italic gene name, a superscript), and stage 6
+                          renders the cut title in place of the CV's
+                          (EBYSBC E19: QNZADH-02, AKPQEB-01). WARN, one per
+                          citation
+14s. enrichment_pubtype_mismatch an accepted PubMed record that is a notice
+                          about a paper (Published Erratum, a retraction, an
+                          expression of concern, or a title opening
+                          "Correction:") where the CV lists the paper itself,
+                          so the citation renders the notice (EBYSBC E19:
+                          QNZADH-01). WARN, one per citation
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -339,6 +352,8 @@ from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_GATE,
     lint_enrichment_failures,
     lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
+    lint_enrichment_pubtype_mismatch,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     DEAD_SECTION_MIN_LINES,
@@ -486,6 +501,8 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "pubmed_title_truncated",
+    "enrichment_pubtype_mismatch",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -620,6 +637,12 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # EBYSBC E19, measured 2026-10-04 on the 63 runs of the EBYSBC/s7ab/pilot
+    # farm (its stored stage-5 JSON, built before #1358): titles cut on 8 of
+    # 63 runs, a notice accepted on 2 of 63. #1358 fixed both at the source,
+    # so both should fall toward zero on runs built after it.
+    "pubmed_title_truncated": 0.127,
+    "enrichment_pubtype_mismatch": 0.032,
 }
 
 
@@ -1146,6 +1169,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("pubmed_title_truncated", lint_pubmed_title_truncated, ("stage_5_enrichment",)),
+    LintSpec("enrichment_pubtype_mismatch", lint_enrichment_pubtype_mismatch,
+             ("stage_5_enrichment",)),
 )
 
 

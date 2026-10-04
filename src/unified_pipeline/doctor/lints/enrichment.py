@@ -5,6 +5,12 @@ the enriched ones. Both findings are about what stage 5/4 attached to a record
 rather than how the record was cut or rendered, and neither reads the output
 document.
 
+`lint_pubmed_title_truncated` and `lint_enrichment_pubtype_mismatch` (EBYSBC
+E19) read the same stage-5 artifact for an accepted PubMed record whose text
+is wrong: a title cut short, or a correction or retraction notice accepted in
+place of the paper. Stage 6 renders the PubMed title as a tracked replacement
+of the CV's own, so either one reaches the document once changes are accepted.
+
 `lint_owner_contact_missing` is the quality score's cap-25 HARD-FAIL gate --
 without a usable `cv_owner` name the document cannot be delivered under
 anyone's name, so it is not a degraded run but a blocked one. It reuses the
@@ -24,7 +30,10 @@ another. Bodies are unmodified; `run_doctor` re-exports every name it exported
 before.
 """
 
+import re
+
 from unified_pipeline.quality_score import cv_owner_name_missing
+from unified_pipeline.stage_5_pubmed_enrichment import NOTICE_PUBTYPES
 
 from ..shared import _finding
 
@@ -52,6 +61,116 @@ def lint_enrichment_failures(stage5e: dict) -> list[dict]:
         f"{len(failed)} publication(s) failed PubMed enrichment ({breakdown}) "
         f"— citations degrade to CV-extracted fields (#222)",
         [str(e.get("text", ""))[:100] for e in failed[:3]])]
+
+
+# --------------------------------------------------------------------------
+# Stage-5 PubMed enrichment: an accepted record whose text is wrong (EBYSBC E19).
+
+
+#: The status stage 5 gives a record it accepted from PubMed. Stage 6 renders
+#: only these as a tracked replacement of the CV's citation
+#: (`stage6/sections/bibliography.py`), so only these can put a wrong PubMed
+#: title into the document.
+ACCEPTED_ENRICHMENT_STATUS = "enriched"
+
+#: A PubMed ArticleTitle ends in one of these. Before #1358, stage 5 read the
+#: title with `.text`, which stops at the first inline element (an italic
+#: gene or organism name, a superscript), so a cut title ends mid-phrase:
+#: an invented example is "Sediment transport in ".
+#: Measured over the 63-run farm (2026-10-04): of 1,432 accepted titles, the
+#: 22 that end in no character of this set are all cut, and each renders cut
+#: in the base docx.
+TITLE_TERMINAL_CHARS = frozenset(".?!)]\"'\u201d\u2019")
+
+#: Notice records about a paper rather than the paper. Stage 5's
+#: `NOTICE_PUBTYPES` (#1358) plus "Retraction of Publication", the PubMed
+#: publication type of a retraction notice, which stage 5's set does not
+#: name. "Comment" is not here: all 24
+#: Comment-typed records accepted on the farm are the CV's own paper (title
+#: overlap 0.86 or more), and "Retracted Publication" is the paper itself.
+DOCTOR_NOTICE_PUBTYPES = NOTICE_PUBTYPES | {"Retraction of Publication"}
+
+#: A PubMed title that opens like a notice ("Correction: <the paper's title>").
+#: Applied with `re.match`, which anchors at the start, so no `^`.
+_NOTICE_TITLE_RE = re.compile(
+    r"\s*(?:author\s+)?(?:correction|erratum|corrigendum|retraction"
+    r"|expression of concern)\b", re.IGNORECASE)
+
+#: The CV itself lists the notice: its entry text or title names a correction,
+#: erratum or retraction, so citing the notice is what the CV asked for.
+_CV_NAMES_NOTICE_RE = re.compile(
+    r"\b(?:correction|erratum|errata|corrigendum|retraction|retracted"
+    r"|expression of concern)\b", re.IGNORECASE)
+
+
+def _accepted_pubmed_records(stage5e: dict) -> list[tuple[dict, dict]]:
+    """(entry, enrichment_data) for every record stage 5 accepted from PubMed."""
+    accepted = []
+    for e in stage5e.get("entries", []):
+        data = e.get("enrichment_data")
+        if e.get("enrichment_status") == ACCEPTED_ENRICHMENT_STATUS and isinstance(data, dict):
+            accepted.append((e, data))
+    return accepted
+
+
+def _cv_title(entry: dict) -> str:
+    fields = entry.get("extracted_fields")
+    return str((fields or {}).get("title") or "") if isinstance(fields, dict) else ""
+
+
+def _entry_label(entry: dict) -> str:
+    return f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code') or '?'})"
+
+
+def lint_pubmed_title_truncated(stage5e: dict) -> list[dict]:
+    """An accepted PubMed title that ends without terminal punctuation: it
+    was cut at inline markup, and stage 6 renders the cut title in place of
+    the CV's full one (QNZADH-02, AKPQEB-01). WARN, one per citation.
+
+    An empty title is not reported: stage 6 then falls back to the CV's
+    title (`stage6/normalization/publication.py`), so nothing cut renders.
+    A PubMed title shorter than the CV's is not reported either: on the farm
+    the two such titles that end in a full stop are the paper's published
+    title, which differs from the one the CV gives."""
+    findings = []
+    for entry, data in _accepted_pubmed_records(stage5e):
+        title = str(data.get("pubmed_title") or "").rstrip()
+        if not title or title[-1] in TITLE_TERMINAL_CHARS:
+            continue
+        findings.append(_finding(
+            "pubmed_title_truncated", "WARN",
+            f"{_entry_label(entry)}: the PubMed title stage 5 accepted ends "
+            f"mid-phrase, so the citation renders it cut (EBYSBC E19, #1358)",
+            [f"PubMed title: {len(title)} chars, ends {title[-30:]!r}; "
+             f"the CV's title: {len(_cv_title(entry))} chars"]))
+    return findings
+
+
+def lint_enrichment_pubtype_mismatch(stage5e: dict) -> list[dict]:
+    """An accepted PubMed record that is a notice about a paper (an erratum,
+    a retraction, an expression of concern) where the CV lists the paper:
+    the citation then renders the notice's title, authors and pages
+    (QNZADH-01). WARN, one per citation. A CV entry that itself names a
+    correction or retraction is the notice by the CV's own choice."""
+    findings = []
+    for entry, data in _accepted_pubmed_records(stage5e):
+        pubtypes = [str(p) for p in data.get("publication_types") or []]
+        notice_types = sorted(DOCTOR_NOTICE_PUBTYPES.intersection(pubtypes))
+        notice_title = bool(_NOTICE_TITLE_RE.match(str(data.get("pubmed_title") or "")))
+        if not notice_types and not notice_title:
+            continue
+        cv_side = f"{entry.get('text') or ''} {_cv_title(entry)}"
+        if _CV_NAMES_NOTICE_RE.search(cv_side):
+            continue
+        why = ", ".join(notice_types) or "a title that opens as a notice"
+        findings.append(_finding(
+            "enrichment_pubtype_mismatch", "WARN",
+            f"{_entry_label(entry)}: stage 5 accepted a PubMed notice ({why}) "
+            f"for a paper the CV lists, so the citation renders the notice "
+            f"(EBYSBC E19, #1358)",
+            [f"publication_types: {', '.join(pubtypes) or 'none'}; "
+             f"enrichment_source: {entry.get('enrichment_source') or 'unknown'}"]))
+    return findings
 
 
 # --------------------------------------------------------------------------
