@@ -9,6 +9,10 @@ here looks at the rendered document: a header demoted to content misroutes
 everything filed under it long before stage 6 runs, and the finding is about
 the cut, not the page.
 
+`lint_segmentation_collapse` (EBYSBC E17) reads stage 1b as well: the cut
+can lose every heading while every line is still covered, which none of the
+coverage metrics above can see.
+
 `MISSED_HEADERS_WARN_COUNT`, `_hierarchy_titles` and `_header_key` are used by
 nothing else in `run_doctor.py`, so they move here and stop being
 module-global. `_magnitude_severity` is shared with the extraction domain and
@@ -18,6 +22,7 @@ name it exported before.
 
 import re
 from difflib import SequenceMatcher
+from typing import NamedTuple
 
 from unified_pipeline.core.text_norm import fold_quotes, norm
 from unified_pipeline.segmentation_regression import (
@@ -327,3 +332,100 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
     for f in strong:
         f["severity"] = severity
     return findings
+
+
+# --------------------------------------------------------------------------
+# Stage 1b placed almost none of 1a's headings.
+#
+# DPEHSZ (EBYSBC E17, DPEHSZ-04): the converted input kept only bare ':'
+# paragraphs where its headings stood. Stage 1a still returned 24 headings,
+# stage 1b placed none of them, and every one of the 292 stage-2 entries was
+# filed under the one synthetic PERSONAL DATA section, at 100% coverage. Stage
+# 3b then classified the whole CV with no section context, and the run scored
+# 99 with no finding. On the other 62 runs of the farm the lowest placed share
+# is 70% and the largest synthetic share 14%, so either threshold below sits
+# far from every healthy run.
+
+#: Below this share of stage 1a's (non-synthetic) headings placed on a source
+#: line by stage 1b, the run's sections are not the source's.
+SEGMENTATION_COLLAPSE_MIN_PLACED_SHARE = 0.5
+
+#: Above this share of stage-2 content entries inside synthetic sections, the
+#: synthetic preamble holds most of the CV.
+SEGMENTATION_COLLAPSE_MAX_SYNTHETIC_SHARE = 0.5
+
+#: Stage 2's element type for a separator row, which is not an entry.
+STAGE2_BREAK_TYPE = "break"
+
+
+def _hierarchy_nodes(nodes: list[dict] | None) -> list[dict]:
+    flat: list[dict] = []
+    for node in nodes or []:
+        flat.append(node)
+        flat.extend(_hierarchy_nodes(node.get("children")))
+    return flat
+
+
+def _placed_headings(stage1b: dict) -> tuple[int, int]:
+    """(headings stage 1b placed on a source line, headings it was given),
+    counting only the headings stage 1a read from the source, not the
+    synthetic ones it added."""
+    headings = [node for node in _hierarchy_nodes(stage1b.get("hierarchy_with_indices"))
+                if not node.get("synthetic")]
+    placed = sum(1 for node in headings if node.get("element_idx") is not None)
+    return placed, len(headings)
+
+
+class _SyntheticShare(NamedTuple):
+    """How much of stage 2 sits in stage 1b's synthetic sections."""
+    in_synthetic: int
+    entries: int
+    biggest: dict | None
+    biggest_held: int
+
+
+def _synthetic_entries(stage1b: dict, stage2: dict) -> _SyntheticShare:
+    """Stage-2 content entries inside a synthetic section, all content
+    entries, and the synthetic section holding the most of them."""
+    synthetic = [section for section in stage1b.get("section_boundaries", [])
+                 if section.get("synthetic")]
+    entries = [entry for entry in stage2.get("entries", [])
+               if entry.get("element_type") != STAGE2_BREAK_TYPE]
+    held: dict[int, int] = {}
+    for entry in entries:
+        start = entry.get("element_idx_start")
+        for i, section in enumerate(synthetic):
+            if (isinstance(start, (int, float))
+                    and section.get("element_idx_start", 0) <= start <= section.get("element_idx_end", -1)):
+                held[i] = held.get(i, 0) + 1
+                break
+    if not held:
+        return _SyntheticShare(0, len(entries), None, 0)
+    biggest = max(held, key=held.__getitem__)
+    return _SyntheticShare(sum(held.values()), len(entries), synthetic[biggest], held[biggest])
+
+
+def lint_segmentation_collapse(stage1b: dict, stage2: dict) -> list[dict]:
+    """Stage 1b placed under half of stage 1a's headings, or the synthetic
+    preamble section holds most of stage 2's entries: the CV was classified
+    without its own section structure (EBYSBC E17, DPEHSZ). One WARN per run."""
+    placed, headings = _placed_headings(stage1b)
+    share = _synthetic_entries(stage1b, stage2)
+    few_placed = bool(headings) and placed / headings < SEGMENTATION_COLLAPSE_MIN_PLACED_SHARE
+    synthetic_holds_most = (bool(share.entries) and share.in_synthetic / share.entries
+                            > SEGMENTATION_COLLAPSE_MAX_SYNTHETIC_SHARE)
+    if not (few_placed or synthetic_holds_most):
+        return []
+    evidence = [f"stage 1b placed {placed} of {headings} stage 1a headings"]
+    if share.biggest is not None:
+        section = share.biggest
+        title = " > ".join(str(h) for h in section.get("hierarchy") or [])
+        evidence.append(
+            f"element_idx_start {section.get('element_idx_start')}: synthetic section "
+            f"'{title}' (to {section.get('element_idx_end')}) holds {share.biggest_held} of "
+            f"{share.entries} stage-2 entries")
+    return [_finding(
+        "segmentation_collapse", "WARN",
+        f"section structure lost: {placed} of {headings} headings placed, "
+        f"{share.in_synthetic} of {share.entries} entries in synthetic sections",
+        evidence)]

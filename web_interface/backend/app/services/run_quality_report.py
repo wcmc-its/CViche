@@ -391,6 +391,18 @@ LINT_COPY = {
         "says is ongoing, a stored value such as 2003-04-2005-09, or a range whose two ends are the "
         "same, such as 2013-2013.",
         "Correct the date from the source CV."),
+    "section_consistency": LintCopy(
+        "Entry filed in the wrong section",
+        "An entry was given a section its own heading or text contradicts: a residency listed as an "
+        "appointment, a board certification as a membership, a grant review as a committee, a "
+        "course attended as teaching, or a published journal article as a non-peer-reviewed report.",
+        "Move the quoted entries to the section their source heading names."),
+    "segmentation_collapse": LintCopy(
+        "Source sections not found",
+        "Almost none of the source CV's section headings were found, so its entries were sorted "
+        "without knowing which section they came from.",
+        "Check every section of the output against the source CV, or fix the headings in the "
+        "source and rerun."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "

@@ -68,6 +68,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_stage_failure_recorded,
     lint_taxonomy_code_coverage,
     lint_segmentation,
+    lint_segmentation_collapse,
     lint_stage6_warnings,
     lint_table_lost,
     lint_table_shape,
@@ -181,6 +182,63 @@ def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
     assert [(f["lint"], f["severity"]) for f in findings] == [("table_lost", "WARN")]
     assert findings[0]["message"] == "2 source table(s) mostly lost; worst: 6 of 6 lines"
     assert findings[0]["evidence"] == large[:5]
+
+
+def _stage1b(placed, unplaced, synthetic_end=2):
+    """Stage 1b with `placed` headings on a source line, `unplaced` without
+    one, and a synthetic preamble section over elements 0..synthetic_end."""
+    nodes = [{"text": "PERSONAL DATA", "element_idx": None, "synthetic": True}]
+    nodes += [{"text": f"SECTION {i}", "element_idx": 10 * (i + 1), "synthetic": False}
+              for i in range(placed)]
+    nodes += [{"text": f"LOST {i}", "element_idx": None, "synthetic": False}
+              for i in range(unplaced)]
+    sections = [{"hierarchy": ["PERSONAL DATA"], "element_idx_start": 0,
+                 "element_idx_end": synthetic_end, "synthetic": True}]
+    sections += [{"hierarchy": [f"SECTION {i}"], "element_idx_start": 10 * (i + 1),
+                  "element_idx_end": 10 * (i + 1) + 9} for i in range(placed)]
+    return {"hierarchy_with_indices": nodes, "section_boundaries": sections}
+
+
+def _stage2_at(*starts):
+    return {"entries": [{"element_idx_start": s, "element_type": "paragraph", "text": "x"}
+                        for s in starts]}
+
+
+def test_segmentation_collapse_fires_when_1b_places_no_heading():
+    # DPEHSZ shape: every 1a heading unplaced, every entry in the preamble.
+    stage1b = _stage1b(placed=0, unplaced=4, synthetic_end=50)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 5, 20, 40))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("segmentation_collapse", "WARN")]
+    assert findings[0]["message"] == ("section structure lost: 0 of 4 headings placed, "
+                                      "4 of 4 entries in synthetic sections")
+    assert findings[0]["evidence"] == [
+        "stage 1b placed 0 of 4 stage 1a headings",
+        "element_idx_start 0: synthetic section 'PERSONAL DATA' (to 50) holds 4 of 4 stage-2 entries"]
+
+
+def test_segmentation_collapse_fires_on_under_half_placed_alone():
+    findings = lint_segmentation_collapse(_stage1b(placed=1, unplaced=2), _stage2_at(11, 12))
+    assert len(findings) == 1
+    assert "1 of 3 headings placed" in findings[0]["message"]
+
+
+def test_segmentation_collapse_fires_when_the_preamble_holds_most_entries_alone():
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 2, 3, 11))
+    assert len(findings) == 1
+    assert "3 of 4 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_segmentation_collapse_quiet_at_half_placed_and_a_small_preamble():
+    stage1b = _stage1b(placed=2, unplaced=2)
+    assert lint_segmentation_collapse(stage1b, _stage2_at(1, 11, 12, 21, 22)) == []
+
+
+def test_segmentation_collapse_does_not_count_break_rows_as_entries():
+    stage1b = _stage1b(placed=2, unplaced=0, synthetic_end=9)
+    stage2 = _stage2_at(11, 21)
+    stage2["entries"] += [{"element_idx_start": i, "element_type": "break"} for i in range(1, 9)]
+    assert lint_segmentation_collapse(stage1b, stage2) == []
 
 
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
@@ -3661,6 +3719,12 @@ def _build_clean_run(tmp_path, uid=_UID):
 
     _write_stage(root, "stage_1a_segmentation", f"{uid}_cv_segmented.json",
                  {"document_uid": uid, **_STAGE1A})
+    _write_stage(root, "stage_1b_hierarchy_mapping", f"{uid}_cv_hierarchy_mapped.json",
+                 {"document_uid": uid,
+                  "hierarchy_with_indices": [{"text": "GRANTS", "level": "H1",
+                                              "element_idx": 0, "synthetic": False}],
+                  "section_boundaries": [{"hierarchy": ["GRANTS"], "element_idx_start": 0,
+                                          "element_idx_end": len(grants)}]})
     stage2_entries = [_entry("GRANTS", etype="header", start=0)] + [
         _entry(grant, start=i + 1) for i, grant in enumerate(grants)]
     _write_stage(root, "stage_2_entry_extraction", f"{uid}_cv_entries.json",
@@ -3715,14 +3779,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (39), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (41), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 37
+    assert len(payload["findings"]) == 39
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

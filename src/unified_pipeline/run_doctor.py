@@ -200,6 +200,20 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
+14r. section_consistency  a stage-3b code that contradicts the entry's own
+                          heading, text or siblings: intern and resident rows
+                          as appointments, an ABIM line as a membership,
+                          BLS/ACLS as a licence, grant reviews as committees,
+                          courses attended as teaching, a thesis-committee
+                          block as institutional committees, a 'see section'
+                          line or bare URL as a record, a journal article
+                          with volume and pages as a non-peer-reviewed report
+                          among peer-reviewed siblings (EBYSBC E11/E30); WARN
+14s. segmentation_collapse stage 1b placed under half of stage 1a's headings,
+                          or the synthetic preamble section holds most of
+                          stage 2's entries, so stage 3b classified the CV
+                          without its sections (EBYSBC E17: DPEHSZ placed 0
+                          of 24 headings and scored 99); WARN
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -393,7 +407,11 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     _hierarchy_titles,
     lint_missed_headers,
     lint_segmentation,
+    lint_segmentation_collapse,
     lint_table_lost,
+)
+from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_section_consistency,
 )
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
     lint_protected_data_in_output,
@@ -486,6 +504,8 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "section_consistency",
+    "segmentation_collapse",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -620,6 +640,13 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # section_consistency (EBYSBC E11/E30): 24 of the 63 runs of the
+    # EBYSBC/s7ab/pilot farm, and segmentation_collapse (E17): 1 of 63
+    # (DPEHSZ), one fire per CV, over the farm's stage 1b/2/3b artifacts,
+    # measured 2026-10-04. Both lints read only those artifacts, so the
+    # render arm does not matter. Same mixed-corpus caveat as above.
+    "section_consistency": 0.381,
+    "segmentation_collapse": 0.016,
 }
 
 
@@ -835,6 +862,8 @@ class ArtifactSpec(NamedTuple):
 _ARTIFACTS = {
     "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json",
                              record_lists=("hierarchy",)),
+    "stage_1b": ArtifactSpec("stage_1b_hierarchy_mapping", "_hierarchy_mapped.json",
+                             record_lists=("hierarchy_with_indices", "section_boundaries")),
     "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json",
                             record_lists=("entries",)),
     "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json",
@@ -1069,6 +1098,7 @@ _VIEW_LABELS = {
     "source_block_lines": "source",
     "candidates": "candidates",
     "stage_1a": "stage_1a",
+    "stage_1b": "stage_1b",
     "stage_2": "stage_2",
     "stage_3b": "stage_3b",
     "stage_4": "stage_4",
@@ -1146,6 +1176,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("section_consistency", lint_section_consistency, ("stage_3b",)),
+    LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
 )
 
 
