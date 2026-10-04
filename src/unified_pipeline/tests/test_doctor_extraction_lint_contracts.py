@@ -19,6 +19,7 @@ Run:
 """
 import itertools
 import json
+from datetime import datetime
 from collections import Counter
 import sys
 from pathlib import Path
@@ -2987,6 +2988,23 @@ def test_grant_boundary_does_not_pair_a_sponsor_line_that_carries_its_title():
                      _grant(39, "Study two", title="Study two")) == []
 
 
+def test_grant_boundary_pairs_a_title_half_that_carries_its_number():
+    """The title half is judged by its missing sponsor alone: a title with the
+    grant number but no agency still completes the sponsor line before it."""
+    findings = _boundary(_grant(40, "Example Fund", agency="Example Fund"),
+                         _grant(41, "Study of example things (R01 XX000001)",
+                                title="Study of example things", grant_number="R01 XX000001"))
+    assert _flagged(findings) == [40]
+
+
+def test_grant_boundary_reads_an_end_date_alone_as_a_period():
+    """A sponsor line with only an end date carries a period, so it is a
+    whole record's head, not a source half."""
+    assert _boundary(_grant(42, "Example Fund, ending 2004", agency="Example Fund",
+                            end_date="2004"),
+                     _grant(43, "Study of example things", title="Study of example things")) == []
+
+
 def test_grant_boundary_does_not_pair_a_sponsor_line_that_carries_its_period():
     """A one-line record with a sponsor and dates but no title (a fellowship)
     next to a titled one with no sponsor is two whole records."""
@@ -3262,6 +3280,19 @@ def test_grant_bucket_defaults_to_this_year():
                    end_date="2001")
     findings = lint_grant_bucket({"entries": [entry]}, _blocks_under("M2A", _BUCKET_TEXT))
     assert len(findings) == 1 and "reads as 2001" in findings[0]["message"]
+
+
+def test_grant_bucket_default_year_is_this_year_not_next():
+    """A Current grant ending this year is not yet ended; one that ended last
+    year is. Both are read against the real current year."""
+    this_year = datetime.now().year
+    current = _grant(231, _BUCKET_TEXT, ["Ongoing"], code="M2A", start_date="2010",
+                     end_date=str(this_year))
+    assert lint_grant_bucket({"entries": [current]}, _blocks_under("M2A", _BUCKET_TEXT)) == []
+    ended = _grant(232, _BUCKET_TEXT, ["Ongoing"], code="M2A", start_date="2010",
+                   end_date=str(this_year - 1))
+    findings = lint_grant_bucket({"entries": [ended]}, _blocks_under("M2A", _BUCKET_TEXT))
+    assert len(findings) == 1 and f"reads as {this_year - 1}" in findings[0]["message"]
 
 
 def test_grant_bucket_ignores_non_grant_codes():
