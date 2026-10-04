@@ -6,4 +6,6 @@ public import surface; these modules hold the lint rules it calls.
     shared.py      the finding vocabulary and shared text matching
     lints/         one module per domain the lints inspect
     PRECISION.md   each lint's last measured precision and recall (#819)
+    precision.py   reads PRECISION.md's per-lint table for doctor.tsv, the
+                   Teams card and #813's remediation gate
 """
