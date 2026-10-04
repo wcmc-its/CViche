@@ -1055,3 +1055,40 @@ def test_q1_further_span_follows_the_first(tmp_path):
     rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Org Five"))
     assert len(rows) == 1
     assert rows[0][2] == "2001-2003, 2007-2009"
+# --- EBYSBC E14 (ZGBCIT-07): Q4B `section` had no slot ------------------------
+
+def test_q4b_section_follows_the_journal():
+    fields = {"role": "Guest Editor", "journal_name": "Fictional Widget Letters",
+              "section": "Special Issue on Gadget Repair"}
+    assert _other_service_organization_text(fields, "Q4B") == (
+        "Fictional Widget Letters - Special Issue on Gadget Repair")
+
+
+def test_q4b_section_the_cell_already_holds_is_not_repeated():
+    fields = {"journal_name": "Fictional Widget Letters: Gadget Section",
+              "section": "gadget section"}
+    assert _other_service_organization_text(fields, "Q4B") == (
+        "Fictional Widget Letters: Gadget Section")
+
+
+def test_q4b_section_alone_fills_an_empty_cell():
+    assert _other_service_organization_text({"section": "Gadget Section"}, "Q4B") == "Gadget Section"
+
+
+@pytest.mark.parametrize("code", ["Q4C", "Q4", "Q2", "Q3"])
+def test_section_is_read_only_on_q4b(code):
+    fields = {"journal_name": "Fictional Widget Letters", "organization": "",
+              "section": "Gadget Section"}
+    assert "Gadget Section" not in _other_service_organization_text(fields, code)
+
+
+def test_q4b_section_reaches_the_editorial_board_row(tmp_path):
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q4B", role="Guest Co-Editor", journal_name="Fictional Widget Letters",
+               section="Special Issue on Gadget Repair", start_date="2021"),
+    ]
+    rows = list(_rows_containing(_render(tmp_path, entries), "Fictional Widget Letters"))
+    assert len(rows) == 1
+    assert rows[0][0] == ("Guest Co-Editor, Fictional Widget Letters - "
+                          "Special Issue on Gadget Repair")

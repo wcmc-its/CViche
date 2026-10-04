@@ -172,6 +172,7 @@ class LicensureEntry:
     issue_date: str = ''
     expiration_date: str = ''
     license_type: str = ''
+    status: str = ''
     original_text: str = ''
 
 
@@ -294,9 +295,34 @@ def _normalize_licensure_entry(entry: Mapping[str, Any]) -> LicensureEntry:
                    or fields.get('number') or '').strip(),
         issue_date=fields.get('issue_date') or fields.get('date') or '',
         expiration_date=fields.get('expiration_date') or '',
-        license_type=fields.get('license_type') or '',
+        license_type=_field_text(fields.get('license_type')),
+        status=_field_text(fields.get('status')),
         original_text=str(entry.get('text') or ''),
     )
+
+
+def _field_text(value: object) -> str:
+    """A stage-4 scalar as cell text: '' for a missing, blank or non-scalar
+    value (a list or dict is no licence type)."""
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        return str(value).strip()
+    return ''
+
+
+def _with_qualifier(cell: str, qualifier: str, row_text: str) -> str:
+    """`cell` with `qualifier` after it in parentheses, the qualifier alone
+    when the cell is empty, and `cell` unchanged when `row_text` already
+    holds the qualifier as whole words.
+
+    The licence table has no column for the licence type or its status
+    (EBYSBC E14): the type follows the state ("<state> (<type>)", MYNQRA
+    56) and the status the last registration date ("<date> (<status>)",
+    SEKQUI 33/34), so a relinquished licence no longer reads as one that
+    simply lapsed."""
+    if not qualifier or re.search(rf'(?<!\w){re.escape(qualifier)}(?!\w)',
+                                  row_text, re.IGNORECASE):
+        return cell
+    return f"{cell} ({qualifier})" if cell else qualifier
 
 
 def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
@@ -312,14 +338,16 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     classifier's own answer (#573 review).
     """
     if entry.state or entry.number:
+        last_registration = (format_date_for_section(entry.expiration_date, 'F1')
+                             if entry.expiration_date else '')
         return LicenseRecord(
-            state=entry.state,
+            state=_with_qualifier(entry.state, entry.license_type,
+                                  f"{entry.state} {entry.number}"),
             number=entry.number,
             issue_date=(format_date_for_section(entry.issue_date, 'F1')
                         if entry.issue_date else ''),
-            last_registration_date=(
-                format_date_for_section(entry.expiration_date, 'F1')
-                if entry.expiration_date else ''),
+            last_registration_date=_with_qualifier(
+                last_registration, entry.status, last_registration),
         )
     if entry.original_text:
         return LicenseRecord(state=entry.original_text[:_FALLBACK_TEXT_CHARS])

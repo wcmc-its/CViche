@@ -47,6 +47,8 @@ JOURNAL_REVIEWING_CODE = 'Q4D'          # Journal / ad hoc reviewing
 LEADERSHIP_TAXONOMY_CODE = 'Q1'         # Leadership in Extramural Organizations
 GRANT_REVIEWING_CODE = 'Q3'             # Grant Reviewing / Study Sections
 EDITORIAL_BOARD_CODES = ('Q4B', 'Q4C')  # Editorial Board Membership roles
+SECTION_EDITOR_CODE = 'Q4B'             # the one code whose schema has `section`
+_SECTION_SEPARATOR = ' - '              # journal, then the section or special issue
 
 # The fields that can name the organization of a Q1 row, in priority order. Q1's
 # own schema names it `organization`; an entry the hierarchy-mismatch reroute
@@ -657,6 +659,20 @@ def _service_boards_dates_text(fields: dict, taxonomy_code: str,
 
 
 def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
+    """The organization/agency cell of an Other Service row
+    (`_journal_or_organization_text`), then a Q4B `section` after it: the
+    section edited, or the title of a special issue a guest editor ran,
+    which had no slot and was dropped (EBYSBC E14, ZGBCIT-07). A section the
+    cell already holds is not repeated."""
+    organization = _journal_or_organization_text(fields, taxonomy_code)
+    section = (_cell_text(fields.get('section') or '')
+               if taxonomy_code == SECTION_EDITOR_CODE else '')
+    if not section or _squash(section) in _squash(organization):
+        return organization
+    return f"{organization}{_SECTION_SEPARATOR}{section}" if organization else section
+
+
+def _journal_or_organization_text(fields: dict, taxonomy_code: str) -> str:
     """Compute the organization/agency cell text for an Other Service row.
 
     Q3 uses `agency`; others use `organization`/`committee_name`. Q4B/Q4C

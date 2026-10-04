@@ -887,6 +887,92 @@ class TestSectionLabel:
         assert _fan(entry) == [entry]
 
 
+class TestSharedContextLines:
+    """EBYSBC E6 residual (#1187, KYOPUV 32 / WTKSYX 32): undated lines of
+    context every record shares, around a dated list, are not a record's own
+    words. Invented values."""
+    _UNIT = 'Unit of Kestrel Studies'
+    _PLACE = 'Ashby University, Fernvale'
+    _DATED = ("March '88-May '89 Lecturer\t"
+              "June '89-Feb '94 Senior Lecturer\t"
+              "March '94-present Reader")
+
+    def _d1(self, text, institution=_PLACE, titles=('Lecturer', 'Senior Lecturer', 'Reader')):
+        dates = [('1988-03', '1989-05'), ('1989-06', '1994-02'), ('1994-03', 'present')]
+        return {'taxonomy_code': 'D1', 'text': text,
+                'extracted_fields': {'appointments': [
+                    _appointment(title, start, end, institution)
+                    for title, (start, end) in zip(titles, dates)]}}
+
+    def test_a_trailing_unit_and_institution_line_fan_out(self):
+        entry = self._d1(f'{self._DATED}\t{self._UNIT}\t{self._PLACE}')
+        assert [c['extracted_fields']['title'] for c in _fan(entry)] == [
+            'Lecturer', 'Senior Lecturer', 'Reader']
+
+    def test_a_leading_institution_and_unit_line_fan_out(self):
+        assert len(_fan(self._d1(f'{self._PLACE}\t{self._UNIT}\t{self._DATED}'))) == 3
+
+    def test_without_an_institution_line_every_child_holds_the_unit_is_content(self):
+        entry = self._d1(f'{self._DATED}\t{self._UNIT}\t{self._PLACE}',
+                         institution='Ashby University')
+        assert _fan(entry) == [entry]
+
+    def test_a_context_line_longer_than_a_unit_name_is_content(self):
+        unit = 'Unit of Kestrel Studies and the Joint Program in Heron Ecology'
+        entry = self._d1(f'{self._DATED}\t{unit}\t{self._PLACE}')
+        assert _fan(entry) == [entry]
+
+    def test_an_undated_line_between_records_is_content(self):
+        first, rest = self._DATED.split('\t', 1)
+        entry = self._d1(f'{first}\t{self._UNIT}\t{rest}\t{self._PLACE}')
+        assert _fan(entry) == [entry]
+
+    def test_a_records_own_word_is_still_compared(self):
+        entry = self._d1(f'{self._DATED}\t{self._UNIT}\t{self._PLACE}'.replace(
+            'Senior Lecturer', 'Senior Visiting Lecturer'))
+        assert _fan(entry) == [entry]
+
+    def test_one_records_periods_are_not_a_list_of_records(self):
+        # VNUAHA 142's shape (EBYSBC E22): two terms of one post.
+        entry = self._d1(f'{self._DATED}\t{self._UNIT}\t{self._PLACE}',
+                         titles=('Reader', 'Reader', 'Reader'))
+        entry['text'] = entry['text'].replace('Senior Lecturer', 'Reader').replace(
+            'Lecturer', 'Reader')
+        assert _fan(entry) == [entry]
+
+    @pytest.mark.parametrize('segments,children,expected', [
+        (['1990 Alpha', '1991 Beta', 'Unit', 'Ashby'], 2, {2, 3}),
+        (['1990 Alpha', '1991 Beta', '1992 Gamma', 'Unit', 'Ashby'], 2, set()),
+        (['1990 Alpha', 'Unit', 'Ashby'], 1, set()),
+        (['1990 Alpha', '1991 Beta', '', 'Ashby'], 2, {2, 3}),
+        (['1990 Alpha', '1991 Beta', 'Unit'], 2, set()),
+    ], ids=['one-dated-segment-per-child', 'a-dated-segment-no-child-holds',
+            'a-lone-record', 'an-empty-line-is-no-anchor-but-goes', 'no-anchor-line'])
+    def test_which_segments_are_context(self, segments, children, expected):
+        child_fields = [{'title': f'T{i}', 'institution': 'Ashby'} for i in range(children)]
+        rendered = fan_out._RENDERED_FIELDS['D1']
+        assert fan_out._shared_context_segments(segments, child_fields, rendered, 'D1') == expected
+
+    def test_an_open_end_dates_a_segment(self):
+        child_fields = [{'title': f'T{i}', 'institution': 'Ashby'} for i in range(2)]
+        rendered = fan_out._RENDERED_FIELDS['D1']
+        assert fan_out._shared_context_segments(
+            ['1990 Alpha', 'present Beta', 'Unit', 'Ashby'], child_fields, rendered, 'D1') == {2, 3}
+
+    def test_an_institution_one_child_holds_is_no_anchor(self):
+        child_fields = [{'title': 'T0', 'institution': 'Ashby'},
+                        {'title': 'T1', 'institution': 'Birch'}]
+        rendered = fan_out._RENDERED_FIELDS['D1']
+        assert fan_out._shared_context_segments(
+            ['1990 Alpha', '1991 Beta', 'Unit', 'Ashby'], child_fields, rendered, 'D1') == set()
+
+    def test_an_empty_edge_line_alone_is_no_anchor(self):
+        child_fields = [{'title': f'T{i}', 'institution': 'Ashby'} for i in range(2)]
+        rendered = fan_out._RENDERED_FIELDS['D1']
+        assert fan_out._shared_context_segments(
+            ['1990 Alpha', '1991 Beta', '', 'Unit'], child_fields, rendered, 'D1') == set()
+
+
 class TestOneItemList:
     def test_beside_the_parents_own_role_it_is_a_second_record(self):
         # MRJDWE 101's shape; the one segment holds both records.
@@ -1137,7 +1223,9 @@ class TestInheritedScope:
         assert generator._classify_geographic_scope({**entry, 'text': 'Spring Forum, Ashby'}) == 'Regional'
 
 
-def test_every_appointment_of_a_label_led_list_renders(tmp_path):
+@pytest.mark.parametrize('context', ['', '\tUnit of Kestrel Studies\tAshby University'],
+                         ids=['label-led', 'trailing-unit-and-institution'])
+def test_every_appointment_of_a_label_led_list_renders(tmp_path, context):
     import json
 
     from docx import Document
@@ -1145,7 +1233,7 @@ def test_every_appointment_of_a_label_led_list_renders(tmp_path):
     from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
     entry = {'taxonomy_code': 'D1', 'element_idx_start': 3,
              'text': "Positions      March '88-May '89 Zqlecturer, Ashby University\t"
-                     "June '89-present Zqreader, Ashby University",
+                     "June '89-present Zqreader, Ashby University" + context,
              'extracted_fields': {'appointments': [
                  _appointment('Zqlecturer', '1988-03', '1989-05'),
                  _appointment('Zqreader', '1989-06', 'present')]}}

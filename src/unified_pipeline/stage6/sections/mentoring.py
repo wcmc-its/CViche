@@ -427,6 +427,43 @@ def _contains_words(text: str, words: str) -> bool:
     return re.search(rf'(?<!\w){re.escape(words)}(?!\w)', text, re.IGNORECASE) is not None
 
 
+# Off-schema keys stage 4 puts a mentee's institution and advisor under
+# (EBYSBC E14: HFAJCC-09 `advisor`/`advisors`, ZCTARO-07 `institution`).
+# No other row reads them, so each joins Site/Position, in this order, with
+# the label the advisor keys get; the same block's other rows carry
+# "Advisor: <name>" inside `site_position` itself.
+_SITE_EXTRA_KEYS: tuple[tuple[str, str], ...] = (
+    ('institution', ''),
+    ('advisor', 'Advisor: '),
+    ('advisors', 'Advisors: '),
+)
+_SITE_PART_SEPARATOR = ', '
+_LIST_VALUE_SEPARATOR = '; '
+
+
+def _plain_text(value: object) -> str:
+    """A string field, or a list of strings joined, stripped; '' for
+    anything else (a dict is no cell value)."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        return _LIST_VALUE_SEPARATOR.join(
+            v.strip() for v in value if isinstance(v, str) and v.strip())
+    return ''
+
+
+def _with_site_extras(site_position: str, fields: Mapping[str, Any]) -> str:
+    """`site_position` with the mentee's institution and advisor appended
+    when stage 4 kept them under off-schema keys (`_SITE_EXTRA_KEYS`). A
+    value Site/Position already holds as whole words is not repeated."""
+    parts = [site_position] if site_position else []
+    for key, label in _SITE_EXTRA_KEYS:
+        value = _plain_text(fields.get(key))
+        if value and not _contains_words(site_position, value):
+            parts.append(f"{label}{value}")
+    return _SITE_PART_SEPARATOR.join(parts)
+
+
 def _infer_supervision_type(level_text: str) -> str:
     """Supervision type from the mentee's level/position when stage 4 gave
     none. Checked in this order on purpose: a "clinical fellow" is Research
@@ -474,6 +511,7 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
         site_position = f"{mentee_level} - {site_pos_raw}"
     else:
         site_position = site_pos_raw or mentee_level
+    site_position = _with_site_extras(site_position, fields)
 
     project = _text(fields.get('research_focus') or fields.get('dissertation_title'))
     mentee_awards = _text(fields.get('awards') or fields.get('funding_source')).strip()

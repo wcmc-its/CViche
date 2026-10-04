@@ -843,6 +843,65 @@ def _holds_assigned_kind_fields(entry: Mapping[str, Any], assigned_code: str,
     return bool(_filled_field_names(entry) & kind_fields)
 
 
+# EBYSBC class E33 (HZGJFM-06): a B1 row that names no degree and names
+# pre-collegiate schooling -- a high, secondary or preparatory school, a
+# gymnasium or lycee -- is not an academic degree, and sat in the degree table
+# with an empty Year Awarded. It renders under B2, Other Educational
+# Experiences. A row that names a degree, or a college or university with no
+# degree, stays in B1.
+_PRECOLLEGIATE_SCHOOL_RE = re.compile(
+    r"\b(?:(?:high|secondary|senior|junior|middle|grammar|elementary|primary"
+    r"|preparatory|prep|parochial|boarding)\s+schools?"
+    r"|gymnasium|lyc[e\u00e9]e|liceo)\b",
+    re.IGNORECASE)
+PRECOLLEGIATE_SOURCE_CODE = 'B1'
+PRECOLLEGIATE_TARGET_CODE = 'B2'
+PRECOLLEGIATE_REROUTE_CHECK = 'precollegiate_education_reroute'
+
+
+def _is_precollegiate_without_degree(entry: Mapping[str, Any]) -> bool:
+    """Whether a B1 entry names no degree and its institution (its text when
+    stage 4 wrote none) names pre-collegiate schooling."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping) or not _is_blank_value(fields.get('degree')):
+        return False
+    institution = fields.get('institution')
+    if not isinstance(institution, str) or not institution.strip():
+        institution = entry.get('text') or ''
+    return isinstance(institution, str) and bool(_PRECOLLEGIATE_SCHOOL_RE.search(institution))
+
+
+def _route_precollegiate_education(entry: dict[str, Any], code: str,
+                                   moved: list[object]) -> str:
+    """The code to group *entry* under: B2 for a degree-less pre-collegiate
+    B1 row (`_is_precollegiate_without_degree`), whose element_idx_start is
+    appended to *moved*; *code* otherwise."""
+    if code != PRECOLLEGIATE_SOURCE_CODE or not _is_precollegiate_without_degree(entry):
+        return code
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = PRECOLLEGIATE_TARGET_CODE
+    moved.append(entry.get('element_idx_start'))
+    return PRECOLLEGIATE_TARGET_CODE
+
+
+def precollegiate_reroute_warnings(moved: list[object]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record naming every B1 row moved to B2 by
+    `_route_precollegiate_education`, by element_idx_start only (never CV
+    text); none when nothing moved."""
+    if not moved:
+        return []
+    return [{
+        'check': PRECOLLEGIATE_REROUTE_CHECK,
+        'code': PRECOLLEGIATE_SOURCE_CODE,
+        'section': None,
+        'message': (f"pre-collegiate education with no degree moved "
+                    f"{PRECOLLEGIATE_SOURCE_CODE}->{PRECOLLEGIATE_TARGET_CODE}: "
+                    f"{len(moved)} entr{'y' if len(moved) == 1 else 'ies'}"),
+        'evidence': [f"element_idx_start {idx}" for idx in moved],
+        'severity': 'INFO',
+    }]
+
+
 def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
     """One render-warnings record per (outcome, assigned, target), naming the
     entries by element_idx_start only (never CV text). Sorted, so the sidecar
@@ -1356,16 +1415,19 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
         reroutes: list[RerouteDecision] = []
+        precollegiate_moved: list[object] = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code, reroutes)
+            code = _route_precollegiate_education(entry, code, precollegiate_moved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
         self._section_failures.extend(reroute_warnings(reroutes))
+        self._section_failures.extend(precollegiate_reroute_warnings(precollegiate_moved))
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")

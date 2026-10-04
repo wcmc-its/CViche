@@ -154,6 +154,29 @@ _LIST_NUMBER_RE = re.compile(r'(^|\t|\n)\s*(?:\d{1,3}[.)]|[a-z]\))(?=\s)', re.IG
 _LEADING_LABEL_RE = re.compile(
     r"^\s*[A-Za-z]+(?: [A-Za-z]+){0,2}(?:\s*:\s*|\t\s*| {2,})"
     rf"(?=['‘’`]?\d|(?:{_MONTH_WORDS})\b)", re.IGNORECASE)
+# EBYSBC E6 residual (#1187, KYOPUV 32 re-run as WTKSYX 32): a dated list
+# whose text ends (or begins) with undated lines of shared context -- a
+# section name, then the institution -- that apply to every record. One stage-4
+# run folded the section name into every record's institution and the list
+# fanned out; the re-run left it out, so its words were held by no field and
+# all five appointments were lost. An undated edge line is that context, and
+# not content the children must hold, when (`_shared_context_segments`):
+# - it lies before the first or after the last tab segment that holds a
+#   year (an undated line between records stays content), and the segments
+#   holding a year number exactly one per child, so a dated record the list
+#   missed shows up as a count mismatch;
+# - one undated edge line is held whole by a value every child carries
+#   identically (the institution line), which is what marks the edge block as
+#   shared context rather than records;
+# - it is no longer than `_MAX_CONTEXT_TOKENS` content words (a unit name, not
+#   a narrative);
+# - the children are distinct records, not one record's periods: some child
+#   differs from another in a rendered value other than its dates (so a lone
+#   record never qualifies). A list of extra terms of one post (VNUAHA 142's
+#   `additional_dates`) is EBYSBC E22's multi-span shape and is left to it.
+# Every dated segment, i.e. each record's own words, is still compared.
+_MAX_CONTEXT_TOKENS = 6
+_YEAR_TOKEN_RE = re.compile(r'\d{4}')
 # The fields that name a record's role or title, per `_RENDERED_FIELDS`.
 _ROLE_FIELDS = frozenset({'leadership_role', 'membership_type', 'role', 'title'})
 _MONTHS_IN_YEAR = 12
@@ -179,7 +202,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
     'D2': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
     'D3': frozenset({'department', 'end_date', 'organization', 'start_date', 'title'}),
-    'F1': frozenset({'expiration_date', 'issue_date', 'license_number', 'state_country'}),
+    'F1': frozenset({'expiration_date', 'issue_date', 'license_number', 'license_type', 'state_country', 'status'}),
     'F2': frozenset({'certifying_board', 'recertification_date', 'specialty', 'year_certified'}),
     'H': frozenset({'award_name', 'date', 'granting_body'}),
     'I': frozenset({'end_date', 'membership_type', 'organization', 'start_date'}),
@@ -199,7 +222,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'Q3': frozenset({'agency', 'end_date', 'panel_name', 'role', 'start_date'}),
     'Q4': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
     'Q4A': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
-    'Q4B': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
+    'Q4B': frozenset({'end_date', 'journal_name', 'role', 'section', 'start_date'}),
     'Q4C': frozenset({'end_date', 'journal_name', 'start_date'}),
     'Q4D': frozenset({'journal_name', 'year'}),
     'R': frozenset({'date', 'event_name', 'location', 'role', 'title'}),
@@ -354,15 +377,62 @@ def _tokens(text: str) -> Counter[str]:
     return Counter(_OPEN_END_TOKEN if t in CURRENT_DATE_VALUES else t for t in words)
 
 
+def _is_dated(segment: str) -> bool:
+    """Whether a tab segment names a year or an open end ('present')."""
+    return any(_YEAR_TOKEN_RE.fullmatch(token) or token == _OPEN_END_TOKEN
+               for token in _tokens(segment))
+
+
+def _identity(fields: Mapping[str, Any], rendered: frozenset[str]) -> dict[str, Any]:
+    """A child's rendered, non-date, non-blank values: what tells it apart
+    from a sibling other than its dates."""
+    return {key: value for key, value in fields.items()
+            if key in rendered and not _is_date_key(key) and not _is_blank(value)}
+
+
+def _common_values(child_fields: Sequence[Mapping[str, Any]],
+                   rendered: frozenset[str], code: str) -> list[Counter[str]]:
+    """The tokens of each rendered, non-date value every child holds
+    identically (the institution all of a list's records share)."""
+    first, *rest = child_fields
+    return [_tokens(_rendered_text(key, value, code))
+            for key, value in _identity(first, rendered).items()
+            if all(fields.get(key) == value for fields in rest)]
+
+
+def _shared_context_segments(segments: Sequence[str],
+                             child_fields: Sequence[Mapping[str, Any]],
+                             rendered: frozenset[str], code: str) -> set[int]:
+    """The indexes of the undated edge segments that are context every record
+    shares, not a record's own words (see `_MAX_CONTEXT_TOKENS` above); empty
+    when the entry is not a dated list with such an edge block."""
+    dated = [i for i, segment in enumerate(segments) if _is_dated(segment)]
+    if len(dated) != len(child_fields):
+        return set()
+    identities = [_identity(fields, rendered) for fields in child_fields]
+    if all(identity == identities[0] for identity in identities[1:]):
+        return set()
+    edges = [i for i in range(len(segments)) if i < dated[0] or i > dated[-1]]
+    common = _common_values(child_fields, rendered, code)
+    if not any(_tokens(segments[i]) and not _tokens(segments[i]) - value
+               for i in edges for value in common):
+        return set()
+    return {i for i in edges if sum(_tokens(segments[i]).values()) <= _MAX_CONTEXT_TOKENS}
+
+
 def _text_to_cover(text: str, child_fields: Sequence[Mapping[str, Any]],
-                   rendered: frozenset[str]) -> str:
-    """The entry's text less its list numbers and, when every child names its
-    own role, a leading section label (see `_LEADING_LABEL_RE` above)."""
+                   rendered: frozenset[str], code: str) -> str:
+    """The entry's text less its list numbers, when every child names its own
+    role a leading section label (see `_LEADING_LABEL_RE` above), and the
+    shared context lines around a dated list (`_shared_context_segments`)."""
     text = _LIST_NUMBER_RE.sub(r'\1', text)
     roles = _ROLE_FIELDS & rendered
     if all(any(not _is_blank(fields.get(key)) for key in roles) for fields in child_fields):
         text = _LEADING_LABEL_RE.sub('', text, count=1)
-    return text
+    segments = text.split(_TEXT_SEGMENT_SEPARATOR)
+    context = _shared_context_segments(segments, child_fields, rendered, code)
+    return _TEXT_SEGMENT_SEPARATOR.join(
+        segment for i, segment in enumerate(segments) if i not in context)
 
 
 def _leaf_text(value: object) -> str:
@@ -415,7 +485,8 @@ def _fields_carry_text(entry: Mapping[str, Any],
                 held += _tokens(_rendered_text(key, value, code))
             elif _is_written_date(code, key, value, fields):
                 held += _tokens(_leaf_text(value))
-    return not _tokens(_text_to_cover(str(entry.get('text') or ''), child_fields, rendered)) - held
+    text = _text_to_cover(str(entry.get('text') or ''), child_fields, rendered, code)
+    return not _tokens(text) - held
 
 
 def _record_list(value: object, schema: frozenset[str],
