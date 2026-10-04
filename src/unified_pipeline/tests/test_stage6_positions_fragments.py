@@ -1302,6 +1302,18 @@ def test_superseded_rank_rows_reads_the_records_it_is_given():
     assert records == before
 
 
+def test_a_further_span_follows_the_appointments_own_dates():
+    """EBYSBC E22 (#1245): a second term of one appointment under
+    `additional_dates` rendered nowhere; the date cell now lists it."""
+    entry = _position_entry(1, "Attending Physician", "Fictional Valley Hospital",
+                            ["D. POSITIONS", "Hospital Appointments"],
+                            start="2001-07", end="2004-06")
+    entry["extracted_fields"]["additional_dates"] = [
+        {"start_date": "2008-07", "end_date": "2010-06"}]
+    (row,) = _render_positions([entry])
+    assert row[2] == "07/01-06/04, 07/08-06/10"
+
+
 # --- #1342 (decision 2026-10-02): the source-open-marker rule on D rows -----
 # A start-only D row renders "<start>-Present" only when its own text leaves
 # the start year open; the CV's latest D1 row (no later D1 start year) keeps
@@ -1341,6 +1353,17 @@ def test_only_the_latest_d1_row_keeps_present_without_a_marker():
         "Postdoctoral Associate": "2009",
         "Clinical Lecturer": "2012-Present",
     }
+
+
+def test_a_closed_d2_row_keeps_its_further_span_under_the_open_marker_rule():
+    """#1342's source-open-marker rule and #1245's extra spans meet on one
+    cell: a start-only D2 row with no open marker renders its bare start year,
+    and the further span stage 4 returned still follows it."""
+    entry = _texted_entry(1, "Visiting Fellow", "2014",
+                          "Visiting Fellow | Quexley Institute | 2014; 2018", code="D2")
+    entry["extracted_fields"]["additional_dates"] = [{"start_date": "2018", "end_date": "2018"}]
+    rows = _render_positions([entry], code="D2")
+    assert [row[2] for row in rows] == ["2014, 2018"]
 
 
 def test_a_d1_row_opened_with_a_two_digit_year_keeps_present():

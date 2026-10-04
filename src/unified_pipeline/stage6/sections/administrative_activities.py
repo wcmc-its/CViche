@@ -48,7 +48,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import List, Tuple, TypedDict
 
-from ..formatting import _clear_table_data, _set_font, format_date_range
+from ..formatting import (
+    _clear_table_data,
+    _set_font,
+    format_date_range,
+    with_extra_date_spans,
+)
 from ..normalization import _committee_cell_text
 from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
@@ -295,8 +300,10 @@ class AdministrativeActivitiesSection:
             # look at what extraction produced, not at the fallback's
             # rewrite.
             extracted_activity = activity
-            dates = format_date_range(record.start_date, record.end_date, taxonomy_code,
-                                      original_text) or ''
+            dates = with_extra_date_spans(
+                format_date_range(record.start_date, record.end_date, taxonomy_code,
+                                  original_text) or '',
+                fields, taxonomy_code)
 
             # #660: extraction alone already produced a complete
             # activity+dates record for this entry. Capture that BEFORE any
