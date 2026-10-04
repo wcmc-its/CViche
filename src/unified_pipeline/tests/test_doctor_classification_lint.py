@@ -186,3 +186,89 @@ def test_entries_without_a_heading_or_code_do_not_crash():
     assert _run({"element_idx_start": 1, "text": "ACLS 2020"},
                 {"element_idx_start": 2, "text": "", "taxonomy_code": "F1",
                  "hierarchy": None}) == []
+
+
+def test_evidence_cap_is_three_entries():
+    # The cap is the doctor's usual 3, not whatever the constant says.
+    assert SECTION_CONSISTENCY_EVIDENCE_MAX == 3
+    rows = [_entry(f"{2000 + i}-{2001 + i} Resident, Surgery, Invented Hospital", "D3",
+                   "Appointments", idx=20 + i) for i in range(5)]
+    findings = _run(*rows)
+    assert [e.split(":")[0] for e in findings[0]["evidence"]] == [
+        "entry 20 (D3)", "entry 21 (D3)", "entry 22 (D3)"]
+
+
+def test_codes_in_the_message_are_sorted():
+    # Six codes under one grant-review heading, given in reverse order: an
+    # unsorted set would print them in hash order.
+    codes = ["Q4A", "Q2", "Q1", "P", "O", "I"]
+    rows = [_entry(f"{2010 + i} Invented Seed Grant Program", code, "Grant Review", idx=i)
+            for i, code in enumerate(codes)]
+    findings = _run(*rows)
+    assert _shapes(findings) == ["grant_review_not_q3"]
+    assert "6 entries under 'Grant Review' coded I, O, P, Q1, Q2, Q4A;" in findings[0]["message"]
+
+
+def test_grant_review_row_coded_as_membership_is_flagged():
+    findings = _run(_entry("2016 Invented Foundation Pilot Awards", "I", "Grant Review"))
+    assert _shapes(findings) == ["grant_review_not_q3"]
+    assert "coded I;" in findings[0]["message"]
+
+
+def test_diplomate_line_filed_as_membership_is_flagged():
+    findings = _run(_entry("Diplomate, Invented Board of Widget Medicine", "I", "Memberships"))
+    assert _shapes(findings) == ["board_certification_misfiled"]
+
+
+def test_entry_with_no_heading_names_no_heading_in_the_message():
+    findings = _run(_entry("see Section 4", "H"))
+    assert "under '(no heading)' coded H" in findings[0]["message"]
+
+
+def test_entry_with_no_code_is_reported_with_an_empty_code():
+    findings = _run({"element_idx_start": 5, "text": "see Section 4",
+                     "taxonomy_code": None, "hierarchy": ["Honors"]})
+    assert findings[0]["evidence"] == ["entry 5 (): see Section 4"]
+
+
+def test_volume_and_pages_after_a_semicolon_or_comma_alone_is_a_citation():
+    # Neither citation has the 'vol(issue):page' form; each has only the
+    # '; vol:page' or ', vol: page' form.
+    semicolon = "Panel EF. A guideline on widgets. Invented Rev. 2006; 3:1250-1258."
+    comma = "Panel EF. A guideline on gadgets. Invented Rev, 6: 869-871, 2009."
+    for text in (semicolon, comma):
+        siblings = [_entry(_ARTICLE, "S1", "Writing", idx=i) for i in range(S5_MIN_SIBLINGS)]
+        findings = _run(*siblings, _entry(text, "S5", "Writing", idx=99))
+        assert _shapes(findings) == ["journal_article_as_report"], text
+
+
+def test_volume_issue_and_pages_alone_is_a_citation():
+    # '14(1):82' with no ';' or ',' before the volume.
+    text = "Panel EF. A guideline on sprockets. Invented Rev 14(1):82-113 (2021)."
+    siblings = [_entry(_ARTICLE, "S1", "Writing", idx=i) for i in range(S5_MIN_SIBLINGS)]
+    findings = _run(*siblings, _entry(text, "S5", "Writing", idx=99))
+    assert _shapes(findings) == ["journal_article_as_report"]
+
+
+def test_s5_among_s2_siblings_is_flagged():
+    siblings = [_entry(_ARTICLE, "S2", "Writing", idx=i) for i in range(S5_MIN_SIBLINGS)]
+    findings = _run(*siblings, _entry(_GUIDELINE, "S5", "Writing", idx=99))
+    assert _shapes(findings) == ["journal_article_as_report"]
+
+
+def test_not_peer_reviewed_parent_heading_quiets_s5_under_a_plain_leaf():
+    path = ("Non-Peer-Reviewed Works", "Guidelines")
+    siblings = [_entry(_ARTICLE, "S1", *path, idx=i) for i in range(S5_MIN_SIBLINGS)]
+    assert _run(*siblings, _entry(_GUIDELINE, "S5", *path, idx=99)) == []
+
+
+def test_s5_sibling_count_and_article_share_bounds_are_inclusive():
+    # Exactly S5_MIN_SIBLINGS classified siblings (the S5 included) fires.
+    siblings = [_entry(_ARTICLE, "S1", "Writing", idx=i) for i in range(S5_MIN_SIBLINGS - 1)]
+    assert _shapes(_run(*siblings, _entry(_GUIDELINE, "S5", "Writing", idx=99))) == [
+        "journal_article_as_report"]
+    # Exactly a 60% article share (3 of 5) fires.
+    rows = [_entry(_ARTICLE, "S1", "Writing", idx=i) for i in range(3)]
+    rows.append(_entry("Invented Agency. A report on widgets. 2001.", "S5", "Writing", idx=50))
+    assert _shapes(_run(*rows, _entry(_GUIDELINE, "S5", "Writing", idx=99))) == [
+        "journal_article_as_report"]

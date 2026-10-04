@@ -261,6 +261,48 @@ def test_segmentation_collapse_does_not_count_break_rows_as_entries():
     assert lint_segmentation_collapse(stage1b, stage2) == []
 
 
+def test_segmentation_collapse_counts_an_entry_on_the_synthetic_end_bound():
+    # Section bounds are inclusive: an entry at element_idx_end is inside.
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 9, 11))
+    assert "2 of 3 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_segmentation_collapse_names_the_synthetic_section_holding_the_most():
+    stage1b = _stage1b(placed=0, unplaced=2, synthetic_end=4)
+    stage1b["section_boundaries"].append(
+        {"hierarchy": ["CONTACT"], "element_idx_start": 5, "element_idx_end": 30,
+         "synthetic": True})
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 6, 7, 8))
+    assert findings[0]["evidence"][1] == (
+        "element_idx_start 5: synthetic section 'CONTACT' (to 30) holds 3 of 4 stage-2 entries")
+
+
+def test_segmentation_collapse_counts_an_entry_once_in_overlapping_synthetic_sections():
+    stage1b = _stage1b(placed=0, unplaced=2, synthetic_end=9)
+    stage1b["section_boundaries"].append(
+        {"hierarchy": ["CONTACT"], "element_idx_start": 0, "element_idx_end": 9,
+         "synthetic": True})
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 2))
+    assert "2 of 2 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_run_doctor_wires_segmentation_collapse_to_stage_1b_then_stage_2(tmp_path):
+    """The wire: LintSpec passes artifacts positionally, so swapping the
+    registry's ("stage_1b", "stage_2") would read headings from stage 2 and
+    entries from stage 1b, and the lint would go silent."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "segmentation_collapse"]
+    collapsed = _stage1b(placed=0, unplaced=3, synthetic_end=50)
+    _write_stage(root, "stage_1b_hierarchy_mapping", f"{_UID}_cv_hierarchy_mapped.json",
+                 {"document_uid": _UID, **collapsed})
+    findings = [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "segmentation_collapse"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("WARN", "section structure lost")]
+
+
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
     """The wire (#539): run_doctor hands stage 4's cv_owner to the lint, so a
     bare owner-name line is not reported while a real header still is."""
