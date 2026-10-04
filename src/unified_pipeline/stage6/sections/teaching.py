@@ -106,6 +106,7 @@ Title" or a dangling continuation line is source-table furniture, not a
 teaching activity.
 """
 import logging
+import re
 import zipfile
 from typing import TypedDict
 
@@ -114,7 +115,12 @@ from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 from docx.table import _Row
 
-from ..formatting import normalize_iso_dates_in_text
+from ..formatting import (
+    DATE_SPAN_SEPARATOR,
+    extra_date_spans,
+    normalize_iso_dates_in_text,
+)
+from ..parsing.dates import _parse_date_components
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
@@ -140,6 +146,7 @@ class _TeachingFields(TypedDict, total=False):
     fact that makes it necessary rather than defensive noise.
     """
     formatted_text: str
+    start_date: str
     course_code: str | list[str]
     course_title: str | list[str]
     institution: str
@@ -180,6 +187,11 @@ _STRUCTURAL_COLUMN_LABELS = frozenset({'title', 'institution', 'dates', 'role'})
 # it was guarding against (§8.2).
 _SEMICOLON_SPLIT_MIN_CHARS = 100
 
+# Stage 5c's own date for a record starting in `year`: the year, or a range
+# opening with it ("1982-1986", "1982 - present"). Not inside a longer number.
+_OWN_DATE_TOKEN = (r'(?<!\d){year}(?:\s*[-\u2013\u2014]\s*(?:\d{{2,4}}|present|current))?'
+                   r'(?!\d)')
+
 
 def _item_parts(text: str | None) -> list[str]:
     """Stripped, non-empty ITEMS of `text`: newlines and tabs separate items,
@@ -205,8 +217,28 @@ def _item_parts(text: str | None) -> list[str]:
 
 
 
+def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) -> str:
+    """Stage 5c's `text` with the record's other spans (`extra_date_spans`)
+    written after its own date: "1982-1986, 1989-1995, 2004-2012 - <role>".
+    Stage 5c formats from the fields and drops the spans stage 4 filed under
+    `additional_periods`/`additional_dates` (EBYSBC E22: EQADVR 33/34). The
+    own date is the first year-or-range token naming the record's start
+    year; a text with none is left as it is, since there is no date to
+    extend."""
+    extras = extra_date_spans(fields, taxonomy_code)
+    if not extras:  # also when the start has no year: extra_date_spans is [] then
+        return text
+    start_year = _parse_date_components(str(fields.get('start_date') or '').strip())[0]
+    own_date = re.search(_OWN_DATE_TOKEN.format(year=start_year), text, re.IGNORECASE)
+    if own_date is None:
+        return text
+    cut = own_date.end()
+    return DATE_SPAN_SEPARATOR.join([text[:cut], *extras]) + text[cut:]
+
+
 def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
-                          row_text: str | None = None) -> list[str]:
+                          row_text: str | None = None,
+                          taxonomy_code: str = '') -> list[str]:
     """The bullet strings one teaching entry renders as, in page order.
 
     Pure: no document, no logging, no insertion -- extracted out of
@@ -241,7 +273,7 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
             return [row_text] if row_text else original_lines
         stripped = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
         if stripped.strip():
-            return [stripped]
+            return [_with_extra_spans(stripped, fields, taxonomy_code)]
         # Stage 5c sent a formatted_text with no words in it ("   ", "**  **").
         # Bulleting it renders an empty list paragraph and throws away the raw
         # line this entry still has, so take the raw line instead; when the raw
@@ -513,7 +545,8 @@ class TeachingSection:
         # course whose cells wrap (#987): `wrapped_row_text` cannot tell them
         # apart from the text alone, and would weld the bullets into one line.
         lines = _teaching_entry_lines(fields, original_text,
-                                      row_text=None if levels else wrapped_row_text(entry))
+                                      row_text=None if levels else wrapped_row_text(entry),
+                                      taxonomy_code=str(entry.get('taxonomy_code') or ''))
         if levels and lines != raw_lines:
             levels = None  # not the raw-lines path (e.g. stage 5c prose); nothing to align
         if not lines:

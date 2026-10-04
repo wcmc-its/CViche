@@ -15,11 +15,16 @@ that decides *how a value should read* belongs in normalization.
 
 from .dates import (  # noqa: F401
     DATE_FORMATS,
+    DATE_SPAN_SEPARATOR,
+    EXTRA_SPAN_CODES,
+    EXTRA_SPAN_KEYS,
     _MONTH_NAMES,
     _source_leaves_year_open,
+    extra_date_spans,
     format_date_for_section,
     format_date_range,
     normalize_iso_dates_in_text,
+    with_extra_date_spans,
 )
 from .docx import (  # noqa: F401
     DetachedAnchorError,

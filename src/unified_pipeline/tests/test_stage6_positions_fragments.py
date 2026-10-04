@@ -1300,3 +1300,15 @@ def test_superseded_rank_rows_reads_the_records_it_is_given():
     before = copy.deepcopy(records)
     assert _superseded_rank_rows(records) == {1}
     assert records == before
+
+
+def test_a_further_span_follows_the_appointments_own_dates():
+    """EBYSBC E22 (#1245): a second term of one appointment under
+    `additional_dates` rendered nowhere; the date cell now lists it."""
+    entry = _position_entry(1, "Attending Physician", "Fictional Valley Hospital",
+                            ["D. POSITIONS", "Hospital Appointments"],
+                            start="2001-07", end="2004-06")
+    entry["extracted_fields"]["additional_dates"] = [
+        {"start_date": "2008-07", "end_date": "2010-06"}]
+    (row,) = _render_positions([entry])
+    assert row[2] == "07/01-06/04, 07/08-06/10"

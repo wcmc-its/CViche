@@ -943,3 +943,53 @@ def test_fallback_heading_skips_instruction_prose_that_mentions_it():
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+class TestFurtherSpansFollowStage5csDate:
+    """EBYSBC E22 (#1245): stage 5c formats a teaching row from its fields and
+    drops the spans stage 4 filed under `additional_periods`/`additional_dates`."""
+
+    @staticmethod
+    def _fields(formatted_text, **extra):
+        return {"formatted_text": formatted_text, "start_date": "1990",
+                "end_date": "1994", **extra}
+
+    def test_the_spans_follow_the_rows_own_date(self):
+        fields = self._fields("**1990-1994** - **Fictional Lab Director**",
+                              additional_periods=[{"start_date": "1997", "end_date": "2001"},
+                                                  {"start_date": "2006", "end_date": "2009"}])
+        assert _teaching_entry_lines(fields, "Fictional Lab Director 1990-94, 1997-2001",
+                                     taxonomy_code="K3") == [
+            "1990-1994, 1997-2001, 2006-2009 - Fictional Lab Director"]
+
+    def test_a_text_without_the_rows_own_date_is_left_alone(self):
+        fields = self._fields("Fictional Lab Director", additional_dates="2003")
+        assert _teaching_entry_lines(fields, "Fictional Lab Director 1990-94, 2003",
+                                     taxonomy_code="K1") == ["Fictional Lab Director"]
+
+    def test_years_inside_the_rows_range_add_nothing(self):
+        fields = self._fields("**1990-1994** - Fictional Course", additional_dates="1991; 1993")
+        assert _teaching_entry_lines(fields, "Fictional Course 1990-1994",
+                                     taxonomy_code="K1") == ["1990-1994 - Fictional Course"]
+
+
+def test_the_spans_skip_a_start_year_inside_a_longer_number():
+    """EBYSBC E22 (#1245): the row's own date is a whole token, not the tail
+    of a course number that ends in its start year."""
+    fields = {"formatted_text": "Fictional Course 41990 (1990-1994)", "start_date": "1990",
+              "end_date": "1994", "additional_periods": [{"start_date": "1997",
+                                                          "end_date": "2001"}]}
+    assert _teaching_entry_lines(fields, "Fictional Course 41990 1990-94, 1997-2001",
+                                 taxonomy_code="K3") == [
+        "Fictional Course 41990 (1990-1994, 1997-2001)"]
+
+
+def test_the_spans_skip_a_start_year_that_opens_a_longer_number():
+    """EBYSBC E22 (#1245): the start year at the head of a longer number (a
+    course code 19905) is not the row's own date either."""
+    fields = {"formatted_text": "Fictional Course 19905 (1990-1994)", "start_date": "1990",
+              "end_date": "1994", "additional_periods": [{"start_date": "1997",
+                                                          "end_date": "2001"}]}
+    assert _teaching_entry_lines(fields, "Fictional Course 19905 1990-94, 1997-2001",
+                                 taxonomy_code="K3") == [
+        "Fictional Course 19905 (1990-1994, 1997-2001)"]
