@@ -200,6 +200,21 @@ Lints, ranked by the severity of the failure class they catch:
                           a range whose ends are equal "2013-2013" (both
                           INFO). Before it, the 24 verified findings of
                           EBYSBC classes E9 and E21 had no doctor finding
+14r. teaching_postcheck   a teaching line stage 5c wrote, and stage 6
+                          renders, that misstates its stage-4 record: 5c's
+                          own post-check (#1349) re-applied -- a date apart
+                          from its title, a year dropped or not in the
+                          source, an echoed 'Original:' line, a role nothing
+                          names -- plus a record of a multi-record entry
+                          left out and an id tag left in (EBYSBC E20). WARN;
+                          INFO when the only reason is a role, and INFO for
+                          each line 5c's post-check rejected
+14s. contact_slot_lost    an office phone or office address stage 4
+                          extracted for Personal Data (off-schema contact
+                          keys included) that the rendered Office telephone
+                          or Office address row does not show: routed to
+                          another row, withheld as home, or read by nothing
+                          (EBYSBC E25, #1222); WARN
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -407,6 +422,12 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_llm_fallback_served,
     lint_stage_failure_recorded,
 )
+from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
+    lint_teaching_postcheck,
+)
+from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
+    lint_contact_slot_lost,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -486,6 +507,8 @@ KNOWN_LINTS = (
     "multi_record_coverage",
     "year_not_in_source",
     "date_cell_shape",
+    "teaching_postcheck",
+    "contact_slot_lost",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -620,6 +643,16 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
+    # teaching_postcheck (EBYSBC E20): 17 of the 63 runs of the EBYSBC/s7ab/
+    # pilot farm fire at any severity (10 at WARN), on origin/dev fb466a0f,
+    # measured 2026-10-04. Their stage-5c output predates #1349's post-check,
+    # which now rejects these lines, so the rate should fall toward the
+    # rejections it reports at INFO. Same mixed-corpus caveat as above.
+    "teaching_postcheck": 0.270,
+    # contact_slot_lost (EBYSBC E25): 1 of the same 63 runs on fb466a0f's
+    # render, after #1381 fixed the contact routing; 9 of 63 on the dev-242
+    # documents the autopsy read. Same mixed-corpus caveat as above.
+    "contact_slot_lost": 0.016,
 }
 
 
@@ -1146,6 +1179,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # view's row; a row may name each artifact only once.
     LintSpec("date_cell_shape", lint_date_cell_shape, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("teaching_postcheck", lint_teaching_postcheck, ("stage_5d",)),
+    LintSpec("contact_slot_lost", lint_contact_slot_lost, ("stage_4", "table_rows")),
 )
 
 
