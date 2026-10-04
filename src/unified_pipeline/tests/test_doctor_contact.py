@@ -94,3 +94,51 @@ def test_entries_of_other_codes_are_not_read():
     stage4 = {"entries": [{"element_idx_start": 4, "taxonomy_code": "D1",
                            "text": f"Phone: {_OFFICE}", "extracted_fields": {"phone": _OFFICE}}]}
     assert lint_contact_slot_lost(stage4, _pd()) == []
+
+
+def test_a_letter_label_after_the_number_is_not_the_office():
+    for label in ("(c)", "(m)", "(f)"):
+        text = f"Office: Example Hall\tPhone: {_CELL} {label}"
+        assert _lost(_a(text, phone=f"{_CELL} {label}"), _pd()) == [], label
+
+
+def test_a_label_before_a_semicolon_does_not_label_the_number():
+    stage4 = _a(f"Cell phone on request; {_OFFICE}", phone=_OFFICE)
+    assert _lost(stage4, _pd()) == [["office phone ending 0142 is in no Personal Data row"]]
+
+
+def test_a_label_before_the_previous_number_does_not_label_the_next():
+    stage4 = _a(f"Cell {_CELL}, {_OFFICE}", phone=_OFFICE)
+    assert _lost(stage4, _pd()) == [["office phone ending 0142 is in no Personal Data row"]]
+
+
+def test_a_label_far_before_the_number_does_not_label_it():
+    stage4 = _a(f"Mobile is listed in the department directory {_OFFICE}", phone=_OFFICE)
+    assert _lost(stage4, _pd()) == [["office phone ending 0142 is in no Personal Data row"]]
+
+
+def test_an_unlabelled_number_in_a_home_and_office_block_is_expected():
+    text = f"Home: 9 Sample Lane, Exampleville. Office: Example Hall, Room 1200. Phone: {_OFFICE}"
+    assert _lost(_a(text, phone=_OFFICE), _pd()) == [
+        ["office phone ending 0142 is in no Personal Data row"]]
+
+
+def test_an_office_label_on_the_value_outranks_the_entry_text():
+    stage4 = _a(f"Mobile {_OFFICE}", phone=f"Office: {_OFFICE}")
+    assert _lost(stage4, _pd()) == [["office phone ending 0142 is in no Personal Data row"]]
+
+
+def test_an_extension_alone_is_not_a_number():
+    assert _lost(_a("Example Hall", office_phone="ext. 1234"), _pd()) == []
+
+
+def test_an_address_half_shown_counts_as_shown():
+    stage4 = _a("Office: 100 Example Avenue, Sampletown", address="100 Example Avenue, Sampletown")
+    assert _lost(stage4, _pd(office_address="100 Example")) == []
+    assert _lost(stage4, _pd(office_address="100")) == [["office address is in no Personal Data row"]]
+
+
+def test_the_office_label_is_not_an_address_word():
+    address = "Home: 9 Sample Lane, Exampleville; Office: Room 1200, Example Hall"
+    stage4 = _a(address, address=address)
+    assert _lost(stage4, _pd(office_address="Room 1200")) == []

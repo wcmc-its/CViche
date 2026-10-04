@@ -133,3 +133,36 @@ def test_a_line_5c_rejected_is_reported_at_info():
     assert finding["severity"] == "INFO"
     assert finding["message"].startswith("entry 12 (K1): stage 5c rejected")
     assert "EC-0003:year_missing:2004" in finding["message"]
+
+
+def _two_titled_records(formatted, dates=("2001", "2003"), text="2001 Alpha Seminar; 2003 Beta Workshop"):
+    records = [{"activity_title": "Alpha Seminar", "date": dates[0]},
+               {"activity_title": "Beta Workshop", "date": dates[1]}]
+    return _k(40, text, {**records[1], "stage4_records": records}, formatted)
+
+
+def test_a_record_whose_title_is_left_out_warns_though_every_year_shows():
+    [finding] = _run(_two_titled_records("**2001, 2003** - Alpha Seminar"))
+    assert (finding["severity"], _reasons(finding)) == ("WARN", "record_unformatted:1 of 2")
+
+
+def test_a_record_with_half_its_title_words_shown_is_formatted():
+    assert _run(_two_titled_records("**2001, 2003** - Alpha Seminar; Beta")) == []
+
+
+def test_a_record_year_the_source_does_not_state_is_not_required():
+    entry = _two_titled_records("Alpha Seminar; Beta Workshop", dates=("2001", "2003"),
+                                text="Alpha Seminar; Beta Workshop")
+    assert _run(entry) == []
+
+
+def test_indented_sub_bullets_are_not_record_lines():
+    entry = _two_records("**1975-2000** - Example Case Leader\n  - Sample Hall\n"
+                         "**2012** - Example Case Leader")
+    [finding] = _run(entry)
+    assert _reasons(finding) == "year_missing:2005"
+
+
+def test_an_empty_formatted_text_is_not_read():
+    entry = _k(11, "2014 Example Workshop", {"activity_title": "Example Workshop", "date": "2014"}, "")
+    assert _run(entry) == []
