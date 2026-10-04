@@ -15,10 +15,12 @@ So the owner's spellings are read from the bibliography itself, once per CV:
   over the WHOLE bibliography. The owner is on nearly every paper in their own
   CV; a co-author with the same initial and a related surname is not.
 - relation: a candidate is the owner when it shares a name part with a
-  stage-4 surname, is a close spelling of one (character-trigram TF-IDF, same
-  first letter), or shares a part with a candidate already accepted. When
-  stage 4's surname names almost no citation, the one dominant candidate
-  replaces it.
+  stage-4 surname, is a close spelling of one no owner-initialled author
+  carries (character-trigram TF-IDF, same first letter), or shares a part
+  with a candidate already accepted. When stage 4's surname names almost no
+  citation and no owner-initialled author carries it, the one dominant
+  candidate replaces it. Once the owner's own spelling is in the
+  bibliography, a merely similar one is another author (#1394).
 
 Every accepted spelling is returned, with the owner's initials and the name
 parts, so the bibliography bolds an alias only on an author whose initials
@@ -54,18 +56,29 @@ _NGRAM = 3
 # Not at any capitalised word, so "Michael E. Wende" stays one author.
 _AUTHOR_SEGMENT_END = re.compile(
     r"\.\s+(?=[\"“'‘]|\S+\s+[a-z])|\(?\b(?:19|20)\d{2}\b")
+# Vancouver "Doe J, Garza Ruiz MA. Title Case Title." ends at the period after
+# the last author's initials (a surname ending lower case, then 1-4 capitals),
+# when two plain words follow -- a Title Case title the rule above misses.
+# "Michael E. Wende, ..." and "... Wende Jr, ..." are not that: the word after
+# the period is followed by a comma, "and", or its own period. A one-word
+# title ("Doe JM. Chemoprevention.") counts only after two or more initials,
+# which a given name with one middle initial never has.
+_VANCOUVER_AUTHORS_END = re.compile(
+    r"(?<=[^\W\d_])(?<![A-Z])\s+(?:[A-Z]{1,4}(?=\.\s+[^\W\d_][^\s,.]*\s+(?!(?:and|&)\s)[^\s,.]+[\s.:?])"
+    r"|[A-Z]{2,4}(?=\.\s+[^\W\d_][^\s,.]*\.\s))")
+_HYPHENS = r"\-‐‑–"
 _LEADING_NUMBER = re.compile(r"^\s*\d+[.)]\s*")
 _AUTHOR_SEPARATOR = re.compile(r"[,;&]|\band\b|\bet al\b", re.IGNORECASE)
 _MARKERS = re.compile(r"[*†‡§¶#^\d]+")
-_INITIALS = re.compile(r"^(?:[A-Z]\.?){1,3}$")
-# "M.E." or "M. E." written as separate words still reads as initials.
+# "M.E." or "M. E." written as separate words still reads as initials, and so
+# do four capitals ("HJWL") and a hyphenated pair ("H.-T"): never a surname.
+_INITIALS = re.compile(rf"^[A-Z](?:\.?[{_HYPHENS}]?[A-Z]){{0,3}}\.?$")
 _PARTICLES = frozenset((
     "van", "von", "der", "den", "de", "la", "le", "da", "di", "del", "della",
     "du", "dos", "das", "do", "bin", "ibn", "al", "el", "ter", "ten", "zu", "st",
 ))
 # An author token longer than this is a title fragment, not a name.
 _MAX_AUTHOR_WORDS = 5
-_HYPHENS = r"\-‐‑–"
 
 
 def fold_name(name: str) -> str:
@@ -93,18 +106,22 @@ class Author:
 @dataclass(frozen=True)
 class OwnerAlias:
     """The owner's surname spellings in this bibliography, most frequent
-    first, the initials an alias match must carry, and every folded name part
-    of those spellings (for widening a half-matched compound)."""
+    first, the initials an alias match must carry, every folded name part
+    of those spellings (for widening a half-matched compound), and
+    `known_parts`: every name part known to be the owner's -- those parts
+    here; the caller adds the stage-4 names it trusts."""
     surnames: tuple[str, ...] = ()
     initials: frozenset[str] = frozenset()
     parts: frozenset[str] = field(default_factory=frozenset)
+    known_parts: frozenset[str] = field(default_factory=frozenset)
 
 
 def author_segment(citation: str) -> str:
     """The citation's author list: from after any leading number to the title."""
     text = _LEADING_NUMBER.sub("", citation)
-    end = _AUTHOR_SEGMENT_END.search(text)
-    return text[:end.start()] if end else text
+    ends = [m.start() for m in (_AUTHOR_SEGMENT_END.search(text),) if m]
+    ends += [m.end() for m in (_VANCOUVER_AUTHORS_END.search(text),) if m]
+    return text[:min(ends)] if ends else text
 
 
 def _is_initials(word: str) -> bool:
@@ -209,15 +226,16 @@ def _owner_initials(given_initials: Iterable[str], surnames: Sequence[str],
                      and fold_name(s) not in carried)
 
 
-def _related(tfidf: _TfIdf, candidate: str, owner_keys: set[str]) -> bool:
-    """A shared folded part, or a close spelling with the same first letter.
-    A different first letter is never a fuzzy match: that gate keeps
-    Henderson off an Anderson CV."""
+def _related(tfidf: _TfIdf, candidate: str, owner_keys: set[str],
+             fuzzy_keys: set[str]) -> bool:
+    """A shared folded part with `owner_keys`, or a close spelling, with the
+    same first letter, of one of `fuzzy_keys`. A different first letter is
+    never a fuzzy match: that gate keeps Henderson off an Anderson CV."""
     cand_keys = _keys(candidate)
     if cand_keys & owner_keys:
         return True
     return any(c[0] == o[0] and tfidf.similarity(c, o) >= MIN_SIMILARITY
-               for c in cand_keys for o in owner_keys)
+               for c in cand_keys for o in fuzzy_keys)
 
 
 @dataclass
@@ -246,11 +264,20 @@ class _Candidates:
                       key=lambda k: (-self.coverage[k], k))
 
 
-def _accept(tfidf: _TfIdf, ranked: list[str], spelling: dict[str, str],
+def _accept(tfidf: _TfIdf, candidates: _Candidates, ranked: list[str],
             owner_keys: set[str]) -> list[str]:
     """Keys related to a stage-4 surname, then, until nothing changes, to an
-    accepted candidate by a shared part."""
-    accepted = [k for k in ranked if _related(tfidf, spelling[k], owner_keys)]
+    accepted candidate by a shared part.
+
+    A close spelling counts only for an owner key no owner-initialled author
+    carries anywhere in the bibliography: once the owner's own spelling is
+    there, even in one citation, a similar one ("Cheng M" on a "Chen M" CV,
+    "Martinez" on "Martin") is another author, not the owner misspelt. That
+    is what stops a co-author filling the citations the owner is absent from
+    on a short bibliography (#1394)."""
+    spelling = candidates.spelling
+    fuzzy_keys = {k for k in owner_keys if not candidates.coverage[k]}
+    accepted = [k for k in ranked if _related(tfidf, spelling[k], owner_keys, fuzzy_keys)]
     grown = True
     while grown:
         parts = set().union(*(_keys(spelling[k]) for k in accepted))
@@ -267,6 +294,17 @@ def _stage4_share(per_citation: list[list[Author]], surnames: Sequence[str]) -> 
     hits = sum(1 for authors in per_citation
                if any(_keys(a.surname) & wanted for a in authors))
     return hits / len(per_citation)
+
+
+def _replaceable(per_citation: list[list[Author]], stage4: Sequence[str],
+                 candidates: _Candidates, owner_keys: set[str]) -> bool:
+    """Stage 4's surname may be replaced by the dominant candidate: it names
+    under `MAX_STAGE4_SHARE` of the citations, and no owner-initialled author
+    carries it at all. A stage-4 spelling the owner does carry, however
+    rarely, is the owner's; the dominant other name is then a co-author
+    ("Cheng M" on 2 of a 3-citation "Chen M" CV, #1394)."""
+    return _stage4_share(per_citation, stage4) < MAX_STAGE4_SHARE \
+        and not any(candidates.coverage[k] for k in owner_keys)
 
 
 def infer_owner_alias(citations: Sequence[str], surnames: Iterable[str],
@@ -288,9 +326,10 @@ def infer_owner_alias(citations: Sequence[str], surnames: Iterable[str],
     ranked = candidates.ranked(needed)
     tfidf = _TfIdf(fold_name(a.surname) for authors in per_citation for a in authors)
     owner_keys = set().union(*(_keys(s) for s in stage4))
-    accepted = _accept(tfidf, ranked, candidates.spelling, owner_keys)
-    if not accepted and ranked and _stage4_share(per_citation, stage4) < MAX_STAGE4_SHARE \
+    accepted = _accept(tfidf, candidates, ranked, owner_keys)
+    if not accepted and ranked and _replaceable(per_citation, stage4, candidates, owner_keys) \
             and candidates.coverage[ranked[0]] >= MIN_REPLACEMENT * len(per_citation):
-        accepted = _accept(tfidf, ranked, candidates.spelling, _keys(candidates.spelling[ranked[0]]))
+        accepted = _accept(tfidf, candidates, ranked, _keys(candidates.spelling[ranked[0]]))
     spellings = tuple(candidates.spelling[k] for k in accepted)
-    return OwnerAlias(spellings, initials, frozenset().union(*(name_parts(s) for s in spellings)))
+    parts = frozenset().union(*(name_parts(s) for s in spellings))
+    return OwnerAlias(spellings, initials, parts, parts)

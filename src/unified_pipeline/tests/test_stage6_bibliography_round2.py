@@ -1042,6 +1042,10 @@ def test_untitled_undated_entries_are_declined_not_numbered():
     (", Wende", ", Wende"),
     # A bare trailing comma is not the "Surname, Given" form.
     ("Wende Michael,", "Wende Michael,"),
+    # Spaced initials all go (#1394).
+    ("Wende M. E.", "Wende"),
+    ("Garza Ruiz M. E.", "Garza Ruiz"),
+    ("Wende M.E.", "Wende"),
 ])
 def test_target_surname_takes_the_part_before_a_comma(target_name, surname):
     assert bibliography._target_surname(target_name) == surname
@@ -1136,11 +1140,13 @@ def _fill(entries, cv_owner, track_changes=False):
 
 
 def test_fill_bibliography_bolds_the_plausible_owner_spelling():
-    exact = _citation_entry("Wende ME, Roe B. A study. J Med. 2021;1:1-2.", None, 2021)
+    # Stage 4's spelling is on no paper; the papers' close spelling is the
+    # owner's. (With stage 4's spelling on a paper, a close one is someone
+    # else: test_stage6_owner_alias.py, #1394.)
     typos = [_citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
-             for n in range(2)]
-    gen, bolds = _fill([exact, *typos], {"last_name": "Wende", "first_name": "Michael"})
-    assert bolds == [["Wende ME"], ["Wendee ME"], ["Wendee ME"]]
+             for n in range(3)]
+    gen, bolds = _fill(typos, {"last_name": "Wende", "first_name": "Michael"})
+    assert bolds == [["Wendee ME"]] * 3
     assert gen.stats["target_names_bolded"] == 3
 
 
@@ -1205,3 +1211,92 @@ def test_fill_bibliography_bolds_two_forms_of_one_compound():
                for n, name in enumerate(["Garza", "Garza", "Ruiz", "Ruiz"])]
     _, bolds = _fill(entries, {"last_name": "Garza-Ruiz", "first_name": "Maria"})
     assert bolds == [["Garza M"], ["Garza M"], ["Ruiz M"], ["Ruiz M"]]
+
+
+# --- #1394 review: a co-author target, and the render warning ----------------
+
+def _bold_texts(entries, cv_owner):
+    _, bolds = _fill(entries, cv_owner)
+    return bolds
+
+
+def test_fill_bibliography_refuses_a_coauthor_comma_target():
+    # web207 shape: no cv_owner; stage 4's majority target is the owner, but
+    # two citations carry a co-author's "Surname, I.I." as their target. The
+    # owner bolds there instead (when present), never the co-author.
+    owner = [_citation_entry(f"Varda PL, Doe J. A study of mice {n}. J Med. 2020;1:1-2.",
+                             "Varda, P.L.", 2020) for n in range(6)]
+    with_owner = _citation_entry("Kessel KA, Varda PL. A study of rats. J Med. 2020;1:1-2.", "Kessel, K.A.", 2020)
+    without = _citation_entry("Kessel KA, Hale SE. A study of dogs. J Med. 2020;1:1-2.", "Kessel, K.A.", 2020)
+    bolds = _bold_texts([*owner, with_owner, without], {})
+    assert bolds == [["Varda PL"]] * 6 + [["Varda PL"], []]
+
+
+def test_fill_bibliography_refuses_a_coauthor_space_target():
+    # web172 shape (before #1393): co-author targets in "Surname I" form, one
+    # with the owner's initial, one without.
+    owner = [_citation_entry(f"Kestrel-Coyle J, Doe A. A study of mice {n}. J Med. 2020;1:1-2.",
+                             "Kestrel-Coyle J", 2020) for n in range(6)]
+    same_initial = _citation_entry("Bolt J, Kestrel-Coyle J. A study of rats. J Med. 2020;1:1-2.", "Bolt J", 2020)
+    other_initial = _citation_entry("Cray K, Kestrel-Coyle J. A study of dogs. J Med. 2020;1:1-2.", "Cray K", 2020)
+    bolds = _bold_texts([*owner, same_initial, other_initial], {})
+    assert bolds == [["Kestrel-Coyle J"]] * 8
+
+
+def test_fill_bibliography_keeps_a_misspelt_owner_target():
+    # A target one typo from the owner's name, with the owner's initial, is
+    # the owner (web200/web246 shape): still bolded.
+    owner = [_citation_entry(f"Talbot S, Doe A. A study of mice {n}. J Med. 2020;1:1-2.", "Talbot S", 2020)
+             for n in range(4)]
+    typo = _citation_entry("Doe A, Tallbot S. A study of rats. J Med. 2020;1:1-2.", "Tallbot S", 2020)
+    assert _bold_texts([*owner, typo], {"last_name": "Talbot", "first_name": "Sam"})[-1] == ["Tallbot S"]
+
+
+def test_fill_bibliography_keeps_the_owners_other_surname_target():
+    # MRJDWE shape: some targets carry the owner's other surname; they agree
+    # with the owner by initial, so that surname is the owner's, and a
+    # co-author target on the same CV gives way to it.
+    other = [_citation_entry(f"Nolan V, Doe A. A study of mice {n}. J Med. 2020;1:1-2.", "Nolan V", 2020)
+             for n in range(4)]
+    kerr = [_citation_entry(f"Kerr V, Doe A. A study of rats {n}. J Med. 2020;1:1-2.", "Kerr V", 2020)
+            for n in range(4)]
+    coauthor = _citation_entry("Nolan V, Sand RA. A study of dogs. J Med. 2020;1:1-2.", "Sand RA", 2020)
+    bolds = _bold_texts([*other, *kerr, coauthor], {"last_name": "Kerr", "first_name": "Vera"})
+    assert bolds == [["Nolan V"]] * 4 + [["Kerr V"]] * 4 + [["Nolan V"]]
+
+
+def test_citation_author_split_takes_every_target_with_no_confirmed_owner():
+    citation = "Cray K, Doe A" + _TAIL
+    assert bibliography._citation_author_split(citation, "Cray K", "", OwnerAlias())[1] == "Cray K"
+    alias = OwnerAlias(("Doe",), frozenset("A"), frozenset({"doe"}), frozenset({"doe"}))
+    assert bibliography._citation_author_split(citation, "Cray K", "", alias)[1] == "Doe A"
+
+
+def test_fill_bibliography_records_the_bibliography_bold_as_a_render_warning():
+    typos = [_citation_entry(f"Roe B, Wendee ME. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+             for n in range(3)]
+    gen, _ = _fill(typos, {"last_name": "Wende", "first_name": "Michael"})
+    [record] = [w for w in gen._section_failures
+                if w["check"] == bibliography.OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK]
+    assert record["severity"] == "INFO"
+    assert record["evidence"] == [f"{bibliography.OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK}=3", "owner_spellings=1"]
+    # A count, never the name.
+    assert "Wende" not in record["message"] + "".join(record["evidence"])
+
+
+def test_fill_bibliography_no_render_warning_when_stage4_names_suffice():
+    entries = [_citation_entry(f"Wende ME, Roe B. A study of mice {n}. J Med. 2020;1:1-2.", None, 2020)
+               for n in range(3)]
+    gen, _ = _fill(entries, {"last_name": "Wende", "first_name": "Michael"})
+    assert not [w for w in gen._section_failures
+                if w["check"] == bibliography.OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK]
+
+
+def test_fill_bibliography_coauthor_target_initials_are_not_the_owners():
+    # A co-author target's initial must not become an owner initial: with
+    # it, "Vard K" (close to the owner's "Varda", but initial K) would pass
+    # as the owner misspelt and bold.
+    owner = [_citation_entry(f"Varda P, Doe J. A study of mice {n}. J Med. 2020;1:1-2.", "Varda P", 2020)
+             for n in range(6)]
+    coauthor = _citation_entry("Vard K, Doe J. A study of rats. J Med. 2020;1:1-2.", "Vard K", 2020)
+    assert _bold_texts([*owner, coauthor], {})[-1] == []
