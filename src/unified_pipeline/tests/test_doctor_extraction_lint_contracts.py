@@ -2961,6 +2961,32 @@ def test_grant_boundary_reads_the_split_in_either_order():
     assert _flagged(findings) == [30]
 
 
+def test_grant_boundary_reads_a_number_alone_as_the_source_half():
+    findings = _boundary(_grant(32, "R01 XX000001", grant_number="R01 XX000001"),
+                         _grant(33, "Study of example things", title="Study of example things"))
+    assert _flagged(findings) == [32]
+
+
+def test_grant_boundary_reads_an_empty_title_as_no_title():
+    findings = _boundary(_grant(34, "Example Fund", agency="Example Fund", title=""),
+                         _grant(35, "Study of example things", title="Study of example things"))
+    assert _flagged(findings) == [34]
+
+
+def test_grant_boundary_does_not_pair_a_number_with_a_record_naming_its_sponsor():
+    """A titled entry that names its own sponsor is a whole record, not the
+    title half of the number-only entry before it."""
+    assert _boundary(_grant(36, "R01 XX000001", grant_number="R01 XX000001"),
+                     _grant(37, "Example Fund\tStudy of example things", agency="Example Fund",
+                            title="Study of example things")) == []
+
+
+def test_grant_boundary_does_not_pair_a_sponsor_line_that_carries_its_title():
+    assert _boundary(_grant(38, "Example Fund\tStudy one", agency="Example Fund",
+                            title="Study one"),
+                     _grant(39, "Study two", title="Study two")) == []
+
+
 def test_grant_boundary_does_not_pair_a_sponsor_line_that_carries_its_period():
     """A one-line record with a sponsor and dates but no title (a fellowship)
     next to a titled one with no sponsor is two whole records."""
@@ -2973,7 +2999,7 @@ def test_grant_boundary_does_not_pair_a_sponsor_line_that_carries_its_period():
 
 @pytest.mark.parametrize("opening", ["PI: A. Person", "P.I.: A. Person", "PI Name: A. Person",
                                      "Personnel: A. Person", "Percent Effort: 5%",
-                                     "% Effort: 5%"])
+                                     "% Effort: 5%", "Effort: 5%"])
 def test_grant_boundary_flags_an_entry_opening_with_a_personnel_line(opening):
     findings = _boundary(_grant(50, f"{opening}\t2001-2004\tExample Fund\tStudy",
                                 **_WHOLE_GRANT))
@@ -3022,6 +3048,20 @@ def test_grant_boundary_reads_a_label_shape_only_from_a_labelled_first_entry():
                      _grant(97, "Role: Lead\tExample Fund\tStudy", **_WHOLE_GRANT)) == []
 
 
+def test_grant_boundary_reads_a_label_shape_held_by_a_third_of_the_list():
+    """Two of six entries open with the first label: a drifted list keeps
+    under half its entries on it, so a third is the bar."""
+    findings = _boundary(_labelled(200), _labelled(202),
+                         *(_labelled(idx, "Grant Title") for idx in (204, 206, 208, 210)))
+    assert _flagged(findings) == [204, 206, 208, 210]
+
+
+def test_grant_boundary_needs_a_third_of_the_list_on_the_first_label():
+    """Two of seven is under a third: no record shape."""
+    assert _boundary(_labelled(220), _labelled(222),
+                     *(_labelled(idx, "Grant Title") for idx in range(224, 234, 2))) == []
+
+
 def test_grant_boundary_needs_three_entries_for_a_label_shape():
     assert _boundary(_labelled(90), _labelled(92, "Grant Title")) == []
 
@@ -3033,6 +3073,23 @@ def test_grant_boundary_flags_a_stray_description_after_the_first_entry():
                          _grant(104, "Other Fund\tStudy\t2005-2008", **_WHOLE_GRANT))
     assert _flagged(findings) == [102]
     assert "tail" in findings[0]["message"]
+
+
+def test_grant_boundary_reads_twelve_words_as_a_description():
+    """The word-count arm alone, with no detail field: twelve words are a
+    stray description, eleven a sub-heading."""
+    def run(count):
+        return _boundary(_grant(240, "Example Fund\tStudy", **_WHOLE_GRANT),
+                         _grant(242, " ".join(["word"] * count)),
+                         _grant(244, "Other Fund\tStudy", **_WHOLE_GRANT))
+    assert _flagged(run(12)) == [242]
+    assert run(11) == []
+
+
+def test_grant_boundary_needs_two_detail_fields_for_a_stray_tail():
+    assert _boundary(_grant(250, "Example Fund\tStudy", **_WHOLE_GRANT),
+                     _grant(252, "2002", start_date="2002"),
+                     _grant(254, "Other Fund\tStudy", **_WHOLE_GRANT)) == []
 
 
 def test_grant_boundary_flags_a_stray_tail_of_detail_fields():
@@ -3122,7 +3179,9 @@ def _bucket(heading, rendered_under, year=2026, code="M2B", **fields):
 
 @pytest.mark.parametrize("heading", [["Grants Applied"], ["Grant Applications"],
                                      ["Research", "Proposals Submitted"], ["Not Funded"],
-                                     ["Submitted But Not Funded Research Grants"]])
+                                     ["Submitted But Not Funded Research Grants"],
+                                     ["Non-Funded Proposals"], ["Non Funded Proposals"],
+                                     ["Grant Applications", "Federal"]])
 @pytest.mark.parametrize("rendered_under", ["M2A", "M2B"])
 def test_grant_bucket_flags_an_application_rendered_as_an_award(heading, rendered_under):
     findings = _bucket(heading, rendered_under)
@@ -3198,10 +3257,22 @@ def test_grant_bucket_judges_the_end_date_against_the_year_it_is_given():
     assert _bucket(["Ongoing"], "M2A", year=2025, code="M2A", **fields) == []
 
 
+def test_grant_bucket_defaults_to_this_year():
+    entry = _grant(230, _BUCKET_TEXT, ["Ongoing"], code="M2A", start_date="1990",
+                   end_date="2001")
+    findings = lint_grant_bucket({"entries": [entry]}, _blocks_under("M2A", _BUCKET_TEXT))
+    assert len(findings) == 1 and "reads as 2001" in findings[0]["message"]
+
+
+def test_grant_bucket_ignores_non_grant_codes():
+    assert _bucket(["Grants Applied"], "M2B", code="D1") == []
+
+
 @pytest.mark.parametrize("end, start, expected", [
     ("8/30/1", "9/1/07", 2011), ("5/30/13", "5/1/08", 2013), ("6/30/0", "2010", 2010),
     ("2/28/05", "1999", 2005), ("8/30", "2001", 2030), ("", "2001", None),
-    ("8/30/1", "", None),
+    ("8/30/1", "", None), ("8-30-1", "2007", 2011), ("8.30.1", "2007", 2011),
+    ("6/30/13", "1995", 2013),  # two digits read modulo 100
 ])
 def test_short_end_year(end, start, expected):
     assert _short_end_year(end, start, 2026) == expected

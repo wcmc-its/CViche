@@ -2359,6 +2359,8 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
 GRANT_CODES = tuple(code for code, _title in _FUNDING_SECTIONS)
 #: A label opening an entry's first line or cell ("Agency:", "Grant Title:",
 #: "P.I.:", "% Effort:"), and the same label anywhere a line or cell starts.
+#: The label cannot run across a tab, newline or " | ", so matching the
+#: whole text reads only its first line or cell.
 _GRANT_LABEL = r"[\s*]*([A-Za-z%][A-Za-z.%#/ ]{0,24}?)\s*:"
 _GRANT_HEAD_LABEL_RE = re.compile(rf"^{_GRANT_LABEL}")
 _GRANT_LINE_LABEL_RE = re.compile(rf"(?:^|\t|\n|\s\|\s){_GRANT_LABEL}")
@@ -2409,7 +2411,7 @@ def _grant_label(label: str) -> str:
 def _grant_entry(raw: dict) -> GrantEntry:
     text = str(raw.get("text") or "")
     fields = raw.get("extracted_fields")
-    head = _GRANT_HEAD_LABEL_RE.match(_STRONG_SEPARATOR_RE.split(text.strip())[0])
+    head = _GRANT_HEAD_LABEL_RE.match(text.strip())
     return GrantEntry(
         raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
         fields if isinstance(fields, Mapping) else {},
