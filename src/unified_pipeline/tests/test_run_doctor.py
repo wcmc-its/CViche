@@ -234,6 +234,26 @@ def test_segmentation_collapse_quiet_at_half_placed_and_a_small_preamble():
     assert lint_segmentation_collapse(stage1b, _stage2_at(1, 11, 12, 21, 22)) == []
 
 
+def test_segmentation_collapse_quiet_when_the_preamble_holds_exactly_half():
+    # The synthetic share must be OVER half: 2 of 4 entries is quiet.
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    assert lint_segmentation_collapse(stage1b, _stage2_at(1, 2, 11, 21)) == []
+
+
+def test_segmentation_collapse_counts_headings_nested_under_children():
+    # Stage 1b nests subheadings under `children`: one placed parent with
+    # three unplaced children is 1 of 4 placed, not 1 of 1.
+    stage1b = _stage1b(placed=1, unplaced=0)
+    stage1b["hierarchy_with_indices"][1]["children"] = [
+        {"text": f"SUB {i}", "element_idx": None, "synthetic": False,
+         "children": [{"text": f"SUBSUB {i}", "element_idx": None, "synthetic": False}]
+         if i == 0 else []}
+        for i in range(2)]
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(11, 12))
+    assert len(findings) == 1
+    assert "1 of 4 headings placed" in findings[0]["message"]
+
+
 def test_segmentation_collapse_does_not_count_break_rows_as_entries():
     stage1b = _stage1b(placed=2, unplaced=0, synthetic_end=9)
     stage2 = _stage2_at(11, 21)
@@ -4396,6 +4416,15 @@ def test_date_cell_shape_prevalence_is_the_measured_farm_fraction():
     new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["date_cell_shape"] == round(19 / 63, 3)
+
+
+def test_classification_lint_prevalence_is_the_measured_farm_fraction():
+    """Measured 2026-10-04 over the 63-run EBYSBC/s7ab/pilot farm's stage
+    1b/2/3b artifacts (one fire per run at any severity); a new measurement
+    updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["section_consistency"] == round(23 / 63, 3)
+    assert LINT_PREVALENCE["segmentation_collapse"] == round(1 / 63, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

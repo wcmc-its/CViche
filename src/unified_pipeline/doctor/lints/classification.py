@@ -73,6 +73,8 @@ INTERNAL_COMMITTEE_CODES = frozenset({"P", "O"})
 #: same heading is a segmentation slip, not this shape.
 NOT_GRANT_REVIEW_CODES = frozenset({"Q1", "Q2", "Q4A", "Q4B", "Q4C", "Q4D", "P", "O", "I"})
 UNCLASSIFIED_CODE = "T"
+#: Researcher Profile & Bibliometric Summary (core/taxonomy_v7.json).
+PROFILE_SUMMARY_CODE = "S0"
 
 
 class HeadingCodeRule(NamedTuple):
@@ -136,13 +138,18 @@ HEADING_CODE_RULES: tuple[HeadingCodeRule, ...] = (
         "thesis_committee_as_committee", "N3A/N3B (mentoring)",
         heading=re.compile(r"thes[ie]s|dissertation", re.IGNORECASE),
         wrong_codes=INTERNAL_COMMITTEE_CODES),
-    # KDAZOM-11, OTBUCZ-04, SJWASY-03: a line that only points elsewhere, or
-    # a bare URL, is not a record.
+    # KDAZOM-11, OTBUCZ-04: a line that only points elsewhere is not a record.
     HeadingCodeRule(
         "cross_reference_as_record", "T (not a record)",
-        text=re.compile(r"^\W*(?:https?://|www\.)\S+\W*$|\bsee (?:section|publication|item|#|appendix)",
-                        re.IGNORECASE),
+        text=re.compile(r"\bsee (?:section|publication|item|#|appendix)", re.IGNORECASE),
         allowed_codes=frozenset({UNCLASSIFIED_CODE})),
+    # SJWASY-03: nor is a bare URL -- unless it is coded S0, whose taxonomy
+    # entry (Researcher Profile & Bibliometric Summary) lists a bare profile
+    # or bibliography URL as a typical entry.
+    HeadingCodeRule(
+        "cross_reference_as_record", "T (not a record)",
+        text=re.compile(r"^\W*(?:https?://|www\.)\S+\W*$", re.IGNORECASE),
+        allowed_codes=frozenset({UNCLASSIFIED_CODE, PROFILE_SUMMARY_CODE})),
 )
 
 

@@ -640,12 +640,12 @@ LINT_PREVALENCE = {
     # still prints '-Present' under the 2026-10-02 decision on #1342, are
     # most of what is left. Same mixed-corpus caveat as above.
     "date_cell_shape": 0.302,
-    # section_consistency (EBYSBC E11/E30): 24 of the 63 runs of the
+    # section_consistency (EBYSBC E11/E30): 23 of the 63 runs of the
     # EBYSBC/s7ab/pilot farm, and segmentation_collapse (E17): 1 of 63
     # (DPEHSZ), one fire per CV, over the farm's stage 1b/2/3b artifacts,
     # measured 2026-10-04. Both lints read only those artifacts, so the
     # render arm does not matter. Same mixed-corpus caveat as above.
-    "section_consistency": 0.381,
+    "section_consistency": 0.365,
     "segmentation_collapse": 0.016,
 }
 

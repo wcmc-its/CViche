@@ -18,10 +18,9 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 | id | date | doctor code | runs scored | labels | issue |
 |---|---|---|---|---|---|
 | M1 | 2026-10-02 | origin/dev `c3d87c5f`, over the base render of the same SHA | 62 of the 63-run farm: EBYSBC 40, s7ab 10, pilot 12 (the 13th pilot run has no verified autopsy) | 516 verified findings (EBYSBC 312, s7ab 112, pilot 92), 487 of them carrying an entry index; 186 EBYSBC verdicts | #819 |
-
 | W3B-SC | 2026-10-04 | origin/dev `fb466a0f` plus `section_consistency` and `segmentation_collapse`, over the base render of `fb466a0f` | 62 of the 63-run farm, as M1 | as M1 | EBYSBC E11/E30/E17 |
 
-W3B-SC hand-checked every hit of its two lints (29 and 1), not only the unmatched ones: all 30 were the shape they name. The 15 unmatched `section_consistency` hits are 8 grant-review headings whose rows are not Q3, 3 journal guideline or protocol articles coded S5 under peer-reviewed headings or among peer-reviewed siblings, 2 BLS/ACLS/PALS lines coded F1/F2, 1 bare URL coded S0 and 1 grant-review heading whose rows are coded I. The rules were written from these same 63 runs, so the precision is in-sample.
+W3B-SC hand-checked every hit of its two lints, not only the unmatched ones. The first version of `section_consistency` had 29 hits, and a blind verifier found one false positive: MQSUIC 241, a bare bibliography URL coded S0, which `src/unified_pipeline/core/taxonomy_v7.json` lists as a typical S0 entry. That made it 28 of 29 (97%). The bare-URL branch of `cross_reference_as_record` now allows S0, which removes exactly that hit, so the shipped lint is 28 of 28 (every hit checked). The 14 unmatched `section_consistency` hits are 7 grant-review headings whose rows are coded Q2, 1 grant-review heading whose rows are coded I (SJWASY), 4 journal guideline or protocol articles coded S5 under a peer-reviewed heading or among peer-reviewed siblings (RGUNJV, VYICGW, ZGBCIT twice), and 2 BLS/ACLS/PALS lines coded F1/F2. The rules were written from these same 63 runs, so the precision is in-sample.
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -41,7 +40,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `offschema_fields` | 47 | 14 | 16 / 2 / 5 | 16 / 23 (70%) | 34 / 47 (72%) | 28 | M1 |
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
-| `section_consistency` | 29 | 29 | none | 29 / 29 hand-checked (100%) | 14 / 29 (48%) | 14 | W3B-SC |
+| `section_consistency` | 28 | 28 | none | 28 / 28 hand-checked (100%) | 14 / 28 (50%) | 14 | W3B-SC |
 | `section_lost` | 1 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | names text | 0 | M1 |
 | `segmentation_collapse` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | W3B-SC |
 | `stage4_group_failures` | 1 | 1 | none | none | names text | 0 | M1 |

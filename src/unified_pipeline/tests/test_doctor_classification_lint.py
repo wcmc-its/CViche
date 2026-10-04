@@ -109,10 +109,19 @@ def test_thesis_committee_block_filed_as_committee_is_flagged():
 
 def test_cross_reference_line_or_bare_url_filed_as_a_record_is_flagged():
     findings = _run(
-        _entry("Teaching Awards - See Section 5", "H", "Teaching Record", idx=154),
-        _entry("http://example.org/academy.html", "K4", "Appendix", idx=641))
+        _entry("Honors listed elsewhere - see Section 9", "H", "Invented Record", idx=154),
+        _entry("http://example.org/widgets/page.html", "K4", "Appendix", idx=641))
     assert sorted(_shapes(findings)) == ["cross_reference_as_record"] * 2
-    assert _run(_entry("http://example.org/academy.html", "T", "Appendix")) == []
+    assert _run(_entry("http://example.org/widgets/page.html", "T", "Appendix")) == []
+
+
+def test_bare_url_coded_s0_is_quiet_but_a_cross_reference_coded_s0_is_not():
+    # S0 (Researcher Profile & Bibliometric Summary) lists a bare profile or
+    # bibliography URL among its typical entries.
+    assert _run(_entry("https://example.org/bibliography/widgets/public/", "S0",
+                       "Bibliography")) == []
+    findings = _run(_entry("Publications - see Appendix 2", "S0", "Bibliography"))
+    assert _shapes(findings) == ["cross_reference_as_record"]
 
 
 def test_cross_reference_inside_a_record_is_quiet():
@@ -141,6 +150,16 @@ def test_s5_under_a_non_peer_reviewed_heading_or_among_reports_is_quiet():
         _entry(_GUIDELINE, "S5", "Other Articles (Non-refereed Journals)"),
         *reports,
         _entry(_GUIDELINE, "S5", "Other Writing", idx=99)) == []
+
+
+def test_unclassified_siblings_do_not_dilute_the_peer_reviewed_share():
+    # 5 S1 and the S5 itself: 5 of 6 classified siblings are articles. Ten
+    # unclassified (T) rows under the same heading must not drag that share
+    # under the bar.
+    siblings = [_entry(_ARTICLE, "S1", "Writing", idx=i) for i in range(S5_MIN_SIBLINGS)]
+    unclassified = [_entry("Invented note", "T", "Writing", idx=40 + i) for i in range(10)]
+    findings = _run(*siblings, *unclassified, _entry(_GUIDELINE, "S5", "Writing", idx=99))
+    assert _shapes(findings) == ["journal_article_as_report"]
 
 
 def test_s5_without_volume_and_pages_among_articles_is_quiet():
