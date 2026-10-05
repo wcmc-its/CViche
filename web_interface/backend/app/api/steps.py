@@ -249,7 +249,8 @@ def download_input_file(
         if as_url:
             # The S3 bucket has no CORS, so the page can't fetch() the presigned
             # URL itself; it navigates to it. With no URL it navigates here.
-            return JSONResponse(content={"url": url})
+            # A presigned URL is a short-lived credential: never cache it.
+            return JSONResponse(content={"url": url}, headers={"Cache-Control": "no-store"})
         if url:
             return RedirectResponse(url, status_code=307)
         data = storage.get_file(run_id, key)
