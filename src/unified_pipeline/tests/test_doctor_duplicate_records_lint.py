@@ -142,9 +142,31 @@ def test_one_letter_tolerance_needs_a_long_body():
     short = "Example Widget Society meeting talk on rotors"  # 46 characters
     blocks = [("p", "D. TALKS"), ("p", f"1. {short}"), ("p", f"2. {short}s")]
     assert lint_duplicate_records(blocks) == []
-    long_body = short + ", Example City, Example State"
+    long_body = short + ", Example City, Example State, 12:34"
     assert len(long_body) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
     blocks = [("p", "D. TALKS"), ("p", f"1. {long_body}"), ("p", f"2. {long_body}s")]
+    assert len(lint_duplicate_records(blocks)) == 1
+
+
+@pytest.mark.parametrize("tail, fires", [
+    ("2018.", False),                 # authors, title and year: one per meeting
+    ("2018, 2019.", False),           # years only
+    ("Example Abstr. 2018;12:345.", True),  # a volume and a page
+    ("2018. p. 12.", True),           # a page
+])
+def test_one_letter_tolerance_needs_a_volume_or_page(tail, fires):
+    """126-run farm/batch corpus (web218, web227 twice, web244): the CV lists
+    one abstract once per meeting, the render leaves the meeting out, and
+    the two bodies end up one letter apart. Only a body naming where it was
+    published (a number besides its years) is one record listed twice."""
+    body = ("Sample AB, Example CD. Rotor mechanisms shaping widget speed in "
+            f"example assemblies under load. {tail}")
+    assert len(body) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
+    other = body.replace("Rotor mechanisms", "Rotors mechanisms")
+    blocks = [("p", "D. ABSTRACTS"), ("p", f"1. {body}"), ("p", f"2. {other}")]
+    assert len(lint_duplicate_records(blocks)) == (1 if fires else 0)
+    # An exact repeat still counts with no volume or page.
+    blocks = [("p", "D. ABSTRACTS"), ("p", f"1. {body}"), ("p", f"2. {body}")]
     assert len(lint_duplicate_records(blocks)) == 1
 
 

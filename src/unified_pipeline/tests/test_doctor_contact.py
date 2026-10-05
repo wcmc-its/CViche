@@ -158,7 +158,7 @@ def test_a_number_stage4_also_filed_as_home_is_not_expected():
 def test_an_office_keyed_address_beside_a_home_address_is_expected():
     """RCBKFG CAOACN (#1222): `address` holds the home address, which is
     withheld, and the office one is under `work_address`, which stage 6
-    reads only when `address` is empty."""
+    routes into the empty Office slot (#1425) unless it repeats `address`."""
     text = f"Address: home: 9 Sample Lane, Exampleville, NY 10002\twork: {_STREET}"
     stage4 = _a(text, address="9 Sample Lane, Exampleville, NY 10002", work_address=_STREET)
     assert _lost(stage4, _pd()) == [["office address is in no Personal Data row"]]
@@ -167,3 +167,7 @@ def test_an_office_keyed_address_beside_a_home_address_is_expected():
                     work_address="Department of Example Studies")
     assert _lost(department, _pd()) == []
     assert _lost(_a(text, address="9 Sample Lane, Exampleville, NY 10002"), _pd()) == []
+    # The home value copied under the office key too stays withheld.
+    copied = _a(text, address="9 Sample Lane, Exampleville, NY 10002",
+                work_address="9 Sample Lane, Exampleville, NY 10002.")
+    assert _lost(copied, _pd()) == []
