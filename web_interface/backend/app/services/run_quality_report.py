@@ -509,6 +509,13 @@ LINT_COPY = {
         "co-investigator on a grant the CV lists you first on.",
         "Check the principal investigator and your role on each flagged grant against the "
         "source CV and correct them."),
+    "fanout_cell_residue": LintCopy(
+        "Leftover text in a split record's row",
+        "A CV line that lists several roles or terms was split into one row each, and a row "
+        "prints text from the other rows (their years, their role, or a cut-off year such as "
+        "'93') in its organization or committee column.",
+        "Delete the leftover text from the quoted rows, and fill in the organization from the "
+        "source CV if it has one."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
