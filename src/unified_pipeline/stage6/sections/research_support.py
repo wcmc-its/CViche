@@ -880,6 +880,20 @@ PI_LABEL_PATTERNS = (
 # owner being the grant's PI. "Sole" is the only qualifier the corpus carries
 # that still means the PI; "Contact PI" does not occur, so it is not accepted.
 OWNER_IS_PI_ROLE_RE = re.compile(r"\(?\s*(?:sole\s+)?p\.?\s*i\.?\s*\)?\s*:?", re.IGNORECASE)
+# The long form "principal investigator", hyphen or space between the words.
+_PI_PHRASE = r"principal[\s-]*investigator"
+_PI_PHRASE_RE = re.compile(_PI_PHRASE, re.IGNORECASE)
+# A long-form PI phrase that makes the owner someone other than the grant's PI
+# (#1455): a co-, sub-, subcontract-, site-, multiple-/multi- or M- prefix
+# ("Co-Principal Investigator", "Yale Site Principal Investigator",
+# "Multiple Principal Investigator"), or "... of subcontract" after it
+# ("Subcontractor (Principal Investigator of subcontract)"). The lookbehind keeps
+# a prefix from matching a word's tail ("Program Principal ..." is not "M-").
+# Survey of the eo/ndm/eb farms' stage-4 pi_role/role values, 2026-10-05.
+_QUALIFIED_PI_PHRASE_RE = re.compile(
+    r"(?<![^\W\d_])(?:co|sub|subcontract|site|multiple|multi|m)[\s-]*" + _PI_PHRASE
+    + r"|" + _PI_PHRASE + r"\s+of\s+(?:an?\s+|the\s+)?sub-?contract",
+    re.IGNORECASE)
 _NAME_JOINER_RE = re.compile(r" (?:&|and) ")
 _NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
 
@@ -1028,13 +1042,18 @@ def resolve_pi_name(
 def _role_names_owner_as_pi(role: str) -> bool:
     """True when the owner's role says they are the grant's PI.
 
-    Any role containing "principal" and "investigator" (which also takes
-    "Co-Principal Investigator" and "Site Principal Investigator", unchanged
-    from before), or a bare PI label (`OWNER_IS_PI_ROLE_RE`).
+    A role containing "principal" and "investigator", unless every
+    "principal investigator" phrase in it is a co-/site-/sub-/multiple-PI form
+    (`_QUALIFIED_PI_PHRASE_RE`, #1455): "Co-Principal Investigator" made the
+    owner the grant's PI. One unqualified phrase is enough ("Co-Principal
+    Investigator 2005-2010; Principal Investigator 2010-2011"). Or a bare PI
+    label (`OWNER_IS_PI_ROLE_RE`).
     """
     lowered = role.lower()
     if 'principal' in lowered and 'investigator' in lowered:
-        return True
+        if not _PI_PHRASE_RE.search(role):
+            return True
+        return _PI_PHRASE_RE.search(_QUALIFIED_PI_PHRASE_RE.sub(' ', role)) is not None
     return OWNER_IS_PI_ROLE_RE.fullmatch(role) is not None
 
 
