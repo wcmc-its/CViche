@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ArrowLeft, Ban, CheckCircle2, Download, Loader2, XCircle } from 'lucide-react'
 import { runRoutes } from '../api/routes'
+import { getInputFileUrl } from '../api/runs'
+import type { ApiError } from '../api/client'
 import { formatCost, formatDate, formatDuration, formatTimeLeft } from '../utils'
 import { useCanSeeCost } from '../contexts/AuthContext'
 import { groupStepsIntoPhases } from './StepSidebar'
@@ -36,6 +38,9 @@ interface PipelineHeaderProps {
    *  run): the Cancel button is not rendered. */
   onCancel?: () => void
   onBack: () => void
+  /** Shows an error message the way the page shows its others (a refused
+   *  "Original file" download, e.g. still being scanned for malware). */
+  onError: (message: string) => void
   /** Complete runs: shows the "Pipeline details" toggle. */
   detailsOpen?: boolean
   onToggleDetails?: () => void
@@ -105,6 +110,7 @@ export default function PipelineHeader({
   isCancelling,
   onCancel,
   onBack,
+  onError,
   detailsOpen,
   onToggleDetails,
   children,
@@ -124,6 +130,21 @@ export default function PipelineHeader({
       setStartedAt(Date.now() - elapsedSeconds * 1000)
     }
   }, [isRunning, startedAt, elapsedSeconds])
+
+  // A plain <a download> turned a refusal (409 still being scanned, 403 flagged)
+  // into a silent failed download, so ask for the URL first (#1333). The S3
+  // bucket has no CORS, so the browser navigates to the URL rather than fetching it.
+  const [isFetchingOriginal, setIsFetchingOriginal] = useState(false)
+  const downloadOriginal = async () => {
+    if (isFetchingOriginal) return
+    setIsFetchingOriginal(true)
+    try {
+      const url = await getInputFileUrl(runId)
+      window.location.href = url ?? runRoutes.inputFile(runId)
+    } catch (err) {
+      onError(`Failed to download the original file: ${(err as ApiError).message || 'Unknown error'}`)
+    } finally { setIsFetchingOriginal(false) }
+  }
 
   const phases = groupStepsIntoPhases(steps)
   const bars = phases.map((phase) => {
@@ -171,15 +192,16 @@ export default function PipelineHeader({
               <StatusPill status={status} />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[13px] text-gray-500">
-              <a
-                href={runRoutes.inputFile(runId)}
-                download
+              <button
+                type="button"
+                onClick={downloadOriginal}
+                disabled={isFetchingOriginal}
                 title="Download the original uploaded CV"
                 className="group inline-flex items-center gap-1.5 text-gray-700 hover:text-primary-600 hover:underline"
               >
                 Original file
                 <Download className="h-3.5 w-3.5 shrink-0 opacity-60 group-hover:opacity-100" aria-hidden="true" />
-              </a>
+              </button>
               {title && title !== filename && <span className="min-w-0 [overflow-wrap:anywhere]">{filename}</span>}
               <span>Run {runId}</span>
               {isRunning && startedAt !== null && (

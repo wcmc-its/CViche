@@ -440,6 +440,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           isCancelling={isCancelling}
           onCancel={canAct ? handleCancel : undefined}
           onBack={onBack}
+          onError={setApiError}
           detailsOpen={isComplete ? showDetails : undefined}
           onToggleDetails={isComplete ? () => setDetailsOverride(!showDetails) : undefined}
         >
