@@ -27,6 +27,7 @@ from copy import deepcopy
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from lxml.etree import _Element
 
 from ..core.template_boilerplate import (
@@ -79,6 +80,12 @@ _DROP = frozenset(qn(t) for t in (
 _UNWRAP = frozenset(qn(t) for t in (
     "w:ins", "w:moveTo", "w:hyperlink", "w:smartTag", "w:customXml", "w:sdt", "w:sdtContent",
 ))
+# The output's style defaults are the theme font, not the template's: every
+# section writer sets Arial 11pt on each run (`formatting.docx._set_font`), so a
+# copy whose source fonts were stripped must carry the same, or it renders in
+# Calibri/Aptos beside the written sections (VFHFER, 2026-10-05).
+COPY_FONT_NAME = "Arial"
+COPY_FONT_PT = 11
 _W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 _ID_ATTRS = (f"{{{_W14}}}paraId", f"{{{_W14}}}textId")
 
@@ -181,7 +188,7 @@ def clean_copy(el: _Element) -> _Element:
 
     Tracked insertions accepted, deletions and comments dropped; references
     into the source package (styles, numbering, images, hyperlink targets,
-    footnotes) removed so the output's own defaults apply."""
+    footnotes) removed; every run set to the template's Arial 11pt."""
     copy = deepcopy(el)
     for node in list(copy.iter()):
         if node.tag in _DROP and node.getparent() is not None:
@@ -198,6 +205,11 @@ def clean_copy(el: _Element) -> _Element:
         for attr in _ID_ATTRS:
             node.attrib.pop(attr, None)
         node.attrib.pop(qn("r:id"), None)
+    for run in copy.iter(qn("w:r")):
+        rpr = run.get_or_add_rPr()
+        rpr.rFonts_ascii = rpr.rFonts_hAnsi = COPY_FONT_NAME
+        rpr.rFonts.set(qn("w:cs"), COPY_FONT_NAME)
+        rpr.sz_val = Pt(COPY_FONT_PT)
     return copy
 
 

@@ -130,3 +130,16 @@ def test_clean_copy_accepts_insertions_and_drops_source_references():
         assert next(copy.iter(qn(tag)), None) is None, tag
     assert not any(qn("r:id") in node.attrib for node in copy.iter())
     assert sb.element_text(p) == "kept inserted linked"  # the source is untouched
+
+
+def test_clean_copy_sets_every_run_to_the_template_font():
+    """Stripped source fonts must not fall back to the theme font (VFHFER J table in Calibri)."""
+    p = _paragraph('<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:sz w:val="16"/></w:rPr>'
+                   '<w:t>bold </w:t></w:r><w:ins w:id="1" w:author="a"><w:r><w:t>plain</w:t></w:r></w:ins>')
+    runs = list(sb.clean_copy(p).iter(qn("w:r")))
+    assert len(runs) == 2
+    for run in runs:
+        fonts = run.rPr.rFonts
+        assert [fonts.get(qn(f"w:{a}")) for a in ("ascii", "hAnsi", "cs")] == [sb.COPY_FONT_NAME] * 3
+        assert run.rPr.sz_val.pt == sb.COPY_FONT_PT
+    assert runs[0].rPr.b is not None  # emphasis survives
