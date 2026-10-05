@@ -404,9 +404,64 @@ def test_principal_investigator_role_auto_fills_cv_owner():
 
 
 def test_non_pi_role_does_not_auto_fill_cv_owner():
-    """The auto-fill needs both "principal" and "investigator"; a Co-I gets nothing."""
+    """A Co-I gets nothing; the long-form auto-fill needs "principal" and "investigator"."""
     assert resolve_pi_name({}, '', 'Co-Investigator', 'Ada Testowner') == ''
     assert resolve_pi_name({}, '', 'Principal Investigator', 'Ada Testowner') == 'Ada Testowner'
+
+
+def test_bare_pi_role_auto_fills_cv_owner_through_the_grant_table():
+    """Stage 4 writes the owner's role as a bare "PI" since #1410 (JIJRSN-01).
+
+    Driven through `_fill_research_support`, the same wire as the long form, so
+    the owner reaches the rendered "Name of Principal Investigator:" cell.
+    """
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Owner Led Trial', agency='NIH',
+                        pi_role='PI', start_date='01/2019', end_date='Present')]},
+        cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
+        current_year=TEST_YEAR)
+
+    cells = _cells(_tables_under(gen, CURRENT)[0])
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
+    assert cells['Your role:'] == 'PI'
+
+
+@pytest.mark.parametrize('role', [
+    'PI', 'pi', ' PI ', 'P.I.', 'P.I', 'P. I.', 'p.i.', '(PI)', '( PI )', '(PI) ', 'PI:', 'PI :',
+    'Sole PI', 'sole P.I.',
+])
+def test_bare_pi_role_forms_auto_fill_cv_owner(role):
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
+
+
+@pytest.mark.parametrize('role', [
+    'Co-PI', 'co-PI', 'Co-P.I.', 'Co PI', 'Co-I', 'Sub-PI', 'Subcontract PI', 'MPI', 'M-PI',
+    'Multi-PI', 'Multiple PI', 'Contact MPI', 'Site PI', 'PI-DDN', 'Pilot', 'Pi Beta', 'P', 'I',
+])
+def test_pi_roles_that_are_not_the_owner_as_pi_do_not_auto_fill(role):
+    """A whole-role match: a qualifier that makes someone else the PI never fires."""
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == ''
+
+
+def test_long_form_rule_is_unchanged_for_co_principal_investigator():
+    """The "principal" + "investigator" test still fires on its long forms.
+
+    That includes "Co-Principal Investigator" and "Site Principal
+    Investigator", as before this change; "Co-PI" does not (above). The bare
+    form is not widened to match the long form's reach.
+    """
+    for role in ('Co-Principal Investigator', 'Site Principal Investigator'):
+        assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
+    assert resolve_pi_name({}, '', 'Principle Investigator', 'Ada Testowner') == ''
+
+
+def test_a_named_pi_beats_the_owner_on_a_bare_pi_role():
+    """The bare-PI auto-fill runs last: an extracted or labelled PI wins."""
+    assert resolve_pi_name({'pi_name': 'Jane Smith'}, '', 'PI', 'Ada Testowner') == 'Jane Smith'
+    assert resolve_pi_name({}, 'Ellison Foundation (PI: Holloway)', 'PI',
+                           'Ada Testowner') == 'Holloway'
+    assert resolve_pi_name({}, 'PI', 'PI', '') == ''
 
 
 def test_extracted_pi_name_beats_the_cv_owner():
