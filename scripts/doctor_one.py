@@ -11,6 +11,10 @@ substitution, and standalone to (re)doctor any local run):
 
   stdout  ONE machine-readable TSV line -- the program's output, not a log:
             worst<TAB>nERROR<TAB>nWARN<TAB>nINFO<TAB>top_lints
+          top_lints is up to four comma-separated `lint:count (p~0.50 n=8)`
+          items: each lint's hand-checked precision from
+          doctor/PRECISION.md (#819), or `(p unmeasured)`. A report without a
+          `lint_precision` block prints the bare `lint:count`.
   stderr  diagnostics only (the batch runner appends these to the per-CV log)
   exit 1  the doctor could not run; the caller substitutes an 'error' row
 
@@ -33,6 +37,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from unified_pipeline.doctor.precision import UNMEASURED_LABEL
 from unified_pipeline.run_doctor import rank_lints, run_doctor
 
 logger = logging.getLogger(__name__)
@@ -64,6 +69,16 @@ def _metrics_tsv_row(uid: str, metrics: dict) -> str:
         else:
             cells.append(str(value))
     return "\t".join(cells)
+
+
+def _top_lint_item(lint: str, count: int, lint_precision: object) -> str:
+    """One top_lints item: `lint:count`, then the lint's precision label when
+    the report carries a `lint_precision` block (#819)."""
+    if not isinstance(lint_precision, dict):
+        return f"{lint}:{count}"
+    entry = lint_precision.get(lint)
+    label = entry.get("label") if isinstance(entry, dict) else None
+    return f"{lint}:{count} ({label if isinstance(label, str) else UNMEASURED_LABEL})"
 
 
 def main(argv=None):
@@ -117,7 +132,7 @@ def main(argv=None):
     # them and hid the rare ones that identify this run (#438). Same four slots,
     # same format -- the TSV contract is unchanged.
     top_lints = rank_lints(lints)[:4]
-    top = ",".join(f"{k}:{v}" for k, v in top_lints)
+    top = ",".join(_top_lint_item(k, v, report.get("lint_precision")) for k, v in top_lints)
 
     # stdout is the TSV contract (see the docstring): deliberately print(), not a
     # logger call -- run_corpus_batch.sh captures this line with $(...), so

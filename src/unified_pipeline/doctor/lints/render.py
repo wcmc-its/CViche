@@ -39,6 +39,7 @@ from ..shared import (
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
     _entry_pieces,
+    _fields_entries,
     _finding,
     _haystacks,
     _long_word_tokens,
@@ -1291,21 +1292,10 @@ DUPLICATE_RECORD_MIN_CHARS = 20
 DUPLICATE_RECORD_WARN_COUNT = 1
 
 
-def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
-    """A single numbered/bulleted paragraph block whose normalized body
-    repeats at a different list position within DUPLICATE_RECORD_WINDOW
-    enumerated blocks of its first occurrence, in the SAME output section
-    (#446) -- the shape duplicate_passages cannot see because it requires
-    >=2 consecutive repeated blocks, and 55.2% of substantive records in the
-    corpus occupy exactly one.
-
-    Section scope is tracked with `_output_section_header`; the match state
-    is reset on every section change, so a publication legitimately listed
-    under two different headings never fires -- that is the same record two
-    sections chose to carry, not a duplicate. A blank spacer paragraph does
-    not match the enumerator prefix, so it is skipped rather than consuming a
-    window slot or breaking one, same as `lint_duplicate_passages`.
-    """
+def _duplicate_block_pairs(blocks: list[tuple[str, str]]) -> list[tuple[int, int]]:
+    """(first, second) block indices of every enumerated paragraph whose
+    normalized body repeats within DUPLICATE_RECORD_WINDOW enumerated blocks,
+    in the same output section (`lint_duplicate_records`)."""
     current_section: str | None = None
     recent: list[tuple[str, int, int]] = []  # (key, enum_index, block_index)
     enum_index = 0
@@ -1330,17 +1320,208 @@ def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
         if match is not None:
             pairs.append((match[2], i))
         recent.append((key, enum_index, i))
+    return pairs
 
-    if len(pairs) < DUPLICATE_RECORD_WARN_COUNT:
+
+# The record-identity half of duplicate_records (EBYSBC E16/E28: SJWASY-01,
+# NDXXAD-02, AKPQEB-04). The block rule above sees only a byte-identical body
+# a few list numbers away; a CV that lists one article twice in different
+# words ("Conn Med" beside "Connecticut Medicine", a one-letter title typo),
+# far apart, or one grant under two funding codes, renders it twice past it.
+# Entries are paired on what names the record:
+#   - an article, review or book (`_DUPLICATE_CITATION_CODES`, same code):
+#     the same title, or a shared PMID or DOI with near the same title words
+#     or a shared PMID or DOI where one copy has no title (a citation's tail
+#     enriched by its PMID into a second full copy, NDXXAD-02). A shared PMID
+#     under two different titles is a stage-5 lookup error, not a duplicate
+#     (measured 7 such pairs on the 63-run farm, 0 duplicates).
+#     Presentations and abstracts (S4, S8) repeat a title by design: one talk
+#     given at several meetings, one abstract per meeting.
+#   - a grant (`_DUPLICATE_GRANT_CODES`, ANY of the three codes, so a grant
+#     listed as current and as past is one group): the same title and start
+#     year, and no funder, grant number or PI that differs. A renewal keeps
+#     the title under another start year; three "Administrative Supplement"s
+#     to three parent grants, or one training grant's two trainees, share a
+#     title and year but not a grant number or PI (measured on the farm).
+# Two years that differ are two records, even a year apart: on the farm that
+# cut 4 true pairs (an e-pub year beside the print year) and 3 false ones (a
+# reprint, a series' yearly review, an abstract and its paper), the trade
+# that keeps the rule above 80% precision. A pair fires only when the title
+# renders in two blocks of the right kind: a copy stage 6 dedup dropped is
+# not a duplicate on the page.
+_DUPLICATE_CITATION_CODES = frozenset({"S1", "S2", "S3"})
+_DUPLICATE_GRANT_CODES = frozenset({"M2A", "M2B", "M2C"})
+DUPLICATE_RECORD_TITLE_MIN_CHARS = 30
+DUPLICATE_RECORD_ID_TITLE_OVERLAP = 0.8
+_RECORD_PMID_MIN_DIGITS = 5
+_DOI_PREFIX_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
+_YEAR_IN_VALUE_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+class _RecordIdentity(NamedTuple):
+    """What names one stage-5d entry as a record, read once."""
+    element_idx: object
+    code: str
+    title: str          # `_passage_key` of the title
+    year: int | None
+    ids: frozenset[str]  # "pmid:..." / "doi:..."
+    # Grants only, each a `_passage_key`; empty when the entry fills none.
+    funder: str
+    grant_number: str
+    pi: str
+
+
+def _value_year(value: object) -> int | None:
+    match = _YEAR_IN_VALUE_RE.search(str(value or ""))
+    return int(match.group()) if match else None
+
+
+def _record_ids(fields: Mapping) -> frozenset[str]:
+    ids = set()
+    pmid = re.sub(r"\D", "", str(fields.get("pmid") or ""))
+    if len(pmid) >= _RECORD_PMID_MIN_DIGITS:
+        ids.add(f"pmid:{pmid}")
+    doi = _DOI_PREFIX_RE.sub("", str(fields.get("doi") or "").strip()).lower()
+    if doi.startswith("10."):
+        ids.add(f"doi:{doi}")
+    return frozenset(ids)
+
+
+def _record_identities(stage_5d: Mapping) -> list[_RecordIdentity]:
+    identities = []
+    for entry in _fields_entries(stage_5d):
+        if entry.code not in _DUPLICATE_CITATION_CODES | _DUPLICATE_GRANT_CODES:
+            continue
+        grant = entry.code in _DUPLICATE_GRANT_CODES
+        title = _passage_key(entry.fields.get("title") or "")
+        if len(title) < DUPLICATE_RECORD_TITLE_MIN_CHARS:
+            title = ""
+        ids = frozenset() if grant else _record_ids(entry.fields)
+        if not title and not ids:
+            continue
+
+        def grant_key(name: str) -> str:
+            return _passage_key(entry.fields.get(name) or "") if grant else ""
+        identities.append(_RecordIdentity(
+            entry.element_idx, entry.code, title,
+            _value_year(entry.fields.get("start_date" if grant else "year")),
+            ids, grant_key("agency"), grant_key("grant_number"), grant_key("pi_name")))
+    return identities
+
+
+def _title_overlap(a: str, b: str) -> float:
+    words_a, words_b = set(a.split()), set(b.split())
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _same_grant(a: _RecordIdentity, b: _RecordIdentity) -> str | None:
+    if b.code not in _DUPLICATE_GRANT_CODES or a.title != b.title \
+            or a.year is None or a.year != b.year:
+        return None
+    if any(x and y and x != y for x, y in ((a.funder, b.funder),
+                                           (a.grant_number, b.grant_number),
+                                           (a.pi, b.pi))):
+        return None
+    return "title, year"
+
+
+def _same_record(a: _RecordIdentity, b: _RecordIdentity) -> str | None:
+    """What makes two entries one record ("title", "pmid:...", ...), or None."""
+    if a.code in _DUPLICATE_GRANT_CODES:
+        return _same_grant(a, b)
+    if a.code != b.code or (a.year is not None and b.year is not None and a.year != b.year):
+        return None
+    if a.title and a.title == b.title:
+        return "title"
+    shared = sorted(a.ids & b.ids)
+    if shared and (not a.title or not b.title
+                   or _title_overlap(a.title, b.title) >= DUPLICATE_RECORD_ID_TITLE_OVERLAP):
+        return shared[0]
+    return None
+
+
+def _title_blocks(title: str, code: str, blocks: list[tuple[str, str]],
+                  keys: list[str]) -> set[int]:
+    """Blocks a record of `code` with `title` renders as: an enumerated
+    paragraph for a citation, a table for a grant."""
+    if not title:
+        return set()
+    kind = "table" if code in _DUPLICATE_GRANT_CODES else "p"
+    return {i for i, (block_kind, text) in enumerate(blocks)
+            if block_kind == kind and title in keys[i]
+            and (kind == "table" or _PASSAGE_ENUMERATOR_RE.match(str(text or "")))}
+
+
+def _duplicate_entry_pairs(blocks: list[tuple[str, str]], stage_5d: Mapping
+                           ) -> list[tuple[_RecordIdentity, _RecordIdentity, str, set[int]]]:
+    """(first, second, why, rendered blocks) for each pair of entries naming
+    one record whose title renders in at least two blocks. A title other
+    entries of other codes also carry (an abstract of the article) must render
+    once more for each of them."""
+    identities = _record_identities(stage_5d)
+    keys = [_passage_key(text) for _kind, text in blocks]
+    title_codes = Counter((_passage_key(entry.fields.get("title") or ""), entry.code)
+                          for entry in _fields_entries(stage_5d))
+    pairs = []
+    for i, first in enumerate(identities):
+        for second in identities[i + 1:]:
+            why = _same_record(first, second)
+            if why is None:
+                continue
+            rendered = (_title_blocks(first.title, first.code, blocks, keys)
+                        | _title_blocks(second.title, second.code, blocks, keys))
+            family = (_DUPLICATE_GRANT_CODES if first.code in _DUPLICATE_GRANT_CODES
+                      else {first.code})
+            others = sum(count for (title, code), count in title_codes.items()
+                         if title and title in (first.title, second.title)
+                         and code not in family)
+            if len(rendered) >= 2 + others:
+                pairs.append((first, second, why, rendered))
+    return pairs
+
+
+def lint_duplicate_records(blocks: list[tuple[str, str]],
+                           stage_5d: Mapping | None = None) -> list[dict]:
+    """One record rendered twice.
+
+    Block rule (#446): a single numbered/bulleted paragraph block whose
+    normalized body repeats at a different list position within
+    DUPLICATE_RECORD_WINDOW enumerated blocks of its first occurrence, in the
+    SAME output section -- the shape duplicate_passages cannot see because it
+    requires >=2 consecutive repeated blocks, and 55.2% of substantive records
+    in the corpus occupy exactly one. Section scope is tracked with
+    `_output_section_header`; the match state is reset on every section
+    change, so a publication legitimately listed under two different headings
+    never fires. A blank spacer paragraph does not match the enumerator
+    prefix, so it is skipped rather than consuming a window slot or breaking
+    one, same as `lint_duplicate_passages`.
+
+    Record rule (EBYSBC E16/E28, needs `stage_5d`): two entries naming one
+    record by title, PMID or DOI, or one grant under two funding codes, at
+    any distance (`_duplicate_entry_pairs`). Its evidence leads with the
+    entry index; a block pair both of whose blocks a record pair already
+    names is not counted twice.
+    """
+    entry_pairs = _duplicate_entry_pairs(blocks, stage_5d) if stage_5d else []
+    named_blocks = set().union(*(rendered for *_rest, rendered in entry_pairs))
+    block_pairs = [(first, second) for first, second in _duplicate_block_pairs(blocks)
+                   if not {first, second} <= named_blocks]
+    count = len(entry_pairs) + len(block_pairs)
+    if count < DUPLICATE_RECORD_WARN_COUNT:
         return []
 
-    evidence = [f"block {first} repeats at {second}: "
-                f"{str(blocks[first][1])[:100]}" for first, second in pairs[:5]]
+    evidence = [f"entry {first.element_idx} repeats as entry {second.element_idx} "
+                f"({first.code}/{second.code}, same {why}): "
+                f"{(first.title or second.title)[:80]}"
+                for first, second, why, _rendered in entry_pairs]
+    evidence += [f"block {first} repeats at {second}: "
+                 f"{str(blocks[first][1])[:100]}" for first, second in block_pairs]
     return [_finding(
         "duplicate_records", "WARN",
-        f"{len(pairs)} duplicated record(s) — the same enumerated entry "
-        f"appears twice within the same output section",
-        evidence)]
+        f"{count} duplicated record(s) — the same entry appears twice: one "
+        f"enumerated entry within the same output section, or one article or "
+        f"grant listed twice",
+        evidence[:5])]
 
 
 # A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -
@@ -2109,4 +2290,293 @@ def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],
             f"{shape}: {len(rendered)} rendered date(s) tied to no stage-4 "
             f"entry: {_DATE_SHAPE_MESSAGES[shape]}",
             list(dict.fromkeys(rendered))[:DATE_CELL_EVIDENCE_LIMIT]))
+    return findings
+
+
+# Lint junk_or_header_row (EBYSBC E8, E10, E29): a stage-4 entry that is no
+# record of its own -- a group header, a lead-in label, a date fragment, a
+# dateless copy of a dated appointment -- rendered as a row or bullet.
+#
+#   date_fragment     the entry's text has no word, only a date or number
+#                     ('47.', '1983- 1984.', '1997-'): a wrapped line's tail
+#   label             a short line ending in ':' ('Widget Advisor:',
+#                     'Widget committees:'): a lead-in for the lines below
+#   header_only       stage 4 found only an institution or organization,
+#                     perhaps with a place (with a date span only under
+#                     teaching), and the row shows next to nothing else:
+#                     a group header, or a record whose title was lost
+#   undated_duplicate a D1 with no date whose title is a dated D1's: the CV
+#                     banner's current titles repeated as an appointment
+JUNK_SHAPE_DATE_FRAGMENT = "date_fragment"
+JUNK_SHAPE_LABEL = "label"
+JUNK_SHAPE_HEADER_ONLY = "header_only"
+JUNK_SHAPE_UNDATED_DUPLICATE = "undated_duplicate"
+
+#: Severity of every finding. Measured 2026-10-04 over the 63-run
+#: EBYSBC/s7ab/pilot farm (origin/dev fb466a0f renders): 104 hits, 65 on an
+#: entry a verified autopsy finding names; all 104 hand-read, 102 a header,
+#: label, fragment or banner row and 2 partly so. PRECISION.md has the row.
+JUNK_ROW_SEVERITY = "WARN"
+
+_JUNK_SHAPE_MESSAGES = MappingProxyType({
+    JUNK_SHAPE_DATE_FRAGMENT: "a date or number fragment with no words "
+                              "renders as a record of its own",
+    JUNK_SHAPE_LABEL: "a lead-in label ending in ':' renders as a record "
+                      "of its own",
+    JUNK_SHAPE_HEADER_ONLY: "renders as a row with only an institution or "
+                            "organization: a group header, or a record "
+                            "whose title was not extracted",
+    JUNK_SHAPE_UNDATED_DUPLICATE: "an undated appointment whose title a "
+                                  "dated D1 row already shows renders as "
+                                  "a row with no date",
+})
+
+#: Taxonomy letters the lint does not judge. A is Personal Data, rendered as
+#: fields; T is the Appendix, the CV's own text by contract; S is the
+#: bibliography. For B, C, F and I an institution or organization with dates
+#: and nothing else IS the record: a school attended, a licensing state, a
+#: society one belongs to.
+JUNK_ROW_SKIP_LETTERS = frozenset("ABCFIST")
+
+#: Fields that hold or place a record but never name it.
+_JUNK_HOLDER_FIELDS = frozenset({"institution", "organization", "unit_program",
+                                 "division_department", "department", "school"})
+_JUNK_DATE_FIELDS = frozenset({"start_date", "end_date", "date", "year",
+                               "dates", "dates_attended"})
+_JUNK_PLACEMENT_FIELDS = (_JUNK_HOLDER_FIELDS | _JUNK_DATE_FIELDS
+                          | {"location", "state_country", "setting"})
+#: The one taxonomy letter whose dated institution-only entries are headers.
+JUNK_DATED_HEADER_LETTER = "K"
+
+#: Words that make another appointment of the same title: an undated
+#: 'Assistant Professor' beside a dated 'Clinical Assistant Professor' is a
+#: second post, not a repeat (EBYSBC E4).
+_RANK_QUALIFIERS = frozenset({"clinical", "adjunct", "visiting", "research",
+                              "associate", "assistant", "emeritus", "courtesy",
+                              "affiliate", "acting", "interim", "instructor"})
+#: Stage-4 bookkeeping, not a value the record carries.
+_JUNK_IGNORED_FIELDS = frozenset({"stage4_records"})
+
+#: A label longer than this is a sentence with a list after it, not a
+#: lead-in ('Developed and taught the following courses at ...:').
+JUNK_LABEL_MAX_WORDS = 10
+
+#: Words a rendered row may carry beyond the entry's own before it reads as
+#: another record: a label like "Teaching Activities", or the city and
+#: state stage 5b adds to an institution. Numbers do not count.
+JUNK_ROW_EXTRA_WORDS = 2
+
+#: A word in a date fragment's sense: three letters or more, other than an
+#: open end ("1997-present" is still a fragment).
+_JUNK_WORD_RE = re.compile(r"[^\W\d_]{3,}")
+_JUNK_OPEN_WORDS = frozenset({"present", "current", "ongoing"})
+
+
+class _RenderedRow(NamedTuple):
+    """One rendered record: a body paragraph, or a table row's distinct
+    non-empty cells joined with TABLE_ROW_JOINER."""
+    text: str
+    tokens: frozenset[str]
+    cells: tuple[frozenset[str], ...]
+    has_year: bool
+
+
+class _JunkCandidate(NamedTuple):
+    """A stage-4 entry of one junk shape, and the words that must show for
+    a rendered row to be it."""
+    element_idx: object
+    code: str
+    shape: str
+    core: frozenset[str]
+    allowed: frozenset[str]
+    extra_words: int
+
+
+def _junk_rendered_rows(table_rows: list[list[list[str]]],
+                        blocks: list[tuple[str, str]]) -> list[_RenderedRow]:
+    """Every rendered record line: body paragraphs that are not section
+    headings, and table rows."""
+    rows = []
+    for kind, text in blocks:
+        line = str(text or "").strip()
+        if kind != "p" or not line or _output_section_header(line):
+            continue
+        rows.append(_RenderedRow(line, frozenset(_name_tokens(line)),
+                                 (frozenset(_name_tokens(line)),),
+                                 bool(_FOUR_DIGIT_YEAR_RE.search(line))))
+    for table in table_rows:
+        for row in table:
+            cells = list(dict.fromkeys(cell for cell in row if cell.strip()))
+            if not cells:
+                continue
+            line = TABLE_ROW_JOINER.join(cells)
+            rows.append(_RenderedRow(
+                line, frozenset(_name_tokens(line)),
+                tuple(frozenset(_name_tokens(cell)) for cell in cells),
+                bool(_FOUR_DIGIT_YEAR_RE.search(line))))
+    return rows
+
+
+def _filled_fields(raw: dict) -> dict[str, object]:
+    fields = raw.get("extracted_fields")
+    if not isinstance(fields, dict):
+        return {}
+    return {key: value for key, value in fields.items()
+            if value not in (None, "", [], {}) and key not in _JUNK_IGNORED_FIELDS}
+
+
+def _field_tokens(fields: dict[str, object], keys: frozenset[str]) -> frozenset[str]:
+    return frozenset(_name_tokens(" ".join(str(fields[key]) for key in keys
+                                           if key in fields)))
+
+
+def _has_dated_field(fields: dict[str, object]) -> bool:
+    return any(_FOUR_DIGIT_YEAR_RE.search(str(fields.get(key) or ""))
+               for key in _JUNK_DATE_FIELDS)
+
+
+class _DatedRanks(NamedTuple):
+    """The CV's D1 entries that carry a year: each one's title and
+    institution words, and the first and last of their entry positions."""
+    tokens: tuple[frozenset[str], ...]
+    first: float
+    last: float
+
+
+def _entry_position(raw: dict) -> float | None:
+    try:
+        return float(raw.get("element_idx_start"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dated_ranks(stage4: dict) -> _DatedRanks | None:
+    """The dated D1 entries, or None when the CV has none."""
+    tokens, positions = [], []
+    for raw in stage4.get("entries", []):
+        fields = _filled_fields(raw)
+        position = _entry_position(raw)
+        if (raw.get("taxonomy_code") == DATE_CELL_LATEST_RANK_CODE
+                and _has_dated_field(fields) and position is not None):
+            tokens.append(_field_tokens(fields, frozenset({"title", "institution"})))
+            positions.append(position)
+    if not tokens:
+        return None
+    return _DatedRanks(tuple(tokens), min(positions), max(positions))
+
+
+def _is_header_only(code: str, fields: dict[str, object]) -> bool:
+    """Whether stage 4 found only where the entry sits: an institution or
+    organization, perhaps with a place, and no title, role or name. With
+    dates too, only under teaching (K): a CV groups its courses under an
+    institution and its years, while elsewhere "1998-2004 <organization>"
+    is how a CV lists a consultancy or a board seat, and the row is the
+    source's own wording. And only a span: one dated day at a place is a
+    session of its own (a training given at a site), not a header."""
+    keys = fields.keys()
+    if not keys <= _JUNK_PLACEMENT_FIELDS:
+        return False
+    if not keys & _JUNK_DATE_FIELDS:
+        return True
+    return code.startswith(JUNK_DATED_HEADER_LETTER) and "start_date" in keys
+
+
+def _undated_duplicate_core(position: float | None, fields: dict[str, object],
+                            dated: _DatedRanks | None) -> frozenset[str] | None:
+    """The first ';'-part of an undated D1 title whose words a dated D1's
+    title and institution all carry (the banner joins several titles).
+    Only above or below the dated appointments: an undated row inside the
+    list is an appointment whose date was lost, not the CV's banner."""
+    if (dated is None or position is None or _has_dated_field(fields)
+            or dated.first <= position <= dated.last):
+        return None
+    for part in str(fields.get("title") or "").split(";"):
+        tokens = frozenset(_name_tokens(part))
+        if tokens and any(tokens <= other and not (other - tokens) & _RANK_QUALIFIERS
+                          for other in dated.tokens):
+            return tokens
+    return None
+
+
+def _junk_shape(raw: dict, code: str, text: str, fields: dict[str, object],
+                dated: _DatedRanks | None) -> _JunkCandidate | None:
+    """The entry's junk shape, first match in the order the shapes are
+    listed above; None for a record of its own. A date fragment's row, and
+    a dated header's, may show no word beyond the entry's own: a dated row
+    with one more word is a record."""
+    candidate = functools.partial(_JunkCandidate, raw.get("element_idx_start"), code)
+    text_tokens = frozenset(_name_tokens(text))
+    words = [w for w in _JUNK_WORD_RE.findall(text) if w.lower() not in _JUNK_OPEN_WORDS]
+    if not words:
+        return candidate(JUNK_SHAPE_DATE_FRAGMENT, text_tokens, text_tokens, 0)
+    if text.endswith(":") and len(text.split()) <= JUNK_LABEL_MAX_WORDS:
+        return candidate(JUNK_SHAPE_LABEL, text_tokens, text_tokens, JUNK_ROW_EXTRA_WORDS)
+    if _is_header_only(code, fields):
+        dated_header = bool(fields.keys() & _JUNK_DATE_FIELDS)
+        return candidate(JUNK_SHAPE_HEADER_ONLY,
+                         _field_tokens(fields, _JUNK_HOLDER_FIELDS),
+                         _field_tokens(fields, _JUNK_PLACEMENT_FIELDS),
+                         0 if dated_header else JUNK_ROW_EXTRA_WORDS)
+    core = (_undated_duplicate_core(_entry_position(raw), fields, dated)
+            if code == DATE_CELL_LATEST_RANK_CODE else None)
+    if core is not None:
+        return candidate(JUNK_SHAPE_UNDATED_DUPLICATE, core, core, 0)
+    return None
+
+
+def _junk_candidate(raw: dict, dated: _DatedRanks | None) -> _JunkCandidate | None:
+    """The entry as a junk candidate, or None: a record of its own, a code
+    the lint does not judge, or a shape with no word to look for."""
+    code = str(raw.get("taxonomy_code") or "")
+    text = str(raw.get("text") or "").strip()
+    if not text or code[:1] in JUNK_ROW_SKIP_LETTERS:
+        return None
+    candidate = _junk_shape(raw, code, text, _filled_fields(raw), dated)
+    # No core word, nothing to find: a punctuation-only text, or a header
+    # with dates and a place but no institution or organization.
+    return candidate if candidate is not None and candidate.core else None
+
+
+def _extra_words(row: _RenderedRow, allowed: frozenset[str]) -> int:
+    return sum(1 for tok in row.tokens - allowed
+               if not tok.isdigit() and tok not in _JUNK_OPEN_WORDS)
+
+
+def _junk_row_rendered(candidate: _JunkCandidate,
+                       rows: list[_RenderedRow]) -> _RenderedRow | None:
+    """The first rendered row that is this entry and nothing more: it shows
+    every core word and at most the candidate's extra words. An undated
+    duplicate's row is a table row with no year whose title cell carries
+    the title."""
+    for row in rows:
+        if candidate.shape == JUNK_SHAPE_UNDATED_DUPLICATE:
+            if not row.has_year and len(row.cells) > 1 and any(
+                    candidate.core <= cell for cell in row.cells):
+                return row
+            continue
+        if (candidate.core <= row.tokens
+                and _extra_words(row, candidate.allowed) <= candidate.extra_words):
+            return row
+    return None
+
+
+def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
+                            blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """Stage-4 entries that are no record of their own, rendered as one
+    (EBYSBC E8, E10, E29): a group header, a lead-in label, a date fragment,
+    or a dateless repeat of a dated D1 appointment. One finding per entry,
+    named by its element_idx_start, quoting the rendered row."""
+    dated = _dated_ranks(stage4)
+    rows = _junk_rendered_rows(table_rows, blocks or [])
+    findings = []
+    for raw in stage4.get("entries", []):
+        candidate = _junk_candidate(raw, dated)
+        row = None if candidate is None else _junk_row_rendered(candidate, rows)
+        if row is None:
+            continue
+        findings.append(_finding(
+            "junk_or_header_row", JUNK_ROW_SEVERITY,
+            f"entry {candidate.element_idx} ({candidate.code}): {candidate.shape}: "
+            f"{_JUNK_SHAPE_MESSAGES[candidate.shape]}",
+            [row.text]))
     return findings

@@ -2477,3 +2477,94 @@ def test_a_run_already_below_green_keeps_its_lower_score_under_the_content_cap(t
     assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP]
     assert result["raw_score_before_caps"] < qs.CONTENT_LOSS_CAP, result
     assert result["totalScore"] == round(result["raw_score_before_caps"])
+
+
+# ------------------------------------------------ #822 owner-cut citations gate
+# Invented authors and titles. Stage 5d's "first 6 authors, et al." cut drops
+# the owner, who is eighth on every source list.
+
+_CUT_OWNER = {"full_name": "Rowan Thornquist", "first_name": "Rowan",
+              "last_name": "Thornquist"}
+_CUT_KEPT = "Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E, Fenwick F"
+_CUT_TRAILER = "J Synth Geol. 2019;12(3):45-67."
+_CUT_TITLES = ("Tidal patterns in synthetic estuary sediment cores",
+               "Seasonal drift of invented glacier meltwater channels",
+               "Mineral banding in fictional basalt columns",
+               "Wind erosion of imaginary coastal dune ridges")
+
+
+def _owner_cut_run(tmp_path: Path, cut: int, kept: int = 0) -> Path:
+    """A run whose bibliography renders `cut` citations without the owner and
+    `kept` more with them."""
+    authors = f"{_CUT_KEPT}, Garrow G, Thornquist R"
+    titles = _CUT_TITLES[:cut + kept]
+    _write_json(tmp_path, "X_fields.json", {
+        "cv_owner": _CUT_OWNER,
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"element_idx_start": 10 + n, "taxonomy_code": "S1",
+                     "text": f"{authors}. {title}. {_CUT_TRAILER}",
+                     "extracted_fields": {"authors": authors}, "extraction_success": True}
+                    for n, title in enumerate(titles)]})
+    lines = [f"{_CUT_KEPT}, et al. {title}. {_CUT_TRAILER}" for title in titles[:cut]]
+    lines += [f"{authors}. {title}. {_CUT_TRAILER}" for title in titles[cut:]]
+    _make_docx(["BIBLIOGRAPHY", "Peer-reviewed Research Articles:"]
+               + [f"{n}. {line}" for n, line in enumerate(lines, 1)]).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_owner_missing_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.OWNER_MISSING_CITATIONS_CAP_MIN == 3
+    assert qs.score_owner_missing_from_citation(_owner_cut_run(tmp_path, cut=3)) == (
+        1.0, f"owner_missing_citations=3; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_owner_missing_gate_quiet_below_the_minimum_count(tmp_path):
+    """Two cut citations and one that keeps the owner: the finding reports, the
+    gate does not cap."""
+    assert qs.score_owner_missing_from_citation(_owner_cut_run(tmp_path, cut=2, kept=1)) == (
+        0.0, "owner_missing_citations=2", None)
+
+
+def test_owner_missing_gate_not_evaluated_without_its_artifacts(tmp_path):
+    fraction, detail, cap = qs.score_owner_missing_from_citation(tmp_path)
+    assert (fraction, cap) == (0.0, None) and "no fields.json found; not evaluated" == detail
+    _owner_cut_run(tmp_path, cut=3)
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_owner_missing_from_citation(tmp_path) == (
+        0.0, "no docx found; not evaluated", None)
+
+
+def test_score_run_caps_a_run_whose_owner_was_cut_from_three_citations(tmp_path):
+    """The wire: registered in CAP_ONLY_GATES, weightless, and its flag names it."""
+    assert qs.score_owner_missing_from_citation in [fn for _, fn in qs.CAP_ONLY_GATES]
+    assert qs.score_owner_missing_from_citation not in [fn for _, _, fn in qs.DIMENSIONS]
+    _complete_run_dir(tmp_path)
+    result = score_run(_owner_cut_run(tmp_path, cut=3))
+    assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP]
+    assert any(f.startswith(f"HARD-FAIL cap={qs.CONTENT_LOSS_CAP}: CV owner cut from their own "
+                            "citations") for f in result["flags"]), result["flags"]
+
+
+# ------------------------------------------------ #822 raw-tab deduction limit
+
+@pytest.mark.parametrize("tabs, expected_fraction", [
+    (4, 0.12),    # under the limit: 0.6 * 4 / 20, unchanged
+    (10, 0.3),    # the limit itself
+    (40, 0.3),    # VVRTUC's shape: was clamp(1.2) = all 10 points
+])
+def test_broken_format_raw_tabs_cost_at_most_three_points(tmp_path, tabs, expected_fraction):
+    _make_docx([f"line {n}\twith a raw tab" for n in range(tabs)]).save(tmp_path / "out.docx")
+    fraction, detail, _ = score_broken_format(tmp_path)
+    assert f"raw_tab_paragraphs={tabs}" in detail
+    assert fraction == pytest.approx(expected_fraction)
+    assert fraction * dict((s, w) for _, w, s in DIMENSIONS)[score_broken_format] <= 3
+
+
+def test_broken_format_echoes_still_add_on_top_of_the_tab_limit(tmp_path):
+    """The limit is on tabs only: 40 tabs plus 15 instruction echoes is 3 + 4 points."""
+    echo = "Please list here the courses taught"
+    _make_docx([f"line {n}\twith a raw tab" for n in range(40)]
+               + [f"{echo} {n}" for n in range(15)]).save(tmp_path / "out.docx")
+    fraction, detail, _ = score_broken_format(tmp_path)
+    assert "echo_paragraphs=15" in detail
+    assert fraction == pytest.approx(0.7)

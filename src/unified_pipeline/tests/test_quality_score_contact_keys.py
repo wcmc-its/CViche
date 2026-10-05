@@ -42,8 +42,8 @@ def _fields(tmp_path, extracted_fields):
 
 def _any_contact(tmp_path, extracted_fields) -> bool:
     _, detail, _ = score_cv_owner(_fields(tmp_path, extracted_fields))
-    assert "any_contact=" in detail
-    return "any_contact=True" in detail
+    assert "stage4_contact_field=" in detail
+    return "stage4_contact_field=True" in detail
 
 
 def test_plain_key_names_still_count(tmp_path):
@@ -79,7 +79,7 @@ def test_unrelated_fields_are_not_mistaken_for_contact(tmp_path):
 def test_no_contact_still_takes_the_penalty(tmp_path):
     """The dimension must keep firing when the CV really has no contact."""
     fraction, detail, cap = score_cv_owner(_fields(tmp_path, {"title": "Professor"}))
-    assert "any_contact=False" in detail
+    assert "stage4_contact_field=False" in detail
     assert fraction >= 0.3, "the missing-contact penalty must survive this change"
     assert cap is None, "this is not the hard-fail path"
 
