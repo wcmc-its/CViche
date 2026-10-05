@@ -794,6 +794,25 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
     assert rule in prompt
 
 
+@pytest.mark.parametrize("rule", [
+    "- A SESSION, PANEL, SYMPOSIUM or WORKSHOP entry (e.g., one you moderated or chaired) "
+    "names a title, often in quotes: committee_name = that title (without the quotes)",
+    "- Example: \"Moderator, Society for Example Medicine Annual Meeting, 'Advances in Example Care'\"",
+    '     * committee_name = "Advances in Example Care"',
+    '     * role = "Moderator"',
+    '     * organization = "Society for Example Medicine Annual Meeting"',
+    "- Never leave committee_name null when the entry names such a title, "
+    'and never put the title in a key not listed above (e.g., "topic")',
+])
+def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule):
+    """#1346: the EBYSBC batch lost 14 Q2 session titles in 6 CVs: stage 4 left
+    committee_name null on moderated or chaired sessions, or put the title under
+    an off-schema `topic` key. Each rule line is asserted alone so dropping any
+    one of them fails here."""
+    prompt = _prompt("Q2", [{"text": "Moderator, Invented Meeting, 'Invented Session'"}])
+    assert rule in prompt
+
+
 # --- #985: sub-heading context reaches the stage 4 prompt ---------------------
 
 #: sha256 of build_extraction_prompt for two unstamped entries on origin/dev
