@@ -19,7 +19,7 @@ import InboxSection from './upload/InboxSection'
 import SingleFileRow from './upload/SingleFileRow'
 import UploadFooter from './upload/UploadFooter'
 import {
-  H2, CompletionEmailOption, OptionsSection, DuplicateNotice, SingleEstimate, TemplateWarning, WhoToggle,
+  H2, CompletionEmailOption, IntakeEmailLine, OptionsSection, DuplicateNotice, SingleEstimate, TemplateWarning, WhoToggle,
 } from './upload/UploadSections'
 import { useBatchUpload } from './upload/useBatchUpload'
 import type { BatchUpload } from './upload/useBatchUpload'
@@ -31,10 +31,11 @@ interface BatchFilesProps {
   batch: BatchUpload
   showCost: boolean
   onRunAgain: (key: string) => void
+  intake: string | null
 }
 
 /** Step 2 for a batch: heading with "N to submit · M skipped", the multi-file drop zone, the table. */
-function BatchFiles({ batch, showCost, onRunAgain }: BatchFilesProps) {
+function BatchFiles({ batch, showCost, onRunAgain, intake }: BatchFilesProps) {
   const editable = batch.phase === 'edit'
   return (
     <>
@@ -56,6 +57,7 @@ function BatchFiles({ batch, showCost, onRunAgain }: BatchFilesProps) {
           onFiles={batch.addFiles}
         />
       )}
+      {editable && intake && <IntakeEmailLine address={intake} multi />}
       {batch.rows.length > 0 && (
         <BatchFileTable rows={batch.rows} showCost={showCost} editable={editable} onRemove={batch.removeRow} onRunAgain={batch.phase === 'done' ? onRunAgain : undefined} />
       )}
@@ -64,7 +66,7 @@ function BatchFiles({ batch, showCost, onRunAgain }: BatchFilesProps) {
 }
 
 /** Step 2 without a batch: one file, as before. */
-function SingleFiles({ single, run }: { single: SingleFile; run: SingleRun }) {
+function SingleFiles({ single, run, intake }: { single: SingleFile; run: SingleRun; intake: string | null }) {
   return (
     <>
       <h2 className={`${H2} mt-2`}>2 &middot; CV file</h2>
@@ -74,6 +76,7 @@ function SingleFiles({ single, run }: { single: SingleFile; run: SingleRun }) {
         hint=".docx or .pdf (text-based PDFs work best). One file per run."
         onFiles={(files) => void single.pick(files[0])}
       />
+      {intake && <IntakeEmailLine address={intake} multi={false} />}
       {single.file && <SingleFileRow file={single.file} size={single.held?.size_bytes} disabled={run.uploading} onRemove={single.clear} />}
     </>
   )
@@ -142,6 +145,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const navigate = useNavigate()
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
+  const intake = user?.intake_address ?? null
   const toConsent = () => navigate('/consent')
   const { queue, quota, refreshQueue, refreshQuota } = useUploadContext(isAdmin)
   const [stripWcmInstructions, setStripWcmInstructions] = useState(true)
@@ -259,7 +263,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">
           <div className="flex flex-col gap-4">
             {editable && <WhoToggle value={submissionType} queueMode={queueMode} onChange={chooseWho} />}
-            {multi ? <BatchFiles batch={batch} showCost={showCost} onRunAgain={(key) => void runAgain(key)} /> : <SingleFiles single={single} run={run} />}
+            {multi ? <BatchFiles batch={batch} showCost={showCost} onRunAgain={(key) => void runAgain(key)} intake={intake} /> : <SingleFiles single={single} run={run} intake={intake} />}
 
             {editable && (
               <>

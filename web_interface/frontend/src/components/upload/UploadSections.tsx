@@ -1,4 +1,5 @@
-import { AlertTriangle } from 'lucide-react'
+import { useState } from 'react'
+import { AlertTriangle, Copy, Mail } from 'lucide-react'
 import type { Estimate } from '../../types'
 import { formatCost, formatDuration } from '../../utils'
 import { scannedPagesText } from './batchRows'
@@ -64,6 +65,35 @@ export function WhoToggle({ value, queueMode, onChange }: WhoToggleProps) {
       </div>
       <p className="text-[13px] text-gray-500">{(queueMode ? WHO_HELP_QUEUE : WHO_HELP)[value]}</p>
     </>
+  )
+}
+
+/** "Or forward … to cv@…" under the drop zone; the page shows it only while email intake (#1298) is on. */
+export function IntakeEmailLine({ address, multi }: { address: string; multi: boolean }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      // ponytail: no clipboard (insecure context, denied) -- the mailto link still works.
+    }
+  }
+  return (
+    <div className="-mt-1 flex items-start gap-2 text-[13px] leading-normal text-gray-500">
+      <Mail className="mt-[3px] h-3.5 w-3.5 flex-none" aria-hidden="true" />
+      <span className="min-w-0">
+        {multi ? 'Or forward CVs as attachments from your WCM email to' : 'Or forward your CV as an attachment from your WCM email to'}{' '}
+        <a href={`mailto:${address}`} className="font-semibold text-primary-700 hover:underline [overflow-wrap:anywhere]">{address}</a>
+        {multi ? '. Each attachment becomes its own run.' : '.'}
+      </span>
+      <button type="button" onClick={() => void copy()} title="Copy address"
+        className="flex flex-none items-center gap-1 rounded-md px-1.5 py-px text-xs text-gray-600 hover:bg-sand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500">
+        <Copy className="h-[13px] w-[13px]" aria-hidden="true" />
+        <span aria-live="polite">{copied ? 'Copied' : 'Copy'}</span>
+      </button>
+    </div>
   )
 }
 
