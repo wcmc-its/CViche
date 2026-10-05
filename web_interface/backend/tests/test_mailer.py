@@ -37,6 +37,16 @@ def test_send_calls_ses_when_the_flag_is_on(ses, monkeypatch):
     kwargs = ses.send_email.call_args.kwargs
     assert kwargs["FromEmailAddress"] == "no-reply@mail.example.org"
     assert kwargs["Destination"] == {"ToAddresses": ["pat@med.cornell.edu"]}
+    # The display name rides on the header only; SES/IAM see the bare address.
+    assert _parse(kwargs)["From"] == "CViche <no-reply@mail.example.org>"
+
+
+def test_cviche_wordmark_has_an_opaque_white_ground():
+    """Outlook dark mode darkens the white card but not the image, so a
+    transparent dark-ink wordmark vanishes; the PNG carries its own white."""
+    from PIL import Image
+    image = Image.open(templates.LOGO_FILES[templates.CVICHE_LOGO_CID])
+    assert image.mode == "RGB" and image.getpixel((0, 0)) == (255, 255, 255)
 
 
 def test_default_sender_is_the_cviche_no_reply_address(ses, monkeypatch):
