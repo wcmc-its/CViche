@@ -3869,6 +3869,24 @@ def test_run_doctor_wires_llm_fallback_served_through_to_the_verdict(tmp_path):
     assert payload["counts"]["ERROR"] == 0
 
 
+def test_run_doctor_reports_a_fallback_served_call_from_the_prompt_logs(tmp_path):
+    """#1174 residual: a stage no artifact stamps (here 5d) is found through
+    the run's prompt logs, one finding per stage; without prompt_log_dir the
+    doctor is unchanged."""
+    root = _build_clean_run(tmp_path / "run")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name in ("a", "b"):
+        (logs / f"{name}_RESPONSE.json").write_text(json.dumps({"purpose": "stage_5d", "response": {
+            "model": _FALLBACK_MODEL, "served_by_fallback_model": _FALLBACK_MODEL}}))
+
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "llm_fallback_served"]
+    found = [f for f in run_doctor(root, _UID, prompt_log_dir=logs)["findings"]
+             if f["lint"] == "llm_fallback_served"]
+    assert [(f["severity"], f["evidence"]) for f in found] == [
+        ("WARN", [f"stage 5d calls on {_FALLBACK_MODEL} (2 calls)"])]
+
+
 # ----------------- #1174: stage_failure_recorded (a recorded stage failure) --
 
 def test_stage_failure_recorded_errors_on_a_fatal_stage_4_5_and_says_what_is_missing():

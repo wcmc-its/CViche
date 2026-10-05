@@ -1219,6 +1219,7 @@ class PipelineOrchestrator:
             self.pipeline_output_dir,
             self.document_uid,
             source=source if source.exists() else None,
+            prompt_log_dir=PROMPT_LOGS_DIR / self.run_id,
         )
         out_path = (
             self.pipeline_output_dir / 'stage_7_doctor'

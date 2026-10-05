@@ -55,6 +55,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
     stage4_group_failures,
     FallbackServedCall,
     llm_fallback_served,
+    prompt_log_fallback_served,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _FUNDING_SECTIONS,
@@ -2227,9 +2228,9 @@ def test_llm_fallback_served_groups_stage_4_entries_by_section_and_lists_4_5_cal
         {"llm_fallback_calls": [{"call": "summary_generation", "model": _FB_MODEL}]})
 
     assert served == [
-        FallbackServedCall("4", "M2A", _FB_MODEL, 1),
-        FallbackServedCall("4", "S1", _FB_MODEL, 2),
-        FallbackServedCall("4.5", "research summary (summary_generation)", _FB_MODEL, 1)]
+        FallbackServedCall("4", "M2A", _FB_MODEL, 1, "entries"),
+        FallbackServedCall("4", "S1", _FB_MODEL, 2, "entries"),
+        FallbackServedCall("4.5", "research summary (summary_generation)", _FB_MODEL, 1, "call")]
     assert served[1].describe() == f"stage 4 S1 on {_FB_MODEL} (2 entries)"
 
 
@@ -2240,6 +2241,28 @@ def test_llm_fallback_served_groups_stage_4_entries_by_section_and_lists_4_5_cal
 ], ids=repr)
 def test_llm_fallback_served_is_empty_without_provenance_and_never_raises(stage_4, stage_4_5):
     assert llm_fallback_served(stage_4, stage_4_5) == []
+
+
+def _prompt_log(directory, name, purpose, response):
+    (directory / f"{name}_RESPONSE.json").write_text(json.dumps({"purpose": purpose, "response": response}))
+
+
+def test_prompt_log_fallback_served_counts_served_calls_per_stage_but_not_4_5(tmp_path):
+    served = {"model": _FB_MODEL, "served_by_fallback_model": _FB_MODEL}
+    _prompt_log(tmp_path, "a", "stage_5d", served)
+    _prompt_log(tmp_path, "b", "stage_5d", served)
+    _prompt_log(tmp_path, "c", "stage_3b", served)
+    _prompt_log(tmp_path, "d", "stage_4_5", served)   # stage 4.5 lists its own
+    _prompt_log(tmp_path, "e", "stage_5d", {"model": "primary"})
+    (tmp_path / "f_RESPONSE.json").write_text("{torn")
+    _prompt_log(tmp_path, "g", "stage_5d", "not a dict")
+    (tmp_path / "h.json").write_text(json.dumps({"purpose": "stage_6", "response": served}))  # a prompt, not a response
+
+    assert prompt_log_fallback_served(tmp_path) == [
+        FallbackServedCall("3b", "calls", _FB_MODEL, 1, "calls"),
+        FallbackServedCall("5d", "calls", _FB_MODEL, 2, "calls")]
+    assert prompt_log_fallback_served(None) == []
+    assert prompt_log_fallback_served(tmp_path / "absent") == []
 
 
 def test_score_run_does_not_cap_a_run_with_a_fallback_served_call(tmp_path):
