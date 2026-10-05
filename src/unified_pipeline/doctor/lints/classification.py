@@ -19,7 +19,9 @@ are reported here so the defect is visible before that fix ships, and so the
 fix can be measured against them afterwards. The S5 shape also needs the
 sibling codes, so it is its own function; it follows the 2026-10-02 decision
 on #1344 that S5 is only for an item with no evidence of journal
-publication.
+publication. So does the Q4C shape (RCBKFG JJUQDF 342-346): a bare journal
+name coded as an editorial board among journals coded as reviewing, which
+stage 3b reads that way when its batch holds none of the list's lead-in.
 
 Reads stage 3b only: the code, the heading path stage 2 gave the entry, and
 its text. One finding per shape and heading path, naming up to three entries.
@@ -74,6 +76,17 @@ INTERNAL_COMMITTEE_CODES = frozenset({"P", "O"})
 #: same heading is a segmentation slip, not this shape.
 NOT_GRANT_REVIEW_CODES = frozenset({"Q1", "Q2", "Q4A", "Q4B", "Q4C", "Q4D", "P", "O", "I"})
 UNCLASSIFIED_CODE = "T"
+EDITORIAL_BOARD_CODE = "Q4C"
+JOURNAL_REVIEWER_CODE = "Q4D"
+#: Words that name the owner's part in a journal: an editorial board seat, an
+#: editor, or another role. A Q4C entry with none of them, under a heading
+#: that names no board, is a journal's bare name; the role came from
+#: elsewhere. A panel or committee seat ("Member, <newsletter> Consultant
+#: Panel") is a role of its own (EBYSBC BFSUMA 170). The heading test is
+#: narrower: "Editorial Activities" heads reviewing too.
+_JOURNAL_ROLE_WORD_RE = re.compile(
+    r"board|editor|member|panel|consult|advis|chair|committee", re.IGNORECASE)
+_BOARD_HEADING_RE = re.compile(r"board", re.IGNORECASE)
 #: Researcher Profile & Bibliometric Summary (core/taxonomy_v7.json).
 PROFILE_SUMMARY_CODE = "S0"
 
@@ -218,6 +231,15 @@ def _is_misfiled_journal_article(entry: _ClassifiedEntry, sibling_codes: Counter
     return mostly_articles or bool(_PEER_REVIEWED_HEADING_RE.search(path))
 
 
+def _is_reviewer_journal_as_board(entry: _ClassifiedEntry, sibling_codes: Counter) -> bool:
+    """A Q4C entry that names no role, under a heading that names no board,
+    beside one or more Q4D entries under that heading."""
+    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return (entry.code == EDITORIAL_BOARD_CODE and sibling_codes[JOURNAL_REVIEWER_CODE] > 0
+            and not _JOURNAL_ROLE_WORD_RE.search(entry.text)
+            and not _BOARD_HEADING_RE.search(leaf))
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -245,6 +267,9 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
                 groups[(rule.shape, rule.expected, entry.heading_path)].append(entry)
         if _is_misfiled_journal_article(entry, siblings[entry.heading_path]):
             groups[("journal_article_as_report", "S1/S2 (a journal article; #1344's decision)",
+                    entry.heading_path)].append(entry)
+        if _is_reviewer_journal_as_board(entry, siblings[entry.heading_path]):
+            groups[("reviewer_journal_as_editorial_board", "Q4D (journal reviewer)",
                     entry.heading_path)].append(entry)
     return [_finding("section_consistency", SECTION_CONSISTENCY_SEVERITY,
                      *_group_message(shape, expected, path, members))
