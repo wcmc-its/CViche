@@ -189,6 +189,13 @@ def test_invited_presentation_role_hint_keeps_the_presentation_format_in_event_n
     assert "event_name" in schemas_mod.FIELD_DESCRIPTIONS["R"]["role"]
 
 
+def test_q2_committee_name_guide_takes_a_session_panel_or_workshop_title():
+    """#1346: the Q2 guide said 'committee ONLY', and stage 4 left committee_name
+    null on 14 moderated or chaired session rows in the EBYSBC batch."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS["Q2"]["committee_name"]
+    assert "For a session, panel, symposium or workshop entry, its title" in guide
+
+
 def test_b2_guide_covers_every_extracted_field_and_asks_for_the_whole_line():
     """#1092: a code listed in FIELD_DESCRIPTIONS shows the model only those
     fields, so the B2 guide must name all of them; and program_name fills the

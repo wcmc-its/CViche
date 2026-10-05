@@ -745,7 +745,13 @@ def build_extraction_prompt(
      * committee_name = "Education Committee"
      * role = "Member"
      * organization = "American Academy of Neurology"
-   - Do NOT put the committee name in the role field or vice versa"""
+   - Do NOT put the committee name in the role field or vice versa
+   - A SESSION, PANEL, SYMPOSIUM or WORKSHOP entry (e.g., one you moderated or chaired) names a title, often in quotes: committee_name = that title (without the quotes), role = the role word(s), organization = the meeting or society
+   - Example: "Moderator, Society for Example Medicine Annual Meeting, 'Advances in Example Care'"
+     * committee_name = "Advances in Example Care"
+     * role = "Moderator"
+     * organization = "Society for Example Medicine Annual Meeting"
+   - Never leave committee_name null when the entry names such a title, and never put the title in a key not listed above (e.g., "topic")"""
     elif code == 'P':
         code_specific_instructions = """
 9. **INSTITUTIONAL COMMITTEES (P)** - CRITICAL field separation:
