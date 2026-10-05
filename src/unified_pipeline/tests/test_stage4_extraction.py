@@ -902,9 +902,11 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: M2A re-measured for #1403 on top of #1243, whose added unlabelled-title
 #: line is the only difference: dropping it gives the #1243 hash 0ab6854a...
 #: back. The pi_role line names the owner, so this owner-less prompt does not
-#: carry it.
+#: carry it. M2A re-measured for the EOAHMI recheck (#1403 items b/c), whose
+#: two added pi_name lines are the only difference: dropping them gives
+#: 108969062c... back.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "108969062c9e3d82bddbdf02b0220cf5b2ae054d8cfa5a05c08ecc6e29578683",
+    "M2A": "d69c439ddab70048345703c9eb14caefa71eae7de2378d68b88192fc2c4eb8a3",
     "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
@@ -973,9 +975,41 @@ def test_grant_prompt_names_the_owner_in_the_pi_role_rule(code):
     # The owner's own label sets the role: the case the A/B regressed.
     assert 'When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI"' in rule
     # Someone else's label does not (XELRLZ 170, the #1403 target).
-    assert "When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner" in rule
-    assert rule.endswith("if it states none, leave pi_role null")
+    assert "When a PI label names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner" in rule
+    assert "if it states none, leave pi_role null. " in rule
+    # EOAHMI DUTAVD 186: a plural "Investigators - <other>, <owner>" label gave pi_role null.
+    assert ('A plural role label that lists the CV owner among others (e.g., "Investigators - <name>, <name>") '
+            'is the owner\'s role, in the singular (pi_role = "Investigator").') in rule
+    # NDXXAD 638: "Secured the ... grant" gained an invented "PI".
+    assert rule.endswith('A verb such as "secured", "led" or "established" is not a stated role: '
+                         'with no role stated for the CV owner, leave pi_role null')
     assert prompt.index("- If no PI name is found") < prompt.index("- pi_role = ") < prompt.index("- status = ")
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_keeps_an_unlabelled_collaborator_out_of_pi_name(code):
+    # EOAHMI JIJRSN 150/152/154/156: "<title>, with Dr. <collaborator>" made the
+    # collaborator pi_name; 562: the investigator who "initiated" a trial the
+    # owner was "Principal Investigator in" became pi_name.
+    rule = ('- A person the entry names without a PI label, such as a "with Dr. <name>" collaborator or the '
+            'investigator who "initiated" a study, is not pi_name; put a collaborator in co_investigators')
+    for owner in (None, _OWNER):  # not tied to the owner: it is a pi_name rule
+        prompt = extraction.build_extraction_prompt(
+            [{"text": "Invented grant, with Dr. A. Example."}], extraction.get_field_schema(code), code, owner)
+        assert rule in prompt
+        assert prompt.index("- Do NOT put the project title") < prompt.index(rule) < prompt.index("- If no PI name is found")
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_takes_the_first_listed_author_as_pi_name(code):
+    # EOAHMI QTATUP 529..562: an author-list grant batch left pi_name null on
+    # all 9 and listed the first author (the owner on 529/533/537) only as a
+    # co-investigator.
+    prompt = _prompt(code, [{"text": "Doe AB, Roe CD. Invented title. $1,000 (Invented sponsor)"}])
+    rule = ('- An entry that opens with an author list and has no PI label (e.g., "<name> AB, <name> CD. <title>. '
+            '$<amount> (<sponsor>)"): pi_name = the first-listed author, co_investigators = the other authors')
+    assert rule in prompt
+    assert prompt.index("- A person the entry names without a PI label") < prompt.index(rule) < prompt.index("- If no PI name is found")
 
 
 def test_grant_pi_role_rule_is_left_out_when_the_owner_is_unknown():
@@ -1017,6 +1051,13 @@ def test_past_mentee_prompt_puts_the_mentoring_period_school_in_site_position():
     # text when the rule named only a school or institution.
     assert '"MS, Thesis committee" → site_position = "Thesis committee"' in prompt
     assert "current_position = where the mentee is NOW, only when the entry says so" in prompt
+    # EOAHMI LOOTTE 237..342: under the site_position rule the degree line
+    # ("B.S., <institution>, 2003") fell out of every field.
+    degree = ('- mentee_level = the mentee\'s degree or level. When the entry gives a degree line (e.g., "B.S., '
+              'Example University, 2003", "PhD, Example University"), mentee_level = that whole line and the level '
+              'or role of the mentoring period (e.g., "Predoc") goes in site_position; never drop the degree line')
+    assert degree in prompt
+    assert prompt.index("- site_position = ") < prompt.index(degree) < prompt.index("- current_position = ")
     assert "Do NOT put the institution of the mentoring period in current_position" in prompt
     assert prompt.index("PAST MENTEES (N3B)") < prompt.index("Return JSON")
 
