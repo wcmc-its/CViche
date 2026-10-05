@@ -2029,7 +2029,11 @@ _CLAUSE_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 #: year in two digits: a month and year ("7/05", "10/08"; not a day of
 #: "m/d/yy", and not one run of slashed numbers) and an apostrophe year
 #: ("Jul '96", with a straight or curly mark). RCBKFG CAOACN 32 and 64 date
-#: every record that way, so the lint read no clause at all.
+#: every record that way, so the lint read no clause at all. Only in an entry
+#: that writes no four-digit year: one that does dates its records that way,
+#: and its two-digit dates are notes on the record ("no-cost extension
+#: through 06/09", "Degree conferred 6/83", "the aftermath of 9/11"; three
+#: false positives on the 126-run farm/batch corpus).
 _DATE_YEAR_RE = re.compile(
     r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
     r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
@@ -2158,12 +2162,15 @@ def _anchor_year(match: re.Match[str]) -> str:
     return str(expand_two_digit_year(int(two_digits)))
 
 
-def _date_anchors(text: str) -> list[DateAnchor]:
+def _date_anchors(text: str, two_digit_years: bool) -> list[DateAnchor]:
     """Each written date of the text: a run of years joined by date-only
-    gaps. A month or day written before a year stays in the text around it;
-    `_has_payload` and `_clause_words` read past date words."""
+    gaps, reading two-digit years only when `two_digit_years`. A month or
+    day written before a year stays in the text around it; `_has_payload`
+    and `_clause_words` read past date words."""
     anchors: list[DateAnchor] = []
     for match in _DATE_YEAR_RE.finditer(text):
+        if not (match.group("year") or two_digit_years):
+            continue
         year = _anchor_year(match)
         if anchors and _DATE_GAP_RE.match(text[anchors[-1].end:match.start()]):
             last = anchors[-1]
@@ -2197,13 +2204,13 @@ def _opens_inside_parens(part: str, position: int) -> bool:
     return depth > 0
 
 
-def _part_clauses(part: str) -> list[Clause]:
+def _part_clauses(part: str, two_digit_years: bool) -> list[Clause]:
     """One part's dated clauses. A part whose dates are not separated by any
     words is one clause (a record with a list of dates); otherwise each date
     takes the words after it when the part opens with a date ("<year> <talk>
     <year> <talk>"), else the words before it ("<role>, <years> <role>,
     <years>")."""
-    anchors = _date_anchors(part)
+    anchors = _date_anchors(part, two_digit_years)
     if not anchors:
         return []
     between = [part[a.end:b.start] for a, b in zip(anchors, anchors[1:])]
@@ -2228,8 +2235,9 @@ def _record_clauses(text: str) -> list[Clause]:
     """The record-shaped clauses of an entry's text: its dated clauses when
     there are two or more, else its undated parts that each name a title and
     an institution. Fewer than two means the text reads as one record."""
+    two_digit_years = not _CLAUSE_YEAR_RE.search(text)
     dated = [clause for part in _STRONG_SEPARATOR_RE.split(text)
-             for clause in _part_clauses(part)]
+             for clause in _part_clauses(part, two_digit_years)]
     if len(dated) >= 2:
         return dated
     return [Clause(part, frozenset(_CLAUSE_YEAR_RE.findall(part)))

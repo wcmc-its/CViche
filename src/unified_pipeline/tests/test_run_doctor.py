@@ -5736,6 +5736,10 @@ def test_junk_or_header_row_warns_on_a_duty_sentence_rendered_as_its_role():
     # a dated entry is a record of its own
     (_junk4(_DUTY, "L3", 79, leadership_role="Administrator", start_date="2015"), [],
      [("p", "Administrator")]),
+    # a launch date dates it too (126-run corpus web40 150, 154: an L2
+    # project's name and year sit on the line above its role sentence)
+    (_junk4(_DUTY, "L2", 150, role="Administrator", project_name="Widget Service",
+            launch_date="2012"), [], [("p", "Administrator")]),
     # a short capitalised line, not a sentence
     (_junk4("Administrator, Example Widget Clinic Program", "L3", 79,
             leadership_role="Administrator"), [], [("p", "Administrator")]),

@@ -2458,12 +2458,27 @@ def test_multi_record_reads_two_digit_year_dates(first, second):
     "Lab'06",      # an apostrophe after a letter
 ])
 def test_multi_record_two_digit_year_needs_a_month_or_an_apostrophe(not_a_date):
-    """Read as a date, the token would make a second dated clause."""
+    """Read as a date, the token would make a second dated clause. The other
+    clause's dates are two-digit too: beside a four-digit year, no two-digit
+    date is read at all."""
     text = (f"Lecturer, Northfield University School of Medicine, {not_a_date} "
-            "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008")
+            "Visiting Instructor of Pathology, Lakeside Hospital Institute, 6/06-8/08")
     assert _multi_record(text, _FIRST_ROLE, lines=()) == []
     dated = text.replace(not_a_date, "7/05")
     assert [f["severity"] for f in _multi_record(dated, _FIRST_ROLE, lines=())] == ["WARN"]
+
+
+@pytest.mark.parametrize("note", [
+    "no-cost extension through 06/09",   # 126-run corpus 2068 537
+    "Degree conferred 6/83",             # web187 16
+    "set in the aftermath of 9/11",      # web200 153
+    "Example Society Fellow '09",
+])
+def test_multi_record_reads_no_two_digit_date_beside_a_four_digit_year(note):
+    """An entry that writes a four-digit year dates its records that way; a
+    two-digit date in it is a note on the record, not a second record."""
+    text = f"Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008, {note}"
+    assert _multi_record(text, _FIRST_ROLE, lines=()) == []
 
 
 def test_multi_record_through_joins_two_years_into_one_date():
