@@ -25,7 +25,7 @@ cluster-mode slot rules, and a MULTI/EXEC (``ack``, ``dead_letter``,
 
 Two queues (#1114), each its own stream, consumer group and dead-letter
 stream (``Queue`` below): ``SINGLE``, the original stream every run used
-before batch upload, and ``BATCH``, for runs that carry a ``batch_id``
+before batch upload, and ``BATCH``, for runs in a batch of two or more files
 (``queue_for``). Every per-entry operation takes the ``Queue`` the entry was
 read from, so an entry is always ACKed, requeued or dead-lettered on its own
 stream. A worker reads the queues ``CVICHE_WORKER_STREAMS`` names
@@ -41,6 +41,7 @@ from typing import Any, TypedDict
 import redis
 
 from app.config_loader import get_config
+from app.models import is_bulk_batch
 from app.services.artifact_service import RUN_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -110,12 +111,16 @@ QUEUES_BY_NAME = MappingProxyType({queue.name: queue for queue in (SINGLE, BATCH
 WORKER_STREAMS_DEFAULT = SINGLE.name
 
 
-def queue_for(batch_id: str | None) -> Queue:
-    """The queue a run's token goes on: ``BATCH`` for a run in a batch,
-    ``SINGLE`` otherwise. The one routing rule every producer (``/start``,
-    ``/retry``, the already-queued re-enqueue, the queued-run reconciler)
-    goes through, so none of them can route a run differently."""
-    return BATCH if batch_id else SINGLE
+def queue_for(batch_files_submitted: int | None) -> Queue:
+    """The queue a run's token goes on, from its batch's ``files_submitted``
+    (``batch_service.batch_size``; None for a run in no batch): ``BATCH`` for
+    a run in a bulk batch (``is_bulk_batch``), ``SINGLE`` otherwise -- a
+    one-file batch is a single upload that asked for the completion email
+    (#1340) and must not wait behind bulk uploads. The one routing rule every
+    producer (``/start``, ``/retry``, the already-queued re-enqueue, the
+    queued-run reconciler, email intake) goes through, so none of them can
+    route a run differently."""
+    return BATCH if is_bulk_batch(batch_files_submitted) else SINGLE
 
 
 def parse_worker_streams(raw: str) -> tuple[Queue, ...]:

@@ -841,3 +841,24 @@ describe('UploadPage "Email me when job completes" (#1335)', () => {
     expect(onUploadSuccess).toHaveBeenCalledWith('R1')
   })
 })
+
+describe('UploadPage intake address line (#1298)', () => {
+  const ADDRESS = 'cv@intake.example.org'
+  const link = () => screen.queryByRole('link', { name: ADDRESS })
+
+  it('sits under the drop zone in the batch and single layouts while intake is on', async () => {
+    currentUser = { ...ADMIN, intake_address: ADDRESS }
+    await renderPage(QUEUE)
+    expect(link()?.getAttribute('href')).toBe(`mailto:${ADDRESS}`)
+    expect(screen.getByText(/Each attachment becomes its own run/)).toBeTruthy()
+    fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
+    expect(link()).toBeTruthy()
+    expect(screen.getByText(/Or forward your CV as an attachment/)).toBeTruthy()
+  })
+
+  it('is absent while intake is off', async () => {
+    await renderPage(QUEUE)
+    expect(link()).toBeNull()
+    expect(screen.queryByRole('button', { name: /Copy/ })).toBeNull()
+  })
+})

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { ChevronDown } from 'lucide-react'
+import { useAuth } from '../contexts/AuthContext'
+import { SUPPORT_EMAIL } from '../utils'
 
 const sections = [
   { id: 'what-is-cviche', label: 'What is CViche?' },
@@ -10,8 +12,6 @@ const sections = [
   { id: 'faq', label: 'Frequently Asked Questions' },
   { id: 'contact', label: 'Contact & Support' },
 ]
-
-const CONTACT_EMAIL = 'paa2013@med.cornell.edu'
 
 const handleScrollTo = (e: React.MouseEvent, id: string) => {
   e.preventDefault()
@@ -23,8 +23,8 @@ const handleScrollTo = (e: React.MouseEvent, id: string) => {
 }
 
 const mailLink = (
-  <a href={`mailto:${CONTACT_EMAIL}`} className="text-primary-600 hover:underline">
-    {CONTACT_EMAIL}
+  <a href={`mailto:${SUPPORT_EMAIL}`} className="text-primary-600 hover:underline">
+    {SUPPORT_EMAIL}
   </a>
 )
 
@@ -32,11 +32,29 @@ const H2 = 'text-[19px] font-semibold text-gray-900 mb-3'
 const DT = 'pt-3 sm:py-3 sm:border-b sm:border-sand-200 font-semibold text-gray-900'
 const DD = 'pb-3 sm:py-3 border-b border-sand-200'
 
-const gettingStartedTiles = [
+const gettingStartedTiles: [string, React.ReactNode][] = [
   ['.docx or .pdf', "Text-based PDFs work best; scanned pages can't be read"],
   ['2–6 minutes', 'Longer CVs with many publications can take more'],
   ['No charge to you', 'AI processing is covered by the Library'],
 ]
+
+const intakeLink = (address: string) => (
+  <a href={`mailto:${address}`} className="text-primary-600 hover:underline break-all">{address}</a>
+)
+
+/** Shown only while email intake (#1298) is on; limits from SPEC-email-cv-intake. */
+const intakeFaq = (address: string) => ({
+  q: 'Can I send CVs by email?',
+  a: (
+    <>
+      Yes. Forward your CVs as attachments to {intakeLink(address)} from your WCM email account. You must have
+      signed in to CViche at least once. Word and PDF files are accepted, up to 50 per email, 10 MB each and about
+      30 MB in total. Each attachment is virus-scanned and becomes its own run. Duplicates and files over your quota
+      are held in the Emailed to CViche list on the New run page for you to confirm. You'll get an email when
+      processing is done.
+    </>
+  ),
+})
 
 const faqs: { q: string; a: React.ReactNode }[] = [
   {
@@ -92,7 +110,7 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     a: (
       <>
         Use the feedback form on your completed run page to report the specific issue. For general questions or
-        urgent concerns, email Paul Albert at {mailLink}.
+        urgent concerns, email {mailLink}.
       </>
     ),
   },
@@ -102,6 +120,11 @@ export default function HelpPage() {
   const { hash } = useLocation()
   const [activeId, setActiveId] = useState(sections[0].id)
   const [openFaq, setOpenFaq] = useState<number | null>(0)
+  const intake = useAuth().user?.intake_address ?? null
+  const tiles: [string, React.ReactNode][] = intake
+    ? [...gettingStartedTiles, ['Or email it', <>Forward to {intakeLink(intake)}</>]]
+    : gettingStartedTiles
+  const allFaqs = intake ? [faqs[0], intakeFaq(intake), ...faqs.slice(1)] : faqs
 
   useEffect(() => {
     if (hash) document.getElementById(hash.slice(1))?.scrollIntoView()
@@ -153,8 +176,8 @@ export default function HelpPage() {
           </ol>
           <div className="mt-4 mx-2.5 pt-3.5 border-t border-sand-400 text-gray-500 flex flex-col gap-1">
             <span>Questions?</span>
-            <a href={`mailto:${CONTACT_EMAIL}`} className="text-primary-600 hover:underline break-all">
-              {CONTACT_EMAIL}
+            <a href={`mailto:${SUPPORT_EMAIL}`} className="text-primary-600 hover:underline break-all">
+              {SUPPORT_EMAIL}
             </a>
           </div>
         </nav>
@@ -189,8 +212,8 @@ export default function HelpPage() {
 
             <section id="getting-started" className="scroll-mt-6">
               <h2 className={H2}>Getting Started</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-3">
-                {gettingStartedTiles.map(([title, desc]) => (
+              <div className={`grid grid-cols-1 gap-2.5 mb-3 ${intake ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-3'}`}>
+                {tiles.map(([title, desc]) => (
                   <div key={title} className="bg-sand-50 rounded-[10px] px-3.5 py-3 text-[13px] leading-[1.45]">
                     <div className="font-semibold text-gray-900">{title}</div>
                     {desc}
@@ -203,6 +226,12 @@ export default function HelpPage() {
                   can't be read. If your CV is in .doc or another format, convert it to .docx first using Microsoft
                   Word or Google Docs.
                 </p>
+                {intake && (
+                  <p>
+                    You can also forward CVs as attachments from your WCM email to {intakeLink(intake)}. Each
+                    attachment becomes its own run, and you'll get an email when it's done.
+                  </p>
+                )}
                 <p>
                   After uploading, you will see a real-time progress view showing each step of the pipeline as it
                   processes your document. Most CVs complete in 2 to 6 minutes depending on length and number of
@@ -275,7 +304,7 @@ export default function HelpPage() {
                 </dd>
                 <dt className={DT}>Removal</dt>
                 <dd className={DD}>
-                  To have a run removed, contact Paul Albert at {mailLink}. The original CV, intermediate outputs, and
+                  To have a run removed, contact {mailLink}. The original CV, intermediate outputs, and
                   final document are deleted from storage and the run record from the database. Deleted runs may remain
                   in routine system backups for a limited period.
                 </dd>
@@ -290,7 +319,7 @@ export default function HelpPage() {
             <section id="faq" className="scroll-mt-6">
               <h2 className="text-[19px] font-semibold text-gray-900 mb-2">Frequently Asked Questions</h2>
               <div>
-                {faqs.map((item, i) => {
+                {allFaqs.map((item, i) => {
                   const open = openFaq === i
                   return (
                     <div key={item.q} className="border-t border-sand-200">
@@ -332,7 +361,7 @@ export default function HelpPage() {
                   report exactly what went wrong so we can investigate and improve the results.
                 </p>
                 <p>
-                  For general questions, suggestions, or anything else, contact Paul Albert at {mailLink}.
+                  For general questions, suggestions, or anything else, contact {mailLink}.
                 </p>
               </div>
             </section>

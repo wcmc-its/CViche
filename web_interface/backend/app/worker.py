@@ -42,7 +42,7 @@ from typing import NamedTuple
 
 from sqlalchemy import select
 
-from app.config_loader import get_config
+from app.config_loader import email_intake_enabled, get_config
 from app.database import SessionLocal
 from app.logging_config import configure_logging
 from app.models import Run, RunState
@@ -402,18 +402,13 @@ def loop(queues: tuple[Queue, ...] = DEFAULT_QUEUES) -> None:
             shutting_down.wait(RETRY_DELAY_S)
 
 
-EMAIL_INTAKE_FLAG = "CVICHE_EMAIL_INTAKE"
-_FLAG_ON = frozenset({"1", "true", "yes", "on"})
-
-
 def _start_email_intake() -> threading.Thread | None:
     """Start the emailed-CV intake poller (#1298) when CVICHE_EMAIL_INTAKE is on.
 
     Off by default. The import is here, not at module top: the intake service
     pulls in app.auth for the ED check, which a worker with intake off must not
     need (see run_service.UPLOAD_DIR)."""
-    flag, _ = get_config("mail", EMAIL_INTAKE_FLAG, default="")
-    if str(flag).strip().lower() not in _FLAG_ON:
+    if not email_intake_enabled():
         return None
     from app.services import inbound_service
     from app.storage import get_storage

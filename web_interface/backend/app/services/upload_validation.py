@@ -96,11 +96,13 @@ _WORD_PART_PREFIX = "word/"
 _XML_SUFFIX = ".xml"
 _EXTERNAL_TARGET_MODE = "external"
 _HYPERLINK_TYPE_SUFFIX = "/hyperlink"
-_NETWORK_SCHEMES = frozenset({"http", "https", "ftp"})
 _FILE_SCHEME = "file"
 _LOCAL_FILE_HOSTS = frozenset({"", "localhost"})
 _DDE_FIELD_CODES = frozenset({"DDE", "DDEAUTO"})
-_URI_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
+# 2+ characters: a one-letter "scheme" is a Windows drive (C:/x.dotm).
+_URI_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]+):")
+# A URL nested after another scheme, as in mhtml:http://host/x!y (#1336).
+_NESTED_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]+://")
 # \\host\share, //host/share, and the mixed-slash spellings Windows also reads as UNC.
 _UNC_PREFIX = re.compile(r"[\\/]{2}")
 _FIELD_CODE = re.compile(r"\s*([A-Za-z]+)")
@@ -190,18 +192,27 @@ def _has_network_relationship(root: etree._Element | None) -> bool:
 
 
 def _is_network_target(target: str) -> bool:
-    """http(s)/ftp, a UNC path, or a file URL naming a host other than
-    localhost (file://host/...)."""
+    """A UNC path, a file URL naming a host other than localhost
+    (file://host/...), or any other scheme that names a remote resource
+    (https://, smb://, mhtml:http://...)."""
     target = unquote(target).strip()
     if _UNC_PREFIX.match(target):
         return True
     scheme = _URI_SCHEME.match(target)
     if scheme is None:
         return False
-    name = scheme.group(1).lower()
-    if name in _NETWORK_SCHEMES:
-        return True
-    return name == _FILE_SCHEME and _is_remote_file_path(target[scheme.end():])
+    rest = target[scheme.end():]
+    if scheme.group(1).lower() == _FILE_SCHEME:
+        return _is_remote_file_path(rest)
+    return _names_remote_resource(rest)
+
+
+def _names_remote_resource(rest: str) -> bool:
+    """What follows a non-file scheme: remote when it has an authority
+    (smb://host) or nests a URL (mhtml:http://host). A Mac HFS path
+    (Data:Users:x.dotx) parses as scheme "data" but has neither (#1336)."""
+    rest = rest.replace("\\", "/")
+    return rest.startswith("//") or _NESTED_URL.search(rest) is not None
 
 
 def _is_remote_file_path(rest: str) -> bool:

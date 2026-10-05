@@ -158,6 +158,21 @@ def test_create_batch_posts_one_teams_card_and_none_on_a_refusal(client, db, see
     assert facts["Submitted by"] == "Pat.Example"
 
 
+def test_create_batch_of_one_file_posts_no_batch_card(client, db, seed_simple_mode, monkeypatch):
+    """#1340: one file with "Email me when job completes" ticked is a one-file
+    batch; its run posts the single-run started card instead."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    posted = []
+    monkeypatch.setattr(notifications._SESSION, "post",
+                        lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
+    _auth(client, _make_user(db))
+
+    assert client.post("/api/batches", json={"files_submitted": 1, "notify_on_complete": True}).status_code == 200
+    notifications.flush()
+
+    assert posted == []
+
+
 def test_create_batch_without_the_current_consent_is_uploads_403(client, db, seed_simple_mode, monkeypatch):
     """A user who has not accepted the current consent terms is refused
     before anything is stored or posted, with /upload's 403 body."""
@@ -338,6 +353,23 @@ def test_queue_position_counts_only_earlier_queued_runs_on_the_batch_queue(clien
     assert {r["run_id"]: r["queue_position"] for r in rows} == {"FIRSTQ": 1, "SECNDQ": 2, "DONEQQ": None}
 
 
+def test_queue_position_of_a_one_file_batch_run_is_its_place_on_the_single_queue(client, db, seed_simple_mode):
+    """#1340: a one-file batch's run waits on the single queue, so it is
+    ranked among single runs, never among bulk batch runs."""
+    owner = _make_user(db)
+    _batch(db, owner, "BULKBB")
+    _batch(db, owner, "ONEFIL", files_submitted=1)
+    _run(db, "SINGLE", owner, status="queued", queued_at=T0)
+    for n in range(2):
+        _run(db, f"BULKR{n}", owner, batch_id="BULKBB", status="queued", queued_at=T0)
+    _run(db, "ONERUN", owner, batch_id="ONEFIL", status="queued", queued_at=T0 + timedelta(minutes=1))
+    _auth(client, owner)
+
+    rows = client.get("/api/batches/ONEFIL").json()["runs"]
+
+    assert {r["run_id"]: r["queue_position"] for r in rows} == {"ONERUN": 1}
+
+
 # --- GET /queue ---------------------------------------------------------------
 
 @pytest.fixture
@@ -399,6 +431,26 @@ def test_queue_reports_live_workers_waiting_runs_and_the_wait_per_queue(client, 
         "batch": {"workers": 1, "ahead": 3, "est_wait_minutes": 45},
         "completion_email_available": False,
     }
+
+
+def test_queue_counts_a_one_file_batch_run_under_the_single_queue(client, db, seed_simple_mode, fake_valkey):
+    """#1340: lane loads follow run_queue.queue_for -- a one-file batch's run
+    waits (and runs) on the single queue, so it counts there."""
+    user = _make_user(db)
+    _batch(db, user, "BULKBB", files_submitted=2)
+    _batch(db, user, "ONEFIL", files_submitted=1)
+    _run(db, "SNGLQA", user, status="queued", queued_at=T0)
+    _run(db, "ONEQUE", user, batch_id="ONEFIL", status="queued", queued_at=T0)
+    _run(db, "ONERUN", user, batch_id="ONEFIL", status="running")
+    _run(db, "BULKQA", user, batch_id="BULKBB", status="queued", queued_at=T0)
+    _auth(client, user)
+
+    loads = batch_service._lane_loads(db)
+
+    assert loads[run_queue.SINGLE] == batch_service._LaneLoad(waiting=2, running=1)
+    assert loads[run_queue.BATCH] == batch_service._LaneLoad(waiting=1, running=0)
+    body = client.get("/api/queue").json()
+    assert (body["single"]["ahead"], body["batch"]["ahead"]) == (2, 1)
 
 
 def test_queue_still_answers_when_valkey_is_down(client, db, seed_simple_mode, fake_valkey, monkeypatch):

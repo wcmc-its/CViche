@@ -23,7 +23,7 @@ from app.auth import (
 )
 from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.login_throttle import get_login_throttle
-from app.config_loader import get_config_value
+from app.config_loader import INTAKE_ADDRESS, email_intake_enabled, get_config_value
 from app.rate_limiter import get_quota
 from app.services.user_service import provision_user, normalize_email
 from app.audit_events import (
@@ -261,5 +261,6 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         consent_version=user.consent_version,
         default_submission_type=user.default_submission_type,
         quota=QuotaInfo(**quota_data),
+        intake_address=INTAKE_ADDRESS if email_intake_enabled() else None,
     )
     return data

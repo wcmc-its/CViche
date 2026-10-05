@@ -268,8 +268,9 @@ class Run(Base):
     def scanned_page_numbers(self) -> list[int]:
         return [int(n) for n in self.scanned_pages.split(",")] if self.scanned_pages else []
     # The batch upload this run belongs to (#1114), NULL for a single upload.
-    # Also routes the run's queue token to the batch queue
-    # (run_queue.queue_for) and suppresses its Teams "started" card.
+    # A bulk batch (is_bulk_batch: two or more files) also routes the run's
+    # queue token to the batch queue (run_queue.queue_for) and suppresses its
+    # Teams "started" card; a one-file batch does neither.
     batch_id = Column(String(8), ForeignKey("run_batches.id"), nullable=True, index=True)
 
     # ORM relationships (see User for the lazy/cascade rationale). user_id is
@@ -313,6 +314,21 @@ class RunBatch(Base):
     completion_notified_at = Column(DateTime, nullable=True)
 
     user = relationship("User", lazy="raise_on_sql")
+
+
+# The fewest files a batch needs to be treated as a bulk upload. A one-file
+# batch is a single upload in all but name: ticking "Email me when job
+# completes" on a single file creates one so the completion email fires
+# (#1340). Its run is routed (run_queue.queue_for), counted
+# (batch_service._lane_loads) and announced in Teams (notifications) like a
+# single run; only the completion email stays batch-driven.
+BULK_BATCH_MIN_FILES = 2
+
+
+def is_bulk_batch(files_submitted: int | None) -> bool:
+    """True for a batch of BULK_BATCH_MIN_FILES or more files; False for a
+    one-file batch and for no batch at all (``None``)."""
+    return files_submitted is not None and files_submitted >= BULK_BATCH_MIN_FILES
 
 
 class Step(Base):

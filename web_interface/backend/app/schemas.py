@@ -366,6 +366,8 @@ class MeResponse(BaseModel):
     consent_version: str | None = None
     default_submission_type: str | None = None
     quota: QuotaInfo | None = None
+    # Where CVs can be emailed; null while email intake (#1298) is off.
+    intake_address: str | None = None
 
     class Config:
         from_attributes = True
