@@ -265,6 +265,17 @@ def test_a_personal_line_in_the_appendix_is_still_cut(text):
     assert repair._leaks(text, "appendix", dea_label_in_block=False)
 
 
+@pytest.mark.parametrize("text", [
+    # NDMRSO (#1223): a bare "Birth" label before a whole date, as BNYLDF idx 24
+    # and HUOGDE idx 8 rendered it; synthetic values.
+    "Birth: March 4, 1970 in Exampleville, Examplestan",
+    "BIRTH March 4, 1970: Exampleville",
+])
+def test_a_bare_birth_line_in_the_appendix_is_cut_with_its_place(text):
+    leaks = repair._merged(repair._leaks(text, "appendix", dea_label_in_block=False))
+    assert [(leak.start, leak.end) for leak in leaks] == [(0, len(text))]
+
+
 def test_title_text_in_the_appendix_stays_a_finding_and_is_left_whole(tmp_path):
     docx_path = _render(tmp_path)
     doc = Document(str(docx_path))
