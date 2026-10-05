@@ -764,12 +764,39 @@ _YEAR_NOT_IN_SOURCE_NULLED_REASON = (
     'Cleared a year the source text does not contain and gives no single year for')
 
 
+#: The largest number a short dashed date token's first half can be: a day
+#: of the month ("05-31-98") or a month ("09-14"). A larger one ("98-02")
+#: makes the token a two-year range, whose halves are years.
+_MAX_DAY_OF_MONTH = 31
+
+#: A short dashed date token ending where a two-digit number starts: a one-
+#: or two-digit number and a hyphen ("09-14"). Group 1 is that number. A
+#: slash token ("5/16", "10/01/98") is not one here: `_source_years_for_month`
+#: already reads it as a date, and refusing it moved a "6/30/31" grant end
+#: past the century pivot and read "4/27-29/88" as April 2027 (2026-10-04,
+#: both corpus farms).
+_DASHED_DATE_TOKEN_HEAD = re.compile(r'(?<!\d)(\d{1,2})-\Z')
+
+
+def _ends_dashed_date_token(original_text: str, digits_start: int) -> bool:
+    """True when the two digits at `digits_start` are the second half of a
+    short dashed date token, after a number that can be a month or a day:
+    in "09-14" they may be a day or a year, so they do not show that the
+    text writes a year."""
+    head = _DASHED_DATE_TOKEN_HEAD.search(original_text, 0, digits_start)
+    return head is not None and 1 <= int(head.group(1)) <= _MAX_DAY_OF_MONTH
+
+
 def _source_writes_year(year: str, original_text: str) -> bool:
     """True when `original_text` has `year` written out, or its last two
-    digits as a number of their own ("10/01/98", "'98", "1997-98")."""
-    return bool(
-        re.search(rf'(?<!\d){year}(?!\d)', original_text)
-        or re.search(rf'(?<!\d){year[2:]}(?!\d)', original_text)
+    digits as a number of their own ("'98", "1997-98", "98-02", "10/01/98")
+    that is not the second half of a short dashed date token ("09-14";
+    class E26, 2026-10-04 NDMRSO autopsy: GCFEBE)."""
+    if re.search(rf'(?<!\d){year}(?!\d)', original_text):
+        return True
+    return any(
+        not _ends_dashed_date_token(original_text, match.start())
+        for match in re.finditer(rf'(?<!\d){year[2:]}(?!\d)', original_text)
     )
 
 
@@ -802,22 +829,59 @@ def _source_years_for_month(
     return years
 
 
+def _source_years(original_text: str) -> set[int]:
+    """Every readable year a numeric or month-name date in `original_text`
+    gives, in any month."""
+    years = {int(source_year)
+             for *_, source_year in _NAMED_SOURCE_DATE_PATTERN.findall(original_text)}
+    for *_, source_year in _NUMERIC_SOURCE_DATE_PATTERN.findall(original_text):
+        if len(source_year) == 4:
+            years.add(int(source_year))
+        elif len(source_year) == 2:
+            years.add(expand_two_digit_year(int(source_year)))
+    return years
+
+
+def _implausible_year_repair(value: str, original_text: str) -> tuple[str | None, str] | None:
+    """`(repaired value, reason)` for a bare year below `_MIN_PLAUSIBLE_YEAR`
+    the source text does not write ("5/16" stored as 1605; class E26,
+    2026-10-04 NDMRSO autopsy: VXSDRD), or None to leave it alone.
+
+    Re-derived when the text's dates all give one year, cleared when they
+    give more than one, and left alone when the text has no date: an earlier
+    record of a multi-record entry is cleaned against no text.
+    """
+    if not value.isdigit() or len(value) != 4 or int(value) >= _MIN_PLAUSIBLE_YEAR:
+        return None
+    if re.search(rf'(?<!\d){value}(?!\d)', original_text):
+        return None
+    source_years = _source_years(original_text)
+    if not source_years:
+        return None
+    if len(source_years) > 1:
+        return None, _YEAR_NOT_IN_SOURCE_NULLED_REASON
+    (source_year,) = source_years
+    return str(source_year), _YEAR_NOT_IN_SOURCE_REASON
+
+
 def _year_not_in_source_repair(value: str, original_text: str) -> tuple[str | None, str] | None:
     """`(repaired value, reason)` for a dated `value` whose year the source
     text does not contain, or None to leave it alone.
 
-    Left alone: a value without a month (a bare year carries nothing to
-    re-derive it from), a year the text writes in full or as its two digits,
-    a value whose month the text gives no date for -- an entry split across
-    elements can carry its year in a neighbour, and nothing here can tell
-    that from a wrong year -- and a value whose month the text gives a date
-    with an unreadable year for ("05/01/202"): the stored year may be the
-    LLM's reading of it. Re-derived when the text's dates in that month (and
-    on that day) all give one year; cleared when they give more than one.
+    Left alone: a year the text writes in full or as its two digits (see
+    `_source_writes_year`), a value whose month the text gives no date for
+    -- an entry split across elements can carry its year in a neighbour, and
+    nothing here can tell that from a wrong year -- and a value whose month
+    the text gives a date with an unreadable year for ("05/01/202"): the
+    stored year may be the LLM's reading of it. Re-derived when the text's
+    dates in that month (and on that day) all give one year; cleared when
+    they give more than one. A value without a month is left alone unless
+    it is an implausible year (`_implausible_year_repair`): a bare year
+    carries nothing else to re-derive it from.
     """
     dated = _DATED_VALUE_PATTERN.fullmatch(value.strip())
     if dated is None:
-        return None
+        return _implausible_year_repair(value.strip(), original_text)
     year, month, day = dated.groups()
     if _source_writes_year(year, original_text):
         return None

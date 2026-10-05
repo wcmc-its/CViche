@@ -539,6 +539,25 @@ _YEAR_NOT_IN_SOURCE_NULLED_REASON = (
             {"date": "1990-05"},
             {"date": None},
         ),
+        # the day of an "MM-DD" token does not vouch for a year ending in it
+        # (class E26, NDMRSO GCFEBE): the text's own date in that month does
+        (
+            "09-14: Example lecture, September 2016",
+            {"start_date": "2014-09"},
+            {"start_date": "2016-09"},
+        ),
+        (
+            "9-14: Example lecture, Sept 2016",
+            {"start_date": "2014-09"},
+            {"start_date": "2016-09"},
+        ),
+        # a bare year below 1900 the text does not write (class E26, NDMRSO
+        # VXSDRD): re-derived from the text's one year, or cleared
+        ("5/16 Example keynote address", {"date": "1605"}, {"date": "2016"}),
+        ("Example keynote, June 2016", {"date": "1606"}, {"date": "2016"}),
+        ("Example keynote 5/2016", {"date": "1605"}, {"date": "2016"}),
+        ("5/16 Example keynote", {"date": "1605 "}, {"date": "2016"}),
+        ("Example keynote 5/16, June 2017", {"date": "1605"}, {"date": None}),
     ],
 )
 def test_year_not_in_source_is_re_derived_from_the_text(text, fields, expected):
@@ -583,6 +602,25 @@ def test_year_not_in_source_clearing_records_an_empty_string():
         # a word that starts like a month name is not one
         ("Example Institute of Marine 2016", {"date": "1995-03"}),
         ("Example Award, Junior 2015", {"date": "1995-06"}),
+        # two-digit years outside a short dashed date token still vouch
+        ("Example lecture '98, June 2011", {"start_date": "1998-06"}),
+        ("Example committee 98-02, June 2011", {"start_date": "1998-06"}),
+        ("Example committee 98-02, June 2011", {"start_date": "2002-06"}),
+        ("Example committee 2010-12, June 2011", {"start_date": "2012-06"}),
+        ("Example grant 7/1/24-6/30/31", {"end_date": "2031-06-30"}),
+        ("Example meeting 4/27-29/88", {"start_date": "1988-04-27"}),
+        # an "MM-DD" token with no other date in that month: the year may
+        # sit in a neighbouring element, so it is left alone
+        ("07-21: Example lecture", {"date": "2021-07-21"}),
+        ("09-14: Example lecture", {"start_date": "2014-09"}),
+        # a dashed token inside a longer dashed run
+        ("Example post 3-21-11-24", {"start_date": "2021-03"}),
+        # a bare year: plausible, written in the text, or with no source date
+        ("Example fellowship 1966-1868, renewed 5/16", {"end_date": "1868"}),
+        ("Example lecture 5/16", {"date": "n.d."}),
+        ("Example lecture 5/16", {"date": "2015"}),
+        ("Example keynote address", {"date": "1605"}),
+        ("", {"date": "1605"}),
         # a date in another month is not this date
         ("Example grant 04/01/17", {"start_date": "1997-03-01"}),
         # a date on another day of that month is not this date
@@ -596,6 +634,7 @@ def test_year_not_in_source_clearing_records_an_empty_string():
         # not a date value
         ("Example lecture, June 2011", {"date": "1968-06-01-02"}),
         ("Example lecture, June 2011", {"year": 1968}),
+        ("Example lecture 5/16", {"year": 1605}),
         # no text to check against (an earlier record of a multi-record entry)
         ("", {"start_date": "1968-06"}),
     ],
