@@ -82,6 +82,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _short_end_year,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_role_consistency,
     lint_span_count,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
@@ -3490,6 +3491,84 @@ def test_grant_bucket_ignores_non_grant_codes():
 ])
 def test_short_end_year(end, start, expected):
     assert _short_end_year(end, start, 2026) == expected
+
+
+
+# role_consistency (#1403, RCBKFG KUUKNJ 243/247) -- the source names the CV
+# owner under one role label while pi_role states the other.
+
+_ROLE_OWNER = {"first_name": "Ada", "last_name": "Testowner"}
+
+
+def _roles(text, pi_role, owner=_ROLE_OWNER, code="M2A", key="pi_role"):
+    entry = _grant(243, text, code=code, **{key: pi_role})
+    return lint_role_consistency({"cv_owner": owner, "entries": [entry]})
+
+
+@pytest.mark.parametrize("text, pi_role, source", [
+    ("Source: NIH R01\tRole: PIs: Testowner A, Other B, co-Is: Third C\tTitle: T", "co-I", "PI"),
+    ("Source: NIH R01\tRole: PI: Other B, co-Is: Third C, Testowner A\tTitle: T", "PI", "co-I"),
+    ("R01 HL000000 (Testowner, PI)  25%  5/1/08-5/30/13", "Co-Investigator", "PI"),
+    ("Example Foundation 2019-2021, Testowner AB (co-I)", "Principal Investigator", "co-I"),
+    ("NIH R01 | 2019-2021 | Principal Investigators: Testowner A", "co-investigator", "PI"),
+    ("Role: PIs: Other B, Testowner A, co-Is: Third C", "co-I", "PI"),  # next list's label
+    ("PI: Other B; Co-Investigators: Testowner A", "PI", "co-I"),
+    ("co-Is: Third C, Testowner A (PI)", "co-I", "PI"),  # the label after the name wins
+])
+def test_role_consistency_flags_an_owner_role_the_source_contradicts(text, pi_role, source):
+    findings = _roles(text, pi_role)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("role_consistency", "WARN")]
+    assert findings[0]["message"].startswith("entry 243 (M2A):")
+    assert f"names the CV owner as {source}," in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text, pi_role", [
+    ("Role: PIs: Testowner A, Other B, co-Is: Third C", "PI"),        # agrees
+    ("Role: PI: Other B, co-Is: Third C, Testowner A", "Co-I"),
+    ("Role: PIs: Testowner A, co-Is: Third C", None),                 # empty role
+    ("Role: PIs: Testowner A, co-Is: Third C", "Mentor"),             # neither role
+    ("Role: Co-PIs: Testowner A, Other B", "co-I"),                   # a co-PI
+    ("PI: Other B\tco-Is: Third C", "PI"),                           # owner not named
+    ("PI: Testowner A\tco-Is: Third C, Testowner A", "PI"),          # both roles
+    ("Testowner A, Other B\tco-Is: Third C", "PI"),                  # label in another cell
+    ("PI: Other B\tTestowner A", "co-I"),
+    ("PI: Other B | Testowner A", "co-I"),
+    ("PI: Other B, Co-PIs: Testowner A", "co-I"),                     # nearest label is a co-PI
+    ("PI: Other B, Co-PIs: Testowner A", "PI"),
+    ("Supplement to a PI award, Testowner A, Other B", "co-I"),       # no list label
+    ("PIs: Testownerson A, co-Is: Third C", "co-I"),                  # a longer word
+    ("PI: Other B, MD; Co PI: Ada Testowner, MD", "co-I"),            # "Co PI" is a co-PI
+    ("PI: Other B, MD; Co PI: Ada Testowner, MD", "PI"),
+    ("PI: Other B; Subcontract PIs: Testowner A, Third C", "co-I"),
+    ("(PI: Other B, Subcontract PI: Testowner A)\nRole: Co-Investigator",
+     "Co-Investigator"),                                              # a subaward's PI
+])
+def test_role_consistency_spares_agreement_and_what_it_cannot_judge(text, pi_role):
+    assert _roles(text, pi_role) == []
+
+
+def test_role_consistency_reads_role_when_pi_role_is_empty():
+    """Stage 6 renders `pi_role or role`; the lint reads the same value."""
+    assert len(_roles("PIs: Testowner A", "co-I", key="role")) == 1
+
+
+@pytest.mark.parametrize("owner", [{}, {"last_name": None}, {"last_name": "Al"}])
+def test_role_consistency_needs_an_owner_surname(owner):
+    assert _roles("PIs: Al Testowner, co-Is: Third C", "co-I", owner=owner) == []
+
+
+def test_role_consistency_folds_accents_on_both_sides():
+    owner = {"last_name": "Testowner"}
+    assert len(_roles("PIs: T\u00e9stowner A, co-Is: Third C", "co-I", owner=owner)) == 1
+
+
+def test_role_consistency_judges_each_part_of_a_hyphenated_surname():
+    owner = {"last_name": "Rivera-Testowner"}
+    assert len(_roles("PIs: Rivera A, co-Is: Third C", "co-I", owner=owner)) == 1
+
+
+def test_role_consistency_ignores_non_grant_codes():
+    assert _roles("PIs: Testowner A, co-Is: Third C", "co-I", code="D1") == []
 
 
 if __name__ == "__main__":

@@ -52,6 +52,27 @@ _LINE_SENTINEL = "\x00"
 TABLE_ROW_JOINER = " | "
 
 
+#: A word of a name: letters only.
+_NAME_WORD_RE = re.compile(r"[^\W\d_]+")
+
+#: The shortest surname word judged. A two-letter word is an author's
+#: initials as often as a name ("Example LI"); no owner on the farm has a
+#: surname that short, so it is left unjudged rather than guessed at.
+OWNER_SURNAME_MIN_CHARS = 3
+
+
+def _owner_surname_words(stage4: dict) -> frozenset[str]:
+    """The words of `cv_owner.last_name` the owner lints judge
+    (OWNER_SURNAME_MIN_CHARS): owner_missing_from_citation, etal_added and
+    role_consistency."""
+    owner = stage4.get("cv_owner")
+    surname = owner.get("last_name") if isinstance(owner, Mapping) else None
+    if not isinstance(surname, str):
+        return frozenset()
+    return frozenset(word for word in _NAME_WORD_RE.findall(norm(surname))
+                     if len(word) >= OWNER_SURNAME_MIN_CHARS)
+
+
 def _long_word_tokens(text) -> set:
     """5+-letter token set for one string (lints 5/8 render-overlap checks)."""
     return set(_RENDER_TOKEN_RE.findall(norm(text)))

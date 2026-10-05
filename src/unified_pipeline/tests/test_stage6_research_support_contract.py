@@ -67,6 +67,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     reclassify_past_m2a_grants,
     resolve_pi_name,
     _is_cv_owner,
+    _pi_name_from_label,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: E402
     grant_heading_rebucket_target,
@@ -675,6 +676,67 @@ def test_an_explicit_pi_label_beats_a_name_suffix_shape():
     """Shapes are tried in order: "PI: <name>" outranks "<name>, Principal Investigator"."""
     raw = 'Ada Lovelace, Principal Investigator; renewal (PI: Grace Hopper)'
     assert resolve_pi_name({}, raw, '', '') == 'Grace Hopper'
+
+
+_OWN_TITLE = 'Stress Study \u2013 Mouse Models'
+_OWN_TITLE_TEXT = '1997 Example Foundation, "Stress Study" \u2013 Mouse Models, PI, Total $7,000.'
+
+
+def test_a_pi_label_capturing_the_grants_own_title_words_is_not_a_pi():
+    """#1403 (EQADVR 396): "<title>, PI" matched the "Name, PI" shape with the
+    title's last two words. Those words are the title, not a PI. With no
+    role the cell stays empty; with the bare "PI" role the owner fills it
+    (#1446's auto-fill), never the title words."""
+    fields = {'title': _OWN_TITLE, 'pi_role': 'PI'}
+    assert _pi_name_from_label(_OWN_TITLE_TEXT) == 'Mouse Models'
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, '', 'Ada Testowner') == ''
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, 'PI', 'Ada Testowner') == 'Ada Testowner'
+
+
+@pytest.mark.parametrize('fields', [
+    {'title': _OWN_TITLE.lower()},
+    {'title': None, 'study_title': _OWN_TITLE},
+])
+def test_the_own_title_guard_is_case_folded_and_reads_study_title(fields):
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, '', '') == ''
+
+
+@pytest.mark.parametrize('title', ['Stress Study', 'Mouse Modelsx Study', 'AMouse Models Study',
+                                   None, ['a', 'list']])
+def test_a_pi_label_outside_the_title_still_names_the_pi(title):
+    """Only whole title words veto the capture: a title without them, one
+    that holds them inside a longer word, no title, or a non-string title
+    (stage 4 stores raw LLM JSON) keeps it."""
+    assert resolve_pi_name({'title': title}, _OWN_TITLE_TEXT, '', '') == 'Mouse Models'
+
+
+@pytest.mark.parametrize('title', ['Support Grant (PI: Lee)', 'Support Grant [PI Lee]',
+                                   'Support Grant, Lee (PI)'])
+def test_a_pi_named_by_a_label_inside_the_title_is_still_the_pi(title):
+    """A stage-4 title can keep the source's "(PI: <name>)" parenthetical. The
+    name follows a PI label there, so it is the PI, not title words: the guard
+    must not veto it (farm M2B entry 61.1)."""
+    raw = '08/01/2020-07/31/2025 | P30CA000000/ ' + title + ' | NCI | $1,000 (Total) | 5%'
+    assert resolve_pi_name({'title': title, 'pi_role': '5%'}, raw, '5%', 'Ada Testowner') == 'Lee'
+
+
+def test_a_title_word_capture_falls_through_to_the_owner_auto_fill():
+    """With the capture refused, a "Principal Investigator" role still fills
+    the owner, as it does for any grant whose text names no PI."""
+    assert resolve_pi_name({'title': _OWN_TITLE}, _OWN_TITLE_TEXT, 'Principal Investigator',
+                           'Ada Testowner') == 'Ada Testowner'
+
+
+def test_a_grant_whose_title_tail_matches_the_pi_shape_renders_the_owner_not_title_words():
+    """The rendered wire: the PI cell never names the title words. The role is
+    a bare "PI", so the owner auto-fill (#1446) names the CV owner."""
+    table = _generator()._create_grant_table(
+        {'title': _OWN_TITLE, 'agency': 'Example Foundation', 'pi_role': 'PI',
+         'start_date': '1997'},
+        'M2B', entry={'text': _OWN_TITLE_TEXT}, owner_name='Ada Testowner')
+    cells = _cells(table)
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
+    assert cells['Your role:'] == 'PI'
 
 
 def test_a_null_source_text_resolves_to_no_pi_rather_than_raising():

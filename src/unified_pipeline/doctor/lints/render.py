@@ -46,6 +46,8 @@ from ..shared import (
     _magnitude_severity,
     _output_section_header,
     _template_haystack,
+    _NAME_WORD_RE,
+    _owner_surname_words,
 )
 
 
@@ -1758,14 +1760,6 @@ _CITATION_TOKEN_RE = re.compile(r"[^\W_]{3,}")
 CITATION_MATCH_MIN_TOKENS = 4
 CITATION_MATCH_MIN_SHARE = 0.6
 
-#: A word of a name: letters only.
-_NAME_WORD_RE = re.compile(r"[^\W\d_]+")
-
-#: The shortest surname word judged. A two-letter word is an author's
-#: initials as often as a name ("Example LI"); no owner on the farm has a
-#: surname that short, so it is left unjudged rather than guessed at.
-OWNER_SURNAME_MIN_CHARS = 3
-
 #: A surname word this long still counts as shown one letter off: a PubMed
 #: rebuild prints PubMed's spelling of the owner's name (NDXXAD: a letter
 #: doubled), which is the owner, not their absence.
@@ -1869,16 +1863,6 @@ def _rendered_citations(stage4: dict,
             str(entry.get("text") or ""), authors if isinstance(authors, str) else "",
             lines[pairs[i]]))
     return citations
-
-
-def _owner_surname_words(stage4: dict) -> frozenset[str]:
-    """The words of `cv_owner.last_name` the lint judges (OWNER_SURNAME_MIN_CHARS)."""
-    owner = stage4.get("cv_owner")
-    surname = owner.get("last_name") if isinstance(owner, Mapping) else None
-    if not isinstance(surname, str):
-        return frozenset()
-    return frozenset(word for word in _NAME_WORD_RE.findall(norm(surname))
-                     if len(word) >= OWNER_SURNAME_MIN_CHARS)
 
 
 def _one_edit_apart(a: str, b: str) -> bool:

@@ -510,6 +510,11 @@ LINT_COPY = {
         "The CV lists separate years or terms for a record, but the document shows one "
         "continuous range from the first to the last.",
         "Replace the range with the years the source CV gives."),
+    "role_consistency": LintCopy(
+        "Your role on a grant is reversed",
+        "The source CV names you as principal investigator on a grant that is shown with you as "
+        "co-investigator, or the other way round.",
+        "Check your role on each flagged grant against the source CV and correct it."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

@@ -116,6 +116,7 @@ from ..shared import (
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
+    _owner_surname_words,
     _piece_in_template,
 )
 
@@ -2882,4 +2883,106 @@ def lint_span_count(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
                 f"entry {entry.element_idx} ({entry.code}): the source lists {count} "
                 f"separate dates, the row shows one range {_span_text(envelope)} (#1245)",
                 [f"entry {entry.element_idx}: {count} source spans, 1 rendered"]))
+    return findings
+
+
+# --- role_consistency --------------------------------------------------------
+#
+# Stage 6 renders a grant's "Your role:" cell from `pi_role` (or `role`). When
+# the grant's own text names the CV owner under a PI label and `pi_role` says
+# co-investigator, or the reverse, the table credits the owner with the wrong
+# role (#1403; batch RCBKFG, KUUKNJ 243 and 247: "PIs: <owner>, <other>,
+# co-Is: ..." rendered co-I, "PI: <other>, co-Is: ..., <owner>" rendered PI).
+# Every value renders, so no loss lint sees it. Report-only.
+
+#: A role label in a grant's text. A co-PI is neither the PI nor a co-I, so
+#: it names no role this lint judges; "Co PI" with a space is one too (farm
+#: web26 705). Nor does a subcontract PI, who leads a subaward rather than
+#: the grant: "(PI: <other>, Subcontract PI: <owner>)" over "Role:
+#: Co-Investigator" is consistent (farm web241 150).
+_ROLE_LABEL = (r"(?<![\w-])(subcontract pis?|co[- ]?pis?|co-?is?|co-?investigators?|mpis?|pis?"
+               r"|principal investigators?)(?![\w-])")
+#: A label that opens a list of names: "PIs: A, B" or "co-Is: C, D".
+_ROLE_LIST_LABEL_RE = re.compile(_ROLE_LABEL + r"\s*:")
+#: A label right after a name: "<name>, PI" or "<name> (co-I)", allowing a
+#: few initials or a credential between them. Not a label that opens the
+#: next list: in "PIs: Other B, <owner> C, co-Is: ..." the "co-Is:" names
+#: the people after it.
+_ROLE_AFTER_NAME_RE = re.compile(
+    r"[\w .]{0,12}?(?:,\s*|\s*\(\s*)" + _ROLE_LABEL + r"(?!\s*:)")
+#: A grant's text splits into cells and lines here; a label never reaches
+#: across one.
+_GRANT_CELL_SPLIT_RE = re.compile(r"\t|\n| \| ")
+ROLE_PI = "PI"
+ROLE_CO_I = "co-I"
+#: `pi_role` values read as each role, after `norm` and dropping '-' and '.'.
+_PI_ROLE_VALUE_RE = re.compile(r"pi|mpi|multi ?pi|contact pi|principal investigator")
+_CO_I_ROLE_VALUE_RE = re.compile(r"(?:co ?i|co ?investigator|coinvestigator)s?")
+
+
+def _label_role(label: str) -> str | None:
+    """The role a matched label names, or None for a co-PI or a subcontract PI."""
+    bare = label.replace("-", "").replace(" ", "")
+    if bare.startswith(("copi", "subcontract")):
+        return None
+    return ROLE_CO_I if bare.startswith("co") else ROLE_PI
+
+
+def _stated_role(value: object) -> str | None:
+    """The role a `pi_role` value states: PI, co-I, or None for any other
+    (empty, a co-PI, "Mentor", "Site PI (subcontract)")."""
+    bare = norm(str(value or "")).replace("-", "").replace(".", "")
+    if _PI_ROLE_VALUE_RE.fullmatch(bare):
+        return ROLE_PI
+    if _CO_I_ROLE_VALUE_RE.fullmatch(bare):
+        return ROLE_CO_I
+    return None
+
+
+def _owner_roles_in_cell(cell: str, owner: frozenset[str]) -> set[str]:
+    """The roles one normalised cell gives an owner surname word: the label
+    right after the name, else the nearest list label before it."""
+    roles: set[str] = set()
+    for word in owner:
+        for match in re.finditer(rf"(?<!\w){re.escape(word)}(?!\w)", cell):
+            after = _ROLE_AFTER_NAME_RE.match(cell, match.end())
+            before = list(_ROLE_LIST_LABEL_RE.finditer(cell, 0, match.start()))
+            label = after or (before[-1] if before else None)
+            role = _label_role(label.group(1)) if label else None
+            if role:
+                roles.add(role)
+    return roles
+
+
+def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
+    """The one role the grant's text gives the owner, or None when it gives
+    none or both."""
+    roles: set[str] = set()
+    for cell in _GRANT_CELL_SPLIT_RE.split(text):
+        roles |= _owner_roles_in_cell(norm(cell), owner)
+    return roles.pop() if len(roles) == 1 else None
+
+
+def lint_role_consistency(stage4: dict) -> list[dict]:
+    """A grant whose text names the CV owner as PI while `pi_role` says
+    co-I, or the reverse (#1403). WARN, one finding per grant. The owner is
+    `cv_owner.last_name`; with none, no text names them. Not judged: an empty
+    `pi_role` (stage 4 often leaves it empty when `pi_name` holds the owner,
+    and the PI cell then names them), a co-PI, or text that gives the owner
+    both roles."""
+    owner = _owner_surname_words(stage4)
+    findings = []
+    for entry in stage4.get("entries", []):
+        fields = entry.get("extracted_fields")
+        if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
+            continue
+        stated = _stated_role(fields.get("pi_role") or fields.get("role"))
+        source = _source_owner_role(str(entry.get("text") or ""), owner)
+        if stated and source and stated != source:
+            findings.append(_finding(
+                "role_consistency", "WARN",
+                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+                f"the source names the CV owner as {source}, but the rendered role is "
+                f"{stated} (#1403)",
+                [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
