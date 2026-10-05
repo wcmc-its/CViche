@@ -509,6 +509,12 @@ LINT_COPY = {
         "co-investigator on a grant the CV lists you first on.",
         "Check the principal investigator and your role on each flagged grant against the "
         "source CV and correct them."),
+    "identical_rendered_rows": LintCopy(
+        "Rows that read the same",
+        "Two or more rows in one table are identical, although the CV lists different dates "
+        "or details for them, or one item is shown twice: once on its own and again inside "
+        "another row.",
+        "Add the date or detail that tells each flagged row apart, or delete the repeated item."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

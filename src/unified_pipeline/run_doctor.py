@@ -289,6 +289,14 @@ Lints, ranked by the severity of the failure class they catch:
                           owner first on an unlabelled grant shown only as a
                           co-I (JIJRSN 150-156, QTATUP 529-537), INFO. Reads
                           stage 4, and the docx when present
+14y. identical_rendered_rows rows of one rendered table a reader cannot
+                          tell apart: identical rows standing for stage-4
+                          records that differ in a field (a talk given on
+                          seven dates rendered as seven year-only rows,
+                          EOAHMI QTATUP 980), or a multi-record entry's whole
+                          text rendered as one row beside one of its records'
+                          own row (BRUSUZ 228/249/265). WARN, no score cap.
+                          Reads stage 4 and the docx's table rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -474,6 +482,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_etal_added,
+    lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
@@ -607,6 +616,7 @@ KNOWN_LINTS = (
     "research_summary_call_failed",
     "span_count",
     "role_consistency",
+    "identical_rendered_rows",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -788,6 +798,11 @@ LINT_PREVALENCE = {
     # analysis/pilot runs and 7 of the 126 farm/batch-3/batch-4 runs. Same
     # mixed-corpus caveat as above.
     "role_consistency": 0.061,
+    # identical_rendered_rows (EOAHMI QTATUP-04, BRUSUZ-01; IDR in
+    # doctor/PRECISION.md): 8 of the 102 fresh renders of origin/dev 8b287ec2
+    # (EBYSBC/s7ab/pilot 63, EOAHMI 9, NDMRSO 30), measured 2026-10-05. Same
+    # mixed-corpus caveat as above.
+    "identical_rendered_rows": 0.078,
 }
 
 
@@ -1331,6 +1346,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
     LintSpec("role_consistency", lint_role_consistency, ("stage_4",),
              optional=("table_rows",)),
+    LintSpec("identical_rendered_rows", lint_identical_rendered_rows,
+             ("stage_4", "table_rows")),
 )
 
 
