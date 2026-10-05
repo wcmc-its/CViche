@@ -786,6 +786,20 @@ def test_5d_call_llm_formatter_returns_text_and_usage_tuple(monkeypatch):
     assert usage["total_tokens"] == 18
 
 
+def test_5d_prompt_keeps_every_author_and_et_al_only_where_the_source_has_it(monkeypatch):
+    """#1259: a "first 6, et al." rule cut the CV owner from their own
+    citation when they sat seventh or later. The prompt the model receives
+    asks for the whole author list, with "et al." only where the source
+    writes it."""
+    sent = []
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: sent.append(kw) or _llm_result("{}"))
+    s5d.call_llm_formatter("raw content")
+    prompt = sent[0]["messages"][0]["content"]
+    assert "first 6" not in prompt
+    assert ('List every author the source lists, in the source\'s order. Never shorten '
+            'the list: write "et al." only where the source itself does') in prompt
+
+
 def test_5d_call_llm_formatter_exception_arm_returns_none_none(monkeypatch):
     def _boom(**kw):
         raise ValueError("bad request")
