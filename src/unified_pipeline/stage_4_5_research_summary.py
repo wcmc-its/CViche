@@ -24,6 +24,7 @@ from datetime import datetime
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"
 
 from unified_pipeline.llm.bedrock import (
+    CONTENT_FILTERED_STOP_REASON,
     BedrockContentFilteredError,
     BedrockEmptyResponseError,
     BedrockToolCallDidNotFireError,
@@ -32,12 +33,12 @@ from unified_pipeline.llm.retry import RETRYABLE_ERRORS
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm_provenance import (
     FALLBACK_SERVED_KEY,
-    CallFailure,
     STAGE4_5_CALL_FAILURES_KEY,
     STAGE4_5_CALL_M1_SCORE,
     STAGE4_5_CALL_SUMMARY,
     STAGE4_5_FALLBACK_CALLS_KEY,
 )
+from unified_pipeline.stage_errors import CallFailure
 
 logger = logging.getLogger(__name__)
 
@@ -447,62 +448,29 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRec
     return '\n'.join(context_parts)
 
 
-# The stage key call_llm resolves this stage's model and parameters under.
-LLM_STAGE = "stage_4_5"
-
-#: The model a stage-4.5 call gets one more attempt on when the client's own
-#: models all failed to reply (#1174). For QFQLNF's M1 relevance prompt
-#: (replayed 2026-10-05) Sonnet 5 and its content-filter fallback Sonnet 4.6
-#: both ended content_filtered; Haiku 4.5 answered (end_turn). Priced in
-#: config.PRICING.
-LAST_RESORT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-#: The model did not give a usable reply (a content filter, an empty reply, a
-#: tool call that did not fire). A different model may answer, so the call gets
-#: its LAST_RESORT_MODEL attempt.
-MODEL_REPLY_ERRORS = (BedrockContentFilteredError, BedrockEmptyResponseError,
-                      BedrockToolCallDidNotFireError)
-
-#: What a stage-4.5 call can still raise once the client's retries, its
-#: content-filter fallback and the LAST_RESORT_MODEL attempt are spent. Stage
-#: 4.5 records these and carries on without that call's answer: a research
-#: summary is one section, not a reason to fail the run (#1174). An
-#: LLMOutageError is left to propagate, as in every other stage (#810): the
-#: provider is down, and the driver decides.
-LLM_CALL_ERRORS = MODEL_REPLY_ERRORS + RETRYABLE_ERRORS
+#: What a stage-4.5 call can still raise once the client has spent its retries
+#: and its content-filter fallback (#1174): the three ways a model gives no
+#: usable reply, and a provider error. Stage 4.5 records these and carries on
+#: without that call's answer: a research summary is one section, not a reason
+#: to fail the run. An LLMOutageError is left to propagate, as in every other
+#: stage (#810): the provider is down, and the driver decides.
+LLM_CALL_ERRORS = (BedrockContentFilteredError, BedrockEmptyResponseError,
+                   BedrockToolCallDidNotFireError) + RETRYABLE_ERRORS
 
 #: How much of an exception's text the stage-4.5 artifact keeps.
 CALL_FAILURE_MESSAGE_CHARS = 300
 
 
 def call_failure(call: str, exc: Exception) -> CallFailure:
-    """The artifact record of one stage-4.5 call that raised LLM_CALL_ERRORS."""
-    return CallFailure(call=call, exception_type=type(exc).__name__,
-                       stop_reason=getattr(exc, "stop_reason", None),
+    """The artifact record of one stage-4.5 call that raised LLM_CALL_ERRORS.
+    BedrockContentFilteredError carries no stop_reason of its own: it is
+    raised only for a content_filtered ending."""
+    if isinstance(exc, BedrockContentFilteredError):
+        stop_reason: str | None = CONTENT_FILTERED_STOP_REASON
+    else:
+        stop_reason = getattr(exc, "stop_reason", None)
+    return CallFailure(call=call, exception_type=type(exc).__name__, stop_reason=stop_reason,
                        message=str(exc)[:CALL_FAILURE_MESSAGE_CHARS])
-
-
-def call_llm_with_last_resort(messages: list[dict], temperature: float) -> dict:
-    """call_llm for one stage-4.5 call; when no model the client tried gave a
-    usable reply, one more call on LAST_RESORT_MODEL, recorded as a
-    fallback-served call (FALLBACK_SERVED_KEY) like the client's own fallback.
-
-    This is a different model, not a retry of the same one (§5.6): the
-    client already retried the transient faults.
-    ponytail: if the stage is configured to LAST_RESORT_MODEL itself, the extra
-    call repeats it; no deployment does today (llm_config.yaml sets no stage_4_5 model).
-    """
-    try:
-        return call_llm(stage=LLM_STAGE, messages=messages, temperature=temperature)
-    except MODEL_REPLY_ERRORS as e:
-        logger.warning("Stage 4.5 call got no usable reply (%s, stop_reason=%r); trying %s",
-                       type(e).__name__, e.stop_reason, LAST_RESORT_MODEL)
-        failed_attempts_cost = getattr(e, "cost", 0.0)
-    result = call_llm(stage=LLM_STAGE, messages=messages, temperature=temperature,
-                      model=LAST_RESORT_MODEL)
-    result["cost"] = result.get("cost", 0.0) + failed_attempts_cost
-    result[FALLBACK_SERVED_KEY] = LAST_RESORT_MODEL
-    return result
 
 
 def score_existing_m1(m1_content: str) -> tuple[float, str, dict]:
@@ -542,7 +510,11 @@ Respond with JSON only:
 
     messages = [{"role": "user", "content": prompt}]
 
-    llm_result = call_llm_with_last_resort(messages, temperature=0.1)
+    llm_result = call_llm(
+        stage="stage_4_5",
+        messages=messages,
+        temperature=0.1
+    )
 
     result_text = llm_result["content"].strip()
 
@@ -612,7 +584,11 @@ Generate only the research summary paragraph (150-200 words max), no additional 
 
     messages = [{"role": "user", "content": prompt}]
 
-    llm_result = call_llm_with_last_resort(messages, temperature=0.3)
+    llm_result = call_llm(
+        stage="stage_4_5",
+        messages=messages,
+        temperature=0.3
+    )
 
     result_text = llm_result["content"].strip()
 
@@ -667,6 +643,12 @@ def generate_summary_unless_withheld(context: str, cv_owner_name: str) -> tuple[
     return summary, GENERATION_METHOD_LLM, usage
 
 
+def _failed_call_usage(exc: Exception) -> dict:
+    """The usage of a call that raised: what its attempts were billed, when the
+    error carries it (BedrockEmptyResponseError, BedrockToolCallDidNotFireError)."""
+    return {'cost': getattr(exc, "cost", 0.0)}
+
+
 def score_m1_or_unscored(m1_content: str) -> tuple[float, str, dict, CallFailure | None]:
     """score_existing_m1, or, when its call fails, (0.0, M1_UNSCORED_REASONING,
     {}, the failure): unscored M1 text is regenerated exactly as a low score is."""
@@ -675,7 +657,8 @@ def score_m1_or_unscored(m1_content: str) -> tuple[float, str, dict, CallFailure
     except LLM_CALL_ERRORS as e:
         logger.warning("Stage 4.5 M1 relevance call failed (%s); treating M1 as unscored",
                        type(e).__name__, exc_info=True)
-        return 0.0, M1_UNSCORED_REASONING, {}, call_failure(STAGE4_5_CALL_M1_SCORE, e)
+        return (0.0, M1_UNSCORED_REASONING, _failed_call_usage(e),
+                call_failure(STAGE4_5_CALL_M1_SCORE, e))
 
 
 def generate_summary_or_empty(context: str, cv_owner_name: str) -> tuple[str, str, dict, CallFailure | None]:
@@ -686,7 +669,8 @@ def generate_summary_or_empty(context: str, cv_owner_name: str) -> tuple[str, st
     except LLM_CALL_ERRORS as e:
         logger.warning("Stage 4.5 summary generation call failed (%s); writing an empty summary",
                        type(e).__name__, exc_info=True)
-        return "", GENERATION_METHOD_LLM_CALL_FAILED, {}, call_failure(STAGE4_5_CALL_SUMMARY, e)
+        return ("", GENERATION_METHOD_LLM_CALL_FAILED, _failed_call_usage(e),
+                call_failure(STAGE4_5_CALL_SUMMARY, e))
 
 
 @dataclass

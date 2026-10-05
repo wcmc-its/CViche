@@ -78,8 +78,8 @@ from unified_pipeline.quality_score import (
     stage4_group_failures,
 )
 
-from unified_pipeline.llm_provenance import STAGE4_5_CALL_FAILURES_KEY, STAGE4_5_CALL_SUMMARY, CallFailure
-from unified_pipeline.stage_errors import StageError
+from unified_pipeline.llm_provenance import STAGE4_5_CALL_FAILURES_KEY, STAGE4_5_CALL_SUMMARY
+from unified_pipeline.stage_errors import CallFailure, StageError
 
 from ..shared import _finding
 
