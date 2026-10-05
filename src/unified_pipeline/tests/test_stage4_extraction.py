@@ -819,12 +819,17 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: (measured before the change); pins the byte-identical-prompt contract.
 #: M2A re-measured for #291, whose one added line (the clinical-trial field
 #: mapping in the grant instructions) is the only difference from before.
-#: M2A re-measured for #1403, whose added unlabelled-title line is the only
-#: difference: dropping it gives the #291 hash 7d08216a... back. The pi_role
-#: line names the owner, so this owner-less prompt does not carry it.
+#: Both re-measured for #1243, whose rules 1 and 6 (MULTI_RECORD_INSTRUCTION,
+#: TAB_COLUMNS_INSTRUCTION) are the only lines that differ from before. M2A
+#: re-measured again for the one-work guard appended to its rule 1
+#: (SINGLE_WORK_INSTRUCTION): dropping it gives 1b33f2df... back.
+#: M2A re-measured for #1403 on top of #1243, whose added unlabelled-title
+#: line is the only difference: dropping it gives the #1243 hash 0ab6854a...
+#: back. The pi_role line names the owner, so this owner-less prompt does not
+#: carry it.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "1d29164b0587ffa733337b50ca97861e55bca832eca0c027e639cca810cee50f",
-    "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
+    "M2A": "108969062c9e3d82bddbdf02b0220cf5b2ae054d8cfa5a05c08ecc6e29578683",
+    "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
 
@@ -984,6 +989,98 @@ def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
     assert "even as a verb or a qualifier, that role wins over X" in text
     assert '"Co-directed with ..." under "Course Director" is role "Co-Director"' in text
     assert "never copy X verbatim when it only names a kind of activity" in text
+
+
+# --- #1243: a multi-record entry is asked for one item per record -------------
+
+@pytest.mark.parametrize("code", ["K1", "M2A", "N3A", "Q2", "I", "D2", "S1"])
+def test_every_batch_prompt_opens_its_rules_with_the_multi_record_rule(code):
+    prompt = _prompt(code, [{"text": "Alpha\tBeta"}])
+    rules = prompt.split("**Instructions**:\n")[1]
+    assert rules.startswith(extraction.multi_record_rule(code) + "\n2. Use null")
+    assert rules.startswith(extraction.MULTI_RECORD_INSTRUCTION)
+    assert "\n" + extraction.TAB_COLUMNS_INSTRUCTION + "\n7. Only extract" in rules
+
+
+def test_the_multi_record_rule_asks_for_one_item_per_record_under_one_entry_index():
+    # EBYSBC (#1243): 17 of 40 CVs lost a second mentee, role, rank or talk
+    # because the reply held one item for an entry that holds several.
+    text = extraction.MULTI_RECORD_INSTRUCTION
+    assert text.startswith("1. For each entry, extract all available fields. ")
+    assert 'Return one item per record, each with the same "entry_index"' in text
+    assert "repeat in every item a value the records share" in text
+    assert "Never join two records' values into one field" in text
+    assert "never keep only the first, the last or the parent record" in text
+    # The bound on over-splitting: one citation or grant is still one item.
+    assert "An entry about one thing is one item, even when it lists several authors" in text
+
+
+@pytest.mark.parametrize("code", ["S1", "S4", "S8", "M2A", "M2B", "M2C", "M2D", "T"])
+def test_a_citation_patent_or_grant_prompt_keeps_one_work_as_one_item(code):
+    # Wave-4 A/B: NDXXAD 360, one S8 abstract given as a poster at one meeting
+    # and a talk at another, became two items with the same title and authors.
+    rules = _prompt(code, [{"text": "Alpha. Poster at Meeting A 2016, and oral presentation at Meeting B 2016."}]
+                    ).split("**Instructions**:\n")[1]
+    assert rules.startswith(extraction.MULTI_RECORD_INSTRUCTION + extraction.SINGLE_WORK_INSTRUCTION + "\n2. Use null")
+
+
+@pytest.mark.parametrize("code", ["K1", "M1", "N3A", "N3B", "Q2", "Q4D", "I", "D2", "P", "R", "C"])
+def test_a_list_of_records_prompt_does_not_carry_the_one_work_guard(code):
+    # The 12/13 cited multi-record wins (MYNQRA 111/112 N3A, RVROVQ 129 R,
+    # MRJDWE 103 Q2, ...) are on these codes; the guard must not reach them.
+    assert extraction.SINGLE_WORK_INSTRUCTION not in _prompt(code, [{"text": "Alpha\tBeta"}])
+
+
+def test_the_one_work_guard_says_one_item_for_one_work_and_splits_only_separate_titles():
+    text = extraction.SINGLE_WORK_INSTRUCTION
+    assert text.startswith(" Here one citation, abstract, poster, chapter, patent or grant is one work: ")
+    assert "when the entry gives the same work at several venues, meetings, presentations or dates" in text
+    assert "return ONE item and put every venue or date in that item's fields" in text
+    assert "Never return two items with the same title." in text
+    # MYNQRA 63 (two patents) and EQGGRB 144 (two chapters) still split.
+    assert text.endswith("Split only works that each have their own title.")
+
+
+def test_extract_fields_batch_sends_the_one_work_guard_to_the_llm(monkeypatch):
+    """Wire: an abstract batch's prompt as call_llm receives it."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "title": "Alpha"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Alpha. Poster at Meeting A 2016, and oral presentation at Meeting B 2016.",
+          "taxonomy_code": "S8", "element_idx_start": 0, "element_idx_end": 0}], 0, 1)
+    assert prompts and extraction.MULTI_RECORD_INSTRUCTION + extraction.SINGLE_WORK_INSTRUCTION in prompts[0]
+
+
+def test_the_tab_rule_keeps_columns_but_starts_a_new_item_for_a_new_record():
+    # TAUBPU-shaped D2 row: a hospital post, a tab, then a concurrent faculty
+    # rank. The old rule read every tab as a column of one record.
+    text = extraction.TAB_COLUMNS_INSTRUCTION
+    assert text.startswith("6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), "
+                           "these indicate table columns - extract each column as a separate field value, "
+                           "not as merged text. ")
+    assert text.endswith("A column that starts another record (e.g. a second role or person "
+                         "with its own date) is a new item under rule 1.")
+
+
+def test_extract_fields_batch_sends_the_multi_record_rules_to_the_llm(monkeypatch):
+    """Wire: the prompt call_llm receives, not only the builder's output."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "role": "Member"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Member, Alpha Committee 2019\tChair, Beta Committee 2021",
+          "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}], 0, 1)
+    assert prompts and all(extraction.MULTI_RECORD_INSTRUCTION in p and extraction.TAB_COLUMNS_INSTRUCTION in p
+                           for p in prompts)
 
 
 def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):
