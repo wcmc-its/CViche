@@ -711,6 +711,11 @@ def grant_owner_role_rule(cv_owner_name: dict[str, str] | None) -> str:
     CXRYCF "PI: <owner>"). With no owner name there is nothing to compare a
     label against, so the line is left out and the prompt keeps its
     pre-#1403 behaviour.
+
+    The EOAHMI recheck (2026-10-05) added two sentences: a plural label
+    ("Investigators - <other>, <owner>") is the owner's role (DUTAVD 186 lost
+    it), and a verb ("Secured the ... grant") is not one (NDXXAD 638 gained
+    an invented "PI").
     """
     last_name = (cv_owner_name or {}).get('last_name')
     if not last_name:
@@ -718,7 +723,7 @@ def grant_owner_role_rule(cv_owner_name: dict[str, str] | None) -> str:
     full_name = cv_owner_name.get('full_name') or last_name
     owner = f'"{full_name}" (surname "{last_name}")' if full_name != last_name else f'"{last_name}"'
     return f"""
-   - pi_role = the role on this grant of the CV owner, {owner}. A PI label can come before or after a name: "P.I.: <name>", "PI: <name>", "PI <name>", "<name> (PI)", "Principal Investigator: <name>". When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI", or the label as written (e.g., "Site PI"). When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner (e.g., "{last_name} (Co-I)", "Mentor"); if it states none, leave pi_role null"""
+   - pi_role = the role on this grant of the CV owner, {owner}. A PI label can come before or after a name: "P.I.: <name>", "PI: <name>", "PI <name>", "<name> (PI)", "Principal Investigator: <name>". When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI", or the label as written (e.g., "Site PI"). A plural role label that lists the CV owner among others (e.g., "Investigators - <name>, <name>") is the owner's role, in the singular (pi_role = "Investigator"). When a PI label names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner (e.g., "{last_name} (Co-I)", "Mentor"); if it states none, leave pi_role null. A verb such as "secured", "led" or "established" is not a stated role: with no role stated for the CV owner, leave pi_role null"""
 
 
 def build_extraction_prompt(
@@ -793,6 +798,8 @@ def build_extraction_prompt(
    - When there is no "Title:" label, an unlabelled name of the project or program that comes before the labelled parts (e.g., before "Program Partner:" or "Funder:") is the title; do not leave title null when the entry names one
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
+   - A person the entry names without a PI label, such as a "with Dr. <name>" collaborator or the investigator who "initiated" a study, is not pi_name; put a collaborator in co_investigators
+   - An entry that opens with an author list and has no PI label (e.g., "<name> AB, <name> CD. <title>. $<amount> (<sponsor>)"): pi_name = the first-listed author, co_investigators = the other authors
    - If no PI name is found, leave pi_name as null{grant_owner_role_rule(cv_owner_name)}
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
    - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
@@ -841,6 +848,7 @@ def build_extraction_prompt(
         code_specific_instructions = """
 9. **PAST MENTEES (N3B)** - when vs. now:
    - site_position = where and in what the mentee was mentored DURING the mentoring: the school or institution, and the program, project, fellowship or committee the entry names for that period (e.g., "Senior, Example College, 2000" → site_position = "Example College"; "MS, Thesis committee" → site_position = "Thesis committee")
+   - mentee_level = the mentee's degree or level. When the entry gives a degree line (e.g., "B.S., Example University, 2003", "PhD, Example University"), mentee_level = that whole line and the level or role of the mentoring period (e.g., "Predoc") goes in site_position; never drop the degree line
    - current_position = where the mentee is NOW, only when the entry says so (e.g., "now Assistant Professor at ..."); otherwise null
    - Do NOT put the institution of the mentoring period in current_position"""
     elif code == 'S8':
