@@ -1101,6 +1101,79 @@ def test_short_or_mixed_rule_shapes_survive(text):
     assert _sig(text, None) != DROP_RULE_LINE
 
 
+# #530 (RCBKFG GKAQHB 41): a separator of other symbols is a rule line too.
+@pytest.mark.parametrize("text", ["*" * 89, "#####", "~~~~~", "*-*-*", "•••••"])
+def test_symbol_separator_is_dropped_text_only_when_t_coded(text):
+    assert _sig(text, None) == DROP_RULE_LINE
+    assert _sig(text, None, code="K1") is None
+
+
+@pytest.mark.parametrize("text", ["****", "* * * * *", "*****a", "*** 2019 ***"])
+def test_short_spaced_or_alphanumeric_symbol_runs_survive(text):
+    assert _sig(text, None) != DROP_RULE_LINE
+
+
+# #530 (RCBKFG UYFRTL 17): a bare label with a closing colon, alone in its
+# Appendix group, is dropped on its shape alone, whatever 3b's reasoning says.
+def _t_line(text, heading="Sample Heading", reasoning=None, code="T"):
+    return {"text": text, "taxonomy_code": code, "hierarchy": [heading],
+            "classification_reasoning": reasoning}
+
+
+def _kept_texts(entries):
+    kept, dropped = _filter_unmapped_entries(entries)
+    return [t for _, t in kept], dropped
+
+
+@pytest.mark.parametrize("text", [
+    "Sample Background:", "1. Sample Awards:", "b. National:", "Sample background:",
+    "Honors, Awards, etc.:",
+])
+@pytest.mark.parametrize("reasoning", [
+    "[T-validation confirmed] Header label only, no substantive content; correctly T",
+    "[T-validation confirmed] Empty structural header with no content to classify",
+    None,
+])
+def test_lone_bare_label_is_dropped_on_shape_alone(text, reasoning):
+    kept, dropped = _kept_texts([_t_line(text, reasoning=reasoning),
+                                 _t_line("Sample hobby", heading="Other Heading")])
+    assert kept == ["Sample hobby"]
+    assert dropped == Counter({DROP_SECTION_HEADER: 1})
+
+
+def test_bare_label_with_a_line_beside_it_is_a_lead_in_and_kept():
+    entries = [_t_line("Sample reviewer for:"), _t_line("Sample Journal of Testing")]
+    assert _kept_texts(entries) == (["Sample reviewer for:", "Sample Journal of Testing"],
+                                    Counter())
+
+
+def test_lone_bare_label_is_kept_when_not_t_coded():
+    assert _kept_texts([_t_line("Sample Background:", code="K1")])[0] == ["Sample Background:"]
+
+
+def test_an_entry_with_no_hierarchy_groups_under_the_unknown_section():
+    entries = [{"text": "Sample Background:", "taxonomy_code": "T"},
+               {"text": "Sample hobby", "taxonomy_code": "T", "hierarchy": []}]
+    assert _kept_texts(entries)[0] == ["Sample Background:", "Sample hobby"]
+
+
+@pytest.mark.parametrize("text", [
+    "Sample Background",           # no closing colon: a hobby or skill shape
+    "Languages: Example",          # content after the colon
+    "Note: see below:",            # two colons
+    "Sample\tBackground:",         # two cells
+    "Sample\nBackground:",         # two lines
+    "Sample Awards 2019:",         # a digit
+    "Patents (none):",             # says something about the content
+    "the sample background:",      # does not open with a capital
+    "Sample background was here.:",  # a sentence
+    "Prof. Sample Person Email:",  # a period: a title before a person's name
+    "One Two Three Four Five Six Seven Eight Nine Ten Eleven:",  # over the cap
+])
+def test_non_bare_label_shapes_survive_alone(text):
+    assert _kept_texts([_t_line(text)])[0] == [_clean_inline_tabs(text)]
+
+
 @pytest.mark.parametrize("text, sentence", [
     ("(Date)\t(Signature of Candidate)", "This is a structural artifact (signature line)."),
     ("01/02/2020\n(Date)\t(Signature of Candidate)", "Date line with signature placeholder."),

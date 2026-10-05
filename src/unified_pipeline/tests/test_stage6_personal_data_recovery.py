@@ -1573,8 +1573,14 @@ def test_an_off_schema_office_address_beside_a_home_line_fills_the_office_rows(t
      {"office": "555-555-0101", "cell": "555-555-0102"}, None),
     ({"work_phone": "555-555-0101", "clinic_address": "2 Clinic Road, Exampleton"},
      {"office": "555-555-0101"}, {"office_address": "2 Clinic Road, Exampleton"}),
-    # `address` set: an off-schema address is not read
-    ({"address": "1 Sample Way", "research_address": "2 Clinic Road"}, None, None),
+    # `address` set: an office-named key is still read; the caller routes it
+    # after `address`, so it fills only an empty Office address (#1222)
+    ({"address": "1 Sample Way", "research_address": "2 Clinic Road"}, None,
+     {"office_address": "2 Clinic Road"}),
+    # ... but not when it repeats `address`, which may be a withheld home value
+    ({"address": "9 Private Lane", "work_address": " 9 private lane. "}, None, None),
+    # street parts are read only when `address` is empty: they may be `address`
+    ({"address": "1 Sample Way", "street": "1 Sample Way", "city": "Exampleton"}, None, None),
     ({"street": "1 Sample Way", "city": "Exampleton"}, None,
      {"office_address": "1 Sample Way, Exampleton"}),
     # a city and state with no street are not an address
@@ -1585,6 +1591,29 @@ def test_an_off_schema_office_address_beside_a_home_line_fills_the_office_rows(t
 def test_offschema_contact_maps_slot_named_keys(fields, phone, address):
     from unified_pipeline.stage6.sections import personal_data
     assert personal_data._offschema_contact(fields, []) == (phone, address)
+
+
+def test_an_off_schema_office_address_fills_the_row_when_address_is_home(tmp_path):
+    """RCBKFG CAOACN 3 (WJMJXF-R7): stage 4 put the home address in
+    `address` and the office address in `work_address`. The home value is
+    withheld, and the office key was never read because `address` was set,
+    so Office address rendered empty."""
+    entry = _a("Home: 9 Private Lane, Exampleton, ZZ 00000\tPhone: (555) 555-0199\t"
+               "Department of Examples, 1 Sample Way, Exampleton, ZZ 00000",
+               {"address": "9 Private Lane, Exampleton, ZZ 00000",
+                "work_address": "Department of Examples, 1 Sample Way, Exampleton, ZZ 00000"})
+    rows = _contact_rows(tmp_path, [entry])
+    assert rows["Office address:"] == "Department of Examples, 1 Sample Way, Exampleton, ZZ 00000"
+    assert "Private Lane" not in _all_text(tmp_path / "out.docx")
+
+
+def test_an_off_schema_office_address_does_not_displace_an_office_address(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Office: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000",
+            "clinic_address": "2 Clinic Road, Exampleton, ZZ 00000"}),
+    ])
+    assert rows["Office address:"] == "1 Sample Way, Exampleton, ZZ 00000"
 
 
 def test_an_off_schema_value_from_a_protected_fragment_is_not_taken(tmp_path):
