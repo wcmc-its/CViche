@@ -5499,6 +5499,51 @@ def test_junk_or_header_row_reads_a_bulleted_paragraph():
     assert _junk_hits(entries, [], blocks) == [("WARN", "entry 7 (P)", "header_only")]
 
 
+def test_junk_or_header_row_quotes_the_undated_header_row_not_the_dated_record():
+    """QTATUP 1252/1253/1261: a society header renders as its own undated
+    row, after a dated membership row that shows the same name and one
+    extra word. The evidence quotes the header's row, not the record's."""
+    entries = [_junk4("Example Widget Society", "Q2", 1252,
+                      organization="Example Widget Society")]
+    rows = [[["Member, Example Widget Society", "1992-Present"]],
+            [["Example Widget Society", "Member"]]]
+    findings = lint_junk_or_header_row({"entries": entries}, rows, [])
+    assert [f["evidence"] for f in findings] == [["Example Widget Society | Member"]]
+
+
+@pytest.mark.parametrize("text, fields", [
+    ("Example Medical School (2009-2014)", {"institution": "Example Medical School"}),
+    ("Example Medical School", {"institution": "Example Medical School",
+                                "start_date": "2009", "end_date": "2014"}),
+], ids=["year_in_text", "year_in_fields"])
+def test_junk_or_header_row_quotes_a_dated_row_for_a_dated_header(text, fields):
+    """A dated teaching header's own row shows its years, whether the year
+    is in its text or its date fields; an undated row with the same name
+    before it is not that row."""
+    entries = [_junk4(text, "K4", 5, **fields)]
+    rows = [[["Example Medical School"]], [["2009-2014 - Example Medical School"]]]
+    findings = lint_junk_or_header_row({"entries": entries}, rows, [])
+    assert [f["evidence"] for f in findings] == [["2009-2014 - Example Medical School"]]
+
+
+def test_junk_or_header_row_falls_back_to_a_row_whose_year_disagrees():
+    """No row's year agrees with the entry's: the first match is still the
+    evidence, so the finding count does not depend on the year."""
+    entries = [_junk4("Example Widget Society", "Q2", 1261,
+                      organization="Example Widget Society")]
+    rows = [[["Example Widget Society", "1991-Present"]]]
+    findings = lint_junk_or_header_row({"entries": entries}, rows, [])
+    assert [f["evidence"] for f in findings] == [["Example Widget Society | 1991-Present"]]
+
+
+def test_junk_or_header_row_reads_a_cut_row_only_for_a_label():
+    """Only a label's row may lack one of its words: a header's row that
+    lacks one is another line, not the header."""
+    entries = [_junk4("Example Widget Society", "Q2", 1253,
+                      organization="Example Widget Society")]
+    assert _junk_hits(entries, [], [("p", "Widget Society:")]) == []
+
+
 def test_junk_or_header_row_does_not_read_a_section_heading_as_a_row():
     entries = [_junk4("Research", "P", 7, institution="Research")]
     assert _junk_hits(entries, [], [("p", "RESEARCH")]) == []
