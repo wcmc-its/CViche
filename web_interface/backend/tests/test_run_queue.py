@@ -83,10 +83,14 @@ def _batch_entries(r):
     return [fields for _, fields in r.xrange(run_queue.BATCH_STREAM)]
 
 
-def test_queue_for_routes_a_batch_run_to_the_batch_queue_and_anything_else_to_single():
-    assert run_queue.queue_for("BATCHA") is run_queue.BATCH
-    assert run_queue.queue_for(None) is run_queue.SINGLE
-    assert run_queue.queue_for("") is run_queue.SINGLE
+@pytest.mark.parametrize("batch_files_submitted, expected", [
+    (None, "single"),  # no batch
+    (1, "single"),     # a single upload with "Email me when job completes" ticked (#1340)
+    (2, "batch"),
+    (50, "batch"),
+])
+def test_queue_for_routes_only_a_bulk_batch_run_to_the_batch_queue(batch_files_submitted, expected):
+    assert run_queue.queue_for(batch_files_submitted).name == expected
 
 
 def test_the_batch_queue_has_its_own_stream_group_and_dead_stream():
@@ -721,11 +725,11 @@ def test_start_reports_live_status_when_a_revert_loses_to_a_concurrent_claim(cli
     assert _status(db) == "running", "the guarded revert must not clobber the worker's claim"
 
 
-def _make_batch_run(db, run_id="RUNQ01"):
+def _make_batch_run(db, run_id="RUNQ01", files_submitted=2):
     """Put the seeded run in a batch owned by its user (#1114)."""
     from app.models import RunBatch
     run = _row(db, run_id)
-    db.add(RunBatch(id="BATCHQ", user_id=run.user_id, files_submitted=1))
+    db.add(RunBatch(id="BATCHQ", user_id=run.user_id, files_submitted=files_submitted))
     run.batch_id = "BATCHQ"
     db.commit()
 
@@ -738,6 +742,19 @@ def test_start_of_a_batch_run_enqueues_on_the_batch_stream(client, db, fake_redi
     assert resp.status_code == 202, resp.text
     assert [e["run_id"] for e in _batch_entries(fake_redis)] == ["RUNQ01"]
     assert _entries(fake_redis) == []
+
+
+def test_start_of_a_one_file_batch_run_enqueues_on_the_single_stream(
+    client, db, fake_redis, queue_mode, as_user_with_input,
+):
+    """A single upload with "Email me when job completes" ticked is a one-file
+    batch (#1340); it must not wait behind bulk batches on the batch queue."""
+    user, _ = _seed(db)
+    _make_batch_run(db, files_submitted=1)
+    as_user_with_input(user)
+    assert client.post("/api/run/RUNQ01/start").status_code == 202
+    assert [e["run_id"] for e in _entries(fake_redis)] == ["RUNQ01"]
+    assert _batch_entries(fake_redis) == []
 
 
 def test_re_enqueue_of_an_already_queued_batch_run_stays_on_the_batch_stream(

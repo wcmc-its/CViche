@@ -33,7 +33,7 @@ from app.services.runs_admin_query import (
     filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
     my_status_counts, parse_run_filters, parse_status_filter, run_by_summary, status_clause,
 )
-from app.services import batch_completion, quality_score_service
+from app.services import batch_completion, batch_service, quality_score_service
 from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
 from app.storage import get_storage
 
@@ -131,8 +131,8 @@ def _dispatch_queue(
                     "message": "The run queue is unavailable right now -- please try again shortly."},
         )
 
-    # A batch run's token goes on the batch queue (#1114), on every branch below.
-    queue = run_queue.queue_for(run.batch_id)
+    # A bulk batch run's token goes on the batch queue (#1114), on every branch below.
+    queue = run_queue.queue_for(batch_service.batch_size(db, run.batch_id))
     prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step, on_flip=on_flip)
 
     if not prior.flipped and prior.prior_status != RunState.QUEUED:
