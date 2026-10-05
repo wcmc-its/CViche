@@ -2454,6 +2454,9 @@ class _JunkCandidate(NamedTuple):
     core: frozenset[str]
     allowed: frozenset[str]
     extra_words: int
+    #: Whether the entry's text or a date field carries a year: its own
+    #: row shows one exactly when it does.
+    dated: bool
 
 
 def _junk_rendered_rows(table_rows: list[list[list[str]]],
@@ -2568,7 +2571,9 @@ def _junk_shape(raw: dict, code: str, text: str, fields: dict[str, object],
     listed above; None for a record of its own. A date fragment's row, and
     a dated header's, may show no word beyond the entry's own: a dated row
     with one more word is a record."""
-    candidate = functools.partial(_JunkCandidate, raw.get("element_idx_start"), code)
+    candidate = functools.partial(
+        _JunkCandidate, raw.get("element_idx_start"), code,
+        dated=bool(_FOUR_DIGIT_YEAR_RE.search(text)) or _has_dated_field(fields))
     text_tokens = frozenset(_name_tokens(text))
     words = [w for w in _JUNK_WORD_RE.findall(text) if w.lower() not in _JUNK_OPEN_WORDS]
     if not words:
@@ -2639,22 +2644,27 @@ def _extra_words(row: _RenderedRow, allowed: frozenset[str]) -> int:
 
 def _junk_row_rendered(candidate: _JunkCandidate,
                        rows: list[_RenderedRow]) -> _RenderedRow | None:
-    """The first rendered row that is this entry and nothing more: it shows
-    every core word and at most the candidate's extra words. An undated
-    duplicate's row is a table row with no year whose title cell carries
-    the title."""
-    for row in rows:
-        if candidate.shape == JUNK_SHAPE_UNDATED_DUPLICATE:
-            if not row.has_year and len(row.cells) > 1 and any(
-                    candidate.core <= cell for cell in row.cells):
-                return row
-            continue
-        if (candidate.core <= row.tokens
-                and _extra_words(row, candidate.allowed) <= candidate.extra_words):
-            return row
-        if candidate.shape == JUNK_SHAPE_LABEL and _is_cut_label_row(candidate, row):
-            return row
-    return None
+    """The rendered row that is this entry and nothing more. Of the rows
+    that match, the first whose year agrees with the entry's, else the
+    first: an undated society header's own row shows no year, while the
+    dated membership row before it shows the same name and one extra word
+    (QTATUP 1252, 1253, 1261)."""
+    matches = [row for row in rows if _junk_row_matches(candidate, row)]
+    return next((row for row in matches if row.has_year == candidate.dated),
+                matches[0] if matches else None)
+
+
+def _junk_row_matches(candidate: _JunkCandidate, row: _RenderedRow) -> bool:
+    """Whether the row shows every core word and at most the candidate's
+    extra words. An undated duplicate's row is a table row with no year
+    whose title cell carries the title."""
+    if candidate.shape == JUNK_SHAPE_UNDATED_DUPLICATE:
+        return not row.has_year and len(row.cells) > 1 and any(
+            candidate.core <= cell for cell in row.cells)
+    if (candidate.core <= row.tokens
+            and _extra_words(row, candidate.allowed) <= candidate.extra_words):
+        return True
+    return candidate.shape == JUNK_SHAPE_LABEL and _is_cut_label_row(candidate, row)
 
 
 def _role_only_row(candidate: _JunkCandidate, rows: list[_RenderedRow],
