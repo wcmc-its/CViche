@@ -77,7 +77,7 @@ Each entry includes a taxonomy code indicating the publication type:
 VANCOUVER FORMAT RULES:
 1. Authors: LastName INITIALS (no periods, no commas between last name and initials)
    - Example: Smith JA, Jones MB, Brown CK
-   - List all authors, or first 6 followed by "et al." if more than 6
+   - List every author the source lists, in the source's order. Never shorten the list: write "et al." only where the source itself does
 2. Title: Sentence case, ending with period
 3. Journal/Book: Title case or official abbreviation
 4. Year;Volume(Issue):Pages.

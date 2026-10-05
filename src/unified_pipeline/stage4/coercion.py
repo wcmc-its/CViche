@@ -98,6 +98,7 @@ class ExtractedFields(TypedDict, total=False):
     employer: Any
     end_date: Any
     expiration_date: Any
+    filing_date: Any
     fte_percentage: Any
     funding_source: Any
     google_scholar_url: Any
@@ -205,6 +206,7 @@ class ReformattedFields(TypedDict, total=False):
     doi: ReformattedField
     end_date: ReformattedField
     expiration_date: ReformattedField
+    filing_date: ReformattedField
     issue_date: ReformattedField
     launch_date: ReformattedField
     notes: ReformattedField
@@ -639,7 +641,7 @@ def reconcile_date_range(
 #: drift guard. Undeclared keys the LLM invents are left alone: a repair is
 #: recorded in ReformattedFields, whose key set is closed.
 DATE_FIELD_NAMES = (
-    'date', 'dates_attended', 'end_date', 'expiration_date', 'issue_date',
+    'date', 'dates_attended', 'end_date', 'expiration_date', 'filing_date', 'issue_date',
     'launch_date', 'recertification_date', 'start_date', 'submission_date',
     'year', 'year_certified',
 )

@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm.retry import LLMOutageError
-from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_progress_printer, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import (
     extract_docx_structure,
@@ -766,6 +766,63 @@ def filter_extraction_noise(entries: list[dict]) -> list[dict]:
     return kept
 
 
+# Record-aligned batch cut (#1226). Each stage-2 batch is a separate LLM call
+# with no context from the one before, so a record cut by a fixed batch edge
+# reaches the model as a tail with no head and every later entry shifts. A full
+# batch therefore ends at a record edge when one sits in its last
+# BATCH_CUT_LOOKBACK elements: a blank line first, else the last line that
+# opens with the batch's first line's label ("Agency:"). Otherwise the hard
+# cut at STAGE2_BATCH_SIZE stands, so a batch with no such edge is unchanged.
+STAGE2_BATCH_SIZE = 50
+BATCH_CUT_LOOKBACK = 15
+# A short leading "Label:" -- letters first, at most 40 characters before the colon.
+_LEADING_LABEL_RE = re.compile(r"\s*([A-Za-z][A-Za-z .&/()'-]{0,40}?)\s*:")
+
+
+def _leading_label(elem: dict) -> str | None:
+    """The lower-cased leading ``Label:`` of a paragraph or table row, else None."""
+    if elem.get("type") not in ("paragraph", "table_row"):
+        return None
+    match = _LEADING_LABEL_RE.match(elem.get("text", ""))
+    return match.group(1).lower() if match else None
+
+
+def _record_aligned_end(elements: list[dict], start: int, batch_size: int) -> int:
+    """Exclusive end of the batch that starts at ``elements[start]``."""
+    hard_end = start + batch_size
+    if hard_end >= len(elements):
+        return len(elements)
+    if elements[hard_end - 1].get("type") == "empty" or elements[hard_end].get("type") == "empty":
+        return hard_end
+    # The batch's last BATCH_CUT_LOOKBACK elements, newest first: indices
+    # hard_end - BATCH_CUT_LOOKBACK .. hard_end - 1, never before start.
+    window = range(hard_end - 1, max(start, hard_end - BATCH_CUT_LOOKBACK) - 1, -1)
+    for idx in window:
+        if elements[idx].get("type") == "empty":
+            return idx + 1  # the batch ends on the blank
+    label = _leading_label(elements[start])
+    if label is None or _leading_label(elements[hard_end]) == label:
+        return hard_end
+    for idx in window:
+        if idx > start and _leading_label(elements[idx]) == label:
+            return idx  # the next batch opens on the label; this one is never empty
+    return hard_end
+
+
+def make_record_aligned_batches(elements: list[dict], batch_size: int = STAGE2_BATCH_SIZE) -> list[list[dict]]:
+    """Split a section's elements into batches of at most ``batch_size`` whose
+    edges fall between records where the layout shows one (#1226)."""
+    if batch_size < 1:
+        raise ValueError(f"make_record_aligned_batches: batch_size must be >= 1, got {batch_size}")
+    batches = []
+    start = 0
+    while start < len(elements):
+        end = _record_aligned_end(elements, start, batch_size)
+        batches.append(elements[start:end])
+        start = end
+    return batches
+
+
 def detect_entries_for_section(
     section_hierarchy: list[str],
     doc_elements: list[dict],
@@ -1005,19 +1062,19 @@ def detect_entries_for_section(
     section_name = section_hierarchy[-1] if section_hierarchy else "Unknown Section"
     full_hierarchy = " > ".join(section_hierarchy)
 
-    # Process in batches if section is large
-    BATCH_SIZE = 50
+    # Process in batches if section is large; edges fall between records (#1226)
     all_validated_entries = []
     total_cost = 0.0
     total_tokens = 0
     prompt_tokens = 0
     completion_tokens = 0
 
-    batches = make_batches(section_elements, BATCH_SIZE)
+    batches = make_record_aligned_batches(section_elements)
     num_batches = len(batches)
+    batch_end = 0
 
     for batch_idx, batch_elements in enumerate(batches):
-        batch_start = batch_idx * BATCH_SIZE
+        batch_start = batch_end
         batch_end = batch_start + len(batch_elements)
 
         if num_batches > 1:

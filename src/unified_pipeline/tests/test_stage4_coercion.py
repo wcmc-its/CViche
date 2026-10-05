@@ -339,6 +339,8 @@ _CENTURY_REASON = "Re-derived the century of a two-digit source year"
         ("Example lecture, April 2006", {"date": "1906-04"}, {"date": "2006-04"}),
         # ... and a bare year, which has no month to re-derive it from
         ("Example committee, 2010 - 2014", {"end_date": "1914"}, {"end_date": "2014"}),
+        # a patent's filing date, extracted for M2D since #1205 slice (b)
+        ("Example patent, filed 3/09", {"filing_date": "1909-03"}, {"filing_date": "2009-03"}),
     ],
 )
 def test_two_digit_source_year_moves_to_the_pivot_century(text, fields, expected):
@@ -414,6 +416,9 @@ def test_date_field_names_match_declared_date_fields():
     }
 
     assert set(DATE_FIELD_NAMES) == declared_date_fields
+    # The century and year-not-in-source repairs record each change under the
+    # date field's own key, so every date field needs a ReformattedFields key.
+    assert set(DATE_FIELD_NAMES) <= set(ReformattedFields.__annotations__)
 
 
 # --- YYYY-YY source range stored whole in one field (class 2) ---------------
