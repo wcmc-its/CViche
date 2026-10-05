@@ -60,6 +60,50 @@ def test_stdout_is_one_five_field_tsv_line(tmp_path, capsys, monkeypatch):
     assert "output_hygiene:2" in fields[4]
 
 
+def test_top_lints_carry_each_lints_precision(tmp_path, capsys, monkeypatch):
+    """#819: each top_lints item carries its PRECISION.md precision; the line
+    is still five fields and still contains `lint:count`."""
+    cli = _load_cli()
+    report = dict(_REPORT, lint_precision={
+        "output_hygiene": {"precision": 0.9, "judged": 30, "label": "p~0.90 n=30"},
+        "segmentation": {"precision": None, "judged": 0, "label": "p unmeasured"},
+    })
+    monkeypatch.setattr(cli, "run_doctor", lambda *a, **k: report)
+    (tmp_path / "stage_2_entry_extraction").mkdir()
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+
+    fields = capsys.readouterr().out.rstrip("\n").split("\t")
+    assert len(fields) == 5
+    assert set(fields[4].split(",")) == {"output_hygiene:2 (p~0.90 n=30)",
+                                         "segmentation:1 (p unmeasured)"}
+
+
+def test_top_lints_malformed_precision_entry_reads_unmeasured(tmp_path, capsys, monkeypatch):
+    cli = _load_cli()
+    report = dict(_REPORT, lint_precision={"output_hygiene": "garbled"})
+    monkeypatch.setattr(cli, "run_doctor", lambda *a, **k: report)
+    (tmp_path / "stage_2_entry_extraction").mkdir()
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+
+    fields = capsys.readouterr().out.rstrip("\n").split("\t")
+    assert set(fields[4].split(",")) == {"output_hygiene:2 (p unmeasured)",
+                                         "segmentation:1 (p unmeasured)"}
+
+
+def test_top_lints_bare_without_a_precision_block(tmp_path, capsys, monkeypatch):
+    """A report written before #819 has no lint_precision block: no label."""
+    cli = _load_cli()
+    monkeypatch.setattr(cli, "run_doctor", lambda *a, **k: _REPORT)
+    (tmp_path / "stage_2_entry_extraction").mkdir()
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+
+    fields = capsys.readouterr().out.rstrip("\n").split("\t")
+    assert set(fields[4].split(",")) == {"output_hygiene:2", "segmentation:1"}
+
+
 def test_run_doctor_failure_exits_nonzero_without_polluting_stdout(tmp_path, capsys, monkeypatch):
     cli = _load_cli()
 

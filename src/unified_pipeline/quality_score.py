@@ -37,12 +37,14 @@ which a stage-4 extraction group failed outright out of GREEN (#1174). A
 fifth, also cap-only, does the same for a run in which the content-filter
 fallback model served a call (#1174).
 
-Three more cap-only gates (#822) cover source content the pipeline lost before
-the document was written, a thing no weighted dimension measures: an
-under-extracted entry, several fused entries, a lost source table. Each caps a
-run at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss
-cannot read "ship". They are the doctor's own signals, called rather than
-re-derived, restricted to the ones the IPXFBA batch hand-checked as real.
+Four more cap-only gates (#822) cover content the pipeline lost, a thing no
+weighted dimension measures: an under-extracted entry, several fused entries, a
+lost source table, and the CV owner cut from several of their own citations.
+Each caps a run at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a
+verified loss cannot read "ship". They are the doctor's own signals, called
+rather than re-derived, restricted to the ones a batch hand-checked as real: a
+lint feeds this cap only while `doctor/PRECISION.md` records its precision at
+80% or more on 20 or more hits (Paul's decision on #822, 2026-10-02).
 
 The result also says what the score was computed *without*: ``data_complete``
 is False and ``missing_evidence`` names each scored artifact that was absent,
@@ -111,6 +113,7 @@ from unified_pipeline.core.template_boilerplate import (
 )
 from unified_pipeline.doctor.lints.extraction import lint_under_extraction
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
+from unified_pipeline.doctor.lints.render import lint_owner_missing_from_citation
 from unified_pipeline.doctor.shared import _cell_text, _docx_text, docx_body_blocks
 from unified_pipeline.llm_provenance import (
     STAGE4_5_FALLBACK_CALLS_KEY,
@@ -772,7 +775,13 @@ def _source_has_contact(outputs_dir: Path) -> bool | None:
 
 def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
     """CV owner name / contact. Missing name is a hard-fail (cap=25).
-    Missing contact is penalized only when the source has some (#427)."""
+    Missing contact is penalized only when the source has some (#427).
+
+    The detail's `stage4_contact_field` says whether any stage-4 contact
+    field holds a value. It was `any_contact` until batch EBYSBC (#822), which
+    read as "no contact anywhere" on BZZNRL, MUHLLD and GJXIWD, whose docx
+    shows a work email: the email is inside a positions entry's text, which
+    the docx prints, while the contact block stays empty (class E10)."""
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
         return 1.0, _missing_or_unreadable_detail("fields.json", reason), 25
@@ -805,7 +814,7 @@ def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
     detail = (
         f"full_name={full_name!r}; inference_success={inference_success}; "
         f"primary_location={'set' if primary_location else 'missing'}; "
-        f"any_contact={any_contact}; source_contact={source_contact}; "
+        f"stage4_contact_field={any_contact}; source_contact={source_contact}; "
         f"fraction={fraction:.2f}"
     )
     return clamp(fraction), detail, None
@@ -854,6 +863,13 @@ MEGA_ENTRIES_CAP_MIN = 2
 #: tables the corpus shows are template labels (#1102's noise class); the one
 #: loss verified in batch IPXFBA (TALVAE) was far larger. Fitted to one batch.
 LOST_TABLE_CAP_MIN_LINES = 5
+
+#: The owner cut from this many of their own citations caps a run (Paul's
+#: decision on #822, 2026-10-02). `owner_missing_from_citation` measured 27 of
+#: 29 hits real on the 63-run EBYSBC/s7ab/pilot farm (doctor/PRECISION.md, M3);
+#: one or two cut citations are left to the finding alone, the decision's own
+#: starting count, to be re-set from the harness.
+OWNER_MISSING_CITATIONS_CAP_MIN = 3
 
 #: Subdirectory of the scored directory that holds the run's original uploaded
 #: .docx. Optional: `score_lost_source_table` reads the source to find tables
@@ -930,6 +946,24 @@ def score_lost_source_table(outputs_dir: Path) -> tuple[float, str, int | None]:
     if worst >= LOST_TABLE_CAP_MIN_LINES:
         return 1.0, f"worst_lost_table_lines={worst}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
     return 0.0, f"worst_lost_table_lines={worst}", None
+
+
+def score_owner_missing_from_citation(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: the source credits the CV owner on a publication and its
+    own rendered bibliography line does not name them, on
+    OWNER_MISSING_CITATIONS_CAP_MIN or more citations (#822, #1259). The
+    doctor's `owner_missing_from_citation` lint over stage 4 and the rendered
+    docx, called as is."""
+    data, reason = _load_first(outputs_dir, "*_fields.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
+    doc, reason = _load_docx(outputs_dir)
+    if doc is None:
+        return 0.0, f"{reason}; not evaluated", None
+    missing = len(lint_owner_missing_from_citation(data, docx_body_blocks(doc)))
+    if missing >= OWNER_MISSING_CITATIONS_CAP_MIN:
+        return 1.0, f"owner_missing_citations={missing}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, f"owner_missing_citations={missing}", None
 
 
 #: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
@@ -1232,6 +1266,13 @@ def _count_raw_tab_cells(
     return count
 
 
+#: The most the raw-tab half of `score_broken_format` may take, as a fraction
+#: of the dimension: 0.3 of its 10 points is 3 points, reached at 10 raw tabs
+#: (Paul's decision on #822, 2026-10-02). Raw tabs are cosmetic; uncapped, they
+#: cost VVRTUC (batch EBYSBC) all 10 points while no run lost a point for a
+#: lost record.
+RAW_TAB_MAX_FRACTION = 0.3
+
 #: Template instruction text left standing in a rendered CV ("prompt echo").
 #: Each alternation is a phrase the pristine WCM template
 #: (`key_files/wcm_cv_template_faculty_october_2022_final.docx`) itself uses
@@ -1401,7 +1442,8 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     raw_tab_cells = _count_raw_tab_cells(doc.tables)
     total_raw_tab = raw_tab_paragraphs + raw_tab_cells
 
-    fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
+    raw_tab_fraction = min(0.6 * (total_raw_tab / 20), RAW_TAB_MAX_FRACTION)
+    fraction = clamp(raw_tab_fraction + 0.4 * (echo_count / 15))
     detail = (
         f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
         f"template_tab_excluded={template_tab_excluded}; "
@@ -1596,7 +1638,8 @@ PROTECTED_DATA_CAP = 25
 #: are listed most specific first: the lost-table gate measures the loss against
 #: the delivered docx; the fused-entries gate counts records swallowed in the
 #: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
-#: any finding, including ones that lost nothing; the stage-4 gate (#1174)
+#: any finding, including ones that lost nothing; the owner-missing gate names
+#: citations whose credit is gone but whose record is on the page; the stage-4 gate (#1174)
 #: reports that a call failed and was retried and measures no loss. So a run
 #: that trips several is pointed at the signal most likely to name what it
 #: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
@@ -1609,6 +1652,7 @@ CAP_ONLY_GATES = [
     ("Source records fused: several entries swallowed multiple records (CAP-ONLY gate)",
      score_fused_entries),
     ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
+    ("CV owner cut from their own citations (CAP-ONLY gate)", score_owner_missing_from_citation),
     ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
     ("Call served by the content-filter fallback model (caps below GREEN)", score_llm_fallback_served),
 ]
