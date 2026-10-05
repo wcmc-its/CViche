@@ -842,7 +842,7 @@ def test_1223_ndmrso_birth_titles_and_bare_years_are_not_shapes(text):
 @pytest.mark.parametrize("line", [
     "Birth: March 4, 1970 in Exampleville, Examplestan",
     "BIRTH March 4, 1970: Exampleville",
-    "three children",   # VXSDRD idx 26's residue after the marital-status cut
+    "five children",   # a spelled-out count left behind by a marital-status cut
 ])
 def test_1223_ndmrso_the_appendix_leaks_are_findings_and_cap_the_score_red(tmp_path, line):
     appendix = [_p("T. APPENDIX"), _p(line)]

@@ -2356,7 +2356,7 @@ def test_1223_ndmrso_a_bare_birth_cut_stops_where_the_next_field_begins():
 
 
 def test_1223_ndmrso_a_spelled_out_child_count_behind_a_marital_cut_is_withheld():
-    entry = {"text": "Marital Status:  Synthetic; three children", "taxonomy_code": "T",
+    entry = {"text": "Marital Status:  Synthetic; five children", "taxonomy_code": "T",
              "extracted_fields": {}}
     result = _run({"T": [entry]})
     assert "Synthetic" not in entry["text"] and "children" not in entry["text"]

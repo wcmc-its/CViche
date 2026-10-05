@@ -417,7 +417,7 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # be the WHOLE fragment -- opening right after a hard delimiter
     # (`_PII_FRAGMENT_SPLIT_RE`) and closing at the next -- so "20 children
     # and 20 adults" or "20 subjects, 20 children" in a study never matches.
-    # #1223 (NDMRSO, VXSDRD): the count may be spelled out ("<status>; three
+    # #1223 (NDMRSO, VXSDRD): the count may be spelled out ("<status>; <word>
     # children"), as `_CHILD_COUNT` already allows in the parenthetical row.
     # The leading spaces are possessive (`*+`): no count opens with a space,
     # and with eleven alternatives a backtrack into a long space run at every
