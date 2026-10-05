@@ -9,7 +9,8 @@ memberships, grant reviews as external committees, courses attended as
 teaching, a thesis-committee block as institutional committees, a
 cross-reference line as a record, and guideline articles with a journal,
 volume and pages as non-peer-reviewed reports. The doctor had no lint for
-this shape.
+this shape. The RCBKFG autopsy added one more: training rows filed as degrees
+(#1415).
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -18,7 +19,9 @@ are reported here so the defect is visible before that fix ships, and so the
 fix can be measured against them afterwards. The S5 shape also needs the
 sibling codes, so it is its own function; it follows the 2026-10-02 decision
 on #1344 that S5 is only for an item with no evidence of journal
-publication.
+publication. So does the Q4C shape (RCBKFG JJUQDF 342-346): a bare journal
+name coded as an editorial board among journals coded as reviewing, which
+stage 3b reads that way when its batch holds none of the list's lead-in.
 
 Reads stage 3b only: the code, the heading path stage 2 gave the entry, and
 its text. One finding per shape and heading path, naming up to three entries.
@@ -73,6 +76,17 @@ INTERNAL_COMMITTEE_CODES = frozenset({"P", "O"})
 #: same heading is a segmentation slip, not this shape.
 NOT_GRANT_REVIEW_CODES = frozenset({"Q1", "Q2", "Q4A", "Q4B", "Q4C", "Q4D", "P", "O", "I"})
 UNCLASSIFIED_CODE = "T"
+EDITORIAL_BOARD_CODE = "Q4C"
+JOURNAL_REVIEWER_CODE = "Q4D"
+#: Words that name the owner's part in a journal: an editorial board seat, an
+#: editor, or another role. A Q4C entry with none of them, under a heading
+#: that names no board, is a journal's bare name; the role came from
+#: elsewhere. A panel or committee seat ("Member, <newsletter> Consultant
+#: Panel") is a role of its own (EBYSBC BFSUMA 170). The heading test is
+#: narrower: "Editorial Activities" heads reviewing too.
+_JOURNAL_ROLE_WORD_RE = re.compile(
+    r"board|editor|member|panel|consult|advis|chair|committee", re.IGNORECASE)
+_BOARD_HEADING_RE = re.compile(r"board", re.IGNORECASE)
 #: Researcher Profile & Bibliometric Summary (core/taxonomy_v7.json).
 PROFILE_SUMMARY_CODE = "S0"
 
@@ -92,19 +106,34 @@ class HeadingCodeRule(NamedTuple):
     allowed_codes: frozenset[str] | None = None
 
 
+#: An entry whose text opens (after an optional date range) with a training
+#: title: intern, resident, a postdoctoral/clinical/research fellow.
+_TRAINING_TITLE_TEXT_RE = re.compile(
+    r"^\W*(?:[\d/]{4,7}\s*(?:[-–—]|to)\s*(?:[\d/]{4,7}|present)?\s*,?\s*)?"
+    r"(?:chief\s+|senior\s+|assistant\s+(?:and\s+senior\s+)?)?"
+    r"(?:intern(?:ship)?|resident|residency|(?:post-?doctoral|clinical|research)\s+fellow(?:ship)?"
+    r"|fellow(?:ship)?\s+in)\b", re.IGNORECASE)
+#: A faculty role over a training program, which is not itself training.
+_TRAINING_PROGRAM_ROLE_RE = re.compile(r"director|coordinator|chair", re.IGNORECASE)
+
+#: Academic degrees: an entry the Education table renders as conferred.
+DEGREE_CODES = frozenset({"B1"})
+
 HEADING_CODE_RULES: tuple[HeadingCodeRule, ...] = (
     # QITQWH-02, RNKYST-04: intern, resident and fellow rows filed as
     # appointments leave the training table empty.
     HeadingCodeRule(
         "training_as_appointment", "C (training)",
-        text=re.compile(
-            r"^\W*(?:[\d/]{4,7}\s*(?:[-–—]|to)\s*(?:[\d/]{4,7}|present)?\s*,?\s*)?"
-            r"(?:chief\s+|senior\s+|assistant\s+(?:and\s+senior\s+)?)?"
-            r"(?:intern(?:ship)?|resident|residency|(?:post-?doctoral|clinical|research)\s+fellow(?:ship)?"
-            r"|fellow(?:ship)?\s+in)\b", re.IGNORECASE),
-        # A faculty role over a training program is an appointment.
-        text_excluded=re.compile(r"director|coordinator|chair", re.IGNORECASE),
+        text=_TRAINING_TITLE_TEXT_RE,
+        text_excluded=_TRAINING_PROGRAM_ROLE_RE,
         wrong_codes=APPOINTMENT_CODES),
+    # RCBKFG GKAQHB 17/20 (#1415): the same rows filed as degrees render in
+    # Academic Degrees, absent from the training table.
+    HeadingCodeRule(
+        "training_as_degree", "C (training)",
+        text=_TRAINING_TITLE_TEXT_RE,
+        text_excluded=_TRAINING_PROGRAM_ROLE_RE,
+        wrong_codes=DEGREE_CODES),
     # KYOPUV-04, NDXXAD-08: an ABIM line or 'American Board of ...' filed as
     # a membership or an education row.
     HeadingCodeRule(
@@ -202,6 +231,15 @@ def _is_misfiled_journal_article(entry: _ClassifiedEntry, sibling_codes: Counter
     return mostly_articles or bool(_PEER_REVIEWED_HEADING_RE.search(path))
 
 
+def _is_reviewer_journal_as_board(entry: _ClassifiedEntry, sibling_codes: Counter) -> bool:
+    """A Q4C entry that names no role, under a heading that names no board,
+    beside one or more Q4D entries under that heading."""
+    leaf = entry.heading_path[-1] if entry.heading_path else ""
+    return (entry.code == EDITORIAL_BOARD_CODE and sibling_codes[JOURNAL_REVIEWER_CODE] > 0
+            and not _JOURNAL_ROLE_WORD_RE.search(entry.text)
+            and not _BOARD_HEADING_RE.search(leaf))
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -229,6 +267,9 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
                 groups[(rule.shape, rule.expected, entry.heading_path)].append(entry)
         if _is_misfiled_journal_article(entry, siblings[entry.heading_path]):
             groups[("journal_article_as_report", "S1/S2 (a journal article; #1344's decision)",
+                    entry.heading_path)].append(entry)
+        if _is_reviewer_journal_as_board(entry, siblings[entry.heading_path]):
+            groups[("reviewer_journal_as_editorial_board", "Q4D (journal reviewer)",
                     entry.heading_path)].append(entry)
     return [_finding("section_consistency", SECTION_CONSISTENCY_SEVERITY,
                      *_group_message(shape, expected, path, members))
