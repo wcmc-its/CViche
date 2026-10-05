@@ -750,10 +750,11 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
-    # role_consistency (#1403): 2 of the 97 runs under analysis/ with a
-    # stage-4 artifact (KUUKNJ, ZCTARO: two runs of one CV), measured
-    # 2026-10-05. Same mixed-corpus caveat as above.
-    "role_consistency": 0.021,
+    # role_consistency (#1403): 4 of 232 runs, measured 2026-10-05 over
+    # stored stage-4 JSON: 2 of the 106 runs under analysis/ (KUUKNJ, ZCTARO:
+    # two runs of one CV) and 2 of the 126 farm/batch-3/batch-4 runs (web188,
+    # web30). Same mixed-corpus caveat as above.
+    "role_consistency": 0.017,
 }
 
 

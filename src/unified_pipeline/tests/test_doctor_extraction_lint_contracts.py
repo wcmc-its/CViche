@@ -3455,6 +3455,11 @@ def test_role_consistency_flags_an_owner_role_the_source_contradicts(text, pi_ro
     ("PI: Other B, Co-PIs: Testowner A", "PI"),
     ("Supplement to a PI award, Testowner A, Other B", "co-I"),       # no list label
     ("PIs: Testownerson A, co-Is: Third C", "co-I"),                  # a longer word
+    ("PI: Other B, MD; Co PI: Ada Testowner, MD", "co-I"),            # "Co PI" is a co-PI
+    ("PI: Other B, MD; Co PI: Ada Testowner, MD", "PI"),
+    ("PI: Other B; Subcontract PIs: Testowner A, Third C", "co-I"),
+    ("(PI: Other B, Subcontract PI: Testowner A)\nRole: Co-Investigator",
+     "Co-Investigator"),                                              # a subaward's PI
 ])
 def test_role_consistency_spares_agreement_and_what_it_cannot_judge(text, pi_role):
     assert _roles(text, pi_role) == []

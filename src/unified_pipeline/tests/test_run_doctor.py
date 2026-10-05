@@ -4663,6 +4663,14 @@ def test_classification_lint_prevalence_is_the_measured_farm_fraction():
     assert LINT_PREVALENCE["segmentation_collapse"] == round(1 / 63, 3)
 
 
+def test_role_consistency_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 over stored stage-4 JSON: 2 of the 106 analysis/
+    runs and 2 of the 126 farm/batch runs (#1403); a new measurement updates
+    both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["role_consistency"] == round(4 / 232, 3)
+
+
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
     """_ready's contract: a None input is an ERROR "unreadable" when the file
     existed but would not parse, never the benign "missing". The error scan

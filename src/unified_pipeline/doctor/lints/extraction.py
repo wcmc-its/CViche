@@ -2710,8 +2710,11 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
 # Every value renders, so no loss lint sees it. Report-only.
 
 #: A role label in a grant's text. A co-PI is neither the PI nor a co-I, so
-#: it names no role this lint judges.
-_ROLE_LABEL = (r"(?<![\w-])(co-?pis?|co-?is?|co-?investigators?|mpis?|pis?"
+#: it names no role this lint judges; "Co PI" with a space is one too (farm
+#: web26 705). Nor does a subcontract PI, who leads a subaward rather than
+#: the grant: "(PI: <other>, Subcontract PI: <owner>)" over "Role:
+#: Co-Investigator" is consistent (farm web241 150).
+_ROLE_LABEL = (r"(?<![\w-])(subcontract pis?|co[- ]?pis?|co-?is?|co-?investigators?|mpis?|pis?"
                r"|principal investigators?)(?![\w-])")
 #: A label that opens a list of names: "PIs: A, B" or "co-Is: C, D".
 _ROLE_LIST_LABEL_RE = re.compile(_ROLE_LABEL + r"\s*:")
@@ -2732,9 +2735,9 @@ _CO_I_ROLE_VALUE_RE = re.compile(r"(?:co ?i|co ?investigator|coinvestigator)s?")
 
 
 def _label_role(label: str) -> str | None:
-    """The role a matched label names, or None for a co-PI."""
-    bare = label.replace("-", "")
-    if bare.startswith("copi"):
+    """The role a matched label names, or None for a co-PI or a subcontract PI."""
+    bare = label.replace("-", "").replace(" ", "")
+    if bare.startswith(("copi", "subcontract")):
         return None
     return ROLE_CO_I if bare.startswith("co") else ROLE_PI
 
