@@ -871,6 +871,15 @@ PI_LABEL_PATTERNS = (
     re.compile(r"(" + _pi_name(1) + r"), (?:Principal Investigator|PI)\b"),
     re.compile(r"[(\[]PIs +(" + _pi_name(0) + r"(?:, +" + _pi_name(0) + r")*)"),
 )
+# A role that is a bare PI label for the CV owner: "PI", "P.I.", "P. I.", "(PI)",
+# "PI:", "Sole PI", in any case. Since #1410, stage 4 writes an owner labelled
+# "Principal Investigator in ..." as pi_role "PI". The "principal" +
+# "investigator" test in `_role_names_owner_as_pi` does not see that, so the
+# owner's own grants rendered an empty PI-name cell (JIJRSN-01). Matched against the whole role, so "Co-PI",
+# "Sub-PI", "MPI", "Multiple PI", "Site PI" and "Contact MPI" never read as the
+# owner being the grant's PI. "Sole" is the only qualifier the corpus carries
+# that still means the PI; "Contact PI" does not occur, so it is not accepted.
+OWNER_IS_PI_ROLE_RE = re.compile(r"\(?\s*(?:sole\s+)?p\.?\s*i\.?\s*\)?\s*:?", re.IGNORECASE)
 _NAME_JOINER_RE = re.compile(r" (?:&|and) ")
 _NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
 
@@ -988,9 +997,22 @@ def resolve_pi_name(
                     pi_name = potential_name
 
     # Auto-fill PI name when role indicates Principal Investigator and no PI name specified
-    if not pi_name and owner_name and role and 'principal' in role.lower() and 'investigator' in role.lower():
+    if not pi_name and owner_name and role and _role_names_owner_as_pi(role):
         pi_name = owner_name
     return pi_name
+
+
+def _role_names_owner_as_pi(role: str) -> bool:
+    """True when the owner's role says they are the grant's PI.
+
+    Any role containing "principal" and "investigator" (which also takes
+    "Co-Principal Investigator" and "Site Principal Investigator", unchanged
+    from before), or a bare PI label (`OWNER_IS_PI_ROLE_RE`).
+    """
+    lowered = role.lower()
+    if 'principal' in lowered and 'investigator' in lowered:
+        return True
+    return OWNER_IS_PI_ROLE_RE.fullmatch(role) is not None
 
 
 # The WCM template's own M2A placeholder table has row-0 cell-0 "Award
