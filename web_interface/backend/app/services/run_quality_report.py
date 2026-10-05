@@ -468,6 +468,11 @@ LINT_COPY = {
         "A grant is listed as current or completed funding although the CV files it as an "
         "application, or is listed as current although its end date has passed.",
         "Move the grant to the funding heading the source CV gives it."),
+    "span_count": LintCopy(
+        "Separate years shown as one range",
+        "The CV lists separate years or terms for a record, but the document shows one "
+        "continuous range from the first to the last.",
+        "Replace the range with the years the source CV gives."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

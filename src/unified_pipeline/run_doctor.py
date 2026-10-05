@@ -267,6 +267,10 @@ Lints, ranked by the severity of the failure class they catch:
                           (ZDCXIV), or Current with an end date before this
                           year, a truncated end year read against the start
                           year (KYOPUV 589). WARN
+14v. span_count           a record whose source lists separate years or
+                          terms ('2003, 2013') while its row shows one range
+                          over them, their min-max (#1245, batch RCBKFG:
+                          UYFRTL 33/34/48/49). WARN
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -403,6 +407,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_span_count,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -578,6 +583,7 @@ KNOWN_LINTS = (
     "segmentation_collapse",
     "grant_boundary",
     "grant_bucket",
+    "span_count",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -744,6 +750,11 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
+    # span_count (#1245, batch RCBKFG): 37 of the 132 stored runs under
+    # analysis/<uid>, as rendered by origin/dev 8cafcd4c plus this lint's
+    # stage-6 envelope fix, measured 2026-10-04 (39 of 132 on the render
+    # without the fix). Same mixed-corpus caveat as above.
+    "span_count": 0.280,
 }
 
 
@@ -1285,6 +1296,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
+    LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
 )
 
 
