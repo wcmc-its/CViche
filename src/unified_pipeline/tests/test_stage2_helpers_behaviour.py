@@ -1207,3 +1207,142 @@ def test_entry_sort_key_orders_rows_within_a_table_and_tables_after_paragraphs()
     entries = [{"element_idx_start": i} for i in ["22.10", 23, "table_0", "22.2", 22]]
     entries.sort(key=stage2._entry_sort_key)
     assert [e["element_idx_start"] for e in entries] == [22, "22.2", "22.10", 23, "table_0"]
+
+
+# =============================================================== record-aligned batch cut (#1226)
+#
+# Synthetic grant blocks, one field per line (agency, title, role, cost,
+# dates) with a blank line between grants -- the stacked-paragraph layout
+# whose records a fixed 50-element cut split.
+
+def _p(i, text):
+    return {"idx": i, "type": "paragraph", "text": text}
+
+
+def _blank(i):
+    return {"idx": i, "type": "empty", "text": ""}
+
+
+def _cut_points(batches):
+    """Exclusive end offset of every batch but the last."""
+    ends, pos = [], 0
+    for batch in batches[:-1]:
+        pos += len(batch)
+        ends.append(pos)
+    return ends
+
+
+def _stacked_grants(n_elements, blank_every=6):
+    """Five field lines then a blank, repeated: blanks at offsets 5, 11, 17, ..."""
+    return [_blank(i) if i % blank_every == blank_every - 1 else _p(i, f"Field line {i}")
+            for i in range(n_elements)]
+
+
+def test_record_aligned_batches_cut_just_after_the_last_blank_in_the_window():
+    elements = _stacked_grants(80)  # blanks at 41 and 47, element 49 is mid-grant
+    batches = stage2.make_record_aligned_batches(elements)
+    assert _cut_points(batches) == [48]  # the batch ends on the blank at 47
+    assert batches[0][-1]["type"] == "empty"
+    assert batches[1][0]["idx"] == 48
+    assert [e for b in batches for e in b] == elements
+
+
+def test_record_aligned_batches_keep_the_hard_cut_when_a_blank_is_already_at_the_edge():
+    # The element right after the cut is blank, so the cut already sits between records.
+    elements = [_p(i, f"Line {i}") for i in range(70)]
+    elements[45] = _blank(45)
+    elements[50] = _blank(50)
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+    # The batch's own last element is blank: also left alone.
+    elements[50] = _p(50, "Line 50")
+    elements[49] = _blank(49)
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+
+
+def test_record_aligned_batches_blank_window_is_exactly_the_last_15_elements():
+    # The window is elements 35..49 (50 - BATCH_CUT_LOOKBACK .. 49).
+    assert stage2.BATCH_CUT_LOOKBACK == 15
+    elements = [_p(i, f"Line {i}") for i in range(70)]
+    elements[34] = _blank(34)  # one before the window's first index: ignored
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+    elements[35] = _blank(35)  # the window's first index: the batch ends on it
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [36]
+
+
+def test_record_aligned_batches_label_window_is_exactly_the_last_15_elements():
+    elements = [_p(i, f"Line {i}") for i in range(70)]
+    elements[0] = _p(0, "Agency: first")
+    elements[34] = _p(34, "Agency: outside")  # one before the window's first index: ignored
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+    elements[35] = _p(35, "Agency: inside")  # the window's first index: the next batch opens on it
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [35]
+
+
+def test_record_aligned_batches_cut_before_the_repeated_first_label_when_no_blank():
+    # Labelled grants of 7 lines with no blank: each opens with "Agency:".
+    labels = ["Agency", "Title", "Grant Amount", "Dates", "Role", "Effort", "Number"]
+    elements = [_p(i, f"{labels[i % 7]}: value {i}") for i in range(80)]
+    batches = stage2.make_record_aligned_batches(elements)
+    assert _cut_points(batches) == [49]  # 49 is the last "Agency:" line before 50
+    assert batches[1][0]["text"].startswith("Agency:")
+    assert [e for b in batches for e in b] == elements
+
+
+def test_record_aligned_batches_take_the_label_from_each_batch_not_the_section():
+    # Batch 1 opens on an unlabelled line (hard cut at 50); batch 2 opens on
+    # "Agency:", which recurs every 7 lines, last at 99 before its edge at 100.
+    labels = ["Agency", "Title", "Grant Amount", "Dates", "Role", "Effort", "Number"]
+    elements = [_p(i, f"Line {i}") for i in range(50)]
+    elements += [_p(i, f"{labels[(i - 50) % 7]}: value {i}") for i in range(50, 130)]
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50, 99]
+
+
+def test_record_aligned_batches_label_rule_keeps_a_cut_already_at_a_record_start():
+    labels = ["Agency", "Title", "Role", "Cost", "Dates"]  # 50 is a multiple of 5
+    elements = [_p(i, f"{labels[i % 5]}: value {i}") for i in range(70)]
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+
+
+def test_record_aligned_batches_keep_the_hard_cut_with_no_blank_and_no_label():
+    elements = [_p(i, f"Author A. Title {i}. Journal 2001") for i in range(120)]
+    batches = stage2.make_record_aligned_batches(elements)
+    assert [len(b) for b in batches] == [50, 50, 20]
+    # An unlabelled first line turns the label rule off, even when the next batch opens on a label.
+    elements[50] = _p(50, "Role: value")
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50, 100]
+
+
+def test_record_aligned_batches_never_emit_an_empty_batch_when_size_is_below_the_lookback():
+    elements = [_p(i, f"Agency: value {i}") for i in range(9)] + [_blank(9)]
+    batches = stage2.make_record_aligned_batches(elements, 4)
+    assert all(batches)
+    assert [e for b in batches for e in b] == elements
+    # The window reaches back to the batch's own first line; its label there is not a cut.
+    elements = [_p(0, "Agency: only")] + [_p(i, f"Line {i}") for i in range(1, 6)]
+    assert _cut_points(stage2.make_record_aligned_batches(elements, 4)) == [4]
+
+
+def test_record_aligned_batches_label_rule_needs_the_label_inside_the_window():
+    # The batch's first label recurs only at 30, outside the last 15 elements.
+    elements = [_p(i, f"Line {i}") for i in range(70)]
+    elements[0] = _p(0, "Agency: first")
+    elements[30] = _p(30, "Agency: second")
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+    elements[36] = _p(36, "Agency: third")
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [36]
+
+
+def test_record_aligned_batches_short_section_and_bad_size():
+    elements = _stacked_grants(50)
+    assert stage2.make_record_aligned_batches(elements) == [elements]
+    assert stage2.make_record_aligned_batches([]) == []
+    with pytest.raises(ValueError):
+        stage2.make_record_aligned_batches(elements, 0)
+
+
+def test_leading_label_reads_paragraph_and_row_labels_only():
+    assert stage2._leading_label(_p(0, "Grant Amount: $1")) == "grant amount"
+    assert stage2._leading_label({"idx": "4.1", "type": "table_row", "text": "Role: | PI"}) == "role"
+    assert stage2._leading_label({"idx": 1, "type": "table_header", "text": "Role: PI"}) is None
+    assert stage2._leading_label(_p(0, "2001-2004 R01 grant")) is None
+    assert stage2._leading_label(_p(0, "A title that runs far beyond forty characters before: colon")) is None

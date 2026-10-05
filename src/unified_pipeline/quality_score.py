@@ -37,11 +37,13 @@ which a stage-4 extraction group failed outright out of GREEN (#1174). A
 fifth, also cap-only, does the same for a run in which the content-filter
 fallback model served a call (#1174).
 
-Four more cap-only gates (#822) cover content the pipeline lost, a thing no
-weighted dimension measures: an under-extracted entry, several fused entries, a
-lost source table, and the CV owner cut from several of their own citations.
-Each caps a run at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a
-verified loss cannot read "ship". They are the doctor's own signals, called
+Seven more cap-only gates (#822) cover content the pipeline lost or garbled,
+a thing no weighted dimension measures: an under-extracted entry, several fused
+entries, a lost source table, the CV owner cut from several of their own
+citations, a grant list cut in the wrong place, a grant application rendered
+as an award, and several headers or labels rendered as records. Each caps a run
+at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss cannot
+read "ship". They are the doctor's own signals, called
 rather than re-derived, restricted to the ones a batch hand-checked as real: a
 lint feeds this cap only while `doctor/PRECISION.md` records its precision at
 80% or more on 20 or more hits (Paul's decision on #822, 2026-10-02).
@@ -111,10 +113,22 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
-from unified_pipeline.doctor.lints.extraction import lint_under_extraction
+from unified_pipeline.doctor.lints.extraction import (
+    lint_grant_boundary,
+    lint_grant_bucket,
+    lint_under_extraction,
+)
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
-from unified_pipeline.doctor.lints.render import lint_owner_missing_from_citation
-from unified_pipeline.doctor.shared import _cell_text, _docx_text, docx_body_blocks
+from unified_pipeline.doctor.lints.render import (
+    lint_junk_or_header_row,
+    lint_owner_missing_from_citation,
+)
+from unified_pipeline.doctor.shared import (
+    _cell_text,
+    _docx_text,
+    docx_body_blocks,
+    docx_table_rows,
+)
 from unified_pipeline.llm_provenance import (
     STAGE4_5_FALLBACK_CALLS_KEY,
     STAGE4_ENTRY_FALLBACK_KEY,
@@ -871,6 +885,33 @@ LOST_TABLE_CAP_MIN_LINES = 5
 #: starting count, to be re-set from the harness.
 OWNER_MISSING_CITATIONS_CAP_MIN = 3
 
+#: `grant_boundary` findings that cap a run (#1226): a grant list whose stage-2
+#: cut slipped, so grants render with a neighbour's title, PI or dates. Three,
+#: not one: a slipped cut carries down the list (ZCTARO/KUUKNJ 13, CXRYCF 10,
+#: CTWLTR 8, DXAGUS 6, VGHNZD 5, VYRDHN 4 in the stored runs), while a lone
+#: hit is one grant's edge, and both false positives measured so far sit on
+#: runs with 1 or 2 hits (RXYBVF 502, VYNARH 648). At 3 or more: 59 of 59
+#: hand-checked or matched to a verified finding (doctor/PRECISION.md, M4-cap).
+GRANT_BOUNDARY_CAP_MIN = 3
+
+#: `grant_bucket` application-as-award findings that cap a run (#1343): one,
+#: because a single application rendered as a funded award already misstates
+#: the faculty member's funding. 30 of 30 (ZDCXIV-01 and its RCBKFG re-run
+#: FLYBMX, one CV; doctor/PRECISION.md, M4-cap). The lint's other shape (a
+#: Current grant whose end date has passed) does not cap: 2 judged hits, and
+#: it reads today's date, so rescoring a stored run next year would move it.
+GRANT_APPLICATION_AS_AWARD_CAP_MIN = 1
+
+#: `junk_or_header_row` findings that cap a run (EBYSBC E8/E10/E29): a group
+#: header, lead-in label or date fragment rendered as a record. No content is
+#: lost, but the document needs cleanup. Five: one to three such rows take a
+#: minute to delete, and the lint's out-of-sample false positives (batch
+#: NDMRSO) all sit on runs with 1 to 3 hits (EHGXAL 3 of 3 false, UYQRUN 2 of
+#: 3, TVZDVF 1 of 3, REOYVH and SVYSGY 1 of 1). At 5 or more: 100 of 105
+#: (95%) over the EBYSBC farm and NDMRSO; no RCBKFG run reaches 5
+#: (doctor/PRECISION.md, M4-cap).
+JUNK_ROWS_CAP_MIN = 5
+
 #: Subdirectory of the scored directory that holds the run's original uploaded
 #: .docx. Optional: `score_lost_source_table` reads the source to find tables
 #: that never reached stage 2, and is simply not evaluated without it.
@@ -948,22 +989,84 @@ def score_lost_source_table(outputs_dir: Path) -> tuple[float, str, int | None]:
     return 0.0, f"worst_lost_table_lines={worst}", None
 
 
+def _content_loss_count_gate(label: str, count: int,
+                             minimum: int) -> tuple[float, str, int | None]:
+    """A cap-only gate's verdict on a doctor lint's finding count: the
+    content-loss cap at `minimum` findings or more, else nothing."""
+    if count >= minimum:
+        return 1.0, f"{label}={count}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, f"{label}={count}", None
+
+
+def _load_fields_and_docx(outputs_dir: Path) -> tuple[dict, DocumentType] | str:
+    """Stage 4's fields and the rendered docx, or the "not evaluated" detail
+    naming the first one that is absent or unreadable."""
+    data, reason = _load_first(outputs_dir, "*_fields.json")
+    if data is None:
+        return f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated"
+    doc, reason = _load_docx(outputs_dir)
+    if doc is None:
+        return f"{reason}; not evaluated"
+    return data, doc
+
+
 def score_owner_missing_from_citation(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Cap-only gate: the source credits the CV owner on a publication and its
     own rendered bibliography line does not name them, on
     OWNER_MISSING_CITATIONS_CAP_MIN or more citations (#822, #1259). The
     doctor's `owner_missing_from_citation` lint over stage 4 and the rendered
     docx, called as is."""
+    loaded = _load_fields_and_docx(outputs_dir)
+    if isinstance(loaded, str):
+        return 0.0, loaded, None
+    data, doc = loaded
+    return _content_loss_count_gate(
+        "owner_missing_citations",
+        len(lint_owner_missing_from_citation(data, docx_body_blocks(doc))),
+        OWNER_MISSING_CITATIONS_CAP_MIN)
+
+
+def score_grant_boundary(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: a grant list stage 2 cut in the wrong place, so grants
+    render with each other's details, on GRANT_BOUNDARY_CAP_MIN or more grants
+    (#1226). The doctor's `grant_boundary` lint over stage 4, called as is."""
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
         return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
-    doc, reason = _load_docx(outputs_dir)
-    if doc is None:
-        return 0.0, f"{reason}; not evaluated", None
-    missing = len(lint_owner_missing_from_citation(data, docx_body_blocks(doc)))
-    if missing >= OWNER_MISSING_CITATIONS_CAP_MIN:
-        return 1.0, f"owner_missing_citations={missing}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
-    return 0.0, f"owner_missing_citations={missing}", None
+    return _content_loss_count_gate("grant_boundary_findings", len(lint_grant_boundary(data)),
+                                    GRANT_BOUNDARY_CAP_MIN)
+
+
+def score_grant_application_as_award(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: a grant the CV files under an applications heading,
+    rendered as current or completed funding, on
+    GRANT_APPLICATION_AS_AWARD_CAP_MIN or more grants (#1343). The doctor's
+    `grant_bucket` lint over stage 4 and the rendered docx, with its end-date
+    shape off (`check_end_date=False`): that shape reads today's date."""
+    loaded = _load_fields_and_docx(outputs_dir)
+    if isinstance(loaded, str):
+        return 0.0, loaded, None
+    data, doc = loaded
+    return _content_loss_count_gate(
+        "applications_rendered_as_awards",
+        len(lint_grant_bucket(data, docx_body_blocks(doc), check_end_date=False)),
+        GRANT_APPLICATION_AS_AWARD_CAP_MIN)
+
+
+def score_junk_rows(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: stage-4 entries that are no record of their own (a group
+    header, a lead-in label, a date fragment, a dateless repeat of a dated
+    appointment) rendered as records, on JUNK_ROWS_CAP_MIN or more entries
+    (EBYSBC E8/E10/E29). The doctor's `junk_or_header_row` lint over stage 4
+    and the rendered docx's table rows and blocks, called as is."""
+    loaded = _load_fields_and_docx(outputs_dir)
+    if isinstance(loaded, str):
+        return 0.0, loaded, None
+    data, doc = loaded
+    return _content_loss_count_gate(
+        "junk_or_header_rows",
+        len(lint_junk_or_header_row(data, docx_table_rows(doc), docx_body_blocks(doc))),
+        JUNK_ROWS_CAP_MIN)
 
 
 #: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
@@ -1639,7 +1742,9 @@ PROTECTED_DATA_CAP = 25
 #: the delivered docx; the fused-entries gate counts records swallowed in the
 #: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
 #: any finding, including ones that lost nothing; the owner-missing gate names
-#: citations whose credit is gone but whose record is on the page; the stage-4 gate (#1174)
+#: citations whose credit is gone but whose record is on the page; the grant-boundary,
+#: grant-application and junk-row gates (#1226, #1343, E8) name rows that render
+#: with wrong details or should not render at all; the stage-4 gate (#1174)
 #: reports that a call failed and was retried and measures no loss. So a run
 #: that trips several is pointed at the signal most likely to name what it
 #: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
@@ -1653,6 +1758,9 @@ CAP_ONLY_GATES = [
      score_fused_entries),
     ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
     ("CV owner cut from their own citations (CAP-ONLY gate)", score_owner_missing_from_citation),
+    ("Grant details shifted between grants (CAP-ONLY gate)", score_grant_boundary),
+    ("Grant applications rendered as awards (CAP-ONLY gate)", score_grant_application_as_award),
+    ("Headers or labels rendered as records (CAP-ONLY gate)", score_junk_rows),
     ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
     ("Call served by the content-filter fallback model (caps below GREEN)", score_llm_fallback_served),
 ]

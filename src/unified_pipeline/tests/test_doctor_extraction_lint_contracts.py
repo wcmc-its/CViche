@@ -1268,6 +1268,20 @@ def test_wrong_start_date_silent_when_a_condition_fails(entry):
     assert lint_wrong_start_date({"entries": [entry]}) == []
 
 
+@pytest.mark.parametrize("text, fires", [
+    # The range sits in the program name; the record's own date is one month.
+    ("Example Fund Program (2011-2012)\nRole: Principal Investigator - 12/2011", False),
+    # The source leaves the start year open, so stage 6 writes '-Present'.
+    ("Example Fund Program (2011-2012)\nRole: Principal Investigator - 12/2011-", True),
+])
+def test_wrong_start_date_on_a_grant_asks_the_grant_renderer(text, fires):
+    """RCBKFG FLYBMX 157/174/175: stage 6 renders a grant's start alone
+    unless its source leaves that year open, so a grant fires only where
+    `format_date_range` with the entry's text writes '-Present'."""
+    entry = _dated_entry(text, "2011-12", code="M2B", idx=157)
+    assert bool(lint_wrong_start_date({"entries": [entry]})) is fires
+
+
 def test_wrong_start_date_leaves_the_extracted_value_alone():
     entry = _dated_entry("Example Board | 2025-2026", "2026")
     lint_wrong_start_date({"entries": [entry]})
@@ -2414,6 +2428,43 @@ def test_multi_record_one_line_must_carry_the_clause_words_and_years(lines):
     assert [f["severity"] for f in findings] == ["WARN"]
 
 
+@pytest.mark.parametrize("first, second", [
+    ("7/05-10/06", "4/08-5/09"),                     # month and two-digit year
+    ("Jul \u201896-Jun \u201897", "Jul \u201997-Jun \u201901"),  # curly apostrophe years
+    ("Jul '96-Jun '97", "Jul '97-Jun '01"),           # straight apostrophe years
+])
+def test_multi_record_reads_two_digit_year_dates(first, second):
+    """RCBKFG CAOACN 32 and 64 write every date in two digits, and the lint
+    read no clause. Each two-digit year takes the shared century pivot, so
+    the second clause's years match the rendered four-digit ones. No ';'
+    joins the two roles, so only the dates can split them."""
+    text = (f"Lecturer, Northfield University School of Medicine, {first} "
+            f"Visiting Instructor of Pathology, Lakeside Hospital Institute, {second}")
+    findings = _multi_record(text, _FIRST_ROLE)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    end = {"4/08-5/09": "2009"}.get(second, "2001")
+    start = {"4/08-5/09": "2008"}.get(second, "1997")
+    findings = _multi_record(text, _FIRST_ROLE, lines=(
+        _FIRST_ROLE_ROW,
+        f"Visiting Instructor of Pathology | Lakeside Hospital Institute | {start}-{end}"))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+@pytest.mark.parametrize("not_a_date", [
+    "3/14/06",     # a day of m/d/yy
+    "13/05",       # no month 13
+    "5/2/08/09",   # a run of slashed numbers
+    "Lab'06",      # an apostrophe after a letter
+])
+def test_multi_record_two_digit_year_needs_a_month_or_an_apostrophe(not_a_date):
+    """Read as a date, the token would make a second dated clause."""
+    text = (f"Lecturer, Northfield University School of Medicine, {not_a_date} "
+            "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008")
+    assert _multi_record(text, _FIRST_ROLE, lines=()) == []
+    dated = text.replace(not_a_date, "7/05")
+    assert [f["severity"] for f in _multi_record(dated, _FIRST_ROLE, lines=())] == ["WARN"]
+
+
 def test_multi_record_through_joins_two_years_into_one_date():
     text = ("Lecturer, Northfield University School of Medicine, 2001 through 2005\t"
             "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008")
@@ -3412,6 +3463,19 @@ def test_grant_bucket_default_year_is_this_year_not_next():
                    end_date=str(this_year - 1))
     findings = lint_grant_bucket({"entries": [ended]}, _blocks_under("M2A", _BUCKET_TEXT))
     assert len(findings) == 1 and f"reads as {this_year - 1}" in findings[0]["message"]
+
+
+def test_grant_bucket_without_the_end_date_check_judges_the_heading_only():
+    """The quality score's cap reads the application shape alone: an ended
+    Current grant is not flagged, an application rendered as an award is."""
+    ended = _grant(240, _BUCKET_TEXT, ["Ongoing"], code="M2A", start_date="1990",
+                   end_date="2001")
+    assert lint_grant_bucket({"entries": [ended]}, _blocks_under("M2A", _BUCKET_TEXT),
+                             current_year=2026, check_end_date=False) == []
+    applied = _grant(241, _BUCKET_TEXT, ["Grants Applied"])
+    findings = lint_grant_bucket({"entries": [applied]}, _blocks_under("M2B", _BUCKET_TEXT),
+                                 check_end_date=False)
+    assert len(findings) == 1 and "which files applications" in findings[0]["message"]
 
 
 def test_grant_bucket_ignores_non_grant_codes():

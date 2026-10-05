@@ -65,7 +65,8 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
-from unified_pipeline.stage6.formatting.dates import EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS
+from unified_pipeline.stage6.formatting.dates import (
+    EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS, format_date_range)
 from unified_pipeline.stage6.normalization.institutions import (
     _get_cleaned_institution_name,
 )
@@ -93,7 +94,7 @@ from unified_pipeline.stage6.dedup import (
     _part_numbers,
     _trial_phases,
 )
-from unified_pipeline.stage6.sections.research_support import grant_end_year
+from unified_pipeline.stage6.sections.research_support import grant_end_year, year_at_or_after
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -1081,8 +1082,12 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
     deliberately leaves alone, chiefly the FSMB one (text "2025-2026"
     extracted as start_date=2026). WARN when the extracted start equals the
     range's END year (the model took the wrong end of the range), INFO for
-    any other disagreement. Report-only by decision (2026-09-09): the
-    extracted value is never changed."""
+    any other disagreement. A grant renders "-Present" only where its source
+    leaves the start year open; otherwise stage 6 writes the bare start, so
+    the lint asks stage 6's own `format_date_range` with the entry's text,
+    as the grant renderer does (RCBKFG FLYBMX 157, 174, 175: 0 of 3).
+    Report-only by decision (2026-09-09): the extracted value is never
+    changed."""
     findings = []
     for e in stage4.get("entries", []):
         if e.get("taxonomy_code") not in DATE_RANGE_TAXONOMY_CODES:
@@ -1096,6 +1101,9 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
             continue
         range_start, range_end = closed_range
         start = str(fields.get("start_date") or "").strip()
+        code = e.get("taxonomy_code")
+        if code in GRANT_CODES and not format_date_range(start, "", code, text).endswith("Present"):
+            continue
         severity = "WARN" if start == range_end else "INFO"
         findings.append(_finding(
             "wrong_start_date", severity,
@@ -2016,8 +2024,15 @@ MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
 #: patent or licence number).
 _CLAUSE_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 #: The same, with a one- or two-digit end year ("1996-98", "2009-11") kept
-#: in the date rather than opening the next clause.
-_DATE_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)")
+#: in the date rather than opening the next clause. Two more shapes write a
+#: year in two digits: a month and year ("7/05", "10/08"; not a day of
+#: "m/d/yy", and not one run of slashed numbers) and an apostrophe year
+#: ("Jul '96", with a straight or curly mark). RCBKFG CAOACN 32 and 64 date
+#: every record that way, so the lint read no clause at all.
+_DATE_YEAR_RE = re.compile(
+    r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
+    r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
+    r"|(?<!\w)['\u2018\u2019](?P<apostrophe_yy>\d{2})(?!\d)")
 _MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
                   r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
                   r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
@@ -2133,13 +2148,22 @@ def _has_payload(text: str) -> bool:
                for word in _PAYLOAD_WORD_RE.findall(text))
 
 
+def _anchor_year(match: re.Match[str]) -> str:
+    """The four-digit year a `_DATE_YEAR_RE` match writes; a two-digit year
+    takes the shared century pivot, as stage 4 reads it."""
+    if match.group("year"):
+        return match.group("year")
+    two_digits = match.group("slash_yy") or match.group("apostrophe_yy")
+    return str(expand_two_digit_year(int(two_digits)))
+
+
 def _date_anchors(text: str) -> list[DateAnchor]:
     """Each written date of the text: a run of years joined by date-only
     gaps. A month or day written before a year stays in the text around it;
     `_has_payload` and `_clause_words` read past date words."""
     anchors: list[DateAnchor] = []
     for match in _DATE_YEAR_RE.finditer(text):
-        year = match.group(1)
+        year = _anchor_year(match)
         if anchors and _DATE_GAP_RE.match(text[anchors[-1].end:match.start()]):
             last = anchors[-1]
             anchors[-1] = DateAnchor(last.start, match.end(), last.years | {year})
@@ -2623,7 +2647,8 @@ def lint_grant_boundary(stage4: dict) -> list[dict]:
 _AWARD_BUCKETS = frozenset({"M2A", "M2B"})
 _CURRENT_BUCKET, _PAST_BUCKET, _PENDING_BUCKET = GRANT_CODES
 #: A trailing one- or two-digit year after a date separator ("8/30/1"),
-#: which `grant_end_year` does not read.
+#: read looser than `grant_end_year`, which takes a one-digit year only in
+#: an mm/dd/y date and only when given the start date.
 _SHORT_END_YEAR_RE = re.compile(r"[-/.](\d{1,2})\s*$")
 #: "Not funded" names an application, so its "funded" is no award word.
 _NOT_FUNDED_RE = re.compile(r"\b(?:not|non)[\s-]?funded\b")
@@ -2645,9 +2670,7 @@ def _short_end_year(end_date: str, start_date: str, current_year: int) -> int | 
     start = grant_end_year(start_date, current_year)
     if not short or start is None:
         return None
-    modulus = 10 ** len(short.group(1))
-    year = start - start % modulus + int(short.group(1))
-    return year if year >= start else year + modulus
+    return year_at_or_after(short.group(1), start)
 
 
 def _ended_year(fields: Mapping[str, object], current_year: int) -> int | None:
@@ -2659,12 +2682,16 @@ def _ended_year(fields: Mapping[str, object], current_year: int) -> int | None:
     return year if year is not None and year < current_year else None
 
 
-def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int) -> str | None:
+def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int | None) -> str | None:
+    """The contradiction's reason, or None. A None `current_year` judges the
+    heading only, never the end date."""
     hierarchy = [str(level) for level in entry.get("hierarchy") or []]
     if (buckets & _AWARD_BUCKETS and _PENDING_BUCKET not in buckets
             and _application_heading(hierarchy)):
         return (f"rendered as an award ({'/'.join(sorted(buckets))}) under the heading "
                 f"'{hierarchy[-1]}', which files applications")
+    if current_year is None:
+        return None
     fields = entry.get("extracted_fields")
     ended = _ended_year(fields if isinstance(fields, Mapping) else {}, current_year)
     if _CURRENT_BUCKET in buckets and _PAST_BUCKET not in buckets and ended is not None:
@@ -2673,15 +2700,21 @@ def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int) -> 
 
 
 def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
-                      current_year: int | None = None) -> list[dict]:
+                      current_year: int | None = None, *,
+                      check_end_date: bool = True) -> list[dict]:
     """A grant rendered in a funding subsection its own record contradicts
     (#1343): an award subsection (Current or Past) under a heading that
     files applications, or Current with an end date before `current_year`,
     a truncated end year read against the start year. WARN, one finding per
     grant; a grant too short to locate in the document is not judged.
     `current_year` defaults to this year, as stage 6's own rebucket does, so
-    re-doctoring an old render can newly flag a grant that ended since."""
-    year = current_year if current_year is not None else datetime.now().year
+    re-doctoring an old render can newly flag a grant that ended since.
+    `check_end_date=False` judges the heading only: the quality score's
+    grant-bucket cap reads that shape alone (`quality_score.
+    score_grant_application_as_award`), so a later rescore cannot move it."""
+    year = None
+    if check_end_date:
+        year = current_year if current_year is not None else datetime.now().year
     rendered = _funding_haystacks(blocks)
     shared = _shared_entry_pieces(stage4.get("entries", []))
     findings = []

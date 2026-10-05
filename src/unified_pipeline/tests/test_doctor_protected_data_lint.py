@@ -24,6 +24,7 @@ from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls  # noqa: E402
 
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: E402
+    _INDEPENDENT_SHAPES,
     _shape_hits,
     lint_protected_data_in_output,
 )
@@ -807,3 +808,136 @@ def test_1223_run_doctor_and_the_scorer_read_the_deleted_view_and_agree(tmp_path
     fraction, detail, cap = score_protected_data(flat)
     assert cap == PROTECTED_DATA_CAP
     assert "protected_data_hits=1" in detail
+
+
+# --------------------------------------------------------------------------
+# NDMRSO ND1: an institutional or tax ID number recovered into the Appendix
+# (ATUVAL element 1, MQJAVH element 6) -- invented values here
+# --------------------------------------------------------------------------
+
+_ND1_INSTITUTIONAL, _ND1_TAX = "institutional ID number", "tax ID number"
+
+
+@pytest.mark.parametrize("text, category", [
+    ("UFID #: 1234-5678", _ND1_INSTITUTIONAL),
+    ("CWID abc2001", _ND1_INSTITUTIONAL),
+    ("EMPLID: 1234567", _ND1_INSTITUTIONAL),
+    ("Employee ID Number: abc1234", _ND1_INSTITUTIONAL),
+    ("Employee ID No.: 1234567", _ND1_INSTITUTIONAL),
+    ("Employee ID: | 1234567", _ND1_INSTITUTIONAL),
+    ("Employee ID: E-1234567", _ND1_INSTITUTIONAL),
+    ("Employee Identification Number: 1234567", _ND1_INSTITUTIONAL),
+    ("Staff ID: 1234567", _ND1_INSTITUTIONAL),
+    ("Student No. 1234 5678", _ND1_INSTITUTIONAL),
+    ("Faculty ID 1234567", _ND1_INSTITUTIONAL),
+    ("Personnel No. 1234567", _ND1_INSTITUTIONAL),
+    ("Payroll Number: 1234567", _ND1_INSTITUTIONAL),
+    ("Badge ID - 1234567", _ND1_INSTITUTIONAL),
+    ("University ID\t12345678", _ND1_INSTITUTIONAL),
+    ("University Identification: 12345678", _ND1_INSTITUTIONAL),
+    ("Institution ID: 12345678", _ND1_INSTITUTIONAL),
+    ("Institutional ID: 12345678", _ND1_INSTITUTIONAL),
+    ("Campus ID: 12345678", _ND1_INSTITUTIONAL),
+    ("EIN Number\t12-345-6789", _ND1_TAX),
+    ("FEIN: 12-3456789", _ND1_TAX),
+    ("Federal Tax ID No.: 12-3456789", _ND1_TAX),
+    ("Tax Payer ID: 12-3456789", _ND1_TAX),
+    ("Taxpayer Identification Number: 12-3456789", _ND1_TAX),
+    ("Employer Identification Number - 12-3456789", _ND1_TAX),
+    ("TIN 123456789", _ND1_TAX),
+    ("ITIN: 912-34-5678", _ND1_TAX),
+])
+def test_nd1_an_id_number_is_an_independent_shape_and_a_finding(text, category):
+    """The shape takes the whole line, label and value, the way the withhold
+    does, so the matcher scan's span claims it and one leak is one finding."""
+    assert _shape_categories(text) == [category]
+    assert [m.group() for pattern, _ in _INDEPENDENT_SHAPES
+            for m in pattern.finditer(text)] == [text]
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p(text)])
+    assert len(findings) == 1
+    assert f"({category})" in findings[0]["message"]
+    assert "does not recognise" not in findings[0]["message"]
+    assert not any(ch.isdigit() for ch in findings[0]["message"])
+
+
+@pytest.mark.parametrize("text", [
+    "NPI: 1234567890",
+    "ORCID: 0000-0002-1234-5678",
+    "PMID: 12345678",
+    "Example Board of Internal Medicine, ID #: 123456",
+    "Example Fund at Sample University #1234567",
+    "Grant No. R01 CA123456",
+    "Sample University No. 3 Hospital",
+    "Student Number: 12",
+    "Tax ID:",
+    "Employee Assistance Program 2019",
+    "Student Nov2019",
+    "University Idaho1234",
+    "UFIDA1234",
+    "TINY1234 sensor",
+    "Einstein 1234",
+    "Latin 12345",
+    "Crystal clear or tin ear: a study",
+])
+def test_nd1_public_identifiers_and_grant_numbers_are_not_id_findings(text):
+    assert _shape_hits(text, []) == []
+    assert lint_protected_data_in_output([_p("T. APPENDIX"), _p(text)]) == []
+
+
+def test_nd1_an_id_number_in_a_body_section_is_a_finding_too():
+    """The withhold rows are every-code rows, so the matcher scan reports one
+    in any section; the independent shapes stay in Personal Data/Appendix."""
+    findings = lint_protected_data_in_output([_p("HONORS"), _p("Employee ID: 1234567")])
+    assert len(findings) == 1
+    assert "(institutional ID number)" in findings[0]["message"]
+
+
+def test_nd1_a_leaked_tax_id_caps_the_score_red(tmp_path):
+    _write_flat_docx(tmp_path, ["EIN Number\t12-345-6789"])
+    fraction, _detail, cap = score_protected_data(tmp_path)
+    assert cap == PROTECTED_DATA_CAP
+    assert fraction == 1.0
+
+
+# #1223 (NDMRSO, class E2): a bare "Birth" label before a whole date, and a
+# spelled-out child count after a marital-status cut, recovered into the
+# Appendix. Both scored GREEN while they rendered. Synthetic values.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Birth: March 4, 1970 in Exampleville, Examplestan",   # BNYLDF idx 24's shape
+    "BIRTH March 4, 1970: Exampleville",                   # HUOGDE idx 8's, as rendered
+    "BIRTH 04/03/1970",
+    "• Birth – 4 March 1970",
+    "Citizenship: Examplestan\nBirth: 03/04/1970",   # a table block's next line
+])
+def test_1223_ndmrso_a_bare_birth_label_before_a_whole_date_is_a_shape(text):
+    assert _shape_categories(text) == ["date of birth"]
+
+
+@pytest.mark.parametrize("text", [
+    "Birth: A History of Midwifery, 2019",
+    "Birth cohort 1990 follow-up study",
+    "Birth 2019 Symposium, Example City",
+    "Very preterm birth 12 March 2019 outcomes",
+    "Outcomes of preterm birth: 03/15/2019 cohort",
+    "Birthplace of an Idea, Example Press",
+    "Example Children's Oncology Group meeting, 03/04/2015",
+])
+def test_1223_ndmrso_birth_titles_and_bare_years_are_not_shapes(text):
+    assert _shape_hits(text, []) == []
+
+
+@pytest.mark.parametrize("line", [
+    "Birth: March 4, 1970 in Exampleville, Examplestan",
+    "BIRTH March 4, 1970: Exampleville",
+    "five children",   # a spelled-out count left behind by a marital-status cut
+])
+def test_1223_ndmrso_the_appendix_leaks_are_findings_and_cap_the_score_red(tmp_path, line):
+    appendix = [_p("T. APPENDIX"), _p(line)]
+    findings = lint_protected_data_in_output(appendix)
+    assert len(findings) == 1
+    assert "1970" not in findings[0]["message"] and "Exampleville" not in findings[0]["message"]
+    _write_flat_docx(tmp_path, ["T. APPENDIX", line])
+    _fraction, _detail, cap = score_protected_data(tmp_path)
+    assert cap == PROTECTED_DATA_CAP

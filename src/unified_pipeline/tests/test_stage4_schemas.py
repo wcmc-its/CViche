@@ -175,6 +175,33 @@ def test_grant_buckets_ask_the_llm_for_status_and_notes(code):
     assert {"status", "notes"} <= set(schemas_mod.FIELD_DESCRIPTIONS[code])
 
 
+@pytest.mark.parametrize("field", ["status", "filing_date", "issue_date"])
+def test_patent_schema_asks_the_llm_for_the_fields_the_patent_table_renders(field):
+    """#1205 slice (b), EBYSBC E12: the M2D renderer (`stage6/sections/patents.py`)
+    has Status, Filing date and Issue date rows, but the three fields were
+    `extract: false` in field_schemas_v1.1.json, so the stage-4 prompt's field
+    list was "patent_number, title, inventors" and QNZADH lost a patent's status
+    and XELRLZ its issue date. Read off the ACTIVE (config-merged) schema, the
+    list the prompt is built from; the config, not the built-in table, wins."""
+    assert field in schemas_mod.get_field_schema("M2D")["fields"]
+
+
+def test_patent_schema_leaves_narrative_to_the_supplementary_prose_decision():
+    """#1205 decision 3: an entry's supplementary prose renders as a tracked
+    deletion by default; stage-4 extraction is only the per-section fallback if
+    that spike fails. M2D is not on the exclusion list, so its `narrative` stays
+    off until the spike decides M2."""
+    assert "narrative" not in schemas_mod.get_field_schema("M2D")["fields"]
+
+
+def test_d3_title_guide_takes_a_consulting_topic_as_the_title():
+    """#1403 (EBYSBC E32, OIYKZE 87/91/95): the D3 consulting rule says title =
+    the project topic, so the field guide printed in the same prompt must not
+    say only 'Job title or position'."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS["D3"]["title"]
+    assert "For a consulting engagement that states no job title, the project topic" in guide
+
+
 def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
     """#475: web160's 11 "Visiting Professor" roles were dropped at stage 4
     because R had no `role` field. Read off the ACTIVE (config-merged) schema,
@@ -187,6 +214,13 @@ def test_invited_presentation_role_hint_keeps_the_presentation_format_in_event_n
     """#475 r3: adding `role` made the LLM drop 'Invited Workshop' (in neither
     role nor event_name); the description must say where a format goes."""
     assert "event_name" in schemas_mod.FIELD_DESCRIPTIONS["R"]["role"]
+
+
+def test_q2_committee_name_guide_takes_a_session_panel_or_workshop_title():
+    """#1346: the Q2 guide said 'committee ONLY', and stage 4 left committee_name
+    null on 14 moderated or chaired session rows in the EBYSBC batch."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS["Q2"]["committee_name"]
+    assert "For a session, panel, symposium or workshop entry, its title" in guide
 
 
 def test_b2_guide_covers_every_extracted_field_and_asks_for_the_whole_line():

@@ -100,6 +100,16 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
     if m:
         year = expand_two_digit_year(int(m.group(3)))
         return _validate_full_date(year, int(m.group(1)), int(m.group(2)))
+    # YYYY.MM.DD / YYYY.MM (RCBKFG KUUKNJ N4): a CV that dates its rows with
+    # dots ("2021.07 - ...") reaches stage 4 unconverted often enough, and
+    # unread it rendered as the raw "2021.07" and sorted last.
+    m = re.fullmatch(r'(\d{4})\.(\d{1,2})\.(\d{1,2})', s)
+    if m:
+        return _validate_full_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.fullmatch(r'(\d{4})\.(\d{1,2})', s)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        return (year, month, None) if 1 <= month <= 12 else (None, None, None)
     # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
     m = re.fullmatch(r'(\d{4})[-/](\d{1,2})', s)
     if m:

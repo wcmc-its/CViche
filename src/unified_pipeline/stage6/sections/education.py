@@ -161,6 +161,27 @@ def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
     return '' if text.strip() == str(year_awarded or '').strip() else text
 
 
+# A degree cell that opens with a training title names a training post, not
+# a conferred degree: an internship or residency coded B1 rendered "Year
+# Awarded" from its attendance end (RCBKFG GKAQHB 17/20, #1415). An
+# internship or residency may carry one modifier word first ("Surgical
+# Internship", AKPQEB 12). Bare "Fellow" is left out -- a society fellowship
+# ("Fellow of the Royal College ...") is a conferred credential.
+_TRAINING_TITLE_RE = re.compile(
+    r'^\W*(?:(?:chief\s+|senior\s+)?'
+    r'(?:intern(?:ship)?|resident|residency|post-?doc(?:toral)?'
+    r'|(?:clinical|research)\s+fellow(?:ship)?|fellowship|fellow\s+in)'
+    r'|[a-z-]+\s+(?:internship|residency))\b',
+    re.IGNORECASE)
+
+
+def _names_a_degree(degree: str) -> bool:
+    """Whether stage 4's `degree` text names something that is awarded: any
+    text that does not open with a training title."""
+    text = degree.strip()
+    return bool(text) and not _TRAINING_TITLE_RE.match(text)
+
+
 def _year_awarded(fields: Mapping, end: object, raw_text: str, *, degree_named: bool) -> tuple[object, bool]:
     """The Year Awarded value before formatting, and whether it was recovered
     from raw text (shown as a "Text Extraction" insertion).
@@ -170,7 +191,9 @@ def _year_awarded(fields: Mapping, end: object, raw_text: str, *, degree_named: 
     award, so they apply only when the row names a degree. A row with no
     degree (schooling, a year of study, a major alone) has nothing that was
     awarded, and filling the column from its attendance end asserted a degree
-    year the CV never states (EBYSBC E33: HZGJFM-06, ZDCXIV-08).
+    year the CV never states (EBYSBC E33: HZGJFM-06, ZDCXIV-08). Nor does a
+    training row whose degree cell is its title ("Intern", "Resident"):
+    `_names_a_degree`.
     """
     stated = fields.get('year_awarded') or fields.get('year')
     if stated or not degree_named:
@@ -309,7 +332,7 @@ class EducationSection:
             else:
                 dates = ''
             year_awarded, year_is_enriched = _year_awarded(
-                fields, end, raw_text, degree_named=bool(_field_text(fields.get('degree')).strip()),
+                fields, end, raw_text, degree_named=_names_a_degree(_field_text(fields.get('degree'))),
             )
 
             # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy

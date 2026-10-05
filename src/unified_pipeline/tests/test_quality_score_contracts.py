@@ -58,6 +58,11 @@ from unified_pipeline.quality_score import (  # noqa: E402
     FallbackServedCall,
     llm_fallback_served,
 )
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    _FUNDING_SECTIONS,
+    lint_grant_bucket,
+)
+from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
 from unified_pipeline.stage4.error_codes import (  # noqa: E402
     LLM_PROVIDER_ERROR,
     LLM_RESPONSE_INVALID,
@@ -2543,6 +2548,158 @@ def test_score_run_caps_a_run_whose_owner_was_cut_from_three_citations(tmp_path)
     assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP]
     assert any(f.startswith(f"HARD-FAIL cap={qs.CONTENT_LOSS_CAP}: CV owner cut from their own "
                             "citations") for f in result["flags"]), result["flags"]
+
+
+# -------------------------- zero-false-positive WARN lints into the content cap
+# grant_boundary (#1226), grant_bucket's application shape (#1343) and
+# junk_or_header_row (EBYSBC E8/E10/E29). Invented grants and institutions.
+
+#: A named owner with a location, so the owner gate does not cap these runs.
+_OWNED_RUN = {"cv_owner": {"full_name": "Jane Q. Public"},
+              "cv_owner_location": {"inference_success": True, "primary_location": "NY"}}
+
+_WHOLE_GRANT = {"agency": "Example Fund", "grant_number": "R01 XX000001",
+                "title": "Study of example things", "start_date": "2001", "end_date": "2004"}
+
+
+def _shifted_grants_run(tmp_path: Path, shifted: int) -> Path:
+    """A grant list with `shifted` entries that open with the PI line, which
+    closes a record: the shape a slipped stage-2 cut leaves."""
+    entries = [{"element_idx_start": 300 + 2 * n, "taxonomy_code": "M2B",
+                "hierarchy": ["Research Support", "Past"],
+                "text": f"PI: A. Person\t2001-2004\tExample Fund\tStudy {n}",
+                "extracted_fields": dict(_WHOLE_GRANT)} for n in range(shifted)]
+    _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": entries})
+    return tmp_path
+
+
+def test_grant_boundary_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.GRANT_BOUNDARY_CAP_MIN == 3
+    assert qs.score_grant_boundary(_shifted_grants_run(tmp_path, 3)) == (
+        1.0, f"grant_boundary_findings=3; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_grant_boundary_gate_quiet_below_the_minimum_count(tmp_path):
+    """Two flagged grants report in the doctor but do not cap."""
+    assert qs.score_grant_boundary(_shifted_grants_run(tmp_path, 2)) == (
+        0.0, "grant_boundary_findings=2", None)
+
+
+def test_grant_boundary_gate_not_evaluated_without_fields(tmp_path):
+    assert qs.score_grant_boundary(tmp_path) == (
+        0.0, "no fields.json found; not evaluated", None)
+
+
+_GRANT_TEXT = "Example Research Foundation Study of Example Longevity Measures Program"
+_FUNDING_TITLE = dict(_FUNDING_SECTIONS)
+
+
+def _grant_rendered_run(tmp_path: Path, heading: list[str], code: str, rendered_under: str,
+                        **fields) -> Path:
+    """One grant filed under `heading`, rendered in the `rendered_under`
+    funding subsection."""
+    _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": [
+        {"element_idx_start": 200, "taxonomy_code": code, "hierarchy": heading,
+         "text": _GRANT_TEXT, "extracted_fields": fields}]})
+    _make_docx([_FUNDING_TITLE[rendered_under].title(), _GRANT_TEXT]).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_grant_application_gate_caps_on_one_application_rendered_as_an_award(tmp_path):
+    assert qs.GRANT_APPLICATION_AS_AWARD_CAP_MIN == 1
+    run = _grant_rendered_run(tmp_path, ["Grants Applied"], "M2B", "M2B")
+    assert qs.score_grant_application_as_award(run) == (
+        1.0, f"applications_rendered_as_awards=1; cap={qs.CONTENT_LOSS_CAP}",
+        qs.CONTENT_LOSS_CAP)
+
+
+def test_grant_application_gate_spares_an_application_rendered_under_pending(tmp_path):
+    run = _grant_rendered_run(tmp_path, ["Grants Applied"], "M2C", "M2C")
+    assert qs.score_grant_application_as_award(run) == (
+        0.0, "applications_rendered_as_awards=0", None)
+
+
+def test_grant_application_gate_does_not_cap_on_an_ended_current_grant(tmp_path):
+    """The lint flags a Current grant whose end date has passed; the gate does
+    not read that shape, which depends on the day the run is rescored."""
+    run = _grant_rendered_run(tmp_path, ["Research Support", "Ongoing"], "M2A", "M2A",
+                              start_date="1990", end_date="2001")
+    fields = json.loads((run / "X_fields.json").read_text())
+    blocks = docx_body_blocks(Document(str(run / "X_wcm.docx")))
+    assert len(lint_grant_bucket(fields, blocks)) == 1
+    assert qs.score_grant_application_as_award(run) == (
+        0.0, "applications_rendered_as_awards=0", None)
+
+
+def test_grant_application_gate_not_evaluated_without_its_artifacts(tmp_path):
+    assert qs.score_grant_application_as_award(tmp_path) == (
+        0.0, "no fields.json found; not evaluated", None)
+    _grant_rendered_run(tmp_path, ["Grants Applied"], "M2B", "M2B")
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_grant_application_as_award(tmp_path) == (
+        0.0, "no docx found; not evaluated", None)
+
+
+_JUNK_INSTITUTIONS = ("Example State University", "Sample Valley College",
+                      "Placeholder Institute of Studies", "Fictional Medical School",
+                      "Imaginary Coast University")
+
+
+def _junk_rows_run(tmp_path: Path, headers: int) -> Path:
+    """A course list whose first `headers` institution lines each render as a
+    row of their own, with one real course under each."""
+    entries, rows = [], []
+    for n, name in enumerate(_JUNK_INSTITUTIONS[:headers]):
+        course = f"EX10{n} Widget Studies"
+        entries += [{"element_idx_start": 40 + 2 * n, "taxonomy_code": "K1",
+                     "hierarchy": ["Example Heading"], "text": name,
+                     "extracted_fields": {"institution": name}},
+                    {"element_idx_start": 41 + 2 * n, "taxonomy_code": "K1",
+                     "hierarchy": ["Example Heading"], "text": course,
+                     "extracted_fields": {"course_title": course}}]
+        rows += [[name, ""], [course, ""]]
+    _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": entries})
+    _make_docx(tables=[rows]).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_junk_rows_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.JUNK_ROWS_CAP_MIN == 5
+    assert qs.score_junk_rows(_junk_rows_run(tmp_path, 5)) == (
+        1.0, f"junk_or_header_rows=5; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_junk_rows_gate_quiet_below_the_minimum_count(tmp_path):
+    assert qs.score_junk_rows(_junk_rows_run(tmp_path, 4)) == (
+        0.0, "junk_or_header_rows=4", None)
+
+
+def test_junk_rows_gate_not_evaluated_without_its_artifacts(tmp_path):
+    assert qs.score_junk_rows(tmp_path) == (0.0, "no fields.json found; not evaluated", None)
+    _junk_rows_run(tmp_path, 5)
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_junk_rows(tmp_path) == (0.0, "no docx found; not evaluated", None)
+
+
+@pytest.mark.parametrize("gate, flag, build", [
+    (qs.score_grant_boundary, "Grant details shifted between grants",
+     lambda d: _shifted_grants_run(d, 3)),
+    (qs.score_grant_application_as_award, "Grant applications rendered as awards",
+     lambda d: _grant_rendered_run(d, ["Grants Applied"], "M2B", "M2B")),
+    (qs.score_junk_rows, "Headers or labels rendered as records",
+     lambda d: _junk_rows_run(d, 5)),
+])
+def test_score_run_applies_each_zero_fp_lint_gate(tmp_path, gate, flag, build):
+    """The wire: registered in CAP_ONLY_GATES, weightless, and score_run
+    applies its cap under a flag that names it."""
+    assert gate in [fn for _, fn in qs.CAP_ONLY_GATES]
+    assert gate not in [fn for _, _, fn in qs.DIMENSIONS]
+    _complete_run_dir(tmp_path)
+    result = score_run(build(tmp_path))
+    assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP], result["flags"]
+    assert result["totalScore"] <= qs.CONTENT_LOSS_CAP
+    assert any(f.startswith(f"HARD-FAIL cap={qs.CONTENT_LOSS_CAP}: {flag}")
+               for f in result["flags"]), result["flags"]
 
 
 # ------------------------------------------------ #822 raw-tab deduction limit

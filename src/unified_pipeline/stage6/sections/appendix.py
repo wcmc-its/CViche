@@ -126,6 +126,15 @@ Two two-signal shapes widen with it: a column-header row whose cells are
 separated by single spaces (`_is_label_only_row`), and a label followed only by
 a parenthesised directive ("Sample Statement: (to be completed by ...)").
 
+Two shapes no longer wait for 3b's wording (#530, RCBKFG UYFRTL 17, GKAQHB 41).
+The rule line takes any run of five or more symbols with no letter, digit or
+space ("*****"). A bare label that closes with a colon and holds nothing after it
+("Sample Background:") is dropped as `section-header` on its text alone
+(`_is_bare_section_label`) when it is the only line of its Appendix group
+(`_drop_lone_bare_labels`); beside other lines it is their lead-in and stays.
+The two-signal rule kept it whenever 3b called it a "header label only" rather
+than a section header.
+
 The same furniture test keeps an A-coded orphan out of the post-render recovery
 (stage 6's `_unconsumed_personal_data_batch`), and decides the severity of the
 "A ... recovered into the Appendix" warning: INFO when every recovered A line is
@@ -278,7 +287,11 @@ _TOC_LINE_RE = re.compile(r"^.{1,90}?[ \t]Page\s+\d+(?:[-–—]\d+)?\s*$")
 # #1221: a rule line -- nothing but underscores, hyphens, equals signs or
 # dashes, five or more of them. Text-only like `_BARE_YEAR_RE`: a rule is not
 # content under any code, so no reasoning signal is needed.
-_RULE_LINE_RE = re.compile(r"^[_=\-–—]{5,}$")
+#
+# #530 (RCBKFG GKAQHB 41): any other run of five or more symbols with no
+# letter, digit or space ("*****", "#####", "~~~~~") is a separator of the
+# same kind. A spaced run ("_ _ _ _ _") is a fill-in blank and is kept.
+_RULE_LINE_RE = re.compile(r"^(?:[^\w\s]|_){5,}$")
 
 
 # #885 residual: four structural shapes that need TWO independent signals, so
@@ -371,6 +384,7 @@ _KIND_REASONING = {
 # anywhere else still means data.
 _OUTLINE_MARKER_RE = re.compile(r"^(?:\d{1,2}|[A-Za-z]|[ivxIVX]{1,4})[.,)]\s+")
 _LABEL_ETC = ", etc."
+_ETC = "etc."
 # The parenthetical that closes an OUTLINE-MARKED label is the template's
 # qualifier on it ("3. Sample Placement (e.g., ... if applicable)"), not part of
 # the label, so it does not count toward the word cap (#530). It is still
@@ -678,6 +692,29 @@ def is_routine_recovered_line(text: str, owner_tokens: OwnerTokens = OwnerTokens
         return not _RANK_WORD_RE.search(stripped)
     return bool(is_page_furniture(stripped, owner_tokens)
                 or _PROFILE_URL_RE.match(stripped) or _BARE_LABEL_RE.match(stripped))
+
+
+def _is_bare_section_label(text: str) -> bool:
+    """A one-line section label with nothing after its closing colon
+    ("Sample Background:", "1. Honors or Awards:"), on its text alone
+    (#530, RCBKFG UYFRTL 17). The two-signal rule dropped the same label
+    only when 3b's reasoning used one of its section-header wordings, so a
+    run that said "Header label only" kept it. The closing colon is what
+    makes the shape safe without the reasoning: a T hobby or a skill
+    ("Cooking", "Professional Experience") has none, and a label with its
+    content after the colon ("Languages: Spanish") is not bare. The label
+    must sit on one line, open with a capital, hold one colon (a cell break
+    renders as another) and no period but the one in "etc." (a "Dr." or
+    "Prof." line names a person), and pass `_is_section_label_text`
+    (digit-free, no "none"). `_drop_lone_bare_labels` drops it only when it
+    is alone in its Appendix group."""
+    stripped = text.strip()
+    if "\n" in stripped:
+        return False
+    body = _OUTLINE_MARKER_RE.sub("", stripped)
+    return (bool(_BARE_LABEL_RE.match(body)) and body[0].isupper()
+            and "." not in body.replace(_ETC, "")
+            and _is_section_label_text(stripped))
 
 
 _KIND_SHAPE = {
@@ -1162,7 +1199,35 @@ def _filter_unmapped_entries(
             kept.append((entry, rendered))
         else:
             dropped[reason] += 1
-    return kept, dropped
+    return _drop_lone_bare_labels(kept, dropped), dropped
+
+
+def _drop_lone_bare_labels(
+    kept: Sequence[AppendixLine],
+    dropped: Counter[str],
+) -> list[AppendixLine]:
+    """*kept* without each T line that is a bare label
+    (`_is_bare_section_label`) and the only line of its source-heading group,
+    each counted on *dropped* as `section-header` (#530, RCBKFG UYFRTL 17).
+    A label with other lines of its group beside it is a lead-in to them
+    ("Sample reviewer for:" over the venues it introduces) and is kept."""
+    group_sizes = Counter(_source_heading(entry) for entry, _ in kept)
+    result: list[AppendixLine] = []
+    for entry, rendered in kept:
+        if (entry.get("taxonomy_code") == _APPENDIX_TAXONOMY_CODE
+                and group_sizes[_source_heading(entry)] == 1
+                and _is_bare_section_label(rendered)):
+            dropped[DROP_SECTION_HEADER] += 1
+        else:
+            result.append((entry, rendered))
+    return result
+
+
+def _source_heading(entry: UnmappedEntry) -> str:
+    """The top-level source heading an Appendix line is grouped under:
+    `hierarchy[0]`, or `_UNKNOWN_SECTION` for an entry with no hierarchy."""
+    hierarchy = entry.get("hierarchy") or []
+    return hierarchy[0] if hierarchy else _UNKNOWN_SECTION
 
 
 def _group_by_source_heading(
@@ -1177,9 +1242,7 @@ def _group_by_source_heading(
     """
     groups: dict[str, list[AppendixLine]] = {}
     for entry, text in lines:
-        hierarchy = entry.get("hierarchy") or []
-        heading = hierarchy[0] if hierarchy else _UNKNOWN_SECTION
-        groups.setdefault(heading, []).append((entry, text))
+        groups.setdefault(_source_heading(entry), []).append((entry, text))
     return groups
 
 

@@ -77,6 +77,11 @@ DECIDED_821_PENDING = "#821 pending"
 #: Paul's #821 decision comment (2026-09-14): DEA template slot and home
 #: address/phone both move from render to withhold-with-notice.
 DECIDED_821 = "https://github.com/wcmc-its/CViche/issues/821#issuecomment-5671621909"
+#: Paul's decision (2026-10-05, NDMRSO batch autopsy class ND1): an
+#: institutional, employee or student ID number and a tax ID are withheld like
+#: the other personal data. Before it, both reached the Appendix verbatim
+#: (ATUVAL element 1, MQJAVH element 6).
+DECIDED_ID_NUMBERS = "ID numbers, 2026-10-05 (NDMRSO autopsy class ND1)"
 
 # Category labels -- the vocabulary the withheld notice and the Word comment
 # speak in. Named once so a row, a field-key rule and a comment line cannot
@@ -105,6 +110,8 @@ CAT_HEALTH = "health"
 CAT_BLOOD_TYPE = "blood type"
 CAT_DEA = "DEA number"
 CAT_HOME_CONTACT = "home address / phone"
+CAT_INSTITUTIONAL_ID = "institutional ID number"
+CAT_TAX_ID = "tax ID number"
 # #833: a third party's contact data in an unlabelled Appendix-bound entry
 # (a free-form References block -- "Name, Title, Institution" / phone /
 # email, no label WITHHOLD_POLICY can key on). Not a WithholdRule row: the
@@ -293,6 +300,23 @@ _NAME_RUN = r"(?: [^\W\d_] [\w.'’-]* ,? [ \t]+ ){1,4}"
 _BORN_VALUE = r"(?: " + re.escape(PRE_LLM_PLACEHOLDER) + r" | " + _FULL_DATE_VALUE + r" )"
 _BORN_STATEMENT = _FRAGMENT_INITIAL + _NAME_RUN + _STEM_GUARD + r"born (?: [ \t]+ on )? [ \t]+ " + _BORN_VALUE
 
+# #1223 (NDMRSO, BNYLDF/HUOGDE): a bare "Birth" label -- "Birth: <date> in
+# <place>", "BIRTH <date><tab><place>" -- that no date-of-birth row opened on,
+# so the date and the birthplace were recovered into the Appendix verbatim and
+# the date reached the LLM. A shape, not a label row: "Birth:" alone opens real
+# titles ("Birth: A History"), and a label row would also join
+# `_KNOWN_FIELD_LABEL_RE`. So the label counts only with the value that makes
+# it a date of birth right after it -- a whole date or, once the pre-LLM scrub
+# has run, its placeholder; never a bare year -- and only fragment-initial
+# (`anchored`), so "preterm birth: 03/15/2019" inside a line is left alone.
+# The anchoring is also the word-start guard the other stems carry
+# (`_STEM_GUARD`): "Afterbirth:" or "Pre-birth" opens no fragment.
+_BARE_BIRTH_VALUE = r"(?: " + re.escape(PRE_LLM_PLACEHOLDER) + r" | " + _WHOLE_DATE_VALUE + r" )"
+_BARE_BIRTH_LABEL = r"birth (?: [ \t]* [:\-–—] [ \t]* | [ \t]+ ) " + _BARE_BIRTH_VALUE
+#: Compiled for `pii_pass._extend_label_span`: a bare-birth match is a label
+#: whose place of birth continues in the cells after it.
+_BARE_BIRTH_LABEL_RE = re.compile(_BARE_BIRTH_LABEL, re.X | re.I)
+
 # #1223 (EBYSBC, EQADVR): two family labels no row below opened, so the spouse's
 # and the grandchildren's names reached the Appendix. "Married:" names the
 # spouse; the spouse rows open only on "spouse"/"wife"/"husband", "married to"
@@ -313,6 +337,51 @@ _FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
     (CAT_SPOUSE, _MARRIED_STEM),
     (CAT_CHILDREN, _GRANDCHILDREN_STEM),
 )
+
+
+# NDMRSO ND1: an ID number an institution or the tax authority gives the owner
+# ("<institution> ID #: <number>", "EIN Number<tab><number>"). A qualifying
+# LABEL and a NUMBER, never either alone: a bare "ID #:" stays a board
+# certificate's (two corpus F1/F2 entries), and a number with no label is a
+# grant, a PMID or an accession number. NPI and ORCID are public and render
+# (#821; `_RENDER_SET_FIELD_LABELS`), so no label here names them.
+#
+# Shape rows, not label rows: the value often sits after a tab ("EIN
+# Number<tab><value>"), a hard delimiter a label row's span stops at, so the
+# label would be cut and the number would render. A shape's span is the label
+# and the value together.
+#
+# A bare "#" never makes a qualifier a label: "<funder> University #<number>"
+# is a grant (JFGZFT element 146), so an institution word needs "ID", and a
+# person word ("Employee", "Student") needs "ID", "number" or "no.".
+#
+# `(?![a-z])` ends each word, so "no" is not the start of "nominee" and "ein"
+# not the start of "Einstein"; `_STEM_GUARD` starts it, so "tin" is not the end
+# of "Latin". UFID, CWID and EMPLID are the institution-specific labels the
+# corpus and WCM's own systems use; another institution's acronym is one more
+# alternative.
+_ID_NUMBER_NOUN = r"(?: \s* (?: number | no\.? | \# ) )?"
+_INSTITUTIONAL_ID_LABEL = (
+    r"(?: (?: employee | staff | student | faculty | personnel | payroll | badge )"
+    r"    \s* (?: id (?: entification )? | number | no\.? ) (?![a-z])"
+    r"  | (?: university | institution (?: al )? | campus ) \s* id (?: entification )? (?![a-z])"
+    r"  | (?: ufid | cwid | emplid ) (?![a-z]) )"
+)
+_TAX_ID_LABEL = (
+    r"(?: (?: federal \s* )? tax \s* (?: payer \s* )? id (?: entification )?"
+    r"  | employer \s* identification | f? ein | i? tin ) (?![a-z])"
+)
+#: Label-to-value gap: blanks, a tab or a table-cell pipe, at most one colon or
+#: dash.
+_ID_VALUE_SEP = r"[ \t|]* (?: [:\-–—] [ \t|]* )?"
+#: Four or more digits, single spaces or hyphens allowed between them, behind
+#: an optional short letter prefix ("abc1234").
+_ID_NUMBER_VALUE = r"[a-z]{0,4} -? \d (?: [ -]? \d ){3,}"
+
+
+def _id_number_shape(label: str) -> str:
+    """`label`, an optional "number"/"no."/"#" after it, then an ID number."""
+    return _STEM_GUARD + label + _ID_NUMBER_NOUN + _ID_VALUE_SEP + _ID_NUMBER_VALUE
 
 
 #: THE table. Row order is match-priority order within a scope: the engine
@@ -346,6 +415,8 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
         _DOB_STEM,
         wide_value=_FULL_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE + r"|" + _YEAR_VALUE,
         single_space_value=_FULL_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE)),
+    WithholdRule(CAT_DATE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, shape=_BARE_BIRTH_LABEL,
+                 anchored=True),
     WithholdRule(CAT_PLACE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, label=r"""
         place \s* of \s* birth | birth \s*-? \s* place | birthplace
     """),
@@ -363,6 +434,15 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"alien \s* registration (?: \s* (?: number | no\.? ) )?"),
     WithholdRule(CAT_DRIVERS_LICENSE, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"driver.?s? \s* licen[sc]e"),
+    # NDMRSO ND1 (see `_id_number_shape`). Every code, like the passport and
+    # licence rows: a label naming the owner's ID followed by its number is
+    # not a title anywhere. Render-time only: the span can start ahead of an
+    # SSN-shaped value ("Tax ID: <SSN>") and would hide it from the pre-LLM
+    # value scrub, which only replaces a span of its own category.
+    WithholdRule(CAT_INSTITUTIONAL_ID, SCOPE_ALL_CODES, DECIDED_ID_NUMBERS,
+                 shape=_id_number_shape(_INSTITUTIONAL_ID_LABEL), render_only=True),
+    WithholdRule(CAT_TAX_ID, SCOPE_ALL_CODES, DECIDED_ID_NUMBERS,
+                 shape=_id_number_shape(_TAX_ID_LABEL), render_only=True),
     WithholdRule(CAT_MARITAL_STATUS, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"marital \s* status"),
     # #1103: "Name of Spouse & Children:" opened with "Name of" and joined
@@ -398,10 +478,15 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # be the WHOLE fragment -- opening right after a hard delimiter
     # (`_PII_FRAGMENT_SPLIT_RE`) and closing at the next -- so "20 children
     # and 20 adults" or "20 subjects, 20 children" in a study never matches.
+    # #1223 (NDMRSO, VXSDRD): the count may be spelled out ("<status>; <word>
+    # children"), as `_CHILD_COUNT` already allows in the parenthetical row.
+    # The leading spaces are possessive (`*+`): no count opens with a space,
+    # and with eleven alternatives a backtrack into a long space run at every
+    # offset made the row five times slower.
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 shape=r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ ]*"
-                       r" \d{1,2} \s+ (?: children | child | kids | sons? | daughters? )"
-                       r" (?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )",
+                 shape=r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ ]*+"
+                       + _CHILD_COUNT + r" \s+ " + _CHILD_NOUN
+                       + r" (?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )",
                  anchored=True),
     # #1223: "Married (<name>)", "two children (<names>)" and "<name> born
     # [withheld]" -- family prose with no label (see `_MARRIED_PARENTHETICAL`).

@@ -160,6 +160,46 @@ def test_org_not_fabricated_from_the_award_name_itself():
         "Ontario Undergraduate Student Alliance") == ""
 
 
+def test_org_not_fabricated_from_the_award_first_comma_clause_1412():
+    """#1412 (RCBKFG FLYBMX 288/289): the short-proper-noun fallback took
+    the clause an award name opens with as its organization. A first clause
+    with no institutional keyword is the award's own words, not a grantor."""
+    gen = WCMTemplateGenerator(verbose=False)
+    # the last clause is too long for the fallback, so it reached the first
+    assert gen._extract_organization_from_award(
+        "First Place, Imaginary Regional Student Poster Competition Day") == ""
+    assert gen._extract_organization_from_award(
+        "Cum Laude, Made-up School of Example Studies and Arts") == ""
+    # a first clause in no award words is still the grantor
+    assert gen._extract_organization_from_award(
+        "Imaginary Civic Network, Forum for Example Causes") == \
+        "Imaginary Civic Network"
+    # a first clause that names an institution is still the grantor
+    assert gen._extract_organization_from_award(
+        "Made-up University, Teaching Award") == "Made-up University"
+    assert gen._extract_organization_from_award(
+        "Made-up University Award, Forum for Example Causes") == \
+        "Made-up University Award"
+    # a later keyword-free clause is still the proper-noun fallback, award
+    # word or not: only the clause the name opens with is the award's own
+    assert gen._extract_organization_from_award(
+        "Some Prize, Weill Cornell") == "Weill Cornell"
+    assert gen._extract_organization_from_award(
+        "Some Prize, Imaginary Award Committee") == "Imaginary Award Committee"
+
+
+def test_award_name_keeps_an_org_it_ends_on_after_a_preposition_1412():
+    """#1412 (RCBKFG KUUKNJ 139): stripping a granting body that is the
+    object of the name's last phrase left the award cell ending in "of". The name now renders whole."""
+    entry = {"taxonomy_code": "H", "text": "",
+             "extracted_fields": {
+                 "award_name": "Distinguished Alumnus of Made-up Medical College, Narnia",
+                 "granting_body": "Made-up Medical College", "date": "1982"}}
+    assert _render_honors([entry]) == [[
+        "Distinguished Alumnus of Made-up Medical College, Narnia",
+        "Made-up Medical College", "1982"]]
+
+
 def test_org_extraction_still_finds_a_real_grantor_after_887_guards():
     gen = WCMTemplateGenerator(verbose=False)
     # a grantor that is a PREFIX of the award name (not the whole name)

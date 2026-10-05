@@ -9,6 +9,8 @@ Fixtures are invented: no name, institution or citation here comes from a CV.
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -68,6 +70,29 @@ def test_training_row_coded_as_training_and_a_faculty_title_are_quiet():
                "Appointments"),
         _entry("2012-present Residency Program Director, Invented Hospital", "D2",
                "Appointments")) == []
+
+
+def test_training_row_filed_as_degree_is_flagged_1415():
+    """#1415 (RCBKFG GKAQHB 17/20): an internship and a residency coded B1
+    render in Academic Degrees, absent from the training table."""
+    findings = _run(
+        _entry("Intern (Example Medicine)\tInvented General Hospital 1991-1992", "B1",
+               "Education", idx=17),
+        _entry("Resident (Example Pathology) 1993-1996\tInvented Institute", "B1",
+               "Education", idx=20))
+    assert _shapes(findings) == ["training_as_degree"]
+    assert findings[0]["severity"] == "WARN"
+    assert "2 entries under 'Education' coded B1" in findings[0]["message"]
+    assert "C (training)" in findings[0]["message"]
+
+
+def test_a_degree_row_and_a_training_program_director_coded_b1_are_quiet():
+    assert _run(
+        _entry("MD, Invented University, 1990", "B1", "Education"),
+        _entry("PhD in Example Studies, Invented University, 1995 (Dissertation: 'A title')",
+               "B1", "Education"),
+        _entry("Residency Program Director course, Invented Hospital", "B1",
+               "Education")) == []
 
 
 def test_board_certification_filed_as_membership_is_flagged():
@@ -284,3 +309,29 @@ def test_s5_sibling_count_and_article_share_bounds_are_inclusive():
     rows.append(_entry("Invented Agency. A report on widgets. 2001.", "S5", "Writing", idx=50))
     assert _shapes(_run(*rows, _entry(_GUIDELINE, "S5", "Writing", idx=99))) == [
         "journal_article_as_report"]
+
+
+def test_a_bare_journal_coded_editorial_board_among_reviewer_journals_is_flagged():
+    """RCBKFG JJUQDF 342-346: a batch with no lead-in coded the bare names
+    of reviewed journals Q4C beside the Q4D ones."""
+    path = ("Editorial Activities",)
+    reviewed = _entry("Journal of Invented Widgets", "Q4D", *path, idx=330)
+    board = [_entry(f"Invented Review of Sprockets {n}", "Q4C", *path, idx=342 + n)
+             for n in range(2)]
+    findings = _run(reviewed, *board)
+    assert _shapes(findings) == ["reviewer_journal_as_editorial_board"]
+    assert "entries under 'Editorial Activities' coded Q4C" in findings[0]["message"]
+    assert findings[0]["evidence"][0] == "entry 342 (Q4C): Invented Review of Sprockets 0"
+
+
+@pytest.mark.parametrize("text, heading, sibling_code", [
+    ("Member, Editorial Board, Invented Review", "Editorial Activities", "Q4D"),
+    ("Associate Editor, Invented Review", "Editorial Activities", "Q4D"),
+    ("Member, Invented Newsletter Consultant Panel", "Editorial Activities", "Q4D"),
+    ("Invented Review of Sprockets", "Editorial Boards", "Q4D"),
+    ("Invented Review of Sprockets", "Editorial Activities", "Q4C"),
+])
+def test_an_editorial_board_entry_with_a_role_or_board_context_is_quiet(text, heading,
+                                                                       sibling_code):
+    sibling = _entry("Journal of Invented Widgets", sibling_code, heading, idx=330)
+    assert _run(sibling, _entry(text, "Q4C", heading, idx=342)) == []
