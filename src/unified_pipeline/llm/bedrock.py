@@ -44,11 +44,20 @@ STOP_REASON_MAP = {
 # infectious-disease CV content that Sonnet 4.6 answers normally (#1174).
 CONTENT_FILTERED_STOP_REASON = "content_filtered"
 
-# A call that ends content_filtered on a Sonnet-5-family model is retried ONCE
-# on this model (#1174). It has a PRICING entry in config.py, so the retry is
-# costed at its own rate. Only the family below falls back; every other
-# model and every other stopReason keeps today's behaviour.
-CONTENT_FILTER_FALLBACK_MODEL = "us.anthropic.claude-sonnet-4-6"
+# A call that ends content_filtered on a Sonnet-5-family model is retried on
+# these models, in order, until one does not end content_filtered (#1174).
+# Sonnet 4.6 first: closest to the primary. Haiku 4.5 second: on the M1-score
+# prompt of run QFQLNF both Sonnets ended content_filtered and Haiku 4.5
+# answered (end_turn), measured 2026-10-05. Each has a PRICING entry in
+# config.py, so each attempt is costed at its own rate. Only the family below
+# falls back; every other model and every other stopReason keeps today's
+# behaviour.
+CONTENT_FILTER_FALLBACK_MODELS: tuple[str, ...] = (
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+)
+#: The first fallback; kept as a name for the callers and tests that read it.
+CONTENT_FILTER_FALLBACK_MODEL = CONTENT_FILTER_FALLBACK_MODELS[0]
 CONTENT_FILTER_FALLBACK_MODEL_PREFIX = "anthropic.claude-sonnet-5"
 
 
@@ -83,8 +92,8 @@ class BedrockEmptyResponseError(RuntimeError):
 
 
 class BedrockContentFilteredError(RuntimeError):
-    """The model-filter fallback (#1174) also ended content_filtered with
-    partial text. Raised instead of returning truncated output a caller would
+    """The last model of the content-filter fallback chain (#1174) also ended
+    content_filtered with partial text. Raised instead of returning truncated output a caller would
     only mis-parse as invalid JSON."""
 
 # Hard ceiling for any Bedrock call that reaches _call_bedrock without an
@@ -783,42 +792,62 @@ def _content_filter_fallback_applies(model: str) -> bool:
 
 def _call_on_content_filter_fallback(messages: list, response_format: dict | None, cfg: dict,
                                      first_attempt_cost: float) -> dict:
-    """The single fallback attempt (#1174). Calls _dispatch_bedrock, never
-    _handle_bedrock, so it cannot recurse: one fallback per logical call.
+    """Walk CONTENT_FILTER_FALLBACK_MODELS in order until one does not end
+    content_filtered (#1174). Calls _dispatch_bedrock, never _handle_bedrock,
+    so it cannot recurse: each fallback model is tried at most once per
+    logical call.
 
-    The filtered attempt was billed, so its cost is added to the result.
-    A second content_filtered ending raises; any other failure of the
-    fallback call propagates as it would for a primary call.
+    Every filtered attempt was billed, so all of their costs are added to the
+    result that serves, and FALLBACK_SERVED_KEY names the model that served.
+    The last model ending content_filtered raises; any other failure of a
+    fallback call propagates at once, as it would for a primary call, without
+    trying the next model.
     """
     stage = cfg.get("stage")
-    logger.warning(
-        "Bedrock call (stage=%s) ended %s on %s; retrying once on fallback %s.",
-        stage, CONTENT_FILTERED_STOP_REASON, cfg["model"], CONTENT_FILTER_FALLBACK_MODEL,
-    )
-    try:
-        result, stop_reason = _dispatch_bedrock(
-            messages, response_format, {**cfg, "model": CONTENT_FILTER_FALLBACK_MODEL})
-    except (BedrockEmptyResponseError, BedrockToolCallDidNotFireError) as e:
-        if e.stop_reason == CONTENT_FILTERED_STOP_REASON:
-            logger.warning(
-                "Bedrock call (stage=%s) was also %s on fallback %s; giving up.",
-                stage, CONTENT_FILTERED_STOP_REASON, CONTENT_FILTER_FALLBACK_MODEL)
-        raise
-    if stop_reason == CONTENT_FILTERED_STOP_REASON:
+    filtered_on = cfg["model"]
+    billed = first_attempt_cost
+    last_hop = len(CONTENT_FILTER_FALLBACK_MODELS) - 1
+    for hop, fallback in enumerate(CONTENT_FILTER_FALLBACK_MODELS):
         logger.warning(
-            "Bedrock call (stage=%s) was also %s on fallback %s; giving up.",
-            stage, CONTENT_FILTERED_STOP_REASON, CONTENT_FILTER_FALLBACK_MODEL)
-        raise BedrockContentFilteredError(
-            f"Bedrock call ended stopReason={CONTENT_FILTERED_STOP_REASON!r} on "
-            f"{cfg['model']} and again on the fallback {CONTENT_FILTER_FALLBACK_MODEL}")
-    result["cost"] += first_attempt_cost
-    result[FALLBACK_SERVED_KEY] = CONTENT_FILTER_FALLBACK_MODEL
-    return result
+            "Bedrock call (stage=%s) ended %s on %s; retrying on fallback %s (%d of %d).",
+            stage, CONTENT_FILTERED_STOP_REASON, filtered_on, fallback,
+            hop + 1, len(CONTENT_FILTER_FALLBACK_MODELS),
+        )
+        try:
+            result, stop_reason = _dispatch_bedrock(
+                messages, response_format, {**cfg, "model": fallback})
+        except (BedrockEmptyResponseError, BedrockToolCallDidNotFireError) as e:
+            if e.stop_reason != CONTENT_FILTERED_STOP_REASON:
+                raise
+            if hop == last_hop:
+                _log_content_filter_give_up(stage, fallback)
+                raise
+            billed += e.cost
+            filtered_on = fallback
+            continue
+        if stop_reason != CONTENT_FILTERED_STOP_REASON:
+            result["cost"] += billed
+            result[FALLBACK_SERVED_KEY] = fallback
+            return result
+        billed += result["cost"]
+        filtered_on = fallback
+    _log_content_filter_give_up(stage, filtered_on)
+    raise BedrockContentFilteredError(
+        f"Bedrock call ended stopReason={CONTENT_FILTERED_STOP_REASON!r} on "
+        f"{cfg['model']} and on every fallback {', '.join(CONTENT_FILTER_FALLBACK_MODELS)}")
+
+
+def _log_content_filter_give_up(stage: str | None, fallback: str) -> None:
+    """The last fallback also ended content_filtered. The exception that
+    follows is the record; this line names the stage and the model."""
+    logger.warning(
+        "Bedrock call (stage=%s) was also %s on the last fallback %s; giving up.",
+        stage, CONTENT_FILTERED_STOP_REASON, fallback)
 
 
 def _handle_bedrock(messages: list, response_format: dict | None, cfg: dict) -> dict:
     """Dispatch one Bedrock call; if a Sonnet-5-family model ends it
-    content_filtered, retry once on CONTENT_FILTER_FALLBACK_MODEL (#1174).
+    content_filtered, retry it down CONTENT_FILTER_FALLBACK_MODELS (#1174).
     Any other model or stopReason is returned or raised exactly as
     _dispatch_bedrock produced it."""
     eligible = _content_filter_fallback_applies(cfg["model"])
