@@ -51,13 +51,16 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_enrichment_pubtype_mismatch,
     lint_etal_added,
+    lint_junk_or_header_row,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
@@ -1229,6 +1232,168 @@ def test_enrichment_failures_missing_artifact_info_skip(tmp_path):
     assert skips[0]["severity"] == "INFO"
     assert "stage_5_enrichment" in skips[0]["message"]
     assert payload["artifacts"]["stage_5_enrichment"] is None
+
+
+# ------------------------------- lints 14r/14s: accepted PubMed records (E19)
+
+
+def _accepted(idx, pubmed_title, cv_title="A synthetic study of tidal sediment cores",
+              pubtypes=("Journal Article",), status="enriched", text=None):
+    """A stage-5 entry stage 5 accepted from PubMed; every value is invented."""
+    return {"element_idx_start": idx, "taxonomy_code": "S1",
+            "text": text or f"Vandermeer Q. {cv_title}. J Synth Geol. 2031;4:1-9.",
+            "enrichment_status": status, "enrichment_source": "pmid",
+            "extracted_fields": {"title": cv_title},
+            "enrichment_data": {"pubmed_title": pubmed_title,
+                                "publication_types": list(pubtypes)}}
+
+
+@pytest.mark.parametrize("title", [
+    "Sediment transport in ",           # cut before an inline element: trailing space
+    "An N",                             # cut inside a token followed by a superscript
+    "Coastal cores of the (CoRE",       # cut inside a parenthesis
+])
+def test_pubmed_title_truncated_warns_on_a_title_cut_mid_phrase(title):
+    findings = lint_pubmed_title_truncated({"entries": [_accepted(264, title)]})
+    assert [(f["lint"], f["severity"]) for f in findings] == [("pubmed_title_truncated", "WARN")]
+    assert findings[0]["message"].startswith("entry 264 (S1): ")
+
+
+@pytest.mark.parametrize("title", [
+    "A synthetic study of tidal sediment cores.",
+    "Do tidal cores record storms?",
+    "Tidal cores: a field note!",
+    "[A synthetic study of tidal cores in translation]",
+    "A synthetic study of tidal sediment cores (TIDE)",
+    "A synthetic study of tidal sediment cores.   ",
+    "The \u201ctidal core\u201d",
+    "The \u2018tidal core\u2019",
+    "The 'tidal core'",
+    'The "tidal core"',
+])
+def test_pubmed_title_truncated_quiet_on_a_complete_title(title):
+    assert lint_pubmed_title_truncated({"entries": [_accepted(264, title)]}) == []
+
+
+def test_pubmed_title_truncated_skips_records_stage_6_does_not_render_from_pubmed():
+    """An empty title falls back to the CV's in stage 6, and only an accepted
+    ('enriched') record replaces the CV's citation at all."""
+    entries = [_accepted(1, ""), _accepted(2, "Sediment transport in ", status="title_check_failed"),
+               {"element_idx_start": 3, "text": "no enrichment at all"}]
+    assert lint_pubmed_title_truncated({"entries": entries}) == []
+
+
+def test_pubmed_title_truncated_does_not_judge_a_shorter_published_title():
+    entry = _accepted(5, "Tidal cores.", cv_title="A much longer conference title "
+                      "for the same synthetic study of tidal sediment cores in estuaries")
+    assert lint_pubmed_title_truncated({"entries": [entry]}) == []
+
+
+@pytest.mark.parametrize("pubtype", ["Published Erratum", "Retraction of Publication",
+                                     "Expression of Concern"])
+def test_enrichment_pubtype_mismatch_warns_on_a_notice_accepted_for_a_paper(pubtype):
+    entry = _accepted(257, "A synthetic study of tidal sediment cores.", pubtypes=(pubtype,))
+    findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
+    assert [(f["lint"], f["severity"]) for f in findings] == [
+        ("enrichment_pubtype_mismatch", "WARN")]
+    assert findings[0]["message"].startswith("entry 257 (S1): ")
+    assert pubtype in findings[0]["message"]
+
+
+@pytest.mark.parametrize("opening", ["Author Correction", "Correction", "Erratum",
+                                     "Retraction", "Corrigendum", "Expression of concern"])
+def test_enrichment_pubtype_mismatch_reads_a_notice_title_without_the_type(opening):
+    """Each notice opening the title regex names, on a record typed only as
+    a Journal Article, so the title alone decides."""
+    entry = _accepted(257, f"{opening}: A synthetic study of tidal sediment cores.")
+    findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
+    assert [f["lint"] for f in findings] == ["enrichment_pubtype_mismatch"]
+
+
+@pytest.mark.parametrize("cv_title", [
+    "Author Correction: A synthetic study of tidal sediment cores",
+    "Erratum to: A synthetic study of tidal sediment cores",
+])
+def test_enrichment_pubtype_mismatch_quiet_when_the_cv_lists_the_notice(cv_title):
+    entry = _accepted(272, f"{cv_title}.", cv_title=cv_title, pubtypes=("Published Erratum",))
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+@pytest.mark.parametrize("text, cv_title", [
+    # the notice is named only in the entry text, not in the extracted title
+    ("Vandermeer Q. Erratum. J Synth Geol. 2031;4:10.", "A synthetic study of tidal cores"),
+    # the notice is named only in the extracted title, not in the entry text
+    ("Vandermeer Q. J Synth Geol. 2031;4:10.", "Corrigendum to a synthetic study of tidal cores"),
+    ("Vandermeer Q. Retraction: tidal cores. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    # each remaining word the CV-side regex names, alone in the entry text
+    ("Vandermeer Q. Tidal cores (retracted). J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Tidal cores, errata. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Expression of concern: tidal cores. J Synth Geol. 2031;4:10.",
+     "Tidal cores"),
+])
+def test_enrichment_pubtype_mismatch_reads_both_cv_text_and_cv_title(text, cv_title):
+    entry = _accepted(272, "A synthetic study of tidal cores.", cv_title=cv_title,
+                      pubtypes=("Retraction of Publication",), text=text)
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_pubtype_mismatch_reads_only_the_opening_of_the_title():
+    """A paper whose title names a correction mid-way is not a notice."""
+    entry = _accepted(9, "Drift correction for synthetic tidal sediment cores.")
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_lints_skip_an_accepted_entry_with_malformed_enrichment_data():
+    entry = _accepted(9, "Sediment transport in ", pubtypes=("Published Erratum",))
+    entry["enrichment_data"] = ["not", "a", "dict"]
+    stage5e = {"entries": [entry]}
+    assert lint_pubmed_title_truncated(stage5e) == []
+    assert lint_enrichment_pubtype_mismatch(stage5e) == []
+
+
+def test_enrichment_lints_tolerate_non_dict_extracted_fields():
+    """A truthy non-dict `extracted_fields` (a list) is read as no CV title,
+    not dereferenced: both lints still report the record."""
+    cut = _accepted(11, "Sediment transport in ")
+    notice = _accepted(12, "A synthetic study of tidal cores.", pubtypes=("Published Erratum",),
+                       text="Vandermeer Q. Tidal cores. J Synth Geol. 2031;4:10.")
+    for entry in (cut, notice):
+        entry["extracted_fields"] = ["not", "a", "dict"]
+    stage5e = {"entries": [cut, notice]}
+    truncated = lint_pubmed_title_truncated(stage5e)
+    assert [f["lint"] for f in truncated] == ["pubmed_title_truncated"]
+    assert "the CV's title: 0 chars" in truncated[0]["evidence"][0]
+    assert [f["lint"] for f in lint_enrichment_pubtype_mismatch(stage5e)] == [
+        "enrichment_pubtype_mismatch"]
+
+
+@pytest.mark.parametrize("pubtypes", [("Letter", "Comment"), ("Editorial", "Comment"),
+                                      ("Journal Article", "Retracted Publication"),
+                                      ("Journal Article",)])
+def test_enrichment_pubtype_mismatch_quiet_on_a_paper_record(pubtypes):
+    """A Comment is usually the CV owner's own commentary, and a Retracted
+    Publication is the paper itself."""
+    entry = _accepted(9, "A synthetic study of tidal sediment cores.", pubtypes=pubtypes)
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_pubtype_mismatch_skips_a_record_stage_5_did_not_accept():
+    entry = _accepted(9, "Correction: tidal cores.", pubtypes=("Published Erratum",),
+                      status="title_check_failed")
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_lints_run_from_the_stage_5_artifact(tmp_path):
+    """Wired through LINT_REGISTRY: run_doctor reads both off the stage-5 JSON."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_5_enrichment").glob("*.json"))
+    payload = json.loads(path.read_text())
+    payload["entries"] = [_accepted(264, "Sediment transport in "),
+                          _accepted(257, "Correction: tidal cores.", pubtypes=("Published Erratum",))]
+    path.write_text(json.dumps(payload))
+    lints = [f["lint"] for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] in ("pubmed_title_truncated", "enrichment_pubtype_mismatch")]
+    assert sorted(lints) == ["enrichment_pubtype_mismatch", "pubmed_title_truncated"]
 
 
 # ------------------------------------------------- lint 10: stage-6 warnings
@@ -3715,14 +3880,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (39), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (44), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 37
+    assert len(payload["findings"]) == 42
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -3736,7 +3901,9 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     payload = run_doctor(root, _UID)
     assert set(payload) == {"document_uid", "root", "artifacts", "findings",
-                            "counts", "worst_severity", "metrics"}
+                            "counts", "worst_severity", "metrics", "lint_precision"}
+    # #819: one lint_precision entry per lint key that fired, no more.
+    assert set(payload["lint_precision"]) == {f["lint"] for f in payload["findings"]}
     assert all(v is not None for v in payload["artifacts"].values())
     assert not any("skipped" in f["message"] for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
@@ -5022,3 +5189,291 @@ def test_render_overlap_modules_list_matches_a_source_scan():
     assert found == set(_RENDER_OVERLAP_MODULES), (
         f"source scan found {sorted(found)}, _RENDER_OVERLAP_MODULES has "
         f"{sorted(_RENDER_OVERLAP_MODULES)} -- update the hand list")
+
+
+# ------------------------------------------ lint 14r: junk_or_header_row
+
+def _junk4(text, code, idx, **fields):
+    """One stage-4 entry with invented content and the given fields."""
+    return _entry(text, start=idx, hierarchy=["Example Heading"],
+                  taxonomy_code=code, extracted_fields=fields)
+
+
+def _junk_hits(entries, table_rows, blocks=None):
+    findings = lint_junk_or_header_row({"entries": entries}, table_rows, blocks or [])
+    return [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in findings]
+
+
+def test_junk_or_header_row_warns_on_an_institution_header_rendered_as_a_row():
+    """EBYSBC E8: a course list's institution line printed as a course."""
+    entries = [_junk4("Example State University", "K1", 40,
+                      institution="Example State University"),
+               _junk4("EX101 Widget Studies", "K1", 41, course_title="EX101 Widget Studies")]
+    rows = [[["Example State University", ""], ["EX101 Widget Studies", ""]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 40 (K1)", "header_only")]
+
+
+def test_junk_or_header_row_reads_a_bulleted_paragraph():
+    entries = [_junk4("Example State University", "P", 7,
+                      institution="Example State University")]
+    blocks = [("p", "INSTITUTIONAL ADMINISTRATIVE ACTIVITIES"),
+              ("p", "\u2022 Example State University")]
+    assert _junk_hits(entries, [], blocks) == [("WARN", "entry 7 (P)", "header_only")]
+
+
+def test_junk_or_header_row_does_not_read_a_section_heading_as_a_row():
+    entries = [_junk4("Research", "P", 7, institution="Research")]
+    assert _junk_hits(entries, [], [("p", "RESEARCH")]) == []
+
+
+@pytest.mark.parametrize("code", ["I", "B1", "F1", "T", "A", "S", "C1"])
+def test_junk_or_header_row_skips_codes_whose_record_is_an_organization(code):
+    """A membership, a school, a licensing state: the organization IS the record."""
+    entries = [_junk4("Example Widget Society", code, 3,
+                      organization="Example Widget Society")]
+    assert _junk_hits(entries, [[["Example Widget Society"]]]) == []
+
+
+def test_junk_or_header_row_reads_a_dated_header_only_under_teaching():
+    """'2009-2014 <institution>' heads a course list (K), but outside
+    teaching it is how a CV lists a board seat, rendered as the CV says."""
+    fields = {"institution": "Example Medical School", "start_date": "2009",
+              "end_date": "2014"}
+    teaching = [_junk4("Example Medical School (2009-2014)", "K4", 5, **fields)]
+    board = [_junk4("2009-2014 Example Medical School", "Q2", 5, **fields)]
+    rows = [[["2009-2014 - Example Medical School"]]]
+    assert _junk_hits(teaching, rows) == [("WARN", "entry 5 (K4)", "header_only")]
+    assert _junk_hits(board, rows) == []
+
+
+def test_junk_or_header_row_spares_a_dated_session_at_a_site():
+    """One dated day at a place is a session given there, not a header."""
+    entries = [_junk4("5/14/97 Example Community Center", "K4", 9,
+                      institution="Example Community Center", date="1997-05-14")]
+    assert _junk_hits(entries, [[["1997 - Example Community Center"]]]) == []
+
+
+def test_junk_or_header_row_spares_a_row_that_shows_a_record():
+    """The row carries words of its own beyond the institution: a title the
+    renderer took from the entry text, so the row is a record."""
+    entries = [_junk4("Example Medical School\tModels of Widget Wear and Tear", "K2",
+                      11, institution="Example Medical School")]
+    rows = [[["Models of Widget Wear and Tear (Example Medical School)"]]]
+    assert _junk_hits(entries, rows) == []
+
+
+def test_junk_or_header_row_allows_no_extra_word_on_a_dated_header():
+    fields = {"institution": "Example Heart Society", "start_date": "2017",
+              "end_date": "2017"}
+    entries = [_junk4("2017 Attendee, Example Heart Society", "K4", 12, **fields)]
+    assert _junk_hits(entries, [[["2017 - Attendee, Example Heart Society"]]]) == []
+    assert _junk_hits(entries, [[["2017 - Example Heart Society"]]]) == [
+        ("WARN", "entry 12 (K4)", "header_only")]
+
+
+def test_junk_or_header_row_warns_on_a_lead_in_label():
+    """EBYSBC E8: a role label above a mentee list printed as a teaching item."""
+    entries = [_junk4("Major Widget Advisor:", "K2", 577, teaching_role="Major Widget Advisor")]
+    assert _junk_hits(entries, [], [("p", "Major Widget Advisor")]) == [
+        ("WARN", "entry 577 (K2)", "label")]
+
+
+def test_junk_or_header_row_reads_a_long_line_ending_in_a_colon_as_a_record():
+    text = ("Developed and taught the following graduate widget courses in the "
+            "Department of Example Studies:")
+    entries = [_junk4(text, "K1", 20, course_title="graduate widget courses")]
+    assert _junk_hits(entries, [], [("p", text)]) == []
+
+
+def test_junk_or_header_row_warns_on_a_date_fragment_rendered_as_an_award():
+    """EBYSBC E29: a wrapped line's tail number printed as an Honors row."""
+    entries = [_junk4("47.", "H", 93), _junk4("1983- 1984.", "H", 98,
+                                              start_date="1983", end_date="1984")]
+    rows = [[["47.", "", ""], ["1983-1984", "", ""]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 93 (H)", "date_fragment"),
+                                         ("WARN", "entry 98 (H)", "date_fragment")]
+
+
+def test_junk_or_header_row_reads_an_open_end_as_part_of_a_fragment():
+    entries = [_junk4("1997-present", "H", 106, start_date="1997", end_date="present")]
+    assert _junk_hits(entries, [[["1997-Present"]]]) == [
+        ("WARN", "entry 106 (H)", "date_fragment")]
+
+
+def test_junk_or_header_row_needs_an_institution_to_read_a_header():
+    entries = [_junk4("2004-2006 Example City", "K4", 14, location="Example City",
+                      start_date="2004", end_date="2006")]
+    assert _junk_hits(entries, [[["2004-2006 - Example City"]]]) == []
+
+
+def test_junk_or_header_row_needs_the_fragment_alone_on_its_row():
+    entries = [_junk4("1997-", "H", 105, start_date="1997", end_date="present")]
+    assert _junk_hits(entries, [[["Prize", "1997-Present"]]]) == []
+    assert _junk_hits(entries, [[["1997-Present"]]]) == [
+        ("WARN", "entry 105 (H)", "date_fragment")]
+
+
+def _rank(text, idx, title, institution, start=None, end=None):
+    fields = {"title": title, "institution": institution}
+    if start:
+        fields.update(start_date=start, end_date=end)
+    return _junk4(text, "D1", idx, **fields)
+
+
+_DATED_RANK = _rank("2010-present Professor of Widgetry, Example University", 30,
+                    "Professor of Widgetry", "Example University", "2010", "present")
+_EARLIER_RANK = _rank("2004-2010 Assistant Professor, Example University", 25,
+                      "Assistant Professor", "Example University", "2004", "2010")
+
+
+def test_junk_or_header_row_warns_on_the_banner_title_repeated_without_a_date():
+    """EBYSBC E10: the CV banner's current title coded D1 renders as a second,
+    dateless appointment row."""
+    banner = _rank("Current position: Professor of Widgetry", 4,
+                   "Professor of Widgetry", "Example University")
+    rows = [[["Professor of Widgetry", "Example University", "2010-Present"],
+             ["Professor of Widgetry", "Example University", ""]]]
+    assert _junk_hits([banner, _EARLIER_RANK, _DATED_RANK], rows) == [
+        ("WARN", "entry 4 (D1)", "undated_duplicate")]
+
+
+def test_junk_or_header_row_reads_each_part_of_a_joined_banner_title():
+    banner = _rank("Example Banner", 0, "Chief of Widgets; Professor of Widgetry",
+                   "Example University")
+    rows = [[["Chief of Widgets; Professor of Widgetry", "Example University", ""]]]
+    assert _junk_hits([banner, _DATED_RANK], rows) == [
+        ("WARN", "entry 0 (D1)", "undated_duplicate")]
+
+
+def test_junk_or_header_row_spares_an_undated_rank_inside_the_dated_list():
+    """An undated row between dated appointments lost its date; it is no banner."""
+    lost_date = _rank("Professor of Widgetry, Example University", 27,
+                      "Professor of Widgetry", "Example University")
+    rows = [[["Professor of Widgetry", "Example University", ""]]]
+    assert _junk_hits([_EARLIER_RANK, lost_date, _DATED_RANK], rows) == []
+
+
+def test_junk_or_header_row_spares_another_rank_of_the_same_title():
+    """'Assistant Professor' beside a dated 'Clinical Assistant Professor' is
+    a second post (EBYSBC E4), not a repeat."""
+    clinical = _rank("1990-1995 Clinical Assistant Professor, Example University", 30,
+                     "Clinical Assistant Professor", "Example University", "1990", "1995")
+    undated = _rank("Assistant Professor, Example University", 40,
+                    "Assistant Professor", "Example University")
+    rows = [[["Assistant Professor", "Example University", ""]]]
+    assert _junk_hits([clinical, undated], rows) == []
+
+
+def test_junk_or_header_row_needs_the_duplicate_row_to_carry_no_year():
+    banner = _rank("Professor of Widgetry", 4, "Professor of Widgetry",
+                   "Example University")
+    rows = [[["Professor of Widgetry", "Example University", "2010-Present"]]]
+    assert _junk_hits([banner, _DATED_RANK], rows) == []
+
+
+def test_junk_or_header_row_quotes_the_rendered_row_once_per_cell():
+    """The evidence is the row as rendered, a repeated cell shown once."""
+    entries = [_junk4("Example Widget Institute", "K1", 40,
+                      institution="Example Widget Institute")]
+    findings = lint_junk_or_header_row(
+        {"entries": entries},
+        [[["Example Widget Institute", "Example Widget Institute", ""]]], [])
+    assert [f["evidence"] for f in findings] == [["Example Widget Institute"]]
+
+
+def test_junk_or_header_row_needs_every_core_word_on_the_row():
+    """A short row of other words is some other record, not this header."""
+    entries = [_junk4("Example Widget Institute", "K1", 40,
+                      institution="Example Widget Institute")]
+    assert _junk_hits(entries, [[["Gadget College"]]]) == []
+
+
+def test_junk_or_header_row_reads_an_empty_field_as_absent():
+    """Stage 4 often emits a named field with no value: an empty title does
+    not make the header a record."""
+    entries = [_junk4("Example Widget Institute", "K1", 40, title="", course_title=None,
+                      institution="Example Widget Institute", stage4_records=[{"x": 1}])]
+    assert _junk_hits(entries, [[["Example Widget Institute"]]]) == [
+        ("WARN", "entry 40 (K1)", "header_only")]
+
+
+def test_junk_or_header_row_allows_two_extra_words_on_an_undated_header_not_three():
+    """Numbers and the entry's own place are not extra words."""
+    entries = [_junk4("Example Widget Institute, Townsville", "K1", 40,
+                      institution="Example Widget Institute", location="Townsville")]
+    two = [[["Example Widget Institute, Townsville 1997 Alpha Beta"]]]
+    three = [[["Example Widget Institute, Townsville Alpha Beta Gamma"]]]
+    assert _junk_hits(entries, two) == [("WARN", "entry 40 (K1)", "header_only")]
+    assert _junk_hits(entries, three) == []
+
+
+def test_junk_or_header_row_reads_only_body_paragraph_blocks():
+    """A table block's text is read through table_rows, never as a paragraph."""
+    entries = [_junk4("Example Widget Institute", "P", 7,
+                      institution="Example Widget Institute")]
+    assert _junk_hits(entries, [], [("table", "Example Widget Institute")]) == []
+
+
+def test_junk_or_header_row_reads_a_three_letter_word_as_no_fragment():
+    """'May 1997' is a dated record's text; '1983 to 1984' is a fragment."""
+    entries = [_junk4("May 1997", "H", 50), _junk4("1983 to 1984", "H", 51)]
+    rows = [[["May 1997"], ["1983 to 1984"]]]
+    assert _junk_hits(entries, rows) == [("WARN", "entry 51 (H)", "date_fragment")]
+
+
+def test_junk_or_header_row_reads_a_banner_title_against_the_dated_institution():
+    """The banner joins the title and the institution in one field; a dated
+    D1's title plus its institution carries both."""
+    banner = _rank("Example Banner", 4, "Professor of Widgetry, Example University",
+                   "")
+    rows = [[["Professor of Widgetry, Example University", "Example Heading", ""]]]
+    assert _junk_hits([banner, _DATED_RANK], rows) == [
+        ("WARN", "entry 4 (D1)", "undated_duplicate")]
+
+
+def test_junk_or_header_row_reads_undated_duplicates_against_d1_only():
+    """A dated D2 of the same title is not an appointment the banner repeats,
+    and an undated D2 is not read as a banner."""
+    dated_d2 = _junk4("2010-present Professor of Widgetry", "D2", 30,
+                      title="Professor of Widgetry", institution="Example University",
+                      start_date="2010", end_date="present")
+    banner = _rank("Example Banner", 4, "Professor of Widgetry", "Example University")
+    undated_d2 = _junk4("Professor of Widgetry", "D2", 4, title="Professor of Widgetry",
+                        institution="Example University")
+    rows = [[["Professor of Widgetry", "Example University", ""]]]
+    assert _junk_hits([banner, dated_d2], rows) == []
+    assert _junk_hits([undated_d2, _DATED_RANK], rows) == []
+
+
+def test_junk_or_header_row_reads_a_duplicate_only_on_a_multi_cell_row():
+    """A one-cell line with the title is a paragraph-style mention, and a
+    title split across two cells is no title cell."""
+    banner = _rank("Example Banner", 4, "Professor of Widgetry", "Example University")
+    assert _junk_hits([banner, _DATED_RANK], [[["Professor of Widgetry"]]]) == []
+    assert _junk_hits([banner, _DATED_RANK],
+                      [[["Professor of", "Widgetry", "Example University"]]]) == []
+
+
+def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_path):
+    """The LINT_REGISTRY row must hand the lint the docx's body paragraphs
+    (`blocks`, optional): a header bulleted as a paragraph is seen only there.
+    Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "P", "element_type": "paragraph",
+        "element_idx_start": 96, "text": "Example Widget Institute",
+        "extracted_fields": {"institution": "Example Widget Institute"}})
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_paragraph("Example Widget Institute")
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "junk_or_header_row"]
+    assert [(f["severity"], f["evidence"]) for f in hits] == [
+        ("WARN", ["Example Widget Institute"])]
