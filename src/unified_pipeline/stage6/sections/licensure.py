@@ -376,10 +376,11 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
 
     The raw-text fallback runs no NPI/DEA label re-check:
     `_classify_licensure_entry` already tests `original_text` for both labels
-    before returning KIND_LICENSE, and lets a DEA-labelled entry through as a
-    licence only when it names a jurisdiction (`_is_dea_record`), so
-    reaching this branch already proves neither label is present -- re-testing here would only duplicate the
-    classifier's own answer (#573 review).
+    before returning KIND_LICENSE. A DEA-labelled entry gets through as a
+    licence only when it names a jurisdiction (`_is_dea_record`), so it
+    always has a state and takes the branch above, never this one. Reaching
+    the fallback therefore proves neither label is present -- re-testing
+    here would only duplicate the classifier's own answer (#573 review).
     """
     if entry.state or entry.number:
         last_registration = (format_date_for_section(entry.expiration_date, 'F1')

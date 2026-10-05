@@ -371,7 +371,8 @@ def test_a_state_licence_mentioning_dea_renders_its_row_and_withholds_nothing():
 
 
 def test_a_dea_headed_entry_with_a_state_is_still_dea():
-    for text in ("DEA registration, NY", "\u2022 2005 - DEA registration, NY",
+    for text in ("DEA registration, NY", "dea registration, NY",
+                 "\u2022 2005 - DEA registration, NY",
                  "Drug Enforcement Administration registration (NY)"):
         kind = _classify_licensure_entry(
             state="NY", license_number="", license_type="", original_text=text)
@@ -401,6 +402,18 @@ def test_a_nine_letter_word_beside_a_dea_mention_is_not_a_dea_number():
         state="NY", license_number="12345", license_type="",
         original_text="NY license 12345, Certified, and DEA registered")
     assert kind == KIND_LICENSE
+
+
+def test_a_longer_token_holding_a_dea_shape_is_not_a_dea_number():
+    # Both ends of the in-text shape are bounded: a token with letters glued
+    # before the two-letter prefix, or with an eighth character after the
+    # seven, is a longer identifier (a state licence number), not a DEA one.
+    for text in ("NY license MED1234567 and DEA registered",
+                 "NY license AB12345678 and DEA registered"):
+        kind = _classify_licensure_entry(
+            state="NY", license_number="", license_type="",
+            original_text=text)
+        assert kind == KIND_LICENSE, text
 
 
 def test_a_dea_mention_naming_no_state_is_still_dea():
