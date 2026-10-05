@@ -19,7 +19,7 @@ from types import MappingProxyType
 
 from unified_pipeline.core.text_norm import is_placeholder_title
 
-from .fan_out import _FORMATTED_KEYS, _RENDERED_FIELDS, FANNED_OUT_FROM
+from .fan_out import _FORMATTED_KEYS, _RENDERED_FIELDS, FANNED_OUT_FROM, LAST_STAGE4_RECORD
 from .normalization import _squash
 from .normalization.publication import ResolvedPublication, resolve_publication
 from .parsing import _MONTH_NAME_TO_NUM, _dates_overlap_or_match, _parse_date_components
@@ -1340,6 +1340,65 @@ def _drop_citation_copies(entries: list[dict], code: str | None,
     return [entry for index, entry in enumerate(entries) if index not in dropped]
 
 
+# #1445: the decision metric `_drop_split_siblings` writes, so the sidecar
+# tells a sibling dropped with its parent from a similarity drop.
+SPLIT_SIBLING_METRIC = 'split_sibling_of_dropped_parent'
+
+
+def _is_sibling_of(entry: dict, last_record: dict) -> bool:
+    """Whether `entry` is an earlier record of the stage-4 records list whose
+    last record (the parent, `LAST_STAGE4_RECORD`) is `last_record`."""
+    provenance = entry.get(FANNED_OUT_FROM) or {}
+    marker = last_record[LAST_STAGE4_RECORD]
+    return (provenance.get('key') == marker.get('key')
+            and provenance.get('count') == marker.get('count')
+            and entry.get('element_idx_start') == last_record.get('element_idx_start'))
+
+
+def _sibling_is_held(sibling: dict, kept_entry: dict, code: str | None) -> bool:
+    """Whether every word `sibling`'s row would print, its years included, is
+    already in the kept entry's text."""
+    rendered = _RENDERED_FIELDS.get(code or '', frozenset())
+    words = _rendered_words(sibling.get('extracted_fields') or {}, rendered)
+    return words <= _significant_words(kept_entry.get('text') or '')
+
+
+def _drop_split_siblings(entries: list[dict], drops: list[tuple[int, int]],
+                         drop_indices: set[int], code: str | None,
+                         decisions: list[dict] | None, dropped_ids: set[int]) -> None:
+    """Drop the earlier records of a stage-4 records list whose parent dedup
+    dropped, when the entry it was dropped against holds them too (#1445,
+    EOAHMI GHCIXA 70).
+
+    The last record carries the parent's whole text, so dedup weighs the
+    parent through it and drops it when another entry holds that text. The
+    earlier records carry their own short lines and, as fanned-out records,
+    are never dropped by similarity (`_drop_is_safe`), so each one rendered
+    on as an orphan copy of a row the kept entry already prints. A sibling
+    goes only when every word its row would print is in the kept entry
+    (`_sibling_is_held`); one that adds anything stays.
+    """
+    for dropped, kept in drops:
+        if LAST_STAGE4_RECORD not in entries[dropped]:
+            continue
+        for index, entry in enumerate(entries):
+            if (index in drop_indices or index == kept
+                    or not _is_sibling_of(entry, entries[dropped])
+                    or not _sibling_is_held(entry, entries[kept], code)):
+                continue
+            drop_indices.add(index)
+            dropped_ids.add(id(entry))
+            if decisions is not None:
+                decisions.append({
+                    "metric": SPLIT_SIBLING_METRIC,
+                    "jaccard": None, "containment": None, "title_containment": None,
+                    "dropped_text": (entry.get('text') or '')[:500],
+                    "kept_text": (entries[kept].get('text') or '')[:500],
+                    "dropped_fields": _decision_fields(entry, code),
+                    "kept_fields": _decision_fields(entries[kept], code),
+                })
+
+
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None,
@@ -1398,6 +1457,7 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     sigs = [_entry_signature_words(e) for e in entries]
     titles = [_entry_title_words(e) for e in entries]
     drop_indices = set()
+    drops: list[tuple[int, int]] = []
 
     for i in range(len(entries)):
         if i in drop_indices:
@@ -1484,12 +1544,14 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         "kept_fields": _decision_fields(entries[kept], code),
                     })
                 drop_indices.add(drop)
+                drops.append((drop, kept))
                 dropped_ids.add(id(entries[drop]))
                 if drop == i:
                     # i is gone: it must not keep vouching to drop later j's
                     # (observed over-drop vector in the 2Q1_ZQ S8 trace, #227)
                     break
 
+    _drop_split_siblings(entries, drops, drop_indices, code, decisions, dropped_ids)
     if drop_indices:
         return [e for idx, e in enumerate(entries) if idx not in drop_indices]
     return entries

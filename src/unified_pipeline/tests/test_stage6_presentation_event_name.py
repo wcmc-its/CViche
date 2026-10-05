@@ -308,3 +308,25 @@ def test_joining_words_alone_do_not_keep_the_source_line():
     cells = _untitled_row("2015 Invited Speaker at Northgate University", date="2015",
                           role="Invited Speaker", location="Northgate University")
     assert cells == ["Invited Speaker", "Northgate University", "2015"]
+
+
+def test_an_untitled_last_split_record_is_titled_from_its_own_line():
+    """#1445 (EOAHMI BRUSUZ 265): the last of stage 4's records carries the
+    parent's whole line, both talks, and an untitled one was titled with it,
+    so the first talk printed twice."""
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    records = [{"title": None, "location": "Ashby, Varnoria", "event_name": "Zqhubble Institute"},
+               {"title": None, "location": "Kestrel, Japan", "event_name": "2nd Zqriken Symposium"}]
+    entry = {"taxonomy_code": "R", "element_idx_start": 5,
+             "text": "Zqhubble Institute (Ashby, Varnoria) 2nd Zqriken Symposium (Kestrel, Japan)",
+             "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None
+    gen._fill_presentations(fan_out_multi_record_entries(
+        [entry], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY))
+    rows = sorted([c.text for c in row.cells] for table in gen.doc.tables for row in table.rows
+                  if any("Zq" in c.text for c in row.cells))
+    assert rows == [["2nd Zqriken Symposium", "Kestrel, Japan", ""],
+                    ["Zqhubble Institute", "Ashby, Varnoria", ""]]
