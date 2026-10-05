@@ -800,9 +800,11 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
 #: (measured before the change); pins the byte-identical-prompt contract.
 #: M2A re-measured for #291, whose one added line (the clinical-trial field
 #: mapping in the grant instructions) is the only difference from before.
+#: Both re-measured for #1243, whose rules 1 and 6 (MULTI_RECORD_INSTRUCTION,
+#: TAB_COLUMNS_INSTRUCTION) are the only lines that differ from before.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "7d08216a2d2936f486270c1a275265d2dc0a207e0137b44aa98e1130cd661232",
-    "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
+    "M2A": "1b33f2df9958b0ba6e86db141ac52dbd04466a118a93700fe96e5f5c5267aa44",
+    "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
 
@@ -864,6 +866,56 @@ def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
     assert "even as a verb or a qualifier, that role wins over X" in text
     assert '"Co-directed with ..." under "Course Director" is role "Co-Director"' in text
     assert "never copy X verbatim when it only names a kind of activity" in text
+
+
+# --- #1243: a multi-record entry is asked for one item per record -------------
+
+@pytest.mark.parametrize("code", ["K1", "M2A", "N3A", "Q2", "I", "D2", "S1"])
+def test_every_batch_prompt_opens_its_rules_with_the_multi_record_rule(code):
+    prompt = _prompt(code, [{"text": "Alpha\tBeta"}])
+    rules = prompt.split("**Instructions**:\n")[1]
+    assert rules.startswith(extraction.MULTI_RECORD_INSTRUCTION + "\n2. Use null")
+    assert "\n" + extraction.TAB_COLUMNS_INSTRUCTION + "\n7. Only extract" in rules
+
+
+def test_the_multi_record_rule_asks_for_one_item_per_record_under_one_entry_index():
+    # EBYSBC (#1243): 17 of 40 CVs lost a second mentee, role, rank or talk
+    # because the reply held one item for an entry that holds several.
+    text = extraction.MULTI_RECORD_INSTRUCTION
+    assert text.startswith("1. For each entry, extract all available fields. ")
+    assert 'Return one item per record, each with the same "entry_index"' in text
+    assert "repeat in every item a value the records share" in text
+    assert "Never join two records' values into one field" in text
+    assert "never keep only the first, the last or the parent record" in text
+    # The bound on over-splitting: one citation or grant is still one item.
+    assert "An entry about one thing is one item, even when it lists several authors" in text
+
+
+def test_the_tab_rule_keeps_columns_but_starts_a_new_item_for_a_new_record():
+    # TAUBPU-shaped D2 row: a hospital post, a tab, then a concurrent faculty
+    # rank. The old rule read every tab as a column of one record.
+    text = extraction.TAB_COLUMNS_INSTRUCTION
+    assert text.startswith("6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), "
+                           "these indicate table columns - extract each column as a separate field value, "
+                           "not as merged text. ")
+    assert text.endswith("A column that starts another record (e.g. a second role or person "
+                         "with its own date) is a new item under rule 1.")
+
+
+def test_extract_fields_batch_sends_the_multi_record_rules_to_the_llm(monkeypatch):
+    """Wire: the prompt call_llm receives, not only the builder's output."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "role": "Member"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Member, Alpha Committee 2019\tChair, Beta Committee 2021",
+          "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}], 0, 1)
+    assert prompts and all(extraction.MULTI_RECORD_INSTRUCTION in p and extraction.TAB_COLUMNS_INSTRUCTION in p
+                           for p in prompts)
 
 
 def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):

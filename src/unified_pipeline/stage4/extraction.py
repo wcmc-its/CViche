@@ -636,6 +636,21 @@ CONTEXT_HEADING_INSTRUCTION = """
 10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states. When the entry gives its own role, even as a verb or a qualifier, that role wins over X: "Co-directed with ..." under "Course Director" is role "Co-Director", and "Assistant ..." or "Associate ..." stays as the entry words it. Do not copy X into a field it does not describe, and never copy X verbatim when it only names a kind of activity (e.g. "New Course Development")."""
 
 
+#: Rule 1 of the batch extraction prompt (#1243). An entry can hold several
+#: records: two mentees on one line, a hospital post and a faculty rank split by
+#: a tab, one society with two roles and their own dates. The prompt used to say
+#: only "For each entry, extract all available fields", and the model returned
+#: one record for such an entry; the rest never reached the output (EBYSBC: 17 of
+#: 40 CVs, 50 records). The reply parser already keeps every item an entry gets
+#: (#1265) and stage 6 fans them out, so this asks for that shape.
+MULTI_RECORD_INSTRUCTION = """1. For each entry, extract all available fields. One entry can hold several records: several people, roles, positions, committees, memberships, talks, courses, degrees, licences or patents, each usually with its own date or date range, often separated by a tab, a semicolon or a line break. Return one item per record, each with the same "entry_index", and repeat in every item a value the records share (e.g. the organization). Never join two records' values into one field, and never keep only the first, the last or the parent record. An entry about one thing is one item, even when it lists several authors, investigators or dates for that thing."""
+
+#: Rule 6 of the batch extraction prompt. The tab rule used to say only that a
+#: tab separates columns, which merged a tab-joined second record into the first
+#: (#1243); the last sentence defers to rule 1 for that case.
+TAB_COLUMNS_INSTRUCTION = """6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), these indicate table columns - extract each column as a separate field value, not as merged text. A column that starts another record (e.g. a second role or person with its own date) is a new item under rule 1."""
+
+
 # Clinical trials file as current or past funding (#291), never as a pending
 # application or a patent, so only these two grant prompts carry the mapping of
 # a trial onto the grant fields the grant table renders.
@@ -755,7 +770,7 @@ def build_extraction_prompt(
 
     prompt += f"""
 **Instructions**:
-1. For each entry, extract all available fields
+{MULTI_RECORD_INSTRUCTION}
 2. Use null for fields not found
 3. Dates:
    - For single dates: use YYYY-MM-DD or YYYY format
@@ -763,7 +778,7 @@ def build_extraction_prompt(
    - For ongoing dates: preserve "present", "ongoing", or "current" exactly as written (do NOT convert to a year)
 4. Authors: single string (e.g., "Smith J, Doe A")
 5. Emails: extract multiple emails separately (primary_email, secondary_email, institutional_email, personal_email)
-6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), these indicate table columns - extract each column as a separate field value, not as merged text
+{TAB_COLUMNS_INSTRUCTION}
 7. Only extract explicitly stated information - do not infer or guess
 8. CRITICAL: Include "entry_index" field in each extraction to match the entry number above{target_name_instruction}{code_specific_instructions}{context_heading_instruction}
 
