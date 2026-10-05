@@ -51,7 +51,6 @@ from ldap3.core.exceptions import (
 )
 from ldap3.utils.conv import escape_filter_chars
 from pydantic import SecretStr
-from tests.conftest import WCM_IDP_SCOPES
 
 
 # Common LDAP connection config for the membership calls. Spread as **LDAP_PARAMS
@@ -1251,7 +1250,6 @@ from app.auth import create_session_cookie, COOKIE_NAME
 def _mock_saml_client(identity_dict):
     """Create a mock Saml2Client with pre-configured ACS response."""
     mock_client = MagicMock()
-    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
     mock_response.response.destination = None  # absent Destination is allowed (#672)
@@ -1285,7 +1283,7 @@ _ED_ENV = {
 _SAML_IDENTITY = {
     "urn:oid:0.9.2342.19200300.100.1.3": ["test@med.cornell.edu"],
     "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
-    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["test@cornell.edu"],
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["test@med.cornell.edu"],
 }
 
 

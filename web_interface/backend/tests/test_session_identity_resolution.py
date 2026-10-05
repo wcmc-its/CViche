@@ -37,7 +37,6 @@ import redis.exceptions
 import app.session_idle as session_idle
 from app.auth import SessionEpochUnreadable, get_session_epoch
 from app.session_idle import IdleSessionStore
-from tests.conftest import WCM_IDP_SCOPES
 
 _KEY = "cviche:session:idle:{sid}"
 
@@ -607,7 +606,6 @@ def _mock_saml_client(identity_dict):
     """A pysaml2 client stub that "validates" any assertion into identity_dict
     (the same shape tests/test_auth_audit_events.py uses)."""
     mock_client = MagicMock()
-    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
     mock_response.response.destination = None  # absent Destination is allowed (#672)

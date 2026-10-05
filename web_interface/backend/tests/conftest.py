@@ -219,11 +219,6 @@ def seed_ed_enabled(db):
     })
 
 
-# shibmd:Scope list (pysaml2 MetadataStore.shibmd_scopes shape) for a stub WCM
-# IdP: its uid / ePPN local part are CWIDs (app.saml_client.CWID_SCOPES).
-WCM_IDP_SCOPES = [{"regexp": False, "text": "med.cornell.edu"}]
-
-
 @pytest.fixture
 def mock_saml_identity():
     """Mock SAML assertion identity dict with OID-keyed attributes."""

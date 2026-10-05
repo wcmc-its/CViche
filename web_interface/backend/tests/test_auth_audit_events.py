@@ -21,7 +21,6 @@ from app.auth import COOKIE_NAME, create_session_cookie, get_cookie_settings, ge
 from app.ed_group_lookup import EdUnavailableError, MembershipResult, clear_cache
 from app.models import SystemConfig, User
 from itsdangerous import URLSafeTimedSerializer
-from tests.conftest import WCM_IDP_SCOPES
 
 
 def _make_user(db, email="user@example.com", role="user", cwid=None, auth_method="simple",
@@ -52,7 +51,6 @@ def _events_named(caplog, name):
 
 def _mock_saml_client(identity_dict):
     mock_client = MagicMock()
-    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
     mock_response.response.destination = None  # absent Destination is allowed (#672)

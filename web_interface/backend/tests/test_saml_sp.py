@@ -1,5 +1,4 @@
 """Tests for SAML SP client factory, cert generation, and attribute extraction."""
-import re
 
 import pytest
 from pathlib import Path
@@ -19,9 +18,6 @@ from app.saml_client import (
     ATTR_EPPN,
     ATTR_UID,
 )
-from tests.conftest import WCM_IDP_SCOPES
-
-CORNELL_IDP_SCOPES = [{"regexp": False, "text": "cornell.edu"}]
 
 
 # --- Unit tests: extract_user_attrs ---
@@ -32,7 +28,7 @@ class TestExtractUserAttrs:
 
     def test_extract_attrs_oid_keys(self, mock_saml_identity):
         """OID-keyed identity returns correct cwid, email, display_name, eppn."""
-        result = extract_user_attrs(mock_saml_identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(mock_saml_identity)
         assert result["cwid"] == "testuser"  # from ePPN local-part
         assert result["email"] == "testuser@med.cornell.edu"
         assert result["display_name"] == "Test User"
@@ -40,7 +36,7 @@ class TestExtractUserAttrs:
 
     def test_extract_attrs_friendly_keys(self, mock_saml_identity_friendly):
         """Friendly-name-keyed identity returns correct values via fallback."""
-        result = extract_user_attrs(mock_saml_identity_friendly, WCM_IDP_SCOPES)
+        result = extract_user_attrs(mock_saml_identity_friendly)
         assert result["cwid"] == "testuser"
         assert result["email"] == "testuser@med.cornell.edu"
         assert result["display_name"] == "Test User"
@@ -48,14 +44,14 @@ class TestExtractUserAttrs:
 
     def test_extract_attrs_no_mail_uses_eppn_cwid(self, mock_saml_identity_no_mail):
         """No mail is fine (nothing sends email): cwid comes from ePPN, email is None."""
-        result = extract_user_attrs(mock_saml_identity_no_mail, WCM_IDP_SCOPES)
+        result = extract_user_attrs(mock_saml_identity_no_mail)
         assert result["cwid"] == "testuser"
         assert result["email"] is None
 
     def test_extract_attrs_no_identifier_raises(self):
         """No mail, no ePPN, no uid -> nothing to anchor identity on -> ValueError."""
         with pytest.raises(ValueError, match="CWID"):
-            extract_user_attrs({"displayName": ["Nameless"]}, WCM_IDP_SCOPES)
+            extract_user_attrs({"displayName": ["Nameless"]})
 
     def test_extract_attrs_displayname_fallback_to_eppn(self):
         """When displayName is missing, display_name falls back to eppn."""
@@ -63,7 +59,7 @@ class TestExtractUserAttrs:
             ATTR_MAIL: ["testuser@med.cornell.edu"],
             ATTR_EPPN: ["testuser@med.cornell.edu"],
         }
-        result = extract_user_attrs(identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(identity)
         assert result["display_name"] == "testuser@med.cornell.edu"
 
     def test_extract_attrs_email_normalized(self):
@@ -72,7 +68,7 @@ class TestExtractUserAttrs:
             ATTR_MAIL: ["  TestUser@Med.Cornell.Edu  "],
             ATTR_EPPN: ["testuser@med.cornell.edu"],  # provides the cwid anchor
         }
-        result = extract_user_attrs(identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(identity)
         assert result["email"] == "testuser@med.cornell.edu"
 
     def test_extract_attrs_whitespace_only_email_is_none(self):
@@ -83,7 +79,7 @@ class TestExtractUserAttrs:
             ATTR_MAIL: ["  "],
             ATTR_EPPN: ["testuser@med.cornell.edu"],  # provides the cwid anchor
         }
-        result = extract_user_attrs(identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(identity)
         assert result["email"] is None
 
     def test_unmapped_attrs_are_logged_not_silent(self, caplog):
@@ -96,7 +92,7 @@ class TestExtractUserAttrs:
             "isMemberOf": ["cn=secret-group"],
         }
         with caplog.at_level("INFO", logger="app.saml_client"):
-            extract_user_attrs(identity, WCM_IDP_SCOPES)
+            extract_user_attrs(identity)
         msg = "\n".join(r.getMessage() for r in caplog.records)
         assert "eduPersonAffiliation" in msg and "isMemberOf" in msg
         # names only -- attribute values must not leak into logs
@@ -105,7 +101,7 @@ class TestExtractUserAttrs:
     def test_no_log_when_all_attrs_mapped(self, mock_saml_identity, caplog):
         """No unmapped-attribute noise when the IdP releases only known attrs."""
         with caplog.at_level("INFO", logger="app.saml_client"):
-            extract_user_attrs(mock_saml_identity, WCM_IDP_SCOPES)
+            extract_user_attrs(mock_saml_identity)
         assert "unmapped" not in "\n".join(r.getMessage() for r in caplog.records)
 
     # --- D9 #20: malformed/multi-valued IdP attributes (mrj4001 review,
@@ -115,12 +111,12 @@ class TestExtractUserAttrs:
         """An attribute present but released with an empty value list is the
         same as not being released -- falls through to the next candidate."""
         identity = {ATTR_UID: [], ATTR_EPPN: ["testuser@med.cornell.edu"]}
-        result = extract_user_attrs(identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(identity)
         assert result["cwid"] == "testuser"
 
     def test_extract_attrs_none_value_treated_as_absent(self):
         identity = {ATTR_UID: None, ATTR_EPPN: ["testuser@med.cornell.edu"]}
-        result = extract_user_attrs(identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(identity)
         assert result["cwid"] == "testuser"
 
     def test_extract_attrs_multi_valued_list_uses_first_value(self):
@@ -130,7 +126,7 @@ class TestExtractUserAttrs:
             ATTR_UID: ["first-uid", "second-uid"],
             ATTR_EPPN: ["testuser@med.cornell.edu"],
         }
-        result = extract_user_attrs(identity, WCM_IDP_SCOPES)
+        result = extract_user_attrs(identity)
         assert result["cwid"] == "first-uid"
 
     # --- D9 #21: CWID trust-boundary tests (mrj4001 review, PR #781 thread
@@ -142,7 +138,7 @@ class TestExtractUserAttrs:
         never a garbage cwid built from the whole string."""
         identity = {ATTR_EPPN: ["not-an-eppn"]}
         with pytest.raises(ValueError, match="CWID"):
-            extract_user_attrs(identity, WCM_IDP_SCOPES)
+            extract_user_attrs(identity)
 
     def test_extract_attrs_eppn_empty_local_part_yields_no_cwid(self):
         """An empty local part ("@med.cornell.edu") must yield ValueError,
@@ -150,56 +146,23 @@ class TestExtractUserAttrs:
         garbage identity anchor."""
         identity = {ATTR_EPPN: ["@med.cornell.edu"]}
         with pytest.raises(ValueError, match="CWID"):
-            extract_user_attrs(identity, WCM_IDP_SCOPES)
+            extract_user_attrs(identity)
 
     # --- #1452: a partner IdP's users must never land on a WCM account.
-
-    def test_extract_attrs_eppn_outside_idp_scope_is_rejected(self):
-        """An IdP may only assert ePPNs in scopes its metadata declares; the
-        WCM IdP asserting someone@cornell.edu is refused, not mapped to the
-        CWID "someone" (which replaces the old accept-as-is behavior)."""
-        identity = {ATTR_EPPN: ["someone@cornell.edu"]}
-        with pytest.raises(ValueError, match="scope"):
-            extract_user_attrs(identity, WCM_IDP_SCOPES)
 
     def test_extract_attrs_partner_eppn_keyed_on_full_eppn(self):
         """Same local part from WCM and from Cornell Ithaca -> two different
         anchors. The partner's uid (a NetID) is ignored, not taken as a CWID."""
-        wcm = extract_user_attrs({ATTR_EPPN: ["js1234@med.cornell.edu"]}, WCM_IDP_SCOPES)
-        partner = extract_user_attrs(
-            {ATTR_UID: ["js1234"], ATTR_EPPN: ["JS1234@Cornell.edu"]}, CORNELL_IDP_SCOPES
-        )
+        wcm = extract_user_attrs({ATTR_EPPN: ["js1234@med.cornell.edu"]})
+        partner = extract_user_attrs({ATTR_UID: ["js1234"], ATTR_EPPN: ["JS1234@Cornell.edu"]})
         assert wcm["cwid"] == "js1234"
         assert partner["cwid"] == "js1234@cornell.edu"
 
-    def test_extract_attrs_scope_match_ignores_case(self):
-        """DNS-style scopes compare case-insensitively on both sides."""
-        scopes = [{"regexp": False, "text": "Cornell.EDU"}]
-        result = extract_user_attrs({ATTR_EPPN: ["a@cornell.edu"]}, scopes)
-        assert result["cwid"] == "a@cornell.edu"
-
-    def test_extract_attrs_partner_uid_without_eppn_is_rejected(self):
-        """A partner IdP releasing only uid has no safe anchor: its uid is not
-        a CWID, and there is no scope to qualify it with."""
+    def test_extract_attrs_partner_eppn_with_empty_local_part_is_rejected(self):
+        """"@hss.edu" has no local part: no anchor, and the uid is still not
+        taken as a CWID."""
         with pytest.raises(ValueError, match="CWID"):
-            extract_user_attrs({ATTR_UID: ["js1234"]}, CORNELL_IDP_SCOPES)
-
-    def test_extract_attrs_regexp_scope_matches_whole_scope(self):
-        """A regexp shibmd:Scope must match the whole scope: a lookalike like
-        cornell.edu.evil.example fails, not just prefix-matches."""
-        scopes = [{"regexp": True, "text": re.compile(r"(.+\.)?cornell\.edu")}]
-        ok = extract_user_attrs({ATTR_EPPN: ["a@cs.cornell.edu"]}, scopes)
-        assert ok["cwid"] == "a@cs.cornell.edu"
-        with pytest.raises(ValueError, match="scope"):
-            extract_user_attrs({ATTR_EPPN: ["a@cornell.edu.evil.example"]}, scopes)
-
-    def test_extract_attrs_idp_with_no_declared_scopes_admits_nobody(self):
-        """An IdP whose metadata declares no scope (or an issuer missing from
-        metadata) can't vouch for any ePPN, nor is its uid a CWID."""
-        with pytest.raises(ValueError, match="scope"):
-            extract_user_attrs({ATTR_EPPN: ["js1234@med.cornell.edu"]}, [])
-        with pytest.raises(ValueError, match="CWID"):
-            extract_user_attrs({ATTR_UID: ["js1234"]}, [])
+            extract_user_attrs({ATTR_UID: ["js1234"], ATTR_EPPN: ["@hss.edu"]})
 
 
 # --- Unit test: certificate generation ---
@@ -416,7 +379,6 @@ from app.auth import COOKIE_NAME
 def _mock_saml_client(identity_dict=None):
     """Create a mock Saml2Client with pre-configured responses."""
     mock_client = MagicMock()
-    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_client.prepare_for_authenticate.return_value = (
         "req_id",
         {"headers": [("Location", "https://idp.example.com/sso?SAMLRequest=abc123")]},
@@ -657,7 +619,6 @@ class TestSamlAcsExceptionTaxonomy:
     ):
         """#9: ACS signature-validation failure."""
         mock_client = MagicMock()
-        mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
         mock_client.parse_authn_request_response.side_effect = exc
         mock_get_client.return_value = mock_client
         response = client.post(
@@ -674,7 +635,6 @@ class TestSamlAcsExceptionTaxonomy:
     ):
         """#10: ResponseLifetimeExceed -- pysaml2's expired-assertion exception."""
         mock_client = MagicMock()
-        mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
         mock_client.parse_authn_request_response.side_effect = ResponseLifetimeExceed("too old")
         mock_get_client.return_value = mock_client
         response = client.post(
@@ -693,7 +653,6 @@ class TestSamlAcsExceptionTaxonomy:
         D10's catch-all handles this. Mutant M4: dropping that catch-all
         makes this fail (500 instead of a sanitized redirect)."""
         mock_client = MagicMock()
-        mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
         mock_client.parse_authn_request_response.side_effect = Exception(
             "AudienceRestrictions conditions not satisfied!"
         )
@@ -712,7 +671,6 @@ class TestSamlAcsExceptionTaxonomy:
         """#11 (recipient): saml2.response.VerificationError -- a SAMLError
         subclass, caught by the existing typed clause."""
         mock_client = MagicMock()
-        mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
         mock_client.parse_authn_request_response.side_effect = VerificationError(
             "No valid recipient"
         )

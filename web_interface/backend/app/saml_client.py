@@ -180,70 +180,49 @@ _MAPPED_ATTR_KEYS = frozenset({
 })
 
 
-# ePPN scopes under which WCM issues CWIDs. An IdP whose metadata declares
-# one of these is a WCM IdP: its `uid` and its ePPN local part ARE the CWID.
-# Any other scope belongs to a partner institution whose local parts share
-# the CWID namespace's shape (a Cornell Ithaca NetID looks like a CWID), so a
-# partner user is keyed on the full scoped ePPN instead (#1452).
+# ePPN scopes under which WCM issues CWIDs: a `uid` or ePPN local part in
+# these is the CWID. Any other scope belongs to a partner institution whose
+# local parts share the CWID namespace's shape (a Cornell Ithaca NetID looks
+# like a CWID), so a partner user is keyed on the full scoped ePPN instead
+# (#1452). The SP's one IdP is the WCM login proxy, which brokers the partner
+# IdPs and declares only med.cornell.edu in its metadata, so the scope can't
+# be checked against metadata here -- the proxy is the trust boundary.
 CWID_SCOPES = frozenset({"med.cornell.edu"})
 
 
-def _scope_declared(scope: str, idp_scopes: list[dict]) -> bool:
-    """True if `scope` is one the issuing IdP's metadata declares
-    (`shibmd:Scope`, as returned by pysaml2's `MetadataStore.shibmd_scopes`:
-    `text` is a str, or a compiled pattern when `regexp` is true)."""
-    for s in idp_scopes:
-        if s["regexp"]:
-            if s["text"].fullmatch(scope):
-                return True
-        elif s["text"].lower() == scope:
-            return True
-    return False
-
-
-def _identity_key(uid: str | None, eppn: str | None, idp_scopes: list[dict]) -> str | None:
+def _identity_key(uid: str | None, eppn: str | None) -> str | None:
     """Derive the user's identity anchor from released attributes.
 
-    - An ePPN must carry a scope the issuing IdP's metadata declares, else
-      ValueError: an IdP may only assert identities in scopes it owns.
-    - ePPN in a CWID scope (or no ePPN, from a WCM IdP): the CWID -- `uid` if
-      released, else the ePPN local part. Unchanged from before #1452.
-    - ePPN in any other scope: the full lowercased ePPN. It contains "@" and a
-      CWID never does, so a partner user can't land on a WCM account. `uid`
-      is ignored -- it is only a CWID when a WCM IdP released it.
-    - No usable ePPN from a non-WCM IdP: None (no safe anchor).
+    - ePPN outside CWID_SCOPES: the full lowercased ePPN. It contains "@" and
+      a CWID never does, so a partner user can't land on a WCM account.
+      `uid` is ignored -- a partner's uid (e.g. an AD sAMAccountName) is not
+      a CWID.
+    - Otherwise: the CWID -- `uid` if released, else the ePPN local part.
+      Unchanged from before #1452.
 
     Returns None if nothing is usable -- including an ePPN with an empty local
     part, which must yield None, not "" (mrj4001 review, PR #781 thread
     r3967362882 #21).
     """
     local, at, scope = (eppn or "").strip().lower().rpartition("@")
-    if at and scope and not _scope_declared(scope, idp_scopes):
-        raise ValueError(
-            f"ePPN scope {scope!r} is not declared in the issuing IdP's metadata"
-        )
     if at and scope and scope not in CWID_SCOPES:
         return f"{local}@{scope}" if local else None
-    wcm_idp = any(not s["regexp"] and s["text"].lower() in CWID_SCOPES for s in idp_scopes)
-    if not wcm_idp:
-        return None
     if uid and uid.strip():
         return uid.strip().lower()
     return local or None
 
 
-def extract_user_attrs(identity: dict, idp_scopes: list[dict]) -> dict:
+def extract_user_attrs(identity: dict) -> dict:
     """Extract user attributes from a SAML assertion identity dict.
 
     Handles both OID-keyed and friendly-name-keyed attributes.
     Returns dict with keys: cwid, email, display_name, eppn.
 
-    `idp_scopes` are the issuing IdP's metadata scopes; see _identity_key for
-    how they decide between a CWID and a scoped-ePPN anchor (#1452). The
-    anchor is returned under "cwid" either way. Email is
+    The anchor is a CWID, or a partner user's scoped ePPN (see _identity_key,
+    #1452); it is returned under "cwid" either way. Email is
     preferred but optional -- nothing in the app sends mail, so a user with no
     ED `mail` (e.g. external affiliates) still authenticates. Raises ValueError
-    when no anchor is derivable or the ePPN scope isn't the IdP's.
+    only when no anchor is derivable.
 
     Only uid/mail/displayName/eppn are consumed; any other attribute the IdP
     releases is not stored. Log the dropped attribute *names* (not values --
@@ -270,7 +249,7 @@ def extract_user_attrs(identity: dict, idp_scopes: list[dict]) -> dict:
     mail = _get(ATTR_MAIL, "mail")
     display_name = _get(ATTR_DISPLAY_NAME, "displayName")
 
-    cwid = _identity_key(uid, eppn, idp_scopes)
+    cwid = _identity_key(uid, eppn)
     if cwid is None:
         raise ValueError(
             "No CWID derivable from SAML assertion (need uid or eduPersonPrincipalName)"

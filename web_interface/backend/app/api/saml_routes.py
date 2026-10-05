@@ -219,19 +219,13 @@ def _parse_saml_assertion(
 
     try:
         identity = authn_response.get_identity()
-        # The assertion's Issuer, not the Response's: it is the entity whose
-        # key pysaml2 verified the signed assertion against, and the
-        # Response-level Issuer is optional.
-        idp_scopes = list(client.metadata.shibmd_scopes(
-            authn_response.assertion.issuer.text.strip(), "idpsso_descriptor"
-        ))
-        attrs = extract_user_attrs(identity, idp_scopes)
+        attrs = extract_user_attrs(identity)
         # email is the unique identity key; normalize once so the ED membership
         # check, its cache, and provisioning all agree on casing (#348).
         attrs["email"] = normalize_email(attrs["email"])
     except ValueError as e:
-        # No identity anchor, or an ePPN outside the issuing IdP's scopes
-        logger.warning("SAML ACS: unusable attributes -- %s", str(e))
+        # Missing required attribute (e.g., mail)
+        logger.warning("SAML ACS: missing attributes -- %s", str(e))
         return None, None, RedirectResponse("/login?error=missing_attributes", status_code=302)
 
     return attrs, relay_state, None

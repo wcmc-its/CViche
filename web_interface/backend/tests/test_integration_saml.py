@@ -6,7 +6,6 @@ Tests skip gracefully when mock IdP is not running.
 import json
 import os
 import pytest
-from types import SimpleNamespace
 import httpx
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
@@ -20,7 +19,6 @@ from app.ed_group_lookup import (
     MembershipResult,
     EdUnavailableError,
 )
-from tests.conftest import WCM_IDP_SCOPES
 
 MOCK_IDP_URL = "http://localhost:8443"
 MOCK_IDP_METADATA = f"{MOCK_IDP_URL}/simplesaml/saml2/idp/metadata.php"
@@ -136,7 +134,6 @@ class TestSamlACSWithMockIdP:
             "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@med.cornell.edu"],
         }
         mock_client = MagicMock()
-        mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
         mock_response = MagicMock()
         mock_response.get_identity.return_value = mock_identity
         mock_response.response.destination = None  # absent Destination is allowed (#672)
@@ -176,12 +173,9 @@ def _mock_saml_client(identity_dict):
     _mock_saml_client_with_assertion_id instead.
     """
     mock_client = MagicMock()
-    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
     mock_response.response.destination = None  # absent Destination is allowed (#672)
-    # Issuer only, no ID: the ACS reads the issuer's metadata scopes (#1452).
-    mock_response.assertion = SimpleNamespace(id=None, issuer=SimpleNamespace(text="https://idp.test.local"))
     mock_client.parse_authn_request_response.return_value = mock_response
     return mock_client
 
