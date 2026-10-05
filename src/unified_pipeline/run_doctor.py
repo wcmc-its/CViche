@@ -369,6 +369,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _docx_text,
     _table_lines,
     docx_body_blocks,
+    docx_table_rows,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
@@ -925,10 +926,7 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     — _table_lines drops empty cells, which hides an empty date column from
     the shape checks (lint 13)."""
     Document = _get_docx_document()
-
-    doc = Document(docx_path)
-    return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
-            for tbl in doc.tables]
+    return docx_table_rows(Document(docx_path))
 
 
 # --------------------------------------------------------- artifact resolution

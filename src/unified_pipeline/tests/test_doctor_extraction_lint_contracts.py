@@ -3396,6 +3396,19 @@ def test_grant_bucket_default_year_is_this_year_not_next():
     assert len(findings) == 1 and f"reads as {this_year - 1}" in findings[0]["message"]
 
 
+def test_grant_bucket_without_the_end_date_check_judges_the_heading_only():
+    """The quality score's cap reads the application shape alone: an ended
+    Current grant is not flagged, an application rendered as an award is."""
+    ended = _grant(240, _BUCKET_TEXT, ["Ongoing"], code="M2A", start_date="1990",
+                   end_date="2001")
+    assert lint_grant_bucket({"entries": [ended]}, _blocks_under("M2A", _BUCKET_TEXT),
+                             current_year=2026, check_end_date=False) == []
+    applied = _grant(241, _BUCKET_TEXT, ["Grants Applied"])
+    findings = lint_grant_bucket({"entries": [applied]}, _blocks_under("M2B", _BUCKET_TEXT),
+                                 check_end_date=False)
+    assert len(findings) == 1 and "which files applications" in findings[0]["message"]
+
+
 def test_grant_bucket_ignores_non_grant_codes():
     assert _bucket(["Grants Applied"], "M2B", code="D1") == []
 
