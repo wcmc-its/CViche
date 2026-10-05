@@ -4106,14 +4106,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (51), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (52), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 49
+    assert len(payload["findings"]) == 50
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -5886,3 +5886,267 @@ def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_pa
     hits = [f for f in payload["findings"] if f["lint"] == "junk_or_header_row"]
     assert [(f["severity"], f["evidence"]) for f in hits] == [
         ("WARN", ["Example Widget Institute"])]
+
+
+# ------------------------------------------ lint 14y: fanout_cell_residue
+
+_LEADERSHIP_HEADER = ["Organization", "Role (i.e., officer, secretary, chair, etc.)",
+                      "Dates (yyyy-yyyy)"]
+_COMMITTEE_HEADER = ["Name of Committee", "Role (i.e., member, fellow, etc.)",
+                     "Organization (Institution/Location)", "Dates (yyyy-yyyy)"]
+
+
+def _fanout4(text, idx, records, code="Q1"):
+    """A stage-4 entry stage 4 split into `records` (#1406). Invented values;
+    the entry's own fields are its last record's, as stage 4 writes them."""
+    return _entry(text, start=idx, hierarchy=["Example Heading"], taxonomy_code=code,
+                  extracted_fields={**records[-1], "stage4_records": records})
+
+
+def _office(role, start, end, organization=None):
+    return {"role": role, "organization": organization,
+            "start_date": start, "end_date": end}
+
+
+def _fanout_hits(entries, tables):
+    from unified_pipeline.run_doctor import lint_fanout_cell_residue
+    findings = lint_fanout_cell_residue({"entries": entries}, tables)
+    return [(f["severity"], f["message"].split(": ")[0], f["message"].split(": ")[1],
+             f["evidence"]) for f in findings]
+
+
+_KEEPER = _fanout4("Widget Keeper, 1992-1993, 1994-1996, 1997-1998", 82, [
+    _office("Widget Keeper", "1992", "1993"), _office("Widget Keeper", "1994", "1996"),
+    _office("Widget Keeper", "1997", "1998")])
+
+
+def test_fanout_cell_residue_warns_on_the_other_terms_years_in_the_organization_cell():
+    """EOAHMI DUTAVD-01 (entry 82): the last term's row printed the other two
+    terms as its organization."""
+    rows = [["", "Widget Keeper", "1992-1993"], ["", "Widget Keeper", "1994-1996"],
+            ["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]]) == [
+        ("WARN", "entry 82 (Q1)", "sibling_year",
+         [TABLE_ROW_JOINER.join(["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"])])]
+
+
+def test_fanout_cell_residue_spares_the_rows_stage_6_now_renders():
+    """#1449's render of the same entry: every organization cell empty."""
+    rows = [["", "Widget Keeper", "1992-1993"], ["", "Widget Keeper", "1994-1996"],
+            ["", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_warns_on_a_year_stub_and_the_sibling_role():
+    """EOAHMI WYMVGU-01 (entries 931-935): the second of two year-keyed roles
+    printed the first role and the tail of '1992-93' as its organization."""
+    entry = _fanout4("1992-93 Vice-Chair, widget reviewer", 932, [
+        _office("Vice-Chair", "1992", "1993"), _office("Widget reviewer", "1992", "1993")])
+    rows = [["", "Vice-Chair", "1992-1993"], ["93 Vice-Chair", "Widget reviewer", "1992-1993"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == [
+        ("WARN", "entry 932 (Q1)", "sibling_value, year_stub",
+         [TABLE_ROW_JOINER.join(["93 Vice-Chair", "Widget reviewer", "1992-1993"])])]
+
+
+def test_fanout_cell_residue_warns_on_a_bare_range_word():
+    entry = _fanout4("Widget Keeper, 1990 to 1994; Gadget Lead, 1995 to 1996", 40, [
+        _office("Widget Keeper", "1990", "1994"), _office("Gadget Lead", "1995", "1996")])
+    rows = [["to", "Widget Keeper", "1990-1994"], ["", "Gadget Lead", "1995-1996"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == [
+        ("WARN", "entry 40 (Q1)", "bare_to",
+         [TABLE_ROW_JOINER.join(["to", "Widget Keeper", "1990-1994"])])]
+
+
+def test_fanout_cell_residue_reads_a_range_word_at_the_end_of_a_cell():
+    entry = _fanout4("Widget Keeper, Example Guild 1990 to 1994; Gadget Lead, 1995", 41, [
+        _office("Widget Keeper", "1990", "1994"), _office("Gadget Lead", "1995", "1995")])
+    rows = [["Example Guild to", "Widget Keeper", "1990-1994"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])[0][2] == "bare_to"
+
+
+def test_fanout_cell_residue_spares_to_when_the_record_names_it():
+    entry = _fanout4("Widget Keeper, Example Guild to Widgets 1990 to 1994; Gadget Lead, 1995",
+                     42, [_office("Widget Keeper", "1990", "1994", "Example Guild to Widgets"),
+                          _office("Gadget Lead", "1995", "1995")])
+    rows = [["Example Guild to", "Widget Keeper", "1990-1994"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_warns_on_a_built_record_line_in_one_cell():
+    """EOAHMI DUTAVD-01 (entry 79): an earlier record's built line, role and
+    years joined by ' | ', printed as its committee name."""
+    entry = _fanout4("Widget Steward, 1981, 1990-1994", 79, [
+        _office("Widget Steward", "1981", "1981"), _office("Widget Steward", "1990", "1994")],
+        code="Q2")
+    rows = [["Widget Steward | 1981 | 1981", "Widget Steward", "", "1981"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == [
+        ("WARN", "entry 79 (Q2)", "built_line",
+         [TABLE_ROW_JOINER.join(["Widget Steward | 1981 | 1981", "Widget Steward", "1981"])])]
+
+
+def test_fanout_cell_residue_spares_a_cell_that_is_another_records_value():
+    """A record with no role renders the section's default role, which another
+    record holds (EOAHMI JBUVYV 316): no leftover text."""
+    entry = _fanout4("Example Board: Widget Committee 2017-present, Gadget Committee, "
+                     "member 2016-present", 316, [
+                         {"committee_name": "Widget Committee", "role": None,
+                          "start_date": "2017", "end_date": "present"},
+                         {"committee_name": "Gadget Committee", "role": "Member",
+                          "start_date": "2016", "end_date": "present"}], code="Q2")
+    rows = [["Widget Committee", "Member", "", "2017-Present"],
+            ["Gadget Committee", "Member", "", "2016-Present"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_spares_the_records_own_years_in_its_name_cell():
+    """A renderer that prints a record's whole line in its name cell does so
+    for every entry (EBYSBC MQSUIC 611): not fan-out residue."""
+    entry = _fanout4("Widget Coordinator, Example Department; 2003-2008; 2019-now", 611, [
+        _office("Widget Coordinator", "2003", "2008"),
+        _office("Widget Coordinator", "2019", "present")])
+    rows = [["Widget Coordinator, Example Department; 2003-2008", "Widget Coordinator",
+             "2003-2008"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_reads_only_cells_made_of_the_entrys_text():
+    """A cell with a word the parent's text lacks was filled from elsewhere
+    (stage 5b's city, a template default), not left over."""
+    rows = [["Example City 1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_skips_a_row_two_records_match_equally():
+    """Two records with one year: a row showing both roles is neither's."""
+    entry = _fanout4("Widget Keeper, Gadget Lead 2001, Example Guild", 70, [
+        _office("Widget Keeper", "2001", "2001"), _office("Gadget Lead", "2001", "2001")])
+    rows = [["Widget Keeper", "Gadget Lead", "2001"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_skips_a_committee_row_both_records_score_equally():
+    """The tie clause itself: both roles score the same on a row whose third
+    cell holds both, so the row belongs to neither record and is not residue."""
+    entry = _fanout4("Widget Keeper, Gadget Lead 2001, Example Guild", 70, [
+        _office("Widget Keeper", "2001", "2001"), _office("Gadget Lead", "2001", "2001")])
+    rows = [["Gadget Lead", "Widget Keeper", "Widget Keeper Gadget Lead", "2001"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_breaks_a_tie_on_the_rows_dates():
+    """One role for every term: the date cell names the record."""
+    rows = [["1994-1996, 1997-1998", "Widget Keeper", "1992-1993"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]])[0][:3] == (
+        "WARN", "entry 82 (Q1)", "sibling_year")
+
+
+def test_fanout_cell_residue_needs_the_row_dated_as_its_record():
+    """A row whose date cell holds none of the record's years is another
+    entry's row with the same role."""
+    entry = _fanout4("Widget Keeper, 1992-1993; Gadget Lead, 1994-1996", 83, [
+        _office("Widget Keeper", "1992", "1993"), _office("Gadget Lead", "1994", "1996")])
+    rows = [["1994-1996", "Widget Keeper", "2010-2011"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_reads_only_tables_with_a_date_column():
+    rows = [["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    header = ["Organization", "Role", "Notes"]
+    assert _fanout_hits([_KEEPER], [[header, *rows]]) == []
+
+
+def test_fanout_cell_residue_reads_only_split_entries():
+    one = _entry("Widget Keeper, 1992-1993, 1997-1998", start=5, taxonomy_code="Q1",
+                 extracted_fields={**_office("Widget Keeper", "1997", "1998"),
+                                   "stage4_records": [_office("Widget Keeper", "1997", "1998")]})
+    rows = [["1992-1993", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([one], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_quotes_at_most_three_rows():
+    from unified_pipeline.doctor.lints.render import FANOUT_RESIDUE_EVIDENCE_LIMIT
+    terms = [("1990", "1991"), ("1992", "1993"), ("1994", "1995"), ("1996", "1997"),
+             ("1998", "1999")]
+    entry = _fanout4("Widget Keeper, " + ", ".join(f"{a}-{b}" for a, b in terms), 90,
+                     [_office("Widget Keeper", a, b) for a, b in terms])
+    rows = [[f"{terms[(i + 1) % 5][0]}-{terms[(i + 1) % 5][1]}", "Widget Keeper", f"{a}-{b}"]
+            for i, (a, b) in enumerate(terms)]
+    hits = _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])
+    assert len(hits) == 1
+    assert len(hits[0][3]) == FANOUT_RESIDUE_EVIDENCE_LIMIT == 3
+
+
+def test_run_doctor_reports_fanout_cell_residue(tmp_path):
+    """The registry row hands the lint stage 4 and the docx's tables.
+    Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append(_KEEPER)
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    rows = [_LEADERSHIP_HEADER, ["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    table = output.add_table(rows=len(rows), cols=3)
+    for row, cells in zip(table.rows, rows):
+        for cell, text in zip(row.cells, cells):
+            cell.paragraphs[0].text = text
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "fanout_cell_residue"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in hits] == [
+        ("WARN", "entry 82 (Q1)")]
+
+
+def test_fanout_cell_residue_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 (FAN-RES) over the 102 fresh renders of origin/dev
+    8b287ec2; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["fanout_cell_residue"] == round(1 / 102, 3)
+
+
+def test_fanout_cell_residue_names_the_cell_in_its_message():
+    from unified_pipeline.run_doctor import lint_fanout_cell_residue
+    rows = [["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    [finding] = lint_fanout_cell_residue({"entries": [_KEEPER]}, [[_LEADERSHIP_HEADER, *rows]])
+    assert finding["message"] == (
+        "entry 82 (Q1): sibling_year: a record split from this entry prints the entry's "
+        "leftover text in a name, organization or committee cell")
+
+
+def test_fanout_cell_residue_reads_a_three_letter_sibling_role():
+    entry = _fanout4("Board CEO 2001-2003, widget reviewer 2001-2003", 12, [
+        _office("CEO", "2001", "2003"), _office("Widget reviewer", "2001", "2003")])
+    rows = [["Board CEO", "Widget reviewer", "2001-2003"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])[0][2] == "sibling_value"
+
+
+def test_fanout_cell_residue_reads_a_cell_holding_the_whole_parent_line():
+    """EOAHMI BRUSUZ-01's shape: the last record's cell is the parent's whole text."""
+    entry = _fanout4("Widget Keeper 1992-1993, Gadget Lead 1994", 13, [
+        _office("Widget Keeper", "1992", "1993"), _office("Gadget Lead", "1994", "1994")])
+    rows = [["Widget Keeper 1992-1993, Gadget Lead 1994", "Gadget Lead", "1994"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])[0][2] == (
+        "sibling_value, sibling_year")
+
+
+def test_fanout_cell_residue_spares_a_tied_row_and_a_lone_own_year():
+    """A row whose dates break no tie is no record's; a cell holding only its
+    record's own year is no built line. An empty table is skipped."""
+    rows = [["1994-1996", "Widget Keeper", ""]]
+    assert _fanout_hits([_KEEPER], [[], [_LEADERSHIP_HEADER, *rows]]) == []
+    entry = _fanout4("Widget Steward, 1981, 1990-1994", 79, [
+        _office("Widget Steward", "1981", "1981"), _office("Widget Steward", "1990", "1994")],
+        code="Q2")
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER,
+                                   ["1981", "Widget Steward", "", "1981"]]]) == []
+
+
+def test_fanout_cell_residue_skips_records_that_are_not_objects():
+    entry = _entry("Widget Keeper, 1992-1993, 1994-1996", start=14, taxonomy_code="Q1",
+                   extracted_fields={"stage4_records": [
+                       "Widget Keeper 1992-1993", _office("Widget Keeper", "1994", "1996")]})
+    rows = [["1992-1993", "Widget Keeper", "1994-1996"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
