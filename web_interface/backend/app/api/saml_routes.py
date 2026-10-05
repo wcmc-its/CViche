@@ -28,9 +28,10 @@ from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
 from app.ed_group_lookup import (
-    check_ed_membership, fetch_ed_department, EdUnavailableError, LDAPConfig,
+    check_ed_membership, fetch_ed_department, EdUnavailableError, LDAPConfig, MembershipResult,
 )
 from pydantic import SecretStr
+from app.services.ed_access import partner_membership
 from app.services.user_service import provision_user, normalize_email
 from app.redirect_safety import safe_relative_path
 from app.audit_events import (
@@ -311,6 +312,28 @@ def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectRe
     if not get_config_value(db, "ed_enabled"):
         return None, None
 
+    membership = partner_membership(attrs["cwid"], db)
+    if membership is None:
+        membership, redirect = _wcm_membership_from_ed(attrs, db)
+        if redirect is not None:
+            return None, redirect
+
+    if not membership.in_access_group:
+        logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
+        logger.info(
+            LOGIN_FAILED,
+            extra={"cwid": attrs["cwid"], "reason": "not_authorized"},
+        )
+        return None, RedirectResponse("/login?error=not_authorized", status_code=302)
+
+    return role_for_membership(membership), None
+
+
+def _wcm_membership_from_ed(
+    attrs: dict, db: Session,
+) -> tuple[MembershipResult | None, RedirectResponse | None]:
+    """A WCM user's ED membership, read fresh from LDAP; or a redirect when ED
+    is unconfigured or unavailable."""
     from app.config_loader import get_config
 
     ed_access_group = get_config_value(db, "ed_access_group") or ""
@@ -352,16 +375,7 @@ def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectRe
     except EdUnavailableError:
         logger.error("ED unavailable during SAML login for %s", attrs["cwid"], exc_info=True)
         return None, RedirectResponse("/login?error=directory_unavailable", status_code=302)
-
-    if not membership.in_access_group:
-        logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
-        logger.info(
-            LOGIN_FAILED,
-            extra={"cwid": attrs["cwid"], "reason": "not_authorized"},
-        )
-        return None, RedirectResponse("/login?error=not_authorized", status_code=302)
-
-    return role_for_membership(membership), None
+    return membership, None
 
 
 def _saml_department_from_ed(cwid: str, db: Session) -> str | None:
