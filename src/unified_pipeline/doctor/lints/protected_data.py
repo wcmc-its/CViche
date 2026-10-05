@@ -215,10 +215,11 @@ _NAME = r"(?!(?:The|An|And|Of|In|On|For|With|From|To|At|By)\b)[A-Z][a-z][\w'’.
 #: One or more names in a row ("Pat Lee", "Ann, Bob and Cy") -- the whole run
 #: is the value `_locate_entries` looks for in stage 4.
 _NAMES = _NAME + r"(?:[ \t]*,?[ \t]+(?:and[ \t]+)?" + _NAME + r")*"
-_DATE = (r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
-         r"|(?i:" + _MONTH_NAMES + r")\.?[ \t]+\d{1,2}(?:st|nd|rd|th)?,?[ \t]+\d{4}\b"
-         r"|\d{1,2}[ \t]+(?i:" + _MONTH_NAMES + r")\.?[ \t]+\d{4}\b"
-         r"|(?:19|20)\d{2}\b)")
+#: A whole date: day, month and year all present.
+_FULL_DATE = (r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+              r"|(?i:" + _MONTH_NAMES + r")\.?[ \t]+\d{1,2}(?:st|nd|rd|th)?,?[ \t]+\d{4}\b"
+              r"|\d{1,2}[ \t]+(?i:" + _MONTH_NAMES + r")\.?[ \t]+\d{4}\b)")
+_DATE = r"(?:" + _FULL_DATE + r"|(?:19|20)\d{2}\b)"
 #: A small head count: "three children", "Sons: 2". A single digit only, so a
 #: study's "40 children" never reads as a family.
 _COUNT = r"(?:[1-9]|(?i:one|two|three|four|five|six|seven|eight|nine|ten))\b"
@@ -273,6 +274,12 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:\b(?i:born|date[ \t]+of[ \t]+birth|birth[ \t]*date|dob)\b|(?i:d\.o\.b)\.?)"
                 + r"(?:" + _SEP + r"|[ \t]*,?[ \t]+(?:(?i:in|on)[ \t]+)?)"
                 + r"(?P<value>" + _DATE + ")"), CAT_DATE_OF_BIRTH),
+    # A bare "Birth" label (NDMRSO: BNYLDF, HUOGDE) opens a line, and a whole
+    # date follows it -- never a year: "Birth: <date> in <place>", "BIRTH
+    # <date>". Line-initial, so "preterm birth 03/15/2019" in a title is not one.
+    (re.compile(r"(?:^|(?<=[\n\t|;]))[ \t]*(?:[•·*–—-][ \t]*)?(?i:birth)"
+                + r"(?:[ \t]*[:\-–—][ \t]*|[ \t]+)(?P<value>" + _FULL_DATE + ")"),
+     CAT_DATE_OF_BIRTH),
     (re.compile(r"\b(?i:born|birthplace|place[ \t]+of[ \t]+birth)\b"
                 + r"(?:" + _SEP + r"|[ \t]+(?i:in)[ \t]+)(?P<value>" + _NAMES + ")"),
      CAT_PLACE_OF_BIRTH),

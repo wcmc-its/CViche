@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError, HTTPClientError
 
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
 _SRC = Path(__file__).resolve().parents[2]
@@ -28,6 +29,16 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_4_5_research_summary as stage_4_5  # noqa: E402
+from unified_pipeline.llm.bedrock import (  # noqa: E402
+    BedrockContentFilteredError,
+    BedrockEmptyResponseError,
+    BedrockToolCallDidNotFireError,
+)
+from unified_pipeline.llm.retry import LLMOutageError  # noqa: E402
+from unified_pipeline.llm_provenance import (  # noqa: E402
+    STAGE4_5_CALL_FAILURES_KEY,
+    STAGE4_5_FALLBACK_CALLS_KEY,
+)
 from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     CURRENT_CONTEXT_TAG,
     CURRENT_WORK_REQUIREMENT,
@@ -1313,3 +1324,172 @@ def test_run_stage_4_5_writes_no_fallback_record_when_none_was_served(monkeypatc
     out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
 
     assert STAGE4_5_FALLBACK_CALLS_KEY not in out
+
+
+# --- #1174: a failed call never fails the stage ---------------------------------
+
+_SUMMARY_TEXT = "A synthetic research summary paragraph about widget dynamics and their regulation."
+_M1_AND_GRANT = [
+    {"taxonomy_code": "M1", "text": "Keywords only. Widgets.", "extracted_fields": {}},
+    {"taxonomy_code": "M2A", "text": "Grant", "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}]
+
+
+def _access_denied() -> ClientError:
+    return ClientError({"Error": {"Code": "AccessDeniedException", "Message": "denied"}}, "Converse")
+
+
+def _stub_calls(monkeypatch, *, score=None, generation=None):
+    """call_llm by prompt: `score`/`generation` is the reply string, or the
+    exception call_llm raises once the client's retries and fallback are spent.
+    A call with no plan fails the test."""
+    def fake_call_llm(*, messages, **_kwargs):
+        outcome = score if _SCORE_PROMPT_MARKER in messages[0]["content"] else generation
+        assert outcome is not None, "unexpected stage-4.5 call"
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return {"content": outcome, **_REPLY_USAGE}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+
+def _run(tmp_path, entries=_M1_AND_GRANT):
+    inp = _write_fields_json(tmp_path, "TEST20", entries, cv_owner={"first_name": "Jane", "last_name": "Doe"})
+    return json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text())
+
+
+def test_score_call_failing_on_every_model_still_generates_the_summary(monkeypatch, tmp_path):
+    """The QFQLNF failure: the M1 relevance call is content-filtered on every
+    model the client tries. The M1 text is treated as unscored and the summary
+    is generated, exactly as for a low score; the failure is recorded, not
+    swallowed."""
+    _stub_calls(monkeypatch, score=BedrockContentFilteredError("filtered"), generation=_SUMMARY_TEXT)
+
+    out = _run(tmp_path)
+
+    summary = out["research_summary"]
+    assert (summary["text"], summary["generation_method"]) == (_SUMMARY_TEXT, stage_4_5.GENERATION_METHOD_LLM)
+    assert (summary["m1_score"], summary["score_reasoning"]) == (0.0, stage_4_5.M1_UNSCORED_REASONING)
+    assert out["original_m1_content"]["total_entries"] == 1
+    assert out[STAGE4_5_CALL_FAILURES_KEY] == [
+        {"call": "m1_relevance_score", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"}]
+    assert STAGE4_5_FALLBACK_CALLS_KEY not in out
+
+
+def test_generation_call_failing_on_every_model_writes_an_empty_summary(monkeypatch, tmp_path):
+    """The failed call's billed attempts stay in the stage's cost."""
+    _stub_calls(monkeypatch, score='{"score": 0.1, "reasoning": "keywords"}',
+                generation=BedrockEmptyResponseError("no text", stop_reason="content_filtered", cost=0.002))
+
+    out = _run(tmp_path)
+
+    summary = out["research_summary"]
+    assert (summary["text"], summary["generation_method"]) == ("", stage_4_5.GENERATION_METHOD_LLM_CALL_FAILED)
+    assert summary["m1_score"] == 0.1
+    assert out["original_m1_content"] is None   # nothing replaced the M1 text
+    assert out[STAGE4_5_CALL_FAILURES_KEY] == [
+        {"call": "summary_generation", "exception_type": "BedrockEmptyResponseError",
+         "stop_reason": "content_filtered", "message": "no text"}]
+    assert out["total_cost"] == pytest.approx(0.003 + 0.002)   # the score call + the failed call
+
+
+def test_both_calls_failing_records_both_and_keeps_the_m1_text_out(monkeypatch, tmp_path):
+    _stub_calls(monkeypatch, score=_access_denied(), generation=_access_denied())
+
+    out = _run(tmp_path)
+
+    assert out["research_summary"]["generation_method"] == stage_4_5.GENERATION_METHOD_LLM_CALL_FAILED
+    assert [(f["call"], f["exception_type"], f["stop_reason"]) for f in out[STAGE4_5_CALL_FAILURES_KEY]] == [
+        ("m1_relevance_score", "ClientError", None), ("summary_generation", "ClientError", None)]
+    assert out["total_cost"] == 0.0
+
+
+def test_a_successful_run_writes_no_failure_record(monkeypatch, tmp_path):
+    _stub_calls(monkeypatch, score='{"score": 0.1, "reasoning": "keywords"}', generation=_SUMMARY_TEXT)
+
+    assert STAGE4_5_CALL_FAILURES_KEY not in _run(tmp_path)
+
+
+def test_stage_6_renders_nothing_for_a_failed_generation_call(monkeypatch, tmp_path):
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    _stub_calls(monkeypatch, generation=_access_denied())
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    gen = WCMTemplateGenerator(verbose=False)
+    assert gen._fill_research_summary(out) is False
+
+
+def test_a_provider_outage_still_propagates(monkeypatch, tmp_path):
+    """#810: an outage is the driver's call, as in every other stage."""
+    _stub_calls(monkeypatch, generation=LLMOutageError("down", seconds_waited=900.0))
+
+    with pytest.raises(LLMOutageError):
+        _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+
+def test_a_provider_outage_on_the_score_call_still_propagates(monkeypatch, tmp_path):
+    """#810: an outage on the M1 relevance call is not treated as unscored."""
+    _stub_calls(monkeypatch, score=LLMOutageError("down", seconds_waited=900.0), generation="unused")
+
+    with pytest.raises(LLMOutageError):
+        _run(tmp_path)
+
+
+# One instance per LLM_CALL_ERRORS member (the RETRYABLE_ERRORS ones by a
+# concrete subclass where botocore's base needs constructor kwargs).
+_ONE_ERROR_PER_CAUGHT_TYPE = [
+    BedrockContentFilteredError("filtered"),
+    BedrockEmptyResponseError("no text", stop_reason="end_turn"),
+    BedrockToolCallDidNotFireError("no tool call", stop_reason="end_turn"),
+    _access_denied(),
+    EndpointConnectionError(endpoint_url="https://bedrock.example.invalid"),
+    HTTPClientError(error="connection reset"),
+]
+
+
+def test_the_parametrized_errors_cover_every_caught_type():
+    caught = stage_4_5.LLM_CALL_ERRORS
+    assert all(any(isinstance(e, t) for e in _ONE_ERROR_PER_CAUGHT_TYPE) for t in caught)
+
+
+@pytest.mark.parametrize("error", _ONE_ERROR_PER_CAUGHT_TYPE, ids=lambda e: type(e).__name__)
+def test_every_caught_error_on_the_score_call_still_generates_the_summary(monkeypatch, tmp_path, error):
+    _stub_calls(monkeypatch, score=error, generation=_SUMMARY_TEXT)
+
+    out = _run(tmp_path)
+
+    assert out["research_summary"]["text"] == _SUMMARY_TEXT
+    assert [f["exception_type"] for f in out[STAGE4_5_CALL_FAILURES_KEY]] == [type(error).__name__]
+
+
+@pytest.mark.parametrize("error", _ONE_ERROR_PER_CAUGHT_TYPE, ids=lambda e: type(e).__name__)
+def test_every_caught_error_on_the_generation_call_writes_an_empty_summary(monkeypatch, tmp_path, error):
+    _stub_calls(monkeypatch, generation=error)
+
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    summary = out["research_summary"]
+    assert (summary["text"], summary["generation_method"]) == ("", stage_4_5.GENERATION_METHOD_LLM_CALL_FAILED)
+    assert [f["exception_type"] for f in out[STAGE4_5_CALL_FAILURES_KEY]] == [type(error).__name__]
+
+
+def test_a_failure_message_is_cut_to_the_artifact_limit(monkeypatch, tmp_path):
+    long_message = "x" * (stage_4_5.CALL_FAILURE_MESSAGE_CHARS + 50)
+    _stub_calls(monkeypatch, generation=BedrockContentFilteredError(long_message))
+
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    assert out[STAGE4_5_CALL_FAILURES_KEY][0]["message"] == long_message[:stage_4_5.CALL_FAILURE_MESSAGE_CHARS]
+
+
+def test_the_artifact_sums_cache_tokens_over_both_calls(monkeypatch, tmp_path):
+    def fake_call_llm(*, messages, **_kwargs):
+        is_score = _SCORE_PROMPT_MARKER in messages[0]["content"]
+        return {"content": '{"score": 0.1, "reasoning": "keywords"}' if is_score else _SUMMARY_TEXT,
+                **_REPLY_USAGE,
+                "cache_read_tokens": 3 if is_score else 5, "cache_write_tokens": 11 if is_score else 13}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    out = _run(tmp_path)
+
+    assert (out["cache_read_tokens"], out["cache_write_tokens"]) == (3 + 5, 11 + 13)

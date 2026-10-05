@@ -36,7 +36,11 @@ shape alone cannot do it (#573):
   not running on into letters (a fused "NPI15180546000" still counts) -- the
   old substring test fired on any entry mentioning "Dean"; the agency's full
   name ("Drug Enforcement Administration") counts as the DEA label, in the
-  raw text or in the state field it was extracted into (#1217);
+  raw text or in the state field it was extracted into (#1217). A raw-text
+  DEA label makes the entry a DEA record only when it heads the text, the
+  entry names no other jurisdiction, or a DEA-like number is present
+  (`_is_dea_record`); a state licence that merely mentions a DEA
+  registration stays a licence (ND3);
 - else, and only when the entry names no state, the number's shape: an NPI
   is 10 or 11 digits, a DEA-LIKE number two letters plus seven alphanumerics
   (wider than the real two-letters-plus-seven-DIGITS format on purpose --
@@ -139,6 +143,22 @@ _DEA_LIKE_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
 _FUSED_DEA_TOKEN_RE = re.compile(
     rf'(?<![A-Za-z0-9])#?{_DEA_NUMBER_SHAPE}(?![A-Za-z0-9])')
 _NUMBER_SEPARATOR_RE = re.compile(r'[\s,;/]+')
+
+# A DEA label that HEADS the entry (ND3): the label comes before any other
+# word of the raw text -- leading bullets, years and punctuation aside
+# ("DEA registration ...", "1994 DEA license ..."). A label further in only
+# MENTIONS a DEA registration ("<state> medical license and DEA license"),
+# which on its own does not make the entry a DEA record.
+_DEA_HEADED_RE = re.compile(rf'^[^A-Za-z]*(?:{_DEA_LABEL_RE.pattern})',
+                            re.IGNORECASE)
+# A DEA number written anywhere in a DEA-mentioning entry's raw text (ND3).
+# Wide on purpose, like `_DEA_LIKE_SHAPE_RE` and for the same reason -- a
+# match WITHHOLDS the entry: two letters, an optional space or hyphen
+# ("AB-1234567"), then seven alphanumerics of which at least one is a digit
+# (a mis-transcribed "AB123456O" still counts; a nine-letter word does not).
+_DEA_NUMBER_IN_TEXT_RE = re.compile(
+    r'(?<![A-Za-z0-9])[A-Za-z]{2}[\s-]?(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{7}'
+    r'(?![A-Za-z0-9])')
 _SEPARATOR_RUN_RE = re.compile(r'(?:\s*[,;/]\s*){2,}')
 # How many tokens a number cell needs before a DEA-shaped one is cut. A licence
 # cell needs two: a lone token beside a stated jurisdiction can be a real state
@@ -249,7 +269,8 @@ def _classify_licensure_entry(state: str, license_number: str,
     if _NPI_LABEL_RE.search(text):
         return KIND_NPI
     if _DEA_LABEL_RE.search(text) or _DEA_LABEL_RE.search(str(state or '')):
-        return KIND_DEA
+        return (KIND_DEA if _is_dea_record(state, license_number, text)
+                else KIND_LICENSE)
     if not license_number:
         return KIND_LICENSE
     if not state:
@@ -258,6 +279,28 @@ def _classify_licensure_entry(state: str, license_number: str,
         if _DEA_LIKE_SHAPE_RE.match(license_number):
             return KIND_DEA
     return KIND_LICENSE
+
+
+def _is_dea_record(state: str, license_number: str, text: str) -> bool:
+    """Whether a DEA-labelled F1 entry IS a DEA registration, rather than a
+    state licence whose text merely mentions one (ND3).
+
+    It is unless it names a non-DEA jurisdiction, carries no DEA-like number
+    in its number cell or its raw text, and its raw text is not headed by
+    the DEA label. Every doubtful case answers yes -- a yes withholds the
+    entry (#821), a no renders it -- so only an entry that is a licence on
+    every count is let through: the cost of a wrong yes is one licence row
+    withheld with a notice, of a wrong no a leaked DEA number.
+    """
+    state_text = str(state or '')
+    if not state_text or _DEA_LABEL_RE.search(state_text):
+        return True
+    if _DEA_HEADED_RE.search(text):
+        return True
+    if any(_DEA_LIKE_SHAPE_RE.match(tok)
+           for tok in _NUMBER_SEPARATOR_RE.split(license_number)):
+        return True
+    return bool(_DEA_NUMBER_IN_TEXT_RE.search(text))
 
 
 def _claim_identifier_slot(slot_name: str, current: str | None,
@@ -333,9 +376,11 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
 
     The raw-text fallback runs no NPI/DEA label re-check:
     `_classify_licensure_entry` already tests `original_text` for both labels
-    before returning KIND_LICENSE, so reaching this branch already proves
-    neither label is present -- re-testing here would only duplicate the
-    classifier's own answer (#573 review).
+    before returning KIND_LICENSE. A DEA-labelled entry gets through as a
+    licence only when it names a jurisdiction (`_is_dea_record`), so it
+    always has a state and takes the branch above, never this one. Reaching
+    the fallback therefore proves neither label is present -- re-testing
+    here would only duplicate the classifier's own answer (#573 review).
     """
     if entry.state or entry.number:
         last_registration = (format_date_for_section(entry.expiration_date, 'F1')

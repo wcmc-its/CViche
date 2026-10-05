@@ -234,6 +234,10 @@ def clear_cancelled(run_id: str):
 
 USER_CANCEL_MESSAGE = "Cancelled by user"
 
+#: The research-summary stage: the one stage whose failure does not fail the
+#: run (#1174, `_run_research_summary_stage`).
+RESEARCH_SUMMARY_STAGE_ID = "4.5"
+
 
 class CancelledException(Exception):
     """Exception raised when a pipeline run is cancelled."""
@@ -1290,7 +1294,8 @@ class PipelineOrchestrator:
             await asyncio.get_running_loop().run_in_executor(
                 None, self._persist_outputs_to_storage, result.get("output_files", [])
             )
-            await asyncio.to_thread(self._record_stage_outcome, stage_id, None)
+            # None clears the stage's entry; stage 4.5 may hand back a non-fatal one (#1174).
+            await asyncio.to_thread(self._record_stage_outcome, stage_id, result.get("stage_error"))
             if stage_id == CV_OWNER_STAGE_ID:
                 self._persist_cv_owner_name(step)
 
@@ -1483,6 +1488,7 @@ class PipelineOrchestrator:
         output_paths = self._get_output_paths()
         output_files = []
         cost = 0.0
+        stage_error: StageError | None = None  # only stage 4.5 sets it: a failure it carried on past
         step_number = get_step_by_stage_id(stage_id).number
 
         # Pin cwd to the project root for the pipeline's repo-root-relative
@@ -1667,28 +1673,9 @@ class PipelineOrchestrator:
                                        cache_write_tokens_delta=cache_write_tokens)
 
             elif stage_id == '4.5':
-                # Stage 4.5: Research Summary
-                await self.log(step_number, "Generating research summary...")
-
-                stage4_path = self.stage_outputs.get('4') or str(output_paths['4'])
-
-                stage45_output_path = await self._run_with_stdout_capture(
-                    run_stage_4_5,
-                    step_number,
-                    input_path=stage4_path,
-                    verbose=True
-                )
-
-                with open(stage45_output_path, 'r') as f:
-                    stage45_data = json.load(f)
-
-                research_info = stage45_data.get('research_summary', {})
-                self.stage_outputs['4.5'] = stage45_output_path
-                output_files.append(stage45_output_path)
-
-                method = research_info.get('method', 'generated')
-                await self.log(step_number, f"Research summary {method}, M1 score: {research_info.get('m1_score', 0):.2f}")
-
+                # Stage 4.5: Research Summary. Its failure does not fail the run (#1174).
+                stage45_data, stage_error = await self._run_research_summary_stage(
+                    step_number, self.stage_outputs.get('4') or str(output_paths['4']), output_files)
                 cost = await self._track_llm_cost(step_number, stage45_data.get('total_cost', 0), stage45_data)
 
             elif stage_id == '5':
@@ -1854,5 +1841,43 @@ class PipelineOrchestrator:
 
         return {
             "output_files": output_files,
-            "cost": cost
+            "cost": cost,
+            "stage_error": stage_error,
         }
+
+    async def _run_research_summary_stage(self, step_number: int, stage4_path: str,
+                                          output_files: list[str]) -> tuple[dict, StageError | None]:
+        """Stage 4.5 for `_execute_stage_logic`: (its artifact, None), or ({}, a
+        non-fatal StageError) when it raised.
+
+        The one stage that never fails the run (#1174): a research summary is
+        one section, so when run_stage_4_5 raises, the run carries on to
+        stages 5 and 6 without it. Stage 6 renders no summary when the
+        artifact is absent and routes the M1 entries to the Appendix. The
+        failure is recorded non-fatal in the stage-error record, which the
+        quality score counts and the doctor's stage_failure_recorded WARN
+        names, and logged as a WARNING on the step.
+        """
+        await self.log(step_number, "Generating research summary...")
+        try:
+            stage45_output_path = await self._run_with_stdout_capture(
+                run_stage_4_5, step_number, input_path=stage4_path, verbose=True)
+        except CancelledException:
+            raise
+        except Exception as e:
+            logger.warning("Stage 4.5 failed for run %s; continuing without a research summary",
+                           self.run_id, exc_info=True)
+            await self.log(step_number, f"Research summary skipped: stage 4.5 failed ({type(e).__name__}). "
+                           "The Research Activities section has no summary; the run continues.", "WARNING")
+            return {}, StageError.from_exception(RESEARCH_SUMMARY_STAGE_ID, e, fatal=False)
+
+        with open(stage45_output_path, 'r') as f:
+            stage45_data = json.load(f)
+
+        research_info = stage45_data.get('research_summary', {})
+        self.stage_outputs[RESEARCH_SUMMARY_STAGE_ID] = stage45_output_path
+        output_files.append(stage45_output_path)
+
+        method = research_info.get('method', 'generated')
+        await self.log(step_number, f"Research summary {method}, M1 score: {research_info.get('m1_score', 0):.2f}")
+        return stage45_data, None

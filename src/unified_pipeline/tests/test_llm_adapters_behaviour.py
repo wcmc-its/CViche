@@ -1838,29 +1838,148 @@ def test_content_filtered_schema_tool_path_falls_back(monkeypatch: pytest.Monkey
     assert json.loads(result["content"]) == {"foo": "bar"}
 
 
-def test_second_content_filter_on_fallback_raises_and_never_loops(
+HAIKU_4_5 = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def test_fallback_chain_is_sonnet_4_6_then_haiku_4_5() -> None:
+    assert bedrock.CONTENT_FILTER_FALLBACK_MODELS == (
+        "us.anthropic.claude-sonnet-4-6", HAIKU_4_5)
+    assert bedrock.CONTENT_FILTER_FALLBACK_MODEL == bedrock.CONTENT_FILTER_FALLBACK_MODELS[0]
+
+
+def test_haiku_4_5_inference_profile_id_is_priced() -> None:
+    assert pipeline_config.calculate_cost(
+        1_000_000, 1_000_000, model=HAIKU_4_5, provider="bedrock") == pytest.approx(1.1 + 5.5)
+
+
+def test_sonnet_4_6_filtered_then_haiku_4_5_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The QFQLNF shape (#1174): Sonnet 5 and Sonnet 4.6 both end
+    content_filtered with no text; Haiku 4.5 answers."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
+
+    ok = _converse_response("hello", input_tokens=10, output_tokens=5)
+    fake = _FakeBedrockClient(_filtered_empty_pair() + _filtered_empty_pair() + [ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == (
+        [SONNET_5] * 2 + [bedrock.CONTENT_FILTER_FALLBACK_MODEL] * 2 + [HAIKU_4_5])
+    assert result["content"] == "hello"
+    assert result["model"] == HAIKU_4_5
+    assert result[FALLBACK_SERVED_KEY] == HAIKU_4_5
+    # Haiku's own call plus every billed filtered attempt, each at its own rate.
+    expected = (
+        pipeline_config.calculate_cost(10, 5, model=HAIKU_4_5, provider="bedrock")
+        + pipeline_config.calculate_cost(
+            200, 2, model=bedrock.CONTENT_FILTER_FALLBACK_MODEL, provider="bedrock")
+        + pipeline_config.calculate_cost(200, 2, model=SONNET_5, provider="bedrock"))
+    assert result["cost"] == pytest.approx(expected)
+
+
+def test_sonnet_4_6_partial_text_filtered_then_haiku_4_5_serves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _FakeBedrockClient(_filtered_empty_pair() + _filtered_empty_pair())
+    """The returned-stop_reason case: Sonnet 4.6 sends truncated text ending
+    content_filtered (no exception), and the chain still moves on."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
+
+    truncated = _converse_response('{"a": ', stop_reason="content_filtered",
+                                   input_tokens=7, output_tokens=3)
+    ok = _converse_response('{"a": 1}', input_tokens=10, output_tokens=5)
+    fake = _FakeBedrockClient([truncated] * 4 + [ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake)[-1] == HAIKU_4_5
+    assert json.loads(result["content"]) == {"a": 1}
+    assert result[FALLBACK_SERVED_KEY] == HAIKU_4_5
+    expected = (
+        pipeline_config.calculate_cost(10, 5, model=HAIKU_4_5, provider="bedrock")
+        + pipeline_config.calculate_cost(
+            14, 6, model=bedrock.CONTENT_FILTER_FALLBACK_MODEL, provider="bedrock")
+        + pipeline_config.calculate_cost(14, 6, model=SONNET_5, provider="bedrock"))
+    assert result["cost"] == pytest.approx(expected)
+
+
+def test_every_fallback_filtered_raises_and_never_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() * 3)
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
 
     with pytest.raises(bedrock.BedrockEmptyResponseError, match="content_filtered"):
         bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
 
-    # primary + its repair, fallback + its repair: no third model, no more calls.
-    assert _model_ids(fake) == [SONNET_5, SONNET_5] + [bedrock.CONTENT_FILTER_FALLBACK_MODEL] * 2
+    # Each model once, with its JSON-repair retry; no fourth model, no more calls.
+    assert _model_ids(fake) == (
+        [SONNET_5] * 2 + [bedrock.CONTENT_FILTER_FALLBACK_MODEL] * 2 + [HAIKU_4_5] * 2)
 
 
-def test_second_content_filter_with_partial_text_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_every_fallback_filtered_with_partial_text_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     truncated = _converse_response('{"a": ', stop_reason="content_filtered")
-    fake = _FakeBedrockClient([truncated] * 4)
+    fake = _FakeBedrockClient([truncated] * 6)
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
 
-    with pytest.raises(bedrock.BedrockContentFilteredError):
+    with pytest.raises(bedrock.BedrockContentFilteredError, match=HAIKU_4_5):
         bedrock._handle_bedrock(
             _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5))
 
-    assert len(fake.calls) == 4
+    assert len(fake.calls) == 6
+
+
+@pytest.mark.parametrize("partial_text", [False, True])
+def test_give_up_warning_names_the_last_fallback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, partial_text: bool,
+) -> None:
+    truncated = _converse_response('{"a": ', stop_reason="content_filtered")
+    responses = [truncated] * 6 if partial_text else _filtered_empty_pair() * 3
+    fake = _FakeBedrockClient(responses)
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"), \
+            pytest.raises((bedrock.BedrockEmptyResponseError, bedrock.BedrockContentFilteredError)):
+        bedrock._handle_bedrock(
+            _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5, stage="s_syn"))
+
+    give_ups = [r.getMessage() for r in caplog.records if "giving up" in r.getMessage()]
+    assert len(give_ups) == 1
+    assert "s_syn" in give_ups[0] and HAIKU_4_5 in give_ups[0]
+
+
+def test_non_filter_failure_on_sonnet_4_6_propagates_without_trying_haiku(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guardrail = [_empty_response("guardrail_intervened")] * 2
+    fake = _FakeBedrockClient(_filtered_empty_pair() + guardrail)
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError, match="guardrail_intervened"):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert HAIKU_4_5 not in _model_ids(fake)
+
+
+def test_each_fallback_hop_logs_one_warning_naming_its_model(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = _FakeBedrockClient(
+        _filtered_empty_pair() + _filtered_empty_pair() + [_converse_response("hello")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        bedrock._handle_bedrock(
+            _USER_MSG, None, _bedrock_cfg(model=SONNET_5, stage="stage_4_synthetic"))
+
+    hops = [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "retrying on fallback" in r.getMessage()]
+    assert len(hops) == 2
+    assert f"on {SONNET_5}; retrying on fallback {bedrock.CONTENT_FILTER_FALLBACK_MODEL}" in hops[0]
+    assert f"on {bedrock.CONTENT_FILTER_FALLBACK_MODEL}; retrying on fallback {HAIKU_4_5}" in hops[1]
 
 
 @pytest.mark.parametrize(

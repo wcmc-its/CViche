@@ -300,6 +300,23 @@ _NAME_RUN = r"(?: [^\W\d_] [\w.'’-]* ,? [ \t]+ ){1,4}"
 _BORN_VALUE = r"(?: " + re.escape(PRE_LLM_PLACEHOLDER) + r" | " + _FULL_DATE_VALUE + r" )"
 _BORN_STATEMENT = _FRAGMENT_INITIAL + _NAME_RUN + _STEM_GUARD + r"born (?: [ \t]+ on )? [ \t]+ " + _BORN_VALUE
 
+# #1223 (NDMRSO, BNYLDF/HUOGDE): a bare "Birth" label -- "Birth: <date> in
+# <place>", "BIRTH <date><tab><place>" -- that no date-of-birth row opened on,
+# so the date and the birthplace were recovered into the Appendix verbatim and
+# the date reached the LLM. A shape, not a label row: "Birth:" alone opens real
+# titles ("Birth: A History"), and a label row would also join
+# `_KNOWN_FIELD_LABEL_RE`. So the label counts only with the value that makes
+# it a date of birth right after it -- a whole date or, once the pre-LLM scrub
+# has run, its placeholder; never a bare year -- and only fragment-initial
+# (`anchored`), so "preterm birth: 03/15/2019" inside a line is left alone.
+# The anchoring is also the word-start guard the other stems carry
+# (`_STEM_GUARD`): "Afterbirth:" or "Pre-birth" opens no fragment.
+_BARE_BIRTH_VALUE = r"(?: " + re.escape(PRE_LLM_PLACEHOLDER) + r" | " + _WHOLE_DATE_VALUE + r" )"
+_BARE_BIRTH_LABEL = r"birth (?: [ \t]* [:\-–—] [ \t]* | [ \t]+ ) " + _BARE_BIRTH_VALUE
+#: Compiled for `pii_pass._extend_label_span`: a bare-birth match is a label
+#: whose place of birth continues in the cells after it.
+_BARE_BIRTH_LABEL_RE = re.compile(_BARE_BIRTH_LABEL, re.X | re.I)
+
 # #1223 (EBYSBC, EQADVR): two family labels no row below opened, so the spouse's
 # and the grandchildren's names reached the Appendix. "Married:" names the
 # spouse; the spouse rows open only on "spouse"/"wife"/"husband", "married to"
@@ -398,6 +415,8 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
         _DOB_STEM,
         wide_value=_FULL_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE + r"|" + _YEAR_VALUE,
         single_space_value=_FULL_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE)),
+    WithholdRule(CAT_DATE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, shape=_BARE_BIRTH_LABEL,
+                 anchored=True),
     WithholdRule(CAT_PLACE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, label=r"""
         place \s* of \s* birth | birth \s*-? \s* place | birthplace
     """),
@@ -459,10 +478,15 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # be the WHOLE fragment -- opening right after a hard delimiter
     # (`_PII_FRAGMENT_SPLIT_RE`) and closing at the next -- so "20 children
     # and 20 adults" or "20 subjects, 20 children" in a study never matches.
+    # #1223 (NDMRSO, VXSDRD): the count may be spelled out ("<status>; <word>
+    # children"), as `_CHILD_COUNT` already allows in the parenthetical row.
+    # The leading spaces are possessive (`*+`): no count opens with a space,
+    # and with eleven alternatives a backtrack into a long space run at every
+    # offset made the row five times slower.
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 shape=r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ ]*"
-                       r" \d{1,2} \s+ (?: children | child | kids | sons? | daughters? )"
-                       r" (?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )",
+                 shape=r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ ]*+"
+                       + _CHILD_COUNT + r" \s+ " + _CHILD_NOUN
+                       + r" (?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )",
                  anchored=True),
     # #1223: "Married (<name>)", "two children (<names>)" and "<name> born
     # [withheld]" -- family prose with no label (see `_MARRIED_PARENTHETICAL`).

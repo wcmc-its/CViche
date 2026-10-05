@@ -585,7 +585,7 @@ FIELD_DESCRIPTIONS = {
         "notes": GRANT_NOTES_DESCRIPTION,
     },
     "D3": {
-        "title": "Job title or position",
+        "title": "Job title or position. For a consulting engagement that states no job title, the project topic",
         "organization": "Company/organization name with city and state",
         "start_date": "Employment start date (mm/yy format)",
         "end_date": "Employment end date (mm/yy format)",

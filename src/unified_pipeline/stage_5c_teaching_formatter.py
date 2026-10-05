@@ -50,6 +50,20 @@ K_SUBSECTION_LABELS = {
     'K5': 'Other education/outreach activities',
 }
 
+# The prompt's own example of one entry that lists several dated items, and
+# the merged form it forbids (#1345, DPEHSZ 269-297: 49 dated lectures went
+# out as one date list ahead of one title list). `postcheck_line` accepts the
+# first and rejects the second (`date_not_beside_title`); the tests hold the
+# prompt and the post-check to the same rule.
+DATED_ITEMS_EXAMPLE = '- [EC-0124] **6/2012** - "Topic A"; **8/2012** - "Topic B" (School of Medicine; residents)'
+MERGED_DATES_EXAMPLE = '- [EC-0124] **6/2012, 8/2012** - "Topic A"; "Topic B" (School of Medicine; residents)'
+
+# The roles the model used to supply when an entry named none (#1345:
+# 'Presenter' on DPEHSZ's talks, 'Attendee' on a workshop OIYKZE's owner
+# gave). The prompt forbids each by name; they are the roles `_ROLE_EVIDENCE`
+# below rejects in a line whose source does not state them.
+DEFAULT_ROLES_FORBIDDEN = ('Presenter', 'Attendee', 'Participant')
+
 # LLM prompt for reformatting educational contributions
 EDUCATIONAL_CONTRIBUTIONS_PROMPT = '''You are a CV formatter. The input is raw, inconsistently formatted text that has ALREADY been mapped into subsections of a CV section called "Educational Contributions." Your job is to rewrite it into a polished, highly readable format.
 
@@ -58,6 +72,8 @@ NON-NEGOTIABLES
 2) Preserve meaning; DO NOT add facts or infer missing details.
 3) Preserve EVERY entry ID EXACTLY as given (character-for-character). Never delete, reorder IDs, or generate new IDs.
 4) These are NOT citations. Do not label anything as citations and do not add citation formatting.
+5) Never write a role the entry does not state (see ROLE RULE).
+6) Every date and year the input gives for an ID appears in that ID's line.
 
 SECTION FRAME
 - Use this exact top-level heading:
@@ -78,11 +94,28 @@ ENTRY ID RULE (hard)
 - The ID must be the first token on the bullet line.
 - Example: `- [EC-0123] **2021-2022** - Faculty Advisor, SPRINGBOARD Program (Health Sciences)`
 
+ONE ID, ONE RECORD (hard)
+- Each ID's line describes only that ID's input. Never move a date, title or role from one ID's line to another's, and never put two IDs on one bullet.
+- Consecutive IDs followed by one shared `Original:` line are separate records of one entry: give each its own bullet with its own date.
+- An `Original:` line is the source text of the entry above it, given for context only. Never copy it into your output, not even as a sub-bullet.
+
+DATED ITEMS (hard)
+- When one entry lists several items with their own dates (talks, lectures, sessions), write each date immediately before its own title:
+  ''' + DATED_ITEMS_EXAMPLE + '''
+- Never gather the dates into one list ahead of the titles, as in:
+  ''' + MERGED_DATES_EXAMPLE + '''
+  The reader can no longer tell which date goes with which title.
+- An item given more than once keeps every date, each beside its title.
+
+ROLE RULE (hard)
+- Write a role only when the entry's own text names one (e.g., Lecturer, Course Director, Moderator).
+- Never supply a default role. Do not write ''' + ', '.join(DEFAULT_ROLES_FORBIDDEN) + ''' or any other role the entry does not state; an entry with no stated role gets no role.
+
 FIELD EXTRACTION (use only what is present)
 From each entry, extract any of the following if present:
 - Dates (range or single)
 - Activity/Course/Program/Event title
-- Role (e.g., Lecturer, Mentor, Preceptor, Co-Director, Facilitator, Faculty Advisor, Attendee, Participant)
+- Role, only when the entry states it (e.g., Lecturer, Mentor, Preceptor, Co-Director, Facilitator, Faculty Advisor)
 - Audience (e.g., graduate students, 1st-year SOM, MD/PhD)
 - Institution/Unit (e.g., EOH Graduate Program, GSPH, SOM)
 - Quantities (hours, credits, number of sessions, number of students)
@@ -128,7 +161,7 @@ Template C (Administrative teaching with metrics)
   - (Co-leads: [names])
 
 Template D (Continuing education / professional development)
-- [ID] **[Date]** - [Role: Attendee/Participant], [Event/Topic] ([Org/Location])
+- [ID] **[Date]** - [Role, only if stated], [Event/Topic] ([Org/Location])
 
 CONSISTENCY RULES (readability-first)
 - Within each subsection:
