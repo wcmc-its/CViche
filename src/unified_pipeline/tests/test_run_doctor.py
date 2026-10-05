@@ -6024,6 +6024,15 @@ def test_fanout_cell_residue_skips_a_row_two_records_match_equally():
     assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
 
 
+def test_fanout_cell_residue_skips_a_committee_row_both_records_score_equally():
+    """The tie clause itself: both roles score the same on a row whose third
+    cell holds both, so the row belongs to neither record and is not residue."""
+    entry = _fanout4("Widget Keeper, Gadget Lead 2001, Example Guild", 70, [
+        _office("Widget Keeper", "2001", "2001"), _office("Gadget Lead", "2001", "2001")])
+    rows = [["Gadget Lead", "Widget Keeper", "Widget Keeper Gadget Lead", "2001"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == []
+
+
 def test_fanout_cell_residue_breaks_a_tie_on_the_rows_dates():
     """One role for every term: the date cell names the record."""
     rows = [["1994-1996, 1997-1998", "Widget Keeper", "1992-1993"]]
