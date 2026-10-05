@@ -418,6 +418,17 @@ LINT_COPY = {
         "An office phone number or office address in the CV is not in the Office row of Personal "
         "Data: it is in another row, such as Cell phone, or nowhere in the document.",
         "Copy the office phone or address from the source CV into its Office row."),
+    "pubmed_title_truncated": LintCopy(
+        "PubMed title cut short",
+        "A citation's title was replaced with PubMed's, and PubMed's title stops mid-phrase, "
+        "usually just before an italic gene or organism name, so the citation's title is "
+        "incomplete.",
+        "Restore the full title from the source CV."),
+    "enrichment_pubtype_mismatch": LintCopy(
+        "Citation replaced with a correction notice",
+        "A citation was matched to a PubMed correction, retraction or concern notice about the "
+        "paper rather than the paper itself, so it shows the notice's title, authors and pages.",
+        "Restore the paper's own citation from the source CV."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "

@@ -28,6 +28,7 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 | M3 | 2026-10-04 | origin/dev `fb466a0f`, over the base render of the same SHA (`doctor_gate.py`: 63 runs, 1,275 findings) | 62 of 63, as M1 | as M1 | #822 |
 | M2-junk | 2026-10-04 | origin/dev `fb466a0f` plus the `junk_or_header_row` lint, over the base render of `fb466a0f` | 62 of the 63-run farm, as M1 | as M1 | #985, #986, #1222 |
 | M3b-5c | 2026-10-04 | `feat/ebysbc-doctor-5c-and-contact` on origin/dev `fb466a0f`, over the base render of `fb466a0f` | as M1 | as M1 | #1345, #1222 |
+| M2-enrich | 2026-10-04 | origin/dev `fb466a0f` plus `pubmed_title_truncated` and `enrichment_pubtype_mismatch`, over the base render of `fb466a0f` and the farm's stored stage-5 JSON | 62 of the 63-run farm, as M1 | as M1 | #1358 (EBYSBC E19) |
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -42,6 +43,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `duplicate_passages` | 1 | 1 | none | none | names text | 0 | M1 |
 | `duplicate_records` | 8 | 8 | 4 / 0 / 1 | 4 / 5 (80%) | names text | 0 | M1 |
 | `enrichment_failures` | 15 | 15 | 3 / 4 / 0 | 3 / 7 (43%) | names text | 0 | M1 |
+| `enrichment_pubtype_mismatch` | 2 | 2 | 2 / 0 / 0 | 2 / 2 (100%) | 1 / 2 (50%) | 1 | M2-enrich |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `junk_or_header_row` | 104 | 104 | 102 / 2 / 0 | 102 / 104 (98%) | 65 / 104 (63%) | 20 | M2-junk |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |
@@ -49,6 +51,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `offschema_fields` | 47 | 14 | 16 / 2 / 5 | 16 / 23 (70%) | 34 / 47 (72%) | 28 | M1 |
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
+| `pubmed_title_truncated` | 22 | 22 | 22 / 0 / 0 | 22 / 22 (100%) | 8 / 22 (36%) | 2 | M2-enrich |
 | `section_lost` | 1 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | names text | 0 | M1 |
 | `stage4_group_failures` | 1 | 1 | none | none | names text | 0 | M1 |
 | `stage6_render_warnings`: `appendix_grant_too_sparse` | 11 | 11 | 3 / 2 / 1 | 3 / 6 (50%) | names text | 0 | M1 |
@@ -70,6 +73,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `wrong_start_date` | 9 | 1 | 0 / 1 / 1 | 0 / 2 (0%) | 8 / 9 (89%) | 7 | M1 |
 
 M2-junk added `junk_or_header_row` and changed no other lint's findings on any run. All 104 hits were hand-read against the stage-4 entry and the rendered row: the 39 unmatched are 38 group headers, lead-in labels, date fragments or banner titles printed as records, and 1 partly so (a banner title rendered with a date); of the 65 matched, 64 are and 1 is partly so (a header row that also shows a role). 102 of 104 (98%). The shapes were tuned on this farm, so the next batch is the first out-of-sample check.
+M2-enrich added `pubmed_title_truncated` and `enrichment_pubtype_mismatch` and changed no other lint's findings on any run. Every hit was hand-read against the stage-4 title and the accepted text of the base docx (text inside `w:ins` included, `w:delText` excluded). `pubmed_title_truncated`: 22 of 22 are cut titles that render cut, followed directly by the journal; the 14 unmatched sit on 6 runs the autopsies did not record them for. `enrichment_pubtype_mismatch`: 2 of 2 render a correction notice's title where the CV lists the paper; the unmatched one is a CV that gives the notice's PMID for the paper. Both read stage-5 JSON built before #1358, which fixed both causes at the source, so on newer runs they guard against a regression.
 
 No hits on M1's 62 runs: `bucket_status`, `dead_sections`, `invented_records`, `llm_refusal_in_output`, `no_output`, `owner_contact_missing`, `pipeline_errors_present`, `protected_data_in_output`, `python_repr_in_output`, `segmentation`, `stage3b_fallback_ratio`, `stage3b_second_pass_error`, `stage_failure_recorded`, `table_lost`, `under_extraction`, `unrendered_records`.
 

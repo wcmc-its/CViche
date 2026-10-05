@@ -51,6 +51,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_enrichment_pubtype_mismatch,
     lint_etal_added,
     lint_junk_or_header_row,
     lint_llm_fallback_served,
@@ -59,6 +60,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
@@ -1230,6 +1232,168 @@ def test_enrichment_failures_missing_artifact_info_skip(tmp_path):
     assert skips[0]["severity"] == "INFO"
     assert "stage_5_enrichment" in skips[0]["message"]
     assert payload["artifacts"]["stage_5_enrichment"] is None
+
+
+# ------------------------------- lints 14r/14s: accepted PubMed records (E19)
+
+
+def _accepted(idx, pubmed_title, cv_title="A synthetic study of tidal sediment cores",
+              pubtypes=("Journal Article",), status="enriched", text=None):
+    """A stage-5 entry stage 5 accepted from PubMed; every value is invented."""
+    return {"element_idx_start": idx, "taxonomy_code": "S1",
+            "text": text or f"Vandermeer Q. {cv_title}. J Synth Geol. 2031;4:1-9.",
+            "enrichment_status": status, "enrichment_source": "pmid",
+            "extracted_fields": {"title": cv_title},
+            "enrichment_data": {"pubmed_title": pubmed_title,
+                                "publication_types": list(pubtypes)}}
+
+
+@pytest.mark.parametrize("title", [
+    "Sediment transport in ",           # cut before an inline element: trailing space
+    "An N",                             # cut inside a token followed by a superscript
+    "Coastal cores of the (CoRE",       # cut inside a parenthesis
+])
+def test_pubmed_title_truncated_warns_on_a_title_cut_mid_phrase(title):
+    findings = lint_pubmed_title_truncated({"entries": [_accepted(264, title)]})
+    assert [(f["lint"], f["severity"]) for f in findings] == [("pubmed_title_truncated", "WARN")]
+    assert findings[0]["message"].startswith("entry 264 (S1): ")
+
+
+@pytest.mark.parametrize("title", [
+    "A synthetic study of tidal sediment cores.",
+    "Do tidal cores record storms?",
+    "Tidal cores: a field note!",
+    "[A synthetic study of tidal cores in translation]",
+    "A synthetic study of tidal sediment cores (TIDE)",
+    "A synthetic study of tidal sediment cores.   ",
+    "The \u201ctidal core\u201d",
+    "The \u2018tidal core\u2019",
+    "The 'tidal core'",
+    'The "tidal core"',
+])
+def test_pubmed_title_truncated_quiet_on_a_complete_title(title):
+    assert lint_pubmed_title_truncated({"entries": [_accepted(264, title)]}) == []
+
+
+def test_pubmed_title_truncated_skips_records_stage_6_does_not_render_from_pubmed():
+    """An empty title falls back to the CV's in stage 6, and only an accepted
+    ('enriched') record replaces the CV's citation at all."""
+    entries = [_accepted(1, ""), _accepted(2, "Sediment transport in ", status="title_check_failed"),
+               {"element_idx_start": 3, "text": "no enrichment at all"}]
+    assert lint_pubmed_title_truncated({"entries": entries}) == []
+
+
+def test_pubmed_title_truncated_does_not_judge_a_shorter_published_title():
+    entry = _accepted(5, "Tidal cores.", cv_title="A much longer conference title "
+                      "for the same synthetic study of tidal sediment cores in estuaries")
+    assert lint_pubmed_title_truncated({"entries": [entry]}) == []
+
+
+@pytest.mark.parametrize("pubtype", ["Published Erratum", "Retraction of Publication",
+                                     "Expression of Concern"])
+def test_enrichment_pubtype_mismatch_warns_on_a_notice_accepted_for_a_paper(pubtype):
+    entry = _accepted(257, "A synthetic study of tidal sediment cores.", pubtypes=(pubtype,))
+    findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
+    assert [(f["lint"], f["severity"]) for f in findings] == [
+        ("enrichment_pubtype_mismatch", "WARN")]
+    assert findings[0]["message"].startswith("entry 257 (S1): ")
+    assert pubtype in findings[0]["message"]
+
+
+@pytest.mark.parametrize("opening", ["Author Correction", "Correction", "Erratum",
+                                     "Retraction", "Corrigendum", "Expression of concern"])
+def test_enrichment_pubtype_mismatch_reads_a_notice_title_without_the_type(opening):
+    """Each notice opening the title regex names, on a record typed only as
+    a Journal Article, so the title alone decides."""
+    entry = _accepted(257, f"{opening}: A synthetic study of tidal sediment cores.")
+    findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
+    assert [f["lint"] for f in findings] == ["enrichment_pubtype_mismatch"]
+
+
+@pytest.mark.parametrize("cv_title", [
+    "Author Correction: A synthetic study of tidal sediment cores",
+    "Erratum to: A synthetic study of tidal sediment cores",
+])
+def test_enrichment_pubtype_mismatch_quiet_when_the_cv_lists_the_notice(cv_title):
+    entry = _accepted(272, f"{cv_title}.", cv_title=cv_title, pubtypes=("Published Erratum",))
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+@pytest.mark.parametrize("text, cv_title", [
+    # the notice is named only in the entry text, not in the extracted title
+    ("Vandermeer Q. Erratum. J Synth Geol. 2031;4:10.", "A synthetic study of tidal cores"),
+    # the notice is named only in the extracted title, not in the entry text
+    ("Vandermeer Q. J Synth Geol. 2031;4:10.", "Corrigendum to a synthetic study of tidal cores"),
+    ("Vandermeer Q. Retraction: tidal cores. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    # each remaining word the CV-side regex names, alone in the entry text
+    ("Vandermeer Q. Tidal cores (retracted). J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Tidal cores, errata. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Expression of concern: tidal cores. J Synth Geol. 2031;4:10.",
+     "Tidal cores"),
+])
+def test_enrichment_pubtype_mismatch_reads_both_cv_text_and_cv_title(text, cv_title):
+    entry = _accepted(272, "A synthetic study of tidal cores.", cv_title=cv_title,
+                      pubtypes=("Retraction of Publication",), text=text)
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_pubtype_mismatch_reads_only_the_opening_of_the_title():
+    """A paper whose title names a correction mid-way is not a notice."""
+    entry = _accepted(9, "Drift correction for synthetic tidal sediment cores.")
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_lints_skip_an_accepted_entry_with_malformed_enrichment_data():
+    entry = _accepted(9, "Sediment transport in ", pubtypes=("Published Erratum",))
+    entry["enrichment_data"] = ["not", "a", "dict"]
+    stage5e = {"entries": [entry]}
+    assert lint_pubmed_title_truncated(stage5e) == []
+    assert lint_enrichment_pubtype_mismatch(stage5e) == []
+
+
+def test_enrichment_lints_tolerate_non_dict_extracted_fields():
+    """A truthy non-dict `extracted_fields` (a list) is read as no CV title,
+    not dereferenced: both lints still report the record."""
+    cut = _accepted(11, "Sediment transport in ")
+    notice = _accepted(12, "A synthetic study of tidal cores.", pubtypes=("Published Erratum",),
+                       text="Vandermeer Q. Tidal cores. J Synth Geol. 2031;4:10.")
+    for entry in (cut, notice):
+        entry["extracted_fields"] = ["not", "a", "dict"]
+    stage5e = {"entries": [cut, notice]}
+    truncated = lint_pubmed_title_truncated(stage5e)
+    assert [f["lint"] for f in truncated] == ["pubmed_title_truncated"]
+    assert "the CV's title: 0 chars" in truncated[0]["evidence"][0]
+    assert [f["lint"] for f in lint_enrichment_pubtype_mismatch(stage5e)] == [
+        "enrichment_pubtype_mismatch"]
+
+
+@pytest.mark.parametrize("pubtypes", [("Letter", "Comment"), ("Editorial", "Comment"),
+                                      ("Journal Article", "Retracted Publication"),
+                                      ("Journal Article",)])
+def test_enrichment_pubtype_mismatch_quiet_on_a_paper_record(pubtypes):
+    """A Comment is usually the CV owner's own commentary, and a Retracted
+    Publication is the paper itself."""
+    entry = _accepted(9, "A synthetic study of tidal sediment cores.", pubtypes=pubtypes)
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_pubtype_mismatch_skips_a_record_stage_5_did_not_accept():
+    entry = _accepted(9, "Correction: tidal cores.", pubtypes=("Published Erratum",),
+                      status="title_check_failed")
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_lints_run_from_the_stage_5_artifact(tmp_path):
+    """Wired through LINT_REGISTRY: run_doctor reads both off the stage-5 JSON."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_5_enrichment").glob("*.json"))
+    payload = json.loads(path.read_text())
+    payload["entries"] = [_accepted(264, "Sediment transport in "),
+                          _accepted(257, "Correction: tidal cores.", pubtypes=("Published Erratum",))]
+    path.write_text(json.dumps(payload))
+    lints = [f["lint"] for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] in ("pubmed_title_truncated", "enrichment_pubtype_mismatch")]
+    assert sorted(lints) == ["enrichment_pubtype_mismatch", "pubmed_title_truncated"]
 
 
 # ------------------------------------------------- lint 10: stage-6 warnings
@@ -3716,14 +3880,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (42), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (44), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 40
+    assert len(payload["findings"]) == 42
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

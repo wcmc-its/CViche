@@ -222,6 +222,19 @@ Lints, ranked by the severity of the failure class they catch:
                           or Office address row does not show: routed to
                           another row, withheld as home, or read by nothing
                           (EBYSBC E25, #1222); WARN
+14r. pubmed_title_truncated a PubMed title stage 5 accepted that ends with no
+                          terminal punctuation: read with `.text` before
+                          #1358, it stopped at the first inline element (an
+                          italic gene name, a superscript), and stage 6
+                          renders the cut title in place of the CV's
+                          (EBYSBC E19: QNZADH-02, AKPQEB-01). WARN, one per
+                          citation
+14s. enrichment_pubtype_mismatch an accepted PubMed record that is a notice
+                          about a paper (Published Erratum, a retraction, an
+                          expression of concern, or a title opening
+                          "Correction:") where the CV lists the paper itself,
+                          so the citation renders the notice (EBYSBC E19:
+                          QNZADH-01). WARN, one per citation
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -362,6 +375,8 @@ from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_GATE,
     lint_enrichment_failures,
     lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
+    lint_enrichment_pubtype_mismatch,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     DEAD_SECTION_MIN_LINES,
@@ -519,6 +534,8 @@ KNOWN_LINTS = (
     "junk_or_header_row",
     "teaching_postcheck",
     "contact_slot_lost",
+    "pubmed_title_truncated",
+    "enrichment_pubtype_mismatch",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -667,6 +684,12 @@ LINT_PREVALENCE = {
     # render, after #1381 fixed the contact routing; 9 of 63 on the dev-242
     # documents the autopsy read. Same mixed-corpus caveat as above.
     "contact_slot_lost": 0.016,
+    # EBYSBC E19, measured 2026-10-04 on the 63 runs of the EBYSBC/s7ab/pilot
+    # farm (its stored stage-5 JSON, built before #1358): titles cut on 8 of
+    # 63 runs, a notice accepted on 2 of 63. #1358 fixed both at the source,
+    # so both should fall toward zero on runs built after it.
+    "pubmed_title_truncated": 0.127,
+    "enrichment_pubtype_mismatch": 0.032,
 }
 
 
@@ -1197,6 +1220,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("teaching_postcheck", lint_teaching_postcheck, ("stage_5d",)),
     LintSpec("contact_slot_lost", lint_contact_slot_lost, ("stage_4", "table_rows")),
+    LintSpec("pubmed_title_truncated", lint_pubmed_title_truncated, ("stage_5_enrichment",)),
+    LintSpec("enrichment_pubtype_mismatch", lint_enrichment_pubtype_mismatch,
+             ("stage_5_enrichment",)),
 )
 
 
