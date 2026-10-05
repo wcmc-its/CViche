@@ -4,7 +4,9 @@ opposite semantics depending on which driver runs them, and nothing enforced
 that until now.
 
 This covers the orchestrator half -- a stage exception must fail the run and
-must stop the pipeline, not get logged and skipped past. The opposite half
+must stop the pipeline, not get logged and skipped past. Stage 4.5 (the
+research summary) is the one exception, by decision on #1174: its failure is
+recorded non-fatal and the run carries on (the tests at the end of this file). The opposite half
 (the CLI must NOT stop the run on the same kind of failure) is already proven
 by test_run_full_pipeline_exit_status.py::test_a_mid_pipeline_crash_also_exits_non_zero.
 The two together are the check §5.1 was missing.
@@ -242,3 +244,95 @@ def test_the_orchestrator_records_cost_for_exactly_the_stages_the_cli_reports():
     import run_full_pipeline
 
     assert _stage_branches_that_record_cost() == set(run_full_pipeline._COST_REPORTING_STAGES)
+
+
+# --- #1174: stage 4.5 never fails the run --------------------------------------
+
+def _raise_from_stage_4_5(**_kwargs):
+    raise RuntimeError("simulated research summary failure")
+
+
+def test_a_stage_4_5_exception_is_returned_as_a_non_fatal_stage_error(monkeypatch, tmp_path, db):
+    """The 4.5 branch catches run_stage_4_5's exception instead of raising it:
+    no artifact, no cost, and a non-fatal record for execute_step to write."""
+    from app.pipeline import orchestrator as orch
+    from unified_pipeline.stage_errors import StageError
+
+    monkeypatch.setattr(orch, "run_stage_4_5", _raise_from_stage_4_5)
+    o = _orchestrator(monkeypatch, tmp_path, db, "S45RESULT")
+
+    result = asyncio.run(o._execute_stage_logic("4.5", str(tmp_path / "cv.docx")))
+
+    assert result["stage_error"] == StageError(
+        stage="4.5", exception_type="RuntimeError",
+        message="simulated research summary failure", fatal=False)
+    assert result["output_files"] == [] and result["cost"] == 0.0
+    assert "4.5" not in o.stage_outputs
+
+
+def test_a_stage_4_5_cancellation_still_stops_the_run(monkeypatch, tmp_path, db):
+    """A user cancel raised inside stage 4.5 is not a stage failure to carry on past."""
+    from app.pipeline import orchestrator as orch
+
+    def _cancelled(**_kwargs):
+        raise orch.CancelledException("cancelled")
+    monkeypatch.setattr(orch, "run_stage_4_5", _cancelled)
+    o = _orchestrator(monkeypatch, tmp_path, db, "S45CANCEL")
+
+    with pytest.raises(orch.CancelledException):
+        asyncio.run(o._execute_stage_logic("4.5", str(tmp_path / "cv.docx")))
+
+
+def test_a_stage_4_5_exception_lets_the_run_continue_and_records_it_non_fatal(
+        monkeypatch, tmp_path, db):
+    """Through the real execute()/execute_step: stage 4.5 raises, stage 5
+    still runs, the run completes, and the stage-error record holds a
+    non-fatal 4.5 entry (which execute_step's success path would otherwise
+    have cleared)."""
+    from app.models import Log, Run, Step
+    from app.pipeline import orchestrator as orch
+    from unified_pipeline.stage_errors import StageError, read_stage_errors
+
+    monkeypatch.setattr(orch, "run_stage_4_5", _raise_from_stage_4_5)
+    o = _orchestrator(monkeypatch, tmp_path, db, "S45CONT")
+    monkeypatch.setattr(orch, "STEP_REGISTRY", [
+        SimpleNamespace(number=7, stage_id="4.5", name="Research Summary"),
+        SimpleNamespace(number=8, stage_id="5", name="PubMed Enrichment")])
+    real_stage_logic = o._execute_stage_logic
+    ran = []
+
+    async def _stage_logic(stage_id, cv_path):
+        ran.append(stage_id)
+        if stage_id == "4.5":
+            return await real_stage_logic(stage_id, cv_path)
+        return {"output_files": [], "cost": 0.0}
+    monkeypatch.setattr(o, "_execute_stage_logic", _stage_logic)
+
+    asyncio.run(o.execute())
+
+    assert ran == ["4.5", "5"]
+    db.expire_all()
+    assert db.query(Run).filter(Run.id == "S45CONT").first().status == "complete"
+    step = db.query(Step).filter(Step.run_id == "S45CONT", Step.step_number == 7).first()
+    assert step.status == "complete"
+    assert read_stage_errors(o._stage_errors_path()) == [StageError(
+        stage="4.5", exception_type="RuntimeError",
+        message="simulated research summary failure", fatal=False)]
+    skip_logs = db.query(Log).filter(Log.run_id == "S45CONT", Log.step_number == 7,
+                                     Log.message.startswith("Research summary skipped")).all()
+    assert [entry.level for entry in skip_logs] == ["WARNING"]
+
+
+def test_a_successful_stage_4_5_registers_its_artifact_for_later_stages(monkeypatch, tmp_path, db):
+    from app.pipeline import orchestrator as orch
+
+    artifact = tmp_path / "TEST_research_summary.json"
+    artifact.write_text(json.dumps({"research_summary": {"m1_score": 0.1}, "total_cost": 0.0}))
+    monkeypatch.setattr(orch, "run_stage_4_5", lambda **_kwargs: str(artifact))
+    o = _orchestrator(monkeypatch, tmp_path, db, "S45OK")
+
+    result = asyncio.run(o._execute_stage_logic("4.5", str(tmp_path / "cv.docx")))
+
+    assert o.stage_outputs["4.5"] == str(artifact)
+    assert result["output_files"] == [str(artifact)]
+    assert result.get("stage_error") is None

@@ -1779,6 +1779,30 @@ def test_batch_progress_goes_to_the_logger_not_stdout(monkeypatch, caplog, capsy
     assert "Processing batch" not in out
 
 
+def test_batches_reach_call_llm_cut_at_a_record_edge_not_at_element_50(monkeypatch, caplog):
+    # #1226 wire test: stacked grants (5 field lines, then a blank) over 80
+    # elements put blanks at 41 and 47 and grant lines at 48-52. A fixed
+    # 50-element cut sent 48-49 as a headless tail in batch 1 and 50-52 in
+    # batch 2; the record-aligned cut ends batch 1 on the blank at 47.
+    elements = [{"unified_idx": i, "type": "empty"} if i % 6 == 5 else _para(i, f"Field line {i}")
+                for i in range(80)]
+    prompts = []
+
+    def capture(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", capture)
+    with caplog.at_level(logging.INFO, logger=stage2.logger.name):
+        stage2.detect_entries_for_section(["Grants"], elements, 0, 79, element_index_map=_idx_map(elements))
+
+    assert len(prompts) == 2
+    assert "[47] (BLANK LINE)" in prompts[0] and "[48] Field line 48" not in prompts[0]
+    assert "[48] Field line 48" in prompts[1] and "[49] Field line 49" in prompts[1]
+    messages = [r.message for r in caplog.records]
+    assert any("Processing batch 2/2 (elements 49-80 of 80)" in m for m in messages)
+
+
 # =============================================================== detail-line fold (#986)
 
 def _detail_fold_docx(tmp_path):

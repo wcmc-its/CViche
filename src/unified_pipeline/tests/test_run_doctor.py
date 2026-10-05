@@ -69,6 +69,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
     lint_stage_failure_recorded,
+    lint_research_summary_call_failed,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_segmentation_collapse,
@@ -2542,6 +2543,18 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     assert lint_date_cell_shape(stage4, [_MENTEE_TABLE], []) == []
 
 
+def test_date_cell_shape_reports_a_dotted_date_the_source_writes_the_same_way():
+    """RCBKFG KUUKNJ N4: the source dates its rows "YYYY.MM - ..." and stage
+    6 printed the stored "2021.07" as it stood. No WCM date format has a dot,
+    so the source's own spelling does not spare it."""
+    stage4 = {"entries": [_dated4("2021.07 - Example Widget Panel, member",
+                                  "Q3", "2021.07", None, idx=162)]}
+    rows = [[["Example Widget Panel", "Member", "2021.07"]]]
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", ["2021.07"])]
+    assert findings[0]["message"].startswith("entry 162 (Q3): raw_value:")
+
+
 @pytest.mark.parametrize("cell, shapes", [
     ("2003-04-2005-09", ["raw_value"]),
     ("2004-10-07", ["raw_value"]),
@@ -2558,6 +2571,12 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     ("Fall 2019 - fall 2019", ["same_ends"]),
     ("2004-10-07-2004-10-07", ["raw_value", "same_ends"]),
     ("2003-2005-09", ["raw_value"]),
+    # A dotted month or day (RCBKFG KUUKNJ N4), alone or on either side.
+    ("2021.07", ["raw_value"]),
+    ("2021.7.15", ["raw_value"]),
+    ("2017-2021.03", ["raw_value"]),
+    ("2022.07-2026.06", ["raw_value"]),
+    ("2021.07-present", ["open_range", "raw_value"]),
     ("2015-ongoing", ["open_range"]),
     ("2015-current", ["open_range"]),
     ("Sept 2008 - Sept 2008", ["same_ends"]),
@@ -2589,6 +2608,10 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     # are not dates the lint reads.
     ("2004-13-07", []),
     ("2004-10-32", []),
+    # A dot after the year needs a real month: "2021.13" and "2021.075" are
+    # not dates the lint reads.
+    ("2021.13", []),
+    ("2021.075", []),
     # Only a 19xx/20xx run is read as a year to tie by.
     ("1850-1850", []),
     ("2019", []),
@@ -3874,6 +3897,57 @@ def test_stage_failure_recorded_quiet_on_a_clean_run():
     assert lint_stage_failure_recorded([]) == []
 
 
+def test_stage_failure_recorded_names_research_activities_for_a_non_fatal_stage_4_5():
+    """The web driver's record when stage 4.5 raised and the run carried on (#1174)."""
+    (finding,) = lint_stage_failure_recorded([StageError("4.5", "RuntimeError", "boom", False)])
+    assert finding["severity"] == "WARN"
+    assert "the Research Activities section has no research summary" in finding["message"]
+    assert "RED" not in finding["message"]
+
+
+# ----------- #1174: research_summary_call_failed (a call stage 4.5 survived) --
+
+def test_research_summary_call_failed_warns_per_call_and_names_the_section():
+    stage4_5 = {"research_summary": {"text": ""}, "llm_call_failures": [
+        {"call": "m1_relevance_score", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"},
+        {"call": "summary_generation", "exception_type": "ClientError",
+         "stop_reason": None, "message": "denied"}]}
+
+    score, generation = lint_research_summary_call_failed(stage4_5)
+
+    assert {score["lint"], generation["lint"]} == {"research_summary_call_failed"}
+    assert {score["severity"], generation["severity"]} == {"WARN"}
+    assert "Research Activities text was not scored" in score["message"]
+    assert "stop_reason='content_filtered'" in score["message"]
+    assert "the Research Activities section has no research summary" in generation["message"]
+    assert generation["evidence"] == [
+        "call=summary_generation", "exception=ClientError", "stop_reason=None"]
+
+
+def test_research_summary_call_failed_quiet_without_the_record_or_on_a_malformed_one():
+    assert lint_research_summary_call_failed({"research_summary": {"text": "x"}}) == []
+    assert lint_research_summary_call_failed({"llm_call_failures": "not a list"}) == []
+    assert lint_research_summary_call_failed({"llm_call_failures": [None, 3]}) == []
+    assert lint_research_summary_call_failed(None) == []
+
+
+def test_run_doctor_wires_research_summary_call_failed_through_to_the_verdict(tmp_path):
+    """Deleting the LINT_REGISTRY row fails this."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "research_summary_call_failed"]
+    summary = root / "stage_4_5_research_summary" / f"{_UID}_cv_research_summary.json"
+    summary.write_text(json.dumps({"research_summary": {"text": ""}, "llm_call_failures": [
+        {"call": "summary_generation", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"}]}))
+
+    found = [f for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] == "research_summary_call_failed"]
+
+    assert len(found) == 1 and found[0]["severity"] == "WARN"
+
+
 def test_run_doctor_wires_stage_failure_recorded_through_to_the_verdict(tmp_path):
     """The record the drivers write (#745), read from its real location under
     the outputs root. A malformed record is the usual unreadable ERROR, not a
@@ -4014,14 +4088,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (48), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (49), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 46
+    assert len(payload["findings"]) == 47
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

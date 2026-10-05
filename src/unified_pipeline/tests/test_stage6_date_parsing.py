@@ -68,6 +68,13 @@ def test_month_precision_is_preserved_within_a_year():
     ("March 2020", (2020, 3, None)),
     ("Mar. 2020", (2020, 3, None)),
     ("Foobar 2021", (None, None, None)),   # unknown month name -> unreadable (#716)
+    # Dotted (RCBKFG KUUKNJ N4): the month, and the day, after the year.
+    ("2021.07", (2021, 7, None)),
+    ("2021.7", (2021, 7, None)),
+    ("2021.07.15", (2021, 7, 15)),
+    ("2021.13", (None, None, None)),
+    ("2021.02.30", (2021, 2, None)),
+    ("2021.075", (None, None, None)),
     ("", (None, None, None)),
     ("garbage", (None, None, None)),
 ])
@@ -750,6 +757,28 @@ def test_an_entry_opening_with_a_single_digit_dotted_month_keeps_present():
 def test_a_dotted_month_closed_range_stays_the_start_year():
     source_text = "2014.01 - 2016.12 Fictional Journal of Testing, Editorial Board"
     assert format_date_range("2014-01", "", "Q4C", source_text) == "2014"
+
+
+# --- RCBKFG KUUKNJ N4: a dotted value stored by stage 4 ---------------------
+
+@pytest.mark.parametrize("start, end, expected", [
+    ("2017", "2021.03", "2017-2021"),
+    ("2022.07", "2026.06", "2022-2026"),
+])
+def test_a_stored_dotted_date_renders_as_its_year(start, end, expected):
+    """Stage 4 kept the source's "YYYY.MM" and stage 6 printed it raw."""
+    assert format_date_range(start, end, "Q3") == expected
+
+
+def test_a_stored_dotted_start_with_an_open_source_dash_keeps_present():
+    """The start year was unread, so the source's open "YYYY.MM - " marker
+    was never looked for and the row rendered the raw start alone."""
+    source_text = "2021.07 - Fictional Review Panel, member"
+    assert format_date_range("2021.07", None, "Q3", source_text) == "2021-Present"
+
+
+def test_a_stored_dotted_date_sorts_by_its_month():
+    assert _sort("2021.07") == _sort("2021-07")
 
 
 # --- class E21 (EBYSBC autopsy): a range whose two ends read the same --------
