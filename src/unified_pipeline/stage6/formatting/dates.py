@@ -301,11 +301,12 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
 # later spans (EBYSBC class E22, #1245): a list of `{start_date, end_date}`
 # periods, or a string of dates, under `additional_dates`/`additional_periods`
 # (VNUAHA 142's second interim-chair term, EQADVR 33/34's later teaching
-# years), and one more span as a start/end pair (HZGJFM 190's 1994-present
-# committee term). No schema names them, so `fan_out._RENDERED_FIELDS` (which
+# years) or a string of ranges under `additional_date_ranges` (UYFRTL 33's
+# three teaching terms, RCBKFG), and one more span as a start/end pair
+# (HZGJFM 190's 1994-present committee term). No schema names them, so `fan_out._RENDERED_FIELDS` (which
 # may hold schema fields only) does not either; the doctor's offschema_fields
 # lint grades them against the record's own line instead.
-EXTRA_SPAN_LIST_KEYS = ('additional_dates', 'additional_periods')
+EXTRA_SPAN_LIST_KEYS = ('additional_dates', 'additional_periods', 'additional_date_ranges')
 EXTRA_SPAN_START_KEY = 'additional_period_start'
 EXTRA_SPAN_END_KEY = 'additional_period_end'
 EXTRA_SPAN_KEYS = frozenset({*EXTRA_SPAN_LIST_KEYS, EXTRA_SPAN_START_KEY,
@@ -325,6 +326,14 @@ DATE_SPAN_SEPARATOR = ', '
 # A string of extra dates is a list: "1993-12; 1995-09" or "2010, 2012".
 _EXTRA_DATE_STRING_SPLIT_RE = re.compile(r'\s*[;,]\s*')
 
+# One item of such a string that is a range, "1982-1986" or "2004-present":
+# a start and an end that each open with a four-digit year (or the end is an
+# ongoing word), so a year-month item ("1993-12") is not split in two.
+_EXTRA_DATE_RANGE_ITEM_RE = re.compile(
+    r'^(?P<start>\d{4}(?:[-/.]\d{1,2})?)\s*[-\u2013\u2014]\s*'
+    rf'(?P<end>\d{{4}}(?:[-/.]\d{{1,2}})?|{"|".join(sorted(_ONGOING_DATE_WORDS))})$',
+    re.IGNORECASE)
+
 # Upper bound of a span still running ("present"), for `_span_is_covered`.
 _OPEN_END_YEAR = 10_000
 
@@ -333,6 +342,16 @@ class _Span(NamedTuple):
     """One extra span as stage 4 wrote it: a start and an optional end."""
     start: object
     end: object
+
+
+def _string_span(part: str) -> _Span:
+    """One item of a string of extra dates: a range item
+    (`_EXTRA_DATE_RANGE_ITEM_RE`) as its start and end, anything else as a
+    start alone."""
+    match = _EXTRA_DATE_RANGE_ITEM_RE.match(part)
+    if match is None:
+        return _Span(part, '')
+    return _Span(match['start'], match['end'])
 
 
 def _extra_spans(fields: Mapping[str, Any]) -> list[_Span]:
@@ -346,7 +365,7 @@ def _extra_spans(fields: Mapping[str, Any]) -> list[_Span]:
                 spans.append(_Span(item.get(RANGE_START_KEY) or item.get('date') or '',
                                    item.get(RANGE_END_KEY) or ''))
             elif isinstance(item, str):
-                spans.extend(_Span(part, '') for part in
+                spans.extend(_string_span(part) for part in
                              _EXTRA_DATE_STRING_SPLIT_RE.split(item) if part)
     if fields.get(EXTRA_SPAN_START_KEY) or fields.get(EXTRA_SPAN_END_KEY):
         spans.append(_Span(fields.get(EXTRA_SPAN_START_KEY) or '',
@@ -369,10 +388,87 @@ def _span_years(start: object, end: object) -> tuple[int, int] | None:
 
 def _span_is_covered(span: _Span, primary: tuple[int, int]) -> bool:
     """Whether every year of `span` lies inside the record's own range: a
-    teaching row dated 1985-2005 whose extra dates are the years in between
-    (EQADVR 48) gains nothing from listing them."""
+    row dated 1985-2005 whose extra dates fill the years in between gains
+    nothing from listing them. When they leave a gap the range is only their
+    envelope, and `envelope_date_spans` shows them in its place (EQADVR 48,
+    UYFRTL 48, RCBKFG)."""
     years = _span_years(span.start, span.end)
     return years is not None and primary[0] <= years[0] and years[1] <= primary[1]
+
+
+def _primary_is_envelope(years: list[tuple[int, int]], primary: tuple[int, int]) -> bool:
+    """Whether the record's own range is only the envelope of its extra spans:
+    they start at its start and end at its end, and leave a year inside it
+    uncovered. Stage 4 then wrote the min-max of discrete years or separate
+    terms as `start_date`-`end_date` (UYFRTL 33, 34, 48, 49, RCBKFG), and the
+    range claims years the CV does not. Extra spans that cover every year of
+    the range leave it standing: listing them adds nothing."""
+    if not years or min(first for first, _ in years) != primary[0] \
+            or max(last for _, last in years) != primary[1]:
+        return False
+    reached = primary[0] - 1
+    for first, last in sorted(years):
+        if first > reached + 1:
+            return True
+        reached = max(reached, last)
+    return False
+
+
+def _format_span(span: _Span, taxonomy_code: str) -> str:
+    """One extra span as its date column shows it. A span with no end is that
+    date alone: an extra date in a list ("2010" beside a 1978-1979 course) is
+    one occasion, not a range still running, which `format_date_range` would
+    make it."""
+    if span.end:
+        return format_date_range(str(span.start or ''), str(span.end), taxonomy_code)
+    return format_date_for_section(str(span.start or ''), taxonomy_code)
+
+
+# A span that is one bare year: what `_merge_consecutive_years` may join.
+_BARE_YEAR_RE = re.compile(r'^\s*(\d{4})\s*$')
+
+
+def _bare_year(value: object) -> int | None:
+    match = _BARE_YEAR_RE.match(str(value or ''))
+    return int(match[1]) if match else None
+
+
+def _merge_consecutive_years(spans: list[_Span]) -> list[_Span]:
+    """`spans` with each run of bare years one apart joined into one span:
+    stage 4 writes "1992-94" as "1992; 1993; 1994" (UYFRTL 48), which reads
+    back as the range it was. Years with a gap, and any span with a month
+    or an end of its own, stay as they are."""
+    merged: list[_Span] = []
+    for span in spans:
+        year = None if span.end else _bare_year(span.start)
+        previous = merged[-1] if merged else None
+        if (year is not None and previous is not None
+                and _bare_year(previous.end or previous.start) == year - 1):
+            merged[-1] = _Span(previous.start, span.start)
+        else:
+            merged.append(span)
+    return merged
+
+
+def envelope_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
+    """The record's extra spans, formatted and in stage 4's order less
+    repeats, when its own `start_date`-`end_date` range is only their
+    envelope (`_primary_is_envelope`): its date cell shows these in place of
+    that range, with runs of consecutive years joined
+    (`_merge_consecutive_years`). Empty otherwise, or when an extra span has
+    no year to place."""
+    primary = _span_years(fields.get(RANGE_START_KEY), fields.get(RANGE_END_KEY))
+    spans = _extra_spans(fields)
+    years = [_span_years(span.start, span.end) for span in spans]
+    if primary is None or None in years \
+            or not _primary_is_envelope([y for y in years if y is not None], primary):
+        return []
+    shown: list[str] = []
+    for span in _merge_consecutive_years(spans):
+        text = _format_span(span, taxonomy_code)
+        if text and text not in shown:
+            shown.append(text)
+    return shown
 
 
 def extra_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
@@ -389,11 +485,7 @@ def extra_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]
     for span in _extra_spans(fields):
         if _span_is_covered(span, primary):
             continue
-        # A span with no end is that date alone: an extra date in a list
-        # ("2010" beside a 1978-1979 course) is one occasion, not a range
-        # still running, which `format_date_range` would make it.
-        text = (format_date_range(str(span.start or ''), str(span.end), taxonomy_code)
-                if span.end else format_date_for_section(str(span.start or ''), taxonomy_code))
+        text = _format_span(span, taxonomy_code)
         if text and text not in shown:
             shown.append(text)
             extras.append(text)
@@ -405,9 +497,14 @@ def with_extra_date_spans(dates: str, fields: Mapping[str, Any],
     """`dates` (the record's own range, as its renderer formatted it) followed
     by `extra_date_spans`, joined with `DATE_SPAN_SEPARATOR`: "2019-2020,
     2021". An empty `dates` stays empty -- its renderer has its own fallback
-    for a row with no date, which an extra span alone must not pre-empt."""
+    for a row with no date, which an extra span alone must not pre-empt.
+    When the own range is only the envelope of the extra spans
+    (`envelope_date_spans`), the spans replace it."""
     if not dates:
         return dates
+    envelope = envelope_date_spans(fields, taxonomy_code)
+    if envelope:
+        return DATE_SPAN_SEPARATOR.join(envelope)
     return DATE_SPAN_SEPARATOR.join([dates, *extra_date_spans(fields, taxonomy_code)])
 
 

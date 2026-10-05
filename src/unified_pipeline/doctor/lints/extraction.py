@@ -7,8 +7,9 @@ their text, taxonomy codes that vanished between classification and render,
 dedup drops that were not duplicates, records fabricated from the template's
 own scaffolding, values filed under a key no renderer reads, years given the
 wrong century, entries holding several records that stage 4 returned as
-one, grant lists cut into records at the wrong line, and grants filed under a
-funding heading their own record contradicts.
+one, grant lists cut into records at the wrong line, grants filed under a
+funding heading their own record contradicts, and separate years rendered as
+one range over them.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -2729,4 +2730,156 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
                 f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
                 f"{reason} (#1343)",
                 [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- span_count --------------------------------------------------------------
+#
+# Stage 4 sometimes writes a record of separate years or terms ("2003, 2013",
+# "1982-86, 1989-1995, 2004-2012") as one start_date-end_date pair, their
+# min-max, and the row renders a continuous range the CV does not claim
+# (batch RCBKFG, UYFRTL 33/34/48/49; #1245). Stage 6 shows the separate spans
+# when stage 4 also kept them under a further-span key (`envelope_date_spans`),
+# but not when it kept only the envelope, and no other lint compares the
+# source's spans with the row's. Report-only.
+
+#: A dash between the two ends of a span, any of the ways a CV types one.
+_SPAN_DASH = r"[-‐-―−─]"
+#: A written span: a year (a dotted or slashed month after it is read past),
+#: then optionally a dash and an end year, a one- or two-digit end, or an
+#: ongoing word.
+_WRITTEN_SPAN_RE = re.compile(
+    r"(?<![\d/.])((?:19|20)\d{2})(?:[./]\d{1,2}(?!\d))?(?![\d/])"
+    rf"(?:\s*{_SPAN_DASH}\s*((?:19|20)\d{{2}}(?:[./]\d{{1,2}})?(?!\d)|\d{{1,2}}(?!\d)"
+    r"|present|current|ongoing|now))?", re.IGNORECASE)
+#: A month or term word, and the day after it, read past so "Fall 2014 -
+#: Spring 2018" is one span; with the short term names ("Spr 2015") course
+#: lists use.
+_SPAN_MONTH_RE = re.compile(
+    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])\s*(?:\d{{1,2}}(?:st|nd|rd|th)?\b,?)?",
+    re.IGNORECASE)
+#: Words that join the two ends of one span: "1980 to 1987", "between 1978
+#: and 1988".
+_SPAN_CONNECTOR_RE = re.compile(r"\s+(?:to|through|thru|until|till)\s*(?=\d)", re.IGNORECASE)
+_SPAN_BETWEEN_RE = re.compile(r"\bbetween\s+((?:19|20)\d{2})\s+and\s+", re.IGNORECASE)
+#: What separates two spans of one list: "2003, 2013", "2001; 2004", "2015
+#: and 2017". Two years with none of these between them are a range split
+#: across cells or lines ("2014<tab>...2016"), not a list.
+_SPAN_LIST_SEPARATOR_RE = re.compile(r"[,;&]|\band\b", re.IGNORECASE)
+#: The end of a span still running (`present`), for envelope comparison.
+_SPAN_OPEN_END = 10_000
+#: Codes whose line names the mentee's own milestones ("M.S. 1982; Ph.D.
+#: 1986") rather than the record's span: the row's range is the mentorship.
+_SPAN_COUNT_SKIPPED_PREFIXES = ("N",)
+
+
+class WrittenSpan(NamedTuple):
+    """One span of years as written: its first and last year, and where the
+    text it was read from holds it."""
+    first: int
+    last: int
+    start: int
+    end: int
+
+
+def _span_source(text: str) -> str:
+    """`text` with month and term words read past and "X to Y" / "between X
+    and Y" written as one dashed span, the form `_written_spans` reads."""
+    return _SPAN_BETWEEN_RE.sub(r"\1-", _SPAN_CONNECTOR_RE.sub("-", _SPAN_MONTH_RE.sub("", text)))
+
+
+def _written_spans(text: str) -> list[WrittenSpan]:
+    """The year spans of `text` (already `_span_source`), in order. A one- or
+    two-digit end is completed from the start year; one that would end before
+    it (a month: "2019-05") leaves the start year alone."""
+    spans: list[WrittenSpan] = []
+    for match in _WRITTEN_SPAN_RE.finditer(text):
+        first, end = int(match[1]), match[2]
+        if end is None:
+            last = first
+        elif end.isalpha():
+            last = _SPAN_OPEN_END
+        elif len(end) <= 2:
+            last = first - first % 10 ** len(end) + int(end)
+        else:
+            last = int(end[:4])
+        spans.append(WrittenSpan(first, max(first, last), match.start(), match.end()))
+    return spans
+
+
+def _is_a_list(text: str, spans: list[WrittenSpan]) -> bool:
+    """Whether consecutive spans of `text` are separated as items of one list."""
+    return all(_SPAN_LIST_SEPARATOR_RE.search(text[before.end:after.start])
+               for before, after in zip(spans, spans[1:]))
+
+
+def _leaves_a_gap(spans: list[tuple[int, int]], envelope: tuple[int, int]) -> bool:
+    """Whether a year inside `envelope` lies in none of `spans`."""
+    reached = envelope[0] - 1
+    for first, last in sorted(spans):
+        if first > reached + 1:
+            return True
+        reached = max(reached, last)
+    return False
+
+
+def _envelope_of_separate_spans(text: str) -> tuple[tuple[int, int], int] | None:
+    """The min-max of the text's spans and how many there are, when the text
+    lists two or more spans that leave a year of that min-max uncovered."""
+    source = _span_source(text)
+    spans = _written_spans(source)
+    years = list(dict.fromkeys((span.first, span.last) for span in spans))
+    if not years:
+        return None
+    envelope = (min(first for first, _ in years), max(last for _, last in years))
+    # One span, or spans that fill their min-max, leave no gap.
+    if not _leaves_a_gap(years, envelope) or not _is_a_list(source, spans):
+        return None
+    return envelope, len(years)
+
+
+def _renders_only_the_envelope(line: OutputLine, envelope: tuple[int, int]) -> bool:
+    """Whether the line's one span inside `envelope` is the envelope itself."""
+    inside = {(span.first, span.last) for span in _written_spans(_span_source(line.squashed))
+              if envelope[0] <= span.first and span.last <= envelope[1]}
+    return inside == {envelope}
+
+
+def _span_text(envelope: tuple[int, int]) -> str:
+    last = "present" if envelope[1] == _SPAN_OPEN_END else str(envelope[1])
+    return f"{envelope[0]}-{last}"
+
+
+def lint_span_count(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """A record whose source lists separate years or terms ("2003, 2013")
+    while its rendered row shows one continuous range over them, their
+    min-max (#1245, batch RCBKFG: UYFRTL 33/34/48/49). The row is the
+    record's own line (`_record_lines`); the source is the entry's text,
+    whose spans must be written as a list (`_SPAN_LIST_SEPARATOR_RE`) and
+    leave a year of the range uncovered. Skips the codes `multi_record_coverage`
+    skips except teaching, whose rows stage 5c rewrites from the same dates,
+    and mentoring codes (`_SPAN_COUNT_SKIPPED_PREFIXES`). WARN, one finding
+    per entry: 111 of 118 hits real on 245 stored runs (doctor/PRECISION.md,
+    RCB-SC)."""
+    document = _rendered_document(stage4, blocks)
+    declared_by_code = _declared_fields()
+    skipped = _MULTI_RECORD_SKIPPED_CODES - frozenset(TEACHING_CODES)
+    findings = []
+    for entry in _fields_entries(stage4):
+        if (not entry.code or entry.code in skipped or not entry.fields
+                or entry.code.startswith(_SPAN_COUNT_SKIPPED_PREFIXES)):
+            continue
+        found = _envelope_of_separate_spans(entry.text)
+        if found is None:
+            continue
+        envelope, count = found
+        keys = declared_by_code.get(entry.code, frozenset()) | _RENDERED_FIELDS.get(
+            entry.code, frozenset())
+        if any(_renders_only_the_envelope(line, envelope)
+               for line in _record_lines(entry, keys, document)):
+            findings.append(_finding(
+                "span_count", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): the source lists {count} "
+                f"separate dates, the row shows one range {_span_text(envelope)} (#1245)",
+                [f"entry {entry.element_idx}: {count} source spans, 1 rendered"]))
     return findings

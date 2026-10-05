@@ -82,6 +82,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _short_end_year,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_span_count,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack, docx_body_blocks)
@@ -1929,6 +1930,23 @@ def test_offschema_a_span_key_on_a_code_no_date_cell_extends_is_unread():
     assert "date cell" not in findings[0]["message"]
 
 
+def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
+    """RCBKFG (#1245, UYFRTL 33): `additional_date_ranges` is a string, so
+    as a date-named key outside `EXTRA_SPAN_KEYS` it was never a candidate.
+    Its terms missing from the row are now a lost date; once the row
+    carries them it is not reported."""
+    entry = _fields_entry("O", {
+        "leadership_role": "Chair", "institution": "Example College",
+        "start_date": "1982", "end_date": "2012",
+        "additional_date_ranges": "1982-1986; 1989-1995; 2004-2012"})
+    findings = _graded([_table(_row("Chair", "Example College", "1982-2012"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_date_ranges")]
+    assert "its span did not reach the record's date cell" in findings[0]["message"]
+    shown = _table(_row("Chair", "Example College", "1982-1986, 1989-1995, 2004-2012"))
+    assert _graded([shown], entry) == []
+
+
 def test_offschema_row_found_when_its_name_is_split_across_cells():
     """The honors renderer moves an award name's tail into its own cell, and
     the document writes a typographic apostrophe stage 4 wrote plainly."""
@@ -3476,3 +3494,91 @@ def test_short_end_year(end, start, expected):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ==========================================================================
+# span_count (#1245, batch RCBKFG) -- separate source years rendered as one
+# range over them.
+
+def _span_entry(text, start="2003", end="2013", code="Q2"):
+    return _fields_entry(code, {"role": "Reviewer", "organization": "Example Society",
+                                "start_date": start, "end_date": end}, text=text)
+
+
+def _span_row(dates):
+    return [_table(_row("Reviewer, Example Society", dates))]
+
+
+def _span_count(entry, dates):
+    return lint_span_count({"entries": [entry]}, _span_row(dates))
+
+
+def test_span_count_flags_separate_years_rendered_as_their_envelope():
+    findings = _span_count(_span_entry("Reviewer, Example Society, 2003, 2007, 2013"),
+                           "2003-2013")
+    assert [(f["lint"], f["severity"]) for f in findings] == [("span_count", "WARN")]
+    assert "lists 3 separate dates" in findings[0]["message"]
+    assert "2003-2013" in findings[0]["message"]
+
+
+def test_span_count_reads_terms_two_digit_ends_and_and():
+    """UYFRTL 33's shape, terms written 'Fall 2003', and 'and' as a list
+    separator."""
+    assert _span_count(_span_entry("Reviewer, Example Society 1982-86, 1989-1995, 2004-2012",
+                                   "1982", "2012"), "1982-2012")
+    assert _span_count(_span_entry("Reviewer, Example Society, Fall 2003 and Spring 2013"),
+                       "2003-2013")
+
+
+def test_span_count_spares_the_row_that_shows_the_spans():
+    entry = _span_entry("Reviewer, Example Society, 2003, 2007, 2013")
+    assert _span_count(entry, "2003, 2007, 2013") == []
+
+
+def test_span_count_spares_years_that_leave_no_gap():
+    assert _span_count(_span_entry("Reviewer, Example Society, 2003-2008, 2009-2013"),
+                       "2003-2013") == []
+
+
+def test_span_count_spares_one_range_written_with_words_or_split_across_cells():
+    """'2003 to 2013', 'between 2003 and 2013' and 'Jan 2003 - Dec 2013' are
+    one span; two years with no list separator between them are the two ends
+    of a range a table cell split."""
+    for text in ("Reviewer, Example Society, 2003 to 2013",
+                 "Reviewer, Example Society, between 2003 and 2013",
+                 "Reviewer, Example Society, Jan 2003 - Dec 2013",
+                 "Reviewer 2003\tExample Society 2013"):
+        assert _span_count(_span_entry(text), "2003-2013") == [], text
+
+
+def test_span_count_skips_mentoring_codes():
+    """A mentee line's years are the mentee's own degrees (M.S. 2003; Ph.D.
+    2013), not the record's span. The same entry under a code the lint
+    judges (P) fires, so the skip is what spares it."""
+    fields = {"mentee_name": "A. Mentee", "institution": "Example College",
+              "start_date": "2003", "end_date": "2013"}
+    blocks = [_table(_row("A. Mentee", "Example College", "2003-2013"))]
+    text = "A. Mentee, Example College, M.S. 2003; Ph.D. 2013"
+    assert lint_span_count({"entries": [_fields_entry("N3B", fields, text=text)]},
+                           blocks) == []
+    assert lint_span_count({"entries": [_fields_entry("P", fields, text=text)]}, blocks)
+
+
+def test_span_count_completes_a_two_digit_end_and_reads_an_open_one():
+    """'2003-07, 2009-13' spans 2003-2013 (read as 2003 and 2009 it would
+    not match the row); '2003, 2010-present' spans 2003-present."""
+    assert _span_count(_span_entry("Reviewer, Example Society, 2003-07, 2009-13"),
+                       "2003-2013")
+    assert _span_count(_span_entry("Reviewer, Example Society, 2003, 2010-present",
+                                   end="present"), "2003-Present")
+
+
+def test_span_count_judges_teaching_rows():
+    """Teaching is skipped by `multi_record_coverage` but is where the
+    envelope shows most (UYFRTL 33/34/48)."""
+    entry = _fields_entry("K1", {"course_title": "Example Course", "start_date": "2003",
+                                 "end_date": "2013"},
+                          text="Example Course, Fall 2003, Fall 2013")
+    findings = lint_span_count({"entries": [entry]},
+                               [("p", "2003-2013 - Example Course")])
+    assert [f["lint"] for f in findings] == ["span_count"]

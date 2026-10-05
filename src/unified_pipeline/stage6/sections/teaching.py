@@ -117,6 +117,7 @@ from docx.table import _Row
 
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
+    envelope_date_spans,
     extra_date_spans,
     normalize_iso_dates_in_text,
 )
@@ -224,14 +225,18 @@ def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) ->
     `additional_periods`/`additional_dates` (EBYSBC E22: EQADVR 33/34). The
     own date is the first year-or-range token naming the record's start
     year; a text with none is left as it is, since there is no date to
-    extend."""
-    extras = extra_date_spans(fields, taxonomy_code)
-    if not extras:  # also when the start has no year: extra_date_spans is [] then
+    extend. When that own range is only the envelope of the spans
+    (`envelope_date_spans`: UYFRTL 33/34/48/49), the spans replace it."""
+    envelope = envelope_date_spans(fields, taxonomy_code)
+    extras = envelope or extra_date_spans(fields, taxonomy_code)
+    if not extras:  # also when the start has no year: both are [] then
         return text
     start_year = _parse_date_components(str(fields.get('start_date') or '').strip())[0]
     own_date = re.search(_OWN_DATE_TOKEN.format(year=start_year), text, re.IGNORECASE)
     if own_date is None:
         return text
+    if envelope:
+        return text[:own_date.start()] + DATE_SPAN_SEPARATOR.join(envelope) + text[own_date.end():]
     cut = own_date.end()
     return DATE_SPAN_SEPARATOR.join([text[:cut], *extras]) + text[cut:]
 
