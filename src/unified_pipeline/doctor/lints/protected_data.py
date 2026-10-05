@@ -31,9 +31,11 @@ from unified_pipeline.stage6.normalization.pii import (
     CAT_DEA,
     CAT_FAMILY,
     CAT_HOME_CONTACT,
+    CAT_INSTITUTIONAL_ID,
     CAT_MARITAL_STATUS,
     CAT_PLACE_OF_BIRTH,
     CAT_SPOUSE,
+    CAT_TAX_ID,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     _MONTH_NAMES,
@@ -235,6 +237,20 @@ _HOME_LABEL = (r"(?:\b(?i:home|residence)\b"
                r"(?:[ \t]+(?i:phone|telephone|tel|ph|address|addr|number|no|fax)\b\.?)?"
                r"|\((?i:h|home|res)\))")
 _HOME_TAG_AFTER = r"(?:\((?i:h|home|res|residence)\)|\b(?i:home)\b)"
+#: NDMRSO ND1: the owner's institutional or tax ID number. A label naming whose
+#: ID it is, then four or more digits. A bare "ID #" (a board certificate's) or
+#: an institution name before a grant's "#<number>" is not such a label; NPI and
+#: ORCID are public and render (#821).
+_INSTITUTIONAL_ID_LABEL = (
+    r"(?i:(?:employee|staff|student|faculty|personnel|payroll|badge)[ \t]*(?:id|identification|number|no\.?)"
+    r"|(?:university|institution(?:al)?|campus)[ \t]*(?:id|identification)"
+    r"|ufid|cwid|emplid)")
+_TAX_ID_LABEL = (r"(?i:(?:federal[ \t]*)?tax[ \t]*(?:payer[ \t]*)?(?:id|identification)"
+                 r"|employer[ \t]*identification|f?ein|i?tin)")
+#: The label's own trailing "number", "no." or "#", then a colon or dash, blanks,
+#: tabs or a table-cell pipe.
+_ID_LABEL_TAIL = r"(?![A-Za-z])(?:[ \t]*(?i:number|no\.?|#))?[ \t|]*(?:[:\-–—][ \t|]*)?"
+_ID_NUMBER = r"[A-Za-z]{0,4}-?\d(?:[ -]?\d){3,}"
 
 #: (shape, policy category). Every shape names its value `value`. Same line
 #: only (`[ \t]`, never `\s`): a Personal Data row's label and value sit on
@@ -264,6 +280,10 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
      CAT_HOME_CONTACT),
     (re.compile(r"(?P<value>" + _PHONE + "|" + _STREET + r")[ \t]*[,;:]?[ \t]*" + _HOME_TAG_AFTER),
      CAT_HOME_CONTACT),
+    (re.compile(r"(?<![\w-])" + _INSTITUTIONAL_ID_LABEL + _ID_LABEL_TAIL
+                + r"(?P<value>" + _ID_NUMBER + ")"), CAT_INSTITUTIONAL_ID),
+    (re.compile(r"(?<![\w-])" + _TAX_ID_LABEL + _ID_LABEL_TAIL
+                + r"(?P<value>" + _ID_NUMBER + ")"), CAT_TAX_ID),
 )
 
 #: `_locate_entries`: a value shorter than this (a lone given name, a year)
