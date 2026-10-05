@@ -318,3 +318,18 @@ def test_a_stage_4_5_exception_lets_the_run_continue_and_records_it_non_fatal(
     assert read_stage_errors(o._stage_errors_path()) == [StageError(
         stage="4.5", exception_type="RuntimeError",
         message="simulated research summary failure", fatal=False)]
+
+
+def test_a_successful_stage_4_5_registers_its_artifact_for_later_stages(monkeypatch, tmp_path, db):
+    from app.pipeline import orchestrator as orch
+
+    artifact = tmp_path / "TEST_research_summary.json"
+    artifact.write_text(json.dumps({"research_summary": {"m1_score": 0.1}, "total_cost": 0.0}))
+    monkeypatch.setattr(orch, "run_stage_4_5", lambda **_kwargs: str(artifact))
+    o = _orchestrator(monkeypatch, tmp_path, db, "S45OK")
+
+    result = asyncio.run(o._execute_stage_logic("4.5", str(tmp_path / "cv.docx")))
+
+    assert o.stage_outputs["4.5"] == str(artifact)
+    assert result["output_files"] == [str(artifact)]
+    assert result.get("stage_error") is None

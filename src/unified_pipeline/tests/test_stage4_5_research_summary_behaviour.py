@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError, HTTPClientError
 
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
 _SRC = Path(__file__).resolve().parents[2]
@@ -32,6 +32,7 @@ import unified_pipeline.stage_4_5_research_summary as stage_4_5  # noqa: E402
 from unified_pipeline.llm.bedrock import (  # noqa: E402
     BedrockContentFilteredError,
     BedrockEmptyResponseError,
+    BedrockToolCallDidNotFireError,
 )
 from unified_pipeline.llm.retry import LLMOutageError  # noqa: E402
 from unified_pipeline.llm_provenance import (  # noqa: E402
@@ -1424,3 +1425,63 @@ def test_a_provider_outage_still_propagates(monkeypatch, tmp_path):
 
     with pytest.raises(LLMOutageError):
         _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+
+# One instance per LLM_CALL_ERRORS member (the RETRYABLE_ERRORS ones by a
+# concrete subclass where botocore's base needs constructor kwargs).
+_ONE_ERROR_PER_CAUGHT_TYPE = [
+    BedrockContentFilteredError("filtered"),
+    BedrockEmptyResponseError("no text", stop_reason="end_turn"),
+    BedrockToolCallDidNotFireError("no tool call", stop_reason="end_turn"),
+    _access_denied(),
+    EndpointConnectionError(endpoint_url="https://bedrock.example.invalid"),
+    HTTPClientError(error="connection reset"),
+]
+
+
+def test_the_parametrized_errors_cover_every_caught_type():
+    caught = stage_4_5.LLM_CALL_ERRORS
+    assert all(any(isinstance(e, t) for e in _ONE_ERROR_PER_CAUGHT_TYPE) for t in caught)
+
+
+@pytest.mark.parametrize("error", _ONE_ERROR_PER_CAUGHT_TYPE, ids=lambda e: type(e).__name__)
+def test_every_caught_error_on_the_score_call_still_generates_the_summary(monkeypatch, tmp_path, error):
+    _stub_calls(monkeypatch, score=error, generation=_SUMMARY_TEXT)
+
+    out = _run(tmp_path)
+
+    assert out["research_summary"]["text"] == _SUMMARY_TEXT
+    assert [f["exception_type"] for f in out[STAGE4_5_CALL_FAILURES_KEY]] == [type(error).__name__]
+
+
+@pytest.mark.parametrize("error", _ONE_ERROR_PER_CAUGHT_TYPE, ids=lambda e: type(e).__name__)
+def test_every_caught_error_on_the_generation_call_writes_an_empty_summary(monkeypatch, tmp_path, error):
+    _stub_calls(monkeypatch, generation=error)
+
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    summary = out["research_summary"]
+    assert (summary["text"], summary["generation_method"]) == ("", stage_4_5.GENERATION_METHOD_LLM_CALL_FAILED)
+    assert [f["exception_type"] for f in out[STAGE4_5_CALL_FAILURES_KEY]] == [type(error).__name__]
+
+
+def test_a_failure_message_is_cut_to_the_artifact_limit(monkeypatch, tmp_path):
+    long_message = "x" * (stage_4_5.CALL_FAILURE_MESSAGE_CHARS + 50)
+    _stub_calls(monkeypatch, generation=BedrockContentFilteredError(long_message))
+
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    assert out[STAGE4_5_CALL_FAILURES_KEY][0]["message"] == long_message[:stage_4_5.CALL_FAILURE_MESSAGE_CHARS]
+
+
+def test_the_artifact_sums_cache_tokens_over_both_calls(monkeypatch, tmp_path):
+    def fake_call_llm(*, messages, **_kwargs):
+        is_score = _SCORE_PROMPT_MARKER in messages[0]["content"]
+        return {"content": '{"score": 0.1, "reasoning": "keywords"}' if is_score else _SUMMARY_TEXT,
+                **_REPLY_USAGE,
+                "cache_read_tokens": 3 if is_score else 5, "cache_write_tokens": 11 if is_score else 13}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    out = _run(tmp_path)
+
+    assert (out["cache_read_tokens"], out["cache_write_tokens"]) == (3 + 5, 11 + 13)
