@@ -1184,8 +1184,8 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
     institution.
 
     The last one is Strategy 2's short-proper-noun fallback taking the
-    clause a name opens with -- "First Place, <competition>" rendered "First
-    Place" as the organization (RCBKFG FLYBMX 288/289, #1412). A first
+    clause a name opens with -- "<rank>, <competition>" rendered the rank as
+    the organization (RCBKFG FLYBMX 288/289, #1412). A first
     clause with no award word ("<network>, Forum for ...") or one that
     names an institution ("<university>, Teaching Award") is still a
     grantor.
