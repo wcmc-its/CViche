@@ -450,14 +450,20 @@ def repair_and_report(docx_path: str | Path) -> ProtectedDataRepair | None:
     """`repair_protected_data`, then its report beside the document. Never
     raises: a repair that fails leaves the render as stage 6 wrote it (the
     atomic save means it is never half-written) and the run goes on with the
-    findings it had. Returns None in that case."""
+    findings it had. Returns None in that case. A report that cannot be
+    written is logged and the repair still returned: the document is already
+    repaired, and the doctor's lint re-reads it rather than the report."""
     try:
         result = repair_protected_data(docx_path)
     except Exception as exc:  # noqa: BLE001 -- the render must survive its repair
         logger.warning("Protected-data repair failed, document left as rendered: %s",
                        type(exc).__name__)
         return None
-    repairs_report_path(docx_path).write_text(json.dumps(result.to_json(), indent=2))
+    try:
+        repairs_report_path(docx_path).write_text(json.dumps(result.to_json(), indent=2))
+    except OSError:
+        logger.warning("Protected-data repair report not written; the repaired document stands",
+                       exc_info=True)
     if result.found:
         logger.info("Protected-data repair: %d finding(s), %d paragraph(s) cut, %d left",
                     result.found, len(result.removals), result.remaining)
