@@ -143,6 +143,38 @@ def test_stage_6_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
     assert captured.get("original_doc_path") == real_cv_path
 
 
+@pytest.mark.parametrize("env, repair", [(None, False), ("0", False), ("1", True)])
+def test_stage_6_repairs_under_the_flag_and_keeps_the_repair_report(monkeypatch, tmp_path, db,
+                                                                    env, repair):
+    """#1389: CVICHE_RUN_REPAIR=1 asks stage 6 to repair protected data, and
+    the `<uid>_repairs.json` it writes is persisted with the docx, like the
+    render-warnings sidecar, so the run's record of what was cut survives the pod."""
+    from app.pipeline import orchestrator as orch
+
+    if env is None:
+        monkeypatch.delenv("CVICHE_RUN_REPAIR", raising=False)
+    else:
+        monkeypatch.setenv("CVICHE_RUN_REPAIR", env)
+    captured = {}
+
+    def fake_run_stage6(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "STAGE6REPAIR_wcm.docx"
+        out.write_bytes(b"PK")
+        if kwargs["repair_protected_data"]:
+            (tmp_path / "STAGE6REPAIR_repairs.json").write_text("{}")
+        return str(out)
+
+    monkeypatch.setattr(orch, "run_stage6", fake_run_stage6)
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE6REPAIR")
+    o.stage_outputs["5d"] = str(tmp_path / "stage5d.json")
+
+    result = asyncio.run(o._execute_stage_logic("6", str(tmp_path / "cv.docx")))
+
+    assert captured["repair_protected_data"] is repair
+    assert (str(tmp_path / "STAGE6REPAIR_repairs.json") in result["output_files"]) is repair
+
+
 # -- #1177: every stage that calls the LLM adds its cost to the run ---------
 
 

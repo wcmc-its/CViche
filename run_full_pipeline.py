@@ -75,6 +75,7 @@ import sys
 import json
 import logging
 import logging.config
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -97,6 +98,7 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on
 from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 
 logger = logging.getLogger(__name__)
@@ -939,7 +941,11 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
     # the fallback checks is_file() and skips.
     usage = LlmUsage()
     output_path = run_stage6(input_path=input_path, verbose=True,
-                             original_doc_path=str(ctx.cv_path), llm_usage=usage)
+                             original_doc_path=str(ctx.cv_path), llm_usage=usage,
+                             # #1389: off unless "1". The env var only: the web driver's
+                             # get_config also reads auth_config.yaml's "repair" section,
+                             # and that loader is backend code this CLI does not import.
+                             repair_protected_data=repair_flag_on(os.environ.get(REPAIR_FLAG_ENV)))
     logger.info("")
     logger.info("Stage 6 Complete")
     logger.info("  Output: %s", output_path)

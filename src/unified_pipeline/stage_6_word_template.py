@@ -4171,7 +4171,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                recover_unrendered_records: bool = True,
                original_doc_path: str | None = None,
                discover_original_doc: bool = True,
-               llm_usage: LlmUsage | None = None) -> str:
+               llm_usage: LlmUsage | None = None,
+               repair_protected_data: bool = False) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -4243,6 +4244,10 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             scripts/render_gate.py passes it; default True.
         llm_usage: Optional LlmUsage the render's call_llm results are added
             to, so a driver can report stage 6's cost (#1177).
+        repair_protected_data: After the render, remove the protected personal
+            data the doctor's `protected_data_in_output` lint still finds in the
+            document and write `<uid>_repairs.json` beside it (#1389; default
+            False). Both drivers pass it from CVICHE_RUN_REPAIR.
 
     Returns:
         Path to generated document
@@ -4255,8 +4260,13 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         recover_unrendered_records=recover_unrendered_records,
         llm_usage=llm_usage,
     )
-    return generator.generate(input_path, output_path, original_doc_path=original_doc_path,
-                              discover_original_doc=discover_original_doc)
+    output = generator.generate(input_path, output_path, original_doc_path=original_doc_path,
+                                discover_original_doc=discover_original_doc)
+    if repair_protected_data:
+        # Lazy: repair imports the doctor, and doctor/lints/extraction.py imports this module.
+        from unified_pipeline.repair.protected_data import repair_and_report
+        repair_and_report(output)
+    return output
 
 
 def main():
