@@ -1160,6 +1160,13 @@ _AWARD_NAME_TAIL_RE = re.compile(
     r'\s+(?:Award|Prize|Fellowship|Scholarship|List|Fellow)\s*$',
     re.IGNORECASE)
 
+# Words that make a clause the award's own wording -- a rank, a distinction,
+# an award noun -- and never an organization's name ("First Place", "Cum
+# Laude", "<eponym> Award"; #1412).
+_AWARD_CLAUSE_WORD_RE = re.compile(
+    r'\b(?:place|prize|award|laude|winner|finalist|runner[- ]up|medal|'
+    r'mention|distinction)\b', re.IGNORECASE)
+
 # A role a person holds, never the last word of an institution's name.
 _ORG_ROLE_WORDS = frozenset(['representative', 'fellow', 'member'])
 
@@ -1170,9 +1177,18 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
     Strategies 3/4 of `_organization_candidate` anchor on `College` /
     `University` and build outward, so an award named after a college
     ("College of Education 2015 Outstanding Thesis Award") became its own
-    organization (#887). Three tells, each independent: the candidate is the
+    organization (#887). Four tells, each independent: the candidate is the
     whole award name minus its trailing award word; it carries a digit (a
-    year belongs to the date column); it ends in a role word.
+    year belongs to the date column); it ends in a role word; it is the
+    award's own first comma clause, in award words and naming no
+    institution.
+
+    The last one is Strategy 2's short-proper-noun fallback taking the
+    clause a name opens with -- "First Place, <competition>" rendered "First
+    Place" as the organization (RCBKFG FLYBMX 288/289, #1412). A first
+    clause with no award word ("<network>, Forum for ...") or one that
+    names an institution ("<university>, Teaching Award") is still a
+    grantor.
     """
     stripped = text.strip().rstrip('.,;')
     if _AWARD_NAME_TAIL_RE.sub('', stripped).strip().lower() == org.lower() \
@@ -1180,7 +1196,19 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
         return True
     if any(ch.isdigit() for ch in org):
         return True
+    if _is_award_words_first_clause(org, stripped):
+        return True
     return org.split()[-1].lower().strip('.,;') in _ORG_ROLE_WORDS
+
+
+def _is_award_words_first_clause(org: str, text: str) -> bool:
+    """Is `org` the first of `text`'s comma clauses, in award words and with
+    no institutional keyword? (A text with no comma never yields a
+    keyword-free candidate, so it needs no guard of its own.)"""
+    first_clause = text.split(',', 1)[0]
+    return (_comparable(first_clause) == _comparable(org)
+            and bool(_AWARD_CLAUSE_WORD_RE.search(org))
+            and not re.search(_ORG_KEYWORDS, org, re.IGNORECASE))
 
 
 def _extract_organization_from_award(text: str) -> str:

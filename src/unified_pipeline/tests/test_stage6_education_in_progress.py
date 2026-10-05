@@ -333,6 +333,39 @@ class TestYearAwardedNeedsANamedDegree:
         })
         assert row.cells[3].text == "1988"
 
+    def test_a_training_title_row_has_no_year_awarded_1415(self):
+        """#1415 (RCBKFG GKAQHB 17/20): an internship or residency coded B1
+        names a training post, not a degree; its attendance end is not an
+        award year, and neither is a year in its raw text."""
+        for title in ("Intern (Example Medicine)", "Resident (Example Pathology)",
+                      "Residency, Example Surgery", "Postdoctoral Fellow",
+                      "Clinical Fellow in Example Care", "Fellowship, Example Care",
+                      "Example Internship", "Example Residency (Example Care)"):
+            row = self._row({
+                "degree": title, "institution": "Example Hospital",
+                "dates_attended": {"start_date": "1991", "end_date": "1992"},
+            }, text=f"{title} Example Hospital 1991-1992")
+            assert row.cells[2].text != "", title
+            assert row.cells[3].text == "", title
+            assert _cell_ins_parts(row.cells[3]) == [], title
+
+    def test_a_degree_that_merely_mentions_training_still_falls_back(self):
+        """Only a cell that OPENS with a training title is refused; a degree
+        whose field names a residency, and a society fellowship, keep the
+        attendance-end fallback."""
+        for degree in ("MD, Internal Medicine Residency Track", "Fellow of Example College",
+                       "MS Example Studies Residency"):
+            row = self._row({
+                "degree": degree, "institution": "Example College",
+                "dates_attended": {"start_date": "1984", "end_date": "1988"},
+            })
+            assert row.cells[3].text == "1988", degree
+
+    def test_a_stated_year_still_renders_on_a_training_title_row(self):
+        row = self._row({"degree": "Resident", "institution": "Example Hospital",
+                         "year": "1996"})
+        assert row.cells[3].text == "1996"
+
     def test_a_stated_year_renders_without_a_degree(self):
         row = self._row({"degree": None, "major": "Example Studies",
                          "institution": "Example College", "year": "1990"})

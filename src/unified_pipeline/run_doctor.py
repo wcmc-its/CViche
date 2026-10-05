@@ -242,8 +242,9 @@ Lints, ranked by the severity of the failure class they catch:
                           QNZADH-01). WARN, one per citation
 14r. section_consistency  a stage-3b code that contradicts the entry's own
                           heading, text or siblings: intern and resident rows
-                          as appointments, an ABIM line as a membership,
-                          BLS/ACLS as a licence, grant reviews as committees,
+                          as appointments or degrees (RCBKFG, #1415), an ABIM
+                          line as a membership, BLS/ACLS as a licence, grant
+                          reviews as committees,
                           courses attended as teaching, a thesis-committee
                           block as institutional committees, a 'see section'
                           line or bare URL as a record, a journal article
