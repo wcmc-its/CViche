@@ -13,22 +13,33 @@ Output: Same JSON with M1 entry replaced by generated research summary
 
 import argparse
 import json
+import logging
 import re
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from datetime import datetime
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"
 
+from unified_pipeline.llm.bedrock import (
+    BedrockContentFilteredError,
+    BedrockEmptyResponseError,
+    BedrockToolCallDidNotFireError,
+)
+from unified_pipeline.llm.retry import RETRYABLE_ERRORS
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm_provenance import (
     FALLBACK_SERVED_KEY,
+    CallFailure,
+    STAGE4_5_CALL_FAILURES_KEY,
     STAGE4_5_CALL_M1_SCORE,
     STAGE4_5_CALL_SUMMARY,
     STAGE4_5_FALLBACK_CALLS_KEY,
 )
+
+logger = logging.getLogger(__name__)
 
 # Section weights for biosketch relevance (0 = essential, -1 = not useful)
 # Based on NIH biosketch requirements
@@ -436,6 +447,64 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRec
     return '\n'.join(context_parts)
 
 
+# The stage key call_llm resolves this stage's model and parameters under.
+LLM_STAGE = "stage_4_5"
+
+#: The model a stage-4.5 call gets one more attempt on when the client's own
+#: models all failed to reply (#1174). For QFQLNF's M1 relevance prompt
+#: (replayed 2026-10-05) Sonnet 5 and its content-filter fallback Sonnet 4.6
+#: both ended content_filtered; Haiku 4.5 answered (end_turn). Priced in
+#: config.PRICING.
+LAST_RESORT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+#: The model did not give a usable reply (a content filter, an empty reply, a
+#: tool call that did not fire). A different model may answer, so the call gets
+#: its LAST_RESORT_MODEL attempt.
+MODEL_REPLY_ERRORS = (BedrockContentFilteredError, BedrockEmptyResponseError,
+                      BedrockToolCallDidNotFireError)
+
+#: What a stage-4.5 call can still raise once the client's retries, its
+#: content-filter fallback and the LAST_RESORT_MODEL attempt are spent. Stage
+#: 4.5 records these and carries on without that call's answer: a research
+#: summary is one section, not a reason to fail the run (#1174). An
+#: LLMOutageError is left to propagate, as in every other stage (#810): the
+#: provider is down, and the driver decides.
+LLM_CALL_ERRORS = MODEL_REPLY_ERRORS + RETRYABLE_ERRORS
+
+#: How much of an exception's text the stage-4.5 artifact keeps.
+CALL_FAILURE_MESSAGE_CHARS = 300
+
+
+def call_failure(call: str, exc: Exception) -> CallFailure:
+    """The artifact record of one stage-4.5 call that raised LLM_CALL_ERRORS."""
+    return CallFailure(call=call, exception_type=type(exc).__name__,
+                       stop_reason=getattr(exc, "stop_reason", None),
+                       message=str(exc)[:CALL_FAILURE_MESSAGE_CHARS])
+
+
+def call_llm_with_last_resort(messages: list[dict], temperature: float) -> dict:
+    """call_llm for one stage-4.5 call; when no model the client tried gave a
+    usable reply, one more call on LAST_RESORT_MODEL, recorded as a
+    fallback-served call (FALLBACK_SERVED_KEY) like the client's own fallback.
+
+    This is a different model, not a retry of the same one (§5.6): the
+    client already retried the transient faults.
+    ponytail: if the stage is configured to LAST_RESORT_MODEL itself, the extra
+    call repeats it; no deployment does today (llm_config.yaml sets no stage_4_5 model).
+    """
+    try:
+        return call_llm(stage=LLM_STAGE, messages=messages, temperature=temperature)
+    except MODEL_REPLY_ERRORS as e:
+        logger.warning("Stage 4.5 call got no usable reply (%s, stop_reason=%r); trying %s",
+                       type(e).__name__, e.stop_reason, LAST_RESORT_MODEL)
+        failed_attempts_cost = getattr(e, "cost", 0.0)
+    result = call_llm(stage=LLM_STAGE, messages=messages, temperature=temperature,
+                      model=LAST_RESORT_MODEL)
+    result["cost"] = result.get("cost", 0.0) + failed_attempts_cost
+    result[FALLBACK_SERVED_KEY] = LAST_RESORT_MODEL
+    return result
+
+
 def score_existing_m1(m1_content: str) -> tuple[float, str, dict]:
     """
     Score existing M1 content for biosketch summary quality.
@@ -473,11 +542,7 @@ Respond with JSON only:
 
     messages = [{"role": "user", "content": prompt}]
 
-    llm_result = call_llm(
-        stage="stage_4_5",
-        messages=messages,
-        temperature=0.1
-    )
+    llm_result = call_llm_with_last_resort(messages, temperature=0.1)
 
     result_text = llm_result["content"].strip()
 
@@ -547,11 +612,7 @@ Generate only the research summary paragraph (150-200 words max), no additional 
 
     messages = [{"role": "user", "content": prompt}]
 
-    llm_result = call_llm(
-        stage="stage_4_5",
-        messages=messages,
-        temperature=0.3
-    )
+    llm_result = call_llm_with_last_resort(messages, temperature=0.3)
 
     result_text = llm_result["content"].strip()
 
@@ -572,6 +633,13 @@ Generate only the research summary paragraph (150-200 words max), no additional 
 GENERATION_METHOD_LLM = "llm_generated"
 GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT = "skipped_empty_context"
 GENERATION_METHOD_REFUSED = "refused_by_model"
+# The generation call raised LLM_CALL_ERRORS on every model tried (#1174); the
+# artifact's STAGE4_5_CALL_FAILURES_KEY record says how.
+GENERATION_METHOD_LLM_CALL_FAILED = "llm_call_failed"
+
+# score_reasoning when the M1 relevance call failed: the M1 text is treated as
+# unscored (score 0.0), so a summary is generated from the CV instead (#1174).
+M1_UNSCORED_REASONING = "unscored: the M1 relevance call failed"
 
 # The generation prompt demands third person, so a reply that opens by saying "I do not /
 # cannot / am unable / apologize" is the model declining, not the requested paragraph.
@@ -597,6 +665,65 @@ def generate_summary_unless_withheld(context: str, cv_owner_name: str) -> tuple[
     if REFUSAL_OPENER_PATTERN.match(summary):
         return "", GENERATION_METHOD_REFUSED, usage
     return summary, GENERATION_METHOD_LLM, usage
+
+
+def score_m1_or_unscored(m1_content: str) -> tuple[float, str, dict, CallFailure | None]:
+    """score_existing_m1, or, when its call fails, (0.0, M1_UNSCORED_REASONING,
+    {}, the failure): unscored M1 text is regenerated exactly as a low score is."""
+    try:
+        return (*score_existing_m1(m1_content), None)
+    except LLM_CALL_ERRORS as e:
+        logger.warning("Stage 4.5 M1 relevance call failed (%s); treating M1 as unscored",
+                       type(e).__name__, exc_info=True)
+        return 0.0, M1_UNSCORED_REASONING, {}, call_failure(STAGE4_5_CALL_M1_SCORE, e)
+
+
+def generate_summary_or_empty(context: str, cv_owner_name: str) -> tuple[str, str, dict, CallFailure | None]:
+    """generate_summary_unless_withheld, or, when its call fails, an empty
+    summary (stage 6 renders none) with GENERATION_METHOD_LLM_CALL_FAILED and the failure."""
+    try:
+        return (*generate_summary_unless_withheld(context, cv_owner_name), None)
+    except LLM_CALL_ERRORS as e:
+        logger.warning("Stage 4.5 summary generation call failed (%s); writing an empty summary",
+                       type(e).__name__, exc_info=True)
+        return "", GENERATION_METHOD_LLM_CALL_FAILED, {}, call_failure(STAGE4_5_CALL_SUMMARY, e)
+
+
+@dataclass
+class CallTotals:
+    """Tokens and cost over the stage's LLM calls, which calls the fallback
+    served, and which failed. One per run_stage_4_5 call."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost: float = 0.0
+    fallback_calls: list[dict] = field(default_factory=list)
+    failures: list[CallFailure] = field(default_factory=list)
+
+    def add(self, call: str, usage: dict, failure: CallFailure | None) -> None:
+        """Count one call's usage (empty when it made no billed reply) and its failure, if any."""
+        self.prompt_tokens += usage.get('prompt_tokens', 0)
+        self.completion_tokens += usage.get('completion_tokens', 0)
+        self.cache_read_tokens += usage.get('cache_read_tokens', 0)
+        self.cache_write_tokens += usage.get('cache_write_tokens', 0)
+        self.cost += usage.get('cost', 0.0)
+        self.fallback_calls += _fallback_calls(call, usage)
+        if failure is not None:
+            self.failures.append(failure)
+
+    def artifact_fields(self) -> dict:
+        """The cost, token and provenance keys of the stage-4.5 artifact."""
+        return {
+            "total_cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            **({STAGE4_5_FALLBACK_CALLS_KEY: self.fallback_calls} if self.fallback_calls else {}),
+            **({STAGE4_5_CALL_FAILURES_KEY: [asdict(f) for f in self.failures]} if self.failures else {}),
+        }
 
 
 def _resolve_stage_4_5_input_file(input_path: str) -> Path:
@@ -693,27 +820,15 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     use_existing = False
     m1_score = 0.0
     score_reasoning = ""
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-    total_cache_read_tokens = 0
-    total_cache_write_tokens = 0
-    total_cost = 0.0
-    fallback_calls: list[dict] = []
+    totals = CallTotals()
 
     if existing_m1_content.strip():
         if verbose:
             print(f"\nScoring existing M1 content ({len(m1_entries)} entries)...")
 
-        m1_score, score_reasoning, score_usage = score_existing_m1(existing_m1_content)
-
-        # Track usage from scoring call
-        if score_usage:
-            total_prompt_tokens += score_usage.get('prompt_tokens', 0)
-            total_completion_tokens += score_usage.get('completion_tokens', 0)
-            total_cache_read_tokens += score_usage.get('cache_read_tokens', 0)
-            total_cache_write_tokens += score_usage.get('cache_write_tokens', 0)
-            total_cost += score_usage.get('cost', 0.0)
-            fallback_calls += _fallback_calls(STAGE4_5_CALL_M1_SCORE, score_usage)
+        # A failed call leaves the M1 text unscored, so it is regenerated like a low score (#1174).
+        m1_score, score_reasoning, score_usage, score_failure = score_m1_or_unscored(existing_m1_content)
+        totals.add(STAGE4_5_CALL_M1_SCORE, score_usage, score_failure)
 
         if verbose:
             print(f"  Score: {m1_score:.2f}")
@@ -759,23 +874,17 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"  Context length: {len(context)} chars")
 
         # Generate summary
-        # A blank context makes no LLM call, and a refusal-shaped reply is withheld (#1224).
-        research_summary, generation_method, gen_usage = generate_summary_unless_withheld(context, cv_owner_name)
-
-        # Track usage from generation call
-        if gen_usage:
-            total_prompt_tokens += gen_usage.get('prompt_tokens', 0)
-            total_completion_tokens += gen_usage.get('completion_tokens', 0)
-            total_cache_read_tokens += gen_usage.get('cache_read_tokens', 0)
-            total_cache_write_tokens += gen_usage.get('cache_write_tokens', 0)
-            total_cost += gen_usage.get('cost', 0.0)
-            fallback_calls += _fallback_calls(STAGE4_5_CALL_SUMMARY, gen_usage)
+        # A blank context makes no LLM call, a refusal-shaped reply is withheld (#1224),
+        # and a failed call leaves the summary empty (#1174).
+        research_summary, generation_method, gen_usage, gen_failure = generate_summary_or_empty(
+            context, cv_owner_name)
+        totals.add(STAGE4_5_CALL_SUMMARY, gen_usage, gen_failure)
 
         if verbose:
             print(f"\nSummary ({generation_method}, {len(research_summary)} chars):")
             print(f"  {research_summary[:200]}...")
 
-    # total_cost was accumulated from llm_result['cost'] on each call above,
+    # totals.cost was accumulated from llm_result['cost'] on each call above,
     # which calculate_cost() prices per-provider and per-model (and accounts
     # for Bedrock prompt-cache reads at 0.1x and writes at 1.25x). Don't
     # recompute it here from a hardcoded $/M-token figure.
@@ -810,13 +919,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         },
         "original_m1_content": original_m1_content,
         "input_file": str(input_file),
-        "total_cost": total_cost,
-        "prompt_tokens": total_prompt_tokens,
-        "completion_tokens": total_completion_tokens,
-        "total_tokens": total_prompt_tokens + total_completion_tokens,
-        "cache_read_tokens": total_cache_read_tokens,
-        "cache_write_tokens": total_cache_write_tokens,
-        **({STAGE4_5_FALLBACK_CALLS_KEY: fallback_calls} if fallback_calls else {}),
+        **totals.artifact_fields(),
     }
 
     # Determine output path

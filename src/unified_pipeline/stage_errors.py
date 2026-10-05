@@ -2,7 +2,8 @@
 
 Both drivers -- ``run_full_pipeline.py`` (the CLI, which catches a stage's
 exception and carries on) and ``web_interface/.../orchestrator.py`` (which
-records it and fails the run) -- write the same record here, one file per
+records it and fails the run, except for stage 4.5, whose failure it records
+non-fatal and carries on past, #1174) -- write the same record here, one file per
 document, beside the ``stage_*`` output dirs. ``quality_score`` reads it for its
 fatal-error gate, so a stage failure no longer has to leave a Python exception
 *name* in some artifact's ``error`` string to be seen: before this, the only
@@ -49,11 +50,13 @@ class StageError:
     fatal: bool
 
     @classmethod
-    def from_exception(cls, stage: str, exc: BaseException) -> StageError:
-        """A stage whose runner raised. Always fatal: the stage produced
-        nothing, so whatever it owned is missing from the output."""
+    def from_exception(cls, stage: str, exc: BaseException, *, fatal: bool = True) -> StageError:
+        """A stage whose runner raised. Fatal by default: the stage produced
+        nothing, so whatever it owned is missing from the output. A driver
+        that carries on past the stage by policy passes ``fatal=False``
+        (the web driver for stage 4.5, #1174)."""
         return cls(stage=stage, exception_type=type(exc).__name__,
-                   message=str(exc), fatal=True)
+                   message=str(exc), fatal=fatal)
 
 
 def stage_errors_path(outputs_root: Path, document_uid: str) -> Path:

@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
 _SRC = Path(__file__).resolve().parents[2]
@@ -28,6 +29,16 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_4_5_research_summary as stage_4_5  # noqa: E402
+from unified_pipeline.llm.bedrock import (  # noqa: E402
+    BedrockContentFilteredError,
+    BedrockEmptyResponseError,
+)
+from unified_pipeline.llm.retry import LLMOutageError  # noqa: E402
+from unified_pipeline.llm_provenance import (  # noqa: E402
+    FALLBACK_SERVED_KEY,
+    STAGE4_5_CALL_FAILURES_KEY,
+    STAGE4_5_FALLBACK_CALLS_KEY,
+)
 from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     CURRENT_CONTEXT_TAG,
     CURRENT_WORK_REQUIREMENT,
@@ -1313,3 +1324,146 @@ def test_run_stage_4_5_writes_no_fallback_record_when_none_was_served(monkeypatc
     out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
 
     assert STAGE4_5_FALLBACK_CALLS_KEY not in out
+
+
+# --- #1174: a failed call never fails the stage ---------------------------------
+
+_SUMMARY_TEXT = "A synthetic research summary paragraph about widget dynamics and their regulation."
+_M1_AND_GRANT = [
+    {"taxonomy_code": "M1", "text": "Keywords only. Widgets.", "extracted_fields": {}},
+    {"taxonomy_code": "M2A", "text": "Grant", "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}]
+
+
+def _access_denied() -> ClientError:
+    return ClientError({"Error": {"Code": "AccessDeniedException", "Message": "denied"}}, "Converse")
+
+
+def _stub_calls(monkeypatch, *, score, generation):
+    """call_llm by prompt and model: `score`/`generation` map a model (None = the
+    stage's configured one) to a reply string or an exception to raise. A model
+    not in the map raises, so an unexpected extra call fails the test."""
+    calls = []
+
+    def fake_call_llm(*, messages, **kwargs):
+        model = kwargs.get("model")
+        calls.append(model)
+        plan = score if _SCORE_PROMPT_MARKER in messages[0]["content"] else generation
+        outcome = plan[model]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return {"content": outcome, **_REPLY_USAGE}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+    return calls
+
+
+def _run(tmp_path, entries=_M1_AND_GRANT):
+    inp = _write_fields_json(tmp_path, "TEST20", entries, cv_owner={"first_name": "Jane", "last_name": "Doe"})
+    return json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text())
+
+
+def test_last_resort_model_answers_when_the_configured_models_do_not(monkeypatch):
+    """QFQLNF's shape: the client's models end content_filtered; one more call on
+    LAST_RESORT_MODEL answers, is stamped as fallback-served, and the filtered
+    attempts' cost is kept."""
+    calls = _stub_calls(monkeypatch, score={}, generation={
+        None: BedrockEmptyResponseError("empty", stop_reason="content_filtered", cost=0.002),
+        stage_4_5.LAST_RESORT_MODEL: _SUMMARY_TEXT})
+
+    result = stage_4_5.call_llm_with_last_resort([{"role": "user", "content": "x"}], temperature=0.3)
+
+    assert calls == [None, stage_4_5.LAST_RESORT_MODEL]
+    assert result["content"] == _SUMMARY_TEXT
+    assert result[FALLBACK_SERVED_KEY] == stage_4_5.LAST_RESORT_MODEL
+    assert result["cost"] == pytest.approx(0.003 + 0.002)
+
+
+def test_a_provider_error_gets_no_last_resort_call(monkeypatch):
+    """Only a model-reply failure moves to another model; the client already
+    retried a provider error, so it propagates after one call."""
+    calls = _stub_calls(monkeypatch, score={}, generation={None: _access_denied()})
+
+    with pytest.raises(ClientError):
+        stage_4_5.call_llm_with_last_resort([{"role": "user", "content": "x"}], temperature=0.3)
+    assert calls == [None]
+
+
+def test_score_served_by_the_last_resort_model_is_recorded_as_fallback_served(monkeypatch, tmp_path):
+    _stub_calls(monkeypatch,
+                score={None: BedrockContentFilteredError("filtered twice"),
+                       stage_4_5.LAST_RESORT_MODEL: '{"score": 0.2, "reasoning": "keywords"}'},
+                generation={None: _SUMMARY_TEXT})
+
+    out = _run(tmp_path)
+
+    assert out["research_summary"]["m1_score"] == 0.2
+    assert out[STAGE4_5_FALLBACK_CALLS_KEY] == [
+        {"call": "m1_relevance_score", "model": stage_4_5.LAST_RESORT_MODEL}]
+    assert STAGE4_5_CALL_FAILURES_KEY not in out
+
+
+def test_score_call_failing_on_every_model_still_generates_the_summary(monkeypatch, tmp_path):
+    """The QFQLNF failure: the M1 relevance call is filtered on every model.
+    The M1 text is treated as unscored and the summary is generated, exactly
+    as for a low score; the failure is recorded, not swallowed."""
+    filtered = BedrockContentFilteredError("filtered")
+    _stub_calls(monkeypatch,
+                score={None: filtered, stage_4_5.LAST_RESORT_MODEL: filtered},
+                generation={None: _SUMMARY_TEXT})
+
+    out = _run(tmp_path)
+
+    summary = out["research_summary"]
+    assert (summary["text"], summary["generation_method"]) == (_SUMMARY_TEXT, stage_4_5.GENERATION_METHOD_LLM)
+    assert (summary["m1_score"], summary["score_reasoning"]) == (0.0, stage_4_5.M1_UNSCORED_REASONING)
+    assert out["original_m1_content"]["total_entries"] == 1
+    assert out[STAGE4_5_CALL_FAILURES_KEY] == [
+        {"call": "m1_relevance_score", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"}]
+    assert out["total_cost"] == pytest.approx(0.003)   # the generation call only
+
+
+def test_generation_call_failing_on_every_model_writes_an_empty_summary(monkeypatch, tmp_path):
+    filtered = BedrockEmptyResponseError("no text", stop_reason="content_filtered", cost=0.001)
+    _stub_calls(monkeypatch,
+                score={None: '{"score": 0.1, "reasoning": "keywords"}'},
+                generation={None: filtered, stage_4_5.LAST_RESORT_MODEL: filtered})
+
+    out = _run(tmp_path)
+
+    summary = out["research_summary"]
+    assert (summary["text"], summary["generation_method"]) == ("", stage_4_5.GENERATION_METHOD_LLM_CALL_FAILED)
+    assert summary["m1_score"] == 0.1
+    assert out["original_m1_content"] is None   # nothing replaced the M1 text
+    assert out[STAGE4_5_CALL_FAILURES_KEY] == [
+        {"call": "summary_generation", "exception_type": "BedrockEmptyResponseError",
+         "stop_reason": "content_filtered", "message": "no text"}]
+
+
+def test_a_provider_error_on_generation_also_writes_an_empty_summary(monkeypatch, tmp_path):
+    _stub_calls(monkeypatch, score={},
+                generation={None: _access_denied()})
+
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    assert out["research_summary"]["generation_method"] == stage_4_5.GENERATION_METHOD_LLM_CALL_FAILED
+    (failure,) = out[STAGE4_5_CALL_FAILURES_KEY]
+    assert (failure["call"], failure["exception_type"], failure["stop_reason"]) == (
+        "summary_generation", "ClientError", None)
+
+
+def test_stage_6_renders_nothing_for_a_failed_generation_call(monkeypatch, tmp_path):
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    _stub_calls(monkeypatch, score={}, generation={None: _access_denied()})
+    out = _run(tmp_path, entries=_M1_AND_GRANT[1:])
+
+    gen = WCMTemplateGenerator(verbose=False)
+    assert gen._fill_research_summary(out) is False
+
+
+def test_a_provider_outage_still_propagates(monkeypatch, tmp_path):
+    """#810: an outage is the driver's call, as in every other stage."""
+    _stub_calls(monkeypatch, score={}, generation={None: LLMOutageError("down", seconds_waited=900.0)})
+
+    with pytest.raises(LLMOutageError):
+        _run(tmp_path, entries=_M1_AND_GRANT[1:])

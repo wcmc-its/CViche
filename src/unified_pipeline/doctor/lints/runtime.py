@@ -50,7 +50,13 @@ reason as the group-failure lint (`quality_score.FALLBACK_SERVED_CAP`).
 cannot: a stage the driver recorded as failed in the stage-error record
 (#745), which the quality score reads for its fatal gate but the doctor never
 did. It is how a missing stage-4.5 research summary is told apart from a CV
-with no research content.
+with no research content. The web driver records a stage-4.5 failure
+non-fatal and carries on (#1174), so for that stage it is a WARN.
+
+`lint_research_summary_call_failed` (#1174) is the failure stage 4.5 survives
+on its own: a call that raised on every model tried, recorded in the stage's
+artifact rather than the stage-error record because the stage itself did not
+raise.
 
 The transitive-exclusivity fixpoint returned no exclusive helpers at all: this
 domain's only external references are `Dict`/`List`, `_finding`, and the two
@@ -72,12 +78,16 @@ from unified_pipeline.quality_score import (
     stage4_group_failures,
 )
 
+from unified_pipeline.llm_provenance import STAGE4_5_CALL_FAILURES_KEY, STAGE4_5_CALL_SUMMARY, CallFailure
 from unified_pipeline.stage_errors import StageError
 
 from ..shared import _finding
 
 #: The stage id the drivers record for the research-summary stage.
 STAGE_4_5_ID = "4.5"
+
+#: The template section the stage-4.5 research summary fills, as a reader finds it.
+RESEARCH_ACTIVITIES_SECTION = "Research Activities"
 
 
 # --------------------------------------------------------------------------
@@ -274,8 +284,8 @@ def _stage_failure_message(record: StageError) -> str:
     """What the failed stage owned, in the reader's terms."""
     cause = f"{record.exception_type}: {record.message[:120]}"
     if record.stage == STAGE_4_5_ID:
-        return (f"stage 4.5 failed ({cause}): the research summary is missing "
-                f"because the stage raised, not because the CV has no research content")
+        return (f"stage 4.5 failed ({cause}): the {RESEARCH_ACTIVITIES_SECTION} section has no "
+                f"research summary because the stage raised, not because the CV has no research content")
     return f"stage {record.stage} failed ({cause}): whatever it owned is missing from the output"
 
 
@@ -296,3 +306,35 @@ def lint_stage_failure_recorded(records: list[StageError]) -> list[dict]:
             [f"stage={record.stage}", f"exception={record.exception_type}",
              f"fatal={record.fatal}"])
         for record in records]
+
+
+# --------------------------------------------------------------------------
+# A stage-4.5 call that failed on every model tried (#1174).
+
+
+def _call_failure_message(failure: CallFailure) -> str:
+    """What the failed stage-4.5 call cost the Research Activities section."""
+    if failure.call == STAGE4_5_CALL_SUMMARY:
+        consequence = f"the {RESEARCH_ACTIVITIES_SECTION} section has no research summary"
+    else:
+        consequence = (f"the CV's own {RESEARCH_ACTIVITIES_SECTION} text was not scored, "
+                       f"so a summary was generated in its place")
+    return (f"stage 4.5 {failure.call} call failed on every model tried ({failure.exception_type}, "
+            f"stop_reason={failure.stop_reason!r}): {consequence}")
+
+
+def lint_research_summary_call_failed(stage_4_5: dict) -> list[dict]:
+    """A stage-4.5 LLM call that raised on every model tried, which the stage
+    recorded under ``llm_call_failures`` and carried on past (#1174): a
+    failed M1 relevance call leaves the CV's own Research Activities text
+    unscored (a summary is generated instead), a failed generation call
+    leaves the summary empty. One WARN per call, naming the section. It does
+    not cap the score: the summary is one optional section. An artifact
+    without the record, from before it, or malformed is not a finding."""
+    raw = stage_4_5.get(STAGE4_5_CALL_FAILURES_KEY) if isinstance(stage_4_5, dict) else None
+    failures = [CallFailure.from_record(r) for r in raw] if isinstance(raw, list) else []
+    return [
+        _finding("research_summary_call_failed", "WARN", _call_failure_message(failure),
+                 [f"call={failure.call}", f"exception={failure.exception_type}",
+                  f"stop_reason={failure.stop_reason}"])
+        for failure in failures if failure is not None]

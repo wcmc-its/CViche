@@ -87,6 +87,10 @@ class BedrockContentFilteredError(RuntimeError):
     partial text. Raised instead of returning truncated output a caller would
     only mis-parse as invalid JSON."""
 
+    #: Always content_filtered, named like the other two errors' attribute so a
+    #: caller recording the failure reads one field for all three.
+    stop_reason = CONTENT_FILTERED_STOP_REASON
+
 # Hard ceiling for any Bedrock call that reaches _call_bedrock without an
 # explicit max_tokens. When `maxTokens` is omitted, Bedrock applies the MODEL's
 # own default ceiling -- ~64,000 output tokens for the Claude models in use --
