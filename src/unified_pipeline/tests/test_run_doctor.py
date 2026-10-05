@@ -29,6 +29,8 @@ from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
+    IDENTICAL_ROW_EVIDENCE_RECORDS,
+    IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
 from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
@@ -53,6 +55,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
     lint_etal_added,
+    lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
@@ -66,6 +69,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_pipeline_errors,
     lint_python_repr_in_output,
     lint_section_lost,
+    lint_split_child_unsourced,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
     lint_stage_failure_recorded,
@@ -73,7 +77,6 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_segmentation_collapse,
-    lint_split_child_unsourced,
     lint_stage6_warnings,
     lint_table_lost,
     lint_table_shape,
@@ -4107,14 +4110,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (52), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (54), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 50
+    assert len(payload["findings"]) == 52
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -5889,7 +5892,491 @@ def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_pa
         ("WARN", ["Example Widget Institute"])]
 
 
-# --------------------------------------- lint 14y: split_child_unsourced
+# ------------------------------------------ lint 14y: fanout_cell_residue
+
+_LEADERSHIP_HEADER = ["Organization", "Role (i.e., officer, secretary, chair, etc.)",
+                      "Dates (yyyy-yyyy)"]
+_COMMITTEE_HEADER = ["Name of Committee", "Role (i.e., member, fellow, etc.)",
+                     "Organization (Institution/Location)", "Dates (yyyy-yyyy)"]
+
+
+def _fanout4(text, idx, records, code="Q1"):
+    """A stage-4 entry stage 4 split into `records` (#1406). Invented values;
+    the entry's own fields are its last record's, as stage 4 writes them."""
+    return _entry(text, start=idx, hierarchy=["Example Heading"], taxonomy_code=code,
+                  extracted_fields={**records[-1], "stage4_records": records})
+
+
+def _office(role, start, end, organization=None):
+    return {"role": role, "organization": organization,
+            "start_date": start, "end_date": end}
+
+
+def _fanout_hits(entries, tables):
+    from unified_pipeline.run_doctor import lint_fanout_cell_residue
+    findings = lint_fanout_cell_residue({"entries": entries}, tables)
+    return [(f["severity"], f["message"].split(": ")[0], f["message"].split(": ")[1],
+             f["evidence"]) for f in findings]
+
+
+_KEEPER = _fanout4("Widget Keeper, 1992-1993, 1994-1996, 1997-1998", 82, [
+    _office("Widget Keeper", "1992", "1993"), _office("Widget Keeper", "1994", "1996"),
+    _office("Widget Keeper", "1997", "1998")])
+
+
+def test_fanout_cell_residue_warns_on_the_other_terms_years_in_the_organization_cell():
+    """EOAHMI DUTAVD-01 (entry 82): the last term's row printed the other two
+    terms as its organization."""
+    rows = [["", "Widget Keeper", "1992-1993"], ["", "Widget Keeper", "1994-1996"],
+            ["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]]) == [
+        ("WARN", "entry 82 (Q1)", "sibling_year",
+         [TABLE_ROW_JOINER.join(["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"])])]
+
+
+def test_fanout_cell_residue_spares_the_rows_stage_6_now_renders():
+    """#1449's render of the same entry: every organization cell empty."""
+    rows = [["", "Widget Keeper", "1992-1993"], ["", "Widget Keeper", "1994-1996"],
+            ["", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_warns_on_a_year_stub_and_the_sibling_role():
+    """EOAHMI WYMVGU-01 (entries 931-935): the second of two year-keyed roles
+    printed the first role and the tail of '1992-93' as its organization."""
+    entry = _fanout4("1992-93 Vice-Chair, widget reviewer", 932, [
+        _office("Vice-Chair", "1992", "1993"), _office("Widget reviewer", "1992", "1993")])
+    rows = [["", "Vice-Chair", "1992-1993"], ["93 Vice-Chair", "Widget reviewer", "1992-1993"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == [
+        ("WARN", "entry 932 (Q1)", "sibling_value, year_stub",
+         [TABLE_ROW_JOINER.join(["93 Vice-Chair", "Widget reviewer", "1992-1993"])])]
+
+
+def test_fanout_cell_residue_warns_on_a_bare_range_word():
+    entry = _fanout4("Widget Keeper, 1990 to 1994; Gadget Lead, 1995 to 1996", 40, [
+        _office("Widget Keeper", "1990", "1994"), _office("Gadget Lead", "1995", "1996")])
+    rows = [["to", "Widget Keeper", "1990-1994"], ["", "Gadget Lead", "1995-1996"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == [
+        ("WARN", "entry 40 (Q1)", "bare_to",
+         [TABLE_ROW_JOINER.join(["to", "Widget Keeper", "1990-1994"])])]
+
+
+def test_fanout_cell_residue_reads_a_range_word_at_the_end_of_a_cell():
+    entry = _fanout4("Widget Keeper, Example Guild 1990 to 1994; Gadget Lead, 1995", 41, [
+        _office("Widget Keeper", "1990", "1994"), _office("Gadget Lead", "1995", "1995")])
+    rows = [["Example Guild to", "Widget Keeper", "1990-1994"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])[0][2] == "bare_to"
+
+
+def test_fanout_cell_residue_spares_to_when_the_record_names_it():
+    entry = _fanout4("Widget Keeper, Example Guild to Widgets 1990 to 1994; Gadget Lead, 1995",
+                     42, [_office("Widget Keeper", "1990", "1994", "Example Guild to Widgets"),
+                          _office("Gadget Lead", "1995", "1995")])
+    rows = [["Example Guild to", "Widget Keeper", "1990-1994"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_warns_on_a_built_record_line_in_one_cell():
+    """EOAHMI DUTAVD-01 (entry 79): an earlier record's built line, role and
+    years joined by ' | ', printed as its committee name."""
+    entry = _fanout4("Widget Steward, 1981, 1990-1994", 79, [
+        _office("Widget Steward", "1981", "1981"), _office("Widget Steward", "1990", "1994")],
+        code="Q2")
+    rows = [["Widget Steward | 1981 | 1981", "Widget Steward", "", "1981"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == [
+        ("WARN", "entry 79 (Q2)", "built_line",
+         [TABLE_ROW_JOINER.join(["Widget Steward | 1981 | 1981", "Widget Steward", "1981"])])]
+
+
+def test_fanout_cell_residue_spares_a_cell_that_is_another_records_value():
+    """A record with no role renders the section's default role, which another
+    record holds (EOAHMI JBUVYV 316): no leftover text."""
+    entry = _fanout4("Example Board: Widget Committee 2017-present, Gadget Committee, "
+                     "member 2016-present", 316, [
+                         {"committee_name": "Widget Committee", "role": None,
+                          "start_date": "2017", "end_date": "present"},
+                         {"committee_name": "Gadget Committee", "role": "Member",
+                          "start_date": "2016", "end_date": "present"}], code="Q2")
+    rows = [["Widget Committee", "Member", "", "2017-Present"],
+            ["Gadget Committee", "Member", "", "2016-Present"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_spares_the_records_own_years_in_its_name_cell():
+    """A renderer that prints a record's whole line in its name cell does so
+    for every entry (EBYSBC MQSUIC 611): not fan-out residue."""
+    entry = _fanout4("Widget Coordinator, Example Department; 2003-2008; 2019-now", 611, [
+        _office("Widget Coordinator", "2003", "2008"),
+        _office("Widget Coordinator", "2019", "present")])
+    rows = [["Widget Coordinator, Example Department; 2003-2008", "Widget Coordinator",
+             "2003-2008"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_reads_only_cells_made_of_the_entrys_text():
+    """A cell with a word the parent's text lacks was filled from elsewhere
+    (stage 5b's city, a template default), not left over."""
+    rows = [["Example City 1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_skips_a_row_two_records_match_equally():
+    """Two records with one year: a row showing both roles is neither's."""
+    entry = _fanout4("Widget Keeper, Gadget Lead 2001, Example Guild", 70, [
+        _office("Widget Keeper", "2001", "2001"), _office("Gadget Lead", "2001", "2001")])
+    rows = [["Widget Keeper", "Gadget Lead", "2001"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_skips_a_committee_row_both_records_score_equally():
+    """The tie clause itself: both roles score the same on a row whose third
+    cell holds both, so the row belongs to neither record and is not residue."""
+    entry = _fanout4("Widget Keeper, Gadget Lead 2001, Example Guild", 70, [
+        _office("Widget Keeper", "2001", "2001"), _office("Gadget Lead", "2001", "2001")])
+    rows = [["Gadget Lead", "Widget Keeper", "Widget Keeper Gadget Lead", "2001"]]
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_breaks_a_tie_on_the_rows_dates():
+    """One role for every term: the date cell names the record."""
+    rows = [["1994-1996, 1997-1998", "Widget Keeper", "1992-1993"]]
+    assert _fanout_hits([_KEEPER], [[_LEADERSHIP_HEADER, *rows]])[0][:3] == (
+        "WARN", "entry 82 (Q1)", "sibling_year")
+
+
+def test_fanout_cell_residue_needs_the_row_dated_as_its_record():
+    """A row whose date cell holds none of the record's years is another
+    entry's row with the same role."""
+    entry = _fanout4("Widget Keeper, 1992-1993; Gadget Lead, 1994-1996", 83, [
+        _office("Widget Keeper", "1992", "1993"), _office("Gadget Lead", "1994", "1996")])
+    rows = [["1994-1996", "Widget Keeper", "2010-2011"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_reads_only_tables_with_a_date_column():
+    rows = [["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    header = ["Organization", "Role", "Notes"]
+    assert _fanout_hits([_KEEPER], [[header, *rows]]) == []
+
+
+def test_fanout_cell_residue_reads_only_split_entries():
+    one = _entry("Widget Keeper, 1992-1993, 1997-1998", start=5, taxonomy_code="Q1",
+                 extracted_fields={**_office("Widget Keeper", "1997", "1998"),
+                                   "stage4_records": [_office("Widget Keeper", "1997", "1998")]})
+    rows = [["1992-1993", "Widget Keeper", "1997-1998"]]
+    assert _fanout_hits([one], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+def test_fanout_cell_residue_quotes_at_most_three_rows():
+    from unified_pipeline.doctor.lints.render import FANOUT_RESIDUE_EVIDENCE_LIMIT
+    terms = [("1990", "1991"), ("1992", "1993"), ("1994", "1995"), ("1996", "1997"),
+             ("1998", "1999")]
+    entry = _fanout4("Widget Keeper, " + ", ".join(f"{a}-{b}" for a, b in terms), 90,
+                     [_office("Widget Keeper", a, b) for a, b in terms])
+    rows = [[f"{terms[(i + 1) % 5][0]}-{terms[(i + 1) % 5][1]}", "Widget Keeper", f"{a}-{b}"]
+            for i, (a, b) in enumerate(terms)]
+    hits = _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])
+    assert len(hits) == 1
+    assert len(hits[0][3]) == FANOUT_RESIDUE_EVIDENCE_LIMIT == 3
+
+
+def test_run_doctor_reports_fanout_cell_residue(tmp_path):
+    """The registry row hands the lint stage 4 and the docx's tables.
+    Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append(_KEEPER)
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    rows = [_LEADERSHIP_HEADER, ["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    table = output.add_table(rows=len(rows), cols=3)
+    for row, cells in zip(table.rows, rows):
+        for cell, text in zip(row.cells, cells):
+            cell.paragraphs[0].text = text
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "fanout_cell_residue"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in hits] == [
+        ("WARN", "entry 82 (Q1)")]
+
+
+def test_fanout_cell_residue_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 (FAN-RES) over the 102 fresh renders of origin/dev
+    8b287ec2; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["fanout_cell_residue"] == round(1 / 102, 3)
+
+
+def test_fanout_cell_residue_names_the_cell_in_its_message():
+    from unified_pipeline.run_doctor import lint_fanout_cell_residue
+    rows = [["1992-1993, 1994-1996", "Widget Keeper", "1997-1998"]]
+    [finding] = lint_fanout_cell_residue({"entries": [_KEEPER]}, [[_LEADERSHIP_HEADER, *rows]])
+    assert finding["message"] == (
+        "entry 82 (Q1): sibling_year: a record split from this entry prints the entry's "
+        "leftover text in a name, organization or committee cell")
+
+
+def test_fanout_cell_residue_reads_a_three_letter_sibling_role():
+    entry = _fanout4("Board CEO 2001-2003, widget reviewer 2001-2003", 12, [
+        _office("CEO", "2001", "2003"), _office("Widget reviewer", "2001", "2003")])
+    rows = [["Board CEO", "Widget reviewer", "2001-2003"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])[0][2] == "sibling_value"
+
+
+def test_fanout_cell_residue_reads_a_cell_holding_the_whole_parent_line():
+    """EOAHMI BRUSUZ-01's shape: the last record's cell is the parent's whole text."""
+    entry = _fanout4("Widget Keeper 1992-1993, Gadget Lead 1994", 13, [
+        _office("Widget Keeper", "1992", "1993"), _office("Gadget Lead", "1994", "1994")])
+    rows = [["Widget Keeper 1992-1993, Gadget Lead 1994", "Gadget Lead", "1994"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]])[0][2] == (
+        "sibling_value, sibling_year")
+
+
+def test_fanout_cell_residue_spares_a_tied_row_and_a_lone_own_year():
+    """A row whose dates break no tie is no record's; a cell holding only its
+    record's own year is no built line. An empty table is skipped."""
+    rows = [["1994-1996", "Widget Keeper", ""]]
+    assert _fanout_hits([_KEEPER], [[], [_LEADERSHIP_HEADER, *rows]]) == []
+    entry = _fanout4("Widget Steward, 1981, 1990-1994", 79, [
+        _office("Widget Steward", "1981", "1981"), _office("Widget Steward", "1990", "1994")],
+        code="Q2")
+    assert _fanout_hits([entry], [[_COMMITTEE_HEADER,
+                                   ["1981", "Widget Steward", "", "1981"]]]) == []
+
+
+def test_fanout_cell_residue_skips_records_that_are_not_objects():
+    entry = _entry("Widget Keeper, 1992-1993, 1994-1996", start=14, taxonomy_code="Q1",
+                   extracted_fields={"stage4_records": [
+                       "Widget Keeper 1992-1993", _office("Widget Keeper", "1994", "1996")]})
+    rows = [["1992-1993", "Widget Keeper", "1994-1996"]]
+    assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+# identical_rendered_rows (EOAHMI QTATUP-04, BRUSUZ-01). Invented values.
+_IDR_TITLE = "Example Lecture on Widgets"
+_IDR_PLACE = "Example City, ST"
+_IDR_HIDES = "the row hides what tells them apart"
+
+
+def _idr_entry(idx, fields, code="R", text="Example entry text"):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "extracted_fields": fields}
+
+
+def _idr_talk(idx, date, **extra):
+    return _idr_entry(idx, {"title": _IDR_TITLE, "location": _IDR_PLACE, "date": date, **extra})
+
+
+def test_identical_rendered_rows_warns_when_the_year_column_hides_the_dates():
+    """Three talks months apart render as one year-only row three times. A
+    merged cell repeats in python-docx's row; it is one cell of the row."""
+    rows = [[["Title", "Institution/Location", "Dates (yyyy)"],
+             [_IDR_TITLE, _IDR_PLACE, "2003"],
+             [_IDR_TITLE, _IDR_TITLE, _IDR_PLACE, "2003"],
+             [_IDR_TITLE, _IDR_PLACE, "2003"]]]
+    entries = [_idr_talk(10, "2003-03", notes="spring"), _idr_talk(12, "2003-11", notes="fall"),
+               _idr_talk(14, "2003-12", notes="winter")]
+
+    assert lint_identical_rendered_rows({"entries": entries}, rows) == [{
+        "lint": "identical_rendered_rows", "severity": "WARN",
+        "message": "entry 10 (R): distinct_records: 3 identical rows in one table stand "
+                   "for 3 stage-4 records (also entries 12, 14) that differ in date, notes; "
+                   + _IDR_HIDES,
+        "evidence": [f"{_IDR_TITLE} | {_IDR_PLACE} | 2003",
+                     "entry 10: date=2003-03; notes=spring",
+                     "entry 12: date=2003-11; notes=fall",
+                     "entry 14: date=2003-12; notes=winter"],
+        "status": "ran", "reason": ""}]
+
+
+def test_identical_rendered_rows_matches_a_record_whose_every_word_shows():
+    """A record whose values all render (title and year) still stands for
+    the row: its words equal the row's."""
+    entries = [_idr_entry(10, {"title": "Example Widgets", "date": "2003"}),
+               _idr_entry(12, {"title": "Example Widgets", "date": "2003-05"})]
+    rows = [[["Example Widgets", "2003"]] * 2]
+    [finding] = lint_identical_rendered_rows({"entries": entries}, rows)
+    assert finding["evidence"][1:] == ["entry 10: date=2003", "entry 12: date=2003-05"]
+
+
+def test_identical_rendered_rows_reads_each_record_of_a_split_entry():
+    """QTATUP 980's shape: one entry whose stage4_records hold one talk on
+    several dates; the evidence lists the first IDENTICAL_ROW_EVIDENCE_RECORDS."""
+    dates = ["2003-07-30", "2003-09-08", "2003-10-02", "2003-12-03"]
+    series = "Example lecture series"
+    records = [{"title": _IDR_TITLE, "location": _IDR_PLACE, "event_name": series,
+                "date": date} for date in dates]
+    entry = _idr_entry(5, {**records[-1], "stage4_records": records})
+    rows = [[[_IDR_TITLE, f"{series}, {_IDR_PLACE}", "2003"]] * len(dates)]
+
+    [finding] = lint_identical_rendered_rows({"entries": [entry]}, rows)
+
+    assert finding["message"] == (
+        "entry 5 (R): distinct_records: 4 identical rows in one table stand for 4 "
+        "stage-4 records that differ in date; " + _IDR_HIDES)
+    assert finding["evidence"] == [f"{_IDR_TITLE} | {series}, {_IDR_PLACE} | 2003"] + [
+        f"entry 5: date={date}" for date in dates[:3]]
+    assert IDENTICAL_ROW_EVIDENCE_RECORDS == 3
+
+
+def test_identical_rendered_rows_is_silent_when_the_records_agree():
+    """The CV lists one record twice, and the document repeats it: a
+    membership given once with an open end and once without, a talk whose
+    second copy has no date, or two copies differing only in bookkeeping."""
+    member = {"organization": "Example Society", "membership_type": "Member",
+              "start_date": "2013"}
+    society_rows = [[["Member, Example Society", "2013-Present"]] * 2]
+    assert lint_identical_rendered_rows({"entries": [
+        _idr_entry(20, {**member, "end_date": "present"}, code="I"),
+        _idr_entry(21, {**member, "end_date": None}, code="I")]}, society_rows) == []
+
+    talk_rows = [[[_IDR_TITLE, _IDR_PLACE, "2003"]] * 2]
+    assert lint_identical_rendered_rows(
+        {"entries": [_idr_talk(10, "2003-03"), _idr_talk(12, "")]}, talk_rows) == []
+    copies = [_idr_talk(10, "2003-03", target_name=name, formatted_text=name,
+                        formatting_source=name, formatted_citation=name)
+              for name in ("Example A", "Example B")]
+    assert lint_identical_rendered_rows({"entries": copies}, talk_rows) == []
+
+
+def test_identical_rendered_rows_needs_two_identical_rows_of_two_words():
+    """One row is not a repeat, a one-word row repeats by design, and a row
+    no record's words hold is not judged."""
+    entries = [_idr_talk(10, "2003-03"), _idr_talk(12, "2003-11")]
+    one_row = [[[_IDR_TITLE, _IDR_PLACE, "2003"]]]
+    assert lint_identical_rendered_rows({"entries": entries}, one_row) == []
+    assert lint_identical_rendered_rows({"entries": entries}, [[["Widgets"], ["Widgets"]]]) == []
+    two_words = lint_identical_rendered_rows(
+        {"entries": entries}, [[["Example Widgets"], ["Example Widgets"]]])
+    assert [f["message"].split(":")[0] for f in two_words] == ["entry 10 (R)"]
+    assert lint_identical_rendered_rows(
+        {"entries": entries}, [[["Other Lecture", "2003"]] * 2]) == []
+
+
+def test_identical_rendered_rows_reads_an_open_end_stage_6_wrote():
+    """'2013-Present' from a start date alone: no field holds 'present', so
+    the row still stands for both records, which differ in their notes."""
+    society = {"organization": "Example Society", "start_date": "2013"}
+    entries = [_idr_entry(20, {**society, "notes": "first term"}, code="I"),
+               _idr_entry(21, {**society, "notes": "second term"}, code="I")]
+
+    [finding] = lint_identical_rendered_rows(
+        {"entries": entries}, [[["Example Society", "2013-Present"]] * 2])
+
+    assert finding["message"] == (
+        "entry 20 (I): distinct_records: 2 identical rows in one table stand for 2 "
+        "stage-4 records (also entries 21) that differ in notes; " + _IDR_HIDES)
+
+
+_IDR_FIRST = {"event_name": "Example Widget Institute", "location": _IDR_PLACE}
+_IDR_SECOND = {"event_name": "Second Example Symposium on Gadgets", "location": "Other Town, ST"}
+_IDR_FUSED_TEXT = ("Example Widget Institute (Example City, ST)* "
+                   "Second Example Symposium on Gadgets (Other Town, ST)")
+
+
+def _idr_fused_entry(records=(_IDR_FIRST, _IDR_SECOND), text=_IDR_FUSED_TEXT):
+    return _idr_entry(30, {**records[-1], "stage4_records": list(records)}, text=text)
+
+
+def test_identical_rendered_rows_warns_on_a_record_also_rendered_inside_the_raw_text():
+    """BRUSUZ 228/249/265 on the dev-248 render: record 1 renders as its own
+    row, and the whole entry text renders as a second row naming it again.
+    The record row quoted is the one nearest the fused row."""
+    rows = [[["Example Widget Institute", _IDR_PLACE],
+             ["Unrelated Talk", "Elsewhere"],
+             ["Example Widget Institute"],
+             [_IDR_FUSED_TEXT, "Other Town, ST"]]]
+
+    assert lint_identical_rendered_rows({"entries": [_idr_fused_entry()]}, rows) == [{
+        "lint": "identical_rendered_rows", "severity": "WARN",
+        "message": "entry 30 (R): fused_repeat: the entry's whole text renders as one "
+                   "row while one of its 2 records also renders as its own row",
+        "evidence": ["Example Widget Institute", f"{_IDR_FUSED_TEXT} | Other Town, ST"],
+        "status": "ran", "reason": ""}]
+
+
+def test_identical_rendered_rows_fused_needs_a_split_entry_and_its_record_row():
+    entry = _idr_fused_entry()
+    fused_row = [_IDR_FUSED_TEXT, "Other Town, ST"]
+    record_row = ["Example Widget Institute", _IDR_PLACE]
+    # Only the fused row: the records fused, none repeated. Only record
+    # rows: the entry fanned out cleanly.
+    assert lint_identical_rendered_rows({"entries": [entry]}, [[fused_row]]) == []
+    assert lint_identical_rendered_rows(
+        {"entries": [entry]}, [[record_row, ["Second Example Symposium on Gadgets"]]]) == []
+    # A one-word row, and a row the fused row does not hold, are not the record.
+    assert lint_identical_rendered_rows(
+        {"entries": [entry]}, [[["Institute"], fused_row]]) == []
+    organizer = {**_IDR_FIRST, "role": "organizer"}
+    assert lint_identical_rendered_rows(
+        {"entries": [_idr_fused_entry((organizer, _IDR_SECOND))]},
+        [[["organizer, Example Widget Institute"], fused_row]]) == []
+    # One record, a records list holding one object, or no list at all.
+    for records in ([_IDR_FIRST], [_IDR_FIRST, "not a record"], None):
+        one = _idr_entry(30, {**_IDR_FIRST, "stage4_records": records}, text=_IDR_FUSED_TEXT)
+        assert lint_identical_rendered_rows({"entries": [one]}, [[record_row, fused_row]]) == []
+
+
+def test_identical_rendered_rows_fused_record_row_may_show_every_word():
+    """A record row holding every word of its record, and every word of the
+    fused row (the second record repeats the first one's name), is still a
+    repeat."""
+    name, place = "Widget Hall Annex Building", "Townville City"
+    entry = _idr_fused_entry(({"event_name": name, "location": place}, {"event_name": name}),
+                             text=f"{name} ({place})* {name}")
+    rows = [[[name, place], [f"{name} ({place})* {name}"]]]
+    [finding] = lint_identical_rendered_rows({"entries": [entry]}, rows)
+    assert finding["evidence"] == [f"{name} | {place}", f"{name} ({place})* {name}"]
+
+
+def test_identical_rendered_rows_fused_entry_text_floor():
+    """An entry text shorter than IDENTICAL_ROW_FUSED_MIN_CHARS (20 letters
+    and digits) can match a row by chance, so it is not judged. A two-word
+    record row is enough."""
+    assert IDENTICAL_ROW_FUSED_MIN_CHARS == 20
+    head = "Widget Hall (Town)* "
+    first = {"event_name": "Widget Hall", "location": "Town"}
+    for tail, fires in (("Q" * 6, True), ("Q" * 5, False)):
+        entry = _idr_fused_entry((first, {"event_name": tail}), text=head + tail)
+        rows = [[["Widget Hall"], [head + tail]]]
+        assert bool(lint_identical_rendered_rows({"entries": [entry]}, rows)) is fires
+
+
+def test_run_doctor_wires_identical_rendered_rows_to_stage_4_and_the_table_rows(tmp_path):
+    """The LINT_REGISTRY row hands the lint stage 4 and the docx's table
+    rows. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [_idr_talk(910, "2003-03"), _idr_talk(912, "2003-11")]
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    table = output.add_table(rows=2, cols=3)
+    for row in table.rows:
+        for cell, text in zip(row.cells, (_IDR_TITLE, _IDR_PLACE, "2003")):
+            cell.paragraphs[0].text = text
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "identical_rendered_rows"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in hits] == [
+        ("WARN", "entry 910 (R)")]
+
+
+def test_identical_rendered_rows_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 (IDR in doctor/PRECISION.md): 8 of the 102 fresh
+    renders of origin/dev 8b287ec2; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["identical_rendered_rows"] == round(8 / 102, 3)
+
+
+# --------------------------------------- lint 14aa: split_child_unsourced
 # EOAHMI recheck DUTAVD-03 (a split record's blank institution filled from a
 # neighbouring entry) and WYMVGU-02 (an entry's leading range copied onto
 # split records it does not date). Invented values throughout.

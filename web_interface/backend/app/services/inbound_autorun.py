@@ -69,13 +69,14 @@ def _runnable_count(db: Session, user: User, wanted: int) -> int:
 
 def _queue_created_run(db: Session, run_id: str, batch_id: str) -> bool:
     """POST /run/{id}/start's queue-mode path for a brand-new run: flip
-    created -> queued, XADD the token on the batch queue, revert the flip if the
-    XADD fails."""
+    created -> queued, XADD the token on the queue ``run_queue.queue_for``
+    names (single for a one-file batch, batch otherwise), revert the flip if
+    the XADD fails."""
     prior = flip_to_queued(db, run_id, ("created",))
     if not prior.flipped:
         return False
     try:
-        run_queue.enqueue(run_id, run_queue.queue_for(batch_id))
+        run_queue.enqueue(run_id, run_queue.queue_for(batch_service.batch_size(db, batch_id)))
     except redis.exceptions.RedisError:
         logger.exception("email intake: enqueue failed for run %s; reverting", run_id)
         revert_queued(db, run_id, prior)

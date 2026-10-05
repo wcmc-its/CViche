@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
-import { formatCost, formatScannedPages, runningStepCost } from '../utils'
+import { SUPPORT_EMAIL, formatCost, formatScannedPages, runningStepCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 
 import PipelineHeader from './PipelineHeader'
@@ -264,7 +264,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   })()
 
   const supportHref = (reason: string) =>
-    `mailto:paa2013@med.cornell.edu?subject=${encodeURIComponent(`CViche: ${reason} (run ${runId})`)}&body=${encodeURIComponent(`Run ID: ${runId}\nFile: ${runStatus?.filename}\n\nPlease describe what happened:\n`)}`
+    `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(`CViche: ${reason} (run ${runId})`)}&body=${encodeURIComponent(`Run ID: ${runId}\nFile: ${runStatus?.filename}\n\nPlease describe what happened:\n`)}`
 
   if (!runStatus || !runStatus.steps) {
   return (

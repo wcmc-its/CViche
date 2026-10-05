@@ -1697,7 +1697,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
         passthrough_result = self._render_section(
-            'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
+            'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries, original_doc_path))
         consumed_ids = {id(e) for e in (passthrough_result or []) + (section_results['research_support'] or [])}
 
         # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C

@@ -33,6 +33,7 @@ from unified_pipeline.core.text_norm import (
     norm,
 )
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from .extraction import _is_prose
@@ -41,6 +42,7 @@ from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
+    _FieldsEntry,
     _entry_pieces,
     _fields_entries,
     _finding,
@@ -2718,6 +2720,389 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
     return findings
 
 
+# Lint fanout_cell_residue (#1445; EOAHMI DUTAVD-01, WYMVGU-01, BRUSUZ-01): a
+# record stage 6 fanned out of a multi-record entry (`STAGE4_RECORDS_KEY`,
+# #1406) whose table row prints leftover text of the parent entry in a name,
+# organization or committee cell. Before #1449 the last record kept the
+# parent's whole line, and a renderer that fell back to the text for an empty
+# cell printed the other records again: the first two terms' years as the
+# organization of a third term, or '93 <first role>' (the sibling's role and
+# the tail of '1992-93') beside the second role. #1449 fixed the fallbacks it
+# knew of; this lint guards the shape in any grid table, for any code.
+#
+#   sibling_year   a year another record of the entry holds, and this one
+#                  does not
+#   year_stub      a two-digit tail of one of the entry's years ('93')
+#   bare_to        a cell that opens or ends on the range word 'to'
+#   built_line     a built record line ('<role> | 1981 | 1981') in one cell
+#   sibling_value  another record's value (its role, venue, committee) with
+#                  more text around it
+#
+# A row is a record's when more of its cells equal that record's values (and
+# its date cell that record's years) than any other record's; a tie is no
+# one's row. A cell is read only when every word of it is in the parent's
+# text: the residue came from there, and a cell stage 5b or a default filled
+# is not leftover text. A record's own years in its name cell are not read:
+# a renderer that prints a whole line in its name cell does that to every
+# entry (EBYSBC MQSUIC 611), not only to split ones.
+FANOUT_RESIDUE_SIBLING_YEAR = "sibling_year"
+FANOUT_RESIDUE_YEAR_STUB = "year_stub"
+FANOUT_RESIDUE_BARE_TO = "bare_to"
+FANOUT_RESIDUE_BUILT_LINE = "built_line"
+FANOUT_RESIDUE_SIBLING_VALUE = "sibling_value"
+
+#: Severity of every finding. Measured 2026-10-05 (FAN-RES in PRECISION.md):
+#: every hit on the dev-248 render and on the 102 fresh dev renders was read
+#: against its stage-4 entry and its rendered row.
+FANOUT_RESIDUE_SEVERITY = "WARN"
+#: Stage 6 fans an entry out at this many records (`fan_out._MIN_RECORDS`).
+FANOUT_RESIDUE_MIN_RECORDS = 2
+#: Rendered rows quoted per finding.
+FANOUT_RESIDUE_EVIDENCE_LIMIT = 3
+#: A year's tail as a CV abbreviates a range's end ('1992-93').
+FANOUT_YEAR_STUB_DIGITS = 2
+#: The range word a cut date leaves behind ('1990 to').
+FANOUT_RANGE_WORD = "to"
+#: A sibling value counts only with a word this long: a bare 'Dr' or a
+#: number is no value of its own.
+FANOUT_SIBLING_MIN_WORD_CHARS = 3
+#: A grid table's date column, by its header ('Dates (yyyy-yyyy)', 'Year
+#: Awarded', 'Date of issue'). A table with none is a label/value table, one
+#: record per table, which has no row to misplace text in.
+_DATE_HEADER_RE = re.compile(r"\bdates?\b|\byears?\b", re.IGNORECASE)
+_LETTER_WORD_RE = re.compile(r"[^\W\d_]+")
+
+
+class _SplitRecord(NamedTuple):
+    """One stage-4 record: its non-date values as rendered cells read them
+    (`norm`), their words, and its years."""
+    values: frozenset[str]
+    tokens: frozenset[str]
+    years: frozenset[str]
+    value_tokens: tuple[frozenset[str], ...]
+
+
+class _SplitEntry(NamedTuple):
+    """A multi-record stage-4 entry: its records, every year they hold, and
+    the words of the parent's text."""
+    element_idx: object
+    code: str
+    records: tuple[_SplitRecord, ...]
+    years: frozenset[str]
+    text_tokens: frozenset[str]
+
+
+def _split_record(record: Mapping) -> _SplitRecord:
+    values = [str(value) for key, value in record.items()
+              if isinstance(value, (str, int, float)) and str(value).strip()
+              and not _fan_out_date_key(key)]
+    years = frozenset(year for key, value in record.items() if _fan_out_date_key(key)
+                      for year in _FOUR_DIGIT_YEAR_RE.findall(str(value or "")))
+    value_tokens = tuple(frozenset(_name_tokens(value)) for value in values)
+    return _SplitRecord(frozenset(norm(value) for value in values if _name_tokens(value)),
+                        frozenset().union(*value_tokens), years, value_tokens)
+
+
+def _split_entries(stage4: dict) -> list[_SplitEntry]:
+    """The entries stage 4 kept two or more records for."""
+    entries = []
+    for raw in stage4.get("entries", []):
+        fields = raw.get("extracted_fields")
+        records = fields.get(STAGE4_RECORDS_KEY) if isinstance(fields, Mapping) else None
+        if (not isinstance(records, list) or len(records) < FANOUT_RESIDUE_MIN_RECORDS
+                or not all(isinstance(record, Mapping) for record in records)):
+            continue
+        split = tuple(_split_record(record) for record in records)
+        entries.append(_SplitEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), split,
+            frozenset().union(*(record.years for record in split)),
+            frozenset(_name_tokens(str(raw.get("text") or "")))))
+    return entries
+
+
+def _row_record(entry: _SplitEntry, cells: list[str], date_years: set[str]) -> int | None:
+    """The index of the one record this row renders, or None: no record's
+    value is a cell of it, or two records match it equally well."""
+    scores = []
+    for record in entry.records:
+        exact = sum(1 for cell in cells if norm(cell) in record.values)
+        dated = bool(exact) and bool(record.years) and record.years == date_years
+        scores.append(exact + dated)
+    best = max(scores)
+    if not best or scores.count(best) > 1:
+        return None
+    index = scores.index(best)
+    years = entry.records[index].years
+    return None if years and not years & date_years else index
+
+
+def _sibling_value_in(cell_tokens: frozenset[str], record: _SplitRecord,
+                      siblings: list[_SplitRecord]) -> bool:
+    """Whether the cell holds another record's value, with more around it:
+    a cell that IS that value is a value both records render (a default
+    role, a shared organization)."""
+    return any(tokens and not tokens <= record.tokens and tokens < cell_tokens
+               and any(len(tok) >= FANOUT_SIBLING_MIN_WORD_CHARS and not tok.isdigit()
+                       for tok in tokens)
+               for sibling in siblings for tokens in sibling.value_tokens)
+
+
+def _cell_residue(cell: str, entry: _SplitEntry, index: int) -> list[str]:
+    """The residue shapes in one cell of the row of record `index`."""
+    tokens = frozenset(_name_tokens(cell))
+    if not tokens or not tokens <= entry.text_tokens:
+        return []
+    record = entry.records[index]
+    shapes = []
+    if set(_FOUR_DIGIT_YEAR_RE.findall(cell)) & (entry.years - record.years - record.tokens):
+        shapes.append(FANOUT_RESIDUE_SIBLING_YEAR)
+    if any(len(tok) == FANOUT_YEAR_STUB_DIGITS and tok.isdigit() and tok not in record.tokens
+           and any(year.endswith(tok) for year in entry.years) for tok in tokens):
+        shapes.append(FANOUT_RESIDUE_YEAR_STUB)
+    words = _LETTER_WORD_RE.findall(norm(cell))
+    if (words and FANOUT_RANGE_WORD in (words[0], words[-1])
+            and FANOUT_RANGE_WORD not in record.tokens):
+        shapes.append(FANOUT_RESIDUE_BARE_TO)
+    parts = [part.strip() for part in cell.split(TABLE_ROW_JOINER.strip())]
+    if len(parts) > 1 and any(_FOUR_DIGIT_YEAR_RE.fullmatch(part) for part in parts):
+        shapes.append(FANOUT_RESIDUE_BUILT_LINE)
+    siblings = [other for i, other in enumerate(entry.records) if i != index]
+    if _sibling_value_in(tokens, record, siblings):
+        shapes.append(FANOUT_RESIDUE_SIBLING_VALUE)
+    return shapes
+
+
+def _table_residue(entry: _SplitEntry, table: list[list[str]]) -> list[tuple[str, list[str]]]:
+    """Each row of a grid table that one of the entry's records renders with
+    residue: the row joined, and its shapes."""
+    if not table:
+        return []
+    date_cols = {i for i, head in enumerate(table[0]) if _DATE_HEADER_RE.search(head)}
+    if not date_cols:
+        return []
+    found = []
+    for row in table[1:]:
+        cells = [cell for i, cell in enumerate(row) if cell.strip() and i not in date_cols]
+        date_years = set(_FOUR_DIGIT_YEAR_RE.findall(
+            " ".join(cell for i, cell in enumerate(row) if i in date_cols)))
+        index = _row_record(entry, cells, date_years) if cells else None
+        if index is None:
+            continue
+        shapes = [shape for cell in cells if norm(cell) not in entry.records[index].values
+                  for shape in _cell_residue(cell, entry, index)]
+        if shapes:
+            found.append((TABLE_ROW_JOINER.join(c for c in row if c.strip()), shapes))
+    return found
+
+
+def lint_fanout_cell_residue(stage4: dict,
+                             table_rows: list[list[list[str]]]) -> list[dict]:
+    """Records of a multi-record entry whose table row prints the parent's
+    leftover text -- another record's years or value, a cut year, a range
+    word, a built line -- in a name, organization or committee cell (#1445).
+    One finding per entry, named by its element_idx_start, quoting rows."""
+    findings = []
+    for entry in _split_entries(stage4):
+        rows = [found for table in table_rows for found in _table_residue(entry, table)]
+        if not rows:
+            continue
+        shapes = sorted({shape for _, row_shapes in rows for shape in row_shapes})
+        findings.append(_finding(
+            "fanout_cell_residue", FANOUT_RESIDUE_SEVERITY,
+            f"entry {entry.element_idx} ({entry.code}): {', '.join(shapes)}: a record "
+            f"split from this entry prints the entry's leftover text in a name, "
+            f"organization or committee cell",
+            list(dict.fromkeys(text for text, _ in rows))[:FANOUT_RESIDUE_EVIDENCE_LIMIT]))
+    return findings
+# identical_rendered_rows (EOAHMI recheck: QTATUP-04, BRUSUZ-01): rows of one
+# rendered table that a reader cannot tell apart. `duplicate_records` cannot
+# see them: its block rule compares enumerated paragraphs, and `blocks` holds
+# a whole table as one block; its record rule pairs citations and grants by
+# title, and each grant is a table of its own. Stage 4 says what the rows
+# are. A row is matched to the stage-4 records whose words hold all of the
+# row's words, and fires in two shapes:
+#   - distinct_records: identical rows whose matched records disagree on a
+#     field both fill, so the row hides what tells them apart: a talk given
+#     on seven dates rendered as seven year-only rows (QTATUP 980).
+#   - fused_repeat: a multi-record entry whose whole text renders as one
+#     row while one of its records also renders as its own row, so that
+#     record shows twice (BRUSUZ 228, 249, 265 on the dev-248 render).
+# Identical rows whose records agree are silent: the CV lists that record
+# twice ("31." and "32." with one text, or a membership under two headings),
+# and the document repeats it faithfully. A third shape, fewer matched
+# records than identical rows, was measured and dropped: its 3 hits on the
+# 102 dev renders were all a membership the CV lists twice, one copy with an
+# open year to which stage 6 adds "Present", so only one copy matched.
+
+#: A row with fewer words than this (`_name_tokens`) is not compared: a
+#: bare year or a lone word repeats by design.
+IDENTICAL_ROW_MIN_WORDS = 2
+#: A stage-4 entry whose `stage4_records` holds at least this many records
+#: is one source line stage 4 split; only such an entry can render fused.
+IDENTICAL_ROW_MIN_RECORDS = 2
+#: The fused row must carry at least this much of the entry's text (letters
+#: and digits only), so a two-word entry cannot match a row by chance. On
+#: the 111 measured runs any floor up to 26 gives the same hits; the
+#: shortest fused entry found, DUTAVD 79 (26), is a true one.
+IDENTICAL_ROW_FUSED_MIN_CHARS = 20
+IDENTICAL_ROW_SEVERITY = "WARN"
+#: A finding quotes the row and, for at most this many of its records, the
+#: values the row hides.
+IDENTICAL_ROW_EVIDENCE_RECORDS = 3
+#: Stage-4 bookkeeping and formatted copies: none tells one record from
+#: another.
+_IDENTICAL_ROW_IGNORED_FIELDS = frozenset({
+    STAGE4_RECORDS_KEY, "target_name", "formatted_text", "formatting_source",
+    "formatted_citation"})
+#: Words stage 6 writes into a row that no field holds: the open end of a
+#: date range with no end ("2013-Present" from start_date 2013).
+_IDENTICAL_ROW_RENDER_WORDS = frozenset({"present"})
+_NON_ALNUM_RE = re.compile(r"[\W_]+")
+
+IDENTICAL_SHAPE_DISTINCT = "distinct_records"
+IDENTICAL_SHAPE_FUSED = "fused_repeat"
+
+
+class _IdenticalRowRecord(NamedTuple):
+    """One stage-4 record: its entry, its words, and its filled field
+    values, which tell it from another record."""
+    element_idx: object
+    code: str
+    tokens: frozenset[str]
+    values: Mapping[str, str]
+
+
+def _identical_row_record(entry: _FieldsEntry, fields: Mapping) -> _IdenticalRowRecord:
+    values = {key: norm(str(value)) for key, value in fields.items()
+              if key not in _IDENTICAL_ROW_IGNORED_FIELDS
+              and value not in (None, "", [], {})}
+    return _IdenticalRowRecord(entry.element_idx, entry.code,
+                               frozenset(_name_tokens(" ".join(values.values()))),
+                               MappingProxyType(values))
+
+
+def _split_records(fields: Mapping) -> list[Mapping]:
+    """The records of a multi-record entry, or [] for a one-record entry."""
+    children = fields.get(STAGE4_RECORDS_KEY)
+    records = ([child for child in children if isinstance(child, Mapping)]
+               if isinstance(children, list) else [])
+    return records if len(records) >= IDENTICAL_ROW_MIN_RECORDS else []
+
+
+def _identical_row_records(stage4: dict) -> list[_IdenticalRowRecord]:
+    records = []
+    for entry in _fields_entries(stage4):
+        children = _split_records(entry.fields) or [entry.fields]
+        records += [_identical_row_record(entry, child) for child in children]
+    return records
+
+
+def _table_row_text(row: list[str]) -> str:
+    """A table row's distinct non-empty cells, whitespace collapsed, joined
+    with TABLE_ROW_JOINER (a merged cell repeats in `row`)."""
+    cells = dict.fromkeys(" ".join(cell.split()) for cell in row if cell.strip())
+    return TABLE_ROW_JOINER.join(cells)
+
+
+def _row_words(text: str) -> set[str]:
+    return _name_tokens(text) - _IDENTICAL_ROW_RENDER_WORDS
+
+
+def _disagreeing_fields(records: list[_IdenticalRowRecord]) -> list[str]:
+    """The fields two of `records` fill with different values, sorted. A
+    field only one of them fills is no disagreement: "2007" beside
+    "2007-present" can be one membership listed twice."""
+    return sorted({key for i, first in enumerate(records) for second in records[i + 1:]
+                   for key in first.values.keys() & second.values.keys()
+                   if first.values[key] != second.values[key]})
+
+
+def _distinct_records_message(text: str, count: int, matched: list[_IdenticalRowRecord],
+                              fields: list[str]) -> tuple[str, list[str]]:
+    """Message and evidence for identical rows standing for `matched`
+    records that differ in `fields`: the row, then the values it hides."""
+    first = matched[0]
+    others = ", ".join(str(idx) for idx in dict.fromkeys(
+        record.element_idx for record in matched[1:]) if idx != first.element_idx)
+    shown = [f"entry {record.element_idx}: " + "; ".join(
+        f"{key}={record.values.get(key, '')}" for key in fields)
+        for record in matched[:IDENTICAL_ROW_EVIDENCE_RECORDS]]
+    return (f"entry {first.element_idx} ({first.code}): {IDENTICAL_SHAPE_DISTINCT}: "
+            f"{count} identical rows in one table stand for {len(matched)} stage-4 "
+            f"records{' (also entries ' + others + ')' if others else ''} that differ in "
+            f"{', '.join(fields)}; the row hides what tells them apart", [text] + shown)
+
+
+def _distinct_record_rows(table_rows: list[list[list[str]]],
+                          records: list[_IdenticalRowRecord]) -> list[tuple[str, list[str]]]:
+    """(message, evidence) per group of identical rows in one table whose
+    matched records disagree."""
+    found = []
+    for table in table_rows:
+        counts = Counter(_table_row_text(row) for row in table)
+        for text, count in counts.items():
+            words = _row_words(text)
+            if count < 2 or len(words) < IDENTICAL_ROW_MIN_WORDS:
+                continue
+            matched = [record for record in records if words <= record.tokens]
+            fields = _disagreeing_fields(matched)
+            if fields:
+                found.append(_distinct_records_message(text, count, matched, fields))
+    return found
+
+
+def _fused_repeat(texts: list[str], key: str, own: list[frozenset[str]]
+                  ) -> tuple[str, str] | None:
+    """(record row, fused row) when one row of `texts` carries the entry's
+    whole text (`key`) and another, the nearest, is one of its records."""
+    fused = next((i for i, text in enumerate(texts)
+                  if key in _NON_ALNUM_RE.sub("", norm(text))), None)
+    if fused is None:
+        return None
+    fused_words = _row_words(texts[fused])
+    repeats = [i for i, text in enumerate(texts) if i != fused
+               and len(_row_words(text)) >= IDENTICAL_ROW_MIN_WORDS
+               and _row_words(text) <= fused_words
+               and any(_row_words(text) <= tokens for tokens in own)]
+    if not repeats:
+        return None
+    return texts[min(repeats, key=lambda i: abs(i - fused))], texts[fused]
+
+
+def _fused_repeat_rows(stage4: dict, table_rows: list[list[list[str]]]
+                       ) -> list[tuple[str, list[str]]]:
+    """(message, evidence) per multi-record entry rendered fused beside one
+    of its own records."""
+    found = []
+    for entry in _fields_entries(stage4):
+        children = _split_records(entry.fields)
+        key = _NON_ALNUM_RE.sub("", norm(entry.text))
+        if not children or len(key) < IDENTICAL_ROW_FUSED_MIN_CHARS:
+            continue
+        own = [_identical_row_record(entry, child).tokens for child in children]
+        for table in table_rows:
+            pair = _fused_repeat([_table_row_text(row) for row in table], key, own)
+            if pair is not None:
+                found.append((
+                    f"entry {entry.element_idx} ({entry.code}): {IDENTICAL_SHAPE_FUSED}: "
+                    f"the entry's whole text renders as one row while one of its "
+                    f"{len(children)} records also renders as its own row", list(pair)))
+    return found
+
+
+def lint_identical_rendered_rows(stage4: dict,
+                                 table_rows: list[list[list[str]]]) -> list[dict]:
+    """Rows of one rendered table a reader cannot tell apart, where stage 4
+    shows distinct records, or one record rendered twice (EOAHMI QTATUP-04,
+    BRUSUZ-01). One finding per group of identical rows, or per fused
+    entry, quoting the rows. Reads the docx's table rows (`w:ins` text
+    included) and stage 4."""
+    found = (_distinct_record_rows(table_rows, _identical_row_records(stage4))
+             + _fused_repeat_rows(stage4, table_rows))
+    return [_finding("identical_rendered_rows", IDENTICAL_ROW_SEVERITY, message, evidence)
+            for message, evidence in found]
+
+
 # split_child_unsourced (EOAHMI recheck DUTAVD-03, WYMVGU-02): a record
 # stage 4 split out of an entry (`stage4_records`, #1406) shows a place or a
 # date range that does not come from its own text. Two shapes:
@@ -2760,7 +3145,7 @@ class _SplitRange(NamedTuple):
     end: str
 
 
-def _split_records(raw: dict) -> list[Mapping]:
+def _split_child_records(raw: dict) -> list[Mapping]:
     """The entry's stage-4 records, when stage 4 split it into two or more."""
     fields = raw.get("extracted_fields")
     records = fields.get(STAGE4_RECORDS_KEY) if isinstance(fields, Mapping) else None
@@ -2892,7 +3277,7 @@ def lint_split_child_unsourced(stage4: dict,
     rows = _junk_rendered_rows(table_rows, []) if table_rows is not None else None
     findings = []
     for raw in stage4.get("entries", []):
-        records = _split_records(raw)
+        records = _split_child_records(raw)
         text = str(raw.get("text") or "")
         problems = _date_problems(text, records, rows)
         if rows is not None:

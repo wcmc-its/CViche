@@ -123,3 +123,15 @@ def get_config(section, key, default=None):
 
     # 3. default
     return default ,"default"
+
+
+EMAIL_INTAKE_FLAG = "CVICHE_EMAIL_INTAKE"
+_FLAG_ON = frozenset({"1", "true", "yes", "on"})
+# The SES receiving address for emailed CVs (#1298).
+INTAKE_ADDRESS = "cv@scholars-mail.weill.cornell.edu"
+
+
+def email_intake_enabled() -> bool:
+    """CVICHE_EMAIL_INTAKE is on: the poller runs and the UI shows the intake address."""
+    flag, _ = get_config("mail", EMAIL_INTAKE_FLAG, default="")
+    return str(flag).strip().lower() in _FLAG_ON

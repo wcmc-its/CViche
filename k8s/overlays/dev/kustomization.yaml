@@ -30,6 +30,13 @@ configMapGenerator:
       # both corpus farms (PR body) found no non-personal content removed.
       # Watch the "Protected-data repair:" log line here before prod.
       - CVICHE_RUN_REPAIR=1
+      # Outbound mail through SESv2 (#1335). The backend reads MAIL_SEND to
+      # offer the "Email me when job completes" box; the workers send the
+      # completion email, so both need it. The sender is the DKIM-verified
+      # SES identity CvicheBedrockPolicy v16 may send from. SES production
+      # access was granted 2026-10-05 (case 179121184200774).
+      - CVICHE_MAIL_SEND=1
+      - CVICHE_MAIL_FROM=no-reply@scholars-mail.weill.cornell.edu
 
 # 1. Your existing database secrets configuration
 secretGenerator:

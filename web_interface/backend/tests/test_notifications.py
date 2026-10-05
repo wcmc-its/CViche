@@ -18,6 +18,7 @@ call-site wiring -- these tests only cover the notifications helpers.
 Cards are Adaptive Cards in the Teams Workflows envelope:
   {"type": "message", "attachments": [{"content": <AdaptiveCard>}]}
 """
+import asyncio
 import logging
 import threading
 import time
@@ -683,11 +684,56 @@ def test_notify_started_posts_nothing_for_a_run_in_a_batch(monkeypatch):
     cards would bury it (up to 50 of them)."""
     posted = _capture_posts(monkeypatch)
 
-    notifications.notify_run_started(_run(batch_id="BATCHA"))
+    notifications.notify_run_started(_run(batch_id="BATCHA"), batch_files_submitted=2)
     notifications.notify_run_started(_run(id="SNGL01", batch_id=None))
     notifications.flush()
 
     assert [_title(p)["text"] for p in posted] == ["CViche run SNGL01 started"]
+
+
+def test_notify_started_posts_for_a_one_file_batch_run(monkeypatch):
+    """#1340: a single upload with "Email me when job completes" ticked is a
+    one-file batch; it posts no batch card, so its run posts the started card."""
+    posted = _capture_posts(monkeypatch)
+
+    notifications.notify_run_started(_run(id="ONEFIL", batch_id="BATCHA"), batch_files_submitted=1)
+    notifications.flush()
+
+    assert [_title(p)["text"] for p in posted] == ["CViche run ONEFIL started"]
+
+
+def test_notify_started_posts_nothing_for_a_batch_run_of_unknown_size(monkeypatch):
+    """No size supplied for a batch run: the bulk-batch default, never a flood of cards."""
+    posted = _capture_posts(monkeypatch)
+
+    notifications.notify_run_started(_run(batch_id="BATCHA"))
+    notifications.flush()
+
+    assert posted == []
+
+
+@pytest.mark.parametrize("files_submitted, expected", [(1, ["CViche run ONERUN started"]), (2, [])])
+def test_the_orchestrator_gives_notify_run_started_the_batch_size(db, tmp_path, monkeypatch,
+                                                                   files_submitted, expected):
+    """The wire, not just the rule: the orchestrator reads the run's batch
+    size and passes it on, so a one-file batch's run posts its started card
+    and a bulk batch's does not (#1340)."""
+    from app.models import Run, RunBatch, User
+    from app.pipeline import orchestrator as orch
+    user = User(email="pat@example.com", display_name="Pat Example", consent_version="1.0")
+    db.add(user)
+    db.commit()
+    db.add(RunBatch(id="BATCHA", user_id=user.id, files_submitted=files_submitted))
+    run = Run(id="ONERUN", filename="cv.docx", file_type="docx", status="running",
+              user_id=user.id, batch_id="BATCHA")
+    db.add(run)
+    db.commit()
+    posted = _capture_posts(monkeypatch)
+
+    asyncio.run(orch.PipelineOrchestrator("ONERUN", tmp_path / "ONERUN.docx", db)._notify_started(run))
+    notifications.flush()
+
+    assert [_title(p)["text"] for p in posted] == expected
 
 
 def test_notify_terminal_still_posts_for_a_run_in_a_batch(monkeypatch):
@@ -729,6 +775,16 @@ def test_notify_batch_submitted_posts_one_card(monkeypatch):
     notifications.flush()
 
     assert [_title(p)["text"] for p in posted] == ["CViche batch BATCHA submitted (3 files)"]
+
+
+def test_notify_batch_submitted_posts_nothing_for_a_one_file_batch(monkeypatch):
+    """#1340: a one-file batch is a single upload; its run posts the started card instead."""
+    posted = _capture_posts(monkeypatch)
+
+    notifications.notify_batch_submitted(notifications.BatchFacts(id="BATCHA", files_submitted=1), "Pat Example")
+    notifications.flush()
+
+    assert posted == []
 
 
 def test_notify_batch_submitted_is_noop_when_unconfigured(monkeypatch):
