@@ -210,6 +210,7 @@ def _require_clean_scan(storage: RunStorage, run_id: str, key: str) -> None:
 @router.get("/run/{run_id}/input")
 def download_input_file(
     run_id: str,
+    as_url: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Response:
@@ -219,6 +220,10 @@ def download_input_file(
     restart/retry re-materialize it (see run_service._materialize_input_if_missing),
     but it was only ever read internally — there was no way to get the original
     file back out. Same owner, admin or staff gate as the outputs download.
+
+    ``?as_url=true`` answers 200 ``{"url": ...}`` instead of the 307 or the
+    bytes, after the same checks, so the page can fetch() it and show a
+    refusal's message (#1333). ``url`` is null on local storage.
     """
     run = check_run_access(run_id, current_user, db, read_only=True)  # 404/403; returns the Run
 
@@ -241,6 +246,10 @@ def download_input_file(
         # S3 returns a presigned URL that renames the download; local storage
         # returns None (no presigned URLs), so proxy the bytes ourselves.
         url = storage.get_download_url(run_id, key, download_name=original_name)
+        if as_url:
+            # The S3 bucket has no CORS, so the page can't fetch() the presigned
+            # URL itself; it navigates to it. With no URL it navigates here.
+            return JSONResponse(content={"url": url})
         if url:
             return RedirectResponse(url, status_code=307)
         data = storage.get_file(run_id, key)
