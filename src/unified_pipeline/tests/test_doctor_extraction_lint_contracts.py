@@ -82,6 +82,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _short_end_year,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_role_consistency,
+    lint_span_count,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack, docx_body_blocks)
@@ -1929,6 +1931,23 @@ def test_offschema_a_span_key_on_a_code_no_date_cell_extends_is_unread():
     assert "date cell" not in findings[0]["message"]
 
 
+def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
+    """RCBKFG (#1245, UYFRTL 33): `additional_date_ranges` is a string, so
+    as a date-named key outside `EXTRA_SPAN_KEYS` it was never a candidate.
+    Its terms missing from the row are now a lost date; once the row
+    carries them it is not reported."""
+    entry = _fields_entry("O", {
+        "leadership_role": "Chair", "institution": "Example College",
+        "start_date": "1982", "end_date": "2012",
+        "additional_date_ranges": "1982-1986; 1989-1995; 2004-2012"})
+    findings = _graded([_table(_row("Chair", "Example College", "1982-2012"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_date_ranges")]
+    assert "its span did not reach the record's date cell" in findings[0]["message"]
+    shown = _table(_row("Chair", "Example College", "1982-1986, 1989-1995, 2004-2012"))
+    assert _graded([shown], entry) == []
+
+
 def test_offschema_row_found_when_its_name_is_split_across_cells():
     """The honors renderer moves an award name's tail into its own cell, and
     the document writes a typographic apostrophe stage 4 wrote plainly."""
@@ -3489,5 +3508,171 @@ def test_short_end_year(end, start, expected):
     assert _short_end_year(end, start, 2026) == expected
 
 
+
+# role_consistency (#1403, RCBKFG KUUKNJ 243/247) -- the source names the CV
+# owner under one role label while pi_role states the other.
+
+_ROLE_OWNER = {"first_name": "Ada", "last_name": "Testowner"}
+
+
+def _roles(text, pi_role, owner=_ROLE_OWNER, code="M2A", key="pi_role"):
+    entry = _grant(243, text, code=code, **{key: pi_role})
+    return lint_role_consistency({"cv_owner": owner, "entries": [entry]})
+
+
+@pytest.mark.parametrize("text, pi_role, source", [
+    ("Source: NIH R01\tRole: PIs: Testowner A, Other B, co-Is: Third C\tTitle: T", "co-I", "PI"),
+    ("Source: NIH R01\tRole: PI: Other B, co-Is: Third C, Testowner A\tTitle: T", "PI", "co-I"),
+    ("R01 HL000000 (Testowner, PI)  25%  5/1/08-5/30/13", "Co-Investigator", "PI"),
+    ("Example Foundation 2019-2021, Testowner AB (co-I)", "Principal Investigator", "co-I"),
+    ("NIH R01 | 2019-2021 | Principal Investigators: Testowner A", "co-investigator", "PI"),
+    ("Role: PIs: Other B, Testowner A, co-Is: Third C", "co-I", "PI"),  # next list's label
+    ("PI: Other B; Co-Investigators: Testowner A", "PI", "co-I"),
+    ("co-Is: Third C, Testowner A (PI)", "co-I", "PI"),  # the label after the name wins
+])
+def test_role_consistency_flags_an_owner_role_the_source_contradicts(text, pi_role, source):
+    findings = _roles(text, pi_role)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("role_consistency", "WARN")]
+    assert findings[0]["message"].startswith("entry 243 (M2A):")
+    assert f"names the CV owner as {source}," in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text, pi_role", [
+    ("Role: PIs: Testowner A, Other B, co-Is: Third C", "PI"),        # agrees
+    ("Role: PI: Other B, co-Is: Third C, Testowner A", "Co-I"),
+    ("Role: PIs: Testowner A, co-Is: Third C", None),                 # empty role
+    ("Role: PIs: Testowner A, co-Is: Third C", "Mentor"),             # neither role
+    ("Role: Co-PIs: Testowner A, Other B", "co-I"),                   # a co-PI
+    ("PI: Other B\tco-Is: Third C", "PI"),                           # owner not named
+    ("PI: Testowner A\tco-Is: Third C, Testowner A", "PI"),          # both roles
+    ("Testowner A, Other B\tco-Is: Third C", "PI"),                  # label in another cell
+    ("PI: Other B\tTestowner A", "co-I"),
+    ("PI: Other B | Testowner A", "co-I"),
+    ("PI: Other B, Co-PIs: Testowner A", "co-I"),                     # nearest label is a co-PI
+    ("PI: Other B, Co-PIs: Testowner A", "PI"),
+    ("Supplement to a PI award, Testowner A, Other B", "co-I"),       # no list label
+    ("PIs: Testownerson A, co-Is: Third C", "co-I"),                  # a longer word
+    ("PI: Other B, MD; Co PI: Ada Testowner, MD", "co-I"),            # "Co PI" is a co-PI
+    ("PI: Other B, MD; Co PI: Ada Testowner, MD", "PI"),
+    ("PI: Other B; Subcontract PIs: Testowner A, Third C", "co-I"),
+    ("(PI: Other B, Subcontract PI: Testowner A)\nRole: Co-Investigator",
+     "Co-Investigator"),                                              # a subaward's PI
+])
+def test_role_consistency_spares_agreement_and_what_it_cannot_judge(text, pi_role):
+    assert _roles(text, pi_role) == []
+
+
+def test_role_consistency_reads_role_when_pi_role_is_empty():
+    """Stage 6 renders `pi_role or role`; the lint reads the same value."""
+    assert len(_roles("PIs: Testowner A", "co-I", key="role")) == 1
+
+
+@pytest.mark.parametrize("owner", [{}, {"last_name": None}, {"last_name": "Al"}])
+def test_role_consistency_needs_an_owner_surname(owner):
+    assert _roles("PIs: Al Testowner, co-Is: Third C", "co-I", owner=owner) == []
+
+
+def test_role_consistency_folds_accents_on_both_sides():
+    owner = {"last_name": "Testowner"}
+    assert len(_roles("PIs: T\u00e9stowner A, co-Is: Third C", "co-I", owner=owner)) == 1
+
+
+def test_role_consistency_judges_each_part_of_a_hyphenated_surname():
+    owner = {"last_name": "Rivera-Testowner"}
+    assert len(_roles("PIs: Rivera A, co-Is: Third C", "co-I", owner=owner)) == 1
+
+
+def test_role_consistency_ignores_non_grant_codes():
+    assert _roles("PIs: Testowner A, co-Is: Third C", "co-I", code="D1") == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ==========================================================================
+# span_count (#1245, batch RCBKFG) -- separate source years rendered as one
+# range over them.
+
+def _span_entry(text, start="2003", end="2013", code="Q2"):
+    return _fields_entry(code, {"role": "Reviewer", "organization": "Example Society",
+                                "start_date": start, "end_date": end}, text=text)
+
+
+def _span_row(dates):
+    return [_table(_row("Reviewer, Example Society", dates))]
+
+
+def _span_count(entry, dates):
+    return lint_span_count({"entries": [entry]}, _span_row(dates))
+
+
+def test_span_count_flags_separate_years_rendered_as_their_envelope():
+    findings = _span_count(_span_entry("Reviewer, Example Society, 2003, 2007, 2013"),
+                           "2003-2013")
+    assert [(f["lint"], f["severity"]) for f in findings] == [("span_count", "WARN")]
+    assert "lists 3 separate dates" in findings[0]["message"]
+    assert "2003-2013" in findings[0]["message"]
+
+
+def test_span_count_reads_terms_two_digit_ends_and_and():
+    """UYFRTL 33's shape, terms written 'Fall 2003', and 'and' as a list
+    separator."""
+    assert _span_count(_span_entry("Reviewer, Example Society 1982-86, 1989-1995, 2004-2012",
+                                   "1982", "2012"), "1982-2012")
+    assert _span_count(_span_entry("Reviewer, Example Society, Fall 2003 and Spring 2013"),
+                       "2003-2013")
+
+
+def test_span_count_spares_the_row_that_shows_the_spans():
+    entry = _span_entry("Reviewer, Example Society, 2003, 2007, 2013")
+    assert _span_count(entry, "2003, 2007, 2013") == []
+
+
+def test_span_count_spares_years_that_leave_no_gap():
+    assert _span_count(_span_entry("Reviewer, Example Society, 2003-2008, 2009-2013"),
+                       "2003-2013") == []
+
+
+def test_span_count_spares_one_range_written_with_words_or_split_across_cells():
+    """'2003 to 2013', 'between 2003 and 2013' and 'Jan 2003 - Dec 2013' are
+    one span; two years with no list separator between them are the two ends
+    of a range a table cell split."""
+    for text in ("Reviewer, Example Society, 2003 to 2013",
+                 "Reviewer, Example Society, between 2003 and 2013",
+                 "Reviewer, Example Society, Jan 2003 - Dec 2013",
+                 "Reviewer 2003\tExample Society 2013"):
+        assert _span_count(_span_entry(text), "2003-2013") == [], text
+
+
+def test_span_count_skips_mentoring_codes():
+    """A mentee line's years are the mentee's own degrees (M.S. 2003; Ph.D.
+    2013), not the record's span. The same entry under a code the lint
+    judges (P) fires, so the skip is what spares it."""
+    fields = {"mentee_name": "A. Mentee", "institution": "Example College",
+              "start_date": "2003", "end_date": "2013"}
+    blocks = [_table(_row("A. Mentee", "Example College", "2003-2013"))]
+    text = "A. Mentee, Example College, M.S. 2003; Ph.D. 2013"
+    assert lint_span_count({"entries": [_fields_entry("N3B", fields, text=text)]},
+                           blocks) == []
+    assert lint_span_count({"entries": [_fields_entry("P", fields, text=text)]}, blocks)
+
+
+def test_span_count_completes_a_two_digit_end_and_reads_an_open_one():
+    """'2003-07, 2009-13' spans 2003-2013 (read as 2003 and 2009 it would
+    not match the row); '2003, 2010-present' spans 2003-present."""
+    assert _span_count(_span_entry("Reviewer, Example Society, 2003-07, 2009-13"),
+                       "2003-2013")
+    assert _span_count(_span_entry("Reviewer, Example Society, 2003, 2010-present",
+                                   end="present"), "2003-Present")
+
+
+def test_span_count_judges_teaching_rows():
+    """Teaching is skipped by `multi_record_coverage` but is where the
+    envelope shows most (UYFRTL 33/34/48)."""
+    entry = _fields_entry("K1", {"course_title": "Example Course", "start_date": "2003",
+                                 "end_date": "2013"},
+                          text="Example Course, Fall 2003, Fall 2013")
+    findings = lint_span_count({"entries": [entry]},
+                               [("p", "2003-2013 - Example Course")])
+    assert [f["lint"] for f in findings] == ["span_count"]

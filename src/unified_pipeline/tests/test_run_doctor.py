@@ -4101,14 +4101,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (49), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (51), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 47
+    assert len(payload["findings"]) == 49
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4748,6 +4748,23 @@ def test_classification_lint_prevalence_is_the_measured_farm_fraction():
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["section_consistency"] == round(23 / 63, 3)
     assert LINT_PREVALENCE["segmentation_collapse"] == round(1 / 63, 3)
+
+
+def test_span_count_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-05 over the 245 stored runs with stage-4 JSON (106
+    analysis/<uid>, 13 analysis/pilot, 126 farm and batch), as rendered by
+    origin/dev 5e6eac1d plus the stage-6 envelope fix (one fire per run at
+    any severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["span_count"] == round(64 / 245, 3)
+
+
+def test_role_consistency_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 over stored stage-4 JSON: 2 of the 106 analysis/
+    runs and 2 of the 126 farm/batch runs (#1403); a new measurement updates
+    both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["role_consistency"] == round(4 / 232, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

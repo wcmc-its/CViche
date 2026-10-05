@@ -505,6 +505,16 @@ LINT_COPY = {
         "the section has no summary, or the CV's own research text was not checked and a new "
         "summary was written in its place.",
         "Write or check the Research Activities summary from the source CV."),
+    "span_count": LintCopy(
+        "Separate years shown as one range",
+        "The CV lists separate years or terms for a record, but the document shows one "
+        "continuous range from the first to the last.",
+        "Replace the range with the years the source CV gives."),
+    "role_consistency": LintCopy(
+        "Your role on a grant is reversed",
+        "The source CV names you as principal investigator on a grant that is shown with you as "
+        "co-investigator, or the other way round.",
+        "Check your role on each flagged grant against the source CV and correct it."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
