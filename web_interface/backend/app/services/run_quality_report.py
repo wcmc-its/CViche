@@ -57,6 +57,12 @@ _CAP_SOURCE_BY_SCORER = {
     scorer.score_owner_missing_from_citation: CapSource(
         "the CV owner was cut from several of their own citations",
         "owner_missing_from_citation"),
+    scorer.score_grant_boundary: CapSource(
+        "several grants show another grant's details", "grant_boundary"),
+    scorer.score_grant_application_as_award: CapSource(
+        "a grant application is listed as funding received", "grant_bucket"),
+    scorer.score_junk_rows: CapSource(
+        "several headers or labels appear as entries", "junk_or_header_row"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
     scorer.score_llm_fallback_served: CapSource(
@@ -191,6 +197,30 @@ _ROW_COPY_BY_SCORER = {
         "Caps the score at 84 when 3 or more citations leave the faculty member out.",
         "Restore the faculty member's name in the citations named in the owner_missing_from_citation "
         "finding."),
+    scorer.score_grant_boundary: RowCopy(
+        "Grant details kept with their grant",
+        "Uses the grant_boundary finding: a grant list split at the wrong line, so a grant shows "
+        "another grant's title, principal investigator, effort or dates.",
+        "Caps the score at 84 when 3 or more grants are flagged. A single flagged grant does not "
+        "cap.",
+        "Compare the grants named in the grant_boundary finding with the source CV and move each "
+        "detail back to its own grant."),
+    scorer.score_grant_application_as_award: RowCopy(
+        "Grant applications not listed as funding",
+        "Uses the grant_bucket finding: a grant the source CV lists under an applications heading "
+        "that the document shows as current or completed funding.",
+        "Caps the score at 84 on any such grant. A current grant whose end date has passed is "
+        "reported but does not cap.",
+        "Move the grants named in the grant_bucket finding to Pending Funding, as the source CV "
+        "files them."),
+    scorer.score_junk_rows: RowCopy(
+        "Headers not shown as entries",
+        "Uses the junk_or_header_row finding: a group header, a lead-in label, a bare date or a "
+        "repeated undated title that the document shows as an entry of its own.",
+        "Caps the score at 84 when 5 or more are flagged. One to four rows are a quick deletion, "
+        "so they do not cap.",
+        "Delete the rows named in the junk_or_header_row finding, and copy any institution they "
+        "named onto the entries beneath them."),
     scorer.score_llm_fallback_served: RowCopy(
         "Usual AI model used throughout",
         "Checks whether the AI service's content filter blocked the usual model on part of this CV, "
@@ -468,6 +498,18 @@ LINT_COPY = {
         "A grant is listed as current or completed funding although the CV files it as an "
         "application, or is listed as current although its end date has passed.",
         "Move the grant to the funding heading the source CV gives it."),
+    # Draft wording (#1174), not yet approved.
+    "research_summary_call_failed": LintCopy(
+        "Research summary not written by the AI",
+        "Every AI model refused or failed to answer for the Research Activities summary. Either "
+        "the section has no summary, or the CV's own research text was not checked and a new "
+        "summary was written in its place.",
+        "Write or check the Research Activities summary from the source CV."),
+    "span_count": LintCopy(
+        "Separate years shown as one range",
+        "The CV lists separate years or terms for a record, but the document shows one "
+        "continuous range from the first to the last.",
+        "Replace the range with the years the source CV gives."),
     "role_consistency": LintCopy(
         "Your role on a grant is reversed",
         "The source CV names you as principal investigator on a grant that is shown with you as "

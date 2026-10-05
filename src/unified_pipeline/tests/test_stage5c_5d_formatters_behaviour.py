@@ -561,6 +561,57 @@ def test_5c_postcheck_present_in_a_date_range_is_not_a_presenter():
     assert s5c.postcheck_line(line, record, "Harbor Seminar 2009-present") == "role_invented:presenter"
 
 
+# ---------------------------------------------------------------------------
+# stage_5c prompt (#1345): the prompt states the rules the post-check enforces
+# ---------------------------------------------------------------------------
+
+_TWO_TALKS = {"activities": [
+    {"activity_title": "Topic A", "date": "2012-06"},
+    {"activity_title": "Topic B", "date": "2012-08"},
+]}
+_TWO_TALKS_SOURCE = '6/2012 "Topic A", School of Medicine (to residents) 8/2012 "Topic B", School of Medicine'
+
+
+def _prompt_example_line(example: str) -> str:
+    """The formatted text the parser would take from one of the prompt's examples."""
+    assert example in s5c.EDUCATIONAL_CONTRIBUTIONS_PROMPT
+    (line,) = s5c.parse_llm_output(example + "\n", {}).values()
+    return line
+
+
+def test_5c_prompt_dated_items_example_passes_the_postcheck():
+    # DPEHSZ 269-297: the prompt's own example of a dated list must be a line
+    # the post-check keeps, so following it formats the entry.
+    line = _prompt_example_line(s5c.DATED_ITEMS_EXAMPLE)
+    assert s5c.postcheck_line(line, _TWO_TALKS, _TWO_TALKS_SOURCE) is None
+
+
+def test_5c_prompt_merged_dates_example_is_the_shape_the_postcheck_rejects():
+    line = _prompt_example_line(s5c.MERGED_DATES_EXAMPLE)
+    assert s5c.postcheck_line(line, _TWO_TALKS, _TWO_TALKS_SOURCE) == "date_not_beside_title"
+
+
+def test_5c_prompt_forbids_by_name_every_role_the_postcheck_rejects():
+    # DPEHSZ 177-200 / OIYKZE 274: 'Presenter' and 'Attendee' with no stated role.
+    assert {r.lower() for r in s5c.DEFAULT_ROLES_FORBIDDEN} == set(s5c._ROLE_EVIDENCE)
+    assert "Do not write " + ", ".join(s5c.DEFAULT_ROLES_FORBIDDEN) in s5c.EDUCATIONAL_CONTRIBUTIONS_PROMPT
+
+
+def test_5c_prompt_names_a_default_role_only_to_forbid_it():
+    # Template D handed the model "Role: Attendee/Participant", and the field
+    # list offered both as role examples.
+    naming = [line for line in s5c.EDUCATIONAL_CONTRIBUTIONS_PROMPT.splitlines()
+              if s5c._ROLE_WORD.search(line)]
+    assert len(naming) == 1 and "Never supply a default role" in naming[0]
+
+
+def test_5c_prompt_says_the_original_line_is_context_not_output():
+    # OIYKZE 274: the 'Original:' context line was echoed as a sub-bullet.
+    prompt = s5c.EDUCATIONAL_CONTRIBUTIONS_PROMPT.format(raw_content="[EC-0001] x")
+    assert "An `Original:` line is the source text of the entry above it" in prompt
+    assert "Never copy it into your output" in prompt
+
+
 def _run_5c(tmp_path, monkeypatch, entries, reply):
     input_path = _write_json(tmp_path / "in.json", {"document_uid": "E20X", "entries": entries})
     output_path = str(tmp_path / "out.json")
@@ -733,6 +784,20 @@ def test_5d_call_llm_formatter_returns_text_and_usage_tuple(monkeypatch):
     assert text == '{"CIT-0001": {}}'
     assert usage["model"] == "sentinel-model"
     assert usage["total_tokens"] == 18
+
+
+def test_5d_prompt_keeps_every_author_and_et_al_only_where_the_source_has_it(monkeypatch):
+    """#1259: a "first 6, et al." rule cut the CV owner from their own
+    citation when they sat seventh or later. The prompt the model receives
+    asks for the whole author list, with "et al." only where the source
+    writes it."""
+    sent = []
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: sent.append(kw) or _llm_result("{}"))
+    s5d.call_llm_formatter("raw content")
+    prompt = sent[0]["messages"][0]["content"]
+    assert "first 6" not in prompt
+    assert ('List every author the source lists, in the source\'s order. Never shorten '
+            'the list: write "et al." only where the source itself does') in prompt
 
 
 def test_5d_call_llm_formatter_exception_arm_returns_none_none(monkeypatch):

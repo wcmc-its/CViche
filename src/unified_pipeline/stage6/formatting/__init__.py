@@ -20,6 +20,7 @@ from .dates import (  # noqa: F401
     EXTRA_SPAN_KEYS,
     _MONTH_NAMES,
     _source_leaves_year_open,
+    envelope_date_spans,
     extra_date_spans,
     format_date_for_section,
     format_date_range,

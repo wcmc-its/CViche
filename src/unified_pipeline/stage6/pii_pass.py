@@ -60,6 +60,7 @@ from .normalization.pii import (  # noqa: F401
     WITHHOLD_POLICY,
     PiiMatch,
     WithheldItem,
+    _BARE_BIRTH_LABEL_RE,
     _BARE_EMAIL_SHAPE,
     _BARE_PHONE_SHAPE,
     _FAMILY_SHAPE_LABEL_RE,
@@ -586,10 +587,12 @@ def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan
     value that continues: a labelless shape ("Married (<name>)") is the
     whole of what it matched, and the cell after it is somebody else's. A
     label-shaped family row ("Grandchildren:", `_FAMILY_SHAPE_LABEL_RE`) is
-    a label here."""
+    a label here, and so is a bare "Birth <date>" (`_BARE_BIRTH_LABEL_RE`),
+    whose place of birth can sit in the cell after the date."""
     span = _extend_bare_label_span(text, match.start, match.end)
     opens_with_label = (_KNOWN_FIELD_LABEL_RE.match(text, match.start)
-                        or _FAMILY_SHAPE_LABEL_RE.match(text, match.start))
+                        or _FAMILY_SHAPE_LABEL_RE.match(text, match.start)
+                        or _BARE_BIRTH_LABEL_RE.match(text, match.start))
     if (scope == SCOPE_PERSONAL_AND_APPENDIX and match.category in _CONTINUATION_CATEGORIES
             and opens_with_label):
         end = _absorb_continuation_cells(text, span.end)

@@ -8,9 +8,11 @@ label beside each value in the entry, not stage 6's routing, so a value stage
 
 Home and personal values are withheld on purpose (#821) and are never
 expected. A value is skipped whenever its label, or the whole block's, says
-home, cell, fax or pager, and an address is skipped whenever the block says
+home, cell, fax or pager, or stage 4 filed the same number under a home,
+cell, fax or pager key too. An address is skipped whenever the block says
 home anywhere, the line is a birth line, or the value names no street,
-number or state (a department, #1222).
+number or state (a department, #1222); but an address under an office key
+(`work_address`, ...) beside a home `address` is still the office's.
 """
 import re
 from collections.abc import Mapping
@@ -18,6 +20,7 @@ from typing import Any
 
 from unified_pipeline.stage6.sections.personal_data import (
     _BIRTH_WORD_RE,
+    _OFFSCHEMA_OFFICE_ADDRESS_KEYS,
     _PHONE_NUMBER_PATTERN,
     _home_and_office_parts,
     _names_a_street_or_number,
@@ -57,6 +60,11 @@ _TRAILING_LABEL_RE = re.compile(r"^\s*\(([^)]{1,20})\)")
 _NOT_OFFICE_LABEL_RE = re.compile(
     r"\b(?:home|residence|residential|cell(?:ular)?|mobile|mob|fax|pager|beeper|personal)\b"
     r"|\([hcmf]\)", re.IGNORECASE)
+# Off-schema keys stage 4 files a number under that is not the office's. A
+# `phone` value one of them repeats is that number (RCBKFG CAOACN: the home
+# number under both `phone` and `home_phone`, its label out of lookback).
+_NOT_OFFICE_PHONE_KEYS = ("home_phone", "cell_phone", "mobile_phone", "fax", "fax_number",
+                          "pager")
 _HOME_LABEL_RE = re.compile(r"\b(?:home|residence|residential)\b|\(h\)", re.IGNORECASE)
 _WORK_LABEL_RE = re.compile(r"\b(?:office|work|business)\b|\([wo]\)", re.IGNORECASE)
 # Address words compared with the Office address cell: numbers of two or
@@ -116,6 +124,8 @@ def _office_numbers(fields: Mapping[str, Any], text: str) -> list[str]:
     off-schema office phone (#1222). An unlabelled number in a block whose
     only label is home is the home number."""
     home_block = bool(_HOME_LABEL_RE.search(text)) and not _WORK_LABEL_RE.search(text)
+    not_office = {_digits(value)[-_PHONE_DIGITS_COMPARED:] for key in _NOT_OFFICE_PHONE_KEYS
+                  if isinstance(value := fields.get(key), str) and value.strip()}
     numbers = []
     values = fields.get(_PHONE_FIELD)
     for value in values if isinstance(values, list) else [values]:
@@ -124,7 +134,8 @@ def _office_numbers(fields: Mapping[str, Any], text: str) -> list[str]:
         for match in _PHONE_RE.finditer(value):
             digits = _digits(match.group())
             label = _number_label(digits, value) or _number_label(digits, text)
-            if label == _LABEL_KIND_OTHER or (label is None and home_block):
+            if (label == _LABEL_KIND_OTHER or (label is None and home_block)
+                    or digits[-_PHONE_DIGITS_COMPARED:] in not_office):
                 continue
             numbers.append(digits)
     offschema = _offschema_contact(dict(fields), []).phone or {}
@@ -144,6 +155,11 @@ def _office_addresses(fields: Mapping[str, Any], text: str) -> list[str]:
         if parts:
             return [_LEADING_LABEL_RE.sub("", part) for kind, part in parts
                     if kind == _LABEL_KIND_OFFICE]
+        if _HOME_LABEL_RE.search(text):
+            # `address` is the home one; an office one stage 4 filed under an
+            # office key stage 6 reads only when `address` is empty (#1222).
+            office = _office_keyed_address(fields)
+            return [office] if _names_a_street_or_number(office) else []
     else:
         address = (_offschema_contact(dict(fields), []).address or {}).get(_OFFSCHEMA_OFFICE_ADDRESS)
     if not isinstance(address, str) or not address.strip():
@@ -151,6 +167,12 @@ def _office_addresses(fields: Mapping[str, Any], text: str) -> list[str]:
     if _HOME_LABEL_RE.search(text) or _BIRTH_WORD_RE.search(text):
         return []
     return [address] if _names_a_street_or_number(address) else []
+
+
+def _office_keyed_address(fields: Mapping[str, Any]) -> str:
+    """The first address stage 4 filed under an office key, or ''."""
+    return next((value for key in _OFFSCHEMA_OFFICE_ADDRESS_KEYS
+                 if isinstance(value := fields.get(key), str) and value.strip()), "")
 
 
 def _address_shown(address: str, cell: str) -> bool:

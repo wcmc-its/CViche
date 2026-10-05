@@ -405,9 +405,64 @@ def test_principal_investigator_role_auto_fills_cv_owner():
 
 
 def test_non_pi_role_does_not_auto_fill_cv_owner():
-    """The auto-fill needs both "principal" and "investigator"; a Co-I gets nothing."""
+    """A Co-I gets nothing; the long-form auto-fill needs "principal" and "investigator"."""
     assert resolve_pi_name({}, '', 'Co-Investigator', 'Ada Testowner') == ''
     assert resolve_pi_name({}, '', 'Principal Investigator', 'Ada Testowner') == 'Ada Testowner'
+
+
+def test_bare_pi_role_auto_fills_cv_owner_through_the_grant_table():
+    """Stage 4 writes the owner's role as a bare "PI" since #1410 (JIJRSN-01).
+
+    Driven through `_fill_research_support`, the same wire as the long form, so
+    the owner reaches the rendered "Name of Principal Investigator:" cell.
+    """
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Owner Led Trial', agency='NIH',
+                        pi_role='PI', start_date='01/2019', end_date='Present')]},
+        cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
+        current_year=TEST_YEAR)
+
+    cells = _cells(_tables_under(gen, CURRENT)[0])
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
+    assert cells['Your role:'] == 'PI'
+
+
+@pytest.mark.parametrize('role', [
+    'PI', 'pi', ' PI ', 'P.I.', 'P.I', 'P. I.', 'p.i.', '(PI)', '( PI )', '(PI) ', 'PI:', 'PI :',
+    'Sole PI', 'sole P.I.',
+])
+def test_bare_pi_role_forms_auto_fill_cv_owner(role):
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
+
+
+@pytest.mark.parametrize('role', [
+    'Co-PI', 'co-PI', 'Co-P.I.', 'Co PI', 'Co-I', 'Sub-PI', 'Subcontract PI', 'MPI', 'M-PI',
+    'Multi-PI', 'Multiple PI', 'Contact MPI', 'Site PI', 'PI-DDN', 'Pilot', 'Pi Beta', 'P', 'I',
+])
+def test_pi_roles_that_are_not_the_owner_as_pi_do_not_auto_fill(role):
+    """A whole-role match: a qualifier that makes someone else the PI never fires."""
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == ''
+
+
+def test_long_form_rule_is_unchanged_for_co_principal_investigator():
+    """The "principal" + "investigator" test still fires on its long forms.
+
+    That includes "Co-Principal Investigator" and "Site Principal
+    Investigator", as before this change; "Co-PI" does not (above). The bare
+    form is not widened to match the long form's reach.
+    """
+    for role in ('Co-Principal Investigator', 'Site Principal Investigator'):
+        assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
+    assert resolve_pi_name({}, '', 'Principle Investigator', 'Ada Testowner') == ''
+
+
+def test_a_named_pi_beats_the_owner_on_a_bare_pi_role():
+    """The bare-PI auto-fill runs last: an extracted or labelled PI wins."""
+    assert resolve_pi_name({'pi_name': 'Jane Smith'}, '', 'PI', 'Ada Testowner') == 'Jane Smith'
+    assert resolve_pi_name({}, 'Ellison Foundation (PI: Holloway)', 'PI',
+                           'Ada Testowner') == 'Holloway'
+    assert resolve_pi_name({}, 'PI', 'PI', '') == ''
 
 
 def test_extracted_pi_name_beats_the_cv_owner():
@@ -629,10 +684,13 @@ _OWN_TITLE_TEXT = '1997 Example Foundation, "Stress Study" \u2013 Mouse Models, 
 
 def test_a_pi_label_capturing_the_grants_own_title_words_is_not_a_pi():
     """#1403 (EQADVR 396): "<title>, PI" matched the "Name, PI" shape with the
-    title's last two words. Those words are the title, not a PI."""
+    title's last two words. Those words are the title, not a PI. With no
+    role the cell stays empty; with the bare "PI" role the owner fills it
+    (#1446's auto-fill), never the title words."""
     fields = {'title': _OWN_TITLE, 'pi_role': 'PI'}
     assert _pi_name_from_label(_OWN_TITLE_TEXT) == 'Mouse Models'
-    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, 'PI', 'Ada Testowner') == ''
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, '', 'Ada Testowner') == ''
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, 'PI', 'Ada Testowner') == 'Ada Testowner'
 
 
 @pytest.mark.parametrize('fields', [
@@ -669,14 +727,15 @@ def test_a_title_word_capture_falls_through_to_the_owner_auto_fill():
                            'Ada Testowner') == 'Ada Testowner'
 
 
-def test_a_grant_whose_title_tail_matches_the_pi_shape_renders_no_pi():
-    """The rendered wire: the PI cell stays empty rather than naming title words."""
+def test_a_grant_whose_title_tail_matches_the_pi_shape_renders_the_owner_not_title_words():
+    """The rendered wire: the PI cell never names the title words. The role is
+    a bare "PI", so the owner auto-fill (#1446) names the CV owner."""
     table = _generator()._create_grant_table(
         {'title': _OWN_TITLE, 'agency': 'Example Foundation', 'pi_role': 'PI',
          'start_date': '1997'},
         'M2B', entry={'text': _OWN_TITLE_TEXT}, owner_name='Ada Testowner')
     cells = _cells(table)
-    assert cells['Name of Principal Investigator:'] == ''
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
     assert cells['Your role:'] == 'PI'
 
 
@@ -2696,6 +2755,38 @@ def test_a_current_grant_with_a_two_digit_year_end_in_the_past_moves_to_complete
 
 def test_a_completed_grant_with_a_two_digit_year_end_still_running_is_promoted():
     running = _entry('M2B', title='Running Study', start_date='10/1/24', end_date='9/30/28')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_YEAR)
+
+    assert (current, completed) == ([running], [])
+
+
+# --- #1343 (RCBKFG CAOACN 589): a one-digit end year reads off the start ----
+
+@pytest.mark.parametrize('start_date, end_date, expected', [
+    ('9/1/07', '8/30/1', 2011),
+    ('2007-09-01', '8/30/1', 2011),
+    ('9/1/07', '8/30/9', 2009),
+    ('9/1/17', '8/30/1', 2021),
+    ('9/1/07', '13/30/1', None),
+    ('', '8/30/1', None),
+    (None, '8/30/1', None),
+    ('9/1/7', '8/30/1', None),
+])
+def test_grant_end_year_reads_a_one_digit_year_against_the_start(start_date, end_date, expected):
+    assert grant_end_year(end_date, TEST_YEAR, start_date) == expected
+
+
+def test_a_current_grant_with_a_one_digit_year_end_in_the_past_moves_to_completed():
+    ended = _entry('M2A', title='Ended Study', start_date='9/1/07', end_date='8/30/1')
+
+    current, completed, _ = reclassify_past_m2a_grants([ended], [], TEST_YEAR)
+
+    assert (current, completed) == ([], [ended])
+
+
+def test_a_completed_grant_with_a_one_digit_year_end_still_running_is_promoted():
+    running = _entry('M2B', title='Running Study', start_date='7/1/25', end_date='6/30/9')
 
     current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_YEAR)
 

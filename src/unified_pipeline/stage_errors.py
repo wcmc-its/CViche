@@ -2,7 +2,8 @@
 
 Both drivers -- ``run_full_pipeline.py`` (the CLI, which catches a stage's
 exception and carries on) and ``web_interface/.../orchestrator.py`` (which
-records it and fails the run) -- write the same record here, one file per
+records it and fails the run, except for stage 4.5, whose failure it records
+non-fatal and carries on past, #1174) -- write the same record here, one file per
 document, beside the ``stage_*`` output dirs. ``quality_score`` reads it for its
 fatal-error gate, so a stage failure no longer has to leave a Python exception
 *name* in some artifact's ``error`` string to be seen: before this, the only
@@ -49,11 +50,39 @@ class StageError:
     fatal: bool
 
     @classmethod
-    def from_exception(cls, stage: str, exc: BaseException) -> StageError:
-        """A stage whose runner raised. Always fatal: the stage produced
-        nothing, so whatever it owned is missing from the output."""
+    def from_exception(cls, stage: str, exc: BaseException, *, fatal: bool = True) -> StageError:
+        """A stage whose runner raised. Fatal by default: the stage produced
+        nothing, so whatever it owned is missing from the output. A driver
+        that carries on past the stage by policy passes ``fatal=False``
+        (the web driver for stage 4.5, #1174)."""
         return cls(stage=stage, exception_type=type(exc).__name__,
-                   message=str(exc), fatal=True)
+                   message=str(exc), fatal=fatal)
+
+
+@dataclass(frozen=True)
+class CallFailure:
+    """A failure a stage survived rather than raised (#1174): one stage-4.5
+    LLM call that raised on every model tried, recorded in the stage's own
+    artifact under ``llm_provenance.STAGE4_5_CALL_FAILURES_KEY``, not in the
+    stage-error record, because the stage itself did not raise. ``call`` is
+    one of ``llm_provenance``'s STAGE4_5_CALL_* names; ``stop_reason`` is the
+    Converse stopReason when the error carried one."""
+
+    call: str
+    exception_type: str
+    stop_reason: str | None
+    message: str
+
+    @classmethod
+    def from_record(cls, raw: object) -> CallFailure | None:
+        """The record ``raw`` holds, or None when it is not one (a reader of
+        the artifact never raises on a malformed record)."""
+        if not isinstance(raw, dict):
+            return None
+        stop_reason = raw.get("stop_reason")
+        return cls(call=str(raw.get("call")), exception_type=str(raw.get("exception_type")),
+                   stop_reason=None if stop_reason is None else str(stop_reason),
+                   message=str(raw.get("message", "")))
 
 
 def stage_errors_path(outputs_root: Path, document_uid: str) -> Path:

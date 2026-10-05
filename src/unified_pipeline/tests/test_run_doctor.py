@@ -69,6 +69,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
     lint_stage_failure_recorded,
+    lint_research_summary_call_failed,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_segmentation_collapse,
@@ -1351,6 +1352,19 @@ def test_enrichment_failures_quiet_on_non_failure_statuses():
     assert lint_enrichment_failures({"entries": entries}) == []
 
 
+def test_enrichment_failures_skips_a_citation_stage5_restored_from_a_shared_pmid():
+    """RCBKFG JJUQDF 93: another entry kept the shared PMID, so stage 5 put
+    this entry's own citation back; that is right, not a failure."""
+    restored = _enriched_entry("Okafor C. (2023). Simulation debriefing at scale.",
+                               "title_check_failed")
+    restored["enrichment_rejected"] = {"source": "doi_search", "shared_pmid_with": 91}
+    assert lint_enrichment_failures({"entries": [restored]}) == []
+    failed = _enriched_entry("Petrov D. (2022). Rubric drift.", "title_check_failed")
+    failed["enrichment_rejected"] = {"source": "doi_search", "shared_pmid_with": None}
+    findings = lint_enrichment_failures({"entries": [restored, failed]})
+    assert [f["message"][:31] for f in findings] == ["1 publication(s) failed PubMed "]
+
+
 def test_enrichment_failures_missing_artifact_info_skip(tmp_path):
     root = _build_clean_run(tmp_path)
     next((root / "stage_5_enrichment").glob("*.json")).unlink()
@@ -2542,6 +2556,18 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     assert lint_date_cell_shape(stage4, [_MENTEE_TABLE], []) == []
 
 
+def test_date_cell_shape_reports_a_dotted_date_the_source_writes_the_same_way():
+    """RCBKFG KUUKNJ N4: the source dates its rows "YYYY.MM - ..." and stage
+    6 printed the stored "2021.07" as it stood. No WCM date format has a dot,
+    so the source's own spelling does not spare it."""
+    stage4 = {"entries": [_dated4("2021.07 - Example Widget Panel, member",
+                                  "Q3", "2021.07", None, idx=162)]}
+    rows = [[["Example Widget Panel", "Member", "2021.07"]]]
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", ["2021.07"])]
+    assert findings[0]["message"].startswith("entry 162 (Q3): raw_value:")
+
+
 @pytest.mark.parametrize("cell, shapes", [
     ("2003-04-2005-09", ["raw_value"]),
     ("2004-10-07", ["raw_value"]),
@@ -2558,6 +2584,12 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     ("Fall 2019 - fall 2019", ["same_ends"]),
     ("2004-10-07-2004-10-07", ["raw_value", "same_ends"]),
     ("2003-2005-09", ["raw_value"]),
+    # A dotted month or day (RCBKFG KUUKNJ N4), alone or on either side.
+    ("2021.07", ["raw_value"]),
+    ("2021.7.15", ["raw_value"]),
+    ("2017-2021.03", ["raw_value"]),
+    ("2022.07-2026.06", ["raw_value"]),
+    ("2021.07-present", ["open_range", "raw_value"]),
     ("2015-ongoing", ["open_range"]),
     ("2015-current", ["open_range"]),
     ("Sept 2008 - Sept 2008", ["same_ends"]),
@@ -2589,6 +2621,10 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     # are not dates the lint reads.
     ("2004-13-07", []),
     ("2004-10-32", []),
+    # A dot after the year needs a real month: "2021.13" and "2021.075" are
+    # not dates the lint reads.
+    ("2021.13", []),
+    ("2021.075", []),
     # Only a 19xx/20xx run is read as a year to tie by.
     ("1850-1850", []),
     ("2019", []),
@@ -3874,6 +3910,57 @@ def test_stage_failure_recorded_quiet_on_a_clean_run():
     assert lint_stage_failure_recorded([]) == []
 
 
+def test_stage_failure_recorded_names_research_activities_for_a_non_fatal_stage_4_5():
+    """The web driver's record when stage 4.5 raised and the run carried on (#1174)."""
+    (finding,) = lint_stage_failure_recorded([StageError("4.5", "RuntimeError", "boom", False)])
+    assert finding["severity"] == "WARN"
+    assert "the Research Activities section has no research summary" in finding["message"]
+    assert "RED" not in finding["message"]
+
+
+# ----------- #1174: research_summary_call_failed (a call stage 4.5 survived) --
+
+def test_research_summary_call_failed_warns_per_call_and_names_the_section():
+    stage4_5 = {"research_summary": {"text": ""}, "llm_call_failures": [
+        {"call": "m1_relevance_score", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"},
+        {"call": "summary_generation", "exception_type": "ClientError",
+         "stop_reason": None, "message": "denied"}]}
+
+    score, generation = lint_research_summary_call_failed(stage4_5)
+
+    assert {score["lint"], generation["lint"]} == {"research_summary_call_failed"}
+    assert {score["severity"], generation["severity"]} == {"WARN"}
+    assert "Research Activities text was not scored" in score["message"]
+    assert "stop_reason='content_filtered'" in score["message"]
+    assert "the Research Activities section has no research summary" in generation["message"]
+    assert generation["evidence"] == [
+        "call=summary_generation", "exception=ClientError", "stop_reason=None"]
+
+
+def test_research_summary_call_failed_quiet_without_the_record_or_on_a_malformed_one():
+    assert lint_research_summary_call_failed({"research_summary": {"text": "x"}}) == []
+    assert lint_research_summary_call_failed({"llm_call_failures": "not a list"}) == []
+    assert lint_research_summary_call_failed({"llm_call_failures": [None, 3]}) == []
+    assert lint_research_summary_call_failed(None) == []
+
+
+def test_run_doctor_wires_research_summary_call_failed_through_to_the_verdict(tmp_path):
+    """Deleting the LINT_REGISTRY row fails this."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "research_summary_call_failed"]
+    summary = root / "stage_4_5_research_summary" / f"{_UID}_cv_research_summary.json"
+    summary.write_text(json.dumps({"research_summary": {"text": ""}, "llm_call_failures": [
+        {"call": "summary_generation", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"}]}))
+
+    found = [f for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] == "research_summary_call_failed"]
+
+    assert len(found) == 1 and found[0]["severity"] == "WARN"
+
+
 def test_run_doctor_wires_stage_failure_recorded_through_to_the_verdict(tmp_path):
     """The record the drivers write (#745), read from its real location under
     the outputs root. A malformed record is the usual unreadable ERROR, not a
@@ -4014,14 +4101,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (49), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (51), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 47
+    assert len(payload["findings"]) == 49
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4661,6 +4748,15 @@ def test_classification_lint_prevalence_is_the_measured_farm_fraction():
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["section_consistency"] == round(23 / 63, 3)
     assert LINT_PREVALENCE["segmentation_collapse"] == round(1 / 63, 3)
+
+
+def test_span_count_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-05 over the 245 stored runs with stage-4 JSON (106
+    analysis/<uid>, 13 analysis/pilot, 126 farm and batch), as rendered by
+    origin/dev 5e6eac1d plus the stage-6 envelope fix (one fire per run at
+    any severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["span_count"] == round(64 / 245, 3)
 
 
 def test_role_consistency_prevalence_is_the_measured_fraction():
@@ -5604,6 +5700,84 @@ def test_junk_or_header_row_reads_a_duplicate_only_on_a_multi_cell_row():
     assert _junk_hits([banner, _DATED_RANK], [[["Professor of Widgetry"]]]) == []
     assert _junk_hits([banner, _DATED_RANK],
                       [[["Professor of", "Widgetry", "Example University"]]]) == []
+
+
+_DUTY = ("1. Administration of the widget program, including the review of new "
+         "widget requests and the training of junior staff at the example clinic.")
+
+
+def test_junk_or_header_row_warns_on_a_duty_sentence_rendered_as_its_role():
+    """RCBKFG GKAQHB 79/84: two duty sentences rendered as paragraphs that
+    read only the role stage 4 named; each entry takes its own paragraph."""
+    entries = [_junk4(_DUTY, "L3", 79, leadership_role="Administrator",
+                      institution="Example Clinic"),
+               _junk4(_DUTY.replace("1.", "2."), "L3", 84, leadership_role="Administrator",
+                      institution="Example Clinic")]
+    blocks = [("p", "Administrator"), ("p", "Administrator")]
+    assert _junk_hits(entries, [], blocks) == [
+        ("WARN", "entry 79 (L3)", "role_only"), ("WARN", "entry 84 (L3)", "role_only")]
+    # One paragraph serves one entry only.
+    assert _junk_hits(entries, [], blocks[:1]) == [("WARN", "entry 79 (L3)", "role_only")]
+
+
+@pytest.mark.parametrize("entry, rows, blocks", [
+    # the paragraph shows more than the role
+    (_junk4(_DUTY, "L3", 79, leadership_role="Administrator"), [],
+     [("p", "Administrator, Example Clinic")]),
+    # a table row with more than the role
+    (_junk4(_DUTY, "L3", 79, leadership_role="Administrator"),
+     [[["Administrator", "Example Clinic"]]], []),
+    # three lowercase words is a short line, not a sentence
+    (_junk4("Administrator ran two Widget clinics", "L3", 79,
+            leadership_role="Administrator"), [], [("p", "Administrator")]),
+    # more capitalised words than lowercase ones is a name, not a sentence
+    (_junk4("Administrator for the Example Widget Clinic and the Sample Sprocket Program",
+            "L3", 79, leadership_role="Administrator"), [], [("p", "Administrator")]),
+    # a dated entry is a record of its own
+    (_junk4(_DUTY, "L3", 79, leadership_role="Administrator", start_date="2015"), [],
+     [("p", "Administrator")]),
+    # a short capitalised line, not a sentence
+    (_junk4("Administrator, Example Widget Clinic Program", "L3", 79,
+            leadership_role="Administrator"), [], [("p", "Administrator")]),
+    # the role is the whole sentence (EBYSBC JFBPNC 79)
+    (_junk4("Provided instruction with hands-on training, sessions, and teaching to "
+            "all clinical faculty", "K4", 79,
+            role="Provided instruction with hands-on training, sessions, and teaching "
+                 "to all clinical faculty"), [],
+     [("p", "Provided instruction with hands-on training, sessions, and teaching to "
+            "all clinical faculty")]),
+    # a work's own title is not a role
+    (_junk4(_DUTY, "R", 79, title="Administrator"), [], [("p", "Administrator")]),
+])
+def test_junk_or_header_row_spares_a_role_paragraph_that_is_a_record(entry, rows, blocks):
+    assert _junk_hits([entry], rows, blocks) == []
+
+
+def test_junk_or_header_row_warns_on_a_sentence_with_no_name_as_a_record():
+    """RCBKFG GKAQHB 94: stage 4 found only a description, and the sentence
+    fills the committee row's name cell."""
+    text = "1. Collaborated with example colleagues for widget studies and outreach."
+    entry = _junk4(text, "P", 94, description=text[3:])
+    assert _junk_hits([entry], [[[text, "", ""]]]) == [
+        ("WARN", "entry 94 (P)", "description_only")]
+    named = _junk4(text, "P", 94, description=text[3:], committee_name="Widget Committee")
+    assert _junk_hits([named], [[[text, "Widget Committee"]]]) == []
+    narrative = _junk4(text, "M1", 94, narrative=text[3:])
+    assert _junk_hits([narrative], [[[text]]]) == []
+
+
+def test_junk_or_header_row_warns_on_a_lead_in_label_less_its_first_word():
+    """RCBKFG JJUQDF 326: the reviewer lead-in renders as a journal row with
+    its first word cut. A row that is not itself a label, or lacks two of
+    the label's words, is not it."""
+    text = "Reviewer for the following journals and committees:"
+    entry = _junk4(text, "Q4D", 326)
+    assert _junk_hits([entry], [[["for the following journals and committees:", ""]]]) == [
+        ("WARN", "entry 326 (Q4D)", "label")]
+    assert _junk_hits([entry], [[["for the following journals and committees", ""]]]) == []
+    assert _junk_hits([entry], [[["the following journals and committees:", ""]]]) == []
+    assert _junk_hits([entry], [[["for the following journals and committees, books:", ""]]]) == []
+    assert _junk_hits([_junk4("Reviewers:", "Q4D", 5)], [[[":"]]]) == []
 
 
 def test_run_doctor_wires_junk_or_header_row_with_the_rendered_paragraphs(tmp_path):

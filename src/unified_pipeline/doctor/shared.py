@@ -271,6 +271,16 @@ def docx_body_blocks(doc: DocumentType, *, deleted: bool = False) -> list[tuple[
     return blocks
 
 
+def docx_table_rows(doc: DocumentType) -> list[list[list[str]]]:
+    """Raw per-row cell texts of every top-level table of an OPEN python-docx
+    Document, EMPTY CELLS INCLUDED -- _table_lines drops empty cells, which
+    hides an empty date column from the shape checks. `run_doctor.
+    read_docx_table_rows` is the by-path form; `quality_score` calls this on
+    the document it already loaded."""
+    return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
+            for tbl in doc.tables]
+
+
 class _FieldsEntry(NamedTuple):
     """The five things the field lints read off one stage-4 (or later) entry,
     read once at the artifact boundary instead of by `.get()` in every helper

@@ -42,13 +42,29 @@ from ..shared import _finding
 # Stage-5 PubMed enrichment: citations that fell back to CV-extracted fields.
 
 
+#: The key stage 5 sets on a rejection when another entry kept the PMID: the
+#: record had been merged with a different paper that shares the CV's
+#: identifier, and stage 5 put the CV's own citation back
+#: (`_restore_and_reject`). Its citation is the CV's, which is right
+#: (RCBKFG JJUQDF 93, the fix for EBYSBC AQCLHS-02).
+SHARED_PMID_REJECTION_KEY = "shared_pmid_with"
+
+
+def _restored_from_shared_pmid(entry: dict) -> bool:
+    rejected = entry.get("enrichment_rejected")
+    return isinstance(rejected, dict) and rejected.get(SHARED_PMID_REJECTION_KEY) is not None
+
+
 def lint_enrichment_failures(stage5e: dict) -> list[dict]:
     """Publications whose stage-5 PubMed enrichment ended in a *_failed status
     (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed,
     title_check_failed): their citations degrade to CV-extracted fields. Non-failure outcomes
-    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary."""
+    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary, and
+    so is a title check stage 5 failed on purpose because another entry kept
+    the shared PMID (`SHARED_PMID_REJECTION_KEY`)."""
     failed = [e for e in stage5e.get("entries", [])
-              if str(e.get("enrichment_status") or "").endswith("_failed")]
+              if str(e.get("enrichment_status") or "").endswith("_failed")
+              and not _restored_from_shared_pmid(e)]
     if not failed:
         return []
     counts: dict[str, int] = {}

@@ -1293,6 +1293,34 @@ DUPLICATE_RECORD_MIN_CHARS = 20
 
 DUPLICATE_RECORD_WARN_COUNT = 1
 
+#: Two bodies one letter apart are one record: stage 5d formats each copy of
+#: a record the CV lists twice on its own, and can fold one copy one letter
+#: differently (RCBKFG UYFRTL N6: two abstracts listed twice, each pair one
+#: 's' apart). Only a letter, never a digit: "<talk>, 2019" beside
+#: "<talk>, 2018" is the same talk given twice. Only on a body at least this
+#: long, where one letter is a slip rather than a different word.
+DUPLICATE_RECORD_FUZZY_MIN_CHARS = 60
+
+
+def _one_letter_apart(a: str, b: str) -> bool:
+    """Whether at most one inserted, deleted or replaced letter (not a
+    digit) turns `a` into `b`."""
+    start = 0
+    while start < min(len(a), len(b)) and a[start] == b[start]:
+        start += 1
+    end_a, end_b = len(a), len(b)
+    while end_a > start and end_b > start and a[end_a - 1] == b[end_b - 1]:
+        end_a, end_b = end_a - 1, end_b - 1
+    changed = a[start:end_a] + b[start:end_b]
+    return end_a - start <= 1 and end_b - start <= 1 and not any(c.isdigit() for c in changed)
+
+
+def _same_body(a: str, b: str) -> bool:
+    """One record's two rendered bodies: equal, or one letter apart when
+    both are DUPLICATE_RECORD_FUZZY_MIN_CHARS or longer."""
+    return a == b or (min(len(a), len(b)) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
+                      and _one_letter_apart(a, b))
+
 
 def _duplicate_block_pairs(blocks: list[tuple[str, str]]) -> list[tuple[int, int]]:
     """(first, second) block indices of every enumerated paragraph whose
@@ -1318,7 +1346,7 @@ def _duplicate_block_pairs(blocks: list[tuple[str, str]]) -> list[tuple[int, int
             continue
         recent = [r for r in recent
                   if enum_index - r[1] <= DUPLICATE_RECORD_WINDOW]
-        match = next((r for r in recent if r[0] == key), None)
+        match = next((r for r in recent if _same_body(r[0], key)), None)
         if match is not None:
             pairs.append((match[2], i))
         recent.append((key, enum_index, i))
@@ -2001,7 +2029,11 @@ _SEASON_WORD = r"(?:Spring|Summer|Fall|Autumn|Winter)"
 _ISO_DAY = r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?!\d)"
 _ISO_MONTH = r"\d{4}-(?:0[1-9]|1[0-2])(?![\d/])"
 _RAW_SEASON = rf"\d{{4}}-{_SEASON_WORD}\b"
-_DATE_SIDE = (rf"(?:{_ISO_DAY}|{_ISO_MONTH}|{_RAW_SEASON}"
+#: A month, or a month and a day, written after the year with dots, as the
+#: source wrote it: "2021.07", "2021.07.15" (RCBKFG KUUKNJ N4). Raw even when
+#: the source writes it so, since no WCM date format has a dot.
+_DOTTED = r"\d{4}\.(?:0?[1-9]|1[0-2])(?:\.(?:0?[1-9]|[12]\d|3[01]))?(?![\d.])"
+_DATE_SIDE = (rf"(?:{_ISO_DAY}|{_ISO_MONTH}|{_RAW_SEASON}|{_DOTTED}"
               rf"|\d{{1,2}}/\d{{1,2}}/\d{{4}}|\d{{1,2}}/\d{{2}}(?:\d{{2}})?(?!\d)"
               rf"|\b(?:{_MONTH_WORD}|{_SEASON_WORD})\s+\d{{4}}|\d{{4}})")
 _OPEN_END_WORD = r"(?:present|current|ongoing)\b"
@@ -2016,7 +2048,8 @@ _DATE_CELL_RE = re.compile(rf"\s*{_DATE_EXPR}\s*", re.IGNORECASE)
 _DATED_LINE_RE = re.compile(
     rf"\s*(?:[\u2022\u00b7\u25aa\u25e6*]\s*)?{_DATE_EXPR}"
     rf"(?:\s*(?:[-\u2013\u2014:,]|\t)\s*\S|\s*$)", re.IGNORECASE)
-_RAW_SIDE_RE = re.compile(rf"{_ISO_DAY}|{_RAW_SEASON}", re.IGNORECASE)
+_RAW_SIDE_RE = re.compile(rf"{_ISO_DAY}|{_RAW_SEASON}|{_DOTTED}", re.IGNORECASE)
+_DOTTED_RE = re.compile(_DOTTED)
 _ISO_MONTH_RE = re.compile(_ISO_MONTH)
 _OPEN_END_RE = re.compile(_OPEN_END_WORD, re.IGNORECASE)
 _FOUR_DIGIT_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
@@ -2232,8 +2265,9 @@ def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> boo
     entry's own text writes it is the CV's wording, never a defect. An open
     range is a defect only outside DATE_CELL_OPEN_BY_DECISION_CODES and the
     CV's latest D1 rank, and only when neither the entry's text nor its
-    headings carry an open marker."""
-    if date.rendered in entry.text:
+    headings carry an open marker. A dotted date is raw however the source
+    writes it."""
+    if date.rendered in entry.text and not _DOTTED_RE.search(date.rendered):
         return False
     if shape != DATE_SHAPE_OPEN_RANGE:
         return True
@@ -2291,10 +2325,19 @@ def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],
 #                     a group header, or a record whose title was lost
 #   undated_duplicate a D1 with no date whose title is a dated D1's: the CV
 #                     banner's current titles repeated as an appointment
+#   role_only         an undated sentence whose row shows only the role
+#                     stage 4 read from it: the duty it describes is lost
+#                     (RCBKFG GKAQHB 79, 84)
+#   description_only  stage 4 found no name, title or role, only a
+#                     description, perhaps placed: the sentence fills the
+#                     record's name cell (RCBKFG GKAQHB 94). A narrative
+#                     alone is a research statement, written as prose.
 JUNK_SHAPE_DATE_FRAGMENT = "date_fragment"
 JUNK_SHAPE_LABEL = "label"
 JUNK_SHAPE_HEADER_ONLY = "header_only"
 JUNK_SHAPE_UNDATED_DUPLICATE = "undated_duplicate"
+JUNK_SHAPE_ROLE_ONLY = "role_only"
+JUNK_SHAPE_DESCRIPTION_ONLY = "description_only"
 
 #: Severity of every finding. Measured 2026-10-04 over the 63-run
 #: EBYSBC/s7ab/pilot farm (origin/dev fb466a0f renders): 104 hits, 65 on an
@@ -2313,6 +2356,10 @@ _JUNK_SHAPE_MESSAGES = MappingProxyType({
     JUNK_SHAPE_UNDATED_DUPLICATE: "an undated appointment whose title a "
                                   "dated D1 row already shows renders as "
                                   "a row with no date",
+    JUNK_SHAPE_ROLE_ONLY: "a sentence renders as a row with only the "
+                          "role stage 4 read from it",
+    JUNK_SHAPE_DESCRIPTION_ONLY: "a sentence with no name, title or role "
+                                 "renders as a record of its own",
 })
 
 #: Taxonomy letters the lint does not judge. A is Personal Data, rendered as
@@ -2344,6 +2391,22 @@ _JUNK_IGNORED_FIELDS = frozenset({"stage4_records"})
 #: A label longer than this is a sentence with a list after it, not a
 #: lead-in ('Developed and taught the following courses at ...:').
 JUNK_LABEL_MAX_WORDS = 10
+#: A rendered row that is itself a label may lack this many of the entry's
+#: words: stage 6 cut the lead-in's first word (RCBKFG JJUQDF 326).
+JUNK_LABEL_CUT_WORDS = 1
+
+#: The fields that name the owner's role, in the order read. Not `title`:
+#: for a talk or a grant that is the work's own name.
+_JUNK_ROLE_FIELDS = ("leadership_role", "role")
+#: A role-only paragraph stands for an entry whose text is a sentence: at
+#: least this many lowercase words, and more of them than capitalised ones
+#: (the multi-record lint's prose test).
+JUNK_ROLE_ONLY_MIN_LOWERCASE = 4
+#: ... and at least this many words the role does not hold: a role that is
+#: the whole sentence renders the sentence (EBYSBC JFBPNC 79).
+JUNK_ROLE_ONLY_MIN_LOST_WORDS = 4
+#: The field a description-only record carries besides its placement.
+_JUNK_DESCRIPTION_FIELDS = frozenset({"description"})
 
 #: Words a rendered row may carry beyond the entry's own before it reads as
 #: another record: a label like "Teaching Activities", or the city and
@@ -2505,7 +2568,38 @@ def _junk_shape(raw: dict, code: str, text: str, fields: dict[str, object],
             if code == DATE_CELL_LATEST_RANK_CODE else None)
     if core is not None:
         return candidate(JUNK_SHAPE_UNDATED_DUPLICATE, core, core, 0)
+    role = _role_only_core(text, fields)
+    if role:
+        return candidate(JUNK_SHAPE_ROLE_ONLY, role, role, 0)
+    if _is_description_only(fields):
+        described = _field_tokens(fields, _JUNK_DESCRIPTION_FIELDS)
+        return candidate(JUNK_SHAPE_DESCRIPTION_ONLY, described,
+                         _field_tokens(fields, _JUNK_DESCRIPTION_FIELDS | _JUNK_PLACEMENT_FIELDS),
+                         JUNK_ROW_EXTRA_WORDS)
     return None
+
+
+def _role_only_core(text: str, fields: dict[str, object]) -> frozenset[str]:
+    """The words of the entry's role when its text is an undated sentence
+    (see JUNK_ROLE_ONLY_MIN_LOWERCASE); else empty."""
+    role_key = next((key for key in _JUNK_ROLE_FIELDS if key in fields), None)
+    if role_key is None or _has_dated_field(fields):
+        return frozenset()
+    words = _JUNK_WORD_RE.findall(text)
+    lowercase = sum(1 for word in words if word[0].islower())
+    if lowercase < JUNK_ROLE_ONLY_MIN_LOWERCASE or lowercase <= len(words) - lowercase:
+        return frozenset()
+    role = frozenset(_name_tokens(str(fields[role_key])))
+    lost = frozenset(_name_tokens(text)) - role
+    return role if len(lost) >= JUNK_ROLE_ONLY_MIN_LOST_WORDS else frozenset()
+
+
+def _is_description_only(fields: dict[str, object]) -> bool:
+    """Whether stage 4 found only a description of the record, perhaps with
+    where and when: no name, title or role."""
+    keys = fields.keys()
+    return bool(keys & _JUNK_DESCRIPTION_FIELDS) and keys <= (
+        _JUNK_DESCRIPTION_FIELDS | _JUNK_PLACEMENT_FIELDS)
 
 
 def _junk_candidate(raw: dict, dated: _DatedRanks | None) -> _JunkCandidate | None:
@@ -2541,7 +2635,29 @@ def _junk_row_rendered(candidate: _JunkCandidate,
         if (candidate.core <= row.tokens
                 and _extra_words(row, candidate.allowed) <= candidate.extra_words):
             return row
+        if candidate.shape == JUNK_SHAPE_LABEL and _is_cut_label_row(candidate, row):
+            return row
     return None
+
+
+def _role_only_row(candidate: _JunkCandidate, rows: list[_RenderedRow],
+                   taken: set[int]) -> _RenderedRow | None:
+    """The first row of the role's words alone that no other entry took;
+    it joins `taken`. One per entry, so two entries with one role never
+    both claim the same row."""
+    for i, row in enumerate(rows):
+        if i not in taken and row.tokens == candidate.core:
+            taken.add(i)
+            return row
+    return None
+
+
+def _is_cut_label_row(candidate: _JunkCandidate, row: _RenderedRow) -> bool:
+    """A rendered row that is itself the label, less up to
+    JUNK_LABEL_CUT_WORDS of its words."""
+    return (row.text.rstrip(" |").endswith(":") and bool(row.tokens)
+            and row.tokens <= candidate.core
+            and len(candidate.core - row.tokens) <= JUNK_LABEL_CUT_WORDS)
 
 
 def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
@@ -2553,9 +2669,15 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
     dated = _dated_ranks(stage4)
     rows = _junk_rendered_rows(table_rows, blocks or [])
     findings = []
+    taken: set[int] = set()
     for raw in stage4.get("entries", []):
         candidate = _junk_candidate(raw, dated)
-        row = None if candidate is None else _junk_row_rendered(candidate, rows)
+        if candidate is None:
+            continue
+        if candidate.shape == JUNK_SHAPE_ROLE_ONLY:
+            row = _role_only_row(candidate, rows, taken)
+        else:
+            row = _junk_row_rendered(candidate, rows)
         if row is None:
             continue
         findings.append(_finding(

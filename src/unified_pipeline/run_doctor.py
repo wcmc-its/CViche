@@ -160,8 +160,8 @@ Lints, ranked by the severity of the failure class they catch:
                           as stage 4.5 raising so the research summary is
                           missing: the quality score reads that record for its
                           cap-40 gate and the doctor never did. ERROR for a
-                          fatal record (they all are today), WARN otherwise
-                          (#1174)
+                          fatal record, WARN for a non-fatal one, which the
+                          web driver writes when stage 4.5 raises (#1174)
 
 14n. owner_missing_from_citation a publication whose source credits the CV
                           owner (stage 4's authors, the source text, or a
@@ -242,8 +242,9 @@ Lints, ranked by the severity of the failure class they catch:
                           QNZADH-01). WARN, one per citation
 14r. section_consistency  a stage-3b code that contradicts the entry's own
                           heading, text or siblings: intern and resident rows
-                          as appointments, an ABIM line as a membership,
-                          BLS/ACLS as a licence, grant reviews as committees,
+                          as appointments or degrees (RCBKFG, #1415), an ABIM
+                          line as a membership, BLS/ACLS as a licence, grant
+                          reviews as committees,
                           courses attended as teaching, a thesis-committee
                           block as institutional committees, a 'see section'
                           line or bare URL as a record, a journal article
@@ -267,7 +268,17 @@ Lints, ranked by the severity of the failure class they catch:
                           (ZDCXIV), or Current with an end date before this
                           year, a truncated end year read against the start
                           year (KYOPUV 589). WARN
-14v. role_consistency     a grant whose text names the CV owner under a PI
+14v. research_summary_call_failed a stage-4.5 LLM call that raised on every
+                          model tried (#1174), recorded in the stage-4.5
+                          artifact's `llm_call_failures`: the Research
+                          Activities section has no summary (generation), or
+                          its own text went unscored and a summary was
+                          generated instead (M1 relevance). WARN, no score cap
+14w. span_count           a record whose source lists separate years or
+                          terms ('2003, 2013') while its row shows one range
+                          over them, their min-max (#1245, batch RCBKFG:
+                          UYFRTL 33/34/48/49). WARN
+14x. role_consistency     a grant whose text names the CV owner under a PI
                           label while pi_role says co-I, or the reverse
                           (#1403, RCBKFG KUUKNJ 243/247). WARN. Reads stage
                           4 only
@@ -373,6 +384,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _docx_text,
     _table_lines,
     docx_body_blocks,
+    docx_table_rows,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
@@ -407,6 +419,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_span_count,
     lint_role_consistency,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
@@ -488,6 +501,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_stage4_group_failures,
     lint_llm_fallback_served,
     lint_stage_failure_recorded,
+    lint_research_summary_call_failed,
 )
 from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
     lint_teaching_postcheck,
@@ -583,6 +597,8 @@ KNOWN_LINTS = (
     "segmentation_collapse",
     "grant_boundary",
     "grant_bucket",
+    "research_summary_call_failed",
+    "span_count",
     "role_consistency",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -682,6 +698,9 @@ LINT_PREVALENCE = {
     # zero-observed floor, as for pipeline_errors_present above.
     "llm_fallback_served": 0.001,
     "stage_failure_recorded": 0.001,
+    # #1174: the record research_summary_call_failed reads is new, so no
+    # stored artifact carries it yet. The zero-observed floor.
+    "research_summary_call_failed": 0.001,
     # 11 of the 63 runs of the EBYSBC/s7ab/pilot farm (scripts/doctor_gate.py
     # over origin/dev c3d87c5f renders, 2026-10-02), one fire per CV at any
     # severity; another small mixed corpus, as for duplicate_records. That
@@ -750,6 +769,12 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
+    # span_count (#1245, batch RCBKFG): 64 of 245 stored runs with stage-4
+    # JSON (106 analysis/<uid>, 13 analysis/pilot, and the 126-run farm and
+    # 2026-09-11/-17 batches), as rendered by origin/dev 5e6eac1d plus this
+    # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
+    # render without the fix). Same mixed-corpus caveat as above.
+    "span_count": 0.261,
     # role_consistency (#1403): 4 of 232 runs, measured 2026-10-05 over
     # stored stage-4 JSON: 2 of the 106 runs under analysis/ (KUUKNJ, ZCTARO:
     # two runs of one CV) and 2 of the 126 farm/batch-3/batch-4 runs (web188,
@@ -936,10 +961,7 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     — _table_lines drops empty cells, which hides an empty date column from
     the shape checks (lint 13)."""
     Document = _get_docx_document()
-
-    doc = Document(docx_path)
-    return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
-            for tbl in doc.tables]
+    return docx_table_rows(Document(docx_path))
 
 
 # --------------------------------------------------------- artifact resolution
@@ -1296,6 +1318,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
+    LintSpec("research_summary_call_failed", lint_research_summary_call_failed, ("stage_4_5",)),
+    LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
     LintSpec("role_consistency", lint_role_consistency, ("stage_4",)),
 )
 

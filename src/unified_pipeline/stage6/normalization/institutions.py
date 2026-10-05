@@ -114,15 +114,28 @@ def _get_cleaned_institution_name(
     return official if official else None
 
 
+# A word that cannot end an award name: what is left when the organization
+# was the object of the name's own last phrase ("Elected to the
+# <academy>", "Fellowship from the <foundation>"), not a tail after it.
+_DANGLING_NAME_END_RE = re.compile(
+    r'\b(?:of|the|at|from|by|for|in|to|and|with|on)\s*$|&\s*$',
+    re.IGNORECASE)
+
+
 def _strip_org_tail(name: str, org: str) -> str:
     """Remove a trailing organization segment (plus one short comma-led
     city tail, "..., Indiana University, Bloomington") from an award name
     so the org isn't duplicated across the name and Organization cells
-    (#229). Conservative: only strips at end-of-string."""
+    (#229). Conservative: only strips at end-of-string, and only a true
+    tail -- when the org is the object of the name's last phrase, stripping
+    it left the name ending in a dangling "of" (RCBKFG KUUKNJ 139, #1412),
+    so the name is kept whole."""
     if not org:
         return name
     stripped = re.sub(
         r'[\s,]*' + re.escape(org) +
         r'(?:,\s*[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+)?)?[\s,.]*$',
         '', name).strip()
-    return stripped or name
+    if not stripped or _DANGLING_NAME_END_RE.search(stripped):
+        return name
+    return stripped

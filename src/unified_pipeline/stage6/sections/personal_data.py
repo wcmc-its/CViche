@@ -793,6 +793,16 @@ def _address_halves(address: _JsonValue, text: str) -> list[tuple[_JsonValue, st
              part.lower()) for _kind, part in parts]
 
 
+def _entry_addresses(address: _JsonValue, offschema_address: dict[str, str] | None,
+                     text: str) -> list[tuple[_JsonValue, str]]:
+    """The (address, routing text) pairs of one A entry, in routing order:
+    `address` first, each half on its own (`_address_halves`), then the
+    office-named off-schema key. That key is a dict naming its own slot, so
+    it fills Office address only when `address` left the slot empty
+    (#1222, RCBKFG CAOACN 3)."""
+    return [*_address_halves(address, text), *_address_halves(offschema_address, text)]
+
+
 #: Stage-4 keys outside the A schema (`config/field_schemas_v1.1.json`:
 #: name, email, phone, address) that name their own contact slot (#1222,
 #: #741; EBYSBC ZCTARO-06, YYVHNN-02). Personal Data read only `phone` and
@@ -808,6 +818,14 @@ _STREET_KEYS = ('street_address', 'street')
 _CITY_KEYS = ('city',)
 _STATE_KEYS = ('state',)
 _ZIP_KEYS = ('zip_code', 'zip', 'postal_code')
+
+
+def _same_text(value: str, other: _JsonValue) -> bool:
+    """Whether `other` is a string equal to `value`, ignoring case,
+    whitespace and edge punctuation."""
+    def norm(text: str) -> str:
+        return ' '.join(text.split()).strip(' .,;').lower()
+    return isinstance(other, str) and norm(value) == norm(other)
 
 
 class _OffSchemaContact(NamedTuple):
@@ -826,19 +844,29 @@ def _first_value(fields: dict, keys: tuple[str, ...]) -> str:
 
 def _offschema_contact(fields: dict, pii_fragments: list[str]) -> _OffSchemaContact:
     """One A entry's contact values under off-schema keys. A value cut from
-    a protected-data fragment is skipped, as for `phone` and `address`. The
-    address is read only when stage 4 set no `address`."""
+    a protected-data fragment is skipped, as for `phone` and `address`.
+
+    An office-named address key is read even when stage 4 also set
+    `address`: when `address` holds the home value, which is withheld, the
+    office key is the only office address the entry has (#1222, RCBKFG
+    CAOACN 3). The caller routes it after `address`, and it fills Office
+    address only when that slot is still empty. A value equal to `address`
+    is not read, so a home value stage 4 copied under both keys stays
+    withheld. A street split into parts is read only when stage 4 set no
+    `address`, since the parts may be `address` itself."""
     phone = {slot: value for slot, keys in _OFFSCHEMA_PHONE_KEYS.items()
              if (value := _first_value(fields, keys))
              and not _from_pii_fragment(value, pii_fragments)}
-    address = ''
-    if not fields.get('address'):
+    address = _first_value(fields, _OFFSCHEMA_OFFICE_ADDRESS_KEYS)
+    if address and _same_text(address, fields.get('address')):
+        address = ''
+    if not address and not fields.get('address'):
         street = _first_value(fields, _STREET_KEYS)
-        address = _first_value(fields, _OFFSCHEMA_OFFICE_ADDRESS_KEYS) or (street and ', '.join(
+        address = street and ', '.join(
             part for part in (street, _first_value(fields, _CITY_KEYS),
                               ' '.join(p for p in (_first_value(fields, _STATE_KEYS),
                                                    _first_value(fields, _ZIP_KEYS)) if p))
-            if part))
+            if part)
     if address and _from_pii_fragment(address, pii_fragments):
         address = ''
     return _OffSchemaContact(phone or None, {'office_address': address} if address else None)
@@ -1377,7 +1405,7 @@ class PersonalDataSection:
             office_phone, cell_phone, home_phone = phones
 
             # Classify address by type, each half of a "Home: ...; Office: ..." on its own
-            for address, address_text in _address_halves(extracted_address or offschema.address, text):
+            for address, address_text in _entry_addresses(extracted_address, offschema.address, text):
                 home_address, office_address, fate = _route_address(
                     address, _AddressContext(address_text, pii_fragments, fields.get('phone'), entry,
                                              other_entries_text),

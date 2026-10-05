@@ -68,6 +68,13 @@ def test_month_precision_is_preserved_within_a_year():
     ("March 2020", (2020, 3, None)),
     ("Mar. 2020", (2020, 3, None)),
     ("Foobar 2021", (None, None, None)),   # unknown month name -> unreadable (#716)
+    # Dotted (RCBKFG KUUKNJ N4): the month, and the day, after the year.
+    ("2021.07", (2021, 7, None)),
+    ("2021.7", (2021, 7, None)),
+    ("2021.07.15", (2021, 7, 15)),
+    ("2021.13", (None, None, None)),
+    ("2021.02.30", (2021, 2, None)),
+    ("2021.075", (None, None, None)),
     ("", (None, None, None)),
     ("garbage", (None, None, None)),
 ])
@@ -752,6 +759,28 @@ def test_a_dotted_month_closed_range_stays_the_start_year():
     assert format_date_range("2014-01", "", "Q4C", source_text) == "2014"
 
 
+# --- RCBKFG KUUKNJ N4: a dotted value stored by stage 4 ---------------------
+
+@pytest.mark.parametrize("start, end, expected", [
+    ("2017", "2021.03", "2017-2021"),
+    ("2022.07", "2026.06", "2022-2026"),
+])
+def test_a_stored_dotted_date_renders_as_its_year(start, end, expected):
+    """Stage 4 kept the source's "YYYY.MM" and stage 6 printed it raw."""
+    assert format_date_range(start, end, "Q3") == expected
+
+
+def test_a_stored_dotted_start_with_an_open_source_dash_keeps_present():
+    """The start year was unread, so the source's open "YYYY.MM - " marker
+    was never looked for and the row rendered the raw start alone."""
+    source_text = "2021.07 - Fictional Review Panel, member"
+    assert format_date_range("2021.07", None, "Q3", source_text) == "2021-Present"
+
+
+def test_a_stored_dotted_date_sorts_by_its_month():
+    assert _sort("2021.07") == _sort("2021-07")
+
+
 # --- class E21 (EBYSBC autopsy): a range whose two ends read the same --------
 
 @pytest.mark.parametrize("text, expected", [
@@ -883,6 +912,7 @@ def test_a_mapping_dated_entry_sorts_among_string_dated_entries():
 # --- EBYSBC E22 (#1245): a record's further spans in its date cell ----------
 
 from unified_pipeline.stage6.formatting import (  # noqa: E402
+    envelope_date_spans,
     extra_date_spans,
     with_extra_date_spans,
 )
@@ -970,3 +1000,100 @@ def test_a_reversed_span_after_the_records_range_is_not_taken_as_covered():
     fields = {"start_date": "2010", "end_date": "2020",
               "additional_period_start": "2025", "additional_period_end": "2015"}
     assert len(extra_date_spans(fields, "O")) == 1
+
+
+# --- RCBKFG (#1245): a range that is only the envelope of its extra spans ----
+
+def test_a_string_of_ranges_under_additional_date_ranges_is_read():
+    """UYFRTL 33: three terms under `additional_date_ranges`, a key stage 6
+    did not read, with `start_date`-`end_date` their min-max."""
+    fields = {"start_date": "1982", "end_date": "2012",
+              "additional_date_ranges": "1982-1986; 1989-1995; 2004-2012"}
+    assert with_extra_date_spans("1982-2012", fields, "K3") == (
+        "1982-1986, 1989-1995, 2004-2012")
+
+
+def test_discrete_years_replace_the_envelope_they_span():
+    """UYFRTL 34/49: separate years, first and last the record's own range,
+    render as those years, not as a range claiming every year between."""
+    assert with_extra_date_spans("2003-2013", {"start_date": "2003", "end_date": "2013",
+                                               "additional_dates": "2003; 2013"},
+                                 "K1") == "2003, 2013"
+    fields = {"start_date": "1996", "end_date": "2005",
+              "additional_dates": "1996; 1998; 2001; 2005"}
+    assert envelope_date_spans(fields, "K1") == ["1996", "1998", "2001", "2005"]
+
+
+def test_extra_years_filling_the_whole_range_keep_the_range():
+    """No gap: the range says exactly what the years do."""
+    fields = {"start_date": "1996", "end_date": "1999",
+              "additional_dates": "1996; 1997; 1998; 1999"}
+    assert envelope_date_spans(fields, "K1") == []
+    assert with_extra_date_spans("1996-1999", fields, "K1") == "1996-1999"
+
+
+def test_spans_that_do_not_reach_both_ends_are_not_an_envelope():
+    """1991 and 1993 inside 1990-1994 leave the range standing (the record
+    may run the whole time); only spans that open at its start and close at
+    its end show it is their min-max."""
+    fields = {"start_date": "1990", "end_date": "1994", "additional_dates": "1991; 1994"}
+    assert envelope_date_spans(fields, "K1") == []
+    assert with_extra_date_spans("1990-1994", fields, "K1") == "1990-1994"
+
+
+def test_an_envelope_running_to_present_shows_its_open_span():
+    fields = {"start_date": "2010", "end_date": "present",
+              "additional_periods": [{"start_date": "2010", "end_date": "2012"},
+                                     {"start_date": "2015", "end_date": "present"}]}
+    assert with_extra_date_spans("2010-Present", fields, "O") == "2010-2012, 2015-Present"
+
+
+def test_an_extra_span_with_no_year_leaves_the_range_alone():
+    fields = {"start_date": "2003", "end_date": "2013",
+              "additional_dates": "2003; 2013; Fall term"}
+    assert envelope_date_spans(fields, "K1") == []
+
+
+def test_a_year_month_item_is_one_date_not_a_range():
+    """"1993-12" in a string of dates is December 1993: split as a range it
+    would end in a year 12."""
+    fields = _spans(additional_dates="1993-12; 1995-09")
+    assert extra_date_spans(fields, "O") == ["1993", "1995"]
+
+
+def test_a_range_item_with_a_word_end_that_is_not_ongoing_stays_whole():
+    fields = _spans(additional_dates="2022-Spring")
+    assert extra_date_spans(fields, "O") == ["2022-Spring"]
+
+
+def test_consecutive_years_of_an_envelope_read_back_as_ranges():
+    """UYFRTL 48: stage 4 wrote "1992-94" as three years; shown in place of
+    the envelope they rejoin, and the years with gaps stay apart."""
+    fields = {"start_date": "1985", "end_date": "2005",
+              "additional_dates": "1985; 1987; 1990; 1992; 1993; 1994; 2005"}
+    assert envelope_date_spans(fields, "K1") == ["1985", "1987", "1990", "1992-1994", "2005"]
+
+
+def test_a_dated_month_is_never_merged_into_a_year_run():
+    fields = {"start_date": "1990", "end_date": "1994",
+              "additional_dates": "1990; 1991-06; 1994"}
+    assert envelope_date_spans(fields, "K1") == ["1990", "1991", "1994"]
+
+
+def test_spans_that_reach_the_start_but_not_the_end_are_not_an_envelope():
+    fields = {"start_date": "1990", "end_date": "1994", "additional_dates": "1990; 1992"}
+    assert envelope_date_spans(fields, "K1") == []
+
+
+def test_a_short_span_inside_a_longer_one_does_not_open_a_gap():
+    """1991-1992 sits inside 1990-1994; 1995 follows it, so 1990-1995 is
+    covered whole and stays a range."""
+    fields = {"start_date": "1990", "end_date": "1995",
+              "additional_date_ranges": "1990-1994; 1991-1992; 1995"}
+    assert envelope_date_spans(fields, "K1") == []
+
+
+def test_a_span_with_its_own_end_is_not_merged_into_a_year_run():
+    fields = {"start_date": "1990", "end_date": "1995",
+              "additional_date_ranges": "1990; 1991-1992; 1995"}
+    assert envelope_date_spans(fields, "K1") == ["1990", "1991-1992", "1995"]
