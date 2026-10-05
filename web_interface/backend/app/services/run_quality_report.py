@@ -516,6 +516,12 @@ LINT_COPY = {
         "'93') in its organization or committee column.",
         "Delete the leftover text from the quoted rows, and fill in the organization from the "
         "source CV if it has one."),
+    "identical_rendered_rows": LintCopy(
+        "Rows that read the same",
+        "Two or more rows in one table are identical, although the CV lists different dates "
+        "or details for them, or one item is shown twice: once on its own and again inside "
+        "another row.",
+        "Add the date or detail that tells each flagged row apart, or delete the repeated item."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

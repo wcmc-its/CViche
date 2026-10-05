@@ -29,6 +29,8 @@ from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
+    IDENTICAL_ROW_EVIDENCE_RECORDS,
+    IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
 from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
@@ -53,6 +55,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
     lint_etal_added,
+    lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
@@ -4106,14 +4109,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (52), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (53), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 50
+    assert len(payload["findings"]) == 51
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6150,3 +6153,223 @@ def test_fanout_cell_residue_skips_records_that_are_not_objects():
                        "Widget Keeper 1992-1993", _office("Widget Keeper", "1994", "1996")]})
     rows = [["1992-1993", "Widget Keeper", "1994-1996"]]
     assert _fanout_hits([entry], [[_LEADERSHIP_HEADER, *rows]]) == []
+
+
+# identical_rendered_rows (EOAHMI QTATUP-04, BRUSUZ-01). Invented values.
+_IDR_TITLE = "Example Lecture on Widgets"
+_IDR_PLACE = "Example City, ST"
+_IDR_HIDES = "the row hides what tells them apart"
+
+
+def _idr_entry(idx, fields, code="R", text="Example entry text"):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "extracted_fields": fields}
+
+
+def _idr_talk(idx, date, **extra):
+    return _idr_entry(idx, {"title": _IDR_TITLE, "location": _IDR_PLACE, "date": date, **extra})
+
+
+def test_identical_rendered_rows_warns_when_the_year_column_hides_the_dates():
+    """Three talks months apart render as one year-only row three times. A
+    merged cell repeats in python-docx's row; it is one cell of the row."""
+    rows = [[["Title", "Institution/Location", "Dates (yyyy)"],
+             [_IDR_TITLE, _IDR_PLACE, "2003"],
+             [_IDR_TITLE, _IDR_TITLE, _IDR_PLACE, "2003"],
+             [_IDR_TITLE, _IDR_PLACE, "2003"]]]
+    entries = [_idr_talk(10, "2003-03", notes="spring"), _idr_talk(12, "2003-11", notes="fall"),
+               _idr_talk(14, "2003-12", notes="winter")]
+
+    assert lint_identical_rendered_rows({"entries": entries}, rows) == [{
+        "lint": "identical_rendered_rows", "severity": "WARN",
+        "message": "entry 10 (R): distinct_records: 3 identical rows in one table stand "
+                   "for 3 stage-4 records (also entries 12, 14) that differ in date, notes; "
+                   + _IDR_HIDES,
+        "evidence": [f"{_IDR_TITLE} | {_IDR_PLACE} | 2003",
+                     "entry 10: date=2003-03; notes=spring",
+                     "entry 12: date=2003-11; notes=fall",
+                     "entry 14: date=2003-12; notes=winter"],
+        "status": "ran", "reason": ""}]
+
+
+def test_identical_rendered_rows_matches_a_record_whose_every_word_shows():
+    """A record whose values all render (title and year) still stands for
+    the row: its words equal the row's."""
+    entries = [_idr_entry(10, {"title": "Example Widgets", "date": "2003"}),
+               _idr_entry(12, {"title": "Example Widgets", "date": "2003-05"})]
+    rows = [[["Example Widgets", "2003"]] * 2]
+    [finding] = lint_identical_rendered_rows({"entries": entries}, rows)
+    assert finding["evidence"][1:] == ["entry 10: date=2003", "entry 12: date=2003-05"]
+
+
+def test_identical_rendered_rows_reads_each_record_of_a_split_entry():
+    """QTATUP 980's shape: one entry whose stage4_records hold one talk on
+    several dates; the evidence lists the first IDENTICAL_ROW_EVIDENCE_RECORDS."""
+    dates = ["2003-07-30", "2003-09-08", "2003-10-02", "2003-12-03"]
+    series = "Example lecture series"
+    records = [{"title": _IDR_TITLE, "location": _IDR_PLACE, "event_name": series,
+                "date": date} for date in dates]
+    entry = _idr_entry(5, {**records[-1], "stage4_records": records})
+    rows = [[[_IDR_TITLE, f"{series}, {_IDR_PLACE}", "2003"]] * len(dates)]
+
+    [finding] = lint_identical_rendered_rows({"entries": [entry]}, rows)
+
+    assert finding["message"] == (
+        "entry 5 (R): distinct_records: 4 identical rows in one table stand for 4 "
+        "stage-4 records that differ in date; " + _IDR_HIDES)
+    assert finding["evidence"] == [f"{_IDR_TITLE} | {series}, {_IDR_PLACE} | 2003"] + [
+        f"entry 5: date={date}" for date in dates[:3]]
+    assert IDENTICAL_ROW_EVIDENCE_RECORDS == 3
+
+
+def test_identical_rendered_rows_is_silent_when_the_records_agree():
+    """The CV lists one record twice, and the document repeats it: a
+    membership given once with an open end and once without, a talk whose
+    second copy has no date, or two copies differing only in bookkeeping."""
+    member = {"organization": "Example Society", "membership_type": "Member",
+              "start_date": "2013"}
+    society_rows = [[["Member, Example Society", "2013-Present"]] * 2]
+    assert lint_identical_rendered_rows({"entries": [
+        _idr_entry(20, {**member, "end_date": "present"}, code="I"),
+        _idr_entry(21, {**member, "end_date": None}, code="I")]}, society_rows) == []
+
+    talk_rows = [[[_IDR_TITLE, _IDR_PLACE, "2003"]] * 2]
+    assert lint_identical_rendered_rows(
+        {"entries": [_idr_talk(10, "2003-03"), _idr_talk(12, "")]}, talk_rows) == []
+    copies = [_idr_talk(10, "2003-03", target_name=name, formatted_text=name,
+                        formatting_source=name, formatted_citation=name)
+              for name in ("Example A", "Example B")]
+    assert lint_identical_rendered_rows({"entries": copies}, talk_rows) == []
+
+
+def test_identical_rendered_rows_needs_two_identical_rows_of_two_words():
+    """One row is not a repeat, a one-word row repeats by design, and a row
+    no record's words hold is not judged."""
+    entries = [_idr_talk(10, "2003-03"), _idr_talk(12, "2003-11")]
+    one_row = [[[_IDR_TITLE, _IDR_PLACE, "2003"]]]
+    assert lint_identical_rendered_rows({"entries": entries}, one_row) == []
+    assert lint_identical_rendered_rows({"entries": entries}, [[["Widgets"], ["Widgets"]]]) == []
+    two_words = lint_identical_rendered_rows(
+        {"entries": entries}, [[["Example Widgets"], ["Example Widgets"]]])
+    assert [f["message"].split(":")[0] for f in two_words] == ["entry 10 (R)"]
+    assert lint_identical_rendered_rows(
+        {"entries": entries}, [[["Other Lecture", "2003"]] * 2]) == []
+
+
+def test_identical_rendered_rows_reads_an_open_end_stage_6_wrote():
+    """'2013-Present' from a start date alone: no field holds 'present', so
+    the row still stands for both records, which differ in their notes."""
+    society = {"organization": "Example Society", "start_date": "2013"}
+    entries = [_idr_entry(20, {**society, "notes": "first term"}, code="I"),
+               _idr_entry(21, {**society, "notes": "second term"}, code="I")]
+
+    [finding] = lint_identical_rendered_rows(
+        {"entries": entries}, [[["Example Society", "2013-Present"]] * 2])
+
+    assert finding["message"] == (
+        "entry 20 (I): distinct_records: 2 identical rows in one table stand for 2 "
+        "stage-4 records (also entries 21) that differ in notes; " + _IDR_HIDES)
+
+
+_IDR_FIRST = {"event_name": "Example Widget Institute", "location": _IDR_PLACE}
+_IDR_SECOND = {"event_name": "Second Example Symposium on Gadgets", "location": "Other Town, ST"}
+_IDR_FUSED_TEXT = ("Example Widget Institute (Example City, ST)* "
+                   "Second Example Symposium on Gadgets (Other Town, ST)")
+
+
+def _idr_fused_entry(records=(_IDR_FIRST, _IDR_SECOND), text=_IDR_FUSED_TEXT):
+    return _idr_entry(30, {**records[-1], "stage4_records": list(records)}, text=text)
+
+
+def test_identical_rendered_rows_warns_on_a_record_also_rendered_inside_the_raw_text():
+    """BRUSUZ 228/249/265 on the dev-248 render: record 1 renders as its own
+    row, and the whole entry text renders as a second row naming it again.
+    The record row quoted is the one nearest the fused row."""
+    rows = [[["Example Widget Institute", _IDR_PLACE],
+             ["Unrelated Talk", "Elsewhere"],
+             ["Example Widget Institute"],
+             [_IDR_FUSED_TEXT, "Other Town, ST"]]]
+
+    assert lint_identical_rendered_rows({"entries": [_idr_fused_entry()]}, rows) == [{
+        "lint": "identical_rendered_rows", "severity": "WARN",
+        "message": "entry 30 (R): fused_repeat: the entry's whole text renders as one "
+                   "row while one of its 2 records also renders as its own row",
+        "evidence": ["Example Widget Institute", f"{_IDR_FUSED_TEXT} | Other Town, ST"],
+        "status": "ran", "reason": ""}]
+
+
+def test_identical_rendered_rows_fused_needs_a_split_entry_and_its_record_row():
+    entry = _idr_fused_entry()
+    fused_row = [_IDR_FUSED_TEXT, "Other Town, ST"]
+    record_row = ["Example Widget Institute", _IDR_PLACE]
+    # Only the fused row: the records fused, none repeated. Only record
+    # rows: the entry fanned out cleanly.
+    assert lint_identical_rendered_rows({"entries": [entry]}, [[fused_row]]) == []
+    assert lint_identical_rendered_rows(
+        {"entries": [entry]}, [[record_row, ["Second Example Symposium on Gadgets"]]]) == []
+    # A one-word row, and a row the fused row does not hold, are not the record.
+    assert lint_identical_rendered_rows(
+        {"entries": [entry]}, [[["Institute"], fused_row]]) == []
+    organizer = {**_IDR_FIRST, "role": "organizer"}
+    assert lint_identical_rendered_rows(
+        {"entries": [_idr_fused_entry((organizer, _IDR_SECOND))]},
+        [[["organizer, Example Widget Institute"], fused_row]]) == []
+    # One record, a records list holding one object, or no list at all.
+    for records in ([_IDR_FIRST], [_IDR_FIRST, "not a record"], None):
+        one = _idr_entry(30, {**_IDR_FIRST, "stage4_records": records}, text=_IDR_FUSED_TEXT)
+        assert lint_identical_rendered_rows({"entries": [one]}, [[record_row, fused_row]]) == []
+
+
+def test_identical_rendered_rows_fused_record_row_may_show_every_word():
+    """A record row holding every word of its record, and every word of the
+    fused row (the second record repeats the first one's name), is still a
+    repeat."""
+    name, place = "Widget Hall Annex Building", "Townville City"
+    entry = _idr_fused_entry(({"event_name": name, "location": place}, {"event_name": name}),
+                             text=f"{name} ({place})* {name}")
+    rows = [[[name, place], [f"{name} ({place})* {name}"]]]
+    [finding] = lint_identical_rendered_rows({"entries": [entry]}, rows)
+    assert finding["evidence"] == [f"{name} | {place}", f"{name} ({place})* {name}"]
+
+
+def test_identical_rendered_rows_fused_entry_text_floor():
+    """An entry text shorter than IDENTICAL_ROW_FUSED_MIN_CHARS (20 letters
+    and digits) can match a row by chance, so it is not judged. A two-word
+    record row is enough."""
+    assert IDENTICAL_ROW_FUSED_MIN_CHARS == 20
+    head = "Widget Hall (Town)* "
+    first = {"event_name": "Widget Hall", "location": "Town"}
+    for tail, fires in (("Q" * 6, True), ("Q" * 5, False)):
+        entry = _idr_fused_entry((first, {"event_name": tail}), text=head + tail)
+        rows = [[["Widget Hall"], [head + tail]]]
+        assert bool(lint_identical_rendered_rows({"entries": [entry]}, rows)) is fires
+
+
+def test_run_doctor_wires_identical_rendered_rows_to_stage_4_and_the_table_rows(tmp_path):
+    """The LINT_REGISTRY row hands the lint stage 4 and the docx's table
+    rows. Invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"] += [_idr_talk(910, "2003-03"), _idr_talk(912, "2003-11")]
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    table = output.add_table(rows=2, cols=3)
+    for row in table.rows:
+        for cell, text in zip(row.cells, (_IDR_TITLE, _IDR_PLACE, "2003")):
+            cell.paragraphs[0].text = text
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "identical_rendered_rows"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in hits] == [
+        ("WARN", "entry 910 (R)")]
+
+
+def test_identical_rendered_rows_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 (IDR in doctor/PRECISION.md): 8 of the 102 fresh
+    renders of origin/dev 8b287ec2; a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["identical_rendered_rows"] == round(8 / 102, 3)

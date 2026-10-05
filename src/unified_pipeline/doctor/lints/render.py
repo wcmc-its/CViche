@@ -40,6 +40,7 @@ from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
+    _FieldsEntry,
     _entry_pieces,
     _fields_entries,
     _finding,
@@ -2911,3 +2912,190 @@ def lint_fanout_cell_residue(stage4: dict,
             f"organization or committee cell",
             list(dict.fromkeys(text for text, _ in rows))[:FANOUT_RESIDUE_EVIDENCE_LIMIT]))
     return findings
+# identical_rendered_rows (EOAHMI recheck: QTATUP-04, BRUSUZ-01): rows of one
+# rendered table that a reader cannot tell apart. `duplicate_records` cannot
+# see them: its block rule compares enumerated paragraphs, and `blocks` holds
+# a whole table as one block; its record rule pairs citations and grants by
+# title, and each grant is a table of its own. Stage 4 says what the rows
+# are. A row is matched to the stage-4 records whose words hold all of the
+# row's words, and fires in two shapes:
+#   - distinct_records: identical rows whose matched records disagree on a
+#     field both fill, so the row hides what tells them apart: a talk given
+#     on seven dates rendered as seven year-only rows (QTATUP 980).
+#   - fused_repeat: a multi-record entry whose whole text renders as one
+#     row while one of its records also renders as its own row, so that
+#     record shows twice (BRUSUZ 228, 249, 265 on the dev-248 render).
+# Identical rows whose records agree are silent: the CV lists that record
+# twice ("31." and "32." with one text, or a membership under two headings),
+# and the document repeats it faithfully. A third shape, fewer matched
+# records than identical rows, was measured and dropped: its 3 hits on the
+# 102 dev renders were all a membership the CV lists twice, one copy with an
+# open year to which stage 6 adds "Present", so only one copy matched.
+
+#: A row with fewer words than this (`_name_tokens`) is not compared: a
+#: bare year or a lone word repeats by design.
+IDENTICAL_ROW_MIN_WORDS = 2
+#: A stage-4 entry whose `stage4_records` holds at least this many records
+#: is one source line stage 4 split; only such an entry can render fused.
+IDENTICAL_ROW_MIN_RECORDS = 2
+#: The fused row must carry at least this much of the entry's text (letters
+#: and digits only), so a two-word entry cannot match a row by chance. On
+#: the 111 measured runs any floor up to 26 gives the same hits; the
+#: shortest fused entry found, DUTAVD 79 (26), is a true one.
+IDENTICAL_ROW_FUSED_MIN_CHARS = 20
+IDENTICAL_ROW_SEVERITY = "WARN"
+#: A finding quotes the row and, for at most this many of its records, the
+#: values the row hides.
+IDENTICAL_ROW_EVIDENCE_RECORDS = 3
+#: Stage-4 bookkeeping and formatted copies: none tells one record from
+#: another.
+_IDENTICAL_ROW_IGNORED_FIELDS = frozenset({
+    STAGE4_RECORDS_KEY, "target_name", "formatted_text", "formatting_source",
+    "formatted_citation"})
+#: Words stage 6 writes into a row that no field holds: the open end of a
+#: date range with no end ("2013-Present" from start_date 2013).
+_IDENTICAL_ROW_RENDER_WORDS = frozenset({"present"})
+_NON_ALNUM_RE = re.compile(r"[\W_]+")
+
+IDENTICAL_SHAPE_DISTINCT = "distinct_records"
+IDENTICAL_SHAPE_FUSED = "fused_repeat"
+
+
+class _IdenticalRowRecord(NamedTuple):
+    """One stage-4 record: its entry, its words, and its filled field
+    values, which tell it from another record."""
+    element_idx: object
+    code: str
+    tokens: frozenset[str]
+    values: Mapping[str, str]
+
+
+def _identical_row_record(entry: _FieldsEntry, fields: Mapping) -> _IdenticalRowRecord:
+    values = {key: norm(str(value)) for key, value in fields.items()
+              if key not in _IDENTICAL_ROW_IGNORED_FIELDS
+              and value not in (None, "", [], {})}
+    return _IdenticalRowRecord(entry.element_idx, entry.code,
+                               frozenset(_name_tokens(" ".join(values.values()))),
+                               MappingProxyType(values))
+
+
+def _split_records(fields: Mapping) -> list[Mapping]:
+    """The records of a multi-record entry, or [] for a one-record entry."""
+    children = fields.get(STAGE4_RECORDS_KEY)
+    records = ([child for child in children if isinstance(child, Mapping)]
+               if isinstance(children, list) else [])
+    return records if len(records) >= IDENTICAL_ROW_MIN_RECORDS else []
+
+
+def _identical_row_records(stage4: dict) -> list[_IdenticalRowRecord]:
+    records = []
+    for entry in _fields_entries(stage4):
+        children = _split_records(entry.fields) or [entry.fields]
+        records += [_identical_row_record(entry, child) for child in children]
+    return records
+
+
+def _table_row_text(row: list[str]) -> str:
+    """A table row's distinct non-empty cells, whitespace collapsed, joined
+    with TABLE_ROW_JOINER (a merged cell repeats in `row`)."""
+    cells = dict.fromkeys(" ".join(cell.split()) for cell in row if cell.strip())
+    return TABLE_ROW_JOINER.join(cells)
+
+
+def _row_words(text: str) -> set[str]:
+    return _name_tokens(text) - _IDENTICAL_ROW_RENDER_WORDS
+
+
+def _disagreeing_fields(records: list[_IdenticalRowRecord]) -> list[str]:
+    """The fields two of `records` fill with different values, sorted. A
+    field only one of them fills is no disagreement: "2007" beside
+    "2007-present" can be one membership listed twice."""
+    return sorted({key for i, first in enumerate(records) for second in records[i + 1:]
+                   for key in first.values.keys() & second.values.keys()
+                   if first.values[key] != second.values[key]})
+
+
+def _distinct_records_message(text: str, count: int, matched: list[_IdenticalRowRecord],
+                              fields: list[str]) -> tuple[str, list[str]]:
+    """Message and evidence for identical rows standing for `matched`
+    records that differ in `fields`: the row, then the values it hides."""
+    first = matched[0]
+    others = ", ".join(str(idx) for idx in dict.fromkeys(
+        record.element_idx for record in matched[1:]) if idx != first.element_idx)
+    shown = [f"entry {record.element_idx}: " + "; ".join(
+        f"{key}={record.values.get(key, '')}" for key in fields)
+        for record in matched[:IDENTICAL_ROW_EVIDENCE_RECORDS]]
+    return (f"entry {first.element_idx} ({first.code}): {IDENTICAL_SHAPE_DISTINCT}: "
+            f"{count} identical rows in one table stand for {len(matched)} stage-4 "
+            f"records{' (also entries ' + others + ')' if others else ''} that differ in "
+            f"{', '.join(fields)}; the row hides what tells them apart", [text] + shown)
+
+
+def _distinct_record_rows(table_rows: list[list[list[str]]],
+                          records: list[_IdenticalRowRecord]) -> list[tuple[str, list[str]]]:
+    """(message, evidence) per group of identical rows in one table whose
+    matched records disagree."""
+    found = []
+    for table in table_rows:
+        counts = Counter(_table_row_text(row) for row in table)
+        for text, count in counts.items():
+            words = _row_words(text)
+            if count < 2 or len(words) < IDENTICAL_ROW_MIN_WORDS:
+                continue
+            matched = [record for record in records if words <= record.tokens]
+            fields = _disagreeing_fields(matched)
+            if fields:
+                found.append(_distinct_records_message(text, count, matched, fields))
+    return found
+
+
+def _fused_repeat(texts: list[str], key: str, own: list[frozenset[str]]
+                  ) -> tuple[str, str] | None:
+    """(record row, fused row) when one row of `texts` carries the entry's
+    whole text (`key`) and another, the nearest, is one of its records."""
+    fused = next((i for i, text in enumerate(texts)
+                  if key in _NON_ALNUM_RE.sub("", norm(text))), None)
+    if fused is None:
+        return None
+    fused_words = _row_words(texts[fused])
+    repeats = [i for i, text in enumerate(texts) if i != fused
+               and len(_row_words(text)) >= IDENTICAL_ROW_MIN_WORDS
+               and _row_words(text) <= fused_words
+               and any(_row_words(text) <= tokens for tokens in own)]
+    if not repeats:
+        return None
+    return texts[min(repeats, key=lambda i: abs(i - fused))], texts[fused]
+
+
+def _fused_repeat_rows(stage4: dict, table_rows: list[list[list[str]]]
+                       ) -> list[tuple[str, list[str]]]:
+    """(message, evidence) per multi-record entry rendered fused beside one
+    of its own records."""
+    found = []
+    for entry in _fields_entries(stage4):
+        children = _split_records(entry.fields)
+        key = _NON_ALNUM_RE.sub("", norm(entry.text))
+        if not children or len(key) < IDENTICAL_ROW_FUSED_MIN_CHARS:
+            continue
+        own = [_identical_row_record(entry, child).tokens for child in children]
+        for table in table_rows:
+            pair = _fused_repeat([_table_row_text(row) for row in table], key, own)
+            if pair is not None:
+                found.append((
+                    f"entry {entry.element_idx} ({entry.code}): {IDENTICAL_SHAPE_FUSED}: "
+                    f"the entry's whole text renders as one row while one of its "
+                    f"{len(children)} records also renders as its own row", list(pair)))
+    return found
+
+
+def lint_identical_rendered_rows(stage4: dict,
+                                 table_rows: list[list[list[str]]]) -> list[dict]:
+    """Rows of one rendered table a reader cannot tell apart, where stage 4
+    shows distinct records, or one record rendered twice (EOAHMI QTATUP-04,
+    BRUSUZ-01). One finding per group of identical rows, or per fused
+    entry, quoting the rows. Reads the docx's table rows (`w:ins` text
+    included) and stage 4."""
+    found = (_distinct_record_rows(table_rows, _identical_row_records(stage4))
+             + _fused_repeat_rows(stage4, table_rows))
+    return [_finding("identical_rendered_rows", IDENTICAL_ROW_SEVERITY, message, evidence)
+            for message, evidence in found]
