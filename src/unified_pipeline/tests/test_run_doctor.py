@@ -69,6 +69,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_pipeline_errors,
     lint_python_repr_in_output,
     lint_section_lost,
+    lint_split_child_unsourced,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
     lint_stage_failure_recorded,
@@ -4109,14 +4110,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (53), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (54), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 51
+    assert len(payload["findings"]) == 52
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6373,3 +6374,266 @@ def test_identical_rendered_rows_prevalence_is_the_measured_fraction():
     renders of origin/dev 8b287ec2; a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["identical_rendered_rows"] == round(8 / 102, 3)
+
+
+# --------------------------------------- lint 14aa: split_child_unsourced
+# EOAHMI recheck DUTAVD-03 (a split record's blank institution filled from a
+# neighbouring entry) and WYMVGU-02 (an entry's leading range copied onto
+# split records it does not date). Invented values throughout.
+
+_SPLIT_TRAINING_TEXT = ("Resident, Widget Surgery:\tExample Hospital, Springfield (1970-1971) "
+                        "Resident, Gadget Surgery:")
+_SPLIT_TRAINING = [
+    {"training_type": "Resident", "specialty": "Widget Surgery",
+     "institution": "Example Hospital, Springfield", "start_date": "1970", "end_date": "1971"},
+    {"training_type": "Resident", "specialty": "Gadget Surgery",
+     "institution": None, "start_date": None, "end_date": None},
+]
+_SPLIT_BOARD_TEXT = ("1990-2004  Member, Board, Example Clinic\t1996-97 Vice-President\t"
+                     "1997-99 President\tPast-President")
+
+
+def _split_board(past_end="2004"):
+    """Four records of one board line; Past-President carries the board term."""
+    org = {"organization": "Example Clinic"}
+    return [{"role": "Member, Board", "start_date": "1990", "end_date": "2004", **org},
+            {"role": "Vice-President", "start_date": "1996", "end_date": "1997", **org},
+            {"role": "President", "start_date": "1997", "end_date": "1999", **org},
+            {"role": "Past-President", "start_date": "1990", "end_date": past_end, **org}]
+
+
+def _split_board_rows(past_dates="1990-2004"):
+    return [[["Example Clinic", "Member, Board", "1990-2004"],
+             ["Example Clinic", "Vice-President", "1996-1997"],
+             ["Example Clinic", "President", "1997-1999"],
+             ["Example Clinic", "Past-President", past_dates]]]
+
+
+def _split_hits(text, records, table_rows=None, code="Q1", idx=30):
+    entry = _entry(text, start=idx, hierarchy=["Example Heading"], taxonomy_code=code,
+                   extracted_fields={**records[-1], "stage4_records": records})
+    return lint_split_child_unsourced({"entries": [entry]}, table_rows)
+
+
+def test_split_child_unsourced_flags_a_place_from_outside_the_entry():
+    rows = [[["Resident, Widget Surgery", "Example Hospital, Springfield", "1970-1971"],
+             ["Resident, Gadget Surgery", "Other County Hospital, Shelbyville", ""]]]
+    findings = _split_hits(_SPLIT_TRAINING_TEXT, _SPLIT_TRAINING, rows, code="C")
+    assert [(f["lint"], f["severity"], f["evidence"]) for f in findings] == [
+        ("split_child_unsourced", "INFO",
+         ["Resident, Gadget Surgery | Other County Hospital, Shelbyville"])]
+    assert findings[0]["message"].startswith("entry 30 (C): a split record with no institution")
+    assert findings[0]["message"].endswith("(institution_from_outside_entry)")
+
+
+@pytest.mark.parametrize("place", [
+    "Example Hospital, Springfield",   # the sibling's place, which the entry names
+    "Member",                          # one word: the role stage 6 supplies
+    "Other Hospital",                  # one word the entry lacks
+])
+def test_split_child_unsourced_spares_a_place_the_entry_holds_or_a_single_word(place):
+    rows = [[["Resident, Gadget Surgery", place, ""]]]
+    assert _split_hits(_SPLIT_TRAINING_TEXT, _SPLIT_TRAINING, rows, code="C") == []
+
+
+def test_split_child_unsourced_reads_the_place_against_two_foreign_words():
+    rows = [[["Resident, Gadget Surgery", "Other Lakeside Hospital", ""]]]
+    assert len(_split_hits(_SPLIT_TRAINING_TEXT, _SPLIT_TRAINING, rows, code="C")) == 1
+
+
+def test_split_child_unsourced_spares_a_place_when_no_sibling_names_one():
+    """An entry under an employer heading takes its place from the heading."""
+    records = [{**record, "institution": None} for record in _SPLIT_TRAINING]
+    rows = [[["Resident, Gadget Surgery", "Other County Hospital, Shelbyville", ""]]]
+    assert _split_hits(_SPLIT_TRAINING_TEXT, records, rows, code="C") == []
+
+
+@pytest.mark.parametrize("row", [
+    ["Resident, Gadget Surgery", "Other County Hospital, Shelbyville", "1980-1981"],
+    ["Resident, Gadget Surgery, Senior", "Other County Hospital, Shelbyville", ""],
+    ["Resident, Gadget Surgery", "Other County Hospital 1980", ""],
+])
+def test_split_child_unsourced_needs_the_records_own_row(row):
+    """The row is the record's: its name alone in one cell, its years (none
+    here), and a place cell that carries no year."""
+    assert _split_hits(_SPLIT_TRAINING_TEXT, _SPLIT_TRAINING, [[row]], code="C") == []
+
+
+def test_split_child_unsourced_reads_no_place_without_the_docx():
+    assert _split_hits(_SPLIT_TRAINING_TEXT, _SPLIT_TRAINING, None, code="C") == []
+
+
+def test_split_child_unsourced_flags_a_range_copied_onto_an_undated_record():
+    findings = _split_hits(_SPLIT_BOARD_TEXT, _split_board(), _split_board_rows(), idx=865)
+    assert [(f["severity"], f["message"], f["evidence"]) for f in findings] == [
+        ("INFO", "entry 865 (Q1): 2 split records show 1990-2004, which the entry writes "
+                 "fewer times, beside a record with its own dates (date_from_sibling)",
+         ["Example Clinic | Member, Board | 1990-2004",
+          "Example Clinic | Past-President | 1990-2004"])]
+
+
+def test_split_child_unsourced_spares_a_range_stage_6_does_not_render_twice():
+    assert _split_hits(_SPLIT_BOARD_TEXT, _split_board(), _split_board_rows("")) == []
+
+
+def test_split_child_unsourced_reads_stage_4_alone_without_the_docx():
+    findings = _split_hits(_SPLIT_BOARD_TEXT, _split_board())
+    assert [(f["message"].split(":")[0], f["evidence"]) for f in findings] == [
+        ("entry 30 (Q1)", [_SPLIT_BOARD_TEXT])]
+    assert "2 split records show 1990-2004" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text, records", [
+    # one leading range over a list: no record has a range of its own
+    ("2020-present Example Mentee One; Example Mentee Two; Example Mentee Three",
+     [{"mentee_name": name, "start_date": "2020", "end_date": "present"}
+      for name in ("Example Mentee One", "Example Mentee Two", "Example Mentee Three")]),
+    # the range is written as often as it is carried
+    ("Widget Panel 2001-2003\tGadget Panel 2001-2003\tSprocket Panel 2006-2007",
+     [{"committee_name": name, "start_date": start, "end_date": end}
+      for name, start, end in (("Widget Panel", "2001", "2003"), ("Gadget Panel", "2001", "2003"),
+                               ("Sprocket Panel", "2006", "2007"))]),
+    # the other record's range starts inside the shared one
+    ("Facilitator 7/2015-7/2016\tWidget Talk\tGadget Talk\tSprocket Talk",
+     [{"title": "Widget Talk", "start_date": "2015", "end_date": "2016"},
+      {"title": "Gadget Talk", "start_date": "2015", "end_date": "2016"},
+      {"title": "Sprocket Talk", "start_date": "2016"}]),
+    # a sentence about the records
+    ("Research support. In 2016 after I moved here I was awarded a widget grant, "
+     "a gadget grant and a sprocket grant, and in 2018 another grant from the same funder",
+     [{"title": "Widget grant", "start_date": "2016"},
+      {"title": "Gadget grant", "start_date": "2016"},
+      {"title": "Sprocket grant", "start_date": "2018"}]),
+])
+def test_split_child_unsourced_spares_a_range_the_entry_gives_every_record(text, records):
+    assert _split_hits(text, records) == []
+
+
+def test_split_child_unsourced_reads_an_open_end_as_part_of_the_range():
+    """A singleton whose start is the shared range's end is inside it."""
+    text = "2000-2006  Example Board\tDirector-elect\tDirector\t2006-07 Past-director"
+    records = [{"role": "Director-elect", "start_date": "2000", "end_date": "2006"},
+               {"role": "Director", "start_date": "2000", "end_date": "2006"},
+               {"role": "Past-director", "start_date": "2006", "end_date": "2007"}]
+    assert _split_hits(text, records) == []
+    records[-1]["start_date"] = "2007"
+    assert len(_split_hits(text, records)) == 1
+
+
+def test_split_child_unsourced_needs_identity_words_to_find_a_row():
+    """A record with nothing to name it matches no row, not a wordless cell."""
+    records = [_SPLIT_TRAINING[0], {"institution": None, "start_date": None}]
+    rows = [[["-", "Other County Hospital, Shelbyville", ""]]]
+    assert _split_hits(_SPLIT_TRAINING_TEXT, records, rows, code="C") == []
+
+
+def test_split_child_unsourced_reads_no_place_in_a_date_cell_or_the_name_cell():
+    """A month-and-year cell is the record's dates, and the name cell is the
+    record's own, however stage 4 worded it."""
+    records = [_SPLIT_TRAINING[0],
+               {"training_type": "Fellow", "specialty": "Sprocket Medicine",
+                "institution": None, "start_date": "1972", "end_date": "1973"}]
+    rows = [[["Fellow, Sprocket Medicine", "July 1972 - Sept 1973"]]]
+    assert _split_hits(_SPLIT_TRAINING_TEXT, records, rows, code="C") == []
+
+
+def test_split_child_unsourced_reports_every_entry():
+    first = _entry(_SPLIT_BOARD_TEXT, start=1, taxonomy_code="Q1",
+                   extracted_fields={"stage4_records": _split_board()})
+    second = _entry(_SPLIT_BOARD_TEXT, start=2, taxonomy_code="Q1",
+                    extracted_fields={"stage4_records": _split_board()})
+    findings = lint_split_child_unsourced({"entries": [first, second]})
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 1 (Q1)", "entry 2 (Q1)"]
+
+
+def test_split_child_unsourced_cuts_stage_4_evidence():
+    text = _SPLIT_BOARD_TEXT + " " + "x" * 300
+    [finding] = _split_hits(text, _split_board())
+    assert finding["evidence"] == [text[:200]]
+
+
+def test_split_child_unsourced_groups_open_ends_however_written():
+    records = _split_board()
+    records[0]["end_date"], records[-1]["end_date"] = "Present", " present"
+    text = _SPLIT_BOARD_TEXT.replace("1990-2004", "1990-present")
+    assert len(_split_hits(text, records)) == 1
+
+
+def test_split_child_unsourced_reads_the_first_year_of_a_date():
+    records = _split_board()
+    records[-1]["start_date"] = "1990 (renewed 1995)"
+    assert len(_split_hits(_SPLIT_BOARD_TEXT, records)) == 1
+
+
+def test_split_child_unsourced_reads_past_a_record_of_its_own():
+    """Records whose range is theirs alone come first; the shared one is
+    still found, and a lone range the text never writes is not shared."""
+    records = _split_board()
+    records = records[1:3] + [records[0], records[3]]
+    assert len(_split_hits(_SPLIT_BOARD_TEXT, records)) == 1
+    alone = [{"role": "Widget Chair", "start_date": "1990", "end_date": "1991"},
+             {"role": "Gadget Chair", "start_date": "1995"}]
+    assert _split_hits("1990-91 Widget Chair\tGadget Chair", alone) == []
+
+
+def test_split_child_unsourced_counts_each_record_once_on_the_render():
+    """One carrier rendered twice is not two records showing the range."""
+    rows = [[["Example Clinic", "Member, Board", "1990-2004"],
+             ["Example Clinic", "Member, Board", "1990-2004"]]]
+    assert _split_hits(_SPLIT_BOARD_TEXT, _split_board(), rows) == []
+
+
+def test_split_child_unsourced_reads_every_shared_range_of_an_entry():
+    """The first shared range does not render twice; the second does."""
+    text = "2001-2003 Widget Panel\tGadget Panel\t2010-2012 Sprocket Panel\tCog Panel\t2015 Lever Panel"
+    records = [{"committee_name": name, "start_date": start, "end_date": end}
+               for name, start, end in (("Widget Panel", "2001", "2003"),
+                                        ("Gadget Panel", "2001", "2003"),
+                                        ("Sprocket Panel", "2010", "2012"),
+                                        ("Cog Panel", "2010", "2012"),
+                                        ("Lever Panel", "2015", ""))]
+    rows = [[["Sprocket Panel", "2010-2012"], ["Cog Panel", "2010-2012"]]]
+    findings = _split_hits(text, records, rows)
+    assert [f["evidence"] for f in findings] == [["Sprocket Panel | 2010-2012",
+                                                   "Cog Panel | 2010-2012"]]
+
+
+def test_split_child_unsourced_prevalence_is_the_measured_rate():
+    """SC-1 in doctor/PRECISION.md: 1 of 102 fresh renders of origin/dev."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["split_child_unsourced"] == round(1 / 102, 3)
+
+
+def test_split_child_unsourced_ignores_an_entry_stage_4_did_not_split():
+    entry = _entry(_SPLIT_BOARD_TEXT, start=5, taxonomy_code="Q1",
+                   extracted_fields={"stage4_records": _split_board()[:1], "role": "Member"})
+    assert lint_split_child_unsourced({"entries": [entry]}, _split_board_rows()) == []
+    entry["extracted_fields"] = {"stage4_records": "not a list"}
+    assert lint_split_child_unsourced({"entries": [entry]}, _split_board_rows()) == []
+    entry["extracted_fields"] = {"stage4_records": [_split_board()[0], "not a record"]}
+    assert lint_split_child_unsourced({"entries": [entry]}, _split_board_rows()) == []
+
+
+def test_run_doctor_wires_split_child_unsourced_with_the_rendered_tables(tmp_path):
+    """The LINT_REGISTRY row must hand the lint the docx's table rows
+    (`table_rows`, optional): the place shape is visible only there."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append(_entry(
+        _SPLIT_TRAINING_TEXT, start=96, taxonomy_code="C",
+        extracted_fields={**_SPLIT_TRAINING[-1], "stage4_records": _SPLIT_TRAINING}))
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    table = output.add_table(rows=1, cols=3)
+    for cell, value in zip(table.rows[0].cells,
+                           ("Resident, Gadget Surgery", "Other County Hospital, Shelbyville", "")):
+        cell.text = value
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "split_child_unsourced"]
+    assert [(f["severity"], f["evidence"]) for f in hits] == [
+        ("INFO", ["Resident, Gadget Surgery | Other County Hospital, Shelbyville"])]

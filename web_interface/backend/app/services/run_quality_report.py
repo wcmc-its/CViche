@@ -522,6 +522,11 @@ LINT_COPY = {
         "or details for them, or one item is shown twice: once on its own and again inside "
         "another row.",
         "Add the date or detail that tells each flagged row apart, or delete the repeated item."),
+    "split_child_unsourced": LintCopy(
+        "A split entry shows a place or dates from elsewhere",
+        "A line of the CV that was split into several records shows, on one of them, an "
+        "institution the line does not name, or dates the line gives only to another record.",
+        "Check the institution and dates of each flagged record against the source CV."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
