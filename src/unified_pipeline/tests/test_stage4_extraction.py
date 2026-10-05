@@ -1160,10 +1160,13 @@ def test_other_prompts_carry_neither_the_series_nor_the_context_line_guard(code)
 
 def test_the_series_guard_keeps_one_series_as_one_item_and_the_audience_in_every_item():
     text = extraction.ONE_SERIES_INSTRUCTION
-    # JBUVYV 346: 4 topics x 3 years became 12 items.
+    # JBUVYV 346: 4 topics x 3 years became 12 items; the fix is 4, one per topic.
     assert text.startswith(" Never return an item for each combination of two lists (e.g. each topic in each year): ")
-    assert ('one lecture series given in several years on several topics is ONE item, with every year in its date '
-            '(e.g. "2015; 2016; 2017") and every topic in its title (e.g. "Series: Topic A; Topic B"). ') in text
+    assert ('when an entry gives years for a series and then lists its topics, return one item per topic, each with '
+            'every year in its date (e.g. "2015; 2016; 2017"). ') in text
+    # The first wording merged QTATUP 800 (5 cities) and 838 (4 titles) into 1.
+    assert 'Each distinct title, and each place with its own date, is still its own item. ' in text
+    assert "ONE item" not in text
     # QTATUP 980: the seven dated items all lost "to health care practitioners".
     assert text.endswith('When one talk is given on several dates, keep in every item the words that say how '
                          'and to whom it was given (e.g. "a teleconference series to nurses").')

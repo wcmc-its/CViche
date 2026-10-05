@@ -660,10 +660,13 @@ SINGLE_WORK_CODE_PREFIXES = ('S', 'M2', 'T')
 #: (2026-10-05, #1445) found JBUVYV 346, one K4 lecture series given in three
 #: years on four topics, returned as 12 items (each topic in each year), and
 #: QTATUP 980, one R talk given on seven dates as a teleconference series to
-#: named practitioners, returned as 7 items that all dropped the audience. A
-#: talk given in several cities, each with its own date, still splits
-#: (QTATUP 800, RVROVQ 129).
-ONE_SERIES_INSTRUCTION = """ Never return an item for each combination of two lists (e.g. each topic in each year): one lecture series given in several years on several topics is ONE item, with every year in its date (e.g. "2015; 2016; 2017") and every topic in its title (e.g. "Series: Topic A; Topic B"). When one talk is given on several dates, keep in every item the words that say how and to whom it was given (e.g. "a teleconference series to nurses")."""
+#: named practitioners, returned as 7 items that all dropped the audience. The
+#: first wording ("one series ... is ONE item") over-merged in the 2026-10-05
+#: A/B: QTATUP 800 (5 cities, 5 dates) and 838 (4 titles) came back as 1 item,
+#: and K3/K4/R records fell 74 -> 39 on JBUVYV. So the guard only forbids the
+#: cross product: one item per title, every year in each, and distinct titles
+#: or place-and-date pairs still split.
+ONE_SERIES_INSTRUCTION = """ Never return an item for each combination of two lists (e.g. each topic in each year): when an entry gives years for a series and then lists its topics, return one item per topic, each with every year in its date (e.g. "2015; 2016; 2017"). Each distinct title, and each place with its own date, is still its own item. When one talk is given on several dates, keep in every item the words that say how and to whom it was given (e.g. "a teleconference series to nurses")."""
 
 #: Appended to rule 1 for K3. The EOAHMI recheck (#1445) found JBUVYV 337,
 #: "House Leader, <program>, <school> 2016-2020" then a line naming only the
