@@ -386,7 +386,7 @@ def _entry_with_extraction(entry: dict[str, Any], extraction: _EntryExtraction,
 def _fallback_flags(llm_result: dict[str, Any]) -> dict[str, Any]:
     """The entry flag recording which model answered, when the content-filter
     fallback served the group's call (#1174); empty otherwise. Write-only: the
-    doctor and the quality score read it, nothing downstream does."""
+    doctor reads it, nothing downstream does."""
     model = llm_result.get(FALLBACK_SERVED_KEY)
     return {STAGE4_ENTRY_FALLBACK_KEY: model} if model else {}
 

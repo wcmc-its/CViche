@@ -3801,7 +3801,7 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
         assert bool(lint_stage4_group_failures(artifact)) is expect_flag
 
 
-# --------------------- #1174: llm_fallback_served (cap below GREEN) ----------
+# --------------------- #1174: llm_fallback_served (WARN, caps nothing) -------
 #
 # Synthetic provenance: stage 4 stamps the entries of a taxonomy group the
 # content-filter fallback answered; stage 4.5 lists the calls it served.
@@ -3825,7 +3825,8 @@ def test_llm_fallback_served_warns_per_stage_4_section_and_names_the_model():
     assert set(by_section) == {
         f"stage 4 M2A on {_FALLBACK_MODEL} (1 entries)",
         f"stage 4 S1 on {_FALLBACK_MODEL} (2 entries)"}
-    assert all("capped at 84" in f["message"] for f in findings)
+    assert all(f["message"].endswith("the call succeeded, so the quality score is not capped")
+               for f in findings)
 
 
 def test_llm_fallback_served_reports_a_stage_4_5_call_as_the_research_summary():
@@ -3843,20 +3844,6 @@ def test_llm_fallback_served_quiet_without_provenance_or_on_a_malformed_artifact
     assert lint_llm_fallback_served({}, {"research_summary": {}}) == []
     assert lint_llm_fallback_served({"entries": [None, 3, "x"]}, None) == []
     assert lint_llm_fallback_served({}, {"llm_fallback_calls": [None, {"call": "x"}]}) == []
-
-
-def test_llm_fallback_served_and_the_score_gate_agree_on_the_same_artifact(tmp_path):
-    """Both read quality_score.llm_fallback_served, so the lint fires exactly
-    when the cap does."""
-    from unified_pipeline.quality_score import FALLBACK_SERVED_CAP, score_llm_fallback_served
-
-    served = {"entries": [_fallback_entry("S1")]}
-    clean = {"entries": [{"taxonomy_code": "S1", "extraction_success": True}]}
-    for artifact, expect_flag in ((served, True), (clean, False)):
-        (tmp_path / "X_fields.json").write_text(json.dumps(artifact))
-        _fraction, _detail, cap = score_llm_fallback_served(tmp_path)
-        assert (cap == FALLBACK_SERVED_CAP) is expect_flag
-        assert bool(lint_llm_fallback_served(artifact)) is expect_flag
 
 
 def test_run_doctor_wires_llm_fallback_served_through_to_the_verdict(tmp_path):
