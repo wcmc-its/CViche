@@ -17,7 +17,7 @@ from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.services import auto_retry, batch_completion, notifications
+from app.services import auto_retry, batch_completion, batch_service, notifications
 
 # Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
 IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
@@ -359,7 +359,7 @@ def reconcile_queued_runs(db: Session) -> int:
     for run in stranded:
         if run.id in live_ids or not run_queue.claim_reenqueue_slot(run.id):
             continue
-        run_queue.enqueue(run.id, run_queue.queue_for(run.batch_id))
+        run_queue.enqueue(run.id, run_queue.queue_for(batch_service.batch_size(db, run.batch_id)))
         requeued += 1
         logger.warning("requeued_stranded run_id=%s queued_at=%s", run.id, run.queued_at)
 
