@@ -77,6 +77,11 @@ DECIDED_821_PENDING = "#821 pending"
 #: Paul's #821 decision comment (2026-09-14): DEA template slot and home
 #: address/phone both move from render to withhold-with-notice.
 DECIDED_821 = "https://github.com/wcmc-its/CViche/issues/821#issuecomment-5671621909"
+#: Paul's decision (2026-10-05, NDMRSO batch autopsy class ND1): an
+#: institutional, employee or student ID number and a tax ID are withheld like
+#: the other personal data. Before it, both reached the Appendix verbatim
+#: (ATUVAL element 1, MQJAVH element 6).
+DECIDED_ID_NUMBERS = "ID numbers, 2026-10-05 (NDMRSO autopsy class ND1)"
 
 # Category labels -- the vocabulary the withheld notice and the Word comment
 # speak in. Named once so a row, a field-key rule and a comment line cannot
@@ -105,6 +110,8 @@ CAT_HEALTH = "health"
 CAT_BLOOD_TYPE = "blood type"
 CAT_DEA = "DEA number"
 CAT_HOME_CONTACT = "home address / phone"
+CAT_INSTITUTIONAL_ID = "institutional ID number"
+CAT_TAX_ID = "tax ID number"
 # #833: a third party's contact data in an unlabelled Appendix-bound entry
 # (a free-form References block -- "Name, Title, Institution" / phone /
 # email, no label WITHHOLD_POLICY can key on). Not a WithholdRule row: the
@@ -332,6 +339,51 @@ _FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
 )
 
 
+# NDMRSO ND1: an ID number an institution or the tax authority gives the owner
+# ("<institution> ID #: <number>", "EIN Number<tab><number>"). A qualifying
+# LABEL and a NUMBER, never either alone: a bare "ID #:" stays a board
+# certificate's (two corpus F1/F2 entries), and a number with no label is a
+# grant, a PMID or an accession number. NPI and ORCID are public and render
+# (#821; `_RENDER_SET_FIELD_LABELS`), so no label here names them.
+#
+# Shape rows, not label rows: the value often sits after a tab ("EIN
+# Number<tab><value>"), a hard delimiter a label row's span stops at, so the
+# label would be cut and the number would render. A shape's span is the label
+# and the value together.
+#
+# A bare "#" never makes a qualifier a label: "<funder> University #<number>"
+# is a grant (JFGZFT element 146), so an institution word needs "ID", and a
+# person word ("Employee", "Student") needs "ID", "number" or "no.".
+#
+# `(?![a-z])` ends each word, so "no" is not the start of "nominee" and "ein"
+# not the start of "Einstein"; `_STEM_GUARD` starts it, so "tin" is not the end
+# of "Latin". UFID, CWID and EMPLID are the institution-specific labels the
+# corpus and WCM's own systems use; another institution's acronym is one more
+# alternative.
+_ID_NUMBER_NOUN = r"(?: \s* (?: number | no\.? | \# ) )?"
+_INSTITUTIONAL_ID_LABEL = (
+    r"(?: (?: employee | staff | student | faculty | personnel | payroll | badge )"
+    r"    \s* (?: id (?: entification )? | number | no\.? ) (?![a-z])"
+    r"  | (?: university | institution (?: al )? | campus ) \s* id (?: entification )? (?![a-z])"
+    r"  | (?: ufid | cwid | emplid ) (?![a-z]) )"
+)
+_TAX_ID_LABEL = (
+    r"(?: (?: federal \s* )? tax \s* (?: payer \s* )? id (?: entification )?"
+    r"  | employer \s* identification | f? ein | i? tin ) (?![a-z])"
+)
+#: Label-to-value gap: blanks, a tab or a table-cell pipe, at most one colon or
+#: dash.
+_ID_VALUE_SEP = r"[ \t|]* (?: [:\-–—] [ \t|]* )?"
+#: Four or more digits, single spaces or hyphens allowed between them, behind
+#: an optional short letter prefix ("abc1234").
+_ID_NUMBER_VALUE = r"[a-z]{0,4} -? \d (?: [ -]? \d ){3,}"
+
+
+def _id_number_shape(label: str) -> str:
+    """`label`, an optional "number"/"no."/"#" after it, then an ID number."""
+    return _STEM_GUARD + label + _ID_NUMBER_NOUN + _ID_VALUE_SEP + _ID_NUMBER_VALUE
+
+
 #: THE table. Row order is match-priority order within a scope: the engine
 #: tries every row and merges overlapping spans, keeping the category of
 #: the leftmost (then first-listed) match, so "Birth date and birth place:"
@@ -382,6 +434,15 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"alien \s* registration (?: \s* (?: number | no\.? ) )?"),
     WithholdRule(CAT_DRIVERS_LICENSE, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"driver.?s? \s* licen[sc]e"),
+    # NDMRSO ND1 (see `_id_number_shape`). Every code, like the passport and
+    # licence rows: a label naming the owner's ID followed by its number is
+    # not a title anywhere. Render-time only: the span can start ahead of an
+    # SSN-shaped value ("Tax ID: <SSN>") and would hide it from the pre-LLM
+    # value scrub, which only replaces a span of its own category.
+    WithholdRule(CAT_INSTITUTIONAL_ID, SCOPE_ALL_CODES, DECIDED_ID_NUMBERS,
+                 shape=_id_number_shape(_INSTITUTIONAL_ID_LABEL), render_only=True),
+    WithholdRule(CAT_TAX_ID, SCOPE_ALL_CODES, DECIDED_ID_NUMBERS,
+                 shape=_id_number_shape(_TAX_ID_LABEL), render_only=True),
     WithholdRule(CAT_MARITAL_STATUS, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"marital \s* status"),
     # #1103: "Name of Spouse & Children:" opened with "Name of" and joined
