@@ -152,8 +152,8 @@ Lints, ranked by the severity of the failure class they catch:
                           succeeded, so nothing records an error; stage 4
                           stamps the entries of the taxonomy group and stage
                           4.5 lists the calls, and each finding names the
-                          section. WARN: it caps the quality score at 84, one
-                          point under GREEN (#1174)
+                          section. WARN; it does not cap the quality score,
+                          since the call succeeded (#1174, 2026-10-05)
 
 14m. stage_failure_recorded a stage the driver recorded as failed in
                           `stage_errors/<uid>_stage_errors.json` (#745), such

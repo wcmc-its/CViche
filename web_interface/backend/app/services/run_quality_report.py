@@ -65,8 +65,6 @@ _CAP_SOURCE_BY_SCORER = {
         "several headers or labels appear as entries", "junk_or_header_row"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
-    scorer.score_llm_fallback_served: CapSource(
-        "a backup model answered part of the run", "llm_fallback_served"),
 }
 
 # Gate name (as it appears in the scorer's flags) -> its CapSource.
@@ -221,13 +219,6 @@ _ROW_COPY_BY_SCORER = {
         "so they do not cap.",
         "Delete the rows named in the junk_or_header_row finding, and copy any institution they "
         "named onto the entries beneath them."),
-    scorer.score_llm_fallback_served: RowCopy(
-        "Usual AI model used throughout",
-        "Checks whether the AI service's content filter blocked the usual model on part of this CV, "
-        "so a backup model wrote that part.",
-        "Caps the score at 84. The call succeeded, so this is not an error; the cap only says that "
-        "part came from a model the step was not tuned on.",
-        "Read the sections named in the llm_fallback_served finding closely against the source."),
 }
 
 _GATES = (*((n, f) for n, _w, f in scorer.DIMENSIONS), *scorer.CAP_ONLY_GATES)
@@ -498,7 +489,7 @@ LINT_COPY = {
         "A grant is listed as current or completed funding although the CV files it as an "
         "application, or is listed as current although its end date has passed.",
         "Move the grant to the funding heading the source CV gives it."),
-    # Draft wording (#1174), not yet approved.
+    # Wording approved by Paul, 2026-10-05 (#1174).
     "research_summary_call_failed": LintCopy(
         "Research summary not written by the AI",
         "Every AI model refused or failed to answer for the Research Activities summary. Either "
