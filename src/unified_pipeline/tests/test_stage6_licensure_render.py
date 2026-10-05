@@ -350,6 +350,67 @@ def test_a_line_that_only_mentions_drug_enforcement_is_not_dea():
 
 
 # ---------------------------------------------------------------------------
+# ND3: a raw-text DEA label makes a DEA record only when it heads the entry,
+# the entry names no other jurisdiction, or a DEA-like number is present. A
+# state licence whose text merely MENTIONS a DEA registration stays a licence.
+
+
+def test_a_state_licence_that_mentions_a_dea_registration_is_a_licence():
+    kind = _classify_licensure_entry(
+        state="NY", license_number="", license_type="",
+        original_text="NY Medical Board 2001\tActive NY medical license and DEA license")
+    assert kind == KIND_LICENSE
+
+
+def test_a_state_licence_mentioning_dea_renders_its_row_and_withholds_nothing():
+    entries = [{"text": "NY Medical Board 2001\tActive NY license and DEA license",
+                "extracted_fields": {"state_country": "NY", "issue_date": "2001"}}]
+    result = _resolve_licensure(entries)
+    assert [r.state for r in result.licenses] == ["NY"]
+    assert result.dea_withheld is False
+
+
+def test_a_dea_headed_entry_with_a_state_is_still_dea():
+    for text in ("DEA registration, NY", "\u2022 2005 - DEA registration, NY",
+                 "Drug Enforcement Administration registration (NY)"):
+        kind = _classify_licensure_entry(
+            state="NY", license_number="", license_type="", original_text=text)
+        assert kind == KIND_DEA, text
+
+
+def test_a_dea_mention_with_a_dea_shaped_number_cell_is_still_dea():
+    for number in ("AB1234567", "12345, AB12345O7"):
+        kind = _classify_licensure_entry(
+            state="NY", license_number=number, license_type="",
+            original_text="NY license and DEA registration")
+        assert kind == KIND_DEA, number
+
+
+def test_a_dea_mention_with_a_dea_number_in_the_text_is_still_dea():
+    for text in ("NY license 12345; DEA AB1234567",
+                 "NY license 12345; DEA # AB-1234567",
+                 "NY license 12345; DEA AB 123456O"):
+        kind = _classify_licensure_entry(
+            state="NY", license_number="12345", license_type="",
+            original_text=text)
+        assert kind == KIND_DEA, text
+
+
+def test_a_nine_letter_word_beside_a_dea_mention_is_not_a_dea_number():
+    kind = _classify_licensure_entry(
+        state="NY", license_number="12345", license_type="",
+        original_text="NY license 12345, Certified, and DEA registered")
+    assert kind == KIND_LICENSE
+
+
+def test_a_dea_mention_naming_no_state_is_still_dea():
+    kind = _classify_licensure_entry(
+        state="", license_number="", license_type="",
+        original_text="Active medical license and DEA license")
+    assert kind == KIND_DEA
+
+
+# ---------------------------------------------------------------------------
 # T5.3: the number-shape fallback, uncovered before this round -- only
 # reached when the entry carries no label and (for the NPI/DEA branch) no
 # stated jurisdiction.
