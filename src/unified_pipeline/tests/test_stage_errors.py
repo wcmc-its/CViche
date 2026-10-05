@@ -29,6 +29,12 @@ def test_from_exception_names_the_type_and_is_fatal():
     assert err == StageError("4", "TypeError", "'int' object is not iterable", fatal=True)
 
 
+def test_from_exception_records_a_non_fatal_failure_when_the_driver_carries_on():
+    """The web driver's stage-4.5 record (#1174): same fields, fatal=False."""
+    err = StageError.from_exception("4.5", RuntimeError("boom"), fatal=False)
+    assert err == StageError(stage="4.5", exception_type="RuntimeError", message="boom", fatal=False)
+
+
 def test_success_with_no_record_writes_nothing(tmp_path):
     path = stage_errors_path(tmp_path, "ABC")
     assert record_stage_outcome(path, "4", None) is False
@@ -64,3 +70,17 @@ def test_malformed_record_raises_instead_of_reading_as_clean(tmp_path, payload):
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
         read_stage_errors(path)
+
+
+def test_call_failure_reads_back_the_record_stage_4_5_writes():
+    """#1174: the stage-4.5 artifact's llm_call_failures entry, as the doctor reads it."""
+    from dataclasses import asdict
+
+    from unified_pipeline.stage_errors import CallFailure
+
+    for failure in (CallFailure("summary_generation", "ClientError", None, "denied"),
+                    CallFailure("m1_relevance_score", "BedrockContentFilteredError",
+                                "content_filtered", "filtered")):
+        assert CallFailure.from_record(asdict(failure)) == failure
+    assert CallFailure.from_record(None) is None
+    assert CallFailure.from_record(["not", "a", "record"]) is None

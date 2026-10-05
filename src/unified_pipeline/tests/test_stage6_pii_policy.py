@@ -48,6 +48,7 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_GENDER,
     CAT_HEALTH,
     CAT_HOME_CONTACT,
+    CAT_INSTITUTIONAL_ID,
     CAT_MARITAL_STATUS,
     CAT_PASSPORT,
     CAT_PLACE_OF_BIRTH,
@@ -55,12 +56,14 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_SALARY,
     CAT_SPOUSE,
     CAT_SSN,
+    CAT_TAX_ID,
     CAT_THIRD_PARTY_CONTACT,
     CAT_VETERAN,
     CAT_VISA,
     DECIDED_820,
     DECIDED_821,
     DECIDED_821_PENDING,
+    DECIDED_ID_NUMBERS,
     PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
@@ -278,6 +281,12 @@ PROBE_TABLE = [
     ("Newly married: outcomes of a survey", None, _NEVER),
     ("Grandchildren raising grandparents", None, _NEVER),
     ("Married couples: a review", None, _NEVER),
+    # NDMRSO ND1: an institutional or tax ID number in every code, like a
+    # passport number (the full set is `_ND1_ID_LINES` below).
+    ("UFID #: 1234-5678", CAT_INSTITUTIONAL_ID, _ALL),
+    ("EIN Number\t12-345-6789", CAT_TAX_ID, _ALL),
+    ("NPI: 1234567890", None, _NEVER),
+    ("ORCID: 0000-0002-1234-5678", None, _NEVER),
 ]
 
 
@@ -313,7 +322,8 @@ def test_every_policy_row_has_a_probe_that_reaches_it():
 def test_every_policy_row_carries_a_scope_and_a_decision():
     for rule in WITHHOLD_POLICY:
         assert rule.scope in (SCOPE_ALL_CODES, SCOPE_PERSONAL_AND_APPENDIX), rule
-        assert rule.decided_by in (DECIDED_820, DECIDED_821_PENDING, DECIDED_821), rule
+        assert rule.decided_by in (DECIDED_820, DECIDED_821_PENDING, DECIDED_821,
+                                    DECIDED_ID_NUMBERS), rule
         assert (rule.label is None) != (rule.shape is None), rule
 
 
@@ -2296,3 +2306,205 @@ def test_1223_ebysbc_a_routed_content_entry_is_untouched(text):
 ])
 def test_1223_ebysbc_the_pre_llm_value_scrub_is_unchanged(text, expected):
     assert redact_pre_llm_values(text) == expected
+
+
+# --------------------------------------------------------------------------
+# NDMRSO ND1: institutional and tax ID numbers
+# --------------------------------------------------------------------------
+
+#: (text, category): every label the two ID rows know, each with a number
+#: after it. ATUVAL element 1's shape is the first (an institution's ID label,
+#: "#:", the number); MQJAVH element 6's the "EIN Number<tab>" one (the number
+#: in the next tab cell, which a label row's span stops short of).
+_ND1_ID_LINES = [
+    ("UFID #: 1234-5678", CAT_INSTITUTIONAL_ID),
+    ("CWID abc2001", CAT_INSTITUTIONAL_ID),
+    ("EMPLID: 1234567", CAT_INSTITUTIONAL_ID),
+    ("Employee ID: 1234567", CAT_INSTITUTIONAL_ID),
+    ("Employee ID Number: abc1234", CAT_INSTITUTIONAL_ID),
+    ("Employee ID No.: 1234567", CAT_INSTITUTIONAL_ID),
+    ("Employee ID: | 1234567", CAT_INSTITUTIONAL_ID),
+    ("Employee ID: E-1234567", CAT_INSTITUTIONAL_ID),
+    ("Employee Identification Number: 1234567", CAT_INSTITUTIONAL_ID),
+    ("Staff ID: 1234567", CAT_INSTITUTIONAL_ID),
+    ("Student No. 1234 5678", CAT_INSTITUTIONAL_ID),
+    ("Faculty ID 1234567", CAT_INSTITUTIONAL_ID),
+    ("Personnel No. 1234567", CAT_INSTITUTIONAL_ID),
+    ("Payroll Number: 1234567", CAT_INSTITUTIONAL_ID),
+    ("Badge ID - 1234567", CAT_INSTITUTIONAL_ID),
+    ("University ID\t12345678", CAT_INSTITUTIONAL_ID),
+    ("University Identification: 12345678", CAT_INSTITUTIONAL_ID),
+    ("Institution ID: 12345678", CAT_INSTITUTIONAL_ID),
+    ("Institutional ID: 12345678", CAT_INSTITUTIONAL_ID),
+    ("Campus ID: 12345678", CAT_INSTITUTIONAL_ID),
+    ("EIN Number\t12-345-6789", CAT_TAX_ID),
+    ("FEIN: 12-3456789", CAT_TAX_ID),
+    ("Federal Tax ID No.: 12-3456789", CAT_TAX_ID),
+    ("Tax Payer ID: 12-3456789", CAT_TAX_ID),
+    ("Taxpayer Identification Number: 12-3456789", CAT_TAX_ID),
+    ("Employer Identification Number - 12-3456789", CAT_TAX_ID),
+    ("TIN 123456789", CAT_TAX_ID),
+    ("ITIN: 912-34-5678", CAT_TAX_ID),
+    # An SSN given as the tax ID is one tax-ID span, label and value.
+    ("Tax ID: 123-45-6789", CAT_TAX_ID),
+]
+
+#: Public identifiers (#821 renders NPI and ORCID), a board certificate's bare
+#: "ID #", a grant number after an institution name (JFGZFT element 146's
+#: shape), a short count, a bare label, and a label word running on into
+#: another word.
+_ND1_NOT_ID_LINES = [
+    "NPI: 1234567890",
+    "ORCID: 0000-0002-1234-5678",
+    "PMID: 12345678",
+    "Example Board of Internal Medicine, ID #: 123456",
+    "Example Fund at Sample University #1234567",
+    "Grant No. R01 CA123456",
+    "Sample University No. 3 Hospital",
+    "Student Number: 12",
+    "Tax ID:",
+    "Employee Assistance Program 2019",
+    "Student Nov2019",
+    "University Idaho1234",
+    "UFIDA1234",
+    "TINY1234 sensor",
+    "Einstein 1234",
+    "Latin 12345",
+    "Crystal clear or tin ear: a study",
+]
+
+
+@pytest.mark.parametrize("text, category", _ND1_ID_LINES)
+@pytest.mark.parametrize("code", [A, APPENDIX, CONTENT])
+def test_nd1_an_id_number_line_is_cut_whole_in_every_code(text, category, code):
+    """The whole line goes, label and value, so nothing is left for the
+    Appendix recovery to render, and the notice names the category."""
+    residual, withheld = _withheld_residual(text, code=code)
+    assert residual == ""
+    assert [item.category for item in withheld] == [category]
+
+
+@pytest.mark.parametrize("text", _ND1_NOT_ID_LINES)
+@pytest.mark.parametrize("code", [A, APPENDIX, CONTENT])
+def test_nd1_public_identifiers_grants_and_other_words_are_not_id_numbers(text, code):
+    assert not [m for m in _probe_matches(text, code)
+                if m.category in (CAT_INSTITUTIONAL_ID, CAT_TAX_ID)]
+
+
+def test_nd1_the_id_rows_carry_the_id_number_decision():
+    rows = [r for r in WITHHOLD_POLICY if r.category in (CAT_INSTITUTIONAL_ID, CAT_TAX_ID)]
+    assert [r.category for r in rows] == [CAT_INSTITUTIONAL_ID, CAT_TAX_ID]
+    assert all(r.decided_by == DECIDED_ID_NUMBERS for r in rows)
+
+
+def test_nd1_an_id_number_beside_other_contact_data_leaves_the_rest():
+    residual, withheld = _withheld_residual(
+        "Citizenship: Example\tEmployee ID: 1234567\tFax: 555-201-0123", code=A)
+    assert "1234567" not in residual
+    assert "Citizenship: Example" in residual and "Fax: 555-201-0123" in residual
+    assert [item.category for item in withheld] == [CAT_INSTITUTIONAL_ID]
+
+
+def test_nd1_the_id_rows_are_render_time_only():
+    """An SSN given as a tax ID keeps its pre-LLM value scrub: the tax-ID span
+    starts ahead of it and would otherwise take it over."""
+    assert redact_pre_llm_values("Tax ID: 123-45-6789") == f"Tax ID: {PRE_LLM_PLACEHOLDER}"
+    assert (redact_pre_llm_values("Employee ID: 123-45-6789")
+            == f"Employee ID: {PRE_LLM_PLACEHOLDER}")
+    assert redact_pre_llm_values("UFID #: 1234-5678") == "UFID #: 1234-5678"
+
+
+# #1223 (NDMRSO, class E2): a bare "Birth" label with a whole date after it,
+# and a spelled-out child count behind a marital-status cut. The spacing is
+# the corpus's own (BNYLDF idx 24, HUOGDE idx 8, VXSDRD idx 26); every value
+# is synthetic.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Birth: March 4, 1970 in Exampleville, Examplestan",
+    "BIRTH March 4, 1970\tExampleville",
+    f"BIRTH {PRE_LLM_PLACEHOLDER}\tExampleville",
+    "Birth - 4 March 1970",
+    "Birth: 1970-03-04",
+    "BIRTH 04/03/1970",
+])
+def test_1223_ndmrso_a_bare_birth_label_withholds_the_date_and_the_place(text):
+    for code in (A, APPENDIX, CONTENT):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert [item.category for item in withheld] == [CAT_DATE_OF_BIRTH], code
+        if code != CONTENT:
+            # the place of birth in the next cell goes with it
+            assert residual == "", code
+
+
+@pytest.mark.parametrize("text", [
+    "Birth: A History of Midwifery",
+    "Birth cohort 1990",
+    "Birth 2019 Symposium",
+    "Birth: 2019",
+    "Preterm birth: 03/15/2019 outcomes",
+    "Very preterm birth 12 March 2019",
+    "Birthplace of an Idea",
+    "Afterbirth: 03/04/2019 review",
+    "Pre-birth 03/04/2019 visit",
+    "Example Children's Hospital, 03/04/2015",
+    "Example Children's Oncology Group",
+])
+def test_1223_ndmrso_birth_titles_and_childrens_institutions_are_kept(text):
+    for code in (A, APPENDIX, CONTENT):
+        assert not _denied(text, code), code
+    assert redact_pre_llm_values(text) == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("BIRTH March 4, 1970\tExampleville", f"BIRTH {PRE_LLM_PLACEHOLDER}\tExampleville"),
+    ("Birth: 03/04/1970 in Exampleville", f"Birth: {PRE_LLM_PLACEHOLDER} in Exampleville"),
+])
+def test_1223_ndmrso_the_pre_llm_scrub_takes_the_date_after_a_bare_birth_label(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+def test_1223_ndmrso_a_bare_birth_cut_stops_where_the_next_field_begins():
+    residual, withheld = _withheld_residual("BIRTH 03/04/1970\tCitizenship: US", code=A)
+    assert residual == "Citizenship: US"
+    assert [item.category for item in withheld] == [CAT_DATE_OF_BIRTH]
+
+
+def test_1223_ndmrso_a_spelled_out_child_count_behind_a_marital_cut_is_withheld():
+    entry = {"text": "Marital Status:  Synthetic; five children", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"] and "children" not in entry["text"]
+    assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    "Status; two sons",
+    "Status\none child",
+    "Status   four children",
+    "Status | ten kids | Board Certified",
+])
+def test_1223_ndmrso_a_spelled_out_child_count_fragment_is_withheld(text):
+    for code in (A, APPENDIX):
+        assert _denied(text, code), code
+    assert not _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text", [
+    "Cohort A; two children with asthma",
+    "Outcomes in four children",
+    "Board Certified, two children",
+    "Status; often children are seen",
+    "Status; someone child-centred",
+])
+def test_1223_ndmrso_a_spelled_out_child_count_inside_prose_is_not_withheld(text):
+    assert not [m for m in _pii_matches(text) if m.category == CAT_CHILDREN]
+
+
+def test_1223_ndmrso_the_child_count_row_does_not_backtrack_into_a_long_space_run():
+    """The count row tries eleven spelled-out counts after the spaces that open
+    a fragment; with a backtracking space run that cost seconds on a long gap
+    (16,000 spaces: about 0.04 s possessive, several seconds without)."""
+    start = time.perf_counter()
+    _pii_matches("Status;" + " " * 16000 + "x")
+    assert time.perf_counter() - start < 1.0

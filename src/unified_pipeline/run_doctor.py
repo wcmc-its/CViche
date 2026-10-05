@@ -160,8 +160,8 @@ Lints, ranked by the severity of the failure class they catch:
                           as stage 4.5 raising so the research summary is
                           missing: the quality score reads that record for its
                           cap-40 gate and the doctor never did. ERROR for a
-                          fatal record (they all are today), WARN otherwise
-                          (#1174)
+                          fatal record, WARN for a non-fatal one, which the
+                          web driver writes when stage 4.5 raises (#1174)
 
 14n. owner_missing_from_citation a publication whose source credits the CV
                           owner (stage 4's authors, the source text, or a
@@ -267,6 +267,12 @@ Lints, ranked by the severity of the failure class they catch:
                           (ZDCXIV), or Current with an end date before this
                           year, a truncated end year read against the start
                           year (KYOPUV 589). WARN
+14v. research_summary_call_failed a stage-4.5 LLM call that raised on every
+                          model tried (#1174), recorded in the stage-4.5
+                          artifact's `llm_call_failures`: the Research
+                          Activities section has no summary (generation), or
+                          its own text went unscored and a summary was
+                          generated instead (M1 relevance). WARN, no score cap
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -483,6 +489,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_stage4_group_failures,
     lint_llm_fallback_served,
     lint_stage_failure_recorded,
+    lint_research_summary_call_failed,
 )
 from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
     lint_teaching_postcheck,
@@ -578,6 +585,7 @@ KNOWN_LINTS = (
     "segmentation_collapse",
     "grant_boundary",
     "grant_bucket",
+    "research_summary_call_failed",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -676,6 +684,9 @@ LINT_PREVALENCE = {
     # zero-observed floor, as for pipeline_errors_present above.
     "llm_fallback_served": 0.001,
     "stage_failure_recorded": 0.001,
+    # #1174: the record research_summary_call_failed reads is new, so no
+    # stored artifact carries it yet. The zero-observed floor.
+    "research_summary_call_failed": 0.001,
     # 11 of the 63 runs of the EBYSBC/s7ab/pilot farm (scripts/doctor_gate.py
     # over origin/dev c3d87c5f renders, 2026-10-02), one fire per CV at any
     # severity; another small mixed corpus, as for duplicate_records. That
@@ -1285,6 +1296,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
+    LintSpec("research_summary_call_failed", lint_research_summary_call_failed, ("stage_4_5",)),
 )
 
 
