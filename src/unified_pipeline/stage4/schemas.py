@@ -125,6 +125,13 @@ STAGE4_RECORDS_KEY = "stage4_records"
 # when it is 2 or more, so the multi-record shape stays visible downstream.
 STAGE4_RECORDS_RETURNED_KEY = "stage4_records_returned"
 
+# The entry-level count of reply items whose `entry_index` named no entry of
+# the entry's taxonomy-code group, so no entry could take them (#1243). Written
+# on every entry of that group, and only when the group had 2+ entries: a
+# one-entry group folds such items into its entry instead. Write-only: it
+# records the loss for the doctor rather than dropping the items silently.
+STAGE4_UNPLACED_ITEMS_KEY = "stage4_unplaced_items"
+
 # `<schema field>_<n>`: a numbered second copy of a schema field, which the
 # model uses for a second record (`organization_2` held the second column of
 # a two-column memberships list, #1245). Stage 4 splits it into its own

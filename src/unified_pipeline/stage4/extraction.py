@@ -48,6 +48,7 @@ from unified_pipeline.stage4.schemas import (
     NUMBERED_FIELD_RE,
     STAGE4_RECORDS_KEY,
     STAGE4_RECORDS_RETURNED_KEY,
+    STAGE4_UNPLACED_ITEMS_KEY,
     get_active_schemas,
     get_field_schema,
     get_taxonomy_label,
@@ -809,6 +810,35 @@ def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int
     return dict(extraction_map)
 
 
+def _place_out_of_range_items(extraction_map: dict[int, list[dict[str, Any]]],
+                              group_size: int, code: str,
+                              ) -> tuple[dict[int, list[dict[str, Any]]], int]:
+    """`extraction_map` with the items whose `entry_index` names no entry of
+    the group placed, and the count of items no entry could take.
+
+    The model sometimes numbers the records of ONE entry 0, 1, 2, ... as if
+    each were an entry (#1243, RCBKFG CAOACN: a one-entry group's reply held
+    entry_index 0..4). Only index 0 matched, so the other items were dropped
+    without a word. In a one-entry group every item can only belong to that
+    entry, so they are folded into entry 0 as further records, in index
+    order. In a larger group the owner is unknowable: the caller's merge,
+    which reads indices 0..group_size-1 only, leaves them out, so a warning
+    names them and the caller stamps the group with the count.
+    """
+    out_of_range = sorted(i for i in extraction_map if not 0 <= i < group_size)
+    if not out_of_range:
+        return extraction_map, 0
+    if group_size == 1:
+        return {0: [item for i in sorted(extraction_map) for item in extraction_map[i]]}, 0
+    unplaced = sum(len(extraction_map[i]) for i in out_of_range)
+    logger.warning(
+        "Stage 4 batch extraction for %s: %d reply item(s) at entry_index %s fit no entry "
+        "of the %d-entry group; left out and stamped %s on the group (#1243)",
+        code, unplaced, out_of_range, group_size, STAGE4_UNPLACED_ITEMS_KEY,
+    )
+    return extraction_map, unplaced
+
+
 def extract_fields_batch(
     entries: list[dict[str, Any]],
     batch_idx: int,
@@ -901,7 +931,9 @@ def extract_fields_batch(
 
             # Validate each item at the external trust boundary -- see
             # _validate_raw_extractions for what a malformed item does.
-            extraction_map = _validate_raw_extractions(raw_extractions, code)
+            extraction_map, unplaced = _place_out_of_range_items(
+                _validate_raw_extractions(raw_extractions, code), len(code_entries), code)
+            unplaced_flag = {STAGE4_UNPLACED_ITEMS_KEY: unplaced} if unplaced else {}
 
             # Merge using explicit indices to avoid mismapping
             for i, entry in enumerate(code_entries):
@@ -910,14 +942,16 @@ def extract_fields_batch(
                     # reply holds for this entry -- see _extract_entry_items.
                     extraction = _extract_entry_items(
                         entry.get("text", ""), extraction_map[i], entry.get("taxonomy_code", ""))
-                    all_extracted.append(_entry_with_extraction(entry, extraction, _fallback_flags(llm_result)))
+                    all_extracted.append(_entry_with_extraction(
+                        entry, extraction, {**_fallback_flags(llm_result), **unplaced_flag}))
                 else:
                     # No extraction found - mark as failed
                     all_extracted.append({
                         **entry,
                         "extracted_fields": {},
                         "extraction_success": False,
-                        "extraction_error": NO_MATCHING_EXTRACTION
+                        "extraction_error": NO_MATCHING_EXTRACTION,
+                        **unplaced_flag,
                     })
 
         except (ReadTimeoutError, ConnectTimeoutError):
