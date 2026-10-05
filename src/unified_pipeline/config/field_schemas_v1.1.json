@@ -456,9 +456,9 @@
         "patent_number": {"extract": true, "category": "template"},
         "title": {"extract": true, "category": "template"},
         "inventors": {"extract": true, "category": "template"},
-        "filing_date": {"extract": false, "category": "optional"},
-        "issue_date": {"extract": false, "category": "optional"},
-        "status": {"extract": false, "category": "optional"},
+        "filing_date": {"extract": true, "category": "optional"},
+        "issue_date": {"extract": true, "category": "optional"},
+        "status": {"extract": true, "category": "optional"},
         "assignee": {"extract": false, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
       }
