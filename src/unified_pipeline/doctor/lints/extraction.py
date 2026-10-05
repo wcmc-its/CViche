@@ -92,7 +92,7 @@ from unified_pipeline.stage6.dedup import (
     _part_numbers,
     _trial_phases,
 )
-from unified_pipeline.stage6.sections.research_support import grant_end_year
+from unified_pipeline.stage6.sections.research_support import grant_end_year, year_at_or_after
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -2622,7 +2622,8 @@ def lint_grant_boundary(stage4: dict) -> list[dict]:
 _AWARD_BUCKETS = frozenset({"M2A", "M2B"})
 _CURRENT_BUCKET, _PAST_BUCKET, _PENDING_BUCKET = GRANT_CODES
 #: A trailing one- or two-digit year after a date separator ("8/30/1"),
-#: which `grant_end_year` does not read.
+#: read looser than `grant_end_year`, which takes a one-digit year only in
+#: an mm/dd/y date and only when given the start date.
 _SHORT_END_YEAR_RE = re.compile(r"[-/.](\d{1,2})\s*$")
 #: "Not funded" names an application, so its "funded" is no award word.
 _NOT_FUNDED_RE = re.compile(r"\b(?:not|non)[\s-]?funded\b")
@@ -2644,9 +2645,7 @@ def _short_end_year(end_date: str, start_date: str, current_year: int) -> int | 
     start = grant_end_year(start_date, current_year)
     if not short or start is None:
         return None
-    modulus = 10 ** len(short.group(1))
-    year = start - start % modulus + int(short.group(1))
-    return year if year >= start else year + modulus
+    return year_at_or_after(short.group(1), start)
 
 
 def _ended_year(fields: Mapping[str, object], current_year: int) -> int | None:

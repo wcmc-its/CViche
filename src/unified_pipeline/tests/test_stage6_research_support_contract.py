@@ -2644,6 +2644,38 @@ def test_a_completed_grant_with_a_two_digit_year_end_still_running_is_promoted()
     assert (current, completed) == ([running], [])
 
 
+# --- #1343 (RCBKFG CAOACN 589): a one-digit end year reads off the start ----
+
+@pytest.mark.parametrize('start_date, end_date, expected', [
+    ('9/1/07', '8/30/1', 2011),
+    ('2007-09-01', '8/30/1', 2011),
+    ('9/1/07', '8/30/9', 2009),
+    ('9/1/17', '8/30/1', 2021),
+    ('9/1/07', '13/30/1', None),
+    ('', '8/30/1', None),
+    (None, '8/30/1', None),
+    ('9/1/7', '8/30/1', None),
+])
+def test_grant_end_year_reads_a_one_digit_year_against_the_start(start_date, end_date, expected):
+    assert grant_end_year(end_date, TEST_YEAR, start_date) == expected
+
+
+def test_a_current_grant_with_a_one_digit_year_end_in_the_past_moves_to_completed():
+    ended = _entry('M2A', title='Ended Study', start_date='9/1/07', end_date='8/30/1')
+
+    current, completed, _ = reclassify_past_m2a_grants([ended], [], TEST_YEAR)
+
+    assert (current, completed) == ([], [ended])
+
+
+def test_a_completed_grant_with_a_one_digit_year_end_still_running_is_promoted():
+    running = _entry('M2B', title='Running Study', start_date='7/1/25', end_date='6/30/9')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_YEAR)
+
+    assert (current, completed) == ([running], [])
+
+
 def test_a_two_digit_year_end_reaches_past_funding_through_the_section_fill():
     gen = _sectioned_generator()
     gen._fill_research_support(

@@ -2017,7 +2017,11 @@ _SEASON_WORD = r"(?:Spring|Summer|Fall|Autumn|Winter)"
 _ISO_DAY = r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?!\d)"
 _ISO_MONTH = r"\d{4}-(?:0[1-9]|1[0-2])(?![\d/])"
 _RAW_SEASON = rf"\d{{4}}-{_SEASON_WORD}\b"
-_DATE_SIDE = (rf"(?:{_ISO_DAY}|{_ISO_MONTH}|{_RAW_SEASON}"
+#: A month, or a month and a day, written after the year with dots, as the
+#: source wrote it: "2021.07", "2021.07.15" (RCBKFG KUUKNJ N4). Raw even when
+#: the source writes it so, since no WCM date format has a dot.
+_DOTTED = r"\d{4}\.(?:0?[1-9]|1[0-2])(?:\.(?:0?[1-9]|[12]\d|3[01]))?(?![\d.])"
+_DATE_SIDE = (rf"(?:{_ISO_DAY}|{_ISO_MONTH}|{_RAW_SEASON}|{_DOTTED}"
               rf"|\d{{1,2}}/\d{{1,2}}/\d{{4}}|\d{{1,2}}/\d{{2}}(?:\d{{2}})?(?!\d)"
               rf"|\b(?:{_MONTH_WORD}|{_SEASON_WORD})\s+\d{{4}}|\d{{4}})")
 _OPEN_END_WORD = r"(?:present|current|ongoing)\b"
@@ -2032,7 +2036,8 @@ _DATE_CELL_RE = re.compile(rf"\s*{_DATE_EXPR}\s*", re.IGNORECASE)
 _DATED_LINE_RE = re.compile(
     rf"\s*(?:[\u2022\u00b7\u25aa\u25e6*]\s*)?{_DATE_EXPR}"
     rf"(?:\s*(?:[-\u2013\u2014:,]|\t)\s*\S|\s*$)", re.IGNORECASE)
-_RAW_SIDE_RE = re.compile(rf"{_ISO_DAY}|{_RAW_SEASON}", re.IGNORECASE)
+_RAW_SIDE_RE = re.compile(rf"{_ISO_DAY}|{_RAW_SEASON}|{_DOTTED}", re.IGNORECASE)
+_DOTTED_RE = re.compile(_DOTTED)
 _ISO_MONTH_RE = re.compile(_ISO_MONTH)
 _OPEN_END_RE = re.compile(_OPEN_END_WORD, re.IGNORECASE)
 _FOUR_DIGIT_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
@@ -2248,8 +2253,9 @@ def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> boo
     entry's own text writes it is the CV's wording, never a defect. An open
     range is a defect only outside DATE_CELL_OPEN_BY_DECISION_CODES and the
     CV's latest D1 rank, and only when neither the entry's text nor its
-    headings carry an open marker."""
-    if date.rendered in entry.text:
+    headings carry an open marker. A dotted date is raw however the source
+    writes it."""
+    if date.rendered in entry.text and not _DOTTED_RE.search(date.rendered):
         return False
     if shape != DATE_SHAPE_OPEN_RANGE:
         return True

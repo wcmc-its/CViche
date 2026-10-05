@@ -2542,6 +2542,18 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     assert lint_date_cell_shape(stage4, [_MENTEE_TABLE], []) == []
 
 
+def test_date_cell_shape_reports_a_dotted_date_the_source_writes_the_same_way():
+    """RCBKFG KUUKNJ N4: the source dates its rows "YYYY.MM - ..." and stage
+    6 printed the stored "2021.07" as it stood. No WCM date format has a dot,
+    so the source's own spelling does not spare it."""
+    stage4 = {"entries": [_dated4("2021.07 - Example Widget Panel, member",
+                                  "Q3", "2021.07", None, idx=162)]}
+    rows = [[["Example Widget Panel", "Member", "2021.07"]]]
+    findings = lint_date_cell_shape(stage4, rows, [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", ["2021.07"])]
+    assert findings[0]["message"].startswith("entry 162 (Q3): raw_value:")
+
+
 @pytest.mark.parametrize("cell, shapes", [
     ("2003-04-2005-09", ["raw_value"]),
     ("2004-10-07", ["raw_value"]),
@@ -2558,6 +2570,12 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     ("Fall 2019 - fall 2019", ["same_ends"]),
     ("2004-10-07-2004-10-07", ["raw_value", "same_ends"]),
     ("2003-2005-09", ["raw_value"]),
+    # A dotted month or day (RCBKFG KUUKNJ N4), alone or on either side.
+    ("2021.07", ["raw_value"]),
+    ("2021.7.15", ["raw_value"]),
+    ("2017-2021.03", ["raw_value"]),
+    ("2022.07-2026.06", ["raw_value"]),
+    ("2021.07-present", ["open_range", "raw_value"]),
     ("2015-ongoing", ["open_range"]),
     ("2015-current", ["open_range"]),
     ("Sept 2008 - Sept 2008", ["same_ends"]),
@@ -2589,6 +2607,10 @@ def test_date_cell_shape_spares_a_date_the_source_writes_the_same_way():
     # are not dates the lint reads.
     ("2004-13-07", []),
     ("2004-10-32", []),
+    # A dot after the year needs a real month: "2021.13" and "2021.075" are
+    # not dates the lint reads.
+    ("2021.13", []),
+    ("2021.075", []),
     # Only a 19xx/20xx run is read as a year to tie by.
     ("1850-1850", []),
     ("2019", []),
