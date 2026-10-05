@@ -445,16 +445,67 @@ def test_pi_roles_that_are_not_the_owner_as_pi_do_not_auto_fill(role):
     assert resolve_pi_name({}, '', role, 'Ada Testowner') == ''
 
 
-def test_long_form_rule_is_unchanged_for_co_principal_investigator():
-    """The "principal" + "investigator" test still fires on its long forms.
+def test_co_principal_investigator_role_leaves_the_pi_cell_empty_in_the_grant_table():
+    """Driven through `_fill_research_support`: the rendered PI cell stays empty (#1455)."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Shared Project', agency='NIH',
+                        pi_role='Co-Principal Investigator', start_date='01/2019',
+                        end_date='Present')]},
+        cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
+        current_year=TEST_YEAR)
 
-    That includes "Co-Principal Investigator" and "Site Principal
-    Investigator", as before this change; "Co-PI" does not (above). The bare
-    form is not widened to match the long form's reach.
+    cells = _cells(_tables_under(gen, CURRENT)[0])
+    assert cells['Name of Principal Investigator:'] == ''
+    assert cells['Your role:'] == 'Co-Principal Investigator'
+
+
+@pytest.mark.parametrize('role', [
+    'Co-Principal Investigator', 'Co-principal investigator', 'co principal investigator',
+    'CoPrincipal Investigator', 'Co-Principal-Investigator', 'Site Principal Investigator',
+    'Testville Site Principal Investigator', 'Site Principal Investigator, Testville University',
+    'Site Principal Investigator for Multicenter Project', 'Sub-Principal Investigator',
+    'Subcontract Principal Investigator', 'Multiple Principal Investigator',
+    'Multi-Principal Investigator', 'M-Principal Investigator',
+    'Academic co-Principal Investigator, community co-Principal Investigator',
+    'Subcontractor (Principal Investigator of subcontract)',
+    'Co-Investigator (Principal Investigator of a sub-contract)',
+])
+def test_qualified_long_form_pi_roles_do_not_auto_fill(role):
+    """A co-/site-/sub-/multiple-PI long form never makes the owner the PI (#1455).
+
+    "Co-Principal Investigator" rendered the owner as "Name of Principal
+    Investigator" on grants where someone else was the PI.
     """
-    for role in ('Co-Principal Investigator', 'Site Principal Investigator'):
-        assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == ''
+
+
+@pytest.mark.parametrize('role', [
+    'Principal Investigator', 'principal-investigator', 'Principal Investigator (PI)',
+    'Principal Investigator of Project 6', 'Principal Investigator for Multicenter Project',
+    'Testville Principal Investigator', 'Core Principal Investigator',
+    'Program Principal Investigator', 'Investigator and Principal Investigator',
+    'Co-Principal Investigator 2005-2010; Principal Investigator 2010-2011',
+    'Principal Clinical Investigator',
+])
+def test_unqualified_long_form_pi_roles_auto_fill(role):
+    """One unqualified phrase is enough; a prefix inside a word ("Program") is not one.
+
+    "Principal Clinical Investigator" keeps the older "principal" +
+    "investigator" containment test, which does not need the words adjacent.
+    """
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
     assert resolve_pi_name({}, '', 'Principle Investigator', 'Ada Testowner') == ''
+
+
+def test_a_pi_the_source_names_survives_a_co_principal_investigator_role():
+    """The refusal is the owner auto-fill only: a named PI still renders."""
+    role = 'Co-Principal Investigator'
+    assert resolve_pi_name({'pi_name': 'Jane Smith'}, '', role, 'Ada Testowner') == 'Jane Smith'
+    assert resolve_pi_name({}, 'Ellison Foundation (PI: Holloway)', role,
+                           'Ada Testowner') == 'Holloway'
+    assert resolve_pi_name({}, 'NIH | R01 | 2019-2024 | Grace Hopper', role,
+                           'Ada Testowner') == 'Grace Hopper'
 
 
 def test_a_named_pi_beats_the_owner_on_a_bare_pi_role():
