@@ -36,6 +36,19 @@ W3B-SC hand-checked every hit of its two lints, not only the unmatched ones. The
 | W3B-GR | 2026-10-04 | origin/dev `fb466a0f` plus `grant_boundary` and `grant_bucket`, over the base render of `fb466a0f`; re-run on origin/dev `89ee30f7` with the same 45 and 16 hits | 62 of the 63-run farm, as M1 | as M1 | #1226, #1343 |
 
 W3B-GR added `grant_boundary` and `grant_bucket` and changed no other lint's findings on any run. Every unmatched hit was hand-read against the stage-4 grant list and the source document's line order. `grant_boundary`: of its 18 unmatched hits, 13 are one ZCTARO list whose records open with Source and whose stage-2 cut slipped one line from entry 304 on, so each later grant carries the next grant's title; 2 (VGHNZD 1496, 1504) are the drift verified finding VGHNZD-01 describes, which names only 1488 by index; 1 (VGHNZD 1546) opens with a title whose sponsor line sits in the entry before; 1 (SDEBQJ 291) opens with the PI and end-date line of the grant before it. The 18th (RXYBVF 502) is doubtful: the source holds that title alone after the last numbered grant, so no record visibly lost it; it is counted as a false positive. 44 of 45 (98%). `grant_bucket`: all 16 hits match a verified finding (ZDCXIV-01, 15 grants; KYOPUV-05, entry 589). The shapes were written from these same 63 runs, so the precision is in-sample.
+| RCB-D | 2026-10-04 | `fix/rcbkfg-doctor-precision` on origin/dev `8cafcd4c`, over a fresh base render of `8cafcd4c` (`render_gate.py`, 69 of 69 rendered) | 62 of the 63-run farm, as M1, plus the 6 RCBKFG runs (JJUQDF, KUUKNJ, FLYBMX, CAOACN, GKAQHB, UYFRTL), which have no label file and were hand-checked against their per-run autopsies | as M1 | RCBKFG (d), #1243, #446, #729, #222, #1222 |
+
+RCB-D is the RCBKFG batch's doctor section (d). It changes seven lints and leaves every other lint's findings unchanged on all 69 runs: base and branch differ in 24 findings, each listed here and each hand-read against the stage-4 entry and the rendered docx (`w:ins` text included).
+
+- `multi_record_coverage` (+3, all true): it now reads month/two-digit-year dates ("7/05") and apostrophe years ("'96"). CAOACN 32 and 64 (RCBKFG N1, KYOPUV-01/02: 4 appointments and 3 task forces lost) and YOXXOH 93 (verified YOXXOH-uid-4, a second training program lost). CAOACN 62 and 88 stay silent: 62 has `stage4_records` and four-digit years, and 88 is undated with no title word.
+- `junk_or_header_row` (+7, all true): `role_only` (a duty sentence rendered as a row holding only the role stage 4 read: GKAQHB and MRJDWE 79, 84, verified MRJDWE-07), `description_only` (a description-only record whose sentence fills the committee row: GKAQHB 94), and a lead-in label rendered with its first word cut (JJUQDF and AQCLHS 326, verified AQCLHS-05). A first `role_only` draft, with `title` as a role field and no prose test, fired 55 times on D1, K1 and R rows that are records; the shipped rule fires only on the 4 above.
+- `duplicate_records` (+3, all true): two bodies one letter apart (not a digit, 60 characters or more) are one record. UYFRTL and EQADVR (same source; RCBKFG N6, two abstracts the CV lists twice) and VVRTUC (one book chapter listed twice, same authors, book and pages, one title with a plural).
+- `section_consistency` (+1, true): new shape `reviewer_journal_as_editorial_board`, JJUQDF 342-346 (RCBKFG NEW-01). On the farm, every other Q4C entry with no board or editor word sits under a heading that names a board, or names a role ("Member, ... Panel", BFSUMA 170, which stays quiet).
+- `wrong_start_date` (-7): a grant renders "-Present" only where its source leaves the start year open, so the lint asks `format_date_range` with the entry's text, as the grant renderer does. FLYBMX and ZDCXIV 157, 174, 175 render one award date (RCBKFG FLYBMX: 0 of 3), and RGUNJV 314 now renders "2002-2003, 2006" with no "-Present", so the shape the verified RGUNJV-06 described is gone from the current render. The one recall match lost (RGUNJV-06, s7ab-13) is that finding.
+- `enrichment_failures` (-1): a `title_check_failed` whose `enrichment_rejected.shared_pmid_with` is set is stage 5 putting the CV's own citation back; JJUQDF 93 is that correct rejection (RCBKFG, the fix for AQCLHS-02).
+- `contact_slot_lost` (1 replaced): CAOACN 3 no longer names the home number stage 4 also filed as `home_phone`, and now names the office address filed under `work_address` beside the home `address`, which the rendered Office address row lacks (RCBKFG; appended to #1222).
+
+The 62 labelled runs score as before except: `junk_or_header_row` matched 65 to 68, `multi_record_coverage` matched 84 to 85, `wrong_start_date` hits 9 to 5 (matched 8 to 5), `duplicate_records` unlocated 2 to 4, and recall 191 to 190 of 487 (the RGUNJV-06 match above). Every new shape was written from these runs, so the precision is in-sample; the next batch is the first out-of-sample check.
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -44,24 +57,25 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
 |---|---|---|---|---|---|---|---|
 | `classified_unrendered` | 1 | 0 | 0 / 0 / 1 | 0 / 1 (0%) | names text | 0 | M1 |
-| `contact_slot_lost` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | 1 / 1 (100%) | 1 | M3b-5c |
+| `contact_slot_lost` | 1 | 1 | 1 / 0 / 0 | 2 / 2 hand-checked (100%) | 1 / 1 (100%) | 1 | RCB-D |
 | `date_only_lines` | 2 | 0 | none | none | names text | 0 | M1 |
 | `dedup_drops` | 14 | 7 | 2 / 2 / 4 | 2 / 8 (25%) | 3 / 14 (21%) | 3 | M1-dup |
 | `duplicate_passages` | 1 | 1 | none | none | names text | 0 | M1 |
-| `duplicate_records` | 11 | 11 | 4 / 0 / 1 | 4 / 5 (80%) | 1 / 9 (11%) | 1 | M1-dup |
-| `enrichment_failures` | 15 | 15 | 3 / 4 / 0 | 3 / 7 (43%) | names text | 0 | M1 |
+| `duplicate_records` | 13 | 13 | 4 / 0 / 1 | 6 / 7 judged or hand-checked (86%) | 1 / 9 (11%) | 1 | RCB-D |
+| `enrichment_failures` | 15 | 15 | 3 / 4 / 0 | 3 / 7 (43%) | names text | 0 | M1, RCB-D |
 | `enrichment_pubtype_mismatch` | 2 | 2 | 2 / 0 / 0 | 2 / 2 (100%) | 1 / 2 (50%) | 1 | M2-enrich |
 | `grant_boundary` | 45 | 45 | none | 44 / 45 hand-checked or matched (98%) | 27 / 45 (60%) | 11 | W3B-GR |
 | `grant_bucket` | 16 | 16 | none | 16 / 16 matched (100%) | 16 / 16 (100%) | 2 | W3B-GR |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
-| `junk_or_header_row` | 104 | 104 | 102 / 2 / 0 | 102 / 104 (98%) | 65 / 104 (63%) | 20 | M2-junk |
+| `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |
 | `missed_headers` | 21 | 0 | 4 / 2 / 2 | 4 / 8 (50%) | names text | 0 | M1 |
+| `multi_record_coverage` | 152 | 103 | none | 12 / 13 hand-checked (92%) | 85 / 152 (56%) | 48 | RCB-D |
 | `offschema_fields` | 47 | 14 | 16 / 2 / 5 | 16 / 23 (70%) | 34 / 47 (72%) | 28 | M1 |
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
 | `pubmed_title_truncated` | 22 | 22 | 22 / 0 / 0 | 22 / 22 (100%) | 8 / 22 (36%) | 2 | M2-enrich |
-| `section_consistency` | 28 | 28 | none | 28 / 28 hand-checked (100%) | 14 / 28 (50%) | 14 | W3B-SC |
+| `section_consistency` | 28 | 28 | none | 29 / 29 hand-checked (100%) | 14 / 28 (50%) | 14 | RCB-D |
 | `section_lost` | 1 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | names text | 0 | M1 |
 | `segmentation_collapse` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | W3B-SC |
 | `stage4_group_failures` | 1 | 1 | none | none | names text | 0 | M1 |
@@ -81,7 +95,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `table_shape` | 12 | 0 | 1 / 2 / 3 | 1 / 6 (17%) | names text | 0 | M1 |
 | `taxonomy_code_coverage` | 3 | 0 | none | none | names text | 0 | M1 |
 | `teaching_postcheck` | 105 | 42 | 86 / 3 / 16 | 86 / 105 (82%) | 51 / 105 (49%) | 11 | M3b-5c |
-| `wrong_start_date` | 9 | 1 | 0 / 1 / 1 | 0 / 2 (0%) | 8 / 9 (89%) | 7 | M1 |
+| `wrong_start_date` | 5 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | 5 / 5 (100%) | 5 | RCB-D |
 
 M2-junk added `junk_or_header_row` and changed no other lint's findings on any run. All 104 hits were hand-read against the stage-4 entry and the rendered row: the 39 unmatched are 38 group headers, lead-in labels, date fragments or banner titles printed as records, and 1 partly so (a banner title rendered with a date); of the 65 matched, 64 are and 1 is partly so (a header row that also shows a role). 102 of 104 (98%). The shapes were tuned on this farm, so the next batch is the first out-of-sample check.
 M2-enrich added `pubmed_title_truncated` and `enrichment_pubtype_mismatch` and changed no other lint's findings on any run. Every hit was hand-read against the stage-4 title and the accepted text of the base docx (text inside `w:ins` included, `w:delText` excluded). `pubmed_title_truncated`: 22 of 22 are cut titles that render cut, followed directly by the journal; the 14 unmatched sit on 6 runs the autopsies did not record them for. `enrichment_pubtype_mismatch`: 2 of 2 render a correction notice's title where the CV lists the paper; the unmatched one is a CV that gives the notice's PMID for the paper. Both read stage-5 JSON built before #1358, which fixed both causes at the source, so on newer runs they guard against a regression.
@@ -194,3 +208,21 @@ These come from before this ledger. They are quoted as recorded, on the batch an
 | 2026-10-04 | `contact_slot_lost`, every hit | 1 of 1 on the `fb466a0f` render; 9 of 9 on the dev-242 documents the EBYSBC autopsy read | the 63-run farm | same |
 | 2026-10-04 | `duplicate_records` record rule (title, PMID or DOI; one grant across M2A/M2B/M2C) | 16 of 18 entry pairs (89%), every pair read; 7 of 9 findings | base render of `fb466a0f`, 62 runs | M1-dup |
 | 2026-10-04 | `dedup_drops` occasion test (a month, day, part or numeral the kept entry lacks) | 9 of 9 drops, every one read: 1 on the `fb466a0f` render, 8 more on the dev-242 render the batch was autopsied on | EBYSBC farm | M1-dup |
+| 2026-10-05 | `etal_added` | 92 of 92 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `grant_bucket` | 16 of 16 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `grant_boundary` | 14 of 14 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `multi_record_coverage` | 9 of 10; silent on all 4 CAOACN multi-record losses (two-digit and M/YY dates); RCB-D catches 2 of them | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `stage6_render_warnings` | 8 of 10 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `junk_or_header_row` | 9 of 9 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `offschema_fields` | 6 of 9 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `output_hygiene` | 4 of 5, 1 a neutral metric | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `missed_headers` | 3 of 3 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `enrichment_failures` | 1 of 3; the JJUQDF shared-PMID false positive is fixed in RCB-D | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `table_shape` | 2 of 3 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `wrong_start_date` | 0 of 3 (FLYBMX grants); fixed in RCB-D | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `section_consistency` | 1 of 2 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `taxonomy_code_coverage` | 1 of 1 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `contact_slot_lost` | 0 of 1 (CAOACN home number); fixed in RCB-D | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `year_not_in_source` | 0 of 1 (CAOACN 454, an 'M/DYY' date) | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | `teaching_postcheck` | 1 of 1 | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
+| 2026-10-05 | all lints | 167 of 182 judged (92%); 75 of 90 without etal_added; recall 33 of 77 verified defects (43%) | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |

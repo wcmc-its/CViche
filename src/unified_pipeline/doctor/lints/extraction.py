@@ -64,7 +64,8 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
-from unified_pipeline.stage6.formatting.dates import EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS
+from unified_pipeline.stage6.formatting.dates import (
+    EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS, format_date_range)
 from unified_pipeline.stage6.normalization.institutions import (
     _get_cleaned_institution_name,
 )
@@ -1080,8 +1081,12 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
     deliberately leaves alone, chiefly the FSMB one (text "2025-2026"
     extracted as start_date=2026). WARN when the extracted start equals the
     range's END year (the model took the wrong end of the range), INFO for
-    any other disagreement. Report-only by decision (2026-09-09): the
-    extracted value is never changed."""
+    any other disagreement. A grant renders "-Present" only where its source
+    leaves the start year open; otherwise stage 6 writes the bare start, so
+    the lint asks stage 6's own `format_date_range` with the entry's text,
+    as the grant renderer does (RCBKFG FLYBMX 157, 174, 175: 0 of 3).
+    Report-only by decision (2026-09-09): the extracted value is never
+    changed."""
     findings = []
     for e in stage4.get("entries", []):
         if e.get("taxonomy_code") not in DATE_RANGE_TAXONOMY_CODES:
@@ -1095,6 +1100,9 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
             continue
         range_start, range_end = closed_range
         start = str(fields.get("start_date") or "").strip()
+        code = e.get("taxonomy_code")
+        if code in GRANT_CODES and not format_date_range(start, "", code, text).endswith("Present"):
+            continue
         severity = "WARN" if start == range_end else "INFO"
         findings.append(_finding(
             "wrong_start_date", severity,
@@ -2015,8 +2023,15 @@ MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
 #: patent or licence number).
 _CLAUSE_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 #: The same, with a one- or two-digit end year ("1996-98", "2009-11") kept
-#: in the date rather than opening the next clause.
-_DATE_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)")
+#: in the date rather than opening the next clause. Two more shapes write a
+#: year in two digits: a month and year ("7/05", "10/08"; not a day of
+#: "m/d/yy", and not one run of slashed numbers) and an apostrophe year
+#: ("Jul '96", with a straight or curly mark). RCBKFG CAOACN 32 and 64 date
+#: every record that way, so the lint read no clause at all.
+_DATE_YEAR_RE = re.compile(
+    r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
+    r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
+    r"|(?<!\w)['\u2018\u2019](?P<apostrophe_yy>\d{2})(?!\d)")
 _MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
                   r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
                   r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
@@ -2132,13 +2147,22 @@ def _has_payload(text: str) -> bool:
                for word in _PAYLOAD_WORD_RE.findall(text))
 
 
+def _anchor_year(match: re.Match[str]) -> str:
+    """The four-digit year a `_DATE_YEAR_RE` match writes; a two-digit year
+    takes the shared century pivot, as stage 4 reads it."""
+    if match.group("year"):
+        return match.group("year")
+    two_digits = match.group("slash_yy") or match.group("apostrophe_yy")
+    return str(expand_two_digit_year(int(two_digits)))
+
+
 def _date_anchors(text: str) -> list[DateAnchor]:
     """Each written date of the text: a run of years joined by date-only
     gaps. A month or day written before a year stays in the text around it;
     `_has_payload` and `_clause_words` read past date words."""
     anchors: list[DateAnchor] = []
     for match in _DATE_YEAR_RE.finditer(text):
-        year = match.group(1)
+        year = _anchor_year(match)
         if anchors and _DATE_GAP_RE.match(text[anchors[-1].end:match.start()]):
             last = anchors[-1]
             anchors[-1] = DateAnchor(last.start, match.end(), last.years | {year})

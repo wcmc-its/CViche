@@ -29,6 +29,7 @@ from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls  # noqa: E402
 
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    DUPLICATE_RECORD_FUZZY_MIN_CHARS,
     DUPLICATE_RECORD_ID_TITLE_OVERLAP,
     DUPLICATE_RECORD_MIN_CHARS,
     DUPLICATE_RECORD_TITLE_MIN_CHARS,
@@ -119,6 +120,32 @@ def test_flags_when_enumerator_and_punctuation_differ_between_occurrences():
     ]
     findings = lint_duplicate_records(blocks)
     assert len(findings) == 1
+
+
+@pytest.mark.parametrize("second, fires", [
+    (_CITATION_A.replace("documents", "document"), True),   # one letter dropped
+    (_CITATION_A.replace("study", "studs"), True),          # one letter replaced
+    (_CITATION_A.replace("documents", "documentss"), True),  # one letter added
+    (_CITATION_A.replace("documents", "documen"), False),   # two letters
+    (_CITATION_A.replace("2020", "2021"), False),           # a digit is another record
+    (_CITATION_A.replace("12(3)", "12(4)"), False),
+])
+def test_flags_a_body_one_letter_apart(second, fires):
+    """RCBKFG UYFRTL N6: stage 5d formats each copy of a record the CV lists
+    twice on its own and can fold them one letter apart."""
+    blocks = [("p", "D. PUBLICATIONS"), ("p", f"1. {_CITATION_A}"), ("p", f"2. {second}")]
+    assert len(lint_duplicate_records(blocks)) == (1 if fires else 0)
+
+
+def test_one_letter_tolerance_needs_a_long_body():
+    assert DUPLICATE_RECORD_FUZZY_MIN_CHARS == 60
+    short = "Example Widget Society meeting talk on rotors"  # 46 characters
+    blocks = [("p", "D. TALKS"), ("p", f"1. {short}"), ("p", f"2. {short}s")]
+    assert lint_duplicate_records(blocks) == []
+    long_body = short + ", Example City, Example State"
+    assert len(long_body) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
+    blocks = [("p", "D. TALKS"), ("p", f"1. {long_body}"), ("p", f"2. {long_body}s")]
+    assert len(lint_duplicate_records(blocks)) == 1
 
 
 def test_three_occurrences_count_as_two_duplicate_pairs():

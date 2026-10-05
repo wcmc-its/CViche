@@ -9,6 +9,8 @@ Fixtures are invented: no name, institution or citation here comes from a CV.
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -284,3 +286,29 @@ def test_s5_sibling_count_and_article_share_bounds_are_inclusive():
     rows.append(_entry("Invented Agency. A report on widgets. 2001.", "S5", "Writing", idx=50))
     assert _shapes(_run(*rows, _entry(_GUIDELINE, "S5", "Writing", idx=99))) == [
         "journal_article_as_report"]
+
+
+def test_a_bare_journal_coded_editorial_board_among_reviewer_journals_is_flagged():
+    """RCBKFG JJUQDF 342-346: a batch with no lead-in coded the bare names
+    of reviewed journals Q4C beside the Q4D ones."""
+    path = ("Editorial Activities",)
+    reviewed = _entry("Journal of Invented Widgets", "Q4D", *path, idx=330)
+    board = [_entry(f"Invented Review of Sprockets {n}", "Q4C", *path, idx=342 + n)
+             for n in range(2)]
+    findings = _run(reviewed, *board)
+    assert _shapes(findings) == ["reviewer_journal_as_editorial_board"]
+    assert "entries under 'Editorial Activities' coded Q4C" in findings[0]["message"]
+    assert findings[0]["evidence"][0] == "entry 342 (Q4C): Invented Review of Sprockets 0"
+
+
+@pytest.mark.parametrize("text, heading, sibling_code", [
+    ("Member, Editorial Board, Invented Review", "Editorial Activities", "Q4D"),
+    ("Associate Editor, Invented Review", "Editorial Activities", "Q4D"),
+    ("Member, Invented Newsletter Consultant Panel", "Editorial Activities", "Q4D"),
+    ("Invented Review of Sprockets", "Editorial Boards", "Q4D"),
+    ("Invented Review of Sprockets", "Editorial Activities", "Q4C"),
+])
+def test_an_editorial_board_entry_with_a_role_or_board_context_is_quiet(text, heading,
+                                                                       sibling_code):
+    sibling = _entry("Journal of Invented Widgets", sibling_code, heading, idx=330)
+    assert _run(sibling, _entry(text, "Q4C", heading, idx=342)) == []

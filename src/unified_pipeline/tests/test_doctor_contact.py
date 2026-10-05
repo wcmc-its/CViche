@@ -142,3 +142,28 @@ def test_the_office_label_is_not_an_address_word():
     address = "Home: 9 Sample Lane, Exampleville; Office: Room 1200, Example Hall"
     stage4 = _a(address, address=address)
     assert _lost(stage4, _pd(office_address="Room 1200")) == []
+
+
+def test_a_number_stage4_also_filed_as_home_is_not_expected():
+    """RCBKFG CAOACN: the home number under both `phone` and `home_phone`,
+    its home label outside the lookback in a block that also says work."""
+    text = (f"Address: home: 9 Sample Lane, Exampleville, NY 10002\tphone: {_OFFICE}"
+            f"\twork: Example Hall, {_STREET}\tphone {_CELL}")
+    for key in ("home_phone", "cell_phone", "mobile_phone", "fax", "fax_number", "pager"):
+        assert _lost(_a(text, phone=_OFFICE, **{key: _OFFICE}), _pd()) == [], key
+    assert _lost(_a(text, phone=_OFFICE, work_phone=_CELL), _pd(office_phone=_CELL)) == [
+        ["office phone ending 0142 is in no Personal Data row"]]
+
+
+def test_an_office_keyed_address_beside_a_home_address_is_expected():
+    """RCBKFG CAOACN (#1222): `address` holds the home address, which is
+    withheld, and the office one is under `work_address`, which stage 6
+    reads only when `address` is empty."""
+    text = f"Address: home: 9 Sample Lane, Exampleville, NY 10002\twork: {_STREET}"
+    stage4 = _a(text, address="9 Sample Lane, Exampleville, NY 10002", work_address=_STREET)
+    assert _lost(stage4, _pd()) == [["office address is in no Personal Data row"]]
+    assert _lost(stage4, _pd(office_address=_STREET)) == []
+    department = _a(text, address="9 Sample Lane, Exampleville, NY 10002",
+                    work_address="Department of Example Studies")
+    assert _lost(department, _pd()) == []
+    assert _lost(_a(text, address="9 Sample Lane, Exampleville, NY 10002"), _pd()) == []
