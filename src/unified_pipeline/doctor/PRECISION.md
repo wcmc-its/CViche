@@ -30,6 +30,9 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 | M3b-5c | 2026-10-04 | `feat/ebysbc-doctor-5c-and-contact` on origin/dev `fb466a0f`, over the base render of `fb466a0f` | as M1 | as M1 | #1345, #1222 |
 | M2-enrich | 2026-10-04 | origin/dev `fb466a0f` plus `pubmed_title_truncated` and `enrichment_pubtype_mismatch`, over the base render of `fb466a0f` and the farm's stored stage-5 JSON | 62 of the 63-run farm, as M1 | as M1 | #1358 (EBYSBC E19) |
 | M1-dup | 2026-10-04 | the `dedup_drops` / `duplicate_records` extension, over the base render of origin/dev `fb466a0f` (`~/worktrees/eb-farm-w3b/base`) | as M1 | as M1 | #446, #666 |
+| W3B-SC | 2026-10-04 | origin/dev `fb466a0f` plus `section_consistency` and `segmentation_collapse`, over the base render of `fb466a0f` | 62 of the 63-run farm, as M1 | as M1 | EBYSBC E11/E30/E17 |
+
+W3B-SC hand-checked every hit of its two lints, not only the unmatched ones. The first version of `section_consistency` had 29 hits, and a blind verifier found one false positive: MQSUIC 241, a bare bibliography URL coded S0, which `src/unified_pipeline/core/taxonomy_v7.json` lists as a typical S0 entry. That made it 28 of 29 (97%). The bare-URL branch of `cross_reference_as_record` now allows S0, which removes exactly that hit, so the shipped lint is 28 of 28 (every hit checked). The 14 unmatched `section_consistency` hits are 7 grant-review headings whose rows are coded Q2, 1 grant-review heading whose rows are coded I (SJWASY), 4 journal guideline or protocol articles coded S5 under a peer-reviewed heading or among peer-reviewed siblings (RGUNJV, VYICGW, ZGBCIT twice), and 2 BLS/ACLS/PALS lines coded F1/F2. The rules were written from these same 63 runs, so the precision is in-sample.
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -53,7 +56,9 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
 | `pubmed_title_truncated` | 22 | 22 | 22 / 0 / 0 | 22 / 22 (100%) | 8 / 22 (36%) | 2 | M2-enrich |
+| `section_consistency` | 28 | 28 | none | 28 / 28 hand-checked (100%) | 14 / 28 (50%) | 14 | W3B-SC |
 | `section_lost` | 1 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | names text | 0 | M1 |
+| `segmentation_collapse` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | W3B-SC |
 | `stage4_group_failures` | 1 | 1 | none | none | names text | 0 | M1 |
 | `stage6_render_warnings`: `appendix_grant_too_sparse` | 11 | 11 | 3 / 2 / 1 | 3 / 6 (50%) | names text | 0 | M1 |
 | `stage6_render_warnings`: `appendix_no_route` | 4 | 4 | none | none | names text | 0 | M1 |
