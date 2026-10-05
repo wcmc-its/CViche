@@ -175,6 +175,14 @@ def test_grant_buckets_ask_the_llm_for_status_and_notes(code):
     assert {"status", "notes"} <= set(schemas_mod.FIELD_DESCRIPTIONS[code])
 
 
+def test_patent_schema_asks_the_llm_for_the_issue_date():
+    """#1403 (EBYSBC E32, XELRLZ 630): an issued patent's 'issued <date>' never
+    reached the patent table because M2D `issue_date` was extract:false in the
+    config, though stage 6 renders it. Read off the ACTIVE (config-merged)
+    schema, which the prompt's field list is built from."""
+    assert "issue_date" in schemas_mod.get_field_schema("M2D")["fields"]
+
+
 def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
     """#475: web160's 11 "Visiting Professor" roles were dropped at stage 4
     because R had no `role` field. Read off the ACTIVE (config-merged) schema,

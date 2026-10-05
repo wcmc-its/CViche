@@ -712,9 +712,11 @@ def build_extraction_prompt(
 9. **GRANTS (M2A/M2B/M2C)**:
    - pi_name = a PERSON'S NAME (e.g., "Susan Bostwick", "John Smith") - NOT the project title
    - title = the scientific project title - NOT a person's name, NOT FTE information
+   - When there is no "Title:" label, an unlabelled name of the project or program that comes before the labelled parts (e.g., before "Program Partner:" or "Funder:") is the title; do not leave title null when the entry names one
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
    - If no PI name is found, leave pi_name as null
+   - pi_role = the CV owner's own role only. A "(PI)" or "PI:" label attached to another person's name makes that person pi_name; it is NOT the owner's role. If the entry states no role for the owner, leave pi_role null
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
    - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
         if code in CLINICAL_TRIAL_CODES:
@@ -752,6 +754,22 @@ def build_extraction_prompt(
    - committee_name = the committee/body name ONLY (e.g., "Quality Improvement Committee")
    - role = ONLY the role word(s) (e.g., "Chair", "Member") - NOT the committee name
    - Do NOT merge role into committee_name or vice versa"""
+    elif code == 'N3B':
+        code_specific_instructions = """
+9. **PAST MENTEES (N3B)** - when vs. now:
+   - site_position = the school, program or institution the mentee was at DURING the mentoring (e.g., "Senior, Example College, 2000" → site_position = "Example College")
+   - current_position = where the mentee is NOW, only when the entry says so (e.g., "now Assistant Professor at ..."); otherwise null
+   - Do NOT put the institution of the mentoring period in current_position"""
+    elif code == 'S8':
+        # A sub-point of the S/R target_name instruction (9), which names the owner.
+        code_specific_instructions = """
+   - Co-presented: when the entry says it was "co-presented with" other people, the CV owner presented it too. authors = the CV owner's name first, then those co-presenters, and target_name = the owner's name as written there. Never list only the co-presenters"""
+    elif code == 'D3':
+        code_specific_instructions = """
+9. **OTHER POSITIONS (D3)** - consulting engagements:
+   - A consulting line (a year, the client organization, the project topic, a client contact) that states no job title: title = the project topic, organization = the client organization
+   - Do not leave title null when the entry names the work done
+   - Never put the client contact's name or job title in title"""
 
     prompt += f"""
 **Instructions**:

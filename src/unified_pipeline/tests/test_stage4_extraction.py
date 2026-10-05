@@ -800,8 +800,11 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
 #: (measured before the change); pins the byte-identical-prompt contract.
 #: M2A re-measured for #291, whose one added line (the clinical-trial field
 #: mapping in the grant instructions) is the only difference from before.
+#: M2A re-measured for #1403, whose two added grant lines (the unlabelled-title
+#: and owner-only pi_role rules) are the only difference: dropping them gives
+#: the #291 hash 7d08216a... back.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "7d08216a2d2936f486270c1a275265d2dc0a207e0137b44aa98e1130cd661232",
+    "M2A": "500556253ded348d5e0290768ef6e68d0ee0598577b379a20a6347102368f4e0",
     "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
 }
 
@@ -841,6 +844,54 @@ def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
     assert "agency = its sponsor" in prompt
     for code in ("M2C", "M2D"):  # a pending application or a patent is never a trial
         assert "CLINICAL TRIAL" not in _prompt(code, [{"text": "Invented entry"}])
+
+
+# --- #1403 (EBYSBC E32): stage-4 field rules --------------------------------
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+@pytest.mark.parametrize("rule", [
+    # XELRLZ 170: another investigator's "(PI)" became the owner's role.
+    "- pi_role = the CV owner's own role only. A \"(PI)\" or \"PI:\" label attached to "
+    "another person's name makes that person pi_name; it is NOT the owner's role. "
+    "If the entry states no role for the owner, leave pi_role null",
+    # NDXXAD 411: an unlabelled program name was dropped, title null.
+    "- When there is no \"Title:\" label, an unlabelled name of the project or program "
+    "that comes before the labelled parts",
+])
+def test_grant_prompt_carries_the_owner_role_and_unlabelled_title_rules(code, rule):
+    assert rule in _prompt(code, [{"text": "Invented grant; Doe (PI)."}])
+
+
+def test_past_mentee_prompt_puts_the_mentoring_period_school_in_site_position():
+    # EQADVR 509/516/517: the college of the mentoring year went to current_position.
+    prompt = _prompt("N3B", [{"text": "a) Invented Mentee, Senior, Example College, 2000"}])
+    assert "site_position = the school, program or institution the mentee was at DURING the mentoring" in prompt
+    assert "current_position = where the mentee is NOW, only when the entry says so" in prompt
+    assert "Do NOT put the institution of the mentoring period in current_position" in prompt
+    assert prompt.index("PAST MENTEES (N3B)") < prompt.index("Return JSON")
+
+
+def test_abstract_prompt_puts_the_owner_first_on_a_co_presented_talk():
+    # XWNZWW 752..1210: "co-presented with X" listed only X as authors.
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "\"Invented Talk,\" co-presented with A. Example, at an invented meeting."}],
+        extraction.get_field_schema("S8"), "S8", {"last_name": "Owner"})
+    rule = "- Co-presented: when the entry says it was \"co-presented with\" other people"
+    assert rule in prompt
+    assert "authors = the CV owner's name first, then those co-presenters" in prompt
+    # A sub-point of instruction 9 (target_name), which names the owner.
+    assert prompt.index("9. **target_name**") < prompt.index(rule) < prompt.index("Return JSON")
+    for code in ("S1", "R"):  # R's authors are extract:false; S1 has no co-presenter
+        assert "Co-presented:" not in _prompt(code, [{"text": "Invented entry"}])
+
+
+def test_other_positions_prompt_takes_a_consulting_topic_as_the_title():
+    # OIYKZE 87/91/95: consulting lines kept organization and year only.
+    prompt = _prompt("D3", [{"text": "2020 Example University\tInvented Topic\tA. Contact, Director"}])
+    assert "OTHER POSITIONS (D3)" in prompt
+    assert "title = the project topic, organization = the client organization" in prompt
+    assert "Do not leave title null when the entry names the work done" in prompt
+    assert "Never put the client contact's name or job title in title" in prompt
 
 
 def test_the_instruction_follows_the_code_specific_rules_block():
