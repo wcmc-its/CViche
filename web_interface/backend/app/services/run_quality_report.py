@@ -10,15 +10,17 @@ import re
 from dataclasses import dataclass
 
 from app.schemas import (
-    DoctorFindingGroup, DoctorSeverityCounts, QualityDimension, QualityGate, RunDoctorReport,
-    RunQualityReport,
+    DoctorFindingGroup, DoctorFindingInstance, DoctorSeverityCounts, QualityDimension, QualityGate,
+    RunDoctorReport, RunQualityReport,
 )
 from app.services import quality_score_service as qss
 from app.services.quality_score_service import DimensionPoints, ScoreColumns, ScoreSnapshot
 
 from unified_pipeline import quality_score as scorer  # noqa: E402  (path set by quality_score_service)
+from unified_pipeline.doctor.lints.render import CITATION_EVIDENCE_CHARS  # noqa: E402
 from unified_pipeline.doctor.shared import STATUS_RAN  # noqa: E402
 from unified_pipeline.run_doctor import LINT_PREVALENCE, SEVERITY_ORDER, rank_lints  # noqa: E402
+from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
 
 BAND_MEANINGS = {
     qss.BAND_GREEN: "Ship",
@@ -541,27 +543,108 @@ def columns_need_cleanup(cols: ScoreColumns) -> bool:
     return cols.quality_band != qss.BAND_GREEN or cols.quality_cap is not None
 
 
+#: Instances listed per lint row. A lint can fire hundreds of times on one CV
+#: (output_hygiene); the row's count still says how many there were.
+MAX_INSTANCES_SHOWN = 25
+
+# ponytail: the section is read off the doctor's own message prefix, not a
+# structured field, so it also works on every doctor report already stored. A
+# lint that words its location another way (protected_data_in_output says
+# "found in <section>" inside its message) shows no section, only its detail.
+# Upgrade path: give `_finding` a `code` field, read it here first, and keep
+# these patterns for old reports. Each is anchored at the message start;
+# `drop` is the span removed from the detail once `code` names a known section.
+_CODE = r"(?P<code>[A-Z][A-Z0-9]*)"
+_LOCATION_PREFIX_RES = (
+    re.compile(rf"^(?P<drop>entry [^\s:]+ \({_CODE}\):\s*)"),  # "entry 42 (D1): ..."
+    re.compile(rf"^(?P<drop>taxonomy code {_CODE}:\s*)"),  # "taxonomy code D1: ..."
+    # offschema_fields: "3 B1 entries: `x` is outside ..." -> "3 entries: `x` is outside ...";
+    # stage 6's self-check words the same finding after its own prefix.
+    re.compile(rf"^(?:stage 6 self-check: )?\d+(?P<drop> {_CODE}) entr(?:y|ies): "),
+    # section_lost: "F1: 1 entry absent from the LICENSURE section ..."
+    re.compile(rf"^(?P<drop>{_CODE}:\s+)\d+ entr(?:y|ies) absent from "),
+    # stage6_render_warnings: "stage 6 self-check: T: 6 entries diverted ..." and
+    # "stage 6 self-check: K4 (Clinical teaching): No visible ..."
+    re.compile(rf"^(?P<drop>stage 6 self-check: {_CODE}(?: \([^)]*\))?:\s*)"),
+)
+# The doctor's issue references, "(#1243)": meaningful to developers, noise on the run page.
+_ISSUE_REF_RE = re.compile(r"\s*\(#\d+\)")
+# Evidence that opens with one of the doctor's own locators ("entry 16", "row 3:
+# ...", "block 4 repeats at 9: ...", "element_idx_start 43", "stage 5.2 ...") or
+# is a bare known taxonomy code is the doctor's note, not text quoted from the CV.
+_EVIDENCE_NOTE_RE = re.compile(r"^(?:entry|row|blocks?|element_idx_start|stage) \d")
+#: Lengths the doctor cuts quoted text to without marking the cut: `[:100]` in
+#: most lints, `[:120]` in the extraction/formatting ones, and the citation
+#: lints' own constant. A quote exactly this long was almost surely cut.
+DOCTOR_EVIDENCE_CAPS = frozenset({100, 120, CITATION_EVIDENCE_CHARS})
+TRUNCATION_MARK = "\u2026"
+
+
+def _section_and_detail(message: str) -> tuple[str | None, str]:
+    """The CV section a known taxonomy-code prefix names, and the message
+    without that prefix (unchanged when no known code is found)."""
+    for pattern in _LOCATION_PREFIX_RES:
+        match = pattern.match(message)
+        if match is None:
+            continue
+        section = TAXONOMY_LABELS.get(match.group("code"))
+        if section is not None:
+            start, end = match.span("drop")
+            return section, message[:start] + message[end:]
+        return None, message
+    return None, message
+
+
+def _quotes_and_notes(evidence: object, detail: str) -> tuple[list[str], list[str]]:
+    """Split the doctor's evidence into CV quotes and its own diagnostic notes.
+    Blank items and quotes the detail already shows verbatim are dropped; a
+    quote cut at a doctor cap gets an ellipsis."""
+    quotes: list[str] = []
+    notes: list[str] = []
+    for item in evidence if isinstance(evidence, list) else []:
+        text = str(item)
+        if not text.strip():
+            continue
+        if _EVIDENCE_NOTE_RE.match(text) or text in TAXONOMY_LABELS:
+            notes.append(text)
+        elif text not in detail:
+            quotes.append(text + TRUNCATION_MARK if len(text) in DOCTOR_EVIDENCE_CAPS else text)
+    return quotes, notes
+
+
+def _instance(finding: dict) -> DoctorFindingInstance:
+    """One finding as the run page lists it: the CV section its taxonomy code
+    names, the message without that prefix, and its evidence."""
+    section, message = _section_and_detail(str(finding.get("message") or finding["lint"]))
+    detail = _ISSUE_REF_RE.sub("", message).strip()
+    quotes, notes = _quotes_and_notes(finding.get("evidence"), detail)
+    return DoctorFindingInstance(
+        severity=finding["severity"], section=section, detail=detail, quotes=quotes, notes=notes)
+
+
+def _shown_instances(findings: list[dict]) -> list[DoctorFindingInstance]:
+    """One lint's findings, worst first and otherwise in report order, capped."""
+    ordered = sorted(findings, key=lambda f: _SEVERITY_RANK[f["severity"]])  # stable: keeps report order
+    return [_instance(f) for f in ordered[:MAX_INSTANCES_SHOWN]]
+
+
 def _doctor_groups(findings: list[dict], cap_lint: str | None) -> list[DoctorFindingGroup]:
     """Collapse the ran findings to one row per lint, rarest lint first."""
-    counts: dict[str, int] = {}
-    worst: dict[str, str] = {}
-    first_message: dict[str, str] = {}
+    by_lint: dict[str, list[dict]] = {}
     for f in findings:
-        lint, severity = f["lint"], f["severity"]
-        counts[lint] = counts.get(lint, 0) + 1
-        if lint not in worst or _SEVERITY_RANK[severity] < _SEVERITY_RANK[worst[lint]]:
-            worst[lint] = severity
-        first_message.setdefault(lint, f.get("message") or lint)
+        by_lint.setdefault(f["lint"], []).append(f)
     groups = []
-    for lint, count in rank_lints(counts):
+    for lint, count in rank_lints({lint: len(fs) for lint, fs in by_lint.items()}):
         copy = LINT_COPY.get(lint)
+        instances = _shown_instances(by_lint[lint])
         groups.append(DoctorFindingGroup(
-            lint=lint, severity=worst[lint],
-            message=copy.explanation if copy else first_message[lint],
+            lint=lint, severity=instances[0].severity,  # worst first, so the row's worst
+            message=copy.explanation if copy else by_lint[lint][0].get("message") or lint,
             title=copy.title if copy else None,
             what_to_do=copy.what_to_do if copy else None,
             count=count, prevalence=LINT_PREVALENCE.get(lint),
             caps_score=lint == cap_lint,
+            instances=instances,
         ))
     return groups
 

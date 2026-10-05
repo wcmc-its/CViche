@@ -318,6 +318,130 @@ def test_summarize_doctor_none_for_a_non_report(payload):
     assert rqr.summarize_doctor(payload) is None
 
 
+def test_doctor_instance_names_the_section_and_quotes_the_real_lints_evidence():
+    """#1388: "Several records read as one" said "compare the quoted entry" and
+    showed no quote. Runs the real lint, so a reworded "entry N (CODE):" prefix
+    fails here instead of silently dropping the section."""
+    from unified_pipeline.doctor.lints.extraction import lint_multi_record_coverage
+
+    entry = {"taxonomy_code": "D1", "element_idx_start": 7, "extracted_fields": {
+                 "title": "Lecturer", "institution": "Northfield University School of Medicine",
+                 "start_date": "2001", "end_date": "2005"},
+             "text": "Lecturer, Northfield University School of Medicine, 2001-2005 "
+                     "Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"}
+    findings = lint_multi_record_coverage(
+        {"entries": [entry]}, [("p", "Lecturer | Northfield University School of Medicine | 2001-2005")])
+
+    [instance] = rqr.summarize_doctor({"findings": findings}).findings[0].instances
+
+    assert instance.model_dump() == {
+        "severity": "WARN", "section": "Academic Appointments",
+        "detail": "2 record-shaped clauses, one stage-4 record; 1 other clause(s) on no line of the output",
+        "quotes": ["Visiting Instructor of Pathology, Lakeside Hospital Institute, 2006-2008"], "notes": []}
+
+
+@pytest.mark.parametrize("message, section, detail", [
+    ("taxonomy code M2A: none of its 3 classified entries appear in the output document",
+     "Current Research Funding", "none of its 3 classified entries appear in the output document"),
+    # An unknown code is not a section: the message keeps its prefix rather than lose it.
+    ("entry 4 (ZZ9): one record", None, "entry 4 (ZZ9): one record"),
+    ("entry 4: status 'completed' implies M2B (#561)", None, "entry 4: status 'completed' implies M2B"),
+    ("protected personal data (date of birth) found in Personal Data",
+     None, "protected personal data (date of birth) found in Personal Data"),
+])
+def test_doctor_instance_section_comes_only_from_a_known_taxonomy_code(message, section, detail):
+    [instance] = rqr.summarize_doctor({"findings": [_finding("segmentation", message=message)]}).findings[0].instances
+    assert (instance.section, instance.detail) == (section, detail)
+
+
+def test_doctor_instance_reads_the_section_off_the_real_offschema_message():
+    """"3 B1 entries: `x` is outside the B1 schema" names its code after a count."""
+    from unified_pipeline.doctor.lints.extraction import lint_offschema_fields
+
+    findings = lint_offschema_fields({"entries": [{
+        "taxonomy_code": "B1", "element_idx_start": 3,
+        "extracted_fields": {"degree": "MD", "research_mentor": "Dr. Ada Quill"}}]})
+
+    [instance] = rqr.summarize_doctor({"findings": findings}).findings[0].instances
+
+    assert instance.section == "Academic Degrees"
+    assert instance.detail.startswith("1 entry: `research_mentor` is outside the B1 schema")
+    assert (instance.quotes, instance.notes) == ([], ["entry 3: Dr. Ada Quill"])
+
+
+def test_doctor_instance_reads_the_section_off_the_real_section_lost_message():
+    """"O: 2 entries absent from the INSTITUTIONAL LEADERSHIP section" opens with its code."""
+    from unified_pipeline.doctor.lints.render import lint_section_lost
+
+    rows = ("Founding Director, Quillfeather Cellular Therapeutics Institute\t1998-2014",
+            "Chairman, Marbleton Steering Committee on Genomic Medicine\t1992-1997")
+    blocks = [("p", "INSTITUTIONAL LEADERSHIP ACTIVITIES"), ("p", "Please list activities."),
+              ("p", "T. APPENDIX"), *[("p", row) for row in rows]]
+    findings = lint_section_lost({"entries": [{"taxonomy_code": "O", "text": t} for t in rows]}, blocks)
+
+    [instance] = rqr.summarize_doctor({"findings": findings}).findings[0].instances
+
+    assert instance.section == "Institutional Leadership"
+    assert instance.detail.startswith("2 entries absent from the INSTITUTIONAL LEADERSHIP section")
+
+
+@pytest.mark.parametrize("warning, section, detail", [
+    ({"message": "T: 6 entries diverted to the Appendix"}, "Appendix/Other", "6 entries diverted to the Appendix"),
+    ({"message": "K2 (Clinical teaching): Content appears combined with semicolons"},
+     "Research Mentoring & Clinical Teaching", "Content appears combined with semicolons"),
+    ({"message": "2 D1 entries: `consulting` is outside the D1 schema"},
+     "Academic Appointments", "stage 6 self-check: 2 entries: `consulting` is outside the D1 schema"),
+    # No known code: the self-check keeps its whole message.
+    ({"message": "K (Teaching): No visible bulleted content found"},
+     None, "stage 6 self-check: K (Teaching): No visible bulleted content found"),
+    ({"message": "hierarchy-mismatch reroute L2->Q2 refused"}, None,
+     "stage 6 self-check: hierarchy-mismatch reroute L2->Q2 refused"),
+])
+def test_doctor_instance_reads_the_section_off_the_real_stage6_self_check(warning, section, detail):
+    from unified_pipeline.doctor.lints.render import lint_stage6_warnings
+
+    [instance] = rqr.summarize_doctor(
+        {"findings": lint_stage6_warnings({"warnings": [warning]})}).findings[0].instances
+
+    assert (instance.section, instance.detail) == (section, detail)
+
+
+def test_doctor_instance_splits_its_notes_from_cv_quotes_and_marks_a_cut_quote():
+    cut = "x" * 100
+    report = rqr.summarize_doctor({"findings": [{**_finding(
+        "table_shape", message="missed header: CLINICAL SERVICE"), "evidence": [
+            "entry 16", "row 3: name-cell blob (140 chars): Lakeside", "block 4 repeats at 9: Lecture",
+            "element_idx_start 43", "D1", "CLINICAL SERVICE", "EDUCATION", cut, cut + "y"]}]})
+
+    [instance] = report.findings[0].instances
+
+    assert instance.notes == ["entry 16", "row 3: name-cell blob (140 chars): Lakeside",
+                              "block 4 repeats at 9: Lecture", "element_idx_start 43", "D1"]
+    # "CLINICAL SERVICE" is already in the detail; an all-caps CV line is not a code.
+    assert instance.quotes == ["EDUCATION", cut + rqr.TRUNCATION_MARK, cut + "y"]
+
+
+def test_doctor_instances_list_the_worst_first_and_cap_the_list_but_not_the_count():
+    infos = [_finding("output_hygiene", "INFO", message=f"info {i}") for i in range(rqr.MAX_INSTANCES_SHOWN)]
+    findings = [*infos, _finding("output_hygiene", "WARN", message="the warning")]
+
+    group = rqr.summarize_doctor({"findings": findings}).findings[0]
+
+    assert group.count == rqr.MAX_INSTANCES_SHOWN + 1
+    assert len(group.instances) == rqr.MAX_INSTANCES_SHOWN
+    assert [i.detail for i in group.instances[:3]] == ["the warning", "info 0", "info 1"]
+    assert group.severity == "WARN"
+
+
+def test_doctor_instance_quotes_skip_blank_and_non_list_evidence():
+    report = rqr.summarize_doctor({"findings": [
+        {**_finding("table_shape"), "evidence": ["  ", "kept", 3]},
+        {**_finding("pipe_leaks"), "evidence": "not a list"},
+    ]})
+    assert {g.lint: g.instances[0].quotes for g in report.findings} == {
+        "table_shape": ["kept", "3"], "pipe_leaks": []}
+
+
 def test_report_for_a_capped_run_ties_the_cap_lint_to_its_finding():
     doctor = {"findings": [_finding("owner_contact_missing", "ERROR"), _finding("table_shape", "INFO")]}
 

@@ -112,6 +112,19 @@ export interface QualityGate extends ScoreRowWording {
   lint: string
 }
 
+/** One instance of a lint: where in the CV it is and what it quotes. */
+export interface DoctorFindingInstance {
+  severity: DoctorSeverity
+  /** CV section name; null when the finding names no taxonomy code. */
+  section: string | null
+  /** The doctor's own message, its entry/code prefix and issue refs removed. */
+  detail: string
+  /** Text the doctor quotes from the CV or output; ends in "…" where the doctor cut it. */
+  quotes: string[]
+  /** The doctor's own locators ("row 3: ...", "entry 16"), not CV text. */
+  notes: string[]
+}
+
 export interface DoctorFindingGroup {
   lint: string
   /** Most severe of the lint's instances. */
@@ -127,6 +140,8 @@ export interface DoctorFindingGroup {
   prevalence: number | null
   /** This lint is the gate behind the run's applied cap. */
   caps_score: boolean
+  /** Worst first, capped by the server, so `count` can exceed its length. */
+  instances: DoctorFindingInstance[]
 }
 
 export interface RunDoctorReport {

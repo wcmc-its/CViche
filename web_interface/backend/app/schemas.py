@@ -803,6 +803,15 @@ class DoctorSeverityCounts(BaseModel):
     info: int = 0
 
 
+class DoctorFindingInstance(BaseModel):
+    """One instance of a lint: where in the CV it is and what it quotes."""
+    severity: DoctorSeverity
+    section: str | None = None  # CV section name; None when the finding names no taxonomy code
+    detail: str  # the doctor's own message, its entry/code prefix and issue refs removed
+    quotes: list[str] = []  # text the doctor quotes from the CV or output; "\u2026" where it was cut
+    notes: list[str] = []  # the doctor's own locators ("row 3: ...", "entry 16"), not CV text
+
+
 class DoctorFindingGroup(BaseModel):
     """One lint that fired, collapsed across its instances."""
     lint: str
@@ -813,6 +822,8 @@ class DoctorFindingGroup(BaseModel):
     count: int  # instances of this lint in the run
     prevalence: float | None = None  # share of runs it fires on; None if unmeasured
     caps_score: bool = False  # this lint is the gate behind the run's applied cap
+    # Worst first, then report order; at most MAX_INSTANCES_SHOWN, so count can exceed its length.
+    instances: list[DoctorFindingInstance] = []
 
 
 class RunDoctorReport(BaseModel):
