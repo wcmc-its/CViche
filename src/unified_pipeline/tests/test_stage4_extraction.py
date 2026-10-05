@@ -800,11 +800,11 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
 #: (measured before the change); pins the byte-identical-prompt contract.
 #: M2A re-measured for #291, whose one added line (the clinical-trial field
 #: mapping in the grant instructions) is the only difference from before.
-#: M2A re-measured for #1403, whose two added grant lines (the unlabelled-title
-#: and owner-only pi_role rules) are the only difference: dropping them gives
-#: the #291 hash 7d08216a... back.
+#: M2A re-measured for #1403, whose added unlabelled-title line is the only
+#: difference: dropping it gives the #291 hash 7d08216a... back. The pi_role
+#: line names the owner, so this owner-less prompt does not carry it.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "500556253ded348d5e0290768ef6e68d0ee0598577b379a20a6347102368f4e0",
+    "M2A": "1d29164b0587ffa733337b50ca97861e55bca832eca0c027e639cca810cee50f",
     "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
 }
 
@@ -848,24 +848,74 @@ def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
 
 # --- #1403 (EBYSBC E32): stage-4 field rules --------------------------------
 
+_OWNER = {"last_name": "Owner", "full_name": "Ann B. Owner"}
+
+
 @pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
-@pytest.mark.parametrize("rule", [
-    # XELRLZ 170: another investigator's "(PI)" became the owner's role.
-    "- pi_role = the CV owner's own role only. A \"(PI)\" or \"PI:\" label attached to "
-    "another person's name makes that person pi_name; it is NOT the owner's role. "
-    "If the entry states no role for the owner, leave pi_role null",
+def test_grant_prompt_carries_the_unlabelled_title_rule(code):
     # NDXXAD 411: an unlabelled program name was dropped, title null.
-    "- When there is no \"Title:\" label, an unlabelled name of the project or program "
-    "that comes before the labelled parts",
-])
-def test_grant_prompt_carries_the_owner_role_and_unlabelled_title_rules(code, rule):
+    rule = ("- When there is no \"Title:\" label, an unlabelled name of the project or program "
+            "that comes before the labelled parts")
     assert rule in _prompt(code, [{"text": "Invented grant; Doe (PI)."}])
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_names_the_owner_in_the_pi_role_rule(code):
+    # Wave-4 A/B: told only that another person's "(PI)" is not the owner's
+    # role, a model that cannot tell who the owner is cleared pi_role on
+    # RVROVQ 9/9 "P.I.: <owner>", XELRLZ "<owner> (PI)" and CXRYCF "PI: <owner>".
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "Invented grant; Doe (PI)."}], extraction.get_field_schema(code), code, _OWNER)
+    rule = prompt.split("- pi_role = ", 1)[1].split("\n", 1)[0]
+    assert rule.startswith('the role on this grant of the CV owner, "Ann B. Owner" (surname "Owner"). ')
+    for label in ('"P.I.: <name>"', '"PI: <name>"', '"PI <name>"', '"<name> (PI)"', '"Principal Investigator: <name>"'):
+        assert label in rule
+    # The owner's own label sets the role: the case the A/B regressed.
+    assert 'When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI"' in rule
+    # Someone else's label does not (XELRLZ 170, the #1403 target).
+    assert "When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner" in rule
+    assert rule.endswith("if it states none, leave pi_role null")
+    assert prompt.index("- If no PI name is found") < prompt.index("- pi_role = ") < prompt.index("- status = ")
+
+
+def test_grant_pi_role_rule_is_left_out_when_the_owner_is_unknown():
+    # Nothing to compare a PI label against: keep the pre-#1403 prompt.
+    for owner in (None, {}, {"last_name": ""}):
+        assert extraction.grant_owner_role_rule(owner) == ""
+        assert "- pi_role = " not in extraction.build_extraction_prompt(
+            [{"text": "Invented grant"}], extraction.get_field_schema("M2B"), "M2B", owner)
+
+
+def test_grant_pi_role_rule_names_a_surname_only_owner_once():
+    rule = extraction.grant_owner_role_rule({"last_name": "Owner"})
+    assert 'of the CV owner, "Owner". ' in rule
+    assert "(surname" not in rule
+    assert '(e.g., "Owner (Co-I)", "Mentor")' in rule
+
+
+def test_extract_fields_batch_sends_the_owner_named_pi_role_rule_to_the_llm(monkeypatch):
+    """Wire: the cv_owner_name extract_fields_batch is given reaches the grant prompt."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "pi_role": "PI"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Invented Agency\tInvented title\tP.I.: Ann B. Owner", "taxonomy_code": "M2B",
+          "element_idx_start": 0, "element_idx_end": 0}], 0, 1, cv_owner_name=_OWNER)
+    assert prompts and extraction.grant_owner_role_rule(_OWNER) in prompts[0]
 
 
 def test_past_mentee_prompt_puts_the_mentoring_period_school_in_site_position():
     # EQADVR 509/516/517: the college of the mentoring year went to current_position.
     prompt = _prompt("N3B", [{"text": "a) Invented Mentee, Senior, Example College, 2000"}])
-    assert "site_position = the school, program or institution the mentee was at DURING the mentoring" in prompt
+    assert ("site_position = where and in what the mentee was mentored DURING the mentoring: the school or "
+            "institution, and the program, project, fellowship or committee the entry names for that period") in prompt
+    # Wave-4 A/B: MYNQRA's "MS, Thesis committee" rows lost their Site/Position
+    # text when the rule named only a school or institution.
+    assert '"MS, Thesis committee" → site_position = "Thesis committee"' in prompt
     assert "current_position = where the mentee is NOW, only when the entry says so" in prompt
     assert "Do NOT put the institution of the mentoring period in current_position" in prompt
     assert prompt.index("PAST MENTEES (N3B)") < prompt.index("Return JSON")
