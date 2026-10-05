@@ -90,7 +90,7 @@ No hits on M1's 62 runs: `bucket_status`, `dead_sections`, `invented_records`, `
 
 ## Score cap inputs (M3)
 
-The quality score caps a run at 84 on four more lints only while this table records the cap's own findings at 80% precision or more on 20 or more of them (Paul's decision on #822, 2026-10-02). Each row measures the subset of the lint's findings that would cap, not the whole lint. **matched** is M1's index match; every unmatched hit was hand-checked against the rendered docx (`w:ins` text included) and the stage-4 entry. A partial is a real defect other than the one the cap claims, and counts against precision.
+The quality score caps a run at 84 on more lints only while this table records the cap's own findings at 80% precision or more on 20 or more of them (Paul's decision on #822, 2026-10-02). Each row measures the subset of the lint's findings that would cap, not the whole lint. **matched** is M1's index match; every unmatched hit was hand-checked against the rendered docx (`w:ins` text included) and the stage-4 entry. A partial is a real defect other than the one the cap claims, and counts against precision.
 
 | cap input | caps when | hits | matched | hand-checked: TP / partial / FP | precision | caps? |
 |---|---|---|---|---|---|---|
@@ -103,6 +103,24 @@ The quality score caps a run at 84 on four more lints only while this table reco
 `owner_missing_from_citation`'s partial is a data-safety-board credit dropped from a trial citation, and its false positive a co-presented talk whose rendered line names only the other presenter. Both sit on runs with a single hit, so neither caps. Its 13 matched hits sit on verified findings of the owner-dropped classes (EBYSBC E13 and E32, and s7ab-8); 11 of them are on the capping runs. The unmatched 14 true positives are owner credits the autopsies did not list one by one: eight cut by "et al.", and six study-group or collaborator credits ("including ...") the rendered line leaves out. The doctor reports 30 hits; the 30th is on QFJSXR, the one run with no autopsy labels, so the harness does not score it, and with 1 hit it never caps.
 
 `multi_record_coverage`'s false positives are one record's own detail split across two source lines (a meeting's name and its venue, twice on one run) and a mentee list the docx renders on one line; its partials lose a mentee's career detail, one of two committee roles, or mentees' years while their names render.
+
+### Zero-false-positive WARN lints (M4-cap, 2026-10-05)
+
+The RCBKFG autopsy (6 runs, dev-247) found 0 false positives for `grant_boundary`, `grant_bucket`, `junk_or_header_row` and `etal_added`, and Paul approved feeding them into the cap on 2026-10-05. Each row pools that batch with the ledger rows above and with the NDMRSO autopsy (30 runs, dev-246), whose per-run `doctor_review` judged these lints on the dev-HEAD doctor; NDMRSO is the first batch these shapes were not written from. Hits are counted with origin/dev `10f18e34`'s lints over each run's stored stage-4 JSON and docx (`analysis/<uid>/`), and over the EBYSBC farm's base render of `fb466a0f`. A hit "matched" names an entry a verified autopsy finding lists; an unmatched hit was read by hand. A partial counts against precision.
+
+| cap input | caps when | lint-wide TP / judged | cap subset: TP / judged | caps? |
+|---|---|---|---|---|
+| `grant_boundary` | 3 or more on a run | 68 / 70 (97%): farm 44 / 45 (W3B-GR), RCBKFG 14 / 14, NDMRSO 10 / 11 | 59 / 59: ZCTARO 13, CXRYCF 10, CTWLTR 8, VGHNZD 5 (farm); KUUKNJ 13 (RCBKFG N1); DXAGUS 6 (DXAGUS-01/-02), VYRDHN 4 (VYRDHN-02) | yes |
+| `grant_bucket`, an application rendered as an award | 1 or more | 30 / 30 (100%): ZDCXIV 15 (ZDCXIV-01), FLYBMX 15 (RCBKFG); one CV in two runs | same 30 / 30 | yes |
+| `grant_bucket`, a Current grant whose end date has passed | | 2 / 2: KYOPUV 589 (farm), CAOACN 589 (RCBKFG) | n under 20, and the shape reads today's date | no |
+| `junk_or_header_row` | 5 or more on a run | 149 / 165 (90%): farm 102 / 104 (M2-junk), RCBKFG 9 / 9, NDMRSO 38 / 52 (73%) | 100 / 105 (95%): farm 69 hits on 6 runs, the 2 M2-junk partials counted as if they sit there; NDMRSO KHXOUF 12 / 15, BNYLDF 11 / 11, SYWZJA 5 / 5, GCFEBE 5 / 5 | yes |
+| `etal_added` (INFO) | | RCBKFG 92 / 92; NDMRSO 17 judged lines, 0 false | | no: see below |
+
+`grant_boundary`'s two false positives (RXYBVF 502, VYNARH 648) sit on runs with 1 and 2 hits, and a lone hit is one grant's edge; a slipped stage-2 cut carries down the list, which is what 3 or more catches. The NDMRSO 10 / 11 is DXAGUS 6 (judged TP) and VYRDHN 4 (each names a VYRDHN-02 record), against VYNARH 648.
+
+`junk_or_header_row` out of sample is the weakest number here: NDMRSO judged 22 TP, 3 partial and 11 FP over its reviewed runs (EHGXAL 3 of 3 false: trainee headings that do group their awards; UYQRUN 2 of 3 quote a row that is not the entry's own, KHXOUF 3 of 15 quote another row or name an entry stage 6 dropped; REOYVH and SVYSGY 1 of 1). BNYLDF's 11 and GCFEBE's 5 were not in that review and were read for this row: BNYLDF 9 are BNYLDF-03 and 2 are military-award lead-in labels printed as rows; GCFEBE's 5 are GCFEBE-06. Every NDMRSO false positive sits on a run with 1 to 3 hits, so the cap needs 5.
+
+`etal_added` qualifies on precision but does not cap. It is INFO, not WARN: the owner stays on every line it names, and a citation that lost the owner is `owner_missing_from_citation`'s, which already caps. It fires on 88 of the 96 stored runs, so a cap at 1 would mark nearly every run for one systemic stage-5d rule rather than for anything run-specific. And #1404 (merged 2026-10-05, not yet deployed) removes that rule from the 5d prompt, so on new runs the lint should go quiet; a cap now would mostly re-mark stored runs.
 
 ## Recall (M1)
 

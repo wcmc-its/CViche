@@ -2657,12 +2657,16 @@ def _ended_year(fields: Mapping[str, object], current_year: int) -> int | None:
     return year if year is not None and year < current_year else None
 
 
-def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int) -> str | None:
+def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int | None) -> str | None:
+    """The contradiction's reason, or None. A None `current_year` judges the
+    heading only, never the end date."""
     hierarchy = [str(level) for level in entry.get("hierarchy") or []]
     if (buckets & _AWARD_BUCKETS and _PENDING_BUCKET not in buckets
             and _application_heading(hierarchy)):
         return (f"rendered as an award ({'/'.join(sorted(buckets))}) under the heading "
                 f"'{hierarchy[-1]}', which files applications")
+    if current_year is None:
+        return None
     fields = entry.get("extracted_fields")
     ended = _ended_year(fields if isinstance(fields, Mapping) else {}, current_year)
     if _CURRENT_BUCKET in buckets and _PAST_BUCKET not in buckets and ended is not None:
@@ -2671,15 +2675,21 @@ def _bucket_contradiction(entry: dict, buckets: set[str], current_year: int) -> 
 
 
 def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
-                      current_year: int | None = None) -> list[dict]:
+                      current_year: int | None = None, *,
+                      check_end_date: bool = True) -> list[dict]:
     """A grant rendered in a funding subsection its own record contradicts
     (#1343): an award subsection (Current or Past) under a heading that
     files applications, or Current with an end date before `current_year`,
     a truncated end year read against the start year. WARN, one finding per
     grant; a grant too short to locate in the document is not judged.
     `current_year` defaults to this year, as stage 6's own rebucket does, so
-    re-doctoring an old render can newly flag a grant that ended since."""
-    year = current_year if current_year is not None else datetime.now().year
+    re-doctoring an old render can newly flag a grant that ended since.
+    `check_end_date=False` judges the heading only: the quality score's
+    grant-bucket cap reads that shape alone (`quality_score.
+    score_grant_application_as_award`), so a later rescore cannot move it."""
+    year = None
+    if check_end_date:
+        year = current_year if current_year is not None else datetime.now().year
     rendered = _funding_haystacks(blocks)
     shared = _shared_entry_pieces(stage4.get("entries", []))
     findings = []
