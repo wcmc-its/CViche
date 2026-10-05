@@ -244,8 +244,10 @@ END_DATE_FOUR_DIGIT_YEAR_RE = re.compile(r'(\d{4})')
 # "6/30/95" is 1995). Grant end dates run into the future, so the shared
 # past-leaning pivot (core/two_digit_year.py) misreads them (EBYSBC E7).
 GRANT_END_YEAR_HORIZON = 10
-# mm/dd/yy or mm-dd-yy: an end date whose year is two digits.
-TWO_DIGIT_YEAR_DATE_RE = re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{2})')
+# mm/dd/yy or mm-dd-yy: an end date whose year is two digits -- or one, a
+# truncated year ("8/30/1", RCBKFG CAOACN 589, #1343) that only the grant's
+# start date can place.
+TWO_DIGIT_YEAR_DATE_RE = re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{1,2})')
 
 # The goals phrase in a grant's own text or in a goals row of its own (#958),
 # and four measured wording variants (#829): the WCM label "(Optional - The
@@ -542,7 +544,18 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
     return messages
 
 
-def grant_end_year(end_date: str | None, current_year: int) -> int | None:
+def year_at_or_after(digits: str, start_year: int) -> int:
+    """The first year at or after `start_year` whose last `len(digits)`
+    digits are `digits`: a truncated end year read against the start year
+    ("9/1/07" to "8/30/1" is 2011). Shared with the doctor's grant_bucket lint,
+    so the stage-6 rebucket and the check that judges it read it alike."""
+    modulus = 10 ** len(digits)
+    year = start_year - start_year % modulus + int(digits)
+    return year if year >= start_year else year + modulus
+
+
+def grant_end_year(end_date: str | None, current_year: int,
+                   start_date: str | None = None) -> int | None:
     """The year a grant's stage-4 end date names, or None when none reads.
 
     The first four-digit run, as before; failing that, a valid mm/dd/yy date
@@ -550,16 +563,28 @@ def grant_end_year(end_date: str | None, current_year: int) -> int | None:
     found no four-digit year in their end dates). Its century is read against
     `current_year`, not the shared past-leaning pivot: a grant's end date can
     lie in the future, so yy is 20yy up to `GRANT_END_YEAR_HORIZON` years past
-    `current_year`, else 19yy. A one-digit year ("7/31/1") still reads as
-    nothing: no rule recovers a truncated date."""
+    `current_year`, else 19yy. A one-digit year ("8/30/1") reads only against
+    the year of `start_date` (`year_at_or_after`, #1343); with no readable
+    start it reads as nothing."""
     text = str(end_date or '').strip()
     year_match = END_DATE_FOUR_DIGIT_YEAR_RE.search(text)
     if year_match:
         return int(year_match.group(1))
-    two_digit = TWO_DIGIT_YEAR_DATE_RE.fullmatch(text)
-    if not two_digit or _parse_date_components(text)[0] is None:
+    short = TWO_DIGIT_YEAR_DATE_RE.fullmatch(text)
+    if not short:
         return None
-    year = 2000 + int(two_digit.group(1))
+    digits = short.group(1)
+    if len(digits) == 1:
+        # `_parse_date_components` reads no one-digit year, so the month and
+        # day are checked on the start year's own calendar instead.
+        start = grant_end_year(start_date, current_year) if start_date else None
+        if start is None:
+            return None
+        year = year_at_or_after(digits, start)
+        return year if _parse_date_components(f'{text[:-1]}{year}')[0] else None
+    if _parse_date_components(text)[0] is None:
+        return None
+    year = 2000 + int(digits)
     return year if year <= current_year + GRANT_END_YEAR_HORIZON else year - 100
 
 
@@ -646,7 +671,7 @@ def reclassify_past_m2a_grants(
 
         # Parse end date to check if it's in the past
         if end_date and end_date.lower() not in OPEN_ENDED_END_DATES:
-            end_year = grant_end_year(end_date, current_year)
+            end_year = grant_end_year(end_date, current_year, fields.get('start_date'))
             if end_year is not None and end_year < current_year:
                 # This grant has ended - reclassify to M2B
                 entries_to_move.append((entry, end_date, end_year))
@@ -691,7 +716,7 @@ def promote_open_ended_m2b_grants(
         if explicit_status_target(entry)[0] or grant_heading_is_past(
                 entry.get('hierarchy') or []):
             continue
-        end_year = grant_end_year(end_date, current_year)
+        end_year = grant_end_year(end_date, current_year, fields.get('start_date'))
         if end_date.lower() in OPEN_ENDED_END_DATES:
             running = True
         else:
