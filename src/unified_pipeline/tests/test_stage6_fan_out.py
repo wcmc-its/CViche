@@ -663,7 +663,10 @@ class TestStage4Records:
         assert last['text'] == parent['text']
         assert last['extracted_fields'] == _THREE_COMMITTEES[-1]
         assert FANNED_OUT_FROM not in last
-        assert last[LAST_STAGE4_RECORD] == {'key': _RECORDS, 'index': 2, 'count': 3}
+        # The default text's "Committees:" label is held by no field, so the
+        # parent's whole line stays the last record's fallback (#1445).
+        assert last[LAST_STAGE4_RECORD] == {'key': _RECORDS, 'index': 2, 'count': 3,
+                                            fan_out.OWN_TEXT_KEY: None}
         assert [c[FANNED_OUT_FROM] for c in children[:-1]] == [
             {'key': _RECORDS, 'index': 0, 'count': 3}, {'key': _RECORDS, 'index': 1, 'count': 3}]
         assert all(LAST_STAGE4_RECORD not in c for c in children[:-1])
@@ -1243,3 +1246,131 @@ def test_every_appointment_of_a_label_led_list_renders(tmp_path, context):
     body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
         '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
     assert 'Zqlecturer' in body and 'Zqreader' in body
+
+
+# --- #1445: residue of the stage-4 records split (EOAHMI recheck) ----------
+# Invented values, in the shapes the EOAHMI runs carried: a Q1 role held over
+# three terms (DUTAVD 82), a board list whose undated last line took the first
+# line's term (WYMVGU 865), one talk given on several dates in one year
+# (QTATUP 980).
+
+
+def _q1_record(role, start, end, organization=None):
+    return {'role': role, 'organization': organization, 'start_date': start, 'end_date': end}
+
+
+class TestStage4RecordOwnText:
+    def test_the_last_record_falls_back_to_its_own_line_when_the_fields_hold_the_text(self):
+        records = [_q1_record('Zqhistorian', '1992', '1993'),
+                   _q1_record('Zqhistorian', '1994', '1996'),
+                   _q1_record('Zqhistorian', '1997', '1998')]
+        children = _fan4(_stage4_entry(records, code='Q1',
+                                       text='Zqhistorian, 1992-1993, 1994-1996, 1997-1998'))
+        last = children[-1]
+        assert last['text'] == 'Zqhistorian, 1992-1993, 1994-1996, 1997-1998'
+        assert last[LAST_STAGE4_RECORD][fan_out.OWN_TEXT_KEY] == 'Zqhistorian | 1997 | 1998'
+        assert [fan_out.fallback_text(c) for c in children] == [
+            'Zqhistorian | 1992 | 1993', 'Zqhistorian | 1994 | 1996', 'Zqhistorian | 1997 | 1998']
+
+    def test_the_own_line_is_the_last_tab_segment_when_the_segments_line_up(self):
+        text = 'Chair, Glade Board 1999-2001\tMember, Fern Council 2001-2003\tMember, Moss Panel 2004-2006'
+        records = [{**r, 'institution': None} for r in copy.deepcopy(_THREE_COMMITTEES)]
+        children = _fan4(_stage4_entry(records, text=text))
+        assert fan_out.fallback_text(children[-1]) == 'Member, Moss Panel 2004-2006'
+
+    def test_text_no_field_holds_keeps_the_whole_line_as_the_fallback(self):
+        # BRUSUZ 196: the venue names are in no record, so the whole line is
+        # the only place they are kept.
+        records = [{'location': 'Ashby'}, {'location': 'Varnor'}]
+        text = 'Zqfoundation Center (Ashby) Zqcapital Partners (Varnor)'
+        children = _fan4(_stage4_entry(records, code='R', text=text))
+        assert children[-1][LAST_STAGE4_RECORD][fan_out.OWN_TEXT_KEY] is None
+        assert fan_out.fallback_text(children[-1]) == text
+
+    def test_an_entry_that_was_not_split_falls_back_to_its_text(self):
+        assert fan_out.fallback_text({'text': 'Glade Board'}) == 'Glade Board'
+        assert fan_out.fallback_text({'text': None}) == ''
+
+    def test_is_split_record(self):
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES)))
+        assert [fan_out.is_split_record(c) for c in children] == [True, True, True]
+        assert [fan_out.is_split_record(c) for c in _fan(_THREE_HONORS)] == [True] * 3
+        assert not fan_out.is_split_record({'text': 'Glade Board'})
+
+
+class TestStage4RecordDates:
+    _BOARD_TEXT = ('1993-2004 Member, Zqboard, Ashby Clinic\t1996-97 Vice-President\t'
+                   '1997-99 President\tPast-President')
+
+    def _board(self, last_dates=('1993', '2004')):
+        return [_q1_record('Member', '1993', '2004', 'Ashby Clinic'),
+                _q1_record('Vice-President', '1996', '1997', 'Ashby Clinic'),
+                _q1_record('President', '1997', '1999', 'Ashby Clinic'),
+                _q1_record('Past-President', *last_dates, 'Ashby Clinic')]
+
+    def test_an_undated_line_loses_dates_it_took_from_a_line_other_than_the_one_above(self):
+        children = _fan4(_stage4_entry(self._board(), code='Q1', text=self._BOARD_TEXT))
+        last = children[-1]['extracted_fields']
+        assert (last['role'], last['start_date'], last['end_date']) == ('Past-President', None, None)
+        assert [c['extracted_fields']['start_date'] for c in children[:-1]] == ['1993', '1996', '1997']
+
+    def test_an_earlier_undated_record_loses_them_too(self):
+        records = self._board()
+        records[2], records[3] = records[3], records[2]
+        text = '1993-2004 Member, Zqboard, Ashby Clinic\t1996-97 Vice-President\tPast-President\t1997-99 President'
+        children = _fan4(_stage4_entry(records, code='Q1', text=text))
+        assert children[2]['extracted_fields']['start_date'] is None
+        assert children[3]['extracted_fields']['start_date'] == '1997'
+
+    @pytest.mark.parametrize('second_date', ['2015', '2015-05-10'],
+                             ids=['year', 'a-day-the-year-column-does-not-show'])
+    def test_an_undated_line_keeps_the_dates_of_the_line_above_it(self, second_date):
+        # A year printed once over two talks.
+        records = [{'title': 'Zqtalk one', 'date': '2015'}, {'title': 'Zqtalk two', 'date': second_date}]
+        children = _fan4(_stage4_entry(records, code='R', text='2015 Zqtalk one\tZqtalk two'))
+        assert [c['extracted_fields']['date'] for c in children] == ['2015', second_date]
+
+    @pytest.mark.parametrize('text', [
+        'Past-President\t1993-2004 Member, Zqboard\t1996-97 Vice-President\t1997-99 President',
+        '1993-2004 Member, Zqboard\tVice-President, President, Past-President',
+    ], ids=['undated-line-above-every-dated-one', 'lines-do-not-line-up'])
+    def test_dates_are_left_as_stage4_wrote_them(self, text):
+        records = self._board()
+        if text.startswith('Past'):
+            records = [records[3], *records[:3]]
+        children = _fan4(_stage4_entry(records, code='Q1', text=text))
+        assert all(c['extracted_fields']['start_date'] for c in children)
+
+
+class TestStage4RepeatedRows:
+    def _talk(self, date, title='Zqsafety talk'):
+        return {'title': title, 'location': 'Ashby', 'date': date,
+                'event_name': 'Zqteleconference series', 'role': None}
+
+    def test_records_a_year_only_column_prints_identically_render_once(self):
+        records = [self._talk(d) for d in ('2003-07-30', '2003-09-08', '2003-12-03')]
+        children = _fan4(_stage4_entry(records, code='R', text='Zqsafety talk, Ashby, 2003'))
+        assert len(children) == 1
+        assert children[0]['extracted_fields']['date'] == '2003-12-03'
+        assert LAST_STAGE4_RECORD in children[0]
+
+    def test_only_the_repeated_records_go(self):
+        records = [self._talk('2003-07-30'), self._talk('2004-01-05'),
+                   self._talk('2003-09-01', title='Zqother talk'), self._talk('2003-12-03')]
+        children = _fan4(_stage4_entry(records, code='R', text='Zqsafety talk and Zqother talk'))
+        assert [(c['extracted_fields']['title'], c['extracted_fields']['date']) for c in children] == [
+            ('Zqsafety talk', '2004-01-05'), ('Zqother talk', '2003-09-01'),
+            ('Zqsafety talk', '2003-12-03')]
+
+    def test_a_value_no_cell_prints_does_not_tell_rows_apart(self):
+        records = [{**self._talk('2011-03'), 'target_name': 'Zqfirst'},
+                   {**self._talk('2011-09'), 'target_name': 'Zqsecond'}]
+        assert len(_fan4(_stage4_entry(records, code='R', text='Zqsafety talk, 2011'))) == 1
+
+    def test_a_month_the_date_column_shows_keeps_both_records(self):
+        records = [{'training_type': 'Resident', 'institution': 'Ashby Hospital',
+                    'start_date': start, 'end_date': end}
+                   for start, end in (('2001-07', '2002-06'), ('2002-07', '2002-12'))]
+        records[1]['start_date'] = '2001-09'
+        records[1]['end_date'] = '2002-06'
+        assert len(_fan4(_stage4_entry(records, code='C', text='Resident, Ashby Hospital'))) == 2

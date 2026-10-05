@@ -34,6 +34,7 @@ from ..formatting import (
     format_date_range,
     with_extra_date_spans,
 )
+from ..fan_out import fallback_text, is_split_record
 from ..sorting import sort_entries_reverse_chronological
 from ..normalization import _cell_text, _squash
 
@@ -899,10 +900,16 @@ class ServiceSection:
                 dates = _service_boards_dates_text(fields, taxonomy_code,
                                                    entry.get('text', ''))
 
-                # If we don't have structured fields, parse from raw text
-                if not committee:
-                    text = entry.get('text', '')
-                    committee = text
+                # If we don't have structured fields, parse from raw text.
+                # A split record's row already shows its role and dates, so
+                # only what its own line holds beyond them is left (#1445,
+                # EOAHMI DUTAVD 79).
+                if not committee and is_split_record(entry):
+                    committee = _organization_left_in_text(
+                        fallback_text(entry), fields.get('role'),
+                        fields.get('start_date'), fields.get('end_date'))
+                elif not committee:
+                    committee = entry.get('text', '')
 
                 # Add row to table
                 row = table.add_row()
@@ -978,8 +985,9 @@ class ServiceSection:
                     format_date_range(start_date, end_date, 'Q1', original_text),
                     fields, 'Q1')
                 if not organization:
+                    # A split record's own line, not every record's (#1445).
                     organization = _organization_left_in_text(
-                        original_text, role, start_date, end_date)
+                        fallback_text(entry), role, start_date, end_date)
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text

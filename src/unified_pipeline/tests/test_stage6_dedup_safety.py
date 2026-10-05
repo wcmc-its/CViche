@@ -22,6 +22,8 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
+    SPLIT_SIBLING_METRIC,
+    _drop_split_siblings,
     _GROUP_HEADER_RE,
     _bare_occasion_apart,
     _carries_record,
@@ -2199,3 +2201,80 @@ def test_an_identity_drop_records_both_copies_name_fields():
     assert deduplicate_entries([a, b], decisions=decisions, code="S3") == [a]
     assert decisions[0]["dropped_fields"] == {"title": "Gizmo outcomes"}
     assert decisions[0]["kept_fields"] == {"journal_name": "Toy Press", "title": "Gizmo outcomes"}
+
+
+# ------------------- #1445: the earlier records of a parent dedup drops
+
+def _split_q1(records, text, idx=70):
+    """The children stage 6 fans a stage-4 records list out into (`fan_out`),
+    the last of them carrying the parent's whole text."""
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    entry = {"taxonomy_code": "Q1", "element_idx_start": idx, "text": text,
+             "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    return fan_out_multi_record_entries([entry], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+
+
+def _q1(role, organization=None):
+    return {"role": role, "organization": organization, "start_date": "2008", "end_date": "2012"}
+
+
+_FULLER_Q1 = {"taxonomy_code": "Q1", "element_idx_start": 154,
+              "text": "Zqboard Member, Ashby Pediatric Association 2008-2012\t"
+                      "Elected by the membership\tServe as the Zqcomms Director of the association",
+              "extracted_fields": _q1("Zqboard Member", "Ashby Pediatric Association")}
+
+
+def test_a_dropped_parent_takes_the_earlier_records_the_kept_entry_holds():
+    """EOAHMI GHCIXA 70: the parent was dropped as contained in a fuller entry,
+    and its earlier record rendered on as an orphan copy of that entry's row."""
+    children = _split_q1([_q1("Zqboard Member"), _q1("Zqcomms Director")],
+                         "Zqboard Member, Zqcomms Director    2008-2012")
+    decisions, dropped_ids = [], set()
+    kept = deduplicate_entries([*children, _FULLER_Q1], decisions=decisions, code="Q1",
+                               dropped_ids=dropped_ids)
+    assert kept == [_FULLER_Q1]
+    # A later group must not see the sibling vouch for another drop.
+    assert dropped_ids == {id(children[0]), id(children[1])}
+    assert [d["metric"].split("=")[0] for d in decisions] == [
+        "containment", SPLIT_SIBLING_METRIC]
+
+
+def test_an_earlier_record_the_kept_entry_does_not_hold_stays():
+    # Its row would print an organization the kept entry never names.
+    children = _split_q1([_q1("Zqboard Member", "Zqvarnor Society"), _q1("Zqcomms Director")],
+                         "Zqboard Member, Zqcomms Director    2008-2012")
+    kept = deduplicate_entries([*children, _FULLER_Q1], code="Q1")
+    assert kept == [children[0], _FULLER_Q1]
+
+
+def test_a_record_of_another_entry_is_not_a_sibling():
+    other = _split_q1([_q1("Zqboard Member"), _q1("Zqtreasurer")],
+                      "Zqboard Member; Zqtreasurer 2008-2012 Zqother", idx=12)
+    children = _split_q1([_q1("Zqboard Member"), _q1("Zqcomms Director")],
+                         "Zqboard Member, Zqcomms Director    2008-2012")
+    kept = deduplicate_entries([other[0], *children, _FULLER_Q1], code="Q1")
+    assert other[0] in kept and children[0] not in kept
+
+
+@pytest.mark.parametrize("change", [
+    {"fanned_out_from": {"key": "committees", "index": 0, "count": 2}},
+    {"fanned_out_from": {"key": "stage4_records", "index": 0, "count": 3}},
+    {"element_idx_start": 12},
+], ids=["another-list", "another-count", "another-entry"])
+def test_only_a_record_of_the_same_list_is_a_sibling(change):
+    children = _split_q1([_q1("Zqboard Member"), _q1("Zqcomms Director")],
+                         "Zqboard Member, Zqcomms Director    2008-2012")
+    stranger = {**children[0], **change}
+    kept = deduplicate_entries([stranger, children[1], _FULLER_Q1], code="Q1")
+    assert kept == [stranger, _FULLER_Q1]
+
+
+def test_a_sibling_the_parent_was_dropped_against_stays():
+    # Should dedup ever keep an earlier record over its own parent, that
+    # record is the keeper, not a copy to drop with the parent.
+    children = _split_q1([_q1("Zqboard Member"), _q1("Zqcomms Director")],
+                         "Zqboard Member, Zqcomms Director    2008-2012")
+    drop_indices = {1}
+    _drop_split_siblings(children, [(1, 0)], drop_indices, "Q1", None, set())
+    assert drop_indices == {1}
