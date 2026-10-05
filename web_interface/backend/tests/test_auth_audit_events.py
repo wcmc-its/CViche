@@ -68,7 +68,7 @@ def _mock_saml_client(identity_dict):
 _SAML_IDENTITY = {
     "urn:oid:0.9.2342.19200300.100.1.3": ["samluser@med.cornell.edu"],
     "urn:oid:2.16.840.1.113730.3.1.241": ["SAML User"],
-    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["samluser@cornell.edu"],
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["samluser@med.cornell.edu"],
 }
 
 _ED_ENV = {

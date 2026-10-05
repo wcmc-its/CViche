@@ -225,7 +225,7 @@ def mock_saml_identity():
     return {
         "urn:oid:0.9.2342.19200300.100.1.3": ["testuser@med.cornell.edu"],
         "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
-        "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@cornell.edu"],
+        "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@med.cornell.edu"],
     }
 
 
@@ -235,7 +235,7 @@ def mock_saml_identity_friendly():
     return {
         "mail": ["testuser@med.cornell.edu"],
         "displayName": ["Test User"],
-        "eduPersonPrincipalName": ["testuser@cornell.edu"],
+        "eduPersonPrincipalName": ["testuser@med.cornell.edu"],
     }
 
 
@@ -252,7 +252,7 @@ def mock_saml_identity_no_mail():
     """Mock SAML assertion missing required mail attribute."""
     return {
         "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
-        "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@cornell.edu"],
+        "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@med.cornell.edu"],
     }
 
 

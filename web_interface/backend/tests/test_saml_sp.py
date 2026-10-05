@@ -1,4 +1,5 @@
 """Tests for SAML SP client factory, cert generation, and attribute extraction."""
+
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -31,7 +32,7 @@ class TestExtractUserAttrs:
         assert result["cwid"] == "testuser"  # from ePPN local-part
         assert result["email"] == "testuser@med.cornell.edu"
         assert result["display_name"] == "Test User"
-        assert result["eppn"] == "testuser@cornell.edu"
+        assert result["eppn"] == "testuser@med.cornell.edu"
 
     def test_extract_attrs_friendly_keys(self, mock_saml_identity_friendly):
         """Friendly-name-keyed identity returns correct values via fallback."""
@@ -39,7 +40,7 @@ class TestExtractUserAttrs:
         assert result["cwid"] == "testuser"
         assert result["email"] == "testuser@med.cornell.edu"
         assert result["display_name"] == "Test User"
-        assert result["eppn"] == "testuser@cornell.edu"
+        assert result["eppn"] == "testuser@med.cornell.edu"
 
     def test_extract_attrs_no_mail_uses_eppn_cwid(self, mock_saml_identity_no_mail):
         """No mail is fine (nothing sends email): cwid comes from ePPN, email is None."""
@@ -56,16 +57,16 @@ class TestExtractUserAttrs:
         """When displayName is missing, display_name falls back to eppn."""
         identity = {
             ATTR_MAIL: ["testuser@med.cornell.edu"],
-            ATTR_EPPN: ["testuser@cornell.edu"],
+            ATTR_EPPN: ["testuser@med.cornell.edu"],
         }
         result = extract_user_attrs(identity)
-        assert result["display_name"] == "testuser@cornell.edu"
+        assert result["display_name"] == "testuser@med.cornell.edu"
 
     def test_extract_attrs_email_normalized(self):
         """Email is lowercased and stripped of whitespace."""
         identity = {
             ATTR_MAIL: ["  TestUser@Med.Cornell.Edu  "],
-            ATTR_EPPN: ["testuser@cornell.edu"],  # provides the cwid anchor
+            ATTR_EPPN: ["testuser@med.cornell.edu"],  # provides the cwid anchor
         }
         result = extract_user_attrs(identity)
         assert result["email"] == "testuser@med.cornell.edu"
@@ -76,7 +77,7 @@ class TestExtractUserAttrs:
         nullable column."""
         identity = {
             ATTR_MAIL: ["  "],
-            ATTR_EPPN: ["testuser@cornell.edu"],  # provides the cwid anchor
+            ATTR_EPPN: ["testuser@med.cornell.edu"],  # provides the cwid anchor
         }
         result = extract_user_attrs(identity)
         assert result["email"] is None
@@ -86,7 +87,7 @@ class TestExtractUserAttrs:
         name) so the drop is visible -- and their VALUES are never logged."""
         identity = {
             ATTR_MAIL: ["testuser@med.cornell.edu"],
-            ATTR_EPPN: ["testuser@cornell.edu"],  # cwid anchor -- a mapped attr
+            ATTR_EPPN: ["testuser@med.cornell.edu"],  # cwid anchor -- a mapped attr
             "eduPersonAffiliation": ["staff"],
             "isMemberOf": ["cn=secret-group"],
         }
@@ -109,12 +110,12 @@ class TestExtractUserAttrs:
     def test_extract_attrs_empty_list_value_treated_as_absent(self):
         """An attribute present but released with an empty value list is the
         same as not being released -- falls through to the next candidate."""
-        identity = {ATTR_UID: [], ATTR_EPPN: ["testuser@cornell.edu"]}
+        identity = {ATTR_UID: [], ATTR_EPPN: ["testuser@med.cornell.edu"]}
         result = extract_user_attrs(identity)
         assert result["cwid"] == "testuser"
 
     def test_extract_attrs_none_value_treated_as_absent(self):
-        identity = {ATTR_UID: None, ATTR_EPPN: ["testuser@cornell.edu"]}
+        identity = {ATTR_UID: None, ATTR_EPPN: ["testuser@med.cornell.edu"]}
         result = extract_user_attrs(identity)
         assert result["cwid"] == "testuser"
 
@@ -123,7 +124,7 @@ class TestExtractUserAttrs:
         pinned explicitly rather than left to accidental indexing."""
         identity = {
             ATTR_UID: ["first-uid", "second-uid"],
-            ATTR_EPPN: ["testuser@cornell.edu"],
+            ATTR_EPPN: ["testuser@med.cornell.edu"],
         }
         result = extract_user_attrs(identity)
         assert result["cwid"] == "first-uid"
@@ -147,13 +148,21 @@ class TestExtractUserAttrs:
         with pytest.raises(ValueError, match="CWID"):
             extract_user_attrs(identity)
 
-    def test_extract_attrs_untrusted_eppn_domain_is_accepted_as_is(self):
-        """The SP trusts exactly one registered IdP (docs/sp-registration.md);
-        pin the current behavior -- an unexpected ePPN domain is accepted,
-        not rejected. No domain allowlist is added here."""
-        identity = {ATTR_EPPN: ["someone@unexpected-domain.example"]}
-        result = extract_user_attrs(identity)
-        assert result["cwid"] == "someone"
+    # --- #1452: a partner IdP's users must never land on a WCM account.
+
+    def test_extract_attrs_partner_eppn_keyed_on_full_eppn(self):
+        """Same local part from WCM and from Cornell Ithaca -> two different
+        anchors. The partner's uid (a NetID) is ignored, not taken as a CWID."""
+        wcm = extract_user_attrs({ATTR_EPPN: ["js1234@med.cornell.edu"]})
+        partner = extract_user_attrs({ATTR_UID: ["js1234"], ATTR_EPPN: ["JS1234@Cornell.edu"]})
+        assert wcm["cwid"] == "js1234"
+        assert partner["cwid"] == "js1234@cornell.edu"
+
+    def test_extract_attrs_partner_eppn_with_empty_local_part_is_rejected(self):
+        """"@hss.edu" has no local part: no anchor, and the uid is still not
+        taken as a CWID."""
+        with pytest.raises(ValueError, match="CWID"):
+            extract_user_attrs({ATTR_UID: ["js1234"], ATTR_EPPN: ["@hss.edu"]})
 
 
 # --- Unit test: certificate generation ---

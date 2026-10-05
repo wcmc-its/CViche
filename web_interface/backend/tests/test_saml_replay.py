@@ -622,7 +622,7 @@ def test_replay_ttl_garbage_conditions_string_is_skipped_with_warning(caplog):
 _IDENTITY = {
     "urn:oid:0.9.2342.19200300.100.1.3": ["testuser@med.cornell.edu"],
     "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
-    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@cornell.edu"],  # ePPN -> cwid anchor
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@med.cornell.edu"],  # ePPN -> cwid anchor
 }
 
 
