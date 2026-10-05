@@ -69,6 +69,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
     lint_stage_failure_recorded,
+    lint_research_summary_call_failed,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_segmentation_collapse,
@@ -3896,6 +3897,57 @@ def test_stage_failure_recorded_quiet_on_a_clean_run():
     assert lint_stage_failure_recorded([]) == []
 
 
+def test_stage_failure_recorded_names_research_activities_for_a_non_fatal_stage_4_5():
+    """The web driver's record when stage 4.5 raised and the run carried on (#1174)."""
+    (finding,) = lint_stage_failure_recorded([StageError("4.5", "RuntimeError", "boom", False)])
+    assert finding["severity"] == "WARN"
+    assert "the Research Activities section has no research summary" in finding["message"]
+    assert "RED" not in finding["message"]
+
+
+# ----------- #1174: research_summary_call_failed (a call stage 4.5 survived) --
+
+def test_research_summary_call_failed_warns_per_call_and_names_the_section():
+    stage4_5 = {"research_summary": {"text": ""}, "llm_call_failures": [
+        {"call": "m1_relevance_score", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"},
+        {"call": "summary_generation", "exception_type": "ClientError",
+         "stop_reason": None, "message": "denied"}]}
+
+    score, generation = lint_research_summary_call_failed(stage4_5)
+
+    assert {score["lint"], generation["lint"]} == {"research_summary_call_failed"}
+    assert {score["severity"], generation["severity"]} == {"WARN"}
+    assert "Research Activities text was not scored" in score["message"]
+    assert "stop_reason='content_filtered'" in score["message"]
+    assert "the Research Activities section has no research summary" in generation["message"]
+    assert generation["evidence"] == [
+        "call=summary_generation", "exception=ClientError", "stop_reason=None"]
+
+
+def test_research_summary_call_failed_quiet_without_the_record_or_on_a_malformed_one():
+    assert lint_research_summary_call_failed({"research_summary": {"text": "x"}}) == []
+    assert lint_research_summary_call_failed({"llm_call_failures": "not a list"}) == []
+    assert lint_research_summary_call_failed({"llm_call_failures": [None, 3]}) == []
+    assert lint_research_summary_call_failed(None) == []
+
+
+def test_run_doctor_wires_research_summary_call_failed_through_to_the_verdict(tmp_path):
+    """Deleting the LINT_REGISTRY row fails this."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "research_summary_call_failed"]
+    summary = root / "stage_4_5_research_summary" / f"{_UID}_cv_research_summary.json"
+    summary.write_text(json.dumps({"research_summary": {"text": ""}, "llm_call_failures": [
+        {"call": "summary_generation", "exception_type": "BedrockContentFilteredError",
+         "stop_reason": "content_filtered", "message": "filtered"}]}))
+
+    found = [f for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] == "research_summary_call_failed"]
+
+    assert len(found) == 1 and found[0]["severity"] == "WARN"
+
+
 def test_run_doctor_wires_stage_failure_recorded_through_to_the_verdict(tmp_path):
     """The record the drivers write (#745), read from its real location under
     the outputs root. A malformed record is the usual unreadable ERROR, not a
@@ -4036,14 +4088,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (48), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (49), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 46
+    assert len(payload["findings"]) == 47
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

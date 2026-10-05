@@ -24,6 +24,12 @@ configMapGenerator:
       # zero subject-own rows touched. Watch the "10c." log line + Bedrock
       # cost here before enabling in prod.
       - CVICHE_BLOCK_COHERENCE_REPAIR=1
+      # Dev-first rollout of the #1392 protected-data repair (off by
+      # default in code): stage 6 removes protected personal data from the
+      # finished docx and writes <uid>_repairs.json beside it. Render A/B on
+      # both corpus farms (PR body) found no non-personal content removed.
+      # Watch the "Protected-data repair:" log line here before prod.
+      - CVICHE_RUN_REPAIR=1
 
 # 1. Your existing database secrets configuration
 secretGenerator:

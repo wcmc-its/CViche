@@ -520,6 +520,82 @@ def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(
     assert STAGE4_ENTRY_FALLBACK_KEY not in by_code["B1"]
 
 
+# --- #1243: reply items whose entry_index is past the group size --------------
+
+def _d1_at(text, idx):
+    return {"text": text, "taxonomy_code": "D1", "element_idx_start": idx, "element_idx_end": idx}
+
+
+def _llm_returning(items):
+    return lambda **_kwargs: {"content": json.dumps({"entries": items}), "cost": 0.0, "total_tokens": 0}
+
+
+def test_extract_fields_batch_folds_out_of_range_items_into_a_one_entry_group(monkeypatch, caplog):
+    """RCBKFG CAOACN: the model numbered the records of the group's one entry
+    0..N-1, and only index 0 was kept. Every item is now a record of entry 0,
+    in index order; the scalar fields are the last, as for any multi-record
+    entry, and nothing is stamped because nothing was lost."""
+    from unified_pipeline.stage4.schemas import (
+        STAGE4_RECORDS_KEY, STAGE4_RECORDS_RETURNED_KEY, STAGE4_UNPLACED_ITEMS_KEY)
+
+    monkeypatch.setattr(extraction, "call_llm", _llm_returning([
+        {"entry_index": 0, "title": "Rank A", "start_date": "2001"},
+        {"entry_index": 2, "title": "Rank C", "start_date": "2003"},
+        {"entry_index": 1, "title": "Rank B", "start_date": "2002"},
+    ]))
+
+    with caplog.at_level("WARNING"):
+        [entry] = extraction.extract_fields_batch([_d1_at("Rank A 2001 Rank B 2002 Rank C 2003", 0)], 0, 1)["entries"]
+
+    fields = entry["extracted_fields"]
+    assert [r["title"] for r in fields[STAGE4_RECORDS_KEY]] == ["Rank A", "Rank B", "Rank C"]
+    assert fields["title"] == "Rank C"
+    assert entry[STAGE4_RECORDS_RETURNED_KEY] == 3
+    assert STAGE4_UNPLACED_ITEMS_KEY not in entry
+    assert "fit no entry" not in caplog.text
+
+
+def test_extract_fields_batch_one_entry_group_with_no_index_0_still_extracts(monkeypatch):
+    """A one-entry reply that numbers from 1 used to leave the entry with no
+    match at all; its one item is that entry's."""
+    monkeypatch.setattr(extraction, "call_llm", _llm_returning([{"entry_index": 1, "title": "Rank A"}]))
+
+    [entry] = extraction.extract_fields_batch([_d1_at("Rank A", 0)], 0, 1)["entries"]
+
+    assert entry["extraction_success"] is True
+    assert entry["extracted_fields"]["title"] == "Rank A"
+
+
+def test_extract_fields_batch_stamps_a_larger_group_with_items_no_entry_can_take(monkeypatch, caplog):
+    """In a 2+-entry group the owner of an out-of-range item is unknowable: it
+    is not guessed into an entry, but a warning names it and every entry of
+    the group, matched or not, carries the count. Another group's entries are
+    not stamped."""
+    from unified_pipeline.stage4.schemas import STAGE4_UNPLACED_ITEMS_KEY
+
+    def fake_call_llm(*, messages, **_kwargs):
+        if "Other group" in messages[1]["content"]:
+            return _llm_returning([{"entry_index": 0, "degree": "Other group"}])()
+        return _llm_returning([
+            {"entry_index": 0, "title": "Rank A"},
+            {"entry_index": -1, "title": "Rank X"},
+            {"entry_index": 5, "title": "Rank Y"},
+        ])()
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    entries = [_d1_at("Rank A", 0), _d1_at("Rank B", 1),
+               {"text": "Other group", "taxonomy_code": "B1", "element_idx_start": 2, "element_idx_end": 2}]
+
+    with caplog.at_level("WARNING"):
+        result = extraction.extract_fields_batch(entries, 0, 1)["entries"]
+
+    by_text = {e["text"]: e for e in result}
+    assert by_text["Rank A"]["extracted_fields"]["title"] == "Rank A"
+    assert by_text["Rank B"]["extraction_error"] == extraction.NO_MATCHING_EXTRACTION
+    assert [by_text[t].get(STAGE4_UNPLACED_ITEMS_KEY) for t in ("Rank A", "Rank B", "Other group")] == [2, 2, None]
+    assert "2 reply item(s) at entry_index [-1, 5] fit no entry of the 2-entry group" in caplog.text
+
+
 @pytest.mark.parametrize("timeout_error", [
     ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
     ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
@@ -794,15 +870,42 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
     assert rule in prompt
 
 
+@pytest.mark.parametrize("rule", [
+    "- A SESSION, PANEL, SYMPOSIUM or WORKSHOP entry (e.g., one you moderated or chaired) "
+    "names a title, often in quotes: committee_name = that title (without the quotes)",
+    "- Example: \"Moderator, Society for Example Medicine Annual Meeting, 'Advances in Example Care'\"",
+    '     * committee_name = "Advances in Example Care"',
+    '     * role = "Moderator"',
+    '     * organization = "Society for Example Medicine Annual Meeting"',
+    "- Never leave committee_name null when the entry names such a title, "
+    'and never put the title in a key not listed above (e.g., "topic")',
+])
+def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule):
+    """#1346: the EBYSBC batch lost 14 Q2 session titles in 6 CVs: stage 4 left
+    committee_name null on moderated or chaired sessions, or put the title under
+    an off-schema `topic` key. Each rule line is asserted alone so dropping any
+    one of them fails here."""
+    prompt = _prompt("Q2", [{"text": "Moderator, Invented Meeting, 'Invented Session'"}])
+    assert rule in prompt
+
+
 # --- #985: sub-heading context reaches the stage 4 prompt ---------------------
 
 #: sha256 of build_extraction_prompt for two unstamped entries on origin/dev
 #: (measured before the change); pins the byte-identical-prompt contract.
 #: M2A re-measured for #291, whose one added line (the clinical-trial field
 #: mapping in the grant instructions) is the only difference from before.
+#: Both re-measured for #1243, whose rules 1 and 6 (MULTI_RECORD_INSTRUCTION,
+#: TAB_COLUMNS_INSTRUCTION) are the only lines that differ from before. M2A
+#: re-measured again for the one-work guard appended to its rule 1
+#: (SINGLE_WORK_INSTRUCTION): dropping it gives 1b33f2df... back.
+#: M2A re-measured for #1403 on top of #1243, whose added unlabelled-title
+#: line is the only difference: dropping it gives the #1243 hash 0ab6854a...
+#: back. The pi_role line names the owner, so this owner-less prompt does not
+#: carry it.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "7d08216a2d2936f486270c1a275265d2dc0a207e0137b44aa98e1130cd661232",
-    "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
+    "M2A": "108969062c9e3d82bddbdf02b0220cf5b2ae054d8cfa5a05c08ecc6e29578683",
+    "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
 
@@ -843,6 +946,104 @@ def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
         assert "CLINICAL TRIAL" not in _prompt(code, [{"text": "Invented entry"}])
 
 
+# --- #1403 (EBYSBC E32): stage-4 field rules --------------------------------
+
+_OWNER = {"last_name": "Owner", "full_name": "Ann B. Owner"}
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_carries_the_unlabelled_title_rule(code):
+    # NDXXAD 411: an unlabelled program name was dropped, title null.
+    rule = ("- When there is no \"Title:\" label, an unlabelled name of the project or program "
+            "that comes before the labelled parts")
+    assert rule in _prompt(code, [{"text": "Invented grant; Doe (PI)."}])
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_names_the_owner_in_the_pi_role_rule(code):
+    # Wave-4 A/B: told only that another person's "(PI)" is not the owner's
+    # role, a model that cannot tell who the owner is cleared pi_role on
+    # RVROVQ 9/9 "P.I.: <owner>", XELRLZ "<owner> (PI)" and CXRYCF "PI: <owner>".
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "Invented grant; Doe (PI)."}], extraction.get_field_schema(code), code, _OWNER)
+    rule = prompt.split("- pi_role = ", 1)[1].split("\n", 1)[0]
+    assert rule.startswith('the role on this grant of the CV owner, "Ann B. Owner" (surname "Owner"). ')
+    for label in ('"P.I.: <name>"', '"PI: <name>"', '"PI <name>"', '"<name> (PI)"', '"Principal Investigator: <name>"'):
+        assert label in rule
+    # The owner's own label sets the role: the case the A/B regressed.
+    assert 'When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI"' in rule
+    # Someone else's label does not (XELRLZ 170, the #1403 target).
+    assert "When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner" in rule
+    assert rule.endswith("if it states none, leave pi_role null")
+    assert prompt.index("- If no PI name is found") < prompt.index("- pi_role = ") < prompt.index("- status = ")
+
+
+def test_grant_pi_role_rule_is_left_out_when_the_owner_is_unknown():
+    # Nothing to compare a PI label against: keep the pre-#1403 prompt.
+    for owner in (None, {}, {"last_name": ""}):
+        assert extraction.grant_owner_role_rule(owner) == ""
+        assert "- pi_role = " not in extraction.build_extraction_prompt(
+            [{"text": "Invented grant"}], extraction.get_field_schema("M2B"), "M2B", owner)
+
+
+def test_grant_pi_role_rule_names_a_surname_only_owner_once():
+    rule = extraction.grant_owner_role_rule({"last_name": "Owner"})
+    assert 'of the CV owner, "Owner". ' in rule
+    assert "(surname" not in rule
+    assert '(e.g., "Owner (Co-I)", "Mentor")' in rule
+
+
+def test_extract_fields_batch_sends_the_owner_named_pi_role_rule_to_the_llm(monkeypatch):
+    """Wire: the cv_owner_name extract_fields_batch is given reaches the grant prompt."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "pi_role": "PI"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Invented Agency\tInvented title\tP.I.: Ann B. Owner", "taxonomy_code": "M2B",
+          "element_idx_start": 0, "element_idx_end": 0}], 0, 1, cv_owner_name=_OWNER)
+    assert prompts and extraction.grant_owner_role_rule(_OWNER) in prompts[0]
+
+
+def test_past_mentee_prompt_puts_the_mentoring_period_school_in_site_position():
+    # EQADVR 509/516/517: the college of the mentoring year went to current_position.
+    prompt = _prompt("N3B", [{"text": "a) Invented Mentee, Senior, Example College, 2000"}])
+    assert ("site_position = where and in what the mentee was mentored DURING the mentoring: the school or "
+            "institution, and the program, project, fellowship or committee the entry names for that period") in prompt
+    # Wave-4 A/B: MYNQRA's "MS, Thesis committee" rows lost their Site/Position
+    # text when the rule named only a school or institution.
+    assert '"MS, Thesis committee" → site_position = "Thesis committee"' in prompt
+    assert "current_position = where the mentee is NOW, only when the entry says so" in prompt
+    assert "Do NOT put the institution of the mentoring period in current_position" in prompt
+    assert prompt.index("PAST MENTEES (N3B)") < prompt.index("Return JSON")
+
+
+def test_abstract_prompt_puts_the_owner_first_on_a_co_presented_talk():
+    # XWNZWW 752..1210: "co-presented with X" listed only X as authors.
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "\"Invented Talk,\" co-presented with A. Example, at an invented meeting."}],
+        extraction.get_field_schema("S8"), "S8", {"last_name": "Owner"})
+    rule = "- Co-presented: when the entry says it was \"co-presented with\" other people"
+    assert rule in prompt
+    assert "authors = the CV owner's name first, then those co-presenters" in prompt
+    # A sub-point of instruction 9 (target_name), which names the owner.
+    assert prompt.index("9. **target_name**") < prompt.index(rule) < prompt.index("Return JSON")
+    for code in ("S1", "R"):  # R's authors are extract:false; S1 has no co-presenter
+        assert "Co-presented:" not in _prompt(code, [{"text": "Invented entry"}])
+
+
+def test_other_positions_prompt_takes_a_consulting_topic_as_the_title():
+    # OIYKZE 87/91/95: consulting lines kept organization and year only.
+    prompt = _prompt("D3", [{"text": "2020 Example University\tInvented Topic\tA. Contact, Director"}])
+    assert "OTHER POSITIONS (D3)" in prompt
+    assert "title = the project topic, organization = the client organization" in prompt
+    assert "Do not leave title null when the entry names the work done" in prompt
+    assert "Never put the client contact's name or job title in title" in prompt
+
+
 def test_the_instruction_follows_the_code_specific_rules_block():
     prompt = _prompt("M2A", [{"text": "Alpha", "context_heading": "Funded"}])
     assert prompt.index("- notes = a labelled remark") < prompt.index("10. **Sub-heading context**")
@@ -864,6 +1065,98 @@ def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
     assert "even as a verb or a qualifier, that role wins over X" in text
     assert '"Co-directed with ..." under "Course Director" is role "Co-Director"' in text
     assert "never copy X verbatim when it only names a kind of activity" in text
+
+
+# --- #1243: a multi-record entry is asked for one item per record -------------
+
+@pytest.mark.parametrize("code", ["K1", "M2A", "N3A", "Q2", "I", "D2", "S1"])
+def test_every_batch_prompt_opens_its_rules_with_the_multi_record_rule(code):
+    prompt = _prompt(code, [{"text": "Alpha\tBeta"}])
+    rules = prompt.split("**Instructions**:\n")[1]
+    assert rules.startswith(extraction.multi_record_rule(code) + "\n2. Use null")
+    assert rules.startswith(extraction.MULTI_RECORD_INSTRUCTION)
+    assert "\n" + extraction.TAB_COLUMNS_INSTRUCTION + "\n7. Only extract" in rules
+
+
+def test_the_multi_record_rule_asks_for_one_item_per_record_under_one_entry_index():
+    # EBYSBC (#1243): 17 of 40 CVs lost a second mentee, role, rank or talk
+    # because the reply held one item for an entry that holds several.
+    text = extraction.MULTI_RECORD_INSTRUCTION
+    assert text.startswith("1. For each entry, extract all available fields. ")
+    assert 'Return one item per record, each with the same "entry_index"' in text
+    assert "repeat in every item a value the records share" in text
+    assert "Never join two records' values into one field" in text
+    assert "never keep only the first, the last or the parent record" in text
+    # The bound on over-splitting: one citation or grant is still one item.
+    assert "An entry about one thing is one item, even when it lists several authors" in text
+
+
+@pytest.mark.parametrize("code", ["S1", "S4", "S8", "M2A", "M2B", "M2C", "M2D", "T"])
+def test_a_citation_patent_or_grant_prompt_keeps_one_work_as_one_item(code):
+    # Wave-4 A/B: NDXXAD 360, one S8 abstract given as a poster at one meeting
+    # and a talk at another, became two items with the same title and authors.
+    rules = _prompt(code, [{"text": "Alpha. Poster at Meeting A 2016, and oral presentation at Meeting B 2016."}]
+                    ).split("**Instructions**:\n")[1]
+    assert rules.startswith(extraction.MULTI_RECORD_INSTRUCTION + extraction.SINGLE_WORK_INSTRUCTION + "\n2. Use null")
+
+
+@pytest.mark.parametrize("code", ["K1", "M1", "N3A", "N3B", "Q2", "Q4D", "I", "D2", "P", "R", "C"])
+def test_a_list_of_records_prompt_does_not_carry_the_one_work_guard(code):
+    # The 12/13 cited multi-record wins (MYNQRA 111/112 N3A, RVROVQ 129 R,
+    # MRJDWE 103 Q2, ...) are on these codes; the guard must not reach them.
+    assert extraction.SINGLE_WORK_INSTRUCTION not in _prompt(code, [{"text": "Alpha\tBeta"}])
+
+
+def test_the_one_work_guard_says_one_item_for_one_work_and_splits_only_separate_titles():
+    text = extraction.SINGLE_WORK_INSTRUCTION
+    assert text.startswith(" Here one citation, abstract, poster, chapter, patent or grant is one work: ")
+    assert "when the entry gives the same work at several venues, meetings, presentations or dates" in text
+    assert "return ONE item and put every venue or date in that item's fields" in text
+    assert "Never return two items with the same title." in text
+    # MYNQRA 63 (two patents) and EQGGRB 144 (two chapters) still split.
+    assert text.endswith("Split only works that each have their own title.")
+
+
+def test_extract_fields_batch_sends_the_one_work_guard_to_the_llm(monkeypatch):
+    """Wire: an abstract batch's prompt as call_llm receives it."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "title": "Alpha"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Alpha. Poster at Meeting A 2016, and oral presentation at Meeting B 2016.",
+          "taxonomy_code": "S8", "element_idx_start": 0, "element_idx_end": 0}], 0, 1)
+    assert prompts and extraction.MULTI_RECORD_INSTRUCTION + extraction.SINGLE_WORK_INSTRUCTION in prompts[0]
+
+
+def test_the_tab_rule_keeps_columns_but_starts_a_new_item_for_a_new_record():
+    # TAUBPU-shaped D2 row: a hospital post, a tab, then a concurrent faculty
+    # rank. The old rule read every tab as a column of one record.
+    text = extraction.TAB_COLUMNS_INSTRUCTION
+    assert text.startswith("6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), "
+                           "these indicate table columns - extract each column as a separate field value, "
+                           "not as merged text. ")
+    assert text.endswith("A column that starts another record (e.g. a second role or person "
+                         "with its own date) is a new item under rule 1.")
+
+
+def test_extract_fields_batch_sends_the_multi_record_rules_to_the_llm(monkeypatch):
+    """Wire: the prompt call_llm receives, not only the builder's output."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "role": "Member"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Member, Alpha Committee 2019\tChair, Beta Committee 2021",
+          "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}], 0, 1)
+    assert prompts and all(extraction.MULTI_RECORD_INSTRUCTION in p and extraction.TAB_COLUMNS_INSTRUCTION in p
+                           for p in prompts)
 
 
 def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):
@@ -1263,3 +1556,26 @@ def test_each_finished_batch_prints_a_progress_bar_line(monkeypatch, capsys, pro
         if match:
             seen.append((int(match.group(1)), int(match.group(2))))
     assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_year_group_lines_are_re_dated_after_the_batches_are_reassembled(monkeypatch):
+    # Class E26: the pass needs document order across batches, so the two
+    # entries go into different batches and the later batch finishes first.
+    _stub_owner(monkeypatch)
+    fields = {"2016:  03-16: Example lecture A": {"date": "2016-03-16"},
+              "09-14: Example lecture B": {"start_date": "2014-09"}}
+    entries = [{"text": text, "element_idx_start": idx, "element_idx_end": idx,
+                "hierarchy": ["Teaching"], "taxonomy_code": "K1"}
+               for idx, text in enumerate(fields)]
+
+    def llm_batch(batch, batch_idx, total, cv_owner_name, cancel_check=None):
+        time.sleep((total - batch_idx) * 0.01)
+        return _batch_result([dict(e, extracted_fields=dict(fields[e["text"]])) for e in batch])
+
+    monkeypatch.setattr(extraction, "extract_fields_batch", llm_batch)
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=1, workers=2)
+
+    assert [e["extracted_fields"] for e in out["entries"]] == [
+        {"date": "2016-03-16"}, {"start_date": "2016-09-14"}]
+    assert out["stats"]["entries_reformatted"] == 1

@@ -468,6 +468,13 @@ LINT_COPY = {
         "A grant is listed as current or completed funding although the CV files it as an "
         "application, or is listed as current although its end date has passed.",
         "Move the grant to the funding heading the source CV gives it."),
+    # Draft wording (#1174), not yet approved.
+    "research_summary_call_failed": LintCopy(
+        "Research summary not written by the AI",
+        "Every AI model refused or failed to answer for the Research Activities summary. Either "
+        "the section has no summary, or the CV's own research text was not checked and a new "
+        "summary was written in its place.",
+        "Write or check the Research Activities summary from the source CV."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
