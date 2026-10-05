@@ -2296,3 +2296,100 @@ def test_1223_ebysbc_a_routed_content_entry_is_untouched(text):
 ])
 def test_1223_ebysbc_the_pre_llm_value_scrub_is_unchanged(text, expected):
     assert redact_pre_llm_values(text) == expected
+
+
+# --------------------------------------------------------------------------
+# #1223 (NDMRSO, class E2): a bare "Birth" label with a whole date after it,
+# and a spelled-out child count behind a marital-status cut. The spacing is
+# the corpus's own (BNYLDF idx 24, HUOGDE idx 8, VXSDRD idx 26); every value
+# is synthetic.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Birth: March 4, 1970 in Exampleville, Examplestan",
+    "BIRTH March 4, 1970\tExampleville",
+    f"BIRTH {PRE_LLM_PLACEHOLDER}\tExampleville",
+    "Birth - 4 March 1970",
+    "Birth: 1970-03-04",
+    "BIRTH 04/03/1970",
+])
+def test_1223_ndmrso_a_bare_birth_label_withholds_the_date_and_the_place(text):
+    for code in (A, APPENDIX, CONTENT):
+        residual, withheld = _withheld_residual(text, code=code)
+        assert [item.category for item in withheld] == [CAT_DATE_OF_BIRTH], code
+        if code != CONTENT:
+            # the place of birth in the next cell goes with it
+            assert residual == "", code
+
+
+@pytest.mark.parametrize("text", [
+    "Birth: A History of Midwifery",
+    "Birth cohort 1990",
+    "Birth 2019 Symposium",
+    "Birth: 2019",
+    "Preterm birth: 03/15/2019 outcomes",
+    "Very preterm birth 12 March 2019",
+    "Birthplace of an Idea",
+    "Afterbirth: 03/04/2019 review",
+    "Pre-birth 03/04/2019 visit",
+    "Example Children's Hospital, 03/04/2015",
+    "Example Children's Oncology Group",
+])
+def test_1223_ndmrso_birth_titles_and_childrens_institutions_are_kept(text):
+    for code in (A, APPENDIX, CONTENT):
+        assert not _denied(text, code), code
+    assert redact_pre_llm_values(text) == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("BIRTH March 4, 1970\tExampleville", f"BIRTH {PRE_LLM_PLACEHOLDER}\tExampleville"),
+    ("Birth: 03/04/1970 in Exampleville", f"Birth: {PRE_LLM_PLACEHOLDER} in Exampleville"),
+])
+def test_1223_ndmrso_the_pre_llm_scrub_takes_the_date_after_a_bare_birth_label(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+def test_1223_ndmrso_a_bare_birth_cut_stops_where_the_next_field_begins():
+    residual, withheld = _withheld_residual("BIRTH 03/04/1970\tCitizenship: US", code=A)
+    assert residual == "Citizenship: US"
+    assert [item.category for item in withheld] == [CAT_DATE_OF_BIRTH]
+
+
+def test_1223_ndmrso_a_spelled_out_child_count_behind_a_marital_cut_is_withheld():
+    entry = {"text": "Marital Status:  Synthetic; three children", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"] and "children" not in entry["text"]
+    assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    "Status; two sons",
+    "Status\none child",
+    "Status   four children",
+    "Status | ten kids | Board Certified",
+])
+def test_1223_ndmrso_a_spelled_out_child_count_fragment_is_withheld(text):
+    for code in (A, APPENDIX):
+        assert _denied(text, code), code
+    assert not _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text", [
+    "Cohort A; two children with asthma",
+    "Outcomes in four children",
+    "Board Certified, two children",
+    "Status; often children are seen",
+    "Status; someone child-centred",
+])
+def test_1223_ndmrso_a_spelled_out_child_count_inside_prose_is_not_withheld(text):
+    assert not [m for m in _pii_matches(text) if m.category == CAT_CHILDREN]
+
+
+def test_1223_ndmrso_the_child_count_row_does_not_backtrack_into_a_long_space_run():
+    """The count row tries eleven spelled-out counts after the spaces that open
+    a fragment; with a backtracking space run that cost seconds on a long gap
+    (16,000 spaces: about 0.04 s possessive, several seconds without)."""
+    start = time.perf_counter()
+    _pii_matches("Status;" + " " * 16000 + "x")
+    assert time.perf_counter() - start < 1.0

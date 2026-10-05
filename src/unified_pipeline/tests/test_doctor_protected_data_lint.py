@@ -807,3 +807,48 @@ def test_1223_run_doctor_and_the_scorer_read_the_deleted_view_and_agree(tmp_path
     fraction, detail, cap = score_protected_data(flat)
     assert cap == PROTECTED_DATA_CAP
     assert "protected_data_hits=1" in detail
+
+
+# --------------------------------------------------------------------------
+# #1223 (NDMRSO, class E2): a bare "Birth" label before a whole date, and a
+# spelled-out child count after a marital-status cut, recovered into the
+# Appendix. Both scored GREEN while they rendered. Synthetic values.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Birth: March 4, 1970 in Exampleville, Examplestan",   # BNYLDF idx 24's shape
+    "BIRTH March 4, 1970: Exampleville",                   # HUOGDE idx 8's, as rendered
+    "BIRTH 04/03/1970",
+    "• Birth – 4 March 1970",
+    "Citizenship: Examplestan\nBirth: 03/04/1970",   # a table block's next line
+])
+def test_1223_ndmrso_a_bare_birth_label_before_a_whole_date_is_a_shape(text):
+    assert _shape_categories(text) == ["date of birth"]
+
+
+@pytest.mark.parametrize("text", [
+    "Birth: A History of Midwifery, 2019",
+    "Birth cohort 1990 follow-up study",
+    "Birth 2019 Symposium, Example City",
+    "Very preterm birth 12 March 2019 outcomes",
+    "Outcomes of preterm birth: 03/15/2019 cohort",
+    "Birthplace of an Idea, Example Press",
+    "Example Children's Oncology Group meeting, 03/04/2015",
+])
+def test_1223_ndmrso_birth_titles_and_bare_years_are_not_shapes(text):
+    assert _shape_hits(text, []) == []
+
+
+@pytest.mark.parametrize("line", [
+    "Birth: March 4, 1970 in Exampleville, Examplestan",
+    "BIRTH March 4, 1970: Exampleville",
+    "three children",   # VXSDRD idx 26's residue after the marital-status cut
+])
+def test_1223_ndmrso_the_appendix_leaks_are_findings_and_cap_the_score_red(tmp_path, line):
+    appendix = [_p("T. APPENDIX"), _p(line)]
+    findings = lint_protected_data_in_output(appendix)
+    assert len(findings) == 1
+    assert "1970" not in findings[0]["message"] and "Exampleville" not in findings[0]["message"]
+    _write_flat_docx(tmp_path, ["T. APPENDIX", line])
+    _fraction, _detail, cap = score_protected_data(tmp_path)
+    assert cap == PROTECTED_DATA_CAP
