@@ -276,6 +276,13 @@ def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict
     an education, teaching or personal-data entry, degree and years included.
     Returns '' when nothing qualifies: an empty cell is correct, a stranger's
     institution is not.
+
+    #1445 (EOAHMI DUTAVD 30): nor when a record split out of the same source
+    line (another training entry at the same `element_idx_start`) names an
+    institution of its own. That line names its institutions record by
+    record, so one it names for no record was not named above it either: the
+    residency the line leaves without one took the internship hospital two
+    lines up.
     """
     try:
         entry_start = int(entry.get('element_idx_start', -1))
@@ -297,6 +304,8 @@ def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict
         institution = ((other.get('extracted_fields') or {}).get('institution') or '')
         if not isinstance(institution, str) or not institution.strip():
             continue
+        if other_start == entry_start:
+            return ''  # a sibling record names its own: see #1445 above
         if best_start < other_start < entry_start:
             best_start, best = other_start, institution.strip()
     return best

@@ -727,7 +727,7 @@ def _resolve_stage_4_5_input_file(input_path: str) -> Path:
 
 def _fallback_calls(call: str, usage: dict) -> list[dict]:
     """The provenance record of one call when the content-filter fallback served
-    it (#1174), else empty. Write-only: the doctor and the quality score read it."""
+    it (#1174), else empty. Write-only: the doctor reads it."""
     model = usage.get('fallback_model')
     return [{"call": call, "model": model}] if model else []
 

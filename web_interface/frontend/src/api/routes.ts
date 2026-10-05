@@ -29,6 +29,8 @@ export const runRoutes = {
     `/api/run/${id}/data/${file}` as const,
   /** GET/href /api/run/:id/input  (original uploaded CV download) */
   inputFile: (id: string) => `/api/run/${id}/input` as const,
+  /** GET /api/run/:id/input?as_url=true  ({url}: presigned S3 URL, or null on local storage) */
+  inputFileUrl: (id: string) => `/api/run/${id}/input?as_url=true` as const,
   /** POST /api/run/:id/cancel */
   cancel: (id: string) => `/api/run/${id}/cancel` as const,
   /** POST /api/run/:id/restart */

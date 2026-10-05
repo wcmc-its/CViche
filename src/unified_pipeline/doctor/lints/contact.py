@@ -12,7 +12,8 @@ home, cell, fax or pager, or stage 4 filed the same number under a home,
 cell, fax or pager key too. An address is skipped whenever the block says
 home anywhere, the line is a birth line, or the value names no street,
 number or state (a department, #1222); but an address under an office key
-(`work_address`, ...) beside a home `address` is still the office's.
+(`work_address`, ...) beside a home `address` is still the office's, which
+stage 6 renders since #1425, unless it repeats the home value.
 """
 import re
 from collections.abc import Mapping
@@ -25,6 +26,7 @@ from unified_pipeline.stage6.sections.personal_data import (
     _home_and_office_parts,
     _names_a_street_or_number,
     _offschema_contact,
+    _same_text,
 )
 
 from ..shared import _finding
@@ -156,9 +158,12 @@ def _office_addresses(fields: Mapping[str, Any], text: str) -> list[str]:
             return [_LEADING_LABEL_RE.sub("", part) for kind, part in parts
                     if kind == _LABEL_KIND_OFFICE]
         if _HOME_LABEL_RE.search(text):
-            # `address` is the home one; an office one stage 4 filed under an
-            # office key stage 6 reads only when `address` is empty (#1222).
+            # `address` is the home one. Stage 6 routes an office-keyed
+            # address after it into the empty Office slot, unless it repeats
+            # `address` (#1222, #1425).
             office = _office_keyed_address(fields)
+            if _same_text(office, address):
+                return []
             return [office] if _names_a_street_or_number(office) else []
     else:
         address = (_offschema_contact(dict(fields), []).address or {}).get(_OFFSCHEMA_OFFICE_ADDRESS)

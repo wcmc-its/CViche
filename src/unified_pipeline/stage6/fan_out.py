@@ -72,10 +72,18 @@ FANNED_OUT_FROM = 'fanned_out_from'
 # The same provenance, written instead on the last child of stage 4's records
 # list, which is the parent itself (`_stage4_children`). That child keeps the
 # parent's whole text and no `FANNED_OUT_FROM`, so dedup weighs it as it
-# weighed the parent; dedup and the doctor do not read this key. The scope
-# rules read it (`record_scope`, `record_text`): the last record is a record
-# of the list like its siblings (EBYSBC E34, BZZNRL 137).
+# weighed the parent; the doctor does not read this key. The scope rules read
+# it (`record_scope`, `record_text`): the last record is a record of the list
+# like its siblings (EBYSBC E34, BZZNRL 137). Dedup reads it to drop the
+# siblings of a parent it drops (`dedup._drop_split_siblings`, #1445).
 LAST_STAGE4_RECORD = 'last_stage4_record'
+# #1445: the key in `LAST_STAGE4_RECORD` holding the last record's own line,
+# the one a renderer falls back to (`fallback_text`) for a cell its fields
+# leave empty. None when the records' fields do not hold every word of the
+# parent's text (`_fields_carry_text`): that text is then the only place the
+# words no field holds are kept, so the parent's whole line stays the
+# fallback (EOAHMI BRUSUZ 196: venue names stage 4 left out of every record).
+OWN_TEXT_KEY = 'text'
 
 # A list of records has at least this many; below it the entry is one record.
 # Stage 4's own records list (`records_key`) is held to it.
@@ -691,6 +699,68 @@ def _renders_something(record: Mapping[str, Any], rendered: frozenset[str]) -> b
     return any(not _is_blank(record.get(key)) for key in rendered)
 
 
+def _date_tokens(record: Mapping[str, Any], code: str) -> set[str]:
+    """What a record's date fields put in the code's date column, as `_tokens`
+    reads it: its years, an open end as 'present'."""
+    return set().union(*(_tokens(_rendered_text(key, value, code))
+                         for key, value in record.items()
+                         if _is_date_key(key) and not _is_blank(value)))
+
+
+def _unsourced_date_records(records: Sequence[Mapping[str, Any]], text: object,
+                            code: str) -> set[int]:
+    """The indexes of the records whose dates their own line does not give
+    them (#1445, EOAHMI WYMVGU 865).
+
+    Read only when the entry's tab segments line up one to one with the
+    records, so each segment is one record's line. An undated line under a
+    dated one may share that line's dates -- a year printed once over two
+    talks -- so a record whose own line names no year keeps dates that the
+    nearest dated line above it names. Dates it took from anywhere else (the
+    board term two lines up, copied onto an undated "Past-President" below
+    two later terms) are not in the source for that record. A record above
+    every dated line, and every record of an entry whose lines do not line
+    up, is left as stage 4 wrote it.
+    """
+    segments = _segments(text)
+    if len(segments) != len(records):
+        return set()
+    unsourced = set()
+    nearest_dated: str | None = None
+    for i, (record, segment) in enumerate(zip(records, segments)):
+        if _is_dated(segment):
+            nearest_dated = segment
+        elif nearest_dated is not None \
+                and not _date_tokens(record, code) <= set(_tokens(nearest_dated)):
+            unsourced.add(i)
+    return unsourced
+
+
+def _without_dates(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """`fields` with every date field cleared, so the row's date cell is empty."""
+    return {key: None if _is_date_key(key) else value for key, value in fields.items()}
+
+
+def _row_identity(record: Mapping[str, Any], rendered: frozenset[str],
+                  code: str) -> tuple[tuple[str, str], ...]:
+    """What a record's row shows: every rendered value as its cell writes it,
+    a date as the code's date column shows it."""
+    return tuple(sorted((key, norm(_rendered_text(key, value, code)))
+                        for key, value in record.items()
+                        if key in rendered and not _is_blank(value)))
+
+
+def _repeated_rows(records: Sequence[Mapping[str, Any]], rendered: frozenset[str],
+                   code: str) -> set[int]:
+    """The indexes of the records whose row a LATER record of the same entry
+    would print identically (#1445, EOAHMI QTATUP 980: seven dates of one
+    talk series in 2003, in a column that shows the year only, printed seven
+    identical rows). The later copy is the one kept, so the last record --
+    the parent, which dedup weighs -- always stays."""
+    identities = [_row_identity(record, rendered, code) for record in records]
+    return {i for i, identity in enumerate(identities) if identity in identities[i + 1:]}
+
+
 def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
                      records_key: str) -> list[dict[str, Any]] | None:
     """One child per record stage 4 kept under `records_key`, or None.
@@ -702,29 +772,43 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     row does not carry, `_recover_unrendered_records`) sees what it saw
     before. It carries no `FANNED_OUT_FROM` either, so dedup weighs it as it
     weighed the parent; `LAST_STAGE4_RECORD` marks it for the scope rules
-    instead. Every earlier child is its record alone, with its own
+    instead, and holds its own line (`OWN_TEXT_KEY`) for the renderers'
+    fallbacks. Every earlier child is its record alone, with its own
     segment or built line, and without the parent's `_STAGE5_ENTRY_KEYS`: a
     scalar or an enrichment inherited from the last record would put that
     record's value on another one. Declined for a code whose section
     renders the text rather than the fields, for an entry a stage-5 formatter
     rendered whole, and when a record holds no value its section writes (its
     row would be empty).
+
+    #1445: a record keeps no dates its own line does not give it
+    (`_unsourced_date_records`), and an earlier record whose row a later one
+    prints identically is not emitted (`_repeated_rows`).
     """
-    rendered = _RENDERED_FIELDS.get(str(entry.get('taxonomy_code')))
+    code = str(entry.get('taxonomy_code'))
+    rendered = _RENDERED_FIELDS.get(code)
     records = fields[records_key]
     if rendered is None or any(fields.get(k) for k in _FORMATTED_KEYS):
         return None
     if not all(_renders_something(record, rendered) for record in records):
         return None
     texts = _child_texts(entry.get('text'), records)
+    own_text = texts[-1] if _fields_carry_text(entry, records) else None
+    unsourced = _unsourced_date_records(records, entry.get('text'), code)
+    records = [_without_dates(record) if i in unsourced else dict(record)
+               for i, record in enumerate(records)]
+    repeated = _repeated_rows(records, rendered, code)
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
-    earlier = [_child(bare, copy.deepcopy(dict(record)), text, records_key, i, len(records))
-               for i, (record, text) in enumerate(zip(records[:-1], texts))]
+    earlier = [_child(bare, copy.deepcopy(record), text, records_key, i, len(records))
+               for i, (record, text) in enumerate(zip(records[:-1], texts))
+               if i not in repeated]
     last = copy.deepcopy(dict(entry))
     last['extracted_fields'] = {key: value for key, value in last['extracted_fields'].items()
                                 if key != records_key}
+    if len(records) - 1 in unsourced:
+        last['extracted_fields'] = _without_dates(last['extracted_fields'])
     last[LAST_STAGE4_RECORD] = {'key': records_key, 'index': len(records) - 1,
-                                'count': len(records)}
+                                'count': len(records), OWN_TEXT_KEY: own_text}
     return [*earlier, last]
 
 
@@ -778,7 +862,7 @@ def inherited_scope(entry: Mapping[str, Any]) -> str | None:
     Every child counts, the last of stage 4's records included. None when the
     entry is not a child, or when that heading names two scopes
     ("International/National") or none does."""
-    if FANNED_OUT_FROM not in entry and LAST_STAGE4_RECORD not in entry:
+    if not is_split_record(entry):
         return None
     for heading in reversed(entry.get('hierarchy') or []):
         named = [scope for scope, pattern in _SCOPE_RES if pattern.search(str(heading))]
@@ -796,6 +880,22 @@ def record_scope(entry: Mapping[str, Any], own_scope: str) -> str:
     if heading is None or own_scope == _ABROAD_SCOPE:
         return own_scope
     return heading
+
+
+def fallback_text(entry: Mapping[str, Any]) -> str:
+    """The text a renderer falls back to for a cell `entry`'s fields leave
+    empty: its own text, except for the last of stage 4's records, whose text
+    is the parent's whole line. That one falls back to its own line
+    (`OWN_TEXT_KEY`), so a cell does not print the other records again
+    (#1445: EOAHMI DUTAVD 82, WYMVGU 931, BRUSUZ 265) -- unless the records'
+    fields leave words of that line unheld, when the whole line stays."""
+    own = (entry.get(LAST_STAGE4_RECORD) or {}).get(OWN_TEXT_KEY)
+    return str(entry.get('text') or '') if own is None else own
+
+
+def is_split_record(entry: Mapping[str, Any]) -> bool:
+    """Whether `entry` is one record fanned out of a multi-record entry."""
+    return FANNED_OUT_FROM in entry or LAST_STAGE4_RECORD in entry
 
 
 def record_text(entry: Mapping[str, Any]) -> str:

@@ -152,8 +152,8 @@ Lints, ranked by the severity of the failure class they catch:
                           succeeded, so nothing records an error; stage 4
                           stamps the entries of the taxonomy group and stage
                           4.5 lists the calls, and each finding names the
-                          section. WARN: it caps the quality score at 84, one
-                          point under GREEN (#1174)
+                          section. WARN; it does not cap the quality score,
+                          since the call succeeded (#1174, 2026-10-05)
 
 14m. stage_failure_recorded a stage the driver recorded as failed in
                           `stage_errors/<uid>_stage_errors.json` (#745), such
@@ -274,6 +274,20 @@ Lints, ranked by the severity of the failure class they catch:
                           Activities section has no summary (generation), or
                           its own text went unscored and a summary was
                           generated instead (M1 relevance). WARN, no score cap
+14w. span_count           a record whose source lists separate years or
+                          terms ('2003, 2013') while its row shows one range
+                          over them, their min-max (#1245, batch RCBKFG:
+                          UYFRTL 33/34/48/49). WARN
+14x. role_consistency     a grant table that misstates who led the grant
+                          (#1403): the text names the CV owner under a PI
+                          label while pi_role says co-I, or the reverse
+                          (RCBKFG KUUKNJ 243/247), or a rendered table whose
+                          role says PI and whose PI cell is empty (EOAHMI
+                          JIJRSN 516), both WARN; pi_name also listed as a
+                          co-I, a "with Dr. X" collaborator as pi_name, or the
+                          owner first on an unlabelled grant shown only as a
+                          co-I (JIJRSN 150-156, QTATUP 529-537), INFO. Reads
+                          stage 4, and the docx when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -411,6 +425,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_span_count,
+    lint_role_consistency,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -588,6 +604,8 @@ KNOWN_LINTS = (
     "grant_boundary",
     "grant_bucket",
     "research_summary_call_failed",
+    "span_count",
+    "role_consistency",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -757,6 +775,18 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
+    # span_count (#1245, batch RCBKFG): 64 of 245 stored runs with stage-4
+    # JSON (106 analysis/<uid>, 13 analysis/pilot, and the 126-run farm and
+    # 2026-09-11/-17 batches), as rendered by origin/dev 5e6eac1d plus this
+    # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
+    # render without the fix). Same mixed-corpus caveat as above.
+    "span_count": 0.261,
+    # role_consistency (#1403, RC-ROLE2 in doctor/PRECISION.md): 15 of 245
+    # runs at any severity, measured 2026-10-05 over each run's stored stage-4
+    # JSON and a render of origin/dev 43f84e1e: 8 of the 119 analysis/ and
+    # analysis/pilot runs and 7 of the 126 farm/batch-3/batch-4 runs. Same
+    # mixed-corpus caveat as above.
+    "role_consistency": 0.061,
 }
 
 
@@ -1296,6 +1326,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
     LintSpec("research_summary_call_failed", lint_research_summary_call_failed, ("stage_4_5",)),
+    LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
+    LintSpec("role_consistency", lint_role_consistency, ("stage_4",),
+             optional=("table_rows",)),
 )
 
 

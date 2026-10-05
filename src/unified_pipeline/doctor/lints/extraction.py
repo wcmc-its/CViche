@@ -7,8 +7,9 @@ their text, taxonomy codes that vanished between classification and render,
 dedup drops that were not duplicates, records fabricated from the template's
 own scaffolding, values filed under a key no renderer reads, years given the
 wrong century, entries holding several records that stage 4 returned as
-one, grant lists cut into records at the wrong line, and grants filed under a
-funding heading their own record contradicts.
+one, grant lists cut into records at the wrong line, grants filed under a
+funding heading their own record contradicts, and separate years rendered as
+one range over them.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -71,6 +72,7 @@ from unified_pipeline.stage6.normalization.institutions import (
 )
 from unified_pipeline.stage6.fan_out import (
     FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
     _FORMATTED_KEYS,
     _RENDERED_FIELDS,
     _TEXT_RENDERED_CODES,
@@ -93,7 +95,13 @@ from unified_pipeline.stage6.dedup import (
     _part_numbers,
     _trial_phases,
 )
-from unified_pipeline.stage6.sections.research_support import grant_end_year, year_at_or_after
+from unified_pipeline.stage6.sections.research_support import (
+    PI_NAME_LABEL,
+    PROJECT_TITLE_LABEL,
+    YOUR_ROLE_LABEL,
+    grant_end_year,
+    year_at_or_after,
+)
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -103,8 +111,10 @@ from unified_pipeline.stage_6_word_template import (
 
 from ..shared import (
     Haystack,
+    OWNER_SURNAME_MIN_CHARS,
     _FieldsEntry,
     _LINE_SENTINEL,
+    _NAME_WORD_RE,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
@@ -115,6 +125,7 @@ from ..shared import (
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
+    _owner_surname_words,
     _piece_in_template,
 )
 
@@ -1346,13 +1357,16 @@ def _fanned_out_keys(entry: _FieldsEntry) -> frozenset[str]:
     """The keys stage 6's fan-out splits this entry on, each record then
     rendering as its own child -- run through the same call and the same
     built-in schema `stage_6_word_template` hands it, so the doctor cannot
-    disagree with the renderer about which lists render."""
+    disagree with the renderer about which lists render. The last of stage
+    4's records counts too: when every earlier record would print the same
+    row as a later one, it is the only child left (#1445)."""
     probe = {"taxonomy_code": entry.code, "text": entry.text,
              "extracted_fields": dict(entry.fields)}
     children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS,
                                             records_key=STAGE4_RECORDS_KEY)
-    return frozenset(child[FANNED_OUT_FROM]["key"] for child in children
-                     if FANNED_OUT_FROM in child)
+    return frozenset((child.get(FANNED_OUT_FROM) or child[LAST_STAGE4_RECORD])["key"]
+                     for child in children
+                     if FANNED_OUT_FROM in child or LAST_STAGE4_RECORD in child)
 
 
 def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool:
@@ -2027,7 +2041,11 @@ _CLAUSE_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 #: year in two digits: a month and year ("7/05", "10/08"; not a day of
 #: "m/d/yy", and not one run of slashed numbers) and an apostrophe year
 #: ("Jul '96", with a straight or curly mark). RCBKFG CAOACN 32 and 64 date
-#: every record that way, so the lint read no clause at all.
+#: every record that way, so the lint read no clause at all. Only in an entry
+#: that writes no four-digit year: one that does dates its records that way,
+#: and its two-digit dates are notes on the record ("no-cost extension
+#: through 06/09", "Degree conferred 6/83", "the aftermath of 9/11"; three
+#: false positives on the 126-run farm/batch corpus).
 _DATE_YEAR_RE = re.compile(
     r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
     r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
@@ -2156,12 +2174,15 @@ def _anchor_year(match: re.Match[str]) -> str:
     return str(expand_two_digit_year(int(two_digits)))
 
 
-def _date_anchors(text: str) -> list[DateAnchor]:
+def _date_anchors(text: str, two_digit_years: bool) -> list[DateAnchor]:
     """Each written date of the text: a run of years joined by date-only
-    gaps. A month or day written before a year stays in the text around it;
-    `_has_payload` and `_clause_words` read past date words."""
+    gaps, reading two-digit years only when `two_digit_years`. A month or
+    day written before a year stays in the text around it; `_has_payload`
+    and `_clause_words` read past date words."""
     anchors: list[DateAnchor] = []
     for match in _DATE_YEAR_RE.finditer(text):
+        if not (match.group("year") or two_digit_years):
+            continue
         year = _anchor_year(match)
         if anchors and _DATE_GAP_RE.match(text[anchors[-1].end:match.start()]):
             last = anchors[-1]
@@ -2195,13 +2216,13 @@ def _opens_inside_parens(part: str, position: int) -> bool:
     return depth > 0
 
 
-def _part_clauses(part: str) -> list[Clause]:
+def _part_clauses(part: str, two_digit_years: bool) -> list[Clause]:
     """One part's dated clauses. A part whose dates are not separated by any
     words is one clause (a record with a list of dates); otherwise each date
     takes the words after it when the part opens with a date ("<year> <talk>
     <year> <talk>"), else the words before it ("<role>, <years> <role>,
     <years>")."""
-    anchors = _date_anchors(part)
+    anchors = _date_anchors(part, two_digit_years)
     if not anchors:
         return []
     between = [part[a.end:b.start] for a, b in zip(anchors, anchors[1:])]
@@ -2226,8 +2247,9 @@ def _record_clauses(text: str) -> list[Clause]:
     """The record-shaped clauses of an entry's text: its dated clauses when
     there are two or more, else its undated parts that each name a title and
     an institution. Fewer than two means the text reads as one record."""
+    two_digit_years = not _CLAUSE_YEAR_RE.search(text)
     dated = [clause for part in _STRONG_SEPARATOR_RE.split(text)
-             for clause in _part_clauses(part)]
+             for clause in _part_clauses(part, two_digit_years)]
     if len(dated) >= 2:
         return dated
     return [Clause(part, frozenset(_CLAUSE_YEAR_RE.findall(part)))
@@ -2729,4 +2751,441 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
                 f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
                 f"{reason} (#1343)",
                 [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- span_count --------------------------------------------------------------
+#
+# Stage 4 sometimes writes a record of separate years or terms ("2003, 2013",
+# "1982-86, 1989-1995, 2004-2012") as one start_date-end_date pair, their
+# min-max, and the row renders a continuous range the CV does not claim
+# (batch RCBKFG, UYFRTL 33/34/48/49; #1245). Stage 6 shows the separate spans
+# when stage 4 also kept them under a further-span key (`envelope_date_spans`),
+# but not when it kept only the envelope, and no other lint compares the
+# source's spans with the row's. Report-only.
+
+#: A dash between the two ends of a span, any of the ways a CV types one.
+_SPAN_DASH = r"[-‐-―−─]"
+#: A written span: a year (a dotted or slashed month after it is read past),
+#: then optionally a dash and an end year, a one- or two-digit end, or an
+#: ongoing word.
+_WRITTEN_SPAN_RE = re.compile(
+    r"(?<![\d/.])((?:19|20)\d{2})(?:[./]\d{1,2}(?!\d))?(?![\d/])"
+    rf"(?:\s*{_SPAN_DASH}\s*((?:19|20)\d{{2}}(?:[./]\d{{1,2}})?(?!\d)|\d{{1,2}}(?!\d)"
+    r"|present|current|ongoing|now))?", re.IGNORECASE)
+#: A month or term word, and the day after it, read past so "Fall 2014 -
+#: Spring 2018" is one span; with the short term names ("Spr 2015") course
+#: lists use.
+_SPAN_MONTH_RE = re.compile(
+    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])\s*(?:\d{{1,2}}(?:st|nd|rd|th)?\b,?)?",
+    re.IGNORECASE)
+#: Words that join the two ends of one span: "1980 to 1987", "between 1978
+#: and 1988".
+_SPAN_CONNECTOR_RE = re.compile(r"\s+(?:to|through|thru|until|till)\s*(?=\d)", re.IGNORECASE)
+_SPAN_BETWEEN_RE = re.compile(r"\bbetween\s+((?:19|20)\d{2})\s+and\s+", re.IGNORECASE)
+#: What separates two spans of one list: "2003, 2013", "2001; 2004", "2015
+#: and 2017". Two years with none of these between them are a range split
+#: across cells or lines ("2014<tab>...2016"), not a list.
+_SPAN_LIST_SEPARATOR_RE = re.compile(r"[,;&]|\band\b", re.IGNORECASE)
+#: The end of a span still running (`present`), for envelope comparison.
+_SPAN_OPEN_END = 10_000
+#: Codes whose line names the mentee's own milestones ("M.S. 1982; Ph.D.
+#: 1986") rather than the record's span: the row's range is the mentorship.
+_SPAN_COUNT_SKIPPED_PREFIXES = ("N",)
+
+
+class WrittenSpan(NamedTuple):
+    """One span of years as written: its first and last year, and where the
+    text it was read from holds it."""
+    first: int
+    last: int
+    start: int
+    end: int
+
+
+def _span_source(text: str) -> str:
+    """`text` with month and term words read past and "X to Y" / "between X
+    and Y" written as one dashed span, the form `_written_spans` reads."""
+    return _SPAN_BETWEEN_RE.sub(r"\1-", _SPAN_CONNECTOR_RE.sub("-", _SPAN_MONTH_RE.sub("", text)))
+
+
+def _written_spans(text: str) -> list[WrittenSpan]:
+    """The year spans of `text` (already `_span_source`), in order. A one- or
+    two-digit end is completed from the start year; one that would end before
+    it (a month: "2019-05") leaves the start year alone."""
+    spans: list[WrittenSpan] = []
+    for match in _WRITTEN_SPAN_RE.finditer(text):
+        first, end = int(match[1]), match[2]
+        if end is None:
+            last = first
+        elif end.isalpha():
+            last = _SPAN_OPEN_END
+        elif len(end) <= 2:
+            last = first - first % 10 ** len(end) + int(end)
+        else:
+            last = int(end[:4])
+        spans.append(WrittenSpan(first, max(first, last), match.start(), match.end()))
+    return spans
+
+
+def _is_a_list(text: str, spans: list[WrittenSpan]) -> bool:
+    """Whether consecutive spans of `text` are separated as items of one list."""
+    return all(_SPAN_LIST_SEPARATOR_RE.search(text[before.end:after.start])
+               for before, after in zip(spans, spans[1:]))
+
+
+def _leaves_a_gap(spans: list[tuple[int, int]], envelope: tuple[int, int]) -> bool:
+    """Whether a year inside `envelope` lies in none of `spans`."""
+    reached = envelope[0] - 1
+    for first, last in sorted(spans):
+        if first > reached + 1:
+            return True
+        reached = max(reached, last)
+    return False
+
+
+def _envelope_of_separate_spans(text: str) -> tuple[tuple[int, int], int] | None:
+    """The min-max of the text's spans and how many there are, when the text
+    lists two or more spans that leave a year of that min-max uncovered."""
+    source = _span_source(text)
+    spans = _written_spans(source)
+    years = list(dict.fromkeys((span.first, span.last) for span in spans))
+    if not years:
+        return None
+    envelope = (min(first for first, _ in years), max(last for _, last in years))
+    # One span, or spans that fill their min-max, leave no gap.
+    if not _leaves_a_gap(years, envelope) or not _is_a_list(source, spans):
+        return None
+    return envelope, len(years)
+
+
+def _renders_only_the_envelope(line: OutputLine, envelope: tuple[int, int]) -> bool:
+    """Whether the line's one span inside `envelope` is the envelope itself."""
+    inside = {(span.first, span.last) for span in _written_spans(_span_source(line.squashed))
+              if envelope[0] <= span.first and span.last <= envelope[1]}
+    return inside == {envelope}
+
+
+def _span_text(envelope: tuple[int, int]) -> str:
+    last = "present" if envelope[1] == _SPAN_OPEN_END else str(envelope[1])
+    return f"{envelope[0]}-{last}"
+
+
+def lint_span_count(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """A record whose source lists separate years or terms ("2003, 2013")
+    while its rendered row shows one continuous range over them, their
+    min-max (#1245, batch RCBKFG: UYFRTL 33/34/48/49). The row is the
+    record's own line (`_record_lines`); the source is the entry's text,
+    whose spans must be written as a list (`_SPAN_LIST_SEPARATOR_RE`) and
+    leave a year of the range uncovered. Skips the codes `multi_record_coverage`
+    skips except teaching, whose rows stage 5c rewrites from the same dates,
+    and mentoring codes (`_SPAN_COUNT_SKIPPED_PREFIXES`). WARN, one finding
+    per entry: 111 of 118 hits real on 245 stored runs (doctor/PRECISION.md,
+    RCB-SC)."""
+    document = _rendered_document(stage4, blocks)
+    declared_by_code = _declared_fields()
+    skipped = _MULTI_RECORD_SKIPPED_CODES - frozenset(TEACHING_CODES)
+    findings = []
+    for entry in _fields_entries(stage4):
+        if (not entry.code or entry.code in skipped or not entry.fields
+                or entry.code.startswith(_SPAN_COUNT_SKIPPED_PREFIXES)):
+            continue
+        found = _envelope_of_separate_spans(entry.text)
+        if found is None:
+            continue
+        envelope, count = found
+        keys = declared_by_code.get(entry.code, frozenset()) | _RENDERED_FIELDS.get(
+            entry.code, frozenset())
+        if any(_renders_only_the_envelope(line, envelope)
+               for line in _record_lines(entry, keys, document)):
+            findings.append(_finding(
+                "span_count", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): the source lists {count} "
+                f"separate dates, the row shows one range {_span_text(envelope)} (#1245)",
+                [f"entry {entry.element_idx}: {count} source spans, 1 rendered"]))
+    return findings
+
+
+# --- role_consistency --------------------------------------------------------
+#
+# Stage 6 renders a grant's "Your role:" cell from `pi_role` (or `role`). When
+# the grant's own text names the CV owner under a PI label and `pi_role` says
+# co-investigator, or the reverse, the table credits the owner with the wrong
+# role (#1403; batch RCBKFG, KUUKNJ 243 and 247: "PIs: <owner>, <other>,
+# co-Is: ..." rendered co-I, "PI: <other>, co-Is: ..., <owner>" rendered PI).
+# Every value renders, so no loss lint sees it. Report-only.
+
+#: A role label in a grant's text. A co-PI is neither the PI nor a co-I, so
+#: it names no role this lint judges; "Co PI" with a space is one too (farm
+#: web26 705). Nor does a subcontract PI, who leads a subaward rather than
+#: the grant: "(PI: <other>, Subcontract PI: <owner>)" over "Role:
+#: Co-Investigator" is consistent (farm web241 150).
+_ROLE_LABEL = (r"(?<![\w-])(subcontract pis?|co[- ]?pis?|co-?is?|co-?investigators?|mpis?|pis?"
+               r"|principal investigators?)(?![\w-])")
+#: A label that opens a list of names: "PIs: A, B" or "co-Is: C, D".
+_ROLE_LIST_LABEL_RE = re.compile(_ROLE_LABEL + r"\s*:")
+#: A label right after a name: "<name>, PI" or "<name> (co-I)", allowing a
+#: few initials or a credential between them. Not a label that opens the
+#: next list: in "PIs: Other B, <owner> C, co-Is: ..." the "co-Is:" names
+#: the people after it.
+_ROLE_AFTER_NAME_RE = re.compile(
+    r"[\w .]{0,12}?(?:,\s*|\s*\(\s*)" + _ROLE_LABEL + r"(?!\s*:)")
+#: A grant's text splits into cells and lines here; a label never reaches
+#: across one.
+_GRANT_CELL_SPLIT_RE = re.compile(r"\t|\n| \| ")
+ROLE_PI = "PI"
+ROLE_CO_I = "co-I"
+#: `pi_role` values read as each role, after `norm` and dropping '-' and '.'.
+_PI_ROLE_VALUE_RE = re.compile(r"pi|mpi|multi ?pi|contact pi|principal investigator")
+_CO_I_ROLE_VALUE_RE = re.compile(r"(?:co ?i|co ?investigator|coinvestigator)s?")
+
+
+def _label_role(label: str) -> str | None:
+    """The role a matched label names, or None for a co-PI or a subcontract PI."""
+    bare = label.replace("-", "").replace(" ", "")
+    if bare.startswith(("copi", "subcontract")):
+        return None
+    return ROLE_CO_I if bare.startswith("co") else ROLE_PI
+
+
+def _stated_role(value: object) -> str | None:
+    """The role a `pi_role` value states: PI, co-I, or None for any other
+    (empty, a co-PI, "Mentor", "Site PI (subcontract)")."""
+    bare = norm(str(value or "")).replace("-", "").replace(".", "")
+    if _PI_ROLE_VALUE_RE.fullmatch(bare):
+        return ROLE_PI
+    if _CO_I_ROLE_VALUE_RE.fullmatch(bare):
+        return ROLE_CO_I
+    return None
+
+
+def _owner_roles_in_cell(cell: str, owner: frozenset[str]) -> set[str]:
+    """The roles one normalised cell gives an owner surname word: the label
+    right after the name, else the nearest list label before it."""
+    roles: set[str] = set()
+    for word in owner:
+        for match in re.finditer(rf"(?<!\w){re.escape(word)}(?!\w)", cell):
+            after = _ROLE_AFTER_NAME_RE.match(cell, match.end())
+            before = list(_ROLE_LIST_LABEL_RE.finditer(cell, 0, match.start()))
+            label = after or (before[-1] if before else None)
+            role = _label_role(label.group(1)) if label else None
+            if role:
+                roles.add(role)
+    return roles
+
+
+def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
+    """The one role the grant's text gives the owner, or None when it gives
+    none or both."""
+    roles: set[str] = set()
+    for cell in _GRANT_CELL_SPLIT_RE.split(text):
+        roles |= _owner_roles_in_cell(norm(cell), owner)
+    return roles.pop() if len(roles) == 1 else None
+
+
+# --- role_consistency: the #1410 shapes (EOAHMI recheck) --------------------
+#
+# Four more ways a grant table misstates who led the grant, each a #1410
+# regression the EOAHMI recheck verified and no lint flagged (#1403):
+#
+# - pi_cell_empty: "Your role:" says PI and "Name of Principal Investigator:"
+#   is empty (JIJRSN 516 and 10 sibling trials). Read off the render, since
+#   stage 6 fills that cell from the owner on a PI role (#1446) and stage 4's
+#   empty `pi_name` is not what the reader sees.
+# - pi_also_co_i: `pi_name` is one of the people `co_investigators` lists, so
+#   the table names one person as both (JIJRSN 156, which the next shape
+#   reports first; farm KDAZOM 380, MQSUIC 153).
+# - pi_from_collaborator: `pi_name` is a person the text names only as a
+#   "with Dr. X" collaborator, where no role label names anyone and no role is
+#   stated for the owner (JIJRSN 148-156).
+# - owner_lead_as_co_i: an unlabelled author-list grant whose first or only
+#   name is the owner, rendered with an empty PI cell and the owner among the
+#   co-investigators (QTATUP 529, 533, 537).
+
+ROLE_SHAPE_CONTRADICTED = "contradicted"
+ROLE_SHAPE_PI_CELL_EMPTY = "pi_cell_empty"
+ROLE_SHAPE_PI_ALSO_CO_I = "pi_also_co_i"
+ROLE_SHAPE_PI_FROM_COLLABORATOR = "pi_from_collaborator"
+ROLE_SHAPE_OWNER_LEAD_AS_CO_I = "owner_lead_as_co_i"
+#: Each shape's severity, from its measured precision (RC-ROLE2 in
+#: doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked hits,
+#: INFO below either bar.
+ROLE_SHAPE_SEVERITY = MappingProxyType({
+    ROLE_SHAPE_CONTRADICTED: "WARN",
+    ROLE_SHAPE_PI_CELL_EMPTY: "WARN",
+    ROLE_SHAPE_PI_ALSO_CO_I: "INFO",
+    ROLE_SHAPE_PI_FROM_COLLABORATOR: "INFO",
+    ROLE_SHAPE_OWNER_LEAD_AS_CO_I: "INFO",
+})
+
+#: Any word that labels a role on a grant, in normalised text: "PI", "P.I.",
+#: "PD/PI", "MPI", "co-I", "Investigator", "Role", "Director". Broader than
+#: `_ROLE_LABEL` on purpose: the two shapes that read an unlabelled grant
+#: stay quiet on any text that labels anyone.
+_ANY_ROLE_WORD_RE = re.compile(
+    r"(?<![a-z])(?:p\.?\s?i|pis|mpi|pd|co-?is?|investigators?|role|director)(?![a-z])")
+#: "with Dr. X", "with Drs. X and Y": X is a collaborator, not a PI.
+_WITH_COLLABORATOR_RE = re.compile(
+    r"(?<![a-z])with\s+(?:(?:drs?|mr|mrs|ms|prof|professor)\.?\s+)?(?P<names>[^;:$()]{1,80})")
+#: Splits a `co_investigators` value into one name per person.
+_PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|\band\b)\s*")
+#: Words in a person's name that do not identify them.
+_NAME_NOISE_WORDS = frozenset({"drs", "prof", "professor", "phd", "mph", "msc", "pharmd",
+                               "dds", "dmd", "facp", "student"})
+
+
+def _person_key(name: str) -> frozenset[str]:
+    """The words that identify one named person, for comparing two names."""
+    return frozenset(word for word in _NAME_WORD_RE.findall(norm(name))
+                     if len(word) >= OWNER_SURNAME_MIN_CHARS and word not in _NAME_NOISE_WORDS)
+
+
+def _co_investigator_keys(fields: Mapping[str, object]) -> list[frozenset[str]]:
+    """One `_person_key` per person `co_investigators` lists, in its order."""
+    keys = (_person_key(name)
+            for name in _PERSON_SPLIT_RE.split(str(fields.get("co_investigators") or "")))
+    return [key for key in keys if key]
+
+
+def _first_index(text: str, key: frozenset[str]) -> int | None:
+    """Where the earliest word of `key` occurs in normalised `text`."""
+    hits = [match.start() for word in key
+            for match in [re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text)] if match]
+    return min(hits) if hits else None
+
+
+def _pi_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
+                  owner: frozenset[str]) -> bool:
+    """`pi_name` is one of the people `co_investigators` lists, and the two
+    values differ, so stage 6 renders both rows (it drops a Co-Investigators
+    value identical to the PI). Not an author list headed by the PI that also
+    names the owner ("Cutter, G., <owner>"): that is the source's own line
+    copied whole, and the PI cell still names the right person (farm web204,
+    30 grants)."""
+    co_text = norm(str(fields.get("co_investigators") or ""))
+    keys = _co_investigator_keys(fields)
+    if not pi_key or co_text == norm(str(fields.get("pi_name") or "")) or pi_key not in keys:
+        return False
+    return not (keys[0] == pi_key and any(key & owner for key in keys[1:]))
+
+
+def _pi_from_collaborator(text: str, fields: Mapping[str, object],
+                          pi_key: frozenset[str]) -> bool:
+    """`pi_name` is named only after "with", the text labels no role, and no
+    role is stated for the owner."""
+    if not pi_key or fields.get("pi_role") or fields.get("role") or _ANY_ROLE_WORD_RE.search(text):
+        return False
+    return any(pi_key <= _person_key(match.group("names"))
+               for match in _WITH_COLLABORATOR_RE.finditer(text))
+
+
+def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
+                        owner: frozenset[str]) -> bool:
+    """No `pi_name`, no stated role, no role label, and the owner is the first
+    person `co_investigators` lists and the first of them the text names. A
+    stated role ("Program Partner", NDXXAD 411) is what renders, so the
+    owner is not shown as only a co-investigator."""
+    keys = _co_investigator_keys(fields)
+    if fields.get("pi_name") or fields.get("pi_role") or fields.get("role"):
+        return False
+    if not keys or _ANY_ROLE_WORD_RE.search(text):
+        return False
+    owner_at = _first_index(text, keys[0] & owner)
+    others = [_first_index(text, key) for key in keys[1:] if not key & owner]
+    return owner_at is not None and all(at is None or owner_at < at for at in others)
+
+
+def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
+                      owner: frozenset[str]) -> tuple[str, str] | None:
+    """The first role shape one grant entry shows, as (shape, what it says),
+    or None."""
+    text = norm(str(entry.get("text") or ""))
+    stated = _stated_role(fields.get("pi_role") or fields.get("role"))
+    source = _source_owner_role(str(entry.get("text") or ""), owner)
+    if stated and source and stated != source:
+        return (ROLE_SHAPE_CONTRADICTED,
+                f"the source names the CV owner as {source}, but the rendered role is {stated}")
+    pi_key = _person_key(str(fields.get("pi_name") or ""))
+    if pi_key & owner:
+        return None
+    if _pi_from_collaborator(text, fields, pi_key):
+        return (ROLE_SHAPE_PI_FROM_COLLABORATOR,
+                "the PI is a person the source names only as a 'with' collaborator")
+    if _pi_also_co_i(fields, pi_key, owner):
+        return (ROLE_SHAPE_PI_ALSO_CO_I, "the PI is also listed as a co-investigator")
+    if owner and _owner_lead_as_co_i(text, fields, owner):
+        return (ROLE_SHAPE_OWNER_LEAD_AS_CO_I,
+                "the CV owner is the first name on an unlabelled grant but renders only "
+                "as a co-investigator, with no PI")
+    return None
+
+
+def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
+    """Each rendered grant table as {row label: value}: the tables that have
+    a PI row."""
+    tables = []
+    for table in table_rows:
+        cells = {row[0]: (row[1] if len(row) > 1 else "") for row in table if row}
+        if PI_NAME_LABEL in cells:
+            tables.append(cells)
+    return tables
+
+
+def _entry_index_by_title(stage4: dict) -> dict[str, object]:
+    """element_idx_start of the first grant entry per normalised title."""
+    by_title: dict[str, object] = {}
+    for entry in stage4.get("entries", []):
+        fields = entry.get("extracted_fields")
+        if entry.get("taxonomy_code") in GRANT_CODES and isinstance(fields, Mapping):
+            title = norm(str(fields.get("title") or fields.get("study_title") or ""))
+            if title:
+                by_title.setdefault(title, entry.get("element_idx_start"))
+    return by_title
+
+
+def _empty_pi_cells(stage4: dict, table_rows: list[list[list[str]]]) -> list[dict]:
+    """A pi_cell_empty finding per rendered grant table whose role row says
+    PI and whose PI row is empty."""
+    by_title = _entry_index_by_title(stage4)
+    findings = []
+    for cells in _grant_tables(table_rows):
+        role = cells.get(YOUR_ROLE_LABEL, "")
+        if cells[PI_NAME_LABEL] or _stated_role(role) != ROLE_PI:
+            continue
+        title = cells.get(PROJECT_TITLE_LABEL, "")
+        idx = by_title.get(norm(title))
+        where = f"entry {idx}" if idx is not None else "a grant table"
+        findings.append(_finding(
+            "role_consistency", ROLE_SHAPE_SEVERITY[ROLE_SHAPE_PI_CELL_EMPTY],
+            f"{where}: 'Your role:' is {role}, but 'Name of Principal Investigator:' "
+            f"is empty ({ROLE_SHAPE_PI_CELL_EMPTY}, #1403)",
+            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+def lint_role_consistency(stage4: dict,
+                          table_rows: list[list[list[str]]] | None = None) -> list[dict]:
+    """A grant table that misstates who led the grant (#1403). One finding
+    per grant entry, for the first shape it shows (see the shapes above),
+    plus one per rendered grant table whose role says PI and whose PI cell is
+    empty (only when the docx was read). The owner is
+    `cv_owner.last_name`; with none, no shape that names the owner fires.
+    Not judged: an empty `pi_role` against the source's label (stage 6 then
+    names the owner from `pi_name`), a co-PI, or text that gives the owner
+    both roles."""
+    owner = _owner_surname_words(stage4)
+    findings = []
+    for entry in stage4.get("entries", []):
+        fields = entry.get("extracted_fields")
+        if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
+            continue
+        shape = _entry_role_shape(entry, fields, owner)
+        if shape:
+            findings.append(_finding(
+                "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+                f"{shape[1]} ({shape[0]}, #1403)",
+                [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    if table_rows is not None:
+        findings.extend(_empty_pi_cells(stage4, table_rows))
     return findings

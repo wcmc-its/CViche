@@ -67,6 +67,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     reclassify_past_m2a_grants,
     resolve_pi_name,
     _is_cv_owner,
+    _pi_name_from_label,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: E402
     grant_heading_rebucket_target,
@@ -444,16 +445,67 @@ def test_pi_roles_that_are_not_the_owner_as_pi_do_not_auto_fill(role):
     assert resolve_pi_name({}, '', role, 'Ada Testowner') == ''
 
 
-def test_long_form_rule_is_unchanged_for_co_principal_investigator():
-    """The "principal" + "investigator" test still fires on its long forms.
+def test_co_principal_investigator_role_leaves_the_pi_cell_empty_in_the_grant_table():
+    """Driven through `_fill_research_support`: the rendered PI cell stays empty (#1455)."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title='Shared Project', agency='NIH',
+                        pi_role='Co-Principal Investigator', start_date='01/2019',
+                        end_date='Present')]},
+        cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
+        current_year=TEST_YEAR)
 
-    That includes "Co-Principal Investigator" and "Site Principal
-    Investigator", as before this change; "Co-PI" does not (above). The bare
-    form is not widened to match the long form's reach.
+    cells = _cells(_tables_under(gen, CURRENT)[0])
+    assert cells['Name of Principal Investigator:'] == ''
+    assert cells['Your role:'] == 'Co-Principal Investigator'
+
+
+@pytest.mark.parametrize('role', [
+    'Co-Principal Investigator', 'Co-principal investigator', 'co principal investigator',
+    'CoPrincipal Investigator', 'Co-Principal-Investigator', 'Site Principal Investigator',
+    'Testville Site Principal Investigator', 'Site Principal Investigator, Testville University',
+    'Site Principal Investigator for Multicenter Project', 'Sub-Principal Investigator',
+    'Subcontract Principal Investigator', 'Multiple Principal Investigator',
+    'Multi-Principal Investigator', 'M-Principal Investigator',
+    'Academic co-Principal Investigator, community co-Principal Investigator',
+    'Subcontractor (Principal Investigator of subcontract)',
+    'Co-Investigator (Principal Investigator of a sub-contract)',
+])
+def test_qualified_long_form_pi_roles_do_not_auto_fill(role):
+    """A co-/site-/sub-/multiple-PI long form never makes the owner the PI (#1455).
+
+    "Co-Principal Investigator" rendered the owner as "Name of Principal
+    Investigator" on grants where someone else was the PI.
     """
-    for role in ('Co-Principal Investigator', 'Site Principal Investigator'):
-        assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == ''
+
+
+@pytest.mark.parametrize('role', [
+    'Principal Investigator', 'principal-investigator', 'Principal Investigator (PI)',
+    'Principal Investigator of Project 6', 'Principal Investigator for Multicenter Project',
+    'Testville Principal Investigator', 'Core Principal Investigator',
+    'Program Principal Investigator', 'Investigator and Principal Investigator',
+    'Co-Principal Investigator 2005-2010; Principal Investigator 2010-2011',
+    'Principal Clinical Investigator',
+])
+def test_unqualified_long_form_pi_roles_auto_fill(role):
+    """One unqualified phrase is enough; a prefix inside a word ("Program") is not one.
+
+    "Principal Clinical Investigator" keeps the older "principal" +
+    "investigator" containment test, which does not need the words adjacent.
+    """
+    assert resolve_pi_name({}, '', role, 'Ada Testowner') == 'Ada Testowner'
     assert resolve_pi_name({}, '', 'Principle Investigator', 'Ada Testowner') == ''
+
+
+def test_a_pi_the_source_names_survives_a_co_principal_investigator_role():
+    """The refusal is the owner auto-fill only: a named PI still renders."""
+    role = 'Co-Principal Investigator'
+    assert resolve_pi_name({'pi_name': 'Jane Smith'}, '', role, 'Ada Testowner') == 'Jane Smith'
+    assert resolve_pi_name({}, 'Ellison Foundation (PI: Holloway)', role,
+                           'Ada Testowner') == 'Holloway'
+    assert resolve_pi_name({}, 'NIH | R01 | 2019-2024 | Grace Hopper', role,
+                           'Ada Testowner') == 'Grace Hopper'
 
 
 def test_a_named_pi_beats_the_owner_on_a_bare_pi_role():
@@ -675,6 +727,67 @@ def test_an_explicit_pi_label_beats_a_name_suffix_shape():
     """Shapes are tried in order: "PI: <name>" outranks "<name>, Principal Investigator"."""
     raw = 'Ada Lovelace, Principal Investigator; renewal (PI: Grace Hopper)'
     assert resolve_pi_name({}, raw, '', '') == 'Grace Hopper'
+
+
+_OWN_TITLE = 'Stress Study \u2013 Mouse Models'
+_OWN_TITLE_TEXT = '1997 Example Foundation, "Stress Study" \u2013 Mouse Models, PI, Total $7,000.'
+
+
+def test_a_pi_label_capturing_the_grants_own_title_words_is_not_a_pi():
+    """#1403 (EQADVR 396): "<title>, PI" matched the "Name, PI" shape with the
+    title's last two words. Those words are the title, not a PI. With no
+    role the cell stays empty; with the bare "PI" role the owner fills it
+    (#1446's auto-fill), never the title words."""
+    fields = {'title': _OWN_TITLE, 'pi_role': 'PI'}
+    assert _pi_name_from_label(_OWN_TITLE_TEXT) == 'Mouse Models'
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, '', 'Ada Testowner') == ''
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, 'PI', 'Ada Testowner') == 'Ada Testowner'
+
+
+@pytest.mark.parametrize('fields', [
+    {'title': _OWN_TITLE.lower()},
+    {'title': None, 'study_title': _OWN_TITLE},
+])
+def test_the_own_title_guard_is_case_folded_and_reads_study_title(fields):
+    assert resolve_pi_name(fields, _OWN_TITLE_TEXT, '', '') == ''
+
+
+@pytest.mark.parametrize('title', ['Stress Study', 'Mouse Modelsx Study', 'AMouse Models Study',
+                                   None, ['a', 'list']])
+def test_a_pi_label_outside_the_title_still_names_the_pi(title):
+    """Only whole title words veto the capture: a title without them, one
+    that holds them inside a longer word, no title, or a non-string title
+    (stage 4 stores raw LLM JSON) keeps it."""
+    assert resolve_pi_name({'title': title}, _OWN_TITLE_TEXT, '', '') == 'Mouse Models'
+
+
+@pytest.mark.parametrize('title', ['Support Grant (PI: Lee)', 'Support Grant [PI Lee]',
+                                   'Support Grant, Lee (PI)'])
+def test_a_pi_named_by_a_label_inside_the_title_is_still_the_pi(title):
+    """A stage-4 title can keep the source's "(PI: <name>)" parenthetical. The
+    name follows a PI label there, so it is the PI, not title words: the guard
+    must not veto it (farm M2B entry 61.1)."""
+    raw = '08/01/2020-07/31/2025 | P30CA000000/ ' + title + ' | NCI | $1,000 (Total) | 5%'
+    assert resolve_pi_name({'title': title, 'pi_role': '5%'}, raw, '5%', 'Ada Testowner') == 'Lee'
+
+
+def test_a_title_word_capture_falls_through_to_the_owner_auto_fill():
+    """With the capture refused, a "Principal Investigator" role still fills
+    the owner, as it does for any grant whose text names no PI."""
+    assert resolve_pi_name({'title': _OWN_TITLE}, _OWN_TITLE_TEXT, 'Principal Investigator',
+                           'Ada Testowner') == 'Ada Testowner'
+
+
+def test_a_grant_whose_title_tail_matches_the_pi_shape_renders_the_owner_not_title_words():
+    """The rendered wire: the PI cell never names the title words. The role is
+    a bare "PI", so the owner auto-fill (#1446) names the CV owner."""
+    table = _generator()._create_grant_table(
+        {'title': _OWN_TITLE, 'agency': 'Example Foundation', 'pi_role': 'PI',
+         'start_date': '1997'},
+        'M2B', entry={'text': _OWN_TITLE_TEXT}, owner_name='Ada Testowner')
+    cells = _cells(table)
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
+    assert cells['Your role:'] == 'PI'
 
 
 def test_a_null_source_text_resolves_to_no_pi_rather_than_raising():

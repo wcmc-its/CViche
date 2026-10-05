@@ -972,6 +972,15 @@ class TestFurtherSpansFollowStage5csDate:
         assert _teaching_entry_lines(fields, "Fictional Course 1990-1994",
                                      taxonomy_code="K1") == ["1990-1994 - Fictional Course"]
 
+    def test_separate_years_replace_the_range_they_span(self):
+        """RCBKFG (#1245, UYFRTL 48/49): stage 4 wrote the first and last of
+        separate years as the row's range; the row shows the years."""
+        fields = self._fields("**1990-1994** - Fictional Course",
+                              additional_dates="1990; 1992; 1994")
+        assert _teaching_entry_lines(fields, "Fictional Course 1990, 1992, 1994",
+                                     taxonomy_code="K1") == [
+            "1990, 1992, 1994 - Fictional Course"]
+
 
 def test_the_spans_skip_a_start_year_inside_a_longer_number():
     """EBYSBC E22 (#1245): the row's own date is a whole token, not the tail

@@ -3801,7 +3801,7 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
         assert bool(lint_stage4_group_failures(artifact)) is expect_flag
 
 
-# --------------------- #1174: llm_fallback_served (cap below GREEN) ----------
+# --------------------- #1174: llm_fallback_served (WARN, caps nothing) -------
 #
 # Synthetic provenance: stage 4 stamps the entries of a taxonomy group the
 # content-filter fallback answered; stage 4.5 lists the calls it served.
@@ -3825,7 +3825,8 @@ def test_llm_fallback_served_warns_per_stage_4_section_and_names_the_model():
     assert set(by_section) == {
         f"stage 4 M2A on {_FALLBACK_MODEL} (1 entries)",
         f"stage 4 S1 on {_FALLBACK_MODEL} (2 entries)"}
-    assert all("capped at 84" in f["message"] for f in findings)
+    assert all(f["message"].endswith("the call succeeded, so the quality score is not capped")
+               for f in findings)
 
 
 def test_llm_fallback_served_reports_a_stage_4_5_call_as_the_research_summary():
@@ -3843,20 +3844,6 @@ def test_llm_fallback_served_quiet_without_provenance_or_on_a_malformed_artifact
     assert lint_llm_fallback_served({}, {"research_summary": {}}) == []
     assert lint_llm_fallback_served({"entries": [None, 3, "x"]}, None) == []
     assert lint_llm_fallback_served({}, {"llm_fallback_calls": [None, {"call": "x"}]}) == []
-
-
-def test_llm_fallback_served_and_the_score_gate_agree_on_the_same_artifact(tmp_path):
-    """Both read quality_score.llm_fallback_served, so the lint fires exactly
-    when the cap does."""
-    from unified_pipeline.quality_score import FALLBACK_SERVED_CAP, score_llm_fallback_served
-
-    served = {"entries": [_fallback_entry("S1")]}
-    clean = {"entries": [{"taxonomy_code": "S1", "extraction_success": True}]}
-    for artifact, expect_flag in ((served, True), (clean, False)):
-        (tmp_path / "X_fields.json").write_text(json.dumps(artifact))
-        _fraction, _detail, cap = score_llm_fallback_served(tmp_path)
-        assert (cap == FALLBACK_SERVED_CAP) is expect_flag
-        assert bool(lint_llm_fallback_served(artifact)) is expect_flag
 
 
 def test_run_doctor_wires_llm_fallback_served_through_to_the_verdict(tmp_path):
@@ -4101,14 +4088,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (49), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (51), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 47
+    assert len(payload["findings"]) == 49
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4748,6 +4735,53 @@ def test_classification_lint_prevalence_is_the_measured_farm_fraction():
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["section_consistency"] == round(23 / 63, 3)
     assert LINT_PREVALENCE["segmentation_collapse"] == round(1 / 63, 3)
+
+
+def test_span_count_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-05 over the 245 stored runs with stage-4 JSON (106
+    analysis/<uid>, 13 analysis/pilot, 126 farm and batch), as rendered by
+    origin/dev 5e6eac1d plus the stage-6 envelope fix (one fire per run at
+    any severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["span_count"] == round(64 / 245, 3)
+
+
+def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
+    """The role_consistency row must hand the lint the docx (#1403, EOAHMI
+    JIJRSN 516): a grant table whose role says PI and whose PI cell is empty
+    reaches the report as a WARN. Invented values."""
+    from unified_pipeline.stage6.sections.research_support import (
+        PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "M2B", "element_type": "paragraph", "element_idx_start": 516,
+        "text": "2013-2018: Principal Investigator in \u201cExample Trial\u201d",
+        "extracted_fields": {"title": "Example Trial", "pi_role": "PI"}})
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(docx_path)
+    table = output.add_table(rows=3, cols=2)
+    for row, cells in zip(table.rows, ((PROJECT_TITLE_LABEL, "Example Trial"),
+                                       (PI_NAME_LABEL, ""), (YOUR_ROLE_LABEL, "PI"))):
+        for cell, text in zip(row.cells, cells):
+            cell.paragraphs[0].text = text
+    output.save(docx_path)
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "role_consistency"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in hits] == [("WARN", "entry 516")]
+    assert "(pi_cell_empty, #1403)" in hits[0]["message"]
+
+
+def test_role_consistency_prevalence_is_the_measured_fraction():
+    """Measured 2026-10-05 (RC-ROLE2) over stored stage-4 JSON and a render
+    of origin/dev 43f84e1e: 8 of the 119 analysis/ runs and 7 of the 126
+    farm/batch runs (#1403); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["role_consistency"] == round(15 / 245, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
@@ -5452,6 +5486,51 @@ def test_junk_or_header_row_reads_a_bulleted_paragraph():
     assert _junk_hits(entries, [], blocks) == [("WARN", "entry 7 (P)", "header_only")]
 
 
+def test_junk_or_header_row_quotes_the_undated_header_row_not_the_dated_record():
+    """QTATUP 1252/1253/1261: a society header renders as its own undated
+    row, after a dated membership row that shows the same name and one
+    extra word. The evidence quotes the header's row, not the record's."""
+    entries = [_junk4("Example Widget Society", "Q2", 1252,
+                      organization="Example Widget Society")]
+    rows = [[["Member, Example Widget Society", "1992-Present"]],
+            [["Example Widget Society", "Member"]]]
+    findings = lint_junk_or_header_row({"entries": entries}, rows, [])
+    assert [f["evidence"] for f in findings] == [["Example Widget Society | Member"]]
+
+
+@pytest.mark.parametrize("text, fields", [
+    ("Example Medical School (2009-2014)", {"institution": "Example Medical School"}),
+    ("Example Medical School", {"institution": "Example Medical School",
+                                "start_date": "2009", "end_date": "2014"}),
+], ids=["year_in_text", "year_in_fields"])
+def test_junk_or_header_row_quotes_a_dated_row_for_a_dated_header(text, fields):
+    """A dated teaching header's own row shows its years, whether the year
+    is in its text or its date fields; an undated row with the same name
+    before it is not that row."""
+    entries = [_junk4(text, "K4", 5, **fields)]
+    rows = [[["Example Medical School"]], [["2009-2014 - Example Medical School"]]]
+    findings = lint_junk_or_header_row({"entries": entries}, rows, [])
+    assert [f["evidence"] for f in findings] == [["2009-2014 - Example Medical School"]]
+
+
+def test_junk_or_header_row_falls_back_to_a_row_whose_year_disagrees():
+    """No row's year agrees with the entry's: the first match is still the
+    evidence, so the finding count does not depend on the year."""
+    entries = [_junk4("Example Widget Society", "Q2", 1261,
+                      organization="Example Widget Society")]
+    rows = [[["Example Widget Society", "1991-Present"]]]
+    findings = lint_junk_or_header_row({"entries": entries}, rows, [])
+    assert [f["evidence"] for f in findings] == [["Example Widget Society | 1991-Present"]]
+
+
+def test_junk_or_header_row_reads_a_cut_row_only_for_a_label():
+    """Only a label's row may lack one of its words: a header's row that
+    lacks one is another line, not the header."""
+    entries = [_junk4("Example Widget Society", "Q2", 1253,
+                      organization="Example Widget Society")]
+    assert _junk_hits(entries, [], [("p", "Widget Society:")]) == []
+
+
 def test_junk_or_header_row_does_not_read_a_section_heading_as_a_row():
     entries = [_junk4("Research", "P", 7, institution="Research")]
     assert _junk_hits(entries, [], [("p", "RESEARCH")]) == []
@@ -5719,6 +5798,10 @@ def test_junk_or_header_row_warns_on_a_duty_sentence_rendered_as_its_role():
     # a dated entry is a record of its own
     (_junk4(_DUTY, "L3", 79, leadership_role="Administrator", start_date="2015"), [],
      [("p", "Administrator")]),
+    # a launch date dates it too (126-run corpus web40 150, 154: an L2
+    # project's name and year sit on the line above its role sentence)
+    (_junk4(_DUTY, "L2", 150, role="Administrator", project_name="Widget Service",
+            launch_date="2012"), [], [("p", "Administrator")]),
     # a short capitalised line, not a sentence
     (_junk4("Administrator, Example Widget Clinic Program", "L3", 79,
             leadership_role="Administrator"), [], [("p", "Administrator")]),

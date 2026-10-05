@@ -27,6 +27,7 @@ without the list number, year and venue the other two cells already show.
 import logging
 import re
 
+from ..fan_out import fallback_text
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
 
@@ -212,8 +213,9 @@ class PresentationsSection:
                     role = ''
 
                 if not title:
+                    # A split record's own line, not every record's (#1445).
                     title = _untitled_talk_title(
-                        entry.get('text', ''), role,
+                        fallback_text(entry), role,
                         str(fields.get('event_name') or ''), institution, formatted_date)
 
                 # The R block is Title | Institution/Location | Dates, so the

@@ -880,6 +880,20 @@ PI_LABEL_PATTERNS = (
 # owner being the grant's PI. "Sole" is the only qualifier the corpus carries
 # that still means the PI; "Contact PI" does not occur, so it is not accepted.
 OWNER_IS_PI_ROLE_RE = re.compile(r"\(?\s*(?:sole\s+)?p\.?\s*i\.?\s*\)?\s*:?", re.IGNORECASE)
+# The long form "principal investigator", hyphen or space between the words.
+_PI_PHRASE = r"principal[\s-]*investigator"
+_PI_PHRASE_RE = re.compile(_PI_PHRASE, re.IGNORECASE)
+# A long-form PI phrase that makes the owner someone other than the grant's PI
+# (#1455): a co-, sub-, subcontract-, site-, multiple-/multi- or M- prefix
+# ("Co-Principal Investigator", "Yale Site Principal Investigator",
+# "Multiple Principal Investigator"), or "... of subcontract" after it
+# ("Subcontractor (Principal Investigator of subcontract)"). The lookbehind keeps
+# a prefix from matching a word's tail ("Program Principal ..." is not "M-").
+# Survey of the eo/ndm/eb farms' stage-4 pi_role/role values, 2026-10-05.
+_QUALIFIED_PI_PHRASE_RE = re.compile(
+    r"(?<![^\W\d_])(?:co|sub|subcontract|site|multiple|multi|m)[\s-]*" + _PI_PHRASE
+    + r"|" + _PI_PHRASE + r"\s+of\s+(?:an?\s+|the\s+)?sub-?contract",
+    re.IGNORECASE)
 _NAME_JOINER_RE = re.compile(r" (?:&|and) ")
 _NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
 
@@ -891,6 +905,27 @@ def _pi_name_from_label(raw_text: str) -> str:
         if match:
             return match.group(1).strip()
     return ''
+
+
+def _in_own_title(name: str, fields: GrantFields) -> bool:
+    """True when `name` is a run of whole words of the grant's own title.
+
+    A source line "<sponsor>, "<title> – Mouse Models", PI, Total $<n>"
+    matches the "Name, PI" shape with the title's last two words, so the
+    owner's own role label put title words in the PI cell (#1403, EQADVR 396).
+    A PI's name is not part of the project's title, so a label capture the
+    title already holds is the title, not a PI. Case-folded, whole words.
+    A title that carries its own PI label ("Support Grant (PI: Lee)") keeps
+    that name as a PI: the labelled spans are cut out of the title first, so
+    only an unlabelled run of title words vetoes the capture.
+    """
+    title = fields.get('title') or fields.get('study_title') or ''
+    if not name or not isinstance(title, str):
+        return False
+    for pattern in PI_LABEL_PATTERNS:
+        title = pattern.sub(' ', title)
+    words = r'(?<!\w)' + re.escape(name.casefold()) + r'(?!\w)'
+    return re.search(words, title.casefold()) is not None
 
 
 def _surname_parts(name: str) -> frozenset[str]:
@@ -963,6 +998,8 @@ def resolve_pi_name(
 
     if not pi_name:
         pi_name = _pi_name_from_label(raw_text)
+        if _in_own_title(pi_name, fields):
+            pi_name = ''
         if pi_name and _is_cv_owner(pi_name, owner_name):
             pi_name = owner_name
 
@@ -1005,13 +1042,18 @@ def resolve_pi_name(
 def _role_names_owner_as_pi(role: str) -> bool:
     """True when the owner's role says they are the grant's PI.
 
-    Any role containing "principal" and "investigator" (which also takes
-    "Co-Principal Investigator" and "Site Principal Investigator", unchanged
-    from before), or a bare PI label (`OWNER_IS_PI_ROLE_RE`).
+    A role containing "principal" and "investigator", unless every
+    "principal investigator" phrase in it is a co-/site-/sub-/multiple-PI form
+    (`_QUALIFIED_PI_PHRASE_RE`, #1455): "Co-Principal Investigator" made the
+    owner the grant's PI. One unqualified phrase is enough ("Co-Principal
+    Investigator 2005-2010; Principal Investigator 2010-2011"). Or a bare PI
+    label (`OWNER_IS_PI_ROLE_RE`).
     """
     lowered = role.lower()
     if 'principal' in lowered and 'investigator' in lowered:
-        return True
+        if not _PI_PHRASE_RE.search(role):
+            return True
+        return _PI_PHRASE_RE.search(_QUALIFIED_PI_PHRASE_RE.sub(' ', role)) is not None
     return OWNER_IS_PI_ROLE_RE.fullmatch(role) is not None
 
 
@@ -1049,6 +1091,12 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
 # direct costs:"; a total award amount gets its own label instead, because a
 # total under "Annual" states a false fact (#982).
 ANNUAL_COSTS_LABEL = 'Annual direct costs:'
+# The rows the doctor's role_consistency lint reads back off a rendered grant
+# table (#1403): the PI cell, the owner's role, and the title it names the
+# grant by.
+PROJECT_TITLE_LABEL = 'Project title:'
+PI_NAME_LABEL = 'Name of Principal Investigator:'
+YOUR_ROLE_LABEL = 'Your role:'
 TOTAL_AWARD_LABEL = 'Total award:'
 STATUS_LABEL = 'Status:'
 NOTES_LABEL = 'Notes:'
@@ -1434,12 +1482,12 @@ class ResearchSupportSection:
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
         rows = [
             ('Award Source:', agency),
-            ('Project title:', title),
+            (PROJECT_TITLE_LABEL, title),
             *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
             ('Duration of support:', self._format_grant_duration(fields, code, raw_text)),
-            ('Name of Principal Investigator:', pi_name),
-            ('Your role:', role),
+            (PI_NAME_LABEL, pi_name),
+            (YOUR_ROLE_LABEL, role),
             ('Your percent (%) effort:', percent_effort),
             *_optional_grant_rows(fields, title, pi_name),
         ]

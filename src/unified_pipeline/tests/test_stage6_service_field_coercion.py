@@ -1092,3 +1092,43 @@ def test_q4b_section_reaches_the_editorial_board_row(tmp_path):
     assert len(rows) == 1
     assert rows[0][0] == ("Guest Co-Editor, Fictional Widget Letters - "
                           "Special Issue on Gadget Repair")
+
+
+# #1445 (EOAHMI recheck): the records of a stage-4 records list fan out into
+# one row each, and the last carries the parent's whole line. A cell its
+# fields leave empty fell back to that line, so it printed the other records.
+
+def _split_entry(code, records, text):
+    from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+    return {"text": text, "taxonomy_code": code, "element_idx_start": 3,
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+def test_q1_split_record_organization_is_its_own_line_not_every_record(tmp_path):
+    """DUTAVD 82: the last term's Organization cell read the earlier terms."""
+    records = [{"role": "Zqhistorian", "organization": None, "start_date": s, "end_date": e}
+               for s, e in (("1992", "1993"), ("1994", "1996"), ("1997", "1998"))]
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"), _split_entry(
+        "Q1", records, "Zqhistorian, 1992-1993, 1994-1996, 1997-1998")])
+    assert sorted(_rows_containing(doc, "Zqhistorian")) == [
+        ["", "Zqhistorian", "1992-1993"], ["", "Zqhistorian", "1994-1996"],
+        ["", "Zqhistorian", "1997-1998"]]
+
+
+def test_q2_split_record_committee_is_what_its_line_holds_beyond_role_and_dates(tmp_path):
+    """DUTAVD 79: the Committee cell printed the whole line, or a record's
+    built line with its role and years in it."""
+    records = [{"committee_name": None, "role": "Zqcouncil Member", "organization": None,
+                "start_date": s, "end_date": e} for s, e in (("1981", "1981"), ("1990", "1994"))]
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"), _split_entry(
+        "Q2", records, "Zqcouncil Member, 1981, 1990-1994")])
+    assert sorted(_rows_containing(doc, "Zqcouncil")) == [
+        ["", "Zqcouncil Member", "", "1981"], ["", "Zqcouncil Member", "", "1990-1994"]]
+
+
+def test_q2_unsplit_entry_still_falls_back_to_its_whole_text(tmp_path):
+    entry = _entry("Q2", role="Zqcouncil Member", start_date="1990", end_date="1994")
+    entry["text"] = "Zqcouncil Member, Ashby Society 1990-1994"
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"), entry])
+    assert list(_rows_containing(doc, "Zqcouncil")) == [
+        ["Zqcouncil Member, Ashby Society 1990-1994", "Zqcouncil Member", "", "1990-1994"]]

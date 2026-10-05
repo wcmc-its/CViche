@@ -4,9 +4,10 @@ fallback model (#1174).
 A Sonnet-5-family call that ends content_filtered is retried down an ordered
 chain of fallback models (`llm.bedrock.CONTENT_FILTER_FALLBACK_MODELS`) until
 one does not end content_filtered. The call succeeds, so nothing in the run reads as a failure; these keys are the
-write-only record that lets the doctor and the quality score tell such a call
-from an ordinary one. The writers (`llm.bedrock`, stage 4, stage 4.5) and the
-readers (`quality_score`, the doctor) all import the names from here.
+write-only record that lets the doctor tell such a call from an ordinary one;
+the quality score does not cap on it (#1174). The writers (`llm.bedrock`,
+stage 4, stage 4.5) and the reader (`quality_score.llm_fallback_served`, which
+the doctor's lint calls) all import the names from here.
 
 A leaf: imports nothing, so the scorer can read the names without loading the
 LLM client and botocore.
