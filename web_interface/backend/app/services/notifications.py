@@ -46,7 +46,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from app.config_loader import get_config
-from app.models import Run
+from app.models import Run, is_bulk_batch
 
 logger = logging.getLogger(__name__)
 
@@ -395,9 +395,10 @@ def build_started_payload(facts: RunFacts, submitter: str | None = None) -> dict
 
 
 def build_batch_submitted_payload(batch: BatchFacts, submitter: str | None = None) -> dict:
-    """Build the one Teams card for a batch upload (#1114): who submitted it,
-    how many files, and an "Open batch" link to the Runs page filtered to it.
-    Its runs post no "started" card of their own (see notify_run_started)."""
+    """Build the one Teams card for a bulk batch upload (#1114): who
+    submitted it, how many files, and an "Open batch" link to the Runs page
+    filtered to it. Its runs post no "started" card of their own (see
+    notify_run_started)."""
     batch_id = _card_text(batch.id, _FACT_MAX_CHARS)
     card_facts = [
         {"name": "Batch ID", "value": batch_id},
@@ -761,16 +762,29 @@ def flush(timeout: float = 15.0) -> None:
 # worker gets to the task (#782 review follow-up, r3968142554).
 
 
-def notify_run_started(run: object, submitter: str | None = None) -> None:
+def _posts_started_card(facts: RunFacts, batch_files_submitted: int | None) -> bool:
+    """False for a run in a bulk batch (#1114): its batch already posted one
+    "batch submitted" card, and 50 "started" cards would bury it. A one-file
+    batch is a single upload that asked for the completion email (#1340), so
+    its run posts one like any single run. A batch run whose size the caller
+    did not supply posts none, the bulk-batch default."""
+    if not facts.batch_id:
+        return True
+    return batch_files_submitted is not None and not is_bulk_batch(batch_files_submitted)
+
+
+def notify_run_started(
+    run: object, submitter: str | None = None, batch_files_submitted: int | None = None,
+) -> None:
     """Best-effort: queue a Teams notification for a run that just started.
 
-    A run in a batch posts none (#1114): its batch already posted one
-    "batch submitted" card, and 50 "started" cards would bury it."""
+    batch_files_submitted: the run's batch's ``files_submitted``, or None for
+    a run in no batch; see _posts_started_card."""
     run_id = "unknown"
     try:
         run_id = getattr(run, "id", None) or "unknown"
         facts = RunFacts.from_run(run)
-        if facts.batch_id:
+        if not _posts_started_card(facts, batch_files_submitted):
             return
         payload = build_started_payload(facts, submitter)
         url = _webhook_url()
@@ -832,8 +846,12 @@ def notify_feedback_submitted(feedback: object, run: object, submitter: str | No
 
 
 def notify_batch_submitted(batch: BatchFacts, submitter: str | None = None) -> None:
-    """Best-effort: queue the Teams "batch submitted" card (#1114)."""
+    """Best-effort: queue the Teams "batch submitted" card (#1114). A
+    one-file batch posts none: its run posts the single-run "started" card
+    instead (#1340, see _posts_started_card)."""
     try:
+        if not is_bulk_batch(batch.files_submitted):
+            return
         payload = build_batch_submitted_payload(batch, submitter)
         url = _webhook_url()
         if not url:

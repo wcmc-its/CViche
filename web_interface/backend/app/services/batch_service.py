@@ -21,12 +21,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import redis
-from sqlalchemy import func
+from sqlalchemy import ColumnElement, func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 
 from app.errors import not_found
-from app.models import BatchSource, Run, RunBatch, RunState, User, can_view_all_runs
+from app.models import BULK_BATCH_MIN_FILES, BatchSource, Run, RunBatch, RunState, User, can_view_all_runs
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
     BatchDetail, BatchRunRow, BatchStatusCounts, BatchSummary, QueueLane, QueueOverview,
@@ -191,11 +191,33 @@ def _status_counts(runs: list[Run]) -> BatchStatusCounts:
     )
 
 
-def _queued_at_in_batch_queue(db: Session) -> list[datetime]:
-    """When every queued run on the batch queue entered it, ascending."""
+def batch_size(db: Session, batch_id: str | None) -> int | None:
+    """``files_submitted`` of the batch ``batch_id`` names -- the input
+    ``run_queue.queue_for`` routes on -- or None for a run in no batch."""
+    if batch_id is None:
+        return None
+    return db.query(RunBatch.files_submitted).filter(RunBatch.id == batch_id).scalar()
+
+
+def _on_batch_queue() -> ColumnElement[bool]:
+    """SQL twin of ``run_queue.queue_for``: true for a run whose token goes
+    on the batch queue, i.e. one in a batch of BULK_BATCH_MIN_FILES or more
+    files. Needs ``Run`` outer-joined to ``RunBatch`` (``_with_batch``); a
+    run in no batch has no ``files_submitted`` and reads as false."""
+    return func.coalesce(RunBatch.files_submitted, 0) >= BULK_BATCH_MIN_FILES
+
+
+def _with_batch(query: Query) -> Query:
+    """``query`` over ``Run`` with each run's batch outer-joined, for ``_on_batch_queue``."""
+    return query.outerjoin(RunBatch, Run.batch_id == RunBatch.id)
+
+
+def _queued_at_in(db: Session, queue: run_queue.Queue) -> list[datetime]:
+    """When every queued run on ``queue`` entered it, ascending."""
+    in_queue = _on_batch_queue() if queue is run_queue.BATCH else ~_on_batch_queue()
     rows = (
-        db.query(Run.queued_at)
-        .filter(Run.status == RunState.QUEUED, Run.batch_id.isnot(None), Run.queued_at.isnot(None))
+        _with_batch(db.query(Run.queued_at))
+        .filter(Run.status == RunState.QUEUED, Run.queued_at.isnot(None), in_queue)
         .order_by(Run.queued_at)
         .all()
     )
@@ -203,9 +225,11 @@ def _queued_at_in_batch_queue(db: Session) -> list[datetime]:
 
 
 def _queue_position(run: Run, queue_times: list[datetime]) -> int | None:
-    """Queued batch runs that entered the batch queue before ``run`` (spec
-    endpoint 7). Single runs are on the other queue and never count, so a
-    batch run's position can hold still while single runs go ahead of it."""
+    """Queued runs that entered the batch's queue before ``run`` (spec
+    endpoint 7). Runs on the other queue never count, so a bulk batch run's
+    position can hold still while single runs go ahead of it. A one-file
+    batch's run is on the single queue (``run_queue.queue_for``) and is
+    ranked there."""
     if run.status != RunState.QUEUED or run.queued_at is None:
         return None
     return bisect.bisect_left(queue_times, run.queued_at)
@@ -220,7 +244,8 @@ def batch_detail(db: Session, batch: RunBatch, viewer: User) -> BatchDetail:
         .order_by(Run.created_at, Run.id)
         .all()
     )
-    queue_times = _queued_at_in_batch_queue(db) if any(r.status == RunState.QUEUED for r in runs) else []
+    queue = run_queue.queue_for(batch.files_submitted)
+    queue_times = _queued_at_in(db, queue) if any(r.status == RunState.QUEUED for r in runs) else []
     show_score = can_view_all_runs(viewer)
     rows = [
         BatchRunRow(
@@ -250,12 +275,14 @@ class _LaneLoad:
 
 def _lane_loads(db: Session) -> dict[run_queue.Queue, _LaneLoad]:
     """Queued and running counts per queue. The queue a run is on is
-    ``run_queue.queue_for(batch_id)``, so batch runs are the ones with a
-    batch_id."""
+    ``run_queue.queue_for`` of its batch's size, so batch-queue runs are the
+    ones in a bulk batch (``_on_batch_queue``); a one-file batch's run counts
+    under the single queue, where it waits."""
+    on_batch_queue = _on_batch_queue()
     rows = (
-        db.query(Run.status, Run.batch_id.isnot(None), func.count(Run.id))
+        _with_batch(db.query(Run.status, on_batch_queue, func.count(Run.id)))
         .filter(Run.status.in_((RunState.QUEUED, RunState.RUNNING)))
-        .group_by(Run.status, Run.batch_id.isnot(None))
+        .group_by(Run.status, on_batch_queue)
         .all()
     )
     counts: Counter[tuple[str, bool]] = Counter()

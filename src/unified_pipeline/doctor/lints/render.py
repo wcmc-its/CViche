@@ -33,6 +33,7 @@ from unified_pipeline.core.text_norm import (
     norm,
 )
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from ..shared import (
@@ -2717,6 +2718,200 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
     return findings
 
 
+# Lint fanout_cell_residue (#1445; EOAHMI DUTAVD-01, WYMVGU-01, BRUSUZ-01): a
+# record stage 6 fanned out of a multi-record entry (`STAGE4_RECORDS_KEY`,
+# #1406) whose table row prints leftover text of the parent entry in a name,
+# organization or committee cell. Before #1449 the last record kept the
+# parent's whole line, and a renderer that fell back to the text for an empty
+# cell printed the other records again: the first two terms' years as the
+# organization of a third term, or '93 <first role>' (the sibling's role and
+# the tail of '1992-93') beside the second role. #1449 fixed the fallbacks it
+# knew of; this lint guards the shape in any grid table, for any code.
+#
+#   sibling_year   a year another record of the entry holds, and this one
+#                  does not
+#   year_stub      a two-digit tail of one of the entry's years ('93')
+#   bare_to        a cell that opens or ends on the range word 'to'
+#   built_line     a built record line ('<role> | 1981 | 1981') in one cell
+#   sibling_value  another record's value (its role, venue, committee) with
+#                  more text around it
+#
+# A row is a record's when more of its cells equal that record's values (and
+# its date cell that record's years) than any other record's; a tie is no
+# one's row. A cell is read only when every word of it is in the parent's
+# text: the residue came from there, and a cell stage 5b or a default filled
+# is not leftover text. A record's own years in its name cell are not read:
+# a renderer that prints a whole line in its name cell does that to every
+# entry (EBYSBC MQSUIC 611), not only to split ones.
+FANOUT_RESIDUE_SIBLING_YEAR = "sibling_year"
+FANOUT_RESIDUE_YEAR_STUB = "year_stub"
+FANOUT_RESIDUE_BARE_TO = "bare_to"
+FANOUT_RESIDUE_BUILT_LINE = "built_line"
+FANOUT_RESIDUE_SIBLING_VALUE = "sibling_value"
+
+#: Severity of every finding. Measured 2026-10-05 (FAN-RES in PRECISION.md):
+#: every hit on the dev-248 render and on the 102 fresh dev renders was read
+#: against its stage-4 entry and its rendered row.
+FANOUT_RESIDUE_SEVERITY = "WARN"
+#: Stage 6 fans an entry out at this many records (`fan_out._MIN_RECORDS`).
+FANOUT_RESIDUE_MIN_RECORDS = 2
+#: Rendered rows quoted per finding.
+FANOUT_RESIDUE_EVIDENCE_LIMIT = 3
+#: A year's tail as a CV abbreviates a range's end ('1992-93').
+FANOUT_YEAR_STUB_DIGITS = 2
+#: The range word a cut date leaves behind ('1990 to').
+FANOUT_RANGE_WORD = "to"
+#: A sibling value counts only with a word this long: a bare 'Dr' or a
+#: number is no value of its own.
+FANOUT_SIBLING_MIN_WORD_CHARS = 3
+#: A grid table's date column, by its header ('Dates (yyyy-yyyy)', 'Year
+#: Awarded', 'Date of issue'). A table with none is a label/value table, one
+#: record per table, which has no row to misplace text in.
+_DATE_HEADER_RE = re.compile(r"\bdates?\b|\byears?\b", re.IGNORECASE)
+_LETTER_WORD_RE = re.compile(r"[^\W\d_]+")
+
+
+class _SplitRecord(NamedTuple):
+    """One stage-4 record: its non-date values as rendered cells read them
+    (`norm`), their words, and its years."""
+    values: frozenset[str]
+    tokens: frozenset[str]
+    years: frozenset[str]
+    value_tokens: tuple[frozenset[str], ...]
+
+
+class _SplitEntry(NamedTuple):
+    """A multi-record stage-4 entry: its records, every year they hold, and
+    the words of the parent's text."""
+    element_idx: object
+    code: str
+    records: tuple[_SplitRecord, ...]
+    years: frozenset[str]
+    text_tokens: frozenset[str]
+
+
+def _split_record(record: Mapping) -> _SplitRecord:
+    values = [str(value) for key, value in record.items()
+              if isinstance(value, (str, int, float)) and str(value).strip()
+              and not _fan_out_date_key(key)]
+    years = frozenset(year for key, value in record.items() if _fan_out_date_key(key)
+                      for year in _FOUR_DIGIT_YEAR_RE.findall(str(value or "")))
+    value_tokens = tuple(frozenset(_name_tokens(value)) for value in values)
+    return _SplitRecord(frozenset(norm(value) for value in values if _name_tokens(value)),
+                        frozenset().union(*value_tokens), years, value_tokens)
+
+
+def _split_entries(stage4: dict) -> list[_SplitEntry]:
+    """The entries stage 4 kept two or more records for."""
+    entries = []
+    for raw in stage4.get("entries", []):
+        fields = raw.get("extracted_fields")
+        records = fields.get(STAGE4_RECORDS_KEY) if isinstance(fields, Mapping) else None
+        if (not isinstance(records, list) or len(records) < FANOUT_RESIDUE_MIN_RECORDS
+                or not all(isinstance(record, Mapping) for record in records)):
+            continue
+        split = tuple(_split_record(record) for record in records)
+        entries.append(_SplitEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), split,
+            frozenset().union(*(record.years for record in split)),
+            frozenset(_name_tokens(str(raw.get("text") or "")))))
+    return entries
+
+
+def _row_record(entry: _SplitEntry, cells: list[str], date_years: set[str]) -> int | None:
+    """The index of the one record this row renders, or None: no record's
+    value is a cell of it, or two records match it equally well."""
+    scores = []
+    for record in entry.records:
+        exact = sum(1 for cell in cells if norm(cell) in record.values)
+        dated = bool(exact) and bool(record.years) and record.years == date_years
+        scores.append(exact + dated)
+    best = max(scores)
+    if not best or scores.count(best) > 1:
+        return None
+    index = scores.index(best)
+    years = entry.records[index].years
+    return None if years and not years & date_years else index
+
+
+def _sibling_value_in(cell_tokens: frozenset[str], record: _SplitRecord,
+                      siblings: list[_SplitRecord]) -> bool:
+    """Whether the cell holds another record's value, with more around it:
+    a cell that IS that value is a value both records render (a default
+    role, a shared organization)."""
+    return any(tokens and not tokens <= record.tokens and tokens < cell_tokens
+               and any(len(tok) >= FANOUT_SIBLING_MIN_WORD_CHARS and not tok.isdigit()
+                       for tok in tokens)
+               for sibling in siblings for tokens in sibling.value_tokens)
+
+
+def _cell_residue(cell: str, entry: _SplitEntry, index: int) -> list[str]:
+    """The residue shapes in one cell of the row of record `index`."""
+    tokens = frozenset(_name_tokens(cell))
+    if not tokens or not tokens <= entry.text_tokens:
+        return []
+    record = entry.records[index]
+    shapes = []
+    if set(_FOUR_DIGIT_YEAR_RE.findall(cell)) & (entry.years - record.years - record.tokens):
+        shapes.append(FANOUT_RESIDUE_SIBLING_YEAR)
+    if any(len(tok) == FANOUT_YEAR_STUB_DIGITS and tok.isdigit() and tok not in record.tokens
+           and any(year.endswith(tok) for year in entry.years) for tok in tokens):
+        shapes.append(FANOUT_RESIDUE_YEAR_STUB)
+    words = _LETTER_WORD_RE.findall(norm(cell))
+    if (words and FANOUT_RANGE_WORD in (words[0], words[-1])
+            and FANOUT_RANGE_WORD not in record.tokens):
+        shapes.append(FANOUT_RESIDUE_BARE_TO)
+    parts = [part.strip() for part in cell.split(TABLE_ROW_JOINER.strip())]
+    if len(parts) > 1 and any(_FOUR_DIGIT_YEAR_RE.fullmatch(part) for part in parts):
+        shapes.append(FANOUT_RESIDUE_BUILT_LINE)
+    siblings = [other for i, other in enumerate(entry.records) if i != index]
+    if _sibling_value_in(tokens, record, siblings):
+        shapes.append(FANOUT_RESIDUE_SIBLING_VALUE)
+    return shapes
+
+
+def _table_residue(entry: _SplitEntry, table: list[list[str]]) -> list[tuple[str, list[str]]]:
+    """Each row of a grid table that one of the entry's records renders with
+    residue: the row joined, and its shapes."""
+    if not table:
+        return []
+    date_cols = {i for i, head in enumerate(table[0]) if _DATE_HEADER_RE.search(head)}
+    if not date_cols:
+        return []
+    found = []
+    for row in table[1:]:
+        cells = [cell for i, cell in enumerate(row) if cell.strip() and i not in date_cols]
+        date_years = set(_FOUR_DIGIT_YEAR_RE.findall(
+            " ".join(cell for i, cell in enumerate(row) if i in date_cols)))
+        index = _row_record(entry, cells, date_years) if cells else None
+        if index is None:
+            continue
+        shapes = [shape for cell in cells if norm(cell) not in entry.records[index].values
+                  for shape in _cell_residue(cell, entry, index)]
+        if shapes:
+            found.append((TABLE_ROW_JOINER.join(c for c in row if c.strip()), shapes))
+    return found
+
+
+def lint_fanout_cell_residue(stage4: dict,
+                             table_rows: list[list[list[str]]]) -> list[dict]:
+    """Records of a multi-record entry whose table row prints the parent's
+    leftover text -- another record's years or value, a cut year, a range
+    word, a built line -- in a name, organization or committee cell (#1445).
+    One finding per entry, named by its element_idx_start, quoting rows."""
+    findings = []
+    for entry in _split_entries(stage4):
+        rows = [found for table in table_rows for found in _table_residue(entry, table)]
+        if not rows:
+            continue
+        shapes = sorted({shape for _, row_shapes in rows for shape in row_shapes})
+        findings.append(_finding(
+            "fanout_cell_residue", FANOUT_RESIDUE_SEVERITY,
+            f"entry {entry.element_idx} ({entry.code}): {', '.join(shapes)}: a record "
+            f"split from this entry prints the entry's leftover text in a name, "
+            f"organization or committee cell",
+            list(dict.fromkeys(text for text, _ in rows))[:FANOUT_RESIDUE_EVIDENCE_LIMIT]))
+    return findings
 # identical_rendered_rows (EOAHMI recheck: QTATUP-04, BRUSUZ-01): rows of one
 # rendered table that a reader cannot tell apart. `duplicate_records` cannot
 # see them: its block rule compares enumerated paragraphs, and `blocks` holds

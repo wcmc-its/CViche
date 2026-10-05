@@ -9,6 +9,8 @@ export interface User {
   default_submission_type: string | null
   /** Run quota from GET /api/auth/me; null limits mean unlimited. */
   quota?: QuotaInfo | null
+  /** Where CVs can be emailed (#1298); null while email intake is off. */
+  intake_address?: string | null
 }
 
 export interface QuotaInfo {
