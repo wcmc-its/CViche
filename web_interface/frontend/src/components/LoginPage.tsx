@@ -4,15 +4,13 @@ import { useAuth } from '../contexts/AuthContext'
 import ErrorBanner from './ErrorBanner'
 import { LogIn, Loader2, Shield } from 'lucide-react'
 import { authRoutes } from '../api/routes'
-
-// Same address the Help page and the not_authorized message use.
-const CONTACT_EMAIL = 'paa2013@med.cornell.edu'
+import { SUPPORT_EMAIL } from '../utils'
 
 const SAML_ERROR_MESSAGES: Record<string, string> = {
   auth_failed: "Authentication failed. Please try again or contact IT support.",
   missing_attributes: "Your account is missing required information. Contact your IT administrator.",
   saml_not_enabled: "SSO login is not available. Please use the standard sign-in form.",
-  not_authorized: "You are not authorized to use CViche. Contact Paul Albert at paa2013@med.cornell.edu to request access.",
+  not_authorized: `You are not authorized to use CViche. Contact ${SUPPORT_EMAIL} to request access.`,
   directory_unavailable: "Unable to verify group membership. The directory service may be temporarily unavailable. Please try again in a few minutes.",
   session_store_unavailable: "We could not start your session because the sign-in service is temporarily unavailable. Please try again in a few minutes.",
   session_state_unavailable: "We could not start your session because sign-in state could not be read. Please try again in a few minutes, or contact IT support if this persists.",
@@ -199,12 +197,6 @@ export default function LoginPage() {
               </button>
             </form>
           )}
-          <p className="mt-6 border-t border-gray-100 pt-4 text-sm text-gray-500">
-            No access yet?{' '}
-            <a href={`mailto:${CONTACT_EMAIL}`} className="text-primary-600 hover:underline">
-              Request it
-            </a>
-          </p>
         </section>
         <p className="mt-6 text-center text-xs text-gray-500">
           CViche is provided by the Library and Software Development Services
