@@ -109,6 +109,18 @@ class TestSimpleModeFullCycle:
         assert logout_resp.status_code == 200
         assert "Logged out" in logout_resp.json()["message"]
 
+    @pytest.mark.parametrize("flag, expected", [("1", "cv@scholars-mail.weill.cornell.edu"), ("", None)])
+    def test_me_exposes_intake_address_only_while_intake_is_on(self, client, db, seed_simple_mode, monkeypatch, flag, expected):
+        """#1298: /api/auth/me carries the intake address only while CVICHE_EMAIL_INTAKE is on.
+
+        Mints the cookie directly: a real login spends the shared login rate limit."""
+        monkeypatch.setenv("CVICHE_EMAIL_INTAKE", flag)
+        user = User(email="test@example.com", display_name="Test", role="user", status="active", consent_version="1.0")
+        db.add(user)
+        db.commit()
+        me_resp = client.get("/api/auth/me", cookies={COOKIE_NAME: create_session_cookie(user, db)})
+        assert me_resp.json()["intake_address"] == expected
+
     def test_simple_mode_config_returns_simple(self, client, seed_simple_mode):
         """GET /api/auth/config returns {"mode": "simple"} with no discovery_url key."""
         response = client.get("/api/auth/config")

@@ -43,8 +43,10 @@ of RED (`quality_score.STAGE4_GROUP_FAILURE_CAP`).
 `lint_llm_fallback_served` (#1174) reports the success the lints above cannot
 see: a Sonnet-5 call that ended content_filtered and was answered by the
 fallback model. Nothing failed, so nothing marks an error; stage 4 stamps the
-entries of the group and stage 4.5 lists the calls. A WARN for the same
-reason as the group-failure lint (`quality_score.FALLBACK_SERVED_CAP`).
+entries of the group and stage 4.5 lists the calls. A WARN that caps
+nothing: the call's reply parsed and validated before it reached the run, so
+the score does not cap on it (#1174, Paul 2026-10-05); the finding is the
+provenance record of which model answered.
 
 `lint_stage_failure_recorded` (#1174) reports what `lint_pipeline_errors`
 cannot: a stage the driver recorded as failed in the stage-error record
@@ -66,9 +68,9 @@ exported before.
 """
 
 from unified_pipeline.quality_score import (
-    FALLBACK_SERVED_CAP,
     FATAL_ERROR_PATTERN,
     NO_OUTPUT_CAP,
+    FallbackServedCall,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
     STAGE4_GROUP_FAILURE_CAP,
     iter_error_fields,
@@ -254,26 +256,27 @@ def lint_no_output(has_stage4: bool, has_docx: bool, has_report: bool) -> list[d
 # A call the content-filter fallback served (#1174).
 
 
-def lint_llm_fallback_served(stage_4: dict, stage_4_5: dict | None = None) -> list[dict]:
-    """The quality score's fallback-served gate: a Sonnet-5 call ended
-    content_filtered and the fallback model answered it, so the output of that
-    section came from a model the stage was not tuned on. One finding per
-    section, so the evidence names which section to check.
+def lint_llm_fallback_served(stage_4: dict, stage_4_5: dict | None = None,
+                             prompt_log_calls: list[FallbackServedCall] | None = None) -> list[dict]:
+    """A Sonnet-5 call ended content_filtered and the fallback model answered
+    it, so the output of that section came from a model the stage was not
+    tuned on. One finding per section, so the evidence names which section to
+    check.
 
-    WARN, not ERROR: the call succeeded, and the cap
-    (`quality_score.FALLBACK_SERVED_CAP`) keeps the run out of GREEN without
-    putting it in the RED band. ``stage_4_5`` is optional because a run may
-    have no research-summary artifact; an artifact from before the stage
-    recorded provenance is not a finding."""
+    WARN, and the quality score does not cap on it (#1174): the call succeeded
+    and its reply parsed, so this records provenance, not a defect.
+    ``stage_4_5`` is optional because a run may have no research-summary
+    artifact; an artifact from before the stage recorded provenance is not a
+    finding. ``prompt_log_calls`` (`prompt_log_fallback_served`) adds one
+    finding per stage for the calls no artifact records."""
     return [
         _finding(
             "llm_fallback_served", "WARN",
             f"stage {call.stage} {call.section}: the content filter blocked the "
-            f"primary model and {call.model} answered ({call.count} "
-            f"{'entries' if call.stage == '4' else 'call'}) — the quality score "
-            f"is capped at {FALLBACK_SERVED_CAP} (never GREEN)",
+            f"primary model and {call.model} answered ({call.count} {call.unit}); "
+            f"the call succeeded, so the quality score is not capped",
             [call.describe()])
-        for call in llm_fallback_served(stage_4, stage_4_5)]
+        for call in llm_fallback_served(stage_4, stage_4_5) + list(prompt_log_calls or [])]
 
 
 # --------------------------------------------------------------------------

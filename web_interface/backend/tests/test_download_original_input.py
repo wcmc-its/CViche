@@ -278,3 +278,71 @@ def test_scan_flag_on_absent_original_is_404_before_any_tag_lookup(client, db, s
     resp = client.get(f"/api/run/{run.id}/input", follow_redirects=False)
     assert resp.status_code == 404
     assert store.scan_lookups == 0
+
+
+# --- #1333: ?as_url=true lets the page fetch() the download and show a refusal --
+
+def test_as_url_on_s3_returns_the_presigned_url_as_json(client, db, seed_simple_mode, monkeypatch):
+    user, run = _user_and_run(db, suffix="-asurl-s3", filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    store = _S3Storage({f"input/{run.id}.docx": b"ignored"})
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+
+    resp = client.get(f"/api/run/{run.id}/input?as_url=true", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"url": f"https://s3.example/{run.id}/input/{run.id}.docx?sig=abc"}
+    assert store.asked_name == _SYNTHETIC_NAME
+    # A presigned URL is a short-lived credential; no cache may keep it.
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_as_url_on_local_storage_returns_null_url_not_the_bytes(client, db, seed_simple_mode, monkeypatch):
+    user, run = _user_and_run(db, suffix="-asurl-local", filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage",
+                        lambda: _LocalStorage({f"input/{run.id}.docx": b"PK\x03\x04 docx bytes"}))
+
+    resp = client.get(f"/api/run/{run.id}/input?as_url=true")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"url": None}
+    assert "content-disposition" not in resp.headers
+
+
+def test_as_url_with_scan_flag_on_untagged_original_is_409_and_issues_no_url(
+        client, db, seed_simple_mode, monkeypatch):
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    user, run = _user_and_run(db, suffix="-asurl-scan", filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    store = _ScannedS3Storage({f"input/{run.id}.docx": b"x"}, None)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+
+    resp = client.get(f"/api/run/{run.id}/input?as_url=true", follow_redirects=False)
+    assert resp.status_code == 409
+    assert "still being scanned" in resp.json()["detail"]["message"]
+    assert resp.headers["Retry-After"] == "60"
+    assert store.asked_name is None  # no presigned URL was issued
+
+
+def test_as_url_absent_original_is_404_and_issues_no_url(client, db, seed_simple_mode, monkeypatch):
+    user, run = _user_and_run(db, suffix="-asurl-404", filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    store = _S3Storage({})
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+
+    resp = client.get(f"/api/run/{run.id}/input?as_url=true", follow_redirects=False)
+    assert resp.status_code == 404
+    assert "url" not in resp.json()
+    assert store.asked_name is None  # no presigned URL was issued
+
+
+def test_as_url_non_owner_is_403_and_issues_no_url(client, db, seed_simple_mode, monkeypatch):
+    _, run = _user_and_run(db, suffix="-asurl-own", filename=_SYNTHETIC_NAME)
+    other, _ = _user_and_run(db, suffix="-asurl-other")
+    _auth(client, other)
+    store = _S3Storage({f"input/{run.id}.docx": b"x"})
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+
+    resp = client.get(f"/api/run/{run.id}/input?as_url=true", follow_redirects=False)
+    assert resp.status_code == 403
+    assert "url" not in resp.json()
+    assert store.asked_name is None  # no presigned URL was issued

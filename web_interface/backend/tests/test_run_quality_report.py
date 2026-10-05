@@ -101,9 +101,6 @@ def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp
     ((scorer.score_lost_source_table, scorer.score_fused_entries), "table_lost"),
     ((scorer.score_under_extracted_records, scorer.score_stage4_group_failures),
      "under_extraction"),
-    ((scorer.score_stage4_group_failures, scorer.score_llm_fallback_served),
-     "stage4_group_failures"),
-    ((scorer.score_fused_entries, scorer.score_llm_fallback_served), "segmentation"),
 ])
 def test_when_gates_tie_at_the_same_cap_the_pointer_names_the_most_specific(fired, lint):
     """#822: the content-loss caps and the stage-4 cap all sit at 84, and the
@@ -156,9 +153,9 @@ def test_a_run_with_fused_entries_and_a_failed_stage4_group_points_at_the_fused_
         "several records were fused into one entry", "segmentation")
 
 
-def test_cap_source_names_the_fallback_served_gate_from_the_real_scorer(tmp_path):
-    """#1174: the same 85 GREEN run with one fallback-served stage-4 group is
-    capped at 84, and the report names that gate and its doctor lint."""
+def test_a_fallback_served_call_caps_nothing_through_the_real_scorer(tmp_path):
+    """#1174 (Paul, 2026-10-05): the same 85 GREEN run with one fallback-served
+    stage-4 group stays 85 GREEN, so the report names no cap."""
     import json
     from docx import Document
 
@@ -180,8 +177,8 @@ def test_cap_source_names_the_fallback_served_gate_from_the_real_scorer(tmp_path
     result = scorer.score_run(tmp_path, "T1")
     source = rqr.cap_source(qss.parse_score(result))
 
-    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 84)
-    assert source == rqr.CapSource("a backup model answered part of the run", "llm_fallback_served")
+    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 85)
+    assert result["hard_fail_caps_applied"] == [] and source is None
 
 
 def test_every_known_lint_has_plain_wording():
@@ -212,6 +209,7 @@ def test_fired_zero_weight_gates_are_listed_and_weighted_caps_are_not():
     flags = [
         f"HARD-FAIL cap=25: {OWNER_GATE} (fraction=1.00)",
         "HARD-FAIL cap=84: Source table lost before extraction (CAP-ONLY gate) (worst=6)",
+        # A score cached before #1174 dropped the fallback-served gate: no row.
         "HARD-FAIL cap=84: Call served by the content-filter fallback model (caps below GREEN) (x)",
         "HARD-FAIL cap=99: unknown gate",
     ]
@@ -219,7 +217,6 @@ def test_fired_zero_weight_gates_are_listed_and_weighted_caps_are_not():
 
     assert [(g.label, g.cap, g.lint) for g in report.gates_fired] == [
         ("Source tables read in full", 84, "table_lost"),
-        ("Usual AI model used throughout", 84, "llm_fallback_served"),
     ]
 
 

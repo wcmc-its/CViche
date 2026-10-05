@@ -130,11 +130,16 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
     payload = _doctor_payload()
-    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    kwargs = []
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: kwargs.append(k) or payload)
     posts = _capture_posts(monkeypatch)
 
     o = _orchestrator(monkeypatch, tmp_path, db, "DOC_ON")
     asyncio.run(o.execute())
+
+    # #1174: the doctor reads this run's prompt logs for fallback-served calls.
+    from app.pipeline.orchestrator import PROMPT_LOGS_DIR
+    assert kwargs[-1]["prompt_log_dir"] == PROMPT_LOGS_DIR / "DOC_ON"
 
     db.expire_all()
     assert db.query(Run).filter(Run.id == "DOC_ON").first().status == "complete"
@@ -195,7 +200,7 @@ def test_doctor_source_is_the_runs_private_input_copy(monkeypatch, tmp_path, db)
     seen = {}
     monkeypatch.setattr(
         run_doctor_mod, "run_doctor",
-        lambda out_dir, uid, source=None: seen.update(source=source) or _doctor_payload(),
+        lambda out_dir, uid, source=None, prompt_log_dir=None: seen.update(source=source) or _doctor_payload(),
     )
     o._doctor_report()
 

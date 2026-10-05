@@ -486,6 +486,13 @@ def _complex_field(*instr_runs: str) -> str:
      None),
     ("Macintosh HD attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "Macintosh%20HD:Users:x.dotx")},
      None),
+    ("mhtml: nesting a URL (CVE-2021-40444 shape)", {"word/_rels/document.xml.rels": _rels(
+        "oleObject", "mhtml:http://evil.example/x.html!x-usc:http://evil.example/x.html")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("smb attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "smb://evil.example/s/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("Mac HFS volume without a space", {_SETTINGS_RELS: _rels("attachedTemplate", "Data:Users:x.dotx")}, None),
+    ("Windows drive with forward slashes", {_SETTINGS_RELS: _rels("attachedTemplate", "C://x.dotm")}, None),
     ("Mac Word file://// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:////Users/x.dotx")},
      None),
     ("internal https-looking target", {_SETTINGS_RELS: _rels("attachedTemplate", "https://x/y.dotm", "Internal")},

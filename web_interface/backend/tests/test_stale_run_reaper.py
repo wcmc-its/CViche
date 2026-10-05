@@ -18,7 +18,7 @@ import pytest
 import redis
 
 import app.main as main_mod
-from app.models import Run, RunState
+from app.models import Run, RunBatch, RunState, User
 from app.pipeline import run_queue
 from app.services import run_service
 
@@ -184,7 +184,17 @@ def _stream_run_ids(r):
     return [fields["run_id"] for _, fields in r.xrange(run_queue.STREAM)]
 
 
-def _seed_queued_run(db, run_id, *, queued_at, batch_id=None):
+def _seed_batch(db, batch_id, files_submitted):
+    user = User(email=f"{batch_id.lower()}@example.com", display_name="Pat Example", consent_version="1.0")
+    db.add(user)
+    db.commit()
+    db.add(RunBatch(id=batch_id, user_id=user.id, files_submitted=files_submitted))
+    db.commit()
+
+
+def _seed_queued_run(db, run_id, *, queued_at, batch_id=None, batch_files_submitted=2):
+    if batch_id is not None and db.get(RunBatch, batch_id) is None:
+        _seed_batch(db, batch_id, batch_files_submitted)
     run = Run(id=run_id, filename="cv.docx", file_type="docx",
               status=RunState.QUEUED, queued_at=queued_at, batch_id=batch_id)
     db.add(run)
@@ -268,6 +278,16 @@ class TestReconcileQueuedRuns:
         assert run_service.reconcile_queued_runs(db) == 1
         assert _batch_stream_run_ids(fake_redis) == ["SQB001"]
         assert _stream_run_ids(fake_redis) == []
+
+    def test_requeues_a_stranded_one_file_batch_run_onto_the_single_queue(self, db, fake_redis, queue_mode):
+        """#1340: a one-file batch (a single upload that asked for the
+        completion email) routes like a single run on every producer,
+        including this one."""
+        _seed_queued_run(db, "SQB003", queued_at=datetime.now() - timedelta(minutes=10), batch_id="ONEFIL",
+                         batch_files_submitted=1)
+        assert run_service.reconcile_queued_runs(db) == 1
+        assert _stream_run_ids(fake_redis) == ["SQB003"]
+        assert _batch_stream_run_ids(fake_redis) == []
 
     def test_leaves_a_batch_run_alone_while_its_batch_token_is_live(self, db, fake_redis, queue_mode):
         """#1114: live_run_ids() must see the batch stream too, or every queued

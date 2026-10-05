@@ -4,9 +4,10 @@ fallback model (#1174).
 A Sonnet-5-family call that ends content_filtered is retried down an ordered
 chain of fallback models (`llm.bedrock.CONTENT_FILTER_FALLBACK_MODELS`) until
 one does not end content_filtered. The call succeeds, so nothing in the run reads as a failure; these keys are the
-write-only record that lets the doctor and the quality score tell such a call
-from an ordinary one. The writers (`llm.bedrock`, stage 4, stage 4.5) and the
-readers (`quality_score`, the doctor) all import the names from here.
+write-only record that lets the doctor tell such a call from an ordinary one;
+the quality score does not cap on it (#1174). The writers (`llm.bedrock`,
+stage 4, stage 4.5) and the reader (`quality_score.llm_fallback_served`, which
+the doctor's lint calls) all import the names from here.
 
 A leaf: imports nothing, so the scorer can read the names without loading the
 LLM client and botocore.
@@ -28,6 +29,11 @@ STAGE4_5_FALLBACK_CALLS_KEY = "llm_fallback_calls"
 #: "stop_reason", "message"}` per call that raised on every model tried, so
 #: stage 4.5 went on without its answer (#1174). Absent when every call answered.
 STAGE4_5_CALL_FAILURES_KEY = "llm_call_failures"
+
+#: Suffix of a prompt log's response record (`core.prompt_logger`). Every
+#: `call_llm` writes one, with FALLBACK_SERVED_KEY under its "response" when
+#: a fallback served the call: the one record that covers every stage.
+PROMPT_LOG_RESPONSE_SUFFIX = "_RESPONSE.json"
 
 #: The stage-4.5 calls, as `call` values in the records above.
 STAGE4_5_CALL_M1_SCORE = "m1_relevance_score"

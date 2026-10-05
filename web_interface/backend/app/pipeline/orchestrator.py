@@ -1139,10 +1139,13 @@ class PipelineOrchestrator:
         swallows every failure so a webhook problem can never affect the run.
         """
         try:
+            from app.services.batch_service import batch_size
             from app.services.notifications import notify_run_started
             submitter = self._submitter_label(run)
+            # Read here, like the submitter: the POST thread must not touch the session.
+            batch_files_submitted = batch_size(self.db, getattr(run, "batch_id", None))
             await asyncio.get_running_loop().run_in_executor(
-                None, notify_run_started, run, submitter
+                None, notify_run_started, run, submitter, batch_files_submitted
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Run start notification failed for run %s: %s", self.run_id, e)
@@ -1219,6 +1222,7 @@ class PipelineOrchestrator:
             self.pipeline_output_dir,
             self.document_uid,
             source=source if source.exists() else None,
+            prompt_log_dir=PROMPT_LOGS_DIR / self.run_id,
         )
         out_path = (
             self.pipeline_output_dir / 'stage_7_doctor'

@@ -13,6 +13,7 @@ from docx import Document
 from app.models import (
     InboundFile, InboundFileStatus, InboundMessage, Run, RunBatch, RunState, User,
 )
+from app.pipeline import run_queue
 from app.services import batch_completion, batch_service, inbound_autorun, inbound_service, mailer
 from app.services.pdf_sandbox import PdfText
 from app.storage.local_storage import LocalRunStorage
@@ -84,6 +85,17 @@ def _statuses(db):
     return {f.filename: f.status for f in db.query(InboundFile)}
 
 
+def test_a_one_file_email_batch_goes_on_the_single_queue(db, storage, sent, queue, seed_simple_mode):
+    """#1340: a one-file batch routes like a single upload; the batch only
+    drives the completion email."""
+    _user(db)
+    _send(db, storage, ["one"])
+
+    run = db.query(Run).one()
+    assert db.query(RunBatch).one().files_submitted == 1
+    assert queue.enqueued == [(run.id, run_queue.SINGLE)]
+
+
 def test_accepted_cvs_become_one_queued_batch_and_the_reply_links_to_it(db, storage, sent, queue, seed_simple_mode):
     _user(db)
     _send(db, storage, ["one", "two"])
@@ -93,6 +105,7 @@ def test_accepted_cvs_become_one_queued_batch_and_the_reply_links_to_it(db, stor
     assert (batch.files_submitted, len(runs)) == (2, 2)
     assert {r.batch_id for r in runs} == {batch.id} and {r.status for r in runs} == {RunState.QUEUED}
     assert sorted(run_id for run_id, _ in queue.enqueued) == sorted(r.id for r in runs)
+    assert {q for _, q in queue.enqueued} == {run_queue.BATCH}
     assert [c.id for c in queue.cards] == [batch.id]  # the Teams batch card, once
     assert set(_statuses(db).values()) == {InboundFileStatus.SUBMITTED}
     assert storage.list_global(inbound_service.HELD_PREFIX) == []

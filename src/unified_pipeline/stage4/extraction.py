@@ -386,7 +386,7 @@ def _entry_with_extraction(entry: dict[str, Any], extraction: _EntryExtraction,
 def _fallback_flags(llm_result: dict[str, Any]) -> dict[str, Any]:
     """The entry flag recording which model answered, when the content-filter
     fallback served the group's call (#1174); empty otherwise. Write-only: the
-    doctor and the quality score read it, nothing downstream does."""
+    doctor reads it, nothing downstream does."""
     model = llm_result.get(FALLBACK_SERVED_KEY)
     return {STAGE4_ENTRY_FALLBACK_KEY: model} if model else {}
 
@@ -656,13 +656,35 @@ MULTI_RECORD_INSTRUCTION = """1. For each entry, extract all available fields. O
 SINGLE_WORK_INSTRUCTION = """ Here one citation, abstract, poster, chapter, patent or grant is one work: when the entry gives the same work at several venues, meetings, presentations or dates (e.g. "Poster presentation at Meeting A 2016, and oral presentation at Meeting B 2016"), return ONE item and put every venue or date in that item's fields (e.g. "Meeting A 2016; Meeting B 2016"). Never return two items with the same title. Split only works that each have their own title."""
 SINGLE_WORK_CODE_PREFIXES = ('S', 'M2', 'T')
 
+#: Appended to rule 1 for a lecture or talk code (K4, R). The EOAHMI recheck
+#: (2026-10-05, #1445) found JBUVYV 346, one K4 lecture series given in three
+#: years on four topics, returned as 12 items (each topic in each year), and
+#: QTATUP 980, one R talk given on seven dates as a teleconference series to
+#: named practitioners, returned as 7 items that all dropped the audience. The
+#: first wording ("one series ... is ONE item") over-merged in the 2026-10-05
+#: A/B: QTATUP 800 (5 cities, 5 dates) and 838 (4 titles) came back as 1 item,
+#: and K3/K4/R records fell 74 -> 39 on JBUVYV. So the guard only forbids the
+#: cross product: one item per title, every year in each, and distinct titles
+#: or place-and-date pairs still split.
+ONE_SERIES_INSTRUCTION = """ Never return an item for each combination of two lists (e.g. each topic in each year): when an entry gives years for a series and then lists its topics, return one item per topic, each with every year in its date (e.g. "2015; 2016; 2017"). Each distinct title, and each place with its own date, is still its own item. When one talk is given on several dates, keep in every item the words that say how and to whom it was given (e.g. "a teleconference series to nurses")."""
+
+#: Appended to rule 1 for K3. The EOAHMI recheck (#1445) found JBUVYV 337,
+#: "House Leader, <program>, <school> 2016-2020" then a line naming only the
+#: program's leadership council, returned as two items; the second had no
+#: role, and stage 5c then copied the first item's role onto it.
+CONTEXT_LINE_INSTRUCTION = """ A line that only names a body the program belongs to (e.g. a council), with no role or date of its own, is context for that program's item, not a new item."""
+
+_RULE1_GUARDS = {'K3': CONTEXT_LINE_INSTRUCTION, 'K4': ONE_SERIES_INSTRUCTION, 'R': ONE_SERIES_INSTRUCTION}
+
 
 def multi_record_rule(code: str) -> str:
     """Rule 1 for `code`: the multi-record rule, with the one-work guard
-    appended for a citation, patent or grant code."""
+    appended for a citation, patent or grant code, and the one-series or
+    context-line guard for the codes in `_RULE1_GUARDS`."""
+    rule = MULTI_RECORD_INSTRUCTION
     if code.startswith(SINGLE_WORK_CODE_PREFIXES):
-        return MULTI_RECORD_INSTRUCTION + SINGLE_WORK_INSTRUCTION
-    return MULTI_RECORD_INSTRUCTION
+        rule += SINGLE_WORK_INSTRUCTION
+    return rule + _RULE1_GUARDS.get(code, "")
 
 
 #: Rule 6 of the batch extraction prompt. The tab rule used to say only that a
@@ -689,6 +711,11 @@ def grant_owner_role_rule(cv_owner_name: dict[str, str] | None) -> str:
     CXRYCF "PI: <owner>"). With no owner name there is nothing to compare a
     label against, so the line is left out and the prompt keeps its
     pre-#1403 behaviour.
+
+    The EOAHMI recheck (2026-10-05) added two sentences: a plural label
+    ("Investigators - <other>, <owner>") is the owner's role (DUTAVD 186 lost
+    it), and a verb ("Secured the ... grant") is not one (NDXXAD 638 gained
+    an invented "PI").
     """
     last_name = (cv_owner_name or {}).get('last_name')
     if not last_name:
@@ -696,7 +723,7 @@ def grant_owner_role_rule(cv_owner_name: dict[str, str] | None) -> str:
     full_name = cv_owner_name.get('full_name') or last_name
     owner = f'"{full_name}" (surname "{last_name}")' if full_name != last_name else f'"{last_name}"'
     return f"""
-   - pi_role = the role on this grant of the CV owner, {owner}. A PI label can come before or after a name: "P.I.: <name>", "PI: <name>", "PI <name>", "<name> (PI)", "Principal Investigator: <name>". When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI", or the label as written (e.g., "Site PI"). When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner (e.g., "{last_name} (Co-I)", "Mentor"); if it states none, leave pi_role null"""
+   - pi_role = the role on this grant of the CV owner, {owner}. A PI label can come before or after a name: "P.I.: <name>", "PI: <name>", "PI <name>", "<name> (PI)", "Principal Investigator: <name>". When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI", or the label as written (e.g., "Site PI"). A plural role label that lists the CV owner among others (e.g., "Investigators - <name>, <name>") is the owner's role, in the singular (pi_role = "Investigator"). When a PI label names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner (e.g., "{last_name} (Co-I)", "Mentor"); if it states none, leave pi_role null. A verb such as "secured", "led" or "established" is not a stated role: with no role stated for the CV owner, leave pi_role null"""
 
 
 def build_extraction_prompt(
@@ -771,6 +798,8 @@ def build_extraction_prompt(
    - When there is no "Title:" label, an unlabelled name of the project or program that comes before the labelled parts (e.g., before "Program Partner:" or "Funder:") is the title; do not leave title null when the entry names one
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
+   - A person the entry names without a PI label, such as a "with Dr. <name>" collaborator or the investigator who "initiated" a study, is not pi_name; put a collaborator in co_investigators
+   - An entry that opens with an author list and has no PI label (e.g., "<name> AB, <name> CD. <title>. $<amount> (<sponsor>)"): pi_name = the first-listed author, co_investigators = the other authors
    - If no PI name is found, leave pi_name as null{grant_owner_role_rule(cv_owner_name)}
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
    - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
@@ -819,6 +848,7 @@ def build_extraction_prompt(
         code_specific_instructions = """
 9. **PAST MENTEES (N3B)** - when vs. now:
    - site_position = where and in what the mentee was mentored DURING the mentoring: the school or institution, and the program, project, fellowship or committee the entry names for that period (e.g., "Senior, Example College, 2000" → site_position = "Example College"; "MS, Thesis committee" → site_position = "Thesis committee")
+   - mentee_level = the mentee's degree or level. When the entry gives a degree line (e.g., "B.S., Example University, 2003", "PhD, Example University"), mentee_level = that whole line and the level or role of the mentoring period (e.g., "Predoc") goes in site_position; never drop the degree line
    - current_position = where the mentee is NOW, only when the entry says so (e.g., "now Assistant Professor at ..."); otherwise null
    - Do NOT put the institution of the mentoring period in current_position"""
     elif code == 'S8':

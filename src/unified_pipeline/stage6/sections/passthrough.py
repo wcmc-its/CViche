@@ -68,10 +68,16 @@ import logging
 import re
 from typing import NamedTuple
 
+from docx.oxml.ns import qn
 from docx.table import Table, _Cell
+from lxml.etree import _Element
 
 from ..formatting import _set_font
 from ..normalization import _squash
+from ..normalization.pii import SCOPE_PERSONAL_AND_APPENDIX, _pii_matches
+from ..source_blocks import (
+    block_lines, capture_source_blocks, clean_copy, element_text, is_unfilled, section_blocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -408,10 +414,42 @@ def _percent_effort_row_index(table) -> dict[str, int]:
     return mapping
 
 
+# --- Verbatim copy from a WCM-format source (#1463) ----------------------
+
+# When a letter's block is copied, its writer is skipped, so the entries it
+# would have written are consumed here instead -- but only an entry at least
+# this share of whose tokens is printed in the copied text. Anything else (a
+# J-coded row from some other table, say) still reaches the Appendix.
+_COPIED_ENTRY_TOKEN_COVERAGE = 0.8
+_ENTRY_TOKEN_RE = re.compile(r"[a-z]{3,}|\d+")
+
+
+def _passthrough_letter(text: str) -> str | None:
+    """Which passthrough section `text` (a heading, or a joined hierarchy)
+    names: 'E', 'G', 'J' or None -- the writers' own heading predicates."""
+    upper = text.upper()
+    if _is_affiliation_heading(upper):
+        return 'G'
+    if _is_employment_status_heading(upper):
+        return 'E'
+    if _PERCENT_EFFORT_HIERARCHY_KEYWORD in upper:
+        return 'J'
+    return None
+
+
+def _copied_block_covers(entry: dict, letter: str, block_tokens: set[str]) -> bool:
+    """`entry` belongs to `letter` (by heading or code) and its text is in the copied block."""
+    belongs = (_passthrough_letter(' '.join(entry.get('hierarchy', []))) == letter
+               or entry.get('taxonomy_code') == letter)
+    tokens = set(_ENTRY_TOKEN_RE.findall(str(entry.get('text') or '').lower()))
+    return belongs and bool(tokens) and len(tokens & block_tokens) >= _COPIED_ENTRY_TOKEN_COVERAGE * len(tokens)
+
+
 class PassthroughSection:
     """Section E, G and J writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_passthrough_sections(self, all_entries: list[dict]) -> list[dict]:
+    def _fill_passthrough_sections(self, all_entries: list[dict],
+                                   original_doc_path: str | None = None) -> list[dict]:
         """Fill sections that can be copied directly from source CV when format matches.
 
         These are short, structured sections in the WCM template that may already exist
@@ -422,8 +460,12 @@ class PassthroughSection:
         - G. INSTITUTIONAL/HOSPITAL AFFILIATION
         - J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260)
 
+        A WCM-format source's own E/G/J block is copied verbatim instead
+        (#1463, `_copy_source_blocks`); that letter's writer then doesn't run.
+
         Args:
             all_entries: All entries from the pipeline (to search by hierarchy)
+            original_doc_path: The source CV, for the verbatim copy; None skips it.
 
         Returns:
             The union of entry dicts each writer actually wrote into the
@@ -434,9 +476,66 @@ class PassthroughSection:
             recognized activity) is NOT in this list, so it still reaches
             the Appendix as before.
         """
-        return (self._fill_employment_status(all_entries)
-                + self._fill_hospital_affiliation(all_entries)
-                + self._fill_percent_effort(all_entries))
+        copied = self._copy_source_blocks(original_doc_path)
+        consumed = []
+        for letter, writer in (('E', self._fill_employment_status),
+                               ('G', self._fill_hospital_affiliation),
+                               ('J', self._fill_percent_effort)):
+            if letter in copied:
+                consumed += [e for e in all_entries if _copied_block_covers(e, letter, copied[letter])]
+            else:
+                consumed += writer(all_entries)
+        return consumed
+
+    def _copy_source_blocks(self, original_doc_path: str | None) -> dict[str, set[str]]:
+        """Copy each filled E/G/J block of a WCM-format source over the
+        template's placeholder (#1463). Returns {letter: tokens of the copied
+        text} for the letters copied. Any failure costs only that letter,
+        whose writer then runs as before; the path each letter took is logged."""
+        if not original_doc_path:
+            return {}
+        try:
+            source = capture_source_blocks(original_doc_path, _passthrough_letter)
+        except Exception:
+            logger.warning("Passthrough: could not read source %s; writers run", original_doc_path, exc_info=True)
+            return {}
+        _, template = section_blocks(self.doc.element.body, _passthrough_letter) if source else (None, {})
+        copied = {}
+        for letter, elements in source.items():
+            try:
+                path = self._insert_source_block(template.get(letter), elements)
+            except Exception:
+                logger.warning("Passthrough %s: copy failed; writer runs", letter, exc_info=True)
+                path = 'failed'
+            logger.info("Passthrough %s: %s", letter, path)
+            if path == 'copied':
+                copied[letter] = set(_ENTRY_TOKEN_RE.findall(' '.join(block_lines(elements)).lower()))
+        return copied
+
+    def _insert_source_block(self, template_block: tuple[_Element, list[_Element]] | None,
+                             elements: list[_Element]) -> str:
+        """Replace the template's placeholder for one letter with cleaned
+        copies of the source `elements`; returns 'copied' or why not."""
+        if template_block is None:
+            return 'no template heading'
+        heading, placeholders = template_block
+        if is_unfilled(elements, placeholders):
+            return 'unfilled'
+        # E/G/J have no routed code, so the full Appendix-scope policy applies;
+        # a block holding anything it would withhold is left to the writer,
+        # whose entries the pre-render deny pass already scrubbed.
+        if _pii_matches('\n'.join(element_text(e) for e in elements), SCOPE_PERSONAL_AND_APPENDIX):
+            return 'withheld (protected data)'
+        copies = [clean_copy(e) for e in elements]
+        for el in placeholders:
+            el.getparent().remove(el)
+        anchor = heading
+        for el in copies:
+            anchor.addnext(el)
+            anchor = el
+        self.stats['entries_inserted'] += 1
+        self.stats['tables_populated'] += sum(el.tag == qn('w:tbl') for el in copies)
+        return 'copied'
 
     def _fill_employment_status(self, all_entries: list[dict]) -> list[dict]:
         """Fill E. EMPLOYMENT STATUS section.

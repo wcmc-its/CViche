@@ -83,6 +83,14 @@ export async function getFeedbackStatuses(): Promise<FeedbackStatus[]> {
   return api.get<FeedbackStatus[]>(runRoutes.feedbackStatus())
 }
 
+/** Where to download the original upload: a presigned S3 URL, or null on local
+ *  storage (download from runRoutes.inputFile instead). Rejects with the
+ *  backend's message when the download is refused (e.g. 409 still scanning). */
+export async function getInputFileUrl(runId: string): Promise<string | null> {
+  const { url } = await api.get<{ url: string | null }>(runRoutes.inputFileUrl(runId))
+  return url
+}
+
 export async function startRun(runId: string): Promise<void> {
   await api.post(runRoutes.start(runId))
 }

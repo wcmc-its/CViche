@@ -51,6 +51,13 @@ spec:
             # mode; rollback is deleting this entry.
             - name: CVICHE_DISPATCH_MODE
               value: "queue"
+            # "Original file" downloads wait for GuardDuty's NO_THREATS_FOUND
+            # tag (#1333). GuardDuty scans cviche/runs/ (plan
+            # 1cd0864c2a29eeeeaa79) and all 338 pre-existing originals read
+            # back clean on 2026-10-05. Backend-only: no worker serves files.
+            # Rollback is deleting this entry.
+            - name: CVICHE_REQUIRE_MALWARE_SCAN
+              value: "1"
           # CVICHE_BLOCK_COHERENCE_REPAIR (and any other pipeline-behaviour
           # flag shared with the worker) comes from the cviche-pipeline-flags
           # ConfigMap below, not a literal env entry here -- see its comment
