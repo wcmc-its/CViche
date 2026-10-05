@@ -267,6 +267,10 @@ Lints, ranked by the severity of the failure class they catch:
                           (ZDCXIV), or Current with an end date before this
                           year, a truncated end year read against the start
                           year (KYOPUV 589). WARN
+14v. role_consistency     a grant whose text names the CV owner under a PI
+                          label while pi_role says co-I, or the reverse
+                          (#1403, RCBKFG KUUKNJ 243/247). WARN. Reads stage
+                          4 only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -403,6 +407,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_role_consistency,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -578,6 +583,7 @@ KNOWN_LINTS = (
     "segmentation_collapse",
     "grant_boundary",
     "grant_bucket",
+    "role_consistency",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -744,6 +750,10 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
+    # role_consistency (#1403): 2 of the 97 runs under analysis/ with a
+    # stage-4 artifact (KUUKNJ, ZCTARO: two runs of one CV), measured
+    # 2026-10-05. Same mixed-corpus caveat as above.
+    "role_consistency": 0.021,
 }
 
 
@@ -1285,6 +1295,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
+    LintSpec("role_consistency", lint_role_consistency, ("stage_4",)),
 )
 
 

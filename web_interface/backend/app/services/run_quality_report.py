@@ -468,6 +468,11 @@ LINT_COPY = {
         "A grant is listed as current or completed funding although the CV files it as an "
         "application, or is listed as current although its end date has passed.",
         "Move the grant to the funding heading the source CV gives it."),
+    "role_consistency": LintCopy(
+        "Your role on a grant is reversed",
+        "The source CV names you as principal investigator on a grant that is shown with you as "
+        "co-investigator, or the other way round.",
+        "Check your role on each flagged grant against the source CV and correct it."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

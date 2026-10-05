@@ -37,6 +37,10 @@ W3B-SC hand-checked every hit of its two lints, not only the unmatched ones. The
 
 W3B-GR added `grant_boundary` and `grant_bucket` and changed no other lint's findings on any run. Every unmatched hit was hand-read against the stage-4 grant list and the source document's line order. `grant_boundary`: of its 18 unmatched hits, 13 are one ZCTARO list whose records open with Source and whose stage-2 cut slipped one line from entry 304 on, so each later grant carries the next grant's title; 2 (VGHNZD 1496, 1504) are the drift verified finding VGHNZD-01 describes, which names only 1488 by index; 1 (VGHNZD 1546) opens with a title whose sponsor line sits in the entry before; 1 (SDEBQJ 291) opens with the PI and end-date line of the grant before it. The 18th (RXYBVF 502) is doubtful: the source holds that title alone after the last numbered grant, so no record visibly lost it; it is counted as a false positive. 44 of 45 (98%). `grant_bucket`: all 16 hits match a verified finding (ZDCXIV-01, 15 grants; KYOPUV-05, entry 589). The shapes were written from these same 63 runs, so the precision is in-sample.
 
+| RC-ROLE | 2026-10-05 | origin/dev `8cafcd4c` plus `role_consistency`, over each run's stored stage-4 JSON (the lint reads nothing else) | the 97 runs under `analysis/` with a stage-4 artifact, which include the 6 RCBKFG runs | the RCBKFG per-run autopsies | #1403 |
+
+RC-ROLE: 3 hits on 2 runs, every one hand-read against the grant's own text. KUUKNJ 243 and 247 are verified finding KUUKNJ N8 (the owner listed under "PIs:" rendered co-I, and listed under "co-Is:" rendered PI). ZCTARO 247 is the same CV's earlier run, which the KUUKNJ report already names as wrong there; it is matched by reading, not by a verified finding of its own. 3 of 3. Of the 280 grants on those 97 runs whose text gives the owner exactly one role, 197 agree with `pi_role`, 3 contradict it, and the rest carry an empty or other role, which the lint does not judge. CAOACN N4 (owner named PI, `pi_role` empty) is that unjudged case: an empty role lands on 58 grants across 13 runs, 53 of them with the owner in `pi_name`, so it is not reported. The shapes were written from these same runs, so the precision is in-sample.
+
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
 ## Per-lint precision
@@ -61,6 +65,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
 | `pubmed_title_truncated` | 22 | 22 | 22 / 0 / 0 | 22 / 22 (100%) | 8 / 22 (36%) | 2 | M2-enrich |
+| `role_consistency` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 2 / 3 (67%) | 1 | RC-ROLE |
 | `section_consistency` | 28 | 28 | none | 28 / 28 hand-checked (100%) | 14 / 28 (50%) | 14 | W3B-SC |
 | `section_lost` | 1 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | names text | 0 | M1 |
 | `segmentation_collapse` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | W3B-SC |
