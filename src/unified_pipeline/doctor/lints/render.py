@@ -46,6 +46,8 @@ from ..shared import (
     _magnitude_severity,
     _output_section_header,
     _template_haystack,
+    _NAME_WORD_RE,
+    _owner_surname_words,
 )
 
 
@@ -1298,6 +1300,13 @@ DUPLICATE_RECORD_WARN_COUNT = 1
 #: "<talk>, 2018" is the same talk given twice. Only on a body at least this
 #: long, where one letter is a slip rather than a different word.
 DUPLICATE_RECORD_FUZZY_MIN_CHARS = 60
+#: And only on a body that says where the record was published: a number
+#: besides its years (a volume or a page, "1998;24:709"). A body of authors,
+#: title and year alone is a talk or an abstract the CV lists once per
+#: meeting, and the render leaves the meeting out, so two such bodies one
+#: letter apart are two records (126-run farm/batch corpus: web218, web227
+#: twice and web244, each the same abstract at two meetings).
+_NON_YEAR_NUMBER_RE = re.compile(r"(?<!\d)(?!(?:19|20)\d{2}(?!\d))\d+")
 
 
 def _one_letter_apart(a: str, b: str) -> bool:
@@ -1315,8 +1324,10 @@ def _one_letter_apart(a: str, b: str) -> bool:
 
 def _same_body(a: str, b: str) -> bool:
     """One record's two rendered bodies: equal, or one letter apart when
-    both are DUPLICATE_RECORD_FUZZY_MIN_CHARS or longer."""
+    both are DUPLICATE_RECORD_FUZZY_MIN_CHARS or longer and name a volume
+    or page (_NON_YEAR_NUMBER_RE)."""
     return a == b or (min(len(a), len(b)) >= DUPLICATE_RECORD_FUZZY_MIN_CHARS
+                      and bool(_NON_YEAR_NUMBER_RE.search(a))
                       and _one_letter_apart(a, b))
 
 
@@ -1758,14 +1769,6 @@ _CITATION_TOKEN_RE = re.compile(r"[^\W_]{3,}")
 CITATION_MATCH_MIN_TOKENS = 4
 CITATION_MATCH_MIN_SHARE = 0.6
 
-#: A word of a name: letters only.
-_NAME_WORD_RE = re.compile(r"[^\W\d_]+")
-
-#: The shortest surname word judged. A two-letter word is an author's
-#: initials as often as a name ("Example LI"); no owner on the farm has a
-#: surname that short, so it is left unjudged rather than guessed at.
-OWNER_SURNAME_MIN_CHARS = 3
-
 #: A surname word this long still counts as shown one letter off: a PubMed
 #: rebuild prints PubMed's spelling of the owner's name (NDXXAD: a letter
 #: doubled), which is the owner, not their absence.
@@ -1869,16 +1872,6 @@ def _rendered_citations(stage4: dict,
             str(entry.get("text") or ""), authors if isinstance(authors, str) else "",
             lines[pairs[i]]))
     return citations
-
-
-def _owner_surname_words(stage4: dict) -> frozenset[str]:
-    """The words of `cv_owner.last_name` the lint judges (OWNER_SURNAME_MIN_CHARS)."""
-    owner = stage4.get("cv_owner")
-    surname = owner.get("last_name") if isinstance(owner, Mapping) else None
-    if not isinstance(surname, str):
-        return frozenset()
-    return frozenset(word for word in _NAME_WORD_RE.findall(norm(surname))
-                     if len(word) >= OWNER_SURNAME_MIN_CHARS)
 
 
 def _one_edit_apart(a: str, b: str) -> bool:
@@ -2390,6 +2383,14 @@ _JUNK_HOLDER_FIELDS = frozenset({"institution", "organization", "unit_program",
                                  "division_department", "department", "school"})
 _JUNK_DATE_FIELDS = frozenset({"start_date", "end_date", "date", "year",
                                "dates", "dates_attended"})
+#: The schema's other one-date fields (`config/field_schemas_v1.1.json`): an
+#: entry dated by one of these is a dated record too. An L2 project row with
+#: its `launch_date` and its name on the line above is no lost duty sentence
+#: (126-run farm/batch corpus: web40 150 and 154). Only `_has_dated_field`
+#: reads them; the header and description shapes read _JUNK_DATE_FIELDS.
+_JUNK_OTHER_DATE_FIELDS = frozenset({
+    "launch_date", "issue_date", "filing_date", "effective_date",
+    "expiration_date", "submission_date", "recertification_date"})
 _JUNK_PLACEMENT_FIELDS = (_JUNK_HOLDER_FIELDS | _JUNK_DATE_FIELDS
                           | {"location", "state_country", "setting"})
 #: The one taxonomy letter whose dated institution-only entries are headers.
@@ -2498,7 +2499,7 @@ def _field_tokens(fields: dict[str, object], keys: frozenset[str]) -> frozenset[
 
 def _has_dated_field(fields: dict[str, object]) -> bool:
     return any(_FOUR_DIGIT_YEAR_RE.search(str(fields.get(key) or ""))
-               for key in _JUNK_DATE_FIELDS)
+               for key in _JUNK_DATE_FIELDS | _JUNK_OTHER_DATE_FIELDS)
 
 
 class _DatedRanks(NamedTuple):

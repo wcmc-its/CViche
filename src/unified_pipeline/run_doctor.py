@@ -274,6 +274,14 @@ Lints, ranked by the severity of the failure class they catch:
                           Activities section has no summary (generation), or
                           its own text went unscored and a summary was
                           generated instead (M1 relevance). WARN, no score cap
+14w. span_count           a record whose source lists separate years or
+                          terms ('2003, 2013') while its row shows one range
+                          over them, their min-max (#1245, batch RCBKFG:
+                          UYFRTL 33/34/48/49). WARN
+14x. role_consistency     a grant whose text names the CV owner under a PI
+                          label while pi_role says co-I, or the reverse
+                          (#1403, RCBKFG KUUKNJ 243/247). WARN. Reads stage
+                          4 only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -411,6 +419,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_span_count,
+    lint_role_consistency,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -588,6 +598,8 @@ KNOWN_LINTS = (
     "grant_boundary",
     "grant_bucket",
     "research_summary_call_failed",
+    "span_count",
+    "role_consistency",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -757,6 +769,17 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
+    # span_count (#1245, batch RCBKFG): 64 of 245 stored runs with stage-4
+    # JSON (106 analysis/<uid>, 13 analysis/pilot, and the 126-run farm and
+    # 2026-09-11/-17 batches), as rendered by origin/dev 5e6eac1d plus this
+    # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
+    # render without the fix). Same mixed-corpus caveat as above.
+    "span_count": 0.261,
+    # role_consistency (#1403): 4 of 232 runs, measured 2026-10-05 over
+    # stored stage-4 JSON: 2 of the 106 runs under analysis/ (KUUKNJ, ZCTARO:
+    # two runs of one CV) and 2 of the 126 farm/batch-3/batch-4 runs (web188,
+    # web30). Same mixed-corpus caveat as above.
+    "role_consistency": 0.017,
 }
 
 
@@ -1296,6 +1319,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
     LintSpec("research_summary_call_failed", lint_research_summary_call_failed, ("stage_4_5",)),
+    LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
+    LintSpec("role_consistency", lint_role_consistency, ("stage_4",)),
 )
 
 
