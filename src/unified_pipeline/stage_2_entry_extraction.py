@@ -794,17 +794,18 @@ def _record_aligned_end(elements: list[dict], start: int, batch_size: int) -> in
         return len(elements)
     if elements[hard_end - 1].get("type") == "empty" or elements[hard_end].get("type") == "empty":
         return hard_end
-    # Every candidate end leaves at least one element in the batch.
-    candidates = range(hard_end - 1, max(start, hard_end - BATCH_CUT_LOOKBACK - 1), -1)
-    for end in candidates:
-        if elements[end - 1].get("type") == "empty":
-            return end
+    # The batch's last BATCH_CUT_LOOKBACK elements, newest first: indices
+    # hard_end - BATCH_CUT_LOOKBACK .. hard_end - 1, never before start.
+    window = range(hard_end - 1, max(start, hard_end - BATCH_CUT_LOOKBACK) - 1, -1)
+    for idx in window:
+        if elements[idx].get("type") == "empty":
+            return idx + 1  # the batch ends on the blank
     label = _leading_label(elements[start])
     if label is None or _leading_label(elements[hard_end]) == label:
         return hard_end
-    for end in candidates:
-        if _leading_label(elements[end]) == label:
-            return end
+    for idx in window:
+        if idx > start and _leading_label(elements[idx]) == label:
+            return idx  # the next batch opens on the label; this one is never empty
     return hard_end
 
 

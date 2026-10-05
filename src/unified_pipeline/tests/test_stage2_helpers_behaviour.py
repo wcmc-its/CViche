@@ -1259,11 +1259,22 @@ def test_record_aligned_batches_keep_the_hard_cut_when_a_blank_is_already_at_the
     assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
 
 
-def test_record_aligned_batches_ignore_a_blank_older_than_the_lookback_window():
+def test_record_aligned_batches_blank_window_is_exactly_the_last_15_elements():
+    # The window is elements 35..49 (50 - BATCH_CUT_LOOKBACK .. 49).
+    assert stage2.BATCH_CUT_LOOKBACK == 15
     elements = [_p(i, f"Line {i}") for i in range(70)]
-    elements[33] = _blank(33)  # a cut after it (34) is below the window's floor, 50 - 15
+    elements[34] = _blank(34)  # one before the window's first index: ignored
     assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
-    elements[34] = _blank(34)  # a cut at 35 is the window's lowest
+    elements[35] = _blank(35)  # the window's first index: the batch ends on it
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [36]
+
+
+def test_record_aligned_batches_label_window_is_exactly_the_last_15_elements():
+    elements = [_p(i, f"Line {i}") for i in range(70)]
+    elements[0] = _p(0, "Agency: first")
+    elements[34] = _p(34, "Agency: outside")  # one before the window's first index: ignored
+    assert _cut_points(stage2.make_record_aligned_batches(elements)) == [50]
+    elements[35] = _p(35, "Agency: inside")  # the window's first index: the next batch opens on it
     assert _cut_points(stage2.make_record_aligned_batches(elements)) == [35]
 
 
@@ -1306,6 +1317,9 @@ def test_record_aligned_batches_never_emit_an_empty_batch_when_size_is_below_the
     batches = stage2.make_record_aligned_batches(elements, 4)
     assert all(batches)
     assert [e for b in batches for e in b] == elements
+    # The window reaches back to the batch's own first line; its label there is not a cut.
+    elements = [_p(0, "Agency: only")] + [_p(i, f"Line {i}") for i in range(1, 6)]
+    assert _cut_points(stage2.make_record_aligned_batches(elements, 4)) == [4]
 
 
 def test_record_aligned_batches_label_rule_needs_the_label_inside_the_window():
