@@ -2859,7 +2859,7 @@ def lint_span_count(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     leave a year of the range uncovered. Skips the codes `multi_record_coverage`
     skips except teaching, whose rows stage 5c rewrites from the same dates,
     and mentoring codes (`_SPAN_COUNT_SKIPPED_PREFIXES`). WARN, one finding
-    per entry: 70 of 74 hits real on the 132 stored runs (doctor/PRECISION.md,
+    per entry: 111 of 118 hits real on 245 stored runs (doctor/PRECISION.md,
     RCB-SC)."""
     document = _rendered_document(stage4, blocks)
     declared_by_code = _declared_fields()

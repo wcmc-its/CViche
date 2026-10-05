@@ -763,11 +763,12 @@ LINT_PREVALENCE = {
     # 2026-10-04. Same mixed-corpus caveat as above.
     "grant_boundary": 0.175,
     "grant_bucket": 0.032,
-    # span_count (#1245, batch RCBKFG): 37 of the 132 stored runs under
-    # analysis/<uid>, as rendered by origin/dev 8cafcd4c plus this lint's
-    # stage-6 envelope fix, measured 2026-10-04 (39 of 132 on the render
-    # without the fix). Same mixed-corpus caveat as above.
-    "span_count": 0.280,
+    # span_count (#1245, batch RCBKFG): 64 of 245 stored runs with stage-4
+    # JSON (106 analysis/<uid>, 13 analysis/pilot, and the 126-run farm and
+    # 2026-09-11/-17 batches), as rendered by origin/dev 5e6eac1d plus this
+    # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
+    # render without the fix). Same mixed-corpus caveat as above.
+    "span_count": 0.261,
 }
 
 
