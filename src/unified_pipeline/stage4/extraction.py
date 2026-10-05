@@ -677,6 +677,26 @@ CLINICAL_TRIAL_FIELD_MAPPING = """
    - A CLINICAL TRIAL filed here uses the same fields: title = the trial title with its phase (e.g., "Phase II trial of ..."), grant_number = its NCT or protocol number, agency = its sponsor, pi_role = the CV owner's role on the trial (e.g., "Site PI", "Sub-Investigator")"""
 
 
+def grant_owner_role_rule(cv_owner_name: dict[str, str] | None) -> str:
+    """The grant prompt's pi_role line (#1403), naming the CV owner.
+
+    The wave-4 A/B (2026-10-05) showed why the owner has to be named: told
+    only that a "PI:" label on *another* person is not the owner's role, a
+    model that cannot tell who the owner is cleared pi_role on grants whose
+    label names the owner (RVROVQ 9/9 "P.I.: <owner>", XELRLZ "<owner> (PI)",
+    CXRYCF "PI: <owner>"). With no owner name there is nothing to compare a
+    label against, so the line is left out and the prompt keeps its
+    pre-#1403 behaviour.
+    """
+    last_name = (cv_owner_name or {}).get('last_name')
+    if not last_name:
+        return ""
+    full_name = cv_owner_name.get('full_name') or last_name
+    owner = f'"{full_name}" (surname "{last_name}")' if full_name != last_name else f'"{last_name}"'
+    return f"""
+   - pi_role = the role on this grant of the CV owner, {owner}. A PI label can come before or after a name: "P.I.: <name>", "PI: <name>", "PI <name>", "<name> (PI)", "Principal Investigator: <name>". When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI", or the label as written (e.g., "Site PI"). When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner (e.g., "{last_name} (Co-I)", "Mentor"); if it states none, leave pi_role null"""
+
+
 def build_extraction_prompt(
     entries: list[dict[str, Any]],
     schema: dict[str, Any],
@@ -697,7 +717,8 @@ def build_extraction_prompt(
         code: Taxonomy code for this group (e.g. "M2A", "S8")
         cv_owner_name: Dict with 'last_name' and optionally 'full_name' of CV
             owner, used to hint the target_name instruction for publications
-            and presentations (codes starting with "S", and "R")
+            and presentations (codes starting with "S", and "R") and to name
+            the owner in the grant pi_role rule (codes starting with "M2")
     """
     code_label = get_taxonomy_label(code)
 
@@ -741,13 +762,14 @@ def build_extraction_prompt(
     # Add code-specific instructions
     code_specific_instructions = ""
     if code.startswith('M2'):
-        code_specific_instructions = """
+        code_specific_instructions = f"""
 9. **GRANTS (M2A/M2B/M2C)**:
    - pi_name = a PERSON'S NAME (e.g., "Susan Bostwick", "John Smith") - NOT the project title
    - title = the scientific project title - NOT a person's name, NOT FTE information
+   - When there is no "Title:" label, an unlabelled name of the project or program that comes before the labelled parts (e.g., before "Program Partner:" or "Funder:") is the title; do not leave title null when the entry names one
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
-   - If no PI name is found, leave pi_name as null
+   - If no PI name is found, leave pi_name as null{grant_owner_role_rule(cv_owner_name)}
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
    - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
         if code in CLINICAL_TRIAL_CODES:
@@ -791,6 +813,22 @@ def build_extraction_prompt(
    - committee_name = the committee/body name ONLY (e.g., "Quality Improvement Committee")
    - role = ONLY the role word(s) (e.g., "Chair", "Member") - NOT the committee name
    - Do NOT merge role into committee_name or vice versa"""
+    elif code == 'N3B':
+        code_specific_instructions = """
+9. **PAST MENTEES (N3B)** - when vs. now:
+   - site_position = where and in what the mentee was mentored DURING the mentoring: the school or institution, and the program, project, fellowship or committee the entry names for that period (e.g., "Senior, Example College, 2000" → site_position = "Example College"; "MS, Thesis committee" → site_position = "Thesis committee")
+   - current_position = where the mentee is NOW, only when the entry says so (e.g., "now Assistant Professor at ..."); otherwise null
+   - Do NOT put the institution of the mentoring period in current_position"""
+    elif code == 'S8':
+        # A sub-point of the S/R target_name instruction (9), which names the owner.
+        code_specific_instructions = """
+   - Co-presented: when the entry says it was "co-presented with" other people, the CV owner presented it too. authors = the CV owner's name first, then those co-presenters, and target_name = the owner's name as written there. Never list only the co-presenters"""
+    elif code == 'D3':
+        code_specific_instructions = """
+9. **OTHER POSITIONS (D3)** - consulting engagements:
+   - A consulting line (a year, the client organization, the project topic, a client contact) that states no job title: title = the project topic, organization = the client organization
+   - Do not leave title null when the entry names the work done
+   - Never put the client contact's name or job title in title"""
 
     prompt += f"""
 **Instructions**:

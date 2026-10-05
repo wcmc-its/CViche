@@ -823,8 +823,12 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: TAB_COLUMNS_INSTRUCTION) are the only lines that differ from before. M2A
 #: re-measured again for the one-work guard appended to its rule 1
 #: (SINGLE_WORK_INSTRUCTION): dropping it gives 1b33f2df... back.
+#: M2A re-measured for #1403 on top of #1243, whose added unlabelled-title
+#: line is the only difference: dropping it gives the #1243 hash 0ab6854a...
+#: back. The pi_role line names the owner, so this owner-less prompt does not
+#: carry it.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "0ab6854a271fcc1a49348715209a3c853ad9e882d87b741f0626a227d23a4873",
+    "M2A": "108969062c9e3d82bddbdf02b0220cf5b2ae054d8cfa5a05c08ecc6e29578683",
     "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
@@ -864,6 +868,104 @@ def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
     assert "agency = its sponsor" in prompt
     for code in ("M2C", "M2D"):  # a pending application or a patent is never a trial
         assert "CLINICAL TRIAL" not in _prompt(code, [{"text": "Invented entry"}])
+
+
+# --- #1403 (EBYSBC E32): stage-4 field rules --------------------------------
+
+_OWNER = {"last_name": "Owner", "full_name": "Ann B. Owner"}
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_carries_the_unlabelled_title_rule(code):
+    # NDXXAD 411: an unlabelled program name was dropped, title null.
+    rule = ("- When there is no \"Title:\" label, an unlabelled name of the project or program "
+            "that comes before the labelled parts")
+    assert rule in _prompt(code, [{"text": "Invented grant; Doe (PI)."}])
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_names_the_owner_in_the_pi_role_rule(code):
+    # Wave-4 A/B: told only that another person's "(PI)" is not the owner's
+    # role, a model that cannot tell who the owner is cleared pi_role on
+    # RVROVQ 9/9 "P.I.: <owner>", XELRLZ "<owner> (PI)" and CXRYCF "PI: <owner>".
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "Invented grant; Doe (PI)."}], extraction.get_field_schema(code), code, _OWNER)
+    rule = prompt.split("- pi_role = ", 1)[1].split("\n", 1)[0]
+    assert rule.startswith('the role on this grant of the CV owner, "Ann B. Owner" (surname "Owner"). ')
+    for label in ('"P.I.: <name>"', '"PI: <name>"', '"PI <name>"', '"<name> (PI)"', '"Principal Investigator: <name>"'):
+        assert label in rule
+    # The owner's own label sets the role: the case the A/B regressed.
+    assert 'When that label names the CV owner (in full, by surname, or with initials), pi_role = "PI"' in rule
+    # Someone else's label does not (XELRLZ 170, the #1403 target).
+    assert "When it names someone else, that person is pi_name, and pi_role is only a role the entry states for the CV owner" in rule
+    assert rule.endswith("if it states none, leave pi_role null")
+    assert prompt.index("- If no PI name is found") < prompt.index("- pi_role = ") < prompt.index("- status = ")
+
+
+def test_grant_pi_role_rule_is_left_out_when_the_owner_is_unknown():
+    # Nothing to compare a PI label against: keep the pre-#1403 prompt.
+    for owner in (None, {}, {"last_name": ""}):
+        assert extraction.grant_owner_role_rule(owner) == ""
+        assert "- pi_role = " not in extraction.build_extraction_prompt(
+            [{"text": "Invented grant"}], extraction.get_field_schema("M2B"), "M2B", owner)
+
+
+def test_grant_pi_role_rule_names_a_surname_only_owner_once():
+    rule = extraction.grant_owner_role_rule({"last_name": "Owner"})
+    assert 'of the CV owner, "Owner". ' in rule
+    assert "(surname" not in rule
+    assert '(e.g., "Owner (Co-I)", "Mentor")' in rule
+
+
+def test_extract_fields_batch_sends_the_owner_named_pi_role_rule_to_the_llm(monkeypatch):
+    """Wire: the cv_owner_name extract_fields_batch is given reaches the grant prompt."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "pi_role": "PI"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Invented Agency\tInvented title\tP.I.: Ann B. Owner", "taxonomy_code": "M2B",
+          "element_idx_start": 0, "element_idx_end": 0}], 0, 1, cv_owner_name=_OWNER)
+    assert prompts and extraction.grant_owner_role_rule(_OWNER) in prompts[0]
+
+
+def test_past_mentee_prompt_puts_the_mentoring_period_school_in_site_position():
+    # EQADVR 509/516/517: the college of the mentoring year went to current_position.
+    prompt = _prompt("N3B", [{"text": "a) Invented Mentee, Senior, Example College, 2000"}])
+    assert ("site_position = where and in what the mentee was mentored DURING the mentoring: the school or "
+            "institution, and the program, project, fellowship or committee the entry names for that period") in prompt
+    # Wave-4 A/B: MYNQRA's "MS, Thesis committee" rows lost their Site/Position
+    # text when the rule named only a school or institution.
+    assert '"MS, Thesis committee" → site_position = "Thesis committee"' in prompt
+    assert "current_position = where the mentee is NOW, only when the entry says so" in prompt
+    assert "Do NOT put the institution of the mentoring period in current_position" in prompt
+    assert prompt.index("PAST MENTEES (N3B)") < prompt.index("Return JSON")
+
+
+def test_abstract_prompt_puts_the_owner_first_on_a_co_presented_talk():
+    # XWNZWW 752..1210: "co-presented with X" listed only X as authors.
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "\"Invented Talk,\" co-presented with A. Example, at an invented meeting."}],
+        extraction.get_field_schema("S8"), "S8", {"last_name": "Owner"})
+    rule = "- Co-presented: when the entry says it was \"co-presented with\" other people"
+    assert rule in prompt
+    assert "authors = the CV owner's name first, then those co-presenters" in prompt
+    # A sub-point of instruction 9 (target_name), which names the owner.
+    assert prompt.index("9. **target_name**") < prompt.index(rule) < prompt.index("Return JSON")
+    for code in ("S1", "R"):  # R's authors are extract:false; S1 has no co-presenter
+        assert "Co-presented:" not in _prompt(code, [{"text": "Invented entry"}])
+
+
+def test_other_positions_prompt_takes_a_consulting_topic_as_the_title():
+    # OIYKZE 87/91/95: consulting lines kept organization and year only.
+    prompt = _prompt("D3", [{"text": "2020 Example University\tInvented Topic\tA. Contact, Director"}])
+    assert "OTHER POSITIONS (D3)" in prompt
+    assert "title = the project topic, organization = the client organization" in prompt
+    assert "Do not leave title null when the entry names the work done" in prompt
+    assert "Never put the client contact's name or job title in title" in prompt
 
 
 def test_the_instruction_follows_the_code_specific_rules_block():

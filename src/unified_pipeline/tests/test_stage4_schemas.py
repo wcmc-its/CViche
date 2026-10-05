@@ -194,6 +194,14 @@ def test_patent_schema_leaves_narrative_to_the_supplementary_prose_decision():
     assert "narrative" not in schemas_mod.get_field_schema("M2D")["fields"]
 
 
+def test_d3_title_guide_takes_a_consulting_topic_as_the_title():
+    """#1403 (EBYSBC E32, OIYKZE 87/91/95): the D3 consulting rule says title =
+    the project topic, so the field guide printed in the same prompt must not
+    say only 'Job title or position'."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS["D3"]["title"]
+    assert "For a consulting engagement that states no job title, the project topic" in guide
+
+
 def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
     """#475: web160's 11 "Visiting Professor" roles were dropped at stage 4
     because R had no `role` field. Read off the ACTIVE (config-merged) schema,
