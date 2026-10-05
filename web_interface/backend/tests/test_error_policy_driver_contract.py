@@ -289,7 +289,7 @@ def test_a_stage_4_5_exception_lets_the_run_continue_and_records_it_non_fatal(
     still runs, the run completes, and the stage-error record holds a
     non-fatal 4.5 entry (which execute_step's success path would otherwise
     have cleared)."""
-    from app.models import Run, Step
+    from app.models import Log, Run, Step
     from app.pipeline import orchestrator as orch
     from unified_pipeline.stage_errors import StageError, read_stage_errors
 
@@ -318,6 +318,9 @@ def test_a_stage_4_5_exception_lets_the_run_continue_and_records_it_non_fatal(
     assert read_stage_errors(o._stage_errors_path()) == [StageError(
         stage="4.5", exception_type="RuntimeError",
         message="simulated research summary failure", fatal=False)]
+    skip_logs = db.query(Log).filter(Log.run_id == "S45CONT", Log.step_number == 7,
+                                     Log.message.startswith("Research summary skipped")).all()
+    assert [entry.level for entry in skip_logs] == ["WARNING"]
 
 
 def test_a_successful_stage_4_5_registers_its_artifact_for_later_stages(monkeypatch, tmp_path, db):

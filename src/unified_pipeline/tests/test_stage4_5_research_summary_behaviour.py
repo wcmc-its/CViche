@@ -1427,6 +1427,14 @@ def test_a_provider_outage_still_propagates(monkeypatch, tmp_path):
         _run(tmp_path, entries=_M1_AND_GRANT[1:])
 
 
+def test_a_provider_outage_on_the_score_call_still_propagates(monkeypatch, tmp_path):
+    """#810: an outage on the M1 relevance call is not treated as unscored."""
+    _stub_calls(monkeypatch, score=LLMOutageError("down", seconds_waited=900.0), generation="unused")
+
+    with pytest.raises(LLMOutageError):
+        _run(tmp_path)
+
+
 # One instance per LLM_CALL_ERRORS member (the RETRYABLE_ERRORS ones by a
 # concrete subclass where botocore's base needs constructor kwargs).
 _ONE_ERROR_PER_CAUGHT_TYPE = [
