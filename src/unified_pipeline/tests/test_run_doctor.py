@@ -4160,6 +4160,25 @@ def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
     assert [f["severity"] for f in drops] == ["INFO"]
 
 
+def test_run_doctor_wires_stage_5d_into_dedup_drops_entry_index(tmp_path):
+    """The evidence names the dropped entry only through the optional
+    `stage_5d` view; without that wiring every drop goes back to naming text,
+    which the precision harness cannot match to a verified finding."""
+    root = _build_clean_run(tmp_path)
+    dropped = "3/2031 Example grand rounds talk"
+    _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                 {"document_uid": _UID, "warnings": [],
+                  "dedup_decisions": [
+                      {"code": "K4", "metric": "jaccard=0.95", "dropped_text": dropped,
+                       "kept_text": "9/2031 Example grand rounds talk, 3 hours"}]})
+    _write_stage(root, "stage_5d_citation_formatted", f"{_UID}_cv_citation_formatted.json",
+                 {"entries": [{"element_idx_start": 77, "taxonomy_code": "K4",
+                               "text": dropped, "extracted_fields": {}}]})
+    payload = run_doctor(root, _UID)
+    drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
+    assert drops[0]["evidence"][0].startswith("entry 77: K4 (")
+
+
 def test_run_doctor_hard_fail_gate_makes_an_undeliverable_run_an_error(tmp_path):
     """web139: score 25, RED, do-not-deliver — but worst=WARN, indistinguishable
     from a healthy run. An emptied cv_owner must now push worst to ERROR and say

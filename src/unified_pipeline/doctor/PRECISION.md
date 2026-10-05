@@ -29,6 +29,7 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 | M2-junk | 2026-10-04 | origin/dev `fb466a0f` plus the `junk_or_header_row` lint, over the base render of `fb466a0f` | 62 of the 63-run farm, as M1 | as M1 | #985, #986, #1222 |
 | M3b-5c | 2026-10-04 | `feat/ebysbc-doctor-5c-and-contact` on origin/dev `fb466a0f`, over the base render of `fb466a0f` | as M1 | as M1 | #1345, #1222 |
 | M2-enrich | 2026-10-04 | origin/dev `fb466a0f` plus `pubmed_title_truncated` and `enrichment_pubtype_mismatch`, over the base render of `fb466a0f` and the farm's stored stage-5 JSON | 62 of the 63-run farm, as M1 | as M1 | #1358 (EBYSBC E19) |
+| M1-dup | 2026-10-04 | the `dedup_drops` / `duplicate_records` extension, over the base render of origin/dev `fb466a0f` (`~/worktrees/eb-farm-w3b/base`) | as M1 | as M1 | #446, #666 |
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
@@ -39,9 +40,9 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `classified_unrendered` | 1 | 0 | 0 / 0 / 1 | 0 / 1 (0%) | names text | 0 | M1 |
 | `contact_slot_lost` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | 1 / 1 (100%) | 1 | M3b-5c |
 | `date_only_lines` | 2 | 0 | none | none | names text | 0 | M1 |
-| `dedup_drops` | 12 | 10 | 2 / 2 / 4 | 2 / 8 (25%) | names text | 0 | M1 |
+| `dedup_drops` | 14 | 7 | 2 / 2 / 4 | 2 / 8 (25%) | 3 / 14 (21%) | 3 | M1-dup |
 | `duplicate_passages` | 1 | 1 | none | none | names text | 0 | M1 |
-| `duplicate_records` | 8 | 8 | 4 / 0 / 1 | 4 / 5 (80%) | names text | 0 | M1 |
+| `duplicate_records` | 11 | 11 | 4 / 0 / 1 | 4 / 5 (80%) | 1 / 9 (11%) | 1 | M1-dup |
 | `enrichment_failures` | 15 | 15 | 3 / 4 / 0 | 3 / 7 (43%) | names text | 0 | M1 |
 | `enrichment_pubtype_mismatch` | 2 | 2 | 2 / 0 / 0 | 2 / 2 (100%) | 1 / 2 (50%) | 1 | M2-enrich |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
@@ -181,3 +182,5 @@ These come from before this ledger. They are quoted as recorded, on the batch an
 | 2026-10-02 | `field_loss` (draft, not shipped) | 20 of 112 (18%) | 118 farm CVs and 20 production runs | #819 comment, 2026-10-02; #817 |
 | 2026-10-04 | `teaching_postcheck`, every hit (M3b-5c) | WARN: 39 of 42 real, 3 partly (a 5c line stage 6 dedup then dropped); INFO (role only): 47 of 63 real, 16 a role the entry implies (talks to residents read as Presenter) | the 63-run farm, origin/dev `fb466a0f` | PR body, `feat/ebysbc-doctor-5c-and-contact` |
 | 2026-10-04 | `contact_slot_lost`, every hit | 1 of 1 on the `fb466a0f` render; 9 of 9 on the dev-242 documents the EBYSBC autopsy read | the 63-run farm | same |
+| 2026-10-04 | `duplicate_records` record rule (title, PMID or DOI; one grant across M2A/M2B/M2C) | 16 of 18 entry pairs (89%), every pair read; 7 of 9 findings | base render of `fb466a0f`, 62 runs | M1-dup |
+| 2026-10-04 | `dedup_drops` occasion test (a month, day, part or numeral the kept entry lacks) | 9 of 9 drops, every one read: 1 on the `fb466a0f` render, 8 more on the dev-242 render the batch was autopsied on | EBYSBC farm | M1-dup |

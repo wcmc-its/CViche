@@ -290,8 +290,8 @@ LINT_COPY = {
     "dedup_drops": LintCopy(
         "Distinct entries removed as duplicates",
         "An entry removed as a duplicate was either not nearly contained in the copy kept (under 90% "
-        "overlap), or was contained but named something the page no longer shows, so it may be a "
-        "different record.",
+        "overlap), named a date, part or number the kept copy lacks, or was contained but named "
+        "something the page no longer shows or a different rank, so it may be a different record.",
         "Compare the quoted dropped text with the kept entry and restore anything that was different."),
     "pipe_leaks": LintCopy(
         "Raw pipe characters in text",
@@ -310,7 +310,8 @@ LINT_COPY = {
         "Delete the repeated passage."),
     "duplicate_records": LintCopy(
         "Repeated numbered entry",
-        "The same numbered or bulleted entry appears twice within a few lines of itself in one section.",
+        "The same numbered or bulleted entry appears twice within a few lines of itself in one "
+        "section, or one article or grant is listed twice anywhere in the document.",
         "Delete the repeat."),
     "protected_data_in_output": LintCopy(
         "Protected personal data in document",
