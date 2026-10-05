@@ -72,6 +72,7 @@ from unified_pipeline.stage6.normalization.institutions import (
 )
 from unified_pipeline.stage6.fan_out import (
     FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
     _FORMATTED_KEYS,
     _RENDERED_FIELDS,
     _TEXT_RENDERED_CODES,
@@ -1356,13 +1357,16 @@ def _fanned_out_keys(entry: _FieldsEntry) -> frozenset[str]:
     """The keys stage 6's fan-out splits this entry on, each record then
     rendering as its own child -- run through the same call and the same
     built-in schema `stage_6_word_template` hands it, so the doctor cannot
-    disagree with the renderer about which lists render."""
+    disagree with the renderer about which lists render. The last of stage
+    4's records counts too: when every earlier record would print the same
+    row as a later one, it is the only child left (#1445)."""
     probe = {"taxonomy_code": entry.code, "text": entry.text,
              "extracted_fields": dict(entry.fields)}
     children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS,
                                             records_key=STAGE4_RECORDS_KEY)
-    return frozenset(child[FANNED_OUT_FROM]["key"] for child in children
-                     if FANNED_OUT_FROM in child)
+    return frozenset((child.get(FANNED_OUT_FROM) or child[LAST_STAGE4_RECORD])["key"]
+                     for child in children
+                     if FANNED_OUT_FROM in child or LAST_STAGE4_RECORD in child)
 
 
 def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool:
