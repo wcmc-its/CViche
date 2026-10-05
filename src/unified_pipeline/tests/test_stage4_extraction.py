@@ -1132,6 +1132,68 @@ def test_extract_fields_batch_sends_the_one_work_guard_to_the_llm(monkeypatch):
     assert prompts and extraction.MULTI_RECORD_INSTRUCTION + extraction.SINGLE_WORK_INSTRUCTION in prompts[0]
 
 
+# --- #1445: the stage-4 over-splits #1406 left (EOAHMI recheck) ---------------
+
+def _rule1(code):
+    rules = _prompt(code, [{"text": "Lecturer: Alpha Series 2015, 2016\tTopic A\tTopic B"}]).split("**Instructions**:\n")[1]
+    return rules.split("\n2. Use null")[0]
+
+
+@pytest.mark.parametrize("code, guard", [("K4", "ONE_SERIES_INSTRUCTION"), ("R", "ONE_SERIES_INSTRUCTION"),
+                                         ("K3", "CONTEXT_LINE_INSTRUCTION")])
+def test_a_lecture_talk_or_program_prompt_appends_its_guard_to_rule_1(code, guard):
+    # JBUVYV 346 (K4) and QTATUP 980 (R) over-split one series; JBUVYV 337 (K3)
+    # made a context line its own item.
+    assert _rule1(code) == extraction.MULTI_RECORD_INSTRUCTION + getattr(extraction, guard)
+
+
+@pytest.mark.parametrize("code", ["K1", "K2", "K5", "O", "P", "Q1", "Q2", "N3A", "D2", "I", "S1", "S8", "M2A", "T"])
+def test_other_prompts_carry_neither_the_series_nor_the_context_line_guard(code):
+    # The cited #1406 wins (MYNQRA 111/112 N3A, RVROVQ 171 Q2, AQCLHS 63 P, ...)
+    # sit on these codes; their rule 1 stays as it was.
+    rule = _rule1(code)
+    assert extraction.ONE_SERIES_INSTRUCTION not in rule
+    assert extraction.CONTEXT_LINE_INSTRUCTION not in rule
+    assert rule == extraction.MULTI_RECORD_INSTRUCTION + (
+        extraction.SINGLE_WORK_INSTRUCTION if code.startswith(extraction.SINGLE_WORK_CODE_PREFIXES) else "")
+
+
+def test_the_series_guard_keeps_one_series_as_one_item_and_the_audience_in_every_item():
+    text = extraction.ONE_SERIES_INSTRUCTION
+    # JBUVYV 346: 4 topics x 3 years became 12 items; the fix is 4, one per topic.
+    assert text.startswith(" Never return an item for each combination of two lists (e.g. each topic in each year): ")
+    assert ('when an entry gives years for a series and then lists its topics, return one item per topic, each with '
+            'every year in its date (e.g. "2015; 2016; 2017"). ') in text
+    # The first wording merged QTATUP 800 (5 cities) and 838 (4 titles) into 1.
+    assert 'Each distinct title, and each place with its own date, is still its own item. ' in text
+    assert "ONE item" not in text
+    # QTATUP 980: the seven dated items all lost "to health care practitioners".
+    assert text.endswith('When one talk is given on several dates, keep in every item the words that say how '
+                         'and to whom it was given (e.g. "a teleconference series to nurses").')
+
+
+def test_the_context_line_guard_keeps_a_line_without_role_or_date_in_its_program():
+    # JBUVYV 337: a line naming only the program's council became a role-less item.
+    assert extraction.CONTEXT_LINE_INSTRUCTION == (
+        " A line that only names a body the program belongs to (e.g. a council), with no role or date of its own, "
+        "is context for that program's item, not a new item.")
+
+
+def test_extract_fields_batch_sends_the_series_guard_to_the_llm(monkeypatch):
+    """Wire: a K4 batch's prompt as call_llm receives it."""
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _reply({"entries": [{"entry_index": 0, "activity_title": "Alpha Series"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    extraction.extract_fields_batch(
+        [{"text": "Lecturer: Alpha Series 2015, 2016\tTopic A\tTopic B",
+          "taxonomy_code": "K4", "element_idx_start": 0, "element_idx_end": 0}], 0, 1)
+    assert prompts and extraction.MULTI_RECORD_INSTRUCTION + extraction.ONE_SERIES_INSTRUCTION in prompts[0]
+
+
 def test_the_tab_rule_keeps_columns_but_starts_a_new_item_for_a_new_record():
     # TAUBPU-shaped D2 row: a hospital post, a tab, then a concurrent faculty
     # rank. The old rule read every tab as a column of one record.
