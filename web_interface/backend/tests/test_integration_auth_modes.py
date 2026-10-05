@@ -23,6 +23,7 @@ from app.ed_group_lookup import (
     MembershipResult,
     EdUnavailableError,
 )
+from tests.conftest import WCM_IDP_SCOPES
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,7 @@ from app.ed_group_lookup import (
 def _mock_saml_client(identity_dict=None):
     """Create a mock Saml2Client with pre-configured responses."""
     mock_client = MagicMock()
+    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_client.prepare_for_authenticate.return_value = (
         "req_id",
         {"headers": [("Location", "https://idp.example.com/sso?SAMLRequest=abc123")]},
@@ -58,7 +60,7 @@ def _mock_saml_client(identity_dict=None):
 _SAML_IDENTITY = {
     "urn:oid:0.9.2342.19200300.100.1.3": ["testuser@med.cornell.edu"],
     "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
-    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@cornell.edu"],
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@med.cornell.edu"],
 }
 
 _ED_ENV = {

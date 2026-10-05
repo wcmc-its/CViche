@@ -27,6 +27,8 @@ CViche expects the following attributes in the SAML assertion. OID format is pre
 **Notes:**
 
 - CViche anchors each user's identity on a CWID, derived from `uid` or `eduPersonPrincipalName` (ePPN). At least one of the two must be released, or login fails with `No CWID derivable from SAML assertion (need uid or eduPersonPrincipalName)`. `uid` is checked first and used as the CWID directly; if `uid` is absent, CViche derives the CWID from the local part of ePPN (the portion before `@`).
+- An ePPN must carry a scope the issuing IdP declares in its metadata (`shibmd:Scope`); otherwise login fails with `missing_attributes`. The WCM IdP declares `med.cornell.edu`, so a WCM ePPN must be `<cwid>@med.cornell.edu`.
+- An ePPN in any scope other than `med.cornell.edu` (a partner institution) is not a CWID: CViche keys that user on the full lowercased ePPN (e.g. `js1234@cornell.edu`) and ignores `uid`, so a partner user can never land on a WCM account with the same local part (#1452). A partner IdP must release ePPN.
 - `displayName` is used to populate the user's display name. If absent, CViche falls back to `eduPersonPrincipalName`, then to `mail`.
 - `mail` is optional; a user with no `mail` released (e.g. an external affiliate) still authenticates. When present, CViche stores it for display in the UI and admin views and to identify the submitter in run/feedback notifications -- it is not used for login or identity matching.
 

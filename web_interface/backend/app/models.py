@@ -58,7 +58,9 @@ class User(Base):
     # identity). email is preferred-but-optional -- nothing in the app sends
     # mail, so a user without an ED `mail` (e.g. external affiliates) still
     # authenticates. nullable for simple-auth users, who have no CWID.
-    cwid = Column(String(20), unique=True, nullable=True, index=True)
+    # A partner-institution user's anchor is their scoped ePPN instead
+    # ("user@cornell.edu"), never a bare CWID -- hence 255 (#1452).
+    cwid = Column(String(255), unique=True, nullable=True, index=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
     display_name = Column(String(255), nullable=False)
     # A UserRole value: "user", "staff" or "admin". A plain String with no

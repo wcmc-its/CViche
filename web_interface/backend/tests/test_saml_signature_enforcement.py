@@ -43,7 +43,7 @@ from saml2.config import Config as _Saml2Config
 
 from app.api.saml_routes import _reject_wrong_destination
 from app.auth import COOKIE_NAME
-from app.models import SystemConfig
+from app.models import SystemConfig, User
 from app.saml_client import extract_user_attrs
 from app.saml_replay import assertion_ids, set_replay_cache
 
@@ -61,6 +61,7 @@ SSO = "https://idp.test.local/sso"
 REDIRECT = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
 AUTHN = {"class_ref": "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
          "authn_auth": IDP_EID}
+IDP_SCOPE = "test.local"
 IDENTITY = {"mail": ["victim@test.local"], "displayName": ["Victim User"],
             "eduPersonPrincipalName": ["victim@test.local"]}
 
@@ -77,7 +78,9 @@ def _gen_cert(tmp, name):
 def _idp_conf(tmp, key, crt, metadata=None):
     c = {"entityid": IDP_EID,
          "service": {"idp": {"endpoints": {"single_sign_on_service": [(SSO, REDIRECT)]},
-                             "name_id_format": [NAMEID_FORMAT_EMAILADDRESS]}},
+                             "name_id_format": [NAMEID_FORMAT_EMAILADDRESS],
+                             # published as shibmd:Scope in the IdP metadata
+                             "scope": [IDP_SCOPE]}},
          "key_file": key, "cert_file": crt, "xmlsec_binary": _XMLSEC}
     if metadata:
         c["metadata"] = {"local": metadata}
@@ -160,8 +163,12 @@ def _parse(sp, xml, outstanding=None):
 def test_valid_signature_is_accepted(harness):
     resp = _parse(harness["strict"], harness["valid"])
     assert resp is not None
-    attrs = extract_user_attrs(resp.get_identity())
+    scopes = list(harness["strict"].metadata.shibmd_scopes(
+        resp.assertion.issuer.text, "idpsso_descriptor"))
+    attrs = extract_user_attrs(resp.get_identity(), scopes)
     assert attrs["email"] == "victim@test.local"
+    # test.local is not a CWID scope: keyed on the full ePPN (#1452)
+    assert attrs["cwid"] == "victim@test.local"
 
 
 def test_tampered_assertion_is_rejected(harness):
@@ -277,7 +284,8 @@ def _iso(delta_minutes):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _mint(server, *, destination=ACS, audience=None, not_before=None, not_on_or_after=None):
+def _mint(server, *, destination=ACS, audience=None, not_before=None, not_on_or_after=None,
+          identity=IDENTITY):
     """Sign a real Response/Assertion with `server`; optionally rewrite the
     Conditions the IdP puts in the assertion BEFORE signing."""
     real_conditions = Policy.conditions
@@ -294,7 +302,7 @@ def _mint(server, *, destination=ACS, audience=None, not_before=None, not_on_or_
 
     with patch.object(Policy, "conditions", tweaked):
         return str(server.create_authn_response(
-            IDENTITY, in_response_to=None, destination=destination, sp_entity_id=SP_EID,
+            identity, in_response_to=None, destination=destination, sp_entity_id=SP_EID,
             name_id=server.ident.transient_nameid(SP_EID, "victim"), authn=AUTHN,
             # The app's SP config leaves pysaml2's want_response_signed at its
             # default (True) and sets want_assertions_signed=True: sign both.
@@ -310,12 +318,27 @@ def _assert_rejected(resp, caplog, reason):
     assert COOKIE_NAME not in {c.name for c in resp.cookies.jar}
 
 
-def test_acs_valid_signed_response_is_accepted(acs_env, acs_app):
+def test_acs_valid_signed_response_is_accepted(acs_env, acs_app, db):
     """Control: the un-tweaked fixture logs in through the real ACS path."""
     resp = acs_app(_mint(acs_env["idp"]))
     assert resp.status_code == 302
     assert resp.headers["location"] == "/"
     assert COOKIE_NAME in {c.name for c in resp.cookies.jar}
+    # The scope came from the real metadata's shibmd:Scope (#1452).
+    assert db.query(User).filter(User.cwid == "victim@test.local").count() == 1
+
+
+def test_acs_rejects_eppn_outside_idp_scope(acs_env, acs_app, db, caplog):
+    """A correctly signed assertion from a trusted IdP claiming an ePPN in a
+    scope it doesn't own -- here WCM's -- must not log in as that WCM CWID
+    (#1452)."""
+    forged = {**IDENTITY, "eduPersonPrincipalName": ["victim@med.cornell.edu"]}
+    resp = acs_app(_mint(acs_env["idp"], identity=forged))
+    assert "is not declared in the issuing IdP's metadata" in caplog.text
+    assert resp.status_code == 302
+    assert "error=missing_attributes" in resp.headers["location"]
+    assert COOKIE_NAME not in {c.name for c in resp.cookies.jar}
+    assert db.query(User).filter(User.cwid == "victim").count() == 0
 
 
 def test_acs_rejects_wrong_audience(acs_env, acs_app, caplog):

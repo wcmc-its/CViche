@@ -45,6 +45,7 @@ from app.saml_replay import (
     _CLOCK_SKEW,
     _MAX_TTL,
 )
+from tests.conftest import WCM_IDP_SCOPES
 
 
 @pytest.fixture(autouse=True)
@@ -515,6 +516,7 @@ class _Assertion:
 
     def __init__(self, aid, conditions_noa=None, scd_noas=None):
         self.id = aid
+        self.issuer = SimpleNamespace(text="https://idp.test.local")
         self.conditions = _Boundary(conditions_noa) if conditions_noa is not None else None
         self.subject = _Subject([_SubjectConfirmation(n) for n in (scd_noas or [])])
 
@@ -622,7 +624,7 @@ def test_replay_ttl_garbage_conditions_string_is_skipped_with_warning(caplog):
 _IDENTITY = {
     "urn:oid:0.9.2342.19200300.100.1.3": ["testuser@med.cornell.edu"],
     "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
-    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@cornell.edu"],  # ePPN -> cwid anchor
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@med.cornell.edu"],  # ePPN -> cwid anchor
 }
 
 
@@ -639,6 +641,7 @@ def replay_cache():
 
 def _mock_client(response):
     mock_client = MagicMock()
+    mock_client.metadata.shibmd_scopes.return_value = WCM_IDP_SCOPES
     mock_client.parse_authn_request_response.return_value = response
     return mock_client
 
@@ -752,6 +755,7 @@ class TestAcsReplayGate:
         mock_response = MagicMock()
         mock_response.get_identity.return_value = _IDENTITY
         mock_response.response.destination = None  # absent Destination is allowed (#672)
+        mock_response.assertion = SimpleNamespace(id=None, issuer=SimpleNamespace(text="https://idp.test.local"))  # issuer, no ID (#1452)
         mock_get_client.return_value = _mock_client(mock_response)
         assert _post_acs(client).status_code == 302
         assert _post_acs(client).status_code == 302
