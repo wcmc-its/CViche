@@ -51,6 +51,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_enrichment_pubtype_mismatch,
     lint_etal_added,
     lint_junk_or_header_row,
     lint_llm_fallback_served,
@@ -59,6 +60,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
@@ -69,6 +71,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_stage_failure_recorded,
     lint_taxonomy_code_coverage,
     lint_segmentation,
+    lint_segmentation_collapse,
     lint_stage6_warnings,
     lint_table_lost,
     lint_table_shape,
@@ -182,6 +185,133 @@ def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
     assert [(f["lint"], f["severity"]) for f in findings] == [("table_lost", "WARN")]
     assert findings[0]["message"] == "2 source table(s) mostly lost; worst: 6 of 6 lines"
     assert findings[0]["evidence"] == large[:5]
+
+
+def _stage1b(placed, unplaced, synthetic_end=2):
+    """Stage 1b with `placed` headings on a source line, `unplaced` without
+    one, and a synthetic preamble section over elements 0..synthetic_end."""
+    nodes = [{"text": "PERSONAL DATA", "element_idx": None, "synthetic": True}]
+    nodes += [{"text": f"SECTION {i}", "element_idx": 10 * (i + 1), "synthetic": False}
+              for i in range(placed)]
+    nodes += [{"text": f"LOST {i}", "element_idx": None, "synthetic": False}
+              for i in range(unplaced)]
+    sections = [{"hierarchy": ["PERSONAL DATA"], "element_idx_start": 0,
+                 "element_idx_end": synthetic_end, "synthetic": True}]
+    sections += [{"hierarchy": [f"SECTION {i}"], "element_idx_start": 10 * (i + 1),
+                  "element_idx_end": 10 * (i + 1) + 9} for i in range(placed)]
+    return {"hierarchy_with_indices": nodes, "section_boundaries": sections}
+
+
+def _stage2_at(*starts):
+    return {"entries": [{"element_idx_start": s, "element_type": "paragraph", "text": "x"}
+                        for s in starts]}
+
+
+def test_segmentation_collapse_fires_when_1b_places_no_heading():
+    # DPEHSZ shape: every 1a heading unplaced, every entry in the preamble.
+    stage1b = _stage1b(placed=0, unplaced=4, synthetic_end=50)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 5, 20, 40))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("segmentation_collapse", "WARN")]
+    assert findings[0]["message"] == ("section structure lost: 0 of 4 headings placed, "
+                                      "4 of 4 entries in synthetic sections")
+    assert findings[0]["evidence"] == [
+        "stage 1b placed 0 of 4 stage 1a headings",
+        "element_idx_start 0: synthetic section 'PERSONAL DATA' (to 50) holds 4 of 4 stage-2 entries"]
+
+
+def test_segmentation_collapse_fires_on_under_half_placed_alone():
+    findings = lint_segmentation_collapse(_stage1b(placed=1, unplaced=2), _stage2_at(11, 12))
+    assert len(findings) == 1
+    assert "1 of 3 headings placed" in findings[0]["message"]
+
+
+def test_segmentation_collapse_fires_when_the_preamble_holds_most_entries_alone():
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 2, 3, 11))
+    assert len(findings) == 1
+    assert "3 of 4 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_segmentation_collapse_quiet_at_half_placed_and_a_small_preamble():
+    stage1b = _stage1b(placed=2, unplaced=2)
+    assert lint_segmentation_collapse(stage1b, _stage2_at(1, 11, 12, 21, 22)) == []
+
+
+def test_segmentation_collapse_quiet_when_the_preamble_holds_exactly_half():
+    # The synthetic share must be OVER half: 2 of 4 entries is quiet.
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    assert lint_segmentation_collapse(stage1b, _stage2_at(1, 2, 11, 21)) == []
+
+
+def test_segmentation_collapse_counts_headings_nested_under_children():
+    # Stage 1b nests subheadings under `children`: one placed parent with
+    # three unplaced children is 1 of 4 placed, not 1 of 1.
+    stage1b = _stage1b(placed=1, unplaced=0)
+    stage1b["hierarchy_with_indices"][1]["children"] = [
+        {"text": f"SUB {i}", "element_idx": None, "synthetic": False,
+         "children": [{"text": f"SUBSUB {i}", "element_idx": None, "synthetic": False}]
+         if i == 0 else []}
+        for i in range(2)]
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(11, 12))
+    assert len(findings) == 1
+    assert "1 of 4 headings placed" in findings[0]["message"]
+
+
+def test_segmentation_collapse_does_not_count_break_rows_as_entries():
+    stage1b = _stage1b(placed=2, unplaced=0, synthetic_end=9)
+    stage2 = _stage2_at(11, 21)
+    stage2["entries"] += [{"element_idx_start": i, "element_type": "break"} for i in range(1, 9)]
+    assert lint_segmentation_collapse(stage1b, stage2) == []
+
+
+def test_segmentation_collapse_counts_an_entry_on_the_synthetic_end_bound():
+    # Section bounds are inclusive: an entry at element_idx_end is inside.
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 9, 11))
+    assert "2 of 3 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_segmentation_collapse_counts_an_entry_on_the_synthetic_start_bound():
+    # Section bounds are inclusive at the start too: an entry at
+    # element_idx_start is inside (DPEHSZ's first entry sits on it).
+    stage1b = _stage1b(placed=3, unplaced=0, synthetic_end=9)
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(0, 5, 11))
+    assert "2 of 3 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_segmentation_collapse_names_the_synthetic_section_holding_the_most():
+    stage1b = _stage1b(placed=0, unplaced=2, synthetic_end=4)
+    stage1b["section_boundaries"].append(
+        {"hierarchy": ["CONTACT"], "element_idx_start": 5, "element_idx_end": 30,
+         "synthetic": True})
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 6, 7, 8))
+    assert findings[0]["evidence"][1] == (
+        "element_idx_start 5: synthetic section 'CONTACT' (to 30) holds 3 of 4 stage-2 entries")
+
+
+def test_segmentation_collapse_counts_an_entry_once_in_overlapping_synthetic_sections():
+    stage1b = _stage1b(placed=0, unplaced=2, synthetic_end=9)
+    stage1b["section_boundaries"].append(
+        {"hierarchy": ["CONTACT"], "element_idx_start": 0, "element_idx_end": 9,
+         "synthetic": True})
+    findings = lint_segmentation_collapse(stage1b, _stage2_at(1, 2))
+    assert "2 of 2 entries in synthetic sections" in findings[0]["message"]
+
+
+def test_run_doctor_wires_segmentation_collapse_to_stage_1b_then_stage_2(tmp_path):
+    """The wire: LintSpec passes artifacts positionally, so swapping the
+    registry's ("stage_1b", "stage_2") would read headings from stage 2 and
+    entries from stage 1b, and the lint would go silent."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "segmentation_collapse"]
+    collapsed = _stage1b(placed=0, unplaced=3, synthetic_end=50)
+    _write_stage(root, "stage_1b_hierarchy_mapping", f"{_UID}_cv_hierarchy_mapped.json",
+                 {"document_uid": _UID, **collapsed})
+    findings = [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "segmentation_collapse"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
+        ("WARN", "section structure lost")]
 
 
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
@@ -1230,6 +1360,168 @@ def test_enrichment_failures_missing_artifact_info_skip(tmp_path):
     assert skips[0]["severity"] == "INFO"
     assert "stage_5_enrichment" in skips[0]["message"]
     assert payload["artifacts"]["stage_5_enrichment"] is None
+
+
+# ------------------------------- lints 14r/14s: accepted PubMed records (E19)
+
+
+def _accepted(idx, pubmed_title, cv_title="A synthetic study of tidal sediment cores",
+              pubtypes=("Journal Article",), status="enriched", text=None):
+    """A stage-5 entry stage 5 accepted from PubMed; every value is invented."""
+    return {"element_idx_start": idx, "taxonomy_code": "S1",
+            "text": text or f"Vandermeer Q. {cv_title}. J Synth Geol. 2031;4:1-9.",
+            "enrichment_status": status, "enrichment_source": "pmid",
+            "extracted_fields": {"title": cv_title},
+            "enrichment_data": {"pubmed_title": pubmed_title,
+                                "publication_types": list(pubtypes)}}
+
+
+@pytest.mark.parametrize("title", [
+    "Sediment transport in ",           # cut before an inline element: trailing space
+    "An N",                             # cut inside a token followed by a superscript
+    "Coastal cores of the (CoRE",       # cut inside a parenthesis
+])
+def test_pubmed_title_truncated_warns_on_a_title_cut_mid_phrase(title):
+    findings = lint_pubmed_title_truncated({"entries": [_accepted(264, title)]})
+    assert [(f["lint"], f["severity"]) for f in findings] == [("pubmed_title_truncated", "WARN")]
+    assert findings[0]["message"].startswith("entry 264 (S1): ")
+
+
+@pytest.mark.parametrize("title", [
+    "A synthetic study of tidal sediment cores.",
+    "Do tidal cores record storms?",
+    "Tidal cores: a field note!",
+    "[A synthetic study of tidal cores in translation]",
+    "A synthetic study of tidal sediment cores (TIDE)",
+    "A synthetic study of tidal sediment cores.   ",
+    "The \u201ctidal core\u201d",
+    "The \u2018tidal core\u2019",
+    "The 'tidal core'",
+    'The "tidal core"',
+])
+def test_pubmed_title_truncated_quiet_on_a_complete_title(title):
+    assert lint_pubmed_title_truncated({"entries": [_accepted(264, title)]}) == []
+
+
+def test_pubmed_title_truncated_skips_records_stage_6_does_not_render_from_pubmed():
+    """An empty title falls back to the CV's in stage 6, and only an accepted
+    ('enriched') record replaces the CV's citation at all."""
+    entries = [_accepted(1, ""), _accepted(2, "Sediment transport in ", status="title_check_failed"),
+               {"element_idx_start": 3, "text": "no enrichment at all"}]
+    assert lint_pubmed_title_truncated({"entries": entries}) == []
+
+
+def test_pubmed_title_truncated_does_not_judge_a_shorter_published_title():
+    entry = _accepted(5, "Tidal cores.", cv_title="A much longer conference title "
+                      "for the same synthetic study of tidal sediment cores in estuaries")
+    assert lint_pubmed_title_truncated({"entries": [entry]}) == []
+
+
+@pytest.mark.parametrize("pubtype", ["Published Erratum", "Retraction of Publication",
+                                     "Expression of Concern"])
+def test_enrichment_pubtype_mismatch_warns_on_a_notice_accepted_for_a_paper(pubtype):
+    entry = _accepted(257, "A synthetic study of tidal sediment cores.", pubtypes=(pubtype,))
+    findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
+    assert [(f["lint"], f["severity"]) for f in findings] == [
+        ("enrichment_pubtype_mismatch", "WARN")]
+    assert findings[0]["message"].startswith("entry 257 (S1): ")
+    assert pubtype in findings[0]["message"]
+
+
+@pytest.mark.parametrize("opening", ["Author Correction", "Correction", "Erratum",
+                                     "Retraction", "Corrigendum", "Expression of concern"])
+def test_enrichment_pubtype_mismatch_reads_a_notice_title_without_the_type(opening):
+    """Each notice opening the title regex names, on a record typed only as
+    a Journal Article, so the title alone decides."""
+    entry = _accepted(257, f"{opening}: A synthetic study of tidal sediment cores.")
+    findings = lint_enrichment_pubtype_mismatch({"entries": [entry]})
+    assert [f["lint"] for f in findings] == ["enrichment_pubtype_mismatch"]
+
+
+@pytest.mark.parametrize("cv_title", [
+    "Author Correction: A synthetic study of tidal sediment cores",
+    "Erratum to: A synthetic study of tidal sediment cores",
+])
+def test_enrichment_pubtype_mismatch_quiet_when_the_cv_lists_the_notice(cv_title):
+    entry = _accepted(272, f"{cv_title}.", cv_title=cv_title, pubtypes=("Published Erratum",))
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+@pytest.mark.parametrize("text, cv_title", [
+    # the notice is named only in the entry text, not in the extracted title
+    ("Vandermeer Q. Erratum. J Synth Geol. 2031;4:10.", "A synthetic study of tidal cores"),
+    # the notice is named only in the extracted title, not in the entry text
+    ("Vandermeer Q. J Synth Geol. 2031;4:10.", "Corrigendum to a synthetic study of tidal cores"),
+    ("Vandermeer Q. Retraction: tidal cores. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    # each remaining word the CV-side regex names, alone in the entry text
+    ("Vandermeer Q. Tidal cores (retracted). J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Tidal cores, errata. J Synth Geol. 2031;4:10.", "Tidal cores"),
+    ("Vandermeer Q. Expression of concern: tidal cores. J Synth Geol. 2031;4:10.",
+     "Tidal cores"),
+])
+def test_enrichment_pubtype_mismatch_reads_both_cv_text_and_cv_title(text, cv_title):
+    entry = _accepted(272, "A synthetic study of tidal cores.", cv_title=cv_title,
+                      pubtypes=("Retraction of Publication",), text=text)
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_pubtype_mismatch_reads_only_the_opening_of_the_title():
+    """A paper whose title names a correction mid-way is not a notice."""
+    entry = _accepted(9, "Drift correction for synthetic tidal sediment cores.")
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_lints_skip_an_accepted_entry_with_malformed_enrichment_data():
+    entry = _accepted(9, "Sediment transport in ", pubtypes=("Published Erratum",))
+    entry["enrichment_data"] = ["not", "a", "dict"]
+    stage5e = {"entries": [entry]}
+    assert lint_pubmed_title_truncated(stage5e) == []
+    assert lint_enrichment_pubtype_mismatch(stage5e) == []
+
+
+def test_enrichment_lints_tolerate_non_dict_extracted_fields():
+    """A truthy non-dict `extracted_fields` (a list) is read as no CV title,
+    not dereferenced: both lints still report the record."""
+    cut = _accepted(11, "Sediment transport in ")
+    notice = _accepted(12, "A synthetic study of tidal cores.", pubtypes=("Published Erratum",),
+                       text="Vandermeer Q. Tidal cores. J Synth Geol. 2031;4:10.")
+    for entry in (cut, notice):
+        entry["extracted_fields"] = ["not", "a", "dict"]
+    stage5e = {"entries": [cut, notice]}
+    truncated = lint_pubmed_title_truncated(stage5e)
+    assert [f["lint"] for f in truncated] == ["pubmed_title_truncated"]
+    assert "the CV's title: 0 chars" in truncated[0]["evidence"][0]
+    assert [f["lint"] for f in lint_enrichment_pubtype_mismatch(stage5e)] == [
+        "enrichment_pubtype_mismatch"]
+
+
+@pytest.mark.parametrize("pubtypes", [("Letter", "Comment"), ("Editorial", "Comment"),
+                                      ("Journal Article", "Retracted Publication"),
+                                      ("Journal Article",)])
+def test_enrichment_pubtype_mismatch_quiet_on_a_paper_record(pubtypes):
+    """A Comment is usually the CV owner's own commentary, and a Retracted
+    Publication is the paper itself."""
+    entry = _accepted(9, "A synthetic study of tidal sediment cores.", pubtypes=pubtypes)
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_pubtype_mismatch_skips_a_record_stage_5_did_not_accept():
+    entry = _accepted(9, "Correction: tidal cores.", pubtypes=("Published Erratum",),
+                      status="title_check_failed")
+    assert lint_enrichment_pubtype_mismatch({"entries": [entry]}) == []
+
+
+def test_enrichment_lints_run_from_the_stage_5_artifact(tmp_path):
+    """Wired through LINT_REGISTRY: run_doctor reads both off the stage-5 JSON."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_5_enrichment").glob("*.json"))
+    payload = json.loads(path.read_text())
+    payload["entries"] = [_accepted(264, "Sediment transport in "),
+                          _accepted(257, "Correction: tidal cores.", pubtypes=("Published Erratum",))]
+    path.write_text(json.dumps(payload))
+    lints = [f["lint"] for f in run_doctor(root, _UID)["findings"]
+             if f["lint"] in ("pubmed_title_truncated", "enrichment_pubtype_mismatch")]
+    assert sorted(lints) == ["enrichment_pubtype_mismatch", "pubmed_title_truncated"]
 
 
 # ------------------------------------------------- lint 10: stage-6 warnings
@@ -3662,6 +3954,12 @@ def _build_clean_run(tmp_path, uid=_UID):
 
     _write_stage(root, "stage_1a_segmentation", f"{uid}_cv_segmented.json",
                  {"document_uid": uid, **_STAGE1A})
+    _write_stage(root, "stage_1b_hierarchy_mapping", f"{uid}_cv_hierarchy_mapped.json",
+                 {"document_uid": uid,
+                  "hierarchy_with_indices": [{"text": "GRANTS", "level": "H1",
+                                              "element_idx": 0, "synthetic": False}],
+                  "section_boundaries": [{"hierarchy": ["GRANTS"], "element_idx_start": 0,
+                                          "element_idx_end": len(grants)}]})
     stage2_entries = [_entry("GRANTS", etype="header", start=0)] + [
         _entry(grant, start=i + 1) for i, grant in enumerate(grants)]
     _write_stage(root, "stage_2_entry_extraction", f"{uid}_cv_entries.json",
@@ -3716,14 +4014,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (44), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (48), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 42
+    assert len(payload["findings"]) == 46
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -3994,6 +4292,25 @@ def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
     payload = run_doctor(root, _UID)
     drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
     assert [f["severity"] for f in drops] == ["INFO"]
+
+
+def test_run_doctor_wires_stage_5d_into_dedup_drops_entry_index(tmp_path):
+    """The evidence names the dropped entry only through the optional
+    `stage_5d` view; without that wiring every drop goes back to naming text,
+    which the precision harness cannot match to a verified finding."""
+    root = _build_clean_run(tmp_path)
+    dropped = "3/2031 Example grand rounds talk"
+    _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                 {"document_uid": _UID, "warnings": [],
+                  "dedup_decisions": [
+                      {"code": "K4", "metric": "jaccard=0.95", "dropped_text": dropped,
+                       "kept_text": "9/2031 Example grand rounds talk, 3 hours"}]})
+    _write_stage(root, "stage_5d_citation_formatted", f"{_UID}_cv_citation_formatted.json",
+                 {"entries": [{"element_idx_start": 77, "taxonomy_code": "K4",
+                               "text": dropped, "extracted_fields": {}}]})
+    payload = run_doctor(root, _UID)
+    drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
+    assert drops[0]["evidence"][0].startswith("entry 77: K4 (")
 
 
 def test_run_doctor_hard_fail_gate_makes_an_undeliverable_run_an_error(tmp_path):
@@ -4335,6 +4652,15 @@ def test_date_cell_shape_prevalence_is_the_measured_farm_fraction():
     new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
     assert LINT_PREVALENCE["date_cell_shape"] == round(19 / 63, 3)
+
+
+def test_classification_lint_prevalence_is_the_measured_farm_fraction():
+    """Measured 2026-10-04 over the 63-run EBYSBC/s7ab/pilot farm's stage
+    1b/2/3b artifacts (one fire per run at any severity); a new measurement
+    updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["section_consistency"] == round(23 / 63, 3)
+    assert LINT_PREVALENCE["segmentation_collapse"] == round(1 / 63, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

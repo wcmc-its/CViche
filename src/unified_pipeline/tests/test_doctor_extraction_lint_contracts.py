@@ -751,6 +751,107 @@ def test_dedup_drops_reports_warn_and_info_together():
     assert [f["severity"] for f in result] == ["WARN", "INFO"]
 
 
+# #666 (EBYSBC E4): a drop that names another occasion -- a month, a day, a
+# part or a numeral the kept entry lacks -- is another record even when its
+# words are all in the kept text. Synthetic dates and titles.
+
+def _drop(dropped, kept, code="K4", metric="jaccard=0.95", **extra):
+    return {"code": code, "metric": metric, "dropped_text": dropped,
+            "kept_text": kept, **extra}
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    # the same lecture in another month: every dropped word is in the kept text
+    ("3/2031 Example grand rounds talk", "9/2031 Example grand rounds talk, 3 hours"),
+    # another day of the same month, a two-digit year
+    ("5/9/31 Example teaching session", "5/16/31 Example teaching session 9"),
+])
+def test_dedup_drops_warns_on_a_date_the_kept_entry_lacks(dropped, kept):
+    result = lint_dedup_drops({"dedup_decisions": [_drop(dropped, kept)]})
+    assert [f["severity"] for f in result] == ["WARN"]
+    assert "a date the kept entry does not carry" in result[0]["evidence"][0]
+
+
+def test_dedup_drops_quiet_when_the_kept_entry_carries_the_date():
+    decision = _drop("3/2031 Example grand rounds talk",
+                     "3/2031 Example grand rounds talk, Example Hospital")
+    assert lint_dedup_drops({"dedup_decisions": [decision]}) == []
+
+
+@pytest.mark.parametrize("dropped, kept, reason", [
+    ("Example Series Part I, noon talk", "Example Series Part II, noon talk", "part 1"),
+    ("Example Program II", "Example Program III", "numeral II"),
+    ("Example Course I\tExample Society", "Example Course II\tExample Society", "numeral I"),
+    ("Example trial, Phase II", "Example trial, Phase III", "phase 2"),
+])
+def test_occasion_apart_reads_parts_and_numerals(dropped, kept, reason):
+    assert extraction_lints._occasion_apart(dropped, kept) == f"{reason} the kept entry lacks"
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    ("I taught an example course", "Taught an example course"),     # a pronoun
+    ("Doe V, Roe X. Example paper", "Doe V. Example paper"),       # initials
+    ("Example Series Part I", "Example Series Parts I and II"),     # a listing covers it
+])
+def test_occasion_apart_ignores_pronouns_initials_and_listed_parts(dropped, kept):
+    assert extraction_lints._occasion_apart(dropped, kept) is None
+
+
+def test_dedup_drops_occasion_test_also_checks_record_rule_drops():
+    """A record-rule drop skips the word-coverage test (its texts share few
+    words by construction) but not the occasion test."""
+    decision = _drop("Example Series Part I", "Example Series Part II overview",
+                     metric="record=example_rule")
+    result = lint_dedup_drops({"dedup_decisions": [decision]})
+    assert [f["severity"] for f in result] == ["WARN"]
+    assert "record=example_rule, part 1" in result[0]["evidence"][0]
+
+
+def test_dedup_drops_info_on_a_rank_word_even_when_the_name_renders():
+    """SEKQUI-01's shape: the dropped rank renders elsewhere (another row), so
+    the cell test alone stays quiet; the rank word tells the records apart."""
+    decision = _drop("Assistant Professor, Example Dept", "Clinical Assistant Professor, "
+                     "Example Dept, 2001", code="D1", metric="containment=1.00",
+                     dropped_fields={"title": "Assistant Professor"},
+                     kept_fields={"title": "Clinical Assistant Professor"})
+    blocks = [("table", "Assistant Professor\nClinical Assistant Professor")]
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, blocks)
+    assert [f["severity"] for f in result] == ["INFO"]
+    assert lint_dedup_drops({"dedup_decisions": [decision]}) == result
+
+
+def test_dedup_drops_evidence_names_the_dropped_entry_from_stage_5d():
+    decision = _drop("3/2031 Example grand rounds talk", "9/2031 Example grand rounds talk, 3")
+    stage_5d = {"entries": [
+        {"element_idx_start": 12, "taxonomy_code": "K4",
+         "text": "3/2031  Example grand rounds talk", "extracted_fields": {}},
+        {"element_idx_start": 14, "taxonomy_code": "K4",
+         "text": "9/2031 Example grand rounds talk, 3", "extracted_fields": {}}]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, stage_5d)
+    assert result[0]["evidence"][0].startswith("entry 12: K4 (")
+
+
+def test_dedup_drops_evidence_names_the_entry_by_its_formatted_citation():
+    """A citation's dropped text is its stage-5d formatted_citation, not its
+    raw text."""
+    decision = _drop("3/2031 Example grand rounds talk", "9/2031 Example grand rounds talk, 3")
+    stage_5d = {"entries": [
+        {"element_idx_start": 12, "taxonomy_code": "K4", "text": "raw source line 12",
+         "extracted_fields": {"formatted_citation": "3/2031 Example grand rounds talk"}}]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, stage_5d)
+    assert result[0]["evidence"][0].startswith("entry 12: K4 (")
+
+
+def test_dedup_drops_evidence_names_no_entry_when_two_carry_the_text():
+    decision = _drop("3/2031 Example grand rounds talk", "9/2031 Example grand rounds talk, 3")
+    twin = {"taxonomy_code": "K4", "text": "3/2031 Example grand rounds talk",
+            "extracted_fields": {}}
+    stage_5d = {"entries": [dict(twin, element_idx_start=12),
+                            dict(twin, element_idx_start=20)]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, stage_5d)
+    assert result[0]["evidence"][0].startswith("K4 (")
+
+
 def test_dedup_drops_record_rule_drop_skips_the_coverage_warn_not_the_name_info():
     """A stage-6 record-rule drop matched on fields: its low text coverage
     is not evidence, but a dropped name absent from the page still is."""

@@ -52,9 +52,11 @@ Lints, ranked by the severity of the failure class they catch:
                           near-fully contained in the kept entry — at loose
                           thresholds these are distinct records lost, not
                           duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real);
-                          plus an INFO finding for a fully-covered drop whose
-                          extracted name differs from the kept entry's and is
-                          on the page as no cell of its own (#666)
+                          or that names a month, day, part or numeral the
+                          kept entry lacks (#666, EBYSBC E4); plus an INFO
+                          finding for a fully-covered drop whose extracted
+                          name differs from the kept entry's by a rank word
+                          or is on the page as no cell of its own (#666)
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
                           the faculty-facing document (#208 costs) — and
@@ -75,7 +77,10 @@ Lints, ranked by the severity of the failure class they catch:
                           normalized body repeats at a different list
                           position within the same output section — the
                           ONE-block shape duplicate_passages cannot see by
-                          construction (#446)
+                          construction (#446); with stage 5d, also two
+                          entries naming one article (title, PMID, DOI) or
+                          one grant across M2A/M2B/M2C, rendered twice at
+                          any distance (EBYSBC E16/E28)
 14b. invented_records     a rendered stage-4 record built entirely from the
                           WCM template's own field labels rather than real
                           content (the F2 board-certification header row
@@ -222,6 +227,33 @@ Lints, ranked by the severity of the failure class they catch:
                           or Office address row does not show: routed to
                           another row, withheld as home, or read by nothing
                           (EBYSBC E25, #1222); WARN
+14r. pubmed_title_truncated a PubMed title stage 5 accepted that ends with no
+                          terminal punctuation: read with `.text` before
+                          #1358, it stopped at the first inline element (an
+                          italic gene name, a superscript), and stage 6
+                          renders the cut title in place of the CV's
+                          (EBYSBC E19: QNZADH-02, AKPQEB-01). WARN, one per
+                          citation
+14s. enrichment_pubtype_mismatch an accepted PubMed record that is a notice
+                          about a paper (Published Erratum, a retraction, an
+                          expression of concern, or a title opening
+                          "Correction:") where the CV lists the paper itself,
+                          so the citation renders the notice (EBYSBC E19:
+                          QNZADH-01). WARN, one per citation
+14r. section_consistency  a stage-3b code that contradicts the entry's own
+                          heading, text or siblings: intern and resident rows
+                          as appointments, an ABIM line as a membership,
+                          BLS/ACLS as a licence, grant reviews as committees,
+                          courses attended as teaching, a thesis-committee
+                          block as institutional committees, a 'see section'
+                          line or bare URL as a record, a journal article
+                          with volume and pages as a non-peer-reviewed report
+                          among peer-reviewed siblings (EBYSBC E11/E30); WARN
+14s. segmentation_collapse stage 1b placed under half of stage 1a's headings,
+                          or the synthetic preamble section holds most of
+                          stage 2's entries, so stage 3b classified the CV
+                          without its sections (EBYSBC E17: DPEHSZ placed 0
+                          of 24 headings and scored 99); WARN
 14t. grant_boundary       a grant list stage 2 cut one line or row off
                           (#1226, EBYSBC E5): two neighbours splitting one
                           record (sponsor or number in one, title in the
@@ -377,6 +409,8 @@ from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_GATE,
     lint_enrichment_failures,
     lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
+    lint_enrichment_pubtype_mismatch,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     DEAD_SECTION_MIN_LINES,
@@ -432,7 +466,11 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     _hierarchy_titles,
     lint_missed_headers,
     lint_segmentation,
+    lint_segmentation_collapse,
     lint_table_lost,
+)
+from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_section_consistency,
 )
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
     lint_protected_data_in_output,
@@ -534,6 +572,10 @@ KNOWN_LINTS = (
     "junk_or_header_row",
     "teaching_postcheck",
     "contact_slot_lost",
+    "pubmed_title_truncated",
+    "enrichment_pubtype_mismatch",
+    "section_consistency",
+    "segmentation_collapse",
     "grant_boundary",
     "grant_bucket",
     "owner_contact_missing",
@@ -684,6 +726,19 @@ LINT_PREVALENCE = {
     # render, after #1381 fixed the contact routing; 9 of 63 on the dev-242
     # documents the autopsy read. Same mixed-corpus caveat as above.
     "contact_slot_lost": 0.016,
+    # EBYSBC E19, measured 2026-10-04 on the 63 runs of the EBYSBC/s7ab/pilot
+    # farm (its stored stage-5 JSON, built before #1358): titles cut on 8 of
+    # 63 runs, a notice accepted on 2 of 63. #1358 fixed both at the source,
+    # so both should fall toward zero on runs built after it.
+    "pubmed_title_truncated": 0.127,
+    "enrichment_pubtype_mismatch": 0.032,
+    # section_consistency (EBYSBC E11/E30): 23 of the 63 runs of the
+    # EBYSBC/s7ab/pilot farm, and segmentation_collapse (E17): 1 of 63
+    # (DPEHSZ), one fire per CV, over the farm's stage 1b/2/3b artifacts,
+    # measured 2026-10-04. Both lints read only those artifacts, so the
+    # render arm does not matter. Same mixed-corpus caveat as above.
+    "section_consistency": 0.365,
+    "segmentation_collapse": 0.016,
     # grant_boundary and grant_bucket (EBYSBC E5/E7): 11 and 2 of the 63 runs
     # of the same farm, as rendered by origin/dev fb466a0f, measured
     # 2026-10-04. Same mixed-corpus caveat as above.
@@ -904,6 +959,8 @@ class ArtifactSpec(NamedTuple):
 _ARTIFACTS = {
     "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json",
                              record_lists=("hierarchy",)),
+    "stage_1b": ArtifactSpec("stage_1b_hierarchy_mapping", "_hierarchy_mapped.json",
+                             record_lists=("hierarchy_with_indices", "section_boundaries")),
     "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json",
                             record_lists=("entries",)),
     "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json",
@@ -1138,6 +1195,7 @@ _VIEW_LABELS = {
     "source_block_lines": "source",
     "candidates": "candidates",
     "stage_1a": "stage_1a",
+    "stage_1b": "stage_1b",
     "stage_2": "stage_2",
     "stage_3b": "stage_3b",
     "stage_4": "stage_4",
@@ -1180,12 +1238,13 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
     LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",),
-             optional=("blocks",)),
+             optional=("blocks", "stage_5d")),
     LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
     LintSpec("table_shape", lint_table_shape, ("table_rows",),
              optional=("stage_4",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
-    LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
+    LintSpec("duplicate_records", lint_duplicate_records, ("blocks",),
+             optional=("stage_5d",)),
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",),
              optional=("deleted_blocks", "stage_4")),
     LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),
@@ -1219,6 +1278,11 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("teaching_postcheck", lint_teaching_postcheck, ("stage_5d",)),
     LintSpec("contact_slot_lost", lint_contact_slot_lost, ("stage_4", "table_rows")),
+    LintSpec("pubmed_title_truncated", lint_pubmed_title_truncated, ("stage_5_enrichment",)),
+    LintSpec("enrichment_pubtype_mismatch", lint_enrichment_pubtype_mismatch,
+             ("stage_5_enrichment",)),
+    LintSpec("section_consistency", lint_section_consistency, ("stage_3b",)),
+    LintSpec("segmentation_collapse", lint_segmentation_collapse, ("stage_1b", "stage_2")),
     LintSpec("grant_boundary", lint_grant_boundary, ("stage_4",)),
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
 )

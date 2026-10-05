@@ -84,6 +84,14 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
+from unified_pipeline.stage6.dedup import (
+    _PART_NUMBER_RE,
+    _TRIAL_PHASE_RE,
+    _dates_compatible,
+    _different_rank,
+    _part_numbers,
+    _trial_phases,
+)
 from unified_pipeline.stage6.sections.research_support import grant_end_year
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
@@ -94,11 +102,13 @@ from unified_pipeline.stage_6_word_template import (
 
 from ..shared import (
     Haystack,
+    _FieldsEntry,
     _LINE_SENTINEL,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
     _entry_pieces,
+    _fields_entries,
     _finding,
     _haystacks,
     _long_word_tokens,
@@ -777,54 +787,144 @@ def _unrendered_identity(decision: Mapping, rendered_items: set[str]) -> str | N
     return None
 
 
+# A Roman numeral standing on its own tells two records of one series apart
+# ("Example Seminar II" beside "Example Seminar III", "Sample Course I"
+# beside "Sample Course II")
+# where no "Part" or "Phase" word precedes it, so stage 6's `_part_numbers`
+# and `_trial_phases` cannot read it (EBYSBC E4: OIYKZE-01). Upper case only,
+# and V and X never alone: a citation's author initials are single capitals.
+# A lone "I" counts only where a title segment ends after it, never before a
+# lower-case word ("I taught"). A numeral after "Part" or "Phase" is left to
+# those readers, which also read a listing ("Parts I and II") as a whole.
+_STANDALONE_NUMERAL_RE = re.compile(
+    r"\b(?:II|III|IV|VI|VII|VIII|IX)\b|\bI(?=\s*(?:$|[\t,.;:)\"\u201d\u2019]))")
+
+
+def _standalone_numerals(text: str) -> set[str]:
+    bare = _TRIAL_PHASE_RE.sub(" ", _PART_NUMBER_RE.sub(" ", text))
+    return set(_STANDALONE_NUMERAL_RE.findall(bare))
+
+
+# What tells two occasions of one record apart, each read the way stage 6's
+# dedup reads it where stage 6 has a reader (#666, EBYSBC E4).
+_OCCASION_MARKS = (("part", _part_numbers), ("phase", _trial_phases),
+                   ("numeral", _standalone_numerals))
+
+
+def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
+    """Why the dropped text names another occasion than the kept text: a
+    date stated to the month or a year the kept text does not carry, or a
+    part, phase or numeral it lacks. None when nothing tells them apart.
+
+    The same predicate stage 6 now refuses a drop on (`_dates_compatible`,
+    `_part_numbers`, `_trial_phases`), re-checked here because a sidecar may
+    predate it and a record-rule or non-date-aware code skips it (DPEHSZ-01,
+    KDAZOM-03, XWNZWW-03)."""
+    if not _dates_compatible(dropped_text, kept_text):
+        return "a date the kept entry does not carry"
+    for mark, read in _OCCASION_MARKS:
+        missing = read(dropped_text) - read(kept_text)
+        if missing:
+            return f"{mark} {', '.join(sorted(missing))} the kept entry lacks"
+    return None
+
+
+def _entry_index_by_text(stage_5d: Mapping | None) -> dict[str, object]:
+    """Whitespace-folded entry text -> its element_idx_start, for the texts
+    exactly one entry carries. A dedup decision records the dropped TEXT and no
+    index, so this is how a finding names the entry it is about."""
+    if not stage_5d:
+        return {}
+    by_text: dict[str, list[object]] = {}
+    for entry in _fields_entries(stage_5d):
+        for text in (entry.text, entry.fields.get("formatted_citation")):
+            if isinstance(text, str) and text.strip():
+                by_text.setdefault(" ".join(text.split()), []).append(entry.element_idx)
+    return {text: indices[0] for text, indices in by_text.items()
+            if len(set(map(str, indices))) == 1}
+
+
+def _drop_evidence(decision: Mapping, index_by_text: Mapping[str, object],
+                   detail: str) -> str:
+    """One evidence line for a drop, led by `entry N` when the dropped text
+    names exactly one entry, so the precision harness can match it."""
+    dropped = str(decision.get("dropped_text", ""))
+    index = index_by_text.get(" ".join(dropped.split()))
+    prefix = f"entry {index}: " if index is not None else ""
+    return (f"{prefix}{decision.get('code', '?')} ({detail}): "
+            f"dropped '{dropped[:80]}' vs kept '{str(decision.get('kept_text', ''))[:80]}'")
+
+
+def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:
+    """INFO test (#666): the dropped entry's name differs from the kept one's,
+    and either that name is no cell of its own on the page, or the two names
+    carry different rank or qualifier words (stage 6's `_different_rank`:
+    "Assistant Professor" beside "Clinical Assistant Professor", SEKQUI-01;
+    an "Outreach" award beside the plain one, NDXXAD-01), which tells two
+    records apart even when the dropped name renders for another year."""
+    if _different_rank(decision.get("code"), decision.get("dropped_fields") or {},
+                       decision.get("kept_fields") or {}):
+        return True
+    return rendered_items is not None and bool(_unrendered_identity(decision, rendered_items))
+
+
 def lint_dedup_drops(report: Dict,
-                     blocks: list[tuple[str, str]] | None = None) -> List[Dict]:
+                     blocks: list[tuple[str, str]] | None = None,
+                     stage_5d: Mapping | None = None) -> List[Dict]:
     """Stage-6 dedup decisions that may have dropped a distinct record.
 
     WARN: the dropped text is NOT near-fully contained in the kept entry, so at
     these loose similarity thresholds it is a distinct record, not a duplicate
-    (#227).
+    (#227); or it names another occasion than the kept entry, a date, part,
+    phase or numeral the kept text lacks (`_occasion_apart`, #666).
 
-    INFO (#666, needs the rendered document): the dropped text IS contained, but
-    the two entries carry different names and the dropped name is on the page
-    as no cell of its own. Whichever guard let stage 6 approve the drop, the
-    name it dropped is absent from the output. A duplicate reworded by the kept
-    entry also lands here, so it stays INFO.
+    INFO (#666): the dropped text IS contained, but the two entries carry
+    different names, and either the dropped name is on the page as no cell of
+    its own (needs the rendered document) or the names differ by a rank or
+    qualifier word (`_named_apart`). A duplicate reworded by the kept entry
+    also lands here, so it stays INFO.
 
     A record-rule drop (`stage6/record_dedup.py`, metric
     `RECORD_RULE_METRIC_PREFIX`) matched the two records on their fields, not
     their text: a header line beside a table row shares few words with it by
-    construction, so it skips the WARN and takes only the INFO name test."""
+    construction, so it skips the coverage test and takes the others.
+
+    `stage_5d`, when given, names each drop's entry (`_entry_index_by_text`)."""
     suspect = []
     named_apart = []
     rendered_items = _rendered_item_set(blocks) if blocks is not None else None
+    index_by_text = _entry_index_by_text(stage_5d)
     for d in report.get("dedup_decisions", []):
         dropped = _alphanumeric_tokens(d.get("dropped_text", ""))
         kept = _alphanumeric_tokens(d.get("kept_text", ""))
         if not dropped:
             continue
         coverage = sum((dropped & kept).values()) / sum(dropped.values())
-        pair = (f"dropped '{d.get('dropped_text', '')[:80]}' "
-                f"vs kept '{d.get('kept_text', '')[:80]}'")
-        field_matched = str(d.get("metric", "")).startswith(RECORD_RULE_METRIC_PREFIX)
+        metric = d.get("metric", "?")
+        field_matched = str(metric).startswith(RECORD_RULE_METRIC_PREFIX)
+        occasion = _occasion_apart(str(d.get("dropped_text", "")), str(d.get("kept_text", "")))
         if coverage < DEDUP_SAFE_CONTAINMENT and not field_matched:
-            suspect.append(f"{d.get('code', '?')} ({d.get('metric', '?')}, "
-                           f"{coverage:.0%} covered by kept): {pair}")
-        elif rendered_items is not None and _unrendered_identity(d, rendered_items):
-            named_apart.append(f"{d.get('code', '?')} ({d.get('metric', '?')}): {pair}")
+            suspect.append(_drop_evidence(d, index_by_text,
+                                          f"{metric}, {coverage:.0%} covered by kept"))
+        elif occasion:
+            suspect.append(_drop_evidence(d, index_by_text, f"{metric}, {occasion}"))
+        elif _named_apart(d, rendered_items):
+            named_apart.append(_drop_evidence(d, index_by_text, str(metric)))
     findings = []
     if suspect:
         findings.append(_finding(
             "dedup_drops", "WARN",
-            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
-            f"possible distinct records lost (#227)",
+            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry or "
+            f"naming another date, part or numeral — possible distinct records "
+            f"lost (#227, #666)",
             suspect[:DEDUP_EVIDENCE_LIMIT]))
     if named_apart:
         findings.append(_finding(
             "dedup_drops", "INFO",
             f"{len(named_apart)} dedup drop(s) fully covered by the kept entry "
-            f"but named differently, and the dropped name is no cell of its own "
-            f"on the page — possible distinct records lost (#666)",
+            f"but named differently: another rank or qualifier, or a name that "
+            f"is no cell of its own on the page — possible distinct records "
+            f"lost (#666)",
             named_apart[:DEDUP_EVIDENCE_LIMIT]))
     return findings
 
@@ -1017,31 +1117,6 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
 # place of its date fields (`_year_renders`). `offschema_fields` reads the
 # docx, when the run has one, only to grade what stage 4 showed it (#1245):
 # see `_grade_value`.
-
-
-class _FieldsEntry(NamedTuple):
-    """The five things the field lints read off one stage-4 entry, read once
-    at the artifact boundary instead of by `.get()` in every helper (§8.1).
-    `fields` is empty when `extracted_fields` is absent or not an object.
-    `element_idx_end` completes the span a later stage's copy of the entry
-    is found by (`_span`)."""
-    element_idx: object
-    code: str
-    text: str
-    fields: Mapping[str, object]
-    element_idx_end: object = None
-
-
-def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
-    entries = []
-    for raw in stage4.get("entries", []):
-        fields = raw.get("extracted_fields")
-        entries.append(_FieldsEntry(
-            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
-            str(raw.get("text") or ""),
-            fields if isinstance(fields, Mapping) else {},
-            raw.get("element_idx_end")))
-    return entries
 
 
 #: A key that names a date or a year: `date`, `start_date`, `year_certified`,

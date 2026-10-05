@@ -195,7 +195,8 @@ HOME_ONLY_IMPORTS = {
                                       "_different_book", "_different_rank", "_part_numbers",
                                       "_verbatim_contained",
                                       "_YEAR_RE", "_is_subsequence", "_is_word_run", "_ordered_words",
-                                      "_rank_qualifiers"),
+                                      "_rank_qualifiers",
+                                      "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases"),
 }
 
 _RELOCATED_CASES = [

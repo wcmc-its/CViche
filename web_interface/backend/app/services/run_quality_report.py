@@ -290,8 +290,8 @@ LINT_COPY = {
     "dedup_drops": LintCopy(
         "Distinct entries removed as duplicates",
         "An entry removed as a duplicate was either not nearly contained in the copy kept (under 90% "
-        "overlap), or was contained but named something the page no longer shows, so it may be a "
-        "different record.",
+        "overlap), named a date, part or number the kept copy lacks, or was contained but named "
+        "something the page no longer shows or a different rank, so it may be a different record.",
         "Compare the quoted dropped text with the kept entry and restore anything that was different."),
     "pipe_leaks": LintCopy(
         "Raw pipe characters in text",
@@ -310,7 +310,8 @@ LINT_COPY = {
         "Delete the repeated passage."),
     "duplicate_records": LintCopy(
         "Repeated numbered entry",
-        "The same numbered or bulleted entry appears twice within a few lines of itself in one section.",
+        "The same numbered or bulleted entry appears twice within a few lines of itself in one "
+        "section, or one article or grant is listed twice anywhere in the document.",
         "Delete the repeat."),
     "protected_data_in_output": LintCopy(
         "Protected personal data in document",
@@ -418,6 +419,29 @@ LINT_COPY = {
         "An office phone number or office address in the CV is not in the Office row of Personal "
         "Data: it is in another row, such as Cell phone, or nowhere in the document.",
         "Copy the office phone or address from the source CV into its Office row."),
+    "pubmed_title_truncated": LintCopy(
+        "PubMed title cut short",
+        "A citation's title was replaced with PubMed's, and PubMed's title stops mid-phrase, "
+        "usually just before an italic gene or organism name, so the citation's title is "
+        "incomplete.",
+        "Restore the full title from the source CV."),
+    "enrichment_pubtype_mismatch": LintCopy(
+        "Citation replaced with a correction notice",
+        "A citation was matched to a PubMed correction, retraction or concern notice about the "
+        "paper rather than the paper itself, so it shows the notice's title, authors and pages.",
+        "Restore the paper's own citation from the source CV."),
+    "section_consistency": LintCopy(
+        "Entry filed in the wrong section",
+        "An entry was given a section its own heading or text contradicts: a residency listed as an "
+        "appointment, a board certification as a membership, a grant review as a committee, a "
+        "course attended as teaching, or a published journal article as a non-peer-reviewed report.",
+        "Move the quoted entries to the section their source heading names."),
+    "segmentation_collapse": LintCopy(
+        "Source sections not found",
+        "Almost none of the source CV's section headings were found, so its entries were sorted "
+        "without knowing which section they came from.",
+        "Check every section of the output against the source CV, or fix the headings in the "
+        "source and rerun."),
     "owner_contact_missing": LintCopy(
         "Owner name not found",
         "No usable CV owner name was found, or the extracted-fields file is missing, so the document "
