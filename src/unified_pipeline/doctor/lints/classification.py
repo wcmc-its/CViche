@@ -9,7 +9,8 @@ memberships, grant reviews as external committees, courses attended as
 teaching, a thesis-committee block as institutional committees, a
 cross-reference line as a record, and guideline articles with a journal,
 volume and pages as non-peer-reviewed reports. The doctor had no lint for
-this shape.
+this shape. The RCBKFG autopsy added one more: training rows filed as degrees
+(#1415).
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -92,19 +93,34 @@ class HeadingCodeRule(NamedTuple):
     allowed_codes: frozenset[str] | None = None
 
 
+#: An entry whose text opens (after an optional date range) with a training
+#: title: intern, resident, a postdoctoral/clinical/research fellow.
+_TRAINING_TITLE_TEXT_RE = re.compile(
+    r"^\W*(?:[\d/]{4,7}\s*(?:[-–—]|to)\s*(?:[\d/]{4,7}|present)?\s*,?\s*)?"
+    r"(?:chief\s+|senior\s+|assistant\s+(?:and\s+senior\s+)?)?"
+    r"(?:intern(?:ship)?|resident|residency|(?:post-?doctoral|clinical|research)\s+fellow(?:ship)?"
+    r"|fellow(?:ship)?\s+in)\b", re.IGNORECASE)
+#: A faculty role over a training program, which is not itself training.
+_TRAINING_PROGRAM_ROLE_RE = re.compile(r"director|coordinator|chair", re.IGNORECASE)
+
+#: Academic degrees: an entry the Education table renders as conferred.
+DEGREE_CODES = frozenset({"B1"})
+
 HEADING_CODE_RULES: tuple[HeadingCodeRule, ...] = (
     # QITQWH-02, RNKYST-04: intern, resident and fellow rows filed as
     # appointments leave the training table empty.
     HeadingCodeRule(
         "training_as_appointment", "C (training)",
-        text=re.compile(
-            r"^\W*(?:[\d/]{4,7}\s*(?:[-–—]|to)\s*(?:[\d/]{4,7}|present)?\s*,?\s*)?"
-            r"(?:chief\s+|senior\s+|assistant\s+(?:and\s+senior\s+)?)?"
-            r"(?:intern(?:ship)?|resident|residency|(?:post-?doctoral|clinical|research)\s+fellow(?:ship)?"
-            r"|fellow(?:ship)?\s+in)\b", re.IGNORECASE),
-        # A faculty role over a training program is an appointment.
-        text_excluded=re.compile(r"director|coordinator|chair", re.IGNORECASE),
+        text=_TRAINING_TITLE_TEXT_RE,
+        text_excluded=_TRAINING_PROGRAM_ROLE_RE,
         wrong_codes=APPOINTMENT_CODES),
+    # RCBKFG GKAQHB 17/20 (#1415): the same rows filed as degrees render in
+    # Academic Degrees, absent from the training table.
+    HeadingCodeRule(
+        "training_as_degree", "C (training)",
+        text=_TRAINING_TITLE_TEXT_RE,
+        text_excluded=_TRAINING_PROGRAM_ROLE_RE,
+        wrong_codes=DEGREE_CODES),
     # KYOPUV-04, NDXXAD-08: an ABIM line or 'American Board of ...' filed as
     # a membership or an education row.
     HeadingCodeRule(

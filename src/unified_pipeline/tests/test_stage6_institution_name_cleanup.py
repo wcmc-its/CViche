@@ -161,8 +161,20 @@ def test_an_org_containing_regex_metacharacters_is_matched_literally() -> None:
     or "." in the organization name must not be read as a quantifier or a
     wildcard."""
     assert _strip_org_tail(
-        "Award from Prof. A+B University", "Prof. A+B University"
-    ) == "Award from"
+        "Award, Prof. A+B University", "Prof. A+B University"
+    ) == "Award"
+
+
+def test_an_org_that_is_the_object_of_the_last_phrase_is_not_stripped() -> None:
+    """#1412 (RCBKFG KUUKNJ 139): an org the name ends on after "of" or
+    "from" is part of the name, not a tail. Stripping it left the name
+    ending in a dangling preposition."""
+    name = "Distinguished Alumnus of Made-up Medical College, Narnia"
+    assert _strip_org_tail(name, "Made-up Medical College") == name
+    name = "Fellowship from the Imaginary Foundation"
+    assert _strip_org_tail(name, "Imaginary Foundation") == name
+    name = "Prize awarded by Imaginary Society"
+    assert _strip_org_tail(name, "Imaginary Society") == name
 
 
 def test_trailing_stray_punctuation_after_the_org_is_absorbed() -> None:

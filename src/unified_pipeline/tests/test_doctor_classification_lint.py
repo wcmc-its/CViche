@@ -70,6 +70,29 @@ def test_training_row_coded_as_training_and_a_faculty_title_are_quiet():
                "Appointments")) == []
 
 
+def test_training_row_filed_as_degree_is_flagged_1415():
+    """#1415 (RCBKFG GKAQHB 17/20): an internship and a residency coded B1
+    render in Academic Degrees, absent from the training table."""
+    findings = _run(
+        _entry("Intern (Example Medicine)\tInvented General Hospital 1991-1992", "B1",
+               "Education", idx=17),
+        _entry("Resident (Example Pathology) 1993-1996\tInvented Institute", "B1",
+               "Education", idx=20))
+    assert _shapes(findings) == ["training_as_degree"]
+    assert findings[0]["severity"] == "WARN"
+    assert "2 entries under 'Education' coded B1" in findings[0]["message"]
+    assert "C (training)" in findings[0]["message"]
+
+
+def test_a_degree_row_and_a_training_program_director_coded_b1_are_quiet():
+    assert _run(
+        _entry("MD, Invented University, 1990", "B1", "Education"),
+        _entry("PhD in Example Studies, Invented University, 1995 (Dissertation: 'A title')",
+               "B1", "Education"),
+        _entry("Residency Program Director course, Invented Hospital", "B1",
+               "Education")) == []
+
+
 def test_board_certification_filed_as_membership_is_flagged():
     findings = _run(_entry("ABIM, Internal Medicine 2001, 2011", "I", "Post Graduate Experience"))
     assert _shapes(findings) == ["board_certification_misfiled"]
