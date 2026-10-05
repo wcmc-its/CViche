@@ -198,6 +198,30 @@ def test_a_failing_repair_leaves_the_render_and_writes_no_report(tmp_path, monke
     assert not repair.repairs_report_path(docx_path).exists()
 
 
+def test_a_report_that_cannot_be_written_is_logged_and_the_repair_stands(tmp_path, caplog):
+    """One sidecar must never fail a run: an OSError on the report write
+    (here a directory squatting on its name) is logged, not raised."""
+    docx_path = _render(tmp_path)
+    _leak_everywhere(docx_path)
+    repair.repairs_report_path(docx_path).mkdir()
+
+    with caplog.at_level("WARNING", logger=repair.__name__):
+        result = repair.repair_and_report(docx_path)
+
+    assert result is not None and (result.found, len(result.removals), result.remaining) == (6, 6, 0)
+    assert _findings(docx_path) == []
+    assert [r.exc_info[0] for r in caplog.records if "report not written" in r.getMessage()] == [
+        IsADirectoryError]
+
+
+def test_run_stage6_survives_a_report_it_cannot_write(tmp_path):
+    out_path = tmp_path / f"{_UID}_wcm.docx"
+    repair.repairs_report_path(out_path).mkdir()
+    out = run_stage6(str(_input(tmp_path)), str(out_path), verbose=False,
+                     discover_original_doc=False, repair_protected_data=True)
+    assert Path(out).is_file()
+
+
 @pytest.mark.parametrize("flag, ran", [(False, False), (True, True)])
 def test_run_stage6_repairs_only_when_asked(tmp_path, flag, ran):
     out = run_stage6(str(_input(tmp_path)), str(tmp_path / f"{_UID}_wcm.docx"), verbose=False,
