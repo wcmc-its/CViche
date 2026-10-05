@@ -520,6 +520,82 @@ def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(
     assert STAGE4_ENTRY_FALLBACK_KEY not in by_code["B1"]
 
 
+# --- #1243: reply items whose entry_index is past the group size --------------
+
+def _d1_at(text, idx):
+    return {"text": text, "taxonomy_code": "D1", "element_idx_start": idx, "element_idx_end": idx}
+
+
+def _llm_returning(items):
+    return lambda **_kwargs: {"content": json.dumps({"entries": items}), "cost": 0.0, "total_tokens": 0}
+
+
+def test_extract_fields_batch_folds_out_of_range_items_into_a_one_entry_group(monkeypatch, caplog):
+    """RCBKFG CAOACN: the model numbered the records of the group's one entry
+    0..N-1, and only index 0 was kept. Every item is now a record of entry 0,
+    in index order; the scalar fields are the last, as for any multi-record
+    entry, and nothing is stamped because nothing was lost."""
+    from unified_pipeline.stage4.schemas import (
+        STAGE4_RECORDS_KEY, STAGE4_RECORDS_RETURNED_KEY, STAGE4_UNPLACED_ITEMS_KEY)
+
+    monkeypatch.setattr(extraction, "call_llm", _llm_returning([
+        {"entry_index": 0, "title": "Rank A", "start_date": "2001"},
+        {"entry_index": 2, "title": "Rank C", "start_date": "2003"},
+        {"entry_index": 1, "title": "Rank B", "start_date": "2002"},
+    ]))
+
+    with caplog.at_level("WARNING"):
+        [entry] = extraction.extract_fields_batch([_d1_at("Rank A 2001 Rank B 2002 Rank C 2003", 0)], 0, 1)["entries"]
+
+    fields = entry["extracted_fields"]
+    assert [r["title"] for r in fields[STAGE4_RECORDS_KEY]] == ["Rank A", "Rank B", "Rank C"]
+    assert fields["title"] == "Rank C"
+    assert entry[STAGE4_RECORDS_RETURNED_KEY] == 3
+    assert STAGE4_UNPLACED_ITEMS_KEY not in entry
+    assert "fit no entry" not in caplog.text
+
+
+def test_extract_fields_batch_one_entry_group_with_no_index_0_still_extracts(monkeypatch):
+    """A one-entry reply that numbers from 1 used to leave the entry with no
+    match at all; its one item is that entry's."""
+    monkeypatch.setattr(extraction, "call_llm", _llm_returning([{"entry_index": 1, "title": "Rank A"}]))
+
+    [entry] = extraction.extract_fields_batch([_d1_at("Rank A", 0)], 0, 1)["entries"]
+
+    assert entry["extraction_success"] is True
+    assert entry["extracted_fields"]["title"] == "Rank A"
+
+
+def test_extract_fields_batch_stamps_a_larger_group_with_items_no_entry_can_take(monkeypatch, caplog):
+    """In a 2+-entry group the owner of an out-of-range item is unknowable: it
+    is not guessed into an entry, but a warning names it and every entry of
+    the group, matched or not, carries the count. Another group's entries are
+    not stamped."""
+    from unified_pipeline.stage4.schemas import STAGE4_UNPLACED_ITEMS_KEY
+
+    def fake_call_llm(*, messages, **_kwargs):
+        if "Other group" in messages[1]["content"]:
+            return _llm_returning([{"entry_index": 0, "degree": "Other group"}])()
+        return _llm_returning([
+            {"entry_index": 0, "title": "Rank A"},
+            {"entry_index": -1, "title": "Rank X"},
+            {"entry_index": 5, "title": "Rank Y"},
+        ])()
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+    entries = [_d1_at("Rank A", 0), _d1_at("Rank B", 1),
+               {"text": "Other group", "taxonomy_code": "B1", "element_idx_start": 2, "element_idx_end": 2}]
+
+    with caplog.at_level("WARNING"):
+        result = extraction.extract_fields_batch(entries, 0, 1)["entries"]
+
+    by_text = {e["text"]: e for e in result}
+    assert by_text["Rank A"]["extracted_fields"]["title"] == "Rank A"
+    assert by_text["Rank B"]["extraction_error"] == extraction.NO_MATCHING_EXTRACTION
+    assert [by_text[t].get(STAGE4_UNPLACED_ITEMS_KEY) for t in ("Rank A", "Rank B", "Other group")] == [2, 2, None]
+    assert "2 reply item(s) at entry_index [-1, 5] fit no entry of the 2-entry group" in caplog.text
+
+
 @pytest.mark.parametrize("timeout_error", [
     ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
     ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
