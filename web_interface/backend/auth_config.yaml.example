@@ -49,6 +49,7 @@ ed:
   access_group: ""  # DN of access group, e.g., "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
   admin_group: ""   # DN of admin group, e.g., "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
   staff_group: ""   # DN of read-only staff group, e.g., "cn=ITS:Library:CViche/staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu". Empty = nobody is staff; admin wins if a user is in both.
+  partner_scopes: ""   # Comma-separated partner ePPN scopes admitted with the user role and no WCM ED entry, e.g., "hss.edu,nyp.org". Empty = no partner user is admitted.
   contact_name: ""  # Name shown in access denial message
   contact_email: "" # Email shown in access denial message
 

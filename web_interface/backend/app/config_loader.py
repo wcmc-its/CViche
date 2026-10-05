@@ -83,6 +83,9 @@ def seed_system_config(db: Session) -> None:
         "ed_admin_group": json.dumps(config.get("ed", {}).get("admin_group", "")),
         # Empty/unset = nobody is staff (read-only elevated role, UserRole.STAFF).
         "ed_staff_group": json.dumps(config.get("ed", {}).get("staff_group", "")),
+        # Comma-separated partner ePPN scopes whose users get the user role
+        # without a WCM ED entry (#1453). Empty/unset = no partner is admitted.
+        "ed_partner_scopes": json.dumps(config.get("ed", {}).get("partner_scopes", "")),
         "ed_contact_name": json.dumps(config.get("ed", {}).get("contact_name", "")),
         "ed_contact_email": json.dumps(config.get("ed", {}).get("contact_email", "")),
     }

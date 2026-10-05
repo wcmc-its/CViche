@@ -1403,6 +1403,70 @@ class TestACSGroupCheck:
 # ---------------------------------------------------------------------------
 
 
+def _set_partner_scopes(db, scopes: str) -> None:
+    """Upsert ed_partner_scopes: app startup may already have seeded it empty."""
+    row = db.query(SystemConfig).filter_by(key="ed_partner_scopes").first()
+    if row is None:
+        db.add(SystemConfig(key="ed_partner_scopes", value=json.dumps(scopes)))
+    else:
+        row.value = json.dumps(scopes)
+    db.commit()
+
+
+class TestPartnerScopeAdmission:
+    """#1453: a partner user (anchor = scoped ePPN, #1452) is admitted with the
+    user role when their scope is in ed_partner_scopes, without an ED lookup."""
+
+    def _acs(self, client, mock_get_client, mock_extract, cwid):
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"cwid": cwid, "email": None, "display_name": "Partner User"}
+        return client.post("/api/saml/acs", data={"SAMLResponse": "dummy", "RelayState": "/"},
+                           follow_redirects=False)
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_allowed_scope_admitted_as_user_without_ed(
+        self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
+    ):
+        _set_partner_scopes(db, " HSS.edu , nyp.org")
+        response = self._acs(client, mock_get_client, mock_extract, "js1234@hss.edu")
+        assert response.headers["location"] == "/"
+        mock_check_ed.assert_not_called()
+        assert db.query(User).filter_by(cwid="js1234@hss.edu").one().role == "user"
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_unlisted_scope_denied(
+        self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
+    ):
+        _set_partner_scopes(db, "nyp.org")
+        response = self._acs(client, mock_get_client, mock_extract, "js1234@hss.edu")
+        assert "error=not_authorized" in response.headers["location"]
+        mock_check_ed.assert_not_called()
+
+    def _me(self, client, db, role):
+        user = User(cwid="js1234@hss.edu", email=None, display_name="Partner User",
+                    role=role, auth_method="saml")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return client.get("/api/auth/me", cookies={COOKIE_NAME: create_session_cookie(user, db)})
+
+    def test_per_request_keeps_partner_and_never_elevates(self, client, db, seed_ed_enabled):
+        _set_partner_scopes(db, "hss.edu")
+        response = self._me(client, db, role="admin")
+        assert response.status_code == 200
+        assert response.json()["role"] == "user"
+
+    def test_per_request_evicts_partner_when_scope_removed(self, client, db, seed_ed_enabled):
+        _set_partner_scopes(db, "")
+        assert self._me(client, db, role="user").status_code == 401
+
+
 class TestPerRequestCheck:
     """Integration tests for get_current_user ED group re-check."""
 
