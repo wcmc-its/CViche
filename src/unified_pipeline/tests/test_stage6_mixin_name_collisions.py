@@ -211,6 +211,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Other Educational Experiences: expected a %d-column table, found %d columns; %d entries not rendered': 'warning',
     'Other Educational Experiences: section heading not found in template; %d entries not rendered': 'warning',
     'Other Educational Experiences: table not found after section heading; %d entries not rendered': 'warning',
+    'Owner surname read from the bibliography as %r (stage 4 last name %r)': 'info',
     'Patents & Inventions: removed %d previously rendered patent tables before rendering again': 'info',
     'Patents & Inventions: section heading not found in template; %d entries not rendered': 'warning',
     'Patents & Inventions: skipped %d sparse entries (no title or patent number)': 'info',
@@ -389,7 +390,7 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 123, (
+    assert len(text_level_records) == 124, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

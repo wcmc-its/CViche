@@ -34,14 +34,18 @@ over two different substrates:
 
 Author bolding targets `target_name` from `_format_citation`, falling back to
 the CV owner's last name -- taken from `cv_owner`, or recovered from the
-document uid when the pipeline never resolved an owner.
+document uid when the pipeline never resolved an owner -- and last to the
+plausible spelling `normalization/owner_alias.py` infers from the citations
+none of those names matched (#1393).
 """
 import inspect
 import logging
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -58,6 +62,13 @@ from unified_pipeline.core.text_norm import is_placeholder_title
 
 from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries
+from ..normalization.owner_alias import (
+    OwnerAlias,
+    author_segment,
+    fold_name,
+    infer_owner_alias,
+    name_parts,
+)
 from ..normalization.publication import resolve_publication
 from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
 from ..sorting import sort_entries_reverse_chronological
@@ -171,6 +182,16 @@ _PARTICLES_BEFORE = re.compile(
     re.IGNORECASE,
 )
 _WHITESPACE_RUN = re.compile(r"\s*")
+# #1393: a name word right after / right before a matched surname, in the same
+# author (whitespace only between), for widening a spaced compound.
+_NAME_WORD = rf"[^\W\d_]{_NAME_CHAR}*(?:[{_NAME_APOSTROPHES}]{_NAME_CHAR}+)?"
+_OWNER_PART_AFTER = re.compile(rf"[ \t]+({_NAME_WORD})(?!{_NAME_CHAR}|{_NAME_JOIN})")
+_OWNER_PART_BEFORE = re.compile(rf"(?<!{_NAME_CHAR})(?<!{_NAME_JOIN})({_NAME_WORD})[ \t]+$")
+# The first initial after a surname ("Ruiz MJ", "Ruiz, M. J."), and a given
+# name opening the same author before it ("Mateo Ruiz", "M. E. Ruiz").
+_INITIAL_AFTER = re.compile(rf"\s*,?\s*([A-Z])\.?(?:\s?[A-Z]\.?){{0,2}}(?!{_NAME_CHAR})")
+_GIVEN_NAME_BEFORE = re.compile(
+    rf"(?:^\s*(?:\d+[.)]\s*)?|[,;&]\s*|\band\s+)({_NAME_WORD})\.?(?:\s+[A-Z]\.?)*\s+$")
 
 
 def _name_pattern(name: str) -> str | None:
@@ -214,35 +235,105 @@ def _trailing_initials_end(citation: str, end: int) -> int:
     return stop
 
 
-def _find_surname_span(citation: str, surname: str) -> tuple[int, int] | None:
-    """Span of a surname plus trailing initials, widened leftward over
-    surname particles ("de la Cruz M")."""
+def _widen_over_owner_parts(citation: str, start: int, end: int,
+                           owner_parts: frozenset[str]) -> tuple[int, int]:
+    """`start, end` widened over the adjacent space-separated words of the
+    same author that are owner name parts, so a spaced compound bolds whole
+    ("Garza Ruiz M", not "Garza" or "Ruiz M") wherever it is matched (#1393)."""
+    if not owner_parts:
+        return start, end
+    while (after := _OWNER_PART_AFTER.match(citation, end)) \
+            and fold_name(after.group(1)) in owner_parts:
+        end = after.end()
+    while (before := _OWNER_PART_BEFORE.search(citation, 0, start)) \
+            and fold_name(before.group(1)) in owner_parts:
+        start = before.start(1)
+    return start, end
+
+
+def _find_surname_span(citation: str, surname: str,
+                       owner_parts: frozenset[str] = frozenset()) -> tuple[int, int] | None:
+    """Span of a surname plus trailing initials, widened over adjacent owner
+    name parts and leftward over surname particles ("de la Cruz M")."""
     span = _find_name_span(citation, surname)
     if span is None:
         return None
-    start, end = span
+    return _surname_span_around(citation, *span, owner_parts)
+
+
+def _surname_span_around(citation: str, start: int, end: int,
+                         owner_parts: frozenset[str]) -> tuple[int, int]:
+    """A matched surname's `start:end` grown to the whole author token."""
+    start, end = _widen_over_owner_parts(citation, start, end, owner_parts)
     particles = _PARTICLES_BEFORE.search(citation, 0, start)
     if particles:
         start = particles.start(1)
     return start, _trailing_initials_end(citation, end)
 
 
+def _author_initial(citation: str, start: int, end: int) -> str:
+    """The initial of the author whose surname spans `start:end`: the first
+    trailing initial ("Ruiz M", "Ruiz, M."), else the first letter of a given
+    name before it in the same author ("Mateo Ruiz"), else ''."""
+    after = _INITIAL_AFTER.match(citation, end)
+    if after:
+        return after.group(1)
+    before = _GIVEN_NAME_BEFORE.search(citation, 0, start)
+    return before.group(1)[0].upper() if before else ''
+
+
+def _find_alias_span(citation: str, alias: OwnerAlias) -> tuple[int, int] | None:
+    """Span of the first alias match, in the author list, on an author whose
+    initial is the owner's: an alias never bolds a co-author who shares the
+    surname, or half of it, but not the initials (#1393)."""
+    segment = author_segment(citation)
+    segment_end = citation.find(segment) + len(segment)
+    for surname in alias.surnames:
+        pattern = _name_pattern(surname)
+        for match in re.finditer(pattern, citation[:segment_end], re.IGNORECASE) if pattern else ():
+            start, end = _widen_over_owner_parts(citation, *match.span(), alias.parts)
+            if _author_initial(citation, start, end) in alias.initials:
+                return _surname_span_around(citation, start, end, alias.parts)
+    return None
+
+
 def _target_surname(target_name: str) -> str:
     """`target_name` without its trailing capital initials ("Pell-Rowan FM"
     -> "Pell-Rowan", "Tarn-Ellery, K." -> "Tarn-Ellery"), or unchanged
     when it does not end in some. Stage 4 records the initials it saw in one
-    citation form; another form of the same author may carry more or fewer."""
+    citation form; another form of the same author may carry more or fewer.
+    A "Surname, Given" form keeps what precedes the comma ("Wende, Michael
+    E." -> "Wende", #1393); a bare trailing comma is not that form. Spaced
+    initials all go ("Wende M. E." -> "Wende")."""
+    surname, comma, given = target_name.partition(",")
+    if comma and surname.strip() and given.strip():
+        return surname.strip()
     parts = re.split(r"[\s,]+", target_name.strip())
-    initials = parts[-1].rstrip(".")
-    if len(parts) > 1 and 0 < len(initials) <= _MAX_INITIALS \
-            and initials.isalpha() and initials.isupper():
-        return " ".join(parts[:-1])
-    return target_name
+    cut = len(parts)
+    while cut > 1 and _is_initials_word(parts[cut - 1]):
+        cut -= 1
+    return " ".join(parts[:cut]) if cut < len(parts) else target_name
 
+
+def _is_initials_word(word: str) -> bool:
+    """One word of up to `_MAX_INITIALS` capitals, dotted or not ("ME",
+    "M.", "M.E.") -- spaced initials ("I. I.") are several such words."""
+    letters = word.replace(".", "")
+    return 0 < len(letters) <= _MAX_INITIALS and letters.isalpha() and letters.isupper()
+
+
+# The render-warnings sidecar check for citations whose owner bold differs
+# from what stage 4's names alone give (`_warn_owner_bold_from_bibliography`).
+OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK = "owner_bold_from_bibliography"
 
 # A stage-4 target_name longer than this, or holding a colon, is not an author
 # name (the corpus has a book title there) and is skipped for the owner surname.
 _MAX_TARGET_NAME_TOKENS = 4
+# A target surname this close (difflib ratio) to a known owner name part, with
+# the same first letter and an owner initial, is the owner misspelt
+# ("Wesssely S", "Ramanaujam N" in the corpus score 0.93-0.95; a transposition
+# "Oprekso" 0.86), not a co-author (#1394).
+MIN_TARGET_SIMILARITY = 0.8
 
 
 def _looks_like_author_name(target_name: str | None) -> bool:
@@ -252,7 +343,8 @@ def _looks_like_author_name(target_name: str | None) -> bool:
 
 
 def _citation_author_split(citation: str, target_name: str | None,
-                           cv_owner_last_name: str) -> tuple[str, str, str]:
+                           cv_owner_last_name: str,
+                           owner_alias: OwnerAlias | None = None) -> tuple[str, str, str]:
     """Split a citation around the author name that should render bold.
 
     The one home for the author-matching rule shared by the plain and the
@@ -268,7 +360,12 @@ def _citation_author_split(citation: str, target_name: str | None,
 
     Prefers `target_name` when it appears in the citation as written; then
     tries its surname alone, so "Quill J" still finds "Quill JD"; otherwise
-    falls back to `cv_owner_last_name`. A `target_name` shaped like a title
+    falls back to `cv_owner_last_name`, and last to `owner_alias`, the
+    spellings `_infer_bibliography_owner_alias` read from the whole
+    bibliography (#1393) -- matched only in the author list and only on an
+    author whose initial is the owner's. Every surname match is widened over
+    adjacent owner name parts, so a spaced compound bolds whole. A
+    `target_name` shaped like a title
     (a colon, or more than `_MAX_TARGET_NAME_TOKENS` words) is skipped. A surname match takes trailing capital
     initials, e.g. "Wende ME", "Wende M", and any leading particles ("de la
     Cruz M"). The comma form ("Wende, M") bolds only the surname, pinned by
@@ -278,13 +375,18 @@ def _citation_author_split(citation: str, target_name: str | None,
     citation's own text. When nothing matches, `name_to_bold` is '' and the
     whole citation is in `before`.
     """
-    if not _looks_like_author_name(target_name):
+    alias = owner_alias or OwnerAlias()
+    if not _looks_like_author_name(target_name) or not _target_is_owner(target_name, alias):
         target_name = None
     span = _find_name_span(citation, target_name) if target_name else None
+    if span is not None:
+        span = _widen_over_owner_parts(citation, *span, alias.parts)
     if span is None and target_name:
-        span = _find_surname_span(citation, _target_surname(target_name))
+        span = _find_surname_span(citation, _target_surname(target_name), alias.parts)
     if span is None and cv_owner_last_name:
-        span = _find_surname_span(citation, cv_owner_last_name)
+        span = _find_surname_span(citation, cv_owner_last_name, alias.parts)
+    if span is None:
+        span = _find_alias_span(citation, alias)
     if span is None:
         return citation, '', ''
     start, end = span
@@ -316,6 +418,106 @@ def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
     if not raw or any(_find_surname_span(c, raw) for c in citations):
         return raw
     return _strip_appended_initials(raw)
+
+
+def _name_initial(name: str) -> str:
+    """The given-name initial in a stage-4 name: after a comma ("Wende,
+    Michael E."), the trailing initials ("Eil R"), or the first of several
+    words ("Michael E. Wende"); '' for a lone word."""
+    surname, comma, given = name.partition(",")
+    if comma:
+        return next((ch.upper() for ch in given if ch.isalpha()), '')
+    words = name.split()
+    if len(words) < 2:
+        return ''
+    if _target_surname(name) != name:
+        return words[-1][0]
+    return words[0][0].upper()
+
+
+@dataclass(frozen=True)
+class _OwnerAnchor:
+    """What stage 4 says about the owner before the bibliography is read:
+    the name parts of `cv_owner.last_name` and of the bibliography-majority
+    target surname, and the owner's first initials (cv_owner first and full
+    name, the majority target)."""
+    parts: frozenset[str]
+    initials: frozenset[str]
+
+    def names_owner(self, target_name: str) -> bool:
+        """A target sharing a surname part, or the first initial, with the
+        owner -- the owner's other surname ("Married V" on a "Maiden" CV)
+        agrees by initial."""
+        return bool(name_parts(_target_surname(target_name)) & self.parts) \
+            or _name_initial(target_name) in self.initials
+
+
+def _majority_target(targets: list[str]) -> str:
+    """The target_name whose surname more than half of `targets` carry, or ''."""
+    folded = Counter(fold_name(_target_surname(t)) for t in targets)
+    if not folded:
+        return ''
+    top, count = folded.most_common(1)[0]
+    if count * 2 <= len(targets):
+        return ''
+    return next(t for t in targets if fold_name(_target_surname(t)) == top)
+
+
+def _owner_anchor(targets: list[str], owner: Mapping) -> _OwnerAnchor:
+    """The `_OwnerAnchor` of one CV, from its cv_owner and its targets."""
+    majority = _majority_target(targets)
+    parts = name_parts(str(owner.get('last_name') or '')) | name_parts(_target_surname(majority))
+    initials = {str(owner.get('first_name') or '')[:1].upper(),
+                _name_initial(str(owner.get('full_name') or '')), _name_initial(majority)}
+    return _OwnerAnchor(frozenset(parts), frozenset(initials - {''}))
+
+
+def _target_is_owner(target_name: str, alias: OwnerAlias) -> bool:
+    """False for a `target_name` that is not the owner, once the bibliography
+    has confirmed the owner (`alias.surnames`): its surname shares no part
+    with a name known to be the owner's, and is not a close spelling of one
+    (same first letter, `MIN_TARGET_SIMILARITY`) carried with an owner
+    initial. Stage 4 set that citation's target to a co-author, and bolding
+    it would mark the co-author as the owner (web207, web172; #1394). A
+    misspelt owner ("Wesssely S") still counts. With nothing confirmed,
+    every target is taken, as before."""
+    if not alias.surnames:
+        return True
+    target_parts = name_parts(_target_surname(target_name))
+    if target_parts & alias.known_parts:
+        return True
+    return _name_initial(target_name) in alias.initials and any(
+        t[0] == k[0] and SequenceMatcher(None, t, k).ratio() >= MIN_TARGET_SIMILARITY
+        for t in target_parts for k in alias.known_parts)
+
+
+def _infer_bibliography_owner_alias(publications: list[dict], cv_owner: Mapping | None,
+                                    cv_owner_last_name: str) -> OwnerAlias:
+    """The owner's surname spellings, read from every citation in the
+    bibliography (#1393). Stage 4's names are one input, not the answer: the
+    last name, each `target_name` surname, and the owner's initials from the
+    first name, full name and `target_name`."""
+    owner = cv_owner if isinstance(cv_owner, Mapping) else {}
+    citations: list[str] = []
+    targets: list[str] = []
+    for pub in publications:
+        citation, target_name, _ = _format_citation(pub, 0)
+        citations.append(citation)
+        if _looks_like_author_name(target_name):
+            targets.append(target_name)
+    anchor = _owner_anchor(targets, owner)
+    # Only the targets that name the owner: stage 4 sometimes sets one
+    # citation's target to a co-author (web207), whose surname and initial
+    # must not become the owner's. All of them when the anchor is empty.
+    owner_targets = [t for t in targets if anchor.names_owner(t)] or targets
+    surnames = [cv_owner_last_name] + [_target_surname(t) for t in owner_targets]
+    initials = [*anchor.initials, *(_name_initial(t) for t in owner_targets)]
+    alias = infer_owner_alias(citations, surnames, initials)
+    alias = replace(alias, known_parts=alias.parts | anchor.parts | name_parts(cv_owner_last_name))
+    if any(fold_name(s) != fold_name(cv_owner_last_name) for s in alias.surnames):
+        logger.info("Owner surname read from the bibliography as %r (stage 4 last name %r)",
+                    alias.surnames, cv_owner_last_name)
+    return alias
 
 
 class BibliographySection:
@@ -369,6 +571,10 @@ class BibliographySection:
             cv_owner_last_name = _resolve_uid_owner_surname(
                 document_uid,
                 [pub for code in pub_codes for pub in entries_by_code.get(code, [])])
+
+        all_pubs = [pub for code in pub_codes for pub in entries_by_code.get(code, [])]
+        owner_alias = _infer_bibliography_owner_alias(all_pubs, cv_owner, cv_owner_last_name)
+        self._warn_owner_bold_from_bibliography(all_pubs, cv_owner_last_name, owner_alias)
 
         # Count total publications
         total_pubs = sum(len(entries_by_code.get(code, [])) for code in pub_codes)
@@ -450,11 +656,12 @@ class BibliographySection:
                     # Then add the insertion (enriched citation) with bold author
                     self._add_citation_with_bold_author_as_insertion(
                         para, citation_text, target_name, cv_owner_last_name,
-                        author="PubMed Enrichment"
+                        author="PubMed Enrichment", owner_alias=owner_alias
                     )
                 else:
                     # No enrichment - add citation normally with target name bolded
-                    self._add_citation_with_bold_author(para, citation_text, target_name, cv_owner_last_name)
+                    self._add_citation_with_bold_author(para, citation_text, target_name,
+                                                        cv_owner_last_name, owner_alias)
 
                 # Add comment explaining enrichment (no inline text)
                 if enriched_fields:
@@ -489,11 +696,42 @@ class BibliographySection:
         self._add_word_comment(para, enrichment.in_press_note,
                                author="PubMed Enrichment", always=True)
 
-    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None, cv_owner_last_name: str = '') -> None:
+    def _warn_owner_bold_from_bibliography(self, publications: list[dict], cv_owner_last_name: str,
+                                           owner_alias: OwnerAlias) -> None:
+        """Record, as an INFO render warning, how many citations bold other
+        text than stage 4's names alone would: the owner's spelling read
+        from the bibliography, a compound widened, or a co-author target
+        refused (#1393, #1394). Counts only, like the stat-style records
+        (geographic-classification and reclassify failures). Some self-check
+        records quote a paragraph, but this one would quote the owner's name,
+        and the sidecar reaches the Teams card; the bolds are in the document."""
+        changed = 0
+        for pub in publications:
+            citation, target_name, _ = _format_citation(pub, 0)
+            changed += _citation_author_split(citation, target_name, cv_owner_last_name)[1] \
+                != _citation_author_split(citation, target_name, cv_owner_last_name, owner_alias)[1]
+        if not changed:
+            return
+        self._section_failures.append({
+            "check": OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK,
+            "code": None,
+            "section": "bibliography",
+            "message": (f"{changed} citation(s) bold the CV owner as the bibliography "
+                        "spells the name, or refuse a co-author target, where stage 4's "
+                        "names alone would bold otherwise"),
+            "evidence": [f"{OWNER_BOLD_FROM_BIBLIOGRAPHY_CHECK}={changed}",
+                         f"owner_spellings={len(owner_alias.surnames)}"],
+            "severity": "INFO",
+        })
+
+    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None,
+                                       cv_owner_last_name: str = '',
+                                       owner_alias: OwnerAlias | None = None) -> None:
         """
         Add citation text to paragraph, bolding the target author name.
 
-        If target_name is not found, falls back to searching for cv_owner_last_name.
+        If target_name is not found, falls back to searching for
+        cv_owner_last_name, then owner_alias.
         """
         para.clear()
 
@@ -510,7 +748,7 @@ class BibliographySection:
             target_name = self._sanitize_run_text(target_name)
 
         before, name_to_bold, after = _citation_author_split(
-            citation, target_name, cv_owner_last_name)
+            citation, target_name, cv_owner_last_name, owner_alias)
 
         if name_to_bold:
             # Add before (normal)
@@ -534,7 +772,8 @@ class BibliographySection:
 
     def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
                                                      target_name: str | None, cv_owner_last_name: str = '',
-                                                     author: str = "PubMed Enrichment") -> None:
+                                                     author: str = "PubMed Enrichment",
+                                                     owner_alias: OwnerAlias | None = None) -> None:
         """
         Add citation as a track change insertion, bolding the target author name.
 
@@ -551,7 +790,8 @@ class BibliographySection:
         # Issue #153: when track changes are disabled, render the citation as a
         # plain (non-tracked) paragraph with the target author bolded.
         if not self.emit_track_changes:
-            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
+            self._add_citation_with_bold_author(para, citation, target_name,
+                                                cv_owner_last_name, owner_alias)
             return
         try:
             revision_id = str(self._revision_id)
@@ -564,7 +804,7 @@ class BibliographySection:
             ins.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
 
             before, name_to_bold, after = _citation_author_split(
-                citation, target_name, cv_owner_last_name)
+                citation, target_name, cv_owner_last_name, owner_alias)
 
             def create_run_element(text: str, bold: bool = False) -> Any:
                 """Create a w:r element with text and optional bold."""
@@ -624,4 +864,5 @@ class BibliographySection:
         except Exception as e:
             logger.warning("Could not add citation as insertion: %s", e)
             # Fall back to normal citation
-            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
+            self._add_citation_with_bold_author(para, citation, target_name,
+                                                cv_owner_last_name, owner_alias)
