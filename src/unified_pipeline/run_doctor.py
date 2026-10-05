@@ -278,10 +278,16 @@ Lints, ranked by the severity of the failure class they catch:
                           terms ('2003, 2013') while its row shows one range
                           over them, their min-max (#1245, batch RCBKFG:
                           UYFRTL 33/34/48/49). WARN
-14x. role_consistency     a grant whose text names the CV owner under a PI
+14x. role_consistency     a grant table that misstates who led the grant
+                          (#1403): the text names the CV owner under a PI
                           label while pi_role says co-I, or the reverse
-                          (#1403, RCBKFG KUUKNJ 243/247). WARN. Reads stage
-                          4 only
+                          (RCBKFG KUUKNJ 243/247), or a rendered table whose
+                          role says PI and whose PI cell is empty (EOAHMI
+                          JIJRSN 516), both WARN; pi_name also listed as a
+                          co-I, a "with Dr. X" collaborator as pi_name, or the
+                          owner first on an unlabelled grant shown only as a
+                          co-I (JIJRSN 150-156, QTATUP 529-537), INFO. Reads
+                          stage 4, and the docx when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -775,11 +781,12 @@ LINT_PREVALENCE = {
     # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
     # render without the fix). Same mixed-corpus caveat as above.
     "span_count": 0.261,
-    # role_consistency (#1403): 4 of 232 runs, measured 2026-10-05 over
-    # stored stage-4 JSON: 2 of the 106 runs under analysis/ (KUUKNJ, ZCTARO:
-    # two runs of one CV) and 2 of the 126 farm/batch-3/batch-4 runs (web188,
-    # web30). Same mixed-corpus caveat as above.
-    "role_consistency": 0.017,
+    # role_consistency (#1403, RC-ROLE2 in doctor/PRECISION.md): 15 of 245
+    # runs at any severity, measured 2026-10-05 over each run's stored stage-4
+    # JSON and a render of origin/dev 43f84e1e: 8 of the 119 analysis/ and
+    # analysis/pilot runs and 7 of the 126 farm/batch-3/batch-4 runs. Same
+    # mixed-corpus caveat as above.
+    "role_consistency": 0.061,
 }
 
 
@@ -1320,7 +1327,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("grant_bucket", lint_grant_bucket, ("stage_4", "blocks")),
     LintSpec("research_summary_call_failed", lint_research_summary_call_failed, ("stage_4_5",)),
     LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
-    LintSpec("role_consistency", lint_role_consistency, ("stage_4",)),
+    LintSpec("role_consistency", lint_role_consistency, ("stage_4",),
+             optional=("table_rows",)),
 )
 
 

@@ -4759,12 +4759,42 @@ def test_span_count_prevalence_is_the_measured_corpus_fraction():
     assert LINT_PREVALENCE["span_count"] == round(64 / 245, 3)
 
 
+def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
+    """The role_consistency row must hand the lint the docx (#1403, EOAHMI
+    JIJRSN 516): a grant table whose role says PI and whose PI cell is empty
+    reaches the report as a WARN. Invented values."""
+    from unified_pipeline.stage6.sections.research_support import (
+        PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "M2B", "element_type": "paragraph", "element_idx_start": 516,
+        "text": "2013-2018: Principal Investigator in \u201cExample Trial\u201d",
+        "extracted_fields": {"title": "Example Trial", "pi_role": "PI"}})
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(docx_path)
+    table = output.add_table(rows=3, cols=2)
+    for row, cells in zip(table.rows, ((PROJECT_TITLE_LABEL, "Example Trial"),
+                                       (PI_NAME_LABEL, ""), (YOUR_ROLE_LABEL, "PI"))):
+        for cell, text in zip(row.cells, cells):
+            cell.paragraphs[0].text = text
+    output.save(docx_path)
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "role_consistency"]
+    assert [(f["severity"], f["message"].split(":")[0]) for f in hits] == [("WARN", "entry 516")]
+    assert "(pi_cell_empty, #1403)" in hits[0]["message"]
+
+
 def test_role_consistency_prevalence_is_the_measured_fraction():
-    """Measured 2026-10-05 over stored stage-4 JSON: 2 of the 106 analysis/
-    runs and 2 of the 126 farm/batch runs (#1403); a new measurement updates
-    both sides."""
+    """Measured 2026-10-05 (RC-ROLE2) over stored stage-4 JSON and a render
+    of origin/dev 43f84e1e: 8 of the 119 analysis/ runs and 7 of the 126
+    farm/batch runs (#1403); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
-    assert LINT_PREVALENCE["role_consistency"] == round(4 / 232, 3)
+    assert LINT_PREVALENCE["role_consistency"] == round(15 / 245, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
