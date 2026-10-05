@@ -289,6 +289,15 @@ Lints, ranked by the severity of the failure class they catch:
                           owner first on an unlabelled grant shown only as a
                           co-I (JIJRSN 150-156, QTATUP 529-537), INFO. Reads
                           stage 4, and the docx when present
+14y. split_child_unsourced a record stage 4 split out of an entry
+                          (stage4_records, #1406) that shows a place or a
+                          date range from outside its own text: a record with
+                          no institution, beside siblings that have one,
+                          rendered with a place its entry does not name
+                          (EOAHMI DUTAVD-03), or two or more records carrying
+                          one range the entry writes fewer times, beside a
+                          record with its own range (WYMVGU-02). INFO. Reads stage 4,
+                          and the docx when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -480,6 +489,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_python_repr_in_output,
+    lint_split_child_unsourced,
     lint_section_lost,
     lint_stage6_warnings,
     lint_table_shape,
@@ -607,6 +617,7 @@ KNOWN_LINTS = (
     "research_summary_call_failed",
     "span_count",
     "role_consistency",
+    "split_child_unsourced",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -788,6 +799,11 @@ LINT_PREVALENCE = {
     # analysis/pilot runs and 7 of the 126 farm/batch-3/batch-4 runs. Same
     # mixed-corpus caveat as above.
     "role_consistency": 0.061,
+    # split_child_unsourced (EOAHMI DUTAVD-03/WYMVGU-02, SC-1 in
+    # doctor/PRECISION.md): 1 of 102 runs (WYMVGU), measured 2026-10-05 over
+    # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
+    # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
+    "split_child_unsourced": 0.01,
 }
 
 
@@ -1330,6 +1346,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("research_summary_call_failed", lint_research_summary_call_failed, ("stage_4_5",)),
     LintSpec("span_count", lint_span_count, ("stage_4", "blocks")),
     LintSpec("role_consistency", lint_role_consistency, ("stage_4",),
+             optional=("table_rows",)),
+    LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
 )
 

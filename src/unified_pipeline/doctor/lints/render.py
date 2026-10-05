@@ -32,7 +32,10 @@ from unified_pipeline.core.text_norm import (
     looks_like_record,
     norm,
 )
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
+
+from .extraction import _is_prose
 
 from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
@@ -2712,4 +2715,190 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
             f"entry {candidate.element_idx} ({candidate.code}): {candidate.shape}: "
             f"{_JUNK_SHAPE_MESSAGES[candidate.shape]}",
             [row.text]))
+    return findings
+
+
+# split_child_unsourced (EOAHMI recheck DUTAVD-03, WYMVGU-02): a record
+# stage 4 split out of an entry (`stage4_records`, #1406) shows a place or a
+# date range that does not come from its own text. Two shapes:
+#
+# - institution_from_outside_entry (DUTAVD-03): a record with no institution
+#   or organization, whose siblings name one, renders in a row whose place
+#   cell holds words the entry's text does not. Stage 6 filled the blank
+#   from a neighbouring entry. A record whose siblings name no place either
+#   is skipped: an entry under an employer or society heading takes its
+#   place from that heading.
+# - date_from_sibling (WYMVGU-02): two or more records carry one range the
+#   entry writes fewer times than that, while another record carries its own
+#   range outside it. One leading range over a list ("2020-present A; B; C",
+#   the true negative #1458 names) has no record of its own beside it and is
+#   spared, as is a sentence about the records ("In 2016 I was awarded A,
+#   B and C"). With the docx read, two of the records must render the range.
+#   Not separable from this shape: "2015 talk A, talk B, 2016 talk C", where
+#   the year is printed once over two talks (#1449 keeps that date). No
+#   split entry on the measured farms has that layout (PRECISION.md, SC-1).
+SPLIT_CHILD_SEVERITY = "INFO"
+SPLIT_SHAPE_INSTITUTION = "institution_from_outside_entry"
+SPLIT_SHAPE_DATE = "date_from_sibling"
+#: The fields that name where a record was held.
+_SPLIT_PLACE_FIELDS = ("institution", "organization")
+#: Fields that hold, place, date or annotate a record but never name it.
+_SPLIT_NON_IDENTITY_FIELDS = _JUNK_PLACEMENT_FIELDS | {
+    "agency", "granting_body", "notes", "note", "description", "narrative", "status"}
+#: A place cell shows at least this many words the entry's text lacks. One
+#: word is the role stage 6 supplies when a record has none ("Member").
+SPLIT_FOREIGN_PLACE_MIN_WORDS = 2
+#: A split entry has at least this many records, and a shared range is
+#: carried by at least this many.
+SPLIT_MIN_RECORDS = 2
+SPLIT_EVIDENCE_CHARS = 200
+
+
+class _SplitRange(NamedTuple):
+    """A record's first start year and its end (a year or an open word)."""
+    start: str
+    end: str
+
+
+def _split_records(raw: dict) -> list[Mapping]:
+    """The entry's stage-4 records, when stage 4 split it into two or more."""
+    fields = raw.get("extracted_fields")
+    records = fields.get(STAGE4_RECORDS_KEY) if isinstance(fields, Mapping) else None
+    if not isinstance(records, list):
+        return []
+    records = [record for record in records if isinstance(record, Mapping)]
+    return records if len(records) >= SPLIT_MIN_RECORDS else []
+
+
+def _record_years(record: Mapping) -> frozenset[str]:
+    return frozenset(_FOUR_DIGIT_YEAR_RE.findall(
+        " ".join(str(record.get(key) or "") for key in _JUNK_DATE_FIELDS)))
+
+
+def _identity_tokens(record: Mapping) -> frozenset[str]:
+    """The words of the values that name the record: its role, title, name."""
+    return frozenset(_name_tokens(" ".join(
+        value for key, value in record.items()
+        if key not in _SPLIT_NON_IDENTITY_FIELDS and isinstance(value, str))))
+
+
+def _unplaced_records(records: list[Mapping]) -> list[Mapping]:
+    """Records with no place of their own beside a sibling that has one."""
+    placed = [any(record.get(key) for key in _SPLIT_PLACE_FIELDS) for record in records]
+    if not any(placed):
+        return []
+    return [record for record, has_place in zip(records, placed) if not has_place]
+
+
+def _record_rows(record: Mapping, rows: list[_RenderedRow]) -> list[_RenderedRow]:
+    """The table rows that are this record: a cell of its identity words and
+    nothing else, and the record's years."""
+    identity = _identity_tokens(record)
+    if not identity:
+        return []
+    years = _record_years(record)
+    return [row for row in rows if identity in row.cells
+            and frozenset(_FOUR_DIGIT_YEAR_RE.findall(row.text)) == years]
+
+
+def _foreign_place_row(record: Mapping, text_tokens: frozenset[str],
+                       rows: list[_RenderedRow]) -> _RenderedRow | None:
+    """The record's row, when a cell other than its name and dates shows a
+    place the entry's text does not hold."""
+    identity = _identity_tokens(record)
+    for row in _record_rows(record, rows):
+        for cell in row.cells:
+            if cell == identity or any(_FOUR_DIGIT_YEAR_RE.fullmatch(tok) for tok in cell):
+                continue
+            foreign = [tok for tok in cell - text_tokens if not tok.isdigit()]
+            if len(foreign) >= SPLIT_FOREIGN_PLACE_MIN_WORDS:
+                return row
+    return None  # no row of the record's shows a foreign place
+
+
+def _record_range(record: Mapping) -> _SplitRange | None:
+    start = _FOUR_DIGIT_YEAR_RE.findall(
+        str(record.get("start_date") or record.get("date") or record.get("year") or ""))
+    if not start:
+        return None
+    end_text = str(record.get("end_date") or "").strip().lower()
+    end = _FOUR_DIGIT_YEAR_RE.findall(end_text)
+    return _SplitRange(start[0], end[0] if end else end_text)
+
+
+def _shared_ranges(text: str, records: list[Mapping]) -> list[tuple[_SplitRange, list[Mapping]]]:
+    """Each range two or more records carry that the text writes fewer
+    times, beside a record whose own range starts outside it, with the
+    records that carry it."""
+    by_range: dict[_SplitRange, list[Mapping]] = defaultdict(list)
+    for record in records:
+        span = _record_range(record)
+        if span is not None:
+            by_range[span].append(record)
+    shared = []
+    for span, carriers in by_range.items():
+        if len(carriers) < SPLIT_MIN_RECORDS:
+            continue
+        written = len(re.findall(rf"(?<!\d){span.start}(?!\d)", text))
+        own = [other for other, holders in by_range.items()
+               if len(holders) == 1 and other.start not in span]
+        if written < len(carriers) and own:
+            shared.append((span, carriers))
+    return shared
+
+
+def _date_problems(text: str, records: list[Mapping],
+                   rows: list[_RenderedRow] | None) -> list[tuple[str, list[str]]]:
+    """(what, evidence) per shared range; with the docx read, only when two
+    or more of its records render it (#1449 drops WYMVGU 865's copied date
+    on origin/dev 8b287ec2, so that render is right)."""
+    if _is_prose(text):
+        return []
+    problems = []
+    for span, carriers in _shared_ranges(text, records):
+        shown = carriers if rows is None else [
+            row for record in carriers for row in _record_rows(record, rows)[:1]]
+        if len(shown) < SPLIT_MIN_RECORDS:
+            continue
+        evidence = [text[:SPLIT_EVIDENCE_CHARS]] if rows is None else [row.text for row in shown]
+        problems.append((
+            f"{len(shown)} split records show {span.start}-{span.end}, which the entry "
+            f"writes fewer times, beside a record with its own dates ({SPLIT_SHAPE_DATE})",
+            evidence))
+    return problems
+
+
+def _place_problems(text: str, records: list[Mapping],
+                    rows: list[_RenderedRow]) -> list[tuple[str, list[str]]]:
+    """(what, evidence) per unplaced record rendered with a foreign place."""
+    text_tokens = frozenset(_name_tokens(text))
+    problems = []
+    for record in _unplaced_records(records):
+        row = _foreign_place_row(record, text_tokens, rows)
+        if row is not None:
+            problems.append((
+                f"a split record with no institution of its own renders a place its "
+                f"entry does not name ({SPLIT_SHAPE_INSTITUTION})", [row.text]))
+    return problems
+
+
+def lint_split_child_unsourced(stage4: dict,
+                               table_rows: list[list[list[str]]] | None = None) -> list[dict]:
+    """A record stage 4 split out of an entry that shows a place or a date
+    range from outside its own text (EOAHMI recheck DUTAVD-03, WYMVGU-02).
+    One finding per record or shared range. The place shape reads the
+    rendered tables, so it runs only when the docx was read; without it the
+    date shape reports what stage 4 holds."""
+    rows = _junk_rendered_rows(table_rows, []) if table_rows is not None else None
+    findings = []
+    for raw in stage4.get("entries", []):
+        records = _split_records(raw)
+        text = str(raw.get("text") or "")
+        problems = _date_problems(text, records, rows)
+        if rows is not None:
+            problems += _place_problems(text, records, rows)
+        findings += [_finding(
+            "split_child_unsourced", SPLIT_CHILD_SEVERITY,
+            f"entry {raw.get('element_idx_start')} ({raw.get('taxonomy_code')}): {what}",
+            evidence) for what, evidence in problems]
     return findings
