@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from email.message import EmailMessage
+from email.utils import formataddr
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAIL_FROM = "no-reply@cviche.weill.cornell.edu"
+# Display name on the From header only. SES and IAM's ses:FromAddress
+# condition see FromEmailAddress, which stays the bare address.
+MAIL_FROM_NAME = "CViche"
 # SES identities for CViche live in us-east-1 (spec, 2026-10-02).
 DEFAULT_MAIL_REGION = "us-east-1"
 # Where the terms live in the app. A user who has consented is bounced from
@@ -220,7 +224,7 @@ def build_message(mail: OutboundMail, sender: str) -> EmailMessage:
     inside multipart/alternative's HTML part. Every header value is one line."""
     message = EmailMessage()
     message["Subject"] = one_line(mail.subject)
-    message["From"] = sender
+    message["From"] = formataddr((MAIL_FROM_NAME, sender))
     message["To"] = one_line(mail.to_addr)
     message.set_content(mail.body)
     if mail.html:
