@@ -39,6 +39,14 @@ spec:
           # same flags as the backend, or the queue path silently diverges
           # from the in-process path (#701 rework, mrj4001 review
           # 4070646335#1).
+          # Emailed-CV intake poller (#1298) on this pool only, not flex (see
+          # base/worker/deployment.yaml). Each S3 key becomes one
+          # inbound_messages row (unique), so the 3 replicas polling together
+          # never double-process a message. Needs ED_LDAP_* (cviche-secrets)
+          # and auth_config.yaml (mounted below) for the sender's ED check.
+          env:
+            - name: CVICHE_EMAIL_INTAKE
+              value: "1"
           envFrom:
             - configMapRef:
                 name: cviche-pipeline-flags

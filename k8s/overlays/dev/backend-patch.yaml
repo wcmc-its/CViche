@@ -58,6 +58,11 @@ spec:
             # Rollback is deleting this entry.
             - name: CVICHE_REQUIRE_MALWARE_SCAN
               value: "1"
+            # Emailed-CV intake (#1298): here it only shows the cv@ address
+            # in the UI (GET /api/auth/me); the poller runs on the
+            # cviche-worker pool (worker-patch.yaml). Keep the two in step.
+            - name: CVICHE_EMAIL_INTAKE
+              value: "1"
           # CVICHE_BLOCK_COHERENCE_REPAIR (and any other pipeline-behaviour
           # flag shared with the worker) comes from the cviche-pipeline-flags
           # ConfigMap below, not a literal env entry here -- see its comment
