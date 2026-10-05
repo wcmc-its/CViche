@@ -32,6 +32,8 @@ from datetime import datetime
 from typing import Any
 import hashlib
 
+from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, PROMPT_LOG_RESPONSE_SUFFIX
+
 
 # Default prompt log directory - use absolute path based on this module's location
 # This ensures logs go to src/unified_pipeline/prompt_logs regardless of cwd
@@ -260,6 +262,8 @@ def log_prompt_response(
             response_record["response"]["cost"] = response.get("cost", 0.0)
             response_record["response"]["model"] = response.get("model", "")
             response_record["response"]["provider"] = response.get("provider", "")
+            if response.get(FALLBACK_SERVED_KEY):
+                response_record["response"][FALLBACK_SERVED_KEY] = response[FALLBACK_SERVED_KEY]
         else:
             # Handle OpenAI SDK response objects (exception files)
             if hasattr(response, 'choices'):
@@ -286,7 +290,7 @@ def log_prompt_response(
                 response_record["response"]["model"] = response.model
 
         # Save response
-        filename = f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{purpose}_{log_id}_RESPONSE.json"
+        filename = f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{purpose}_{log_id}{PROMPT_LOG_RESPONSE_SUFFIX}"
         log_path = _log_dir() / filename
 
         with open(log_path, 'w', encoding='utf-8') as f:

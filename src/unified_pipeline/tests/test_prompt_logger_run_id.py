@@ -52,6 +52,19 @@ def test_reset_restores_prior_value_for_nested_scopes():
     assert _current_run_id.get() is None
 
 
+def test_response_log_records_the_fallback_model_the_doctor_reads(tmp_path, monkeypatch):
+    """#1174: the writer and the doctor's reader agree on the record, so a
+    fallback-served call in any stage reaches `llm_fallback_served`."""
+    from unified_pipeline.core import prompt_logger
+    from unified_pipeline.quality_score import prompt_log_fallback_served
+
+    monkeypatch.setattr(prompt_logger, "PROMPT_LOG_DIR", tmp_path)
+    prompt_logger.log_prompt_response("id1", {"model": "fb", "served_by_fallback_model": "fb"}, "stage_6")
+    prompt_logger.log_prompt_response("id2", {"model": "primary"}, "stage_6")
+
+    assert [c.describe() for c in prompt_log_fallback_served(tmp_path)] == ["stage 6 calls on fb (1 calls)"]
+
+
 if __name__ == "__main__":
     test_valid_run_id_is_accepted_and_scopes_log_dir()
     test_path_traversal_run_id_is_rejected()

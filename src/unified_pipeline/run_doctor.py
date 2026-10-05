@@ -152,7 +152,8 @@ Lints, ranked by the severity of the failure class they catch:
                           succeeded, so nothing records an error; stage 4
                           stamps the entries of the taxonomy group and stage
                           4.5 lists the calls, and each finding names the
-                          section. WARN; it does not cap the quality score,
+                          section; with --prompt-logs, the other stages'
+                          calls are counted per stage from the prompt logs. WARN; it does not cap the quality score,
                           since the call succeeded (#1174, 2026-10-05)
 
 14m. stage_failure_recorded a stage the driver recorded as failed in
@@ -358,7 +359,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.precision import precision_payload
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
-from unified_pipeline.quality_score import stage3b_fallback_ratios
+from unified_pipeline.quality_score import prompt_log_fallback_served, stage3b_fallback_ratios
 from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
 from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
 
@@ -1241,6 +1242,7 @@ _VIEW_LABELS = {
     "stage_4": "stage_4",
     "stage_4_5": "stage_4_5",
     "stage_errors": "stage_errors",
+    "prompt_log_fallbacks": "prompt_logs",
     "stage_5_enrichment": "stage_5_enrichment",
     "stage_5b": "stage_5b",
     "stage_5d": "stage_5d",
@@ -1302,7 +1304,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
     LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
     LintSpec("llm_fallback_served", lint_llm_fallback_served, ("stage_4",),
-             optional=("stage_4_5",)),
+             optional=("stage_4_5", "prompt_log_fallbacks")),
     LintSpec("stage_failure_recorded", lint_stage_failure_recorded, ("stage_errors",)),
     LintSpec("owner_missing_from_citation", lint_owner_missing_from_citation,
              ("stage_4", "blocks")),
@@ -1481,8 +1483,11 @@ def _run_hand_dispatched_gates(views: dict, paths: dict, uid: str,
                bool(paths["stage_6_report"])), findings)
 
 
-def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
+def run_doctor(root: Path, uid: str, source: Path | None = None,
+               prompt_log_dir: Path | None = None) -> dict:
     """Run every lint whose artifacts exist under root for this document uid.
+    ``prompt_log_dir`` is the run's prompt-log directory, when the caller has
+    it; `llm_fallback_served` reads it for the stages no artifact covers.
     Never raises on missing/unreadable artifacts, never raises out of a lint
     (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
     — the backend calls this in-process; the CLI wraps it."""
@@ -1507,6 +1512,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     source_block_lines = (_try(lambda: iter_source_block_lines(str(source_path)), "source", _note)
                           if source_path else None)
     views["stage_errors"] = _load_stage_errors(stage_errors_path(root, uid), _note)
+    views["prompt_log_fallbacks"] = prompt_log_fallback_served(prompt_log_dir)
     views["source_block_lines"] = source_block_lines
     views["source_lines"] = (None if source_block_lines is None
                              else [line for _, line in source_block_lines])
@@ -1565,6 +1571,7 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("uid", help="document uid (artifact filename prefix)")
     parser.add_argument("--source", help="source .docx (default: <root>[/uploads]/<uid>*.docx)")
     parser.add_argument("--out", help="report file (default: <root>/<uid>_doctor.json)")
+    parser.add_argument("--prompt-logs", help="the run's prompt-log directory, for llm_fallback_served")
     args = parser.parse_args(argv)
 
     # Advisory pre-check only: fail fast with a clear message BEFORE the slow
@@ -1577,7 +1584,8 @@ def main(argv: Optional[List[str]] = None):
         parser.error(f"output path not writable: {out_path}")
 
     payload = run_doctor(Path(args.root), args.uid,
-                         Path(args.source) if args.source else None)
+                         Path(args.source) if args.source else None,
+                         Path(args.prompt_logs) if args.prompt_logs else None)
 
     report_json = json.dumps(payload, indent=2)
     if len(report_json.encode("utf-8")) > MAX_REPORT_BYTES:

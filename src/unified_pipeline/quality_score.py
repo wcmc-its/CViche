@@ -131,6 +131,8 @@ from unified_pipeline.doctor.shared import (
     docx_table_rows,
 )
 from unified_pipeline.llm_provenance import (
+    FALLBACK_SERVED_KEY,
+    PROMPT_LOG_RESPONSE_SUFFIX,
     STAGE4_5_FALLBACK_CALLS_KEY,
     STAGE4_ENTRY_FALLBACK_KEY,
 )
@@ -596,18 +598,20 @@ _STAGE4_5_SECTION = "research summary"
 class FallbackServedCall:
     """One section whose LLM call the content-filter fallback served.
 
-    ``count`` is the entries of a stage-4 taxonomy group, or 1 for a stage-4.5
-    call; ``section`` is the taxonomy code, or "research summary (<call>)".
+    ``count`` is the entries of a stage-4 taxonomy group, 1 for a stage-4.5
+    call, or the calls of one prompt-log purpose; ``unit`` says which.
+    ``section`` is the taxonomy code, "research summary (<call>)", or
+    "calls" for a prompt-log count.
     """
 
     stage: str
     section: str
     model: str
     count: int
+    unit: str
 
     def describe(self) -> str:
-        unit = "entries" if self.stage == "4" else "call"
-        return f"stage {self.stage} {self.section} on {self.model} ({self.count} {unit})"
+        return f"stage {self.stage} {self.section} on {self.model} ({self.count} {self.unit})"
 
 
 def _stage4_fallback_served(stage_4_data: object) -> list[FallbackServedCall]:
@@ -615,14 +619,48 @@ def _stage4_fallback_served(stage_4_data: object) -> list[FallbackServedCall]:
     served = Counter(
         (str(e.get("taxonomy_code") or "?"), str(e[STAGE4_ENTRY_FALLBACK_KEY]))
         for e in entries or [] if isinstance(e, dict) and e.get(STAGE4_ENTRY_FALLBACK_KEY))
-    return [FallbackServedCall("4", code, model, n) for (code, model), n in sorted(served.items())]
+    return [FallbackServedCall("4", code, model, n, "entries")
+            for (code, model), n in sorted(served.items())]
 
 
 def _stage4_5_fallback_served(stage_4_5_data: object) -> list[FallbackServedCall]:
     calls = stage_4_5_data.get(STAGE4_5_FALLBACK_CALLS_KEY) if isinstance(stage_4_5_data, dict) else None
     return [
-        FallbackServedCall("4.5", f"{_STAGE4_5_SECTION} ({c.get('call')})", str(c.get("model")), 1)
+        FallbackServedCall("4.5", f"{_STAGE4_5_SECTION} ({c.get('call')})", str(c.get("model")), 1, "call")
         for c in calls or [] if isinstance(c, dict) and c.get("model")]
+
+
+#: The prompt-log purpose whose fallback-served calls the stage-4.5 artifact
+#: already lists one by one, so the prompt-log count would only repeat them.
+_PROMPT_LOG_PURPOSES_RECORDED_ELSEWHERE = frozenset({"stage_4_5"})
+
+
+def prompt_log_fallback_served(log_dir: Path | None) -> list[FallbackServedCall]:
+    """Fallback-served calls counted per stage from one run's prompt-log
+    response records (#1174): the record every `call_llm` writes, so it covers
+    the calls stages 4 and 4.5 do not stamp in their artifacts (stages 1a-3b,
+    5b-6, stage-4 recovery, owner-name and location calls). Stage-4 group
+    calls are counted here too, beside their per-section findings.
+
+    Empty when ``log_dir`` is None or absent. A record that does not parse is
+    logged and skipped: one torn log file must not hide the others.
+    Undercounts a run that resumed on another pod, whose earlier logs are
+    only in storage."""
+    if log_dir is None or not log_dir.is_dir():
+        return []
+    served: Counter[tuple[str, str]] = Counter()
+    for path in log_dir.glob(f"*{PROMPT_LOG_RESPONSE_SUFFIX}"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            model = record["response"].get(FALLBACK_SERVED_KEY)
+            purpose = str(record.get("purpose") or "?")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            logger.warning("skipping unreadable prompt log %s (%s): %s", path.name, type(e).__name__, e)
+            continue
+        if model and purpose not in _PROMPT_LOG_PURPOSES_RECORDED_ELSEWHERE:
+            served[(purpose, str(model))] += 1
+    return [FallbackServedCall(purpose.removeprefix("stage_").replace("_", "."), "calls", model, n, "calls")
+            for (purpose, model), n in sorted(served.items())]
 
 
 def llm_fallback_served(stage_4_data: dict | None,
@@ -634,8 +672,9 @@ def llm_fallback_served(stage_4_data: dict | None,
 
     A served call is a SUCCESS, so no error marker records it: stage 4 stamps
     ``llm_fallback_model`` on the entries of the taxonomy group the fallback
-    answered, stage 4.5 lists the calls under ``llm_fallback_calls``. Stage 2,
-    3b, 5d and 6 calls are not recorded.
+    answered, stage 4.5 lists the calls under ``llm_fallback_calls``. The
+    other stages' calls are counted from the prompt logs by
+    `prompt_log_fallback_served`.
 
     Read by the doctor's `llm_fallback_served` lint only. The score does not
     cap on it (#1174, Paul 2026-10-05): a served call reached the run only

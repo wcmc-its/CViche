@@ -70,6 +70,7 @@ exported before.
 from unified_pipeline.quality_score import (
     FATAL_ERROR_PATTERN,
     NO_OUTPUT_CAP,
+    FallbackServedCall,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
     STAGE4_GROUP_FAILURE_CAP,
     iter_error_fields,
@@ -255,7 +256,8 @@ def lint_no_output(has_stage4: bool, has_docx: bool, has_report: bool) -> list[d
 # A call the content-filter fallback served (#1174).
 
 
-def lint_llm_fallback_served(stage_4: dict, stage_4_5: dict | None = None) -> list[dict]:
+def lint_llm_fallback_served(stage_4: dict, stage_4_5: dict | None = None,
+                             prompt_log_calls: list[FallbackServedCall] | None = None) -> list[dict]:
     """A Sonnet-5 call ended content_filtered and the fallback model answered
     it, so the output of that section came from a model the stage was not
     tuned on. One finding per section, so the evidence names which section to
@@ -265,16 +267,16 @@ def lint_llm_fallback_served(stage_4: dict, stage_4_5: dict | None = None) -> li
     and its reply parsed, so this records provenance, not a defect.
     ``stage_4_5`` is optional because a run may have no research-summary
     artifact; an artifact from before the stage recorded provenance is not a
-    finding."""
+    finding. ``prompt_log_calls`` (`prompt_log_fallback_served`) adds one
+    finding per stage for the calls no artifact records."""
     return [
         _finding(
             "llm_fallback_served", "WARN",
             f"stage {call.stage} {call.section}: the content filter blocked the "
-            f"primary model and {call.model} answered ({call.count} "
-            f"{'entries' if call.stage == '4' else 'call'}); the call "
-            f"succeeded, so the quality score is not capped",
+            f"primary model and {call.model} answered ({call.count} {call.unit}); "
+            f"the call succeeded, so the quality score is not capped",
             [call.describe()])
-        for call in llm_fallback_served(stage_4, stage_4_5)]
+        for call in llm_fallback_served(stage_4, stage_4_5) + list(prompt_log_calls or [])]
 
 
 # --------------------------------------------------------------------------
