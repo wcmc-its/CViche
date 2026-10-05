@@ -859,6 +859,22 @@ def _pi_name_from_label(raw_text: str) -> str:
     return ''
 
 
+def _in_own_title(name: str, fields: GrantFields) -> bool:
+    """True when `name` is a run of whole words of the grant's own title.
+
+    A source line "<sponsor>, "<title> – Mouse Models", PI, Total $<n>"
+    matches the "Name, PI" shape with the title's last two words, so the
+    owner's own role label put title words in the PI cell (#1403, EQADVR 396).
+    A PI's name is not part of the project's title, so a label capture the
+    title already holds is the title, not a PI. Case-folded, whole words.
+    """
+    title = fields.get('title') or fields.get('study_title') or ''
+    if not name or not isinstance(title, str):
+        return False
+    words = r'(?<!\w)' + re.escape(name.casefold()) + r'(?!\w)'
+    return re.search(words, title.casefold()) is not None
+
+
 def _surname_parts(name: str) -> frozenset[str]:
     """The casefolded parts of the surname in "First M. Last".
 
@@ -929,6 +945,8 @@ def resolve_pi_name(
 
     if not pi_name:
         pi_name = _pi_name_from_label(raw_text)
+        if _in_own_title(pi_name, fields):
+            pi_name = ''
         if pi_name and _is_cv_owner(pi_name, owner_name):
             pi_name = owner_name
 
