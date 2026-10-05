@@ -194,9 +194,10 @@ class ReformattedFields(TypedDict, total=False):
     ``apply_regex_post_processing`` builds this empty and threads it through
     every helper below, each of which adds its own key in place -- and only
     when it actually changed something, hence ``total=False``. The key set is
-    closed on purpose: this module is the only producer (extraction.py stores
-    the result as an entry's ``reformatted_fields`` and counts non-empty ones
-    for ``entries_reformatted``; nothing else writes it), so a new
+    closed on purpose: this module is the only per-record producer
+    (extraction.py stores the result as an entry's ``reformatted_fields`` and
+    counts non-empty ones for ``entries_reformatted``; the one other writer,
+    ``year_groups.py``, adds date keys already named here), so a new
     post-processor adds its key here.
     """
 
@@ -766,39 +767,17 @@ _YEAR_NOT_IN_SOURCE_NULLED_REASON = (
     'Cleared a year the source text does not contain and gives no single year for')
 
 
-#: The largest number a short dashed date token's first half can be: a day
-#: of the month ("05-31-98") or a month ("04-17"). A larger one ("98-02")
-#: makes the token a two-year range, whose halves are years.
-_MAX_DAY_OF_MONTH = 31
-
-#: A short dashed date token ending where a two-digit number starts: a one-
-#: or two-digit number and a hyphen ("04-17"). Group 1 is that number. A
-#: slash token ("7/18", "10/01/98") is not one here: `_source_years_for_month`
-#: already reads it as a date, and refusing it moved an m/d/yy grant end past
-#: the century pivot and read an "m/d-d/yy" meeting's first day as its year
-#: (2026-10-04, both corpus farms).
-_DASHED_DATE_TOKEN_HEAD = re.compile(r'(?<!\d)(\d{1,2})-\Z')
-
-
-def _ends_dashed_date_token(original_text: str, digits_start: int) -> bool:
-    """True when the two digits at `digits_start` are the second half of a
-    short dashed date token, after a number that can be a month or a day:
-    in "04-17" they may be a day or a year, so they do not show that the
-    text writes a year."""
-    head = _DASHED_DATE_TOKEN_HEAD.search(original_text, 0, digits_start)
-    return head is not None and 1 <= int(head.group(1)) <= _MAX_DAY_OF_MONTH
-
-
 def _source_writes_year(year: str, original_text: str) -> bool:
     """True when `original_text` has `year` written out, or its last two
-    digits as a number of their own ("'98", "1997-98", "98-02", "10/01/98")
-    that is not the second half of a short dashed date token ("04-17";
-    class E26, 2026-10-04 NDMRSO autopsy: GCFEBE)."""
-    if re.search(rf'(?<!\d){year}(?!\d)', original_text):
-        return True
-    return any(
-        not _ends_dashed_date_token(original_text, match.start())
-        for match in re.finditer(rf'(?<!\d){year[2:]}(?!\d)', original_text)
+    digits as a number of their own ("10/01/98", "'98", "1997-98").
+
+    The day of an "MM-DD" token passes too ("09-14" for 2014): from the token
+    alone it cannot be told from an MM-YY date ("07-12" for July 2012). A
+    year-grouped list's lines are re-dated from their group's year by
+    `year_groups.py`, which sees the neighbouring entries this cannot."""
+    return bool(
+        re.search(rf'(?<!\d){year}(?!\d)', original_text)
+        or re.search(rf'(?<!\d){year[2:]}(?!\d)', original_text)
     )
 
 

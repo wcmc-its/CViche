@@ -1282,3 +1282,26 @@ def test_each_finished_batch_prints_a_progress_bar_line(monkeypatch, capsys, pro
         if match:
             seen.append((int(match.group(1)), int(match.group(2))))
     assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_year_group_lines_are_re_dated_after_the_batches_are_reassembled(monkeypatch):
+    # Class E26: the pass needs document order across batches, so the two
+    # entries go into different batches and the later batch finishes first.
+    _stub_owner(monkeypatch)
+    fields = {"2016:  03-16: Example lecture A": {"date": "2016-03-16"},
+              "09-14: Example lecture B": {"start_date": "2014-09"}}
+    entries = [{"text": text, "element_idx_start": idx, "element_idx_end": idx,
+                "hierarchy": ["Teaching"], "taxonomy_code": "K1"}
+               for idx, text in enumerate(fields)]
+
+    def llm_batch(batch, batch_idx, total, cv_owner_name, cancel_check=None):
+        time.sleep((total - batch_idx) * 0.01)
+        return _batch_result([dict(e, extracted_fields=dict(fields[e["text"]])) for e in batch])
+
+    monkeypatch.setattr(extraction, "extract_fields_batch", llm_batch)
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=1, workers=2)
+
+    assert [e["extracted_fields"] for e in out["entries"]] == [
+        {"date": "2016-03-16"}, {"start_date": "2016-09-14"}]
+    assert out["stats"]["entries_reformatted"] == 1
