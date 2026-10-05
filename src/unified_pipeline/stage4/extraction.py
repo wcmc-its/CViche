@@ -656,13 +656,32 @@ MULTI_RECORD_INSTRUCTION = """1. For each entry, extract all available fields. O
 SINGLE_WORK_INSTRUCTION = """ Here one citation, abstract, poster, chapter, patent or grant is one work: when the entry gives the same work at several venues, meetings, presentations or dates (e.g. "Poster presentation at Meeting A 2016, and oral presentation at Meeting B 2016"), return ONE item and put every venue or date in that item's fields (e.g. "Meeting A 2016; Meeting B 2016"). Never return two items with the same title. Split only works that each have their own title."""
 SINGLE_WORK_CODE_PREFIXES = ('S', 'M2', 'T')
 
+#: Appended to rule 1 for a lecture or talk code (K4, R). The EOAHMI recheck
+#: (2026-10-05, #1445) found JBUVYV 346, one K4 lecture series given in three
+#: years on four topics, returned as 12 items (each topic in each year), and
+#: QTATUP 980, one R talk given on seven dates as a teleconference series to
+#: named practitioners, returned as 7 items that all dropped the audience. A
+#: talk given in several cities, each with its own date, still splits
+#: (QTATUP 800, RVROVQ 129).
+ONE_SERIES_INSTRUCTION = """ Never return an item for each combination of two lists (e.g. each topic in each year): one lecture series given in several years on several topics is ONE item, with every year in its date (e.g. "2015; 2016; 2017") and every topic in its title (e.g. "Series: Topic A; Topic B"). When one talk is given on several dates, keep in every item the words that say how and to whom it was given (e.g. "a teleconference series to nurses")."""
+
+#: Appended to rule 1 for K3. The EOAHMI recheck (#1445) found JBUVYV 337,
+#: "House Leader, <program>, <school> 2016-2020" then a line naming only the
+#: program's leadership council, returned as two items; the second had no
+#: role, and stage 5c then copied the first item's role onto it.
+CONTEXT_LINE_INSTRUCTION = """ A line that only names a body the program belongs to (e.g. a council), with no role or date of its own, is context for that program's item, not a new item."""
+
+_RULE1_GUARDS = {'K3': CONTEXT_LINE_INSTRUCTION, 'K4': ONE_SERIES_INSTRUCTION, 'R': ONE_SERIES_INSTRUCTION}
+
 
 def multi_record_rule(code: str) -> str:
     """Rule 1 for `code`: the multi-record rule, with the one-work guard
-    appended for a citation, patent or grant code."""
+    appended for a citation, patent or grant code, and the one-series or
+    context-line guard for the codes in `_RULE1_GUARDS`."""
+    rule = MULTI_RECORD_INSTRUCTION
     if code.startswith(SINGLE_WORK_CODE_PREFIXES):
-        return MULTI_RECORD_INSTRUCTION + SINGLE_WORK_INSTRUCTION
-    return MULTI_RECORD_INSTRUCTION
+        rule += SINGLE_WORK_INSTRUCTION
+    return rule + _RULE1_GUARDS.get(code, "")
 
 
 #: Rule 6 of the batch extraction prompt. The tab rule used to say only that a
