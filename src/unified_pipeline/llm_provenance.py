@@ -24,6 +24,11 @@ STAGE4_ENTRY_FALLBACK_KEY = "llm_fallback_model"
 #: fallback-served call. Absent when none was.
 STAGE4_5_FALLBACK_CALLS_KEY = "llm_fallback_calls"
 
-#: The stage-4.5 calls, as `call` values in the record above.
+#: Top level of the stage-4.5 artifact: one `{"call", "exception_type",
+#: "stop_reason", "message"}` per call that raised on every model tried, so
+#: stage 4.5 went on without its answer (#1174). Absent when every call answered.
+STAGE4_5_CALL_FAILURES_KEY = "llm_call_failures"
+
+#: The stage-4.5 calls, as `call` values in the records above.
 STAGE4_5_CALL_M1_SCORE = "m1_relevance_score"
 STAGE4_5_CALL_SUMMARY = "summary_generation"
