@@ -652,6 +652,16 @@ def test_a_pi_label_outside_the_title_still_names_the_pi(title):
     assert resolve_pi_name({'title': title}, _OWN_TITLE_TEXT, '', '') == 'Mouse Models'
 
 
+@pytest.mark.parametrize('title', ['Support Grant (PI: Lee)', 'Support Grant [PI Lee]',
+                                   'Support Grant, Lee (PI)'])
+def test_a_pi_named_by_a_label_inside_the_title_is_still_the_pi(title):
+    """A stage-4 title can keep the source's "(PI: <name>)" parenthetical. The
+    name follows a PI label there, so it is the PI, not title words: the guard
+    must not veto it (farm M2B entry 61.1)."""
+    raw = '08/01/2020-07/31/2025 | P30CA000000/ ' + title + ' | NCI | $1,000 (Total) | 5%'
+    assert resolve_pi_name({'title': title, 'pi_role': '5%'}, raw, '5%', 'Ada Testowner') == 'Lee'
+
+
 def test_a_title_word_capture_falls_through_to_the_owner_auto_fill():
     """With the capture refused, a "Principal Investigator" role still fills
     the owner, as it does for any grant whose text names no PI."""

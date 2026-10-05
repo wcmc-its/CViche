@@ -867,10 +867,15 @@ def _in_own_title(name: str, fields: GrantFields) -> bool:
     owner's own role label put title words in the PI cell (#1403, EQADVR 396).
     A PI's name is not part of the project's title, so a label capture the
     title already holds is the title, not a PI. Case-folded, whole words.
+    A title that carries its own PI label ("Support Grant (PI: Lee)") keeps
+    that name as a PI: the labelled spans are cut out of the title first, so
+    only an unlabelled run of title words vetoes the capture.
     """
     title = fields.get('title') or fields.get('study_title') or ''
     if not name or not isinstance(title, str):
         return False
+    for pattern in PI_LABEL_PATTERNS:
+        title = pattern.sub(' ', title)
     words = r'(?<!\w)' + re.escape(name.casefold()) + r'(?!\w)'
     return re.search(words, title.casefold()) is not None
 
