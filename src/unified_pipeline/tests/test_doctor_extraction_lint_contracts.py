@@ -1417,6 +1417,17 @@ def test_offschema_stage4_records_fan_out_splits_is_not_reported():
     assert _offschema(entry) == []
 
 
+def test_offschema_stage4_records_whose_rows_repeat_is_not_reported():
+    """#1445: records that print one identical row (two dates of one talk in
+    a year-only column) fan out into the last record alone; the list still
+    rendered, so it is not an unread key."""
+    talk = {"title": "Talk one", "location": "Springfield", "event_name": "Example Series"}
+    entry = _anchored("R", {**talk, "date": "2011-09", STAGE4_RECORDS_KEY: [
+        {**talk, "date": "2011-03"}, {**talk, "date": "2011-09"}]},
+        text="Talk one. Example Series; March 2011 and September 2011; Springfield.")
+    assert _offschema(entry) == []
+
+
 def test_offschema_stage4_records_fan_out_declines_is_warn():
     """A record with no value its section writes makes fan-out decline the
     whole list, so the records are never read."""

@@ -219,9 +219,18 @@ def test_non_string_institution_is_skipped_not_a_crash():
     assert _recover_institution_from_nearby_entries(target, entries) == "Real Hospital"
 
 
-def test_same_start_sibling_is_not_preceding():
+def test_a_same_start_sibling_naming_its_own_institution_stops_the_recovery():
+    """#1445 (EOAHMI DUTAVD 30): a record split out of the same source line
+    names its institution, so the line names them record by record; the
+    record it leaves without one does not take the entry above's."""
     target = _e(20, "C2")
     entries = [_e(18, "C", "Real Hospital"), _e(20, "C", "Same Start Hospital"), target]
+    assert _recover_institution_from_nearby_entries(target, entries) == ""
+
+
+def test_a_same_start_sibling_with_no_institution_is_not_preceding():
+    target = _e(20, "C2")
+    entries = [_e(18, "C", "Real Hospital"), _e(20, "C"), target]
     assert _recover_institution_from_nearby_entries(target, entries) == "Real Hospital"
 
 
