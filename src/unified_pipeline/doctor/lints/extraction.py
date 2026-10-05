@@ -94,7 +94,13 @@ from unified_pipeline.stage6.dedup import (
     _part_numbers,
     _trial_phases,
 )
-from unified_pipeline.stage6.sections.research_support import grant_end_year, year_at_or_after
+from unified_pipeline.stage6.sections.research_support import (
+    PI_NAME_LABEL,
+    PROJECT_TITLE_LABEL,
+    YOUR_ROLE_LABEL,
+    grant_end_year,
+    year_at_or_after,
+)
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -104,8 +110,10 @@ from unified_pipeline.stage_6_word_template import (
 
 from ..shared import (
     Haystack,
+    OWNER_SURNAME_MIN_CHARS,
     _FieldsEntry,
     _LINE_SENTINEL,
+    _NAME_WORD_RE,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
@@ -2971,12 +2979,195 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
     return roles.pop() if len(roles) == 1 else None
 
 
-def lint_role_consistency(stage4: dict) -> list[dict]:
-    """A grant whose text names the CV owner as PI while `pi_role` says
-    co-I, or the reverse (#1403). WARN, one finding per grant. The owner is
-    `cv_owner.last_name`; with none, no text names them. Not judged: an empty
-    `pi_role` (stage 4 often leaves it empty when `pi_name` holds the owner,
-    and the PI cell then names them), a co-PI, or text that gives the owner
+# --- role_consistency: the #1410 shapes (EOAHMI recheck) --------------------
+#
+# Four more ways a grant table misstates who led the grant, each a #1410
+# regression the EOAHMI recheck verified and no lint flagged (#1403):
+#
+# - pi_cell_empty: "Your role:" says PI and "Name of Principal Investigator:"
+#   is empty (JIJRSN 516 and 10 sibling trials). Read off the render, since
+#   stage 6 fills that cell from the owner on a PI role (#1446) and stage 4's
+#   empty `pi_name` is not what the reader sees.
+# - pi_also_co_i: `pi_name` is one of the people `co_investigators` lists, so
+#   the table names one person as both (JIJRSN 156, which the next shape
+#   reports first; farm KDAZOM 380, MQSUIC 153).
+# - pi_from_collaborator: `pi_name` is a person the text names only as a
+#   "with Dr. X" collaborator, where no role label names anyone and no role is
+#   stated for the owner (JIJRSN 148-156).
+# - owner_lead_as_co_i: an unlabelled author-list grant whose first or only
+#   name is the owner, rendered with an empty PI cell and the owner among the
+#   co-investigators (QTATUP 529, 533, 537).
+
+ROLE_SHAPE_CONTRADICTED = "contradicted"
+ROLE_SHAPE_PI_CELL_EMPTY = "pi_cell_empty"
+ROLE_SHAPE_PI_ALSO_CO_I = "pi_also_co_i"
+ROLE_SHAPE_PI_FROM_COLLABORATOR = "pi_from_collaborator"
+ROLE_SHAPE_OWNER_LEAD_AS_CO_I = "owner_lead_as_co_i"
+#: Each shape's severity, from its measured precision (RC-ROLE2 in
+#: doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked hits,
+#: INFO below either bar.
+ROLE_SHAPE_SEVERITY = MappingProxyType({
+    ROLE_SHAPE_CONTRADICTED: "WARN",
+    ROLE_SHAPE_PI_CELL_EMPTY: "WARN",
+    ROLE_SHAPE_PI_ALSO_CO_I: "INFO",
+    ROLE_SHAPE_PI_FROM_COLLABORATOR: "INFO",
+    ROLE_SHAPE_OWNER_LEAD_AS_CO_I: "INFO",
+})
+
+#: Any word that labels a role on a grant, in normalised text: "PI", "P.I.",
+#: "PD/PI", "MPI", "co-I", "Investigator", "Role", "Director". Broader than
+#: `_ROLE_LABEL` on purpose: the two shapes that read an unlabelled grant
+#: stay quiet on any text that labels anyone.
+_ANY_ROLE_WORD_RE = re.compile(
+    r"(?<![a-z])(?:p\.?\s?i|pis|mpi|pd|co-?is?|investigators?|role|director)(?![a-z])")
+#: "with Dr. X", "with Drs. X and Y": X is a collaborator, not a PI.
+_WITH_COLLABORATOR_RE = re.compile(
+    r"(?<![a-z])with\s+(?:(?:drs?|mr|mrs|ms|prof|professor)\.?\s+)?(?P<names>[^;:$()]{1,80})")
+#: Splits a `co_investigators` value into one name per person.
+_PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|\band\b)\s*")
+#: Words in a person's name that do not identify them.
+_NAME_NOISE_WORDS = frozenset({"drs", "prof", "professor", "phd", "mph", "msc", "pharmd",
+                               "dds", "dmd", "facp", "student"})
+
+
+def _person_key(name: str) -> frozenset[str]:
+    """The words that identify one named person, for comparing two names."""
+    return frozenset(word for word in _NAME_WORD_RE.findall(norm(name))
+                     if len(word) >= OWNER_SURNAME_MIN_CHARS and word not in _NAME_NOISE_WORDS)
+
+
+def _co_investigator_keys(fields: Mapping[str, object]) -> list[frozenset[str]]:
+    """One `_person_key` per person `co_investigators` lists, in its order."""
+    keys = (_person_key(name)
+            for name in _PERSON_SPLIT_RE.split(str(fields.get("co_investigators") or "")))
+    return [key for key in keys if key]
+
+
+def _first_index(text: str, key: frozenset[str]) -> int | None:
+    """Where the earliest word of `key` occurs in normalised `text`."""
+    hits = [match.start() for word in key
+            for match in [re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text)] if match]
+    return min(hits) if hits else None
+
+
+def _pi_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
+                  owner: frozenset[str]) -> bool:
+    """`pi_name` is one of the people `co_investigators` lists, and the two
+    values differ, so stage 6 renders both rows (it drops a Co-Investigators
+    value identical to the PI). Not an author list headed by the PI that also
+    names the owner ("Cutter, G., <owner>"): that is the source's own line
+    copied whole, and the PI cell still names the right person (farm web204,
+    30 grants)."""
+    co_text = norm(str(fields.get("co_investigators") or ""))
+    keys = _co_investigator_keys(fields)
+    if not pi_key or co_text == norm(str(fields.get("pi_name") or "")) or pi_key not in keys:
+        return False
+    return not (keys[0] == pi_key and any(key & owner for key in keys[1:]))
+
+
+def _pi_from_collaborator(text: str, fields: Mapping[str, object],
+                          pi_key: frozenset[str]) -> bool:
+    """`pi_name` is named only after "with", the text labels no role, and no
+    role is stated for the owner."""
+    if not pi_key or fields.get("pi_role") or fields.get("role") or _ANY_ROLE_WORD_RE.search(text):
+        return False
+    return any(pi_key <= _person_key(match.group("names"))
+               for match in _WITH_COLLABORATOR_RE.finditer(text))
+
+
+def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
+                        owner: frozenset[str]) -> bool:
+    """No `pi_name`, no stated role, no role label, and the owner is the first
+    person `co_investigators` lists and the first of them the text names. A
+    stated role ("Program Partner", NDXXAD 411) is what renders, so the
+    owner is not shown as only a co-investigator."""
+    keys = _co_investigator_keys(fields)
+    if fields.get("pi_name") or fields.get("pi_role") or fields.get("role"):
+        return False
+    if not keys or _ANY_ROLE_WORD_RE.search(text):
+        return False
+    owner_at = _first_index(text, keys[0] & owner)
+    others = [_first_index(text, key) for key in keys[1:] if not key & owner]
+    return owner_at is not None and all(at is None or owner_at < at for at in others)
+
+
+def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
+                      owner: frozenset[str]) -> tuple[str, str] | None:
+    """The first role shape one grant entry shows, as (shape, what it says),
+    or None."""
+    text = norm(str(entry.get("text") or ""))
+    stated = _stated_role(fields.get("pi_role") or fields.get("role"))
+    source = _source_owner_role(str(entry.get("text") or ""), owner)
+    if stated and source and stated != source:
+        return (ROLE_SHAPE_CONTRADICTED,
+                f"the source names the CV owner as {source}, but the rendered role is {stated}")
+    pi_key = _person_key(str(fields.get("pi_name") or ""))
+    if pi_key & owner:
+        return None
+    if _pi_from_collaborator(text, fields, pi_key):
+        return (ROLE_SHAPE_PI_FROM_COLLABORATOR,
+                "the PI is a person the source names only as a 'with' collaborator")
+    if _pi_also_co_i(fields, pi_key, owner):
+        return (ROLE_SHAPE_PI_ALSO_CO_I, "the PI is also listed as a co-investigator")
+    if owner and _owner_lead_as_co_i(text, fields, owner):
+        return (ROLE_SHAPE_OWNER_LEAD_AS_CO_I,
+                "the CV owner is the first name on an unlabelled grant but renders only "
+                "as a co-investigator, with no PI")
+    return None
+
+
+def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
+    """Each rendered grant table as {row label: value}: the tables that have
+    a PI row."""
+    tables = []
+    for table in table_rows:
+        cells = {row[0]: (row[1] if len(row) > 1 else "") for row in table if row}
+        if PI_NAME_LABEL in cells:
+            tables.append(cells)
+    return tables
+
+
+def _entry_index_by_title(stage4: dict) -> dict[str, object]:
+    """element_idx_start of the first grant entry per normalised title."""
+    by_title: dict[str, object] = {}
+    for entry in stage4.get("entries", []):
+        fields = entry.get("extracted_fields")
+        if entry.get("taxonomy_code") in GRANT_CODES and isinstance(fields, Mapping):
+            title = norm(str(fields.get("title") or fields.get("study_title") or ""))
+            if title:
+                by_title.setdefault(title, entry.get("element_idx_start"))
+    return by_title
+
+
+def _empty_pi_cells(stage4: dict, table_rows: list[list[list[str]]]) -> list[dict]:
+    """A pi_cell_empty finding per rendered grant table whose role row says
+    PI and whose PI row is empty."""
+    by_title = _entry_index_by_title(stage4)
+    findings = []
+    for cells in _grant_tables(table_rows):
+        role = cells.get(YOUR_ROLE_LABEL, "")
+        if cells[PI_NAME_LABEL] or _stated_role(role) != ROLE_PI:
+            continue
+        title = cells.get(PROJECT_TITLE_LABEL, "")
+        idx = by_title.get(norm(title))
+        where = f"entry {idx}" if idx is not None else "a grant table"
+        findings.append(_finding(
+            "role_consistency", ROLE_SHAPE_SEVERITY[ROLE_SHAPE_PI_CELL_EMPTY],
+            f"{where}: 'Your role:' is {role}, but 'Name of Principal Investigator:' "
+            f"is empty ({ROLE_SHAPE_PI_CELL_EMPTY}, #1403)",
+            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+def lint_role_consistency(stage4: dict,
+                          table_rows: list[list[list[str]]] | None = None) -> list[dict]:
+    """A grant table that misstates who led the grant (#1403). One finding
+    per grant entry, for the first shape it shows (see the shapes above),
+    plus one per rendered grant table whose role says PI and whose PI cell is
+    empty (only when the docx was read). The owner is
+    `cv_owner.last_name`; with none, no shape that names the owner fires.
+    Not judged: an empty `pi_role` against the source's label (stage 6 then
+    names the owner from `pi_name`), a co-PI, or text that gives the owner
     both roles."""
     owner = _owner_surname_words(stage4)
     findings = []
@@ -2984,13 +3175,13 @@ def lint_role_consistency(stage4: dict) -> list[dict]:
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
             continue
-        stated = _stated_role(fields.get("pi_role") or fields.get("role"))
-        source = _source_owner_role(str(entry.get("text") or ""), owner)
-        if stated and source and stated != source:
+        shape = _entry_role_shape(entry, fields, owner)
+        if shape:
             findings.append(_finding(
-                "role_consistency", "WARN",
+                "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
                 f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
-                f"the source names the CV owner as {source}, but the rendered role is "
-                f"{stated} (#1403)",
+                f"{shape[1]} ({shape[0]}, #1403)",
                 [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    if table_rows is not None:
+        findings.extend(_empty_pi_cells(stage4, table_rows))
     return findings

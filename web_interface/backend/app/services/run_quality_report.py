@@ -511,10 +511,13 @@ LINT_COPY = {
         "continuous range from the first to the last.",
         "Replace the range with the years the source CV gives."),
     "role_consistency": LintCopy(
-        "Your role on a grant is reversed",
-        "The source CV names you as principal investigator on a grant that is shown with you as "
-        "co-investigator, or the other way round.",
-        "Check your role on each flagged grant against the source CV and correct it."),
+        "A grant shows the wrong principal investigator or role",
+        "A grant table does not match the source CV on who led the grant: your role is reversed, "
+        "your role says PI but the principal investigator is blank, the PI is also listed as a "
+        "co-investigator, a collaborator is shown as the PI, or you are shown only as a "
+        "co-investigator on a grant the CV lists you first on.",
+        "Check the principal investigator and your role on each flagged grant against the "
+        "source CV and correct them."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

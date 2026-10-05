@@ -1072,6 +1072,12 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
 # direct costs:"; a total award amount gets its own label instead, because a
 # total under "Annual" states a false fact (#982).
 ANNUAL_COSTS_LABEL = 'Annual direct costs:'
+# The rows the doctor's role_consistency lint reads back off a rendered grant
+# table (#1403): the PI cell, the owner's role, and the title it names the
+# grant by.
+PROJECT_TITLE_LABEL = 'Project title:'
+PI_NAME_LABEL = 'Name of Principal Investigator:'
+YOUR_ROLE_LABEL = 'Your role:'
 TOTAL_AWARD_LABEL = 'Total award:'
 STATUS_LABEL = 'Status:'
 NOTES_LABEL = 'Notes:'
@@ -1457,12 +1463,12 @@ class ResearchSupportSection:
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
         rows = [
             ('Award Source:', agency),
-            ('Project title:', title),
+            (PROJECT_TITLE_LABEL, title),
             *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
             ('Duration of support:', self._format_grant_duration(fields, code, raw_text)),
-            ('Name of Principal Investigator:', pi_name),
-            ('Your role:', role),
+            (PI_NAME_LABEL, pi_name),
+            (YOUR_ROLE_LABEL, role),
             ('Your percent (%) effort:', percent_effort),
             *_optional_grant_rows(fields, title, pi_name),
         ]

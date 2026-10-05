@@ -19,6 +19,7 @@ Run:
 """
 import itertools
 import json
+import re
 from datetime import datetime
 from collections import Counter
 import sys
@@ -77,6 +78,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_offschema_fields,
     lint_year_not_in_source,
 )
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     GRANT_ORPHAN_MIN_WORDS,
     _short_end_year,
@@ -3584,6 +3587,143 @@ def test_role_consistency_judges_each_part_of_a_hyphenated_surname():
 
 def test_role_consistency_ignores_non_grant_codes():
     assert _roles("PIs: Testowner A, co-Is: Third C", "co-I", code="D1") == []
+
+
+# role_consistency, the #1410 shapes (#1403, EOAHMI recheck: JIJRSN 150-156 and
+# 516, QTATUP 529-537). Each shape's key is in the message; severity follows
+# ROLE_SHAPE_SEVERITY.
+
+def _shapes(*entries, table_rows=None, owner=_ROLE_OWNER):
+    findings = lint_role_consistency({"cv_owner": owner, "entries": list(entries)}, table_rows)
+    return [(re.search(r"\((\w+), #1403\)", f["message"]).group(1), f["severity"])
+            for f in findings]
+
+
+def _grant_table(role, pi_name="", title="Example Project"):
+    """A rendered grant table's raw rows, as `docx_table_rows` reads them."""
+    return [["Award Source:", "NIH"], [PROJECT_TITLE_LABEL, title],
+            [PI_NAME_LABEL, pi_name], [YOUR_ROLE_LABEL, role],
+            ["Your percent (%) effort:", ""]]
+
+
+@pytest.mark.parametrize("role", ["PI", "P.I.", "MPI", "Contact PI", "Principal Investigator"])
+def test_role_consistency_flags_a_pi_role_over_an_empty_pi_cell(role):
+    entry = _grant(516, "Principal Investigator in a trial", title="Example Project")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [entry]},
+                                     [_grant_table(role)])
+    assert [(f["lint"], f["severity"]) for f in findings] == [("role_consistency", "WARN")]
+    assert findings[0]["message"].startswith(f"entry 516: 'Your role:' is {role},")
+    assert "(pi_cell_empty, #1403)" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("role, pi_name", [
+    ("PI", "Ada Testowner"),            # the cell is filled
+    ("Co-PI", ""),                      # a co-PI names no PI
+    ("Co-Investigator", ""),
+    ("", ""),
+])
+def test_role_consistency_spares_a_filled_pi_cell_or_another_role(role, pi_name):
+    assert _shapes(table_rows=[_grant_table(role, pi_name)]) == []
+
+
+def test_role_consistency_pi_cell_names_a_table_it_cannot_place():
+    """A table whose title no grant entry carries (or an empty title) is
+    reported without an entry index rather than matched to a wrong one."""
+    entry = _grant(384, "NIH (see above), total $20,350")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [entry]},
+                                     [_grant_table("PI", title="")])
+    assert findings[0]["message"].startswith("a grant table: 'Your role:' is PI,")
+
+
+def test_role_consistency_reads_no_render_without_a_docx():
+    assert _shapes(table_rows=None) == []
+    assert _shapes(table_rows=[]) == []
+
+
+@pytest.mark.parametrize("pi_name, co_investigators", [
+    ("Other Person", "Other Person, MD, PI"),               # KDAZOM 380
+    ("O. Juniorname", "O. Juniorname, student Co-P.I."),    # MQSUIC 153
+    ("Other Person", "Third Person; Other Person"),
+])
+def test_role_consistency_flags_a_pi_also_listed_as_co_i(pi_name, co_investigators):
+    entry = _grant(380, "Co-I with Other Person, MD, PI.", pi_name=pi_name,
+                   co_investigators=co_investigators, pi_role="Co-I")
+    assert _shapes(entry) == [("pi_also_co_i", "INFO")]
+
+
+@pytest.mark.parametrize("pi_name, co_investigators", [
+    ("Other Person", "Other Person"),                       # stage 6 shows one row
+    ("Other Person", "Third Person"),                       # not the PI
+    ("Cutter, G.", "Cutter, G., Testowner, A."),            # an author line, PI first
+    ("Ada Testowner", "Ada Testowner, Other Person"),       # the PI is the owner
+    ("", "Other Person"),
+])
+def test_role_consistency_spares_a_pi_the_co_i_row_does_not_repeat(pi_name, co_investigators):
+    entry = _grant(380, "Co-I with Other Person.", pi_name=pi_name,
+                   co_investigators=co_investigators, pi_role="Co-I")
+    assert _shapes(entry) == []
+
+
+@pytest.mark.parametrize("text, pi_name", [
+    ("1998: Foundation: \u201cA title,\u201d with Dr. William H. Other; $25,000.",
+     "William H. Other"),
+    ("1986: Foundation: \u201cA title,\u201d with Drs. Bruce Other and Will Third; $20,000.",
+     "Bruce Other"),
+])
+def test_role_consistency_flags_a_with_collaborator_as_pi(text, pi_name):
+    """JIJRSN 156 also lists the PI among co-investigators; the collaborator
+    shape is the one reported."""
+    entry = _grant(150, text, pi_name=pi_name, co_investigators=f"{pi_name}, Will Third")
+    assert _shapes(entry) == [("pi_from_collaborator", "INFO")]
+
+
+@pytest.mark.parametrize("text, fields", [
+    ("Foundation, co-investigator with Dr. G. Other", {"pi_role": "Co-Investigator"}),
+    ("Foundation, with Dr. G. Other; PI: G. Other", {}),              # a label names them
+    ("Foundation (Other)  2001-2003  A title", {}),                   # no "with"
+    ("Foundation, with Dr. G. Other", {"role": "Collaborator"}),      # a stated role
+])
+def test_role_consistency_spares_a_pi_the_text_supports(text, fields):
+    entry = _grant(150, text, pi_name="G. Other", **fields)
+    assert _shapes(entry) == []
+
+
+@pytest.mark.parametrize("text, co_investigators", [
+    ("Testowner AB, Other CD, Third EF.\tA title.\t$22,000 (Sponsor)",
+     "Testowner AB, Other CD, Third EF"),                             # QTATUP 529
+    ("Testowner AB.\tA title.\t$13,148 (Sponsor)", "Testowner AB"),  # QTATUP 533, sole
+])
+def test_role_consistency_flags_an_owner_lead_shown_only_as_co_i(text, co_investigators):
+    entry = _grant(529, text, co_investigators=co_investigators)
+    assert _shapes(entry) == [("owner_lead_as_co_i", "INFO")]
+
+
+@pytest.mark.parametrize("text, fields", [
+    ("Other CD, Testowner AB.\tA title.", {"co_investigators": "Other CD, Testowner AB"}),
+    ("Testowner AB, Other CD.\tA title.", {"co_investigators": "Other CD, Testowner AB"}),
+    ("Other CD, Testowner AB.\tA title.", {"co_investigators": "Testowner AB, Other CD"}),
+    ("Testowner AB, Other CD.\tA title.", {"co_investigators": "Testowner AB",
+                                           "pi_name": "Other CD"}),           # a PI
+    ("Program Partner: Drs. Ada Testowner and Other CD",               # NDXXAD 411
+     {"co_investigators": "Drs. Ada Testowner and Other CD", "pi_role": "Program Partner"}),
+    ("Testowner AB, Other CD (PI).\tA title.", {"co_investigators": "Testowner AB, Other CD"}),
+    ("Testowner AB, Other CD.\tRole: Co-I", {"co_investigators": "Testowner AB, Other CD"}),
+])
+def test_role_consistency_spares_a_labelled_or_led_by_another_grant(text, fields):
+    assert _shapes(_grant(529, text, **fields)) == []
+
+
+def test_role_consistency_owner_lead_needs_an_owner_surname():
+    entry = _grant(533, "Testowner AB.\tA title.", co_investigators="Testowner AB")
+    assert _shapes(entry, owner={}) == []
+
+
+def test_role_consistency_reports_the_contradiction_before_a_new_shape():
+    """One finding per grant entry: a source label that contradicts the role
+    wins over a shape the same entry also shows."""
+    entry = _grant(243, "PIs: Testowner A, with Dr. Other B", pi_role="co-I",
+                   pi_name="Other B", co_investigators="Third C, Other B")
+    assert _shapes(entry) == [("contradicted", "WARN")]
 
 
 if __name__ == "__main__":
