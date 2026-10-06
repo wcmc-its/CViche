@@ -118,8 +118,11 @@ src/logs/
 src/unified_pipeline/core/*.txt
 src/unified_pipeline/core/*.md
 
-# Claude Code
-.claude/
+# Claude Code: local state (worktrees, settings.local.json) stays out; the
+# shared cloud-session hook and its registration are tracked.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 
 # Playwright MCP
 .playwright-mcp/
