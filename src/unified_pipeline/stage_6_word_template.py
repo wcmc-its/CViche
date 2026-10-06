@@ -1317,7 +1317,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
         if stage4_candidates:
             try:
-                with open(stage4_candidates[0], 'r') as f:
+                with open(stage4_candidates[0], 'r', encoding='utf-8') as f:
                     stage4_data = json.load(f)
                 cv_owner_location = stage4_data.get('cv_owner_location', {})
                 if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
@@ -1380,7 +1380,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         body, no behaviour change.
         """
         if research_summary_path and os.path.exists(research_summary_path):
-            with open(research_summary_path, 'r') as f:
+            with open(research_summary_path, 'r', encoding='utf-8') as f:
                 research_summary_data = json.load(f)
             if self.verbose:
                 logger.info(f"Loaded research summary from Stage 4.5: {research_summary_path}")
@@ -1390,7 +1390,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         input_dir = Path(input_path).parent.parent
         auto_summary_path = input_dir / "stage_4_5_research_summary" / f"{document_uid}_research_summary.json"
         if auto_summary_path.exists():
-            with open(auto_summary_path, 'r') as f:
+            with open(auto_summary_path, 'r', encoding='utf-8') as f:
                 research_summary_data = json.load(f)
             if self.verbose:
                 logger.info(f"Auto-loaded research summary from: {auto_summary_path}")
@@ -1609,7 +1609,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._a_researcher_profiles = []
 
         # Load input data - each stage output is self-contained
-        with open(input_path, 'r') as f:
+        with open(input_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
         document_uid = data.get('document_uid', 'unknown')

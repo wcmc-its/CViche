@@ -73,7 +73,7 @@ Some hand-written prose after the block, which --update must leave alone.
 
 def _write(path, content):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
 
 
@@ -81,7 +81,7 @@ def build_tree(tree):
     """A minimal repo skeleton with exactly one planted violation per row."""
     os.makedirs(os.path.join(tree, "scripts"))
     for src, name in ((SCRIPT, "check_standards.py"), (CHECK_FUNCTION_SIZE, "check_function_size.py")):
-        with open(src) as fh, open(os.path.join(tree, "scripts", name), "w") as out:
+        with open(src, encoding="utf-8") as fh, open(os.path.join(tree, "scripts", name), "w", encoding="utf-8") as out:
             out.write(fh.read())
     # the real ruff.toml, not a fixture copy of its rule list: the test
     # proves the committed config is what the rows count
@@ -242,7 +242,7 @@ def main():
         print("7.4 absent from --report's auto-checkable set             ok")
 
         # --report never touches the doc
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             assert "placeholder" in fh.read()
 
         # default mode, before any baseline exists: the four ratcheted rows
@@ -255,7 +255,7 @@ def main():
         # --update rewrites the doc block AND writes a fresh baseline
         r = run(tree, "--update")
         assert r.returncode == 0, r.stderr
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             updated = fh.read()
         assert "placeholder" not in updated
         assert "1.2 pure layers import no `docx`" in updated
@@ -267,12 +267,12 @@ def main():
         # a second --update must leave the doc byte-identical -- it used to
         # add one blank line after the end marker per run
         run(tree, "--update")
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             assert fh.read() == updated, "--update is not idempotent"
         print("--update is idempotent                                     ok")
 
         baseline_path = os.path.join(tree, "scripts", "standards-baseline.json")
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             baseline = json.load(fh)
         assert baseline["2.1 no `db.query(` in `api/`"] == 1
         assert baseline["7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)"] == 3
@@ -289,7 +289,7 @@ def main():
         print("default mode  in sync            exit=0    ok")
 
         # add a second db.query( site -> 2.1's count rises past its baseline
-        with open(os.path.join(tree, "web_interface", "backend", "app", "api", "widgets.py"), "a") as fh:
+        with open(os.path.join(tree, "web_interface", "backend", "app", "api", "widgets.py"), "a", encoding="utf-8") as fh:
             fh.write("\n\ndef handler2(db):\n    return db.query(Gadget).all()\n")
         r = run(tree)
         assert r.returncode == 1, r.stdout
@@ -300,7 +300,7 @@ def main():
         r = run(tree, "--update")
         assert r.returncode == 1, r.stdout
         assert "refusing to raise the baseline" in r.stderr
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             assert json.load(fh)["2.1 no `db.query(` in `api/`"] == 1  # unchanged
         print("--update refuses to raise a ratcheted baseline             ok")
 
@@ -315,11 +315,11 @@ def main():
         r = run(tree, "--update")
         assert r.returncode == 1, r.stdout  # still blocked overall: 2.1 is still up
         assert "2.1" in r.stderr and "refusing to raise" in r.stderr
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             b = json.load(fh)
         assert b["2.1 no `db.query(` in `api/`"] == 1  # blocked row: untouched
         assert b["3.7 dynamic attribute access (non-literal)"] == 0  # other row: locked in
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             assert "| 3.7 dynamic attribute access (non-literal) | falling | 0 | ratchet |" in fh.read()
         print("--update locks in an unrelated improvement despite a blocked row  ok")
 
@@ -334,7 +334,7 @@ def main():
             "def f(obj, field):\n    return getattr(obj, field)\n\n"
             "def g(obj):\n    return getattr(obj, 'literal_is_fine')\n",
         )
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             b = json.load(fh)
         b["3.7 dynamic attribute access (non-literal)"] = 1
         # the same edit for the annotations row: dynattr's trimmed `f` took 3
@@ -342,7 +342,7 @@ def main():
         # partial --update above legitimately locked that row at 18; the
         # restored fixtures put it back at 19
         b["8.3 missing annotations (ANN*, RUF012)"] = 19
-        with open(baseline_path, "w") as fh:
+        with open(baseline_path, "w", encoding="utf-8") as fh:
             json.dump(b, fh)
         _write(
             os.path.join(tree, "web_interface", "backend", "app", "api", "widgets.py"),
@@ -405,14 +405,14 @@ def main():
             "    def __getattr__(self, name):\n"
             "        return None\n",
         )
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             b = json.load(fh)
         b["3.7 no metaprogramming [waived]"] = 2
-        with open(baseline_path, "w") as fh:
+        with open(baseline_path, "w", encoding="utf-8") as fh:
             json.dump(b, fh)
         r = run(tree, "--update")
         assert r.returncode == 0, r.stderr
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             doc = fh.read()
         assert "| 3.7 no metaprogramming | 0 | 0 (2 waived) | ~ |" in doc
         print("net-zero-but-waived renders ~, not a clean check mark      ok")
@@ -423,10 +423,10 @@ def main():
             os.path.join(tree, "src", "meta.py"),
             "class Router:\n    def __getattr__(self, name):\n        return None\n",
         )
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             b = json.load(fh)
         b["3.7 no metaprogramming [waived]"] = 1
-        with open(baseline_path, "w") as fh:
+        with open(baseline_path, "w", encoding="utf-8") as fh:
             json.dump(b, fh)
         run(tree, "--update")
 
@@ -445,7 +445,7 @@ def main():
         r = run(tree, "--update")
         assert r.returncode == 1, r.stdout
         assert "refusing to raise" in r.stderr
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             b = json.load(fh)
         assert b["7.1 print() in library code (T201)"] == 1
         assert b["8.3 typing syntax (UP*, RUF013)"] == 7
@@ -464,18 +464,18 @@ def main():
         empty_bin = os.path.join(tree, "empty-bin")
         os.makedirs(empty_bin)
         no_ruff = dict(os.environ, PATH=empty_bin)
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             baseline_before = fh.read()
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             doc_before = fh.read()
         for mode in ((), ("--report",), ("--update",)):
             r = run(tree, *mode, env=no_ruff)
             assert r.returncode == 2, (mode, r.returncode, r.stdout, r.stderr)
             assert "ruff is not on PATH" in r.stderr, (mode, r.stderr)
             assert "today=" not in r.stdout, (mode, r.stdout)
-        with open(baseline_path) as fh:
+        with open(baseline_path, encoding="utf-8") as fh:
             assert fh.read() == baseline_before
-        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md"), encoding="utf-8") as fh:
             assert fh.read() == doc_before
         print("missing ruff fails closed in every mode      exit=2    ok (nothing written)")
 

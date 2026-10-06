@@ -358,7 +358,7 @@ class PubMedEnricher:
             Enriched output dict
         """
         # Load Stage 4 output
-        with open(stage4_path, 'r') as f:
+        with open(stage4_path, 'r', encoding='utf-8') as f:
             stage4_data = json.load(f)
 
         document_uid = stage4_data.get('document_uid', 'unknown')
@@ -1275,7 +1275,7 @@ def run_stage5(stage4_path: str, output_path: str | None = None, verbose: bool =
         doc_uid = result.get('document_uid', 'unknown')
         output_path = OUTPUT_DIR / f"{doc_uid}_enriched.json"
 
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
 
     if verbose:

@@ -58,7 +58,7 @@ class PromptAnalyzer:
 
         for prompt_file in prompt_files:
             try:
-                with open(prompt_file, 'r') as f:
+                with open(prompt_file, 'r', encoding="utf-8") as f:
                     prompt_data = json.load(f)
 
                 # Filter by purpose if specified
@@ -73,7 +73,7 @@ class PromptAnalyzer:
                 response_files = list(self.log_dir.glob(response_pattern))
 
                 if response_files:
-                    with open(response_files[0], 'r') as f:
+                    with open(response_files[0], 'r', encoding="utf-8") as f:
                         response_data = json.load(f)
 
                     self.responses.append(response_data)
@@ -426,7 +426,7 @@ def main():
     )
 
     if args.output:
-        with open(args.output, 'w') as f:
+        with open(args.output, 'w', encoding="utf-8") as f:
             f.write(report)
         print(f"📄 Report saved to {args.output}")
     else:

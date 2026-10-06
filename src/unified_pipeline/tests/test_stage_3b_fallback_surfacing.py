@@ -368,7 +368,7 @@ def test_run_survives_partial_failure_and_reports_stats(monkeypatch, tmp_path):
         output_dir=str(out_dir),
     )
 
-    output = json.loads(Path(result["output_path"]).read_text())
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     cstats = output["meta"]["classification_stats"]
     assert cstats["llm_batches"] == 2
     assert cstats["failed_batches"] == 1
@@ -406,7 +406,7 @@ def test_run_with_zero_entries_does_not_raise_zero_llm_error(monkeypatch, tmp_pa
         output_dir=str(out_dir),
     )
 
-    output = json.loads(Path(result["output_path"]).read_text())
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
 
     assert output["entries"] == []
     assert output["meta"]["classification_stats"]["llm_batches"] == 0
@@ -432,7 +432,7 @@ def test_run_with_only_empty_entries_does_not_fail(monkeypatch, tmp_path):
         output_dir=str(out_dir),
     )
 
-    output = json.loads(Path(result["output_path"]).read_text())
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     cstats = output["meta"]["classification_stats"]
     assert cstats["llm_batches"] == 0
     assert cstats["failed_batches"] == 0
@@ -460,7 +460,7 @@ def _run(tmp_path, monkeypatch, call, workers):
         "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
         output_dir=str(tmp_path / f"out_w{workers}"), workers=workers,
     )
-    artifact = json.loads(Path(result["output_path"]).read_text())
+    artifact = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     del artifact["meta"]["generated_at"]  # the only field that legitimately differs run to run
     return artifact
 
@@ -634,7 +634,7 @@ def test_no_hierarchy_entries_are_grouped_and_classified(tmp_path, monkeypatch):
         output_dir=str(out_dir),
     )
 
-    output = json.loads(Path(result["output_path"]).read_text())
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     assert len(output["entries"]) == 1
     assert output["entries"][0]["classification_source"] == "llm"
     assert output["meta"]["classification_stats"]["llm_classified"] == 1
@@ -718,7 +718,7 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
         output_dir=str(tmp_path / "out"),
     )
 
-    output = json.loads(Path(result["output_path"]).read_text())
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     by_text = {e["text"].split()[1]: e for e in output["entries"]}
     applicant, volunteer, committee = by_text["Applicant"], by_text["Riverside"], by_text["City"]
     via_committee, via_leadership = by_text["Hospital"], by_text["Lakeside"]
@@ -844,7 +844,7 @@ def test_312_header_pin_runs_in_the_stage_3b_group_pass(monkeypatch, tmp_path):
         output_dir=str(tmp_path / "out"),
     )
 
-    output = json.loads(Path(result["output_path"]).read_text())
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     by_section = {e["hierarchy"][0]: e for e in output["entries"]}
     assert by_section["INVITED PRESENTATIONS"]["taxonomy_code"] == "R"
     assert by_section["INVITED PRESENTATIONS"]["pre_pin_code"] == "K4"

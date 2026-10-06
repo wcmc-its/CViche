@@ -765,7 +765,7 @@ def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool
     input_file = _resolve_stage_4_5_input_file(input_path)
 
     # Load data
-    with open(input_file, 'r') as f:
+    with open(input_file, 'r', encoding="utf-8") as f:
         data = json.load(f)
 
     current_year = resolve_current_year(None)  # resolved once, reused for the whole run
@@ -912,7 +912,7 @@ def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool
         output_path = str(OUTPUT_DIR / f"{document_uid}_research_summary.json")
 
     # Save
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
     if verbose:

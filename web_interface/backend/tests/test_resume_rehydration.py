@@ -83,7 +83,7 @@ def _seed_steps(db, complete_through, cost_each=1.0):
 
 def _write(path: Path, body: str = "{}"):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
 
 def _run_prepare(db, tmp_path, start_step, storage):

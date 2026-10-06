@@ -643,7 +643,7 @@ def _hierarchy_lines(nodes: list[dict], depth: int = 0) -> list[str]:
 
 def _write_hierarchy_txt(txt_file: Path, document_uid: str, hierarchy: list[dict]) -> None:
     """Write stage 1a's .txt companion next to its JSON."""
-    with open(txt_file, 'w') as f:
+    with open(txt_file, 'w', encoding='utf-8') as f:
         f.write(f"CV Hierarchy: {document_uid}\n")
         f.write("=" * _BANNER_WIDTH + "\n\n")
         for line in _hierarchy_lines(hierarchy):
@@ -661,7 +661,7 @@ def _stage_1a(ctx: PipelineContext) -> StageResult:
     output_file = output_dir / f"{ctx.document_uid}_segmented.json"
     total_headers = _count_headers(hierarchy)
 
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump({'document_uid': ctx.document_uid,
                    'hierarchy': hierarchy,
                    'meta': stats}, f, indent=2)
@@ -808,7 +808,7 @@ def _stage_4_5(ctx: PipelineContext) -> StageResult:
         return _skipped('4.5', _requirement_label(STAGE_INPUT_PREFERENCE['4.5']))
 
     output_path = run_stage_4_5(input_path=input_path, verbose=True)
-    with open(output_path) as f:
+    with open(output_path, encoding='utf-8') as f:
         data = json.load(f)
     info = data.get('research_summary', {})
     logger.info("")
@@ -849,7 +849,7 @@ def _read_stage_5b_cost(output_path: str) -> float | None:
     output was swallowed and reported as a genuine $0.00.
     """
     try:
-        with open(output_path) as f:
+        with open(output_path, encoding='utf-8') as f:
             data = json.load(f)
     except Exception as e:
         logger.warning("Could not read stage 5b cost from %s: %s: %s",
@@ -865,7 +865,7 @@ def _read_stage_cost(output_path: str, stage: str, section: str) -> float | None
     JSON. None is not 0.0, for the same reason as stage 5b's (#489).
     """
     try:
-        with open(output_path) as f:
+        with open(output_path, encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError) as e:  # unreadable file, or JSON that does not parse
         logger.warning("Could not read stage %s cost from %s: %s: %s",
@@ -978,7 +978,7 @@ def _load_existing_results(ctx: PipelineContext) -> None:
         return
     expected = get_output_paths(ctx.document_uid)
     if not ctx.should_run('1a') and expected['1a'].is_file():
-        with open(expected['1a']) as f:
+        with open(expected['1a'], encoding='utf-8') as f:
             hierarchy = json.load(f).get('hierarchy', [])
         ctx.results['stage_1a'] = StageResult(
             stage='1a', output_file=str(expected['1a']),

@@ -249,10 +249,10 @@ def convert_unified_to_classified(
         print()
 
     # Load unified outputs
-    with open(segmented_file) as f:
+    with open(segmented_file, encoding="utf-8") as f:
         segmented_data = json.load(f)
 
-    with open(mapped_file) as f:
+    with open(mapped_file, encoding="utf-8") as f:
         mapped_data = json.load(f)
 
     # Build mapping from group_id → taxonomy
@@ -353,7 +353,7 @@ def convert_unified_to_classified(
 
     # Save classified output
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding="utf-8") as f:
         json.dump(classified_data, f, indent=2)
 
     if verbose:

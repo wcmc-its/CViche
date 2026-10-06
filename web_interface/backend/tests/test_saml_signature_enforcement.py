@@ -96,7 +96,7 @@ def _sp_conf(key, crt, metadata=None, *, want_signed=True):
 
 
 def _write_md(conf, path):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(str(entity_descriptor(Config().load(conf))))
     return path
 

@@ -178,7 +178,7 @@ def process_cv(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{document_uid}_fields.json"
 
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
 
     logger.info(f"\n{'='*80}")

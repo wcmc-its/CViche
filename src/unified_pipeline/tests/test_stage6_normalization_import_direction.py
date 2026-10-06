@@ -142,7 +142,7 @@ def _absolute_targets(path: Path) -> set[str]:
     """
     parts = _package_dotted(path).split(".")
     targets: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             targets.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
