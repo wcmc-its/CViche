@@ -189,12 +189,12 @@ cheaper than answering them one comment at a time:
 |---|---|---|
 | Split the function — one responsibility, one level of abstraction | 24 | #577 |
 | Builtin generics (`dict`, not `typing.Dict`) and full annotations | 23 | #533 |
-| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567, #494 — now also `CODING_STANDARDS.md` §8.1 |
+| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567 (it absorbed #494 in the 2026-10-06 triage) — now also `CODING_STANDARDS.md` §8.1 |
 | No silently swallowed exception, no bare `except Exception` | 17 | — |
 | A named constant or `Enum` instead of an inline taxonomy code or format literal | 16 | now `CODING_STANDARDS.md` §8.2 |
-| No `print()` in `src/` — and mind the two parsers that consume stage output | 8 | #563 |
+| No `print()` in `src/` — and mind the two parsers that consume stage output | 8 | the §7.1 `print()` (T201) ratchet row in `check_standards.py` — no issue; the row is the tracker, and CLAUDE.md names the two parsers |
 
-Those five standing issues absorb roughly 60% of everything written in review, so
+Those standing issues and ratchet rows absorb roughly 60% of everything written in review, so
 a comment that maps onto one of them belongs there rather than in a new issue.
 
 **Tests are asked for in review now.** This document used to say the opposite,
