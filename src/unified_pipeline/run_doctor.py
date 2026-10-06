@@ -261,7 +261,9 @@ Lints, ranked by the severity of the failure class they catch:
                           record (sponsor or number in one, title in the
                           other), an entry whose first line is a PI or effort
                           line, an entry opening with a label its siblings
-                          carry mid-record, or a stray tail or title. WARN.
+                          carry mid-record, a run of entries opening with a
+                          title then a sponsor line after a titleless one
+                          (X6 RVTAQT), or a stray tail or title. WARN.
                           Reads stage 4 only
 14u. grant_bucket         a grant rendered in a funding subsection its own
                           record contradicts (#1343, EBYSBC E7): Current or
@@ -313,6 +315,12 @@ Lints, ranked by the severity of the failure class they catch:
                           one range the entry writes fewer times, beside a
                           record with its own range (WYMVGU-02). INFO. Reads stage 4,
                           and the docx when present
+14ab. record_boundary     a non-grant list stage 2 cut one line off (X6
+                          class E5): an entry after the first that opens with
+                          a labelled line its siblings carry mid-record, a
+                          mentee's 'Current position:' opening the next
+                          mentee's entry (IEUPKK 438/444/466/467). WARN.
+                          Reads stage 4 only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -450,6 +458,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_record_boundary,
     lint_span_count,
     lint_role_consistency,
 )
@@ -637,6 +646,7 @@ KNOWN_LINTS = (
     "fanout_cell_residue",
     "identical_rendered_rows",
     "split_child_unsourced",
+    "record_boundary",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -834,6 +844,11 @@ LINT_PREVALENCE = {
     # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
     # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
     "split_child_unsourced": 0.01,
+    # record_boundary (X6 class E5, X6-grant in doctor/PRECISION.md): 8 of
+    # 221 distinct stored stage-4 JSON files (the EBYSBC/s7ab/pilot, EOAHMI
+    # and X6 farms, analysis/<uid>, the 2026-09 batches), measured 2026-10-06.
+    # Reads stage 4 only. Same mixed-corpus caveat as above.
+    "record_boundary": 0.036,
 }
 
 
@@ -1382,6 +1397,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              ("stage_4", "table_rows")),
     LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
+    LintSpec("record_boundary", lint_record_boundary, ("stage_4",)),
 )
 
 
