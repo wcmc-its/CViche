@@ -9,16 +9,16 @@ small-screen media query (clients that drop it fall back to the desktop sizes)
 and the dark palette. No web fonts, no external images: the logos are CID
 attachments (the app's host resolves to private addresses, so a hotlinked image
 would not load off the network); mailer attaches exactly the ones the HTML
-names. The ITS banner has the manila ground multiplied in, because mail clients
-do not blend.
+names. Both logos are transparent PNGs, per the handoff.
 
 Dark mode: the email declares ``color-scheme: light dark`` and sets every colour
 again under ``prefers-color-scheme: dark`` (Apple Mail, Outlook for Mac/iOS) and
 under ``[data-ogsc]``/``[data-ogsb]`` (Outlook.com, new Outlook for Windows), so
 those clients show the designed dark palette instead of inverting the light
-one. Each logo is a pair: the opaque light PNG by default, a transparent
-light-ink PNG swapped in by the same rules. Classic Outlook for Windows ignores
-all of it and inverts on its own; the opaque light logos stay legible there.
+one. Each logo is a pair: the dark-ink PNG by default, a light-ink PNG swapped
+in by the same rules. Classic Outlook for Windows ignores all of it and inverts
+on its own, darkening the ground behind the dark-ink logos (accepted by the
+handoff: "Outlook ignores both and shows the light version").
 
 Every interpolated value is HTML-escaped. Content is counts and fixed wording
 only: callers must never pass a filename.
@@ -65,7 +65,7 @@ INK = "#222222"
 MUTED = "#5F5A50"
 FONT = "Arial, Helvetica, sans-serif"
 MAX_WIDTH_PX = 600
-BUTTON_COLOUR = "#1F2328"
+BUTTON_COLOUR = WCM_RED
 BADGE_PX = 44
 BADGE_MOBILE_PX = 38
 BUTTON_CHAR_PX = 9

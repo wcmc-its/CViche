@@ -41,12 +41,12 @@ def test_send_calls_ses_when_the_flag_is_on(ses, monkeypatch):
     assert _parse(kwargs)["From"] == "CViche <no-reply@mail.example.org>"
 
 
-def test_cviche_wordmark_has_an_opaque_white_ground():
-    """Outlook dark mode darkens the white card but not the image, so a
-    transparent dark-ink wordmark vanishes; the PNG carries its own white."""
+def test_light_logos_are_transparent_never_on_a_white_or_cream_box():
+    """The handoff: "use transparent PNGs, never images on a white or cream box"."""
     from PIL import Image
-    image = Image.open(templates.LOGO_FILES[templates.CVICHE_LOGO_CID])
-    assert image.mode == "RGB" and image.getpixel((0, 0)) == (255, 255, 255)
+    for cid in (templates.CVICHE_LOGO_CID, templates.ITS_LOGO_CID):
+        image = Image.open(templates.LOGO_FILES[cid])
+        assert image.mode == "RGBA" and image.getpixel((0, 0))[3] == 0
 
 
 def test_default_sender_is_the_cviche_no_reply_address(ses, monkeypatch):
@@ -347,10 +347,10 @@ def test_the_rejection_email_has_no_button(monkeypatch):
     assert 'class="btn"' not in mail.html and "<v:roundrect" not in mail.html and "https://" not in mail.body.split("SIGNATURE")[0].replace(templates.HELPDESK_ARTICLE_URL, "")
 
 
-def test_the_button_is_a_filled_dark_vml_and_anchor_pair():
+def test_the_button_is_a_filled_red_vml_and_anchor_pair():
     html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
-    assert 'fillcolor="#1F2328"' in html and "background-color:#1F2328" in html and "border-radius:6px" in html
-    assert 'fillcolor="#B31B1B"' not in html
+    assert 'fillcolor="#B31B1B"' in html and "background-color:#B31B1B" in html and "border-radius:6px" in html
+    assert 'fillcolor="#1F2328"' not in html and "#1F2328" not in html  # the round-2 dark fill is gone
     assert "<!--[if mso]>" in html and "<!--[if !mso]><!-->" in html
 
 
@@ -426,10 +426,10 @@ def test_badge_kinds_differ_in_glyph_or_colour_and_stay_text_only():
     assert "<svg" not in html and html.count("<img") == 4  # two logos, light and dark; no badge image
 
 
-def test_every_button_is_the_dark_fill_and_links_stay_red(monkeypatch):
+def test_every_button_is_the_red_fill_and_links_stay_red(monkeypatch):
     for mail in _all_mails(monkeypatch):
         if 'class="btn"' in mail.html:
-            assert mail.html.count("background-color:#1F2328") == 1 and 'fillcolor="#1F2328"' in mail.html
+            assert mail.html.count("background-color:#B31B1B;color:#ffffff") == 1 and 'fillcolor="#B31B1B"' in mail.html
         assert "color:#B31B1B;text-decoration:underline" in mail.html  # the footer links
 
 
