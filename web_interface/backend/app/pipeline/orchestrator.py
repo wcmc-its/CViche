@@ -306,7 +306,8 @@ def _get_stage_timeout_seconds() -> int:
     *user* is left waiting. Tune via CVICHE_STAGE_TIMEOUT_SECONDS.
     """
     try:
-        #value = int(os.environ.get("CVICHE_STAGE_TIMEOUT_SECONDS", 1800))
+        # "llm" is where buildspec.yaml writes this key into the ConfigMap's
+        # auth_config.yaml; that file has no "app" section (#305).
         timeout_seconds,_ = get_config("llm","CVICHE_STAGE_TIMEOUT_SECONDS",default=1800)
         value = int(timeout_seconds) 
     except (TypeError, ValueError):
@@ -872,8 +873,16 @@ class PipelineOrchestrator:
                         "Rehydrated stage %s output for run %s from storage",
                         step_def.stage_id, self.run_id,
                     )
+                except FileNotFoundError:
+                    pass  # never mirrored; the back-up below logs the gap
                 except Exception:
-                    pass
+                    # A misconfigured or unreachable store: still recompute
+                    # from here, but keep the trace that says why (#305).
+                    logger.warning(
+                        "Could not rehydrate stage %s output for run %s from "
+                        "storage; recomputing it", step_def.stage_id, self.run_id,
+                        exc_info=True,
+                    )
             if path.exists():
                 self.stage_outputs[step_def.stage_id] = str(path)
             else:

@@ -21,7 +21,6 @@ docs/proposals/issue-4-redis-broker.md and concurrency-and-load-readiness.md).
 """
 import asyncio
 import logging
-import os
 import threading
 from collections import Counter
 from typing import Literal
@@ -60,7 +59,6 @@ _draining = False
 def get_max_concurrent_runs() -> int:
     """Read the per-pod concurrency cap from CVICHE_MAX_CONCURRENT_RUNS."""
     try:
-        #value = int(os.environ.get("CVICHE_MAX_CONCURRENT_RUNS", DEFAULT_MAX_CONCURRENT_RUNS))
         max_concurrent_runs, _ = get_config("llm","CVICHE_MAX_CONCURRENT_RUNS",default=DEFAULT_MAX_CONCURRENT_RUNS)
         value = int(max_concurrent_runs) 
     except (TypeError, ValueError):
