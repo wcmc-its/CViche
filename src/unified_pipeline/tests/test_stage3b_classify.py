@@ -284,6 +284,27 @@ def test_missing_code_key_falls_back_and_is_tagged_invalid(monkeypatch):
     assert stats["llm_classified"] == 0
 
 
+def test_no_suggested_code_falls_back_to_t_on_every_path(monkeypatch):
+    """#608: with no code suggested by the context, all four fallbacks land
+    on T -- an all-empty batch (no LLM call), an empty entry beside real
+    ones, an unknown code, and an index the model left out."""
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        return _llm_response([{"index": 1, "code": "ZZ99", "confidence": 0.9}])
+
+    monkeypatch.setattr(classify, "call_llm", fake)
+    entries = [_entry(""), _entry("Unknown-code line"), _entry("Omitted line"),
+               _entry(""), _entry("")]
+    results, _ = classify.classify_entries_batch(entries, TaxonomyContext(), _taxonomy(), batch_size=3)
+    assert len(calls) == 1
+    assert [(r["taxonomy_code"], r["classification_source"]) for r in results] == [
+        ("T", "empty_entry"), ("T", "llm_invalid_code"), ("T", "fallback"),
+        ("T", "empty_entry"), ("T", "empty_entry"),
+    ]
+
+
 def test_entry_with_non_string_text_degrades_instead_of_crashing(monkeypatch):
     """An entry whose "text" field is present but non-string (e.g. an
     explicit None) must not crash _classify_one_batch's bare .strip() calls
@@ -705,6 +726,20 @@ def test_cache_opt_out_leaves_prompt_text_byte_identical(monkeypatch):
         context_str=_context().format_context_string(), taxonomy_ref=ref)
     assert single["messages"][0] == {"role": "system", "content": expected}
     assert set(single) - {"enable_prompt_caching"} == set(split_first)
+
+
+def test_every_batch_sends_the_same_system_prompt(monkeypatch):
+    """#608: the system prompt depends on the group, never on the batch, so
+    every batch of a split group sends the one template rendering, while the
+    user message still carries only that batch's entries."""
+    calls = _capture_calls(monkeypatch)
+    context = _context(["H", "S1"])
+    classify.classify_entries_batch(_entries(5), context, _taxonomy(), batch_size=2)
+    _, ref = classify._build_taxonomy_ref_for_batch(context, _taxonomy())
+    expected = classify._CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=context.format_context_string(), taxonomy_ref=ref)
+    assert [c["messages"][0] for c in calls] == [{"role": "system", "content": expected}] * 3
+    assert ["Synthetic entry 4" in c["messages"][1]["content"] for c in calls] == [False, False, True]
 
 
 def test_cache_opt_out_kwarg_is_consumed_by_call_llm():
