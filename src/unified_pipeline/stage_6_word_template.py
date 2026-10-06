@@ -25,7 +25,7 @@ import json
 import traceback
 from types import MappingProxyType
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Dict, List, Any, Literal, NamedTuple, Optional, Tuple
 from collections.abc import Callable
@@ -222,6 +222,8 @@ from unified_pipeline.stage6.sections.appendix import (
     APPENDIX_MAX_CHARS,
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
     APPENDIX_INTRO_TEXT,
+    CODE_ORIGIN_ENTRY,
+    CODE_ORIGIN_RECONSIDER,
     OwnerTokens,
     RecoveredLine,
     UnmappedEntry,
@@ -2935,6 +2937,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Collect all segments that could be reclassified
         segments_to_route = []  # List of (segment_text, taxonomy_code, original_entry)
         remaining_for_appendix = []  # Entries/segments that couldn't be reclassified
+        # Parallel to remaining_for_appendix: whether this pass coded the
+        # segment or the code is still the entry's own (#1225).
+        remaining_origins: list[str] = []
 
         for entry, coverage_pct in self._appendix_pending:
             original_text = entry.get('text', '').strip()
@@ -2958,9 +2963,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     else:
                         # Couldn't reclassify this segment
                         remaining_for_appendix.append((segment_text, new_code or original_code, coverage_pct))
+                        remaining_origins.append(CODE_ORIGIN_RECONSIDER if new_code else CODE_ORIGIN_ENTRY)
             else:
                 # LLM couldn't process - keep original in appendix
                 remaining_for_appendix.append((original_text, original_code, coverage_pct))
+                remaining_origins.append(CODE_ORIGIN_ENTRY)
 
         # Route reclassified segments to their new sections
         for segment_text, new_code, original_entry in segments_to_route:
@@ -2970,11 +2977,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # No usable anchor for this code — keep the segment visible
                 # in the appendix rather than dropping it silently (#221).
                 remaining_for_appendix.append((segment_text, new_code, 0.0))
+                remaining_origins.append(CODE_ORIGIN_RECONSIDER)
 
         # Add remaining unmappable content to appendix
         recovered: list[RecoveredLine] = []
         if remaining_for_appendix:
-            recovered = self._add_remaining_to_appendix(remaining_for_appendix)
+            recovered = self._add_remaining_to_appendix(remaining_for_appendix, remaining_origins)
 
         if self.verbose and segments_to_route:
             logger.info(f"  Reclassified {len(segments_to_route)} segments to other sections")
@@ -3228,7 +3236,8 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
-    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]) -> list[RecoveredLine]:
+    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]],
+                                   origins: Sequence[str] = ()) -> list[RecoveredLine]:
         """Add remaining unmappable segments to the appendix as bullet lines.
 
         Returns the taxonomy code and text of each segment actually written --
@@ -3237,17 +3246,25 @@ Now analyze the text above:"""
         the passthrough writers use (#531-R2 finding F1); the text decides the
         warning's severity (#1221). A segment this method drops (blank,
         template-instruction, source-boilerplate) is NOT in the returned list.
+
+        *origins*, when given, runs parallel to *remaining*: the
+        `CODE_ORIGIN_*` of each segment's code, carried onto its
+        `RecoveredLine` so the warning names the pass that coded it (#1225).
+        Omitted, every code is the entry's own.
         """
+        if not origins:
+            origins = [CODE_ORIGIN_ENTRY] * len(remaining)
         # Filter BEFORE creating the section header so an all-noise batch
         # doesn't leave an empty T. APPENDIX behind (#213).
-        remaining = [
-            (text, code, cov) for text, code, cov in remaining
+        lines = [
+            RecoveredLine(code, text, origin)
+            for (text, code, _), origin in zip(remaining, origins, strict=True)
             if text and text.strip()
             and not is_template_instruction(text)
             and not is_foreign_template_instruction(text)
             and not is_source_boilerplate(text)
         ]
-        if not remaining:
+        if not lines:
             return []
 
         # Find or create the T. APPENDIX section
@@ -3269,7 +3286,8 @@ Now analyze the text above:"""
         # Add each remaining segment. The taxonomy code is an internal
         # pipeline identifier — keep it in a reviewer comment, never in the
         # faculty-facing text (#213).
-        for segment_text, original_code, coverage_pct in remaining:
+        for line in lines:
+            segment_text, original_code = line.text, line.code
             entry_para = self.doc.add_paragraph()
             run = entry_para.add_run(segment_text)
             _set_font(run)
@@ -3292,7 +3310,7 @@ Now analyze the text above:"""
                 author="Classification",
             )
 
-        return [RecoveredLine(code, text) for text, code, _ in remaining]
+        return lines
 
     def _rendered_output_lines(self, *, exclude_instruction_box: bool = False,
                                include_tracked_insertions: bool = False) -> list[str]:

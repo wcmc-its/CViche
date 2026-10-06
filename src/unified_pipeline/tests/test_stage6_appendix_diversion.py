@@ -61,6 +61,7 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
+    CODE_ORIGIN_RECONSIDER,
     REASON_NO_RENDER_ROUTE,
     REASON_RECOVERED_UNRENDERED,
     REASON_RENDERER_DECLINED,
@@ -219,6 +220,32 @@ def test_build_warnings_same_code_both_streams_two_warnings_sorted():
         ("T", REASON_NO_RENDER_ROUTE, 2),
         ("T", REASON_RECOVERED_UNRENDERED, 1),
     ]
+
+
+def test_build_warnings_reconsider_coded_lines_do_not_read_as_stage_3b():
+    """#1225: a segment the stage 6 reconsider pass split off an overflow
+    entry and coded K4 is not an entry stage 3b classified K4. Its warning
+    names the pass, and a K4 line whose code IS the entry's own keeps the
+    original wording in a warning of its own."""
+    recovered = [RecoveredLine("K4", "Course director duties", CODE_ORIGIN_RECONSIDER),
+                 RecoveredLine("K4", "Textbook chapter work", CODE_ORIGIN_RECONSIDER),
+                 RecoveredLine("K4", "CME course, 2019")]
+    warnings = build_appendix_diversion_warnings([], recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    assert [(w["code"], w["reason"], w["count"], w["message"]) for w in warnings] == [
+        ("K4", REASON_RECOVERED_UNRENDERED, 1,
+         "K4: 1 entry classified K4 was not found in the rendered document "
+         "and was recovered into the Appendix"),
+        ("K4", REASON_RECOVERED_UNRENDERED, 2,
+         "K4: 2 segments of overflow content that the stage 6 reconsider pass "
+         "coded K4 were not placed in a section and were recovered into the Appendix"),
+    ]
+
+
+def test_reconsider_message_singular_is_grammatical():
+    assert _diversion_message("K5", 1, REASON_RECOVERED_UNRENDERED, PASSTHROUGH_CODES,
+                              CODE_ORIGIN_RECONSIDER) == (
+        "K5: 1 segment of overflow content that the stage 6 reconsider pass "
+        "coded K5 was not placed in a section and was recovered into the Appendix")
 
 
 # ------------------------------------------------------------------ wire tests
@@ -602,6 +629,39 @@ def test_reconsider_appendix_entries_real_tail_wires_recovered_codes(tmp_path):
     assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
         ("D2", REASON_RECOVERED_UNRENDERED, 1),
         ("ZZ", REASON_NO_RENDER_ROUTE, 1),
+    ]
+
+
+def test_reconsider_coded_segments_warn_as_the_reconsider_pass(tmp_path):
+    """#1225 (batch IPXFBA, HGBSCI): the reconsider pass split a D1 entry's
+    duties prose into K4/K5 segments that found no anchor, and the warning
+    read "K4: 7 entries classified K4", as if stage 3b had coded them. The
+    real `_reconsider_appendix_entries` runs with only the LLM step stubbed
+    and every anchor refused. A second pending entry whose reclassification
+    fails reaches the Appendix whole under its own K4, so it keeps the
+    stage 3b wording in a warning of its own."""
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    position = {"text": "SYNTHETIC_PENDING_D1 position with its duties prose",
+                "taxonomy_code": "D1", "extracted_fields": {}}
+    unsplit = {"text": "SYNTHETIC_PENDING_K4 continuing education course",
+               "taxonomy_code": "K4", "extracted_fields": {}}
+    gen._appendix_pending = [(position, 5.0), (unsplit, 40.0)]
+    segments = {"D1": [("SYNTHETIC course director duties for the program", "K4"),
+                       ("SYNTHETIC textbook chapters and case studies", "K4"),
+                       ("SYNTHETIC outreach talks for patient groups", "K5")]}
+    gen._reclassify_entry_segments = lambda text, code: segments.get(code)
+    gen._insert_reconsidered_segment = lambda text, code, comment=None: False
+    input_path = tmp_path / "in.json"
+    input_path.write_text(json.dumps({"document_uid": "T1225", "entries": [_OWNER_ENTRY]}))
+    gen.generate(str(input_path), str(tmp_path / "out.docx"), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T1225_render_warnings.json").read_text())
+    assert [(w["code"], w["count"], w["message"]) for w in _diversion_warnings(sidecar)] == [
+        ("K4", 1, "K4: 1 entry classified K4 was not found in the rendered document "
+                  "and was recovered into the Appendix"),
+        ("K4", 2, "K4: 2 segments of overflow content that the stage 6 reconsider pass "
+                  "coded K4 were not placed in a section and were recovered into the Appendix"),
+        ("K5", 1, "K5: 1 segment of overflow content that the stage 6 reconsider pass "
+                  "coded K5 was not placed in a section and was recovered into the Appendix"),
     ]
 
 
