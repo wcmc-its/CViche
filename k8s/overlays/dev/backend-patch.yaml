@@ -46,11 +46,6 @@ spec:
             # ceiling is the pub/sub->Streams + worker migration.
             - name: CVICHE_MAX_CONCURRENT_RUNS
               value: "3"
-            # Runs go to the Valkey queue and execute on cviche-worker pods
-            # (#701). CVICHE_MAX_CONCURRENT_RUNS only applies in in_process
-            # mode; rollback is deleting this entry.
-            - name: CVICHE_DISPATCH_MODE
-              value: "queue"
             # "Original file" downloads wait for GuardDuty's NO_THREATS_FOUND
             # tag (#1333). GuardDuty scans cviche/runs/ (plan
             # 1cd0864c2a29eeeeaa79) and all 338 pre-existing originals read
