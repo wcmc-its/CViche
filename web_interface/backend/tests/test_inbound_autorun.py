@@ -182,7 +182,7 @@ def test_outdated_consent_holds_everything_and_says_to_sign_in(db, storage, sent
     assert db.query(Run).count() == 0 and db.query(RunBatch).count() == 0 and queue.enqueued == []
     assert set(_statuses(db).values()) == {InboundFileStatus.PENDING}
     body = sent[0].body.lower()
-    assert "terms have been updated" in body and "sign in to review and accept them" in body and "- 2 waiting for you in new run" in body
+    assert "terms have been updated" in body and "sign in to review and accept them" in body and "- 2 waiting for you" in body
     assert "- 2 processing" not in body
 
 

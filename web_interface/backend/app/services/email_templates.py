@@ -4,12 +4,21 @@ notification-email design in the CViche redesign handoff.
 Layout: ITS logo on a manila ground, a white card (4px red top rule) holding
 the CViche wordmark, headline, greeting, an optional status list, copy and one
 filled button, then the ITS name and help line below the card. Table layout and
-inline CSS so it holds up in Outlook desktop; the only <style> block is a
-small-screen media query (clients that drop it fall back to the desktop sizes).
-No web fonts, no external images: both logos are CID attachments (the app's
-host resolves to private addresses, so a hotlinked image would not load off
-the network); mailer attaches exactly the ones the HTML names. The ITS banner
-has the manila ground multiplied in, because mail clients do not blend.
+inline CSS so it holds up in Outlook desktop; the <style> block holds a
+small-screen media query (clients that drop it fall back to the desktop sizes)
+and the dark palette. No web fonts, no external images: the logos are CID
+attachments (the app's host resolves to private addresses, so a hotlinked image
+would not load off the network); mailer attaches exactly the ones the HTML
+names. The ITS banner has the manila ground multiplied in, because mail clients
+do not blend.
+
+Dark mode: the email declares ``color-scheme: light dark`` and sets every colour
+again under ``prefers-color-scheme: dark`` (Apple Mail, Outlook for Mac/iOS) and
+under ``[data-ogsc]``/``[data-ogsb]`` (Outlook.com, new Outlook for Windows), so
+those clients show the designed dark palette instead of inverting the light
+one. Each logo is a pair: the opaque light PNG by default, a transparent
+light-ink PNG swapped in by the same rules. Classic Outlook for Windows ignores
+all of it and inverts on its own; the opaque light logos stay legible there.
 
 Every interpolated value is HTML-escaped. Content is counts and fixed wording
 only: callers must never pass a filename.
@@ -24,10 +33,13 @@ from pathlib import Path
 STATIC_EMAIL_DIR = Path(__file__).resolve().parent.parent / "static" / "email"
 CVICHE_LOGO_CID = "cviche-logo"
 ITS_LOGO_CID = "wcm-its-logo"
+DARK_CID_SUFFIX = "-dark"
 # CID -> file, for every logo an email may reference.
 LOGO_FILES = {
     CVICHE_LOGO_CID: STATIC_EMAIL_DIR / "cviche-logo.png",
     ITS_LOGO_CID: STATIC_EMAIL_DIR / "wcm-its-logo.png",
+    CVICHE_LOGO_CID + DARK_CID_SUFFIX: STATIC_EMAIL_DIR / "cviche-logo-dark.png",
+    ITS_LOGO_CID + DARK_CID_SUFFIX: STATIC_EMAIL_DIR / "wcm-its-logo-dark.png",
 }
 ITS_LOGO_WIDTH_PX = 280
 ITS_LOGO_HEIGHT_PX = 34  # 703x85 scaled to the width
@@ -95,6 +107,34 @@ BADGES = {
     BadgeKind.CHECK_GREEN: ("\u2713\uFE0E", "#ECFDF3", "#15803D"),
     BadgeKind.CROSS: ("\u2715", "#FEF2F2", "#B91C1C"),
     BadgeKind.EXCLAMATION: ("!", "#FFFBEB", "#B45309"),
+}
+
+# Dark palette, from the handoff's dark-mode mock (2a-2f).
+DARK_GROUND = "#1C1A16"
+DARK_CARD = "#26231E"
+DARK_BORDER = "#3A352C"
+DARK_LIST_BG = "#2E2A24"
+DARK_INK = "#EDE6D8"
+DARK_MUTED = "#B5AC9C"
+DARK_LINK = "#FF9A8F"
+DARK_RED_RULE = "#C8372D"
+DARK_BLUE = ("#1E2A44", "#8AB4FF")  # (tint, stroke)
+DARK_GREEN = ("#16301F", "#6FD39A")
+DARK_RED = ("#3A1D1D", "#FF8A80")
+DARK_AMBER = ("#3A2E14", "#F5B85A")
+DARK_STATUS_COLOURS = {
+    StatusKind.PROCESSING: DARK_BLUE[1],
+    StatusKind.READY: DARK_GREEN[1],
+    StatusKind.FAILED: DARK_RED[1],
+    StatusKind.WAITING: DARK_AMBER[1],
+    StatusKind.SKIPPED: DARK_MUTED,
+}
+DARK_BADGES = {
+    BadgeKind.CLOCK: DARK_BLUE,
+    BadgeKind.CHECK_AMBER: DARK_AMBER,
+    BadgeKind.CHECK_GREEN: DARK_GREEN,
+    BadgeKind.CROSS: DARK_RED,
+    BadgeKind.EXCLAMATION: DARK_AMBER,
 }
 
 
@@ -166,17 +206,25 @@ def _para_text(para: Para) -> str:
 
 
 def _link(url: str, label: str) -> str:
-    return f'<a href="{escape(url, quote=True)}" style="color:{WCM_RED};text-decoration:underline;">{escape(label)}</a>'
+    return f'<a class="lk" href="{escape(url, quote=True)}" style="color:{WCM_RED};text-decoration:underline;">{escape(label)}</a>'
 
 
 def _row(inner: str, style: str = "", cls: str = "") -> str:
-    attr = f' class="{cls}"' if cls else ""
+    attr = f' class="tx {cls}"' if cls else ' class="tx"'
     return f'<tr><td{attr} style="font-family:{FONT};color:{INK};{style}">{inner}</td></tr>'
 
 
-def _img(cid: str, width: int, height: int, alt: str, cls: str) -> str:
+def _img(cid: str, width: int, height: int, alt: str, cls: str, display: str = "block") -> str:
     return (f'<img class="{cls}" src="cid:{cid}" width="{width}" height="{height}" alt="{escape(alt)}" '
-            f'style="display:block;border:0;outline:none;width:{width}px;max-width:100%;height:auto;">')
+            f'style="display:{display};border:0;outline:none;width:{width}px;max-width:100%;height:auto;">')
+
+
+def _logo(cid: str, width: int, height: int, alt: str, cls: str) -> str:
+    """The light logo, plus its dark twin hidden until the dark rules show it.
+    The twin is kept from Outlook desktop, which would otherwise show both."""
+    light = _img(cid, width, height, alt, f"{cls} lt")
+    dark = _img(cid + DARK_CID_SUFFIX, width, height, alt, f"{cls} dk", display="none")
+    return f"{light}<!--[if !mso]><!-->{dark}<!--<![endif]-->"
 
 
 def _para_html(para: Para) -> str:
@@ -188,10 +236,10 @@ def _status_row_html(row: StatusRow, first: bool) -> str:
     divider = "" if first else f"border-top:1px solid {CARD_BORDER};"
     cell = f"padding:11px 0;background-color:{LIST_BG};{divider}font-family:{FONT};color:{INK};"
     return (
-        f'<tr><td width="32" style="{cell}padding-left:14px;font-size:20px;line-height:18px;'
+        f'<tr><td class="li d-{row.kind}" width="32" style="{cell}padding-left:14px;font-size:20px;line-height:18px;'
         f'color:{STATUS_COLOURS[row.kind]};">&#9679;</td>'
-        f'<td width="32" style="{cell}font-size:18px;line-height:18px;font-weight:bold;">{row.count}</td>'
-        f'<td style="{cell}padding-right:14px;font-size:14px;line-height:18px;">{escape(row.label)}</td></tr>'
+        f'<td class="li" width="32" style="{cell}font-size:18px;line-height:18px;font-weight:bold;">{row.count}</td>'
+        f'<td class="li" style="{cell}padding-right:14px;font-size:14px;line-height:18px;">{escape(row.label)}</td></tr>'
     )
 
 
@@ -199,7 +247,7 @@ def _status_html(rows: tuple[StatusRow, ...]) -> str:
     if not rows:
         return ""
     body = "".join(_status_row_html(row, index == 0) for index, row in enumerate(rows))
-    table = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+    table = (f'<table class="ln" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
              f'style="border:1px solid {CARD_BORDER};border-radius:6px;border-collapse:separate;">{body}</table>')
     return _row(table, "padding:0 0 20px 0;")
 
@@ -230,13 +278,42 @@ def _footer_html() -> str:
                  f'or contact {_link("mailto:" + SUPPORT_EMAIL, SUPPORT_EMAIL)}.')
     return (
         _row(escape(SIGNATURE), "padding:16px 4px 8px 4px;font-size:13px;line-height:19px;font-weight:bold;")
-        + _row(f'<strong style="color:{INK};">About CViche.</strong> {escape(ABOUT_TEXT)} {help_line}',
-               f"padding:0 4px;font-size:12px;line-height:18px;color:{MUTED};")
+        + _row(f'<strong class="tx" style="color:{INK};">About CViche.</strong> {escape(ABOUT_TEXT)} {help_line}',
+               f"padding:0 4px;font-size:12px;line-height:18px;color:{MUTED};", "mu")
+    )
+
+
+# selector -> declarations, applied in dark mode. Order matters: a later rule
+# wins over an earlier one of the same specificity (.mu over .tx, .d-* over .li).
+_DARK_RULES = (
+    (".bg", f"background-color:{DARK_GROUND}"),
+    (".cardbg", f"background-color:{DARK_CARD};border-color:{DARK_BORDER};border-top-color:{DARK_RED_RULE}"),
+    (".tx", f"color:{DARK_INK}"),
+    (".mu", f"color:{DARK_MUTED}"),
+    (".lk", f"color:{DARK_LINK}"),
+    (".ln", f"border-color:{DARK_BORDER}"),
+    (".li", f"background-color:{DARK_LIST_BG};border-color:{DARK_BORDER};color:{DARK_INK}"),
+    *((f".d-{kind}", f"color:{colour}") for kind, colour in DARK_STATUS_COLOURS.items()),
+    *((f".b-{kind}", f"background-color:{tint};color:{stroke}") for kind, (tint, stroke) in DARK_BADGES.items()),
+    (".btn", f"background-color:{DARK_INK};color:{DARK_GROUND}"),
+    (".lt", "display:none"),
+    (".dk", "display:block"),
+)
+
+
+def _dark_css(prefix: str) -> str:
+    return "".join(
+        f"{prefix}{selector}{{{';'.join(d + ' !important' for d in decls.split(';'))};}}"
+        for selector, decls in _DARK_RULES
     )
 
 
 _STYLE = (
-    "@media only screen and (max-width:480px){"
+    ":root{color-scheme:light dark;supported-color-schemes:light dark;}"
+    f"@media (prefers-color-scheme:dark){{{_dark_css('')}}}"
+    # Outlook.com and new Outlook for Windows mark their dark mode with these attributes.
+    + _dark_css("[data-ogsc] ") + _dark_css("[data-ogsb] ")
+    + "@media only screen and (max-width:480px){"
     ".outer{padding:20px 12px 28px 12px !important;}"
     ".card{padding:16px 22px 22px 22px !important;}"
     ".its{width:220px !important;}"
@@ -252,7 +329,7 @@ def _badge_html(kind: BadgeKind | None) -> str:
         return ""
     glyph, background, colour = BADGES[kind]
     cell = (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
-            f'<td class="badge" width="{BADGE_PX}" height="{BADGE_PX}" align="center" valign="middle" '
+            f'<td class="badge b-{kind}" width="{BADGE_PX}" height="{BADGE_PX}" align="center" valign="middle" '
             f'style="width:{BADGE_PX}px;height:{BADGE_PX}px;background-color:{background};border-radius:50%;'
             f'font-family:{FONT};font-size:22px;line-height:{BADGE_PX}px;font-weight:bold;color:{colour};'
             f'text-align:center;">{glyph}</td></tr></table>')
@@ -264,13 +341,13 @@ def _card_html(content: EmailContent) -> str:
     lead = _para_html(paragraphs[0]) if paragraphs and paragraphs[0].lead else ""
     rest = paragraphs[1:] if lead else paragraphs
     inner = (
-        _row(_img(CVICHE_LOGO_CID, CVICHE_LOGO_WIDTH_PX, CVICHE_LOGO_HEIGHT_PX, "CViche", "mark"), "padding:0 0 22px 0;")
+        _row(_logo(CVICHE_LOGO_CID, CVICHE_LOGO_WIDTH_PX, CVICHE_LOGO_HEIGHT_PX, "CViche", "mark"), "padding:0 0 22px 0;")
         + _badge_html(content.badge)
         + _row(escape(content.headline), "padding:0 0 16px 0;font-size:28px;line-height:34px;font-weight:bold;", "h")
         + _row(escape(content.greeting), "padding:0 0 14px 0;font-size:15px;line-height:22px;")
         + lead + _status_html(_visible(content.status)) + "".join(_para_html(p) for p in rest) + _cta_html(content)
     )
-    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+    return (f'<table class="cardbg" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
             f'style="background-color:#ffffff;border:1px solid {CARD_BORDER};border-top:4px solid {WCM_RED};'
             f'border-radius:8px;border-collapse:separate;"><tr><td class="card" style="padding:30px 36px 36px 36px;">'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{inner}</table>'
@@ -279,14 +356,15 @@ def _card_html(content: EmailContent) -> str:
 
 def render_html(content: EmailContent) -> str:
     """The HTML part; logos are referenced as ``cid:`` images."""
-    its = _img(ITS_LOGO_CID, ITS_LOGO_WIDTH_PX, ITS_LOGO_HEIGHT_PX,
+    its = _logo(ITS_LOGO_CID, ITS_LOGO_WIDTH_PX, ITS_LOGO_HEIGHT_PX,
                "Weill Cornell Medicine Information Technologies & Services", "its")
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">'
         f'<title>{escape(content.headline)}</title><style>{_STYLE}</style></head>'
-        f'<body style="margin:0;padding:0;background-color:{MANILA};">'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'<body class="bg" style="margin:0;padding:0;background-color:{MANILA};">'
+        f'<table class="bg" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
         f'style="background-color:{MANILA};"><tr><td class="outer" align="center" style="padding:32px 24px 40px 24px;">'
         f'<table role="presentation" width="{MAX_WIDTH_PX}" cellpadding="0" cellspacing="0" border="0" '
         f'style="width:100%;max-width:{MAX_WIDTH_PX}px;">'
