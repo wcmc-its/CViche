@@ -527,6 +527,13 @@ LINT_COPY = {
         "A line of the CV that was split into several records shows, on one of them, an "
         "institution the line does not name, or dates the line gives only to another record.",
         "Check the institution and dates of each flagged record against the source CV."),
+    "group_header_context": LintCopy(
+        "Rows lost the heading they sat under",
+        "The CV groups some lines under a society, an employer, a course or a dated block. "
+        "The rows for those lines don't show it: an organization cell is empty, a role "
+        "appears on its own, a lead line sits apart from its list, or a role has no dates.",
+        "Add the society, institution, course or dates from the line above to each flagged "
+        "row, and delete a lead line that shows as a row of its own."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

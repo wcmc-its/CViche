@@ -2720,6 +2720,444 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
     return findings
 
 
+# Lint group_header_context (X6 E8 and E11): a CV's group header -- a society
+# or employer line, a course, a dated block, a lead line over a list -- whose
+# context never reached the lines below it, so the rows that render lose it.
+# junk_or_header_row reports the header row itself; this reports what its
+# lines lost. Stage 4 stamps a header's organization on the lines below only
+# when stage 3b codes the header T; coded as a record, the header renders as
+# a row of its own and every line under it renders without it (X6 KJJVVO-01:
+# five societies, 37 records).
+#
+#   children_lost_header      an organization or institution alone, followed
+#                             under its heading by lines of the same family
+#                             (society, employer, teaching) that name none;
+#                             their rows do not show the header's name
+#   role_without_holder       a line that is a bare role and its dates
+#                             ('Chair 2010-2011') rendered as the role alone:
+#                             the course, committee or society it was a role
+#                             in is the line above it (RINASX-06)
+#   header_coded_unlike_list  an undated lead line coded unlike the dated
+#                             list below it, which shares one code: the lead
+#                             line renders alone in one section and its list
+#                             in another (IEUPKK-18, RINASX-14)
+#   parent_dates_lost         an undated role at an institution, directly
+#                             under a dated entry of its section letter: the
+#                             block's dates were not carried to it, and its
+#                             row shows none (IEUPKK-14, IEUPKK-17)
+GROUP_SHAPE_CHILDREN_LOST_HEADER = "children_lost_header"
+GROUP_SHAPE_ROLE_WITHOUT_HOLDER = "role_without_holder"
+GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST = "header_coded_unlike_list"
+GROUP_SHAPE_PARENT_DATES_LOST = "parent_dates_lost"
+
+#: Severity per shape. Measured 2026-10-06 (X6-header in PRECISION.md).
+GROUP_HEADER_SEVERITY = MappingProxyType({
+    GROUP_SHAPE_CHILDREN_LOST_HEADER: "WARN",
+    GROUP_SHAPE_ROLE_WITHOUT_HOLDER: "WARN",
+    GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST: "INFO",
+    GROUP_SHAPE_PARENT_DATES_LOST: "INFO",
+})
+
+_GROUP_SHAPE_MESSAGES = MappingProxyType({
+    GROUP_SHAPE_CHILDREN_LOST_HEADER: "a group header's name (an organization or "
+                                      "institution) is missing from the rows of the "
+                                      "lines under it",
+    GROUP_SHAPE_ROLE_WITHOUT_HOLDER: "a role renders alone: what it was a role in is the "
+                                     "line above it",
+    GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST: "a lead line is coded unlike the dated list under "
+                                          "it, so it renders apart from its list",
+    GROUP_SHAPE_PARENT_DATES_LOST: "a role under a dated entry renders with no dates: the "
+                                   "block's dates were not carried to it",
+})
+
+#: Taxonomy letters a lead line is not read under: Personal Data, the
+#: Appendix and the bibliography (see JUNK_ROW_SKIP_LETTERS). A group header
+#: and its lines need a family (`_GROUP_FAMILIES`), which none of these has.
+GROUP_SKIP_LETTERS = frozenset("AST")
+
+#: Codes whose rows carry the group's name in a cell of their own: a
+#: society's offices, committees and memberships; an employer's posts,
+#: committees and leadership roles; a teaching institution's courses. A
+#: header and its lines must share one family: an honor or a talk under a
+#: society line is a list of its own.
+_GROUP_FAMILIES = MappingProxyType({
+    **dict.fromkeys(("I", "Q1", "Q2", "Q3"), "society"),
+    **dict.fromkeys(("D1", "D2", "D3", "G", "L1", "L2", "L3", "O", "P"), "employer"),
+    **dict.fromkeys(("K1", "K2", "K3", "K4", "K5"), "teaching"),
+})
+
+#: The fields that hold only a role, and the extra date fields a role line
+#: carries ('1975-2000, 2005-2012').
+_GROUP_ROLE_FIELDS = frozenset({"role", "leadership_role", "teaching_role",
+                                "membership_type"})
+_GROUP_EXTRA_DATE_FIELDS = frozenset({"additional_dates", "additional_periods"})
+#: A role's own word: a K2 'teaching_role' of '<session name>'
+#: is a session's name stage 4 filed as a role, and that line names what it
+#: is (RINASX 39).
+_GROUP_ROLE_WORD_RE = re.compile(
+    r"\b(?:(?:vice[- ]|co-?)?(?:chair\w*|president\w*|director)|member|leader|lead"
+    r"|coordinator|instructor|lecturer|facilitator|tutor|preceptor|supervisor|mentor"
+    r"|organi[sz]er|advis[eo]r|secretary|treasurer|officer|liaison|delegate"
+    r"|representative|editor|reviewer|fellow|head|dean|councill?or|trustee|governor"
+    r"|moderator|convener|founder)\b", re.IGNORECASE)
+#: A role that names what it is held in: 'Chair, <committee>', 'Dean for
+#: <area>', 'Director of <program>'. Its row is whole.
+_GROUP_ROLE_NAMES_HOLDER_RE = re.compile(r",|\b(?:of|for|on|in|at)\b", re.IGNORECASE)
+#: A bare role may hold this many words besides role words (a four-word
+#: '<a b c> Leader' role, RINASX 32); more is a name, such as an award a
+#: reviewer judged.
+GROUP_ROLE_MAX_OTHER_WORDS = 3
+#: Words a bare role line may hold besides the role and its dates.
+_GROUP_ROLE_LINE_FILLER = frozenset({"and", "to", "present", "current", "ongoing"})
+#: Codes whose row needs what a role was held in: a society's or an
+#: employer's office, or a role in a course (RINASX-06: 'Course Director').
+_GROUP_ROLE_CODES = frozenset({"I", "Q1", "Q2", "Q3", "O", "P",
+                               "K1", "K2", "K3", "K4", "K5"})
+
+#: A lead line is short: longer, it is a record with no year.
+GROUP_LEAD_MAX_WORDS = 12
+#: The list under a lead line: at least this many dated entries in a row,
+#: sharing one code.
+GROUP_LIST_MIN_ENTRIES = 3
+#: A numbered, lettered or bulleted line is an item of a list, not its lead.
+_GROUP_ENUMERATED_RE = re.compile(r"^\W*(?:\(?\d{1,3}[.)]|\(?[A-Za-z][.)]\s|[-–•·◦*])")
+
+#: A date with no four-digit year: '7/79', '6/83'. An entry that writes one
+#: has dates of its own (QZWBKQ 45), whatever stage 4 read from them.
+_GROUP_SHORT_DATE_RE = re.compile(r"\b\d{1,2}/\d{2}\b")
+#: The section letters whose undated roles take a dated block's years, and
+#: the fields that name such a role and its institution.
+_GROUP_DATED_BLOCK_LETTERS = frozenset("DK")
+_GROUP_NAME_FIELDS = frozenset({"title", "role", "teaching_role", "activity_title",
+                                "course_title"})
+
+#: A row shows a header's name when it holds at least this share of its
+#: words: stage 5b and stage 6 respell a name ('Dept.' as 'Department').
+GROUP_HEADER_SHOWN_SHARE = 0.5
+#: Child entries a finding names in its evidence, and the characters of a
+#: list entry's text quoted.
+GROUP_EVIDENCE_LIMIT = 3
+GROUP_EVIDENCE_TEXT_CHARS = 80
+
+
+class _GroupEntry(NamedTuple):
+    """The stage-4 fields this lint reads, taken once at the boundary."""
+    element_idx: object
+    code: str
+    text: str
+    heading: tuple[str, ...]
+    fields: dict[str, object]
+    #: Whether the text or a date field carries a four-digit year.
+    dated: bool
+    #: Whether the text carries any date: a year, or a short form ('7/79').
+    any_date: bool
+    #: Whether stage 2 joined more than one source line into the entry.
+    multi_line: bool
+
+
+def _group_entries(stage4: dict) -> list[_GroupEntry]:
+    """The entries in source order, each with a position."""
+    entries = []
+    for raw in stage4.get("entries", []):
+        position = _entry_position(raw)
+        if position is None:
+            continue
+        fields = _filled_fields(raw)
+        text = str(raw.get("text") or "").strip()
+        hierarchy = raw.get("hierarchy")
+        dated = bool(_FOUR_DIGIT_YEAR_RE.search(text)) or _has_dated_field(fields)
+        try:
+            multi_line = float(raw.get("element_idx_end")) > position
+        except (TypeError, ValueError):
+            multi_line = False
+        entries.append((position, _GroupEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
+            tuple(str(h) for h in hierarchy) if isinstance(hierarchy, list) else (),
+            fields, dated, dated or bool(_GROUP_SHORT_DATE_RE.search(text)), multi_line)))
+    return [entry for _, entry in sorted(entries, key=lambda pair: pair[0])]
+
+
+def _letter_tokens(text: str) -> frozenset[str]:
+    return frozenset(tok for tok in _name_tokens(text) if not tok.isdigit())
+
+
+def _value_tokens(entry: _GroupEntry, keys: frozenset[str]) -> frozenset[str]:
+    """The letter words of the entry's values under `keys`."""
+    return frozenset(tok for tok in _field_tokens(entry.fields, keys) if not tok.isdigit())
+
+
+def _is_group_header(entry: _GroupEntry) -> bool:
+    """An organization or institution alone, perhaps placed, and dated only
+    by a span: one dated day at a place is a session of its own (see
+    `_is_header_only`)."""
+    keys = entry.fields.keys()
+    return (bool(keys) and keys <= _JUNK_PLACEMENT_FIELDS and bool(keys & _JUNK_HOLDER_FIELDS)
+            and (not keys & _JUNK_DATE_FIELDS or "start_date" in keys))
+
+
+def _is_role_and_dates(entry: _GroupEntry) -> bool:
+    keys = entry.fields.keys()
+    return bool(keys & _GROUP_ROLE_FIELDS) and keys <= (
+        _GROUP_ROLE_FIELDS | _JUNK_DATE_FIELDS | _GROUP_EXTRA_DATE_FIELDS)
+
+
+def _lost_children(entries: list[_GroupEntry], index: int) -> list[_GroupEntry]:
+    """The lines under the header at `index`: same heading, same family, no
+    holder of their own. Under a dated header, only bare roles: a dated
+    society line is a membership of its own, and the committee after it may
+    be another body's (MUHLLD 82, 84 in one flat membership list). Stops at
+    the first line that is not one."""
+    header = entries[index]
+    family = _GROUP_FAMILIES.get(header.code)
+    children = []
+    for entry in entries[index + 1:]:
+        keys = entry.fields.keys()
+        if (entry.heading != header.heading or family is None
+                or _GROUP_FAMILIES.get(entry.code) != family or not keys
+                or keys & _JUNK_HOLDER_FIELDS or keys <= _JUNK_PLACEMENT_FIELDS
+                or (header.dated and not _is_role_and_dates(entry))):
+            break
+        children.append(entry)
+    return children
+
+
+def _rows_showing(entry: _GroupEntry, core: frozenset[str],
+                  rows: list[_RenderedRow]) -> list[_RenderedRow]:
+    """The rows showing every `core` word and every year the entry's
+    fields hold."""
+    if not core:
+        return []
+    years = frozenset(_FOUR_DIGIT_YEAR_RE.findall(" ".join(
+        str(entry.fields[key]) for key in entry.fields.keys() & _JUNK_DATE_FIELDS)))
+    return [row for row in rows if core <= row.tokens and years <= row.tokens]
+
+
+def _tightest_row(shown: list[_RenderedRow], allowed: frozenset[str]) -> _RenderedRow | None:
+    """Of `shown`, the row with the fewest words beyond `allowed`: a short
+    role like 'Chair' also shows inside longer rows."""
+    return min(shown, key=lambda row: len(_letter_tokens(row.text) - allowed), default=None)
+
+
+def _entry_row(entry: _GroupEntry, core: frozenset[str], allowed: frozenset[str],
+               rows: list[_RenderedRow]) -> _RenderedRow | None:
+    """The entry's rendered row, or None when no row shows it."""
+    return _tightest_row(_rows_showing(entry, core, rows), allowed)
+
+
+def _child_lost_header(child: _GroupEntry, header_name: frozenset[str],
+                       rows: list[_RenderedRow]) -> _RenderedRow | None:
+    """The child's rendered row, when no row showing the child shows the
+    header's name (at GROUP_HEADER_SHOWN_SHARE of its words); else None.
+    Any row, not only the tightest: a short child ('Assistant Professor')
+    also shows inside another entry's row, and its own row may be the one
+    that carries the name (ATUVAL 95)."""
+    core = _value_tokens(child, frozenset(child.fields) - _JUNK_DATE_FIELDS)
+    shown = _rows_showing(child, core, rows)
+    if any(len(header_name & row.tokens) >= len(header_name) * GROUP_HEADER_SHOWN_SHARE
+           for row in shown):
+        return None
+    return _tightest_row(shown, core)
+
+
+def _is_bare_role(entry: _GroupEntry) -> bool:
+    """A line that is a role and its dates, and nothing more."""
+    if entry.code not in _GROUP_ROLE_CODES or not _is_role_and_dates(entry):
+        return False
+    role = _value_tokens(entry, frozenset(_GROUP_ROLE_FIELDS))
+    role_text = " ".join(str(entry.fields[key]) for key in entry.fields.keys() & _GROUP_ROLE_FIELDS)
+    other_words = [word for word in _NAME_WORD_RE.findall(role_text)
+                   if not _GROUP_ROLE_WORD_RE.fullmatch(word)]
+    return (bool(role) and _letter_tokens(entry.text) <= role | _GROUP_ROLE_LINE_FILLER
+            and bool(_GROUP_ROLE_WORD_RE.search(role_text))
+            and not _GROUP_ROLE_NAMES_HOLDER_RE.search(role_text)
+            and len(other_words) <= GROUP_ROLE_MAX_OTHER_WORDS)
+
+
+def _bare_role_row(entry: _GroupEntry, rows: list[_RenderedRow],
+                   taken: set[int]) -> _RenderedRow | None:
+    """The first row no other entry took that shows the role and no other
+    word; it joins `taken`."""
+    role = _value_tokens(entry, frozenset(_GROUP_ROLE_FIELDS))
+    for i, row in enumerate(rows):
+        if i not in taken and frozenset(t for t in row.tokens if not t.isdigit()) - \
+                _GROUP_ROLE_LINE_FILLER == role:
+            taken.add(i)
+            return row
+    return None
+
+
+def _states_its_role(entry: _GroupEntry) -> bool:
+    """A role the text itself writes, beside what it is held in ('Chair,
+    <campaign>'): a record of its own, not a lead line (WYMVGU 492)."""
+    role_keys = entry.fields.keys() & (_GROUP_ROLE_FIELDS | {"title"})
+    text = _letter_tokens(entry.text)
+    return "," in entry.text and any(
+        _letter_tokens(str(entry.fields[key])) <= text for key in role_keys)
+
+
+def _is_lead_line(entry: _GroupEntry) -> bool:
+    """An undated short line that is no list item and states no role. A
+    line ending in ':' is junk_or_header_row's label."""
+    return (entry.code[:1] not in GROUP_SKIP_LETTERS and not entry.dated
+            and not entry.text.endswith(":")
+            and len(entry.text.split()) <= GROUP_LEAD_MAX_WORDS
+            and not _GROUP_ENUMERATED_RE.match(entry.text)
+            and not _states_its_role(entry))
+
+
+def _list_code(entries: list[_GroupEntry], index: int) -> str | None:
+    """The one code of the dated list directly under the lead line at
+    `index`, when it differs from the lead line's section letter."""
+    lead = entries[index]
+    below = entries[index + 1:index + 1 + GROUP_LIST_MIN_ENTRIES]
+    codes = {entry.code for entry in below}
+    if (len(below) < GROUP_LIST_MIN_ENTRIES or len(codes) != 1
+            or any(entry.heading != lead.heading or not entry.dated for entry in below)):
+        return None
+    code = codes.pop()
+    return code if code[:1] not in GROUP_SKIP_LETTERS | {lead.code[:1]} else None
+
+
+def _undated_role_at_institution(entry: _GroupEntry) -> bool:
+    keys = entry.fields.keys()
+    return (entry.code[:1] in _GROUP_DATED_BLOCK_LETTERS and not entry.any_date
+            and bool(keys & _GROUP_NAME_FIELDS) and bool(keys & _JUNK_HOLDER_FIELDS)
+            and not _GROUP_ENUMERATED_RE.match(entry.text))
+
+
+def _dated_parent(entries: list[_GroupEntry], index: int) -> int | None:
+    """The index of the dated block of the same section letter directly
+    above the entry at `index`, past undated roles like it; None when
+    another line comes first. A block is a dated entry stage 2 joined from
+    several source lines (IEUPKK 64: the dates, the rank, the department,
+    the school), or a dated group header: one dated line above an undated
+    one is a list whose next line has no date in the source (RNKYST 18-21,
+    WWSEWY 27-28)."""
+    entry = entries[index]
+    for above_index in range(index - 1, -1, -1):
+        above = entries[above_index]
+        if above.heading != entry.heading or above.code[:1] != entry.code[:1]:
+            return None
+        if above.dated:
+            is_block = above.multi_line or _is_group_header(above)
+            return above_index if is_block and not _GROUP_ENUMERATED_RE.match(above.text) else None
+        if not _undated_role_at_institution(above):
+            return None
+    return None
+
+
+class _GroupHit(NamedTuple):
+    """One finding before it is built: the shape, the entry it is about,
+    and its lines, each with its rendered row (or, for a lead line's list,
+    its text)."""
+    shape: str
+    subject: _GroupEntry
+    members: list[tuple[_GroupEntry, str]]
+
+
+def _group_message(hit: _GroupHit) -> tuple[str, str, list[str]]:
+    """(severity, message, evidence) of one finding, quoting up to
+    GROUP_EVIDENCE_LIMIT of its lines."""
+    count = ("" if hit.shape == GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST else
+             f"; {len(hit.members)} entr{'y' if len(hit.members) == 1 else 'ies'} below it")
+    return (GROUP_HEADER_SEVERITY[hit.shape],
+            f"entry {hit.subject.element_idx} ({hit.subject.code}): {hit.shape}: "
+            f"{_GROUP_SHAPE_MESSAGES[hit.shape]}{count}",
+            [f"entry {entry.element_idx} ({entry.code}): {shown}"
+             for entry, shown in hit.members[:GROUP_EVIDENCE_LIMIT]])
+
+
+def _children_lost_header_hits(entries: list[_GroupEntry], rows: list[_RenderedRow],
+                                   reported: set[int]) -> list[_GroupHit]:
+    hits = []
+    for index, header in enumerate(entries):
+        if not _is_group_header(header):
+            continue
+        header_name = _value_tokens(header, _JUNK_HOLDER_FIELDS)
+        lost = []
+        for offset, child in enumerate(_lost_children(entries, index), index + 1):
+            row = _child_lost_header(child, header_name, rows)
+            if row is not None:
+                lost.append((child, row.text))
+                reported.add(offset)
+        if lost:
+            hits.append(_GroupHit(GROUP_SHAPE_CHILDREN_LOST_HEADER, header, lost))
+    return hits
+
+
+def _role_without_holder_hits(entries: list[_GroupEntry], rows: list[_RenderedRow],
+                                  reported: set[int]) -> list[_GroupHit]:
+    """One finding per run of bare roles, named by the line above them."""
+    hits = []
+    taken: set[int] = set()
+    above: _GroupEntry | None = None
+    run: list[tuple[_GroupEntry, str]] = []
+    for index, entry in enumerate(entries):
+        if not _is_bare_role(entry) or index in reported:
+            if run and above is not None:
+                hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, above, run))
+            above, run = entry, []
+            continue
+        row = _bare_role_row(entry, rows, taken)
+        if row is not None and above is not None and above.heading == entry.heading:
+            run.append((entry, row.text))
+    if run and above is not None:
+        hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, above, run))
+    return hits
+
+
+def _header_coded_unlike_list_hits(entries: list[_GroupEntry],
+                                       rows: list[_RenderedRow]) -> list[_GroupHit]:
+    hits = []
+    for index, lead in enumerate(entries):
+        if not _is_lead_line(lead) or _list_code(entries, index) is None:
+            continue
+        allowed = _value_tokens(lead, frozenset(lead.fields)) | _letter_tokens(lead.text)
+        core = _value_tokens(lead, frozenset(lead.fields)) & _letter_tokens(lead.text)
+        row = _entry_row(lead, core, allowed, rows)
+        if (row is not None and not row.has_year
+                and len(_letter_tokens(row.text) - allowed) <= JUNK_ROW_EXTRA_WORDS):
+            below = entries[index + 1:index + 1 + GROUP_LIST_MIN_ENTRIES]
+            hits.append(_GroupHit(
+                GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST, lead,
+                [(lead, row.text)] + [(entry, entry.text[:GROUP_EVIDENCE_TEXT_CHARS])
+                                           for entry in below[:GROUP_EVIDENCE_LIMIT - 1]]))
+    return hits
+
+
+def _parent_dates_lost_hits(entries: list[_GroupEntry],
+                                rows: list[_RenderedRow]) -> list[_GroupHit]:
+    """One finding per dated parent, naming its undated roles."""
+    by_parent: dict[int, list[tuple[_GroupEntry, str]]] = {}
+    for index, entry in enumerate(entries):
+        if not _undated_role_at_institution(entry):
+            continue
+        parent = _dated_parent(entries, index)
+        if parent is None:
+            continue
+        row = _entry_row(entry, _value_tokens(entry, _GROUP_NAME_FIELDS),
+                         _value_tokens(entry, frozenset(entry.fields)), rows)
+        if row is not None and not row.has_year:
+            by_parent.setdefault(parent, []).append((entry, row.text))
+    return [_GroupHit(GROUP_SHAPE_PARENT_DATES_LOST, entries[parent], members)
+            for parent, members in by_parent.items()]
+
+
+def lint_group_header_context(stage4: dict, table_rows: list[list[list[str]]],
+                              blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """Lines whose group header's context did not reach their rendered rows
+    (X6 E8, E11): one finding per header, lead line or dated parent, named
+    by its element_idx_start, quoting up to three of its lines' rows."""
+    entries = _group_entries(stage4)
+    rows = _junk_rendered_rows(table_rows, blocks or [])
+    reported: set[int] = set()
+    hits = (_children_lost_header_hits(entries, rows, reported)
+            + _role_without_holder_hits(entries, rows, reported)
+            + _header_coded_unlike_list_hits(entries, rows)
+            + _parent_dates_lost_hits(entries, rows))
+    return [_finding("group_header_context", *_group_message(hit)) for hit in hits]
+
+
 # Lint fanout_cell_residue (#1445; EOAHMI DUTAVD-01, WYMVGU-01, BRUSUZ-01): a
 # record stage 6 fanned out of a multi-record entry (`STAGE4_RECORDS_KEY`,
 # #1406) whose table row prints leftover text of the parent entry in a name,

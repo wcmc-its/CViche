@@ -313,6 +313,16 @@ Lints, ranked by the severity of the failure class they catch:
                           one range the entry writes fewer times, beside a
                           record with its own range (WYMVGU-02). INFO. Reads stage 4,
                           and the docx when present
+14ab. group_header_context a group header whose context never reached the
+                          rows of the lines under it (X6 E8, E11): a society
+                          or employer line coded as a record, whose lines
+                          render without its name (KJJVVO-01), and a bare
+                          role line ('Chair 2010-2011') rendered as the role
+                          alone (RINASX-06), both WARN; an undated lead line
+                          coded unlike the dated list under it (IEUPKK-18,
+                          RINASX-14) and an undated role under a dated block
+                          rendered with no dates (IEUPKK-14/-17), both INFO.
+                          Reads stage 4 and the docx's rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -507,6 +517,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_pipe_leaks,
     lint_python_repr_in_output,
     lint_split_child_unsourced,
+    lint_group_header_context,
     lint_section_lost,
     lint_stage6_warnings,
     lint_table_shape,
@@ -637,6 +648,7 @@ KNOWN_LINTS = (
     "fanout_cell_residue",
     "identical_rendered_rows",
     "split_child_unsourced",
+    "group_header_context",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -834,6 +846,11 @@ LINT_PREVALENCE = {
     # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
     # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
     "split_child_unsourced": 0.01,
+    # group_header_context (X6 E8/E11, X6-header in doctor/PRECISION.md): 23
+    # of the 63 runs of the EBYSBC/s7ab/pilot farm at any severity, over its
+    # render of origin/dev fb466a0f, measured 2026-10-06 (46 of the 111
+    # stored analysis/ runs). Same mixed-corpus caveat as above.
+    "group_header_context": 0.365,
 }
 
 
@@ -1382,6 +1399,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              ("stage_4", "table_rows")),
     LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
+             optional=("blocks",)),
 )
 
 
