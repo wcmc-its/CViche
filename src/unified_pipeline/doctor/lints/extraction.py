@@ -3001,21 +3001,52 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
 # - owner_lead_as_co_i: an unlabelled author-list grant whose first or only
 #   name is the owner, rendered with an empty PI cell and the owner among the
 #   co-investigators (QTATUP 529, 533, 537).
+#
+# Five more from the X6 batch autopsy (class E32, wrong-field values on
+# grants), each verified there and missed by the dev-246 doctor:
+#
+# - owner_also_co_i: the owner is listed under Co-Investigators while the
+#   role row states a role other than co-I (IEUPKK 257-342: Co-PI or Mentor),
+#   or states none and the owner's own co-investigator item carries a lead
+#   role ("<owner> (Site PI)", RVTAQT 223).
+# - role_in_title: `title` holds the owner's roles as list items ("<project>,
+#   Director Core B., Mentor Project IV") and no role is stated (RINASX 405).
+# - owner_pi_role_empty: the rendered PI cell names the owner and "Your
+#   role:" is empty (RVTAQT 260, 273).
+# - owner_pi_other_role: the rendered PI cell names only the owner beside a
+#   role that is not the grant's PI: a co-, site- or sub-PI, a co-I, a mentor
+#   (KJJVVO 168-178, the stage-6 PI auto-fill #1457 stopped).
+# - pi_cell_from_title: the rendered PI cell is a run of the project title's
+#   own words (RINASX 396, "<title> - Human and Animal Studies, PI", the
+#   label parse #1418 stopped).
+#
+# The last two are regression guards on current dev: the stage-6 causes are
+# fixed, and they fire on documents rendered before the fix.
 
 ROLE_SHAPE_CONTRADICTED = "contradicted"
 ROLE_SHAPE_PI_CELL_EMPTY = "pi_cell_empty"
 ROLE_SHAPE_PI_ALSO_CO_I = "pi_also_co_i"
 ROLE_SHAPE_PI_FROM_COLLABORATOR = "pi_from_collaborator"
 ROLE_SHAPE_OWNER_LEAD_AS_CO_I = "owner_lead_as_co_i"
-#: Each shape's severity, from its measured precision (RC-ROLE2 in
-#: doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked hits,
-#: INFO below either bar.
+ROLE_SHAPE_OWNER_ALSO_CO_I = "owner_also_co_i"
+ROLE_SHAPE_ROLE_IN_TITLE = "role_in_title"
+ROLE_SHAPE_OWNER_PI_ROLE_EMPTY = "owner_pi_role_empty"
+ROLE_SHAPE_OWNER_PI_OTHER_ROLE = "owner_pi_other_role"
+ROLE_SHAPE_PI_CELL_FROM_TITLE = "pi_cell_from_title"
+#: Each shape's severity, from its measured precision (RC-ROLE2 and X6-role
+#: in doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked
+#: hits, INFO below either bar.
 ROLE_SHAPE_SEVERITY = MappingProxyType({
     ROLE_SHAPE_CONTRADICTED: "WARN",
     ROLE_SHAPE_PI_CELL_EMPTY: "WARN",
     ROLE_SHAPE_PI_ALSO_CO_I: "INFO",
     ROLE_SHAPE_PI_FROM_COLLABORATOR: "INFO",
     ROLE_SHAPE_OWNER_LEAD_AS_CO_I: "INFO",
+    ROLE_SHAPE_OWNER_ALSO_CO_I: "WARN",
+    ROLE_SHAPE_ROLE_IN_TITLE: "INFO",
+    ROLE_SHAPE_OWNER_PI_ROLE_EMPTY: "WARN",
+    ROLE_SHAPE_OWNER_PI_OTHER_ROLE: "WARN",
+    ROLE_SHAPE_PI_CELL_FROM_TITLE: "INFO",
 })
 
 #: Any word that labels a role on a grant, in normalised text: "PI", "P.I.",
@@ -3027,6 +3058,9 @@ _ANY_ROLE_WORD_RE = re.compile(
 #: "with Dr. X", "with Drs. X and Y": X is a collaborator, not a PI.
 _WITH_COLLABORATOR_RE = re.compile(
     r"(?<![a-z])with\s+(?:(?:drs?|mr|mrs|ms|prof|professor)\.?\s+)?(?P<names>[^;:$()]{1,80})")
+#: The fewest words a PI cell read as a run of the title needs: one word of
+#: a title is as often a person's surname ("The Lee Cohort").
+_PI_FROM_TITLE_MIN_WORDS = 2
 #: Splits a `co_investigators` value into one name per person.
 _PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|\band\b)\s*")
 #: Words in a person's name that do not identify them.
@@ -3095,6 +3129,78 @@ def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
     return owner_at is not None and all(at is None or owner_at < at for at in others)
 
 
+#: A lead role on the owner's own co-investigator item: "(Site PI)", "PI",
+#: "Co-PI", "Principal Investigator", "Director", "Mentor". Not a co-I or a
+#: bare "Investigator", which is what the Co-Investigators row says anyway.
+_LEAD_ROLE_WORD_RE = re.compile(
+    r"(?<![a-z])(?:p\.?\s?i|pis|mpi|principal investigators?|director|mentor)(?![a-z])")
+#: A co-investigator role anywhere in a stated role ("Co-Investigator/Mentor",
+#: "Investigator and Associate Director", IZJADE 433): the owner then
+#: belongs in the Co-Investigators row.
+_CO_I_ROLE_WORD_RE = re.compile(
+    r"(?<![a-z])(?:co-?(?:investigators?|is?)|(?<!principal )investigators?)(?![a-z])")
+#: A list item of a title that is a role, not part of the project's name:
+#: ", Director Core B.", "; Mentor Project IV", ", Co-Investigator". Not
+#: "Investigator-Initiated", which names a kind of trial, nor a bare "PI",
+#: which a title uses to name a subproject's PI (", PI <other>)", XELRLZ 138).
+_TITLE_ROLE_ITEM_RE = re.compile(
+    r"[,;]\s*(?:co-?)?(?:director|mentor|principal investigator|investigator"
+    r"|project leader|core leader)(?![\w-])")
+
+
+#: A role that makes the owner someone other than the grant's PI: a co-,
+#: site- or sub-PI, or a co-investigator.
+_NOT_THE_PI_ROLE_RE = re.compile(
+    r"(?<![a-z])(?:(?:co|site|sub|subcontract)[\s-]*(?:p\.?\s?i|principal investigator)"
+    r"|principal investigator of (?:an? |the )?sub-?contract"
+    r"|co-?investigators?|co-?is?)(?![a-z])")
+#: A PI-equivalent role left once the qualified forms are cut out: "PI",
+#: "MPI", "PD/PI", "Program Director", "Principle Investigator". With one,
+#: the owner in the PI cell is right ("co-investigator; PI of project 2").
+_PI_EQUIVALENT_ROLE_RE = re.compile(
+    r"(?<![a-z])(?:p\.?\s?i|mpi|pd|principa?le? investigators?|program director)(?![a-z])")
+
+
+def _role_not_the_pi(role: str) -> bool:
+    """`role` names the owner as a co-, site- or sub-PI or a co-I, and as no
+    kind of PI besides."""
+    text = norm(role)
+    if not _NOT_THE_PI_ROLE_RE.search(text):
+        return False
+    return not _PI_EQUIVALENT_ROLE_RE.search(_NOT_THE_PI_ROLE_RE.sub(" ", text))
+
+
+def _stated_role_text(fields: Mapping[str, object]) -> str:
+    """The role stage 6 renders in "Your role:" (`pi_role or role`)."""
+    return str(fields.get("pi_role") or fields.get("role") or "").strip()
+
+
+def _owner_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
+                     owner: frozenset[str]) -> bool:
+    """The owner is one of the people `co_investigators` lists, while the
+    stated role is a lead role (a PI of any kind, a director, a mentor), or
+    no role is stated and the owner's own item names one. Another stated role
+    ("Program Partner", NDXXAD 411) may share the row with its co-holders. Not
+    a list headed by the PI (the source's author line copied whole, farm
+    web204), which `_pi_also_co_i` spares too."""
+    items = [item for item in _PERSON_SPLIT_RE.split(str(fields.get("co_investigators") or ""))
+             if _person_key(item) & owner]
+    keys = _co_investigator_keys(fields)
+    if not items or (pi_key and keys and keys[0] == pi_key):
+        return False
+    stated = norm(_stated_role_text(fields))
+    if stated:
+        return (_LEAD_ROLE_WORD_RE.search(stated) is not None
+                and not _CO_I_ROLE_WORD_RE.search(stated) and ":" not in stated)
+    return any(_LEAD_ROLE_WORD_RE.search(norm(item)) for item in items)
+
+
+def _role_in_title(fields: Mapping[str, object]) -> bool:
+    """No role is stated and the title carries a role as a list item."""
+    title = norm(str(fields.get("title") or ""))
+    return not _stated_role_text(fields) and _TITLE_ROLE_ITEM_RE.search(title) is not None
+
+
 def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
                       owner: frozenset[str]) -> tuple[str, str] | None:
     """The first role shape one grant entry shows, as (shape, what it says),
@@ -3117,6 +3223,13 @@ def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
         return (ROLE_SHAPE_OWNER_LEAD_AS_CO_I,
                 "the CV owner is the first name on an unlabelled grant but renders only "
                 "as a co-investigator, with no PI")
+    if _owner_also_co_i(fields, pi_key, owner):
+        return (ROLE_SHAPE_OWNER_ALSO_CO_I,
+                "the CV owner is listed as a co-investigator, but the owner's role is "
+                f"{_stated_role_text(fields) or 'a lead role the co-investigator row carries'}")
+    if _role_in_title(fields):
+        return (ROLE_SHAPE_ROLE_IN_TITLE,
+                "the project title carries the owner's role, and 'Your role:' is empty")
     return None
 
 
@@ -3131,34 +3244,72 @@ def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
     return tables
 
 
-def _entry_index_by_title(stage4: dict) -> dict[str, object]:
-    """element_idx_start of the first grant entry per normalised title."""
-    by_title: dict[str, object] = {}
+def _grant_entry_by_title(stage4: dict) -> dict[str, Mapping[str, object]]:
+    """The first grant entry per normalised title."""
+    by_title: dict[str, Mapping[str, object]] = {}
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") in GRANT_CODES and isinstance(fields, Mapping):
             title = norm(str(fields.get("title") or fields.get("study_title") or ""))
             if title:
-                by_title.setdefault(title, entry.get("element_idx_start"))
+                by_title.setdefault(title, entry)
     return by_title
 
 
-def _empty_pi_cells(stage4: dict, table_rows: list[list[list[str]]]) -> list[dict]:
-    """A pi_cell_empty finding per rendered grant table whose role row says
-    PI and whose PI row is empty."""
-    by_title = _entry_index_by_title(stage4)
+def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
+                      extracted_pi: str) -> tuple[str, str] | None:
+    """The first role shape one rendered grant table shows, as (shape, what
+    it says), or None: pi_cell_empty, then the three render shapes the X6
+    batch added. The owner is read off the PI cell by surname word, the way
+    `_entry_role_shape` reads `pi_name`. `extracted_pi` is the table's
+    entry's `pi_name`: a PI cell stage 4 extracted as a person is not a
+    title run, even where the title names that person (a fellowship titled
+    after its holder, NDMRSO CAGLNY 118)."""
+    pi_cell, role = cells[PI_NAME_LABEL], cells.get(YOUR_ROLE_LABEL, "")
+    if not pi_cell:
+        if _stated_role(role) == ROLE_PI:
+            return (ROLE_SHAPE_PI_CELL_EMPTY,
+                    f"'Your role:' is {role}, but 'Name of Principal Investigator:' is empty")
+        return None
+    pi_keys = [key for key in map(_person_key, _PERSON_SPLIT_RE.split(pi_cell)) if key]
+    names_owner = [bool(key & owner) for key in pi_keys]
+    if any(names_owner) and not role:
+        return (ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
+                "'Name of Principal Investigator:' names the CV owner, and 'Your role:' is empty")
+    if names_owner and all(names_owner) and _role_not_the_pi(role):
+        return (ROLE_SHAPE_OWNER_PI_OTHER_ROLE,
+                f"'Name of Principal Investigator:' names only the CV owner, but 'Your role:' "
+                f"is {role}")
+    title = norm(cells.get(PROJECT_TITLE_LABEL, ""))
+    pi_text = norm(pi_cell)
+    if (not any(names_owner) and pi_text != norm(extracted_pi)
+            and len(pi_text.split()) >= _PI_FROM_TITLE_MIN_WORDS
+            and re.search(rf"(?<!\w){re.escape(pi_text)}(?!\w)", title)):
+        return (ROLE_SHAPE_PI_CELL_FROM_TITLE,
+                "'Name of Principal Investigator:' is a run of the project title's words")
+    return None
+
+
+def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
+                         owner: frozenset[str], reported: set[object]) -> list[dict]:
+    """A finding per rendered grant table that shows a role shape. A table
+    whose entry already has an entry finding is reported only for
+    pi_cell_empty, which predates the others and was always reported beside
+    them."""
+    by_title = _grant_entry_by_title(stage4)
     findings = []
     for cells in _grant_tables(table_rows):
-        role = cells.get(YOUR_ROLE_LABEL, "")
-        if cells[PI_NAME_LABEL] or _stated_role(role) != ROLE_PI:
-            continue
         title = cells.get(PROJECT_TITLE_LABEL, "")
-        idx = by_title.get(norm(title))
+        entry = by_title.get(norm(title), {})
+        fields = entry.get("extracted_fields", {})
+        shape = _table_role_shape(cells, owner, str(fields.get("pi_name") or ""))
+        idx = entry.get("element_idx_start")
+        if not shape or (idx in reported and shape[0] != ROLE_SHAPE_PI_CELL_EMPTY):
+            continue
         where = f"entry {idx}" if idx is not None else "a grant table"
         findings.append(_finding(
-            "role_consistency", ROLE_SHAPE_SEVERITY[ROLE_SHAPE_PI_CELL_EMPTY],
-            f"{where}: 'Your role:' is {role}, but 'Name of Principal Investigator:' "
-            f"is empty ({ROLE_SHAPE_PI_CELL_EMPTY}, #1403)",
+            "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+            f"{where}: {shape[1]} ({shape[0]}, #1403)",
             [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
 
@@ -3167,25 +3318,27 @@ def lint_role_consistency(stage4: dict,
                           table_rows: list[list[list[str]]] | None = None) -> list[dict]:
     """A grant table that misstates who led the grant (#1403). One finding
     per grant entry, for the first shape it shows (see the shapes above),
-    plus one per rendered grant table whose role says PI and whose PI cell is
-    empty (only when the docx was read). The owner is
+    plus one per rendered grant table for the first render shape it shows
+    (only when the docx was read; see `_table_role_findings`). The owner is
     `cv_owner.last_name`; with none, no shape that names the owner fires.
-    Not judged: an empty `pi_role` against the source's label (stage 6 then
-    names the owner from `pi_name`), a co-PI, or text that gives the owner
-    both roles."""
+    Not judged from stage 4: an empty `pi_role` against the source's label
+    (the render shape owner_pi_role_empty reads that off the table), a
+    co-PI, or text that gives the owner both roles."""
     owner = _owner_surname_words(stage4)
     findings = []
+    reported: set[object] = set()
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
             continue
         shape = _entry_role_shape(entry, fields, owner)
         if shape:
+            reported.add(entry.get("element_idx_start"))
             findings.append(_finding(
                 "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
                 f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
                 f"{shape[1]} ({shape[0]}, #1403)",
                 [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
     if table_rows is not None:
-        findings.extend(_empty_pi_cells(stage4, table_rows))
+        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
     return findings

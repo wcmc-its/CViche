@@ -4799,11 +4799,11 @@ def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
 
 
 def test_role_consistency_prevalence_is_the_measured_fraction():
-    """Measured 2026-10-05 (RC-ROLE2) over stored stage-4 JSON and a render
-    of origin/dev 43f84e1e: 8 of the 119 analysis/ runs and 7 of the 126
-    farm/batch runs (#1403); a new measurement updates both sides."""
+    """Measured 2026-10-06 (X6-role) over the stored docx of 125 analysis/
+    runs and a render of origin/dev 05966dac of the 126 farm/batch runs:
+    75 and 31 of them (#1403); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
-    assert LINT_PREVALENCE["role_consistency"] == round(15 / 245, 3)
+    assert LINT_PREVALENCE["role_consistency"] == round(106 / 251, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

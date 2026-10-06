@@ -287,8 +287,15 @@ Lints, ranked by the severity of the failure class they catch:
                           JIJRSN 516), both WARN; pi_name also listed as a
                           co-I, a "with Dr. X" collaborator as pi_name, or the
                           owner first on an unlabelled grant shown only as a
-                          co-I (JIJRSN 150-156, QTATUP 529-537), INFO. Reads
-                          stage 4, and the docx when present
+                          co-I (JIJRSN 150-156, QTATUP 529-537), INFO; the
+                          owner listed as a co-I beside a lead role (X6
+                          IEUPKK 257-342, RVTAQT 223), a PI cell naming the
+                          owner beside an empty role (RVTAQT 260/273) or
+                          beside a co-/site-PI or co-I role (KJJVVO
+                          168-178), WARN; the owner's role inside the title
+                          (RINASX 405) or a title run in the PI cell (RINASX
+                          396), INFO. Reads stage 4, and the docx when
+                          present
 14y. fanout_cell_residue  a record stage 6 fanned out of a multi-record
                           entry (#1406) whose table row prints the parent's
                           leftover text in a name, organization or committee
@@ -812,12 +819,14 @@ LINT_PREVALENCE = {
     # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
     # render without the fix). Same mixed-corpus caveat as above.
     "span_count": 0.261,
-    # role_consistency (#1403, RC-ROLE2 in doctor/PRECISION.md): 15 of 245
-    # runs at any severity, measured 2026-10-05 over each run's stored stage-4
-    # JSON and a render of origin/dev 43f84e1e: 8 of the 119 analysis/ and
-    # analysis/pilot runs and 7 of the 126 farm/batch-3/batch-4 runs. Same
-    # mixed-corpus caveat as above.
-    "role_consistency": 0.061,
+    # role_consistency (#1403, X6-role in doctor/PRECISION.md): 106 of 251
+    # runs at any severity, measured 2026-10-06: 75 of the 125 analysis/ and
+    # analysis/pilot runs over their stored docx, and 31 of the 126 farm/
+    # batch-3/batch-4 runs over a render of origin/dev 05966dac. The X6
+    # shapes owner_pi_role_empty and owner_also_co_i are most of the rise
+    # (37 of 251 before them); runs built before #1410 carry most of it.
+    # Same mixed-corpus caveat as above.
+    "role_consistency": 0.422,
     # fanout_cell_residue (#1445, FAN-RES in doctor/PRECISION.md): 1 of the
     # 102 fresh renders of origin/dev 8b287ec2 (EBYSBC/s7ab/pilot 63, EOAHMI
     # 9, NDMRSO 30), measured 2026-10-05. #1449 fixed the stage-6 fallbacks
