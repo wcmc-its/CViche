@@ -312,7 +312,7 @@ class PubMedEnricher:
     - DOI (via esearch)
     """
 
-    def __init__(self, api_key: str = None, verbose: bool = True):
+    def __init__(self, api_key: str | None = None, verbose: bool = True):
         self.api_key = api_key or NCBI_API_KEY
         self.verbose = verbose
         self.session = requests.Session()
@@ -1254,7 +1254,7 @@ class PubMedEnricher:
             entry.setdefault('enriched_fields', []).append('pages')
 
 
-def run_stage5(stage4_path: str, output_path: str = None, verbose: bool = True) -> dict[str, Any]:
+def run_stage5(stage4_path: str, output_path: str | None = None, verbose: bool = True) -> dict[str, Any]:
     """
     Run Stage 5 enrichment on a Stage 4 output file.
 

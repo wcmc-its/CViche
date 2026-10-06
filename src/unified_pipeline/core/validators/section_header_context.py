@@ -176,7 +176,7 @@ class SectionHeaderContextValidator(BaseValidator):
         },
     }
 
-    def analyze(self, entry_text: str, header: str = None) -> ValidatorGuidance:
+    def analyze(self, entry_text: str, header: str | None = None) -> ValidatorGuidance:
         """
         Analyze entry based on section header context.
 

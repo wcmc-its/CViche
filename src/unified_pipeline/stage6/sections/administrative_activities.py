@@ -46,7 +46,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import List, Tuple, TypedDict
+from typing import TypedDict
 
 from ..formatting import (
     _clear_table_data,
@@ -149,7 +149,7 @@ class _CommitteeRecord:
     institution: str = ''
 
     @classmethod
-    def from_raw(cls, raw, *, name_fallback: bool = False) -> '_CommitteeRecord':
+    def from_raw(cls, raw, *, name_fallback: bool = False) -> _CommitteeRecord:
         """Build a record from one raw stage-4 value.
 
         `raw` is normally a dict (or dict-like Mapping); `name_fallback=True`
@@ -217,7 +217,7 @@ def _name_with_institution(activity: str, institution: str) -> str:
 class AdministrativeActivitiesSection:
     """Section P writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_administrative_activities(self, entries: List[_AdminActivityEntry]):
+    def _fill_administrative_activities(self, entries: list[_AdminActivityEntry]):
         """Fill P. INSTITUTIONAL ADMINISTRATIVE ACTIVITIES section.
 
         WCM template has table with: Activity/Committee | Role | Dates
@@ -261,7 +261,7 @@ class AdministrativeActivitiesSection:
         table. See `_fill_administrative_activities` for why that ordering
         matters (review thread 3850029915).
         """
-        rows: List[Tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str]] = []
 
         for entry in sorted_entries:
             # Guard the type, not just falsiness: a truthy non-dict here (a
@@ -437,7 +437,7 @@ class AdministrativeActivitiesSection:
                     _set_font(run)
         self.stats['entries_inserted'] += 1
 
-    def _multiline_committee_rows(self, lines: List[str]) -> List[Tuple[str, str, str]]:
+    def _multiline_committee_rows(self, lines: list[str]) -> list[tuple[str, str, str]]:
         """Parse multiline content into (activity, role, dates) rows.
 
         Pure with respect to the Word document -- see
@@ -450,7 +450,7 @@ class AdministrativeActivitiesSection:
         left inside (or dropped from) the Activity cell. Parsed role titles go
         into P's Role column.
         """
-        rows: List[Tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str]] = []
         for item in _parse_flattened_committee_lines(lines):
             role = '; '.join(item.roles)
             # Skip if nothing renderable remains after date extraction

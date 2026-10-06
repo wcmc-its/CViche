@@ -88,7 +88,7 @@ logger = logging.getLogger(__name__)
 
 def process_cv(
     docx_path: str,
-    model: str = None,
+    model: str | None = None,
     cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """

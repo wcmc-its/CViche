@@ -37,7 +37,7 @@ class BulkPubMedFetcher:
         records = fetcher.fetch_records_bulk(['12345', '67890', ...])
     """
 
-    def __init__(self, api_key: str = None, db_connection=None, verbose: bool = True):
+    def __init__(self, api_key: str | None = None, db_connection=None, verbose: bool = True):
         """
         Initialize the bulk fetcher.
 

@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, List, NamedTuple, Tuple
+from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
@@ -397,7 +397,7 @@ def lint_dead_sections(stage2: dict,
     falls back to `_names_match`'s token containment, which is what the
     farm's 2100_Mocco true positive (matching the shorter 'RESEARCH' output
     section) needs."""
-    per_h1: Dict[str, int] = {}
+    per_h1: dict[str, int] = {}
     for e in stage2.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
@@ -406,7 +406,7 @@ def lint_dead_sections(stage2: dict,
                     if len(norm(line)) >= SUBSTANTIVE_LINE_CHARS)
         per_h1[top] = per_h1.get(top, 0) + lines
 
-    sections: List[List] = []  # [raw title, normalized name, substantive lines]
+    sections: list[list] = []  # [raw title, normalized name, substantive lines]
     current = None
     for kind, text in blocks:
         stripped = str(text).strip()
@@ -464,7 +464,7 @@ def _bare_date_lines(text: object) -> int:
                if _is_bare_date_line(line.strip()))
 
 
-def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
+def _line_token_sets(blocks: list[tuple[str, str]]) -> list[set]:
     """Distinctive-token set per OUTPUT LINE. Lint 8 verifies each record line
     against single output lines: the pooled document tokens of _haystacks let
     common academic words scattered across unrelated sections vouch for a
@@ -730,7 +730,7 @@ def lint_section_lost(stage4: dict,
 _STAGE6_WARNING_SEVERITIES = {"INFO", "WARN", "ERROR"}
 
 
-def lint_stage6_warnings(report: Dict) -> List[Dict]:
+def lint_stage6_warnings(report: dict) -> list[dict]:
     """Stage 6's post-generation self-check (_validate_output) findings,
     plus per-section render failures (#565), re-emitted from the
     render-warnings sidecar so they reach the doctor report and the Teams
@@ -788,7 +788,7 @@ def _fuses_citations(line: str) -> bool:
         for left, right in zip(wedges, wedges[1:]))
 
 
-def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_pipe_leaks(blocks: list[tuple[str, str]]) -> list[dict]:
     """Verbatim-fallback formatting reaching the output document: paragraphs
     carrying multiple raw ' | ' field separators, clusters of single-pipe
     bullets under one section, and numbered citations fusing several
@@ -796,9 +796,9 @@ def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
     listing the meetings it was presented at (`_fuses_citations`). Paragraph
     blocks only: _table_lines synthesizes ' | ' row joins by design. The
     appendix is excluded — it is verbatim-by-contract."""
-    multi: List[str] = []
-    fused: List[str] = []
-    clusters: Dict[str, List[str]] = {}
+    multi: list[str] = []
+    fused: list[str] = []
+    clusters: dict[str, list[str]] = {}
     section = None
     in_appendix = False
     for kind, text in blocks:
@@ -937,7 +937,7 @@ def _honors_header(tbl: list[list[str]]) -> list[str] | None:
     return header
 
 
-def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
+def _honors_table_shape(tbl: list[list[str]]) -> _HonorsTableShape | None:
     """One table's honors-shape defects (#229), or None when it is not an
     honors/awards table at all (no 'name of award'/'date awarded' header).
     Factored out of `lint_table_shape` so the doctor's `metrics` block
@@ -953,7 +953,7 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     if name_i is None:
         return None
     defective_rows: set = set()
-    defects: List[str] = []
+    defects: list[str] = []
     non_blank_rows = 0
 
     def flag(rn, msg):
@@ -1219,7 +1219,7 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     # a repeated passage. Taking CONSECUTIVE pairs of each window's positions
     # keeps that set small even when one window repeats many times (measured
     # max 17 distances over 123 documents; 121 of them have none at all).
-    windows: Dict[Tuple[str, ...], List[int]] = {}
+    windows: dict[tuple[str, ...], list[int]] = {}
     for i in range(n - span + 1):
         windows.setdefault(tuple(keys[i:i + span]), []).append(i)
     distances = {b - a for positions in windows.values() if len(positions) > 1
@@ -1236,7 +1236,7 @@ def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     # already charged, so each redundant copy is counted once regardless of
     # how many distances re-derive it (#446 review, fb73705 rework).
     charged_second_ranges: list[tuple[int, int]] = []
-    passages: List[Tuple[int, int, int]] = []
+    passages: list[tuple[int, int, int]] = []
     for distance in sorted(distances):
         i = 0
         while i < n - distance:

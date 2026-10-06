@@ -239,7 +239,7 @@ def _finalize_stage5b_enrichment(
     return stats
 
 
-def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
+def run_stage5b(input_path: str, output_path: str | None = None, verbose: bool = True,
                 refresh_cache: bool = False) -> str:
     """
     Run Stage 5b: Institution Enrichment via LLM.

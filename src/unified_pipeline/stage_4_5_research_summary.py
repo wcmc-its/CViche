@@ -262,7 +262,7 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
 
 
 def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: int, cv_owner_name: str = '',
-                       limit: int = None, recency_by_id: dict[int, EntryRecency] | None = None) -> list[dict]:
+                       limit: int | None = None, recency_by_id: dict[int, EntryRecency] | None = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
 
@@ -750,7 +750,7 @@ def _original_m1_record(m1_entries: list[dict], combined_text: str, m1_score: fl
     }
 
 
-def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True) -> str:
+def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool = True) -> str:
     """
     Run Stage 4.5: Research Summary Generation.
 

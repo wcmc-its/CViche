@@ -27,7 +27,7 @@ from types import MappingProxyType
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Dict, List, Any, Literal, NamedTuple, Optional, Tuple
+from typing import Any, Literal, NamedTuple
 from collections.abc import Callable
 from datetime import datetime
 from collections import defaultdict
@@ -1021,7 +1021,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     Generates WCM Word documents from enriched CV data.
     """
 
-    def __init__(self, template_path: str = None, verbose: bool = True,
+    def __init__(self, template_path: str | None = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
                  recover_unrendered_records: bool = True,
@@ -1124,7 +1124,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             RECLASSIFY_FAILURE_STAT: 0,
         }
 
-    def _find_template(self, template_path: str = None) -> str:
+    def _find_template(self, template_path: str | None = None) -> str:
         """Find a valid template file."""
         if template_path and os.path.exists(template_path):
             return template_path
@@ -1144,7 +1144,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             f"  - {FALLBACK_TEMPLATES}"
         )
 
-    def _correct_mismatch_if_needed(self, entry: Dict, assigned_code: str,
+    def _correct_mismatch_if_needed(self, entry: dict, assigned_code: str,
                                     decisions: list[RerouteDecision] | None = None) -> str:
         """Correct taxonomy code routing when hierarchy mismatch flag indicates a likely misclassification.
 
@@ -1234,7 +1234,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         return assigned_code
 
-    def _merge_stage_5c_entries(self, base_entries: List[Dict], stage_5c_entries: List[Dict]) -> List[Dict]:
+    def _merge_stage_5c_entries(self, base_entries: list[dict], stage_5c_entries: list[dict]) -> list[dict]:
         """Merge Stage 5c K-code entries as overrides into base entries.
 
         Stage 5c contains only K-code entries with LLM formatting.
@@ -1584,8 +1584,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 or (_is_m1_record(entry)
                     and _record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
 
-    def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
-                 original_doc_path: str = None, discover_original_doc: bool = True) -> str:
+    def generate(self, input_path: str, output_path: str | None = None, research_summary_path: str | None = None,
+                 original_doc_path: str | None = None, discover_original_doc: bool = True) -> str:
         """
         Main entry point: Generate WCM document from pipeline output.
 
@@ -1966,7 +1966,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
 
 
-    def _classify_geographic_scope(self, entry: Dict) -> str:
+    def _classify_geographic_scope(self, entry: dict) -> str:
         """Classify an entry's geographic scope as Regional, National, or International.
 
         A record fanned out of a multi-record entry keeps the scope its CV
@@ -2256,7 +2256,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         }
         return section_fallback.get(prefix, '')
 
-    def _find_paragraph_with_text(self, search_text: str) -> Optional[int]:
+    def _find_paragraph_with_text(self, search_text: str) -> int | None:
         """Find paragraph index containing text."""
         search = search_text.lower()
         for i, para in enumerate(self.doc.paragraphs):
@@ -2297,7 +2297,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 return i
         return None
 
-    def _find_header_paragraph(self, search_text: str) -> Optional[int]:
+    def _find_header_paragraph(self, search_text: str) -> int | None:
         """First paragraph containing search_text that is formatted like a
         section header (ALL-CAPS text or a bold run) — never plain body text.
 
@@ -2321,7 +2321,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 return i
         return None
 
-    def _find_section_end_paragraph_idx(self, section_para_idx: int) -> Optional[int]:
+    def _find_section_end_paragraph_idx(self, section_para_idx: int) -> int | None:
         """Find the paragraph index where the next major WCM section starts.
 
         Scans forward from section_para_idx looking for the next bold+underlined
@@ -2363,7 +2363,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return None
 
-    def _find_paragraph_exact(self, search_text: str) -> Optional[int]:
+    def _find_paragraph_exact(self, search_text: str) -> int | None:
         """Find paragraph index with exact text match (stripped, case-insensitive)."""
         search = search_text.lower().strip()
         for i, para in enumerate(self.doc.paragraphs):
@@ -2372,7 +2372,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 return i
         return None
 
-    def _find_table_with_cell_text(self, search_text: str) -> Optional[Table]:
+    def _find_table_with_cell_text(self, search_text: str) -> Table | None:
         """Find a table containing a cell with the given text."""
         search = search_text.lower()
         for table in self.doc.tables:
@@ -2382,7 +2382,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         return table
         return None
 
-    def _find_table_after_paragraph(self, para_idx: int) -> Optional[Table]:
+    def _find_table_after_paragraph(self, para_idx: int) -> Table | None:
         """Find the first table after a paragraph."""
         if para_idx >= len(self.doc.paragraphs):
             return None
@@ -2499,8 +2499,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
 
 
-    def _add_table_row_with_track_changes(self, table: Table, data: List[Tuple[str, bool]],
-                                           is_header: bool = False, entry: Dict = None,
+    def _add_table_row_with_track_changes(self, table: Table, data: list[tuple[str, bool]],
+                                           is_header: bool = False, entry: dict | None = None,
                                            track_change_author: str = "Institution Enrichment"):
         """Add a row to a table with track changes for enriched content.
 
@@ -2544,8 +2544,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         self.stats['entries_inserted'] += 1
 
-    def _add_table_row_with_mixed_content(self, table: Table, cell_contents: List[List[Tuple[str, bool, str]]],
-                                           is_header: bool = False, entry: Dict = None):
+    def _add_table_row_with_mixed_content(self, table: Table, cell_contents: list[list[tuple[str, bool, str]]],
+                                           is_header: bool = False, entry: dict | None = None):
         """Add a row to a table with mixed normal and track-change content per cell.
 
         Args:
@@ -2785,7 +2785,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Last section or lookup failed — fall back to appendix, keep original in place
                 self._route_overflow_to_appendix(entry, coverage_pct)
 
-    def _insert_overflow_bullet(self, insert_idx: int, text: str) -> Optional[Paragraph]:
+    def _insert_overflow_bullet(self, insert_idx: int, text: str) -> Paragraph | None:
         """Insert overflow content as tracked-change bullet(s) preserving original structure.
 
         Each tab-separated segment from the original CV becomes its own paragraph,
@@ -2894,7 +2894,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if self.verbose:
                 logger.warning(f"  Warning: Could not remove abbreviated entry: {e}")
 
-    def _route_overflow_to_appendix(self, entry: Dict, coverage_pct: float = 0):
+    def _route_overflow_to_appendix(self, entry: dict, coverage_pct: float = 0):
         """Queue an overflow entry for reconsideration before adding to appendix.
 
         Instead of immediately adding to appendix, we collect entries here.
@@ -2989,7 +2989,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return recovered
 
-    def _reclassify_entry_segments(self, text: str, original_code: str) -> List[Tuple[str, str]]:
+    def _reclassify_entry_segments(self, text: str, original_code: str) -> list[tuple[str, str]]:
         """Use LLM to segment and reclassify content from an appendix entry.
 
         Returns list of (segment_text, taxonomy_code) tuples.
@@ -3096,7 +3096,7 @@ Now analyze the text above:"""
         self.stats[RECLASSIFY_FAILURE_STAT] += 1
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
-                                     comment: str = None) -> bool:
+                                     comment: str | None = None) -> bool:
         """Insert a reclassified segment into the appropriate WCM subsection.
 
         Returns True when the bullet was actually inserted, so callers can
@@ -3166,7 +3166,7 @@ Now analyze the text above:"""
             return False
 
     def _find_subsection_header(self, search_text: str,
-                                before_idx: int = None) -> Optional[int]:
+                                before_idx: int | None = None) -> int | None:
         """Find a subsection header that exactly matches the search text.
 
         Unlike _find_paragraph_with_text which does substring matching,
@@ -3203,7 +3203,7 @@ Now analyze the text above:"""
 
         return None
 
-    def _find_subsection_insert_point(self, header_idx: int) -> Optional[int]:
+    def _find_subsection_insert_point(self, header_idx: int) -> int | None:
         """Find the right paragraph index to insert content after a subsection header.
 
         Scans forward from header_idx, skipping instructional text (paragraphs
@@ -3236,7 +3236,7 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
-    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]],
+    def _add_remaining_to_appendix(self, remaining: list[tuple[str, str, float]],
                                    origins: Sequence[str] = ()) -> list[RecoveredLine]:
         """Add remaining unmappable segments to the appendix as bullet lines.
 
@@ -3376,7 +3376,7 @@ Now analyze the text above:"""
             walk_table(tbl)
         return lines
 
-    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]],
+    def _recover_unrendered_records(self, entries_by_code: dict[str, list[dict]],
                                     cv_owner: Mapping[str, object] | None = None,
                                     ) -> list[RecoveredLine]:
         """Post-render safety net (#221): re-emit record lines the structured
@@ -3521,7 +3521,7 @@ Now analyze the text above:"""
 
     def _unconsumed_personal_data_batch(self, haystack: str,
                                         owner_tokens: OwnerTokens = OwnerTokens(),
-                                        ) -> List[Tuple[str, str, float]]:
+                                        ) -> list[tuple[str, str, float]]:
         """A-coded entries that reached no Personal Data slot and no page.
 
         'A' is listed in `mapped_codes`, whose comment says "unused A entries
@@ -3564,7 +3564,7 @@ Now analyze the text above:"""
           contributes nothing. Either way the single document-wide notice
           already tells the reader something was withheld.
         """
-        batch: List[Tuple[str, str, float]] = []
+        batch: list[tuple[str, str, float]] = []
         redacted = 0
         for entry in getattr(self, '_unconsumed_personal_data', []):
             # #820 piece 2 / #821 R2 F3: read the pre-render pass's own
@@ -4083,7 +4083,7 @@ Now analyze the text above:"""
         lines.append('</w:comments>')
         return '\n'.join(lines)
 
-    def _validate_output(self, entries_by_code: Mapping[str, object] | None = None) -> List[Dict]:
+    def _validate_output(self, entries_by_code: Mapping[str, object] | None = None) -> list[dict]:
         """Validate the generated document for common issues.
 
         Returns a list of structured warning dicts ({check, code, section,

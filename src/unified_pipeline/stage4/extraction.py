@@ -14,7 +14,8 @@ function in play (the #496 split-state lesson).
 import json
 import logging
 from collections import defaultdict
-from typing import Any, Callable, NamedTuple, NotRequired, TypedDict
+from typing import Any, NamedTuple, NotRequired, TypedDict
+from collections.abc import Callable
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
