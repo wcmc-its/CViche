@@ -172,9 +172,10 @@ Lints, ranked by the severity of the failure class they catch:
                           restore declined, a PubMed author list that stops
                           short, a dropped consortium credit. WARN, one per
                           citation. Its sibling `etal_added` reports, at
-                          INFO, a line whose author list ends in "et al."
+                          WARN, a line whose author list ends in "et al."
                           where the source elides no author: co-authors cut
-                          (#1259)
+                          (#1259; INFO until #1404 took the cut out of the
+                          5d prompt)
 14o. multi_record_coverage a stage-4 entry whose text holds several records
                           -- two or more dated clauses, or undated parts that
                           each name a title and an institution -- while stage
@@ -313,6 +314,13 @@ Lints, ranked by the severity of the failure class they catch:
                           one range the entry writes fewer times, beside a
                           record with its own range (WYMVGU-02). INFO. Reads stage 4,
                           and the docx when present
+14ab. citation_field_dropped a publication whose rendered bibliography
+                          line leaves out a stage-4 field that identifies it:
+                          its title, on no bibliography line at all (an
+                          untitled item rendered as venue, date and pages,
+                          X6 KJJVVO-10; WARN), or its link, where the line
+                          gives no DOI, PMID or volume and pages either (a
+                          webinar, UXBHHF-20; INFO). No score cap
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -497,6 +505,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
+    lint_citation_field_dropped,
     lint_etal_added,
     lint_fanout_cell_residue,
     lint_identical_rendered_rows,
@@ -637,6 +646,7 @@ KNOWN_LINTS = (
     "fanout_cell_residue",
     "identical_rendered_rows",
     "split_child_unsourced",
+    "citation_field_dropped",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -834,6 +844,13 @@ LINT_PREVALENCE = {
     # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
     # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
     "split_child_unsourced": 0.01,
+    # citation_field_dropped (X6 KJJVVO-10, UXBHHF-20, VPMMFM-08; X6-cite in
+    # doctor/PRECISION.md): 18 of the 111 runs under analysis/ with a stage-4
+    # artifact and a stage-6 docx, each over its stored docx, measured
+    # 2026-10-06 (6 of the 63 on the EBYSBC/s7ab/pilot farm's base render).
+    # Several of the 18 are one CV run more than once. Same mixed-corpus
+    # caveat as above.
+    "citation_field_dropped": 0.162,
 }
 
 
@@ -1382,6 +1399,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              ("stage_4", "table_rows")),
     LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
+    LintSpec("citation_field_dropped", lint_citation_field_dropped, ("stage_4", "blocks")),
 )
 
 

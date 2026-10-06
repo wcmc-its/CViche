@@ -527,6 +527,12 @@ LINT_COPY = {
         "A line of the CV that was split into several records shows, on one of them, an "
         "institution the line does not name, or dates the line gives only to another record.",
         "Check the institution and dates of each flagged record against the source CV."),
+    "citation_field_dropped": LintCopy(
+        "Citation leaves out its title, link or \"...\"",
+        "A citation in the document leaves out something the source CV gives to identify the "
+        "item: its title, its web link, or the \"...\" showing that the source left some "
+        "authors out, so the shorter list reads as complete.",
+        "Add the title or link from the source CV, or put the \"...\" back in the author list."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

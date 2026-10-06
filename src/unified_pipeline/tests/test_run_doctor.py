@@ -54,6 +54,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
+    lint_citation_field_dropped,
     lint_etal_added,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
@@ -2201,8 +2202,9 @@ def test_etal_added_reports_a_cut_that_keeps_the_owner():
     stage4 = _cite_run(_publication(12, _source(authors=authors), authors=authors))
     blocks = _bibliography(line)
     findings = lint_etal_added(stage4, blocks)
+    # WARN since #1404 removed the 5d cut (X6 E3: 95 lists cut on 6 CVs).
     assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [(
-        "etal_added", "INFO",
+        "etal_added", "WARN",
         "entry 12 (S1): the rendered citation keeps 6 author(s) and then 'et al.', "
         "where the source elides no author")]
     assert lint_owner_missing_from_citation(stage4, blocks) == []
@@ -2231,6 +2233,142 @@ def test_etal_added_ignores_an_et_al_in_an_editor_list(editors):
     source = f"Thornquist R, Ashdown A. Chapter on tidal cores. In: Synthetic Geology, Garrow G, Holloway H, Ivesdale I, Jessop J, Larkspur, Mossgrove Press, 2019."
     stage4 = _cite_run(_publication(703, source, authors="Thornquist R, Ashdown A", code="S4"))
     assert lint_etal_added(stage4, _bibliography(line)) == []
+
+
+# ------------- lint 14ab: a field that identifies a citation, left out of its line
+
+_BULLETIN = "Synthetic Pharmacy Bulletin"
+_BULLETIN_LINE = f"{_BULLETIN}. March/April 2004;24(2):4."
+_UNTITLED_TITLE = "Report on pharmacy volunteer outreach programmes for rural clinics"
+_UNTITLED_TEXT = f"{_UNTITLED_TITLE}. {_BULLETIN}. March/April 2004;24(2):4."
+_WEBINAR_URL = "https://events.example.org/index.jsp?eid=3486"
+_WEBINAR_LINE = "Tidal cores explained for clinicians. Webinar; 2018 Mar 28."
+
+
+def _cited(idx, text, code="S1", **fields):
+    """A publication entry with the stage-4 fields given."""
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+            "extracted_fields": fields}
+
+
+def _field_shapes(stage4, blocks):
+    return [(f["severity"], f["message"].split(": ")[1])
+            for f in lint_citation_field_dropped(stage4, blocks)]
+
+
+def test_citation_field_dropped_reports_an_untitled_item_rendered_as_its_venue():
+    # KJJVVO-10: the descriptive sentence stage 4 filed as the title is the
+    # only thing saying what the item is, and the line is venue, date, pages.
+    # "Pharmacy" is on the line, but as the venue's word, not the title's.
+    entry = _cited(60, _UNTITLED_TEXT, code="S5", publication_venue=_BULLETIN, year=2004,
+                   title=_UNTITLED_TITLE)
+    findings = lint_citation_field_dropped(_cite_run(entry), _bibliography(_BULLETIN_LINE))
+    assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [(
+        "citation_field_dropped", "WARN",
+        "entry 60 (S5): title_dropped: no word of stage 4's title is in the rendered "
+        "citation, so it does not say what the item is")]
+    assert findings[0]["evidence"] == [_BULLETIN_LINE]
+
+
+@pytest.mark.parametrize(("title", "line"), [
+    # One title word on the line is a title, reworded or cut, not a drop.
+    (_UNTITLED_TITLE, f"Outreach. {_BULLETIN_LINE}"),
+    # Two words beyond the venue's own are too few to judge.
+    ("Pharmacy bulletin outreach report", _BULLETIN_LINE),
+])
+def test_citation_field_dropped_quiet_on_a_title_it_cannot_judge_lost(title, line):
+    entry = _cited(60, _UNTITLED_TEXT, code="S5", publication_venue=_BULLETIN, title=title)
+    assert lint_citation_field_dropped(_cite_run(entry), _bibliography(line)) == []
+
+
+def test_citation_field_dropped_quiet_when_another_line_prints_the_title():
+    # The entry paired with the wrong line: the title is on the page.
+    entry = _cited(60, _UNTITLED_TEXT, code="S5", publication_venue=_BULLETIN,
+                   title=_UNTITLED_TITLE)
+    blocks = _bibliography(_BULLETIN_LINE, "Garrow G. Volunteer outreach programmes. Synth Rural Med. 2005;3:1-9.")
+    assert lint_citation_field_dropped(_cite_run(entry), blocks) == []
+    # Exactly half of the title's six words is enough.
+    half = "Garrow G. Volunteer outreach for clinics. Synth Med. 2005;3:1-9."
+    assert _field_shapes(_cite_run(entry), _bibliography(_BULLETIN_LINE, half)) == []
+
+
+def test_citation_field_dropped_reports_a_webinar_rendered_without_its_link():
+    # UXBHHF-20: stage 4 kept the URL; the 5d citation left it out.
+    entry = _cited(269, f"{_WEBINAR_LINE} {_WEBINAR_URL}", code="S9",
+                   title="Tidal cores explained for clinicians", url=_WEBINAR_URL)
+    findings = lint_citation_field_dropped(_cite_run(entry), _bibliography(_WEBINAR_LINE))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "INFO",
+        "entry 269 (S9): url_dropped: the rendered citation leaves out the link stage 4 "
+        "kept, and gives no DOI, PMID or volume and pages instead")]
+
+
+@pytest.mark.parametrize(("url", "line"), [
+    (_WEBINAR_URL, f"{_WEBINAR_LINE} {_WEBINAR_URL}"),                 # printed
+    ("www.events.example.org/tidal", f"{_WEBINAR_LINE} events.example.org/tidal"),
+    (_WEBINAR_URL, f"{_WEBINAR_LINE} doi:10.0000/tidal.1"),             # a DOI locates it
+    (_WEBINAR_URL, f"{_WEBINAR_LINE} PMID:12345678."),
+    (_WEBINAR_URL, "Tidal cores explained for clinicians. Synth Geol. 2018;12(3):45-67."),
+    ("https://doi.org/10.0000/tidal.1", _WEBINAR_LINE),                # a DOI, not a link
+    ("10.0000/tidal.1", _WEBINAR_LINE),
+    ("interview link here", _WEBINAR_LINE),                             # not a URL
+])
+def test_citation_field_dropped_quiet_on_a_link_that_is_not_lost(url, line):
+    entry = _cited(269, f"{_WEBINAR_LINE} {url}", code="S9",
+                   title="Tidal cores explained for clinicians", url=url)
+    assert lint_citation_field_dropped(_cite_run(entry), _bibliography(line)) == []
+
+
+def test_citation_field_dropped_quiet_on_a_link_the_source_does_not_give():
+    entry = _cited(269, f"{_WEBINAR_LINE} {_WEBINAR_URL}", code="S9",
+                   title="Tidal cores explained for clinicians",
+                   url="https://other.example.net/page")
+    assert lint_citation_field_dropped(_cite_run(entry), _bibliography(_WEBINAR_LINE)) == []
+
+
+_ELIDED_SOURCE = f"Ashdown A, Brimley B ... Thornquist R. {_CITE_TITLE}. Annual Synthetic Geology Meeting; 2001."
+_ELIDED_LINE = f"Ashdown A, Brimley B, Thornquist R. {_CITE_TITLE}. Annual Synthetic Geology Meeting; 2001."
+
+
+@pytest.mark.parametrize("marker", ["...", "\u2026", "[...]", "et al.,"])
+def test_citation_field_dropped_reports_an_elided_list_rendered_as_complete(marker):
+    # VPMMFM-08: the source elides the middle of the author list; the line
+    # prints the names on either side as the whole list.
+    source = _ELIDED_SOURCE.replace("...", marker)
+    entry = _cited(410, source, code="S8", title=_CITE_TITLE,
+                   authors="Ashdown A, Brimley B, Thornquist R")
+    assert _field_shapes(_cite_run(entry), _bibliography(_ELIDED_LINE)) == [
+        ("INFO", "elision_dropped")]
+
+
+@pytest.mark.parametrize(("source", "line"), [
+    # The line keeps the elision.
+    (_ELIDED_SOURCE, _ELIDED_LINE.replace("Brimley B,", "Brimley B, et al.,")),
+    # A PubMed rebuild prints the whole list.
+    (_ELIDED_SOURCE, _ELIDED_LINE + " PMID:12345678."),
+    # The ellipsis is in the venue, after the title, not in the author list.
+    (_ELIDED_SOURCE.replace(" ... ", ", ").replace("Annual", "Annual ..."), _ELIDED_LINE),
+    # No title phrase in the source to tell the author list from the rest.
+    (_ELIDED_SOURCE.replace(_CITE_TITLE, "Tidal sediment patterns"), _ELIDED_LINE),
+])
+def test_citation_field_dropped_quiet_on_an_elision_that_is_not_lost(source, line):
+    entry = _cited(410, source, code="S8", title=_CITE_TITLE,
+                   authors="Ashdown A, Brimley B, Thornquist R")
+    assert _field_shapes(_cite_run(entry), _bibliography(line)) == []
+
+
+def test_citation_field_dropped_judges_no_elision_without_a_title():
+    entry = _cited(410, _ELIDED_SOURCE, code="S8", title="",
+                   authors="Ashdown A, Brimley B, Thornquist R")
+    assert _field_shapes(_cite_run(entry), _bibliography(_ELIDED_LINE)) == []
+
+
+def test_citation_field_dropped_is_a_registered_lint():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    assert "citation_field_dropped" in KNOWN_LINTS
+    assert any(spec.lint_id == "citation_field_dropped"
+               and spec.rule is lint_citation_field_dropped
+               and spec.inputs == ("stage_4", "blocks") for spec in LINT_REGISTRY)
 
 
 def test_owner_lints_are_registered_lints():
@@ -4110,14 +4248,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (54), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (55), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 52
+    assert len(payload["findings"]) == 53
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

@@ -1799,18 +1799,27 @@ _EMAIL_OR_URL_RE = re.compile(r"\S+@\S+|\bhttps?://\S+|\bwww\.\S+", re.IGNORECAS
 #: Characters of the rendered line quoted as evidence.
 CITATION_EVIDENCE_CHARS = 160
 
+#: The stage-4 fields `RenderedCitation` carries by name; every other text
+#: field goes into its `other_fields`.
+_CITATION_OWN_FIELDS = frozenset({"authors", "title", "url"})
+
 
 class RenderedCitation(NamedTuple):
     """One publication entry and the bibliography line it rendered as, read
     once at the artifact boundary (§8.1). `line` is the accepted-changes
     text -- `docx_body_blocks` keeps `w:ins` and drops `w:delText` -- with
-    its citation number removed. `authors` is stage 4's own value, or ''
-    when it is absent or not text."""
+    its citation number removed. `authors`, `title` and `url` are stage 4's
+    own values, or '' when absent or not text; `other_fields` joins its
+    other text fields (journal, venue, publisher), which the line may print
+    in words a title shares."""
     element_idx: object
     code: str
     source: str
     authors: str
     line: str
+    title: str = ""
+    url: str = ""
+    other_fields: str = ""
 
 
 def _bibliography_lines(blocks: list[tuple[str, str]]) -> list[str]:
@@ -1871,11 +1880,15 @@ def _rendered_citations(stage4: dict,
         if i not in pairs:
             continue
         fields = entry.get("extracted_fields")
-        authors = fields.get("authors") if isinstance(fields, Mapping) else None
+        if not isinstance(fields, Mapping):
+            fields = {}
+        text_fields = {key: value for key, value in fields.items() if isinstance(value, str)}
         citations.append(RenderedCitation(
             entry.get("element_idx_start"), str(entry.get("taxonomy_code")),
-            str(entry.get("text") or ""), authors if isinstance(authors, str) else "",
-            lines[pairs[i]]))
+            str(entry.get("text") or ""), text_fields.get("authors", ""),
+            lines[pairs[i]], text_fields.get("title", ""), text_fields.get("url", ""),
+            " ".join(value for key, value in text_fields.items()
+                     if key not in _CITATION_OWN_FIELDS)))
     return citations
 
 
@@ -1971,11 +1984,14 @@ def lint_owner_missing_from_citation(stage4: dict,
 
 
 def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
-    """One INFO per rendered citation whose author list ends in "et al."
+    """One WARN per rendered citation whose author list ends in "et al."
     (`_author_list_end`) where the source text elides no author
     (`_SOURCE_ELISION_RE`): co-authors cut, the stage 5d "first 6" rule (#1259).
     A citation that also lost the owner is owner_missing_from_citation's
-    WARN, not reported again here."""
+    WARN, not reported again here. WARN since #1404 took the rule out of the
+    5d prompt: on the 9 EOAHMI runs built after it (dev-248) the lint fires
+    0 times, so a hit now is lost co-authors, not the old systemic cut
+    (X6-cite in doctor/PRECISION.md)."""
     owner = _owner_surname_words(stage4)
     findings = []
     for citation in _rendered_citations(stage4, blocks):
@@ -1985,11 +2001,147 @@ def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
             continue
         kept = len([name for name in citation.line[:end].split(",") if name.strip()])
         findings.append(_finding(
-            "etal_added", "INFO",
+            "etal_added", "WARN",
             f"entry {citation.element_idx} ({citation.code}): the rendered "
             f"citation keeps {kept} author(s) and then 'et al.', where the "
             f"source elides no author",
             [citation.line[:CITATION_EVIDENCE_CHARS]]))
+    return findings
+
+
+# Lint 14n's third sibling, citation_field_dropped (X6 KJJVVO-10, UXBHHF-20):
+# a stage-4 field that identifies the item and that its rendered citation
+# leaves out. Stage 5d rewrites every non-PubMed citation from stage 4's
+# fields, and nothing checks that the identifying ones survive: KJJVVO 60, an
+# untitled bulletin item whose descriptive sentence stage 4 filed as its
+# title, rendered as the bulletin's name, date and pages alone; UXBHHF 269, a
+# webinar, rendered without the link stage 4 kept, while its two sibling
+# webinars kept theirs; VPMMFM 410 and 412, abstracts whose source elides
+# the middle of the author list, rendered as complete two-author lists.
+CITATION_SHAPE_TITLE_DROPPED = "title_dropped"
+CITATION_SHAPE_URL_DROPPED = "url_dropped"
+CITATION_SHAPE_ELISION_DROPPED = "elision_dropped"
+
+#: A title word: four or more letters, so initials, "and" and "of" do not
+#: count, and a title made of them is not judged.
+_TITLE_WORD_RE = re.compile(r"[^\W\d_]{4,}")
+
+#: The fewest title words, after removing the words the entry's other fields
+#: also hold, for a title the lint judges. Below it a line could miss every
+#: one by rewording.
+CITATION_TITLE_MIN_WORDS = 3
+
+#: Another bibliography line holding at least this share of the title's
+#: words prints the title: the entry paired with the wrong line, and the
+#: title is on the page.
+CITATION_TITLE_ELSEWHERE_SHARE = 0.5
+
+#: A URL's host, with or without its scheme and "www.": dotted labels ending
+#: in a letter-only top-level label, so a bare DOI ("10.1101/...") and free
+#: text in the url field ("interview link here") are not hosts.
+_URL_HOST_RE = re.compile(
+    r"^(?:https?://)?(?:www\d?\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?=[/:?#]|$)")
+
+#: A rendered line that names a DOI or PMID, or gives a journal's year;
+#: volume: pages ("2011;8:e19"), already says where to find the item, so a
+#: URL it leaves out is redundant (a publisher page for a DOI'd preprint,
+#: an article's landing page).
+_CITATION_LOCATOR_RE = re.compile(
+    r"\bdoi\b|\bpmid\b|\b\d{4}\s*;\s*\d+\s*(?:\([^)]*\))?\s*:", re.IGNORECASE)
+
+#: A DOI resolver's host: a url there is a DOI, which stage 5d prints as one.
+_DOI_HOST_WORD = "doi.org"
+
+#: A rendered line naming a PMID or DOI: stage 5 rebuilt it from PubMed or
+#: Crossref, whose author list is the whole one, so an elision the source
+#: wrote is rightly gone.
+_CITATION_REBUILT_RE = re.compile(r"\bdoi\b|\bpmid\b", re.IGNORECASE)
+
+#: The title's first words, as a phrase, mark where the source's author
+#: list ends: an elision after them is in the venue ("AMIA ... Symposium")
+#: or in a second citation fused onto the entry, not in the author list.
+CITATION_TITLE_LEAD_WORDS = 3
+
+
+def _title_words(citation: RenderedCitation) -> set[str]:
+    """The title's words that no other field of the entry holds: a venue
+    the line prints ("Society", "Bulletin") does not show the title."""
+    other = set(_TITLE_WORD_RE.findall(norm(citation.other_fields)))
+    return set(_TITLE_WORD_RE.findall(norm(citation.title))) - other
+
+
+def _title_dropped(citation: RenderedCitation, line_words: list[set[str]]) -> bool:
+    """Whether the title has CITATION_TITLE_MIN_WORDS words, none of them
+    on the citation's own line, and no bibliography line holds
+    CITATION_TITLE_ELSEWHERE_SHARE of them."""
+    words = _title_words(citation)
+    if len(words) < CITATION_TITLE_MIN_WORDS:
+        return False
+    if words & set(_TITLE_WORD_RE.findall(norm(citation.line))):
+        return False
+    return all(len(words & other) < CITATION_TITLE_ELSEWHERE_SHARE * len(words)
+               for other in line_words)
+
+
+def _url_dropped(citation: RenderedCitation) -> bool:
+    """Whether stage 4's url names a host the source also names, the line
+    does not print that host, and the line gives no other locator."""
+    match = _URL_HOST_RE.match(norm(citation.url).strip())
+    if match is None or _DOI_HOST_WORD in match.group(1):
+        return False
+    host = match.group(1)
+    line = norm(citation.line)
+    return (host in norm(citation.source) and host not in line
+            and not _CITATION_LOCATOR_RE.search(line))
+
+
+def _elision_dropped(citation: RenderedCitation) -> bool:
+    """Whether the source elides authors (`_SOURCE_ELISION_RE`) before its
+    title begins, and the line, not rebuilt from PubMed, shows no elision:
+    an incomplete author list printed as if it were complete."""
+    source = norm(citation.source)
+    # -1 when the source does not hold the title's lead, 0 for no title:
+    # either way no elision can come before it, and nothing is judged.
+    title_at = source.find(" ".join(norm(citation.title).split()[:CITATION_TITLE_LEAD_WORDS]))
+    elision = _SOURCE_ELISION_RE.search(source)
+    if elision is None or elision.start() >= title_at:
+        return False
+    return not (_SOURCE_ELISION_RE.search(citation.line)
+                or _CITATION_REBUILT_RE.search(citation.line))
+
+
+def lint_citation_field_dropped(stage4: dict,
+                                blocks: list[tuple[str, str]]) -> list[dict]:
+    """One finding per rendered citation that leaves out a field identifying
+    the item: `title_dropped` (WARN), stage 4's title absent from the line
+    and from every other bibliography line (`_title_dropped`); `url_dropped`
+    (INFO), the link stage 4 kept, where the line has nothing else to find
+    the item by (`_url_dropped`); `elision_dropped` (INFO), the source's
+    "..." or "et al." inside its author list (`_elision_dropped`)."""
+    line_words = [set(_TITLE_WORD_RE.findall(norm(line)))
+                  for line in _bibliography_lines(blocks)]
+    findings = []
+    for citation in _rendered_citations(stage4, blocks):
+        where = f"entry {citation.element_idx} ({citation.code})"
+        evidence = [citation.line[:CITATION_EVIDENCE_CHARS]]
+        if _title_dropped(citation, line_words):
+            findings.append(_finding(
+                "citation_field_dropped", "WARN",
+                f"{where}: {CITATION_SHAPE_TITLE_DROPPED}: no word of stage 4's "
+                f"title is in the rendered citation, so it does not say what "
+                f"the item is", evidence))
+        if _url_dropped(citation):
+            findings.append(_finding(
+                "citation_field_dropped", "INFO",
+                f"{where}: {CITATION_SHAPE_URL_DROPPED}: the rendered citation "
+                f"leaves out the link stage 4 kept, and gives no DOI, PMID or "
+                f"volume and pages instead", evidence))
+        if _elision_dropped(citation):
+            findings.append(_finding(
+                "citation_field_dropped", "INFO",
+                f"{where}: {CITATION_SHAPE_ELISION_DROPPED}: the source elides "
+                f"authors, and the rendered author list shows no elision, so it "
+                f"reads as complete", evidence))
     return findings
 
 
