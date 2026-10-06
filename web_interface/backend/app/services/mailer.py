@@ -105,21 +105,21 @@ def processing_notice(
     display_name: str | None = None,
 ) -> OutboundMail:
     """The reply to an accepted message: a status list of how many CVs are
-    processing, waiting for the sender in New run, and skipped, with one button.
+    processing, waiting for the sender to confirm, and skipped, with one button.
     Counts only, never a filename."""
     if outdated_consent:
         paras = [Para("The CViche terms have been updated. Please sign in to review and accept them.", lead=True)]
-        status = (StatusRow(StatusKind.WAITING, held, "Waiting for you in New run"),)
+        status = (StatusRow(StatusKind.WAITING, held, "Waiting for you"),)
         cta = ("Review the terms", f"{_new_run_url()}{CONSENT_PATH}")
     else:
         paras = [Para("Follow progress in Runs.", lead=True)] if runs else []
         paras.append(_terms_para(consent_date))
         status = (
             StatusRow(StatusKind.PROCESSING, runs, "Processing"),
-            StatusRow(StatusKind.WAITING, held, "Waiting for your confirmation in New run"),
+            StatusRow(StatusKind.WAITING, held, "Waiting for your confirmation"),
             StatusRow(StatusKind.SKIPPED, skipped, f"{_plural(skipped, 'Attachment')} skipped"),
         )
-        cta = ((_cv_button(runs), _runs_batch_url(batch_id)) if runs else ("Open New run", _new_run_url()))
+        cta = ((_cv_button(runs), _runs_batch_url(batch_id)) if runs else ("Review and confirm", _new_run_url()))
     badge = BadgeKind.CLOCK if runs and not outdated_consent else BadgeKind.EXCLAMATION
     content = EmailContent(_processing_headline(runs, held, outdated_consent), tuple(paras), *cta,
                            greeting=greeting_for(display_name), status=status, badge=badge)

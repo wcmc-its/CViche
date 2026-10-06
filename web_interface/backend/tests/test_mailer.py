@@ -71,7 +71,7 @@ def test_notice_for_runs_only_links_to_the_batch(monkeypatch):
 def test_notice_with_held_files_names_new_run_and_keeps_one_button(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(runs=2, held=1)
-    assert "- 2 processing" in body and "- 1 waiting for your confirmation in New run" in body
+    assert "- 2 processing" in body and "- 1 waiting for your confirmation" in body
     assert "View your CVs: https://cviche.example.org/runs?batch=BATCHA" in body
     assert body.count("https://cviche.example.org/runs") == 1  # one button; no inline duplicate link
 
@@ -85,7 +85,7 @@ def test_notice_for_outdated_consent_says_to_sign_in(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(runs=0, held=3, batch_id=None, outdated_consent=True)
     assert "terms have been updated" in body and "sign in to review and accept them" in body
-    assert "https://cviche.example.org/consent" in body and "- 3 waiting for you in New run" in body
+    assert "https://cviche.example.org/consent" in body and "- 3 waiting for you" in body
     assert "agreed to" not in body
     assert "processing" not in body.split("\n\n")[2]
 
@@ -169,16 +169,16 @@ def _images(message):
     return {p["Content-ID"]: p for p in message.walk() if p.get_content_type() == "image/png"}
 
 
-def test_every_mail_attaches_both_logos_inline_and_references_them(ses, monkeypatch):
+def test_every_mail_attaches_all_four_logos_inline_and_references_them(ses, monkeypatch):
     monkeypatch.setenv("CVICHE_MAIL_SEND", "1")
     for mail in _all_mails(monkeypatch):
         assert mailer.send(mail)
         message = _parse(ses.send_email.call_args.kwargs)
         images = _images(message)
-        assert set(images) == {"<wcm-its-logo>", "<cviche-logo>"}
+        assert set(images) == {"<wcm-its-logo>", "<cviche-logo>", "<wcm-its-logo-dark>", "<cviche-logo-dark>"}
         assert all(p.get_content()[:4] == b"\x89PNG" for p in images.values())
         html = _html(message)
-        assert "cid:wcm-its-logo" in html and "cid:cviche-logo" in html
+        assert all(f'"cid:{cid}"' in html for cid in templates.LOGO_FILES)
 
 
 def test_only_the_logos_the_html_names_are_attached(ses, monkeypatch):
@@ -195,7 +195,7 @@ def test_its_banner_is_above_the_card_and_the_wordmark_inside_it():
     assert html.index("cid:wcm-its-logo") < html.index("border-top:4px solid #B31B1B") < html.index("cid:cviche-logo")
     assert html.index("cid:cviche-logo") < html.index("Your CVs have been converted") < html.index("About CViche")
     assert html.index("Information Technologies &amp; Services</td>") > html.index("View your CVs")  # signature below the card
-    assert "#F3EAD7" in html and 'class="its"' in html and "max-width:480px" in head
+    assert "#F3EAD7" in html and 'class="its lt"' in html and "max-width:480px" in head
 
 
 def test_every_mail_is_text_plus_html_with_cid_images(ses, monkeypatch):
@@ -294,7 +294,7 @@ def test_skipped_attachment_wording_is_singular_or_plural(skipped, text):
 
 @pytest.mark.parametrize("kwargs,label", [
     ({"runs": 3, "held": 0}, "View your CVs"), ({"runs": 1, "held": 0}, "View your CV"),
-    ({"runs": 0, "held": 2}, "Open New run"), ({"runs": 0, "held": 2, "outdated_consent": True}, "Review the terms"),
+    ({"runs": 0, "held": 2}, "Review and confirm"), ({"runs": 0, "held": 2, "outdated_consent": True}, "Review the terms"),
 ])
 def test_each_email_has_one_button_labelled_for_it(monkeypatch, kwargs, label):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
@@ -312,9 +312,10 @@ def _rows(mail):
 def test_status_list_has_one_row_per_non_zero_count_and_hides_zeroes():
     mail = mailer.processing_notice("pat@med.cornell.edu", runs=3, held=0, skipped=0, batch_id="BATCHA")
     assert _rows(mail) == ["3 processing"]
-    assert "Waiting" not in mail.html and "skipped" not in mail.html
+    body = mail.html[mail.html.index("<body"):]  # the dark CSS names every status kind
+    assert "Waiting" not in body and "skipped" not in body
     mail = mailer.processing_notice("pat@med.cornell.edu", runs=3, held=1, skipped=2, batch_id="BATCHA")
-    assert _rows(mail) == ["3 processing", "1 waiting for your confirmation in New run", "2 attachments skipped"]
+    assert _rows(mail) == ["3 processing", "1 waiting for your confirmation", "2 attachments skipped"]
     mail = mailer.completion_notice("pat@med.cornell.edu", complete=3, failed=0, batch_id="BATCHA")
     assert _rows(mail) == ["3 ready to download"] and "Failed" not in mail.html
 
@@ -323,7 +324,7 @@ def test_status_dots_use_the_colour_for_their_kind():
     mail = mailer.processing_notice("pat@med.cornell.edu", runs=1, held=1, skipped=1, batch_id="BATCHA")
     done = mailer.completion_notice("pat@med.cornell.edu", complete=1, failed=1, batch_id="BATCHA")
     for html, kind, label in [
-        (mail.html, templates.StatusKind.PROCESSING, "Processing"), (mail.html, templates.StatusKind.WAITING, "Waiting for your confirmation in New run"),
+        (mail.html, templates.StatusKind.PROCESSING, "Processing"), (mail.html, templates.StatusKind.WAITING, "Waiting for your confirmation"),
         (mail.html, templates.StatusKind.SKIPPED, "Attachment skipped"), (done.html, templates.StatusKind.READY, "Ready to download"),
         (done.html, templates.StatusKind.FAILED, "Failed"),
     ]:
@@ -371,7 +372,7 @@ def test_round_two_copy_per_email(monkeypatch):
     failed = mailer.completion_notice("pat@med.cornell.edu", complete=0, failed=1, batch_id="BATCHA", single_run_id="RUNAAA")
     assert _blocks(failed)[2] == "Open the run to retry it."
     held = mailer.processing_notice("pat@med.cornell.edu", runs=0, held=2, outdated_consent=True)
-    assert "are waiting for you" not in held.body and "- 2 waiting for you in New run" in held.body
+    assert "are waiting for you" not in held.body and "- 2 waiting for you" in held.body
 
 
 def test_leads_are_regular_weight_in_html():
@@ -395,8 +396,8 @@ def test_html_puts_the_lead_before_the_status_list_and_other_copy_after():
 
 
 def _badge_cell(mail):
-    cell = mail.html[:mail.html.index("</td>", mail.html.index('class="badge"'))]
-    return cell[cell.rindex("<td"):] if 'class="badge"' in mail.html else ""
+    cell = mail.html[:mail.html.index("</td>", mail.html.index('class="badge '))]
+    return cell[cell.rindex("<td"):] if 'class="badge ' in mail.html else ""
 
 
 # (builder, background, glyph colour) as the round-2 mock draws each email's badge.
@@ -422,7 +423,7 @@ def test_each_email_has_its_badge_in_the_mocks_colours(name):
 def test_badge_kinds_differ_in_glyph_or_colour_and_stay_text_only():
     assert len(set(templates.BADGES.values())) == len(templates.BadgeKind)
     html = mailer.rejection("a@b.org", InboundRejectReason.TOO_MANY_FILES).html
-    assert "<svg" not in html and html.count("<img") == 2  # the two logos, no badge image
+    assert "<svg" not in html and html.count("<img") == 4  # two logos, light and dark; no badge image
 
 
 def test_every_button_is_the_dark_fill_and_links_stay_red(monkeypatch):
@@ -430,3 +431,40 @@ def test_every_button_is_the_dark_fill_and_links_stay_red(monkeypatch):
         if 'class="btn"' in mail.html:
             assert mail.html.count("background-color:#1F2328") == 1 and 'fillcolor="#1F2328"' in mail.html
         assert "color:#B31B1B;text-decoration:underline" in mail.html  # the footer links
+
+
+def test_dark_mode_is_declared_and_every_colour_set_for_both_engines(monkeypatch):
+    """Without the declaration Apple Mail and Outlook invert the light palette
+    themselves (olive manila, grey status rows, boxed logos)."""
+    for mail in _all_mails(monkeypatch):
+        head = mail.html[:mail.html.index("<body")]
+        assert '<meta name="color-scheme" content="light dark">' in head and "color-scheme:light dark" in head
+        media = head[head.index("@media (prefers-color-scheme:dark){"):head.index("max-width:480px")]
+        for selector, decls in templates._DARK_RULES:
+            for decl in decls.split(";"):
+                rule = f"{decl} !important"
+                assert f"{selector}{{" in media and rule in media, (selector, decl)
+                assert f"[data-ogsc] {selector}{{" in head and f"[data-ogsb] {selector}{{" in head
+        assert ".tx{color:#EDE6D8 !important;}" in head and ".btn{background-color:#EDE6D8 !important;color:#1C1A16 !important;}" in head
+
+
+def test_dark_classes_reach_the_elements_they_recolour(monkeypatch):
+    mail = mailer.completion_notice("pat@med.cornell.edu", complete=1, failed=1, batch_id="BATCHA")
+    body = mail.html[mail.html.index("<body"):]
+    assert body.startswith('<body class="bg"') and 'class="cardbg"' in body and 'class="ln"' in body
+    assert 'class="li d-ready"' in body and 'class="li d-failed"' in body and 'class="badge b-check_amber"' in body
+    assert 'class="tx mu"' in body and 'class="lk"' in body and 'class="btn"' in body
+
+
+def test_each_logo_has_a_dark_twin_hidden_by_default_and_kept_from_outlook_desktop(monkeypatch):
+    from PIL import Image
+    for mail in _all_mails(monkeypatch):
+        for cid, cls in ((templates.ITS_LOGO_CID, "its"), (templates.CVICHE_LOGO_CID, "mark")):
+            light = f'<img class="{cls} lt" src="cid:{cid}"'
+            dark = f'<!--[if !mso]><!--><img class="{cls} dk" src="cid:{cid}-dark"'
+            assert light in mail.html and dark in mail.html
+            assert mail.html.index(dark) < mail.html.index("display:none", mail.html.index(dark)) < mail.html.index("<!--<![endif]-->", mail.html.index(dark))
+    for cid in (templates.ITS_LOGO_CID, templates.CVICHE_LOGO_CID):
+        light = Image.open(templates.LOGO_FILES[cid])
+        dark = Image.open(templates.LOGO_FILES[cid + templates.DARK_CID_SUFFIX])
+        assert dark.size == light.size and dark.mode == "RGBA" and dark.getpixel((0, 0))[3] == 0  # transparent ground
