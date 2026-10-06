@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
@@ -188,6 +188,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
   // Emailed CVs still waiting, less those already in the table.
   const inbox = useInbox()
+  // The list is read at sign-in; opening New run is when it has to be current.
+  const refreshInbox = inbox.refresh
+  useEffect(() => { void refreshInbox() }, [refreshInbox])
   const inTable = new Set(batch.rows.flatMap((r) => (r.inbox ? [r.inbox.id] : [])))
   const waiting = inbox.items.filter((item) => !inTable.has(item.id) && item.id !== single.held?.id)
 

@@ -668,9 +668,17 @@ describe('UploadPage emailed CV inbox (#1298)', () => {
     expect(list.getAllByText(/Already processed/)).toHaveLength(1)
   })
 
+  it('re-reads the inbox on opening New run, not only at sign-in', async () => {
+    vi.mocked(listInbox).mockResolvedValue([])
+    await renderPage()
+    expect(vi.mocked(listInbox).mock.calls.length).toBe(2) // InboxProvider's sign-in read + New run's
+  })
+
   it('discards one item and re-reads the list', async () => {
-    vi.mocked(listInbox).mockResolvedValueOnce(INBOX_ITEMS).mockResolvedValue([INBOX_ITEMS[1]])
-    vi.mocked(discardInboxItem).mockResolvedValue(undefined)
+    // The list is read at sign-in and again on opening New run; it shrinks only once the discard lands.
+    let discarded = false
+    vi.mocked(listInbox).mockImplementation(async () => (discarded ? [INBOX_ITEMS[1]] : INBOX_ITEMS))
+    vi.mocked(discardInboxItem).mockImplementation(async () => { discarded = true })
     await renderPage()
     fireEvent.click(button('Discard emailed_one.docx'))
     await flush()
