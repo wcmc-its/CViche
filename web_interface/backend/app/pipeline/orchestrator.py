@@ -9,7 +9,6 @@ import json
 import logging
 import time
 import asyncio
-import logging
 import os
 import re
 import shutil
@@ -38,8 +37,6 @@ from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.config_loader import get_config
-
-logger = logging.getLogger(__name__)
 
 # The pipeline's prompt_logger writes per-LLM-call transcripts here. We
 # replicate fresh files into per-run storage so they survive container
