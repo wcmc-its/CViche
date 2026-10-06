@@ -35,6 +35,14 @@ configMapGenerator:
       # completion email, so both need it. The sender is the DKIM-verified
       # SES identity CvicheBedrockPolicy v16 may send from. SES production
       # access was granted 2026-10-05 (case 179121184200774).
+      # Runs go to the Valkey queue and execute on cviche-worker pods (#701).
+      # Here, not in backend-patch.yaml, because the worker reads it too: email
+      # intake (inbound_autorun) queues runs only in queue mode, and held every
+      # emailed CV for confirmation while the worker saw the in_process default
+      # (2026-10-06). The reconcilers that also branch on it run on the backend
+      # only. CVICHE_MAX_CONCURRENT_RUNS only applies in in_process mode;
+      # rollback is deleting this entry.
+      - CVICHE_DISPATCH_MODE=queue
       - CVICHE_MAIL_SEND=1
       - CVICHE_MAIL_FROM=no-reply@scholars-mail.weill.cornell.edu
 
