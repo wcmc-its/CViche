@@ -11,12 +11,12 @@ from app.audit_events import (
     USER_EMAIL_UPDATED,
     USER_IDENTITY_LINKED,
 )
-from app.models import User
+from app.models import User, UserRole
 
 logger = logging.getLogger(__name__)
 
 # Default role for a newly provisioned user when the caller resolves none.
-DEFAULT_ROLE = "user"
+DEFAULT_ROLE = UserRole.USER
 # Which workflow made the change, so a provisioning ROLE_CHANGED is told apart
 # from the per-request ED re-check's (app.auth) in the same log stream.
 PROVISIONING_SOURCE = "provisioning"

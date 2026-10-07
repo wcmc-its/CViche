@@ -24,6 +24,7 @@ from app.models import (
     RunState,
     Step,
     User,
+    UserRole,
     can_view_all_runs,
 )
 from app.pipeline import concurrency, run_queue
@@ -150,7 +151,7 @@ def _mark_run_failed(
     This is the pre-#145 behaviour, factored out so both the default path and
     the auto-retry fallback (when a resume launch fails) can reuse it.
     """
-    run.status = "failed"
+    run.status = RunState.FAILED
     run.completed_at = now
     run.error_message = message
     running_steps = (
@@ -266,7 +267,7 @@ def reconcile_stale_runs(db: Session) -> int:
     cutoff = datetime.now() - timedelta(minutes=minutes)
     stale_runs = (
         db.query(Run)
-        .filter(Run.status == "running", Run.started_at < cutoff)
+        .filter(Run.status == RunState.RUNNING, Run.started_at < cutoff)
         .all()
     )
     if not stale_runs:
@@ -293,7 +294,7 @@ def reconcile_stale_runs(db: Session) -> int:
 
         # Every replica sweeps: fail the run only if no other pod has resumed or
         # failed it since this sweep read it.
-        if not _claim_stale_run(db, run, seen_started_at, status="failed"):
+        if not _claim_stale_run(db, run, seen_started_at, status=RunState.FAILED):
             continue
         _mark_run_failed(run, db, now)
         failed_count += 1
@@ -530,7 +531,7 @@ def reap_orphaned_created_runs(
     cutoff = datetime.now() - timedelta(hours=older_than_hours)
     orphans = (
         db.query(Run)
-        .filter(Run.status == "created", Run.started_at < cutoff)
+        .filter(Run.status == RunState.CREATED, Run.started_at < cutoff)
         .all()
     )
 
@@ -580,7 +581,7 @@ def _claim_stale_run(db: Session, run: Run, seen_started_at: datetime, **values:
     """
     won = db.query(Run).filter(
         Run.id == run.id,
-        Run.status == "running",
+        Run.status == RunState.RUNNING,
         Run.started_at == seen_started_at,
     ).update(values, synchronize_session=False) == 1
     if won:
@@ -718,7 +719,7 @@ def _schedule_auto_retry(
         logger.exception(
             "Auto-retry could not resolve input for run %s; marking failed", run.id
         )
-        if _claim_stale_run(db, run, seen_started_at, status="failed"):
+        if _claim_stale_run(db, run, seen_started_at, status=RunState.FAILED):
             _mark_run_failed(run, db, datetime.now())
         return False
 
@@ -747,7 +748,7 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     now = datetime.now()
     failed = []
     for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
-        if not _claim_stale_run(db, run, run.started_at, status="failed"):
+        if not _claim_stale_run(db, run, run.started_at, status=RunState.FAILED):
             continue
         _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
         db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=DEPLOY_INTERRUPT_MESSAGE))
@@ -787,7 +788,7 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
     commits on a win, and on a loss holds nothing to undo.
     """
     result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
-        {"status": "running", "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
+        {"status": RunState.RUNNING, "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
     )
     return result == 1
 
@@ -817,7 +818,7 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
     run = query.first()
     if not run:
         raise not_found("Run not found")
-    if current_user.role == "admin" or run.user_id == current_user.id:
+    if current_user.role == UserRole.ADMIN or run.user_id == current_user.id:
         return run
     if read_only and can_view_all_runs(current_user):
         return run

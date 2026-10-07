@@ -7,7 +7,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.errors import not_found, validation_error
-from app.models import Feedback, Run, Step, User
+from app.models import Feedback, Run, RunState, Step, User, UserRole, UserStatus
 from app.schemas import AdminStats, AdminStepAvg, AdminUser, AdminUserUpdate
 from app.services import admin_policy
 from app.services.runs_admin_query import submission_split
@@ -30,7 +30,7 @@ def get_admin_stats(db: Session) -> AdminStats:
     total_cost = db.query(func.sum(Run.total_cost)).scalar() or 0.0
 
     completed_runs = (
-        db.query(func.count(Run.id)).filter(Run.status == "complete").scalar() or 0
+        db.query(func.count(Run.id)).filter(Run.status == RunState.COMPLETE).scalar() or 0
     )
     runs_with_feedback = (
         db.query(func.count(func.distinct(Feedback.run_id))).scalar() or 0
@@ -57,7 +57,7 @@ def get_admin_stats(db: Session) -> AdminStats:
         for total, started_at, completed_at in db.query(
             Run.total_duration_seconds, Run.started_at, Run.completed_at
         )
-        .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
+        .filter(Run.status == RunState.COMPLETE, Run.started_at.isnot(None), Run.completed_at.isnot(None))
         .all()
     )
     avg_duration_seconds = round(sum(durations) / len(durations), 1) if durations else None
@@ -99,7 +99,7 @@ def get_users_with_stats(db: Session) -> list[AdminUser]:
             Run.user_id,
             func.count(Run.id).label("total_runs"),
             func.coalesce(func.sum(Run.total_cost), 0.0).label("total_cost"),
-            func.count(case((Run.status == "complete", Run.id))).label("completed_runs"),
+            func.count(case((Run.status == RunState.COMPLETE, Run.id))).label("completed_runs"),
             func.count(case((Run.started_at >= today_start, Run.id))).label("runs_today"),
         )
         .group_by(Run.user_id)
@@ -185,7 +185,7 @@ def get_single_user_stats(user: User, db: Session) -> dict:
     )
     completed_run_count = (
         db.query(func.count(Run.id))
-        .filter(Run.user_id == user.id, Run.status == "complete")
+        .filter(Run.user_id == user.id, Run.status == RunState.COMPLETE)
         .scalar() or 0
     )
 
@@ -200,7 +200,7 @@ def get_single_user_stats(user: User, db: Session) -> dict:
 
 def _active_admin_count(db: Session, *, excluding: int | None = None) -> int:
     """Active admins, less the user ``excluding`` names when given."""
-    query = db.query(func.count(User.id)).filter(User.role == "admin", User.status == "active")
+    query = db.query(func.count(User.id)).filter(User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE)
     if excluding is not None:
         query = query.filter(User.id != excluding)
     return query.scalar()
@@ -301,7 +301,7 @@ def get_step_avg_seconds(db: Session) -> list[AdminStepAvg]:
         )
         .join(Run, Run.id == Step.run_id)
         .filter(
-            Run.status == "complete",
+            Run.status == RunState.COMPLETE,
             Step.duration_seconds.isnot(None),
             Step.stage_id.isnot(None),
         )

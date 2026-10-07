@@ -21,7 +21,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.errors import bad_request, duplicate_file, internal_error
-from app.models import Run, Step, User, can_view_all_runs
+from app.models import Run, RunState, Step, User, can_view_all_runs
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.schemas import UploadResponse
 from app.services.config_service import BASE_OVERHEAD_SECONDS, TIME_PER_1K_TOKENS
@@ -591,7 +591,7 @@ async def create_run_from_bytes(
         id=run_id,
         filename=filename,
         file_type=file_ext[1:],  # Remove dot
-        status="created",
+        status=RunState.CREATED,
         started_at=datetime.now(),
         user_id=current_user.id,
         submission_type=submission_type,
@@ -614,7 +614,7 @@ async def create_run_from_bytes(
         run_id=run_id,
         filename=filename,
         file_type=file_ext[1:],
-        status="created",
+        status=RunState.CREATED,
         message=f"File uploaded successfully. Run ID: {run_id}",
         wcm_template_warning=wcm_template_warning,
         wcm_template_match_ratio=wcm_template_match_ratio,

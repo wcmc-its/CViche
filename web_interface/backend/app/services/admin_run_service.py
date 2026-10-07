@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, contains_eager
 from app.audit_events import RUN_DELETED
 from app.config_loader import get_config
 from app.errors import conflict, internal_error, not_found
-from app.models import Feedback, Run, User
+from app.models import Feedback, Run, RunState, User
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
     AdminRunEntry,
@@ -65,7 +65,7 @@ def list_runs(
     elif status:
         query = query.filter(Run.status == status)
     else:
-        query = query.filter(Run.status != "created")
+        query = query.filter(Run.status != RunState.CREATED)
 
     total = query.count()
     rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
@@ -195,7 +195,7 @@ def hard_delete_run(db: Session, run_id: str, admin: User) -> None:
     run = find_run(db, run_id)
     if not run:
         raise not_found("Run not found.")
-    if run.status == "running":
+    if run.status == RunState.RUNNING:
         raise conflict("Run is still running; wait for it to finish before deleting.")
 
     try:
