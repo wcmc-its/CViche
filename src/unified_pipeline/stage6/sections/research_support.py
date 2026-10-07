@@ -81,6 +81,8 @@ RESEARCH_SUPPORT_SECTIONS = (
     ('M2B', 'Past (Completed) Funding'),
     ('M2C', 'Pending Funding'),
 )
+# The bucket whose amounts are requests, not awards (#1299, #1343).
+PENDING_GRANT_CODE = 'M2C'
 
 
 class GrantFields(TypedDict, total=False):
@@ -1228,7 +1230,8 @@ SHARE_LABEL = 'Your share of award:'
 
 
 def _optional_grant_rows(
-    fields: GrantFields, title: str, pi_name: str | None
+    fields: GrantFields, title: str, pi_name: str | None,
+    cost_rows: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """The rows after the eight the WCM template defines, each only when it has text.
 
@@ -1241,6 +1244,9 @@ def _optional_grant_rows(
     Total requested and Submitted (#1299) carry the two M2C schema fields
     nothing else reads: a pending grant's requested amount and its submission
     date. Your share of award (#817) carries the off-schema `share_total`.
+    The requested row is skipped when `cost_rows` already carries that amount
+    under the same label: a grant moved into Pending renders its
+    `total_funding` as "Total requested:" (#1343).
 
     Status and Notes (#982) keep a grant's own status word and labelled remark
     ("Update: withdrawn"), which reached no cell before. Major project goals
@@ -1255,7 +1261,7 @@ def _optional_grant_rows(
     if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
         rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
     requested = _format_currency(fields.get('total_funding_requested'))
-    if requested:
+    if requested and (TOTAL_REQUESTED_LABEL, requested) not in cost_rows:
         rows.append((TOTAL_REQUESTED_LABEL, requested))
     share = _format_currency(fields.get('share_total'))
     if share:
@@ -1292,17 +1298,24 @@ def _first_rendering_amount(fields: GrantFields) -> str | int | float:
 
 
 def _format_grant_costs(
-    annual_costs: str | int | float | None, total_funding: str | int | float | None
+    annual_costs: str | int | float | None, total_funding: str | int | float | None,
+    code: str,
 ) -> list[tuple[str, str]]:
     """The costs rows as (label, currency text) pairs.
 
     `annual_costs` goes under "Annual direct costs:" whenever it renders. A
-    `total_funding` that renders goes under "Total award:", never under
-    "Annual": alone it is the only costs row, and beside a different yearly
-    amount it is a second row, so neither figure is dropped. With neither, the
-    template's own label and an empty cell. Both arguments are
-    `_create_grant_table`'s locals rather than fresh `fields` reads, so a
-    duplicate-of-title blanking made before the call is what renders here too.
+    `total_funding` that renders goes under "Total award:" (under Pending,
+    `code` M2C, "Total requested:"), never under "Annual": alone it is the
+    only costs row, and beside a different yearly amount it is a second row,
+    so neither figure is dropped. With neither, the template's own label and
+    an empty cell. Both arguments are `_create_grant_table`'s locals rather
+    than fresh `fields` reads, so a duplicate-of-title blanking made before
+    the call is what renders here too.
+
+    Only a grant moved into Pending from M2A/M2B carries `total_funding` under
+    M2C (M2C's schema names it `total_funding_requested`), and what moved it
+    -- its status or its heading -- says it awaits or lost a decision, so its
+    amount is a request, not an award (#1343).
     """
     annual_formatted = _format_currency(annual_costs)
     total_formatted = _format_currency(total_funding)
@@ -1310,8 +1323,13 @@ def _format_grant_costs(
     if annual_formatted or not total_formatted:
         rows.append((ANNUAL_COSTS_LABEL, annual_formatted))
     if total_formatted and total_formatted != annual_formatted:
-        rows.append((TOTAL_AWARD_LABEL, total_formatted))
+        rows.append((_total_amount_label(code), total_formatted))
     return rows
+
+
+def _total_amount_label(code: str) -> str:
+    """The label a grant's `total_funding` renders under in bucket `code`."""
+    return TOTAL_REQUESTED_LABEL if code == PENDING_GRANT_CODE else TOTAL_AWARD_LABEL
 
 
 class ResearchSupportSection:
@@ -1585,7 +1603,7 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
-        cost_rows = _format_grant_costs(annual_direct_costs, total_funding)
+        cost_rows = _format_grant_costs(annual_direct_costs, total_funding, code)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --
@@ -1607,7 +1625,7 @@ class ResearchSupportSection:
             (PI_NAME_LABEL, pi_name),
             (YOUR_ROLE_LABEL, role),
             ('Your percent (%) effort:', percent_effort),
-            *_optional_grant_rows(fields, title, pi_name),
+            *_optional_grant_rows(fields, title, pi_name, cost_rows),
         ]
 
         # Create a new table with 2 columns
