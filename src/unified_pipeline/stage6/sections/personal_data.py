@@ -86,6 +86,7 @@ from ..normalization import (
     WithheldItem,
     _address_cell_text,
     _from_pii_fragment,
+    _is_unlabelled_home_address,
     _labels_its_own_address_slots,
     _labels_its_own_phone_slots,
     _phone_cell_text,
@@ -596,9 +597,10 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     A dict that names its own halves fills both slots from them instead of
     forcing the whole thing into whichever one the raw text happened to label
     (#442); a dict that names no slot is one address and is routed by the
-    raw text, same as a string. A place of birth fills no slot: it is
-    recorded on `withheld`, and SET_ASIDE makes the caller count
-    the entry consumed, since the recovery pass would render its residual,
+    raw text, same as a string. A "Current Address" naming no workplace is
+    the home address (`_is_unlabelled_home_address`, #1426). A place of
+    birth fills no slot: it is recorded on `withheld`, and SET_ASIDE makes
+    the caller count the entry consumed, since the recovery pass would render its residual,
     the place (#1223, EBYSBC EQADVR-02). A value with no street, number or
     state (`_names_a_street_or_number`) is a department or school name, not
     an address, and fills no slot either (#1222, EBYSBC RVROVQ-04). When a
@@ -610,7 +612,8 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     if _labels_its_own_address_slots(address):
         return (home_address or _address_cell_text(address, 'home'),
                 office_address or _address_cell_text(address, 'office'), _AddressFate.ROUTED)
-    if _address_is_home(ctx.text, ctx.pii_fragments, ctx.phone):
+    if (_address_is_home(ctx.text, ctx.pii_fragments, ctx.phone)
+            or _is_unlabelled_home_address(ctx.text, _address_cell_text(address, 'office'))):
         return home_address or _address_cell_text(address, 'home'), office_address, _AddressFate.ROUTED
     if _address_is_birthplace(ctx.text, ctx.pii_fragments):
         withheld.append(WithheldItem(CAT_PLACE_OF_BIRTH, _PERSONAL_DATA_SECTION_LABEL, None))

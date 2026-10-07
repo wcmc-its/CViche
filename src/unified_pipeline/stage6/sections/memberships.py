@@ -93,7 +93,12 @@ from ..formatting import (
     _set_font,
     format_date_range,
 )
-from ..parsing import _is_table_header_entry, _parse_multi_membership_entry
+from ..parsing import (
+    _is_table_header_entry,
+    _parse_multi_membership_entry,
+    is_membership_date_part,
+)
+from ..parsing.dates import DATE_DASH, OPEN_END, YEAR
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -103,24 +108,21 @@ logger = logging.getLogger(__name__)
 # helper below and nowhere else; a bare 'I' at a call site reads like an index.
 _MEMBERSHIPS_TAXONOMY_CODE = 'I'
 
-# The vocabulary `_parse_multi_membership_entry` (stage6/parsing/text.py)
+# The type vocabulary `_parse_multi_membership_entry` (stage6/parsing/text.py)
 # classifies parts with, restated here so `_entry_parts`'s grammar gate accepts
 # exactly the splits that parser can actually read. The parser keeps these
 # private to its own body; duplicating the two rules is deliberate -- a gate
 # that used a DIFFERENT grammar than the consumer would either admit splits the
-# parser then mangles, or reject splits it would have read correctly.
+# parser then mangles, or reject splits it would have read correctly. The date
+# rule is not restated: the gate calls the parser's own `is_membership_date_part`
+# (#665 -- the restated copy took a hyphen only, while the parser it mirrored
+# took en and em dashes too).
 _MEMBERSHIP_TYPE_KEYWORDS = ('member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary')
 _MEMBERSHIP_TYPE_MAX_WORDS = 3
-_DATE_PART_RE = re.compile(
-    r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$'
-    r'|^(\d{4}\s*-\s*(?:present|\d{4}))$',
-    re.IGNORECASE,
-)
-_DATE_PREFIX_RE = re.compile(r'^\d{1,2}/\d{4}')
 
 # One raw range string -> (start, end). Hyphen, en dash and em dash only: a
 # slash is part of a date ("1/1997"), not a separator between two.
-_DATE_RANGE_SPLIT_RE = re.compile(r'\s*[-–—]\s*')
+_DATE_RANGE_SPLIT_RE = re.compile(rf'\s*{DATE_DASH}\s*')
 
 # Word tokens for the type-already-named test: everything that is not a letter
 # or digit is a separator, so "Fellow," "(Fellow)" and "Fellow" tokenize alike.
@@ -154,12 +156,12 @@ _MONTH_NAME_ALTERNATION = (
     r'|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
 )
 _DATE_ENDPOINT = (
-    rf'(?:\b(?:{_MONTH_NAME_ALTERNATION})\.?\s+)?(?:\d{{1,2}}/)?\d{{4}}|present'
+    rf'(?:\b(?:{_MONTH_NAME_ALTERNATION})\.?\s+)?(?:\d{{1,2}}/)?{YEAR}|{OPEN_END}'
 )
 _TRAILING_DATES_RE = re.compile(
     r'[\s,;:(\[]*'
     rf'({_DATE_ENDPOINT})'
-    rf'(?:\s*[-–—]\s*({_DATE_ENDPOINT}))?'
+    rf'(?:\s*{DATE_DASH}\s*({_DATE_ENDPOINT}))?'
     r'[\s)\].,;:]*$',
     re.IGNORECASE,
 )
@@ -217,7 +219,7 @@ def _classify_part(part: str) -> str:
     if any(kw in part.lower() for kw in _MEMBERSHIP_TYPE_KEYWORDS) \
             and len(part.split()) <= _MEMBERSHIP_TYPE_MAX_WORDS:
         return 'type'
-    if _DATE_PART_RE.match(part) or _DATE_PREFIX_RE.match(part):
+    if is_membership_date_part(part):
         return 'date'
     return 'organization'
 

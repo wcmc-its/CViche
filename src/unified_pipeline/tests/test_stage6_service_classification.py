@@ -79,6 +79,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _LEADING_DATE_CELL_RE,
     EXTRAMURAL_ROLE_KEYWORDS,
     _is_known_org_line,
     _is_q2_journal_reviewer,
@@ -116,6 +117,36 @@ def test_reviewer_for_still_triggers_the_reroute():
     with no board signal present."""
     assert _is_q2_journal_reviewer(
         "reviewer for the annals of pediatrics", "member", "", "") is True
+
+
+def test_abstract_reviewer_is_not_journal_reviewing():
+    """#1428 (DXAGUS 94): a meeting's abstract reviewer stays a Q2 row."""
+    line = "society x, abstract reviewer and session chair, 2009"
+    assert _is_q2_journal_reviewer(line, "abstract reviewer", "", "society x") is False
+    assert _split_q2_lines(["Abstract Reviewer, Society X", "Manuscript reviewer, Journal Y"]) == (
+        ["Manuscript reviewer, Journal Y"], ["Abstract Reviewer, Society X"])
+
+
+def test_reviewer_for_needs_a_journal_on_the_line():
+    """#1428 (VYNARH 96): "reviewer for" a program or a grant is not
+    journal reviewing; "reviewer for" a journal still is."""
+    program = "2006: reviewer for the program x cooperative studies program."
+    assert _is_q2_journal_reviewer(program, "reviewer", "", "program x") is False
+    assert _split_q2_lines(["Reviewer for Agency X grants", "Reviewer for Annals of X"]) == (
+        ["Reviewer for Annals of X"], ["Reviewer for Agency X grants"])
+
+
+def test_ad_hoc_reviewer_needs_a_journal_on_the_line():
+    """#1532 (ZCTARO 151-157, BMAMWE 619/622): an "ad hoc reviewer" of a
+    grant program or funder stays a Q2 row; one of a journal still
+    reroutes, through either the single-line or the line-split path."""
+    funder = "2005 - 2006 ad hoc reviewer, fictional science foundation"
+    assert _is_q2_journal_reviewer(funder, "ad hoc reviewer", "", "") is False
+    assert _is_q2_journal_reviewer(
+        "ad hoc reviewer, journal of fictional medicine", "ad hoc reviewer", "", "") is True
+    assert _split_q2_lines(["2016 Ad Hoc Reviewer, Agency X Grant Program",
+                            "Ad hoc reviewer, Annals of X"]) == (
+        ["Ad hoc reviewer, Annals of X"], ["2016 Ad Hoc Reviewer, Agency X Grant Program"])
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +496,43 @@ def test_parse_extramural_leadership_lines_subcommittee_decides_the_role_line():
         ["American Academy of Pediatrics",
          "AHA Hospital Accreditation Stroke Certification Subcommittee",
          "2018-present"]]
+
+
+# ---------------------------------------------------------------------------
+# #665: service.py's date patterns are on the shared stage-6 date grammar
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_parse_extramural_leadership_lines_reads_every_dash(dash):
+    """The pipe-cell date and the date-only column used their own
+    hyphen/en-dash copy, so an em-dash range was read as content."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+
+    gen._parse_extramural_leadership_lines(
+        table,
+        ["Zorblax Society of Medicine",
+         f"   Program Chair | 2015{dash}2017"])
+
+    assert _leadership_rows(table) == [
+        ["Zorblax Society of Medicine", "Program Chair", f"2015{dash}2017"]]
+
+
+@pytest.mark.parametrize("dates", ["2014, 2017—2020", "2018–ongoing", "2016-18, 2020"])
+def test_q2_date_only_continuation_reads_the_shared_grammar(dates):
+    journal, board = _split_q2_lines(["Zorblax Advisory Board", dates])
+    assert (journal, board) == ([], [f"Zorblax Advisory Board {dates}"])
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2010-2014 | Editorial Board", "Editorial Board"),
+    ("2010 - present | Editorial Board", "Editorial Board"),
+    ("2010- | Editorial Board", "Editorial Board"),
+    # a century-less end year: the copy this replaced took it, so the grammar
+    # must too, or "23" is left at the front of the organization
+    ("2016-23\tZorblax Representative", "Zorblax Representative"),
+    ("Editorial Board 2010", "Editorial Board 2010"),
+])
+def test_leading_date_cell_is_stripped_whole(raw, expected):
+    assert _LEADING_DATE_CELL_RE.sub("", raw) == expected

@@ -354,6 +354,12 @@ Lints, ranked by the severity of the failure class they catch:
                           RINASX-14) and an undated role under a dated block
                           rendered with no dates (IEUPKK-14/-17), both INFO.
                           Reads stage 4 and the docx's rows
+14ae. orphaned_fragments  a stage-3b fragment whose text is not in the entry
+                          it belongs to, so no record holds it (#1256:
+                          JNATFN's title tail, MQJAVH's examiner sessions).
+                          WARN; INFO for a header, column label or
+                          organisation sub-heading stage 3b leaves out on
+                          purpose. Reads stage 3b only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -464,6 +470,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_invented_records,
     lint_multi_record_coverage,
     lint_offschema_fields,
+    lint_orphaned_fragments,
     lint_record_boundary,
     lint_role_consistency,
     lint_span_count,
@@ -592,6 +599,7 @@ from unified_pipeline.segmentation_regression import (
     compute_metrics,
     iter_source_block_lines,
 )
+from unified_pipeline.stage3b.fragment_merge import fragment_text_in_parent
 from unified_pipeline.stage_errors import (
     StageError,
     read_stage_errors,
@@ -693,6 +701,7 @@ KNOWN_LINTS = (
     "record_boundary",
     "citation_field_dropped",
     "group_header_context",
+    "orphaned_fragments",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -910,6 +919,12 @@ LINT_PREVALENCE = {
     # render of origin/dev fb466a0f, measured 2026-10-06 (46 of the 111
     # stored analysis/ runs). Same mixed-corpus caveat as above.
     "group_header_context": 0.365,
+    # orphaned_fragments (#1256, FRAG in doctor/PRECISION.md): 17 of 125
+    # distinct stored stage-3b artifacts (the EBYSBC/s7ab/pilot, NDMRSO, X6
+    # and EOAHMI farms and analysis/<uid>) at any severity once
+    # stage3b.fragment_merge has run over them, measured 2026-10-07; 22 of 125
+    # as stored, before it. Same mixed-corpus caveat as above.
+    "orphaned_fragments": 0.136,
 }
 
 
@@ -1463,6 +1478,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("orphaned_fragments", lint_orphaned_fragments, ("stage_3b",)),
 )
 
 
@@ -1543,11 +1559,12 @@ def _build_metrics(views: dict) -> dict:
             corrections = stats.get("total_post_corrections")
             if isinstance(corrections, int) and not isinstance(corrections, bool):
                 metrics["total_post_corrections"] = corrections
-            fr = stats.get("fragment_reconnection") or {}
-            f_reviewed = fr.get("fragments_reviewed") if isinstance(fr, dict) else None
-            if f_reviewed:
+            # #1256: the share of tagged fragments whose text their parent holds, not of tags.
+            entries = stage_3b.get("entries") or []
+            fragments = [i for i, e in enumerate(entries) if isinstance(e, dict) and e.get("is_fragment")]
+            if fragments and all(isinstance(e, dict) for e in entries):
                 metrics["fragment_reconnection_yield"] = round(
-                    fr.get("fragments_reconnected", 0) / f_reviewed, 4)
+                    sum(fragment_text_in_parent(entries, i) for i in fragments) / len(fragments), 4)
     except Exception:
         logger.exception("run_doctor: stage3b-derived metrics crashed")
 

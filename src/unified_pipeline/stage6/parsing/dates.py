@@ -59,6 +59,37 @@ CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now',
 RANGE_START_KEY = 'start_date'
 RANGE_END_KEY = 'end_date'
 
+# The regex grammar every stage-6 date recogniser is composed from: the
+# committee and membership parsers in text.py, and the date patterns in
+# sections/service.py and sections/memberships.py (#665). Those used to spell
+# their own dashes, years and open ends, and had drifted -- service.py took no
+# em dash, memberships.py took only a hyphen while the parser it gates took all
+# three, and only service.py knew "current" and "ongoing". A change to a dash
+# or to how a range may end now reaches every one of them.
+DATE_DASH = r'[-–—]'
+YEAR = r'\d{4}'
+# The words a CV writes for an end that has not come yet. A regex subset of
+# CURRENT_DATE_VALUES: "now", "date" and "to date" are left out because each is
+# also ordinary prose ("to date" ends sentences), and a recogniser that admits
+# them reads text as a date range.
+OPEN_END = r'(?:present|current|ongoing)'
+# A range's end year written with its century dropped ("2016-23"). Not when a
+# digit or a slash follows: in "4/2013-12/2014" the "12" is a month, and
+# reading it as an end year splits that range into "2013-12" and "/2014".
+SHORT_END_YEAR = r'\d{2}(?![\d/])'
+RANGE_END = rf'(?:{YEAR}|{SHORT_END_YEAR}|{OPEN_END})'
+# "2001-2005", "2016-23", "2010-present".
+YEAR_SPAN = rf'{YEAR}\s*{DATE_DASH}\s*{RANGE_END}'
+# "2001", "2001-2005", "2010-present".
+YEAR_OR_SPAN = rf'{YEAR}(?:\s*{DATE_DASH}\s*{RANGE_END})?'
+# YEAR_OR_SPAN plus a range whose end is missing altogether ("2001-").
+YEAR_OR_OPEN_SPAN = rf'{YEAR}(?:\s*{DATE_DASH}\s*{RANGE_END}?)?'
+# Several of the above, comma-separated: "2014, 2017-2020".
+YEAR_LIST = rf'{YEAR_OR_SPAN}(?:\s*,\s*{YEAR_OR_SPAN})*'
+# "3/2010", "03/2010-present", "3/2010-6/2012".
+MONTH_YEAR_DATE = r'\d{1,2}/?\d{0,4}'
+MONTH_YEAR_SPAN = rf'{MONTH_YEAR_DATE}\s*{DATE_DASH}\s*(?:{OPEN_END}|{MONTH_YEAR_DATE})'
+
 
 def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int | None]:
     """Parse a date string into (year, month, day) ints; any component absent

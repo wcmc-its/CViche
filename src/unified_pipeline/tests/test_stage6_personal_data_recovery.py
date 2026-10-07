@@ -1286,6 +1286,30 @@ def test_a_banner_that_names_its_workplace_keeps_its_address_beside_a_home_numbe
     assert "555-0198" not in _all_text(tmp_path / "out.docx")
 
 
+def test_1426_a_current_address_naming_no_workplace_is_withheld_as_home(tmp_path):
+    """#1426 (NDMRSO MQJAVH 8): "Current Address" with a street and no
+    institution, department or building word is the owner's home address. The
+    Office catch-all rendered it as the Office address; it now goes to the
+    (withheld) home slot, with the notice."""
+    rows = _contact_rows(tmp_path, [
+        _a("Current Address\t12 Sample Lane\tExampleton, ZZ  00000",
+           {"address": "12 Sample Lane, Exampleton, ZZ 00000"}),
+    ])
+    assert "12 Sample Lane" not in _all_text(tmp_path / "out.docx")
+    assert rows["Office address:"] == ""
+    assert CAT_HOME_CONTACT in _withheld_comment(tmp_path)
+
+
+def test_1426_a_current_address_naming_its_department_stays_the_office_address(tmp_path):
+    """The negative control: a department word keeps a "Current Address" in
+    Office address."""
+    rows = _contact_rows(tmp_path, [
+        _a("Current Address\tDepartment of Example\t12 Sample Lane\tExampleton, ZZ 00000",
+           {"address": "Department of Example, 12 Sample Lane, Exampleton, ZZ 00000"}),
+    ])
+    assert "12 Sample Lane" in rows["Office address:"]
+
+
 def test_an_address_beside_an_unlabelled_or_work_number_still_fills_the_office_row(tmp_path):
     """Only a HOME label moves the address: a banner with a plain or a
     work-labelled number keeps its address in Office address, as before."""

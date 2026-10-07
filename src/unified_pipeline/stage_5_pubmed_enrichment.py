@@ -190,6 +190,23 @@ PUBLISHED_ARTICLE_CODES = frozenset({'S1', 'S2', 'S6'})
 # journal paper of the same title (SDEBQJ, dev-239, 2026-10-02); a PubMed
 # journal article is no replacement for a chapter or a book either.
 IN_PRESS_ELIGIBLE_CODES = PUBLISHED_ARTICLE_CODES | {IN_REVIEW_CODE}
+# PubMed often indexes an author's reply under the letter it answers, so the
+# PMID a CV gives for its reply resolves to the letter, by someone else
+# (VYNARH, dev-246: three "(Reply to Editor)" entries rendered the letter
+# writers in place of the owner, #1438). The CV text marks a reply in these
+# shapes; a bare "response" is not one ("immune response", "Dose-Response").
+REPLY_CITATION_PATTERN = re.compile(
+    r"\b(?:in\s+)?repl(?:y|ies)\s+to\b"
+    r"|\bresponse\s+to\s+(?:the\s+|a\s+)?"
+    r"(?:letters?|editors?|editorials?|comments?|commentary|correspondence)\b"
+    r"|\bauthors?['\u2019]?s?\s+(?:reply|response)\b"
+    r"|\(\s*(?:reply|response)\s*\)", re.I)
+# A record whose own title says reply or response is the reply itself, which
+# PubMed titles "Reply", "Response to ...", "The authors reply" and so on.
+REPLY_RECORD_TITLE_PATTERN = re.compile(r'\b(?:repl(?:y|ies)|response|rebuttal)\b', re.I)
+# The status of a reply whose record is the item it replies to. Not a
+# *_failed status: the CV's own citation is the right one to render.
+REPLY_TARGET_STATUS = 'reply_resolved_to_replied_item'
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
@@ -267,6 +284,27 @@ def pubmed_list_drops_the_owner(cv_authors: str | list[str] | None, target_name:
     return bool(owner & cv_words and surnames
                 and all(s <= cv_words for s in surnames)
                 and not any(owner & s for s in surnames))
+
+
+def cites_a_reply(text: str, title: str = '') -> bool:
+    """Whether the CV's citation text calls the entry a reply. A marker inside
+    the title is the title's, so the text must hold more matches than the
+    title does (the counting `in_press_phrase` uses)."""
+    return (len(REPLY_CITATION_PATTERN.findall(text or ''))
+            > len(REPLY_CITATION_PATTERN.findall(title or '')))
+
+
+def record_is_the_replied_item(entry: dict, pubmed_record: dict) -> bool:
+    """Whether `pubmed_record` is the item a CV reply answers rather than the
+    reply: the CV calls the entry a reply, the record's title does not, and
+    the record names none of the CV's authors (#1438). A record naming a CV
+    author may be the reply indexed with its letter, and stays."""
+    fields = entry.get('extracted_fields') or {}
+    title = fields.get('title') or fields.get('chapter_title') or ''
+    record_titles = f"{pubmed_record.get('title') or ''} {pubmed_record.get('vernacular_title') or ''}"
+    return (cites_a_reply(entry.get('text') or '', title)
+            and not REPLY_RECORD_TITLE_PATTERN.search(record_titles)
+            and not shares_an_author(fields.get('authors'), pubmed_record.get('authors') or []))
 
 
 def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | None) -> bool:
@@ -410,6 +448,7 @@ class PubMedEnricher:
             'doi_searches': 0,
             'failed_lookups': 0,
             'title_mismatches': 0,
+            'reply_targets_rejected': 0,
             'api_errors': 0,
             'title_searches': 0,
             'in_press_resolved': 0,
@@ -1232,6 +1271,9 @@ class PubMedEnricher:
             self._reject_record(entry, source, pubmed_record.get('pmid'),
                                 pubmed_record.get('title'), overlap)
             return False
+        if record_is_the_replied_item(entry, pubmed_record):
+            self._reject_replied_item(entry, source, pubmed_record)
+            return False
         self._acceptances.append(_Acceptance(
             entry, copy.deepcopy(entry), pubmed_record.get('pmid'),
             pubmed_record.get('title'), source, overlap))
@@ -1259,6 +1301,19 @@ class PubMedEnricher:
             entry['enrichment_rejected']['shared_pmid_with'] = shared_pmid_with
         self.stats['title_mismatches'] += 1
         self.stats['failed_lookups'] += 1
+
+    def _reject_replied_item(self, entry: dict, source: str, pubmed_record: dict) -> None:
+        """Leave a CV reply on its own fields when its record is the item it
+        replies to (#1438), with that record kept under `enrichment_rejected`
+        for audit."""
+        entry['enrichment_status'] = REPLY_TARGET_STATUS
+        entry['enrichment_rejected'] = {
+            'source': source,
+            'pubmed_pmid': pubmed_record.get('pmid'),
+            'pubmed_title': pubmed_record.get('title'),
+            'pubmed_authors': pubmed_record.get('authors_vancouver'),
+        }
+        self.stats['reply_targets_rejected'] += 1
 
     def _release_weaker_shared_pmids(self) -> None:
         """When one PMID was accepted for several entries, the entry whose

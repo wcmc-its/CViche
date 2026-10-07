@@ -1493,3 +1493,75 @@ def test_pubmed_author_list_naming_the_owner_still_renders(monkeypatch):
     [result] = enricher._enrich_by_pmid([(_owner_entry(), PMID)])
     assert result['enrichment_data']['pubmed_authors'] == 'Abel A, Quill JA'
     assert 'pubmed_authors_without_owner' not in result['enrichment_data']
+
+
+# #1438 (VYNARH, dev-246): PubMed indexes an author's reply under the letter
+# it answers, so the CV's "(Reply to Editor)" PMID resolved to the letter and
+# the letter's writer rendered in place of the owner.
+REPLY_TITLE = 'Tidal heron foraging in estuarine marshes'
+REPLY_CV_AUTHORS = 'Quill JA, Wren D'
+
+
+def _reply_entry(note='(Reply to Editor)', authors=REPLY_CV_AUTHORS):
+    return {'taxonomy_code': 'S2',
+            'text': f'{authors}. {REPLY_TITLE}. Heart Journal. 2025;7:101 {note}. PMID: {PMID}.',
+            'extracted_fields': {'title': REPLY_TITLE, 'authors': authors,
+                                 'target_name': 'Quill JA', 'pmid': PMID}}
+
+
+def _letter_response(title=REPLY_TITLE, authors=('Abel A',)):
+    return _article_set(_article(PMID, title, pubtypes=('Comment', 'Letter'), authors=authors))
+
+
+@pytest.mark.parametrize('note', [
+    '(Reply to Editor)', '(Response to Letter to Editor by A. Abel)', '(In reply to Abel)',
+    "(Authors' response)", '(reply)'])
+def test_reply_whose_pmid_is_the_letter_keeps_the_cv_citation(monkeypatch, note):
+    enricher, _, _ = _make(monkeypatch, [_letter_response()])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(note), PMID)])
+    assert result['enrichment_status'] == stage5.REPLY_TARGET_STATUS
+    assert 'enrichment_data' not in result  # stage 6 renders the CV's own citation
+    assert result['enrichment_rejected'] == {
+        'source': 'pmid', 'pubmed_pmid': PMID, 'pubmed_title': REPLY_TITLE,
+        'pubmed_authors': 'Abel A'}
+    assert enricher.stats['reply_targets_rejected'] == 1
+    assert enricher.stats['enriched'] == 0
+    assert enricher.stats['failed_lookups'] == 0
+
+
+def test_reply_record_titled_as_a_reply_is_accepted(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_letter_response(title=f'Reply: {REPLY_TITLE}')])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_reply_record_naming_a_cv_author_is_accepted(monkeypatch):
+    # A record with the CV's author may be the reply indexed with its letter.
+    enricher, _, _ = _make(monkeypatch, [_letter_response(authors=('Abel A', 'Quill JA'))])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_entry_not_called_a_reply_is_accepted(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_letter_response()])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(note='(Letter)'), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_reply_doi_path_does_not_store_the_letters_pmid(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, json_data=ESEARCH_JSON), _letter_response()])
+    entry = _reply_entry()
+    del entry['extracted_fields']['pmid']
+    [result] = enricher._enrich_by_doi([(entry, DOI)])
+    assert result['enrichment_status'] == stage5.REPLY_TARGET_STATUS
+    assert result['enrichment_rejected']['source'] == 'doi_search'
+    assert 'pmid' not in result['extracted_fields']
+
+
+def test_reply_marker_inside_the_title_is_not_a_reply():
+    title = 'Response to the editor as a teaching device'
+    assert not stage5.cites_a_reply(f'Quill JA. {title}. J Ed. 2020.', title)
+    assert stage5.cites_a_reply(f'Quill JA. {title}. J Ed. 2020 (Reply to Editor).', title)
+    # "response" alone is a common title word, not a reply.
+    assert not stage5.cites_a_reply('Quill JA. Immune response to vaccination. 2020.')
+    assert not stage5.cites_a_reply('Quill JA. Dose-Response in cognition. 2020.')

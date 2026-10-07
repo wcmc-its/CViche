@@ -961,7 +961,8 @@ def test_normalize_institution_falls_through_an_empty_cleaned_name():
     empty one must fall through to official_name and then to the raw
     extracted field, not blank the institution."""
     enriched = {"extracted_fields": {"institution": "Duke Medical Center, Durham, NC"},
-                "institution_enrichment": {"cleaned_name": "Duke Medical Center"}}
+                "institution_enrichment": {"cleaned_name": "Duke Medical Center",
+                                           "city": "Durham", "state": "NC"}}
     assert _normalize_training_entry(enriched, "C1").institution == "Duke Medical Center"
 
     official_only = {"extracted_fields": {"institution": "Fictional Regional Hosp., Springfield"},

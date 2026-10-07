@@ -79,6 +79,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_invented_records,
     lint_multi_record_coverage,
     lint_offschema_fields,
+    lint_orphaned_fragments,
     lint_record_boundary,
     lint_role_consistency,
     lint_span_count,
@@ -4446,3 +4447,56 @@ def test_span_count_judges_teaching_rows():
     findings = lint_span_count({"entries": [entry]},
                                [("p", "2003-2013 - Example Course")])
     assert [f["lint"] for f in findings] == ["span_count"]
+
+
+# ---------------------------------------------------------------------------
+# orphaned_fragments (#1256) -- a stage-3b fragment whose text no record
+# holds: WARN, or INFO when stage 3b left a label or an organisation
+# sub-heading out on purpose.
+
+def _orphan_entries(*fragments):
+    parent = {"text": "Examiner for a specialty board", "taxonomy_code": "Q2",
+              "element_idx_start": 10}
+    return {"entries": [parent, *fragments]}
+
+
+def _orphan(text, start, reasoning="completes the previous entry", code="Q2"):
+    return {"text": text, "taxonomy_code": code, "element_idx_start": start,
+            "is_fragment": True, "fragment_of": 0, "fragment_reasoning": reasoning}
+
+
+def test_orphaned_fragments_warns_on_a_fragment_never_merged():
+    """MQJAVH 201 as stored before the merge: the session line is in no record."""
+    findings = lint_orphaned_fragments(_orphan_entries(_orphan("Springfield, 1985", 11)))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("orphaned_fragments", "WARN")]
+    assert "entry 11" in findings[0]["message"] and "never merged" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["Springfield, 1985"]
+
+
+def test_orphaned_fragments_is_silent_once_the_parent_holds_the_text():
+    stage3b = _orphan_entries(_orphan("Springfield, 1985", 11))
+    stage3b["entries"][0]["text"] += " Springfield, 1985"
+    assert lint_orphaned_fragments(stage3b) == []
+
+
+def test_orphaned_fragments_reports_a_label_left_out_on_purpose_at_info():
+    findings = lint_orphaned_fragments(_orphan_entries(
+        _orphan("Institution Title Dates", 11, reasoning="a header/column label")))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "header_or_label" in findings[0]["message"]
+
+
+def test_orphaned_fragments_reports_an_organisation_sub_heading_at_info():
+    findings = lint_orphaned_fragments(_orphan_entries(_orphan("Example State University", 11)))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_orphaned_fragments_warns_on_a_skip_that_loses_content():
+    """RWBQKF 94: a numbered item kept out of item 2 is still lost."""
+    findings = lint_orphaned_fragments(_orphan_entries(_orphan("1. Collaboration with colleagues", 11)))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "numbered_list_item" in findings[0]["message"]
+
+
+def test_orphaned_fragments_is_silent_on_a_list_holding_a_non_entry():
+    assert lint_orphaned_fragments({"entries": [None, _orphan("tail", 1)]}) == []

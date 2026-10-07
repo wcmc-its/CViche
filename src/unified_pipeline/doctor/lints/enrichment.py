@@ -59,9 +59,11 @@ def lint_enrichment_failures(stage5e: dict) -> list[dict]:
     (lookup_failed, pmcid_lookup_failed, doi_found_but_fetch_failed,
     title_check_failed; pmcid_conversion_failed in stage-5 output written before
     #1219 split it): their citations degrade to CV-extracted fields. Non-failure
-    outcomes (enriched, no_identifier, doi_not_in_pubmed, pmcid_not_found) are
-    expected vocabulary, and so is a title check stage 5 failed on purpose
-    because another entry kept the shared PMID (`SHARED_PMID_REJECTION_KEY`)."""
+    outcomes (enriched, no_identifier, doi_not_in_pubmed, pmcid_not_found, and
+    reply_resolved_to_replied_item, a CV reply whose PMID is the letter it
+    answers, #1438) are expected vocabulary, and so is a title check stage 5
+    failed on purpose because another entry kept the shared PMID
+    (`SHARED_PMID_REJECTION_KEY`)."""
     failed = [e for e in stage5e.get("entries", [])
               if str(e.get("enrichment_status") or "").endswith("_failed")
               and not _restored_from_shared_pmid(e)]

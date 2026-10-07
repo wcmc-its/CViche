@@ -139,13 +139,16 @@ src/unified_pipeline/config/institution_cache.json
 # the PNGs are regenerable via scripts/diagrams/build.mjs.
 docs/architecture/*.png
 
-# Rendered secret material for k8s overlays (generated at build time by buildspec.yaml; never commit)
+# Secret material for k8s overlays (never commit).
 # The db.env, auth_config.yaml and cviche-saml-sp-prod.*.pem files are committed
 # as intentionally empty/placeholder content and stay tracked, so the overlays
-# render from a clean checkout / CI (issue #108); buildspec.yaml overwrites them
-# with real values at deploy time. This ignore only blocks *rendered* secrets
-# (session secret, SAML SP key/cert) from being re-added once a local
-# build has populated them.
+# render from a clean checkout / CI (issue #108). Because they are tracked,
+# these rules do NOT protect them: git ignores .gitignore for tracked paths, so
+# a populated copy shows up as an ordinary modification and `git commit -a`
+# would commit it. The protection is that buildspec.yaml never writes into the
+# checkout: it renders secrets into a mktemp -d copy of k8s/ and applies that
+# (#688). Do the same for any local render. These rules only keep NEW untracked
+# key/cert files (e.g. a differently named *.key) out of `git add`.
 k8s/overlays/*/db.env
 k8s/overlays/*/auth_config.yaml
 k8s/overlays/*/*.pem
