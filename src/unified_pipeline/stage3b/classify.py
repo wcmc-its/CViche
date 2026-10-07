@@ -818,7 +818,9 @@ def reconnect_fragments(
         entries: List of classified entries (sorted by element_idx_start)
 
     Returns:
-        Tuple of (updated_entries, stats) where fragments are annotated
+        Tuple of (updated_entries, stats) where fragments are annotated.
+        Only annotated: `fragment_merge.merge_fragment_text` folds their text
+        into the parent at the end of stage 3b (#1256).
     """
     # Find T entries that look like fragments (short, low confidence)
     fragment_candidates = []
