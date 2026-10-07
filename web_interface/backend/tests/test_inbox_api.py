@@ -4,6 +4,7 @@ Ownership isolation (admins see only their own), discard, and submit through
 the shared upload core. Storage is a LocalRunStorage in tmp_path; users and
 files are invented.
 """
+import functools
 import hashlib
 import io
 from datetime import datetime
@@ -28,7 +29,11 @@ from app.storage.local_storage import LocalRunStorage
 ATTEST = {"submission_type": "own_cv"}
 
 
+@functools.cache
 def _docx(label="a") -> bytes:
+    """One set of bytes per label (#1325): python-docx stamps the save time into
+    the zip, so two saves either side of a 2-second boundary hash differently and
+    a test that holds the "same" file twice would lose its duplicate match."""
     document = Document()
     document.add_paragraph(f"Synthetic CV {label}. " * 60)
     buffer = io.BytesIO()
