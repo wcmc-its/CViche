@@ -440,6 +440,7 @@ def enforced_foreign_keys() -> Iterator[None]:
     """Enforce FKs the way MySQL InnoDB does. The suite's SQLite engine leaves
     them off, so a delete that MySQL refuses would otherwise pass here."""
     from sqlalchemy import text
+
     from tests.conftest import engine
     with engine.connect() as conn:
         conn.execute(text("PRAGMA foreign_keys=ON"))
