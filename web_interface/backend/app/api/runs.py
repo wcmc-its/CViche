@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Query as SAQuery
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.upload import UPLOAD_DIR, commit_run_or_compensate, create_run_archive
+from app.api.upload import UPLOAD_DIR, compensated_run_creation, create_run_archive
 from app.auth import (
     can_view_all_runs,
     get_current_user,
@@ -598,50 +598,50 @@ async def restart_run(
                 ),
             },
         )
-    storage = get_storage()
+    # Everything from here to the commit compensates the archive on failure (#802).
+    with compensated_run_creation(db, new_run_id, current_user.email, new_file_path):
+        storage = get_storage()
 
-    # Cross-run, browsable-by-submitter index (best-effort; never fail the
-    # restart). Mirrors /upload so restarted runs are findable by submitter too.
-    try:
-        storage.put_global(
-            f"by-submitter/{current_user.email.lower()}/{new_run_id}/manifest.json",
-            manifest,
+        # Cross-run, browsable-by-submitter index (best-effort; never fail the
+        # restart). Mirrors /upload so restarted runs are findable by submitter too.
+        try:
+            storage.put_global(
+                f"by-submitter/{current_user.email.lower()}/{new_run_id}/manifest.json",
+                manifest,
+            )
+        except Exception as e:
+            logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
+
+        # Create new Run record, inheriting submission_type and the user's
+        # output-rendering choices (issues #153, #199) from the original. Without
+        # this the restarted run silently reverts to the column defaults (track
+        # changes ON, classification comments OFF, strip instructions ON),
+        # discarding a choice the user made at upload.
+        new_run = Run(
+            id=new_run_id,
+            filename=original_run.filename,
+            file_type=original_run.file_type,
+            status=RunState.CREATED,
+            started_at=datetime.now(),
+            user_id=current_user.id,
+            submission_type=original_run.submission_type,
+            show_track_changes=original_run.show_track_changes,
+            show_pipeline_comments=original_run.show_pipeline_comments,
+            strip_template_instructions=original_run.strip_template_instructions,
+            scanned_pages=original_run.scanned_pages,  # same file, same pages (#1282)
         )
-    except Exception as e:
-        logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
+        db.add(new_run)
 
-    # Create new Run record, inheriting submission_type and the user's
-    # output-rendering choices (issues #153, #199) from the original. Without
-    # this the restarted run silently reverts to the column defaults (track
-    # changes ON, classification comments OFF, strip instructions ON),
-    # discarding a choice the user made at upload.
-    new_run = Run(
-        id=new_run_id,
-        filename=original_run.filename,
-        file_type=original_run.file_type,
-        status=RunState.CREATED,
-        started_at=datetime.now(),
-        user_id=current_user.id,
-        submission_type=original_run.submission_type,
-        show_track_changes=original_run.show_track_changes,
-        show_pipeline_comments=original_run.show_pipeline_comments,
-        strip_template_instructions=original_run.strip_template_instructions,
-        scanned_pages=original_run.scanned_pages,  # same file, same pages (#1282)
-    )
-    db.add(new_run)
-
-    # Create Step records from step registry
-    for step_def in STEP_REGISTRY:
-        step = Step(
-            run_id=new_run_id,
-            step_number=step_def.number,
-            stage_id=step_def.stage_id,
-            step_name=step_def.name,
-            status="pending",
-        )
-        db.add(step)
-
-    commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
+        # Create Step records from step registry
+        for step_def in STEP_REGISTRY:
+            step = Step(
+                run_id=new_run_id,
+                step_number=step_def.number,
+                stage_id=step_def.stage_id,
+                step_name=step_def.name,
+                status="pending",
+            )
+            db.add(step)
 
     # #181: restart replaces a still-running original rather than forking a
     # second copy that keeps spending alongside the new run. Done last, after
@@ -662,7 +662,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     the run is still running first.
 
     Commit BEFORE signalling, not after: db.commit() can raise (see
-    commit_run_or_compensate's #802 handling above), while orchestrator_cancel
+    compensated_run_creation's #802 handling above), while orchestrator_cancel
     cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
     wraps its body in try/except (redis_broker.py, "best-effort"). A commit
     failure here leaves the run running with nothing told to stop it --
