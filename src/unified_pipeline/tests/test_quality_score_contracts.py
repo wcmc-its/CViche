@@ -2550,6 +2550,77 @@ def test_score_run_caps_a_run_whose_owner_was_cut_from_three_citations(tmp_path)
                             "citations") for f in result["flags"]), result["flags"]
 
 
+# ------------------------------------------- #1259 co-authors cut to "et al."
+# The same invented owner, now first on every source list, so the cut keeps
+# them and drops two co-authors: etal_added's shape, not owner_missing's.
+
+_ETAL_AUTHORS = f"Thornquist R, {_CUT_KEPT}, Garrow G"
+_ETAL_KEPT = "Thornquist R, Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E"
+
+
+def _etal_cut_run(tmp_path: Path, cut: int, kept: int = 0) -> Path:
+    """A run whose bibliography renders `cut` citations cut to six authors and
+    "et al." and `kept` more with every author."""
+    titles = _CUT_TITLES[:cut + kept]
+    _write_json(tmp_path, "X_fields.json", {
+        "cv_owner": _CUT_OWNER,
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"element_idx_start": 10 + n, "taxonomy_code": "S1",
+                     "text": f"{_ETAL_AUTHORS}. {title}. {_CUT_TRAILER}",
+                     "extracted_fields": {"authors": _ETAL_AUTHORS}, "extraction_success": True}
+                    for n, title in enumerate(titles)]})
+    lines = [f"{_ETAL_KEPT}, et al. {title}. {_CUT_TRAILER}" for title in titles[:cut]]
+    lines += [f"{_ETAL_AUTHORS}. {title}. {_CUT_TRAILER}" for title in titles[cut:]]
+    _make_docx(["BIBLIOGRAPHY", "Peer-reviewed Research Articles:"]
+               + [f"{n}. {line}" for n, line in enumerate(lines, 1)]).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_etal_added_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.ETAL_ADDED_CAP_MIN == 3
+    assert qs.score_etal_added(_etal_cut_run(tmp_path, cut=3)) == (
+        1.0, f"etal_added_citations=3; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_etal_added_gate_quiet_below_the_minimum_count(tmp_path):
+    """Two cut lists and one full one: the finding reports, the gate does not
+    cap."""
+    assert qs.score_etal_added(_etal_cut_run(tmp_path, cut=2, kept=1)) == (
+        0.0, "etal_added_citations=2", None)
+
+
+def test_etal_added_gate_leaves_an_owner_cut_to_the_owner_gate(tmp_path):
+    """Three cut lists that also lost the owner are owner_missing's findings,
+    not etal_added's: the two gates never count one citation twice."""
+    _owner_cut_run(tmp_path, cut=3)
+    assert qs.score_etal_added(tmp_path) == (0.0, "etal_added_citations=0", None)
+
+
+def test_etal_added_gate_not_evaluated_without_its_artifacts(tmp_path):
+    assert qs.score_etal_added(tmp_path) == (0.0, "no fields.json found; not evaluated", None)
+    _etal_cut_run(tmp_path, cut=3)
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_etal_added(tmp_path) == (0.0, "no docx found; not evaluated", None)
+
+
+def test_score_run_caps_a_run_with_three_cut_author_lists(tmp_path):
+    """The wire: registered in CAP_ONLY_GATES, weightless, and its flag names it."""
+    assert qs.score_etal_added in [fn for _, fn in qs.CAP_ONLY_GATES]
+    assert qs.score_etal_added not in [fn for _, _, fn in qs.DIMENSIONS]
+    _complete_run_dir(tmp_path)
+    result = score_run(_etal_cut_run(tmp_path, cut=3))
+    assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP], result["flags"]
+    assert result["totalScore"] <= qs.CONTENT_LOSS_CAP
+    assert any(f.startswith(f"HARD-FAIL cap={qs.CONTENT_LOSS_CAP}: Co-authors cut from citations")
+               for f in result["flags"]), result["flags"]
+
+
+def test_score_run_does_not_cap_two_cut_author_lists(tmp_path):
+    _complete_run_dir(tmp_path)
+    result = score_run(_etal_cut_run(tmp_path, cut=2, kept=1))
+    assert result["hard_fail_caps_applied"] == [], result["flags"]
+
+
 # -------------------------- zero-false-positive WARN lints into the content cap
 # grant_boundary (#1226), grant_bucket's application shape (#1343) and
 # junk_or_header_row (EBYSBC E8/E10/E29). Invented grants and institutions.
