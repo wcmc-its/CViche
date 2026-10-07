@@ -438,6 +438,11 @@ LINT_COPY = {
         "a co-presenter), but its citation in the document does not, usually because the author "
         "list was cut to the first six names and \"et al.\".",
         "Copy the full author list, with the faculty member's name, from the source CV."),
+    "orphaned_fragments": LintCopy(
+        "Line not joined to its entry",
+        "A line in the source CV continues the entry next to it, but could not be safely "
+        "joined to that entry, so its text may be missing from the document.",
+        "Check the named entries against the source CV and add any missing text."),
     "etal_added": LintCopy(
         "Co-authors cut to \"et al.\"",
         "A citation lists its first authors and then \"et al.\", although the source CV lists "
@@ -578,6 +583,12 @@ LINT_COPY = {
         "appears on its own, a lead line sits apart from its list, or a role has no dates.",
         "Add the society, institution, course or dates from the line above to each flagged "
         "row, and delete a lead line that shows as a row of its own."),
+    "stage4_unplaced_items": LintCopy(
+        "Records read but not placed",
+        "While reading a group of entries, some records came back that could not be matched "
+        "to any entry, so they are not in the document.",
+        "Check the entries in the named categories against the source CV and add any missing "
+        "records."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

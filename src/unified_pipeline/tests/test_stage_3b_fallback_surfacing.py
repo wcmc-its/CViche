@@ -381,6 +381,33 @@ def test_run_survives_partial_failure_and_reports_stats(monkeypatch, tmp_path):
     assert sources == ["fallback", "llm"]
 
 
+def test_run_folds_fragment_text_into_the_written_artifact(monkeypatch, tmp_path):
+    """#1256: `merge_fragment_text` runs on the final entry list and what it
+    returns is what the artifact holds, with its stats under meta.stats."""
+    seen = {}
+
+    def _merge(entries):
+        seen["sources"] = [e.get("classification_source") for e in entries]
+        entries[0]["text"] += " (merged tail)"
+        return entries, {"fragments_merged": 1}
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="H"))
+    monkeypatch.setattr(stage_3b, "merge_fragment_text", _merge)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES[:1], _MAPPINGS)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    assert seen["sources"] == ["llm"]
+    assert output["entries"][0]["text"].endswith(" (merged tail)")
+    assert output["meta"]["stats"]["fragment_merge"] == {"fragments_merged": 1}
+
+
 def test_run_with_zero_entries_does_not_raise_zero_llm_error(monkeypatch, tmp_path):
     """Zero entries (empty content list) is NOT the same state as "entries
     exist but their text is blank" (see test_run_with_only_empty_entries_does_not_fail

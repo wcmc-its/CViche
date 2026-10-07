@@ -11,6 +11,7 @@ This is significantly cheaper and faster than vision-based approaches.
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
@@ -357,6 +358,90 @@ def _carry_grid_metadata(source_row: list[Any], new_row: list[Any]) -> None:
                 new.setdefault(key, src[key])
 
 
+_MIN_ALIGNED_LINES = 3  # aligned lists need 3+ lines; matching 2-line cells stay whole
+_MIN_PARALLEL_CELLS = 2  # cells that must agree on a count before it reads as parallel lists
+
+CellSplits = list[list[str] | None]
+
+
+def _cell_text(cell: dict[str, Any] | str) -> str:
+    return cell.get("text", "") if isinstance(cell, dict) else str(cell)
+
+
+def _nonblank_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.strip().split("\n") if line.strip()]
+
+
+def _double_newline_splits(
+    row: list[dict[str, Any]], min_chars: int, min_newlines: int
+) -> tuple[CellSplits, int]:
+    """Split each cell on blank lines (\\n\\n). Returns (per-cell segments or None, max segments)."""
+    cell_splits: CellSplits = []
+    max_splits = 1
+    for cell in row:
+        cell_text = _cell_text(cell)
+        if "\n\n" not in cell_text:
+            cell_splits.append(None)
+            continue
+        segments = [s.strip() for s in cell_text.split("\n\n") if s.strip()]
+        # Split if ANY segment is substantial, or if there are 2+ non-trivial
+        # segments even when short ("MBA\n\nBS").
+        has_substantial = any(len(s) > min_chars or s.count("\n") >= min_newlines for s in segments)
+        has_multiple_items = len(segments) >= 2 and all(len(s) >= 2 for s in segments)
+        if has_substantial or has_multiple_items:
+            cell_splits.append(segments)  # keep ALL segments, not just substantial ones
+            max_splits = max(max_splits, len(segments))
+        else:
+            cell_splits.append(None)
+    return cell_splits, max_splits
+
+
+def _aligned_line_splits(row: list[dict[str, Any]]) -> tuple[CellSplits, int]:
+    """Split cells that are stacked parallel lists: 2+ cells with the same
+    non-blank line count >= 3 (blank paragraphs ignored). A shorter date
+    column is spread over the sub-rows. Returns ([None]*n, 1) if no match."""
+    cell_lines = [_nonblank_lines(_cell_text(cell)) for cell in row]
+    count_freq = Counter(len(lines) for lines in cell_lines if len(lines) >= _MIN_ALIGNED_LINES)
+    for target_count, freq in count_freq.most_common():
+        if freq < _MIN_PARALLEL_CELLS:
+            continue
+        cell_splits: CellSplits = []
+        for lines in cell_lines:
+            if len(lines) == target_count:
+                cell_splits.append(lines)
+            elif _is_date_column(lines):
+                cell_splits.append(_fit_lines_to_slots(lines, target_count))
+            else:
+                cell_splits.append(None)  # don't split non-matching cells
+        return cell_splits, target_count
+    return [None] * len(row), 1
+
+
+def _is_parallel_split(cell_splits: CellSplits) -> bool:
+    """True if 2+ cells split into the same number (>= 2) of segments."""
+    counts = Counter(len(s) for s in cell_splits if s is not None and len(s) >= 2)
+    return any(freq >= _MIN_PARALLEL_CELLS for freq in counts.values())
+
+
+def _choose_cell_splits(
+    row: list[dict[str, Any]], min_chars: int, min_newlines: int
+) -> tuple[CellSplits, int]:
+    """Pick the blank-line split or the aligned-line split for a row.
+
+    A blank-line split wins when it is itself parallel (2+ cells agree on the
+    segment count), so multi-line entries separated by blank lines stay whole.
+    Otherwise stacked parallel lists win: one blank paragraph in one cell must
+    not stop 4 ranks pairing with their 4 dates (#612, web240).
+    """
+    blank_splits, blank_max = _double_newline_splits(row, min_chars, min_newlines)
+    if _is_parallel_split(blank_splits):
+        return blank_splits, blank_max
+    aligned_splits, aligned_max = _aligned_line_splits(row)
+    if aligned_max > 1:
+        return aligned_splits, aligned_max
+    return blank_splits, blank_max
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -365,6 +450,9 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
     1. Double newlines (\\n\\n): Explicit entry separators like "MBA\\n\\nBS"
     2. Aligned single newlines: When 2+ cells have the same line count, indicating
        corresponding entries (e.g., Cell 0 has 3 roles, Cell 1 has 3 dates)
+
+    Pattern 1 wins only when 2+ cells split into the same number of blank-line
+    segments; otherwise pattern 2 is tried first (`_choose_cell_splits`, #612).
 
     The function intelligently handles multi-column tables:
     - If multiple cells have the same number of splits, splits them in parallel
@@ -382,67 +470,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
     if not row:
         return [row]
 
-    # First pass: check for double-newline splits (\n\n)
-    cell_splits = []
-    max_splits = 1
-
-    for cell in row:
-        cell_text = cell.get("text", "") if isinstance(cell, dict) else str(cell)
-
-        if '\n\n' in cell_text:
-            segments = [s.strip() for s in cell_text.split('\n\n') if s.strip()]
-            # Check if ANY segment is substantial (to decide whether to split)
-            has_substantial = any(
-                len(s) > min_chars or s.count('\n') >= min_newlines
-                for s in segments
-            )
-            # Also consider: if we have 2+ non-trivial segments, split even if short
-            # This handles cases like "MBA\n\nBS" where both are short but valid
-            has_multiple_items = len(segments) >= 2 and all(len(s) >= 2 for s in segments)
-
-            if has_substantial or has_multiple_items:
-                # Keep ALL segments, not just substantial ones
-                cell_splits.append(segments)
-                max_splits = max(max_splits, len(segments))
-            else:
-                cell_splits.append(None)  # No split needed
-        else:
-            cell_splits.append(None)
-
-    # Second pass: check for aligned single-newline patterns
-    # If no \n\n splits were found, check if multiple cells have matching line counts
-    if max_splits == 1:
-        # Count lines in each cell (split by single \n)
-        line_counts = []
-        cell_lines = []
-        for cell in row:
-            cell_text = cell.get("text", "") if isinstance(cell, dict) else str(cell)
-            lines = [line.strip() for line in cell_text.strip().split('\n') if line.strip()]
-            line_counts.append(len(lines))
-            cell_lines.append(lines)
-
-        # Find the most common line count >= 3 (to avoid splitting single-line or 2-line content)
-        from collections import Counter
-        count_freq = Counter(c for c in line_counts if c >= 3)
-
-        if count_freq:
-            # Get the most common multi-line count that appears in 2+ cells
-            most_common = count_freq.most_common()
-            for target_count, freq in most_common:
-                if freq >= 2:  # At least 2 cells have this many lines
-                    # Use this count for aligned splitting
-                    max_splits = target_count
-                    cell_splits = []
-                    for cell_idx, lines in enumerate(cell_lines):
-                        if line_counts[cell_idx] == target_count:
-                            cell_splits.append(lines)
-                        elif _is_date_column(lines):
-                            # Date column with fewer lines - try to distribute dates
-                            # Pad with empty strings to match target_count
-                            cell_splits.append(_fit_lines_to_slots(lines, target_count))
-                        else:
-                            cell_splits.append(None)  # Don't split non-matching cells
-                    break
+    cell_splits, max_splits = _choose_cell_splits(row, min_chars, min_newlines)
 
     # If no splits needed, return original row
     if max_splits == 1:

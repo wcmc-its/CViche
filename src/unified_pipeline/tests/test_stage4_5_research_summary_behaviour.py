@@ -42,8 +42,11 @@ from unified_pipeline.llm_provenance import (  # noqa: E402
 from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     CURRENT_CONTEXT_TAG,
     CURRENT_WORK_REQUIREMENT,
+    FIRST_PERSON_REQUIREMENT,
+    GRANT_STATUS_BY_CODE,
     NEUTRAL_REFERENCE_REQUIREMENT,
     ONGOING_PATTERN,
+    PENDING_FUNDING_REQUIREMENT,
     PI_BONUS,
     RECENCY_WEIGHT,
     SENIOR_AUTHOR_BONUS,
@@ -665,7 +668,28 @@ def test_format_entry_for_context_publication():
 
 def test_format_entry_for_context_grant():
     entry = {"extracted_fields": {"title": "Grant T", "pi_role": "PI", "agency": "NIH"}, "text": ""}
-    assert format_entry_for_context("M2A", entry) == "[GRANT-M2A] Grant T | Role: PI | Agency: NIH"
+    assert format_entry_for_context("M2A", entry) == (
+        "[GRANT-M2A] Grant T | Status: current | Role: PI | Agency: NIH")
+
+
+@pytest.mark.parametrize("code, status", [
+    ("M2A", "current"),
+    ("M2B", "completed"),
+    ("M2C", "pending application (not funded)"),
+    ("M2D", "patent or innovation (not a grant)"),
+])
+def test_format_entry_for_context_grant_states_its_funding_status_as_a_word(code, status):
+    """#1484: a bare GRANT-M2C told the model nothing, and it summarised pending
+    applications as funded studies. Each M2 code now carries its status word."""
+    entry = {"extracted_fields": {"title": "Widget trial", "pi_role": "PI", "agency": "NIH"}, "text": ""}
+    assert format_entry_for_context(code, entry) == (
+        f"[GRANT-{code}] Widget trial | Status: {status} | Role: PI | Agency: NIH")
+    assert GRANT_STATUS_BY_CODE[code] == status
+
+
+def test_format_entry_for_context_unknown_grant_code_has_no_status_segment():
+    entry = {"extracted_fields": {"title": "Grant T", "pi_role": "PI", "agency": "NIH"}, "text": ""}
+    assert format_entry_for_context("M2Z", entry) == "[GRANT-M2Z] Grant T | Role: PI | Agency: NIH"
 
 
 def test_format_entry_for_context_research_activities():
@@ -767,8 +791,8 @@ def test_build_context_string_tag_follows_recency_computed_at_a_year_other_than_
         [("M2A", current_grant, 0.0, current_recency), ("M2A", past_grant, 0.0, past_recency)],
         max_tokens=100)
 
-    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Role:  | Agency: "
-                       "\n[GRANT-M2A] R21 | Role:  | Agency: ")
+    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Status: current | Role:  | Agency: "
+                       "\n[GRANT-M2A] R21 | Status: current | Role:  | Agency: ")
 
 
 # --- score_existing_m1 (call_llm stubbed) -----------------------------------------
@@ -847,7 +871,7 @@ def test_generate_research_summary_returns_stripped_text_and_usage(monkeypatch):
         }
     monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
 
-    text, usage = stage_4_5.generate_research_summary("some context", "Jane Doe")
+    text, usage = stage_4_5.generate_research_summary("some context")
 
     assert text == "Generated summary text about research."
     assert usage["prompt_tokens"] == 20
@@ -865,7 +889,7 @@ def test_generate_research_summary_prompt_requires_current_work_first_and_neutra
         return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
 
-    stage_4_5.generate_research_summary("[CURRENT] [RESEARCH] ctx", "Jane Doe")
+    stage_4_5.generate_research_summary("[CURRENT] [RESEARCH] ctx")
 
     prompt = captured["prompt"]
     assert f"- {CURRENT_WORK_REQUIREMENT}" in prompt
@@ -874,8 +898,50 @@ def test_generate_research_summary_prompt_requires_current_work_first_and_neutra
     assert "older work only briefly" in CURRENT_WORK_REQUIREMENT
     assert CURRENT_CONTEXT_TAG in CURRENT_WORK_REQUIREMENT
     assert "never use gendered pronouns" in NEUTRAL_REFERENCE_REQUIREMENT
-    assert "never infer gender from the name" in NEUTRAL_REFERENCE_REQUIREMENT
+    assert "never infer anyone's gender" in NEUTRAL_REFERENCE_REQUIREMENT
     assert f"ongoing entries tagged {CURRENT_CONTEXT_TAG}" in prompt
+
+
+def test_generate_research_summary_prompt_asks_for_first_person_without_naming_the_researcher(monkeypatch):
+    """#1539 (Paul, 2026-10-07): the summary is the researcher's own statement.
+    The prompt asks for the first person, drops the third-person rule, and no
+    longer frames the paragraph as being "for" a named owner, so the model has
+    no name to write "Dr. X" from."""
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    stage_4_5.generate_research_summary("[GRANT-M2A] R01 Widgets")
+
+    prompt = captured["prompt"]
+    assert f"- {FIRST_PERSON_REQUIREMENT}" in prompt
+    assert "first person" in FIRST_PERSON_REQUIREMENT
+    assert "third person" not in prompt
+    assert "paragraph for " not in prompt
+    assert "Do not name the researcher" in NEUTRAL_REFERENCE_REQUIREMENT
+    assert "by name" not in NEUTRAL_REFERENCE_REQUIREMENT
+
+
+def test_generate_research_summary_prompt_says_pending_applications_are_not_funded(monkeypatch):
+    """#1484: the prompt tells the model that a pending application is an
+    application, never funded work; the status word it keys on is the one
+    format_entry_for_context writes for M2C."""
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    stage_4_5.generate_research_summary("[GRANT-M2C] R01 Widgets | Status: pending application (not funded)")
+
+    assert f"- {PENDING_FUNDING_REQUIREMENT}" in captured["prompt"]
+    assert "pending application" in PENDING_FUNDING_REQUIREMENT
+    assert "pending application" in GRANT_STATUS_BY_CODE["M2C"]
+    assert "never describe it as funded" in PENDING_FUNDING_REQUIREMENT
 
 
 def test_current_context_tag_appears_in_current_work_requirement():
@@ -908,7 +974,7 @@ def test_blank_context_makes_no_llm_call_and_returns_empty_summary(monkeypatch, 
     refusal that stage 6 then rendered as the Research Activities paragraph."""
     calls = _stub_reply(monkeypatch, "I don't have access to specific CV details for Jane Doe.")
 
-    text, method, usage = stage_4_5.generate_summary_unless_withheld(blank_context, "Jane Doe")
+    text, method, usage = stage_4_5.generate_summary_unless_withheld(blank_context)
 
     assert calls == []
     assert (text, method, usage) == ("", stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {})
@@ -917,7 +983,7 @@ def test_blank_context_makes_no_llm_call_and_returns_empty_summary(monkeypatch, 
 def test_non_blank_context_returns_the_generated_summary(monkeypatch):
     calls = _stub_reply(monkeypatch, "  Doe's lab studies widget dynamics.  ")
 
-    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
 
     assert len(calls) == 1
     assert text == "Doe's lab studies widget dynamics."
@@ -946,7 +1012,7 @@ def test_refusal_opening_reply_is_withheld_but_its_cost_is_kept(monkeypatch, rep
     is still returned so the stage's cost total stays honest."""
     _stub_reply(monkeypatch, reply)
 
-    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
 
     assert text == ""
     assert method == stage_4_5.GENERATION_METHOD_REFUSED
@@ -960,13 +1026,24 @@ def test_refusal_opening_reply_is_withheld_but_its_cost_is_kept(monkeypatch, rep
     "Investigations by Doe's group, including ones I'm told were pioneering, ...",
     "This work could not have proceeded without R01 support.",
     'Doe studies why patients with asthma say "I cannot breathe" during exacerbations.',  # refusal words mid-text
+    # First-person summary openers (#1539): the prompt now asks for "I" / "my research".
+    "I study how widget signalling shapes immune tolerance, using mouse models and patient cohorts.",
+    "My research focuses on widget dynamics in the developing heart.",
+    "I lead an NIH-funded program on widget signalling in asthma.",
+    "I have spent the past decade developing computational methods for widget imaging.",
+    "I am a physician-scientist studying widget signalling in chronic kidney disease.",
+    "I direct a translational laboratory that tests widget inhibitors in early-phase trials.",
+    "I developed, and now apply, a widget assay that cannot be run without single-cell imaging.",
+    "In my laboratory, I combine widget imaging with patient cohorts.",
+    "I'm a clinician-investigator; my group studies widget signalling.",
+    "I do research on widget signalling.",
 ])
 def test_real_summary_is_never_mistaken_for_a_refusal(monkeypatch, reply):
     """The pattern is anchored to the reply's opening first-person phrase: a summary
     that merely contains 'cannot', 'does not' or an I-initial word is kept."""
     _stub_reply(monkeypatch, reply)
 
-    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
 
     assert text == reply
     assert method == stage_4_5.GENERATION_METHOD_LLM
@@ -1092,18 +1169,20 @@ def test_run_stage_4_5_skips_scoring_when_no_existing_m1(monkeypatch, tmp_path):
 def test_run_stage_4_5_derives_owner_name_from_document_uid(monkeypatch, tmp_path):
     """With no cv_owner block, the owner name is derived from the second
     underscore-delimited segment of document_uid: the literal substrings
-    "js" and "Cv" are stripped (line 456's ``.replace('js', '').replace('Cv',
-    '')``), then the result is capitalized, and threaded into the
-    generation prompt.
+    "js" and "Cv" are stripped, then the result is capitalized, and threaded
+    into the seniority scoring (gather_context_entries). It no longer reaches
+    the generation prompt, which is written in the first person (#1539).
 
     "JanejsCv" contains "Jane" as a substring even WITHOUT stripping (it
-    capitalizes to "Janejscv"), so merely checking ``"Jane" in prompt``
-    passes on both the correct and the buggy (unstripped) behaviour and
-    proves nothing. Instead assert the exact rendered clause "for Jane."
-    (name immediately followed by the sentence's period) is present, and
-    that the unstripped form "Janejscv" is absent -- only the intended
-    strip-then-capitalize route produces exactly "Jane"."""
+    capitalizes to "Janejscv"), so the derived name is checked for equality
+    with "Jane": only the intended strip-then-capitalize route produces it."""
     captured = {}
+    real_gather = stage_4_5.gather_context_entries
+
+    def spy_gather(entries_by_code, current_year, cv_owner_name=''):
+        captured["cv_owner_name"] = cv_owner_name
+        return real_gather(entries_by_code, current_year, cv_owner_name=cv_owner_name)
+    monkeypatch.setattr(stage_4_5, "gather_context_entries", spy_gather)
 
     def fake_call_llm(*, messages, **_kwargs):
         if _SCORE_PROMPT_MARKER in messages[0]["content"]:
@@ -1124,8 +1203,8 @@ def test_run_stage_4_5_derives_owner_name_from_document_uid(monkeypatch, tmp_pat
 
     run_stage_4_5(str(inp), str(outp), verbose=False)
 
-    assert "for Jane." in captured["prompt"]
-    assert "Janejscv" not in captured["prompt"]
+    assert captured["cv_owner_name"] == "Jane"
+    assert "Jane" not in captured["prompt"]
 
 
 def test_run_stage_4_5_raises_file_not_found_for_missing_input(monkeypatch, tmp_path):
@@ -1178,6 +1257,32 @@ def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, t
     # check the CV CONTEXT entry itself is not tagged.
     assert f"{CURRENT_CONTEXT_TAG} [GRANT-M2A]" not in captured["prompt"]
     assert "[GRANT-M2A]" in captured["prompt"]
+
+
+def test_run_stage_4_5_generation_prompt_carries_no_owner_name(monkeypatch, tmp_path):
+    """#1539, through the real driver: the owner's name from cv_owner no longer
+    reaches the generation prompt, so the model cannot write "Dr. <name>" into a
+    first-person paragraph."""
+    captured = {}
+
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
+            raise AssertionError("no M1 content -- scoring must not run")
+        captured["prompt"] = messages[0]["content"]
+        return {"content": "I study widgets.", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    inp = _write_fields_json(
+        tmp_path, "TEST1539",
+        [{"taxonomy_code": "M2C", "text": "Grant", "extracted_fields": {"title": "R01 Widgets", "agency": "NIH"}}],
+        cv_owner={"first_name": "Quillon", "last_name": "Vexmoor"},
+    )
+
+    run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)
+
+    assert "Quillon" not in captured["prompt"]
+    assert "Vexmoor" not in captured["prompt"]
+    assert "[GRANT-M2C] R01 Widgets | Status: pending application (not funded)" in captured["prompt"]
 
 
 def test_run_stage_4_5_calls_send_no_call_site_max_tokens(monkeypatch, tmp_path):

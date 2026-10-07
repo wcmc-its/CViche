@@ -79,6 +79,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_split_child_unsourced,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
+    lint_stage4_unplaced_items,
     lint_stage6_warnings,
     lint_stage_failure_recorded,
     lint_surprise,
@@ -3955,6 +3956,45 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
         assert bool(lint_stage4_group_failures(artifact)) is expect_flag
 
 
+# --------------------- #1243: stage4_unplaced_items (WARN) -------------------
+#
+# Stage 4 stamps every entry of a 2+-entry group whose reply numbered an item
+# past the group's entries (#1417); synthetic entries carry that stamp.
+
+def _stamped_entry(code, start, unplaced):
+    from unified_pipeline.stage4.schemas import STAGE4_UNPLACED_ITEMS_KEY
+
+    return {"taxonomy_code": code, "element_idx_start": start, "extraction_success": True,
+            "extracted_fields": {"note": "x"}, STAGE4_UNPLACED_ITEMS_KEY: unplaced}
+
+
+def test_stage4_unplaced_items_warns_once_and_names_each_code_and_its_entries():
+    stage4 = {"entries": [_stamped_entry("Q1", 10, 2), _stamped_entry("Q1", 14, 2),
+                          _stamped_entry("O", 30, 1), _stamped_entry("O", 31, 1),
+                          {"taxonomy_code": "P", "element_idx_start": 40}]}
+    (finding,) = lint_stage4_unplaced_items(stage4)
+    assert finding["lint"] == "stage4_unplaced_items"
+    assert finding["severity"] == "WARN"
+    assert "left 3 reply item(s) out of 2 taxonomy group(s)" in finding["message"]
+    assert finding["evidence"] == ["O: 1 item(s) left out; entries 30, 31",
+                                   "Q1: 2 item(s) left out; entries 10, 14"]
+
+
+def test_stage4_unplaced_items_quiet_on_a_clean_or_older_artifact():
+    assert lint_stage4_unplaced_items({"entries": [{"taxonomy_code": "P"}]}) == []
+    assert lint_stage4_unplaced_items({"entries": [_stamped_entry("P", 1, 0)]}) == []
+    assert lint_stage4_unplaced_items({}) == []
+
+
+def test_stage4_unplaced_items_runs_from_the_registry(tmp_path):
+    stage_dir = tmp_path / "stage_4_field_extraction"
+    stage_dir.mkdir()
+    (stage_dir / "ABCDEF_fields.json").write_text(json.dumps(
+        {"entries": [_stamped_entry("Q1", 10, 2), _stamped_entry("Q1", 14, 2)]}))
+    report = run_doctor(tmp_path, "ABCDEF")
+    assert [f["lint"] for f in report["findings"]].count("stage4_unplaced_items") == 1
+
+
 # --------------------- #1174: llm_fallback_served (WARN, caps nothing) -------
 #
 # Synthetic provenance: stage 4 stamps the entries of a taxonomy group the
@@ -4260,14 +4300,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (57), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (58), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 55
+    assert len(payload["findings"]) == 57
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4332,6 +4372,11 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
         "entries": [
             _entry("Mentored an invented student", taxonomy_code="N3", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
+            # #1256: the yield counts text in the parent, not tags. Of these
+            # two fragments of the entry above, only the first is in it.
+            _entry("A grant tail", taxonomy_code="M2A", start=3),
+            _entry("tail", taxonomy_code="M2A", start=4, is_fragment=True, fragment_of=2),
+            _entry("Lost line", taxonomy_code="M2A", start=5, is_fragment=True, fragment_of=2),
         ],
         "meta": {"stats": {
             "failed_batches": 41, "llm_batches": 83,
@@ -4363,13 +4408,13 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     metrics = _build_metrics(views)
 
     assert metrics["appendix_entries"] == 2
-    assert metrics["appendix_share"] == round(2 / 2, 4)
+    assert metrics["appendix_share"] == round(2 / 5, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
     assert metrics["unrouted_code_entries"] == {"N3": 1}  # N3: #529 routes N2, #291 routes M4
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
-    assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert metrics["fragment_reconnection_yield"] == round(1 / 2, 4)  # not the stats' 3 / 7
     assert metrics["total_post_corrections"] == 5
     assert "source_coverage_pct" in metrics
 

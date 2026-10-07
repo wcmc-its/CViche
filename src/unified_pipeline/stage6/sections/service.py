@@ -75,18 +75,21 @@ JOURNAL_SPECIALTY_KEYWORDS = (
     'journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
     'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
 )
-JOURNAL_ROLE_PHRASES = ('editorial board', 'ad hoc reviewer', 'manuscript review')
+JOURNAL_ROLE_PHRASES = ('editorial board', 'manuscript review')
 # Role phrases that name journal reviewing on their own. 'abstract reviewer'
 # is not one: every one of its 24 Q2 lines over the NDMRSO and EBYSBC farms
 # reviews meeting abstracts, not manuscripts (DXAGUS 94, #1428).
 REVIEWER_PATTERNS = (
-    'manuscript reviewer', 'peer reviewer', 'ad hoc reviewer',
+    'manuscript reviewer', 'peer reviewer',
 )
 # Role phrases that name journal reviewing only when the line also names a
 # journal (`GENERIC_REVIEWER_JOURNAL_SIGNALS`). "Reviewer for" introduces
 # whatever is reviewed: all 10 such Q2 lines on those farms review grants,
-# abstracts or a study program (VYNARH 96, #1428), none a journal.
-GENERIC_REVIEWER_PHRASES = ('reviewer for',)
+# abstracts or a study program (VYNARH 96, #1428), none a journal. "Ad hoc
+# reviewer" is the same: every Q2 line holding it on those farms names a
+# grant program or funder (ZCTARO 151-157, BMAMWE 619/622, #1532), none a
+# journal; a Q4D line keeps it regardless, since only Q2 is rerouted.
+GENERIC_REVIEWER_PHRASES = ('reviewer for', 'ad hoc reviewer')
 GENERIC_REVIEWER_JOURNAL_SIGNALS = (*JOURNAL_SPECIALTY_KEYWORDS, 'annals')
 BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
