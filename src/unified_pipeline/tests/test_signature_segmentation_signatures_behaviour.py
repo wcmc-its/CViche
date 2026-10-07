@@ -1169,6 +1169,53 @@ def test_ensure_personal_data_first_boundary_index_two_is_early():
     assert [h["text"] for h in result] == ["Education"]
 
 
+def test_ensure_personal_data_first_keeps_a_title_like_header_after_the_first_section():
+    # #1254: a title phrase after the first real section is a section header.
+    # Filtering the whole outline deleted mid-document H1s and their H2s
+    # attached to the previous H1.
+    hierarchy = [
+        _header("Contact", has_index=False),
+        _header("Education", has_index=False),
+        _header("My Professional Portfolio", has_index=False),
+        {"text": "Faculty Appointments", "level": "H2", "children": []},
+    ]
+
+    result = sbs.ensure_personal_data_first(hierarchy)
+
+    assert [h["text"] for h in result] == [
+        "Contact", "Education", "My Professional Portfolio", "Faculty Appointments",
+    ]
+
+
+def test_ensure_personal_data_first_strips_every_consecutive_leading_title():
+    hierarchy = [
+        _header("Curriculum Vitae", paragraph_index=0),
+        _header("CV", paragraph_index=1),
+        _header("Education", paragraph_index=2),
+        _header("Biosketch", paragraph_index=9),
+    ]
+
+    result = sbs.ensure_personal_data_first(hierarchy)
+
+    assert [h["text"] for h in result] == ["Education", "Biosketch"]
+
+
+@pytest.mark.parametrize("section_name", [
+    "PROFESSIONAL EXPERIENCE", "Professional Background", "Clinical Practice",
+    "Research Focus", "Industry Positions", "Career Summary", "Experience Summary",
+    "Qualifications and Experience", "Teaching Portfolio", "Research Portfolio Summary",
+    "Research, Teaching, and Service",
+])
+def test_ensure_personal_data_first_keeps_a_leading_section_name(section_name):
+    # #1254: these phrases name ordinary CV sections, so even as the first
+    # header of the outline they are not a document title.
+    hierarchy = [_header(section_name, paragraph_index=0), _header("Education", paragraph_index=5)]
+
+    result = sbs.ensure_personal_data_first(hierarchy)
+
+    assert [h["text"] for h in result] == [section_name, "Education"]
+
+
 # ---------------------------------------------------------------------------
 # remove_duplicate_children
 # ---------------------------------------------------------------------------

@@ -856,12 +856,79 @@ def rescue_locked_headers(signature_groups: dict, classifications: dict) -> dict
 # STEP 6b: Ensure PERSONAL DATA is the First Section
 # ============================================================================
 
+# Document titles to exclude -- these are NOT section headers. Matched after
+# lowercasing and stripping a trailing ':' or '.'.
+_EXACT_DOCUMENT_TITLES = frozenset({
+    # Standard
+    'cv', 'vita', 'resume', 'résumé', 'vitae',
+    'c.v', 'c.v.',
+    # International
+    'lebenslauf', 'bio-data', 'biodata',
+    # Short variants
+    'cv profile', 'cv experience', 'cv overview',
+    'professional overview', 'info sheet', 'experience record',
+    # Dossier variants
+    'personal dossier', 'professional dossier',
+})
+
+# A header that CONTAINS any of these is a document title. Phrases that are
+# also ordinary section names ('professional experience', 'professional
+# background', 'clinical practice', 'research focus', 'industry position',
+# 'career summary', 'experience summary', 'qualifications and experience',
+# 'teaching portfolio', 'research portfolio', 'research, teaching, and
+# service') are deliberately absent: matching them deleted real H1s (#1254).
+_DOCUMENT_TITLE_SUBSTRINGS = (
+    'curriculum vitae', 'curriculum vitæ',
+    'biosketch', 'bio-sketch', 'bio sketch',
+    'professional resume', 'academic resume', 'executive resume',
+    'technical resume', 'clinical resume', 'medical resume', 'engineering resume',
+    'professional profile', 'academic profile', 'scholarly profile', 'faculty profile',
+    'professional portfolio',
+    'career story', 'career narrative', 'professional journey',
+    'professional snapshot',
+    'my work & experience', 'my work and experience',
+    'tenure & promotion', 'tenure and promotion',
+    'for grant application', 'for promotion review',
+    'research statement included',
+    'portfolio highlights',
+    'investigator curriculum', 'scientific curriculum', 'clinical curriculum',
+    'scholarly curriculum', 'faculty curriculum', 'academic curriculum',
+    'leadership curriculum', 'executive curriculum',
+    'candidate curriculum', 'application curriculum',
+)
+
+
+def _is_document_title(text: str) -> bool:
+    """True when a header's text is a document title, not a section header."""
+    normalized = text.lower().strip().rstrip(':').rstrip('.').strip()
+    if normalized in _EXACT_DOCUMENT_TITLES:
+        return True
+    return any(substring in normalized for substring in _DOCUMENT_TITLE_SUBSTRINGS)
+
+
+def _strip_leading_document_titles(hierarchy: list[dict]) -> tuple[list[dict], list[str]]:
+    """Drop the document-title nodes that open the outline; return (kept, removed texts).
+
+    A title only ever precedes the first real section. Once one node is kept,
+    every later node is a section header whatever its wording -- filtering the
+    whole outline deleted real 'Professional Experience' H1s mid-document and
+    filed their entries under the previous section (#1254).
+    """
+    first_kept = 0
+    while first_kept < len(hierarchy) and _is_document_title(hierarchy[first_kept]['text']):
+        first_kept += 1
+    removed = [node['text'] for node in hierarchy[:first_kept]]
+    return list(hierarchy[first_kept:]), removed
+
+
 def ensure_personal_data_first(hierarchy: list[dict]) -> list[dict]:
     """
     Ensure PERSONAL DATA is the first H1 section in the hierarchy when needed.
 
     This function:
-    1. Removes document title headers (CURRICULUM VITAE, CV, Resume, Biosketch, etc.)
+    1. Removes the document title headers that open the outline (CURRICULUM VITAE,
+       CV, Resume, Biosketch, etc.); a title-like header after the first real
+       section is kept (#1254)
     2. If there's still an early header (paragraph_index < 3), assumes it captures preamble
     3. Otherwise, inserts synthetic PERSONAL DATA as the first H1 section
 
@@ -873,73 +940,9 @@ def ensure_personal_data_first(hierarchy: list[dict]) -> list[dict]:
     """
 
     # -------------------------------------------------------------------------
-    # Document titles to exclude - these are NOT section headers
+    # Step 1: Strip document titles from the front of the outline (#1254)
     # -------------------------------------------------------------------------
-
-    # Exact matches (after lowercasing and stripping punctuation)
-    EXACT_TITLE_MATCHES = {
-        # Standard
-        'cv', 'vita', 'resume', 'résumé', 'vitae',
-        'c.v', 'c.v.',
-        # International
-        'lebenslauf', 'bio-data', 'biodata',
-        # Short variants
-        'cv profile', 'cv experience', 'cv overview',
-        'professional overview', 'info sheet', 'experience record',
-        # Dossier variants
-        'personal dossier', 'professional dossier',
-    }
-
-    # Substring matches - if header CONTAINS any of these, it's a document title
-    TITLE_SUBSTRINGS = [
-        'curriculum vitae', 'curriculum vitæ',
-        'biosketch', 'bio-sketch', 'bio sketch',
-        'professional resume', 'academic resume', 'executive resume',
-        'technical resume', 'clinical resume', 'medical resume', 'engineering resume',
-        'professional profile', 'academic profile', 'scholarly profile', 'faculty profile',
-        'research portfolio', 'professional portfolio',
-        'career summary', 'career story', 'career narrative', 'professional journey',
-        'professional snapshot', 'professional background',
-        'qualifications & experience', 'qualifications and experience',
-        'experience summary', 'my work & experience', 'my work and experience',
-        'tenure & promotion', 'tenure and promotion',
-        'for grant application', 'for promotion review',
-        'teaching portfolio', 'research focus', 'clinical practice', 'industry position',
-        'research statement included', 'professional experience',
-        'portfolio highlights', 'research, teaching, and service',
-        'investigator curriculum', 'scientific curriculum', 'clinical curriculum',
-        'scholarly curriculum', 'faculty curriculum', 'academic curriculum',
-        'leadership curriculum', 'executive curriculum',
-        'candidate curriculum', 'application curriculum',
-    ]
-
-    def is_document_title(text: str) -> bool:
-        """Check if text is a document title (not a real section header)."""
-        # Normalize: lowercase, strip whitespace and common punctuation
-        normalized = text.lower().strip().rstrip(':').rstrip('.').strip()
-
-        # Check exact matches
-        if normalized in EXACT_TITLE_MATCHES:
-            return True
-
-        # Check substring matches
-        for substring in TITLE_SUBSTRINGS:
-            if substring in normalized:
-                return True
-
-        return False
-
-    # -------------------------------------------------------------------------
-    # Step 1: Filter out document titles from top level
-    # -------------------------------------------------------------------------
-    filtered = []
-    removed_titles = []
-
-    for node in hierarchy:
-        if is_document_title(node['text']):
-            removed_titles.append(node['text'])
-        else:
-            filtered.append(node)
+    filtered, removed_titles = _strip_leading_document_titles(hierarchy)
 
     if removed_titles:
         print(f"  ⚠️  Removed {len(removed_titles)} document title(s):")
