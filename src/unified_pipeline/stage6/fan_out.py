@@ -205,9 +205,11 @@ _MAX_SHORT_RANGE_YEARS = 50
 # set: nothing writes it. A code missing here is never fanned out. That includes
 # every code whose section writes the entry's TEXT and no field (E, G, J, K2-K5,
 # L1, L2, M1, M2, N1, N3, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would
-# render only its built text, which does not carry the parent's scalars.
+# render only its built text, which does not carry the parent's scalars. (N4
+# may reorder a scrambled line by its fields, but only when they hold exactly
+# the text's words -- `mentoring._outcome_line_from_fields`, #1434.)
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
-    'B1': frozenset({'degree', 'discipline', 'institution', 'year'}),
+    'B1': frozenset({'advisor', 'degree', 'discipline', 'institution', 'year'}),
     'B2': frozenset({'institution', 'program_name', 'year'}),
     'C': frozenset({'end_date', 'institution', 'role', 'specialty', 'start_date', 'training_type'}),
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),

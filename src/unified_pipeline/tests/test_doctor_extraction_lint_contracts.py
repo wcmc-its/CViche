@@ -1952,6 +1952,19 @@ def test_offschema_a_span_key_on_a_code_no_date_cell_extends_is_unread():
     assert "date cell" not in findings[0]["message"]
 
 
+def test_offschema_a_talks_further_dates_are_judged_as_its_date_cells_span():
+    """#1245 (X6 VPMMFM 531): the R date cell now reads the span keys, so a
+    talk date under `additional_dates` that its row lacks is a span that did
+    not reach the date cell, not a key no renderer reads."""
+    entry = _fields_entry("R", {
+        "title": "Example Talk", "event_name": "Example Symposium",
+        "date": "2001", "additional_dates": "2004"})
+    findings = _graded([_table(_row("Example Talk", "Example Symposium", "2001"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_dates")]
+    assert "its span did not reach the record's date cell" in findings[0]["message"]
+
+
 def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
     """RCBKFG (#1245, UYFRTL 33): `additional_date_ranges` is a string, so
     as a date-named key outside `EXTRA_SPAN_KEYS` it was never a candidate.

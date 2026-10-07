@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
+from app.database import commit_inserts_retrying_conflict
 from app.errors import bad_request, duplicate_file, internal_error
 from app.models import Run, RunState, Step, User, can_view_all_runs
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -412,11 +413,13 @@ def compensated_run_creation(
     If the body or the commit raises, the session is rolled back, the archive
     is compensated, and a 500 is raised whose message says whether the file
     is still stored. Shared by /upload and restart_run so both write paths
-    handle a failure after the archive identically.
+    handle a failure after the archive identically. A one-off write conflict
+    (MariaDB 1020) gets one retry in a fresh transaction before it counts as
+    a failure (#1285).
     """
     try:
         yield
-        db.commit()
+        commit_inserts_retrying_conflict(db)
     except Exception as exc:
         logger.exception(
             "Run row creation or commit failed after a durable archive; compensating (run=%s)",

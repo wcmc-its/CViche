@@ -191,6 +191,8 @@ export interface RunQualityReport {
 /** GET /api/run/:id/review-note. Never carries the score. */
 export interface RunReviewNote {
   needs_cleanup: boolean
+  /** False until the score is stored; needs_cleanup is not final before then. */
+  scored: boolean
 }
 
 export type RunListScope = 'mine' | 'all'

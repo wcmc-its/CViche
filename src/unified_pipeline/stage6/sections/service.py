@@ -35,6 +35,7 @@ from ..formatting import (
     with_extra_date_spans,
 )
 from ..normalization import _cell_text, _squash
+from ..parsing.dates import YEAR, YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -75,10 +76,18 @@ JOURNAL_SPECIALTY_KEYWORDS = (
     'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
 )
 JOURNAL_ROLE_PHRASES = ('editorial board', 'ad hoc reviewer', 'manuscript review')
+# Role phrases that name journal reviewing on their own. 'abstract reviewer'
+# is not one: every one of its 24 Q2 lines over the NDMRSO and EBYSBC farms
+# reviews meeting abstracts, not manuscripts (DXAGUS 94, #1428).
 REVIEWER_PATTERNS = (
-    'abstract reviewer', 'reviewer for', 'manuscript reviewer',
-    'peer reviewer', 'ad hoc reviewer',
+    'manuscript reviewer', 'peer reviewer', 'ad hoc reviewer',
 )
+# Role phrases that name journal reviewing only when the line also names a
+# journal (`GENERIC_REVIEWER_JOURNAL_SIGNALS`). "Reviewer for" introduces
+# whatever is reviewed: all 10 such Q2 lines on those farms review grants,
+# abstracts or a study program (VYNARH 96, #1428), none a journal.
+GENERIC_REVIEWER_PHRASES = ('reviewer for',)
+GENERIC_REVIEWER_JOURNAL_SIGNALS = (*JOURNAL_SPECIALTY_KEYWORDS, 'annals')
 BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
@@ -131,11 +140,10 @@ _ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
 
 
 # A year, or a year range ("2005-present", "1993-1996", "2001-"), used to find
-# the date text stage 4 already moved into `start_date`/`end_date`.
-_YEAR = r'(?:1[89]|20)\d{2}'
-_DATE_SPAN = re.compile(
-    rf'(?<!\d){_YEAR}(?:\s*[-–—]\s*(?:{_YEAR}|present|current|ongoing)?)?(?!\d)',
-    re.IGNORECASE)
+# the date text stage 4 already moved into `start_date`/`end_date`. On the
+# shared stage-6 date grammar (parsing/dates.py, #665).
+_YEAR_RE = re.compile(YEAR)
+_DATE_SPAN = re.compile(rf'(?<!\d){YEAR_OR_OPEN_SPAN}(?!\d)', re.IGNORECASE)
 _TEXT_CELL_SEPARATORS = re.compile(r'[\t\n|]+')
 _EDGE_PUNCTUATION = ' ,;:.-–—|"“”'
 
@@ -210,10 +218,10 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
     text = _cell_text(text)
     if not isinstance(role, str):
         return text
-    known_years = set(re.findall(_YEAR, f'{_cell_text(start_date)} {_cell_text(end_date)}'))
+    known_years = set(_YEAR_RE.findall(f'{_cell_text(start_date)} {_cell_text(end_date)}'))
 
     def _drop_known_dates(match: re.Match[str]) -> str:
-        return '' if set(re.findall(_YEAR, match.group())) <= known_years else match.group()
+        return '' if set(_YEAR_RE.findall(match.group())) <= known_years else match.group()
 
     text = _DATE_SPAN.sub(_drop_known_dates, text)
     for part in re.split(r'\s*;\s*', _cell_text(role)):
@@ -259,6 +267,15 @@ def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
     both without changing which whole-word/whole-phrase hits count.
     """
     return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
+
+
+def _names_journal_reviewing(text_lower: str) -> bool:
+    """True when `text_lower` holds a `REVIEWER_PATTERNS` phrase, or a
+    `GENERIC_REVIEWER_PHRASES` one beside a journal signal (#1428)."""
+    if _matches_bounded(text_lower, REVIEWER_PATTERNS):
+        return True
+    return (_matches_bounded(text_lower, GENERIC_REVIEWER_PHRASES)
+            and any(signal in text_lower for signal in GENERIC_REVIEWER_JOURNAL_SIGNALS))
 
 
 def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
@@ -345,8 +362,15 @@ def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
 # A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
 # describe the line before them; nothing else should be treated as a
 # continuation (#573 review).
-_DATE_ONLY_LINE_RE = re.compile(
-    r'^\d{4}(?:\s*[-–,]\s*(?:\d{4}|present|current))*\s*$', re.IGNORECASE)
+# The same shape is the date column of a flattened extramural-leadership
+# table (`_parse_extramural_leadership_lines`).
+_DATE_ONLY_LINE_RE = re.compile(rf'^({YEAR_LIST})\s*$', re.IGNORECASE)
+# "Role | 2010-2014" / "Org | Role | 2010-present": the date cell that closes a
+# pipe-flattened row.
+_PIPE_TRAILING_DATE_RE = re.compile(rf'\|\s*({YEAR_OR_SPAN})\s*$', re.IGNORECASE)
+# The date a raw Q4 entry text opens with ("2010-2014 | Editorial Board"), for
+# the organization fallback that must not start with it.
+_LEADING_DATE_CELL_RE = re.compile(rf'^{YEAR_OR_OPEN_SPAN}\s*\|?\s*', re.IGNORECASE)
 
 # Role titles recognized when Stage 4 merges a committee name into the role
 # field (e.g. role="Chair, Ultrasound Committee") and it needs splitting
@@ -414,7 +438,7 @@ def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
 
     for line in lines:
         line_lower = line.lower()
-        is_reviewer_line = _matches_bounded(line_lower, REVIEWER_PATTERNS)
+        is_reviewer_line = _names_journal_reviewing(line_lower)
         is_board_line = _matches_bounded(line_lower, BOARD_KEYWORDS)
 
         if (not is_reviewer_line and not is_board_line and last_group
@@ -443,7 +467,7 @@ def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
     is_journal_reviewer = (
         (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
         any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
-        _matches_bounded(text_lower, REVIEWER_PATTERNS) or
+        _names_journal_reviewing(text_lower) or
         (role == 'reviewer' and 'j ' in committee) or
         (role == 'reviewer' and 'journal' in org)
     )
@@ -1049,10 +1073,6 @@ class ServiceSection:
         - Two-column table extractions where roles and dates are in separate columns
         """
 
-        # Patterns for date detection
-        date_range_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?(?:\s*,\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)*)$', re.IGNORECASE)
-        embedded_date_pattern = re.compile(r'\|\s*(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
-
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
         date_only_lines = []  # standalone dates
@@ -1063,7 +1083,7 @@ class ServiceSection:
                 continue
 
             # Check for date-only line (possibly multiple dates on one line)
-            if date_range_pattern.match(line):
+            if _DATE_ONLY_LINE_RE.match(line):
                 # Split if multiple dates separated by newlines within the line
                 date_parts = re.split(r'\s*\n\s*', line)
                 for dp in date_parts:
@@ -1074,7 +1094,7 @@ class ServiceSection:
 
             # Check for pipe-separated format: "Role | Date" or "Org | Role | Date"
             embedded_date = ''
-            embedded_match = embedded_date_pattern.search(line)
+            embedded_match = _PIPE_TRAILING_DATE_RE.search(line)
             if embedded_match:
                 embedded_date = embedded_match.group(1)
                 line = line[:embedded_match.start()].strip().rstrip('|').strip()
@@ -1384,7 +1404,7 @@ class ServiceSection:
                         # Parse from raw text as fallback, but strip date prefix
                         raw_text = entry.get('text', '')
                         # Remove common date patterns from beginning
-                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)
+                        organization = _LEADING_DATE_CELL_RE.sub('', raw_text)
                         # If role already contains most of the organization text, don't duplicate
                         if role and organization and role.lower()[:30] in organization.lower():
                             organization = ''

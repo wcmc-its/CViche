@@ -95,6 +95,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
     _strip_appended_initials,
+    is_membership_date_part,
 )
 
 # --- item 1: the strip is a guess and lives at the call site (#665) --------
@@ -534,3 +535,71 @@ def test_committee_lines_accept_every_dash(dash):
 @pytest.mark.parametrize("dash", ["-", "–", "—"])
 def test_year_from_text_reads_the_end_of_a_range_for_every_dash(dash):
     assert _extract_year_from_text(f"served 2019{dash}2021") == "2021"
+
+
+# --- #665: orphaned dates pair only in a layout a table produces ------------
+
+@pytest.mark.parametrize("lines", [
+    # column 1 then column 2
+    ["Zorblax Board", "Quux Council", "Frob Panel", "2001", "2002-2004", "2005"],
+    # column 2 then column 1
+    ["2001", "2002-2004", "2005", "Zorblax Board", "Quux Council", "Frob Panel"],
+    # row by row, date after its activity
+    ["Zorblax Board", "2001", "Quux Council", "2002-2004", "Frob Panel", "2005"],
+    # row by row, date before its activity
+    ["2001", "Zorblax Board", "2002-2004", "Quux Council", "2005", "Frob Panel"],
+    # a self-dated row between the runs is not part of the layout
+    ["Zorblax Board", "Quux Council", "Blorp Group  1999", "Frob Panel",
+     "2001", "2002-2004", "2005"],
+])
+def test_orphaned_dates_pair_in_every_table_layout(lines):
+    dated = {item.activity: item.dates
+             for item in _parse_flattened_committee_lines(lines)}
+    assert (dated["Zorblax Board"], dated["Quux Council"], dated["Frob Panel"]) == (
+        "2001", "2002-2004", "2005")
+
+
+@pytest.mark.parametrize("lines", [
+    # one row flattened, then two rows' columns as runs: equal counts, but
+    # nothing proves the second date belongs to the second activity
+    ["Zorblax Board", "2001", "Quux Council", "Frob Panel", "2002-2004", "2005"],
+    ["Zorblax Board", "Quux Council", "2001", "Frob Panel", "2002-2004", "2005"],
+])
+def test_orphaned_dates_in_no_table_layout_stay_unassigned(lines, caplog):
+    with caplog.at_level("WARNING"):
+        items = _parse_flattened_committee_lines(lines)
+    assert [item.dates for item in items] == ["", "", ""]
+    assert "no table layout" in caplog.text
+
+
+@pytest.mark.parametrize("end", ["present", "current", "ongoing", "Current"])
+def test_committee_range_may_end_in_every_open_end_word(end):
+    assert _parse_flattened_committee_lines(
+        [f"Zorblax Board    2001-{end}", f"Quux Council (Chair 2003-{end})"]) == [
+        ParsedActivityLine("Zorblax Board", (), f"2001-{end}"),
+        ParsedActivityLine("Quux Council", ("Chair",), f"2003-{end}"),
+    ]
+
+
+@pytest.mark.parametrize("part, expected", [
+    ("2010-2014", True),
+    ("2010–present", True),
+    ("2010—current", True),
+    ("3/2010-6/2012", True),
+    ("3/2010–ongoing", True),
+    ("3/2010 (founding)", True),   # a month/year that opens the part
+    ("2010", False),                # a bare year is not a membership date part
+    ("Society of 2010", False),
+])
+def test_membership_date_part_is_the_shared_grammar(part, expected):
+    assert is_membership_date_part(part) is expected
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("Zorblax Board    2016-23", ParsedActivityLine("Zorblax Board", (), "2016-23")),
+    ("Zorblax Board (Chair 2016-23)", ParsedActivityLine("Zorblax Board", ("Chair",), "2016-23")),
+    # a third digit is not a short end year cut off early
+    ("Zorblax Board    2016-202", ParsedActivityLine("Zorblax Board    2016-202", (), "")),
+])
+def test_committee_range_may_end_in_a_century_less_year(line, expected):
+    assert _parse_flattened_committee_lines([line]) == [expected]

@@ -15,11 +15,21 @@ Names keep their leading underscore deliberately. Renaming and relocating in the
 same change means a failure cannot be attributed to either; the rename is a
 separate, mechanical follow-up.
 """
+import itertools
 import logging
 import re
 from typing import NamedTuple
 
 from unified_pipeline.core.run_id import is_run_id
+
+from .dates import (
+    DATE_DASH,
+    MONTH_YEAR_SPAN,
+    RANGE_END,
+    YEAR,
+    YEAR_OR_SPAN,
+    YEAR_SPAN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +41,12 @@ logger = logging.getLogger(__name__)
 _UID_PREFIX = 'CV_'
 # A uid part shorter than this is a stray token ("Cv"), not a name.
 _UID_NAME_PART_MIN_CHARS = 3
-# One date grammar for this module (#665 item 5). Every recogniser below --
-# the year extractor, the membership date parts, the committee date lines --
-# is built from these pieces, so a change to a dash or to how a range ends
-# reaches all of them.
-_DATE_DASH = r'[-–—]'
-_YEAR = r'\d{4}'
-_RANGE_END = rf'(?:{_YEAR}|present)'
-_YEAR_SPAN = rf'{_YEAR}\s*{_DATE_DASH}\s*{_RANGE_END}'
-_YEAR_OR_SPAN = rf'{_YEAR}(?:\s*{_DATE_DASH}\s*{_RANGE_END})?'
-_MONTH_YEAR_DATE = r'\d{1,2}/?\d{0,4}'
-_MONTH_YEAR_SPAN = rf'{_MONTH_YEAR_DATE}\s*{_DATE_DASH}\s*(?:present|{_MONTH_YEAR_DATE})'
+# The membership date parts `_parse_multi_membership_entry` reads, on the
+# shared stage-6 date grammar (parsing/dates.py, #665): a year range, a
+# month/year range, or a month/year that opens the part ("3/2010 (founding)").
 _MEMBERSHIP_DATE_RE = re.compile(
-    rf'^(?:{_MONTH_YEAR_SPAN}|{_YEAR_SPAN})$', re.IGNORECASE)
+    rf'^(?:{MONTH_YEAR_SPAN}|{YEAR_SPAN})$', re.IGNORECASE)
+_MEMBERSHIP_DATE_PREFIX_RE = re.compile(r'^\d{1,2}/' + YEAR)
 _MONTH_NAMES = (r'January|February|March|April|May|June|July|August|'
                 r'September|October|November|December')
 
@@ -133,17 +136,17 @@ def _extract_year_from_text(text: str) -> str | None:
         return None
 
     # Pattern 1: Month Year (e.g., "August 2021", "December 2017")
-    month_year = re.search(rf'({_MONTH_NAMES})\s+({_YEAR})', text)
+    month_year = re.search(rf'({_MONTH_NAMES})\s+({YEAR})', text)
     if month_year:
         return month_year.group(2)
 
     # Pattern 2: Year in parentheses at end (e.g., "(2021)")
-    paren_year = re.search(rf'\(({_YEAR})\)\s*$', text)
+    paren_year = re.search(rf'\(({YEAR})\)\s*$', text)
     if paren_year:
         return paren_year.group(1)
 
     # Pattern 3: Year range - take the end year (e.g., "2019-2021")
-    year_range = re.search(rf'({_YEAR})\s*{_DATE_DASH}\s*({_YEAR})', text)
+    year_range = re.search(rf'({YEAR})\s*{DATE_DASH}\s*({YEAR})', text)
     if year_range:
         return year_range.group(2)
 
@@ -359,6 +362,15 @@ def _looks_like_organization(part: str) -> bool:
     return stripped.lower().rstrip(':.') not in _NON_ORGANIZATION_WORDS
 
 
+def is_membership_date_part(part: str) -> bool:
+    """True when one membership fragment is its date: the single test
+    `_parse_multi_membership_entry` classifies dates with, and the one
+    sections/memberships.py's split gate asks, so the gate cannot admit or
+    reject a split on a different notion of "date" than the parser that
+    reads it (#665 -- the gate's own copy took a hyphen only)."""
+    return bool(_MEMBERSHIP_DATE_RE.match(part) or _MEMBERSHIP_DATE_PREFIX_RE.match(part))
+
+
 def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]]:
     """Parse multiple memberships from merged entry lines.
 
@@ -390,7 +402,7 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
                     continue
                 if any(kw in part.lower() for kw in membership_keywords) and len(part.split()) <= 3:
                     membership_types.append(_PlacedValue(part, len(organizations)))
-                elif _MEMBERSHIP_DATE_RE.match(part) or re.match(r'^\d{1,2}/\d{4}', part):
+                elif is_membership_date_part(part):
                     dates.append(_PlacedValue(part, len(organizations)))
                 else:
                     organizations.append(part)
@@ -400,7 +412,7 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
                 membership_types.append(_PlacedValue(line, len(organizations)))
                 after_type = True
                 continue
-            if _MEMBERSHIP_DATE_RE.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
+            if is_membership_date_part(line):
                 dates.append(_PlacedValue(line, len(organizations)))
             elif _looks_like_organization(line) and (
                     after_type or len(line) > _SHORT_ORGANIZATION_MAX_CHARS):
@@ -477,12 +489,12 @@ class ParsedActivityLine(NamedTuple):
 # Column-header labels that survive table flattening as their own lines.
 _COMMITTEE_HEADER_LABELS = ('dates', 'role', 'committee', 'institution')
 # A line that is nothing but a year or a year range ("1999", "1999-2010").
-_DATE_ONLY_LINE = re.compile(rf'^({_YEAR_OR_SPAN})$', re.IGNORECASE)
+_DATE_ONLY_LINE = re.compile(rf'^({YEAR_OR_SPAN})$', re.IGNORECASE)
 # A year or a year range at the end of a line ("Committee    1999-2010").
-_TRAILING_DATE = re.compile(rf'({_YEAR_OR_SPAN})\s*$', re.IGNORECASE)
+_TRAILING_DATE = re.compile(rf'({YEAR_OR_SPAN})\s*$', re.IGNORECASE)
 # Parenthetical role+date: "(Chair 1999-2010)" or "(Vice Chair 2006-2008 )".
 _PAREN_ROLE_DATE = re.compile(
-    rf'\(([^)]*?)({_YEAR})\s*{_DATE_DASH}\s*({_RANGE_END})\s*\)', re.IGNORECASE)
+    rf'\(([^)]*?)({YEAR})\s*{DATE_DASH}\s*({RANGE_END})\s*\)', re.IGNORECASE)
 
 
 def _parse_pipe_date_row(cells: list[str], pipe_date: str,
@@ -509,6 +521,62 @@ def _parse_pipe_date_row(cells: list[str], pipe_date: str,
     return ParsedActivityLine(clean_activity, roles, pipe_date, institution)
 
 
+# The two kinds of line `_parse_flattened_committee_lines` cannot date on its
+# own, recorded in encounter order so the pairing can check their layout.
+_UNDATED_ACTIVITY = 'activity'
+_ORPHAN_DATE = 'date'
+
+
+def _orphan_layout_is_tabular(layout: list[str]) -> bool:
+    """True when undated activities and orphaned dates sit the way a flattened
+    two-column table puts them: one contiguous run of each (column 1, then
+    column 2, or the reverse), or strict alternation (row by row, the date
+    before or after its activity).
+
+    Those are the only layouts in which position is evidence -- each one is
+    the table's own row order read off a single axis. Anything else (a run of
+    activities, a date, more activities, then more dates) means lines were
+    split, inserted or moved between the two columns, so an equal count is a
+    coincidence rather than proof the runs still line up (#665).
+    """
+    run_lengths = [len(list(run)) for _, run in itertools.groupby(layout)]
+    return len(run_lengths) == 2 or all(length == 1 for length in run_lengths)
+
+
+def _pair_orphaned_dates(items: list[ParsedActivityLine], dates_pool: list[str],
+                         layout: list[str]) -> None:
+    """Give each undated item in `items` its orphaned date, in place, forward
+    by position -- only when the counts agree and `layout` is tabular.
+
+    Otherwise every undated item stays dateless and a warning names why: a
+    dateless item renders with a blank Dates cell, a visible gap, where a
+    shifted date would be a silent wrong answer (review thread 3843817401).
+    """
+    if not dates_pool:
+        return
+    undated_count = layout.count(_UNDATED_ACTIVITY)
+    if undated_count != len(dates_pool):
+        logger.warning(
+            "committee/leadership date alignment: %d orphaned date(s) but "
+            "%d undated activity line(s) -- counts disagree, leaving dates "
+            "unassigned instead of pairing positionally",
+            len(dates_pool), undated_count,
+        )
+        return
+    if not _orphan_layout_is_tabular(layout):
+        logger.warning(
+            "committee/leadership date alignment: %d orphaned date(s) and "
+            "%d undated activity line(s) are interleaved in no table layout "
+            "-- leaving dates unassigned instead of pairing positionally",
+            len(dates_pool), undated_count,
+        )
+        return
+    dates = iter(dates_pool)
+    for i, item in enumerate(items):
+        if not item.dates:
+            items[i] = item._replace(dates=next(dates))
+
+
 def _parse_flattened_committee_lines(
     lines: list[str], *, institution_column: bool = False,
 ) -> list[ParsedActivityLine]:
@@ -533,9 +601,10 @@ def _parse_flattened_committee_lines(
     longer proves the two runs still line up; pairing anyway would put a
     real date on the wrong activity, which is worse than no date at all
     because a wrong date looks exactly as confident as a right one once it's
-    in the document. So the forward pairing only runs when the counts match;
-    otherwise the affected items stay dateless (review thread 3843817401 /
-    #665) and a warning is logged naming the mismatch.
+    in the document. So the forward pairing only runs when the counts match
+    AND the two runs sit in one of the layouts a flattened table produces
+    (`_orphan_layout_is_tabular`); otherwise the affected items stay dateless
+    (review thread 3843817401 / #665) and a warning is logged naming why.
 
     A line carrying several parentheticals ("(Vice Chair 2006-2008) (Chair
     2008-2010)") is one role held under changing titles, so it becomes one
@@ -548,6 +617,7 @@ def _parse_flattened_committee_lines(
     """
     items: list[ParsedActivityLine] = []
     dates_pool: list[str] = []
+    layout: list[str] = []
 
     for line in lines:
         # entry_lines() already strips every line at both call sites, but this
@@ -573,6 +643,7 @@ def _parse_flattened_committee_lines(
         # Check if this is a date-only line
         if _DATE_ONLY_LINE.match(line):
             dates_pool.append(line)
+            layout.append(_ORPHAN_DATE)
             continue
 
         # Check for parenthetical role+date: "Committee (Chair 1999-2010)"
@@ -604,40 +675,20 @@ def _parse_flattened_committee_lines(
             else:
                 # Just a date with no text - add to pool
                 dates_pool.append(item_date)
+                layout.append(_ORPHAN_DATE)
             continue
 
         # Plain text line - no date found
         items.append(ParsedActivityLine(line, (), ''))
+        layout.append(_UNDATED_ACTIVITY)
 
-    # Match dates_pool to items without dates using forward mapping. Both
-    # items and dates come from the same source table (column 1 -> items,
-    # column 2 -> dates), and are always in the same order -- but only when
-    # the two runs are the same length is that order still provable. Pair
-    # positionally only on a matching count; on a mismatch, leave the
-    # dateless items dateless rather than shift a real date onto the wrong
-    # activity (review thread 3843817401 / #665). A dateless item renders
-    # with a blank Dates cell -- a visible gap, not a silent wrong answer.
-    undated_count = sum(1 for item in items if not item.dates)
-    if dates_pool and undated_count == len(dates_pool):
-        date_idx = 0
-        for i, item in enumerate(items):
-            if not item.dates:
-                items[i] = item._replace(dates=dates_pool[date_idx])
-                date_idx += 1
-    elif dates_pool:
-        logger.warning(
-            "committee/leadership date alignment: %d orphaned date(s) but "
-            "%d undated activity line(s) -- counts disagree, leaving dates "
-            "unassigned instead of pairing positionally",
-            len(dates_pool), undated_count,
-        )
-
+    _pair_orphaned_dates(items, dates_pool, layout)
     return items
 
 
 # A year or a year range at the START of a line ("1999-2010    Committee"): the
 # date-prefixed layout, where every record opens with its own date.
-_LEADING_DATE = re.compile(rf'^{_YEAR_OR_SPAN}\b', re.IGNORECASE)
+_LEADING_DATE = re.compile(rf'^{YEAR_OR_SPAN}\b', re.IGNORECASE)
 
 # Two dated lines are the smallest text that can hold two records. One dated
 # line is one record plus, at most, a wrapped description under it.

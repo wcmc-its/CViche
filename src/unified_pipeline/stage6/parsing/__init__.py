@@ -37,4 +37,5 @@ from .text import (  # noqa: F401
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
     _strip_appended_initials,
+    is_membership_date_part,
 )

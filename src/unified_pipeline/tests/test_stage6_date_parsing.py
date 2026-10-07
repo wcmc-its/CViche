@@ -915,6 +915,7 @@ def test_a_mapping_dated_entry_sorts_among_string_dated_entries():
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     envelope_date_spans,
     extra_date_spans,
+    further_date_spans,
     with_extra_date_spans,
 )
 
@@ -1205,3 +1206,34 @@ def test_an_extra_span_ending_to_date_reads_as_running():
 def test_a_record_running_to_date_covers_its_later_extra_years():
     fields = {"start_date": "1990", "end_date": "to date", "additional_dates": "1992"}
     assert extra_date_spans(fields, "K1") == []
+
+
+# --- #1245 (X6 RINASX 430, VPMMFM 531): spans in a date-only remark ----------
+
+def test_a_remark_holding_only_spans_replaces_its_envelope():
+    """RINASX 430's shape: own range 1970-present, the two terms only under
+    `additional_info`. The range is their envelope, so the terms show."""
+    fields = {"start_date": "1970", "end_date": "present",
+              "additional_info": "1970\u20131987, 1995\u2013present"}
+    assert with_extra_date_spans("1970-Present", fields, "P") == "1970-1987, 1995-Present"
+
+
+def test_a_remark_of_dates_adds_a_span_outside_the_own_range():
+    fields = _spans(additional_info="2022; 2024-2025")
+    assert extra_date_spans(fields, "O") == ["2022", "2024-2025"]
+
+
+@pytest.mark.parametrize("remark", [
+    "Chair 2022", "2022, as chair", "2022 (acting)", "renewed 2024-2025", "", None, ["2022"], 2022])
+def test_a_remark_that_is_not_only_dates_adds_no_span(remark):
+    assert extra_date_spans(_spans(additional_info=remark), "O") == []
+
+
+def test_further_date_spans_lists_every_span_once_without_an_own_range():
+    fields = {"date": None, "additional_dates": "1999-09-30; 1999-10-14; 2001-03-02"}
+    assert further_date_spans(fields, "R") == ["1999", "2001"]
+
+
+def test_further_date_spans_is_empty_without_a_span_key():
+    assert further_date_spans({"date": "2019"}, "R") == []
+

@@ -870,4 +870,5 @@ def get_run_review_note(
     if cols.quality_score is None:
         # Not yet backfilled onto the row: fall back to the cached score.
         cols = quality_score_service.score_columns(quality_score_service.get_cached_score(run_id))
-    return RunReviewNote(needs_cleanup=columns_need_cleanup(cols))
+    return RunReviewNote(
+        needs_cleanup=columns_need_cleanup(cols), scored=cols.quality_score is not None)

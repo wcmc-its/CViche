@@ -310,12 +310,15 @@ def test_a_grant_without_the_pending_fields_gets_neither_row():
 def test_the_owners_share_of_the_award_gets_its_own_row(code):
     """#817 (EBYSBC E14): stage 4 keeps the owner's part of an award under the
     off-schema `share_total`, which no row read. It renders under its own
-    label, never as the annual direct costs."""
+    label, never as the annual direct costs. Under Pending the total is a
+    request (#1343)."""
     fields = {'agency': 'NIH', 'title': 'Shared Kestrel Project',
               'total_funding': '900000', 'share_total': '$120,500'}
     cells = _cells(_generator()._create_grant_table(fields, code))
+    total_label = (research_support.TOTAL_REQUESTED_LABEL if code == 'M2C'
+                   else research_support.TOTAL_AWARD_LABEL)
     assert cells[research_support.SHARE_LABEL] == '$120,500'
-    assert cells[research_support.TOTAL_AWARD_LABEL] == '$900,000'
+    assert cells[total_label] == '$900,000'
     assert research_support.ANNUAL_COSTS_LABEL not in cells
 
 
@@ -2304,7 +2307,7 @@ def _under(heading, code='M2A', **fields):
     (['Impending Renewals'], None),           # whole words only
     (['Reunfunded Items'], None),             # no boundary before the word
     (['Unfundedness Report'], None),          # no boundary after the word
-    (['Pendingx Applications'], None),        # no boundary after a pending word
+    (['Pendingx Reports'], None),             # no boundary after a pending word
     ([], None),
 ])
 def test_grant_heading_rebucket_target(heading, expected_code):
@@ -2326,6 +2329,63 @@ def test_a_grant_without_a_status_moves_on_its_heading():
 
     assert (current, completed, pending) == ([], [], [entry])
     assert entry['reclassification_note'].startswith('Reclassified to Pending (M2C)')
+
+
+# --- #1343: a heading that lists applications files them as Pending --------------
+
+@pytest.mark.parametrize('heading, expected_code', [
+    (['GRANTS APPLIED'], 'M2C'),
+    (['Research', 'Grants Applied For'], 'M2C'),
+    (['Grants applied:'], 'M2C'),
+    (['Grant Applications'], 'M2C'),
+    (['Research Support', 'Application'], 'M2C'),
+    (['Applied Research Grants'], None),       # the adjective names no bucket
+    (['Grants', 'Applied Health Services'], None),
+    (['Funded Grant Applications'], None),     # an award word keeps it out
+    (['Grant Applications Awarded'], None),
+    (['Current Applications'], None),
+    (['Past Grant Applications'], None),
+    (['Completed Applications'], 'M2B'),       # the existing completed rule wins
+    (['Not Funded Applications'], 'M2C'),      # the existing not-funded rule wins
+    (['Reapplications'], None),                # whole words only
+])
+def test_an_application_heading_is_pending(heading, expected_code):
+    target, note = grant_heading_rebucket_target(heading)
+    assert target == expected_code
+    assert (note is not None) is (expected_code is not None)
+
+
+def test_the_application_heading_note_names_the_heading():
+    _, note = grant_heading_rebucket_target(['GRANTS APPLIED'])
+    assert note == "Reclassified to Pending (M2C): section heading 'GRANTS APPLIED' lists applications"
+
+
+def test_an_application_coded_completed_renders_under_pending_as_a_request():
+    """The ZDCXIV shape (#1343): 3b coded an application under "GRANTS APPLIED"
+    M2B with an amount and an ended date. The wire through
+    `_fill_research_support` files it under Pending and labels its amount a
+    request, not an award."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_under(['GRANTS APPLIED'], code='M2B', title='Kestrel Bone Density Study',
+                        agency='Example Foundation', total_funding='$62,841',
+                        start_date='12/2010', end_date='12/2010')]},
+        current_year=TEST_YEAR)
+
+    (table,) = _tables_under(gen, PENDING)
+    cells = _cells(table)
+    assert cells[research_support.TOTAL_REQUESTED_LABEL] == '$62,841'
+    assert research_support.TOTAL_AWARD_LABEL not in cells
+    assert _tables_under(gen, COMPLETED) == []
+
+
+def test_a_moved_grant_with_both_amounts_renders_one_requested_row():
+    """A grant with `total_funding` and the same `total_funding_requested`
+    renders the request once under Pending."""
+    fields = {'agency': 'NIH', 'title': 'Kestrel Request Project',
+              'total_funding': '250000', 'total_funding_requested': '$250,000'}
+    rows = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2C'))]
+    assert rows.count(research_support.TOTAL_REQUESTED_LABEL) == 1
 
 
 def test_a_status_field_beats_the_heading():

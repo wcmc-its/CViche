@@ -116,6 +116,15 @@ HIERARCHY_TO_EXPECTED_CODES = {
 
     # Leadership sections
     "leadership": ["O", "Q1"],
+    # A board of directors or trustees seats its members, leading or not
+    # (stage 3a maps such headings to Q1/Q2). Without these, "Boards of
+    # Directors (for Professional Organizations or Societies)" expected only
+    # the I its "societies" names, and a board seat rerouted to Memberships
+    # (BNYLDF 285, #1428).
+    "board of directors": ["Q1", "Q2"],
+    "boards of directors": ["Q1", "Q2"],
+    "board of trustees": ["Q1", "Q2"],
+    "boards of trustees": ["Q1", "Q2"],
     "administrative": ["O", "P"],
 
     # Invited talks

@@ -1517,6 +1517,31 @@ def test_upload_compensates_failure_before_the_commit(client, db, seed_simple_mo
     assert list(upload_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize("table, inserts_after_the_conflict", [
+    ("runs", 1),
+    ("steps", len(STEP_REGISTRY)),  # one INSERT per step row
+])
+def test_upload_retries_a_one_off_1020_and_keeps_the_archive(
+    client, db, seed_simple_mode, tmp_path, write_conflict_on_insert, table, inserts_after_the_conflict,
+):
+    """#1285: MariaDB rejecting the new run's INSERT once with 1020 is retried
+    in a fresh transaction, so the upload succeeds with its Run and Step rows
+    and its archive intact -- not a 500 plus a compensated (or orphaned) archive."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="RTRY1K"))
+    attempts = write_conflict_on_insert(table)
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 200, resp.text
+    assert len(attempts) == 1 + inserts_after_the_conflict
+    db.expire_all()
+    assert db.get(Run, "RTRY1K").status == "created"
+    assert db.query(Step).filter(Step.run_id == "RTRY1K").count() == len(STEP_REGISTRY)
+    assert storage.exists("RTRY1K", "input/manifest.json") is True
+
+
 # --- #796: filename bound BEFORE the archive --------------------------------
 
 def test_upload_rejects_filename_over_column_width_before_archive(client, db, seed_simple_mode, tmp_path):

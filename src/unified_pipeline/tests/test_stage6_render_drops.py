@@ -37,6 +37,8 @@ from unified_pipeline.stage_6_word_template import (
     REROUTE_ACCEPTED_SAME_FAMILY,
     REROUTE_CHECK,
     REROUTE_REFUSED_FIELDS,
+    REROUTE_REFUSED_FIELDS_LOST,
+    REROUTE_REFUSED_HEADING,
     REROUTE_REFUSED_MENTEE,
     WCMTemplateGenerator,
 )
@@ -272,7 +274,7 @@ def test_pending_grant_needs_more_than_a_title() -> None:
 
 def test_fields_inside_a_record_list_count_toward_the_fit() -> None:
     # The scalar alone does not fit S8; the list's titles do.
-    entry = _fielded("N3B", ["R", "S8"], {"mentee_level": "Resident",
+    entry = _fielded("N3B", ["R", "S8"], {"research_focus": "Topic X",
                                          "talks": [{"title": "One", "authors": "Doe J"},
                                                    {"title": "Two"}]})
     assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(entry, "N3B") == "S8"
@@ -403,6 +405,58 @@ def test_anchor_and_kind_fields_are_what_the_renderers_write() -> None:
     for (assigned, target), kind in _SAME_FAMILY_KIND_FIELDS.items():
         assert assigned[0] == target[0], (assigned, target)
         assert kind <= _RENDERED_FIELDS[assigned] and not kind & _RENDERED_FIELDS[target]
+
+
+# --- #1428: an accepted reroute still dropped fields or overrode its heading -
+# NDMRSO class E18. Synthetic records, invented values.
+
+def _refusal(gen: WCMTemplateGenerator) -> str:
+    [record] = _reroute_records(gen)
+    return record["message"]
+
+
+def test_reroute_that_drops_a_rendered_field_is_refused() -> None:
+    # TVZDVF 557's shape: a talk (R) under a posters heading kept only its
+    # title in S8; a job (D3) under a memberships heading lost its title in I.
+    talk = _fielded("R", ["S8"], {"title": "Talk X", "event_name": "Seminar",
+                                  "location": "City X", "date": "2006"})
+    job = _fielded("D3", ["I"], {"title": "Instructor", "organization": "School X",
+                                 "start_date": "1998", "end_date": "2000"})
+    for entry in (talk, job):
+        gen, code = _gen_and_code(entry)
+        assert code == entry["hierarchy_mismatch_detail"]["assigned_code"]
+        assert REROUTE_REFUSED_FIELDS_LOST.replace("_", " ") in _refusal(gen)
+        assert "taxonomy_code_original" not in entry
+
+
+def test_target_that_reads_the_field_under_another_name_keeps_the_reroute() -> None:
+    # R takes a talk's date from `year` and states the owner as presenter, so
+    # an abstract under a talks heading loses nothing it would show.
+    abstract = _fielded("S8", ["R"], {"authors": "Doe J", "title": "Abstract X",
+                                      "year": "2003"})
+    assert _gen_and_code(abstract)[1] == "R"
+
+
+def test_plain_member_role_is_not_lost_to_memberships() -> None:
+    member = _fielded("Q2", ["I"], {"organization": "Society X", "role": " Members ",
+                                    "start_date": "2015"})
+    volunteer = _fielded("Q2", ["I"], {"organization": "Society X", "role": "Volunteer",
+                                       "start_date": "2015"})
+    assert _gen_and_code(member)[1] == "I"
+    assert _gen_and_code(volunteer)[1] == "Q2"
+
+
+def test_heading_that_names_the_assigned_code_keeps_it() -> None:
+    # BNYLDF 285's shape: stage 3b expected only the I its "societies" names.
+    seat = _fielded("Q2", ["I"], {"organization": "Society X", "start_date": "1998"})
+    seat["hierarchy_mismatch_detail"]["hierarchy"] = [
+        "BOARDS OF DIRECTORS (For Professional Organizations or Societies)"]
+    gen, code = _gen_and_code(seat)
+    assert code == "Q2"
+    assert REROUTE_REFUSED_HEADING.replace("_", " ") in _refusal(gen)
+    society = _fielded("Q2", ["I"], {"organization": "Society X", "start_date": "1998"})
+    society["hierarchy_mismatch_detail"]["hierarchy"] = ["Professional Societies"]
+    assert _gen_and_code(society)[1] == "I"
 
 
 # --- #983: multi-record entries fan out before the PII pass and dedup --------

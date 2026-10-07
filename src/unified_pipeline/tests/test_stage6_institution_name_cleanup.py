@@ -13,6 +13,8 @@ below is synthetic.
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -70,8 +72,7 @@ def test_official_name_is_used_when_the_entry_has_no_institution() -> None:
 def test_cleaned_name_is_not_checked_against_the_raw_value() -> None:
     """cleaned_name is the raw value without its location, so a name of
     generic words only ("University Hospital") still applies."""
-    entry = {"institution_enrichment": {"cleaned_name": "University Hospital"},
-             "extracted_fields": {"institution": "University Hospital, Springfield, IL"}}
+    entry = _cleaned("University Hospital, Springfield, IL", "University Hospital")
     assert _get_cleaned_institution_name(entry) == "University Hospital"
 
 
@@ -108,6 +109,103 @@ def test_non_mapping_enrichment_is_treated_as_absent() -> None:
     no-enrichment result instead."""
     assert _get_cleaned_institution_name({"institution_enrichment": ["a"]}) is None
     assert _get_cleaned_institution_name({"institution_enrichment": "abc"}) is None
+
+
+# --------------------------------------------------------------------------
+# #1257: cleaned_name may drop only the location
+# --------------------------------------------------------------------------
+
+def _cleaned(raw: str, cleaned: str, city: str = "Springfield",
+             state: str = "Illinois", country: str = "United States") -> dict:
+    return {"institution_enrichment": {"cleaned_name": cleaned, "city": city,
+                                       "state": state, "country": country},
+            "extracted_fields": {"institution": raw}}
+
+
+@pytest.mark.parametrize(("raw", "cleaned", "city", "state", "country"), [
+    # A trailing "City, ST": the state is an acronym of 5b's state.
+    ("Kestrel College of Medicine, Springfield, IL",
+     "Kestrel College of Medicine", "Springfield", "Illinois", "United States"),
+    # Parenthesised, with a ZIP code and a country acronym.
+    ("Kestrel University (Springfield, IL 62701, USA)",
+     "Kestrel University", "Springfield", "Illinois", "United States"),
+    # A joining word and an accent-folded city.
+    ("Kestrel Medical School at Leon",
+     "Kestrel Medical School", "León", "", "Nicaragua"),
+    # A country's long form.
+    ("Kestrel Institute, Lanzhou, The Peoples Republic of China",
+     "Kestrel Institute", "Lanzhou", "", "China"),
+    # An acronym of the city ("OKC") and of the institution itself.
+    ("Kestrel Health Center (KHC), OKC, Oklahoma",
+     "Kestrel Health Center", "Oklahoma City", "Oklahoma", "United States"),
+    # A second city before 5b's state is a city too.
+    ("Kestrel Hospital, Harbor Town, CT",
+     "Kestrel Hospital", "Bayport", "Connecticut", "United States"),
+    # A word the cleaned name already holds names nothing new.
+    ("Kestrel and Bayport Clinics, Kestrel and Bayport, CA",
+     "Kestrel and Bayport Clinics", "Bayport", "California", "United States"),
+])
+def test_cleaned_name_dropping_only_location_is_kept(
+        raw: str, cleaned: str, city: str, state: str, country: str) -> None:
+    assert _get_cleaned_institution_name(
+        _cleaned(raw, cleaned, city, state, country)) == cleaned
+
+
+@pytest.mark.parametrize(("raw", "cleaned", "expected"), [
+    # A department after the school, then the location (TXTATQ shape).
+    ("Kestrel College of Pharmacy, Department of Pharmacy Practice, Springfield, IL",
+     "Kestrel College of Pharmacy",
+     "Kestrel College of Pharmacy, Department of Pharmacy Practice"),
+    # A division and department before the school.
+    ("Division of Trauma, Department of Surgery, Kestrel College of Medicine",
+     "Kestrel College of Medicine",
+     "Division of Trauma, Department of Surgery, Kestrel College of Medicine"),
+    # An online platform in parentheses.
+    ("Kestrel University (Coursera)", "Kestrel University",
+     "Kestrel University (Coursera)"),
+    # A platform in parentheses, then the location: the paren is kept.
+    ("Kestrel University (Coursera), Springfield, IL", "Kestrel University",
+     "Kestrel University (Coursera)"),
+    # A parent-university prefix before a spaced dash (WIANVH shape).
+    ("KHSU - Kestrel Medical School, Springfield, IL", "Kestrel Medical School",
+     "KHSU - Kestrel Medical School"),
+    # Two institutions joined by a hyphen (YYVHNN shape).
+    ("Kestrel-University of Springfield, Springfield, Illinois",
+     "University of Springfield", "Kestrel-University of Springfield"),
+    # An acronym whose later letters happen to occur in the city, in
+    # order ("Springfield" holds a P and a D), but whose first does not
+    # start it, is not the city's.
+    ("Kestrel University (XPD), Springfield, IL", "Kestrel University",
+     "Kestrel University (XPD)"),
+    # A delivery mode after a slash.
+    ("Kestrel Academy / Virtual via Zoom", "Kestrel Academy",
+     "Kestrel Academy / Virtual via Zoom"),
+])
+def test_cleaned_name_dropping_a_qualifier_renders_the_raw_value(
+        raw: str, cleaned: str, expected: str) -> None:
+    assert _get_cleaned_institution_name(_cleaned(raw, cleaned)) == expected
+
+
+def test_leading_location_part_is_cut() -> None:
+    entry = _cleaned("Springfield, Kestrel Academy, Department of Music",
+                     "Kestrel Academy")
+    assert _get_cleaned_institution_name(entry) == (
+        "Kestrel Academy, Department of Music")
+
+
+def test_cleaned_name_not_in_the_raw_value_is_kept() -> None:
+    """An expanded abbreviation ("Depts." -> "Departments") is 5b's
+    rewording, not a drop: there is no raw span to restore around."""
+    entry = _cleaned("Dept. of Music, Kestrel Univ., Springfield, IL",
+                     "Department of Music, Kestrel University")
+    assert _get_cleaned_institution_name(entry) == (
+        "Department of Music, Kestrel University")
+
+
+def test_cleaned_name_with_no_raw_value_is_kept() -> None:
+    entry = {"institution_enrichment": {"cleaned_name": "Kestrel University"},
+             "extracted_fields": {"institution": None}}
+    assert _get_cleaned_institution_name(entry) == "Kestrel University"
 
 
 # --------------------------------------------------------------------------

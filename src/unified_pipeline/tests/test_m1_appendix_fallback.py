@@ -24,6 +24,12 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization import _squash  # noqa: E402
+from unified_pipeline.stage6.render_check import (  # noqa: E402
+    _RENDER_TOKEN_RE,
+    _norm,
+    m1_record_rendered,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 M1_TOKEN = "DISTINCTIVE_M1_TOKEN"
@@ -270,3 +276,74 @@ def test_dated_m1_record_is_not_vouched_for_by_the_template_instruction_box(tmp_
     text = _render(tmp_path, _record_entries(record), research_summary=summary)
     assert "delete this instruction box" not in text.lower()
     assert text.count(BOX_RECORD_TOKEN) == 1, "the instruction box vouched for an M1 record"
+
+
+# #1429 (AUTOPSY-NDMRSO-batch-2026-10-04): one fragment of a dated M1 record
+# vouched for the whole record -- its "<years> Department of <dept>, <school>"
+# fragment matched an appointment row, or its project title matched a summary
+# paragraph that only shares its topic words. "Gearwick", "Tarnholm" and
+# "Pellucid" are invented words.
+PROJECT_TOKEN = "Pellucid"
+
+
+def _project_record() -> dict:
+    return {"text": "2015 to 2017 Department of Gearwork, Tarnholm Widget University\t"
+                    "Principal Investigator: Robin Gearwick\t"
+                    f"Description: {PROJECT_TOKEN} lubricant fatigue modelling in planetary gearboxes",
+            "taxonomy_code": "M1",
+            "extracted_fields": {"start_date": "2015", "end_date": "2017",
+                                 "department": "Department of Gearwork",
+                                 "narrative": "lubricant fatigue modelling in planetary gearboxes"},
+            "element_idx_start": 22}
+
+
+def _letter_token_sets(*lines: str) -> list[set]:
+    return [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in lines]
+
+
+def _haystack(*lines: str) -> str:
+    return "\x00".join(_squash(line) for line in lines)
+
+
+def test_m1_record_is_not_vouched_for_by_its_date_and_department_fragment():
+    """The record's leading fragment matches an appointment row word for word;
+    the record as a whole is not on the page."""
+    text = _project_record()["text"]
+    appointment = "2015-2017 Assistant Professor, Department of Gearwork, Tarnholm Widget University"
+    assert m1_record_rendered(text, _haystack(appointment), _letter_token_sets(appointment)) is False
+
+
+def test_m1_record_is_not_vouched_for_by_its_title_inside_a_summary_paragraph():
+    summary = ("Dr. Public's program studies lubricant fatigue modelling in planetary gearboxes, "
+               "with ongoing work on bearing wear, surface coatings and industrial reliability.")
+    text = _project_record()["text"]
+    assert m1_record_rendered(text, _haystack(summary), _letter_token_sets(summary)) is False
+
+
+def test_m1_record_rendered_whole_on_one_line_counts_as_rendered():
+    """A row that carries the record's own words, reformatted, still vouches."""
+    row = ("Principal Investigator Robin Gearwick | Department of Gearwork, Tarnholm Widget University | "
+           f"{PROJECT_TOKEN} lubricant fatigue modelling in planetary gearboxes | 2015-2017")
+    text = _project_record()["text"]
+    assert m1_record_rendered(text, _haystack(row), _letter_token_sets(row)) is True
+
+
+def test_m1_record_rendered_verbatim_counts_as_rendered():
+    text = "2015 to 2017 Tarnholm gear study"
+    assert m1_record_rendered(text, _haystack("x", text), _letter_token_sets("x")) is True
+
+
+def test_m1_record_with_too_few_tokens_is_not_verifiable():
+    assert m1_record_rendered("2019-2020: Tarnholm lab", _haystack("x"), _letter_token_sets("x")) is None
+
+
+def test_dated_m1_record_whose_title_a_summary_shares_reaches_the_appendix(tmp_path):
+    """End to end: under #1360 the record's title fragment matched the summary
+    paragraph at the overlap share and the record rendered nowhere."""
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on lubricant fatigue modelling in "
+                       "planetary gearboxes and widget dynamics.")
+    text, diversions = _render_with_sidecar(tmp_path, _record_entries(_project_record()), summary)
+    assert text.count(PROJECT_TOKEN) == 1, "the M1 project record rendered nowhere"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "m1_record_not_in_summary", 1)]
