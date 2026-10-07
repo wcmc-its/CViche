@@ -430,9 +430,13 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     flags (comments and review notes) it carries. None when there is nothing to flag."""
     if not isinstance(doctor_payload, dict):
         return None
-    findings = [f for f in _usable_findings(doctor_payload)[0]
-                if f["severity"] in COMMENTED_SEVERITIES]
-    if not findings:
+    usable = _usable_findings(doctor_payload)[0]
+    # Every diversion, INFO ones (routine recovered lines) too: stage 6's
+    # Appendix note counts every line, so where they came from must add up to it.
+    diverted = [f for f in usable
+                if f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail)]
+    findings = [f for f in usable if f["severity"] in COMMENTED_SEVERITIES and f not in diverted]
+    if not findings and not diverted:
         return None
     doc = Document(str(clean_docx))
     paragraphs = [(p, _norm(_paragraph_text(p)))
@@ -440,12 +444,9 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     if not paragraphs:
         return None
     surfaces = (paragraphs, _rows(doc))
-    diverted = [f for f in findings
-                if f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail)]
     flags: list[Flag] = []
     notes: list[Note] = []
     if diverted:
-        findings = [f for f in findings if f not in diverted]
         came_from = _came_from([_instance(f) for f in diverted])
         if not _add_came_from(doc, came_from):
             notes.append(Note(MOVED_TITLE, MOVED_INSTRUCTION, came_from))

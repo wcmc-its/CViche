@@ -229,6 +229,16 @@ def test_where_appendix_entries_came_from_goes_in_stage_6s_appendix_note(tmp_pat
     assert _comments(out) == [] and _notes(out) == []  # nothing on the Appendix lines themselves
 
 
+def test_where_from_counts_info_diversions_too(tmp_path):
+    """The note box counts every Appendix line, routine recovered ones (INFO) included."""
+    out, _ = rc.write_review_docx(_with_appendix_note(tmp_path), _report(
+        _DIVERSIONS[0],
+        _finding("stage6_render_warnings", "stage 6 self-check: A: 1 entry classified A was not found "
+                 "in the rendered document and was recovered into the Appendix", severity="INFO")))
+    assert _box_lines(out, rc.APPENDIX_NOTE_TITLE)[1] == (
+        "Where they came from: 2 from Past Research Funding, 1 from Personal/Contact Information.")
+
+
 def test_without_stage_6s_appendix_note_where_from_is_a_review_note(tmp_path):
     """A document rendered before the Appendix note box existed."""
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(*_DIVERSIONS))
