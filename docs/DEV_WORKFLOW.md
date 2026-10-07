@@ -248,10 +248,14 @@ Two rules:
    If any of these fails, or the PR itself names a judgement call, ask before
    merging. After the merge, check that every `Closes #N` fired (see below).
 2. **CI must be actually green**, not "green locally". A job that failed with
-   zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on PRs to
-   `dev` and `main`: `backend-tests`, `pipeline-tests`, `function-size`,
-   `frontend-typecheck`, `type-check`, `secret-scan`. `issue-narrowing.yml`
-   adds `gate`. `deps-audit.yml` runs only when a requirements file changes.
+   zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on every
+   PR, whatever its base, and on pushes to `dev` and `main`: `backend-tests`,
+   `pipeline-tests`, `function-size`, `frontend-typecheck`, `type-check`,
+   `secret-scan`. A newer push to a PR cancels that PR's in-progress run.
+   On a PR that touches neither `web_interface/frontend/` nor `ci.yml`,
+   `frontend-typecheck` goes green without running its npm steps; it always
+   runs them on `dev`/`main`. `issue-narrowing.yml` adds `gate`.
+   `deps-audit.yml` runs only when a requirements file changes.
 
    **When Actions can't start jobs** (billing, or a GitHub outage), a local run
    of every job counts as green, provided all of the following hold:
