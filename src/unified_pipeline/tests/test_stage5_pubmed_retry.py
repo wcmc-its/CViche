@@ -172,7 +172,8 @@ def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
         monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         result = enricher._convert_pmcids_to_pmids(['PMC1234567'])
-    assert result == {}
+    assert result.pmids == {}
+    assert result.failed == {'PMC1234567'}
     assert len(session.calls) == stage5.MAX_ATTEMPTS
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
     assert sum(sleeps) <= stage5.RETRY_TOTAL_WAIT_CAP_SECONDS
@@ -184,7 +185,7 @@ def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
 def test_id_converter_429_outlasting_the_old_window_now_converts(monkeypatch):
     ok = FakeResponse(200, json_data={'records': [{'pmcid': 'PMC1234567', 'pmid': '7654321'}]})
     enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * 3 + [ok])
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {'PMC1234567': '7654321'}
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {'PMC1234567': '7654321'}
     assert sleeps == [1.0, 2.0, 4.0]
     assert enricher.stats['api_errors'] == 0
 
@@ -201,7 +202,7 @@ def test_id_converter_retry_after_beyond_the_cap_fails_fast(monkeypatch):
     too_long = str(int(stage5.RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)
     enricher, session, sleeps = _make(
         monkeypatch, [FakeResponse(429, headers={'Retry-After': too_long})])
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {}
     assert sleeps == [] and len(session.calls) == 1
     assert enricher.stats['api_errors'] == 1
 
@@ -211,7 +212,7 @@ def test_id_converter_summed_retry_after_waits_are_capped(monkeypatch):
     enricher, session, sleeps = _make(
         monkeypatch,
         [FakeResponse(429, headers={'Retry-After': '25'})] * stage5.MAX_ATTEMPTS)
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {}
     assert sleeps == [25.0, 25.0]
     assert len(session.calls) == 3
     assert enricher.stats['api_errors'] == 1
@@ -310,7 +311,7 @@ def test_title_search_error_is_retried(monkeypatch):
 def test_id_converter_malformed_json_then_valid_converts(monkeypatch):
     ok = FakeResponse(200, json_data={'records': [{'pmcid': 'PMC1234567', 'pmid': '7654321'}]})
     enricher, _, sleeps = _make(monkeypatch, [BadJSONResponse(200), ok])
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {'PMC1234567': '7654321'}
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {'PMC1234567': '7654321'}
     assert sleeps == [1.0]
     assert enricher.stats['api_errors'] == 0
 
@@ -596,6 +597,7 @@ def test_pmid_path_accepts_the_same_paper(monkeypatch):
     assert result['enrichment_status'] == 'enriched'
     assert result['enrichment_source'] == 'pmid'
     assert enricher.stats['title_mismatches'] == 0
+    assert enricher.stats['pmid_lookups'] == 1
 
 
 def test_pmcid_path_rejection_does_not_store_the_discovered_pmid(monkeypatch):
@@ -712,7 +714,7 @@ def test_bare_digit_pmcid_retry_keeps_the_title_guard(monkeypatch):
     ])
     entry = _titled(UNRELATED_TITLE, pmcid=BARE_PMID)
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert 'enrichment_rejected' not in result
     assert enricher.stats['title_mismatches'] == 0
     assert enricher.stats['failed_lookups'] == 1
@@ -734,7 +736,7 @@ def test_nine_digit_pmcid_value_is_not_truncated_to_a_pmid(monkeypatch):
     enricher, session, _ = _make(monkeypatch, [_idconv_error_response()])
     entry = _titled('A test article', pmcid='123456789')
     [result] = enricher._enrich_by_pmcid([(entry, 'PMC123456789')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert len(session.calls) == 1
 
 
@@ -745,7 +747,7 @@ def test_bare_digit_pmcid_missing_as_pmid_keeps_its_original_failure(monkeypatch
     ])
     entry = _titled('A test article', pmcid=BARE_PMID)
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert enricher.stats['failed_lookups'] == 1
 
 
@@ -787,8 +789,129 @@ def test_prefixed_pmcid_is_never_tried_as_a_pmid(monkeypatch):
     enricher, session, _ = _make(monkeypatch, [_idconv_error_response()])
     entry = _titled('A test article', pmcid=f'PMC{BARE_PMID}')
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert len(session.calls) == 1
+
+
+# ------------------------------- #1219 item 1: idconv URL, chunks, status split, re-run
+
+def _idconv_outage():
+    """A 429 asking for longer than the retry cap: fails after one call."""
+    return FakeResponse(
+        429, headers={'Retry-After': str(int(stage5.RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)})
+
+
+def _idconv_found(pmid=PMID):
+    # idconv answers the PMID as a JSON number.
+    return FakeResponse(200, json_data={'records': [{'pmcid': PMCID, 'pmid': int(pmid)}]})
+
+
+def _idconv_not_found():
+    return FakeResponse(200, json_data={'records': [
+        {'pmcid': PMCID, 'requested-id': PMCID, 'status': 'error',
+         'errmsg': 'Identifier not found in PMC'}]})
+
+
+def _pmcid_entry():
+    return {'element_idx_start': 10, 'taxonomy_code': 'S1', 'text': 'Garcia M. A test article.',
+            'extracted_fields': {'title': 'A test article', 'pmcid': PMCID}}
+
+
+def test_id_converter_uses_the_current_url(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_idconv_found()])
+    enricher._convert_pmcids_to_pmids([PMCID])
+    assert session.calls[0][0] == 'https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/'
+
+
+def test_numeric_pmid_from_id_converter_enriches(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_idconv_found(), FakeResponse(200, content=PUBMED_XML)])
+    [result] = enricher._enrich_by_pmcid([(_titled('A test article', pmcid=PMCID), PMCID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['extracted_fields']['pmid'] == PMID
+    assert session.calls[1][1]['id'] == PMID
+
+
+def test_id_converter_sends_at_most_200_ids_per_request(monkeypatch):
+    pmcids = [f'PMC{n}' for n in range(1000001, 1000202)]  # 201
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': []}),
+        FakeResponse(200, json_data={'records': [{'pmcid': pmcids[-1], 'pmid': 7654321}]}),
+    ])
+    result = enricher._convert_pmcids_to_pmids(pmcids + pmcids[:5])  # duplicates sent once
+    assert [len(params['ids'].split(',')) for _, params in session.calls] == [200, 1]
+    assert result.pmids == {pmcids[-1]: '7654321'}
+    assert sleeps == [stage5.RATE_LIMIT_DELAY]
+
+
+def test_a_failed_idconv_chunk_fails_only_its_own_pmcids(monkeypatch):
+    pmcids = [f'PMC{n}' for n in range(1000001, 1000202)]
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': [{'pmcid': pmcids[0], 'pmid': 7654321}]}),
+        _idconv_outage(),
+    ])
+    result = enricher._convert_pmcids_to_pmids(pmcids)
+    assert result.pmids == {pmcids[0]: '7654321'}
+    assert result.failed == {pmcids[-1]}
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_efetch_sends_at_most_200_ids_per_request(monkeypatch):
+    pmids = [str(n) for n in range(10000001, 10000202)]
+    enricher, session, _ = _make(monkeypatch, [FakeResponse(200, content=b'<PubmedArticleSet/>')] * 2)
+    enricher._fetch_pubmed_records(pmids)
+    assert [len(params['id'].split(',')) for _, params in session.calls] == [200, 1]
+
+
+@pytest.mark.parametrize('responses, status', [
+    ([_idconv_not_found()], 'pmcid_not_found'),
+    ([_idconv_outage()], 'pmcid_lookup_failed'),
+    ([_idconv_found(), FakeResponse(200, content=b'<PubmedArticleSet/>')], 'pmcid_lookup_failed'),
+])
+def test_pmcid_not_found_is_told_apart_from_a_failed_lookup(monkeypatch, responses, status):
+    enricher, _, _ = _make(monkeypatch, responses)
+    [result] = enricher._enrich_by_pmcid([(_titled('A test article', pmcid=PMCID), PMCID)])
+    assert result['enrichment_status'] == status
+    assert enricher.stats['failed_lookups'] == 1
+
+
+def test_only_a_failed_lookup_matches_the_doctor_failed_vocabulary():
+    assert stage5.PMCID_LOOKUP_FAILED.endswith('_failed')
+    assert not stage5.PMCID_NOT_FOUND.endswith('_failed')
+
+
+def test_failed_pmcid_lookup_is_rerun_at_the_end_of_the_stage(tmp_path, monkeypatch):
+    results, session, enricher = _run_entries(tmp_path, monkeypatch, [_pmcid_entry()], [
+        _idconv_outage(), _idconv_found(), FakeResponse(200, content=PUBMED_XML)])
+    [result] = results
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_source'] == 'pmcid_conversion'
+    assert [url for url, _ in session.calls] == [stage5.ID_CONVERTER_URL] * 2 + [stage5.EFETCH_URL]
+    assert (enricher.stats['enriched'], enricher.stats['failed_lookups']) == (1, 0)
+
+
+def test_rerun_waits_before_asking_idconv_again(tmp_path, monkeypatch):
+    enricher, _, sleeps = _make(monkeypatch, [
+        _idconv_outage(), _idconv_found(), FakeResponse(200, content=PUBMED_XML)])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_pmcid_entry()]}))
+    enricher.enrich_stage4_output(str(path))
+    assert sleeps == [stage5.PMCID_RERUN_PAUSE_SECONDS]
+
+
+def test_failed_pmcid_lookup_is_rerun_only_once(tmp_path, monkeypatch):
+    results, session, enricher = _run_entries(
+        tmp_path, monkeypatch, [_pmcid_entry()], [_idconv_outage(), _idconv_outage()])
+    assert results[0]['enrichment_status'] == 'pmcid_lookup_failed'
+    assert len(session.calls) == 2
+    assert enricher.stats['failed_lookups'] == 1
+
+
+def test_pmcid_not_found_is_not_rerun(tmp_path, monkeypatch):
+    results, session, enricher = _run_entries(
+        tmp_path, monkeypatch, [_pmcid_entry()], [_idconv_not_found()])
+    assert results[0]['enrichment_status'] == 'pmcid_not_found'
+    assert len(session.calls) == 1
+    assert enricher.stats['failed_lookups'] == 1
 
 
 def test_doi_search_term_is_quoted(monkeypatch):
