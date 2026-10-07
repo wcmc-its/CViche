@@ -194,7 +194,9 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     files = json.loads(db.query(Step).filter(Step.run_id == "DOC_RV").first().output_files)
     assert files == ["/x/cv_wcm.docx", str(report), str(review)]
     assert persisted == [str(report), str(review)]
-    assert [c.author for c in Document(str(review)).comments] == ["CViche check"]
+    # The canned finding quotes nothing, so it is a review note closing the copy.
+    assert [p.text for p in Document(str(review)).paragraphs][-1] == (
+        "\u2022 Text from the original CV may be missing or merged here.")
     assert len(list(Document(str(clean)).comments)) == 0
 
 
