@@ -22,8 +22,9 @@ phases:
         echo "All required environment variables are set."
       # Smoke: both overlays must render from the checked-out source before we
       # spend time building/pushing images. Runs against the committed
-      # placeholder auth_config.yaml/.pem (issue #108) -- pre_build overwrites
-      # those with real secrets later. Catches a missing referenced file or a
+      # placeholder auth_config.yaml/.pem (issue #108) -- pre_build renders the
+      # real values into a copy of k8s/ outside the checkout (#688), never into
+      # these files. Catches a missing referenced file or a
       # broken patch here instead of at `kubectl apply -k` after the build.
       - kubectl kustomize k8s/overlays/dev > /dev/null
       - kubectl kustomize k8s/overlays/prod > /dev/null
@@ -70,19 +71,29 @@ phases:
 
        - 'echo "Targeting environment: ${ENV_NAME}"'
        - 'echo "Injecting AWS Account ID into Service Account manifest..."'
-       # ... Keep your registry login, image tagging, and db.env lines here ...
+       # 0. Render into a copy of k8s/ OUTSIDE the checkout (#688). Every sed,
+       # secret write and the post_build `kubectl apply -k` below target this
+       # copy, so no secret value is ever written into a tracked file of the
+       # work tree (where `git commit -a` would pick it up). mktemp -d creates
+       # the directory mode 0700. RENDER_DIR, K8S_BASE and OVERLAY persist into
+       # post_build the same way TAG does.
+       - RENDER_DIR=$(mktemp -d)
+       - cp -R k8s "$RENDER_DIR/k8s"
+       - K8S_BASE="$RENDER_DIR/k8s/base"
+       - OVERLAY="$RENDER_DIR/k8s/overlays/${ENV_NAME}"
+       - 'echo "Rendering manifests into $OVERLAY (outside the checkout)"'
        # 1. Inject Secrets and Parameters
-       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
+       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" "$OVERLAY"/sa-patch.yaml
        # Target the base ingress.yaml file where your placeholder actually lives
-       - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/overlays/${ENV_NAME}/ingress-patch.yaml
+       - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" "$OVERLAY"/ingress-patch.yaml
        
        # 2. Injects the actual runtime LDAP password variable into the kustomization layout
-       - sed -i "s|CODEBUILD_ED_LDAP_BIND_PASSWORD|$ED_LDAP_BIND_PASSWORD|g" k8s/overlays/${ENV_NAME}/kustomization.yaml
+       - sed -i "s|CODEBUILD_ED_LDAP_BIND_PASSWORD|$ED_LDAP_BIND_PASSWORD|g" "$OVERLAY"/kustomization.yaml
 
        # 3. Dynamic Image Injection via sed (Replaces kubectl set image)
-       - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" k8s/base/kustomization.yaml
-       - sed -i "s|REPO_FE_PLACEHOLDER|$REPO_FE|g" k8s/base/kustomization.yaml
-       - sed -i "s|TAG_PLACEHOLDER|$TAG|g" k8s/base/kustomization.yaml
+       - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" "$K8S_BASE"/kustomization.yaml
+       - sed -i "s|REPO_FE_PLACEHOLDER|$REPO_FE|g" "$K8S_BASE"/kustomization.yaml
+       - sed -i "s|TAG_PLACEHOLDER|$TAG|g" "$K8S_BASE"/kustomization.yaml
        
        - echo "Generating native Kustomize Auth environment configuration for ${ENV_NAME}..."
        - echo "AUTH_BASE_URL is ${AUTH_BASE_URL}"
@@ -90,7 +101,7 @@ phases:
        # Overwrite the auth.env file inside the target overlay instantly
        - echo "Generating the structured auth_config.yaml file for container volume mount..."
        - |
-        cat <<EOF > k8s/overlays/${ENV_NAME}/auth_config.yaml
+        cat <<EOF > "$OVERLAY"/auth_config.yaml
         auth:
           mode: saml
           CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"
@@ -143,19 +154,19 @@ phases:
           contact_email: "${AUTH_CONTACT_EMAIL}"
         EOF
        - echo "Writing live environment secrets into db.env template..."
-       #- echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
-       #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
-       - echo "PUBMED_API_KEY=${PUBMED_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
+       #- echo "DATABASE_URL=${DATABASE_URL}" > "$OVERLAY"/db.env
+       #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> "$OVERLAY"/db.env
+       - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > "$OVERLAY"/db.env
+       - echo "PUBMED_API_KEY=${PUBMED_API_KEY}" >> "$OVERLAY"/db.env
        # Teams run-notification webhook (bearer credential -> secret, like the keys above).
        # Optional: unset -> empty value -> notifier no-ops. Set the CVICHE_TEAMS_WEBHOOK_URL
        # CodeBuild env var (ideally from Secrets Manager) to enable notifications.
-       - echo "CVICHE_TEAMS_WEBHOOK_URL=${CVICHE_TEAMS_WEBHOOK_URL}" >> k8s/overlays/${ENV_NAME}/db.env
+       - echo "CVICHE_TEAMS_WEBHOOK_URL=${CVICHE_TEAMS_WEBHOOK_URL}" >> "$OVERLAY"/db.env
        
        # --- Write your SAML cryptographic assets securely ---
        - echo "Extracting SAML Cryptographic Key Pair..."
-       - echo "${SP_SAML_KEY}" > k8s/overlays/${ENV_NAME}/cviche-saml-sp-prod.key.pem
-       - echo "${SP_SAML_CRT}" > k8s/overlays/${ENV_NAME}/cviche-saml-sp-prod.crt.pem
+       - echo "${SP_SAML_KEY}" > "$OVERLAY"/cviche-saml-sp-prod.key.pem
+       - echo "${SP_SAML_CRT}" > "$OVERLAY"/cviche-saml-sp-prod.crt.pem
 
 
   build:
@@ -181,7 +192,7 @@ phases:
       - docker logout $REPOSITORY_URI
       - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
        
-      - kubectl apply -k k8s/overlays/${ENV_NAME}
+      - kubectl apply -k "$OVERLAY"
 
 
       - echo "Forcing a zero-downtime rolling update to clear configuration caches..."
