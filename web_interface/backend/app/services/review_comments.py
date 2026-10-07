@@ -14,9 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 from docx.oxml.xmlchemy import BaseOxmlElement
+from docx.shared import Pt
+from docx.styles.style import BaseStyle
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from lxml.etree import XMLSyntaxError
@@ -102,6 +105,8 @@ REVIEW_FLAGS = {
     "record_boundary": "This line belongs to the entry before.",
     "citation_field_dropped": 'Title, link or "..." missing from this citation.',
     "group_header_context": "Lost the heading it sat under.",
+    "orphaned_fragments": "Text from the original CV may be missing from this entry.",
+    "stage4_unplaced_items": "Records from the original CV are missing from this section.",
 }
 #: The lint stage 6's Appendix diversions arrive under (lint_stage6_warnings).
 DIVERSION_LINT = "stage6_render_warnings"
@@ -125,6 +130,9 @@ _DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|r
 #: Closes the review copy: findings with no one place in the document, one bullet each.
 REVIEW_NOTES_HEADING = "Review notes from CViche (not part of the CV: delete before sending)"
 NOTE_BULLET = "\u2022 "
+NOTES_FONT = "Arial"
+NOTES_HEADING_STYLE = "Heading 2"
+NOTES_HEADING_SIZE = Pt(13)
 APPENDIX_LINE_FLAG = "Not filed under any section: move it to the right one or delete it."
 APPENDIX_GROUP_FLAG = "Not filed under any section: move these entries to the right one or delete them."
 #: Stage 6 opens each group of Appendix lines with 'From "<source heading>":'
@@ -336,6 +344,34 @@ def _runs(para: Paragraph, span: tuple[int, int] | None) -> list[Run]:
     return [Run(chosen[0], para), Run(chosen[-1], para)]
 
 
+def _heading_style(doc: Document) -> BaseStyle:
+    """Heading 2, in the notes font. The WCM template defines no heading
+    styles (Word only offers its latent built-in), so add it when missing:
+    Word maps a style named "Heading 2" to its built-in, navigation pane included."""
+    try:
+        style = doc.styles[NOTES_HEADING_STYLE]
+    except KeyError:
+        style = doc.styles.add_style(NOTES_HEADING_STYLE, WD_STYLE_TYPE.PARAGRAPH)
+        style.base_style = doc.styles["Normal"]
+        style.next_paragraph_style = doc.styles["Normal"]
+        style.font.bold = True
+        style.font.size = NOTES_HEADING_SIZE
+        style.paragraph_format.keep_with_next = True
+        style.element.get_or_add_pPr().append(style.element.makeelement(qn("w:outlineLvl"), {qn("w:val"): "1"}))
+    style.font.name = NOTES_FONT
+    return style
+
+
+def _add_review_notes(doc: Document, notes: list[str]) -> None:
+    """The review notes closing the document: a blank line, a Heading 2, a bullet per note."""
+    if not notes:
+        return
+    doc.add_paragraph()
+    doc.add_paragraph(REVIEW_NOTES_HEADING, style=_heading_style(doc)).runs[0].font.name = NOTES_FONT
+    for note in notes:
+        doc.add_paragraph(f"{NOTE_BULLET}{note}").runs[0].font.name = NOTES_FONT
+
+
 def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, int] | None:
     """Write the flagged copy of ``clean_docx``; return its path and how many
     flags (comments and review notes) it carries. None when there is nothing to flag."""
@@ -370,11 +406,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
         if flag.paragraph is not None:
             doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
                             author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
-    notes = list(dict.fromkeys(f.text for f in flags if f.paragraph is None))
-    if notes:
-        doc.add_paragraph().add_run(REVIEW_NOTES_HEADING).bold = True
-        for note in notes:
-            doc.add_paragraph(f"{NOTE_BULLET}{note}")
+    _add_review_notes(doc, list(dict.fromkeys(f.text for f in flags if f.paragraph is None)))
     out = review_docx_path(clean_docx)
     doc.save(str(out))
     return out, len(flags)

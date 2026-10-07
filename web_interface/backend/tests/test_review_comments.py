@@ -182,7 +182,7 @@ def test_findings_with_no_place_are_review_notes_closing_the_document(tmp_path):
         _finding("llm_fallback_served", "stage 4 S5: the content filter blocked the primary model")))
     assert n == 3 and _comments(out) == []
     texts = [p.text for p in Document(str(out)).paragraphs]
-    assert texts[-3:-2] == [rc.REVIEW_NOTES_HEADING]  # after the Appendix, at the very end
+    assert texts[-4:-2] == ["", rc.REVIEW_NOTES_HEADING]  # after the Appendix, at the very end
     assert _notes(out) == [f'{_flag("implausible_year")} (Didactic Teaching)',
                            _flag("llm_fallback_served")]  # the same note once
 
@@ -251,6 +251,16 @@ def test_info_and_skipped_findings_get_no_comment(tmp_path):
     assert rc.write_review_docx(clean, _report(
         _finding("missed_headers", "1 header", severity="INFO"), skipped)) is None
     assert not (tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}").exists()
+
+
+def test_review_notes_are_an_arial_heading_2_after_a_blank_line(tmp_path):
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("no_output", "none")))
+    paras = Document(str(out)).paragraphs
+    blank, heading, bullet = paras[-3:]
+    assert blank.text == ""
+    assert heading.text == rc.REVIEW_NOTES_HEADING and heading.style.name == "Heading 2"
+    assert {heading.style.font.name, heading.runs[0].font.name, bullet.runs[0].font.name} == {"Arial"}
+    assert heading.style.element.pPr.find(qn("w:outlineLvl")).get(qn("w:val")) == "1"
 
 
 def test_one_lint_is_capped(tmp_path):
