@@ -53,8 +53,11 @@ from docx.text.paragraph import Paragraph  # noqa: E402
 
 import unified_pipeline.stage_6_word_template as s6  # noqa: E402
 from unified_pipeline.stage6.formatting import (  # noqa: E402
+    CVICHE_BOX_FILL,
     DetachedAnchorError,
     _insert_after,
+    add_cviche_box,
+    is_cviche_box,
 )
 from unified_pipeline.stage6.sections.appendix import CODE_ORIGIN_ENTRY  # noqa: E402
 from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
@@ -1342,3 +1345,19 @@ def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):
     gen._appendix_pending = [(entry, 40)]
     gen._reconsider_appendix_entries()
     assert sent == [((_RECLASSIFY_TEXT, 'P', 40), CODE_ORIGIN_ENTRY)]
+
+
+def test_a_cviche_box_is_one_light_gray_cell_titled_cviche_and_nothing_else_is():
+    """#1388: CViche's note to the submitter, told apart from CV tables by
+    shape (one cell) and its first line, so table passes can skip it."""
+    doc = Document()
+    cell = add_cviche_box(doc, "CViche note: delete this box before sending")
+    box, = doc.tables
+    assert is_cviche_box(box)
+    assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
+    assert cell.paragraphs[0].runs[0].bold and cell.paragraphs[0].runs[0].font.name == "Arial"
+    one_cell = doc.add_table(rows=1, cols=1)
+    one_cell.cell(0, 0).text = "Example Foundation grant"
+    two_cells = doc.add_table(rows=1, cols=2)
+    two_cells.cell(0, 0).text = "CViche-looking start"
+    assert not is_cviche_box(one_cell) and not is_cviche_box(two_cells)

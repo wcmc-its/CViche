@@ -18,11 +18,12 @@ separate, mechanical follow-up.
 import sys
 
 try:
+    from docx.document import Document
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.oxml.xmlchemy import BaseOxmlElement
     from docx.shared import Pt
-    from docx.table import Table
+    from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
 except ImportError:  # pragma: no cover - mirrors stage_6_word_template
     print("Error: python-docx not installed. Install with: pip install python-docx lxml")
@@ -182,6 +183,36 @@ def _set_cell_text(cell, text: str, bold: bool = False):
         para = cell.paragraphs[0]
         run = para.add_run(str(text) if text else "")
         _set_font(run, bold=bold)
+
+
+#: CViche's voice to the submitter: a one-cell, light-gray, bordered table in
+#: Arial whose first line starts "CViche" (#1388). One table, so deleting it
+#: removes the whole note. Distinct from the WCM tables' darker D9D9D9 header.
+CVICHE_BOX_PREFIX = "CViche"
+CVICHE_BOX_FILL = "F2F2F2"
+CVICHE_BOX_BORDER = "BFBFBF"
+
+
+def add_cviche_box(container: Document | _Cell, title: str) -> _Cell:
+    """Append a CViche box to *container* (a Document or a cell); return its
+    cell, whose first paragraph holds *title* in bold. Add lines with
+    `cviche_box_line`."""
+    cell = container.add_table(rows=1, cols=1).cell(0, 0)
+    _set_cell_background(cell, CVICHE_BOX_FILL)
+    _set_cell_borders(cell, CVICHE_BOX_BORDER)
+    cviche_box_line(cell.paragraphs[0], title, bold=True)
+    return cell
+
+
+def cviche_box_line(para: Paragraph, text: str, bold: bool = False) -> None:
+    """Write *text* into a CViche box paragraph, in the box's Arial."""
+    _set_font(para.add_run(text), bold=bold)
+
+
+def is_cviche_box(table: Table) -> bool:
+    """Whether *table* is a CViche box: one cell whose first line starts "CViche"."""
+    cells = table._tbl.findall(".//" + qn("w:tc"))
+    return len(cells) == 1 and table.cell(0, 0).paragraphs[0].text.startswith(CVICHE_BOX_PREFIX)
 
 
 class DetachedAnchorError(ValueError):
