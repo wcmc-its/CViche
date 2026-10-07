@@ -181,10 +181,13 @@ def _raise_or_warn_on_batch_failures(
 def _build_institution_enrichment_stats(
     entries: list, institution_entries: int, cached_count: int, uncached_count: int,
     llm_calls: int, llm_batches: int, failed_batches: int, institutions_unresolved: int,
-    total_cost: float, observed_model: str | None,
+    total_cost: float, observed_model: str | None, *, cache_consulted: bool,
 ) -> dict:
     """Count enriched entries and assemble ``institution_enrichment_stats``
     (pure move out of run_stage5b, plus the #700 failed-batch fields).
+    ``cache_consulted`` is False when no cache could have hit (the web path's
+    per-run dict, or ``refresh_cache``), so a zero ``cache_hits`` is not read
+    as a cold start (#1238).
 
     ``entry.get('institution_enrichment')`` is a presence check. No code
     writes ``{}``: in 5b, ``enrich_entry_with_result`` always assigns a
@@ -200,6 +203,7 @@ def _build_institution_enrichment_stats(
         'entries_processed': institution_entries,
         'entries_enriched': enriched_count,
         'cache_hits': cached_count,
+        'cache_consulted': cache_consulted,
         'llm_lookups': uncached_count,
         'llm_calls': llm_calls,
         'llm_batches': llm_batches,
@@ -218,6 +222,7 @@ def _finalize_stage5b_enrichment(
     document_uid: str, entries: list, institution_entries: int, cached_count: int,
     uncached_count: int, llm_calls: int, llm_batches: int, failed_batches: int,
     institutions_unresolved: int, total_cost: float, observed_model: str | None,
+    *, cache_consulted: bool,
 ) -> dict:
     """Single entry point for #700 finalization: compute
     ``institution_enrichment_stats`` once, then run the batch-failure guard
@@ -230,7 +235,7 @@ def _finalize_stage5b_enrichment(
     stats = _build_institution_enrichment_stats(
         entries, institution_entries, cached_count, uncached_count, llm_calls,
         llm_batches, failed_batches, institutions_unresolved, total_cost,
-        observed_model,
+        observed_model, cache_consulted=cache_consulted,
     )
     _raise_or_warn_on_batch_failures(
         document_uid, llm_batches, failed_batches, institutions_unresolved,
@@ -240,7 +245,7 @@ def _finalize_stage5b_enrichment(
 
 
 def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
-                refresh_cache: bool = False) -> str:
+                refresh_cache: bool = False, *, persist_cache: bool = True) -> str:
     """
     Run Stage 5b: Institution Enrichment via LLM.
 
@@ -249,6 +254,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         output_path: Optional output path
         verbose: Print progress
         refresh_cache: If True, ignore existing cache and re-lookup all institutions
+        persist_cache: False on the web path: no disk cache, a per-run dict (#1238)
 
     Returns:
         Path to enriched output file
@@ -327,8 +333,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         if refresh_cache:
             logger.info("  ** Refresh mode: ignoring cached entries **")
 
-    # Load cache
-    load_institution_cache()
+    store = cache.store_for_run(persist_cache)  # disk on the CLI, per-run on the web (#1238)
 
     # Collect institutions needing lookup
     # Map: cache_key -> (entry indices list, institution_name, context_string)
@@ -367,7 +372,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
         # Check cache (skip if refreshing)
         if not refresh_cache:
-            found, cached = cache.lookup(cache_key, raw_key)
+            found, cached = cache.lookup(store, cache_key, raw_key)
             if found:
                 # Skip old ROR-format entries — they lack cleaned_name and may have
                 # wrong matches (e.g., Northeastern State University → Magadan, Russia).
@@ -455,7 +460,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                 result = results.get(inst_id, {})
                 if result:
                     # Cache the result
-                    cache.set_cached(cache_key, {
+                    cache.set_cached(store, cache_key, {
                         'cleaned_name': result.get('cleaned_name', ''),
                         'official_name': result.get('official_name', ''),
                         'city': result.get('city', ''),
@@ -475,17 +480,17 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                         logger.info("%-40s → %s, %s", name[:40], city, state)
                 else:
                     # LLM succeeded but didn't return this institution — safe to cache negative
-                    cache.set_cached(cache_key, None)
+                    cache.set_cached(store, cache_key, None)
                     if verbose:
                         logger.info("%-40s → (no result)", name[:40])
 
     # Save cache
-    save_institution_cache()
+    cache.save_if_persisted(persist_cache)
 
     stats = _finalize_stage5b_enrichment(
         document_uid, entries, institution_entries, cached_count, uncached_count, llm_calls,
         llm_batches, failed_batches, institutions_unresolved, total_cost,
-        observed_model,
+        observed_model, cache_consulted=persist_cache and not refresh_cache,
     )
 
     if verbose:

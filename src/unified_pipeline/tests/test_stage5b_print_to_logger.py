@@ -234,7 +234,7 @@ def test_run_stage5b_all_batches_fail_but_cache_enriched_does_not_raise(monkeypa
     real_lookup = s5b.cache.lookup
     monkeypatch.setattr(
         s5b.cache, "lookup",
-        lambda key, raw_key=None: (True, cached) if "000" in key else real_lookup(key, raw_key),
+        lambda store, key, raw_key=None: (True, cached) if "000" in key else real_lookup(store, key, raw_key),
     )
 
     def _boom(**kwargs):
@@ -399,7 +399,7 @@ def test_institution_enrichment_stats_empty_dict_not_counted_as_enriched():
     stats = s5b._build_institution_enrichment_stats(
         entries, institution_entries=4, cached_count=0, uncached_count=0,
         llm_calls=0, llm_batches=0, failed_batches=0, institutions_unresolved=0,
-        total_cost=0.0, observed_model=None,
+        total_cost=0.0, observed_model=None, cache_consulted=True,
     )
 
     assert stats["entries_enriched"] == 1
@@ -435,3 +435,77 @@ def test_run_stage5b_enriches_c3_fellowship_entries(monkeypatch, tmp_path):
     assert out["institution_enrichment_stats"]["entries_processed"] == 1
     assert out["institution_enrichment_stats"]["entries_enriched"] == 1
     assert out["entries"][0]["institution_enrichment"]["city"] == "Ithaca"
+
+
+# --- run_stage5b: the web path keeps no disk cache (#1238) --------------------
+
+def _one_cornell_entry(tmp_path):
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({
+        "document_uid": "test-uid",
+        "entries": [{"taxonomy_code": "B1", "extracted_fields": {"institution": "Cornell University"}}],
+    }))
+    return input_path
+
+
+def test_run_stage5b_web_path_neither_reads_nor_writes_the_disk_cache(monkeypatch, tmp_path, caplog):
+    """#1238: in the container the cache directory is not writable, so every
+    web run warned "Could not save institution cache" and started cold anyway.
+    persist_cache=False skips the load and the save, so it does not warn. It
+    uses its own dict, so an entry already in INSTITUTION_CACHE is not a hit
+    and the run does not add to it. The stats say no cache was consulted."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import cache as s5b_cache
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    not_a_dir = tmp_path / "not_a_dir"
+    not_a_dir.write_text("")
+    monkeypatch.setattr(s5b_cache, "CACHE_FILE", not_a_dir / "institution_cache.json")
+    monkeypatch.setattr(s5b_cache, "OLD_CACHE_FILE", tmp_path / "ror_cache.json")
+    key = s5b._institution_cache_key("Cornell University", s5b._build_owner_context(None))
+    shared = {key: {"source": "llm", "cleaned_name": "Stale", "city": "Nowhere", "state": "ZZ"}}
+    monkeypatch.setattr(s5b_cache, "INSTITUTION_CACHE", shared)
+    calls = []
+
+    def _llm(**kw):
+        calls.append(kw)
+        return _fake_llm_result('{"INST-0001": {"city": "Ithaca", "state": "New York"}}')
+
+    monkeypatch.setattr(s5b_lookup, "call_llm", _llm)
+
+    with caplog.at_level(logging.WARNING):
+        result_path = s5b.run_stage5b(
+            str(_one_cornell_entry(tmp_path)), output_path=str(tmp_path / "out.json"),
+            verbose=False, persist_cache=False,
+        )
+
+    stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
+    assert (stats["cache_consulted"], stats["cache_hits"], stats["llm_lookups"]) == (False, 0, 1)
+    assert len(calls) == 1
+    assert s5b_cache.INSTITUTION_CACHE is shared and list(shared) == [key]
+    assert not any("institution cache" in r.getMessage() for r in caplog.records)
+
+
+def test_run_stage5b_cli_path_still_reuses_its_disk_cache(monkeypatch, tmp_path):
+    """The CLI default (persist_cache=True) is unchanged: the first run saves
+    its lookup to disk and a second run is served from it with no LLM call."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        s5b_lookup, "call_llm",
+        lambda **kw: _fake_llm_result('{"INST-0001": {"city": "Ithaca", "state": "New York"}}'),
+    )
+    input_path = _one_cornell_entry(tmp_path)
+    s5b.run_stage5b(str(input_path), output_path=str(tmp_path / "first.json"), verbose=False)
+    assert (tmp_path / "institution_cache.json").exists()
+
+    def _must_not_call(**kw):
+        raise AssertionError("served from the disk cache, so no LLM call")
+
+    monkeypatch.setattr(s5b_lookup, "call_llm", _must_not_call)
+    result_path = s5b.run_stage5b(str(input_path), output_path=str(tmp_path / "second.json"), verbose=False)
+
+    stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
+    assert (stats["cache_consulted"], stats["cache_hits"], stats["llm_lookups"]) == (True, 1, 0)

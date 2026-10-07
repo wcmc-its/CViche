@@ -1712,7 +1712,7 @@ class PipelineOrchestrator:
                     run_stage5b,
                     step_number,
                     input_path=input_path,
-                    verbose=True
+                    verbose=True, persist_cache=False,  # no disk cache on the web path (#1238)
                 )
 
                 self.stage_outputs['5b'] = stage5b_output_path
