@@ -156,12 +156,16 @@ merge-and-renumber scenario this key risks). Only one of the three,
 2068_Yount ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
 inputs, and its current appendix has a single entry under that heading, so
 `_group_by_source_heading` has not yet been exercised on a real collision.
-Numbering restarts under each heading. Bodies are capped at
-`APPENDIX_MAX_CHARS` characters, the marker that shows the cut included: the
-appendix is a pointer back to the original document, not a second copy of it.
-The cap is not what keeps a T entry's records: `_recover_unrendered_records`
-re-scans T entries too (#1230) and writes every record line the cap cut, in
-full, as an uncapped bullet.
+Numbering restarts under each heading. Bodies of entries diverted here from
+another code are capped at `APPENDIX_MAX_CHARS` characters, the marker that
+shows the cut included: such an appendix line is a pointer back to the original
+document, not a second copy of it. A T-coded body is NOT capped
+(`AppendixSection._appendix_body`, #1230) unless the low-coverage overflow
+re-splits it: the Appendix is the only place a T entry renders, so its cut
+tail reached no page. The cut lost undated lines the recovery pass
+cannot tell from template text (a competency list, a duty bullet) and sibling
+rows that differ from a kept one only in a short word or a digit, and where
+recovery did re-add a cut line, the entry printed twice: cut, then whole.
 """
 import logging
 import re
@@ -1464,6 +1468,20 @@ class AppendixSection:
         # Blank paragraph after the intro text.
         self.doc.add_paragraph()
 
+    def _appendix_body(self, entry: UnmappedEntry, text: str) -> str:
+        """The body an Appendix line shows for *entry*: its whole *text* when
+        it is T-coded, otherwise capped by `_truncate_appendix_text` (#1230).
+
+        The Appendix is a T entry's only render, so a cut there lost its tail.
+        The exception is a T entry the low-coverage overflow takes
+        (`is_overflow_candidate`): the reconsider pass re-splits it and routes
+        its segments, and a whole copy here would repeat them.
+        """
+        if (entry.get("taxonomy_code") == _APPENDIX_TAXONOMY_CODE
+                and not self._is_overflow_candidate(entry)):
+            return text
+        return _truncate_appendix_text(text)
+
     def _write_appendix_group(
         self, heading: str, lines: Sequence[AppendixLine], first: bool
     ) -> None:
@@ -1478,7 +1496,7 @@ class AppendixSection:
 
         for number, (entry, text) in enumerate(lines, start=1):
             entry_para = self.doc.add_paragraph()
-            run = entry_para.add_run(f"{number}. {_truncate_appendix_text(text)}")
+            run = entry_para.add_run(f"{number}. {self._appendix_body(entry, text)}")
             _set_font(run)
             # Per-entry comments (e.g. why it was classified T).
             self._add_entry_comments(entry_para, entry)

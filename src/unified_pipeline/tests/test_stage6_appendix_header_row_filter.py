@@ -576,17 +576,31 @@ def test_numbering_restarts_per_source_heading(tmp_path, caplog):
     ]
 
 
-def test_over_limit_entry_renders_at_exactly_the_limit(tmp_path, caplog):
-    """A >200-character entry renders as exactly 200 characters after the
-    number, marker included -- the old `text[:200] + '...'` gave 203."""
+def _diverted_entry(text: str, idx: int) -> dict[str, object]:
+    """A non-T entry the Appendix receives because nothing else rendered it."""
+    return {**_t_entry(text, ["Service"], idx), "taxonomy_code": "Z9"}
+
+
+def _fill_appendix_paragraphs(entries: list[dict[str, object]]) -> list[str]:
+    """`_appendix_paragraphs` of a bare template after `_fill_appendix` alone."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_appendix(entries)
+    paragraphs = [p.text for p in gen.doc.paragraphs]
+    starts = [i for i, t in enumerate(paragraphs) if t.startswith('From "')]
+    return paragraphs[starts[0]:]
+
+
+def test_over_limit_diverted_entry_renders_at_exactly_the_limit():
+    """A >200-character entry diverted from another code renders as exactly
+    200 characters after the number, marker included -- the old
+    `text[:200] + '...'` gave 203."""
     long_text = "LONG_ENTRY " + " ".join(f"word{i}" for i in range(60))
     assert len(long_text) > APPENDIX_MAX_CHARS
     exact_text = "EXACT_ENTRY " + "y" * (APPENDIX_MAX_CHARS - len("EXACT_ENTRY "))
     assert len(exact_text) == APPENDIX_MAX_CHARS
-    entries = [_NAME_ENTRY,
-               _t_entry(long_text, ["Service"], 1),
-               _t_entry(exact_text, ["Service"], 2)]
-    paragraphs = _appendix_paragraphs(_render(tmp_path, entries, caplog))
+    paragraphs = _fill_appendix_paragraphs(
+        [_diverted_entry(long_text, 1), _diverted_entry(exact_text, 2)])
     rendered_long = paragraphs[1]
     assert rendered_long.startswith("1. ")
     body = rendered_long[len("1. "):]
@@ -594,6 +608,28 @@ def test_over_limit_entry_renders_at_exactly_the_limit(tmp_path, caplog):
     assert body.endswith("...")
     assert body[:-3] == long_text[:APPENDIX_MAX_CHARS - 3]
     assert paragraphs[2] == f"2. {exact_text}"  # at the limit: untouched
+
+
+def test_over_limit_t_entry_renders_whole(tmp_path, caplog):
+    """#1230 (pilot TXTATQ shape): a T entry has no other render, so a
+    420-character comma-free list of 30 items reaches the page whole."""
+    items = " ".join(f"Competency{chr(65 + i % 26)}{i:02d}" for i in range(30))
+    long_text = "Synthetic leadership competencies: " + items
+    assert len(long_text) > 400
+    paragraphs = _appendix_paragraphs(
+        _render(tmp_path, [_NAME_ENTRY, _t_entry(long_text, ["Service"], 1)], caplog))
+    assert paragraphs[1] == f"1. {long_text}"
+
+
+def test_t_entry_the_overflow_resplits_keeps_the_capped_pointer():
+    """A long low-coverage T entry goes to the overflow, whose reconsider pass
+    routes its segments; its Appendix line stays a capped pointer so the
+    routed segments are not printed a second time (#1230)."""
+    long_text = " ".join(f"overflowword{i}" for i in range(90))
+    entry = {**_t_entry(long_text, ["Service"], 1),
+             "extraction_coverage": {"extraction_coverage_percent": 5.0}}
+    body = _fill_appendix_paragraphs([entry])[1][len("1. "):]
+    assert len(body) == APPENDIX_MAX_CHARS and body.endswith("...")
 
 
 def test_real_source_table_header_row_is_dropped_but_data_row_survives(tmp_path, caplog):

@@ -305,7 +305,7 @@ def _is_record_or_dated(line: str) -> bool:
 
 
 def t_recovery_lines(text: str | None) -> list[str]:
-    """Lines of a capped T entry the recovery pass should look for (#1230).
+    """Lines of a long T entry the recovery pass should look for (#1230).
 
     Every non-blank line that is record-shaped (`_looks_like_record`, or a
     date-range prefix) or carries a year, plus the one line directly after such
@@ -313,8 +313,9 @@ def t_recovery_lines(text: str | None) -> list[str]:
     Merged-cell repeats are collapsed (`_collapse_repeated_cells`). A line with
     no year and no row shape that does not follow a record (an objective
     statement, a template instruction, an abbreviation key) is not a record and
-    is left to the Appendix pointer: recovering it re-inserts template text as
-    often as it saves content.
+    is not looked for: recovering it re-inserts template text as often as it
+    saves content. The Appendix keeps it: a T body renders there whole unless
+    the low-coverage overflow re-splits the entry.
     """
     lines = [_collapse_repeated_cells(line.strip())
              for line in str(text or "").split("\n") if line.strip()]
