@@ -65,6 +65,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     fill_major_goals_from_text,
     filter_role_effort_headers,
     grant_end_year,
+    grant_id_tokens,
     is_role_effort_header,
     match_effort_for_title,
     normalize_percent_effort,
@@ -72,6 +73,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     promote_open_ended_m2b_grants,
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
+    resolve_grant_back_references,
     resolve_pi_name,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -2853,3 +2855,119 @@ def test_a_two_digit_year_end_reaches_past_funding_through_the_section_fill():
 
     assert _titles_under(gen, COMPLETED) == ['Ended Study']
     assert _tables_under(gen, CURRENT) == []
+
+
+# --- #1485: a "see above" / "Renewal" row takes its grant's title -----------------
+
+def _source_entry(idx, text, **fields):
+    entry = _entry('M2B', text=text, **fields)
+    entry['element_idx_start'] = entry['element_idx_end'] = idx
+    return entry
+
+
+def _back_reference_grants():
+    """Synthetic shape of the RINASX record: each back-reference skips a grant."""
+    return [
+        _source_entry(10, '1970-73 NIH NS-11111, "Alpha Project Title", PI, Total $1.',
+                      grant_number='NIH NS-11111', title='Alpha Project Title', pi_role='PI',
+                      agency='NIH', start_date='1970', end_date='1973'),
+        _source_entry(11, '1974-77 NIH EY-22222, "Beta Project Title", Co-I (PI-A. Example).',
+                      grant_number='NIH EY-22222', title='Beta Project Title',
+                      pi_name='A. Example', pi_role='Co-I', agency='NIH',
+                      start_date='1974', end_date='1977'),
+        _source_entry(12, '1977-79 NIH NS-11111 (see above), total $2.',
+                      grant_number='NIH NS-11111', agency='NIH', notes='see above',
+                      start_date='1977', end_date='1979'),
+        _source_entry(13, '1978-80 NIH EY-22222 Renewal, Total $3.',
+                      grant_number='EY-22222', agency='NIH', notes='Renewal',
+                      start_date='1978', end_date='1980'),
+    ]
+
+
+def test_grant_id_tokens_ignore_the_agency_word_and_short_activity_codes():
+    assert grant_id_tokens('NIH NS-21981') == grant_id_tokens('NS-21981') == {'NS21981'}
+    assert grant_id_tokens('R01') == frozenset()
+    assert grant_id_tokens(None) == frozenset()
+
+
+def test_a_see_above_row_takes_the_title_and_pi_of_the_grant_with_its_number():
+    grants = _back_reference_grants()
+
+    assert resolve_grant_back_references(grants) == 2
+
+    see_above, renewal = (grant['extracted_fields'] for grant in grants[2:])
+    assert see_above['title'] == 'Alpha Project Title (continuation)'
+    assert (see_above['pi_name'], see_above['pi_role']) == (None, 'PI')
+    assert see_above['notes'] is None
+    assert renewal['title'] == 'Beta Project Title (renewal)'
+    assert (renewal['pi_name'], renewal['pi_role']) == ('A. Example', 'Co-I')
+    assert renewal['notes'] is None
+
+
+def test_a_back_reference_row_keeps_its_own_role():
+    grants = _back_reference_grants()
+    grants[3]['extracted_fields']['pi_role'] = 'PI'
+
+    resolve_grant_back_references(grants)
+
+    renewal = grants[3]['extracted_fields']
+    assert renewal['title'] == 'Beta Project Title (renewal)'
+    assert renewal['pi_role'] == 'PI'
+    assert renewal.get('pi_name') is None
+
+
+@pytest.mark.parametrize('change, reason', [
+    ({'grant_number': 'NIH NS-99999'}, 'no earlier grant carries the number'),
+    ({'grant_number': None}, 'no grant number to link by'),
+    ({'title': 'Its Own Project Title'}, 'the row has a title of its own'),
+])
+def test_a_back_reference_row_without_a_linkable_grant_is_left_alone(change, reason):
+    grants = _back_reference_grants()
+    grants[2]['extracted_fields'].update(change)
+    before = dict(grants[2]['extracted_fields'])
+
+    resolve_grant_back_references(grants)
+
+    assert grants[2]['extracted_fields'] == before, reason
+
+
+def test_a_back_reference_never_points_forward():
+    grants = _back_reference_grants()
+    grants[0]['element_idx_start'] = grants[0]['element_idx_end'] = 20
+
+    resolve_grant_back_references(grants)
+
+    assert not grants[2]['extracted_fields'].get('title')
+
+
+def test_a_titled_renewal_is_not_retitled():
+    grant = _source_entry(14, 'NIH NS-11111 Renewal, "Gamma Renewal Title"',
+                          grant_number='NS-11111', title='Gamma Renewal Title')
+    grants = _back_reference_grants() + [grant]
+
+    resolve_grant_back_references(grants)
+
+    assert grant['extracted_fields']['title'] == 'Gamma Renewal Title'
+
+
+def test_a_see_above_row_renders_with_its_grants_title_and_no_see_above_note():
+    gen = _sectioned_generator()
+    grants = _back_reference_grants()
+    gen._fill_research_support({'M2B': grants}, current_year=TEST_YEAR)
+
+    tables = _tables_under(gen, COMPLETED)
+    titles = [_cells(table).get('Project title:') for table in tables]
+    assert titles == ['Beta Project Title (renewal)', 'Alpha Project Title (continuation)',
+                      'Beta Project Title', 'Alpha Project Title']
+    assert all('see above' not in _cells(table).get('Notes:', '') for table in tables)
+    assert grants[2]['extracted_fields'].get('title') is None  # the caller's record is untouched
+
+
+def test_a_back_reference_takes_the_nearest_earlier_grant_with_its_number():
+    retitled = _source_entry(14, 'NIH NS-11111, "Alpha Second Cycle Title"',
+                             grant_number='NS-11111', title='Alpha Second Cycle Title')
+    see_above = _source_entry(15, 'NIH NS-11111 (see above)', grant_number='NS-11111')
+
+    resolve_grant_back_references(_back_reference_grants() + [retitled, see_above])
+
+    assert see_above['extracted_fields']['title'] == 'Alpha Second Cycle Title (continuation)'
