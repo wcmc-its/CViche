@@ -49,6 +49,7 @@ Every item below is already required by a rule; this list adds no obligation. It
 - New module, layer, interface, or dependency → net line delta (above; §3.8)
 - Ran `check_function_size.py --update` → the justification (§3.2a)
 - Which of §6.3's three gates this change's kind requires, and where the evidence is
+- Adds or widens a post-LLM override of a classification → which of §2.4's two admissible cases applies, and the A/B link if it is the second
 - Touches a thinly-covered corpus area → say so, and which hole (§6.5)
 - Behaviour depends on `datetime.now()` or another ambient input → the determinism policy (§7.4)
 - New `ponytail:` shortcut → its ceiling and upgrade path (§3.9)
@@ -123,6 +124,15 @@ There is one place that knows the stage list, the stage order, and the artifact 
 **2.3 A stage owns its artifacts and nothing else. [judgement]**
 A stage reads named inputs and writes named outputs. It does not reach into another stage's directory, and it does not resolve its input by globbing.
 *Why:* the CLI resolves stage 6's input with `glob(f"*{uid}*")` then `candidates[0]` — a substring match that can select a different CV's artifact.
+
+**2.4 A misclassification is fixed in the prompt. A post-LLM override is the exception, and says which exception it is. [judgement]**
+When stage 3a or 3b puts a header or entry under the wrong taxonomy code, the fix is a rule in that stage's prompt. A post-LLM override is code that recodes the model's answer after it returns, by keyword, regex or shape. It is admissible in two cases only:
+- it encodes a deterministic marker the model provably cannot weigh, such as a patent number or an accession ID; or
+- a prompt rule for the same confusion was tried and failed a corpus A/B, and the PR links that A/B.
+
+An override that is admitted does three things. It is gated on confidence, so it breaks a tie rather than overruling a firm answer. It can leave the model's answer alone rather than forcing one of a fixed set of codes. It keeps the original code on the record and logs the flip. `stage3b/header_pin.py` shows the shape: a ≥0.95 stage-3a gate, a named per-code confusion set, and the model's answer kept in `pre_pin_code`.
+*Why:* decided 2026-09-09 on #562 and recorded here after the fact. Two things had gone wrong. First, two classification stacks had grown apart. `core/taxonomy_mapper_v2.py` carried an 834-line `DISAMBIGUATION_GUIDANCE` prompt block and eight post-LLM override functions, and they contradicted each other. `apply_other_appointments_override` had no confidence gate and could emit only `K` or `Q`. It flipped a 0.95-confidence `D` (an adjunct or courtesy faculty title) to `K`, which the prompt's own rule 11 forbade in capitals. Neither mechanism ran: both drivers import stage 3a from `stage_3a_header_taxonomy_mapper.py`, so four taxonomy fixes merged into the dead module reached no CV. #771 deleted it. Second, the decision itself was written only in an issue comment. The stage-3b header and content pins (#1061, #1355, both under #312) landed afterwards without a linked prompt A/B. They do meet the shape above, so this is a record of how a decision held only in a comment goes unread, not a request to revert them. The rule is not retroactive.
+*Check:* the PR that adds or widens an override names which of the two cases applies. A prompt change, an override, and an override's removal are each a behaviour change (§6.3, §5.11). Each is gated by a per-header or per-entry code comparison over the corpus, not by a render diff, because the render gate is text-only and fails open: it cannot see content that lands in a different section. That comparison includes a positive control, so that an empty arm cannot read as zero changes.
 
 ## 3. Function size, responsibility, and clarity
 
