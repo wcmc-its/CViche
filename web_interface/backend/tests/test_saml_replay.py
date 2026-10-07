@@ -652,7 +652,7 @@ def _post_acs(client):
 
 
 class TestAcsReplayGate:
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_replayed_assertion_rejected_with_security_log(
         self, mock_get_client, client, db, seed_saml_mode, replay_cache, caplog
     ):
@@ -679,7 +679,7 @@ class TestAcsReplayGate:
         security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
         assert security_logs, "expected [SECURITY] log for the replayed assertion"
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_fresh_assertions_each_accepted(
         self, mock_get_client, client, db, seed_saml_mode, replay_cache
     ):
@@ -689,7 +689,7 @@ class TestAcsReplayGate:
             assert _post_acs(client).status_code == 302
 
     @pytest.mark.parametrize("fail_closed_opted_out", [False, True])
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_multiple_assertion_ids_always_rejected_without_partial_recording(
         self, mock_get_client, fail_closed_opted_out, client, db, seed_saml_mode,
         replay_cache, monkeypatch,
@@ -708,7 +708,7 @@ class TestAcsReplayGate:
         the `len(ids) > 1` reject entirely) and the flag-leak mutant above
         both die on this test."""
         if fail_closed_opted_out:
-            monkeypatch.setattr("app.api.saml_routes.replay_fail_closed", lambda: False)
+            monkeypatch.setattr("app.services.saml_service.replay_fail_closed", lambda: False)
 
         resp = _AuthnResponse(["_multi-a", "_multi-b"], identity=_IDENTITY)
         mock_get_client.return_value = _mock_client(resp)
@@ -725,7 +725,7 @@ class TestAcsReplayGate:
         assert follow_up.status_code == 302
         assert "error=" not in follow_up.headers["location"]
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_stub_without_ids_fails_closed_by_default(
         self, mock_get_client, client, db, seed_saml_mode, replay_cache, monkeypatch
     ):
@@ -742,8 +742,8 @@ class TestAcsReplayGate:
         assert response.headers["location"] == "/login?error=auth_failed"
         assert replay_cache._local == {}
 
-    @patch("app.api.saml_routes.replay_fail_closed", return_value=False)
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.replay_fail_closed", return_value=False)
+    @patch("app.services.saml_service.get_saml_client")
     def test_stub_without_ids_fails_open_when_opted_out(
         self, mock_get_client, _fail_closed, client, db, seed_saml_mode, replay_cache
     ):
@@ -757,7 +757,7 @@ class TestAcsReplayGate:
         assert _post_acs(client).status_code == 302
         assert replay_cache._local == {}
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_store_unreachable_with_flag_unset_rejects_login(
         self, mock_get_client, client, db, seed_saml_mode, monkeypatch, caplog
     ):
@@ -780,7 +780,7 @@ class TestAcsReplayGate:
         assert response.headers["location"] == "/login?error=auth_failed"
         assert not any(c.name for c in response.cookies.jar)
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_replay_cache_bug_propagates_as_500_not_redirected(
         self, mock_get_client, client, db, seed_saml_mode
     ):
@@ -816,7 +816,7 @@ class TestReplayTtlOnRedisKey:
     on the Redis key, not merely that replay_ttl() and Redis expiry are each
     correct in isolation."""
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_route_level_ttl_matches_computed_ttl(
         self, mock_get_client, client, db, seed_saml_mode
     ):

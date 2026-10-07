@@ -11,6 +11,8 @@ import os
 import time
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 
@@ -151,3 +153,54 @@ def test_admin_revoke_all_bumps_epoch_and_kills_sessions(client, db, seed_simple
 def test_non_admin_cannot_revoke_all(client, db, seed_simple_mode):
     resp = _as_user(client, lambda: client.post("/api/admin/sessions/revoke-all"))
     assert resp.status_code == 403
+
+
+def test_admin_revoke_all_body_audit_line_and_updated_by(client, db, seed_simple_mode, caplog):
+    import logging
+    from app.models import SystemConfig
+    _set_epoch(db, 4)
+
+    with caplog.at_level(logging.INFO):
+        resp = _as_admin(client, lambda: client.post("/api/admin/sessions/revoke-all"))
+
+    assert resp.json() == {"message": "All sessions revoked. Everyone must log in again.",
+                           "session_epoch": 5}
+    audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_sessions_revoked_all")]
+    assert audit == ["admin_sessions_revoked_all: admin=admin@example.com new_epoch=5"]
+    db.rollback()  # only a committed bump survives
+    row = db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first()
+    assert (json.loads(row.value), row.updated_by) == (5, 999)
+
+
+def test_admin_revoke_all_with_no_epoch_row_starts_at_one(client, db, seed_simple_mode):
+    """A missing row is the one benign case (never revoked): epoch 0 + 1, and
+    the row is written so the next read is well-formed."""
+    from app.models import SystemConfig
+    db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").delete()
+    db.commit()
+
+    resp = _as_admin(client, lambda: client.post("/api/admin/sessions/revoke-all"))
+
+    assert resp.json()["session_epoch"] == 1
+    db.expire_all()
+    row = db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first()
+    assert (json.loads(row.value), row.updated_by) == (1, 999)
+
+
+@pytest.mark.parametrize("raw", ["not json", "true", '"3"', "1.5", "null"])
+def test_admin_revoke_all_refuses_an_unreadable_epoch_rather_than_resetting_it(
+        client, db, seed_simple_mode, raw):
+    """An unparseable or non-integer epoch is a misconfiguration: 500, and the
+    row is left alone instead of being reset to 1 (which would un-revoke every
+    session minted since)."""
+    from app.models import SystemConfig
+    row = db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first()
+    row.value = raw
+    db.commit()
+
+    resp = _as_admin(client, lambda: client.post("/api/admin/sessions/revoke-all"))
+
+    assert resp.status_code == 500
+    db.rollback()
+    db.expire_all()
+    assert db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first().value == raw

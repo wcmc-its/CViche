@@ -177,7 +177,7 @@ class TestSamlSignature:
         does)."""
         from saml2.sigver import SignatureError
         # Simulate a SAML response that triggers a signature error
-        with patch("app.api.saml_routes.get_saml_client") as mock_client:
+        with patch("app.services.saml_service.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
                 SignatureError("Signature verification failed")
 
@@ -217,7 +217,7 @@ class TestSamlSignature:
         IdP-reported error SAML Status -- a real, expected non-signature
         failure, and a saml2.SAMLError subclass."""
         from saml2.response import StatusError
-        with patch("app.api.saml_routes.get_saml_client") as mock_client:
+        with patch("app.services.saml_service.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
                 StatusError("Some other pysaml2 failure")
 

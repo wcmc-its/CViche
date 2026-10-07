@@ -644,7 +644,7 @@ def validate_startup_config(ldap_url: str, bind_dn: str, bind_password: str,
     """Validate the ED config an authorization decision needs, at startup.
 
     Every field required to reach `_bind` is checked today only per-request
-    (saml_routes.py, auth.py both build an LDAPConfig from the same env/DB
+    (saml_service.py, auth.py both build an LDAPConfig from the same env/DB
     reads and let a bad one surface as the first login's bind failure), and
     ED_LDAP_BIND_PASSWORD is not checked anywhere -- an empty password reaches
     ldap3 and only then maps to EdConfigurationError (#330). Call this from
@@ -691,7 +691,7 @@ def check_ed_membership(cwid: str, access_group: str, admin_group: str,
                          fine for a session that is already authorized, and an
                          ED outage must not evict it.
       use_cache=False -- skip the live read AND the stale read; always query ED.
-                         The login path (`saml_routes.py`) passes this, because
+                         The login path (`saml_service.py`) passes this, because
                          minting a NEW session is the stronger gate: a user
                          whose access was revoked two minutes ago must not be
                          let in off a warm cache entry, and must not be let in

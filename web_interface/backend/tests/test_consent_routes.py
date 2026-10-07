@@ -163,3 +163,35 @@ def test_consent_publish_is_admin_only(client, db, seed_simple_mode):
     from app.models import SystemConfig
     row = db.query(SystemConfig).filter(SystemConfig.key == "consent_version").first()
     assert json.loads(row.value) == "1.1"
+
+
+def test_consent_publish_422s_when_the_current_version_is_not_major_minor(client, db, seed_simple_mode):
+    _set_consent_version(db, "v2")
+    with _as_user(_seed_user(db, "boss@example.com", role="admin")):
+        preview = client.get("/api/admin/consent/publish")
+        publish = client.post("/api/admin/consent/publish", json={"version": "v3"})
+    message = 'Consent version "v2" is not in <major>.<minor> form.'
+    assert (preview.status_code, preview.json()["detail"]["message"]) == (422, message)
+    assert (publish.status_code, publish.json()["detail"]["message"]) == (422, message)
+
+
+def test_consent_publish_response_and_both_audit_lines(client, db, seed_simple_mode, caplog):
+    """The publish is a config write (its own admin_config_changed line) plus the
+    CONSENT_VERSION_PUBLISHED event carrying the admin and both versions."""
+    import logging
+    _set_consent_version(db, "1.1")
+    _seed_consent_users(db)
+    boss = _seed_user(db, "boss@example.com", role="admin")
+    with _as_user(boss), caplog.at_level(logging.INFO):
+        resp = client.post("/api/admin/consent/publish", json={"version": "1.2"})
+    assert resp.json() == {"current_version": "1.1", "next_version": "1.2", "users_to_reconsent": 4}
+    messages = [r.getMessage() for r in caplog.records]
+    assert ('admin_config_changed: admin=boss@example.com changes='
+            '{"consent_version": {"old": "1.1", "new": "1.2"}}') in messages
+    [event] = [r for r in caplog.records if r.getMessage() == "CONSENT_VERSION_PUBLISHED"]
+    assert (event.admin, event.old_version, event.new_version, event.users_to_reconsent) == \
+        ("boss@example.com", "1.1", "1.2", 4)
+    from app.models import SystemConfig
+    db.expire_all()
+    row = db.query(SystemConfig).filter(SystemConfig.key == "consent_version").first()
+    assert row.updated_by == boss.id

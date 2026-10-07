@@ -41,7 +41,7 @@ from saml2.saml import NAMEID_FORMAT_EMAILADDRESS
 from saml2.assertion import Policy
 from saml2.config import Config as _Saml2Config
 
-from app.api.saml_routes import _reject_wrong_destination
+from app.services.saml_service import _reject_wrong_destination
 from app.auth import COOKIE_NAME
 from app.models import SystemConfig
 from app.saml_client import extract_user_attrs

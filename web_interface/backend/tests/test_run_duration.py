@@ -186,6 +186,58 @@ def test_admin_stats_step_avg_seconds_empty_without_completed_runs(client, db):
     assert resp.json()["step_avg_seconds"] == []
 
 
+def _admin_stats(client):
+    from app.main import app
+    from app.auth import require_admin
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
+    try:
+        return client.get("/api/admin/stats").json()
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+
+def test_admin_stats_totals_active_users_and_feedback_rate(client, db):
+    """active_users: distinct submitters with a run started in the last 30 days.
+    feedback_rate: distinct runs with any feedback (whatever their status) per
+    completed run, as a percentage."""
+    from app.models import Feedback, Run, User
+
+    users = [User(email=f"u{i}@example.com", display_name=f"U{i}", role="user") for i in range(3)]
+    db.add_all(users)
+    db.flush()
+    now = datetime.now()
+    db.add_all([
+        Run(id="ST_A", filename="a.docx", file_type="docx", status="complete", user_id=users[0].id,
+            started_at=now - timedelta(days=1), total_cost=1.11111),
+        Run(id="ST_B", filename="b.docx", file_type="docx", status="complete", user_id=users[1].id,
+            started_at=now - timedelta(days=40), total_cost=2.0),
+        Run(id="ST_C", filename="c.docx", file_type="docx", status="failed", user_id=users[0].id,
+            started_at=now - timedelta(days=2)),
+        Run(id="ST_D", filename="d.docx", file_type="docx", status="running",
+            started_at=now - timedelta(days=1), total_cost=0.5),
+        Run(id="ST_F", filename="f.docx", file_type="docx", status="complete", user_id=users[2].id,
+            started_at=now - timedelta(days=3), total_cost=0.0),
+    ])
+    for run_id, reviewer in (("ST_A", users[0]), ("ST_A", users[1]), ("ST_C", users[0])):
+        db.add(Feedback(run_id=run_id, user_id=reviewer.id, reviewer_role="self", overall_usefulness=3,
+                        manual_conversion_effort="1 hour", correction_effort="1 hour",
+                        biggest_issue="none", likelihood_to_recommend=3))
+    db.commit()
+
+    data = _admin_stats(client)
+
+    assert (data["total_runs"], data["active_users"]) == (5, 2)
+    assert data["total_cost"] == 3.6111
+    assert data["feedback_rate"] == 66.7  # 2 runs with feedback / 3 completed
+
+
+def test_admin_stats_totals_are_zero_on_an_empty_database(client, db):
+    data = _admin_stats(client)
+
+    assert (data["total_runs"], data["active_users"], data["total_cost"], data["feedback_rate"]) == (0, 0, 0.0, 0.0)
+
+
 def test_admin_runs_table_prefers_persisted_duration(client, db):
     """The admin submissions table's Duration column uses the persisted value,
     falling back to wall-clock for older rows -- consistent with the run API."""

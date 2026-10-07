@@ -152,7 +152,7 @@ class TestSimpleModeFullCycle:
 class TestSamlModeFullCycle:
     """Validate SAML mode login cycle with mocked pysaml2 client."""
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_saml_mode_login_full_cycle(self, mock_get_client, client, db, seed_saml_mode):
         """Patch get_saml_client, POST /api/saml/acs creates user and sets cookie, GET /api/auth/me returns 200."""
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
@@ -217,8 +217,8 @@ class TestSamlModeWithED:
 
     @patch.dict(os.environ, _ED_ENV)
     @patch("app.auth.check_ed_membership")
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
     def test_ed_user_in_access_group_full_cycle(
         self, mock_get_client, mock_check_ed, mock_auth_check_ed, client, db, seed_ed_enabled
     ):
@@ -255,8 +255,8 @@ class TestSamlModeWithED:
         assert me_resp.json()["email"] == "testuser@med.cornell.edu"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
     def test_ed_admin_group_sets_admin_role(
         self, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
     ):
@@ -276,8 +276,8 @@ class TestSamlModeWithED:
         assert user.role == "admin"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
     def test_ed_denial_at_login(
         self, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
     ):
@@ -300,8 +300,8 @@ class TestSamlModeWithED:
 
     @patch.dict(os.environ, _ED_ENV)
     @patch("app.auth.check_ed_membership")
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
     def test_ed_cache_expiry_triggers_recheck(
         self, mock_get_client, mock_acs_check_ed, mock_auth_check_ed, client, db, seed_ed_enabled
     ):

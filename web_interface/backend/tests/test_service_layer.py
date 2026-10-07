@@ -722,12 +722,12 @@ class TestCsvInjectionGuard:
     """#333: admin CSV exports must neutralize formula-injection triggers."""
 
     def test_neutralizes_formula_triggers(self):
-        from app.api.admin_routes import _sanitize_csv_cell
+        from app.services.admin_export_service import _sanitize_csv_cell
         for trigger in ("=", "+", "-", "@", "\t", "\r"):
             assert _sanitize_csv_cell(f"{trigger}cmd()") == f"'{trigger}cmd()"
 
     def test_leaves_safe_values_untouched(self):
-        from app.api.admin_routes import _sanitize_csv_cell
+        from app.services.admin_export_service import _sanitize_csv_cell
         assert _sanitize_csv_cell("alice@example.com".lstrip("@")) == "alice@example.com".lstrip("@")
         assert _sanitize_csv_cell("Jane Doe") == "Jane Doe"
         assert _sanitize_csv_cell("cv.docx") == "cv.docx"
@@ -939,11 +939,11 @@ class TestAdminCsvExportStreaming:
 
     @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
     def test_output_identical_to_pre_streaming_behavior(self, client, db, export_type, monkeypatch):
-        import app.api.admin_routes as admin_routes
+        import app.services.admin_export_service as admin_export_service
         _seed_export_fixture(db)
         # Chunk size 2 with 3 rows forces the multi-chunk path; the body must
         # still equal what the old single-buffer implementation produced.
-        monkeypatch.setattr(admin_routes, "_CSV_CHUNK_ROWS", 2, raising=False)
+        monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 2, raising=False)
 
         resp = self._get(client, export_type)
 
@@ -954,12 +954,13 @@ class TestAdminCsvExportStreaming:
     @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
     def test_response_is_produced_in_multiple_chunks(self, db, export_type, monkeypatch):
         import asyncio
-        import app.api.admin_routes as admin_routes
+        from app.api.admin_routes import exports
+        import app.services.admin_export_service as admin_export_service
         _seed_export_fixture(db)
-        monkeypatch.setattr(admin_routes, "_CSV_CHUNK_ROWS", 1, raising=False)
+        monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
 
         async def collect():
-            resp = await admin_routes.export_csv(
+            resp = await exports.export_csv(
                 export_type, db=db,
                 viewer=SimpleNamespace(email="admin@example.com", role="admin"))
             return [c async for c in resp.body_iterator]
@@ -995,13 +996,34 @@ class TestAdminCsvExportStreaming:
 
         assert resp.status_code == 403
 
+    @pytest.mark.parametrize("role", ["admin", "staff"])
+    def test_unknown_type_is_a_422_before_the_role_check(self, client, db, role):
+        resp = self._get(client, "bogus", role=role)
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["message"] == \
+            "Invalid export type: bogus. Must be one of: runs, users, consent, feedback."
+
+    def test_download_filename_and_audit_line(self, client, db, caplog):
+        import logging
+        from datetime import datetime
+        _seed_export_fixture(db)
+
+        with caplog.at_level(logging.INFO):
+            resp = self._get(client, "users")
+
+        stamp = datetime.now().strftime("%Y%m%d")
+        assert resp.headers["content-disposition"] == f'attachment; filename="cviche_users_{stamp}.csv"'
+        audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_export")]
+        assert audit == ["admin_export: user=admin@example.com role=admin export_type=users"]
+
     def test_rows_are_fetched_in_bounded_batches_not_all_at_once(self, db, monkeypatch):
         """The query must carry yield_per, otherwise .all()-style hydration of
         the whole table returns and only the output side is chunked."""
-        import app.api.admin_routes as admin_routes
+        import app.services.admin_export_service as admin_export_service
         from sqlalchemy.orm import Query
         _seed_export_fixture(db)
-        monkeypatch.setattr(admin_routes, "_CSV_CHUNK_ROWS", 1, raising=False)
+        monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
         seen = []
         real = Query.yield_per
 
@@ -1013,7 +1035,7 @@ class TestAdminCsvExportStreaming:
 
         for export_type in ("runs", "users", "consent", "feedback"):
             del seen[:]
-            b"".join(c.encode() for c in admin_routes._iter_csv_chunks(export_type, db))
+            b"".join(c.encode() for c in admin_export_service._iter_csv_chunks(export_type, db))
             assert seen == [1], export_type
 
 

@@ -577,7 +577,7 @@ web_interface/
 │   │   │   ├── steps.py            # Step details, output downloads, prompt logs
 │   │   │   ├── feedback_routes.py  # Feedback GET/POST, feedback status
 │   │   │   ├── consent_routes.py   # Consent GET/POST
-│   │   │   ├── admin_routes.py     # Admin dashboard APIs and CSV export
+│   │   │   ├── admin_routes/       # Admin dashboard APIs and CSV export (one router per domain)
 │   │   │   └── websocket.py        # Real-time pipeline streaming
 │   │   ├── pipeline/               # Pipeline orchestration
 │   │   │   ├── orchestrator.py     # Main executor
