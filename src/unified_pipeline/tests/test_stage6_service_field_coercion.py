@@ -86,6 +86,7 @@ from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
     _committee_cell_text,
 )
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _DATE_SPAN,
     _join_names,
     _journal_name_cell_text,
     _journal_names_contain,
@@ -988,9 +989,23 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     # A structured role is no text to subtract: the entry text stands as it is.
     ("2001- Fictional Society\tSecretary", [{"role": "Secretary"}], "2001", None,
      "2001- Fictional Society\tSecretary"),
+    # A century-less end year goes with its range (#665): taking "1992" alone
+    # left "93" behind as the whole Organization cell.
+    ("1992-93 Vice-President", "Vice-President", "1992", "1993", ""),
 ])
 def test_organization_left_in_text(text, role, start, end, expected):
     assert _organization_left_in_text(text, role, start, end) == expected
+
+
+@pytest.mark.parametrize("text, spans", [
+    ("1992-93 Vice-President", ["1992-93"]),
+    ("2001-2004 Treasurer", ["2001-2004"]),
+    # A "12" followed by a slash is a month, not a century-less end year:
+    # "2013-12" would split the month/year range down the middle (#665).
+    ("President-Elect 4/2013-12/2014", ["2013", "2014"]),
+])
+def test_date_span_reads_century_less_end_years_but_not_months(text, spans):
+    assert [m.group() for m in _DATE_SPAN.finditer(text)] == spans
 
 
 def _q2_role_cell(**entry_keys):
