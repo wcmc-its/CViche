@@ -279,12 +279,6 @@ class StepDetail(BaseModel):
 # WebSocket Event Schemas
 # ============================================================
 
-class WebSocketEvent(BaseModel):
-    """Base WebSocket event."""
-    event: str
-    data: dict
-
-
 class StepStartEvent(BaseModel):
     """Step started event."""
     event: str = "STEP_START"
@@ -468,27 +462,6 @@ class RunFeedbackStatus(BaseModel):
 
 
 # ============================================================
-# Settings Schemas
-# ============================================================
-
-class Settings(BaseModel):
-    """Pipeline settings."""
-    model: str = "gpt-4o-mini"
-    max_tokens: int = 16000
-    enable_step_8: bool = False  # Organization enrichment
-    pricing: dict = {
-        "gpt-4o-mini": {
-            "input_per_1k": 0.00015,
-            "output_per_1k": 0.0006
-        },
-        "gpt-4o": {
-            "input_per_1k": 0.0025,
-            "output_per_1k": 0.01
-        }
-    }
-
-
-# ============================================================
 # Admin Schemas
 # ============================================================
 
@@ -585,12 +558,23 @@ class AdminRunEntry(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DimensionScore(BaseModel):
+    """One weighted dimension of ``quality_score.score_run``'s result, as it
+    builds each ``dimensionScores`` entry: ``score`` earned out of ``max`` (the
+    weight), ``penalty`` lost, and the scorer's ``detail`` line."""
+    name: str
+    score: float
+    max: int
+    penalty: float
+    detail: str
+
+
 class QualityScoreResult(BaseModel):
     """Per-run quality score detail (advisory, computed from artifacts)."""
     run_id: str
     totalScore: int
     band: str
-    dimensionScores: list[dict] = []
+    dimensionScores: list[DimensionScore] = []
     flags: list[str] = []
     # quality_score.score_run's evidence inventory (#745): data_complete is
     # False when any scored artifact was missing or unreadable, and
