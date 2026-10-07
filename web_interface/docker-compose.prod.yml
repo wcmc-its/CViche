@@ -85,7 +85,7 @@ services:
       target: production
     restart: always
     ports:
-      - "80:80"
+      - "80:8080"
     # Drop the dev-only hot-reload mounts (./frontend/src etc.). Without
     # !override Compose appends to the base list and the source-tree
     # bind mounts leak into prod -- benign today because nginx serves

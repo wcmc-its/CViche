@@ -30,15 +30,34 @@ spec:
         image: frontend
         imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 80
+        - containerPort: 8080
         env:
         - name: PORT
-          value: "80"
+          value: "8080"
         readinessProbe:
           httpGet:
             path: /
-            port: 80
+            port: 8080
         livenessProbe:
           httpGet:
             path: /
-            port: 80
+            port: 8080
+        # nginx runs as the image's nginx user (uid 101) on 8080; the Dockerfile
+        # moves its pid file, and nginx.conf its temp paths, to /tmp, the one
+        # writable path (#109).
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 101
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}

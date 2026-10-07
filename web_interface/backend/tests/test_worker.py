@@ -1090,6 +1090,19 @@ def test_flex_worker_manifest_differs_from_the_worker_only_where_intended():
     assert flex == worker
 
 
+def test_prod_worker_pins_the_same_s3_backend_as_the_prod_backend():
+    """#109: main() refuses to start without CVICHE_STORAGE_BACKEND=s3, so the
+    prod worker pins it as a container env var, the same as the backend,
+    rather than depending on the CodeBuild-generated auth_config.yaml."""
+    def pinned_backend(patch_file):
+        patch = yaml.safe_load((_K8S / "overlays/prod" / patch_file).read_text(encoding="utf-8"))
+        env = patch["spec"]["template"]["spec"]["containers"][0].get("env", [])
+        return {item["name"]: item["value"] for item in env}.get("CVICHE_STORAGE_BACKEND")
+
+    assert pinned_backend("worker-patch.yaml") == "s3"
+    assert pinned_backend("worker-patch.yaml") == pinned_backend("backend-patch.yaml")
+
+
 def test_dev_worker_pools_split_six_workers_three_and_three_at_identical_sizing():
     """#1114: dev keeps 6 workers and 6 x 100m / 512Mi of requests in total,
     split 3 general + 3 flex, the flex patch mirroring the general one."""
