@@ -46,8 +46,9 @@ BINDING_HTTP_POST = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
 
 class SamlLoginFailure(StrEnum):
     """Which check refused the session. saml_routes maps each to its
-    login-page redirect; the three that emit a LOGIN_FAILED audit line
-    (NOT_AUTHORIZED and the two SESSION_*) use their value as its `reason`."""
+    login-page redirect; the four that emit a LOGIN_FAILED audit line
+    (NOT_AUTHORIZED, ACCOUNT_DISABLED and the two SESSION_*) use their value as
+    its `reason`."""
     NO_RESPONSE = "no_response"
     BAD_SIGNATURE = "bad_signature"
     RESPONSE_REJECTED = "response_rejected"
@@ -61,6 +62,7 @@ class SamlLoginFailure(StrEnum):
     DIRECTORY_UNAVAILABLE = "directory_unavailable"
     SESSION_STORE_UNAVAILABLE = "session_store_unavailable"
     SESSION_STATE_UNAVAILABLE = "session_state_unavailable"
+    ACCOUNT_DISABLED = "account_disabled"
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,12 @@ def authenticate_saml_response(saml_response: str, db: Session) -> SamlLoginSess
         role=user_role,
         department=_saml_department_from_ed(attrs["cwid"], db),
     )
+
+    # The same test get_current_user applies (app.auth._load_active_user): a
+    # session minted here would be refused on its first use anyway.
+    if user.status != "active":
+        logger.info(LOGIN_FAILED, extra={"cwid": attrs["cwid"], "reason": SamlLoginFailure.ACCOUNT_DISABLED})
+        return SamlLoginFailure.ACCOUNT_DISABLED
 
     token = _mint_saml_session(user, db, attrs["cwid"])
     if isinstance(token, SamlLoginFailure):

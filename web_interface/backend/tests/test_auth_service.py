@@ -7,7 +7,7 @@ Cases, one test each unless named together:
   not allowlisted / allowed_users unset / blank email -> NOT_ALLOWLISTED, no row
   store unwritable -> SESSION_STORE_UNAVAILABLE, row still provisioned
   epoch unreadable -> SESSION_STATE_UNAVAILABLE
-  disabled user -> still signs in (login does not read User.status)
+  disabled user -> ACCOUNT_DISABLED, no session minted, LOGIN_FAILED (account_disabled)
   audit lines: LOGIN_SUCCESS / LOGIN_FAILED extras, under app.api.auth_routes
 """
 import json
@@ -147,11 +147,21 @@ def test_unreadable_epoch_is_rejected(db, allowlist, caplog):
     assert not _events(caplog, "SESSION_STORE_UNAVAILABLE")
 
 
-def test_disabled_user_still_signs_in(db, allowlist):
+def test_disabled_user_is_refused_before_a_session_is_minted(db, allowlist, monkeypatch, caplog):
+    """A disabled account used to get a session, refused only on its next
+    request (get_current_user), with a LOGIN_SUCCESS audit line for a login
+    that could never be used. Login now refuses it outright."""
+    from app.services import auth_service
     db.add(User(email="test@example.com", display_name="T", role="user", status="disabled"))
     db.commit()
+    monkeypatch.setattr(auth_service, "create_session_cookie",
+                        lambda *a, **k: pytest.fail("no session for a disabled account"))
 
-    outcome = authenticate_simple_login(db, "test@example.com", "Test User")
+    with caplog.at_level(logging.INFO, logger=_ROUTE_LOGGER):
+        outcome = authenticate_simple_login(db, "test@example.com", "Test User")
 
-    assert isinstance(outcome, LoginSession)
-    assert outcome.user.status == "disabled"
+    assert outcome is LoginRejection.ACCOUNT_DISABLED
+    assert db.query(User).one().status == "disabled"
+    [failed] = _events(caplog, "LOGIN_FAILED")
+    assert (failed.email, failed.reason) == ("test@example.com", "account_disabled")
+    assert not _events(caplog, "LOGIN_SUCCESS")

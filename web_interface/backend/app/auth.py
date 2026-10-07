@@ -69,7 +69,7 @@ _USER_NOT_FOUND_DETAIL = {
     "error": "auth_required",
     "message": "User not found. Please log in again.",
 }
-_ACCOUNT_DISABLED_DETAIL = {
+ACCOUNT_DISABLED_DETAIL = {
     "error": "account_disabled",
     "message": "Your account has been disabled. Contact an administrator.",
 }
@@ -432,7 +432,7 @@ def _load_active_user(identity: SessionIdentity, db: Session) -> User:
     if not user:
         raise HTTPException(status_code=401, detail=_USER_NOT_FOUND_DETAIL)
     if user.status != "active":
-        raise HTTPException(status_code=401, detail=_ACCOUNT_DISABLED_DETAIL)
+        raise HTTPException(status_code=401, detail=ACCOUNT_DISABLED_DETAIL)
     return user
 
 

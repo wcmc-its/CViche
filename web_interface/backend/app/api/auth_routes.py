@@ -16,6 +16,7 @@ from app.auth import (
     get_current_user,
     resolve_session_identity,
     COOKIE_NAME,
+    ACCOUNT_DISABLED_DETAIL,
     SESSION_STORE_UNAVAILABLE_DETAIL,
     SESSION_STATE_UNAVAILABLE_DETAIL,
 )
@@ -75,6 +76,8 @@ _LOGIN_REJECTION_RESPONSES: dict[LoginRejection, tuple[int, dict[str, str]]] = {
     LoginRejection.NOT_ALLOWLISTED: (
         403, {"error": "forbidden", "message": "Email not in the allowed users list."},
     ),
+    # The body get_current_user refuses a disabled account with, so both read alike.
+    LoginRejection.ACCOUNT_DISABLED: (403, ACCOUNT_DISABLED_DETAIL),
     LoginRejection.SESSION_STORE_UNAVAILABLE: (503, SESSION_STORE_UNAVAILABLE_DETAIL),
     LoginRejection.SESSION_STATE_UNAVAILABLE: (503, SESSION_STATE_UNAVAILABLE_DETAIL),
 }

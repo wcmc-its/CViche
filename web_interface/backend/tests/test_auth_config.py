@@ -210,21 +210,18 @@ def test_login_updates_the_existing_user_row(client, db, seed_simple_mode, login
     assert db.query(User).count() == 1
 
 
-def test_login_of_a_disabled_user_mints_a_session_the_next_request_refuses(
-    client, db, seed_simple_mode, login_throttle,
-):
-    """Current behaviour, pinned: login does not read User.status. The
-    disabled account is refused by get_current_user on the next request."""
+def test_login_of_a_disabled_user_is_refused_with_no_cookie(client, db, seed_simple_mode, login_throttle):
+    """A disabled account gets a 403 carrying the same account_disabled body
+    get_current_user answers with, and no session cookie."""
     db.add(User(email="test@example.com", display_name="Test User", role="user", status="disabled"))
     db.commit()
 
     response = client.post("/api/auth/login", json=_LOGIN)
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["error"] == "account_disabled"
+    assert COOKIE_NAME not in response.cookies
     assert db.query(User).one().status == "disabled"
-    me = client.get("/api/auth/me", cookies={COOKIE_NAME: response.cookies[COOKIE_NAME]})
-    assert me.status_code == 401
-    assert me.json()["detail"]["error"] == "account_disabled"
 
 
 def test_saml_config_seeded(db):

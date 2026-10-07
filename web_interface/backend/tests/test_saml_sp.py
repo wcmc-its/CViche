@@ -832,6 +832,7 @@ _LOGIN_ERROR_FOR = {
     SamlLoginFailure.DIRECTORY_UNAVAILABLE: "/login?error=directory_unavailable",
     SamlLoginFailure.SESSION_STORE_UNAVAILABLE: "/login?error=session_store_unavailable",
     SamlLoginFailure.SESSION_STATE_UNAVAILABLE: "/login?error=session_state_unavailable",
+    SamlLoginFailure.ACCOUNT_DISABLED: "/login?error=account_disabled",
 }
 
 

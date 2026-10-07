@@ -11,6 +11,7 @@ const SAML_ERROR_MESSAGES: Record<string, string> = {
   missing_attributes: "Your account is missing required information. Contact your IT administrator.",
   saml_not_enabled: "SSO login is not available. Please use the standard sign-in form.",
   not_authorized: `You are not authorized to use CViche. Contact ${SUPPORT_EMAIL} to request access.`,
+  account_disabled: `Your CViche account has been disabled. Contact ${SUPPORT_EMAIL} if you think this is a mistake.`,
   directory_unavailable: "Unable to verify group membership. The directory service may be temporarily unavailable. Please try again in a few minutes.",
   session_store_unavailable: "We could not start your session because the sign-in service is temporarily unavailable. Please try again in a few minutes.",
   session_state_unavailable: "We could not start your session because sign-in state could not be read. Please try again in a few minutes, or contact IT support if this persists.",
