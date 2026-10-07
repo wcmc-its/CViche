@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.config_loader import current_image_tag
 from app.models import Run
+from app.services.artifact_service import REVIEW_DOCX_SUFFIX
 from app.storage import get_storage
 from app.storage.base import RunStorage
 
@@ -110,7 +111,10 @@ def compute_and_cache_score(run_id: str) -> dict | None:
 
         storage = get_storage()
         keys = storage.list_files(run_id, "outputs/")
-        wanted = [k for k in keys if k.endswith(_NEEDED_SUFFIXES)]
+        # The annotated copy (#1388) is a second .docx; the scorer would call the
+        # pair ambiguous and skip every docx-reading dimension.
+        wanted = [k for k in keys
+                  if k.endswith(_NEEDED_SUFFIXES) and not k.endswith(REVIEW_DOCX_SUFFIX)]
         if not wanted:
             logger.info("No scorable outputs in storage for run %s", run_id)
             return None

@@ -404,3 +404,14 @@ class TestIsJsonArtifact:
     def test_non_json_is_not_json(self):
         assert svc.is_json_artifact("foo.docx") is False
         assert svc.is_json_artifact("foo.txt") is False
+
+
+class TestIsStaffOnlyArtifact:
+    def test_stage_json_and_the_review_copy_are_staff_only(self):
+        """#1388: the review copy carries the run doctor's findings."""
+        assert svc.is_staff_only_artifact("ABC123_fields.json") is True
+        assert svc.is_staff_only_artifact(f"ABC123{svc.REVIEW_DOCX_SUFFIX}") is True
+        assert svc.is_staff_only_artifact("ABC123_WCM_REVIEW.DOCX") is True
+
+    def test_the_finished_document_is_not(self):
+        assert svc.is_staff_only_artifact("ABC123_wcm.docx") is False

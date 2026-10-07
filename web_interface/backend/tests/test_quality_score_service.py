@@ -44,6 +44,26 @@ def test_stage_error_record_reaches_the_scorer(monkeypatch):
     assert seen["names"] == ["R1_fields.json", "R1_stage_errors.json"]
 
 
+def test_the_review_copy_never_reaches_the_scorer(monkeypatch):
+    """#1388: a second .docx makes the scorer's docx lookup ambiguous, which
+    skips every dimension that reads the document."""
+    storage = _Storage({
+        "outputs/R1_wcm.docx": b"d",
+        f"outputs/R1{svc.REVIEW_DOCX_SUFFIX}": b"r",
+    })
+    seen = {}
+
+    def _score_run(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        return {"totalScore": 40}
+
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
+
+    svc.compute_and_cache_score("R1")
+    assert seen["names"] == ["R1_wcm.docx"]
+
+
 @pytest.mark.parametrize("env_tag, cached_tag", [("dev-9.tag", "dev-9.tag"), (None, None)])
 def test_cached_score_records_the_scoring_image_tag(monkeypatch, env_tag, cached_tag):
     """#1239: quality_score.json names the image whose scorer produced it."""

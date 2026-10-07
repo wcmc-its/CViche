@@ -37,6 +37,7 @@ from app.models import Log, Run, RunState, Step
 from app.pipeline.event_emitter import event_emitter
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
+from app.services.review_comments import REVIEW_DOCX_ERRORS, write_review_docx
 from app.storage import get_storage
 from app.storage.base import RunStorage
 
@@ -1220,6 +1221,10 @@ class PipelineOrchestrator:
 
         loop = asyncio.get_running_loop()
         payload, out_path = await loop.run_in_executor(None, self._doctor_report)
+        new_files = [str(out_path)]
+        review_path = await loop.run_in_executor(None, self._review_docx, payload)
+        if review_path is not None:
+            new_files.append(str(review_path))
 
         # Attach the report to the last step's output_files here, on the
         # orchestrator's thread (like _submitter_label: the session must not
@@ -1232,15 +1237,29 @@ class PipelineOrchestrator:
         )
         if step is not None:
             files = json.loads(step.output_files) if step.output_files else []
-            if str(out_path) not in files:
-                files.append(str(out_path))
-                step.output_files = json.dumps(files)
+            added = [f for f in new_files if f not in files]
+            if added:
+                step.output_files = json.dumps(files + added)
                 self.db.commit()
 
         await loop.run_in_executor(
-            None, self._persist_outputs_to_storage, [str(out_path)]
+            None, self._persist_outputs_to_storage, new_files
         )
         return payload
+
+    def _review_docx(self, payload: dict) -> Path | None:
+        """Write the finished document with the doctor's findings as Word
+        comments (#1388); returns its path, or None when there is none.
+        Best-effort: the doctor report above stands whether or not this works."""
+        clean = self._get_output_paths()['6']
+        if not clean.exists():
+            return None
+        try:
+            written = write_review_docx(clean, payload)
+        except REVIEW_DOCX_ERRORS:
+            logger.warning("Review-comment docx failed for run %s", self.run_id, exc_info=True)
+            return None
+        return written[0] if written else None
 
     def _doctor_report(self):
         """Run the doctor lints and write the JSON report; returns (payload, path)."""

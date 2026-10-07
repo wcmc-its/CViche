@@ -2179,7 +2179,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(numId)
         pPr.append(numPr)
 
-    def _get_wcm_section_header(self, taxonomy_code: str) -> str:
+    @staticmethod
+    def _get_wcm_section_header(taxonomy_code: str) -> str:
         """Map taxonomy code to WCM subsection header text for precise routing.
 
         Returns the WCM subsection header where overflow content for this code
