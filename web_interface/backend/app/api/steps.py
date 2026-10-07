@@ -296,7 +296,7 @@ def get_json_content(
         if not artifact_service.is_json_artifact(resolved.basename):
             raise bad_request("Only JSON files can be viewed")
         try:
-            with open(resolved.local_path) as f:
+            with open(resolved.local_path, encoding="utf-8") as f:
                 data = json.load(f)
             return JSONResponse(content={
                 "filename": filename,

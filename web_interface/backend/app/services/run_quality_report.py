@@ -57,12 +57,16 @@ _CAP_SOURCE_BY_SCORER = {
     scorer.score_owner_missing_from_citation: CapSource(
         "the CV owner was cut from several of their own citations",
         "owner_missing_from_citation"),
+    scorer.score_etal_added: CapSource(
+        "several citations cut their co-authors to \"et al.\"", "etal_added"),
     scorer.score_grant_boundary: CapSource(
         "several grants show another grant's details", "grant_boundary"),
     scorer.score_grant_application_as_award: CapSource(
         "a grant application is listed as funding received", "grant_bucket"),
     scorer.score_junk_rows: CapSource(
         "several headers or labels appear as entries", "junk_or_header_row"),
+    scorer.score_group_header_context: CapSource(
+        "several rows lost the heading they sat under", "group_header_context"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
 }
@@ -195,6 +199,13 @@ _ROW_COPY_BY_SCORER = {
         "Caps the score at 84 when 3 or more citations leave the faculty member out.",
         "Restore the faculty member's name in the citations named in the owner_missing_from_citation "
         "finding."),
+    scorer.score_etal_added: RowCopy(
+        "Co-authors kept on citations",
+        "Uses the etal_added finding: a publication whose line in the document ends its author list "
+        "with \"et al.\" where the source CV names every author.",
+        "Caps the score at 84 when 3 or more citations are flagged. One or two cut lists do not cap.",
+        "Restore the full author list from the source CV in the citations named in the etal_added "
+        "finding."),
     scorer.score_grant_boundary: RowCopy(
         "Grant details kept with their grant",
         "Uses the grant_boundary finding: a grant list split at the wrong line, so a grant shows "
@@ -219,6 +230,14 @@ _ROW_COPY_BY_SCORER = {
         "so they do not cap.",
         "Delete the rows named in the junk_or_header_row finding, and copy any institution they "
         "named onto the entries beneath them."),
+    scorer.score_group_header_context: RowCopy(
+        "Rows keep the heading they sat under",
+        "Uses the group_header_context finding: a society, employer or course line whose lines "
+        "show without its name, or roles that show without the course, committee or society they "
+        "were held in.",
+        "Caps the score at 84 when 4 or more are flagged. Fewer do not cap.",
+        "Add the society, institution or course from the line above to each row named in the "
+        "group_header_context finding."),
 }
 
 _GATES = (*((n, f) for n, _w, f in scorer.DIMENSIONS), *scorer.CAP_ONLY_GATES)
@@ -532,6 +551,19 @@ LINT_COPY = {
         "A labelled line that belongs to one entry, such as a trainee's current position, "
         "starts the next entry instead, so one entry lacks it and the next shows it.",
         "Move each flagged line back to the entry above it, as the source CV orders them."),
+    "citation_field_dropped": LintCopy(
+        "Citation leaves out its title, link or \"...\"",
+        "A citation in the document leaves out something the source CV gives to identify the "
+        "item: its title, its web link, or the \"...\" showing that the source left some "
+        "authors out, so the shorter list reads as complete.",
+        "Add the title or link from the source CV, or put the \"...\" back in the author list."),
+    "group_header_context": LintCopy(
+        "Rows lost the heading they sat under",
+        "The CV groups some lines under a society, an employer, a course or a dated block. "
+        "The rows for those lines don't show it: an organization cell is empty, a role "
+        "appears on its own, a lead line sits apart from its list, or a role has no dates.",
+        "Add the society, institution, course or dates from the line above to each flagged "
+        "row, and delete a lead line that shows as a row of its own."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

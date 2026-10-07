@@ -221,7 +221,7 @@ CACHE_WRITE_PRICE_MULTIPLIER = 1.25  # cache writes cost 1.25x input
 
 
 def calculate_cost(prompt_tokens: int, completion_tokens: int,
-                   model: str = None, provider: str = "bedrock",
+                   model: str | None = None, provider: str = "bedrock",
                    cache_read_tokens: int = 0,
                    cache_write_tokens: int = 0) -> float:
     """
@@ -322,7 +322,7 @@ def _blended_price_per_million(provider: str, model: str) -> float:
             (1 - COST_ESTIMATE_INPUT_SHARE) * pricing["output"] * out_x)
 
 
-def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> float:
+def estimate_cost_per_1k_doc_tokens(model: str | None = None, provider: str | None = None) -> float:
     """Estimate pipeline cost (USD) per 1,000 document tokens for a model.
 
     Lets the web /estimate endpoint show a cost that tracks the model
@@ -396,8 +396,8 @@ def _model_io_rates(provider: str, model: str) -> tuple:
     return pricing["input"] * in_x, pricing["output"] * out_x
 
 
-def estimate_run_cost_usd(text_char_count: int, model: str = None,
-                          provider: str = None) -> float:
+def estimate_run_cost_usd(text_char_count: int, model: str | None = None,
+                          provider: str | None = None) -> float:
     """Point estimate (USD) for a full pipeline run on a CV of this size.
 
     Models stage 3b entry classification explicitly (call_count x fixed

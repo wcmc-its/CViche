@@ -48,7 +48,7 @@ class URLDomainValidator(BaseValidator):
     def _load_config(self, config_path: Path) -> dict:
         """Load domain mapping configuration from JSON."""
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             # Return empty config if file doesn't exist

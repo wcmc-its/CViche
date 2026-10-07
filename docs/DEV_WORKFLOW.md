@@ -188,13 +188,13 @@ cheaper than answering them one comment at a time:
 | Ask | Comments | Standing issue |
 |---|---|---|
 | Split the function — one responsibility, one level of abstraction | 24 | #577 |
-| Builtin generics (`dict`, not `typing.Dict`) and full annotations | 23 | #533 |
-| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567, #494 — now also `CODING_STANDARDS.md` §8.1 |
+| Builtin generics (`dict`, not `typing.Dict`) and full annotations | 23 | builtin generics: a hard zero since #533 (the §8.3 typing-syntax row is at 0); annotations: the §8.3 `ANN*` ratchet row |
+| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567 (it absorbed #494 in the 2026-10-06 triage) — now also `CODING_STANDARDS.md` §8.1 |
 | No silently swallowed exception, no bare `except Exception` | 17 | — |
 | A named constant or `Enum` instead of an inline taxonomy code or format literal | 16 | now `CODING_STANDARDS.md` §8.2 |
-| No `print()` in `src/` — and mind the two parsers that consume stage output | 8 | #563 |
+| No `print()` in `src/` — and mind the two parsers that consume stage output | 8 | the §7.1 `print()` (T201) ratchet row in `check_standards.py` — no issue; the row is the tracker, and CLAUDE.md names the two parsers |
 
-Those five standing issues absorb roughly 60% of everything written in review, so
+Those standing issues and ratchet rows absorb roughly 60% of everything written in review, so
 a comment that maps onto one of them belongs there rather than in a new issue.
 
 **Tests are asked for in review now.** This document used to say the opposite,
@@ -248,10 +248,14 @@ Two rules:
    If any of these fails, or the PR itself names a judgement call, ask before
    merging. After the merge, check that every `Closes #N` fired (see below).
 2. **CI must be actually green**, not "green locally". A job that failed with
-   zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on PRs to
-   `dev` and `main`: `backend-tests`, `pipeline-tests`, `function-size`,
-   `frontend-typecheck`, `type-check`, `secret-scan`. `issue-narrowing.yml`
-   adds `gate`. `deps-audit.yml` runs only when a requirements file changes.
+   zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on every
+   PR, whatever its base, and on pushes to `dev` and `main`: `backend-tests`,
+   `pipeline-tests`, `function-size`, `frontend-typecheck`, `type-check`,
+   `secret-scan`. A newer push to a PR cancels that PR's in-progress run.
+   On a PR that touches neither `web_interface/frontend/` nor `ci.yml`,
+   `frontend-typecheck` goes green without running its npm steps; it always
+   runs them on `dev`/`main`. `issue-narrowing.yml` adds `gate`.
+   `deps-audit.yml` runs only when a requirements file changes.
 
    **When Actions can't start jobs** (billing, or a GitHub outage), a local run
    of every job counts as green, provided all of the following hold:

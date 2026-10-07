@@ -258,7 +258,7 @@ def test_email_param_omitted_when_unset(monkeypatch):
 
 
 def test_placeholder_email_gone_from_source():
-    source = Path(stage5.__file__).read_text()
+    source = Path(stage5.__file__).read_text(encoding='utf-8')
     assert 'support@example.com' not in source
 
 

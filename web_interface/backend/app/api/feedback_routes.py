@@ -109,7 +109,7 @@ def _get_populated_wcm_sections(run_id: str) -> list[dict]:
 
     for metadata_file in metadata_files:
         try:
-            with open(metadata_file, 'r') as f:
+            with open(metadata_file, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
 
             records_processed = metadata.get('records_processed', {})

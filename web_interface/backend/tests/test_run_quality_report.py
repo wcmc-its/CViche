@@ -50,6 +50,8 @@ def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
     (scorer.score_under_extracted_records, "under_extraction"),
     (scorer.score_fused_entries, "segmentation"),
     (scorer.score_lost_source_table, "table_lost"),
+    (scorer.score_etal_added, "etal_added"),
+    (scorer.score_group_header_context, "group_header_context"),
 ])
 def test_each_content_loss_cap_points_at_the_lint_that_reports_it(gate, lint):
     """#822: a content-loss cap on the run page names its own gate and the doctor

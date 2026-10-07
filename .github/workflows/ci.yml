@@ -21,6 +21,13 @@ on:
     branches: [dev, main]
   workflow_dispatch:
 
+# One run per PR: a newer push cancels the run it supersedes, so a burst of
+# pushes to one PR is billed once. Pushes to dev/main and manual runs get a
+# group of their own (the run id), so no merge ever cancels another merge's run.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
@@ -119,23 +126,54 @@ jobs:
         run: python3 scripts/test_check_standards.py
 
   frontend-typecheck:
+    # On a PR, the steps after the diff check run only when the PR touches
+    # web_interface/frontend/ (which reads nothing outside itself) or this
+    # file; pushes to dev/main and manual runs always run them. Skipping steps
+    # rather than path-filtering the workflow keeps the job reporting green, so
+    # it still works as a required check once branch protection exists (#417):
+    # a workflow that never starts leaves a required check pending forever.
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: web_interface/frontend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 2  # a PR's merge commit plus both parents, for the diff below
+      - name: Does this change touch the frontend?
+        id: changes
+        working-directory: .
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # HEAD is the PR merged onto its base, so HEAD^1 is the base tip and
+          # the diff is exactly what the PR changes. Anything unexpected (not a
+          # PR, no parent to diff against) runs the frontend steps.
+          if [ "$EVENT_NAME" != "pull_request" ] \
+              || ! changed=$(git diff --name-only HEAD^1 HEAD); then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          elif grep -qE '^(web_interface/frontend/|\.github/workflows/ci\.yml$)' <<< "$changed"; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+            echo "No web_interface/frontend/ or ci.yml change: skipping the frontend steps."
+          fi
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: steps.changes.outputs.frontend == 'true'
         with:
           node-version: "20"  # match the build image (node:20-alpine)
           cache: npm
           cache-dependency-path: web_interface/frontend/package-lock.json
       - run: npm ci
+        if: steps.changes.outputs.frontend == 'true'
       # Vite does not typecheck on build, so run tsc explicitly, then build to
       # catch anything that breaks the production bundle.
       - run: npx tsc --noEmit
+        if: steps.changes.outputs.frontend == 'true'
       - run: npm run build
+        if: steps.changes.outputs.frontend == 'true'
       - run: npm test
+        if: steps.changes.outputs.frontend == 'true'
 
   type-check:
     # Opt-in mypy over the modules modernized to typed form (#328). Scope lives

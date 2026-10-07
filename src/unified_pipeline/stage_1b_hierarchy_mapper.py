@@ -958,7 +958,7 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
             sys.exit(1)
 
     print(f"Loading hierarchy: {hierarchy_json_path}")
-    with open(hierarchy_json_path) as f:
+    with open(hierarchy_json_path, encoding="utf-8") as f:
         hierarchy_data = json.load(f)
 
     # Extract document structure using the unified element extractor
@@ -1048,7 +1048,7 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
         }
     }
 
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
     # Print sample sections

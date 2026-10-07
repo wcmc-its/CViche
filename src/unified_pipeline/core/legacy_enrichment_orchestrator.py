@@ -193,10 +193,10 @@ class LegacyEnrichmentOrchestrator:
 
             # Load and save (this also validates JSON)
             try:
-                with open(extracted_file) as f:
+                with open(extracted_file, encoding="utf-8") as f:
                     data = json.load(f)
 
-                with open(output_file, 'w') as f:
+                with open(output_file, 'w', encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
 
                 if self.verbose:

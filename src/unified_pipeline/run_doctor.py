@@ -172,9 +172,10 @@ Lints, ranked by the severity of the failure class they catch:
                           restore declined, a PubMed author list that stops
                           short, a dropped consortium credit. WARN, one per
                           citation. Its sibling `etal_added` reports, at
-                          INFO, a line whose author list ends in "et al."
+                          WARN, a line whose author list ends in "et al."
                           where the source elides no author: co-authors cut
-                          (#1259)
+                          (#1259; INFO until #1404 took the cut out of the
+                          5d prompt)
 14o. multi_record_coverage a stage-4 entry whose text holds several records
                           -- two or more dated clauses, or undated parts that
                           each name a title and an institution -- while stage
@@ -182,8 +183,12 @@ Lints, ranked by the severity of the failure class they catch:
                           one record holding several mentees, degree years or
                           licence/patent numbers (#1243: TAUBPU's concurrent
                           faculty rank, VNUAHA's paragraphs of 2-3 roles).
-                          WARN when a left-out clause, mentee, degree year or
-                          number is on no rendered line, INFO otherwise
+                          On an entry stage 4 did split, a clause whose words
+                          the records hold but whose year no record's span
+                          covers (X6: a membership span kept only as its
+                          offices). WARN when a left-out clause, mentee,
+                          degree year or number is on no rendered line, INFO
+                          otherwise
 14q. year_not_in_source   a stage-4 date-named field whose year, inside
                           implausible_year's band, the entry's text states in
                           no form -- four digits, a two-digit year, a range
@@ -328,6 +333,27 @@ Lints, ranked by the severity of the failure class they catch:
                           mentee's 'Current position:' opening the next
                           mentee's entry (IEUPKK 438/444/466/467). WARN.
                           Reads stage 4 only
+14ac. citation_field_dropped a publication whose rendered bibliography
+                          line leaves out a stage-4 field that identifies it:
+                          its title, on no bibliography line at all (an
+                          untitled item rendered as venue, date and pages,
+                          X6 KJJVVO-10; WARN), or its link, where the line
+                          gives no DOI, PMID or volume and pages either (a
+                          webinar, UXBHHF-20; INFO), or the source's author
+                          elision ("...", "[...]" before the title), on a
+                          line that is no PubMed or Crossref rebuild and
+                          shows none, so a cut list reads as complete
+                          (VPMMFM-08; INFO). No score cap
+14ad. group_header_context a group header whose context never reached the
+                          rows of the lines under it (X6 E8, E11): a society
+                          or employer line coded as a record, whose lines
+                          render without its name (KJJVVO-01), and a bare
+                          role line ('Chair 2010-2011') rendered as the role
+                          alone (RINASX-06), both WARN; an undated lead line
+                          coded unlike the dated list under it (IEUPKK-18,
+                          RINASX-14) and an undated role under a dated block
+                          rendered with no dates (IEUPKK-14/-17), both INFO.
+                          Reads stage 4 and the docx's rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -393,7 +419,7 @@ import sys
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.precision import precision_payload
@@ -513,6 +539,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
+    lint_citation_field_dropped,
     lint_etal_added,
     lint_fanout_cell_residue,
     lint_identical_rendered_rows,
@@ -523,6 +550,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_pipe_leaks,
     lint_python_repr_in_output,
     lint_split_child_unsourced,
+    lint_group_header_context,
     lint_section_lost,
     lint_stage6_warnings,
     lint_table_shape,
@@ -654,6 +682,8 @@ KNOWN_LINTS = (
     "identical_rendered_rows",
     "split_child_unsourced",
     "record_boundary",
+    "citation_field_dropped",
+    "group_header_context",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -853,11 +883,24 @@ LINT_PREVALENCE = {
     # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
     # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
     "split_child_unsourced": 0.01,
-    # record_boundary (X6 class E5, X6-grant in doctor/PRECISION.md): 8 of
-    # 221 distinct stored stage-4 JSON files (the EBYSBC/s7ab/pilot, EOAHMI
-    # and X6 farms, analysis/<uid>, the 2026-09 batches), measured 2026-10-06.
-    # Reads stage 4 only. Same mixed-corpus caveat as above.
-    "record_boundary": 0.036,
+    # record_boundary (X6 class E5, X6-grant in doctor/PRECISION.md): 10 of
+    # 306 distinct stored stage-4 JSON files (the EBYSBC/s7ab/pilot, EOAHMI,
+    # X6 and NDMRSO farms, analysis/<uid>, src/unified_pipeline/outputs and
+    # the _autopsy_artifacts batches), measured 2026-10-07. Reads stage 4
+    # only. Same mixed-corpus caveat as above.
+    "record_boundary": 0.033,
+    # citation_field_dropped (X6 KJJVVO-10, UXBHHF-20, VPMMFM-08; X6-cite in
+    # doctor/PRECISION.md): 18 of the 111 runs under analysis/ with a stage-4
+    # artifact and a stage-6 docx, each over its stored docx, measured
+    # 2026-10-06 (6 of the 63 on the EBYSBC/s7ab/pilot farm's base render).
+    # Several of the 18 are one CV run more than once. Same mixed-corpus
+    # caveat as above.
+    "citation_field_dropped": 0.162,
+    # group_header_context (X6 E8/E11, X6-header in doctor/PRECISION.md): 23
+    # of the 63 runs of the EBYSBC/s7ab/pilot farm at any severity, over its
+    # render of origin/dev fb466a0f, measured 2026-10-06 (46 of the 111
+    # stored analysis/ runs). Same mixed-corpus caveat as above.
+    "group_header_context": 0.365,
 }
 
 
@@ -871,7 +914,7 @@ def lint_surprise(lint: str) -> float:
     return math.log2(1.0 / max(LINT_PREVALENCE.get(lint, 0.001), 0.001))
 
 
-def rank_lints(counts: Dict[str, int]) -> List[Tuple[str, int]]:
+def rank_lints(counts: dict[str, int]) -> list[tuple[str, int]]:
     """Order lints for display: most surprising first, count as the tiebreak."""
     return sorted(counts.items(),
                   key=lambda kv: (-lint_surprise(kv[0]), -kv[1], kv[0]))
@@ -967,7 +1010,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     These are what stage 1a should have promoted to hierarchy nodes."""
     Document = _get_docx_document()
 
-    candidates: List[str] = []
+    candidates: list[str] = []
 
     def consider(para):
         text = _ENUM_TAB_RE.sub(r"\1 ", para.text.strip(), count=1)
@@ -1025,7 +1068,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
 # Re-exported by name above for the five files that import them from here.
 
 
-def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> List[Tuple[str, str]]:
+def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> list[tuple[str, str]]:
     """Body-order blocks of a docx: ("p", text) per paragraph, ("table",
     _table_lines joined by newlines) per table. Grants render as one Word
     table per grant, so any output check must read tables AND paragraphs.
@@ -1034,7 +1077,7 @@ def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> List[Tuple[str
     return docx_body_blocks(Document(docx_path), deleted=deleted)
 
 
-def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
+def read_docx_table_rows(docx_path: str) -> list[list[list[str]]]:
     """Raw per-row cell texts of every top-level table, EMPTY CELLS INCLUDED
     — _table_lines drops empty cells, which hides an empty date column from
     the shape checks (lint 13)."""
@@ -1148,7 +1191,7 @@ def _uid_owns(name: str, uid: str) -> bool:
     return bool(rest) and not rest[0].isalnum()
 
 
-def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
+def _find_artifact(root: Path, uid: str, key: str) -> Path | None:
     spec = _ARTIFACTS[key]
     directory = root / spec.stage_dir
     if not directory.is_dir():
@@ -1158,7 +1201,7 @@ def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
     return matches[0] if matches else None
 
 
-def _find_source(root: Path, uid: str) -> Optional[Path]:
+def _find_source(root: Path, uid: str) -> Path | None:
     for directory in (root, root / "uploads"):
         if directory.is_dir():
             matches = sorted(p for p in directory.glob(f"{uid}*.docx")
@@ -1223,7 +1266,7 @@ def _load_stage_errors(path: Path, on_unreadable: Callable[[str, str], None]) ->
         return None
 
 
-def _try(fn, label: str = None, on_unreadable=None):
+def _try(fn, label: str | None = None, on_unreadable=None):
     """Run a docx-reading loader. Its callers guard on the path existing, so a
     failure here is also present-but-unreadable, reported like _load_json."""
     try:
@@ -1238,7 +1281,7 @@ def _try(fn, label: str = None, on_unreadable=None):
 
 # --------------------------------------------------------------------- doctor
 
-def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
+def _ready(lint_id: str, *, unreadable: dict[str, str], findings: list[dict],
            **inputs) -> bool:
     """True when every input for a lint is present; else record why it was
     skipped and return False.
@@ -1407,6 +1450,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
     LintSpec("record_boundary", lint_record_boundary, ("stage_4",)),
+    LintSpec("citation_field_dropped", lint_citation_field_dropped, ("stage_4", "blocks")),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
+             optional=("blocks",)),
 )
 
 
@@ -1576,7 +1623,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     # (so a None input is traced back to a broken file vs a genuinely absent
     # one). The source docx feeds two independent readers; they take separate
     # labels so a reader that fails alone is attributed to the right lint.
-    unreadable: Dict[str, str] = {}
+    unreadable: dict[str, str] = {}
     def _note(label, detail):
         unreadable[label] = detail
 
@@ -1602,7 +1649,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
 
-    findings: List[Dict] = []
+    findings: list[dict] = []
     ready = partial(_ready, unreadable=unreadable, findings=findings)
 
     for spec in LINT_REGISTRY:
@@ -1641,7 +1688,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     }
 
 
-def main(argv: Optional[List[str]] = None):
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("root", help="run outputs root (contains the stage_* dirs)")
     parser.add_argument("uid", help="document uid (artifact filename prefix)")

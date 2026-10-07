@@ -19,7 +19,7 @@ SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_functio
 
 def write_fn(path, name, body_lines):
     """A function of exactly body_lines+1 lines."""
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"def {name}():\n")
         fh.writelines(f"    x{i} = {i}\n" for i in range(body_lines))
 
@@ -36,14 +36,14 @@ def run(tree, *args):
 def main():
     with tempfile.TemporaryDirectory() as tree:
         os.mkdir(os.path.join(tree, "scripts"))
-        with open(SCRIPT) as src, open(os.path.join(tree, "scripts", "check.py"), "w") as dst:
+        with open(SCRIPT, encoding="utf-8") as src, open(os.path.join(tree, "scripts", "check.py"), "w", encoding="utf-8") as dst:
             dst.write(src.read())
 
         # one 301-line function -> excess 101
         write_fn(os.path.join(tree, "a.py"), "big", 300)
         r = run(tree, "--update")
         assert r.returncode == 0, r.stderr
-        base = json.load(open(os.path.join(tree, "scripts", "function-size-baseline.json")))
+        base = json.load(open(os.path.join(tree, "scripts", "function-size-baseline.json"), encoding="utf-8"))
         assert base["excess_lines"] == 101, base
         assert base["count"] == 1, base
         print(f"baseline           excess={base['excess_lines']:4}  ok")
@@ -60,7 +60,7 @@ def main():
         print("debt grows         exit=1  +51 lines     ok")
 
         # split b back below the threshold -> back to exactly the baseline -> pass, unchanged
-        with open(os.path.join(tree, "b.py"), "w") as fh:
+        with open(os.path.join(tree, "b.py"), "w", encoding="utf-8") as fh:
             fh.write("def h1():\n")
             fh.writelines(f"    y{i} = {i}\n" for i in range(120))
             fh.write("\ndef h2():\n")
@@ -71,7 +71,7 @@ def main():
         print("back to baseline   exit=0  unchanged     ok")
 
         # now split the original offender too -> below baseline -> reported as an improvement
-        with open(os.path.join(tree, "a.py"), "w") as fh:
+        with open(os.path.join(tree, "a.py"), "w", encoding="utf-8") as fh:
             fh.write("def a1():\n")
             fh.writelines(f"    x{i} = {i}\n" for i in range(150))
             fh.write("\ndef a2():\n")
@@ -89,7 +89,7 @@ def main():
         r = run(tree, "--update")
         assert r.returncode == 1, f"--update should refuse a regression: {r.stdout}"
         assert "only turns one way" in r.stderr, r.stderr
-        after = json.load(open(os.path.join(tree, "scripts", "function-size-baseline.json")))
+        after = json.load(open(os.path.join(tree, "scripts", "function-size-baseline.json"), encoding="utf-8"))
         assert after["excess_lines"] == 101, "baseline must be untouched after a refused update"
         print("update refuses up  exit=1  baseline kept ok")
 

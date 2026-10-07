@@ -834,7 +834,7 @@ def test_run_stage5_reports_the_path_it_wrote():
     """The production contract behind the test above: run_stage5's own return
     value carries the path, so the CLI never has to rebuild it."""
     from unified_pipeline import stage_5_pubmed_enrichment
-    source = Path(stage_5_pubmed_enrichment.__file__).read_text()
+    source = Path(stage_5_pubmed_enrichment.__file__).read_text(encoding='utf-8')
     assert "result['output_path'] = str(output_path)" in source
 
 

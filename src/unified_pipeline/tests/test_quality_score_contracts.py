@@ -61,7 +61,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _FUNDING_SECTIONS,
     lint_grant_bucket,
 )
-from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
+from unified_pipeline.doctor.lints.render import lint_group_header_context  # noqa: E402
+from unified_pipeline.doctor.shared import docx_body_blocks, docx_table_rows  # noqa: E402
 from unified_pipeline.stage4.error_codes import (  # noqa: E402
     LLM_PROVIDER_ERROR,
     LLM_RESPONSE_INVALID,
@@ -2550,6 +2551,77 @@ def test_score_run_caps_a_run_whose_owner_was_cut_from_three_citations(tmp_path)
                             "citations") for f in result["flags"]), result["flags"]
 
 
+# ------------------------------------------- #1259 co-authors cut to "et al."
+# The same invented owner, now first on every source list, so the cut keeps
+# them and drops two co-authors: etal_added's shape, not owner_missing's.
+
+_ETAL_AUTHORS = f"Thornquist R, {_CUT_KEPT}, Garrow G"
+_ETAL_KEPT = "Thornquist R, Ashdown A, Brimley B, Corwen C, Dunmore D, Elsworth E"
+
+
+def _etal_cut_run(tmp_path: Path, cut: int, kept: int = 0) -> Path:
+    """A run whose bibliography renders `cut` citations cut to six authors and
+    "et al." and `kept` more with every author."""
+    titles = _CUT_TITLES[:cut + kept]
+    _write_json(tmp_path, "X_fields.json", {
+        "cv_owner": _CUT_OWNER,
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"element_idx_start": 10 + n, "taxonomy_code": "S1",
+                     "text": f"{_ETAL_AUTHORS}. {title}. {_CUT_TRAILER}",
+                     "extracted_fields": {"authors": _ETAL_AUTHORS}, "extraction_success": True}
+                    for n, title in enumerate(titles)]})
+    lines = [f"{_ETAL_KEPT}, et al. {title}. {_CUT_TRAILER}" for title in titles[:cut]]
+    lines += [f"{_ETAL_AUTHORS}. {title}. {_CUT_TRAILER}" for title in titles[cut:]]
+    _make_docx(["BIBLIOGRAPHY", "Peer-reviewed Research Articles:"]
+               + [f"{n}. {line}" for n, line in enumerate(lines, 1)]).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_etal_added_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.ETAL_ADDED_CAP_MIN == 3
+    assert qs.score_etal_added(_etal_cut_run(tmp_path, cut=3)) == (
+        1.0, f"etal_added_citations=3; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_etal_added_gate_quiet_below_the_minimum_count(tmp_path):
+    """Two cut lists and one full one: the finding reports, the gate does not
+    cap."""
+    assert qs.score_etal_added(_etal_cut_run(tmp_path, cut=2, kept=1)) == (
+        0.0, "etal_added_citations=2", None)
+
+
+def test_etal_added_gate_leaves_an_owner_cut_to_the_owner_gate(tmp_path):
+    """Three cut lists that also lost the owner are owner_missing's findings,
+    not etal_added's: the two gates never count one citation twice."""
+    _owner_cut_run(tmp_path, cut=3)
+    assert qs.score_etal_added(tmp_path) == (0.0, "etal_added_citations=0", None)
+
+
+def test_etal_added_gate_not_evaluated_without_its_artifacts(tmp_path):
+    assert qs.score_etal_added(tmp_path) == (0.0, "no fields.json found; not evaluated", None)
+    _etal_cut_run(tmp_path, cut=3)
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_etal_added(tmp_path) == (0.0, "no docx found; not evaluated", None)
+
+
+def test_score_run_caps_a_run_with_three_cut_author_lists(tmp_path):
+    """The wire: registered in CAP_ONLY_GATES, weightless, and its flag names it."""
+    assert qs.score_etal_added in [fn for _, fn in qs.CAP_ONLY_GATES]
+    assert qs.score_etal_added not in [fn for _, _, fn in qs.DIMENSIONS]
+    _complete_run_dir(tmp_path)
+    result = score_run(_etal_cut_run(tmp_path, cut=3))
+    assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP], result["flags"]
+    assert result["totalScore"] <= qs.CONTENT_LOSS_CAP
+    assert any(f.startswith(f"HARD-FAIL cap={qs.CONTENT_LOSS_CAP}: Co-authors cut from citations")
+               for f in result["flags"]), result["flags"]
+
+
+def test_score_run_does_not_cap_two_cut_author_lists(tmp_path):
+    _complete_run_dir(tmp_path)
+    result = score_run(_etal_cut_run(tmp_path, cut=2, kept=1))
+    assert result["hard_fail_caps_applied"] == [], result["flags"]
+
+
 # -------------------------- zero-false-positive WARN lints into the content cap
 # grant_boundary (#1226), grant_bucket's application shape (#1343) and
 # junk_or_header_row (EBYSBC E8/E10/E29). Invented grants and institutions.
@@ -2647,7 +2719,8 @@ _JUNK_INSTITUTIONS = ("Example State University", "Sample Valley College",
 
 def _junk_rows_run(tmp_path: Path, headers: int) -> Path:
     """A course list whose first `headers` institution lines each render as a
-    row of their own, with one real course under each."""
+    row of their own, with one real course under each. The course rows name
+    their institution, so `group_header_context` does not also fire."""
     entries, rows = [], []
     for n, name in enumerate(_JUNK_INSTITUTIONS[:headers]):
         course = f"EX10{n} Widget Studies"
@@ -2657,7 +2730,7 @@ def _junk_rows_run(tmp_path: Path, headers: int) -> Path:
                     {"element_idx_start": 41 + 2 * n, "taxonomy_code": "K1",
                      "hierarchy": ["Example Heading"], "text": course,
                      "extracted_fields": {"course_title": course}}]
-        rows += [[name, ""], [course, ""]]
+        rows += [[name, ""], [course, name]]
     _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": entries})
     _make_docx(tables=[rows]).save(tmp_path / "X_wcm.docx")
     return tmp_path
@@ -2681,6 +2754,75 @@ def test_junk_rows_gate_not_evaluated_without_its_artifacts(tmp_path):
     assert qs.score_junk_rows(tmp_path) == (0.0, "no docx found; not evaluated", None)
 
 
+_GROUP_ROLES = ("Module Director", "Workshop Coordinator", "Session Leader",
+                "Course Tutor", "Panel Moderator")
+
+
+def _group_header_run(tmp_path: Path, runs: int, lead_lines: int = 0) -> Path:
+    """`runs` course lines, each over one bare role rendered as the role
+    alone (one `role_without_holder` WARN each), then `lead_lines` undated
+    lead lines over a dated list of another letter, each rendered as a row
+    of its own (one `header_coded_unlike_list` INFO each)."""
+    entries, paragraphs, rows = [], [], []
+    for n, role in enumerate(_GROUP_ROLES[:runs]):
+        year = str(1961 + n)
+        entries += [{"element_idx_start": 60 + 2 * n, "taxonomy_code": "K1",
+                     "hierarchy": ["Example Heading"], "text": f"Widget Course {n} 1950-present",
+                     "extracted_fields": {"course_title": f"Widget Course {n}",
+                                          "start_date": "1950", "end_date": "present"}},
+                    {"element_idx_start": 61 + 2 * n, "taxonomy_code": "K3",
+                     "hierarchy": ["Example Heading"], "text": f"{role} {year}",
+                     "extracted_fields": {"role": role, "start_date": year}}]
+        paragraphs.append(f"{year} - {role}")
+    for n in range(lead_lines):
+        lead = f"Thesis Committees, Example College {n}"
+        entries.append({"element_idx_start": 100 + 10 * n, "taxonomy_code": "K2",
+                        "hierarchy": ["Other Heading"], "text": lead,
+                        "extracted_fields": {"institution": f"Example College {n}",
+                                             "teaching_role": "Thesis Committee Member"}})
+        entries += [{"element_idx_start": 101 + 10 * n + m, "taxonomy_code": "N3B",
+                     "hierarchy": ["Other Heading"], "text": f"1976-1979 Widget Student {m}",
+                     "extracted_fields": {"mentee_name": f"Widget Student {m}",
+                                          "start_date": "1976", "end_date": "1979"}}
+                    for m in range(3)]
+        rows.append([lead, ""])
+    _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": entries})
+    _make_docx(paragraphs, tables=[rows] if rows else []).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_group_header_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.GROUP_HEADER_CAP_MIN == 4
+    run = _group_header_run(tmp_path, qs.GROUP_HEADER_CAP_MIN)
+    assert qs.score_group_header_context(run) == (
+        1.0, f"group_header_warns=4; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_group_header_gate_quiet_below_the_minimum_count(tmp_path):
+    run = _group_header_run(tmp_path, qs.GROUP_HEADER_CAP_MIN - 1)
+    assert qs.score_group_header_context(run) == (0.0, "group_header_warns=3", None)
+
+
+def test_group_header_gate_counts_only_warn_findings(tmp_path):
+    """The INFO shapes (a lead line coded unlike its list, a role that lost a
+    block's dates) are reported by the doctor but do not count toward the cap."""
+    run = _group_header_run(tmp_path, qs.GROUP_HEADER_CAP_MIN - 1, lead_lines=2)
+    fields = json.loads((run / "X_fields.json").read_text())
+    doc = Document(str(run / "X_wcm.docx"))
+    severities = sorted(f["severity"] for f in lint_group_header_context(
+        fields, docx_table_rows(doc), docx_body_blocks(doc)))
+    assert severities == ["INFO", "INFO", "WARN", "WARN", "WARN"]
+    assert qs.score_group_header_context(run) == (0.0, "group_header_warns=3", None)
+
+
+def test_group_header_gate_not_evaluated_without_its_artifacts(tmp_path):
+    assert qs.score_group_header_context(tmp_path) == (
+        0.0, "no fields.json found; not evaluated", None)
+    _group_header_run(tmp_path, 4)
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_group_header_context(tmp_path) == (0.0, "no docx found; not evaluated", None)
+
+
 @pytest.mark.parametrize("gate, flag, build", [
     (qs.score_grant_boundary, "Grant details shifted between grants",
      lambda d: _shifted_grants_run(d, 3)),
@@ -2688,6 +2830,8 @@ def test_junk_rows_gate_not_evaluated_without_its_artifacts(tmp_path):
      lambda d: _grant_rendered_run(d, ["Grants Applied"], "M2B", "M2B")),
     (qs.score_junk_rows, "Headers or labels rendered as records",
      lambda d: _junk_rows_run(d, 5)),
+    (qs.score_group_header_context, "Rows lost the group header above them",
+     lambda d: _group_header_run(d, 4)),
 ])
 def test_score_run_applies_each_zero_fp_lint_gate(tmp_path, gate, flag, build):
     """The wire: registered in CAP_ONLY_GATES, weightless, and score_run

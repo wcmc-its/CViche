@@ -144,7 +144,7 @@ def _masked_id(path: Path) -> str:
 def _load(path: Path):
     """One artifact, or None when it is unreadable -- reported, never fatal."""
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         # The exception is reported by TYPE: an OSError's message embeds the
         # full path it failed on, filename included.

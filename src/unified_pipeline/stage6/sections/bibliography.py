@@ -47,7 +47,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 try:
     from docx.oxml import OxmlElement
@@ -142,7 +142,7 @@ class _CitationEnrichment:
     in_press_superseded: bool = False
 
     @classmethod
-    def from_raw(cls, raw) -> '_CitationEnrichment':
+    def from_raw(cls, raw) -> _CitationEnrichment:
         """Build a record from one raw stage-5 publication entry."""
         if not isinstance(raw, Mapping):
             return cls()
@@ -538,7 +538,7 @@ class BibliographySection:
         """
         return _CONTROL_CHAR_PATTERN.sub('', text)
 
-    def _fill_bibliography(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict,
+    def _fill_bibliography(self, entries_by_code: dict[str, list[dict]], cv_owner: dict,
                            document_uid: str = '') -> list[dict]:
         """Fill bibliography section with formatted citations.
 

@@ -62,7 +62,7 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, NamedTuple
+from typing import NamedTuple
 
 try:
     from docx import Document
@@ -1294,8 +1294,8 @@ class _RecoveredContact(NamedTuple):
 class PersonalDataSection:
     """Section A writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_personal_data(self, entries: List[Dict], cv_owner: Dict, document_uid: str,
-                            all_entries: List[Dict] = None, original_doc_path: str = None):
+    def _fill_personal_data(self, entries: list[dict], cv_owner: dict, document_uid: str,
+                            all_entries: list[dict] | None = None, original_doc_path: str | None = None):
         """Fill personal data section.
 
         Args:

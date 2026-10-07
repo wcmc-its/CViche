@@ -605,7 +605,7 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         return None, None
 
 
-def run_stage_5c(input_path: str, output_path: str = None,
+def run_stage_5c(input_path: str, output_path: str | None = None,
                  verbose: bool = True) -> str:
     """
     Run Stage 5c: Teaching/Educational Contributions Formatter.

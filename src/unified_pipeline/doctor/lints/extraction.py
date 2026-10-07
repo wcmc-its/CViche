@@ -29,7 +29,7 @@ from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
 from types import MappingProxyType
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.validators.grant_status_corrector import (
@@ -163,7 +163,7 @@ _FUNDING_BOUNDARY_TITLES = frozenset({
 })
 
 
-def _entry_status(entry: Dict) -> Optional[str]:
+def _entry_status(entry: dict) -> str | None:
     """The entry's grant status: the stage-4 field when the vocabulary
     `grant_status_rebucket_target` (what `lint_bucket_status` judges by)
     recognises it, else the labelled fragment in the raw text. Stage 4 has no
@@ -179,7 +179,7 @@ def _entry_status(entry: Dict) -> Optional[str]:
 def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     """Per-bucket Haystack of everything rendered under each of stage 6's
     funding subsection headers."""
-    segments: Dict[str, List[Tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
+    segments: dict[str, list[tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
     current = None
     for kind, text in blocks:
         stripped = str(text).strip()
@@ -197,7 +197,7 @@ def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     return {code: _haystacks(seg) for code, seg in segments.items()}
 
 
-def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_bucket_status(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """Grant status (extracted field, else the 'Status:' label in the raw
     entry text) vs the funding subsection the grant actually rendered under.
     Stage 6 rebuckets mis-bucketed grants at render time (#214), so the
@@ -250,7 +250,7 @@ _YEAR_EDGE_LINE_RE = re.compile(
     r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
 
 
-def lint_under_extraction(stage4: Dict) -> List[Dict]:
+def lint_under_extraction(stage4: dict) -> list[dict]:
     """Large multi-record entries whose stage-4 field extraction covered
     almost none of the text: the rest of the records silently vanish."""
     findings = []
@@ -591,10 +591,10 @@ def _classified_entry_rendered(entry: dict, haystacks: Haystack, lines: list[str
     return _entry_rendered(entry.get("text"), haystacks.text, haystacks.tokens, shared)
 
 
-def lint_classified_unrendered(stage3b: Dict,
-                               blocks: List[Tuple[str, str]],
+def lint_classified_unrendered(stage3b: dict,
+                               blocks: list[tuple[str, str]],
                                stage4: dict | None = None,
-                               stage5b: dict | None = None) -> List[Dict]:
+                               stage5b: dict | None = None) -> list[dict]:
     """Taxonomy codes classified at 3b none of whose entries appear anywhere
     in the stage-6 output (paragraphs or tables). Skipped: 'T' (appendix
     catch-all) and 'M1', which stage 6 never renders verbatim when a research
@@ -611,7 +611,7 @@ def lint_classified_unrendered(stage3b: Dict,
     shared = _shared_entry_pieces(stage3b.get("entries", []))
     evidence = _stage4_evidence(stage4, stage5b)
     lines = h.text.split(_LINE_SENTINEL)
-    by_code: Dict[str, List[Dict]] = {}
+    by_code: dict[str, list[dict]] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
@@ -705,7 +705,7 @@ def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
     return by_code
 
 
-def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
+def lint_taxonomy_code_coverage(stage3b: dict) -> list[dict]:
     """Entries classified into a taxonomy code stage 6 has no render route
     for at all -- they land in the Appendix by construction, regardless of
     confidence or content (#529, e.g. N2 "Institutional Training Grants and
@@ -880,9 +880,9 @@ def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:
     return rendered_items is not None and bool(_unrendered_identity(decision, rendered_items))
 
 
-def lint_dedup_drops(report: Dict,
+def lint_dedup_drops(report: dict,
                      blocks: list[tuple[str, str]] | None = None,
-                     stage_5d: Mapping | None = None) -> List[Dict]:
+                     stage_5d: Mapping | None = None) -> list[dict]:
     """Stage-6 dedup decisions that may have dropped a distinct record.
 
     WARN: the dropped text is NOT near-fully contained in the kept entry, so at
@@ -2013,7 +2013,12 @@ def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[d
 # an entry on newlines, and these records share a line. This lint cuts the
 # entry's text into record-shaped clauses, takes the clause the record covers
 # best as the one it stands for, and looks for every other clause in the
-# rendered document. Report-only: nothing is split or asked again.
+# rendered document. A clause whose words the record holds is the record's
+# own unless it writes a span the record lacks: a committee membership kept
+# only as the office held inside it (X6, 2026-10-04: RINASX-10's three
+# entries; VPMMFM-10, an entry stage 4 split into its two offices). That
+# shape is the one judged on an entry stage 4 split into `stage4_records`.
+# Report-only: nothing is split or asked again.
 
 #: A clause the record does not stand for carries at least this many words
 #: or years the record lacks, and they make up at least this share of the
@@ -2032,6 +2037,24 @@ MULTI_RECORD_NEW_SHARE = 0.4
 #: institutions are capitalised; a short role phrase in sentence case
 #: ("Clinical skills tutor") stays below the floor.
 MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
+
+#: How a left-out clause was found; the message names every shape but the
+#: first. CLAUSE_NEW_WORDS: it carries words or years the record lacks.
+#: CLAUSE_SPAN_OUTSIDE: the record holds each of its words, but it writes a
+#: year outside every span the record's dates cover. That is a committee's
+#: membership span with an office inside it, where stage 4 kept the office
+#: ("<committee>, 2011-2016, Chair 2014-15"; X6 RINASX-10, three entries), or
+#: an entry stage 4 split into its offices only (X6 VPMMFM-10). On a one-record
+#: entry the clause the record stands for must also name a role the left-out
+#: clause lacks: the same role written again at another time stays
+#: unreported, as it is when its only new words are years.
+CLAUSE_NEW_WORDS = "new_words"
+CLAUSE_SPAN_OUTSIDE = "span_outside_record"
+#: Codes CLAUSE_SPAN_OUTSIDE and the dated-event clause (`_is_dated_event`)
+#: do not judge: a grant writes its own period beside the owner's role
+#: period inside it, and its credit line beside its award line, and neither
+#: is a second record (BMHBJZ 668, NTCULM 62, web31 455 on the farms).
+_GRANT_CODES_UNJUDGED = frozenset(code for code, _title in _FUNDING_SECTIONS)
 
 #: A year as written in a date: 1900-2099, not inside a longer number (a
 #: patent or licence number).
@@ -2130,19 +2153,30 @@ class DateAnchor(NamedTuple):
     years: frozenset[str]
 
 
+class YearSpan(NamedTuple):
+    """The first and last year one stage-4 record's values write."""
+    first: int
+    last: int
+
+
 class RecordWords(NamedTuple):
-    """The distinctive words and the years of a stage-4 record's values."""
+    """The distinctive words and the years of a stage-4 record's values, and
+    the year span of each record: one span, or one per `stage4_records`
+    child that writes a year."""
     words: frozenset[str]
     years: frozenset[str]
+    spans: tuple[YearSpan, ...]
 
 
 class UncoveredClause(NamedTuple):
-    """A clause the record does not stand for, and the words the render check
-    looks for: its words the record lacks when there are enough of them,
-    else all its words."""
+    """A clause the record does not stand for, the words the render check
+    looks for (its words the record lacks when there are enough of them,
+    else all its words), and which shape found it: CLAUSE_NEW_WORDS, or
+    CLAUSE_SPAN_OUTSIDE for a clause whose words the record holds."""
     text: str
     years: frozenset[str]
     words: frozenset[str]
+    shape: str = CLAUSE_NEW_WORDS
 
 
 class OutputLines(NamedTuple):
@@ -2243,10 +2277,30 @@ def _part_clauses(part: str, two_digit_years: bool) -> list[Clause]:
     return clauses
 
 
-def _record_clauses(text: str) -> list[Clause]:
+def _names_title_and_institution(part: str) -> bool:
+    return bool(_TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part))
+
+
+def _is_dated_event(part: str, record_words: frozenset[str] | None) -> bool:
+    """A part that writes a year and MULTI_RECORD_MIN_NEW or more distinctive
+    words, none of them the record's: an event beside a role ("<committee>
+    member; <named> Symposium in March, 2019", X6 RVTAQT-08). A part that
+    shares a word with the record is the record's own head (a mentee's name
+    and degree year, a residency's dates beside its director's line).
+    `record_words` None judges no part an event."""
+    if record_words is None or not _CLAUSE_YEAR_RE.search(part):
+        return False
+    words = _clause_words(part)
+    return len(words) >= MULTI_RECORD_MIN_NEW and not words & record_words
+
+
+def _record_clauses(text: str, record_words: frozenset[str] | None) -> list[Clause]:
     """The record-shaped clauses of an entry's text: its dated clauses when
-    there are two or more, else its undated parts that each name a title and
-    an institution. Fewer than two means the text reads as one record."""
+    there are two or more, else its parts that each name a title and an
+    institution or are a dated event (see `_is_dated_event`). A text with
+    fewer than two dated clauses holds at most one dated event, so an event
+    is a clause only beside a named part. Fewer than two means the text
+    reads as one record."""
     two_digit_years = not _CLAUSE_YEAR_RE.search(text)
     dated = [clause for part in _STRONG_SEPARATOR_RE.split(text)
              for clause in _part_clauses(part, two_digit_years)]
@@ -2254,7 +2308,7 @@ def _record_clauses(text: str) -> list[Clause]:
         return dated
     return [Clause(part, frozenset(_CLAUSE_YEAR_RE.findall(part)))
             for part in _SOFT_SEPARATOR_RE.split(text)
-            if _TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part)]
+            if _names_title_and_institution(part) or _is_dated_event(part, record_words)]
 
 
 def _clause_words(text: str) -> set[str]:
@@ -2277,21 +2331,77 @@ def _is_prose(text: str) -> bool:
             and lowercase > len(words) - lowercase)
 
 
+def _years_of(value: object) -> frozenset[str]:
+    return frozenset(year for leaf in _leaf_strings(value)
+                     for year in _CLAUSE_YEAR_RE.findall(leaf))
+
+
+def _year_span(years: frozenset[str]) -> YearSpan | None:
+    return YearSpan(int(min(years)), int(max(years))) if years else None
+
+
+def _record_spans(fields: Mapping[str, object]) -> tuple[YearSpan, ...]:
+    """The record's year span, or each `stage4_records` child's."""
+    children = fields.get(STAGE4_RECORDS_KEY)
+    records = ([child for child in children if isinstance(child, Mapping)]
+               if isinstance(children, list) and children else [fields])
+    return tuple(span for span in map(_year_span, map(_years_of, records)) if span)
+
+
 def _record_words(fields: Mapping[str, object]) -> RecordWords:
     leaves = _leaf_strings(fields)
     return RecordWords(
         frozenset(token for leaf in leaves for token in _long_word_tokens(leaf)),
-        frozenset(year for leaf in leaves for year in _CLAUSE_YEAR_RE.findall(leaf)))
+        _years_of(fields), _record_spans(fields))
 
 
-def _uncovered_clauses(clauses: list[Clause], record: RecordWords) -> list[UncoveredClause]:
+def _outside_every_span(years: frozenset[str], spans: tuple[YearSpan, ...]) -> bool:
+    return bool(spans) and any(
+        not any(span.first <= int(year) <= span.last for span in spans) for year in years)
+
+
+def _dated_own_clause(clauses: list[Clause], words: list[set[str]],
+                      record: RecordWords) -> int | None:
+    """The clause the record's dates stand for: of the clauses whose years
+    the record holds, the one sharing most words with it. It can differ from
+    the clause sharing most words: a committee's membership span shares more
+    words with the record than the office inside it whose dates the record
+    holds ("<committee>, 2011-2016, Chair 2014-15")."""
+    dated = [i for i, clause in enumerate(clauses)
+             if clause.years and clause.years <= record.years]
+    return max(dated, key=lambda i: len(words[i] & record.words)) if dated else None
+
+
+def _span_outside(clause: Clause, clause_words: set[str], own_words: set[str] | None,
+                  record: RecordWords) -> bool:
+    """CLAUSE_SPAN_OUTSIDE for a clause whose words the record holds; on a
+    one-record entry (`own_words` given) the clause the record's dates stand
+    for names a role this one lacks."""
+    return (bool(clause_words) and _outside_every_span(clause.years, record.spans)
+            and not _is_prose(clause.text)
+            and (own_words is None or any(_TITLE_WORD_RE.fullmatch(word)
+                                          for word in own_words - clause_words)))
+
+
+def _uncovered_clauses(clauses: list[Clause], record: RecordWords,
+                       judge_spans: bool) -> list[UncoveredClause]:
     """The clauses other than the one the record covers best that carry enough
-    of their own (see MULTI_RECORD_MIN_NEW) and are not prose."""
+    of their own (see MULTI_RECORD_MIN_NEW) and are not prose; and, when
+    `judge_spans`, the clauses other than the one the record's dates stand
+    for whose words the record holds but whose span it lacks
+    (CLAUSE_SPAN_OUTSIDE)."""
     words = [_clause_words(clause.text) for clause in clauses]
     own = max(range(len(clauses)), key=lambda i: len(words[i] & record.words))
+    dated_own = _dated_own_clause(clauses, words, record) if judge_spans else None
     uncovered = []
     for i, clause in enumerate(clauses):
         new_words = words[i] - record.words
+        if not new_words:
+            if dated_own is not None and _span_outside(
+                    clause, words[i], words[dated_own], record):
+                uncovered.append(UncoveredClause(
+                    clause.text, clause.years, frozenset(words[i]), CLAUSE_SPAN_OUTSIDE))
+            continue
         if i == own or not new_words - _NOT_A_RECORD_WORDS:
             continue
         new = len(new_words) + len(clause.years - record.years)
@@ -2301,6 +2411,22 @@ def _uncovered_clauses(clauses: list[Clause], record: RecordWords) -> list[Uncov
             continue
         checked = new_words if len(new_words) >= MULTI_RECORD_MIN_NEW else words[i]
         uncovered.append(UncoveredClause(clause.text, clause.years, frozenset(checked)))
+    return uncovered
+
+
+def _split_uncovered_clauses(clauses: list[Clause],
+                             record: RecordWords) -> list[UncoveredClause]:
+    """On an entry stage 4 split into `stage4_records`, the clauses whose
+    words the records hold and that write a year outside every record's
+    span (CLAUSE_SPAN_OUTSIDE). A clause with words of its own is not judged
+    here: stage 4 splits an entry by its records, and leaves a record's
+    detail words unfiled."""
+    uncovered = []
+    for clause in clauses:
+        words = _clause_words(clause.text)
+        if not words - record.words and _span_outside(clause, words, None, record):
+            uncovered.append(UncoveredClause(
+                clause.text, clause.years, frozenset(words), CLAUSE_SPAN_OUTSIDE))
     return uncovered
 
 
@@ -2325,25 +2451,40 @@ def _clause_evidence(clauses: list[UncoveredClause]) -> list[str]:
             for clause in clauses[:FIELD_EVIDENCE_MAX_VALUES]]
 
 
+def _shape_note(clauses: list[UncoveredClause]) -> str:
+    """The shapes other than CLAUSE_NEW_WORDS that found these clauses, as a
+    message suffix."""
+    shapes = sorted({clause.shape for clause in clauses} - {CLAUSE_NEW_WORDS})
+    return f" [{', '.join(shapes)}]" if shapes else ""
+
+
 def _clause_verdict(entry: _FieldsEntry, output: OutputLines) -> MultiRecordVerdict | None:
-    """WARN when a clause the record does not stand for is on no rendered
-    line, INFO when each is on one (rendered by another entry, or fused into
-    the record's row)."""
-    clauses = _record_clauses(entry.text)
+    """WARN when a clause the record (or, on a split entry, each of its
+    records) does not stand for is on no rendered line, INFO when each is
+    on one (rendered by another entry, or fused into the record's row)."""
+    record = _record_words(entry.fields)
+    judged = entry.code not in _GRANT_CODES_UNJUDGED
+    clauses = _record_clauses(entry.text, record.words if judged else None)
     if len(clauses) < 2:
         return None
-    uncovered = _uncovered_clauses(clauses, _record_words(entry.fields))
+    children = entry.fields.get(STAGE4_RECORDS_KEY)
+    if children:
+        uncovered = _split_uncovered_clauses(clauses, record) if judged else []
+        records = f"{len(children)} stage-4 records"
+    else:
+        uncovered = _uncovered_clauses(clauses, record, judge_spans=judged)
+        records = "one stage-4 record"
     if not uncovered:
         return None
     absent = [clause for clause in uncovered if not _clause_rendered(clause, output)]
     head = (f"entry {entry.element_idx} ({entry.code}): {len(clauses)} record-shaped "
-            f"clauses, one stage-4 record")
+            f"clauses, {records}")
     if absent:
         return MultiRecordVerdict(
-            "WARN", f"{head}; {len(absent)} other clause(s) on no line of the output (#1243)",
-            _clause_evidence(absent))
+            "WARN", f"{head}; {len(absent)} other clause(s) on no line of the output "
+            f"(#1243){_shape_note(absent)}", _clause_evidence(absent))
     return MultiRecordVerdict(
-        "INFO", f"{head}; the other clause(s) are in the output (#1243)",
+        "INFO", f"{head}; the other clause(s) are in the output (#1243){_shape_note(uncovered)}",
         _clause_evidence(uncovered))
 
 
@@ -2442,26 +2583,30 @@ _MULTI_RECORD_SKIPPED_CODES = _OFFSCHEMA_SKIPPED_CODES | frozenset({PERSONAL_DAT
 def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """A stage-4 entry whose text holds several records while stage 4
     returned one record and no `stage4_records` (#1243): two or more dated
-    clauses, or undated parts that each name a title and an institution, of
-    which the record stands for one; or one record holding several mentees,
-    degree years or licence/patent numbers. One finding per entry; WARN when
+    clauses, or parts that each name a title and an institution (with any
+    dated event beside them), of which the record stands for one; or one
+    record holding several mentees, degree years or licence/patent numbers.
+    On an entry with `stage4_records`, only a clause whose words the records
+    hold and whose year lies outside every record's span (CLAUSE_SPAN_OUTSIDE).
+    One finding per entry; WARN when
     a clause it left out, or one of the values it fused, is on no line of the
     rendered document (track changes included), INFO otherwise. Skips the
     codes `offschema_fields` skips (the section writes the entry's text, a
     stage-5 formatter rewrites it whole, or it is personal data). An entry
     stage 6's fan-out splits needs no skip of its own: fan-out splits a
     record list only when the list's values hold every word of the entry's
-    text, so every clause is covered, and it splits `stage4_records`, which
-    are skipped above."""
+    text, so every clause is covered; it also splits `stage4_records`,
+    whose clauses the span shape reads against the rows fan-out renders."""
     output = _output_lines(blocks)
     output_digits = _LINE_SENTINEL.join(
         re.sub(r"\D", "", line) for _, text in blocks for line in str(text).split("\n"))
     findings = []
     for entry in _fields_entries(stage4):
-        if (not entry.code or entry.code in _MULTI_RECORD_SKIPPED_CODES or not entry.fields
-                or entry.fields.get(STAGE4_RECORDS_KEY)):
+        if not entry.code or entry.code in _MULTI_RECORD_SKIPPED_CODES or not entry.fields:
             continue
-        verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output, output_digits)
+        verdict = _clause_verdict(entry, output)
+        if not verdict and not entry.fields.get(STAGE4_RECORDS_KEY):
+            verdict = _fused_verdict(entry, output, output_digits)
         if verdict:
             findings.append(_finding("multi_record_coverage", *verdict))
     return findings
@@ -2479,12 +2624,13 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
 #: The codes stage 6 renders as grants, in the funding subsections' order.
 GRANT_CODES = tuple(code for code, _title in _FUNDING_SECTIONS)
 #: A label opening an entry's first line or cell ("Agency:", "Grant Title:",
-#: "P.I.:", "% Effort:"), and the same label anywhere a line or cell starts.
+#: "P.I.:", "% Effort:", "Current position:"), and the same label anywhere a
+#: line or cell starts. Shared by `grant_boundary` and `record_boundary`.
 #: The label cannot run across a tab, newline or " | ", so matching the
 #: whole text reads only its first line or cell.
-_GRANT_LABEL = r"[\s*]*([A-Za-z%][A-Za-z.%#/ ]{0,24}?)\s*:"
-_GRANT_HEAD_LABEL_RE = re.compile(rf"^{_GRANT_LABEL}")
-_GRANT_LINE_LABEL_RE = re.compile(rf"(?:^|\t|\n|\s\|\s){_GRANT_LABEL}")
+_ENTRY_LABEL = r"[\s*]*([A-Za-z%][A-Za-z.%#/ ]{0,24}?)\s*:"
+_ENTRY_HEAD_LABEL_RE = re.compile(rf"^{_ENTRY_LABEL}")
+_ENTRY_LINE_LABEL_RE = re.compile(rf"(?:^|\t|\n|\s\|\s){_ENTRY_LABEL}")
 #: Labels that name a grant's people or effort. A grant record opens with its
 #: sponsor, number, title or dates; an entry whose first line is one of these
 #: holds the tail of the record before it (EBYSBC CXRYCF, CTWLTR).
@@ -2526,10 +2672,11 @@ GRANT_SOURCE_MIN_CHARS = 3
 _GRANT_SEGMENT_RE = re.compile(r"\t|\n|\s\|\s")
 
 
-class GrantEntry(NamedTuple):
-    """One stage-4 grant entry as the boundary lint reads it: its first
-    line's label (lowercased, '' when it opens with none) and every label
-    that starts one of its lines or cells."""
+class ListEntry(NamedTuple):
+    """One stage-4 entry of a heading's list as the boundary lints read it
+    (`grant_boundary` over the grant lists, `record_boundary` over the
+    others): its first line's label (lowercased, '' when it opens with none)
+    and every label that starts one of its lines or cells."""
     element_idx: object
     code: str
     text: str
@@ -2538,26 +2685,26 @@ class GrantEntry(NamedTuple):
     line_labels: frozenset[str]
 
 
-def _grant_label(label: str) -> str:
+def _normalized_label(label: str) -> str:
     return " ".join(label.lower().split())
 
 
-def _grant_entry(raw: dict) -> GrantEntry:
+def _list_entry(raw: dict) -> ListEntry:
     text = str(raw.get("text") or "")
     fields = raw.get("extracted_fields")
-    head = _GRANT_HEAD_LABEL_RE.match(text.strip())
-    return GrantEntry(
+    head = _ENTRY_HEAD_LABEL_RE.match(text.strip())
+    return ListEntry(
         raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
         fields if isinstance(fields, Mapping) else {},
-        _grant_label(head.group(1)) if head else "",
-        frozenset(_grant_label(m.group(1)) for m in _GRANT_LINE_LABEL_RE.finditer(text)))
+        _normalized_label(head.group(1)) if head else "",
+        frozenset(_normalized_label(m.group(1)) for m in _ENTRY_LINE_LABEL_RE.finditer(text)))
 
 
-def _heading_lists(stage4: dict, grants: bool) -> list[list[GrantEntry]]:
+def _heading_lists(stage4: dict, grants: bool) -> list[list[ListEntry]]:
     """Runs of consecutive entries filed under one heading, the lists stage 2
     cut into records: of grant codes when `grants`, else of every other code.
     An entry of the other kind closes a run."""
-    lists: list[list[GrantEntry]] = []
+    lists: list[list[ListEntry]] = []
     heading = None
     for raw in stage4.get("entries", []):
         code = raw.get("taxonomy_code")
@@ -2568,11 +2715,11 @@ def _heading_lists(stage4: dict, grants: bool) -> list[list[GrantEntry]]:
         if heading is None or this != heading:
             lists.append([])
         heading = this
-        lists[-1].append(_grant_entry(raw))
+        lists[-1].append(_list_entry(raw))
     return lists
 
 
-def _grant_lists(stage4: dict) -> list[list[GrantEntry]]:
+def _grant_lists(stage4: dict) -> list[list[ListEntry]]:
     return _heading_lists(stage4, grants=True)
 
 
@@ -2591,7 +2738,7 @@ def _title_half(fields: Mapping[str, object]) -> bool:
     return _filled(fields, GRANT_TITLE_FIELD) and not _filled(fields, "agency")
 
 
-def _split_pairs(grants: list[GrantEntry]) -> dict[int, str]:
+def _split_pairs(grants: list[ListEntry]) -> dict[int, str]:
     """Two neighbours, one holding a sponsor or number with no title or
     period, the other a title with no sponsor: one record cut in two."""
     reasons = {}
@@ -2603,12 +2750,12 @@ def _split_pairs(grants: list[GrantEntry]) -> dict[int, str]:
     return reasons
 
 
-def _personnel_heads(grants: list[GrantEntry]) -> dict[int, str]:
+def _personnel_heads(grants: list[ListEntry]) -> dict[int, str]:
     return {i: f"its first line is the '{grant.head_label}' line, which closes a record"
             for i, grant in enumerate(grants) if grant.head_label in GRANT_PERSONNEL_LABELS}
 
 
-def _head_label_drift(grants: list[GrantEntry]) -> dict[int, str]:
+def _head_label_drift(grants: list[ListEntry]) -> dict[int, str]:
     """In a list whose records open with the first entry's label, an entry
     that opens instead with a label those records carry mid-record."""
     first = grants[0].head_label
@@ -2633,10 +2780,10 @@ class GrantLineOrder(NamedTuple):
     source_later: bool
 
 
-def _grant_line_order(grant: GrantEntry) -> GrantLineOrder:
+def _grant_line_order(grant: ListEntry) -> GrantLineOrder:
     raw_segments = _GRANT_SEGMENT_RE.split(grant.text.strip())
     segments = [squash(segment) for segment in raw_segments]
-    head = _GRANT_HEAD_LABEL_RE.match(raw_segments[0])
+    head = _ENTRY_HEAD_LABEL_RE.match(raw_segments[0])
     first = squash(raw_segments[0][head.end():]) if head else segments[0]
     rest = "".join(segments[1:])
     title = squash(grant.fields.get(GRANT_TITLE_FIELD) or "")[:GRANT_TITLE_PREFIX_CHARS]
@@ -2651,12 +2798,12 @@ def _grant_line_order(grant: GrantEntry) -> GrantLineOrder:
         any(source in rest for source in sources))
 
 
-def _titleless(grant: GrantEntry) -> bool:
+def _titleless(grant: ListEntry) -> bool:
     return (_filled(grant.fields, GRANT_SOURCE_FIELDS)
             and not _filled(grant.fields, GRANT_TITLE_FIELD))
 
 
-def _line_order_drift(grants: list[GrantEntry]) -> dict[int, str]:
+def _line_order_drift(grants: list[ListEntry]) -> dict[int, str]:
     """In a list whose records open with a sponsor or number line and carry
     the title on a later line, a run of entries that each open with a title
     and then a sponsor or number line, starting right after an entry that
@@ -2682,7 +2829,7 @@ def _line_order_drift(grants: list[GrantEntry]) -> dict[int, str]:
     return reasons
 
 
-def _orphans(grants: list[GrantEntry]) -> dict[int, str]:
+def _orphans(grants: list[ListEntry]) -> dict[int, str]:
     """An entry after the first that names no sponsor, number or title but
     carries a record's detail; and a list's last entry, when it holds only a
     title while its siblings name a sponsor, number or period: the title its
@@ -2749,7 +2896,7 @@ RECORD_INNER_LABEL_MIN_SHARE = 1 / 3
 RECORD_INNER_LABEL_MIN_RATIO = 2
 
 
-def _inner_label_heads(entries: list[GrantEntry]) -> dict[int, str]:
+def _inner_label_heads(entries: list[ListEntry]) -> dict[int, str]:
     reasons = {}
     for i, entry in enumerate(entries[1:], start=1):
         label = entry.head_label
@@ -3137,19 +3284,21 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
 # grants), each verified there and missed by the dev-246 doctor:
 #
 # - owner_also_co_i: the owner is listed under Co-Investigators while the
-#   role row states a role other than co-I (IEUPKK 257-342: Co-PI or Mentor),
-#   or states none and the owner's own co-investigator item carries a lead
-#   role ("<owner> (Site PI)", RVTAQT 223).
+#   role row states a lead role (a PI of any kind, a director or a mentor)
+#   and no co-I role (IEUPKK 257-342: Co-PI or Mentor), or states none and
+#   the owner's own co-investigator item carries a lead role ("<owner> (Site
+#   PI)", RVTAQT 223).
 # - role_in_title: `title` holds the owner's roles as list items ("<project>,
-#   Director Core B., Mentor Project IV") and no role is stated (RINASX 405).
+#   Director <unit>, Mentor <subproject>") and no role is stated (RINASX 405).
 # - owner_pi_role_empty: the rendered PI cell names the owner and "Your
 #   role:" is empty (RVTAQT 260, 273).
 # - owner_pi_other_role: the rendered PI cell names only the owner beside a
-#   role that is not the grant's PI: a co-, site- or sub-PI, a co-I, a mentor
-#   (KJJVVO 168-178, the stage-6 PI auto-fill #1457 stopped).
+#   role that makes the owner someone other than the grant's PI: a co-,
+#   site- or sub-PI, or a co-I (KJJVVO 168-178, the stage-6 PI auto-fill
+#   #1457 stopped). A mentor is spared: that role does not say who the PI is.
 # - pi_cell_from_title: the rendered PI cell is a run of the project title's
-#   own words (RINASX 396, "<title> - Human and Animal Studies, PI", the
-#   label parse #1418 stopped).
+#   own words (RINASX 396: "<title words>, PI" read as a PI label, the
+#   parse #1418 stopped).
 #
 # The last two are regression guards on current dev: the stage-6 causes are
 # fixed, and they fire on documents rendered before the fix.
@@ -3192,8 +3341,13 @@ _WITH_COLLABORATOR_RE = re.compile(
 #: The fewest words a PI cell read as a run of the title needs: one word of
 #: a title is as often a person's surname ("The Lee Cohort").
 _PI_FROM_TITLE_MIN_WORDS = 2
-#: Splits a `co_investigators` value into one name per person.
-_PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|\band\b)\s*")
+#: Splits a `co_investigators` value or a rendered PI cell into one name per
+#: person. A slash joins co-PIs ("<owner>/<other>"): unsplit, the pair reads
+#: as one person who is the owner (X6-role verification, BYFQBG 322). It also
+#: cuts a slash inside a co_investigators item ("<owner> (Co-I/PI)"), leaving
+#: the owner's item the role before the slash: a co-I named first then spares
+#: `_owner_also_co_i`, as a stated "Co-I/PI" role does.
+_PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|/|\band\b)\s*")
 #: Words in a person's name that do not identify them.
 _NAME_NOISE_WORDS = frozenset({"drs", "prof", "professor", "phd", "mph", "msc", "pharmd",
                                "dds", "dmd", "facp", "student"})
@@ -3224,7 +3378,7 @@ def _pi_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
     """`pi_name` is one of the people `co_investigators` lists, and the two
     values differ, so stage 6 renders both rows (it drops a Co-Investigators
     value identical to the PI). Not an author list headed by the PI that also
-    names the owner ("Cutter, G., <owner>"): that is the source's own line
+    names the owner ("<pi>, G., <owner>"): that is the source's own line
     copied whole, and the PI cell still names the right person (farm web204,
     30 grants)."""
     co_text = norm(str(fields.get("co_investigators") or ""))
@@ -3248,8 +3402,8 @@ def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
                         owner: frozenset[str]) -> bool:
     """No `pi_name`, no stated role, no role label, and the owner is the first
     person `co_investigators` lists and the first of them the text names. A
-    stated role ("Program Partner", NDXXAD 411) is what renders, so the
-    owner is not shown as only a co-investigator."""
+    stated role (a program title that is not a lead role, NDXXAD 411) is what
+    renders, so the owner is not shown as only a co-investigator."""
     keys = _co_investigator_keys(fields)
     if fields.get("pi_name") or fields.get("pi_role") or fields.get("role"):
         return False
@@ -3265,13 +3419,13 @@ def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
 #: bare "Investigator", which is what the Co-Investigators row says anyway.
 _LEAD_ROLE_WORD_RE = re.compile(
     r"(?<![a-z])(?:p\.?\s?i|pis|mpi|principal investigators?|director|mentor)(?![a-z])")
-#: A co-investigator role anywhere in a stated role ("Co-Investigator/Mentor",
-#: "Investigator and Associate Director", IZJADE 433): the owner then
+#: A co-investigator role anywhere in a stated role ("Mentor/Co-I", an
+#: investigator who also directs a unit, IZJADE 433): the owner then
 #: belongs in the Co-Investigators row.
 _CO_I_ROLE_WORD_RE = re.compile(
     r"(?<![a-z])(?:co-?(?:investigators?|is?)|(?<!principal )investigators?)(?![a-z])")
 #: A list item of a title that is a role, not part of the project's name:
-#: ", Director Core B.", "; Mentor Project IV", ", Co-Investigator". Not
+#: ", Director Unit C", "; Mentor Track 2", ", Co-Investigator". Not
 #: "Investigator-Initiated", which names a kind of trial, nor a bare "PI",
 #: which a title uses to name a subproject's PI (", PI <other>)", XELRLZ 138).
 _TITLE_ROLE_ITEM_RE = re.compile(
@@ -3311,9 +3465,9 @@ def _owner_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
     """The owner is one of the people `co_investigators` lists, while the
     stated role is a lead role (a PI of any kind, a director, a mentor), or
     no role is stated and the owner's own item names one. Another stated role
-    ("Program Partner", NDXXAD 411) may share the row with its co-holders. Not
-    a list headed by the PI (the source's author line copied whole, farm
-    web204), which `_pi_also_co_i` spares too."""
+    (a program title that is not a lead role, NDXXAD 411) may share the row
+    with its co-holders. Not a list headed by the PI (the source's author line
+    copied whole, farm web204), which `_pi_also_co_i` spares too."""
     items = [item for item in _PERSON_SPLIT_RE.split(str(fields.get("co_investigators") or ""))
              if _person_key(item) & owner]
     keys = _co_investigator_keys(fields)

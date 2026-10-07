@@ -96,6 +96,8 @@ def test_stage6_shape_names_each_emitter_message():
         "into the Appendix": "appendix_recovered_A",
         "T: 1 entry classified T was not found in the rendered document and was recovered "
         "into the Appendix": "appendix_recovered",
+        "K4: 2 segments of overflow content that the stage 6 reconsider pass coded K4 were "
+        "not placed in a section and were recovered into the Appendix": "appendix_recovered",
         "T: 6 entries diverted to the Appendix — no stage 6 section is routed to render this "
         "taxonomy code": "appendix_no_route_T",
         "N3: 2 entries diverted to the Appendix — no stage 6 section is routed to render this "

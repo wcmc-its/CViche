@@ -38,11 +38,13 @@ call the content-filter fallback model served does not cap (#1174, Paul
 2026-10-05): it succeeded, so the doctor's `llm_fallback_served` WARN records
 it and the score does not.
 
-Seven more cap-only gates (#822) cover content the pipeline lost or garbled,
+Nine more cap-only gates (#822) cover content the pipeline lost or garbled,
 a thing no weighted dimension measures: an under-extracted entry, several fused
 entries, a lost source table, the CV owner cut from several of their own
-citations, a grant list cut in the wrong place, a grant application rendered
-as an award, and several headers or labels rendered as records. Each caps a run
+citations, co-authors cut from several citations, a grant list cut in the
+wrong place, a grant application rendered as an award, several headers or
+labels rendered as records, and several group headers whose lines render
+without them. Each caps a run
 at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss cannot
 read "ship". They are the doctor's own signals, called
 rather than re-derived, restricted to the ones a batch hand-checked as real: a
@@ -121,6 +123,8 @@ from unified_pipeline.doctor.lints.extraction import (
 )
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.lints.render import (
+    lint_etal_added,
+    lint_group_header_context,
     lint_junk_or_header_row,
     lint_owner_missing_from_citation,
 )
@@ -196,7 +200,7 @@ def _load_first(outputs_dir: Path, pattern: str) -> tuple[dict | None, str | Non
         logger.warning("quality_score found multiple candidates for %s: %s", pattern, names)
         return None, reason
     try:
-        with open(files[0]) as f:
+        with open(files[0], encoding="utf-8") as f:
             return json.load(f), None
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         reason = f"{type(e).__name__}: {e}"
@@ -741,7 +745,7 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
 
     for json_file in sorted(outputs_dir.glob("*.json")):
         try:
-            with open(json_file) as f:
+            with open(json_file, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             reason = str(e)
@@ -915,6 +919,16 @@ LOST_TABLE_CAP_MIN_LINES = 5
 #: starting count, to be re-set from the harness.
 OWNER_MISSING_CITATIONS_CAP_MIN = 3
 
+#: `etal_added` findings that cap a run (Paul, 2026-10-07): citations whose
+#: rendered author list ends in "et al." where the source names every author,
+#: so co-authors are lost. Three, the owner-missing gate's count: both are
+#: author credit cut from a citation, and one or two such lines are a quick
+#: fix by hand. Precision does not set it: every judged hit so far was true
+#: (204 of 204: RCBKFG 92, NDMRSO 17, X6 95). Before #1404 (dev-248) stage 5d
+#: cut every list past six authors, so the stored runs carry many hits; on the
+#: 9 dev-248 runs the lint fires 0 times (doctor/PRECISION.md, X6-cite cap).
+ETAL_ADDED_CAP_MIN = 3
+
 #: `grant_boundary` findings that cap a run (#1226): a grant list whose stage-2
 #: cut slipped, so grants render with a neighbour's title, PI or dates. Three,
 #: not one: a slipped cut carries down the list (ZCTARO/KUUKNJ 13, CXRYCF 10,
@@ -941,6 +955,21 @@ GRANT_APPLICATION_AS_AWARD_CAP_MIN = 1
 #: (95%) over the EBYSBC farm and NDMRSO; no RCBKFG run reaches 5
 #: (doctor/PRECISION.md, M4-cap).
 JUNK_ROWS_CAP_MIN = 5
+
+#: `group_header_context` WARN findings that cap a run (X6 E8; Paul approved
+#: feeding the cap 2026-10-07): a society, employer or course line coded as a
+#: record, whose lines render without its name (`children_lost_header`), or a
+#: run of bare roles rendered without what they were held in
+#: (`role_without_holder`). One finding is one header or one run of roles,
+#: however many rows it names. Only the WARN shapes count: the INFO shapes
+#: (a lead line coded unlike its list, a role that lost a block's dates) are
+#: n=22 and n=21 on two CVs. Four, not one: a header coded as a record
+#: repeats down a CV's society and employer lists, while at 3 two runs would
+#: cap on one true hit beside two partials (SDEBQJ, ZQJVRN). At 4 or more:
+#: 95 of 99 true over the stored `analysis` runs (KHXOUF 106 false; UYQRUN
+#: 176 and IZJADE/WYMVGU 479 partial), and 4 runs move out of GREEN, each
+#: hand-read (doctor/PRECISION.md, X6-header-cap).
+GROUP_HEADER_CAP_MIN = 4
 
 #: Subdirectory of the scored directory that holds the run's original uploaded
 #: .docx. Optional: `score_lost_source_table` reads the source to find tables
@@ -1056,6 +1085,21 @@ def score_owner_missing_from_citation(outputs_dir: Path) -> tuple[float, str, in
         OWNER_MISSING_CITATIONS_CAP_MIN)
 
 
+def score_etal_added(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: rendered citations that cut the source's full author
+    list to "et al.", on ETAL_ADDED_CAP_MIN or more citations (#1259). The
+    doctor's `etal_added` lint over stage 4 and the rendered docx, called as
+    is; a citation that also lost the owner is the owner-missing gate's."""
+    loaded = _load_fields_and_docx(outputs_dir)
+    if isinstance(loaded, str):
+        return 0.0, loaded, None
+    data, doc = loaded
+    return _content_loss_count_gate(
+        "etal_added_citations",
+        len(lint_etal_added(data, docx_body_blocks(doc))),
+        ETAL_ADDED_CAP_MIN)
+
+
 def score_grant_boundary(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Cap-only gate: a grant list stage 2 cut in the wrong place, so grants
     render with each other's details, on GRANT_BOUNDARY_CAP_MIN or more grants
@@ -1081,6 +1125,21 @@ def score_grant_application_as_award(outputs_dir: Path) -> tuple[float, str, int
         "applications_rendered_as_awards",
         len(lint_grant_bucket(data, docx_body_blocks(doc), check_end_date=False)),
         GRANT_APPLICATION_AS_AWARD_CAP_MIN)
+
+
+def score_group_header_context(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: lines a group header's context never reached (X6 E8),
+    on GROUP_HEADER_CAP_MIN or more WARN findings. The doctor's
+    `group_header_context` lint over stage 4 and the rendered docx's table
+    rows and blocks, called as is; its INFO findings do not count."""
+    loaded = _load_fields_and_docx(outputs_dir)
+    if isinstance(loaded, str):
+        return 0.0, loaded, None
+    data, doc = loaded
+    findings = lint_group_header_context(data, docx_table_rows(doc), docx_body_blocks(doc))
+    return _content_loss_count_gate(
+        "group_header_warns", sum(1 for f in findings if f["severity"] == "WARN"),
+        GROUP_HEADER_CAP_MIN)
 
 
 def score_junk_rows(outputs_dir: Path) -> tuple[float, str, int | None]:
@@ -1759,9 +1818,11 @@ PROTECTED_DATA_CAP = 25
 #: the delivered docx; the fused-entries gate counts records swallowed in the
 #: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
 #: any finding, including ones that lost nothing; the owner-missing gate names
-#: citations whose credit is gone but whose record is on the page; the grant-boundary,
-#: grant-application and junk-row gates (#1226, #1343, E8) name rows that render
-#: with wrong details or should not render at all; the stage-4 gate (#1174)
+#: citations whose credit is gone but whose record is on the page; the et-al gate
+#: names citations that kept the owner but lost co-authors; the grant-boundary,
+#: grant-application, junk-row and group-header gates (#1226, #1343, E8, X6 E8)
+#: name rows that render with wrong details, without their header's context,
+#: or should not render at all; the stage-4 gate (#1174)
 #: reports that a call failed and was retried and measures no loss. So a run
 #: that trips several is pointed at the signal most likely to name what it
 #: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
@@ -1773,9 +1834,11 @@ CAP_ONLY_GATES = [
      score_fused_entries),
     ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
     ("CV owner cut from their own citations (CAP-ONLY gate)", score_owner_missing_from_citation),
+    ("Co-authors cut from citations (CAP-ONLY gate)", score_etal_added),
     ("Grant details shifted between grants (CAP-ONLY gate)", score_grant_boundary),
     ("Grant applications rendered as awards (CAP-ONLY gate)", score_grant_application_as_award),
     ("Headers or labels rendered as records (CAP-ONLY gate)", score_junk_rows),
+    ("Rows lost the group header above them (CAP-ONLY gate)", score_group_header_context),
     ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
 ]
 

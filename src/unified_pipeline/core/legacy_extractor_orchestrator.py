@@ -82,7 +82,7 @@ class LegacyExtractorOrchestrator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Load classified data
-        with open(classified_file) as f:
+        with open(classified_file, encoding="utf-8") as f:
             self.classified_data = json.load(f)
 
         self.cv_id = self._extract_cv_id()
@@ -239,7 +239,7 @@ class LegacyExtractorOrchestrator:
             if extracted_data:
                 # Save extracted data
                 output_file = self.output_dir / f"section_{section_id.upper()}_{self.cv_id}_extracted.json"
-                with open(output_file, 'w') as f:
+                with open(output_file, 'w', encoding="utf-8") as f:
                     json.dump(extracted_data, f, indent=2)
 
                 result['status'] = 'success'

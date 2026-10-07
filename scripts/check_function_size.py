@@ -86,7 +86,7 @@ def main():
         return 0
 
     try:
-        with open(BASELINE) as fh:
+        with open(BASELINE, encoding="utf-8") as fh:
             base = json.load(fh)
     except FileNotFoundError:
         if not args.update:
@@ -99,7 +99,7 @@ def main():
             print(f"refusing to raise the baseline: excess {base['excess_lines']} -> "
                   f"{now['excess_lines']}. The ratchet only turns one way.", file=sys.stderr)
             return 1
-        with open(BASELINE, "w") as fh:
+        with open(BASELINE, "w", encoding="utf-8") as fh:
             json.dump(now, fh, indent=2, sort_keys=True)
             fh.write("\n")
         was = base["excess_lines"] if base else "-"

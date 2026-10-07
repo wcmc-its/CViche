@@ -50,7 +50,7 @@ def log_classification_event(result: dict):
         'original_section_id': result.get('original_section_id')
     }
 
-    with open(CLASSIFICATIONS_LOG, 'a') as f:
+    with open(CLASSIFICATIONS_LOG, 'a', encoding='utf-8') as f:
         f.write(json.dumps(event) + '\n')
 
 
@@ -79,7 +79,7 @@ def log_calibration_issue(llm_result: dict, validation_check: dict):
         'model': llm_result.get('model', 'unknown')
     }
 
-    with open(CALIBRATION_ISSUES_LOG, 'a') as f:
+    with open(CALIBRATION_ISSUES_LOG, 'a', encoding='utf-8') as f:
         f.write(json.dumps(issue) + '\n')
 
 
@@ -113,7 +113,7 @@ def log_validation_event(
     }
 
     validation_log = LOGS_DIR / 'validation_events.jsonl'
-    with open(validation_log, 'a') as f:
+    with open(validation_log, 'a', encoding='utf-8') as f:
         f.write(json.dumps(event) + '\n')
 
 
