@@ -73,6 +73,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     MULTI_RECORD_MIN_NEW,
     MULTI_RECORD_NEW_SHARE,
     MULTI_RECORD_PROSE_MIN_LOWERCASE,
+    CLAUSE_SPAN_OUTSIDE,
     lint_implausible_year,
     lint_multi_record_coverage,
     lint_offschema_fields,
@@ -2880,11 +2881,189 @@ def test_multi_record_skips_the_codes_offschema_skips(code):
 
 
 def test_multi_record_skips_an_entry_stage4_returned_several_records_for():
-    """Stage 4 returned two records, so this is not the one-record shape, even
-    where its second record holds fewer of the text's words than the text."""
+    """Stage 4 returned two records, so a clause with words of its own is not
+    judged, even where the second record holds fewer of the text's words
+    than the text."""
     fields = {**_FIRST_ROLE, STAGE4_RECORDS_KEY: [
         {"title": "Visiting Instructor"}, dict(_FIRST_ROLE)]}
     assert _multi_record(_TWO_ROLES, fields) == []
+
+
+# A committee membership span with an office held inside it; stage 4 kept the
+# office. Every name, word and date below is invented.
+_MEMBERSHIP_THEN_CHAIR = "Example Admissions Committee, 2011-2016, Chair 2014-15."
+_CHAIR_ONLY = {"leadership_role": "Chair", "division_department": "Example Admissions Committee",
+               "start_date": "2014", "end_date": "2015"}
+_CHAIR_ROW = "Chair | Example Admissions Committee | 2014-2015"
+
+
+def test_multi_record_membership_span_outside_the_kept_office_is_warn():
+    findings = _multi_record(_MEMBERSHIP_THEN_CHAIR, _CHAIR_ONLY, code="O", lines=(_CHAIR_ROW,))
+    assert findings == [{
+        "lint": "multi_record_coverage", "severity": "WARN",
+        "message": "entry 7 (O): 2 record-shaped clauses, one stage-4 record; "
+                   f"1 other clause(s) on no line of the output (#1243) [{CLAUSE_SPAN_OUTSIDE}]",
+        "evidence": ["Example Admissions Committee, 2011-2016"],
+        "status": "ran", "reason": ""}]
+
+
+def test_multi_record_membership_span_on_a_rendered_line_is_info():
+    findings = _multi_record(_MEMBERSHIP_THEN_CHAIR, _CHAIR_ONLY, code="O", lines=(
+        _CHAIR_ROW, "Member | Example Admissions Committee | 2011-2016"))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert findings[0]["message"].endswith(
+        f"the other clause(s) are in the output (#1243) [{CLAUSE_SPAN_OUTSIDE}]")
+
+
+def test_multi_record_membership_span_counts_beside_two_officer_clauses():
+    """Two memberships and the office of the second: both spans reach
+    outside the office's year."""
+    text = ("Example Faculty Senate, 1991-1996. Example Library Subcommittee, "
+            "1992-1994; President, 1994.")
+    findings = _multi_record(text, {
+        "leadership_role": "President, Example Library Subcommittee",
+        "division_department": "Example Faculty Senate", "start_date": "1994",
+        "end_date": "1994"}, code="O", lines=())
+    assert findings[0]["message"].startswith(
+        "entry 7 (O): 3 record-shaped clauses, one stage-4 record; 2 other clause(s)")
+
+
+@pytest.mark.parametrize("text, fields", [
+    # the clause's year lies inside the record's span
+    ("Example Admissions Committee, 2014, Chair 2013-2015.",
+     {**_CHAIR_ONLY, "start_date": "2013", "end_date": "2015"}),
+    # the record writes no year, so no clause is the one its dates stand for
+    (_MEMBERSHIP_THEN_CHAIR, {**_CHAIR_ONLY, "start_date": None, "end_date": None}),
+    # a clause with no word of its own is a date, not a membership
+    ("Chair, Example Admissions Committee 2014-2015\t2009", _CHAIR_ONLY),
+    # an undated part is not the clause the record's dates stand for
+    ("Chair, Example Admissions Committee; Member, Example Admissions Committee, 2011-2016",
+     {**_CHAIR_ONLY, "role": "Member", "start_date": "2019", "end_date": None}),
+    # a sentence about the committee, not a record
+    ("Example Committee member since the founding of the group in 2001; Chair 2006-2007",
+     {"leadership_role": "Chair", "division_department": "Example Committee",
+      "notes": "member since the founding of the group", "start_date": "2006",
+      "end_date": "2007"}),
+])
+def test_multi_record_silent_on_a_span_the_record_has_no_claim_to_lack(text, fields):
+    assert _multi_record(text, fields, code="O", lines=()) == []
+
+
+# An entry stage 4 split into its two offices, leaving out the membership
+# span they sit in. Invented text.
+_SPLIT_OFFICES_TEXT = ("Example Guild, Example Archives Board,\t"
+                       "Fall 2010-2019, Treasurer, fall 2012-14, President, fall 2014-2019")
+_SPLIT_OFFICES = {"role": "President", "organization": "Example Guild, Example Archives Board",
+                  "start_date": "2014", "end_date": "2019", STAGE4_RECORDS_KEY: [
+                      {"role": "Treasurer", "organization": "Example Guild",
+                       "start_date": "2012", "end_date": "2014"},
+                      {"role": "President", "organization": "Example Archives Board",
+                       "start_date": "2014", "end_date": "2019"}]}
+
+
+def test_multi_record_split_entry_span_outside_every_record_is_warn():
+    findings = _multi_record(_SPLIT_OFFICES_TEXT, _SPLIT_OFFICES, code="Q1", lines=(
+        "Treasurer | Example Guild | 2012-2014",
+        "President | Example Archives Board | 2014-2019"))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["message"] == (
+        "entry 7 (Q1): 3 record-shaped clauses, 2 stage-4 records; 1 other clause(s) on "
+        f"no line of the output (#1243) [{CLAUSE_SPAN_OUTSIDE}]")
+
+
+def test_multi_record_split_entry_needs_no_role_the_clause_lacks():
+    """On a split entry the records stand for several clauses, so the
+    one-record rule that the record's clause name a role the left-out one
+    lacks does not apply: each year outside every record's span is lost."""
+    text = "Example Society Member 2001-2003\tExample Society Member 2005-2006"
+    findings = _multi_record(text, {STAGE4_RECORDS_KEY: [
+        {"role": "Member", "organization": "Example Society", "start_date": "2005",
+         "end_date": "2006"}]}, code="I", lines=())
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["Example Society Member 2001-2003"]
+
+
+def test_multi_record_split_entry_reads_each_record_s_own_span():
+    """A year between two records' spans is covered by neither."""
+    text = ("Example Society Member 2001-2002\tExample Society Member 2005-2006\t"
+            "Example Society Member 2009-2010")
+    findings = _multi_record(text, {STAGE4_RECORDS_KEY: [
+        {"role": "Member", "organization": "Example Society", "start_date": "2001",
+         "end_date": "2002"},
+        {"role": "Member", "organization": "Example Society", "start_date": "2009",
+         "end_date": "2010"}]}, code="I", lines=())
+    assert findings[0]["evidence"] == ["Example Society Member 2005-2006"]
+
+
+def test_multi_record_split_entry_records_with_no_year_cover_no_span():
+    """Records that write no year give no span to read a clause against."""
+    text = "Example Society Member 2001-2003\tExample Society Member 2005-2006"
+    assert _multi_record(text, {STAGE4_RECORDS_KEY: [
+        {"role": "Member", "organization": "Example Society"},
+        {"role": "Member", "organization": "Example Society"}]}, code="I", lines=()) == []
+
+
+def test_multi_record_the_record_s_dates_stand_for_the_clause_sharing_most_words():
+    """Of the clauses whose years the record holds, the office it names (not
+    a talk in the same year) is the one its dates stand for, so the
+    membership span beside it is left out."""
+    text = "Example Admissions Committee, 2011-2016, Chair 2014, Lakeside Gala 2015"
+    findings = _multi_record(text, _CHAIR_ONLY, code="O", lines=())
+    assert findings[0]["evidence"] == ["Example Admissions Committee, 2011-2016"]
+
+
+def test_multi_record_split_entry_gets_no_fused_values_verdict():
+    """Two licence numbers, each in its own record: the fused-values shapes
+    read one record's fields, so a split entry is not theirs to judge."""
+    text = "License 1234567, Lakeport; License 7654321, Riverton"
+    assert _multi_record(text, {"license_number": "1234567", STAGE4_RECORDS_KEY: [
+        {"license_number": "1234567", "state_country": "Lakeport"},
+        {"license_number": "7654321", "state_country": "Riverton"}]},
+        code="F1", lines=("1234567",)) == []
+
+
+def test_multi_record_dated_event_beside_a_named_role_is_a_clause():
+    """'<committee> member; <named> Symposium in March, 2019': one part names
+    a title and an institution, the other is a dated event."""
+    text = "Department-level: Example Hiring Committee member; Lakeview Symposium in March, 2019."
+    findings = _multi_record(text, {"committee_name": "Example Hiring Committee",
+                                    "role": "Member"}, code="P", lines=(
+        "Example Hiring Committee | Member",))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"] == ["Lakeview Symposium in March, 2019"]
+
+
+@pytest.mark.parametrize("text", [
+    # no part names a title and an institution
+    "Example Planning Group; Lakeview Teaching Symposium in March, 2019.",
+    # one distinctive word beside the year is a note on the record
+    "Example Hiring Committee member; elected 2019.",
+    # an undated event is no clause
+    "Example Hiring Committee member; Lakeview Teaching Symposium.",
+    # a dated part sharing a word with the record is the record's own head
+    "Example Hiring Committee member; Hiring Teaching Symposium in March, 2019.",
+])
+def test_multi_record_dated_event_needs_a_named_part_a_year_and_words(text):
+    assert _multi_record(text, {"committee_name": "Example Hiring Committee",
+                                "role": "Member"}, code="P", lines=()) == []
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+@pytest.mark.parametrize("text, fields", [
+    # a grant's own period beside the owner's role period inside it
+    ("Example Sleep Study, Example Foundation, 1990-1996. Field Manager, 1993-1996",
+     {"title": "Example Sleep Study", "agency": "Example Foundation", "pi_role": "Field Manager",
+      "start_date": "1993", "end_date": "1996"}),
+    # an award line beside the grant's credit line
+    ("Northfield Administrative Supplement 2016-2017\tLakeside Program Director (PI)",
+     {"title": "Predoctoral Training Program", "pi_role": "Program Director (PI)",
+      "start_date": "2016", "end_date": "2017"}),
+    # a split grant entry
+    (_SPLIT_OFFICES_TEXT, _SPLIT_OFFICES),
+])
+def test_multi_record_grants_get_neither_the_span_nor_the_event_shape(code, text, fields):
+    assert _multi_record(text, fields, code=code, lines=()) == []
+    assert [f["severity"] for f in _multi_record(text, fields, code="Q1", lines=())] == ["WARN"]
 
 
 def test_multi_record_is_silent_on_a_record_list_fan_out_splits():
@@ -3026,6 +3205,8 @@ def test_multi_record_licence_numbers_silent_when_not_several_records(text, fiel
 def test_multi_record_constants_are_pinned():
     assert (MULTI_RECORD_MIN_NEW, MULTI_RECORD_NEW_SHARE,
             MULTI_RECORD_PROSE_MIN_LOWERCASE) == (2, 0.4, 4)
+    # the shape name is a message literal the precision ledger counts by
+    assert CLAUSE_SPAN_OUTSIDE == "span_outside_record"
 
 # ==========================================================================
 # lint_year_not_in_source: a plausible year the entry's text never states.
