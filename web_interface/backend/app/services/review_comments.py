@@ -34,8 +34,8 @@ REVIEW_DOCX_ERRORS = (OSError, zipfile.BadZipFile, KeyError, ValueError, XMLSynt
 COMMENT_AUTHOR = "CViche check"
 COMMENT_INITIALS = "CV"
 COMMENTED_SEVERITIES = ("ERROR", "WARN")
-#: Said in a comment the document's first paragraph carries for want of a place.
-UNLOCATED_NOTE = "Not tied to one place in the document: see the run page for the details."
+#: Ends the comment the first paragraph carries when no place matched; {where} names the section.
+UNLOCATED_NOTE = "(Found{where}, but not tied to one place in the document; see the run page.)"
 #: Squashed characters of a quote matched against the output. Long enough that
 #: a hit is that passage, short enough to survive the doctor's own cuts.
 QUOTE_PROBE_CHARS = 40
@@ -68,15 +68,18 @@ def _paragraph_text(p: Paragraph) -> str:
 
 
 def _comment_text(finding: dict, located: bool) -> str:
+    """``Original: "<quoted CV text>"`` (when the finding quotes any), then
+    ``Comment: <title>. <what to do>``. The doctor's own detail is developer
+    wording and stays on the run page; a lint with no plain wording yet falls
+    back to it."""
     inst = _instance(finding)
     copy = LINT_COPY.get(finding["lint"])
-    lines = [f"{copy.title if copy else finding['lint']}: {inst.detail}"]
+    comment = f"{copy.title}. {copy.what_to_do}" if copy else inst.detail
     if not located:
-        lines.append(UNLOCATED_NOTE)
-    if inst.section:
-        lines.append(f"Section: {inst.section}")
-    if copy:
-        lines.append(f"What to do: {copy.what_to_do}")
+        where = f" in {inst.section}" if inst.section else ""
+        comment += f" {UNLOCATED_NOTE.format(where=where)}"
+    lines = [f'Original: "{inst.quotes[0]}"'] if inst.quotes else []
+    lines.append(f"Comment: {comment}")
     return "\n".join(lines)
 
 

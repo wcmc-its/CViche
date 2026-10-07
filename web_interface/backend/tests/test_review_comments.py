@@ -78,9 +78,8 @@ def test_a_quoted_record_gets_the_comment_with_the_run_pages_wording(tmp_path):
     assert author == rc.COMMENT_AUTHOR
     assert anchor == CITATION
     copy_ = LINT_COPY["pipe_leaks"]
-    assert text.startswith(f"{copy_.title}: 1 numbered citation(s)")
-    assert f"What to do: {copy_.what_to_do}" in text
-    assert rc.UNLOCATED_NOTE not in text
+    # The doctor's own detail ("1 numbered citation(s) ...") is developer wording: not shown.
+    assert text == f'Original: "{CITATION}"\nComment: {copy_.title}. {copy_.what_to_do}'
 
 
 def test_output_text_in_a_doctor_note_anchors_the_comment(tmp_path):
@@ -109,7 +108,7 @@ def test_a_quote_stage_6_reworded_is_found_by_its_middle(tmp_path):
                  [f"Grant Title: {GRANT}; Role: PI"])))
     [(_, text, anchor)] = _comments(out)
     assert anchor == GRANT
-    assert "Section: Past Research Funding" in text
+    assert text.startswith(f'Original: "Grant Title: {GRANT}; Role: PI"\nComment: ')
 
 
 def test_a_window_that_recurs_across_records_does_not_anchor(tmp_path):
@@ -120,7 +119,15 @@ def test_a_window_that_recurs_across_records_does_not_anchor(tmp_path):
                  ["99. Other XY, Person Z. Lanternfish vision under pressure. J Example Biol. 2019;4:1-9."])))
     [(_, text, anchor)] = _comments(out)
     assert anchor == HEADER
-    assert rc.UNLOCATED_NOTE in text
+    assert text.endswith(" " + rc.UNLOCATED_NOTE.format(where=""))
+
+
+def test_an_unplaced_comment_names_the_section_it_was_found_in(tmp_path):
+    clean = _clean_docx(tmp_path)  # has no Didactic Teaching heading
+    out, _ = rc.write_review_docx(clean, _report(_finding("implausible_year", "entry 9 (K1): date=1905")))
+    [(_, text, anchor)] = _comments(out)
+    assert anchor == HEADER
+    assert text.endswith("(Found in Didactic Teaching, but not tied to one place in the document; see the run page.)")
 
 
 def test_no_quote_falls_back_to_the_sections_template_heading(tmp_path):
@@ -138,7 +145,7 @@ def test_a_code_stage_6_routes_nowhere_falls_back_to_its_top_level_heading(tmp_p
         _finding("stage6_render_warnings", "stage 6 self-check: T: 6 entries diverted to the Appendix")))
     [(_, text, anchor)] = _comments(out)
     assert anchor == "T. APPENDIX"
-    assert "Section: Appendix/Other" in text
+    assert "not tied to one place" not in text
 
 
 def test_protected_data_comment_never_carries_more_than_the_finding(tmp_path):
@@ -149,8 +156,8 @@ def test_protected_data_comment_never_carries_more_than_the_finding(tmp_path):
                        severity="ERROR")
     out, _ = rc.write_review_docx(clean, _report(finding))
     [(_, text, _)] = _comments(out)
-    assert "date of birth found in Personal Data" in text
-    assert text.count("\n") <= 3  # title line, unlocated note, what to do
+    copy_ = LINT_COPY["protected_data_in_output"]
+    assert text == f"Comment: {copy_.title}. {copy_.what_to_do} {rc.UNLOCATED_NOTE.format(where='')}"
 
 
 def test_info_and_skipped_findings_get_no_comment(tmp_path):
