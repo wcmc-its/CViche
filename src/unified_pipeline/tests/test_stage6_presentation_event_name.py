@@ -330,3 +330,30 @@ def test_an_untitled_last_split_record_is_titled_from_its_own_line():
                   if any("Zq" in c.text for c in row.cells))
     assert rows == [["2nd Zqriken Symposium", "Kestrel, Japan", ""],
                     ["Zqhubble Institute", "Ashby, Varnoria", ""]]
+
+
+def test_an_open_ended_talk_renders_its_range_not_its_start_year():
+    """#1346 (OTBUCZ 116/119/125): a course given "2006 to present" has
+    start_date 2006 and end_date present; the Dates cell showed only 2006."""
+    assert _rendered_date(start_date="2006", end_date="present") == "2006-Present"
+
+
+def test_a_closed_multi_year_range_renders_both_years():
+    assert _rendered_date(start_date="1981-01-09", end_date="1983-05-20") == "1981-1983"
+
+
+def test_a_multi_day_talk_within_one_year_still_renders_one_year():
+    assert _rendered_date(start_date="2014-09-27", end_date="2014-10-02") == "2014"
+
+
+def test_an_end_date_extends_a_year_given_under_date():
+    assert _rendered_date(date="2015", end_date="2017") == "2015-2017"
+
+
+def test_a_string_none_end_date_is_ignored():
+    assert _rendered_date(start_date="2006", end_date="None") == "2006"
+
+
+def test_a_dict_date_does_not_take_a_second_end_date():
+    assert _rendered_date(date={"start_date": "2021-12-30", "end_date": "2022-01-02"},
+                          end_date="2022-01-02") == "2021-2022"
