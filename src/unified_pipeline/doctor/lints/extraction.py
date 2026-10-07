@@ -2624,12 +2624,13 @@ def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> l
 #: The codes stage 6 renders as grants, in the funding subsections' order.
 GRANT_CODES = tuple(code for code, _title in _FUNDING_SECTIONS)
 #: A label opening an entry's first line or cell ("Agency:", "Grant Title:",
-#: "P.I.:", "% Effort:"), and the same label anywhere a line or cell starts.
+#: "P.I.:", "% Effort:", "Current position:"), and the same label anywhere a
+#: line or cell starts. Shared by `grant_boundary` and `record_boundary`.
 #: The label cannot run across a tab, newline or " | ", so matching the
 #: whole text reads only its first line or cell.
-_GRANT_LABEL = r"[\s*]*([A-Za-z%][A-Za-z.%#/ ]{0,24}?)\s*:"
-_GRANT_HEAD_LABEL_RE = re.compile(rf"^{_GRANT_LABEL}")
-_GRANT_LINE_LABEL_RE = re.compile(rf"(?:^|\t|\n|\s\|\s){_GRANT_LABEL}")
+_ENTRY_LABEL = r"[\s*]*([A-Za-z%][A-Za-z.%#/ ]{0,24}?)\s*:"
+_ENTRY_HEAD_LABEL_RE = re.compile(rf"^{_ENTRY_LABEL}")
+_ENTRY_LINE_LABEL_RE = re.compile(rf"(?:^|\t|\n|\s\|\s){_ENTRY_LABEL}")
 #: Labels that name a grant's people or effort. A grant record opens with its
 #: sponsor, number, title or dates; an entry whose first line is one of these
 #: holds the tail of the record before it (EBYSBC CXRYCF, CTWLTR).
@@ -2671,10 +2672,11 @@ GRANT_SOURCE_MIN_CHARS = 3
 _GRANT_SEGMENT_RE = re.compile(r"\t|\n|\s\|\s")
 
 
-class GrantEntry(NamedTuple):
-    """One stage-4 grant entry as the boundary lint reads it: its first
-    line's label (lowercased, '' when it opens with none) and every label
-    that starts one of its lines or cells."""
+class ListEntry(NamedTuple):
+    """One stage-4 entry of a heading's list as the boundary lints read it
+    (`grant_boundary` over the grant lists, `record_boundary` over the
+    others): its first line's label (lowercased, '' when it opens with none)
+    and every label that starts one of its lines or cells."""
     element_idx: object
     code: str
     text: str
@@ -2683,26 +2685,26 @@ class GrantEntry(NamedTuple):
     line_labels: frozenset[str]
 
 
-def _grant_label(label: str) -> str:
+def _normalized_label(label: str) -> str:
     return " ".join(label.lower().split())
 
 
-def _grant_entry(raw: dict) -> GrantEntry:
+def _list_entry(raw: dict) -> ListEntry:
     text = str(raw.get("text") or "")
     fields = raw.get("extracted_fields")
-    head = _GRANT_HEAD_LABEL_RE.match(text.strip())
-    return GrantEntry(
+    head = _ENTRY_HEAD_LABEL_RE.match(text.strip())
+    return ListEntry(
         raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""), text,
         fields if isinstance(fields, Mapping) else {},
-        _grant_label(head.group(1)) if head else "",
-        frozenset(_grant_label(m.group(1)) for m in _GRANT_LINE_LABEL_RE.finditer(text)))
+        _normalized_label(head.group(1)) if head else "",
+        frozenset(_normalized_label(m.group(1)) for m in _ENTRY_LINE_LABEL_RE.finditer(text)))
 
 
-def _heading_lists(stage4: dict, grants: bool) -> list[list[GrantEntry]]:
+def _heading_lists(stage4: dict, grants: bool) -> list[list[ListEntry]]:
     """Runs of consecutive entries filed under one heading, the lists stage 2
     cut into records: of grant codes when `grants`, else of every other code.
     An entry of the other kind closes a run."""
-    lists: list[list[GrantEntry]] = []
+    lists: list[list[ListEntry]] = []
     heading = None
     for raw in stage4.get("entries", []):
         code = raw.get("taxonomy_code")
@@ -2713,11 +2715,11 @@ def _heading_lists(stage4: dict, grants: bool) -> list[list[GrantEntry]]:
         if heading is None or this != heading:
             lists.append([])
         heading = this
-        lists[-1].append(_grant_entry(raw))
+        lists[-1].append(_list_entry(raw))
     return lists
 
 
-def _grant_lists(stage4: dict) -> list[list[GrantEntry]]:
+def _grant_lists(stage4: dict) -> list[list[ListEntry]]:
     return _heading_lists(stage4, grants=True)
 
 
@@ -2736,7 +2738,7 @@ def _title_half(fields: Mapping[str, object]) -> bool:
     return _filled(fields, GRANT_TITLE_FIELD) and not _filled(fields, "agency")
 
 
-def _split_pairs(grants: list[GrantEntry]) -> dict[int, str]:
+def _split_pairs(grants: list[ListEntry]) -> dict[int, str]:
     """Two neighbours, one holding a sponsor or number with no title or
     period, the other a title with no sponsor: one record cut in two."""
     reasons = {}
@@ -2748,12 +2750,12 @@ def _split_pairs(grants: list[GrantEntry]) -> dict[int, str]:
     return reasons
 
 
-def _personnel_heads(grants: list[GrantEntry]) -> dict[int, str]:
+def _personnel_heads(grants: list[ListEntry]) -> dict[int, str]:
     return {i: f"its first line is the '{grant.head_label}' line, which closes a record"
             for i, grant in enumerate(grants) if grant.head_label in GRANT_PERSONNEL_LABELS}
 
 
-def _head_label_drift(grants: list[GrantEntry]) -> dict[int, str]:
+def _head_label_drift(grants: list[ListEntry]) -> dict[int, str]:
     """In a list whose records open with the first entry's label, an entry
     that opens instead with a label those records carry mid-record."""
     first = grants[0].head_label
@@ -2778,10 +2780,10 @@ class GrantLineOrder(NamedTuple):
     source_later: bool
 
 
-def _grant_line_order(grant: GrantEntry) -> GrantLineOrder:
+def _grant_line_order(grant: ListEntry) -> GrantLineOrder:
     raw_segments = _GRANT_SEGMENT_RE.split(grant.text.strip())
     segments = [squash(segment) for segment in raw_segments]
-    head = _GRANT_HEAD_LABEL_RE.match(raw_segments[0])
+    head = _ENTRY_HEAD_LABEL_RE.match(raw_segments[0])
     first = squash(raw_segments[0][head.end():]) if head else segments[0]
     rest = "".join(segments[1:])
     title = squash(grant.fields.get(GRANT_TITLE_FIELD) or "")[:GRANT_TITLE_PREFIX_CHARS]
@@ -2796,12 +2798,12 @@ def _grant_line_order(grant: GrantEntry) -> GrantLineOrder:
         any(source in rest for source in sources))
 
 
-def _titleless(grant: GrantEntry) -> bool:
+def _titleless(grant: ListEntry) -> bool:
     return (_filled(grant.fields, GRANT_SOURCE_FIELDS)
             and not _filled(grant.fields, GRANT_TITLE_FIELD))
 
 
-def _line_order_drift(grants: list[GrantEntry]) -> dict[int, str]:
+def _line_order_drift(grants: list[ListEntry]) -> dict[int, str]:
     """In a list whose records open with a sponsor or number line and carry
     the title on a later line, a run of entries that each open with a title
     and then a sponsor or number line, starting right after an entry that
@@ -2827,7 +2829,7 @@ def _line_order_drift(grants: list[GrantEntry]) -> dict[int, str]:
     return reasons
 
 
-def _orphans(grants: list[GrantEntry]) -> dict[int, str]:
+def _orphans(grants: list[ListEntry]) -> dict[int, str]:
     """An entry after the first that names no sponsor, number or title but
     carries a record's detail; and a list's last entry, when it holds only a
     title while its siblings name a sponsor, number or period: the title its
@@ -2894,7 +2896,7 @@ RECORD_INNER_LABEL_MIN_SHARE = 1 / 3
 RECORD_INNER_LABEL_MIN_RATIO = 2
 
 
-def _inner_label_heads(entries: list[GrantEntry]) -> dict[int, str]:
+def _inner_label_heads(entries: list[ListEntry]) -> dict[int, str]:
     reasons = {}
     for i, entry in enumerate(entries[1:], start=1):
         label = entry.head_label

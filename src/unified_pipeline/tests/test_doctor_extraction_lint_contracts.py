@@ -3786,6 +3786,15 @@ def test_record_boundary_needs_twice_as_many_carriers_as_openers():
                        _whole_mentee(15), _tail(14), _tail(16))) == 2
 
 
+def test_record_boundary_counts_openers_other_than_the_entry_judged():
+    """At exactly twice as many carriers as openers it fires, and the entry
+    being judged is not one of its own openers: two carriers against each
+    tail's one other opener. Counting the tail itself would make it 2 to 2."""
+    findings = _record(_whole_mentee(10), _whole_mentee(12), _tail(14), _tail(16))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 14 (N3B)", "entry 16 (N3B)"]
+    assert all("2 of its list's records" in f["message"] for f in findings)
+
+
 def test_record_boundary_judges_each_heading_on_its_own():
     other = ["Teaching", "Clinical Fellows"]
     assert _record(_whole_mentee(10), _whole_mentee(12),
