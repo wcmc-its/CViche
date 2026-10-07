@@ -50,7 +50,12 @@ jobs:
       # Runtime system libs the app imports at test time (same set the backend
       # Dockerfile installs): xmlsec1 for pysaml2, poppler-utils for PDF parsing.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xmlsec1 poppler-utils
+        # A stalled Ubuntu mirror hung this step for 15-28 min on five runs
+        # (2026-10-07); apt's own timeouts + retries make it fail over instead.
+        timeout-minutes: 5
+        run: |
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update && sudo apt-get $APT install -y --no-install-recommends xmlsec1 poppler-utils
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
@@ -76,7 +81,12 @@ jobs:
           python-version: "3.14"  # match the build image (python:3.14-slim)
           cache: pip
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xmlsec1 poppler-utils
+        # A stalled Ubuntu mirror hung this step for 15-28 min on five runs
+        # (2026-10-07); apt's own timeouts + retries make it fail over instead.
+        timeout-minutes: 5
+        run: |
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update && sudo apt-get $APT install -y --no-install-recommends xmlsec1 poppler-utils
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
