@@ -44,8 +44,11 @@ _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
 # drift between the three date modules again -- it already had (#553): this
 # module recognized only 'present', so an end_date of "ongoing" reached
 # _dates_overlap_or_match as a literal string instead of the open-ended
-# range the other two modules already treat it as.
-CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now'})
+# range the other two modules already treat it as. "to date" and "date" are
+# the end stage 4 stores for a CV's "2012 to date" / "2018-date" (#1432,
+# VYNARH): without them the range rendered as the raw "2012-to date".
+CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now',
+                                 'to date', 'date'})
 
 # The two keys of the range stage 4 sometimes returns where a single date was
 # asked for: `{"start_date": "2008", "end_date": "2018"}` (#1233). B1's
@@ -242,6 +245,23 @@ def _ends_strictly_before(end: tuple[int, int | None] | object, start: tuple[int
         return end_year < start_year
     return (end_month is not None and start_month is not None
             and end_month < start_month)
+
+
+def range_is_reversed(start_date: str, end_date: str) -> bool:
+    """True only when the stated data PROVES `end_date` precedes `start_date`.
+
+    Stage 4 stores a list of separate dates ("2020, 2019, 2018, 2014",
+    "October 14, 2011; September 1, 2010") as its first and last item, so
+    the "range" runs backwards (#1432, UYQRUN). Read at the granularity the
+    CV states, the same way `_dates_overlap_or_match` reads its boundaries:
+    an unreadable boundary, an open end, or the same year with a month
+    missing on either side proves nothing and returns False.
+    """
+    start = _overlap_boundary(start_date, is_end=False)
+    end = _overlap_boundary(end_date, is_end=True)
+    if start is None or end is None:
+        return False
+    return _ends_strictly_before(end, start)
 
 
 def _dates_overlap_or_match(entry_a: dict, entry_b: dict) -> bool:

@@ -1116,6 +1116,18 @@ def test_format_mentee_duration_covers_every_branch(fields, ongoing, expected):
     ({'end_date': '1999-02'}, 'Example mentee 1999-021', '1999'),
     ({'end_date': '1999-02'}, 'Example mentee 1999-02/03', '1999'),
     ({'end_date': '1999-02'}, 'Example mentee ref 31999-02', '1999'),
+    # A range with a month written on one end only reads in one format:
+    # that end renders as its year too (#1432, "1999-September 1999").
+    ({'start_date': 'June 1999', 'end_date': 'September 1999'},
+     'Example mentee, June, 1999-September 1999', '1999'),
+    ({'start_date': 'Fall 2018', 'end_date': '2019'},
+     'Example mentee, Fall 2018-2019', '2018-2019'),
+    ({'start_date': '2018', 'end_date': 'Spring 2019'},
+     'Example mentee, 2018-Spring 2019', '2018-2019'),
+    # Written on both ends, or a single date: as the CV wrote it.
+    ({'start_date': 'June 1999', 'end_date': 'September 1999'},
+     'Example mentee, June 1999-September 1999', 'June 1999-September 1999'),
+    ({'end_date': 'September 1999'}, 'Example mentee September 1999', 'September 1999'),
 ])
 def test_format_mentee_duration_keeps_a_single_date_written_in_the_source(
         fields, source_text, expected):

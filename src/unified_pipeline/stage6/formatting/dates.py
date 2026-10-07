@@ -23,10 +23,12 @@ from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from ..parsing.dates import (
+    CURRENT_DATE_VALUES,
     RANGE_END_KEY,
     RANGE_START_KEY,
     _parse_date_components,
     _year_of_calendar_invalid_date,
+    range_is_reversed,
 )
 
 logger = logging.getLogger(__name__)
@@ -185,10 +187,6 @@ def _format_date_mapping(value: Mapping, taxonomy_code: str) -> str:
                              value.get(RANGE_END_KEY) or '', taxonomy_code)
 
 
-# An end date that says the range is still running.
-_ONGOING_DATE_WORDS = frozenset({'present', 'current', 'ongoing', 'now'})
-
-
 def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
                             is_end_date: bool = False) -> str:
     """
@@ -212,7 +210,7 @@ def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
     date_str = str(date_str).strip()
 
     # Handle 'present', 'current', 'ongoing' - always return as 'Present'
-    if date_str.lower() in _ONGOING_DATE_WORDS:
+    if date_str.lower() in CURRENT_DATE_VALUES:
         return 'Present'
 
     # Get required format for this taxonomy code
@@ -263,7 +261,9 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
     A start with no end renders the bare start unless `source_text` leaves
     that year open, for a `POINT_IN_TIME_CODES` code (#946) and for any code
     whose caller passes `source_text` (class 13, 2026-10-02). Otherwise it
-    renders "<start>-Present".
+    renders "<start>-Present". On a `POINT_IN_TIME_CODES` code an end the CV
+    states before its start renders as the two dates listed, "12/19, 04/18",
+    never as the backwards range "12/19-04/18" (#1432).
 
     Args:
         start_date: Start date string
@@ -282,6 +282,12 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
         # Avoid redundant ranges like "2024-2024" when both resolve to the same string
         if formatted_start == formatted_end:
             return formatted_start
+        # On a single-occasion code a backwards "range" is two separate
+        # dates stage 4 joined (#1432): list them as the CV wrote them. On
+        # any other code it is a typo in a term ("9/1/93-8/31/93") and stays.
+        if (taxonomy_code in POINT_IN_TIME_CODES
+                and range_is_reversed(str(start_date), str(end_date))):
+            return f"{formatted_start}{DATE_SPAN_SEPARATOR}{formatted_end}"
         return f"{formatted_start}-{formatted_end}"
     elif formatted_start:
         # Avoid "Present-Present" when start is already 'Present'
@@ -331,7 +337,7 @@ _EXTRA_DATE_STRING_SPLIT_RE = re.compile(r'\s*[;,]\s*')
 # ongoing word), so a year-month item ("1993-12") is not split in two.
 _EXTRA_DATE_RANGE_ITEM_RE = re.compile(
     r'^(?P<start>\d{4}(?:[-/.]\d{1,2})?)\s*[-\u2013\u2014]\s*'
-    rf'(?P<end>\d{{4}}(?:[-/.]\d{{1,2}})?|{"|".join(sorted(_ONGOING_DATE_WORDS))})$',
+    rf'(?P<end>\d{{4}}(?:[-/.]\d{{1,2}})?|{"|".join(sorted(CURRENT_DATE_VALUES))})$',
     re.IGNORECASE)
 
 # Upper bound of a span still running ("present"), for `_span_is_covered`.
@@ -380,7 +386,7 @@ def _span_years(start: object, end: object) -> tuple[int, int] | None:
     if first is None:
         return None
     end_text = str(end or '').strip()
-    if end_text.lower() in _ONGOING_DATE_WORDS:
+    if end_text.lower() in CURRENT_DATE_VALUES:
         return first, _OPEN_END_YEAR
     last = _parse_date_components(end_text)[0] if end_text else None
     return first, max(first, last or first)
@@ -527,6 +533,45 @@ _SAME_VALUE_RANGE_RE = re.compile(
     rf'\s*(?:[-\u2013\u2014]|\bto\b)\s*\1(?![\w-])')
 
 
+def _iso_date_pattern(year: str, month: str, *, month_optional: bool = False) -> str:
+    """A strict ISO date, its year and month captured under the given names;
+    with `month_optional`, a bare year too."""
+    month_and_day = (rf'[-/](?P<{month}>0[1-9]|1[0-2])'
+                     r'(?:[-/](?:0[1-9]|[12]\d|3[01]))?')
+    return rf'(?P<{year}>\d{{4}})(?:{month_and_day}){"?" if month_optional else ""}'
+
+
+# A strict ISO date inside free text: YYYY-MM or YYYY-MM-DD, two-digit month
+# and day, by hyphen or slash ("2011/07", which 5c writes too) (#1432). Not part of a longer numeric token on either
+# side, so "01/2013-08/2013" (an MM/YYYY range), a programme number
+# "0120-0000-12-027" and the abbreviated range "1997-8" are left as written;
+# a sentence's full stop after the date still counts as its end.
+_NOT_AFTER_NUMBER = r'(?<![\d/.-])'
+_NOT_BEFORE_NUMBER = r'(?![\d/]|[.-]\d)'
+_ISO_DATE_IN_TEXT_RE = re.compile(
+    _NOT_AFTER_NUMBER + _iso_date_pattern('year', 'month') + _NOT_BEFORE_NUMBER)
+# One followed by a bare hyphen and a second ISO date or a year,
+# "2022-05-2022-07", "2010-04-2018" (5c's teaching ranges): one range, read
+# as a pair, since each date's guard above would refuse the other.
+_ISO_RANGE_IN_TEXT_RE = re.compile(
+    _NOT_AFTER_NUMBER + _iso_date_pattern('year', 'month') + '-'
+    + _iso_date_pattern('end_year', 'end_month', month_optional=True)
+    + _NOT_BEFORE_NUMBER)
+
+
+def _iso_date_as_words(match: re.Match) -> str:
+    """One `_ISO_DATE_IN_TEXT_RE` match as "<Month> <year>", the day dropped."""
+    return f"{_MONTH_NAMES[match['month']]} {match['year']}"
+
+
+def _iso_range_as_words(match: re.Match) -> str:
+    """One `_ISO_RANGE_IN_TEXT_RE` match as "<Month> <year>-<Month> <year>",
+    or "<Month> <year>-<year>" when the end states no month."""
+    end_month = match['end_month']
+    end = f"{_MONTH_NAMES[end_month]} {match['end_year']}" if end_month else match['end_year']
+    return f"{_iso_date_as_words(match)}-{end}"
+
+
 def normalize_iso_dates_in_text(text: str) -> str:
     """Replace ISO-format dates in free text with human-readable equivalents,
     then collapse a range whose two ends read the same to one value.
@@ -538,19 +583,13 @@ def normalize_iso_dates_in_text(text: str) -> str:
       2012-06–2012-07  -> June 2012–July 2012
       2006-03-21 to 2006-03-23  -> March 2006
       2011-2011  -> 2011
+
+    Only strict ISO dates are rewritten (`_ISO_DATE_IN_TEXT_RE`): before
+    #1432 any YYYY[-/]M[M] was, so "01/2013-08/2013" read "01/August
+    2013/2013" and "1997-8" read "August 1997".
     """
     if not text:
         return text
-
-    def _iso_to_readable(m):
-        year, month = m.group(1), m.group(2)
-        day = m.group(3) if m.lastindex >= 3 and m.group(3) else None
-        month_name = _MONTH_NAMES.get(month, month)
-        return f"{month_name} {year}"
-
-    # YYYY-MM-DD (drop the day)
-    text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b', _iso_to_readable, text)
-    # YYYY-MM (no day)
-    text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])\b', _iso_to_readable, text)
-
+    text = _ISO_RANGE_IN_TEXT_RE.sub(_iso_range_as_words, text)
+    text = _ISO_DATE_IN_TEXT_RE.sub(_iso_date_as_words, text)
     return _SAME_VALUE_RANGE_RE.sub(r'\1', text)
