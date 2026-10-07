@@ -263,7 +263,7 @@ def test_admin_delete_complete_run_removes_only_target_and_logs_audit(client, db
 
     fake = _FakeStorage()
     with patch("app.services.run_service.get_storage", return_value=fake), \
-            caplog.at_level(logging.INFO, logger="app.api.admin_routes"):
+            caplog.at_level(logging.INFO, logger="app.services.admin_run_service"):
         resp = _as_admin(client, lambda: client.delete("/api/admin/runs/DONE683"))
     assert resp.status_code == 204
     db.rollback()  # discard uncommitted state: only a committed delete survives
@@ -363,6 +363,76 @@ def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
             delete_run_and_artifacts(db, run)
     rollback.assert_called_once()
     assert db.query(Run).filter(Run.id == "FAIL683").first() is not None
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints: response body, threshold override, error text and audit
+# lines, pinned before they move out of the route handlers (#335).
+# ---------------------------------------------------------------------------
+
+def test_admin_reap_body_and_audit_line(client, db, caplog):
+    import logging
+    user = _seed_user(db)
+    _seed_run(db, "OLD005", "created", datetime.now() - timedelta(hours=48), user_id=user.id)
+
+    with caplog.at_level(logging.INFO):
+        resp = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
+
+    assert resp.json() == {"candidates": 1, "reaped": 0, "objects_deleted": 0,
+                           "run_ids": ["OLD005"], "dry_run": True}
+    audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_reap_orphans")]
+    assert audit == ["admin_reap_orphans: admin=admin@example.com dry_run=True candidates=1 reaped=0 objects=0"]
+
+
+def test_admin_reap_older_than_hours_overrides_the_default_threshold(client, db):
+    _seed_run(db, "YOUNG05", "created", datetime.now() - timedelta(hours=5))
+
+    default = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
+    override = _as_admin(
+        client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true&older_than_hours=1"))
+    zero = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?older_than_hours=0"))
+
+    assert default.json()["run_ids"] == []
+    assert override.json()["run_ids"] == ["YOUNG05"]
+    assert zero.status_code == 422  # ge=1
+
+
+def test_admin_delete_error_messages(client, db):
+    _seed_run(db, "BUSY683", "running", datetime.now())
+
+    missing = _as_admin(client, lambda: client.delete("/api/admin/runs/NOSUCH"))
+    busy = _as_admin(client, lambda: client.delete("/api/admin/runs/BUSY683"))
+
+    assert missing.json()["detail"] == {"error": "not_found", "message": "Run not found."}
+    assert busy.json()["detail"] == {
+        "error": "conflict",
+        "message": "Run is still running; wait for it to finish before deleting."}
+
+
+def test_admin_delete_allows_a_cancelled_run(client, db):
+    from app.models import Run
+    _seed_run(db, "CANC683", "cancelled", datetime.now())
+
+    with patch("app.services.run_service.get_storage", return_value=_FakeStorage()):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/CANC683"))
+
+    assert resp.status_code == 204
+    db.rollback()
+    assert db.query(Run).filter(Run.id == "CANC683").first() is None
+
+
+def test_admin_delete_failure_logs_the_traceback_and_returns_the_retry_message(client, db, caplog):
+    import logging
+    _seed_run(db, "LOG683", "complete", datetime.now())
+
+    with patch("app.services.run_service.get_storage", return_value=_FlakyStorage()), \
+            caplog.at_level(logging.INFO):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/LOG683"))
+
+    assert resp.json()["detail"] == {
+        "error": "internal_error", "message": "Run deletion failed; it is safe to retry."}
+    failed = [r for r in caplog.records if r.getMessage() == "Admin delete of run LOG683 failed"]
+    assert len(failed) == 1 and failed[0].exc_info is not None
 
 
 @pytest.fixture

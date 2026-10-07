@@ -937,7 +937,7 @@ web_interface/
 │   │   │   ├── websocket.py          # Real-time streaming
 │   │   │   ├── auth_routes.py        # Login, logout, session
 │   │   │   ├── saml_routes.py        # SAML SSO endpoints
-│   │   │   ├── admin_routes.py       # Admin dashboard API
+│   │   │   ├── admin_routes/         # Admin dashboard API, one router per domain
 │   │   │   ├── consent_routes.py     # Consent tracking
 │   │   │   └── feedback_routes.py    # Feedback submission
 │   │   ├── pipeline/                 # Pipeline orchestration

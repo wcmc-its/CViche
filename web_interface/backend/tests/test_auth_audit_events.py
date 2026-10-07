@@ -300,10 +300,11 @@ def test_directory_unavailable_event_when_access_group_unconfigured(
 
 
 # ---------------------------------------------------------------------------
-# LOGIN_SUCCESS / LOGIN_FAILED -- SAML ACS handler (saml_routes.py)
+# LOGIN_SUCCESS / LOGIN_FAILED -- SAML ACS workflow (services/saml_service.py,
+# logged under the app.api.saml_routes logger name)
 # ---------------------------------------------------------------------------
 
-@patch("app.api.saml_routes.get_saml_client")
+@patch("app.services.saml_service.get_saml_client")
 def test_login_success_event_on_saml_acs(mock_get_client, client, db, seed_saml_mode, caplog):
     mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
 
@@ -322,8 +323,8 @@ def test_login_success_event_on_saml_acs(mock_get_client, client, db, seed_saml_
 
 
 @patch.dict(os.environ, _ED_ENV)
-@patch("app.api.saml_routes.check_ed_membership")
-@patch("app.api.saml_routes.get_saml_client")
+@patch("app.services.saml_service.check_ed_membership")
+@patch("app.services.saml_service.get_saml_client")
 def test_login_failed_event_saml_not_authorized(
     mock_get_client, mock_check_ed, client, db, seed_ed_enabled, caplog
 ):

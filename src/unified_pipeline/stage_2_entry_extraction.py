@@ -44,7 +44,7 @@ from core.template_boilerplate import (
 logger = logging.getLogger(__name__)
 
 
-def get_hierarchy_path(node: dict, current_path: list[str] = None) -> list[str]:
+def get_hierarchy_path(node: dict, current_path: list[str] | None = None) -> list[str]:
     """Build full hierarchy path for a node"""
     if current_path is None:
         current_path = []
@@ -828,9 +828,9 @@ def detect_entries_for_section(
     doc_elements: list[dict],
     start_elem_idx: int,
     end_elem_idx: int,
-    document_uid: str = None,
-    header_indices: set = None,
-    element_index_map: dict = None
+    document_uid: str | None = None,
+    header_indices: set | None = None,
+    element_index_map: dict | None = None
 ) -> tuple[list[dict], dict]:
     """
     Use LLM to detect and extract entries within a section.
@@ -1674,7 +1674,7 @@ def _entry_sort_key(entry: dict) -> tuple[float, float]:
 
 def run_stage_2(
     docx_path: str,
-    hierarchy_json_path: str = None,
+    hierarchy_json_path: str | None = None,
     cancel_check: Callable[[], None] | None = None,
     strip_template_instructions: bool = True,
     workers: int = STAGE2_SECTION_WORKERS,
@@ -1713,7 +1713,7 @@ def run_stage_2(
         hierarchy_json_path = om.get_stage1b_path()
 
     print(f"Loading hierarchy with boundaries: {hierarchy_json_path}")
-    with open(hierarchy_json_path) as f:
+    with open(hierarchy_json_path, encoding="utf-8") as f:
         hierarchy_data = json.load(f)
 
     # Extract document structure using unified elements (matches Stage 1b)
@@ -1902,7 +1902,7 @@ def run_stage_2(
         "entries": all_entries
     }
 
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
     print("="*80)

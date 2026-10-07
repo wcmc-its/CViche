@@ -770,13 +770,24 @@ class UnmappedEntry(TypedDict, total=False):
 AppendixLine = tuple[UnmappedEntry, str]
 
 
+# Which pass put a recovered line's `code` on it (#1225). ENTRY: the entry's
+# own code as stage 6 received it (stage 3b's, or stage 4's quarantine T).
+# RECONSIDER: `_reconsider_appendix_entries` split an overflow entry into
+# segments and coded each one itself, so the code is not a stage 3b
+# classification and the warning must not read as one.
+CODE_ORIGIN_ENTRY = "entry"
+CODE_ORIGIN_RECONSIDER = "reconsider"
+
+
 class RecoveredLine(NamedTuple):
     """One bullet `_add_remaining_to_appendix` wrote into the Appendix: the
-    taxonomy code that classified it and the text the reader sees. The text
-    decides the A warning's severity (#1221)."""
+    taxonomy code that classified it, the text the reader sees, and which
+    pass assigned the code (`CODE_ORIGIN_*`). The text decides the A
+    warning's severity (#1221); the origin decides its wording (#1225)."""
 
     code: str
     text: str
+    origin: str = CODE_ORIGIN_ENTRY
 
 
 # Why a taxonomy code's entries were diverted to the Appendix (#531,
@@ -904,13 +915,17 @@ def _plural_was(count: int) -> str:
 
 
 def _diversion_message(code: str, count: int, reason: str,
-                        passthrough_codes: frozenset[str]) -> str:
+                        passthrough_codes: frozenset[str],
+                        origin: str = CODE_ORIGIN_ENTRY) -> str:
     """The Appendix-diversion warning's human-readable `message` (#531,
     #531-R2, #839, #842). Five shapes, by *reason*:
 
     - REASON_RECOVERED_UNRENDERED: always names *code* twice (the code that
       classified the record, spelled out rather than left implicit, since
-      this reason has nothing to do with routing).
+      this reason has nothing to do with routing). *origin* says who coded
+      it: CODE_ORIGIN_RECONSIDER names the stage 6 reconsider pass and calls
+      the lines segments, so a code that pass gave a split-off segment does
+      not read as a stage 3b classification of an entry (#1225).
     - REASON_RENDERER_DECLINED for a passthrough code (E/G/J,
       *passthrough_codes* -- `stage6/sections/passthrough.py`'s
       `PASSTHROUGH_CODES`, passed in rather than imported; see the module
@@ -955,6 +970,12 @@ def _diversion_message(code: str, count: int, reason: str,
         return (f"{code}: {count} dated {noun} diverted to the Appendix — the "
                 f"generated research summary does not reproduce {pronoun} and no "
                 f"other section renders {pronoun}")
+    if reason == REASON_RECOVERED_UNRENDERED and origin == CODE_ORIGIN_RECONSIDER:
+        verb = _plural_was(count)
+        segments = 'segment' if count == 1 else 'segments'
+        return (f"{code}: {count} {segments} of overflow content that the "
+                f"stage 6 reconsider pass coded {code} {verb} not placed in a "
+                f"section and {verb} recovered into the Appendix")
     if reason == REASON_RECOVERED_UNRENDERED:
         verb = _plural_was(count)
         return (f"{code}: {count} {noun} classified {code} {verb} not "
@@ -1036,9 +1057,10 @@ def build_appendix_diversion_warnings(
     *,
     summary_rendered: bool = False,
 ) -> list[AppendixDiversionWarning]:
-    """One `appendix_diversion` warning per (taxonomy code, reason) pair
-    actually present in the Appendix (#531, #531-R2 finding F1). Two input
-    streams, both post-filter (nothing dropped survives either):
+    """One `appendix_diversion` warning per (taxonomy code, reason, code
+    origin) actually present in the Appendix (#531, #531-R2 finding F1,
+    #1225). Two input streams, both post-filter (nothing dropped survives
+    either):
 
     - *written*: the entries `_fill_appendix` put on the page as NUMBERED
       lines, i.e. AFTER `_appendix_drop_reason` filtering. Reason is
@@ -1048,7 +1070,11 @@ def build_appendix_diversion_warnings(
       `_reconsider_appendix_entries` / `_recover_unrendered_records` --
       always REASON_RECOVERED_UNRENDERED, regardless of the code's own
       routing status, since these exist because a specific record did not
-      render, not because its code lacks a route.
+      render, not because its code lacks a route. A line's `origin` splits
+      its code's warning in two when the stage 6 reconsider pass coded some
+      of the lines and the entry's own code covers the rest: one message
+      cannot say who classified both (#1225). Numbered lines are always
+      CODE_ORIGIN_ENTRY.
 
     Every warning is WARN except one: the recovered A warning is INFO when
     every recovered A line is routine (`is_routine_recovered_line`, which
@@ -1072,14 +1098,14 @@ def build_appendix_diversion_warnings(
     (REASON_M1_RECORD_NOT_IN_SUMMARY); when it did not, every M1 entry is
     there because no summary rendered (REASON_RENDERER_DECLINED).
 
-    Sorted by (code, reason) so the sidecar is deterministic and, when one
-    code has entries in both streams (e.g. some T lines numbered, others
-    bulleted), its two warnings are adjacent. An entry/code with no
+    Sorted by (code, reason, origin) so the sidecar is deterministic and,
+    when one code has entries in both streams (e.g. some T lines numbered,
+    others bulleted), its warnings are adjacent. An entry/code with no
     `taxonomy_code` groups under `"?"` rather than being silently skipped --
     the total count must still reconcile against the docx line total
     (EXPECTED OUTCOME 5 / F1 self-consistency).
     """
-    counts: Counter[tuple[str, str]] = Counter()
+    counts: Counter[tuple[str, str, str]] = Counter()
     for entry in written:
         code = entry.get("taxonomy_code") or "?"
         if entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
@@ -1090,25 +1116,25 @@ def build_appendix_diversion_warnings(
             reason = REASON_M1_RECORD_NOT_IN_SUMMARY
         else:
             reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
-        counts[(code, reason)] += 1
-    routine: Counter[str] = Counter()
+        counts[(code, reason, CODE_ORIGIN_ENTRY)] += 1
+    routine: Counter[tuple[str, str]] = Counter()
     for line in recovered:
         code = line.code or "?"
-        counts[(code, REASON_RECOVERED_UNRENDERED)] += 1
+        counts[(code, REASON_RECOVERED_UNRENDERED, line.origin)] += 1
         if code == _PERSONAL_DATA_CODE and is_routine_recovered_line(line.text, owner_tokens):
-            routine[code] += 1
+            routine[(code, line.origin)] += 1
 
     warnings: list[AppendixDiversionWarning] = []
-    for code, reason in sorted(counts):
-        count = counts[(code, reason)]
-        all_routine = reason == REASON_RECOVERED_UNRENDERED and routine[code] == count
+    for code, reason, origin in sorted(counts):
+        count = counts[(code, reason, origin)]
+        all_routine = reason == REASON_RECOVERED_UNRENDERED and routine[(code, origin)] == count
         warnings.append({
             "check": "appendix_diversion",
             "code": code,
             "section": "T. APPENDIX",
             "count": count,
             "reason": reason,
-            "message": _diversion_message(code, count, reason, passthrough_codes),
+            "message": _diversion_message(code, count, reason, passthrough_codes, origin),
             "evidence": [],
             "severity": SEVERITY_INFO if all_routine else SEVERITY_WARN,
         })

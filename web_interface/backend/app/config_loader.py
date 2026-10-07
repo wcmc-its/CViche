@@ -27,7 +27,7 @@ def load_yaml_config() -> dict:
             CONFIG_PATH, EXAMPLE_CONFIG_PATH.name,
         )
         path = EXAMPLE_CONFIG_PATH
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 # Keys whose source of truth is the runtime admin UI (PUT /api/admin/config).

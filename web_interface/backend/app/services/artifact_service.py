@@ -313,7 +313,7 @@ def generate_preview_from_path(file_path: Path) -> OutputPreview | None:
         return None
 
     try:
-        with open(file_path) as f:
+        with open(file_path, encoding="utf-8") as f:
             data = json.load(f)
         return parse_json_to_preview(data)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, KeyError) as exc:

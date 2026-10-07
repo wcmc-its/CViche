@@ -67,7 +67,7 @@ class PostdocPositionValidator(BaseValidator):
     # Temporal context patterns
     EARLY_CAREER_YEAR_RANGE = range(1990, 2030)  # Adjust based on current year
 
-    def analyze(self, entry_text: str, header: str = None, year_range: tuple = None) -> ValidatorGuidance:
+    def analyze(self, entry_text: str, header: str | None = None, year_range: tuple | None = None) -> ValidatorGuidance:
         """
         Analyze entry for postdoc/fellowship classification.
 

@@ -2046,13 +2046,13 @@ def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -
         output_file = om.get_stage1_json_path()
         text_output_file = om.get_stage1_txt_path()
 
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2)
 
     print(f"\n✓ Saved JSON to: {output_file}")
 
     # Save human-readable text output with hierarchy
-    with open(text_output_file, 'w') as f:
+    with open(text_output_file, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
         f.write("CV SEGMENTATION RESULTS - INFERRED HIERARCHY\n")
         f.write("=" * 80 + "\n")

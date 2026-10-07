@@ -244,7 +244,7 @@ def _finalize_stage5b_enrichment(
     return stats
 
 
-def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
+def run_stage5b(input_path: str, output_path: str | None = None, verbose: bool = True,
                 refresh_cache: bool = False, *, persist_cache: bool = True) -> str:
     """
     Run Stage 5b: Institution Enrichment via LLM.
@@ -260,7 +260,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         Path to enriched output file
     """
     # Load input
-    with open(input_path, 'r') as f:
+    with open(input_path, 'r', encoding="utf-8") as f:
         data = json.load(f)
 
     document_uid = data.get('document_uid', 'unknown')
@@ -290,7 +290,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                     base_uid, len(candidates), candidates[0].name,
                 )
             try:
-                with open(candidates[0], 'r') as f:
+                with open(candidates[0], 'r', encoding="utf-8") as f:
                     stage4_data = json.load(f)
                 cv_owner_location = stage4_data.get('cv_owner_location')
                 if cv_owner_location and cv_owner_location.get('inference_success') and verbose:
@@ -508,7 +508,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         output_path = str(OUTPUT_DIR / f"{document_uid}_institution_enriched.json")
 
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     if verbose:

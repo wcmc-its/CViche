@@ -10,13 +10,11 @@ from app.database import get_db
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
 from app.auth import (
-    create_session_cookie,
     decode_session_cookie,
     get_cookie_settings,
     get_cookie_delete_settings,
     get_current_user,
     resolve_session_identity,
-    SessionEpochUnreadable,
     COOKIE_NAME,
     SESSION_STORE_UNAVAILABLE_DETAIL,
     SESSION_STATE_UNAVAILABLE_DETAIL,
@@ -25,10 +23,8 @@ from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.login_throttle import get_login_throttle
 from app.config_loader import INTAKE_ADDRESS, email_intake_enabled, get_config_value
 from app.rate_limiter import get_quota
-from app.services.user_service import provision_user, normalize_email
+from app.services.auth_service import LoginRejection, authenticate_simple_login
 from app.audit_events import (
-    LOGIN_SUCCESS,
-    LOGIN_FAILED,
     SESSION_REVOKED,
     SESSION_STORE_UNAVAILABLE,
 )
@@ -74,39 +70,21 @@ def get_auth_config(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # POST /api/auth/login
 # ---------------------------------------------------------------------------
-def _mint_login_session(user: User, db: Session) -> tuple[str | None, JSONResponse | None]:
-    """The session cookie value for a freshly-authenticated user.
-
-    Minted BEFORE the response is built: when the session store is enabled the
-    cookie's identity lives server-side, so a store that cannot be written is a
-    login that cannot succeed. Issuing the cookie anyway would hand the user a
-    credential no later request can resolve (#657 review, thread 16). Returns
-    (None, 503 response) in that case, so no cookie is set on either failure path.
-    """
-    try:
-        return create_session_cookie(user, db), None
-    except SessionStoreUnavailable:
-        logger.error("Session store unavailable during login for %s", user.email,
-                     exc_info=True)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"email": user.email, "reason": "session_store_unavailable"},
-        )
-        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
-        return None, JSONResponse(status_code=503, content=SESSION_STORE_UNAVAILABLE_DETAIL)
-    except SessionEpochUnreadable:
-        logger.error("Session epoch unreadable during login for %s", user.email,
-                     exc_info=True)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"email": user.email, "reason": "session_state_unavailable"},
-        )
-        return None, JSONResponse(status_code=503, content=SESSION_STATE_UNAVAILABLE_DETAIL)
+# Status code and body for each way the login workflow refuses a session.
+_LOGIN_REJECTION_RESPONSES: dict[LoginRejection, tuple[int, dict[str, str]]] = {
+    LoginRejection.NOT_ALLOWLISTED: (
+        403, {"error": "forbidden", "message": "Email not in the allowed users list."},
+    ),
+    LoginRejection.SESSION_STORE_UNAVAILABLE: (503, SESSION_STORE_UNAVAILABLE_DETAIL),
+    LoginRejection.SESSION_STATE_UNAVAILABLE: (503, SESSION_STATE_UNAVAILABLE_DETAIL),
+}
 
 
 @router.post("/auth/login")
-def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
+def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -> JSONResponse:
     """Authenticate a user by email against the allowed_users list."""
+    # The mode guard and throttle run here, before any allowlist read; the
+    # workflow itself is app/services/auth_service.py (#343).
     # Mode guard: reject simple login when SAML is active
     auth_mode = get_config_value(db, "auth_mode") or "simple"
     if auth_mode != "simple":
@@ -126,66 +104,20 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
             content={"error": "rate_limited", "message": "Too many login attempts. Please try again later."},
         )
 
-    # Normalise email for comparison
-    email_lower = normalize_email(body.email)
+    outcome = authenticate_simple_login(db, body.email, body.display_name)
+    if isinstance(outcome, LoginRejection):
+        status_code, content = _LOGIN_REJECTION_RESPONSES[outcome]
+        return JSONResponse(status_code=status_code, content=content)
 
-    # Check allowed_users from SystemConfig. frozenset, not list: O(1) membership
-    # instead of a linear scan on every login. Rebuilt per-request rather than
-    # cached at module scope -- admin_users/allowed_users are edited live via
-    # SystemConfig, and a cached copy would need its own invalidation story.
-    allowed_users = get_config_value(db, "allowed_users") or []
-    allowed_lower = frozenset(e.lower() for e in allowed_users)
-
-    if email_lower not in allowed_lower:
-        logger.warning("Login rejected for unrecognised email: %s", body.email)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"email": body.email, "reason": "not_allowlisted"},
-        )
-        return JSONResponse(
-            status_code=403,
-            content={"error": "forbidden", "message": "Email not in the allowed users list."},
-        )
-
-    # Determine role
-    admin_users = get_config_value(db, "admin_users") or []
-    admin_lower = frozenset(e.lower() for e in admin_users)
-    role = "admin" if email_lower in admin_lower else "user"
-
-    # Create or update User record
-    user = provision_user(
-        db=db,
-        email=email_lower,
-        display_name=body.display_name.strip(),
-        auth_method="simple",
-        role=role,
-    )
-
-    # Build response
+    user = outcome.user
     response_data = LoginResponse(
         user_id=user.id,
         email=user.email,
         display_name=user.display_name,
         role=user.role,
     )
-
-    token, failure = _mint_login_session(user, db)
-    if failure is not None:
-        return failure
-
     response = JSONResponse(content=response_data.model_dump())
-    response.set_cookie(value=token, **get_cookie_settings())
-
-    logger.info(
-        LOGIN_SUCCESS,
-        extra={
-            "user_id": user.id,
-            "email": user.email,
-            "role": user.role,
-            "auth_method": "simple",
-        },
-    )
-
+    response.set_cookie(value=outcome.token, **get_cookie_settings())
     return response
 
 

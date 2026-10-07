@@ -49,7 +49,7 @@ _UNREADABLE_STEM = "Vhorlspruit"
 
 def _write(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _synthetic_farm(root: Path) -> Path:

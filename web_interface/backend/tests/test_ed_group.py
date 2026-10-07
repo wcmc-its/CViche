@@ -1291,9 +1291,9 @@ class TestACSGroupCheck:
     """Integration tests for ACS handler ED group authorization wiring."""
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_user_not_in_access_group_denied(
         self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
     ):
@@ -1312,9 +1312,9 @@ class TestACSGroupCheck:
         assert "error=not_authorized" in response.headers["location"]
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_user_in_access_group_allowed(
         self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
     ):
@@ -1334,8 +1334,8 @@ class TestACSGroupCheck:
         cookies = {c.name: c for c in response.cookies.jar}
         assert COOKIE_NAME in cookies
 
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_ed_disabled_skips_check(
         self, mock_extract, mock_get_client, client, seed_saml_mode
     ):
@@ -1353,9 +1353,9 @@ class TestACSGroupCheck:
         assert response.headers["location"] == "/"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_staff_group_member_provisioned_as_staff(
         self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
     ):
@@ -1377,9 +1377,9 @@ class TestACSGroupCheck:
         assert db.query(User).filter_by(cwid="staff0002").one().role == "staff"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_ldap_unavailable_at_login(
         self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
     ):
@@ -1424,9 +1424,9 @@ class TestPartnerScopeAdmission:
                            follow_redirects=False)
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_allowed_scope_admitted_as_user_without_ed(
         self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
     ):
@@ -1437,9 +1437,9 @@ class TestPartnerScopeAdmission:
         assert db.query(User).filter_by(cwid="js1234@hss.edu").one().role == "user"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_unlisted_scope_denied(
         self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
     ):
@@ -2036,9 +2036,9 @@ class TestLoginPathBypassesCache:
     as the stale one."""
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_acs_passes_use_cache_false(
         self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
     ):
@@ -2059,8 +2059,8 @@ class TestLoginPathBypassesCache:
 
     @patch.dict(os.environ, _ED_ENV)
     @patch("app.ed_group_lookup._query_ed")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_acs_requeries_ed_despite_warm_live_cache(
         self, mock_extract, mock_get_client, mock_query, client, seed_ed_enabled
     ):
@@ -2091,8 +2091,8 @@ class TestLoginPathBypassesCache:
 
     @patch.dict(os.environ, _ED_ENV)
     @patch("app.ed_group_lookup._query_ed")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_acs_does_not_serve_stale_during_outage(
         self, mock_extract, mock_get_client, mock_query, client, seed_ed_enabled
     ):
@@ -2206,13 +2206,13 @@ class TestEmptyAccessGroupFailsClosed:
         assert response.json()["detail"]["error"] == "directory_unavailable"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_acs_redirects_without_calling_ldap(
         self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
     ):
-        """saml_routes.py guards ahead of the call, so no LDAP work is even
+        """saml_service.py guards ahead of the call, so no LDAP work is even
         attempted, and the browser sees directory_unavailable."""
         clear_cache()
         _blank_access_group(db)
@@ -2278,10 +2278,10 @@ class TestFetchEdDepartment:
 
 class TestAcsStoresDepartment:
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.fetch_ed_department", return_value="Pediatrics")
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.fetch_ed_department", return_value="Pediatrics")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_department_stored_on_login(
         self, mock_extract, mock_get_client, mock_check_ed, _mock_dept,
         client, db, seed_ed_enabled
@@ -2297,10 +2297,10 @@ class TestAcsStoresDepartment:
         assert db.query(User).filter(User.cwid == "test0001").one().department == "Pediatrics"
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.fetch_ed_department", return_value=None)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
-    @patch("app.api.saml_routes.extract_user_attrs")
+    @patch("app.services.saml_service.fetch_ed_department", return_value=None)
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    @patch("app.services.saml_service.extract_user_attrs")
     def test_missing_department_leaves_null_and_keeps_existing(
         self, mock_extract, mock_get_client, mock_check_ed, _mock_dept,
         client, db, seed_ed_enabled

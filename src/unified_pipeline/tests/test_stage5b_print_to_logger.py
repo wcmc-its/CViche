@@ -256,7 +256,7 @@ def test_run_stage5b_all_batches_fail_but_cache_enriched_does_not_raise(monkeypa
             str(input_path), output_path=str(output_path), verbose=False,
         )
 
-    stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
+    stats = json.loads(Path(result_path).read_text(encoding="utf-8"))["institution_enrichment_stats"]
     assert stats["entries_enriched"] == 1
     assert stats["llm_batches"] == 1
     assert stats["failed_batches"] == 1
@@ -300,7 +300,7 @@ def test_run_stage5b_partial_failure_counted_and_warned(monkeypatch, tmp_path, c
         )
 
     assert calls["n"] == 2
-    stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
+    stats = json.loads(Path(result_path).read_text(encoding="utf-8"))["institution_enrichment_stats"]
     assert stats["llm_batches"] == 2
     assert stats["failed_batches"] == 1
     assert stats["institutions_unresolved"] == 10
@@ -350,7 +350,7 @@ def test_run_stage5b_zero_llm_batches_does_not_raise(monkeypatch, tmp_path):
         verbose=False, refresh_cache=False,
     )
 
-    stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
+    stats = json.loads(Path(result_path).read_text(encoding="utf-8"))["institution_enrichment_stats"]
     assert stats["llm_batches"] == 0
     assert stats["failed_batches"] == 0
     assert stats["institutions_unresolved"] == 0
@@ -377,7 +377,7 @@ def test_run_stage5b_all_batches_succeed_stats_are_zero(monkeypatch, tmp_path):
         verbose=False, refresh_cache=True,
     )
 
-    stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
+    stats = json.loads(Path(result_path).read_text(encoding="utf-8"))["institution_enrichment_stats"]
     assert stats["llm_batches"] == 1
     assert stats["failed_batches"] == 0
     assert stats["institutions_unresolved"] == 0

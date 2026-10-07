@@ -1006,7 +1006,7 @@ def test_run_stage_4_5_keeps_high_scoring_existing_m1(monkeypatch, tmp_path):
 
     result_path = run_stage_4_5(str(inp), str(outp), verbose=True)
 
-    out = json.loads(Path(result_path).read_text())
+    out = json.loads(Path(result_path).read_text(encoding="utf-8"))
     assert out["research_summary"]["generation_method"] == "existing_content"
     assert out["research_summary"]["text"] == existing_text
     assert out["research_summary"]["m1_score"] == 0.9
@@ -1048,7 +1048,7 @@ def test_run_stage_4_5_regenerates_low_scoring_m1(monkeypatch, tmp_path):
 
     result_path = run_stage_4_5(str(inp), str(outp), verbose=True)
 
-    out = json.loads(Path(result_path).read_text())
+    out = json.loads(Path(result_path).read_text(encoding="utf-8"))
     assert out["research_summary"]["generation_method"] == "llm_generated"
     assert out["research_summary"]["text"] == "Newly generated narrative summary."
     assert out["research_summary"]["m1_score"] == 0.3
@@ -1082,7 +1082,7 @@ def test_run_stage_4_5_skips_scoring_when_no_existing_m1(monkeypatch, tmp_path):
 
     result_path = run_stage_4_5(str(inp), str(outp), verbose=False)
 
-    out = json.loads(Path(result_path).read_text())
+    out = json.loads(Path(result_path).read_text(encoding="utf-8"))
     assert out["research_summary"]["generation_method"] == "llm_generated"
     assert out["research_summary"]["text"] == "Generated from context only."
     assert out["research_summary"]["m1_score"] == 0.0
@@ -1230,7 +1230,7 @@ def test_run_stage_4_5_skips_the_llm_when_no_entry_reaches_the_context(monkeypat
     inp = _write_fields_json(tmp_path, "TEST08", _LOW_VALUE_ENTRIES,
                              cv_owner={"first_name": "Jane", "last_name": "Doe"})
 
-    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text())
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text(encoding="utf-8"))
 
     summary = out["research_summary"]
     assert summary["generation_method"] == stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT
@@ -1248,7 +1248,7 @@ def test_run_stage_4_5_blank_context_from_blank_valid_entries_also_skips(monkeyp
                {"taxonomy_code": "H", "text": "", "extracted_fields": {}}]
     inp = _write_fields_json(tmp_path, "TEST09", entries)
 
-    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text(encoding="utf-8"))
 
     assert out["context_used"]["entry_count"] == 2   # weighted entries exist ...
     assert out["research_summary"]["generation_method"] == stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT
@@ -1265,7 +1265,7 @@ def test_run_stage_4_5_withholds_a_refusal_reply_and_still_counts_its_cost(monke
         tmp_path, "TEST10",
         [{"taxonomy_code": "M2A", "text": "Grant", "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}])
 
-    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text(encoding="utf-8"))
 
     assert out["research_summary"]["generation_method"] == stage_4_5.GENERATION_METHOD_REFUSED
     assert out["research_summary"]["text"] == ""
@@ -1282,7 +1282,7 @@ def test_stage_6_renders_nothing_for_the_skipped_summary_run_stage_4_5_writes(mo
     out_path = run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)
 
     gen = WCMTemplateGenerator(verbose=False)
-    assert gen._fill_research_summary(json.loads(Path(out_path).read_text())) is False
+    assert gen._fill_research_summary(json.loads(Path(out_path).read_text(encoding="utf-8"))) is False
     assert gen.stats["entries_inserted"] == 0
 
 
@@ -1304,7 +1304,7 @@ def test_run_stage_4_5_records_each_call_the_fallback_served(monkeypatch, tmp_pa
         {"taxonomy_code": "M2A", "text": "Grant",
          "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}])
 
-    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text(encoding="utf-8"))
 
     assert out[STAGE4_5_FALLBACK_CALLS_KEY] == [
         {"call": "m1_relevance_score", "model": "example.fallback-model-1"},
@@ -1321,7 +1321,7 @@ def test_run_stage_4_5_writes_no_fallback_record_when_none_was_served(monkeypatc
         {"taxonomy_code": "M2A", "text": "Grant",
          "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}])
 
-    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text(encoding="utf-8"))
 
     assert STAGE4_5_FALLBACK_CALLS_KEY not in out
 
@@ -1353,7 +1353,7 @@ def _stub_calls(monkeypatch, *, score=None, generation=None):
 
 def _run(tmp_path, entries=_M1_AND_GRANT):
     inp = _write_fields_json(tmp_path, "TEST20", entries, cv_owner={"first_name": "Jane", "last_name": "Doe"})
-    return json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text())
+    return json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text(encoding="utf-8"))
 
 
 def test_score_call_failing_on_every_model_still_generates_the_summary(monkeypatch, tmp_path):

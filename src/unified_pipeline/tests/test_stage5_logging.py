@@ -105,7 +105,7 @@ def test_stage5_makes_no_print_calls_at_all():
     test_stage5_logging.py::test_stage5_makes_no_print_calls_at_all (assert
     [<lineno>] == []).
     """
-    tree = ast.parse(_STAGE5_PATH.read_text())
+    tree = ast.parse(_STAGE5_PATH.read_text(encoding='utf-8'))
     prints = [node.lineno for node in ast.walk(tree)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
               and node.func.id == 'print']

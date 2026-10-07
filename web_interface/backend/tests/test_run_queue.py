@@ -927,7 +927,7 @@ def test_dispatch_routes_stay_plain_def_not_async():
     instead of stalling the event loop for every other request on the pod."""
     import inspect
     from app.api.runs import start_run, retry_step
-    from app.api.admin_routes import get_queue_stats
+    from app.api.admin_routes.runs import get_queue_stats
 
     assert not inspect.iscoroutinefunction(start_run)
     assert not inspect.iscoroutinefunction(retry_step)
@@ -937,7 +937,8 @@ def test_dispatch_routes_stay_plain_def_not_async():
 def test_queue_stats_route_has_a_typed_response_model():
     """N4: the admin queue-stats route must declare response_model so its
     shape is validated and documented, not returned as an untyped dict."""
-    from app.api.admin_routes import router as admin_router, get_queue_stats
+    from app.api.admin_routes import router as admin_router
+    from app.api.admin_routes.runs import get_queue_stats
     from app.schemas import QueueStatsResponse
 
     route = next(r for r in admin_router.routes if r.endpoint is get_queue_stats)

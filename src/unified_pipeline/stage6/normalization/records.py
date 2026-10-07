@@ -20,7 +20,6 @@ which is normalization; move it to `routing/` when that package is created
 rather than building a package for one function now.
 """
 import re
-from typing import Dict, List, Optional, Tuple
 
 # Status vocabularies for grant_status_rebucket_target (#210, #575). Kept as
 # code, not config: the words change only when the function beside them does,
@@ -88,7 +87,7 @@ def _split_pipe_joined(line: str) -> list[str]:
     return [line]
 
 
-def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
+def split_fused_citation_entries(pubs: list[dict]) -> list[dict]:
     """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
     multiple citations, newline-separated or (#1237) joined by " | ".
 
@@ -110,7 +109,7 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     track-change, original text) is kept on the first line only, not replayed
     on each.
     """
-    out: List[Dict] = []
+    out: list[dict] = []
     for pub in pubs:
         fields = pub.get('extracted_fields') or {}
         fc = fields.get('formatted_citation')
@@ -150,7 +149,7 @@ def grant_status_is_empty_section_label(status: str | None) -> bool:
 
 def grant_status_rebucket_target(
     status: str, label: str = 'Status'
-) -> Tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """Map a grant's extracted status string to the funding bucket it belongs
     in (#210). Returns (target_code, reclassification_note); (None, None)
     when the status doesn't force a move. `label` names where the text came

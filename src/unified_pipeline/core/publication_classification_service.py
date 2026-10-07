@@ -32,7 +32,7 @@ class PublicationClassificationService:
         results = service.classify_publications_bulk(publications)
     """
 
-    def __init__(self, db_connection, api_key: str = None, classifier_version: str = "pubs-v1.0", verbose: bool = True):
+    def __init__(self, db_connection, api_key: str | None = None, classifier_version: str = "pubs-v1.0", verbose: bool = True):
         """
         Initialize the service.
 
@@ -261,7 +261,7 @@ class PublicationClassificationService:
             print(f"Error getting performance metrics: {e}")
             return {}
 
-    def record_user_correction(self, publication_id: str, correct_assignment: str, reason: str = None, user_id: str = "user"):
+    def record_user_correction(self, publication_id: str, correct_assignment: str, reason: str | None = None, user_id: str = "user"):
         """
         Record a user correction of a classification.
 

@@ -436,7 +436,7 @@ Full Swagger documentation is available at `http://localhost:8000/docs` when the
 | `POST` | `/api/run/{run_id}/cancel` | Yes | Cancel a running pipeline. |
 | `POST` | `/api/run/{run_id}/restart` | Yes | Create a new run using the same uploaded file. Inherits submission type. |
 | `POST` | `/api/run/{run_id}/retry/{step_number}` | Yes | Retry a failed step. |
-| `GET` | `/api/run/{run_id}/quality?step=N` | Yes | Data quality report for a specific pipeline step. |
+| `GET` | `/api/run/{run_id}/run-quality` | Admin or staff | Quality score breakdown and run-doctor findings. Either part is null when its artifact was never stored. |
 
 ### Step and Data Endpoints
 
@@ -577,7 +577,7 @@ web_interface/
 │   │   │   ├── steps.py            # Step details, output downloads, prompt logs
 │   │   │   ├── feedback_routes.py  # Feedback GET/POST, feedback status
 │   │   │   ├── consent_routes.py   # Consent GET/POST
-│   │   │   ├── admin_routes.py     # Admin dashboard APIs and CSV export
+│   │   │   ├── admin_routes/       # Admin dashboard APIs and CSV export (one router per domain)
 │   │   │   └── websocket.py        # Real-time pipeline streaming
 │   │   ├── pipeline/               # Pipeline orchestration
 │   │   │   ├── orchestrator.py     # Main executor

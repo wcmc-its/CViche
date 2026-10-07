@@ -73,7 +73,7 @@ def load_fields_json(db: Session, run_id: str, filename: str) -> object | None:
     (S3 in prod). None when the file is in neither place."""
     resolved = artifact_service.resolve_artifact(db, run_id, filename)
     if resolved.local_path is not None:
-        with open(resolved.local_path) as f:
+        with open(resolved.local_path, encoding="utf-8") as f:
             return json.load(f)
     try:
         return json.loads(get_storage().get_file(run_id, resolved.storage_key))
