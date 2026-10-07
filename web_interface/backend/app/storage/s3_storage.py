@@ -10,6 +10,7 @@ for local-only development.
 
 import logging
 import os
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from app.storage.base import (
@@ -22,6 +23,9 @@ from app.storage.base import (
     validate_run_id,
     validate_run_key,
 )
+
+if TYPE_CHECKING:
+    from botocore.client import BaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +104,33 @@ def _validate_s3_key_text(key: str, *, allow_empty: bool) -> None:
         raise ValueError("storage key must be non-empty for an object operation")
 
 
+def _default_s3_client() -> BaseClient:
+    """The production S3 client: SigV4, regional endpoint, bounded timeouts.
+
+    Force Signature Version 4. Without it, botocore falls back to the
+    global s3.amazonaws.com endpoint and signs presigned URLs with SigV2,
+    which S3 rejects for objects encrypted with SSE-KMS:
+      "Requests specifying Server Side Encryption with AWS KMS managed
+       keys require AWS Signature Version 4."
+    Pinning the region (from AWS_REGION, set by the IRSA webhook on EKS)
+    also keeps requests on the regional endpoint.
+    """
+    import boto3
+    from botocore.config import Config
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    return boto3.client(
+        "s3",
+        region_name=region,
+        config=Config(
+            signature_version="s3v4",
+            connect_timeout=S3_CONNECT_TIMEOUT_S,
+            read_timeout=S3_READ_TIMEOUT_S,
+            retries={"mode": "standard", "total_max_attempts": S3_TOTAL_ATTEMPTS},
+        ),
+    )
+
+
 class S3RunStorage(RunStorage):
     """Store run artifacts in Amazon S3.
 
@@ -111,10 +142,17 @@ class S3RunStorage(RunStorage):
         cviche/runs/A1B2C3/steps/3a/output.json
     """
 
-    def __init__(self, bucket: str | None = None, prefix: str | None = None):
-        import boto3
-        from botocore.config import Config
-
+    def __init__(
+        self,
+        bucket: str | None = None,
+        prefix: str | None = None,
+        *,
+        client: BaseClient | None = None,
+    ) -> None:
+        """``client`` injects a ready-made S3 client (a test stub, a moto
+        client, a client for another account). Left as None, the store
+        builds its own with ``_default_s3_client`` (PR #287 review, #298).
+        """
         from app.config_loader import get_config
         # Default to "" (falsy), NOT "local": an s3 backend with CVICHE_S3_BUCKET
         # unset must trip the guard below, not silently operate on a bucket
@@ -134,24 +172,7 @@ class S3RunStorage(RunStorage):
         # the configured default (PR #779 review, s3_storage.py item 5; #791).
         self._prefix = prefix if prefix is not None else s3_bucket_prefix
 
-        # Force Signature Version 4. Without it, botocore falls back to the
-        # global s3.amazonaws.com endpoint and signs presigned URLs with SigV2,
-        # which S3 rejects for objects encrypted with SSE-KMS:
-        #   "Requests specifying Server Side Encryption with AWS KMS managed
-        #    keys require AWS Signature Version 4."
-        # Pinning the region (from AWS_REGION, set by the IRSA webhook on EKS)
-        # also keeps requests on the regional endpoint.
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        self._s3 = boto3.client(
-            "s3",
-            region_name=region,
-            config=Config(
-                signature_version="s3v4",
-                connect_timeout=S3_CONNECT_TIMEOUT_S,
-                read_timeout=S3_READ_TIMEOUT_S,
-                retries={"mode": "standard", "total_max_attempts": S3_TOTAL_ATTEMPTS},
-            ),
-        )
+        self._s3 = client if client is not None else _default_s3_client()
 
     def _key_prefix(self) -> str:
         """The store-root segment before "runs/..." or a global key.
