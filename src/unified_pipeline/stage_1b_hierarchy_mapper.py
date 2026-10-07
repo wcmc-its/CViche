@@ -19,6 +19,7 @@ import bisect
 import json
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
@@ -102,6 +103,9 @@ def normalize_text(text: str) -> str:
 # listed so the set reads as the separators a CV uses, not as what survives
 # normalization.
 _LEADING_SEPARATOR_CHARS = "*-_= "
+
+# Element types that can carry a header line (from extract_unified_elements).
+_HEADER_LINE_TYPES = ("paragraph", "table_header")
 
 
 def is_header_match(expected_header: str, para_text: str, strict: bool = False) -> bool:
@@ -198,7 +202,7 @@ def _find_header_element(
         elem_text = elem.get('text', '')
 
         # Search in paragraphs AND table_header elements (from extract_unified_elements)
-        if elem.get('type') not in ('paragraph', 'table_header') or not elem_text:
+        if elem.get('type') not in _HEADER_LINE_TYPES or not elem_text:
             continue
 
         para_text = normalize_text(elem_text)
@@ -224,7 +228,10 @@ def _find_header_element(
 def find_header_in_sequence(
     elements: list[dict[str, Any]],
     hierarchy_sequence: list[str],
-    start_idx: int = 0
+    start_idx: int = 0,
+    end_idx: int | None = None,
+    partial_floor: int = 0,
+    excluded_headers: frozenset[str] = frozenset(),
 ) -> list[tuple[str, int]] | None:
     """
     Find a sequence of headers in the document elements starting from start_idx.
@@ -233,6 +240,9 @@ def find_header_in_sequence(
         elements: List of document elements from structure extractor
         hierarchy_sequence: List of header texts in order
         start_idx: Where to start searching
+        end_idx: Exclusive end of the search (default: end of the document)
+        partial_floor: The last header (the node itself) may match partially
+            only at or after this element index; an exact line is always taken
 
     Returns:
         List of (header_text, element_idx) tuples, or None if not found
@@ -246,6 +256,7 @@ def find_header_in_sequence(
     # Try to find the sequence
     matches: list[tuple[str, int]] = []
     current_search_idx = start_idx
+    search_end = len(elements) if end_idx is None else end_idx
 
     last = len(normalized_sequence) - 1
     for pos, expected_header in enumerate(normalized_sequence):
@@ -254,7 +265,8 @@ def find_header_in_sequence(
         # hit on its text sent the child to the next section's same-named line
         # (#916).
         hit = _find_header_element(
-            elements, expected_header, current_search_idx, len(elements),
+            elements, expected_header, current_search_idx, search_end,
+            partial_floor=partial_floor, excluded_headers=excluded_headers,
             exact_only=pos < last,
         )
         if hit is None:
@@ -273,22 +285,56 @@ def _is_fragment_hit(elements: list[dict[str, Any]], pos: int, expected_header: 
     return len(normalize_text(elements[pos].get('text', ''))) < len(expected_header)
 
 
+@dataclass(frozen=True)
+class ForwardScope:
+    """Where a node's forward search may look (#916).
+
+    `end` is the exclusive end of the forward search: the first line after the
+    nearest mapped ancestor's own line that carries a header coming after that
+    ancestor in the hierarchy (None: the end of the document). `followers` are
+    the normalized texts of the headers that come after this node in the
+    hierarchy (its later siblings and its ancestors' later siblings).
+    `partial_floor` is the element index a forward partial match may not sit
+    before; exact lines are not floored. `claimed` are the normalized texts of
+    every header in the hierarchy: a child's partial match never lands on a
+    line whose whole text is another header's, since that line is that
+    header's own.
+    """
+    end: int | None = None
+    followers: frozenset[str] = frozenset()
+    partial_floor: int = 0
+    claimed: frozenset[str] = frozenset()
+
+
+# A node searched with no range end, no followers, no floor and no claimed
+# lines: the behaviour before #916.
+_UNBOUNDED_SCOPE = ForwardScope()
+
+
 def _fallback_header_search(
     elements: list[dict[str, Any]],
     expected_header: str,
     start_search_idx: int,
     parent_idx: int,
     excluded_headers: frozenset[str],
+    scope: ForwardScope = _UNBOUNDED_SCOPE,
 ) -> int | None:
     """Plain header search for a node the sequence match could not place.
 
-    Forward from `start_search_idx` first. The hierarchy may not match document
-    order, so a miss, or a forward hit that is only a fragment of the header,
-    gives an exact paragraph behind the cursor the chance to win. After that the
-    backward search accepts a partial match only at or after the parent's own
-    line and never on a top-level heading (#916, #1178).
+    Forward from `start_search_idx` first, up to `scope.end` (the parent's
+    range), with forward partial matches floored at `scope.partial_floor`.
+    The hierarchy may not match document order, so a miss, or a forward hit
+    that is only a fragment of the header, gives an exact paragraph behind the
+    cursor the chance to win. After that the backward search accepts a partial
+    match only at or after the parent's own line and never on a top-level
+    heading (#916, #1178). Nothing past the parent's range is taken: the
+    same label in a later section is that section's line (#916).
     """
-    forward = _find_header_element(elements, expected_header, start_search_idx, len(elements))
+    forward_end = len(elements) if scope.end is None else scope.end
+    forward = _find_header_element(
+        elements, expected_header, start_search_idx, forward_end,
+        partial_floor=scope.partial_floor, excluded_headers=scope.claimed,
+    )
     if forward is not None and not _is_fragment_hit(elements, forward[0], expected_header):
         return forward[1]
     if start_search_idx > 0:
@@ -308,6 +354,46 @@ def _fallback_header_search(
     return None
 
 
+def _locate_node(
+    elements: list[dict[str, Any]],
+    current_path: list[str],
+    start_search_idx: int,
+    parent_idx: int,
+    top_level_headers: frozenset[str],
+    parent_mapped: bool,
+    scope: ForwardScope,
+) -> int | None:
+    """Element index of the last header in `current_path` (the node), or None.
+
+    Sequence-based matching with parent context, only when the parent has no
+    element of its own. A mapped parent is already the anchor: re-searching
+    its text from the cursor found a LATER line with the same name and dragged
+    the child past its own line (#916). A node with no usable sequence goes to
+    the fallback search. Only a child is kept off another header's exact line
+    (`scope.claimed`) and off a top-level heading: a top-level node keeps the
+    old partial matching.
+    """
+    is_child = len(current_path) > 1
+    if not is_child:
+        scope = replace(scope, claimed=frozenset())
+    search_sequence = current_path[-min(3, len(current_path)):]  # last 3 headers for context
+    if is_child and not parent_mapped:
+        matches = find_header_in_sequence(
+            elements, search_sequence, start_search_idx, scope.end, scope.partial_floor,
+            scope.claimed,
+        )
+        if matches:
+            return matches[-1][1]
+    return _fallback_header_search(
+        elements,
+        normalize_text(current_path[-1]),
+        start_search_idx,
+        parent_idx,
+        top_level_headers if is_child else frozenset(),
+        scope,
+    )
+
+
 def map_hierarchy_node(
     node: HierarchyNode,
     elements: list[dict[str, Any]],
@@ -316,6 +402,7 @@ def map_hierarchy_node(
     parent_idx: int = 0,
     top_level_headers: frozenset[str] = frozenset(),
     parent_mapped: bool = False,
+    scope: ForwardScope = _UNBOUNDED_SCOPE,
 ) -> tuple[MappedNode, int]:
     """
     Map a single hierarchy node and its children to element indices.
@@ -330,6 +417,10 @@ def map_hierarchy_node(
         top_level_headers: Normalized texts of the top-level headers. For a
             child, the backward fallback never partial-matches one of them.
         parent_mapped: True when the parent header has its own element index.
+        scope: The forward search's end (the parent's range), the headers
+            that follow this node in the hierarchy, the forward partial
+            floor, and the header texts a child's partial match may not
+            land on (#916).
 
     Returns:
         Tuple of (mapped_node, next_search_idx)
@@ -347,30 +438,10 @@ def map_hierarchy_node(
     element_idx: int | None = None
 
     if node_text and not is_synthetic:
-        # Sequence-based matching with parent context, only when the parent
-        # has no element of its own. A mapped parent is already the anchor:
-        # re-searching its text from the cursor found a LATER line with the
-        # same name and dragged the child past its own line (#916). A node
-        # with no usable sequence goes to the fallback search below.
-        search_sequence = current_path[-min(3, len(current_path)):]  # Use last 3 headers for context
-        use_sequence = len(search_sequence) > 1 and not parent_mapped
-        matches = (
-            find_header_in_sequence(elements, search_sequence, start_search_idx)
-            if use_sequence
-            else None
+        element_idx = _locate_node(
+            elements, current_path, start_search_idx, parent_idx,
+            top_level_headers, parent_mapped, scope,
         )
-
-        if matches:
-            # Found the sequence - use the last match (this node)
-            element_idx = matches[-1][1]
-        else:
-            element_idx = _fallback_header_search(
-                elements,
-                normalize_text(node_text),
-                start_search_idx,
-                parent_idx,
-                top_level_headers if parent_path else frozenset(),
-            )
 
     # Build mapped node
     mapped_node: MappedNode = {
@@ -391,8 +462,17 @@ def map_hierarchy_node(
         # because the LLM may have grouped items out of document order
         child_search_start = start_search_idx if is_synthetic else next_search_idx
         child_parent_idx = parent_idx if element_idx is None else element_idx
+        child_end = (
+            scope.end if element_idx is None
+            else _parent_range_end(elements, element_idx, scope.followers, _subtree_texts(node))
+        )
+        child_floor = scope.partial_floor if is_synthetic else 0
+        later_texts = _later_header_texts(node["children"])
 
-        for child in node["children"]:
+        for child, later in zip(node["children"], later_texts, strict=True):
+            child_scope = ForwardScope(
+                child_end, later | scope.followers, child_floor, scope.claimed
+            )
             mapped_child, child_next_idx = map_hierarchy_node(
                 child,
                 elements,
@@ -401,13 +481,20 @@ def map_hierarchy_node(
                 child_parent_idx,
                 top_level_headers,
                 element_idx is not None,
+                child_scope,
             )
             mapped_children.append(mapped_child)
 
             # For synthetic parents, each child searches from the same start
-            # For real parents, children search sequentially
+            # (the LLM may have grouped them out of document order), but a
+            # partial match may not sit before the last placed sibling: sibling
+            # sub-headings with no line of their own all took the first
+            # fragment line (#916). For real parents, children search
+            # sequentially.
             if not is_synthetic:
                 child_search_start = child_next_idx
+            elif mapped_child["element_idx"] is not None:
+                child_floor = max(child_floor, mapped_child["element_idx"] + 1)
 
         # Update next_search_idx to be after all children
         child_indices = [
@@ -419,6 +506,63 @@ def map_hierarchy_node(
         mapped_node["children"] = mapped_children
 
     return mapped_node, next_search_idx
+
+
+def _subtree_texts(node: HierarchyNode) -> frozenset[str]:
+    """Normalized text of the node and of every node under it."""
+    texts = {normalize_text(node.get("text", ""))}
+    for child in node.get("children") or []:
+        texts |= _subtree_texts(child)
+    return frozenset(texts)
+
+
+def _hierarchy_header_texts(hierarchy: list[HierarchyNode]) -> frozenset[str]:
+    """Normalized text of every header in the hierarchy that can carry a
+    line of its own (not synthetic, not empty)."""
+    texts: set[str] = set()
+    for node in hierarchy:
+        if not _is_synthetic_node(node):
+            texts.add(normalize_text(node.get("text", "")))
+        texts |= _hierarchy_header_texts(node.get("children") or [])
+    texts.discard("")
+    return frozenset(texts)
+
+
+def _later_header_texts(siblings: list[HierarchyNode]) -> list[frozenset[str]]:
+    """For each sibling, the normalized texts of the siblings after it that
+    can carry a line of their own (not synthetic, not empty)."""
+    texts = [
+        "" if _is_synthetic_node(n) else normalize_text(n.get("text", ""))
+        for n in siblings
+    ]
+    return [frozenset(t for t in texts[i + 1:] if t) for i in range(len(siblings))]
+
+
+def _parent_range_end(
+    elements: list[dict[str, Any]],
+    parent_idx: int,
+    followers: frozenset[str],
+    own_texts: frozenset[str],
+) -> int:
+    """Exclusive end of a mapped parent's range for its children's forward search.
+
+    The first line after the parent's own line whose whole text is a header
+    that follows the parent in the hierarchy. A follower with the same text as
+    the parent or one of its descendants is no stop: that line may be the
+    descendant's own. With no such line the range runs to the end of the
+    document, as before (#916).
+    """
+    stops = followers - own_texts
+    if not stops:
+        return len(elements)
+    for i in range(parent_idx + 1, len(elements)):
+        elem = elements[i]
+        if elem.get("type") not in _HEADER_LINE_TYPES:
+            continue
+        line = normalize_text(elem.get("text", "")).lstrip(_LEADING_SEPARATOR_CHARS)
+        if line in stops:
+            return i
+    return len(elements)
 
 
 def top_level_header_texts(hierarchy: list[HierarchyNode]) -> frozenset[str]:
@@ -988,9 +1132,11 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
         hierarchy_data.get("hierarchy", []), elements
     )
     top_level_headers = top_level_header_texts(top_level)
-    for node in top_level:
+    claimed = _hierarchy_header_texts(top_level)
+    for node, later in zip(top_level, _later_header_texts(top_level), strict=True):
         mapped_node, next_search_idx = map_hierarchy_node(
-            node, elements, [], next_search_idx, top_level_headers=top_level_headers
+            node, elements, [], next_search_idx, top_level_headers=top_level_headers,
+            scope=ForwardScope(followers=later, claimed=claimed),
         )
         mapped_hierarchy.append(mapped_node)
 
