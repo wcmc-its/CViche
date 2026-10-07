@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
@@ -141,7 +142,7 @@ class TestReadyz:
         assert body["checks"]["s3"]["ok"] is False
         assert "403" in body["checks"]["s3"]["error"]
 
-    def test_prod_overlay_pins_s3_over_auth_config(self, client, monkeypatch):
+    def test_prod_overlay_pins_s3_over_auth_config(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
         """#109: the prod overlay sets CVICHE_STORAGE_BACKEND=s3 as a container
         env var, which outranks auth_config.yaml. Even when the generated
         auth_config.yaml says local and names no bucket (an unset CodeBuild
