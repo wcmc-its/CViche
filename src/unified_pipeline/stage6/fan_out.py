@@ -47,7 +47,9 @@ as they stand, and every earlier child is its own record alone. The children the
 render everything the parent rendered plus the earlier records, so none of the
 guards above that compare a child against the entry's TEXT apply; only the
 ones about what a child can render do (a code missing from `_RENDERED_FIELDS`,
-a stage-5 rendering, a record with no rendered value). A declined list is
+a 5c `formatted_text` rendering, a record with no rendered value). A 5d
+citation does not decline the list: it formats one record, and goes to that
+record's child alone (#1243, `_citation_record`). A declined list is
 handed to the generic rules above as if that key were absent, so they decide
 what they decided before the key existed.
 """
@@ -258,6 +260,21 @@ _TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', '
 # citation). An entry that carries one already has a rendering of all its
 # records; a child copying it would repeat the whole list once per record.
 _FORMATTED_KEYS = ('formatted_text', 'formatted_citation')
+
+# #1243 (NDMRSO VYRDHN 607/613, EOAHMI LOOTTE 603/606/612): stage 5d formats
+# ONE citation per entry, from the entry's text, so an entry stage 4 split
+# into 2+ publication records carries a citation of one of them -- the first,
+# in every farm case -- while its scalars are the last. Declining that split
+# rendered the one citation and lost every other record. A stage-4 split now
+# fans out: the citation goes to the one record whose title it writes
+# (`_citation_record`), and every other record renders from its own fields.
+_FORMATTED_TEXT_KEY = 'formatted_text'
+_FORMATTED_CITATION_KEY = 'formatted_citation'
+# What 5d writes beside the citation (`apply_formatted_fields`); the
+# publication resolver trusts a citation only with this provenance.
+_CITATION_KEYS = (_FORMATTED_CITATION_KEY, 'formatting_source')
+# A publication record's title: `title`, or S4's `chapter_title`.
+_TITLE_KEYS = ('title', 'chapter_title')
 
 # Stage 4's free-text remark about the entry as a whole ("Entry contains three
 # tab-separated roles ..."). Not a field of any record, so children do not
@@ -782,9 +799,14 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     segment or built line, and without the parent's `_STAGE5_ENTRY_KEYS`: a
     scalar or an enrichment inherited from the last record would put that
     record's value on another one. Declined for a code whose section
-    renders the text rather than the fields, for an entry a stage-5 formatter
-    rendered whole, and when a record holds no value its section writes (its
-    row would be empty).
+    renders the text rather than the fields, for an entry stage 5c rendered
+    whole (`formatted_text`), and when a record holds no value its section
+    writes (its row would be empty).
+
+    #1243: stage 5d's `formatted_citation` (and its `formatting_source`)
+    stays only on the child of the record whose title it writes
+    (`_citation_record`); every other child, the last included, renders
+    from its own fields.
 
     #1445: a record keeps no dates its own line does not give it
     (`_unsourced_date_records`), and an earlier record whose row a later one
@@ -793,7 +815,7 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     code = str(entry.get('taxonomy_code'))
     rendered = _RENDERED_FIELDS.get(code)
     records = fields[records_key]
-    if rendered is None or any(fields.get(k) for k in _FORMATTED_KEYS):
+    if rendered is None or fields.get(_FORMATTED_TEXT_KEY):
         return None
     if not all(_renders_something(record, rendered) for record in records):
         return None
@@ -803,18 +825,42 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     records = [_without_dates(record) if i in unsourced else dict(record)
                for i, record in enumerate(records)]
     repeated = _repeated_rows(records, rendered, code)
+    cited = _citation_record(fields, records)
+    citation = {key: fields[key] for key in _CITATION_KEYS if key in fields}
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
-    earlier = [_child(bare, copy.deepcopy(record), text, records_key, i, len(records))
+    earlier = [_child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
+                      text, records_key, i, len(records))
                for i, (record, text) in enumerate(zip(records[:-1], texts))
                if i not in repeated]
     last = copy.deepcopy(dict(entry))
+    last_cited = cited == len(records) - 1
     last['extracted_fields'] = {key: value for key, value in last['extracted_fields'].items()
-                                if key != records_key}
+                                if key != records_key and (last_cited or key not in _CITATION_KEYS)}
     if len(records) - 1 in unsourced:
         last['extracted_fields'] = _without_dates(last['extracted_fields'])
     last[LAST_STAGE4_RECORD] = {'key': records_key, 'index': len(records) - 1,
                                 'count': len(records), OWN_TEXT_KEY: own_text}
     return [*earlier, last]
+
+
+def _title_words(text: object) -> str:
+    """`text`'s words, lowercased and space-joined: a title compared with the
+    citation that writes it, whatever its punctuation and quotes."""
+    return ' '.join(_TOKEN_RE.findall(norm(str(text or ''))))
+
+
+def _citation_record(fields: Mapping[str, Any],
+                     records: Sequence[Mapping[str, Any]]) -> int | None:
+    """The index of the one record whose title stage 5d's citation writes,
+    or None: no citation, no record's title in it, or several (a citation
+    of the whole list, which no single record may carry)."""
+    citation = _title_words(fields.get(_FORMATTED_CITATION_KEY))
+    if not citation:
+        return None
+    titles = [_title_words(next((record[key] for key in _TITLE_KEYS if record.get(key)), ''))
+              for record in records]
+    hits = [i for i, title in enumerate(titles) if title and f' {title} ' in f' {citation} ']
+    return hits[0] if len(hits) == 1 else None
 
 
 def _fan_out_stage4_records(entry: Mapping[str, Any], schema: frozenset[str],

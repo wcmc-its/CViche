@@ -354,6 +354,12 @@ Lints, ranked by the severity of the failure class they catch:
                           RINASX-14) and an undated role under a dated block
                           rendered with no dates (IEUPKK-14/-17), both INFO.
                           Reads stage 4 and the docx's rows
+14ae. stage4_unplaced_items a stage-4 batch reply item numbered past its
+                          taxonomy group's entries (a group of 2+), which
+                          stage 4 gave to no entry and stamped on the group
+                          (#1243, #1417): the record it holds is in no part
+                          of the output. WARN, one per run, naming each code
+                          and its entries. Reads stage 4 only; no score cap
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -540,6 +546,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_stage3b_fallback_ratio,
     lint_stage3b_second_pass_errors,
     lint_stage4_group_failures,
+    lint_stage4_unplaced_items,
     lint_stage_failure_recorded,
 )
 from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
@@ -693,6 +700,7 @@ KNOWN_LINTS = (
     "record_boundary",
     "citation_field_dropped",
     "group_header_context",
+    "stage4_unplaced_items",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -910,6 +918,11 @@ LINT_PREVALENCE = {
     # render of origin/dev fb466a0f, measured 2026-10-06 (46 of the 111
     # stored analysis/ runs). Same mixed-corpus caveat as above.
     "group_header_context": 0.365,
+    # stage4_unplaced_items (#1243): the stamp it reads is new (#1417), and
+    # none of the 112 stored analysis/ runs nor the eb/eo/ndm/x6 farms'
+    # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
+    # floor, as for research_summary_call_failed above.
+    "stage4_unplaced_items": 0.001,
 }
 
 
@@ -1463,6 +1476,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
 )
 
 

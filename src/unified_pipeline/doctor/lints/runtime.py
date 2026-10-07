@@ -48,6 +48,10 @@ nothing: the call's reply parsed and validated before it reached the run, so
 the score does not cap on it (#1174, Paul 2026-10-05); the finding is the
 provenance record of which model answered.
 
+`lint_stage4_unplaced_items` (#1243) is the stage-4 loss that sets no error
+at all: a batch reply item numbered past its group's entries, which stage 4
+can give to no entry (#1417) and so stamps on the group instead.
+
 `lint_stage_failure_recorded` (#1174) reports what `lint_pipeline_errors`
 cannot: a stage the driver recorded as failed in the stage-error record
 (#745), which the quality score reads for its fatal gate but the doctor never
@@ -83,6 +87,7 @@ from unified_pipeline.quality_score import (
     stage3b_fallback_ratio_exceeded,
     stage4_group_failures,
 )
+from unified_pipeline.stage4.schemas import STAGE4_UNPLACED_ITEMS_KEY
 from unified_pipeline.stage_errors import CallFailure, StageError
 
 from ..shared import _finding
@@ -220,6 +225,53 @@ def lint_stage4_group_failures(stage_4: dict) -> list[dict]:
         f"{failures.entries_rescued} and left {failures.entries_unrecovered} without "
         f"extracted fields — the quality score is capped at "
         f"{STAGE4_GROUP_FAILURE_CAP} (never GREEN)",
+        evidence)]
+
+
+# --------------------------------------------------------------------------
+# Reply items stage 4 could place in no entry (#1243).
+
+#: Entry starts shown per taxonomy code in the evidence.
+_UNPLACED_ENTRIES_SHOWN = 8
+
+
+def _unplaced_by_code(stage_4: dict) -> dict[str, tuple[int, list[object]]]:
+    """`{code: (items left out, element_idx_start of each stamped entry)}`.
+    Stage 4 stamps the same count on every entry of the group, so the count
+    is the largest stamp the code carries, not their sum."""
+    out: dict[str, tuple[int, list[object]]] = {}
+    for entry in stage_4.get("entries") or []:
+        count = entry.get(STAGE4_UNPLACED_ITEMS_KEY)
+        if not isinstance(count, int) or count <= 0:
+            continue
+        code = str(entry.get("taxonomy_code"))
+        items, starts = out.get(code, (0, []))
+        out[code] = (max(items, count), [*starts, entry.get("element_idx_start")])
+    return out
+
+
+def lint_stage4_unplaced_items(stage_4: dict) -> list[dict]:
+    """Reply items stage 4 placed in no entry: a batch reply for a taxonomy
+    group of 2+ entries numbered an item past the group's size, so its owner
+    is unknowable and stage 4 left it out, stamping
+    `STAGE4_UNPLACED_ITEMS_KEY` on every entry of the group (#1243, #1417).
+    Each such item is a record that reached no part of the output, and
+    nothing else reports it. WARN, one finding per run; the evidence names
+    each code, its count and the entries to read. An artifact from before
+    the stamp existed is not a finding."""
+    unplaced = _unplaced_by_code(stage_4)
+    if not unplaced:
+        return []
+    evidence = [
+        f"{code}: {items} item(s) left out; entries "
+        f"{', '.join(str(s) for s in starts[:_UNPLACED_ENTRIES_SHOWN])}"
+        for code, (items, starts) in sorted(unplaced.items())]
+    total = sum(items for items, _ in unplaced.values())
+    return [_finding(
+        "stage4_unplaced_items", "WARN",
+        f"stage 4 left {total} reply item(s) out of {len(unplaced)} taxonomy "
+        f"group(s): the reply numbered them past the group's entries, so no "
+        f"entry took them and the records they hold are not in the document",
         evidence)]
 
 

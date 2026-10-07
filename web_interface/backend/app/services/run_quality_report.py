@@ -578,6 +578,12 @@ LINT_COPY = {
         "appears on its own, a lead line sits apart from its list, or a role has no dates.",
         "Add the society, institution, course or dates from the line above to each flagged "
         "row, and delete a lead line that shows as a row of its own."),
+    "stage4_unplaced_items": LintCopy(
+        "Records read but not placed",
+        "While reading a group of entries, some records came back that could not be matched "
+        "to any entry, so they are not in the document.",
+        "Check the entries in the named categories against the source CV and add any missing "
+        "records."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

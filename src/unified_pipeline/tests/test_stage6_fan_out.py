@@ -1374,3 +1374,73 @@ class TestStage4RepeatedRows:
         records[1]['start_date'] = '2001-09'
         records[1]['end_date'] = '2002-06'
         assert len(_fan4(_stage4_entry(records, code='C', text='Resident, Ashby Hospital'))) == 2
+
+
+# --- #1243: stage 5d's one citation on an entry stage 4 split into records ---
+# NDMRSO VYRDHN 607/613: two tab-joined articles, split by stage 4; 5d wrote
+# one citation (of the first) and the split was declined, so the second
+# article never rendered. Invented authors, titles and journals.
+
+
+def _article(title, journal, authors='Zqowner A, Brack T'):
+    return {'authors': authors, 'year': '2006', 'title': title, 'journal': journal,
+            'volume': '5', 'issue': '1', 'pages': '10-19'}
+
+
+_TWO_ARTICLES = [_article('Lanterns in the orchard model.', 'Zqjournal Alpha'),
+                 _article('Copper weathering of the north arch.', 'Zqjournal Beta')]
+_TWO_ARTICLES_TEXT = ('Zqowner A, Brack T. 2006. Lanterns in the orchard model. Zqjournal Alpha 5(1):10-19.'
+                      '\tZqowner A, Brack T. 2006. Copper weathering of the north arch. '
+                      'Zqjournal Beta 5(1):10-19.')
+
+
+def _cited_entry(citation):
+    entry = _stage4_entry(copy.deepcopy(_TWO_ARTICLES), code='S1', text=_TWO_ARTICLES_TEXT)
+    entry['extracted_fields'].update({'formatted_citation': citation,
+                                      'formatting_source': 'stage_5d_llm'})
+    return entry
+
+
+_FIRST_CITATION = ('Zqowner A, Brack T. "Lanterns in the Orchard Model." '
+                   'Zqjournal Alpha. 2006;5(1):10-19.')
+
+
+class TestStage5dCitationOnASplitEntry:
+    def test_the_split_fans_out_and_the_citation_stays_with_its_record(self):
+        first, last = _fan4(_cited_entry(_FIRST_CITATION))
+        assert first['extracted_fields']['formatted_citation'] == _FIRST_CITATION
+        assert first['extracted_fields']['formatting_source'] == 'stage_5d_llm'
+        assert last['extracted_fields']['title'] == 'Copper weathering of the north arch.'
+        assert 'formatted_citation' not in last['extracted_fields']
+        assert 'formatting_source' not in last['extracted_fields']
+
+    def test_a_citation_of_the_last_record_stays_on_the_last_child(self):
+        citation = 'Zqowner A, Brack T. Copper weathering of the north arch. Zqjournal Beta. 2006.'
+        first, last = _fan4(_cited_entry(citation))
+        assert 'formatted_citation' not in first['extracted_fields']
+        assert last['extracted_fields']['formatted_citation'] == citation
+
+    @pytest.mark.parametrize('citation', [
+        'Zqowner A. An unrelated essay. Zqjournal Gamma. 2006.',
+        'Lanterns in the orchard model. Copper weathering of the north arch.',
+    ], ids=['no_title', 'both_titles'])
+    def test_a_citation_naming_no_one_record_goes_to_no_child(self, citation):
+        children = _fan4(_cited_entry(citation))
+        assert len(children) == 2
+        assert all('formatted_citation' not in c['extracted_fields'] for c in children)
+
+    def test_both_articles_reach_the_document(self, tmp_path):
+        from docx import Document
+
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+        source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+        source.write_text(json.dumps({'document_uid': 'TESTAA',
+                                      'entries': [_cited_entry(_FIRST_CITATION)]}))
+        WCMTemplateGenerator(verbose=False).generate(
+            str(source), str(target), research_summary_path=None)
+        body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+        assert 'Lanterns in the Orchard Model' in body
+        assert 'Copper weathering of the north arch' in body
+        assert body.count('Lanterns in the') == 1
