@@ -207,7 +207,7 @@ _MAX_SHORT_RANGE_YEARS = 50
 # L1, L2, M1, M2, N1, N3, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would
 # render only its built text, which does not carry the parent's scalars.
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
-    'B1': frozenset({'degree', 'discipline', 'institution', 'year'}),
+    'B1': frozenset({'advisor', 'degree', 'discipline', 'institution', 'year'}),
     'B2': frozenset({'institution', 'program_name', 'year'}),
     'C': frozenset({'end_date', 'institution', 'role', 'specialty', 'start_date', 'training_type'}),
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
