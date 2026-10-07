@@ -954,13 +954,13 @@ class TestAdminCsvExportStreaming:
     @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
     def test_response_is_produced_in_multiple_chunks(self, db, export_type, monkeypatch):
         import asyncio
-        import app.api.admin_routes as admin_routes
+        from app.api.admin_routes import exports
         import app.services.admin_export_service as admin_export_service
         _seed_export_fixture(db)
         monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
 
         async def collect():
-            resp = await admin_routes.export_csv(
+            resp = await exports.export_csv(
                 export_type, db=db,
                 viewer=SimpleNamespace(email="admin@example.com", role="admin"))
             return [c async for c in resp.body_iterator]
