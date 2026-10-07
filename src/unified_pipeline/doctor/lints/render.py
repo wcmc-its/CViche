@@ -2734,9 +2734,12 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
 #                             (society, employer, teaching) that name none;
 #                             their rows do not show the header's name
 #   role_without_holder       a line that is a bare role and its dates
-#                             ('Chair 2010-2011') rendered as the role alone:
-#                             the course, committee or society it was a role
-#                             in is the line above it (RINASX-06)
+#                             ('Chair 2010-2011') rendered as the role alone,
+#                             without the course, committee or society it was
+#                             a role in (RINASX-06). The finding names the
+#                             first role, not the line above: that line may
+#                             be a date alone or a sibling (RGUNJV 2987,
+#                             DTFNOR 31)
 #   header_coded_unlike_list  an undated lead line coded unlike the dated
 #                             list below it, which shares one code: the lead
 #                             line renders alone in one section and its list
@@ -2762,8 +2765,8 @@ _GROUP_SHAPE_MESSAGES = MappingProxyType({
     GROUP_SHAPE_CHILDREN_LOST_HEADER: "a group header's name (an organization or "
                                       "institution) is missing from the rows of the "
                                       "lines under it",
-    GROUP_SHAPE_ROLE_WITHOUT_HOLDER: "a role renders alone: what it was a role in is the "
-                                     "line above it",
+    GROUP_SHAPE_ROLE_WITHOUT_HOLDER: "a role renders alone, without the course, committee "
+                                     "or society it was held in",
     GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST: "a lead line is coded unlike the dated list under "
                                           "it, so it renders apart from its list",
     GROUP_SHAPE_PARENT_DATES_LOST: "a role under a dated entry renders with no dates: the "
@@ -2787,7 +2790,7 @@ _GROUP_FAMILIES = MappingProxyType({
 })
 
 #: The fields that hold only a role, and the extra date fields a role line
-#: carries ('1975-2000, 2005-2012').
+#: carries (a second span after the first).
 _GROUP_ROLE_FIELDS = frozenset({"role", "leadership_role", "teaching_role",
                                 "membership_type"})
 _GROUP_EXTRA_DATE_FIELDS = frozenset({"additional_dates", "additional_periods"})
@@ -3058,8 +3061,13 @@ class _GroupHit(NamedTuple):
 def _group_message(hit: _GroupHit) -> tuple[str, str, list[str]]:
     """(severity, message, evidence) of one finding, quoting up to
     GROUP_EVIDENCE_LIMIT of its lines."""
-    count = ("" if hit.shape == GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST else
-             f"; {len(hit.members)} entr{'y' if len(hit.members) == 1 else 'ies'} below it")
+    plural = len(hit.members) != 1
+    if hit.shape == GROUP_SHAPE_HEADER_CODED_UNLIKE_LIST:
+        count = ""
+    elif hit.shape == GROUP_SHAPE_ROLE_WITHOUT_HOLDER:
+        count = f"; {len(hit.members)} role line{'s' if plural else ''}"
+    else:
+        count = f"; {len(hit.members)} entr{'ies' if plural else 'y'} below it"
     return (GROUP_HEADER_SEVERITY[hit.shape],
             f"entry {hit.subject.element_idx} ({hit.subject.code}): {hit.shape}: "
             f"{_GROUP_SHAPE_MESSAGES[hit.shape]}{count}",
@@ -3087,22 +3095,25 @@ def _children_lost_header_hits(entries: list[_GroupEntry], rows: list[_RenderedR
 
 def _role_without_holder_hits(entries: list[_GroupEntry], rows: list[_RenderedRow],
                                   reported: set[int]) -> list[_GroupHit]:
-    """One finding per run of bare roles, named by the line above them."""
+    """One finding per run of bare roles under a line of their heading,
+    named by the run's first role. Not by the line above: that line may be
+    a date alone or a sibling of the roles, not what they were held in
+    (RGUNJV 2987, DTFNOR 31)."""
     hits = []
     taken: set[int] = set()
     above: _GroupEntry | None = None
     run: list[tuple[_GroupEntry, str]] = []
     for index, entry in enumerate(entries):
         if not _is_bare_role(entry) or index in reported:
-            if run and above is not None:
-                hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, above, run))
+            if run:
+                hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, run[0][0], run))
             above, run = entry, []
             continue
         row = _bare_role_row(entry, rows, taken)
         if row is not None and above is not None and above.heading == entry.heading:
             run.append((entry, row.text))
-    if run and above is not None:
-        hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, above, run))
+    if run:
+        hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, run[0][0], run))
     return hits
 
 
