@@ -1422,12 +1422,13 @@ class TestStage5dCitationOnASplitEntry:
 
     @pytest.mark.parametrize('citation', [
         'Zqowner A. An unrelated essay. Zqjournal Gamma. 2006.',
-        'Lanterns in the orchard model. Copper weathering of the north arch.',
+        'Lanterns in the orchard model; Copper weathering of the north arch. Zqmeeting; Ashby.',
     ], ids=['no_title', 'both_titles'])
-    def test_a_citation_naming_no_one_record_goes_to_no_child(self, citation):
-        children = _fan4(_cited_entry(citation))
-        assert len(children) == 2
-        assert all('formatted_citation' not in c['extracted_fields'] for c in children)
+    def test_a_citation_naming_no_one_record_declines_the_split(self, citation):
+        # EOAHMI GHCIXA S8: a citation of every record renders them all, with
+        # a venue and a place no S8 field holds; splitting it lost both.
+        entry = _cited_entry(citation)
+        assert _fan4(entry) == [entry]
 
     def test_both_articles_reach_the_document(self, tmp_path):
         from docx import Document

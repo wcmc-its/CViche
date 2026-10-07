@@ -48,7 +48,7 @@ render everything the parent rendered plus the earlier records, so none of the
 guards above that compare a child against the entry's TEXT apply; only the
 ones about what a child can render do (a code missing from `_RENDERED_FIELDS`,
 a 5c `formatted_text` rendering, a record with no rendered value). A 5d
-citation does not decline the list: it formats one record, and goes to that
+citation that formats one record does not decline the list: it goes to that
 record's child alone (#1243, `_citation_record`). A declined list is
 handed to the generic rules above as if that key were absent, so they decide
 what they decided before the key existed.
@@ -265,9 +265,13 @@ _FORMATTED_KEYS = ('formatted_text', 'formatted_citation')
 # ONE citation per entry, from the entry's text, so an entry stage 4 split
 # into 2+ publication records carries a citation of one of them -- the first,
 # in every farm case -- while its scalars are the last. Declining that split
-# rendered the one citation and lost every other record. A stage-4 split now
+# rendered the one citation and lost every other record. Such a split now
 # fans out: the citation goes to the one record whose title it writes
 # (`_citation_record`), and every other record renders from its own fields.
+# A citation that writes several records' titles already renders them all,
+# with venue and place their fields may not hold (EOAHMI GHCIXA S8: a
+# fan-out lost "Vancouver, Canada"), so that split, and one whose citation
+# writes no record's title, is still declined.
 _FORMATTED_TEXT_KEY = 'formatted_text'
 _FORMATTED_CITATION_KEY = 'formatted_citation'
 # What 5d writes beside the citation (`apply_formatted_fields`); the
@@ -806,7 +810,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     #1243: stage 5d's `formatted_citation` (and its `formatting_source`)
     stays only on the child of the record whose title it writes
     (`_citation_record`); every other child, the last included, renders
-    from its own fields.
+    from its own fields. A citation that writes no single record's title
+    declines the split, as every citation did before.
 
     #1445: a record keeps no dates its own line does not give it
     (`_unsourced_date_records`), and an earlier record whose row a later one
@@ -819,13 +824,15 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
         return None
     if not all(_renders_something(record, rendered) for record in records):
         return None
+    cited = _citation_record(fields, records)
+    if fields.get(_FORMATTED_CITATION_KEY) and cited is None:
+        return None
     texts = _child_texts(entry.get('text'), records)
     own_text = texts[-1] if _fields_carry_text(entry, records) else None
     unsourced = _unsourced_date_records(records, entry.get('text'), code)
     records = [_without_dates(record) if i in unsourced else dict(record)
                for i, record in enumerate(records)]
     repeated = _repeated_rows(records, rendered, code)
-    cited = _citation_record(fields, records)
     citation = {key: fields[key] for key in _CITATION_KEYS if key in fields}
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
     earlier = [_child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
