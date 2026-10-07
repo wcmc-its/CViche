@@ -2656,6 +2656,19 @@ GRANT_HEAD_LABEL_MIN_SHARE = 1 / 3
 #: sub-heading line ("Funded Training Grants").
 GRANT_ORPHAN_MIN_WORDS = 12
 GRANT_ORPHAN_MIN_DETAIL_FIELDS = 2
+#: A list's line-order shape is a sponsor or number line, then the title,
+#: held by as many entries as a label shape needs. Any entry may hold it, not
+#: the first only: RVTAQT's first grant is a whole record of another order.
+#: A title is found by its first GRANT_TITLE_PREFIX_CHARS characters with
+#: whitespace dropped, and only when it has GRANT_TITLE_MIN_CHARS: stage 4
+#: trims or re-punctuates a long title's tail, not its opening words.
+GRANT_TITLE_PREFIX_CHARS = 20
+GRANT_TITLE_MIN_CHARS = 8
+#: A sponsor or number shorter than this ("VA", "NIH") is found inside too
+#: many titles to place a line.
+GRANT_SOURCE_MIN_CHARS = 3
+#: A line or cell break inside an entry's text: tab, newline, or " | ".
+_GRANT_SEGMENT_RE = re.compile(r"\t|\n|\s\|\s")
 
 
 class GrantEntry(NamedTuple):
@@ -2685,13 +2698,15 @@ def _grant_entry(raw: dict) -> GrantEntry:
         frozenset(_grant_label(m.group(1)) for m in _GRANT_LINE_LABEL_RE.finditer(text)))
 
 
-def _grant_lists(stage4: dict) -> list[list[GrantEntry]]:
-    """Runs of consecutive grant entries filed under one heading: the lists
-    stage 2 cut into records."""
+def _heading_lists(stage4: dict, grants: bool) -> list[list[GrantEntry]]:
+    """Runs of consecutive entries filed under one heading, the lists stage 2
+    cut into records: of grant codes when `grants`, else of every other code.
+    An entry of the other kind closes a run."""
     lists: list[list[GrantEntry]] = []
     heading = None
     for raw in stage4.get("entries", []):
-        if raw.get("taxonomy_code") not in GRANT_CODES:
+        code = raw.get("taxonomy_code")
+        if not code or (code in GRANT_CODES) != grants:
             heading = None
             continue
         this = tuple(raw.get("hierarchy") or [])
@@ -2700,6 +2715,10 @@ def _grant_lists(stage4: dict) -> list[list[GrantEntry]]:
         heading = this
         lists[-1].append(_grant_entry(raw))
     return lists
+
+
+def _grant_lists(stage4: dict) -> list[list[GrantEntry]]:
+    return _heading_lists(stage4, grants=True)
 
 
 def _filled(fields: Mapping[str, object], keys: tuple[str, ...] | str) -> bool:
@@ -2749,6 +2768,65 @@ def _head_label_drift(grants: list[GrantEntry]) -> dict[int, str]:
             for i, grant in enumerate(grants) if grant.head_label in inner}
 
 
+class GrantLineOrder(NamedTuple):
+    """Where a grant entry's own values sit among its lines: does its first
+    line hold its title, its sponsor or number, and does a later line hold
+    the title or a sponsor or number."""
+    title_first: bool
+    source_first: bool
+    title_later: bool
+    source_later: bool
+
+
+def _grant_line_order(grant: GrantEntry) -> GrantLineOrder:
+    raw_segments = _GRANT_SEGMENT_RE.split(grant.text.strip())
+    segments = [squash(segment) for segment in raw_segments]
+    head = _GRANT_HEAD_LABEL_RE.match(raw_segments[0])
+    first = squash(raw_segments[0][head.end():]) if head else segments[0]
+    rest = "".join(segments[1:])
+    title = squash(grant.fields.get(GRANT_TITLE_FIELD) or "")[:GRANT_TITLE_PREFIX_CHARS]
+    if len(title) < GRANT_TITLE_MIN_CHARS:
+        title = ""
+    sources = [squash(grant.fields.get(key) or "") for key in GRANT_SOURCE_FIELDS]
+    sources = [source for source in sources if len(source) >= GRANT_SOURCE_MIN_CHARS]
+    return GrantLineOrder(
+        bool(title) and first.startswith(title),
+        any(source in segments[0] for source in sources),
+        bool(title) and title in rest,
+        any(source in rest for source in sources))
+
+
+def _titleless(grant: GrantEntry) -> bool:
+    return (_filled(grant.fields, GRANT_SOURCE_FIELDS)
+            and not _filled(grant.fields, GRANT_TITLE_FIELD))
+
+
+def _line_order_drift(grants: list[GrantEntry]) -> dict[int, str]:
+    """In a list whose records open with a sponsor or number line and carry
+    the title on a later line, a run of entries that each open with a title
+    and then a sponsor or number line, starting right after an entry that
+    names a sponsor or number but no title: the cut gave each title to the
+    next record's sponsor (X6 RVTAQT-01). The titleless entry is the record
+    whose title opens the run; an entry of that order with no titleless
+    record before the run is a record of its own."""
+    orders = [_grant_line_order(grant) for grant in grants]
+    shaped = sum(order.source_first and order.title_later for order in orders)
+    if shaped < max(GRANT_HEAD_LABEL_MIN_COUNT, GRANT_HEAD_LABEL_MIN_SHARE * len(grants)):
+        return {}
+    reasons = {}
+    for i, order in enumerate(orders[1:], start=1):
+        if not (order.title_first and order.source_later and not order.source_first):
+            continue
+        if i - 1 in reasons:
+            reasons[i] = ("its records open with a sponsor or number line; this entry, like "
+                          "the one before it, opens with a title and then a sponsor line")
+        elif _titleless(grants[i - 1]):
+            reasons[i - 1] = f"it holds no title, and entry {grants[i].element_idx} opens with one"
+            reasons[i] = ("its records open with a sponsor or number line, this entry with a "
+                          "title and then a sponsor line: the title of the record before it")
+    return reasons
+
+
 def _orphans(grants: list[GrantEntry]) -> dict[int, str]:
     """An entry after the first that names no sponsor, number or title but
     carries a record's detail; and a list's last entry, when it holds only a
@@ -2784,7 +2862,8 @@ def lint_grant_boundary(stage4: dict) -> list[dict]:
     findings = []
     for grants in _grant_lists(stage4):
         reasons: dict[int, list[str]] = {}
-        for shape in (_split_pairs, _personnel_heads, _head_label_drift, _orphans):
+        for shape in (_split_pairs, _personnel_heads, _head_label_drift, _line_order_drift,
+                      _orphans):
             for i, reason in shape(grants).items():
                 reasons.setdefault(i, []).append(reason)
         for i in sorted(reasons):
@@ -2794,6 +2873,58 @@ def lint_grant_boundary(stage4: dict) -> list[dict]:
                 f"entry {grant.element_idx} ({grant.code}): grant record boundary off -- "
                 f"{'; '.join(reasons[i])} (#1226)",
                 [grant.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- record_boundary ---------------------------------------------------------
+#
+# The same stage-2 cut outside the grant lists: an entry that opens with a
+# labelled line ("Current position:", "Description:", "Inventors:") its list's
+# records carry inside them holds the tail of the record before it (X6 IEUPKK
+# 438/444/466/467, a mentee's current position opening the next mentee's
+# entry, class E5). The record before renders without that line, or both
+# render with it. Report-only. Grant lists are `grant_boundary`'s.
+
+#: A label is a list's inner line when this many of its other entries carry
+#: it after their first line, and this share of the list, and at least twice
+#: as many as open with it (a mentee list that drifted twice: 6 carry it,
+#: 2 open with it).
+RECORD_INNER_LABEL_MIN_COUNT = 2
+RECORD_INNER_LABEL_MIN_SHARE = 1 / 3
+RECORD_INNER_LABEL_MIN_RATIO = 2
+
+
+def _inner_label_heads(entries: list[GrantEntry]) -> dict[int, str]:
+    reasons = {}
+    for i, entry in enumerate(entries[1:], start=1):
+        label = entry.head_label
+        others = [other for j, other in enumerate(entries) if j != i]
+        carriers = sum(label in other.line_labels and other.head_label != label
+                       for other in others)
+        openers = sum(other.head_label == label for other in others)
+        if (carriers >= max(RECORD_INNER_LABEL_MIN_COUNT,
+                            RECORD_INNER_LABEL_MIN_SHARE * len(entries))
+                and carriers >= RECORD_INNER_LABEL_MIN_RATIO * openers):
+            reasons[i] = (f"it opens with '{label}:', a line {carriers} of its list's records "
+                          f"carry inside them: the tail of the record before it")
+    return reasons
+
+
+def lint_record_boundary(stage4: dict) -> list[dict]:
+    """A non-grant list stage 2 cut one line off (X6 class E5): an entry after
+    the first that opens with a labelled line its siblings carry mid-record.
+    WARN, one finding per entry. Reads stage 4 only. Not judged: an
+    unlabelled line on the wrong side of a cut (IEUPKK 113, 924), whose
+    field-order test measured mostly false positives (doctor/PRECISION.md,
+    X6-grant)."""
+    findings = []
+    for entries in _heading_lists(stage4, grants=False):
+        for i, reason in sorted(_inner_label_heads(entries).items()):
+            entry = entries[i]
+            findings.append(_finding(
+                "record_boundary", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): record boundary off -- {reason}",
+                [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
 
 
@@ -3146,21 +3277,52 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
 # - owner_lead_as_co_i: an unlabelled author-list grant whose first or only
 #   name is the owner, rendered with an empty PI cell and the owner among the
 #   co-investigators (QTATUP 529, 533, 537).
+#
+# Five more from the X6 batch autopsy (class E32, wrong-field values on
+# grants), each verified there and missed by the dev-246 doctor:
+#
+# - owner_also_co_i: the owner is listed under Co-Investigators while the
+#   role row states a role other than co-I (IEUPKK 257-342: Co-PI or Mentor),
+#   or states none and the owner's own co-investigator item carries a lead
+#   role ("<owner> (Site PI)", RVTAQT 223).
+# - role_in_title: `title` holds the owner's roles as list items ("<project>,
+#   Director Core B., Mentor Project IV") and no role is stated (RINASX 405).
+# - owner_pi_role_empty: the rendered PI cell names the owner and "Your
+#   role:" is empty (RVTAQT 260, 273).
+# - owner_pi_other_role: the rendered PI cell names only the owner beside a
+#   role that is not the grant's PI: a co-, site- or sub-PI, a co-I, a mentor
+#   (KJJVVO 168-178, the stage-6 PI auto-fill #1457 stopped).
+# - pi_cell_from_title: the rendered PI cell is a run of the project title's
+#   own words (RINASX 396, "<title> - Human and Animal Studies, PI", the
+#   label parse #1418 stopped).
+#
+# The last two are regression guards on current dev: the stage-6 causes are
+# fixed, and they fire on documents rendered before the fix.
 
 ROLE_SHAPE_CONTRADICTED = "contradicted"
 ROLE_SHAPE_PI_CELL_EMPTY = "pi_cell_empty"
 ROLE_SHAPE_PI_ALSO_CO_I = "pi_also_co_i"
 ROLE_SHAPE_PI_FROM_COLLABORATOR = "pi_from_collaborator"
 ROLE_SHAPE_OWNER_LEAD_AS_CO_I = "owner_lead_as_co_i"
-#: Each shape's severity, from its measured precision (RC-ROLE2 in
-#: doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked hits,
-#: INFO below either bar.
+ROLE_SHAPE_OWNER_ALSO_CO_I = "owner_also_co_i"
+ROLE_SHAPE_ROLE_IN_TITLE = "role_in_title"
+ROLE_SHAPE_OWNER_PI_ROLE_EMPTY = "owner_pi_role_empty"
+ROLE_SHAPE_OWNER_PI_OTHER_ROLE = "owner_pi_other_role"
+ROLE_SHAPE_PI_CELL_FROM_TITLE = "pi_cell_from_title"
+#: Each shape's severity, from its measured precision (RC-ROLE2 and X6-role
+#: in doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked
+#: hits, INFO below either bar.
 ROLE_SHAPE_SEVERITY = MappingProxyType({
     ROLE_SHAPE_CONTRADICTED: "WARN",
     ROLE_SHAPE_PI_CELL_EMPTY: "WARN",
     ROLE_SHAPE_PI_ALSO_CO_I: "INFO",
     ROLE_SHAPE_PI_FROM_COLLABORATOR: "INFO",
     ROLE_SHAPE_OWNER_LEAD_AS_CO_I: "INFO",
+    ROLE_SHAPE_OWNER_ALSO_CO_I: "WARN",
+    ROLE_SHAPE_ROLE_IN_TITLE: "INFO",
+    ROLE_SHAPE_OWNER_PI_ROLE_EMPTY: "WARN",
+    ROLE_SHAPE_OWNER_PI_OTHER_ROLE: "WARN",
+    ROLE_SHAPE_PI_CELL_FROM_TITLE: "INFO",
 })
 
 #: Any word that labels a role on a grant, in normalised text: "PI", "P.I.",
@@ -3172,6 +3334,9 @@ _ANY_ROLE_WORD_RE = re.compile(
 #: "with Dr. X", "with Drs. X and Y": X is a collaborator, not a PI.
 _WITH_COLLABORATOR_RE = re.compile(
     r"(?<![a-z])with\s+(?:(?:drs?|mr|mrs|ms|prof|professor)\.?\s+)?(?P<names>[^;:$()]{1,80})")
+#: The fewest words a PI cell read as a run of the title needs: one word of
+#: a title is as often a person's surname ("The Lee Cohort").
+_PI_FROM_TITLE_MIN_WORDS = 2
 #: Splits a `co_investigators` value into one name per person.
 _PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|\band\b)\s*")
 #: Words in a person's name that do not identify them.
@@ -3240,6 +3405,78 @@ def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
     return owner_at is not None and all(at is None or owner_at < at for at in others)
 
 
+#: A lead role on the owner's own co-investigator item: "(Site PI)", "PI",
+#: "Co-PI", "Principal Investigator", "Director", "Mentor". Not a co-I or a
+#: bare "Investigator", which is what the Co-Investigators row says anyway.
+_LEAD_ROLE_WORD_RE = re.compile(
+    r"(?<![a-z])(?:p\.?\s?i|pis|mpi|principal investigators?|director|mentor)(?![a-z])")
+#: A co-investigator role anywhere in a stated role ("Co-Investigator/Mentor",
+#: "Investigator and Associate Director", IZJADE 433): the owner then
+#: belongs in the Co-Investigators row.
+_CO_I_ROLE_WORD_RE = re.compile(
+    r"(?<![a-z])(?:co-?(?:investigators?|is?)|(?<!principal )investigators?)(?![a-z])")
+#: A list item of a title that is a role, not part of the project's name:
+#: ", Director Core B.", "; Mentor Project IV", ", Co-Investigator". Not
+#: "Investigator-Initiated", which names a kind of trial, nor a bare "PI",
+#: which a title uses to name a subproject's PI (", PI <other>)", XELRLZ 138).
+_TITLE_ROLE_ITEM_RE = re.compile(
+    r"[,;]\s*(?:co-?)?(?:director|mentor|principal investigator|investigator"
+    r"|project leader|core leader)(?![\w-])")
+
+
+#: A role that makes the owner someone other than the grant's PI: a co-,
+#: site- or sub-PI, or a co-investigator.
+_NOT_THE_PI_ROLE_RE = re.compile(
+    r"(?<![a-z])(?:(?:co|site|sub|subcontract)[\s-]*(?:p\.?\s?i|principal investigator)"
+    r"|principal investigator of (?:an? |the )?sub-?contract"
+    r"|co-?investigators?|co-?is?)(?![a-z])")
+#: A PI-equivalent role left once the qualified forms are cut out: "PI",
+#: "MPI", "PD/PI", "Program Director", "Principle Investigator". With one,
+#: the owner in the PI cell is right ("co-investigator; PI of project 2").
+_PI_EQUIVALENT_ROLE_RE = re.compile(
+    r"(?<![a-z])(?:p\.?\s?i|mpi|pd|principa?le? investigators?|program director)(?![a-z])")
+
+
+def _role_not_the_pi(role: str) -> bool:
+    """`role` names the owner as a co-, site- or sub-PI or a co-I, and as no
+    kind of PI besides."""
+    text = norm(role)
+    if not _NOT_THE_PI_ROLE_RE.search(text):
+        return False
+    return not _PI_EQUIVALENT_ROLE_RE.search(_NOT_THE_PI_ROLE_RE.sub(" ", text))
+
+
+def _stated_role_text(fields: Mapping[str, object]) -> str:
+    """The role stage 6 renders in "Your role:" (`pi_role or role`)."""
+    return str(fields.get("pi_role") or fields.get("role") or "").strip()
+
+
+def _owner_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
+                     owner: frozenset[str]) -> bool:
+    """The owner is one of the people `co_investigators` lists, while the
+    stated role is a lead role (a PI of any kind, a director, a mentor), or
+    no role is stated and the owner's own item names one. Another stated role
+    ("Program Partner", NDXXAD 411) may share the row with its co-holders. Not
+    a list headed by the PI (the source's author line copied whole, farm
+    web204), which `_pi_also_co_i` spares too."""
+    items = [item for item in _PERSON_SPLIT_RE.split(str(fields.get("co_investigators") or ""))
+             if _person_key(item) & owner]
+    keys = _co_investigator_keys(fields)
+    if not items or (pi_key and keys and keys[0] == pi_key):
+        return False
+    stated = norm(_stated_role_text(fields))
+    if stated:
+        return (_LEAD_ROLE_WORD_RE.search(stated) is not None
+                and not _CO_I_ROLE_WORD_RE.search(stated) and ":" not in stated)
+    return any(_LEAD_ROLE_WORD_RE.search(norm(item)) for item in items)
+
+
+def _role_in_title(fields: Mapping[str, object]) -> bool:
+    """No role is stated and the title carries a role as a list item."""
+    title = norm(str(fields.get("title") or ""))
+    return not _stated_role_text(fields) and _TITLE_ROLE_ITEM_RE.search(title) is not None
+
+
 def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
                       owner: frozenset[str]) -> tuple[str, str] | None:
     """The first role shape one grant entry shows, as (shape, what it says),
@@ -3262,6 +3499,13 @@ def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
         return (ROLE_SHAPE_OWNER_LEAD_AS_CO_I,
                 "the CV owner is the first name on an unlabelled grant but renders only "
                 "as a co-investigator, with no PI")
+    if _owner_also_co_i(fields, pi_key, owner):
+        return (ROLE_SHAPE_OWNER_ALSO_CO_I,
+                "the CV owner is listed as a co-investigator, but the owner's role is "
+                f"{_stated_role_text(fields) or 'a lead role the co-investigator row carries'}")
+    if _role_in_title(fields):
+        return (ROLE_SHAPE_ROLE_IN_TITLE,
+                "the project title carries the owner's role, and 'Your role:' is empty")
     return None
 
 
@@ -3276,34 +3520,72 @@ def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
     return tables
 
 
-def _entry_index_by_title(stage4: dict) -> dict[str, object]:
-    """element_idx_start of the first grant entry per normalised title."""
-    by_title: dict[str, object] = {}
+def _grant_entry_by_title(stage4: dict) -> dict[str, Mapping[str, object]]:
+    """The first grant entry per normalised title."""
+    by_title: dict[str, Mapping[str, object]] = {}
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") in GRANT_CODES and isinstance(fields, Mapping):
             title = norm(str(fields.get("title") or fields.get("study_title") or ""))
             if title:
-                by_title.setdefault(title, entry.get("element_idx_start"))
+                by_title.setdefault(title, entry)
     return by_title
 
 
-def _empty_pi_cells(stage4: dict, table_rows: list[list[list[str]]]) -> list[dict]:
-    """A pi_cell_empty finding per rendered grant table whose role row says
-    PI and whose PI row is empty."""
-    by_title = _entry_index_by_title(stage4)
+def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
+                      extracted_pi: str) -> tuple[str, str] | None:
+    """The first role shape one rendered grant table shows, as (shape, what
+    it says), or None: pi_cell_empty, then the three render shapes the X6
+    batch added. The owner is read off the PI cell by surname word, the way
+    `_entry_role_shape` reads `pi_name`. `extracted_pi` is the table's
+    entry's `pi_name`: a PI cell stage 4 extracted as a person is not a
+    title run, even where the title names that person (a fellowship titled
+    after its holder, NDMRSO CAGLNY 118)."""
+    pi_cell, role = cells[PI_NAME_LABEL], cells.get(YOUR_ROLE_LABEL, "")
+    if not pi_cell:
+        if _stated_role(role) == ROLE_PI:
+            return (ROLE_SHAPE_PI_CELL_EMPTY,
+                    f"'Your role:' is {role}, but 'Name of Principal Investigator:' is empty")
+        return None
+    pi_keys = [key for key in map(_person_key, _PERSON_SPLIT_RE.split(pi_cell)) if key]
+    names_owner = [bool(key & owner) for key in pi_keys]
+    if any(names_owner) and not role:
+        return (ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
+                "'Name of Principal Investigator:' names the CV owner, and 'Your role:' is empty")
+    if names_owner and all(names_owner) and _role_not_the_pi(role):
+        return (ROLE_SHAPE_OWNER_PI_OTHER_ROLE,
+                f"'Name of Principal Investigator:' names only the CV owner, but 'Your role:' "
+                f"is {role}")
+    title = norm(cells.get(PROJECT_TITLE_LABEL, ""))
+    pi_text = norm(pi_cell)
+    if (not any(names_owner) and pi_text != norm(extracted_pi)
+            and len(pi_text.split()) >= _PI_FROM_TITLE_MIN_WORDS
+            and re.search(rf"(?<!\w){re.escape(pi_text)}(?!\w)", title)):
+        return (ROLE_SHAPE_PI_CELL_FROM_TITLE,
+                "'Name of Principal Investigator:' is a run of the project title's words")
+    return None
+
+
+def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
+                         owner: frozenset[str], reported: set[object]) -> list[dict]:
+    """A finding per rendered grant table that shows a role shape. A table
+    whose entry already has an entry finding is reported only for
+    pi_cell_empty, which predates the others and was always reported beside
+    them."""
+    by_title = _grant_entry_by_title(stage4)
     findings = []
     for cells in _grant_tables(table_rows):
-        role = cells.get(YOUR_ROLE_LABEL, "")
-        if cells[PI_NAME_LABEL] or _stated_role(role) != ROLE_PI:
-            continue
         title = cells.get(PROJECT_TITLE_LABEL, "")
-        idx = by_title.get(norm(title))
+        entry = by_title.get(norm(title), {})
+        fields = entry.get("extracted_fields", {})
+        shape = _table_role_shape(cells, owner, str(fields.get("pi_name") or ""))
+        idx = entry.get("element_idx_start")
+        if not shape or (idx in reported and shape[0] != ROLE_SHAPE_PI_CELL_EMPTY):
+            continue
         where = f"entry {idx}" if idx is not None else "a grant table"
         findings.append(_finding(
-            "role_consistency", ROLE_SHAPE_SEVERITY[ROLE_SHAPE_PI_CELL_EMPTY],
-            f"{where}: 'Your role:' is {role}, but 'Name of Principal Investigator:' "
-            f"is empty ({ROLE_SHAPE_PI_CELL_EMPTY}, #1403)",
+            "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+            f"{where}: {shape[1]} ({shape[0]}, #1403)",
             [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
 
@@ -3312,25 +3594,27 @@ def lint_role_consistency(stage4: dict,
                           table_rows: list[list[list[str]]] | None = None) -> list[dict]:
     """A grant table that misstates who led the grant (#1403). One finding
     per grant entry, for the first shape it shows (see the shapes above),
-    plus one per rendered grant table whose role says PI and whose PI cell is
-    empty (only when the docx was read). The owner is
+    plus one per rendered grant table for the first render shape it shows
+    (only when the docx was read; see `_table_role_findings`). The owner is
     `cv_owner.last_name`; with none, no shape that names the owner fires.
-    Not judged: an empty `pi_role` against the source's label (stage 6 then
-    names the owner from `pi_name`), a co-PI, or text that gives the owner
-    both roles."""
+    Not judged from stage 4: an empty `pi_role` against the source's label
+    (the render shape owner_pi_role_empty reads that off the table), a
+    co-PI, or text that gives the owner both roles."""
     owner = _owner_surname_words(stage4)
     findings = []
+    reported: set[object] = set()
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
             continue
         shape = _entry_role_shape(entry, fields, owner)
         if shape:
+            reported.add(entry.get("element_idx_start"))
             findings.append(_finding(
                 "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
                 f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
                 f"{shape[1]} ({shape[0]}, #1403)",
                 [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
     if table_rows is not None:
-        findings.extend(_empty_pi_cells(stage4, table_rows))
+        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
     return findings
