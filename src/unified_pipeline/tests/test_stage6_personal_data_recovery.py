@@ -1888,3 +1888,46 @@ def test_a_number_too_short_to_pair_routes_by_the_whole_text():
     from unified_pipeline.stage6.sections import personal_data
     text = "home: 9 private lane 555-0112\toffice: 1 sample way"
     assert personal_data._phone_text_for_routing("12", text) is text
+
+
+# --------------------------------------------------------------------------
+# #1431 (NDMRSO ZEIGYO 1, REOYVH 0): a running title in cells, and the CV's
+# own date that stage 3b moved from T to A, are not recovered orphans
+# --------------------------------------------------------------------------
+
+_CV_DATE_REASONING = ("[T-validation reclassified from T] Dated fragment likely "
+                      "corresponds to CV date/preparation date.")
+
+
+def test_running_title_and_cv_date_are_not_recovered(tmp_path):
+    title = "Example School of Medicine\tStandardized Curriculum Vitae\tJane Q. Sample, MD"
+    cv_date = dict(_a("April 2020", idx=1), classification_reasoning=_CV_DATE_REASONING)
+    keeper = _a("Foreign Languages: Spanish, French", idx=2)
+    items = _list_item_texts_after(tmp_path, [_a(title, idx=0), cv_date, keeper], _SAMPLE_OWNER)
+    assert "Foreign Languages: Spanish, French" in items
+    assert not any("Curriculum Vitae" in item or item == "April 2020" for item in items)
+
+
+def test_month_year_a_orphan_without_the_cv_date_verdict_is_recovered(tmp_path):
+    plain = dict(_a("April 2020"), classification_reasoning="[T-validation reclassified from T] Date stamp.")
+    assert "April 2020" in _list_item_texts_after(tmp_path, [plain], _SAMPLE_OWNER)
+
+
+def test_labelled_email_already_in_personal_data_is_not_recovered(tmp_path):
+    """X6 UXBHHF 47: a running footer repeats the work email that Personal Data
+    already renders in its own cell, so the whole line is never on the page."""
+    contact = _a("Jane Sample 1 Example Way Exampleton, ZZ 00000 Ph (w): 555-0100 jsample@example.edu",
+                 {"name": "Jane Sample", "email": "jsample@example.edu", "phone_work": "555-0100"}, idx=0)
+    footer = _a("Email: jsample@example.edu",
+                {"email": "jsample@example.edu", "institutional_email": "jsample@example.edu"}, idx=47)
+    items = _list_item_texts_after(tmp_path, [contact, footer], _SAMPLE_OWNER)
+    assert "Email: jsample@example.edu" not in items
+
+
+def test_labelled_email_the_page_does_not_show_is_still_recovered(tmp_path):
+    contact = _a("Jane Sample 1 Example Way Exampleton, ZZ 00000 Ph (w): 555-0100 jsample@example.edu",
+                 {"name": "Jane Sample", "email": "jsample@example.edu", "phone_work": "555-0100"}, idx=0)
+    footer = _a("Email: jq.other@example.org",
+                {"email": "jq.other@example.org", "institutional_email": "jq.other@example.org"}, idx=47)
+    items = _list_item_texts_after(tmp_path, [contact, footer], _SAMPLE_OWNER)
+    assert "Email: jq.other@example.org" in items

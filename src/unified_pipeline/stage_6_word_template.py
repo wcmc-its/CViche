@@ -236,6 +236,8 @@ from unified_pipeline.stage6.sections.appendix import (
     build_appendix_diversion_warnings,
     is_page_furniture,
     is_t_validation_recoded_m1,
+    labelled_email,
+    reclassified_structural_reason,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 from unified_pipeline.stage6.sorting import (  # noqa: F401
@@ -3540,7 +3542,10 @@ Now analyze the text above:"""
           appending them would be pure duplication. A banner the page holds in
           another form ("Name: <owner>"), and a running header (the owner's
           name with a page number or a Word field code), are skipped by
-          `is_page_furniture` with *owner_tokens* (#1221).
+          `is_page_furniture` with *owner_tokens* (#1221), and so is an entry
+          stage 3b moved out of T while naming a structural kind its text has
+          (`reclassified_structural_reason`, #1431: the CV's own date), and
+          a labelled email address the page already shows (`labelled_email`).
         - A PII-withheld entry renders its RESIDUAL text -- `entry['text']`
           after `run_pii_pass` (#820 piece 2, `pii_pass.py`) has already cut
           only the withheld fragment(s) out of it (`_cut_spans`), not the
@@ -3608,6 +3613,11 @@ Now analyze the text above:"""
             if not text:
                 continue
             if _squash(text) in haystack or is_page_furniture(text, owner_tokens):
+                continue
+            if reclassified_structural_reason(raw_text, entry.get('classification_reasoning'), owner_tokens):
+                continue
+            email = labelled_email(text)
+            if email and _squash(email) in haystack:
                 continue
             batch.append((text, 'A', 0))
 
