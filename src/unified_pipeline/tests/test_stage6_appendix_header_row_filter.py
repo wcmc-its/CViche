@@ -1473,3 +1473,126 @@ def test_fill_appendix_drops_the_owners_running_header(tmp_path, caplog):
     text = "\n".join(p.text for p in doc.paragraphs)
     assert "Example Leftover Society Membership" in text
     assert "Curriculum Vitae 21" not in text
+
+
+# ---------------------------------------------- #1431: furniture after #1364
+# Shapes the NDMRSO batch found surviving in the Appendix. Invented text only.
+
+def _reclassified(kind_sentence):
+    return f"[T-validation reclassified from T] {kind_sentence}"
+
+
+@pytest.mark.parametrize("text", [
+    "· · · · · · · · · ·", "·  ·  ·  ·  ·", "•  •  •  •  •", "…  …  …  …  …",
+])
+def test_spaced_dot_leader_is_a_rule_line_when_t_coded(text):
+    assert _sig(text, None) == DROP_RULE_LINE
+    assert _sig(text, None, code="K1") is None
+
+
+@pytest.mark.parametrize("text", ["· · · ·", "· · x · · ·", "Sample · · · · ·", ". . . . . 12"])
+def test_short_or_mixed_dot_leaders_survive(text):
+    assert _sig(text, None) != DROP_RULE_LINE
+
+
+@pytest.mark.parametrize("text, sentence", [
+    ("7/16/18", "Stray date fragment with no context."),
+    ("As of 21 April 2023", "Date marker indicating the CV update date."),
+    ("(As of 3rd March 2019)", "Revision date stamp."),
+    ("(As of 7/16/18)", "Date stamp."),
+])
+def test_two_digit_year_and_day_first_date_stamps_are_dropped(text, sentence):
+    assert _sig(text, _confirmed(sentence)) == DROP_DATE_STAMP
+
+
+@pytest.mark.parametrize("text", [
+    "7-16-18",  # hyphens with a two-digit year read as a range
+    "7/16/18 Sample Annual Meeting",
+    "21 April 2023 Example Society Lecture",
+    "7/16",
+])
+def test_new_date_shapes_keep_a_record_or_a_range(text):
+    assert _sig(text, _confirmed("Stray date fragment.")) is None
+
+
+@pytest.mark.parametrize("text, sentence, code, reason", [
+    ("Period Fellowship/Scholarship Project Grad Student",
+     "Table header for graduate student awards under student supervision.", "N3", DROP_COLUMN_HEADER),
+    ("Semester Project Undergraduate",
+     "Table header for undergraduate student research activities.", "N3", DROP_COLUMN_HEADER),
+    ("SAMPLE PUBLICATIONS (CONTINUED)",
+     "Continuation header for the Sample Publications section.", "S1", DROP_PAGE_FURNITURE),
+    ("Sample Talks (cont'd)", "Continued heading for sample talks.", "R", DROP_PAGE_FURNITURE),
+    ("Professional Experience", "Section header for experience entries.", "B1", DROP_SECTION_HEADER),
+])
+def test_structural_line_3b_moved_out_of_t_is_dropped_with_both_signals(text, sentence, code, reason):
+    assert _sig(text, _reclassified(sentence), code=code) == reason
+
+
+@pytest.mark.parametrize("text, reasoning, code", [
+    # The reclassified verdict names no structural kind.
+    ("Semester Project Undergraduate", _reclassified("Mentee research project."), "N3"),
+    ("SAMPLE PUBLICATIONS (CONTINUED)", _reclassified("Publication list entry."), "S1"),
+    # The kind is named but the text is a record, not that shape.
+    ("Sample Project Grant 2019", _reclassified("Table header for grants."), "M2A"),
+    ("Served on the sample review committee (continued)",
+     _reclassified("Continuation header for service."), "P1"),
+    # The structural verdict without 3b's reclassified tag is not a signal.
+    ("Semester Project Undergraduate", "Table header for undergraduate research.", "N3"),
+    ("Semester Project Undergraduate", _confirmed("Table header row."), "N3"),
+])
+def test_moved_out_of_t_keeps_what_lacks_either_signal(text, reasoning, code):
+    assert _sig(text, reasoning, code=code) is None
+
+
+def test_month_year_alone_drops_only_under_a_cv_date_verdict():
+    cv_date = _reclassified("Dated fragment likely the CV date/preparation date.")
+    assert appendix_module.reclassified_structural_reason("April 2020", cv_date) == DROP_DATE_STAMP
+    assert appendix_module.reclassified_structural_reason(
+        "April 2020", _reclassified("Date stamp.")) is None
+    assert appendix_module.reclassified_structural_reason(
+        "April 2020 Example Award", cv_date) is None
+    # The T path reads the same CV-date kind; a plain stamp verdict still keeps it.
+    assert _sig("April 2020", _confirmed("CV preparation date.")) == DROP_DATE_STAMP
+    assert _sig("April 2020", _confirmed("Date stamp.")) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Date of this résumé: February 9, 2009",
+    "Date of this resume: 2/9/2009",
+    "Résumé updated March 2011",
+])
+def test_resume_date_line_is_page_furniture(text):
+    assert _sig(text, None) == DROP_PAGE_FURNITURE
+
+
+@pytest.mark.parametrize("text", [
+    "Résumé writing workshop, Example University, 2009",
+    "Date of this sample review: February 9, 2009",
+])
+def test_resume_word_needs_a_furniture_only_line(text):
+    assert _sig(text, None) != DROP_PAGE_FURNITURE
+
+
+@pytest.mark.parametrize("text", [
+    "Example University School of Medicine\tStandardized Curriculum Vitae\tJane Q. Doe, MD",
+    "Example University School of Medicine: Standardized Curriculum Vitae — Jane Q. Doe, MD",
+    "Curriculum Vitae | Jane Q. Doe, MD",
+    "Example Institute | Curriculum Vitae | Page 3",
+])
+def test_running_title_cells_are_page_furniture(text):
+    assert appendix_module.is_page_furniture(text, _OWNER_TOKENS)
+
+
+@pytest.mark.parametrize("text, tokens", [
+    # Not the owner's name.
+    ("Example University\tCurriculum Vitae\tPat Roe, MD", _OWNER_TOKENS),
+    ("Example University\tCurriculum Vitae\tJane Q. Doe, MD", OwnerTokens()),
+    # No CV-title cell, two leftover cells, a digit in the leftover, four cells.
+    ("Example University\tSample Department\tJane Q. Doe, MD", _OWNER_TOKENS),
+    ("Example University\tSample Lab\tCurriculum Vitae\tJane Q. Doe", _OWNER_TOKENS),
+    ("Example Hall Room 12\tCurriculum Vitae\tJane Q. Doe", _OWNER_TOKENS),
+    ("Sample Department\tExample University\tCurriculum Vitae", _OWNER_TOKENS),
+])
+def test_running_title_needs_a_title_cell_and_an_owner_or_page_cell(text, tokens):
+    assert not appendix_module.is_page_furniture(text, tokens)
