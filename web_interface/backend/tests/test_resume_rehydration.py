@@ -13,6 +13,7 @@ recycle failed with "No input available for Stage 6". Resume now:
 Cost accounting continues from the persisted per-step costs of the kept
 stages (those before the effective resume point).
 """
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,7 +83,7 @@ def _seed_steps(db, complete_through, cost_each=1.0):
 
 def _write(path: Path, body: str = "{}"):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
 
 def _run_prepare(db, tmp_path, start_step, storage):
@@ -169,9 +170,11 @@ def test_nothing_available_falls_back_to_full_recompute(db, tmp_path):
     assert orch.total_cost == pytest.approx(0.0)
 
 
-def test_storage_error_is_swallowed_and_treated_as_missing(db, tmp_path):
+def test_storage_error_is_logged_and_treated_as_missing(db, tmp_path, caplog):
     """A storage backend that raises on get_file must not crash resume; the
-    output is treated as missing and the resume point backs up."""
+    output is treated as missing and the resume point backs up. The failure
+    is logged with the stage, the run and its traceback -- it used to be
+    `except Exception: pass`, which left a misconfigured S3 untraceable (#305)."""
     _seed_steps(db, complete_through=LAST_STEP - 1)
     paths = _output_paths(tmp_path)
     # Only the first stage exists locally; everything else is gone.
@@ -182,12 +185,29 @@ def test_storage_error_is_swallowed_and_treated_as_missing(db, tmp_path):
         def get_file(self, run_id, key):
             raise RuntimeError("s3 unreachable")
 
-    orch, _, effective = _run_prepare(db, tmp_path, LAST_STEP, _BoomStorage())
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.orchestrator"):
+        orch, _, effective = _run_prepare(db, tmp_path, LAST_STEP, _BoomStorage())
 
     # Backs up to step 2 (first missing output after the one present locally).
     assert effective == 2
     assert set(orch.stage_outputs) == {first_stage}
     assert orch.total_cost == pytest.approx(1.0)
+    [record] = [r for r in caplog.records if "Could not rehydrate stage" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert f"stage {STAGE_BY_STEP[2]} output for run {RUN_ID}" in record.getMessage()
+    assert record.exc_info and str(record.exc_info[1]) == "s3 unreachable"
+
+
+def test_object_absent_from_storage_is_not_logged_as_a_failure(db, tmp_path, caplog):
+    """FileNotFoundError is the expected "never mirrored" case: it backs up
+    like any gap, and only the back-up's own info line reports it."""
+    _seed_steps(db, complete_through=LAST_STEP - 1)
+
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.orchestrator"):
+        _, _, effective = _run_prepare(db, tmp_path, LAST_STEP, _FakeStorage())
+
+    assert effective == 1
+    assert not [r for r in caplog.records if "Could not rehydrate stage" in r.getMessage()]
 
 
 def test_stage_error_record_rehydrated_from_storage(db, tmp_path):

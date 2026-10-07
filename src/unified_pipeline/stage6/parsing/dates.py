@@ -17,7 +17,6 @@ nothing in this file may import from either.
 import datetime
 from types import MappingProxyType
 import re
-from typing import Dict
 
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
@@ -182,7 +181,7 @@ def _year_of_calendar_invalid_date(date_str: str) -> int | None:
     return None
 
 
-def _get_entry_date_range(entry: Dict) -> tuple:
+def _get_entry_date_range(entry: dict) -> tuple:
     """Extract (start_date, end_date) strings from an entry for dedup comparison.
 
     A record that states no start or end but one `date` (a talk, an award, a

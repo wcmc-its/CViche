@@ -29,7 +29,7 @@ from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
 from types import MappingProxyType
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.validators.grant_status_corrector import (
@@ -163,7 +163,7 @@ _FUNDING_BOUNDARY_TITLES = frozenset({
 })
 
 
-def _entry_status(entry: Dict) -> Optional[str]:
+def _entry_status(entry: dict) -> str | None:
     """The entry's grant status: the stage-4 field when the vocabulary
     `grant_status_rebucket_target` (what `lint_bucket_status` judges by)
     recognises it, else the labelled fragment in the raw text. Stage 4 has no
@@ -179,7 +179,7 @@ def _entry_status(entry: Dict) -> Optional[str]:
 def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     """Per-bucket Haystack of everything rendered under each of stage 6's
     funding subsection headers."""
-    segments: Dict[str, List[Tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
+    segments: dict[str, list[tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
     current = None
     for kind, text in blocks:
         stripped = str(text).strip()
@@ -197,7 +197,7 @@ def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     return {code: _haystacks(seg) for code, seg in segments.items()}
 
 
-def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_bucket_status(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """Grant status (extracted field, else the 'Status:' label in the raw
     entry text) vs the funding subsection the grant actually rendered under.
     Stage 6 rebuckets mis-bucketed grants at render time (#214), so the
@@ -250,7 +250,7 @@ _YEAR_EDGE_LINE_RE = re.compile(
     r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
 
 
-def lint_under_extraction(stage4: Dict) -> List[Dict]:
+def lint_under_extraction(stage4: dict) -> list[dict]:
     """Large multi-record entries whose stage-4 field extraction covered
     almost none of the text: the rest of the records silently vanish."""
     findings = []
@@ -591,10 +591,10 @@ def _classified_entry_rendered(entry: dict, haystacks: Haystack, lines: list[str
     return _entry_rendered(entry.get("text"), haystacks.text, haystacks.tokens, shared)
 
 
-def lint_classified_unrendered(stage3b: Dict,
-                               blocks: List[Tuple[str, str]],
+def lint_classified_unrendered(stage3b: dict,
+                               blocks: list[tuple[str, str]],
                                stage4: dict | None = None,
-                               stage5b: dict | None = None) -> List[Dict]:
+                               stage5b: dict | None = None) -> list[dict]:
     """Taxonomy codes classified at 3b none of whose entries appear anywhere
     in the stage-6 output (paragraphs or tables). Skipped: 'T' (appendix
     catch-all) and 'M1', which stage 6 never renders verbatim when a research
@@ -611,7 +611,7 @@ def lint_classified_unrendered(stage3b: Dict,
     shared = _shared_entry_pieces(stage3b.get("entries", []))
     evidence = _stage4_evidence(stage4, stage5b)
     lines = h.text.split(_LINE_SENTINEL)
-    by_code: Dict[str, List[Dict]] = {}
+    by_code: dict[str, list[dict]] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
@@ -705,7 +705,7 @@ def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
     return by_code
 
 
-def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
+def lint_taxonomy_code_coverage(stage3b: dict) -> list[dict]:
     """Entries classified into a taxonomy code stage 6 has no render route
     for at all -- they land in the Appendix by construction, regardless of
     confidence or content (#529, e.g. N2 "Institutional Training Grants and
@@ -880,9 +880,9 @@ def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:
     return rendered_items is not None and bool(_unrendered_identity(decision, rendered_items))
 
 
-def lint_dedup_drops(report: Dict,
+def lint_dedup_drops(report: dict,
                      blocks: list[tuple[str, str]] | None = None,
-                     stage_5d: Mapping | None = None) -> List[Dict]:
+                     stage_5d: Mapping | None = None) -> list[dict]:
     """Stage-6 dedup decisions that may have dropped a distinct record.
 
     WARN: the dropped text is NOT near-fully contained in the kept entry, so at

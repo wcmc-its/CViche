@@ -536,7 +536,7 @@ def test_process_cv_reads_stage3b_and_filters_fragments_and_duplicates(tmp_path,
     # fallback/pass-through path satisfy an assertion meant for the real one).
     assert output["entries"][0]["extracted_fields"]["STUB_MARKER"] is True
 
-    on_disk = json.loads(Path(result["output_path"]).read_text())
+    on_disk = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
     assert on_disk == output
 
 

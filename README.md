@@ -381,7 +381,7 @@ The web interface includes built-in feedback collection. After each pipeline run
 
 CViche was built for Weill Cornell Medicine's CV format, but the architecture is designed to be adaptable. To use it at another institution, you would need to modify:
 
-- **Taxonomy codes** -- The WCM taxonomy (`src/unified_pipeline/core/valid_taxonomy_codes.py`) maps CV sections to institution-specific codes (e.g., S1 for peer-reviewed articles, K1 for teaching). Replace these with your institution's section categories.
+- **Taxonomy codes** -- The WCM taxonomy (`src/unified_pipeline/core/taxonomy_v7.json`, the code list stage 3a loads and stages 3b, 4 and 6 validate against; `taxonomy_reference.md` is its human-readable guide) maps CV sections to institution-specific codes (e.g., S1 for peer-reviewed articles, K1 for teaching). Replace these with your institution's section categories.
 - **Word output template** -- Stage 6 fills a WCM-specific Word template (`key_files/wcm_cv_template_*.docx`). Replace this with your institution's CV template and update the section-to-table mapping in `stage_6_word_template.py`.
 - **Classification prompts** -- The LLM prompts in Stages 3a/3b reference WCM taxonomy definitions. Update these to describe your institution's section structure.
 - **Post-classification validators** -- The 43 validator modules in `src/unified_pipeline/core/validators/` encode WCM-specific rules (e.g., distinguishing regional vs. national presentations). Review and adjust for your taxonomy.

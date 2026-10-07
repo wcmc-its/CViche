@@ -1,5 +1,5 @@
 """Pydantic schemas for API request/response validation."""
-from pydantic import BaseModel, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 from typing import Annotated, Literal
 from datetime import datetime
 
@@ -95,8 +95,7 @@ class RunStatus(BaseModel):
     scanned_pages: list[int] = []
     steps: list[StepSummary]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class StepSummary(BaseModel):
@@ -111,8 +110,7 @@ class StepSummary(BaseModel):
     cost: float | None  # None for non-admins (#1111)
     output_files: str | None = None  # JSON array as string
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FeedbackReviewer(BaseModel):
@@ -156,8 +154,7 @@ class RunSummary(BaseModel):
     # The batch upload this run belongs to (#1114), null for a single upload.
     batch_id: str | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FilterCount(BaseModel):
@@ -335,8 +332,7 @@ class LoginResponse(BaseModel):
     display_name: str
     role: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AuthConfigResponse(BaseModel):
@@ -369,8 +365,7 @@ class MeResponse(BaseModel):
     # Where CVs can be emailed; null while email intake (#1298) is off.
     intake_address: str | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ============================================================
@@ -433,8 +428,7 @@ class FeedbackResponse(BaseModel):
     likelihood_to_recommend: int
     submitted_at: TZDateTime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FeedbackDetail(BaseModel):
@@ -550,8 +544,7 @@ class AdminUser(BaseModel):
     last_active_at: TZDateTime | None = None
     created_at: TZDateTime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AdminUserUpdate(BaseModel):
@@ -587,8 +580,7 @@ class AdminRunEntry(BaseModel):
     quality_data_complete: bool | None = None
     quality_missing_evidence: list[str] = []
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class QualityScoreResult(BaseModel):

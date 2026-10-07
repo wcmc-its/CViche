@@ -52,6 +52,7 @@ from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
+from unified_pipeline.stage6.sections.appendix import CODE_ORIGIN_ENTRY  # noqa: E402
 from unified_pipeline.stage6.sections.patents import (  # noqa: E402
     DESCRIPTION_LABEL,
     _build_patent_rows,
@@ -1251,13 +1252,15 @@ def test_reclassify_failure_reaches_the_render_warnings_sidecar(
 
 def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):
     """The None fallback reaches the caller: the entry goes to the appendix
-    with its original text and code instead of being dropped."""
+    with its original text and code instead of being dropped -- and the code
+    stays the entry's own, since the failed pass coded nothing (#1225)."""
     monkeypatch.setattr(s6, 'call_llm', _raising_llm)
     gen = WCMTemplateGenerator(verbose=False)
     sent = []
-    gen._add_remaining_to_appendix = lambda items: sent.extend(items) or []
+    gen._add_remaining_to_appendix = (
+        lambda items, origins=(): sent.extend(zip(items, origins, strict=True)) or [])
     entry = {'text': _RECLASSIFY_TEXT, 'taxonomy_code': 'P',
              'extracted_fields': {}}
     gen._appendix_pending = [(entry, 40)]
     gen._reconsider_appendix_entries()
-    assert sent == [(_RECLASSIFY_TEXT, 'P', 40)]
+    assert sent == [((_RECLASSIFY_TEXT, 'P', 40), CODE_ORIGIN_ENTRY)]

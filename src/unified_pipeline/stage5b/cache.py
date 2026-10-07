@@ -87,7 +87,7 @@ def save_institution_cache():
         logger.warning("Could not save institution cache: %s", e)
 
 
-def lookup(cache_key: str, raw_key: str = None):
+def lookup(cache_key: str, raw_key: str | None = None):
     """Look up an institution by its cache key, falling back to a secondary
     raw_key only when cache_key has no entry at all.
 

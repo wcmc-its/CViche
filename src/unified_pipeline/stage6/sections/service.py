@@ -26,7 +26,6 @@ of the four writers and by nothing outside the section.
 import logging
 import re
 from collections.abc import Sequence
-from typing import Dict, List
 
 from ..formatting import (
     _clear_table_data,
@@ -740,7 +739,7 @@ def _other_service_dates_text(fields: dict, taxonomy_code: str,
 class ServiceSection:
     """Section Q writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_service(self, entries_by_code: Dict[str, List[Dict]]):
+    def _fill_service(self, entries_by_code: dict[str, list[dict]]):
         """Fill Q. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES sections using tables.
 
         WCM template structure:
@@ -792,7 +791,7 @@ class ServiceSection:
         if other_q_entries:
             self._fill_other_service(other_q_entries)
 
-    def _fill_service_boards(self, entries: List[Dict]):
+    def _fill_service_boards(self, entries: list[dict]):
         """Fill Service on Boards and/or Committees tables.
 
         WCM template has tables for Regional/National/International.
@@ -938,7 +937,7 @@ class ServiceSection:
                             _set_font(run)
                 self.stats['entries_inserted'] += 1
 
-    def _fill_extramural_leadership(self, entries: List[Dict]):
+    def _fill_extramural_leadership(self, entries: list[dict]):
         """Fill Leadership in Extramural Organizations table (Q1 entries).
 
         Table structure: Organization | Role | Dates
@@ -1140,7 +1139,7 @@ class ServiceSection:
                     _set_font(run)
         self.stats['entries_inserted'] += 1
 
-    def _fill_journal_reviewing(self, entries: List[Dict]):
+    def _fill_journal_reviewing(self, entries: list[dict]):
         """Fill Journal Reviewing/Ad hoc Reviewing table.
 
         Table structure: Journal / Organization Name | Dates
@@ -1223,7 +1222,7 @@ class ServiceSection:
                         _set_font(run)
             self.stats['entries_inserted'] += 1
 
-    def _fill_other_service(self, entries: List[Dict]):
+    def _fill_other_service(self, entries: list[dict]):
         """Fill other Q entries that don't have specific tables.
 
         Uses bullet list format under appropriate section headers.

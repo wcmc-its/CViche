@@ -971,7 +971,7 @@ def test_get_max_concurrent_llm_calls_reads_yaml_when_env_unset(
 def _write_llm_yaml(path: Path, **llm_keys: str) -> None:
     """Write an auth_config.yaml-shaped file with only an `llm:` block."""
     lines = ["llm:"] + [f'  {k}: "{v}"' for k, v in llm_keys.items()]
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_get_llm_env_config_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,7 +9,6 @@ import json
 import logging
 import time
 import asyncio
-import logging
 import os
 import re
 import shutil
@@ -38,8 +37,6 @@ from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.config_loader import get_config
-
-logger = logging.getLogger(__name__)
 
 # The pipeline's prompt_logger writes per-LLM-call transcripts here. We
 # replicate fresh files into per-run storage so they survive container
@@ -309,7 +306,8 @@ def _get_stage_timeout_seconds() -> int:
     *user* is left waiting. Tune via CVICHE_STAGE_TIMEOUT_SECONDS.
     """
     try:
-        #value = int(os.environ.get("CVICHE_STAGE_TIMEOUT_SECONDS", 1800))
+        # "llm" is where buildspec.yaml writes this key into the ConfigMap's
+        # auth_config.yaml; that file has no "app" section (#305).
         timeout_seconds,_ = get_config("llm","CVICHE_STAGE_TIMEOUT_SECONDS",default=1800)
         value = int(timeout_seconds) 
     except (TypeError, ValueError):
@@ -875,8 +873,16 @@ class PipelineOrchestrator:
                         "Rehydrated stage %s output for run %s from storage",
                         step_def.stage_id, self.run_id,
                     )
+                except FileNotFoundError:
+                    pass  # never mirrored; the back-up below logs the gap
                 except Exception:
-                    pass
+                    # A misconfigured or unreachable store: still recompute
+                    # from here, but keep the trace that says why (#305).
+                    logger.warning(
+                        "Could not rehydrate stage %s output for run %s from "
+                        "storage; recomputing it", step_def.stage_id, self.run_id,
+                        exc_info=True,
+                    )
             if path.exists():
                 self.stage_outputs[step_def.stage_id] = str(path)
             else:
@@ -1525,12 +1531,12 @@ class PipelineOrchestrator:
                     'meta': stats
                 }
 
-                with open(output_file, 'w') as f:
+                with open(output_file, 'w', encoding='utf-8') as f:
                     json.dump(stage1_output, f, indent=2)
 
                 # Also save human-readable version
                 txt_file = output_file.with_suffix('.txt')
-                with open(txt_file, 'w') as f:
+                with open(txt_file, 'w', encoding='utf-8') as f:
                     f.write(f"CV Hierarchy: {self.document_uid}\n")
                     f.write("=" * 80 + "\n\n")
                     _write_hierarchy(f, hierarchy)
@@ -1719,7 +1725,7 @@ class PipelineOrchestrator:
                 output_files.append(stage5b_output_path)
 
                 # Track LLM cost for stage 5b (the stage reports cost only, no tokens)
-                with open(stage5b_output_path, 'r') as f:
+                with open(stage5b_output_path, 'r', encoding='utf-8') as f:
                     stage5b_data = json.load(f)
                 cost = await self._track_llm_cost(
                     step_number, stage5b_data.get('institution_enrichment_stats', {}).get('cost', 0), {})
@@ -1748,7 +1754,7 @@ class PipelineOrchestrator:
                 output_files.append(stage5c_output_path)
 
                 # Track LLM cost for stage 5c
-                with open(stage5c_output_path, 'r') as f:
+                with open(stage5c_output_path, 'r', encoding='utf-8') as f:
                     stage5c_data = json.load(f)
                 stage5c_meta = stage5c_data.get('stage_5c', {})
                 cost = await self._track_llm_cost(step_number, stage5c_meta.get('total_cost', 0), stage5c_meta)
@@ -1781,7 +1787,7 @@ class PipelineOrchestrator:
                 output_files.append(stage5d_output_path)
 
                 # Track LLM cost for stage 5d
-                with open(stage5d_output_path, 'r') as f:
+                with open(stage5d_output_path, 'r', encoding='utf-8') as f:
                     stage5d_data = json.load(f)
                 stage5d_meta = stage5d_data.get('stage_5d', {})
                 cost = await self._track_llm_cost(step_number, stage5d_meta.get('total_cost', 0), stage5d_meta)
@@ -1875,7 +1881,7 @@ class PipelineOrchestrator:
                            "The Research Activities section has no summary; the run continues.", "WARNING")
             return {}, StageError.from_exception(RESEARCH_SUMMARY_STAGE_ID, e, fatal=False)
 
-        with open(stage45_output_path, 'r') as f:
+        with open(stage45_output_path, 'r', encoding='utf-8') as f:
             stage45_data = json.load(f)
 
         research_info = stage45_data.get('research_summary', {})

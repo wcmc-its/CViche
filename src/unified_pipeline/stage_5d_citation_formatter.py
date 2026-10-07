@@ -336,7 +336,7 @@ def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult],
     return make_progress_printer(format_lines)
 
 
-def run_stage_5d(input_path: str, output_path: str = None,
+def run_stage_5d(input_path: str, output_path: str | None = None,
                  verbose: bool = True, batch_size: int = 20,
                  workers: int = STAGE5D_BATCH_WORKERS) -> str:
     """

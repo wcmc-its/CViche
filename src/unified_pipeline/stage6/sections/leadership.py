@@ -19,7 +19,6 @@ column for them.
 """
 import logging
 import re
-from typing import List
 
 from ..formatting import (
     _clear_table_data,
@@ -263,7 +262,7 @@ class LeadershipSection:
                     _set_font(run)
         self.stats['entries_inserted'] += 1
 
-    def _add_multiline_leadership_rows(self, table, lines: List[str]):
+    def _add_multiline_leadership_rows(self, table, lines: list[str]):
         """Parse multiple leadership/committee lines and add separate rows.
 
         The line parser is `_parse_flattened_committee_lines`, shared with

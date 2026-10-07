@@ -419,7 +419,7 @@ import sys
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.doctor.precision import precision_payload
@@ -914,7 +914,7 @@ def lint_surprise(lint: str) -> float:
     return math.log2(1.0 / max(LINT_PREVALENCE.get(lint, 0.001), 0.001))
 
 
-def rank_lints(counts: Dict[str, int]) -> List[Tuple[str, int]]:
+def rank_lints(counts: dict[str, int]) -> list[tuple[str, int]]:
     """Order lints for display: most surprising first, count as the tiebreak."""
     return sorted(counts.items(),
                   key=lambda kv: (-lint_surprise(kv[0]), -kv[1], kv[0]))
@@ -1010,7 +1010,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     These are what stage 1a should have promoted to hierarchy nodes."""
     Document = _get_docx_document()
 
-    candidates: List[str] = []
+    candidates: list[str] = []
 
     def consider(para):
         text = _ENUM_TAB_RE.sub(r"\1 ", para.text.strip(), count=1)
@@ -1068,7 +1068,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
 # Re-exported by name above for the five files that import them from here.
 
 
-def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> List[Tuple[str, str]]:
+def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> list[tuple[str, str]]:
     """Body-order blocks of a docx: ("p", text) per paragraph, ("table",
     _table_lines joined by newlines) per table. Grants render as one Word
     table per grant, so any output check must read tables AND paragraphs.
@@ -1077,7 +1077,7 @@ def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> List[Tuple[str
     return docx_body_blocks(Document(docx_path), deleted=deleted)
 
 
-def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
+def read_docx_table_rows(docx_path: str) -> list[list[list[str]]]:
     """Raw per-row cell texts of every top-level table, EMPTY CELLS INCLUDED
     — _table_lines drops empty cells, which hides an empty date column from
     the shape checks (lint 13)."""
@@ -1191,7 +1191,7 @@ def _uid_owns(name: str, uid: str) -> bool:
     return bool(rest) and not rest[0].isalnum()
 
 
-def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
+def _find_artifact(root: Path, uid: str, key: str) -> Path | None:
     spec = _ARTIFACTS[key]
     directory = root / spec.stage_dir
     if not directory.is_dir():
@@ -1201,7 +1201,7 @@ def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
     return matches[0] if matches else None
 
 
-def _find_source(root: Path, uid: str) -> Optional[Path]:
+def _find_source(root: Path, uid: str) -> Path | None:
     for directory in (root, root / "uploads"):
         if directory.is_dir():
             matches = sorted(p for p in directory.glob(f"{uid}*.docx")
@@ -1266,7 +1266,7 @@ def _load_stage_errors(path: Path, on_unreadable: Callable[[str, str], None]) ->
         return None
 
 
-def _try(fn, label: str = None, on_unreadable=None):
+def _try(fn, label: str | None = None, on_unreadable=None):
     """Run a docx-reading loader. Its callers guard on the path existing, so a
     failure here is also present-but-unreadable, reported like _load_json."""
     try:
@@ -1281,7 +1281,7 @@ def _try(fn, label: str = None, on_unreadable=None):
 
 # --------------------------------------------------------------------- doctor
 
-def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
+def _ready(lint_id: str, *, unreadable: dict[str, str], findings: list[dict],
            **inputs) -> bool:
     """True when every input for a lint is present; else record why it was
     skipped and return False.
@@ -1623,7 +1623,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     # (so a None input is traced back to a broken file vs a genuinely absent
     # one). The source docx feeds two independent readers; they take separate
     # labels so a reader that fails alone is attributed to the right lint.
-    unreadable: Dict[str, str] = {}
+    unreadable: dict[str, str] = {}
     def _note(label, detail):
         unreadable[label] = detail
 
@@ -1649,7 +1649,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
 
-    findings: List[Dict] = []
+    findings: list[dict] = []
     ready = partial(_ready, unreadable=unreadable, findings=findings)
 
     for spec in LINT_REGISTRY:
@@ -1688,7 +1688,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     }
 
 
-def main(argv: Optional[List[str]] = None):
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("root", help="run outputs root (contains the stage_* dirs)")
     parser.add_argument("uid", help="document uid (artifact filename prefix)")

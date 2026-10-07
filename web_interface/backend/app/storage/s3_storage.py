@@ -12,8 +12,6 @@ import os
 import logging
 from urllib.parse import quote
 
-import yaml
-
 from app.storage.base import (
     RunStorage,
     StorageError,
@@ -51,6 +49,9 @@ S3_READ_TIMEOUT_S = 10
 # Total attempts per call, the initial one included (botocore's
 # `total_max_attempts`; its `max_attempts` would count retries only).
 S3_TOTAL_ATTEMPTS = 3
+
+# Most keys one DeleteObjects request accepts (an S3 API hard limit).
+S3_DELETE_BATCH_MAX = 1000
 
 
 def _translate_client_error(code: str, context: str) -> StorageError | None:
@@ -118,14 +119,14 @@ class S3RunStorage(RunStorage):
         # Default to "" (falsy), NOT "local": an s3 backend with CVICHE_S3_BUCKET
         # unset must trip the guard below, not silently operate on a bucket
         # literally named "local" (issue #109).
-        s3_bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="")
+        s3_bucket, _ = get_config("s3", "CVICHE_S3_BUCKET", default="")
 
         self._bucket = bucket or s3_bucket
         if not self._bucket:
             raise ValueError(
                 "S3 bucket not configured. Set CVICHE_S3_BUCKET environment variable."
             )
-        s3_bucket_prefix, source = get_config("s3", "CVICHE_S3_PREFIX", default="cviche")
+        s3_bucket_prefix, _ = get_config("s3", "CVICHE_S3_PREFIX", default="cviche")
 
         # Unlike self._bucket above (which deliberately keeps `or` for the
         # #109 guard), an explicit prefix="" is a real, distinct choice -- it
@@ -238,7 +239,7 @@ class S3RunStorage(RunStorage):
         """List and bulk-delete every object under a full S3 key prefix.
 
         Idempotent (no objects -> 0). Batches into delete_objects calls of up to
-        1000 keys (the API hard limit), reusing the same paginator idiom as
+        S3_DELETE_BATCH_MAX keys, reusing the same paginator idiom as
         list_files.
         """
         if not s3_prefix or not s3_prefix.strip("/"):
@@ -250,7 +251,7 @@ class S3RunStorage(RunStorage):
         for page in paginator.paginate(Bucket=self._bucket, Prefix=s3_prefix):
             for obj in page.get("Contents", []):
                 batch.append({"Key": obj["Key"]})
-                if len(batch) == 1000:
+                if len(batch) == S3_DELETE_BATCH_MAX:
                     deleted += self._delete_batch(batch)
                     batch = []
         if batch:

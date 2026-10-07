@@ -7,7 +7,7 @@ as a document uid like "2015_Wende", or not at all.
 import re
 
 
-def _get_cv_owner_name(cv_owner: dict = None, document_uid: str = '') -> str:
+def _get_cv_owner_name(cv_owner: dict | None = None, document_uid: str = '') -> str:
     """Extract the CV owner's full name for auto-filling PI fields.
 
     Args:

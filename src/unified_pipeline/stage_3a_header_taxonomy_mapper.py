@@ -26,7 +26,7 @@ from unified_pipeline.llm_client import call_llm
 def load_taxonomy() -> dict:
     """Load the taxonomy reference JSON."""
     taxonomy_path = Path(__file__).parent / "core" / "taxonomy_v7.json"
-    with open(taxonomy_path, 'r') as f:
+    with open(taxonomy_path, 'r', encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -377,7 +377,7 @@ def run_stage_3a(
     print(f"Input: {stage_1a_path}")
 
     # Load hierarchy
-    with open(stage_1a_path, 'r') as f:
+    with open(stage_1a_path, 'r', encoding="utf-8") as f:
         stage_1a_data = json.load(f)
 
     hierarchy = stage_1a_data.get("hierarchy", [])
@@ -425,7 +425,7 @@ def run_stage_3a(
     }
 
     # Write output
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding="utf-8") as f:
         json.dump(output_doc, f, indent=2)
 
     print(f"Output: {output_path}")

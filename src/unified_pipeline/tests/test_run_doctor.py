@@ -5524,7 +5524,7 @@ def test_doctor_render_overlap_names_are_render_check_objects_not_copies():
 
     # Static half: catches EVERY reintroduction, including the small-int
     # ones the int cache would otherwise hide from the runtime half.
-    tree = ast.parse(Path(doctor_shared.__file__).read_text())
+    tree = ast.parse(Path(doctor_shared.__file__).read_text(encoding="utf-8"))
     imported, other_bindings = _module_level_import_bindings(
         tree, doctor_shared.__package__)
 
@@ -5572,7 +5572,7 @@ def test_doctor_render_overlap_names_are_render_check_objects_not_copies_in_cons
             assert getattr(module, name) is getattr(render_check, name), (
                 f"{module_name}.{name} is a copy, not the render_check object")
 
-        tree = ast.parse(Path(module.__file__).read_text())
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         imported, other_bindings = _module_level_import_bindings(
             tree, module.__package__)
         for name in names_here:

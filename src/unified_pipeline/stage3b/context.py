@@ -89,7 +89,7 @@ class TaxonomyContext:
         return "\n".join(lines) if lines else "  (No hierarchy context available)"
 
 
-def build_mapping_index(mappings: list[dict], index: dict = None, path: list[str] = None) -> dict:
+def build_mapping_index(mappings: list[dict], index: dict | None = None, path: list[str] | None = None) -> dict:
     """
     Build an index from header title to taxonomy mapping.
 

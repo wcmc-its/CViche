@@ -86,7 +86,7 @@ COVERAGE_DROP_TOLERANCE_PTS = 1.0
 class HierarchyNode(TypedDict, total=False):
     """A stage-1a hierarchy node; ``children`` nests the same shape."""
     text: str
-    children: list["HierarchyNode"]
+    children: list[HierarchyNode]
 
 
 class Stage1A(TypedDict, total=False):

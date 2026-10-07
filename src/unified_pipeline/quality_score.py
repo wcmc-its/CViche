@@ -200,7 +200,7 @@ def _load_first(outputs_dir: Path, pattern: str) -> tuple[dict | None, str | Non
         logger.warning("quality_score found multiple candidates for %s: %s", pattern, names)
         return None, reason
     try:
-        with open(files[0]) as f:
+        with open(files[0], encoding="utf-8") as f:
             return json.load(f), None
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         reason = f"{type(e).__name__}: {e}"
@@ -745,7 +745,7 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
 
     for json_file in sorted(outputs_dir.glob("*.json")):
         try:
-            with open(json_file) as f:
+            with open(json_file, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             reason = str(e)

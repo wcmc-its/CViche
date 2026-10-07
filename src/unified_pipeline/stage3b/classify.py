@@ -41,6 +41,8 @@ _NO_PROMPT_CACHE = {"enable_prompt_caching": False}
 
 # Taxonomy code prefixes for duplicate-pair resolution (see docs/CODING_STANDARDS.md §8.2):
 # an "M"-series classification (grants etc.) is preferred over the unclassified "T" (Appendix) fallback.
+# APPENDIX_TAXONOMY_PREFIX is also that fallback code itself: `_classify_one_batch`
+# assigns it when the taxonomy context suggests no code to fall back to (#608).
 APPENDIX_TAXONOMY_PREFIX = "T"
 M_SERIES_TAXONOMY_PREFIX = "M"
 
@@ -174,6 +176,7 @@ def _build_taxonomy_ref_for_batch(
     relevant_families = set(c[0] for c in all_suggested_codes) if all_suggested_codes else None
 
     # Build taxonomy reference with disambiguation info for all suggested codes
+    # Cap is checked before the H/T add: up to 5 source families, plus H/T (7 max, #608).
     if relevant_families and len(relevant_families) <= 5:
         # Include suggested families plus a few common alternatives
         relevant_families.update(['H', 'T'])  # Always include honors and other
@@ -244,13 +247,12 @@ def _call_classifier(messages: list[dict], cache_system_prompt: bool) -> dict:
 def _classify_one_batch(
     batch_entries: list[dict],
     batch_start: int,
-    taxonomy_context: TaxonomyContext,
     all_suggested_codes: list[str],
-    taxonomy_ref: str,
+    system_prompt: str,
     valid_codes: set[str],
     cache_system_prompt: bool = True,
 ) -> tuple[list[dict], _BatchStats]:
-    """Classify a single batch against a taxonomy_ref built once by the caller.
+    """Classify a single batch against a system prompt built once by the caller.
 
     Returns this batch's own results list and its own stats contribution --
     it never appends to a shared list or mutates an outer accumulator, so
@@ -273,7 +275,7 @@ def _classify_one_batch(
         # All empty - assign parent code with low confidence
         results = []
         for entry in batch_entries:
-            primary = all_suggested_codes[0] if all_suggested_codes else "T"
+            primary = all_suggested_codes[0] if all_suggested_codes else APPENDIX_TAXONOMY_PREFIX
             results.append({
                 **entry,
                 "taxonomy_code": primary,
@@ -281,12 +283,6 @@ def _classify_one_batch(
                 "classification_source": "empty_entry"
             })
         return results, stats
-
-    # Build prompt
-    context_str = taxonomy_context.format_context_string()
-    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
-        context_str=context_str, taxonomy_ref=taxonomy_ref
-    )
 
     # Build entries list for user message (include per-entry hierarchy)
     entries_lines = []
@@ -372,7 +368,7 @@ Return ONLY valid JSON with the classifications array."""
         # "text" would crash this unguarded .strip() too.
         if not _entry_text(entry).strip():
             # Empty entry
-            primary = all_suggested_codes[0] if all_suggested_codes else "T"
+            primary = all_suggested_codes[0] if all_suggested_codes else APPENDIX_TAXONOMY_PREFIX
             results.append({
                 **entry,
                 "taxonomy_code": primary,
@@ -393,7 +389,7 @@ Return ONLY valid JSON with the classifications array."""
             # indistinguishable downstream from a correct classification (#520).
             c = class_by_idx.get(orig_idx)
             if c is not None:
-                fallback_code = all_suggested_codes[0] if all_suggested_codes else "T"
+                fallback_code = all_suggested_codes[0] if all_suggested_codes else APPENDIX_TAXONOMY_PREFIX
                 code = live_taxonomy_code(c.get("code"))
                 # isinstance-guard before the set membership check: `code`
                 # is untrusted LLM output and could be any JSON type (e.g. a
@@ -433,7 +429,7 @@ Return ONLY valid JSON with the classifications array."""
                 })
             else:
                 # Fallback to primary code
-                primary = all_suggested_codes[0] if all_suggested_codes else "T"
+                primary = all_suggested_codes[0] if all_suggested_codes else APPENDIX_TAXONOMY_PREFIX
                 results.append({
                     **entry,
                     "taxonomy_code": primary,
@@ -479,6 +475,10 @@ def classify_entries_batch(
 
     all_suggested_codes, taxonomy_ref = _build_taxonomy_ref_for_batch(taxonomy_context, taxonomy)
     valid_codes = _valid_taxonomy_codes(taxonomy)
+    # Group context + taxonomy_ref: the same for every batch, so built once (#608).
+    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=taxonomy_context.format_context_string(), taxonomy_ref=taxonomy_ref
+    )
 
     # A group that fits in one batch never re-sends its system prompt, so a
     # cache write would be paid (1.25x) and never read (#50).
@@ -489,8 +489,8 @@ def classify_entries_batch(
         batch_entries = entries[batch_start:batch_start + batch_size]
 
         batch_results, batch_stats = _classify_one_batch(
-            batch_entries, batch_start, taxonomy_context, all_suggested_codes,
-            taxonomy_ref, valid_codes, cache_system_prompt=multi_batch
+            batch_entries, batch_start, all_suggested_codes,
+            system_prompt, valid_codes, cache_system_prompt=multi_batch
         )
         all_results.extend(batch_results)
         total_input_tokens += batch_stats.input_tokens

@@ -43,7 +43,7 @@ def _e(idx, code, text):
 
 def _load_fixture_entries():
     assert FIXTURE.exists(), f"missing committed fixture: {FIXTURE}"
-    return json.load(open(FIXTURE))["entries"]
+    return json.load(open(FIXTURE, encoding="utf-8"))["entries"]
 
 
 def test_i5nkug_stray_d3_reconciled_to_d2():
