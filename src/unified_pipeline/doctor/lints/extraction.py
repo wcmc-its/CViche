@@ -3284,19 +3284,21 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
 # grants), each verified there and missed by the dev-246 doctor:
 #
 # - owner_also_co_i: the owner is listed under Co-Investigators while the
-#   role row states a role other than co-I (IEUPKK 257-342: Co-PI or Mentor),
-#   or states none and the owner's own co-investigator item carries a lead
-#   role ("<owner> (Site PI)", RVTAQT 223).
+#   role row states a lead role (a PI of any kind, a director or a mentor)
+#   and no co-I role (IEUPKK 257-342: Co-PI or Mentor), or states none and
+#   the owner's own co-investigator item carries a lead role ("<owner> (Site
+#   PI)", RVTAQT 223).
 # - role_in_title: `title` holds the owner's roles as list items ("<project>,
-#   Director Core B., Mentor Project IV") and no role is stated (RINASX 405).
+#   Director <unit>, Mentor <subproject>") and no role is stated (RINASX 405).
 # - owner_pi_role_empty: the rendered PI cell names the owner and "Your
 #   role:" is empty (RVTAQT 260, 273).
 # - owner_pi_other_role: the rendered PI cell names only the owner beside a
-#   role that is not the grant's PI: a co-, site- or sub-PI, a co-I, a mentor
-#   (KJJVVO 168-178, the stage-6 PI auto-fill #1457 stopped).
+#   role that makes the owner someone other than the grant's PI: a co-,
+#   site- or sub-PI, or a co-I (KJJVVO 168-178, the stage-6 PI auto-fill
+#   #1457 stopped). A mentor is spared: that role does not say who the PI is.
 # - pi_cell_from_title: the rendered PI cell is a run of the project title's
-#   own words (RINASX 396, "<title> - Human and Animal Studies, PI", the
-#   label parse #1418 stopped).
+#   own words (RINASX 396: "<title words>, PI" read as a PI label, the
+#   parse #1418 stopped).
 #
 # The last two are regression guards on current dev: the stage-6 causes are
 # fixed, and they fire on documents rendered before the fix.
@@ -3339,8 +3341,13 @@ _WITH_COLLABORATOR_RE = re.compile(
 #: The fewest words a PI cell read as a run of the title needs: one word of
 #: a title is as often a person's surname ("The Lee Cohort").
 _PI_FROM_TITLE_MIN_WORDS = 2
-#: Splits a `co_investigators` value into one name per person.
-_PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|\band\b)\s*")
+#: Splits a `co_investigators` value or a rendered PI cell into one name per
+#: person. A slash joins co-PIs ("<owner>/<other>"): unsplit, the pair reads
+#: as one person who is the owner (X6-role verification, BYFQBG 322). It also
+#: cuts a slash inside a co_investigators item ("<owner> (Co-I/PI)"), leaving
+#: the owner's item the role before the slash: a co-I named first then spares
+#: `_owner_also_co_i`, as a stated "Co-I/PI" role does.
+_PERSON_SPLIT_RE = re.compile(r"\s*(?:;|,|&|/|\band\b)\s*")
 #: Words in a person's name that do not identify them.
 _NAME_NOISE_WORDS = frozenset({"drs", "prof", "professor", "phd", "mph", "msc", "pharmd",
                                "dds", "dmd", "facp", "student"})
@@ -3371,7 +3378,7 @@ def _pi_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
     """`pi_name` is one of the people `co_investigators` lists, and the two
     values differ, so stage 6 renders both rows (it drops a Co-Investigators
     value identical to the PI). Not an author list headed by the PI that also
-    names the owner ("Cutter, G., <owner>"): that is the source's own line
+    names the owner ("<pi>, G., <owner>"): that is the source's own line
     copied whole, and the PI cell still names the right person (farm web204,
     30 grants)."""
     co_text = norm(str(fields.get("co_investigators") or ""))
@@ -3395,8 +3402,8 @@ def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
                         owner: frozenset[str]) -> bool:
     """No `pi_name`, no stated role, no role label, and the owner is the first
     person `co_investigators` lists and the first of them the text names. A
-    stated role ("Program Partner", NDXXAD 411) is what renders, so the
-    owner is not shown as only a co-investigator."""
+    stated role (a program title that is not a lead role, NDXXAD 411) is what
+    renders, so the owner is not shown as only a co-investigator."""
     keys = _co_investigator_keys(fields)
     if fields.get("pi_name") or fields.get("pi_role") or fields.get("role"):
         return False
@@ -3412,13 +3419,13 @@ def _owner_lead_as_co_i(text: str, fields: Mapping[str, object],
 #: bare "Investigator", which is what the Co-Investigators row says anyway.
 _LEAD_ROLE_WORD_RE = re.compile(
     r"(?<![a-z])(?:p\.?\s?i|pis|mpi|principal investigators?|director|mentor)(?![a-z])")
-#: A co-investigator role anywhere in a stated role ("Co-Investigator/Mentor",
-#: "Investigator and Associate Director", IZJADE 433): the owner then
+#: A co-investigator role anywhere in a stated role ("Mentor/Co-I", an
+#: investigator who also directs a unit, IZJADE 433): the owner then
 #: belongs in the Co-Investigators row.
 _CO_I_ROLE_WORD_RE = re.compile(
     r"(?<![a-z])(?:co-?(?:investigators?|is?)|(?<!principal )investigators?)(?![a-z])")
 #: A list item of a title that is a role, not part of the project's name:
-#: ", Director Core B.", "; Mentor Project IV", ", Co-Investigator". Not
+#: ", Director Unit C", "; Mentor Track 2", ", Co-Investigator". Not
 #: "Investigator-Initiated", which names a kind of trial, nor a bare "PI",
 #: which a title uses to name a subproject's PI (", PI <other>)", XELRLZ 138).
 _TITLE_ROLE_ITEM_RE = re.compile(
@@ -3458,9 +3465,9 @@ def _owner_also_co_i(fields: Mapping[str, object], pi_key: frozenset[str],
     """The owner is one of the people `co_investigators` lists, while the
     stated role is a lead role (a PI of any kind, a director, a mentor), or
     no role is stated and the owner's own item names one. Another stated role
-    ("Program Partner", NDXXAD 411) may share the row with its co-holders. Not
-    a list headed by the PI (the source's author line copied whole, farm
-    web204), which `_pi_also_co_i` spares too."""
+    (a program title that is not a lead role, NDXXAD 411) may share the row
+    with its co-holders. Not a list headed by the PI (the source's author line
+    copied whole, farm web204), which `_pi_also_co_i` spares too."""
     items = [item for item in _PERSON_SPLIT_RE.split(str(fields.get("co_investigators") or ""))
              if _person_key(item) & owner]
     keys = _co_investigator_keys(fields)
