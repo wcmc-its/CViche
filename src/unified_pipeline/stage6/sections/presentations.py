@@ -20,7 +20,8 @@ unclassifiable talk is published in the middle bucket rather than dropped.
 Dates arrive under four different field names and field extraction emits the
 STRING "None" often enough that it is checked for explicitly on every one; a
 literal "None" in the year column is worse than a blank one. An `end_date`
-makes the Dates cell a range (`_talk_date_cell`). A title-less entry is titled by `_untitled_talk_title`: role and
+makes the Dates cell a range (`_own_talk_date`), and further dates under an
+off-schema span key follow it (`_talk_date_cell`, #1245). A title-less entry is titled by `_untitled_talk_title`: role and
 event name when the source line holds nothing else, otherwise the source line
 without the list number, year and venue the other two cells already show.
 """
@@ -30,10 +31,12 @@ from collections.abc import Mapping
 
 from ..fan_out import fallback_text
 from ..formatting import (
+    DATE_SPAN_SEPARATOR,
     _clear_table_data,
     _set_font,
     format_date_for_section,
     format_date_range,
+    further_date_spans,
 )
 from ..sorting import sort_entries_reverse_chronological
 
@@ -129,8 +132,8 @@ def _date_field(fields: dict, key: str) -> str | Mapping:
     return '' if str(value).strip().lower() == _NONE_STRING else value
 
 
-def _talk_date_cell(fields: dict) -> str:
-    """The Dates cell (yyyy) of an R entry.
+def _own_talk_date(fields: dict) -> str:
+    """The talk's own date (yyyy), from its schema date keys.
 
     The first of `year`, `date`, `start_date` is the talk's date. When stage
     4 also found an `end_date`, the cell is the range: a talk given "2006 to
@@ -145,6 +148,21 @@ def _talk_date_cell(fields: dict) -> str:
     if start and end and not isinstance(start, Mapping):
         return format_date_range(start, end, 'R')
     return format_date_for_section(start, 'R') if start else ''
+
+
+def _talk_date_cell(fields: dict) -> str:
+    """The Dates cell of an R entry: its own date (`_own_talk_date`), then
+    each further date stage 4 kept under an off-schema span key
+    (`further_date_spans`) that reads differently, joined with
+    `DATE_SPAN_SEPARATOR`. A talk whose dates are only under
+    `additional_dates` renders them instead of an empty cell (X6 VPMMFM 531,
+    #1245)."""
+    own = _own_talk_date(fields)
+    shown = [own] if own else []
+    for span in further_date_spans(fields, 'R'):
+        if span not in shown:
+            shown.append(span)
+    return DATE_SPAN_SEPARATOR.join(shown)
 
 
 class PresentationsSection:

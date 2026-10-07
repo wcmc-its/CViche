@@ -274,6 +274,11 @@ class Run(Base):
     # executing image wins), not at upload. NULL for runs that predate the
     # column or when the image was built without a tag.
     image_tag = Column(String(128), nullable=True)
+    # Every image the run executed on, oldest first, as a JSON array of tags
+    # (#1239): a tag is appended when the run moves to "running" on an image
+    # other than the last one recorded, so a run resumed across a deploy shows
+    # both. NULL until a tagged image claims the run.
+    image_tag_history = Column(Text, nullable=True)
     # Whether the uploaded CV was written in the WCM faculty CV template ("wcm")
     # or another format ("other"), and the count of template signals behind it
     # (app.services.input_format). NULL when undetermined: runs that predate the

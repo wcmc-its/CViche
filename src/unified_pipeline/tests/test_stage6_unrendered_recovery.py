@@ -34,6 +34,7 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
+from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
@@ -1052,20 +1053,52 @@ def _t_entry():
     }
 
 
-def test_t_fused_entry_rows_cut_by_the_appendix_cap_are_recovered():
-    """`_fill_appendix` caps a body at APPENDIX_MAX_CHARS, so the rows after the
-    cap reach no page; the recovery pass, no longer skipping T, writes them."""
+def _appendix_count(gen, text):
+    """How many paragraphs of the document carry *text*."""
+    return sum(text in p.text for p in gen.doc.paragraphs)
+
+
+def test_t_fused_entry_rows_past_the_cap_render_once_in_the_appendix():
+    """`_fill_appendix` renders a T body whole (#1230), so every row reaches
+    the page and the recovery pass finds nothing to re-add."""
     gen = _generator()
     entry = _t_entry()
+    assert len(entry["text"]) > 200
     gen._fill_appendix([entry])
-    capped = "\n".join(p.text for p in gen.doc.paragraphs)
-    assert _T_ROWS[2] not in capped  # the cap really cut it
-
     gen._recover_unrendered_records({"T": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+    assert all(_appendix_count(gen, row.split(" | ")[0]) == 1 for row in _T_ROWS)
 
-    bullets = _bulleted_texts(gen.doc.paragraphs)
-    assert _T_ROWS[2] in bullets
-    assert gen.stats["unrendered_records_recovered"] >= 1
+
+def test_t_single_line_over_the_cap_is_not_printed_twice():
+    """EBYSBC XELRLZ shape: a 302-character T footnote printed cut as a
+    numbered item, then again whole as a recovered bullet (#1230)."""
+    footnote = ("Synthetic footnote 2004: the zeolite appointment above was held "
+                "jointly with the Marigold Institute, Example City, and the role "
+                "carried teaching duties in quartzite petrology, field courses in "
+                "obsidian sites, and a review panel seat for the Example Society.")
+    assert len(footnote) > 200
+    entry = {**_t_entry(), "text": footnote, "element_type": "paragraph"}
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    assert _appendix_count(gen, footnote) == 1
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_t_undated_lines_and_near_duplicate_rows_past_the_cap_are_kept():
+    """Undated non-record lines (a duty bullet) and sibling rows that differ
+    only in a short word or a digit reach the page whole (#1230)."""
+    lines = ["Synthetic duty: directed the zeolite workgroup and its quarterly reviews",
+             "Member | Marigold Panel A | Example Society",
+             "Member | Marigold Panel B | Example Society",
+             "Member | Marigold Panel 7 | Example Society",
+             "Synthetic note: obsidian outreach was shared with the nasturtium team"]
+    entry = {**_t_entry(), "text": "\n".join(lines)}
+    gen = _generator()
+    gen._fill_appendix([entry])
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert all(_clean_inline_tabs(line) in body for line in lines)
 
 
 def test_t_row_already_on_the_page_is_not_duplicated():

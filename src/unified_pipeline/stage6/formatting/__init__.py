@@ -24,6 +24,7 @@ from .dates import (  # noqa: F401
     extra_date_spans,
     format_date_for_section,
     format_date_range,
+    further_date_spans,
     normalize_iso_dates_in_text,
     with_extra_date_spans,
 )

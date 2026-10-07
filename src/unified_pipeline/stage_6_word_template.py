@@ -189,6 +189,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     _record_tokens,
     _value_is_datelike,
     _whole_record_rendered,
+    m1_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
     segments_cover_source,
@@ -562,6 +563,47 @@ def rendered_extraction_coverage(entry: Mapping[str, Any]) -> UnextractedContent
     return calculate_unextracted_content(str(entry.get('text') or ''), own)
 
 
+# Low-coverage content overflow (`_add_entry_comments`): an entry whose render
+# kept too little of its text is re-emitted in full. K/L entries support bullet
+# text and qualify more readily; other codes' table rows summarise adequately
+# even at 20-40% coverage, so they qualify only when very low and very long.
+LOW_COVERAGE_COMMENT_PCT = 70
+OVERFLOW_KL_MAX_COVERAGE_PCT = 50
+OVERFLOW_KL_MIN_CHARS = 300
+OVERFLOW_OTHER_MAX_COVERAGE_PCT = 15
+OVERFLOW_OTHER_MIN_CHARS = 1000
+
+
+def _has_formatted_text(entry: Mapping[str, Any]) -> bool:
+    """Whether stage 5c already formatted the entry's full text."""
+    fields = entry.get('extracted_fields') or {}
+    return bool(fields.get('formatted_text')
+                or fields.get('formatting_source') == 'stage_5c_llm')
+
+
+def is_overflow_candidate(entry: Mapping[str, Any]) -> bool:
+    """Whether an entry's coverage and length send it to the content overflow,
+    before the check that its paragraphs already show most of its text.
+
+    K and S entries never qualify (free-form teaching text; bibliography uses
+    enrichment), nor does one stage 5c formatted. A coverage of 0 or None reads
+    as unknown and does not qualify. The Appendix also reads this: a T entry
+    that qualifies is re-split by the reconsider pass, so its Appendix line
+    stays a capped pointer (#1230).
+    """
+    code = str(entry.get('taxonomy_code') or '')
+    if code.startswith(('K', 'S')) or _has_formatted_text(entry):
+        return False
+    coverage = rendered_extraction_coverage(entry) or {}
+    pct = coverage.get('extraction_coverage_percent', 100)
+    if not pct or pct >= LOW_COVERAGE_COMMENT_PCT:
+        return False
+    length = len(entry.get('text', ''))
+    if code.startswith('L'):
+        return pct < OVERFLOW_KL_MAX_COVERAGE_PCT and length > OVERFLOW_KL_MIN_CHARS
+    return pct < OVERFLOW_OTHER_MAX_COVERAGE_PCT and length > OVERFLOW_OTHER_MIN_CHARS
+
+
 _KEEP_SENTINEL = 'KEEP'
 _TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
 
@@ -630,10 +672,12 @@ def _recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
     A fused multi-record entry (two or more record-shaped lines) for any code.
-    A T entry longer than the Appendix cap is the exception: the cap cut
-    everything past `APPENDIX_MAX_CHARS`, so every record-shaped or dated line
-    of it is a candidate (`t_recovery_lines`), and a single-record entry
-    qualifies (#1230). A T entry the cap did not cut renders whole and has none.
+    A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
+    record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
+    a single-record entry qualifies (#1230). The Appendix renders a T body
+    whole (`_appendix_body`) unless the overflow re-splits it, so these lines
+    are usually found on the page; the scan still catches what a re-split
+    reply or dedup left out. A shorter T entry has none.
     """
     text = str(entry.get('text') or '')
     if code == 'T':
@@ -1649,10 +1693,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         (`_is_m1_record`) that no part of the document rendered so far carries,
         the summary paragraph included (AUTOPSY-EBYSBC-batch-2026-10-02 E27: a
         generated summary that never mentions a position or a project). The
-        render check is the #221 recovery pass's `_record_rendered`: a record
-        any line or cell of which surfaces, verbatim or by token overlap with
-        one output line, stays out, and so does one too short to verify, so
-        the Appendix never repeats what the reader already sees. Prose M1
+        render check is `m1_record_rendered`: a record that surfaces as a
+        whole, verbatim or by token overlap with one output line, stays out,
+        and so does one too short to verify, so the Appendix never repeats
+        what the reader already sees. One fragment no longer vouches for the
+        record (#1429): its date-and-department fragment matched appointment
+        rows and its title matched a summary sharing its topic words. Prose M1
         entries are what the summary restates; they stay out too.
         """
         m1_entries = entries_by_code.get('M1', [])
@@ -1664,7 +1710,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         return [entry for entry in m1_entries
                 if is_t_validation_recoded_m1(entry)
                 or (_is_m1_record(entry)
-                    and _record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
+                    and m1_record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
 
     def generate(self, input_path: str, output_path: str | None = None, research_summary_path: str | None = None,
                  original_doc_path: str | None = None, discover_original_doc: bool = True) -> str:
@@ -3712,6 +3758,11 @@ Now analyze the text above:"""
         return batch
 
 
+    @staticmethod
+    def _is_overflow_candidate(entry: dict) -> bool:
+        """`is_overflow_candidate`, reachable from the section mixins."""
+        return is_overflow_candidate(entry)
+
     def _add_entry_comments(self, para: Paragraph, entry: dict,
                             entry_paras: list[Paragraph] | None = None) -> None:
         """Add all relevant comments from an entry to the paragraph.
@@ -3770,14 +3821,12 @@ Now analyze the text above:"""
         # Skip for K-codes (teaching entries) since they have free-form content like director names
         # that aren't separate extraction fields, and skip if Stage 5c has already formatted the entry
         taxonomy_code = entry.get('taxonomy_code', '')
-        fields = entry.get('extracted_fields') or {}
         is_k_code = taxonomy_code.startswith('K')
-        has_formatted_text = fields.get('formatted_text') or fields.get('formatting_source') == 'stage_5c_llm'
 
         extraction_coverage = rendered_extraction_coverage(entry)
-        if isinstance(extraction_coverage, dict) and not is_k_code and not has_formatted_text:
+        if isinstance(extraction_coverage, dict) and not is_k_code and not _has_formatted_text(entry):
             coverage_pct = extraction_coverage.get('extraction_coverage_percent', 100)
-            if coverage_pct and coverage_pct < 70:
+            if coverage_pct and coverage_pct < LOW_COVERAGE_COMMENT_PCT:
                 unextracted = extraction_coverage.get('unextracted_words', [])
                 unextracted_str = ', '.join(unextracted[:5]) if unextracted else ''
                 comments_to_add.append({
@@ -3785,17 +3834,10 @@ Now analyze the text above:"""
                     'author': "Extraction"
                 })
 
-                # Collect for content overflow routing if coverage is low on a substantial entry.
-                # K/L codes (Teaching/Clinical) naturally support bullet text, so use a more
-                # generous threshold (50% coverage, 300 chars) for these sections.
-                # Other codes use strict thresholds (15% coverage, 1000 chars) since table rows
-                # typically summarize entries adequately even at 20-40% coverage.
+                # Collect for content overflow routing if coverage is low on a
+                # substantial entry (thresholds: `is_overflow_candidate`).
                 original_text = entry.get('text', '')
-                is_kl_code = taxonomy_code.startswith('K') or taxonomy_code.startswith('L')
-                if (is_kl_code and coverage_pct < 50 and len(original_text) > 300) or \
-                   (not is_kl_code and coverage_pct < 15 and len(original_text) > 1000):
-                    # Skip S-codes (bibliography) — they use enrichment, low coverage is expected
-                    # Skip entries with formatted_text — they already have full LLM-formatted content
+                if is_overflow_candidate(entry):
                     # Skip if the paragraph already contains most of the original text
                     # (e.g., bullet entries that render full original_text directly)
                     # Measure what the ENTRY rendered, not just `para`. The
@@ -3808,7 +3850,7 @@ Now analyze the text above:"""
                     rendered_paras = entry_paras if entry_paras is not None else ([para] if para else [])
                     para_text_len = len(' '.join(p.text.strip() for p in rendered_paras).strip())
                     para_already_has_content = para_text_len >= len(original_text) * 0.8
-                    if not taxonomy_code.startswith('S') and not has_formatted_text and not para_already_has_content:
+                    if not para_already_has_content:
                         self._overflow_entries.append((entry, para, taxonomy_code))
 
         # Direct comment fields

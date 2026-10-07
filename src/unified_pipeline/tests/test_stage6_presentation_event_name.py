@@ -357,3 +357,19 @@ def test_a_string_none_end_date_is_ignored():
 def test_a_dict_date_does_not_take_a_second_end_date():
     assert _rendered_date(date={"start_date": "2021-12-30", "end_date": "2022-01-02"},
                           end_date="2022-01-02") == "2021-2022"
+
+
+def test_a_talk_dated_only_under_additional_dates_renders_them():
+    """#1245 (X6 VPMMFM 531): `date` null and three dates under the
+    off-schema `additional_dates`; the Dates cell was empty."""
+    assert _rendered_date(date=None, additional_dates="1999-09-30; 1999-10-14; 2000-01-05") \
+        == "1999, 2000"
+
+
+def test_a_further_date_follows_the_talks_own_date_unless_it_repeats_it():
+    assert _rendered_date(date="2018", additional_dates="2018-05; 2020") == "2018, 2020"
+
+
+def test_a_talk_without_further_dates_keeps_its_own_cell():
+    assert _rendered_date(date="2018") == "2018"
+

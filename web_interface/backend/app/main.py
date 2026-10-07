@@ -35,7 +35,7 @@ from app.api import (
     upload,
     websocket,
 )
-from app.config_loader import get_config
+from app.config_loader import current_image_tag, get_config
 from app.database import get_db, init_db
 from app.middleware.request_id import RequestIDMiddleware
 
@@ -543,7 +543,8 @@ async def root():
     """Root endpoint."""
     return {
         "message": "CViche Pipeline Viewer API",
-        "version": "1.0.0",
+        # The deployed image tag (#1239); null for an image built without one.
+        "version": current_image_tag(),
         "docs": "/docs" if _DOCS_ENABLED else None,
         "status": "running"
     }

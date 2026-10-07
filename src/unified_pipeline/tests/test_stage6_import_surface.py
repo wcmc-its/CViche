@@ -93,6 +93,7 @@ STAGE6_IMPORT_SURFACE = (
     "extract_sort_date",
     "format_date_for_section",
     "grant_status_rebucket_target",
+    "is_overflow_candidate",
     "normalize_retired_code",
     "parse_reclassified_segments",
     "rendered_extraction_coverage",
@@ -176,6 +177,7 @@ RELOCATED_BY_398_RESIDUE = {
         "_record_tokens",
         "_value_is_datelike",
         "_whole_record_rendered",
+        "m1_record_rendered",
         "normalize_retired_code",
         "segment_already_rendered",
         "segments_cover_source",
@@ -239,7 +241,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 34, (
+    assert len(_RELOCATED_CASES) == 35, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
@@ -306,7 +308,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 44, (
+    assert len(STAGE6_IMPORT_SURFACE) == 45, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )

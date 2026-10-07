@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import BatchView, { BATCH_REFRESH_MS, COPY_FEEDBACK_MS } from './BatchView'
+import BatchView, { BATCH_REFRESH_MS, COPY_FEEDBACK_MS, missingFilesNote } from './BatchView'
 import { getBatch, getQueue } from '../../api/batches'
 import type { BatchDetail, BatchRunRow, QueueOverview } from '../../types'
 
@@ -88,10 +88,11 @@ describe('BatchView', () => {
 
   it('notes files that never became runs', async () => {
     await renderView()
-    expect(screen.getByText("1 file didn't upload, so it isn't in this batch.")).toBeTruthy()
+    expect(screen.getByText('1 file in this batch has no run.')).toBeTruthy()
     cleanup()
     await renderView({ ...BATCH, files_submitted: 4 })
-    expect(screen.queryByText(/didn't upload/)).toBeNull()
+    expect(screen.queryByText(/has no run|have no run/)).toBeNull()
+    expect(missingFilesNote({ run_count: 1, files_submitted: 3 })).toBe('2 files in this batch have no run.')
   })
 
   it('says all runs finished once none is queued or running', async () => {

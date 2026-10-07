@@ -264,3 +264,45 @@ def test_restart_compensates_archive_when_commit_fails(db, tmp_path, caplog):
     )
     assert list(upload_dir.iterdir()) == []  # pod-local copy unlinked
     assert any("commit failed" in r.getMessage() for r in caplog.records)
+
+
+def test_restart_compensates_failure_before_the_commit(db, tmp_path):
+    """#802 item 1 mirror for restart: an exception while staging the child's
+    rows (before db.commit()) is compensated like a commit failure -- the new
+    run id's storage is deleted, the pod-local copy unlinked, a 500 raised,
+    and the original run is left alone."""
+    from app.api import runs as runs_api
+    from app.models import Run
+    from app.services.run_creation import RUN_NOT_CREATED_NOTHING_SAVED
+
+    user, original = _make_original(db)
+    storage = MagicMock()
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+
+    with patch.object(runs_api, "check_run_access", return_value=original), \
+         patch.object(runs_api, "check_rate_limit", return_value=None), \
+         patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
+         patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage), \
+         patch.object(runs_api, "get_storage", return_value=storage), \
+         patch("app.services.run_creation.generate_run_id", return_value="RSTPRE"), \
+         patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch.object(db, "add", side_effect=RuntimeError("session broken")):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                runs_api.restart_run(run_id="ORIGAR", db=db, current_user=user)
+            )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["message"] == RUN_NOT_CREATED_NOTHING_SAVED
+    db.rollback()
+    assert db.query(Run).filter(Run.id == "RSTPRE").first() is None
+    assert db.get(Run, "ORIGAR").status == "completed"
+    storage.delete_run.assert_called_once_with("RSTPRE")
+    storage.delete_global_prefix.assert_called_once_with(
+        f"by-submitter/{user.email.lower()}/RSTPRE/"
+    )
+    assert list(upload_dir.iterdir()) == []

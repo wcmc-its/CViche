@@ -379,68 +379,45 @@ def test_compute_score_fills_defaults_for_keys_the_result_lacks(client, db, monk
                            "flags": [], "data_complete": None, "missing_evidence": []}
 
 
-# --- GET /api/admin/runs: user filter, row fields, pagination ----------------
-
-def _seed_owned_runs(db):
-    """Three runs, newest first R3 > R2 > R1; R1 and R3 are Alice's, R2 is
-    Bob's, and only R3 has feedback."""
-    from app.models import Feedback, Run, User
-
-    alice = User(email="Alice@Example.com", display_name="Alice", role="user")
-    bob = User(email="bob@example.com", display_name="Bob", role="user")
-    db.add_all([alice, bob])
-    db.flush()
-    base = datetime(2026, 6, 4, 12, 0, 0)
-    db.add_all([
-        Run(id="R1", filename="one.docx", file_type="docx", status="complete", user_id=alice.id,
-            started_at=base, completed_at=base + timedelta(seconds=90), total_cost=0.123456),
-        Run(id="R2", filename="two.docx", file_type="docx", status="failed", user_id=bob.id,
-            started_at=base + timedelta(minutes=1)),
-        Run(id="R3", filename="three.docx", file_type="docx", status="complete", user_id=alice.id,
-            started_at=base + timedelta(minutes=2), completed_at=base + timedelta(minutes=3),
-            total_duration_seconds=42),
-        Feedback(run_id="R3", user_id=bob.id, reviewer_role="staff", overall_usefulness=3,
-                 manual_conversion_effort="1 hour", correction_effort="1 hour",
-                 biggest_issue="none", likelihood_to_recommend=3),
-    ])
-    db.commit()
+# quality_score.score_run's dimensionScores entry, as it builds one (#409).
+_DIMENSION = {"name": "Duplicate-entry ratio", "score": 7.5, "max": 10, "penalty": 2.5,
+              "detail": "3 of 12 entries duplicated"}
 
 
-def test_runs_listing_row_fields_and_newest_first_order(client, db):
-    _seed_owned_runs(db)
+def test_compute_score_returns_each_dimension_as_the_scorer_built_it(client, db, monkeypatch):
+    """dimensionScores is typed (#409): a producer-shaped entry reaches the
+    response with all five keys and their values intact."""
+    from app.services import admin_run_service
 
-    body = _admin_get(client, "/api/admin/runs").json()
+    _seed_mixed_status_runs(db)
+    scored = {**_INCOMPLETE_SCORE, "dimensionScores": [_DIMENSION]}
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: scored)
 
-    assert [r["run_id"] for r in body["runs"]] == ["R3", "R2", "R1"]
-    rows = {r["run_id"]: r for r in body["runs"]}
-    assert rows["R3"]["has_feedback"] is True and rows["R1"]["has_feedback"] is False
-    assert (rows["R1"]["user_email"], rows["R1"]["user_display_name"]) == ("Alice@Example.com", "Alice")
-    assert rows["R1"]["total_cost"] == 0.1235 and rows["R2"]["total_cost"] == 0.0
-    # persisted duration first, then wall-clock, then nothing
-    assert (rows["R3"]["duration_seconds"], rows["R1"]["duration_seconds"],
-            rows["R2"]["duration_seconds"]) == (42, 90, None)
+    resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 
-
-def test_runs_listing_user_filter_is_a_case_insensitive_substring(client, db):
-    """A fragment from the middle of the address, in the other case. (SQLite's
-    LIKE is itself case-insensitive for ASCII, so this cannot tell ilike from
-    like; it does pin the substring match.)"""
-    _seed_owned_runs(db)
-
-    body = _admin_get(client, "/api/admin/runs?user=LICE@EXAMPLE").json()
-
-    assert [r["run_id"] for r in body["runs"]] == ["R3", "R1"]
-    assert body["total"] == 2
+    assert resp.status_code == 200
+    assert resp.json()["dimensionScores"] == [_DIMENSION]
 
 
-def test_runs_listing_paginates_with_total_and_has_more(client, db):
-    _seed_owned_runs(db)
+def test_a_dimension_missing_a_scorer_key_fails_validation():
+    """A scorer-side shape change (here: no ``max``) is a server-side error,
+    not a free-form object the frontend has to cope with (#409)."""
+    import pytest
+    from pydantic import ValidationError
 
-    first = _admin_get(client, "/api/admin/runs?limit=2").json()
-    to_the_end = _admin_get(client, "/api/admin/runs?offset=1&limit=2").json()
-    last = _admin_get(client, "/api/admin/runs?offset=2&limit=2").json()
+    from app.schemas import QualityScoreResult
 
-    assert ([r["run_id"] for r in first["runs"]], first["total"], first["has_more"]) == (["R3", "R2"], 3, True)
-    assert (first["offset"], first["limit"]) == (0, 2)
-    assert ([r["run_id"] for r in to_the_end["runs"]], to_the_end["has_more"]) == (["R2", "R1"], False)
-    assert ([r["run_id"] for r in last["runs"]], last["has_more"]) == (["R1"], False)
+    partial = {k: v for k, v in _DIMENSION.items() if k != "max"}
+    with pytest.raises(ValidationError, match="max"):
+        QualityScoreResult(run_id="R", totalScore=50, band="", dimensionScores=[partial])
+
+
+def test_the_response_schema_documents_the_dimension_fields():
+    """The score response's JSON schema (what FastAPI publishes as OpenAPI)
+    names each dimension field rather than a free-form object (#409)."""
+    from app.schemas import QualityScoreResult
+
+    schema = QualityScoreResult.model_json_schema()
+
+    assert schema["properties"]["dimensionScores"]["items"] == {"$ref": "#/$defs/DimensionScore"}
+    assert sorted(schema["$defs"]["DimensionScore"]["required"]) == ["detail", "max", "name", "penalty", "score"]

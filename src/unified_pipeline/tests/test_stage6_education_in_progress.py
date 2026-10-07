@@ -863,3 +863,44 @@ class TestDegreeHonors:
         gen = _generator()
         gen._fill_education([{"text": "x", "extracted_fields": {"honors": "cum laude"}}])
         assert _education_rows(gen) == []
+
+
+class TestDegreeAdvisor:
+    """#1245 (X6 RINASX 15, CMTQDR 10): the degree's advisor, under the
+    schema's `advisor` or the off-schema `major_professor`/`mentor`, follows
+    the degree with its label; before, no column read it. Synthetic values."""
+
+    @staticmethod
+    def _render(**fields):
+        return TestDisciplineAndStringDates._render(**fields)
+
+    @pytest.mark.parametrize("key,label", [("advisor", "Advisor"),
+                                           ("major_professor", "Major professor"),
+                                           ("mentor", "Mentor")])
+    def test_each_advisor_key_follows_the_degree_with_its_label(self, key, label):
+        row = self._render(degree="PhD", discipline="Zymology", **{key: "Q. Example, PhD"})
+        assert row.cells[0].text == f"PhD, Zymology; {label}: Q. Example, PhD"
+
+    def test_the_advisor_follows_the_honors(self):
+        row = self._render(degree="BA", honors="cum laude", mentor="Q. Example")
+        assert row.cells[0].text == "BA (cum laude); Mentor: Q. Example"
+
+    def test_the_schema_key_wins_over_an_off_schema_one(self):
+        row = self._render(degree="PhD", advisor="Q. Example", mentor="R. Sample")
+        assert row.cells[0].text == "PhD; Advisor: Q. Example"
+
+    def test_an_advisor_the_degree_already_names_is_not_repeated(self):
+        row = self._render(degree="PhD (with Q. Example)", major_professor="Q. Example")
+        assert row.cells[0].text == "PhD (with Q. Example)"
+
+    @pytest.mark.parametrize("value", [None, "", "  ", ["Q. Example"]])
+    def test_a_blank_or_unusable_advisor_changes_nothing(self, value):
+        assert self._render(degree="PhD", major_professor=value).cells[0].text == "PhD"
+
+    def test_an_advisor_on_a_degree_less_row_stands_alone(self):
+        assert self._render(mentor="Q. Example").cells[0].text == "Mentor: Q. Example"
+
+    def test_an_advisor_alone_does_not_create_a_row(self):
+        gen = _generator()
+        gen._fill_education([{"text": "x", "extracted_fields": {"mentor": "Q. Example"}}])
+        assert _education_rows(gen) == []

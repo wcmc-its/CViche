@@ -20,6 +20,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.config_loader import current_image_tag
 from app.models import Run
 from app.storage import get_storage
 from app.storage.base import RunStorage
@@ -48,6 +49,11 @@ _SOURCE_PREFIX = "input/"
 _SOURCE_SUFFIX = ".docx"
 
 CACHE_KEY = "quality_score.json"
+
+# The cached score's record of the image whose scorer computed it (#1239): the
+# executing image for the orchestrator's post-run score, the backend's for an
+# admin rescore. Null when that image was built without a tag.
+IMAGE_TAG_KEY = "image_tag"
 
 # The run doctor report's file suffix (orchestrator._doctor_report).
 DOCTOR_SUFFIX = "_doctor.json"
@@ -118,7 +124,8 @@ def compute_and_cache_score(run_id: str) -> dict | None:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        storage.put_file(run_id, CACHE_KEY, json.dumps(result).encode("utf-8"))
+        cached = {**result, IMAGE_TAG_KEY: current_image_tag()}
+        storage.put_file(run_id, CACHE_KEY, json.dumps(cached).encode("utf-8"))
         return result
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Quality score compute failed for run %s: %s", run_id, e)

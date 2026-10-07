@@ -242,6 +242,16 @@ def lint_bucket_status(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict
 
 # Lint 4: an entry this big, with this many record-like lines, extracting
 # under this coverage is a mass-loss smell, not LLM wobble.
+#
+# Owner: the doctor's under_extraction lint; provenance and any re-derivation
+# are tracked at #721. Derivation: hand-set, not measured. All three values
+# date from the doctor's first commit (823ef4b7, 2026-07-02), tuned against
+# real CVs during the 89HQVQ forensic (#208-#213) to keep false positives near
+# zero; no distribution was recorded. The one check since: the 2026-07-09
+# sweep (docs/analysis/doctor-sweep-results-2026-07-09.md) fired on 2 of 12
+# distinct CVs, both verified real losses (2 TP / 0 FP). The 2Q1_ZQ honors
+# mega-entry at 19% coverage (#229) is the reference true positive. Re-derive
+# against a labelled corpus before changing any of the three.
 UNDER_EXTRACTION_MAX_PCT = 40.0
 UNDER_EXTRACTION_MIN_CHARS = 800
 UNDER_EXTRACTION_MIN_RECORDS = 2
@@ -294,6 +304,7 @@ def lint_under_extraction(stage4: dict) -> list[dict]:
 # 73 scored runs of the 2026-07-25 batch -- the same measurement as
 # the render magnitudes. WARN means this run sits in the corpus's
 # worst quartile, not that the lint fired at all (#438).
+# Owner: the doctor's classified_unrendered lint; provenance tracked at #721.
 CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
@@ -748,6 +759,7 @@ def lint_taxonomy_code_coverage(stage3b: dict) -> list[dict]:
 # true duplicate; anything below carries content the kept entry lacks. On
 # 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
 # 0.60-0.89 (#227).
+# Owner: the doctor's dedup_drops lint; provenance tracked at #721.
 DEDUP_SAFE_CONTAINMENT = 0.9
 _DEDUP_TOKEN_RE = re.compile(r"[^\W_]+")
 

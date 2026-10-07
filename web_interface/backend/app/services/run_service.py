@@ -1,7 +1,7 @@
 """Run-related service functions."""
+import json
 import logging
 import math
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.config_loader import get_config
+from app.config_loader import current_image_tag, get_config
 from app.database import SessionLocal
 from app.errors import forbidden, not_found
 from app.models import (
@@ -32,17 +32,52 @@ from app.services import auto_retry, batch_completion, batch_service, notificati
 from app.storage import get_storage
 from app.storage.base import RunStorage
 
-# Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
-IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
-
-
-def current_image_tag() -> str | None:
-    """The tag of the image this process runs, or None when it was built
-    without one (local dev, or an image built before #1239)."""
-    return os.environ.get(IMAGE_TAG_ENV, "").strip() or None
-
-
 logger = logging.getLogger(__name__)
+
+
+def parse_image_tag_history(raw: str | None) -> list[str]:
+    """The tags stored in ``runs.image_tag_history``, oldest first.
+
+    NULL is an empty history. A value that is not a JSON array of strings
+    raises ValueError: the column is written only by
+    ``_record_image_tag_history``, so that means a corrupt row.
+    """
+    if raw is None:
+        return []
+    history = json.loads(raw)
+    if not isinstance(history, list) or not all(isinstance(t, str) for t in history):
+        raise ValueError(f"image_tag_history is not a JSON list of tags: {raw[:80]!r}")
+    return history
+
+
+def _record_image_tag_history(db: Session, run_id: str) -> None:
+    """Append the executing image's tag to the run's image history (#1239).
+
+    Called only by the caller that just won the move to "running", inside the
+    same transaction, so no other claimer writes the row concurrently. Appends
+    only when the tag differs from the last one recorded: a retry on the same
+    image adds nothing, a resume on a new image adds it. An untagged image
+    records nothing. A corrupt history is logged and restarted from this tag
+    rather than failing the claim: provenance must never stop a run.
+    """
+    tag = current_image_tag()
+    if tag is None:
+        return
+    raw = db.execute(select(Run.image_tag_history).where(Run.id == run_id)).scalar_one_or_none()
+    try:
+        history = parse_image_tag_history(raw)
+    except ValueError:
+        logger.warning("Run %s: discarding unreadable image_tag_history %r", run_id, raw,
+                       exc_info=True)
+        history = []
+    if history[-1:] == [tag]:
+        return
+    db.execute(
+        update(Run).where(Run.id == run_id)
+        .values(image_tag_history=json.dumps([*history, tag]))
+        .execution_options(synchronize_session=False)
+    )
+
 
 # A run older than this while still marked "running" at startup is treated as
 # orphaned by a server restart. Generous relative to the ~15-20 min a real run
@@ -615,6 +650,8 @@ def _transition_run_for_retry(
         completed_at=None,
     ):
         return False
+    _record_image_tag_history(db, run.id)
+    db.refresh(run)
 
     downstream_steps = (
         db.query(Step)
@@ -784,13 +821,17 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
 
     ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
     are extra columns written in the same statement. Also stamps ``image_tag``
-    with the executing image (#1239). Does not commit: the caller
+    with the executing image and appends it to ``image_tag_history`` (#1239).
+    Does not commit: the caller
     commits on a win, and on a loss holds nothing to undo.
     """
     result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
         {"status": RunState.RUNNING, "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
     )
-    return result == 1
+    if result != 1:
+        return False
+    _record_image_tag_history(db, run_id)
+    return True
 
 
 def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
@@ -905,6 +946,8 @@ def claim_queued(run_id: str) -> ClaimResult:
                     image_tag=current_image_tag(),
                     error_message=None, completed_at=None)
         ).rowcount == 1
+        if won:
+            _record_image_tag_history(db, run_id)
         db.commit()
         row = db.execute(
             select(Run.status, Run.file_type, Run.resume_from_step).where(Run.id == run_id)
