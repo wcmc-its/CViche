@@ -582,10 +582,11 @@ def test_current_date_vocabulary_is_pinned():
     """The end-of-range keywords _parse_date_components treats as open-ended.
 
     Pinned so a vocabulary edit is a visible, deliberate act. The formatting
-    and sorting modules keep their own literals on dev; consolidating them
-    was deliberately kept out of #553's PR (cross-file constant conversion).
+    and sorting modules read the same constant since #1432, which added
+    "to date"/"date" and had to reach all three.
     """
-    assert CURRENT_DATE_VALUES == frozenset({"present", "current", "ongoing", "now"})
+    assert CURRENT_DATE_VALUES == frozenset({"present", "current", "ongoing", "now",
+                                             "to date", "date"})
 
 
 # --- #946: a start with no end on a point-in-time code is that one year ------
@@ -1097,3 +1098,110 @@ def test_a_span_with_its_own_end_is_not_merged_into_a_year_run():
     fields = {"start_date": "1990", "end_date": "1995",
               "additional_date_ranges": "1990; 1991-1992; 1995"}
     assert envelope_date_spans(fields, "K1") == ["1990", "1991-1992", "1995"]
+
+
+# --- #1432: "to date" ends, backwards ranges, strict ISO in free text --------
+
+from unified_pipeline.stage6.parsing.dates import range_is_reversed  # noqa: E402
+
+
+@pytest.mark.parametrize("end", ["to date", "date", "To Date"])
+def test_a_to_date_end_renders_as_present(end):
+    """VYNARH: "2012 to date" was stored as end "to date" and rendered raw."""
+    assert format_date_range("2012", end, "D2") == "2012-Present"
+
+
+@pytest.mark.parametrize("end", ["to date", "date"])
+def test_a_to_date_end_sorts_as_current(end):
+    assert _sort(end) == _sort("present")
+
+
+@pytest.mark.parametrize("start, end, code, expected", [
+    # Separate dates stage 4 stored as first and last (UYQRUN shapes).
+    ("2020", "2014", "Q3", "2020, 2014"),
+    ("2019-12-04", "2018-04-13", "B2", "12/19, 04/18"),
+    ("2011-10", "2010-09", "K4", "2011, 2010"),
+    # Same year, both months stated and backwards.
+    ("2011-10", "2011-03", "B2", "10/11, 03/11"),
+])
+def test_a_backwards_range_renders_as_the_dates_listed(start, end, code, expected):
+    assert format_date_range(start, end, code) == expected
+
+
+@pytest.mark.parametrize("start, end, code, expected", [
+    ("2014", "2020", "Q3", "2014-2020"),
+    # Same year with a month missing on one side proves no order.
+    ("2011-10", "2011", "D1", "10/11-2011"),
+    ("2018", "present", "Q3", "2018-Present"),
+    # An end that does not parse proves nothing either.
+    ("2018", "TBD", "Q3", "2018-TBD"),
+    # A term's backwards range is a typo in the CV, not a list: kept.
+    ("1993-09-01", "1993-08-31", "M2B", "09/93-08/93"),
+    ("2011-10", "2010-09", "D1", "10/11-09/10"),
+])
+def test_a_forward_or_unprovable_range_still_renders_as_a_range(start, end, code, expected):
+    assert format_date_range(start, end, code) == expected
+
+
+@pytest.mark.parametrize("start, end, expected", [
+    ("2020", "2014", True),
+    ("2011-10", "2011-03", True),
+    ("2014", "2020", False),
+    ("2011-10", "2011", False),
+    ("2020", "present", False),
+    ("2020", "", False),
+    ("", "2014", False),
+])
+def test_range_is_reversed_needs_proof(start, end, expected):
+    assert range_is_reversed(start, end) is expected
+
+
+@pytest.mark.parametrize("text", [
+    # An MM/YYYY range (JFGZFT shape).
+    "01/2013-08/2013 Fictional training",
+    "Fictional series (7/2008-07/2016)",
+    # Each side of the guard alone: a slash or a hyphen before, a slash after.
+    "Fictional series 7/2008-07",
+    "Fictional ref 0999-0000-12",
+    "Fictional course 2013-08/2014",
+    "Fictional ref 2018-08-123",
+    # A programme number (digits synthesized).
+    "Fictional course; UPN 0999-0000-12-027-L04-P",
+    # An abbreviated year range (RINASX shape).
+    "Fictional course 1997-8",
+    # A one-digit month is not strict ISO.
+    "Fictional course 2018-8-1",
+    "Fictional course 2018/8",
+])
+def test_normalize_leaves_a_non_iso_date_alone(text):
+    assert normalize_iso_dates_in_text(text) == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Fictional course, 2018-08.", "Fictional course, August 2018."),
+    ("(2018-08-01) Fictional course", "(August 2018) Fictional course"),
+    ("2019-08-01\u20132019-09-01 Fictional", "August 2019\u2013September 2019 Fictional"),
+    ("2012-06 to 2012-07 Fictional", "June 2012 to July 2012 Fictional"),
+    # Two joined by a bare hyphen, or one and a year: one range.
+    ("2022-05-2022-07 Fictional", "May 2022-July 2022 Fictional"),
+    ("2010-04-2018 Fictional", "April 2010-2018 Fictional"),
+    ("2023-08-16-2023-08-19 Fictional", "August 2023 Fictional"),
+    # 5c's slashed form.
+    ("Fictional course 2018/08", "Fictional course August 2018"),
+    ("Fictional course 2018/08/01", "Fictional course August 2018"),
+    ("2011/07-2019/07 Fictional", "July 2011-July 2019 Fictional"),
+    ("2016/11-2019 Fictional", "November 2016-2019 Fictional"),
+])
+def test_normalize_still_rewrites_a_strict_iso_date(text, expected):
+    assert normalize_iso_dates_in_text(text) == expected
+
+
+def test_an_extra_span_ending_to_date_reads_as_running():
+    fields = {"start_date": "1990", "end_date": "1995",
+              "additional_date_ranges": "2004-to date"}
+    assert extra_date_spans(fields, "K1") == ["2004-Present"]
+
+
+def test_a_record_running_to_date_covers_its_later_extra_years():
+    fields = {"start_date": "1990", "end_date": "to date", "additional_dates": "1992"}
+    assert extra_date_spans(fields, "K1") == []
