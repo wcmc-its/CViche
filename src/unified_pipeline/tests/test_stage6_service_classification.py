@@ -136,6 +136,19 @@ def test_reviewer_for_needs_a_journal_on_the_line():
         ["Reviewer for Annals of X"], ["Reviewer for Agency X grants"])
 
 
+def test_ad_hoc_reviewer_needs_a_journal_on_the_line():
+    """#1532 (ZCTARO 151-157, BMAMWE 619/622): an "ad hoc reviewer" of a
+    grant program or funder stays a Q2 row; one of a journal still
+    reroutes, through either the single-line or the line-split path."""
+    funder = "2005 - 2006 ad hoc reviewer, fictional science foundation"
+    assert _is_q2_journal_reviewer(funder, "ad hoc reviewer", "", "") is False
+    assert _is_q2_journal_reviewer(
+        "ad hoc reviewer, journal of fictional medicine", "ad hoc reviewer", "", "") is True
+    assert _split_q2_lines(["2016 Ad Hoc Reviewer, Agency X Grant Program",
+                            "Ad hoc reviewer, Annals of X"]) == (
+        ["Ad hoc reviewer, Annals of X"], ["2016 Ad Hoc Reviewer, Agency X Grant Program"])
+
+
 # ---------------------------------------------------------------------------
 # 2. `_split_q2_lines`: same two constants, line-by-line
 

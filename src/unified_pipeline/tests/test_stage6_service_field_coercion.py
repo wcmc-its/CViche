@@ -569,7 +569,7 @@ def test_q2_list_role_and_organization_survive_router_and_render_end_to_end(tmp_
 def _rerouted_q2(**fields):
     """A Q2 entry the router sends to `_fill_journal_reviewing`: no
     `journal_name`, and a text that matches `REVIEWER_PATTERNS`."""
-    return {"text": "Ad hoc reviewer, " + " ".join(str(v) for v in fields.values()),
+    return {"text": "Manuscript reviewer, " + " ".join(str(v) for v in fields.values()),
             "taxonomy_code": "Q2", "element_idx_start": 0,
             "extracted_fields": fields}
 
