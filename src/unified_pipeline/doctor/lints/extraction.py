@@ -2013,7 +2013,12 @@ def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[d
 # an entry on newlines, and these records share a line. This lint cuts the
 # entry's text into record-shaped clauses, takes the clause the record covers
 # best as the one it stands for, and looks for every other clause in the
-# rendered document. Report-only: nothing is split or asked again.
+# rendered document. A clause whose words the record holds is the record's
+# own unless it writes a span the record lacks: a committee membership kept
+# only as the office held inside it (X6, 2026-10-04: RINASX-10's three
+# entries; VPMMFM-10, an entry stage 4 split into its two offices). That
+# shape is the one judged on an entry stage 4 split into `stage4_records`.
+# Report-only: nothing is split or asked again.
 
 #: A clause the record does not stand for carries at least this many words
 #: or years the record lacks, and they make up at least this share of the
@@ -2032,6 +2037,24 @@ MULTI_RECORD_NEW_SHARE = 0.4
 #: institutions are capitalised; a short role phrase in sentence case
 #: ("Clinical skills tutor") stays below the floor.
 MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
+
+#: How a left-out clause was found; the message names every shape but the
+#: first. CLAUSE_NEW_WORDS: it carries words or years the record lacks.
+#: CLAUSE_SPAN_OUTSIDE: the record holds each of its words, but it writes a
+#: year outside every span the record's dates cover. That is a committee's
+#: membership span with an office inside it, where stage 4 kept the office
+#: ("<committee>, 2011-2016, Chair 2014-15"; X6 RINASX-10, three entries), or
+#: an entry stage 4 split into its offices only (X6 VPMMFM-10). On a one-record
+#: entry the clause the record stands for must also name a role the left-out
+#: clause lacks: the same role written again at another time stays
+#: unreported, as it is when its only new words are years.
+CLAUSE_NEW_WORDS = "new_words"
+CLAUSE_SPAN_OUTSIDE = "span_outside_record"
+#: Codes CLAUSE_SPAN_OUTSIDE and the dated-event clause (`_is_dated_event`)
+#: do not judge: a grant writes its own period beside the owner's role
+#: period inside it, and its credit line beside its award line, and neither
+#: is a second record (BMHBJZ 668, NTCULM 62, web31 455 on the farms).
+_GRANT_CODES_UNJUDGED = frozenset(code for code, _title in _FUNDING_SECTIONS)
 
 #: A year as written in a date: 1900-2099, not inside a longer number (a
 #: patent or licence number).
@@ -2130,19 +2153,30 @@ class DateAnchor(NamedTuple):
     years: frozenset[str]
 
 
+class YearSpan(NamedTuple):
+    """The first and last year one stage-4 record's values write."""
+    first: int
+    last: int
+
+
 class RecordWords(NamedTuple):
-    """The distinctive words and the years of a stage-4 record's values."""
+    """The distinctive words and the years of a stage-4 record's values, and
+    the year span of each record: one span, or one per `stage4_records`
+    child that writes a year."""
     words: frozenset[str]
     years: frozenset[str]
+    spans: tuple[YearSpan, ...]
 
 
 class UncoveredClause(NamedTuple):
-    """A clause the record does not stand for, and the words the render check
-    looks for: its words the record lacks when there are enough of them,
-    else all its words."""
+    """A clause the record does not stand for, the words the render check
+    looks for (its words the record lacks when there are enough of them,
+    else all its words), and which shape found it: CLAUSE_NEW_WORDS, or
+    CLAUSE_SPAN_OUTSIDE for a clause whose words the record holds."""
     text: str
     years: frozenset[str]
     words: frozenset[str]
+    shape: str = CLAUSE_NEW_WORDS
 
 
 class OutputLines(NamedTuple):
@@ -2243,10 +2277,30 @@ def _part_clauses(part: str, two_digit_years: bool) -> list[Clause]:
     return clauses
 
 
-def _record_clauses(text: str) -> list[Clause]:
+def _names_title_and_institution(part: str) -> bool:
+    return bool(_TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part))
+
+
+def _is_dated_event(part: str, record_words: frozenset[str] | None) -> bool:
+    """A part that writes a year and MULTI_RECORD_MIN_NEW or more distinctive
+    words, none of them the record's: an event beside a role ("<committee>
+    member; <named> Symposium in March, 2019", X6 RVTAQT-08). A part that
+    shares a word with the record is the record's own head (a mentee's name
+    and degree year, a residency's dates beside its director's line).
+    `record_words` None judges no part an event."""
+    if record_words is None or not _CLAUSE_YEAR_RE.search(part):
+        return False
+    words = _clause_words(part)
+    return len(words) >= MULTI_RECORD_MIN_NEW and not words & record_words
+
+
+def _record_clauses(text: str, record_words: frozenset[str] | None) -> list[Clause]:
     """The record-shaped clauses of an entry's text: its dated clauses when
-    there are two or more, else its undated parts that each name a title and
-    an institution. Fewer than two means the text reads as one record."""
+    there are two or more, else its parts that each name a title and an
+    institution or are a dated event (see `_is_dated_event`). A text with
+    fewer than two dated clauses holds at most one dated event, so an event
+    is a clause only beside a named part. Fewer than two means the text
+    reads as one record."""
     two_digit_years = not _CLAUSE_YEAR_RE.search(text)
     dated = [clause for part in _STRONG_SEPARATOR_RE.split(text)
              for clause in _part_clauses(part, two_digit_years)]
@@ -2254,7 +2308,7 @@ def _record_clauses(text: str) -> list[Clause]:
         return dated
     return [Clause(part, frozenset(_CLAUSE_YEAR_RE.findall(part)))
             for part in _SOFT_SEPARATOR_RE.split(text)
-            if _TITLE_WORD_RE.search(part) and _INSTITUTION_WORD_RE.search(part)]
+            if _names_title_and_institution(part) or _is_dated_event(part, record_words)]
 
 
 def _clause_words(text: str) -> set[str]:
@@ -2277,21 +2331,77 @@ def _is_prose(text: str) -> bool:
             and lowercase > len(words) - lowercase)
 
 
+def _years_of(value: object) -> frozenset[str]:
+    return frozenset(year for leaf in _leaf_strings(value)
+                     for year in _CLAUSE_YEAR_RE.findall(leaf))
+
+
+def _year_span(years: frozenset[str]) -> YearSpan | None:
+    return YearSpan(int(min(years)), int(max(years))) if years else None
+
+
+def _record_spans(fields: Mapping[str, object]) -> tuple[YearSpan, ...]:
+    """The record's year span, or each `stage4_records` child's."""
+    children = fields.get(STAGE4_RECORDS_KEY)
+    records = ([child for child in children if isinstance(child, Mapping)]
+               if isinstance(children, list) and children else [fields])
+    return tuple(span for span in map(_year_span, map(_years_of, records)) if span)
+
+
 def _record_words(fields: Mapping[str, object]) -> RecordWords:
     leaves = _leaf_strings(fields)
     return RecordWords(
         frozenset(token for leaf in leaves for token in _long_word_tokens(leaf)),
-        frozenset(year for leaf in leaves for year in _CLAUSE_YEAR_RE.findall(leaf)))
+        _years_of(fields), _record_spans(fields))
 
 
-def _uncovered_clauses(clauses: list[Clause], record: RecordWords) -> list[UncoveredClause]:
+def _outside_every_span(years: frozenset[str], spans: tuple[YearSpan, ...]) -> bool:
+    return bool(spans) and any(
+        not any(span.first <= int(year) <= span.last for span in spans) for year in years)
+
+
+def _dated_own_clause(clauses: list[Clause], words: list[set[str]],
+                      record: RecordWords) -> int | None:
+    """The clause the record's dates stand for: of the clauses whose years
+    the record holds, the one sharing most words with it. It can differ from
+    the clause sharing most words: a committee's membership span shares more
+    words with the record than the office inside it whose dates the record
+    holds ("<committee>, 2011-2016, Chair 2014-15")."""
+    dated = [i for i, clause in enumerate(clauses)
+             if clause.years and clause.years <= record.years]
+    return max(dated, key=lambda i: len(words[i] & record.words)) if dated else None
+
+
+def _span_outside(clause: Clause, clause_words: set[str], own_words: set[str] | None,
+                  record: RecordWords) -> bool:
+    """CLAUSE_SPAN_OUTSIDE for a clause whose words the record holds; on a
+    one-record entry (`own_words` given) the clause the record's dates stand
+    for names a role this one lacks."""
+    return (bool(clause_words) and _outside_every_span(clause.years, record.spans)
+            and not _is_prose(clause.text)
+            and (own_words is None or any(_TITLE_WORD_RE.fullmatch(word)
+                                          for word in own_words - clause_words)))
+
+
+def _uncovered_clauses(clauses: list[Clause], record: RecordWords,
+                       judge_spans: bool) -> list[UncoveredClause]:
     """The clauses other than the one the record covers best that carry enough
-    of their own (see MULTI_RECORD_MIN_NEW) and are not prose."""
+    of their own (see MULTI_RECORD_MIN_NEW) and are not prose; and, when
+    `judge_spans`, the clauses other than the one the record's dates stand
+    for whose words the record holds but whose span it lacks
+    (CLAUSE_SPAN_OUTSIDE)."""
     words = [_clause_words(clause.text) for clause in clauses]
     own = max(range(len(clauses)), key=lambda i: len(words[i] & record.words))
+    dated_own = _dated_own_clause(clauses, words, record) if judge_spans else None
     uncovered = []
     for i, clause in enumerate(clauses):
         new_words = words[i] - record.words
+        if not new_words:
+            if dated_own is not None and _span_outside(
+                    clause, words[i], words[dated_own], record):
+                uncovered.append(UncoveredClause(
+                    clause.text, clause.years, frozenset(words[i]), CLAUSE_SPAN_OUTSIDE))
+            continue
         if i == own or not new_words - _NOT_A_RECORD_WORDS:
             continue
         new = len(new_words) + len(clause.years - record.years)
@@ -2301,6 +2411,22 @@ def _uncovered_clauses(clauses: list[Clause], record: RecordWords) -> list[Uncov
             continue
         checked = new_words if len(new_words) >= MULTI_RECORD_MIN_NEW else words[i]
         uncovered.append(UncoveredClause(clause.text, clause.years, frozenset(checked)))
+    return uncovered
+
+
+def _split_uncovered_clauses(clauses: list[Clause],
+                             record: RecordWords) -> list[UncoveredClause]:
+    """On an entry stage 4 split into `stage4_records`, the clauses whose
+    words the records hold and that write a year outside every record's
+    span (CLAUSE_SPAN_OUTSIDE). A clause with words of its own is not judged
+    here: stage 4 splits an entry by its records, and leaves a record's
+    detail words unfiled."""
+    uncovered = []
+    for clause in clauses:
+        words = _clause_words(clause.text)
+        if not words - record.words and _span_outside(clause, words, None, record):
+            uncovered.append(UncoveredClause(
+                clause.text, clause.years, frozenset(words), CLAUSE_SPAN_OUTSIDE))
     return uncovered
 
 
@@ -2325,25 +2451,40 @@ def _clause_evidence(clauses: list[UncoveredClause]) -> list[str]:
             for clause in clauses[:FIELD_EVIDENCE_MAX_VALUES]]
 
 
+def _shape_note(clauses: list[UncoveredClause]) -> str:
+    """The shapes other than CLAUSE_NEW_WORDS that found these clauses, as a
+    message suffix."""
+    shapes = sorted({clause.shape for clause in clauses} - {CLAUSE_NEW_WORDS})
+    return f" [{', '.join(shapes)}]" if shapes else ""
+
+
 def _clause_verdict(entry: _FieldsEntry, output: OutputLines) -> MultiRecordVerdict | None:
-    """WARN when a clause the record does not stand for is on no rendered
-    line, INFO when each is on one (rendered by another entry, or fused into
-    the record's row)."""
-    clauses = _record_clauses(entry.text)
+    """WARN when a clause the record (or, on a split entry, each of its
+    records) does not stand for is on no rendered line, INFO when each is
+    on one (rendered by another entry, or fused into the record's row)."""
+    record = _record_words(entry.fields)
+    judged = entry.code not in _GRANT_CODES_UNJUDGED
+    clauses = _record_clauses(entry.text, record.words if judged else None)
     if len(clauses) < 2:
         return None
-    uncovered = _uncovered_clauses(clauses, _record_words(entry.fields))
+    children = entry.fields.get(STAGE4_RECORDS_KEY)
+    if children:
+        uncovered = _split_uncovered_clauses(clauses, record) if judged else []
+        records = f"{len(children)} stage-4 records"
+    else:
+        uncovered = _uncovered_clauses(clauses, record, judge_spans=judged)
+        records = "one stage-4 record"
     if not uncovered:
         return None
     absent = [clause for clause in uncovered if not _clause_rendered(clause, output)]
     head = (f"entry {entry.element_idx} ({entry.code}): {len(clauses)} record-shaped "
-            f"clauses, one stage-4 record")
+            f"clauses, {records}")
     if absent:
         return MultiRecordVerdict(
-            "WARN", f"{head}; {len(absent)} other clause(s) on no line of the output (#1243)",
-            _clause_evidence(absent))
+            "WARN", f"{head}; {len(absent)} other clause(s) on no line of the output "
+            f"(#1243){_shape_note(absent)}", _clause_evidence(absent))
     return MultiRecordVerdict(
-        "INFO", f"{head}; the other clause(s) are in the output (#1243)",
+        "INFO", f"{head}; the other clause(s) are in the output (#1243){_shape_note(uncovered)}",
         _clause_evidence(uncovered))
 
 
@@ -2442,26 +2583,30 @@ _MULTI_RECORD_SKIPPED_CODES = _OFFSCHEMA_SKIPPED_CODES | frozenset({PERSONAL_DAT
 def lint_multi_record_coverage(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     """A stage-4 entry whose text holds several records while stage 4
     returned one record and no `stage4_records` (#1243): two or more dated
-    clauses, or undated parts that each name a title and an institution, of
-    which the record stands for one; or one record holding several mentees,
-    degree years or licence/patent numbers. One finding per entry; WARN when
+    clauses, or parts that each name a title and an institution (with any
+    dated event beside them), of which the record stands for one; or one
+    record holding several mentees, degree years or licence/patent numbers.
+    On an entry with `stage4_records`, only a clause whose words the records
+    hold and whose year lies outside every record's span (CLAUSE_SPAN_OUTSIDE).
+    One finding per entry; WARN when
     a clause it left out, or one of the values it fused, is on no line of the
     rendered document (track changes included), INFO otherwise. Skips the
     codes `offschema_fields` skips (the section writes the entry's text, a
     stage-5 formatter rewrites it whole, or it is personal data). An entry
     stage 6's fan-out splits needs no skip of its own: fan-out splits a
     record list only when the list's values hold every word of the entry's
-    text, so every clause is covered, and it splits `stage4_records`, which
-    are skipped above."""
+    text, so every clause is covered; it also splits `stage4_records`,
+    whose clauses the span shape reads against the rows fan-out renders."""
     output = _output_lines(blocks)
     output_digits = _LINE_SENTINEL.join(
         re.sub(r"\D", "", line) for _, text in blocks for line in str(text).split("\n"))
     findings = []
     for entry in _fields_entries(stage4):
-        if (not entry.code or entry.code in _MULTI_RECORD_SKIPPED_CODES or not entry.fields
-                or entry.fields.get(STAGE4_RECORDS_KEY)):
+        if not entry.code or entry.code in _MULTI_RECORD_SKIPPED_CODES or not entry.fields:
             continue
-        verdict = _clause_verdict(entry, output) or _fused_verdict(entry, output, output_digits)
+        verdict = _clause_verdict(entry, output)
+        if not verdict and not entry.fields.get(STAGE4_RECORDS_KEY):
+            verdict = _fused_verdict(entry, output, output_digits)
         if verdict:
             findings.append(_finding("multi_record_coverage", *verdict))
     return findings
