@@ -187,10 +187,12 @@ def _set_cell_text(cell, text: str, bold: bool = False):
 
 #: CViche's voice to the submitter: a one-cell, light-gray, bordered table in
 #: Arial whose first line starts "CViche" (#1388). One table, so deleting it
-#: removes the whole note. Distinct from the WCM tables' darker D9D9D9 header.
+#: removes the whole note. Fill and border are dark enough to survive print,
+#: a projector and dark mode (F2F2F2 with a 0.5pt BFBFBF border washed out).
 CVICHE_BOX_PREFIX = "CViche"
-CVICHE_BOX_FILL = "F2F2F2"
-CVICHE_BOX_BORDER = "BFBFBF"
+CVICHE_BOX_FILL = "E7E6E6"
+CVICHE_BOX_BORDER = "808080"
+CVICHE_BOX_BORDER_SIZE = "6"  # eighths of a point: 0.75pt
 
 
 def add_cviche_box(container: Document | _Cell, title: str) -> _Cell:
@@ -199,7 +201,7 @@ def add_cviche_box(container: Document | _Cell, title: str) -> _Cell:
     `cviche_box_line`."""
     cell = container.add_table(rows=1, cols=1).cell(0, 0)
     _set_cell_background(cell, CVICHE_BOX_FILL)
-    _set_cell_borders(cell, CVICHE_BOX_BORDER)
+    _set_cell_borders(cell, CVICHE_BOX_BORDER, CVICHE_BOX_BORDER_SIZE)
     cviche_box_line(cell.paragraphs[0], title, bold=True)
     return cell
 

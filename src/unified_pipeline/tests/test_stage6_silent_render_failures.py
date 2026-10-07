@@ -1355,6 +1355,8 @@ def test_a_cviche_box_is_one_light_gray_cell_titled_cviche_and_nothing_else_is()
     box, = doc.tables
     assert is_cviche_box(box)
     assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
+    top = cell._tc.tcPr.find(qn("w:tcBorders")).find(qn("w:top"))
+    assert (top.get(qn("w:color")), top.get(qn("w:sz"))) == ("808080", "6")
     assert cell.paragraphs[0].runs[0].bold and cell.paragraphs[0].runs[0].font.name == "Arial"
     one_cell = doc.add_table(rows=1, cols=1)
     one_cell.cell(0, 0).text = "Example Foundation grant"

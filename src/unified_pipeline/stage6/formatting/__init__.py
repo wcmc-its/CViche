@@ -30,6 +30,7 @@ from .dates import (  # noqa: F401
 )
 from .docx import (  # noqa: F401
     CVICHE_BOX_BORDER,
+    CVICHE_BOX_BORDER_SIZE,
     CVICHE_BOX_FILL,
     CVICHE_BOX_PREFIX,
     DetachedAnchorError,
