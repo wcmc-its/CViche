@@ -315,6 +315,53 @@ def test_second_entry_renders_after_the_first_not_inside_it(code, filler, header
     ]
 
 
+# --- (a0) #1434: L1 list numbers; L3 undated rows keep their institution ---
+
+def test_l1_bullet_drops_the_source_list_number():
+    """The CV numbered its own L1 items ("8. ..."); the bullet is the marker."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l1",
+        [_entry("8. Harbor Cup Regatta (event physician), Kestrel City, 2000- 2004")])
+    assert added == ["", "Harbor Cup Regatta (event physician), Kestrel City, 2000- 2004"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("12) Event physician\n(3) Team physician", ["Event physician", "Team physician"]),
+    ("Event physician\t2. Team physician", ["Event physician", "2. Team physician"]),
+    ("2004. Event physician", ["2004. Event physician"]),
+    ("3.5 sessions per week", ["3.5 sessions per week"]),
+])
+def test_l1_strips_a_list_number_only_at_the_start_of_a_line(text, expected):
+    """Every line's own number goes; a mid-line number, a four-digit year and
+    a decimal are content."""
+    gen, added = _render_through_template("_fill_clinical_practice_l1", [_entry(text)])
+    assert [line for line in added if line] == expected
+
+
+def test_l3_undated_rows_at_two_institutions_do_not_read_as_duplicates():
+    """Two dateless rows with one role used to render as two identical bare
+    role bullets; the institution stage 4 extracted tells them apart."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director", leadership_role="Medical Director",
+                institution="Harrowgate Hospital"),
+         _entry("Medical Director", leadership_role="Medical Director",
+                institution="Birch Hollow Clinic")])
+    assert [line for line in added if line] == [
+        "Medical Director, Harrowgate Hospital", "Medical Director, Birch Hollow Clinic"]
+
+
+def test_l3_undated_row_does_not_repeat_an_institution_the_role_names():
+    """A narrative row whose text already names the institution stays as written."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Grow diagnostic testing with colleagues at Harrowgate Hospital.",
+                leadership_role="Grow diagnostic testing with colleagues at Harrowgate Hospital.",
+                institution="Harrowgate Hospital")])
+    assert [line for line in added if line] == [
+        "Grow diagnostic testing with colleagues at Harrowgate Hospital."]
+
+
 # --- (a1) L3 `unit_program`: the unit the role led reaches the bullet -------
 
 def test_l3_bullet_names_the_unit_program_between_role_and_institution():
