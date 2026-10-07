@@ -2013,6 +2013,32 @@ def test_next_element_scrub_reaches_only_the_first_cell_of_a_table(tmp_path):
     )
 
 
+def test_847_label_with_a_year_in_its_parenthetical_scrubs_the_next_paragraph(tmp_path):
+    """#847: "Birth Date (as of 2020):" alone in a paragraph is still a bare
+    label, and its value in the next paragraph may follow a parenthesis."""
+    doc = Document()
+    doc.add_paragraph("Birth Date (as of 2020):")
+    doc.add_paragraph("(01/02/1970)")
+    docx_path = tmp_path / "next_paragraph_parenthetical_label.docx"
+    doc.save(str(docx_path))
+    label = "Birth Date (as of [withheld]):"
+    assert _reader_view(docx_path) == (
+        [(label, []), ("([withheld])", [])], [label, "([withheld])"]
+    )
+
+
+def test_847_label_cell_with_a_year_in_its_parenthetical_scrubs_the_next_cell(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Date of Birth (as of 2020):"
+    table.cell(0, 1).text = "01/02/1970"
+    docx_path = tmp_path / "next_cell_parenthetical_label.docx"
+    doc.save(str(docx_path))
+    label = "Date of Birth (as of [withheld]):"
+    flat = f"{label} | [withheld]"
+    assert _reader_view(docx_path) == ([(flat, [[label, "[withheld]"]])], [flat])
+
+
 def test_next_element_scrub_takes_a_date_opening_a_table(tmp_path):
     doc = Document()
     doc.add_paragraph("Date of Birth:")

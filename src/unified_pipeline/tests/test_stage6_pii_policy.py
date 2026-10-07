@@ -1492,6 +1492,33 @@ def test_1071_pre_llm_scrub_reaches_a_dob_label_parenthetical(text, expected):
     assert redact_pre_llm_values(text) == expected
 
 
+@pytest.mark.parametrize("text, expected", [
+    # #847: a year inside the label's parentheses no longer uses up the
+    # label's one value -- the date after the colon is withheld as well.
+    ("Birth Date (as of 2020): 01/02/1970",
+     f"Birth Date (as of {PRE_LLM_PLACEHOLDER}): {PRE_LLM_PLACEHOLDER}"),
+    ("Date of Birth (as of 2020): January 2, 1970",
+     f"Date of Birth (as of {PRE_LLM_PLACEHOLDER}): {PRE_LLM_PLACEHOLDER}"),
+    ("Date of Birth (as of 2020):\t01/02/1970",
+     f"Date of Birth (as of {PRE_LLM_PLACEHOLDER}):\t{PRE_LLM_PLACEHOLDER}"),
+    # Still ONE value after the label: a later field's date is kept.
+    ("Date of Birth (as of 2020): 01/02/1970, Appointed 07/01/2005",
+     f"Date of Birth (as of {PRE_LLM_PLACEHOLDER}): {PRE_LLM_PLACEHOLDER}, Appointed 07/01/2005"),
+    ("Date of Birth: 01/02/1970, Appointed 2005",
+     f"Date of Birth: {PRE_LLM_PLACEHOLDER}, Appointed 2005"),
+])
+def test_847_dob_label_parenthetical_year_does_not_spend_the_value(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+def test_847_bare_dob_label_with_a_year_in_its_parenthetical_names_its_category():
+    """A bare year in the parentheses qualifies the label ("as of 2020"); the
+    value is still in the next cell. A whole date there IS the value."""
+    assert pre_llm_bare_label_category("Birth Date (as of 2020):") == CAT_DATE_OF_BIRTH
+    assert pre_llm_bare_label_category("Birth Date (01/02/1970):") is None
+    assert pre_llm_bare_label_category("Birth Date (as of 2020): 1970") is None
+
+
 def test_1071_bare_dob_label_with_a_format_hint_names_its_category():
     """A label cell alone ("Date of Birth (mm/dd/yyyy):") hands its category
     to the next cell's scrub; one whose parentheses hold the value does not
@@ -1783,11 +1810,25 @@ def test_redact_pre_llm_value_of_category_cross_boundary_takes_a_date_after_lead
     assert out == f"  {PRE_LLM_PLACEHOLDER}"
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("(01/02/1970)", f"({PRE_LLM_PLACEHOLDER})"),
+    ("- January 2, 1970", f"- {PRE_LLM_PLACEHOLDER}"),
+    ("\u2022 1970-01-02, Example City", f"\u2022 {PRE_LLM_PLACEHOLDER}, Example City"),
+])
+def test_847_cross_boundary_takes_a_date_after_punctuation_only(text, expected):
+    """#847: only whitespace and punctuation before the date -- a list
+    marker or a parenthesis is not another field's label."""
+    out = redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH, cross_boundary=True)
+    assert out == expected
+
+
 @pytest.mark.parametrize("text", [
     "2001",                                  # bare year: not a whole date
     "1990-1994 BA, Example College",         # bare year opening a range
     "Appointed 07/01/2005",                  # whole date, but not opening
     "Date of Appointment: 07/01/2005",       # its own label opens the text
+    "(Appointed 07/01/2005)",                # a word before it, after punctuation
+    "No. 1 01/02/1970",                      # a digit before it
 ])
 def test_redact_pre_llm_value_of_category_cross_boundary_leaves_it_alone(text):
     assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH, cross_boundary=True) == text

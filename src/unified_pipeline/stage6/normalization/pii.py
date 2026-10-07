@@ -1323,21 +1323,49 @@ def _pre_llm_value_span_in_next_run(text: str, frag_end: int, value_re: re.Patte
     return (vm.start(), vm.end()) if vm else None
 
 
+#: The date-of-birth label row's own opener, colon included -- the one row
+#: whose label can carry a parenthetical (`_DOB_LABEL_PARENTHETICAL`).
+_DOB_LABEL_OPENER_RE = next(pattern for rule, pattern in _COMPILED_POLICY
+                            if rule.category == CAT_DATE_OF_BIRTH and rule.label is not None)
+
+
+def _label_opener_end(text: str, start: int, end: int, category: str) -> int:
+    """Where the VALUE half of the `category` fragment `text[start:end]`
+    can begin: past the date-of-birth label's own opener when one opens
+    the fragment, parenthetical and colon included, else `start` (#847,
+    #1071: "Birth Date (as of 2020): 01/02/1970")."""
+    if category not in (CAT_DATE_OF_BIRTH, CAT_BIRTH):
+        return start
+    opener = _DOB_LABEL_OPENER_RE.match(text, start, end)
+    return opener.end() if opener else start
+
+
+def _pre_llm_fragment_value_spans(text: str, m: PiiMatch, value_re: re.Pattern) -> list[tuple[int, int]]:
+    """The value spans one DOB/SSN fragment `m` carries: every value shape
+    inside its label's parenthetical ("Birth Date (as of 2020):" -- the
+    year there is the label's, but the scrub cannot tell a qualifier from
+    the date itself, "Birth Date (01/02/1970):"), then the first value
+    shape after the label, else the value opening the next tab/`|`/
+    column-gap run (`_pre_llm_value_span_in_next_run`)."""
+    value_start = _label_opener_end(text, m.start, m.end, m.category)
+    spans = [vm.span() for vm in value_re.finditer(text, m.start, value_start)]
+    vm = value_re.search(text, value_start, m.end)
+    if vm is not None:
+        spans.append(vm.span())
+    elif _is_bare_label_span(text, m.start, m.end):
+        nxt = _pre_llm_value_span_in_next_run(text, m.end, value_re)
+        spans.extend([nxt] if nxt else [])
+    return spans
+
+
 def _pre_llm_label_value_spans(text: str) -> list[tuple[int, int]]:
-    """The one value each DOB/SSN label fragment of `text` carries: the
-    first value shape inside the fragment, else the value opening the next
-    tab/`|`/column-gap run (`_pre_llm_value_span_in_next_run`)."""
+    """The value spans of every DOB/SSN label fragment of `text`
+    (`_pre_llm_fragment_value_spans`)."""
     spans: list[tuple[int, int]] = []
     for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX, for_pre_llm_scrub=True):
         value_re = _PRE_LLM_VALUE_RE.get(m.category)
-        if value_re is None:
-            continue
-        vm = value_re.search(text, m.start, m.end)
-        span = (vm.start(), vm.end()) if vm else None
-        if span is None and _is_bare_label_span(text, m.start, m.end):
-            span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
-        if span:
-            spans.append(span)
+        if value_re is not None:
+            spans.extend(_pre_llm_fragment_value_spans(text, m, value_re))
     return spans
 
 
@@ -1359,8 +1387,11 @@ def redact_pre_llm_values(text: str | None) -> str:
     Idempotent: a value already replaced has no digits left for
     `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op.
 
-    A DOB/SSN label takes its FIRST value only, so "Date of Birth:
-    01/02/1970, Appointed 2005" keeps 2005 (`_pre_llm_label_value_spans`).
+    A DOB/SSN label takes its FIRST value after the label only, so "Date
+    of Birth: 01/02/1970, Appointed 2005" keeps 2005; every value inside a
+    DOB label's parenthetical is withheld too, so "Birth Date (as of
+    2020): 01/02/1970" no longer spends the one value on 2020
+    (`_pre_llm_fragment_value_spans`).
     Children's dates and birth years come from
     `_pre_llm_child_date_spans`."""
     text = str(text or "")
@@ -1382,6 +1413,12 @@ def redact_pre_llm_values(text: str | None) -> str:
     return "".join(out)
 
 
+#: What may precede a cross-boundary value (`redact_pre_llm_value_of_category`
+#: with `cross_boundary=True`): whitespace and punctuation, never a letter or
+#: digit -- a list marker or an opening parenthesis is not a label.
+_CROSS_BOUNDARY_LEAD_RE = re.compile(r"[^\w]*")
+
+
 def redact_pre_llm_value_of_category(
     text: str | None, category: str, *, cross_boundary: bool = False
 ) -> str:
@@ -1398,14 +1435,16 @@ def redact_pre_llm_value_of_category(
     CAT_BIRTH, be a whole date, never a bare year
     (`_PRE_LLM_VALUE_RE_FULL_DATE_ONLY`). So "Date of Appointment:
     07/01/2005" or "Appointed 07/01/2005" below a blank "Date of Birth:"
-    keeps its date."""
+    keeps its date. Only whitespace and punctuation may come before it
+    (`_CROSS_BOUNDARY_LEAD_RE`): "(01/02/1970)" or "- January 2, 1970"
+    opens with no word that could be another field's label (#847)."""
     text = str(text or "")
     value_map = _PRE_LLM_VALUE_RE_FULL_DATE_ONLY if cross_boundary else _PRE_LLM_VALUE_RE
     value_re = value_map.get(category)
     if not text or value_re is None:
         return text
     if cross_boundary:
-        vm = value_re.match(text, len(text) - len(text.lstrip()))
+        vm = value_re.match(text, _CROSS_BOUNDARY_LEAD_RE.match(text).end())
     else:
         vm = value_re.search(text)
     if vm is None:
@@ -1429,13 +1468,23 @@ def pre_llm_bare_label_category(text: str | None) -> str | None:
     if not text or not _is_bare_label_span(text, 0, len(text)):
         return None
     for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX, for_pre_llm_scrub=True):
-        if m.category not in _PRE_LLM_VALUE_RE:
-            continue
-        if m.start == 0 and m.end == len(text):
-            value_re = _PRE_LLM_VALUE_RE[m.category]
-            if value_re.search(text, m.start, m.end) is None:
-                return m.category
+        if (m.category in _PRE_LLM_VALUE_RE and m.start == 0 and m.end == len(text)
+                and not _label_carries_value(text, m)):
+            return m.category
     return None
+
+
+def _label_carries_value(text: str, m: PiiMatch) -> bool:
+    """True when the bare-label fragment `m` already holds its value: a
+    value shape after the label, or a WHOLE date inside a DOB label's
+    parenthetical ("Birth Date (01/02/1970):"). A bare year there is the
+    label's own qualifier ("Birth Date (as of 2020):", #847), so the value
+    is still in the next cell."""
+    value_start = _label_opener_end(text, m.start, m.end, m.category)
+    if _PRE_LLM_VALUE_RE[m.category].search(text, value_start, m.end) is not None:
+        return True
+    in_label_re = _PRE_LLM_VALUE_RE_FULL_DATE_ONLY[m.category]
+    return in_label_re.search(text, m.start, value_start) is not None
 
 
 # ---------------------------------------------------------------------------
