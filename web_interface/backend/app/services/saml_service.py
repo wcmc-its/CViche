@@ -27,7 +27,7 @@ from app.config_loader import get_config_value
 from app.ed_group_lookup import (
     check_ed_membership, fetch_ed_department, EdUnavailableError, LDAPConfig, MembershipResult,
 )
-from app.models import User, UserRole
+from app.models import User, UserRole, UserStatus
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
 from app.services.ed_access import partner_membership
@@ -101,7 +101,7 @@ def authenticate_saml_response(saml_response: str, db: Session) -> SamlLoginSess
 
     # The same test get_current_user applies (app.auth._load_active_user): a
     # session minted here would be refused on its first use anyway.
-    if user.status != "active":
+    if user.status != UserStatus.ACTIVE:
         logger.info(LOGIN_FAILED, extra={"cwid": attrs["cwid"], "reason": SamlLoginFailure.ACCOUNT_DISABLED})
         return SamlLoginFailure.ACCOUNT_DISABLED
 

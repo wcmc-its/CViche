@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.audit_events import LOGIN_FAILED, LOGIN_SUCCESS, SESSION_STORE_UNAVAILABLE
 from app.auth import SessionEpochUnreadable, create_session_cookie
 from app.config_loader import get_config_value
-from app.models import User, UserRole
+from app.models import User, UserRole, UserStatus
 from app.services.user_service import normalize_email, provision_user
 from app.session_idle import SessionStoreUnavailable
 
@@ -73,7 +73,7 @@ def authenticate_simple_login(db: Session, email: str, display_name: str) -> Log
 
     # The same test get_current_user applies (app.auth._load_active_user): a
     # session minted here would be refused on its first use anyway.
-    if user.status != "active":
+    if user.status != UserStatus.ACTIVE:
         logger.info(LOGIN_FAILED, extra={"email": user.email, "reason": LoginRejection.ACCOUNT_DISABLED})
         return LoginRejection.ACCOUNT_DISABLED
 
