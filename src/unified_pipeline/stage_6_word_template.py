@@ -185,6 +185,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     _record_tokens,
     _value_is_datelike,
     _whole_record_rendered,
+    m1_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
     segments_cover_source,
@@ -1568,10 +1569,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         (`_is_m1_record`) that no part of the document rendered so far carries,
         the summary paragraph included (AUTOPSY-EBYSBC-batch-2026-10-02 E27: a
         generated summary that never mentions a position or a project). The
-        render check is the #221 recovery pass's `_record_rendered`: a record
-        any line or cell of which surfaces, verbatim or by token overlap with
-        one output line, stays out, and so does one too short to verify, so
-        the Appendix never repeats what the reader already sees. Prose M1
+        render check is `m1_record_rendered`: a record that surfaces as a
+        whole, verbatim or by token overlap with one output line, stays out,
+        and so does one too short to verify, so the Appendix never repeats
+        what the reader already sees. One fragment no longer vouches for the
+        record (#1429): its date-and-department fragment matched appointment
+        rows and its title matched a summary sharing its topic words. Prose M1
         entries are what the summary restates; they stay out too.
         """
         m1_entries = entries_by_code.get('M1', [])
@@ -1583,7 +1586,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         return [entry for entry in m1_entries
                 if is_t_validation_recoded_m1(entry)
                 or (_is_m1_record(entry)
-                    and _record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
+                    and m1_record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
 
     def generate(self, input_path: str, output_path: str | None = None, research_summary_path: str | None = None,
                  original_doc_path: str | None = None, discover_original_doc: bool = True) -> str:

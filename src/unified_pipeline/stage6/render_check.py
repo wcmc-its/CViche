@@ -407,6 +407,31 @@ def _whole_record_rendered(line: str, haystack: str,
             or any(tokens <= cut for cut in cut_token_sets or ()))
 
 
+def m1_record_rendered(text: str, haystack: str,
+                       line_token_sets: list[set]) -> bool | None:
+    """Whether a dated M1 record surfaces on the page as a WHOLE (#1429).
+
+    `_record_rendered` lets any one fragment vouch for a line. An M1 record's
+    leading "2015 to 2017 Department of Psychiatry, <university>" fragment
+    matches an appointment or teaching row, its "Principal Investigator: <name>"
+    fragment matches a grant table, and its project title alone matches a long
+    research-summary paragraph that only shares its topic words (NDMRSO: 24
+    records on 4 CVs lost that way). Here the record is judged as one unit:
+    its squashed text sits in the output verbatim, or `RENDER_TOKEN_OVERLAP`
+    of ALL its distinctive letter tokens sit in ONE output line.
+    `line_token_sets` are those tokens of each output line, as for
+    `_record_rendered`. A record with too few distinctive tokens is None, as
+    there.
+    """
+    if _squash(text) in haystack:
+        return True
+    tokens = set(_RENDER_TOKEN_RE.findall(_norm(text)))
+    if len(tokens) < RENDER_TOKEN_MIN_COUNT:
+        return None
+    return any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
+               for line_tokens in line_token_sets)
+
+
 def _record_rendered(line: str, haystack: str,
                      line_token_sets: list[set]) -> bool | None:
     """Whether one record line surfaces in the output: verbatim piece first,
