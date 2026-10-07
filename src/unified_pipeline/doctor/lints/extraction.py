@@ -785,9 +785,11 @@ def _alphanumeric_tokens(text) -> Counter:
 # fields worth comparing into the decision (`_decision_fields`).
 # Findings listing this many drops stay readable in the finding message.
 DEDUP_EVIDENCE_LIMIT = 6
-#: Characters of each dropped and kept text a dedup evidence line quotes. The
-#: review copy marks a quote this long as cut (#1388).
-DEDUP_TEXT_CHARS = 80
+#: Characters of each dropped and kept text a dedup evidence line quotes:
+#: enough for the whole of a one-line record, since the review copy shows the
+#: two side by side and the difference is often at the end ("4 hrs" vs "5 hrs").
+#: The review copy marks a quote this long as cut (#1388).
+DEDUP_TEXT_CHARS = 300
 
 
 def _identity_conflicts(decision: Mapping) -> list[str]:

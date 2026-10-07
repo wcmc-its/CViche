@@ -229,14 +229,25 @@ def test_where_appendix_entries_came_from_goes_in_stage_6s_appendix_note(tmp_pat
     assert _comments(out) == [] and _notes(out) == []  # nothing on the Appendix lines themselves
 
 
+def test_where_from_is_left_out_when_it_disagrees_with_the_boxs_count(tmp_path, caplog):
+    """The box says 5; diversions adding up to 6 (an older report beside a
+    newer render, say) must not print a second number that disagrees."""
+    out, _ = rc.write_review_docx(_with_appendix_note(tmp_path), _report(
+        _finding("stage6_render_warnings", "stage 6 self-check: T: 6 entries diverted to the Appendix")))
+    assert _box_lines(out, rc.APPENDIX_NOTE_TITLE) == [
+        "These 5 entries from your original CV did not fit any section above."]
+    assert "leaving out where they came from" in caplog.text
+    assert _notes(out) == []
+
+
 def test_where_from_counts_info_diversions_too(tmp_path):
     """The note box counts every Appendix line, routine recovered ones (INFO) included."""
     out, _ = rc.write_review_docx(_with_appendix_note(tmp_path), _report(
         _DIVERSIONS[0],
-        _finding("stage6_render_warnings", "stage 6 self-check: A: 1 entry classified A was not found "
-                 "in the rendered document and was recovered into the Appendix", severity="INFO")))
+        _finding("stage6_render_warnings", "stage 6 self-check: A: 3 entries classified A were not found "
+                 "in the rendered document and were recovered into the Appendix", severity="INFO")))
     assert _box_lines(out, rc.APPENDIX_NOTE_TITLE)[1] == (
-        "Where they came from: 2 from Past Research Funding, 1 from Personal/Contact Information.")
+        "Where they came from: 2 from Past Research Funding, 3 from Personal/Contact Information.")
 
 
 def test_without_stage_6s_appendix_note_where_from_is_a_review_note(tmp_path):
@@ -259,7 +270,7 @@ def test_a_record_printed_across_table_cells_is_found_by_its_row(tmp_path):
 def test_a_dedup_drop_led_by_its_entry_number_and_cut_at_the_doctors_length(tmp_path):
     """Current reports lead with "entry N: " (which the run page files as a
     note) and cut each text at DEDUP_TEXT_CHARS; the box marks the cut."""
-    kept = "Squid Optics Seminar Leader, Example School of Marine Biology, eight lectures yearly"[:80]
+    kept = ("Squid Optics Seminar Leader, Example School of Marine Biology, eight lectures yearly; " * 5)[:rc.DEDUP_TEXT_CHARS]
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("dedup_drops", "1 drop", [
         f"entry 12: K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Optics Seminar' vs kept '{kept}'"])))
     assert _notes(out)[2:] == ['\u2022 Didactic Teaching: "Squid Optics Seminar"', f'Kept: "{kept}\u2026"']

@@ -9,6 +9,7 @@ the Appendix entries came from goes in stage 6's own Appendix note box. The
 clean document is left as it is; this writes a copy beside it.
 """
 import copy
+import logging
 import re
 import zipfile
 from dataclasses import dataclass
@@ -134,14 +135,17 @@ _DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|r
 REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
 APPENDIX_NOTE_TITLE = "CViche note"
 NOTES_FONT = "Arial"
-BOX_FILL = "F2F2F2"
-BOX_BORDER = "BFBFBF"
+BOX_FILL = "E7E6E6"  # stage6/formatting/docx.py CVICHE_BOX_* (#1552)
+BOX_BORDER = "808080"
+BOX_BORDER_SIZE = "6"  # eighths of a point: 0.75pt
 NOTE_BULLET = "\u2022 "
 ITEM_INDENT = 0.25  # inches
 KEPT_INDENT = 0.5
 DEDUP_TITLE = "Removed as near-duplicates"
 DEDUP_INSTRUCTION = ("We kept one copy of each. If any of these is a separate entry, "
                      "add it back in the section shown.")
+#: The count stage 6's Appendix note states: "These 6 entries ..." or "This entry ...".
+_NOTE_COUNT_RE = re.compile(r"^(?:These (?P<count>\d+) entries|This entry)\b")
 CAME_FROM_GROUPING = "Each entry is grouped under the heading it had in your original CV."
 MOVED_TITLE = "Moved to the Appendix"
 MOVED_INSTRUCTION = "Move each Appendix entry to the right section or delete it."
@@ -167,6 +171,7 @@ _TOP_LEVEL_HEADINGS = {
     "J": "PERCENT EFFORT", "T": "APPENDIX",
 }
 _APPENDIX_CODE = "T"
+logger = logging.getLogger(__name__)
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 _QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
 
@@ -312,17 +317,18 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> 
     return [], [Note(copy_.title if copy_ else lint, label, item)]
 
 
-def _came_from(diverted: list[DoctorFindingInstance]) -> str:
+def _came_from(diverted: list[DoctorFindingInstance]) -> tuple[str, int]:
     """Where stage 6's Appendix entries came from, from its diversion warnings,
     which name a count and never the lines (by design: appendix.py
-    AppendixDiversionWarning)."""
+    AppendixDiversionWarning); and how many that adds up to."""
     came_from: dict[str, int] = {}
     for inst in diverted:
         m = _DIVERTED_RE.search(inst.detail)
         where = inst.section if inst.section and inst.section != TAXONOMY_LABELS[_APPENDIX_CODE] else ""
         came_from[where] = came_from.get(where, 0) + (int(m["count"]) if m else 1)
-    return ", ".join(f"{n} from {where}" if where else f"{n} not under any section"
+    text = ", ".join(f"{n} from {where}" if where else f"{n} not under any section"
                      for where, n in came_from.items())
+    return text, sum(came_from.values())
 
 
 def _appendix_note_cell(doc: Document) -> _Cell | None:
@@ -344,7 +350,7 @@ def _box(doc: Document, title: str) -> _Cell:
     borders = tc_pr.makeelement(qn("w:tcBorders"), {})
     for side in ("top", "left", "bottom", "right"):
         borders.append(borders.makeelement(qn(f"w:{side}"), {
-            qn("w:val"): "single", qn("w:sz"): "4", qn("w:color"): BOX_BORDER}))
+            qn("w:val"): "single", qn("w:sz"): BOX_BORDER_SIZE, qn("w:color"): BOX_BORDER}))
     tc_pr.append(borders)
     _box_line(cell.paragraphs[0], title, bold=True)
     return cell
@@ -414,12 +420,20 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
                 _box_line(cell.add_paragraph(), f"Kept: {note.kept}", indent=KEPT_INDENT)
 
 
-def _add_came_from(doc: Document, came_from: str) -> bool:
+def _add_came_from(doc: Document, came_from: str, total: int) -> bool:
     """Say where the Appendix entries came from inside stage 6's Appendix note
-    box; False when the document has none (rendered before that box existed)."""
+    box; False when the document has none (rendered before that box existed).
+    Says nothing when the breakdown does not add up to the box's own count:
+    two numbers that disagree are worse than one."""
     cell = _appendix_note_cell(doc)
     if cell is None:
         return False
+    m = _NOTE_COUNT_RE.match(cell.paragraphs[1].text if len(cell.paragraphs) > 1 else "")
+    shown = (int(m["count"]) if m["count"] else 1) if m else None
+    if shown != total:
+        logger.warning("Appendix note counts %s entries but the diversions add up to %d; "
+                       "leaving out where they came from", shown, total)
+        return True
     _box_line(cell.add_paragraph(), f"Where they came from: {came_from}.")
     _box_line(cell.add_paragraph(), CAME_FROM_GROUPING)
     return True
@@ -447,8 +461,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     flags: list[Flag] = []
     notes: list[Note] = []
     if diverted:
-        came_from = _came_from([_instance(f) for f in diverted])
-        if not _add_came_from(doc, came_from):
+        came_from, total = _came_from([_instance(f) for f in diverted])
+        if not _add_came_from(doc, came_from, total):
             notes.append(Note(MOVED_TITLE, MOVED_INSTRUCTION, came_from))
     per_lint: dict[str, int] = {}
     for f in findings:
