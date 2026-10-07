@@ -79,6 +79,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _LEADING_DATE_CELL_RE,
     EXTRAMURAL_ROLE_KEYWORDS,
     _is_known_org_line,
     _is_q2_journal_reviewer,
@@ -465,3 +466,43 @@ def test_parse_extramural_leadership_lines_subcommittee_decides_the_role_line():
         ["American Academy of Pediatrics",
          "AHA Hospital Accreditation Stroke Certification Subcommittee",
          "2018-present"]]
+
+
+# ---------------------------------------------------------------------------
+# #665: service.py's date patterns are on the shared stage-6 date grammar
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_parse_extramural_leadership_lines_reads_every_dash(dash):
+    """The pipe-cell date and the date-only column used their own
+    hyphen/en-dash copy, so an em-dash range was read as content."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+
+    gen._parse_extramural_leadership_lines(
+        table,
+        ["Zorblax Society of Medicine",
+         f"   Program Chair | 2015{dash}2017"])
+
+    assert _leadership_rows(table) == [
+        ["Zorblax Society of Medicine", "Program Chair", f"2015{dash}2017"]]
+
+
+@pytest.mark.parametrize("dates", ["2014, 2017—2020", "2018–ongoing", "2016-18, 2020"])
+def test_q2_date_only_continuation_reads_the_shared_grammar(dates):
+    journal, board = _split_q2_lines(["Zorblax Advisory Board", dates])
+    assert (journal, board) == ([], [f"Zorblax Advisory Board {dates}"])
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2010-2014 | Editorial Board", "Editorial Board"),
+    ("2010 - present | Editorial Board", "Editorial Board"),
+    ("2010- | Editorial Board", "Editorial Board"),
+    # a century-less end year: the copy this replaced took it, so the grammar
+    # must too, or "23" is left at the front of the organization
+    ("2016-23\tZorblax Representative", "Zorblax Representative"),
+    ("Editorial Board 2010", "Editorial Board 2010"),
+])
+def test_leading_date_cell_is_stripped_whole(raw, expected):
+    assert _LEADING_DATE_CELL_RE.sub("", raw) == expected
