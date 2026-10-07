@@ -13,7 +13,7 @@ import logging
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -730,15 +730,50 @@ CV_SECTION_KEYWORDS = {
 }
 
 
-def looks_like_section_header(text: str) -> tuple[bool, float]:
-    """
-    Determine if text looks like a CV section header.
+# looks_like_section_header's additive signals and their weights (#404: each
+# signal's contribution is emitted as `header_signal_scores` beside
+# `header_confidence`, so a mis-scored header shows which signal carried it).
+HEADER_SIGNAL_KEYWORD = "keyword"  # a CV_SECTION_KEYWORDS term appears anywhere
+HEADER_SIGNAL_ALL_CAPS = "all_caps"  # ALL CAPS, over 3 characters
+HEADER_SIGNAL_TITLE_CASE = "title_case"  # at most 6 words, every word capitalized
+HEADER_SIGNAL_TRAILING_COLON = "trailing_colon"
+HEADER_SIGNAL_SHORT = "short"  # 1-5 words
+HEADER_SIGNAL_SHORT_KEYWORD = "short_keyword"  # at most 2 words and a keyword
+HEADER_SIGNAL_WEIGHTS: dict[str, float] = {
+    HEADER_SIGNAL_KEYWORD: 0.4,
+    HEADER_SIGNAL_ALL_CAPS: 0.3,
+    HEADER_SIGNAL_TITLE_CASE: 0.2,
+    HEADER_SIGNAL_TRAILING_COLON: 0.1,
+    HEADER_SIGNAL_SHORT: 0.1,
+    HEADER_SIGNAL_SHORT_KEYWORD: 0.2,
+}
+# Capped confidence at or above which looks_like_section_header calls a line a header.
+SECTION_HEADER_MIN_CONFIDENCE = 0.4
 
-    Returns:
-        (is_header, confidence) tuple where confidence is 0.0-1.0
+
+class HeaderScore(NamedTuple):
+    """score_section_header's result: the capped total plus the weight of
+    each signal that fired, keyed by its HEADER_SIGNAL_* name."""
+
+    is_header: bool
+    confidence: float
+    signal_scores: dict[str, float]
+
+
+def _rejected_header_score() -> HeaderScore:
+    """A fresh not-a-header score, so no caller shares a mutable signal dict."""
+    return HeaderScore(is_header=False, confidence=0.0, signal_scores={})
+
+
+def score_section_header(text: str) -> HeaderScore:
+    """Score whether text looks like a CV section header, keeping each
+    additive signal's contribution (#404) beside the capped total.
+
+    A line rejected outright (too long, a date range, a citation) scores
+    0.0 with no signals.
     """
     if not text:
-        return False, 0.0
+        return _rejected_header_score()
 
     # For multi-line text, check just the first line
     # (table cells often have header on first line, content below)
@@ -748,7 +783,7 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
 
     # Too long to be a header (headers are typically short)
     if len(text_clean) > 100:
-        return False, 0.0
+        return _rejected_header_score()
 
     # Contains date patterns - likely content, not header
     import re
@@ -760,7 +795,7 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
     ]
     for pattern in date_patterns:
         if re.search(pattern, text_lower):
-            return False, 0.0
+            return _rejected_header_score()
 
     # Contains citation patterns - likely publication, not header
     citation_patterns = [
@@ -773,44 +808,51 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
     ]
     for pattern in citation_patterns:
         if re.search(pattern, text_lower):
-            return False, 0.0
+            return _rejected_header_score()
 
+    signal_scores = _header_signal_scores(text_clean, text_lower)
+    # Accumulated left to right with `+=`, NOT `sum()`: Python 3.12+'s sum()
+    # compensates float error, which turns the 0.9000000000000001 this scorer
+    # has always produced into 0.9 and moves a header's confidence. Capped at
+    # 1.0, so the contributions can sum past the reported confidence.
     confidence = 0.0
-
-    # Check for known CV section keywords
-    for keyword in CV_SECTION_KEYWORDS:
-        if keyword in text_lower:
-            confidence += 0.4
-            break
-
-    # ALL CAPS is a strong header signal
-    if text_clean.isupper() and len(text_clean) > 3:
-        confidence += 0.3
-
-    # Title Case with short text
-    words = text_clean.split()
-    if len(words) <= 6 and all(w[0].isupper() for w in words if w):
-        confidence += 0.2
-
-    # Ends with colon (common header pattern)
-    if text_clean.endswith(':'):
-        confidence += 0.1
-
-    # Short text (1-5 words) is more likely a header
-    if 1 <= len(words) <= 5:
-        confidence += 0.1
-
-    # Very short (1-2 words) known keyword is very likely header
-    if len(words) <= 2 and any(kw in text_lower for kw in CV_SECTION_KEYWORDS):
-        confidence += 0.2
-
-    # Cap at 1.0
+    for weight in signal_scores.values():
+        confidence += weight
     confidence = min(confidence, 1.0)
+    return HeaderScore(
+        is_header=confidence >= SECTION_HEADER_MIN_CONFIDENCE,
+        confidence=confidence,
+        signal_scores=signal_scores,
+    )
 
-    # Threshold for considering it a header
-    is_header = confidence >= 0.4
 
-    return is_header, confidence
+def _header_signal_scores(text_clean: str, text_lower: str) -> dict[str, float]:
+    """Return `{signal name: weight}` for each additive header signal that
+    fires on a first line already past the length/date/citation rejections,
+    in the order `score_section_header` sums them."""
+    words = text_clean.split()
+    has_keyword = any(kw in text_lower for kw in CV_SECTION_KEYWORDS)
+    fired = (
+        (HEADER_SIGNAL_KEYWORD, has_keyword),
+        (HEADER_SIGNAL_ALL_CAPS, text_clean.isupper() and len(text_clean) > 3),
+        (HEADER_SIGNAL_TITLE_CASE, len(words) <= 6 and all(w[0].isupper() for w in words if w)),
+        (HEADER_SIGNAL_TRAILING_COLON, text_clean.endswith(':')),
+        (HEADER_SIGNAL_SHORT, 1 <= len(words) <= 5),
+        (HEADER_SIGNAL_SHORT_KEYWORD, len(words) <= 2 and has_keyword),
+    )
+    return {name: HEADER_SIGNAL_WEIGHTS[name] for name, hit in fired if hit}
+
+
+def looks_like_section_header(text: str) -> tuple[bool, float]:
+    """
+    Determine if text looks like a CV section header.
+
+    Returns:
+        (is_header, confidence) tuple where confidence is 0.0-1.0;
+        `score_section_header` also returns each signal's contribution.
+    """
+    score = score_section_header(text)
+    return score.is_header, score.confidence
 
 
 def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
@@ -953,10 +995,32 @@ def _classify_subheader_row_content(
     return has_value_cells, header_left_content_right
 
 
+def _table_header_element(
+    unified_idx: int, text: str, table_index: int, score: HeaderScore, style: str
+) -> dict[str, Any]:
+    """Build a `table_header` element for a table-sourced header line, with
+    its scorer's per-signal contributions beside `header_confidence` (#404)."""
+    return {
+        "unified_idx": unified_idx,
+        "type": "table_header",
+        "text": text,
+        "table_index": table_index,
+        "header_confidence": score.confidence,
+        "header_signal_scores": dict(score.signal_scores),
+        "is_header_candidate": True,
+        # Paragraph-like metadata for header detection; a table header is
+        # assumed bold-like.
+        "bold": True,
+        "style": style,
+        "alignment": None,
+        "font_size": None,
+    }
+
+
 def _handle_table_row_zero(
     table_data: dict[str, Any],
     first_cell_text: str,
-    header_confidence: float,
+    header_score: HeaderScore,
     unified_idx: int,
     num_tables: int,
 ) -> tuple[list[dict[str, Any]], int, int, list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
@@ -1004,19 +1068,9 @@ def _handle_table_row_zero(
         header_text = lines[0].strip()
 
         # Emit table header as paragraph-like element
-        new_elements.append({
-            "unified_idx": unified_idx,
-            "type": "table_header",
-            "text": header_text,
-            "table_index": num_tables,
-            "header_confidence": header_confidence,
-            "is_header_candidate": True,
-            # Add some paragraph-like metadata for header detection
-            "bold": True,  # Assume table headers are bold-like
-            "style": "TableHeader",
-            "alignment": None,
-            "font_size": None,
-        })
+        new_elements.append(
+            _table_header_element(unified_idx, header_text, num_tables, header_score, "TableHeader")
+        )
         unified_idx += 1
         num_table_headers_emitted += 1
 
@@ -1429,9 +1483,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
             # Check if first cell looks like a section header
             first_cell_text = get_table_first_cell_text(table)
-            is_header, header_confidence = looks_like_section_header(first_cell_text)
+            header_score = score_section_header(first_cell_text)
 
-            if is_header and first_cell_text:
+            if header_score.is_header and first_cell_text:
                 (
                     row0_elements,
                     unified_idx,
@@ -1439,7 +1493,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     table_rows,
                     current_content_rows,
                 ) = _handle_table_row_zero(
-                    table_data, first_cell_text, header_confidence, unified_idx, num_tables
+                    table_data, first_cell_text, header_score, unified_idx, num_tables
                 )
                 elements.extend(row0_elements)
                 num_table_headers += row0_num_headers
@@ -1479,9 +1533,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                                     # Check first line of segment for header
                                     first_line = segment.split('\n')[0].strip()
-                                    is_seg_header, seg_header_conf = looks_like_section_header(first_line)
+                                    seg_score = score_section_header(first_line)
 
-                                    if is_seg_header and len(first_line) <= 80:
+                                    if seg_score.is_header and len(first_line) <= 80:
                                         # Emit accumulated content first
                                         if current_content_rows:
                                             content_text = _flatten_table_content_text(current_content_rows)
@@ -1498,18 +1552,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                                             current_content_rows = []
 
                                         # Emit the embedded header
-                                        elements.append({
-                                            "unified_idx": unified_idx,
-                                            "type": "table_header",
-                                            "text": first_line,
-                                            "table_index": num_tables,
-                                            "header_confidence": seg_header_conf,
-                                            "is_header_candidate": True,
-                                            "bold": True,
-                                            "style": "EmbeddedHeader",
-                                            "alignment": None,
-                                            "font_size": None,
-                                        })
+                                        elements.append(_table_header_element(
+                                            unified_idx, first_line, num_tables, seg_score, "EmbeddedHeader"
+                                        ))
                                         unified_idx += 1
                                         num_table_headers += 1
 
@@ -1536,19 +1581,19 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                             current_content_rows.extend(split_rows)
                             continue
 
-                        is_row_header, row_header_conf = looks_like_section_header(cell_text)
+                        row_score = score_section_header(cell_text)
                         # A real section header with distinct content on the right (no
                         # colon, high confidence) keeps its header AND recovers the
                         # content, instead of being demoted to content-only (#811 round 2,
                         # web064: "WORK ADDRESS | <address>").
                         has_value_cells, header_left_content_right = _classify_subheader_row_content(
-                            cell_text, row_header_conf, row
+                            cell_text, row_score.confidence, row
                         )
 
                         # A non-blank trailing cell means "Name:" is a form label, not a
                         # header (#811 round 1) -- UNLESS the row is header-left/content-right
                         # (#811 round 2), in which case the header signal is kept too.
-                        if is_row_header and cell_text and (not has_value_cells or header_left_content_right):
+                        if row_score.is_header and cell_text and (not has_value_cells or header_left_content_right):
                             # Emit accumulated content rows first
                             if current_content_rows:
                                 content_text = _flatten_table_content_text(current_content_rows)
@@ -1566,18 +1611,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                             # Emit this row's header
                             sub_header_text = cell_text.split('\n')[0].strip()
-                            elements.append({
-                                "unified_idx": unified_idx,
-                                "type": "table_header",
-                                "text": sub_header_text,
-                                "table_index": num_tables,
-                                "header_confidence": row_header_conf,
-                                "is_header_candidate": True,
-                                "bold": True,
-                                "style": "TableSubHeader",
-                                "alignment": None,
-                                "font_size": None,
-                            })
+                            elements.append(_table_header_element(
+                                unified_idx, sub_header_text, num_tables, row_score, "TableSubHeader"
+                            ))
                             unified_idx += 1
                             num_table_headers += 1
 
