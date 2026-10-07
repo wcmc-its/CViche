@@ -15,7 +15,8 @@ Batch EBYSBC (class E11) added three narrow extensions: an author-less S8 loses
 to an R pin; a Q2 grant review loses to a Q3 sub-heading even when its parent
 disagrees (`leaf_header_code`); and `content_pin_code`, a handful of shapes
 whose code does not depend on the heading at all. `is_note_not_record` names
-the T lines stage 3b's T-validation must not turn into records.
+the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
+(#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
@@ -128,6 +129,35 @@ _TEACHING_CERTIFICATE = re.compile(
 _PUBLICATION_POINTER = re.compile(r"\bpublications?\s*#\s*\d+", re.I)
 _PUBLICATION_CODE = re.compile(r"^S\d$")
 
+# --- #1251: a mentee's accomplishments are the mentee's, not the owner's ---
+#
+# Under a heading that names students, mentees, trainees, advisees or fellows
+# mentored, a named-mentee line (N3A/N3B) is followed by that mentee's awards and
+# programmes, and the award lines themselves name nobody (JFBPNC, STUDENT
+# ACCOMPLISHMENTS: 7 H, 1 K4, 1 K5). Without the preceding mentee line the same
+# heading is the owner's own student-era record ("Student/Trainee Awards", web210:
+# 8 H that are the owner's), so the pin needs both.
+_MENTEE_OUTPUT_CODE = "N4"
+_MENTEE_RECORD_CODES = frozenset({"N3A", "N3B"})
+_MENTEE_HEADING = re.compile(
+    r"\b(?:students?|mentees?|trainees?|advisees?|fellows\s+mentored)\b", re.I
+)
+# K and D rows are recoded only when the heading also says these are accomplishments.
+_ACCOMPLISHMENT_HEADING = re.compile(r"\b(?:accomplishments?|achievements?|awards?)\b", re.I)
+_HONOR_CODE = "H"
+_MENTEE_ACTIVITY_FAMILIES = ("K", "D")
+# A row that opens with another person's name and degree, under a research or
+# residency heading, is that person's work (KDAZOM, "Medical Residency Research":
+# "<Name>, M.D., Dermatology: <title>, 2nd place"). An honors heading keeps it:
+# there the same shape is an eponymous award ("<Name>, MD Teaching Award").
+_RESEARCH_HEADING = re.compile(r"\b(?:research|residency|residents?|mentor(?:ing|ed|s)?)\b", re.I)
+_HONORS_HEADING = re.compile(r"\b(?:honou?rs?|awards?|prizes?)\b", re.I)
+_DEGREE = r"(?:M\.?\s?D|Ph\.?\s?D|D\.?\s?O|Pharm\.?\s?D|M\.?\s?P\.?\s?H|M\.?\s?S|B\.?\s?S|R\.?\s?N)\.?"
+_NAMED_PERSON_LEAD = re.compile(
+    r"^[\s\u2022*\-\d.)]*[A-Z][a-z]+(?:\s+[A-Z]\.)?(?:\s+[A-Z][a-z'\u2019-]+){1,2},\s*" + _DEGREE + r"(?=[\s,:;]|$)"
+)
+_MENTEE_PIN_WHY = "Listed as the work of a student or trainee the CV owner mentored"
+
 # A line that only points elsewhere ("<label> - see section N") or is only a
 # URL is a note, not a record: a T it was given must survive T-validation.
 _POINTER = re.compile(r"\(?\bsee\s+(?:sections?|items?|pages?|above|below|publications?)\b[^)]*\)?", re.I)
@@ -198,11 +228,15 @@ def _r_pin_takes(entry: dict) -> bool:
     )
 
 
+def _heading_text(entry: dict) -> str:
+    return " ".join(str(h) for h in entry.get("hierarchy") or [])
+
+
 def _is_grant_review(entry: dict) -> bool:
     text = entry.get("text") or ""
     if _NOT_A_GRANT_REVIEW.search(text):
         return False
-    heading = " ".join(str(h) for h in entry.get("hierarchy") or [])
+    heading = _heading_text(entry)
     return bool(_GRANT_HEADING.search(heading) or _GRANT_REVIEW_TEXT.search(text))
 
 
@@ -233,7 +267,7 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
     a publication code on a note that points at a numbered publication is T.
     """
     code, text = entry.get("taxonomy_code"), entry.get("text") or ""
-    heading = " ".join(str(h) for h in entry.get("hierarchy") or [])
+    heading = _heading_text(entry)
     if code == "K4" and (_ATTENDED.search(heading) or _ATTENDED.search(text)) and not _TEACHING_ROLE.search(text):
         return "B2", "A course the owner attended is education received"
     if code in _POSITION_CODES and _is_trainee_title(text):
@@ -242,6 +276,40 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return "B2", "A life-support or teaching certificate is not a medical licence"
     if code and _PUBLICATION_CODE.match(code) and _PUBLICATION_POINTER.search(text):
         return "T", "A note pointing at a numbered publication is not a second citation"
+    return None
+
+
+def _is_mentee_accomplishment(code: str, heading: str) -> bool:
+    """An H, or a K/D row under an accomplishments heading, beneath a mentee heading."""
+    if not _MENTEE_HEADING.search(heading):
+        return False
+    if code == _HONOR_CODE:
+        return True
+    return code.startswith(_MENTEE_ACTIVITY_FAMILIES) and bool(_ACCOMPLISHMENT_HEADING.search(heading))
+
+
+def _is_named_trainee_work(code: str, heading: str, text: str) -> bool:
+    """An H row that opens with another person's name and degree under a research heading."""
+    return (
+        code == _HONOR_CODE
+        and bool(_RESEARCH_HEADING.search(heading))
+        and not _HONORS_HEADING.search(heading)
+        and bool(_NAMED_PERSON_LEAD.match(text))
+    )
+
+
+def mentee_pin_code(entry: dict, after_mentee: bool) -> tuple[str, str] | None:
+    """(N4, why) when the row is a mentee's accomplishment, not the owner's, else None.
+
+    `after_mentee` says a named-mentee line (N3A/N3B) came earlier in the same
+    hierarchy group; the heading alone never pins (#1251).
+    """
+    code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
+    heading = _heading_text(entry)
+    if after_mentee and _is_mentee_accomplishment(code, heading):
+        return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
+    if _is_named_trainee_work(code, heading, text):
+        return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
     return None
 
 
@@ -284,23 +352,31 @@ def _recode(entry: dict, code: str, why: str) -> dict:
     }
 
 
+def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool) -> tuple[str, str] | None:
+    """(code, why) for one model answer: the header pin, then the mentee pin, then a content pin."""
+    header_code = header_pin_code(entry, pin, leaf)
+    if header_code:
+        return header_code, _HEADER_PIN_WHY
+    return mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
+
+
 def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext) -> tuple[list[dict], int]:
     """Recode model answers that lose to the group's pinned header code or to a content pin.
 
     Returns (entries, number recoded). A recoded entry keeps the model's answer
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
-    checked first; a content pin applies only where the header pin does not.
+    checked first, then the mentee pin (#1251), then a content pin.
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
-    out, recoded = [], 0
+    out, recoded, after_mentee = [], 0, False
     for entry in entries:
         if entry.get("classification_source") == _MODEL_SOURCE:
-            header_code = header_pin_code(entry, pin, leaf)
-            pinned = (header_code, _HEADER_PIN_WHY) if header_code else content_pin_code(entry)
+            pinned = _pin_for(entry, pin, leaf, after_mentee)
             if pinned and pinned[0] != entry.get("taxonomy_code"):
                 recoded += 1
                 entry = _recode(entry, *pinned)
+        after_mentee = after_mentee or entry.get("taxonomy_code") in _MENTEE_RECORD_CODES
         out.append(entry)
     if recoded:
         logger.info("Stage 3b header pin: %d entr%s recoded", recoded, "y" if recoded == 1 else "ies")
