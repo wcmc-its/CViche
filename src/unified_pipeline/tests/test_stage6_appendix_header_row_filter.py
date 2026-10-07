@@ -1598,3 +1598,15 @@ def test_running_title_cells_are_page_furniture(text):
 ])
 def test_running_title_needs_a_title_cell_and_an_owner_or_page_cell(text, tokens):
     assert not appendix_module.is_page_furniture(text, tokens)
+
+
+@pytest.mark.parametrize("text, email", [
+    ("Email: jdoe@example.edu", "jdoe@example.edu"),
+    ("jdoe@example.edu", "jdoe@example.edu"),
+    ("Work E mail:  j.q.doe@mail.example.edu.", "j.q.doe@mail.example.edu"),
+    ("Email: jdoe@example.edu, Phone: 555-0100", None),
+    ("Contact the sample lab at jdoe@example.edu", None),
+    ("Email:", None),
+])
+def test_labelled_email_reads_only_a_lone_address(text, email):
+    assert appendix_module.labelled_email(text) == email

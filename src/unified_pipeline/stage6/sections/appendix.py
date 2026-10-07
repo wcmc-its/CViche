@@ -180,7 +180,7 @@ from ...core.template_boilerplate import (
 )
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs
-from ..normalization.pii import _BARE_PHONE_SHAPE
+from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from ..render_check import _is_column_header_row
 
 logger = logging.getLogger(__name__)
@@ -741,6 +741,19 @@ _PROFILE_URL_RE = re.compile(r"^(?:[A-Za-z ]{1,20}:\s*)?(?:https?://|www\.)\S+$"
 # ... or a label left bare once the PII pass withheld its value ("Contact
 # Details:"); the withheld-data notice beside it says what was removed.
 _BARE_LABEL_RE = re.compile(r"^[^\d:]{1,40}:$")
+
+
+# #1431 (X6 UXBHHF 47): a running footer's "Email: <address>". Personal Data
+# renders the address in its own cell under its own label, so the whole line is
+# never found on the page even when the address is.
+_LABELLED_EMAIL_RE = re.compile(rf"^(?:[A-Za-z ]{{1,20}}:\s*)?(?P<email>{_BARE_EMAIL_SHAPE})\.?$")
+
+
+def labelled_email(text: str) -> str | None:
+    """The address when *text* is an email address alone, or behind one short
+    label ("Email: jdoe@example.edu"), else None (#1431)."""
+    match = _LABELLED_EMAIL_RE.match(text.strip())
+    return match.group("email") if match else None
 
 
 def is_routine_recovered_line(text: str, owner_tokens: OwnerTokens = OwnerTokens()) -> bool:
