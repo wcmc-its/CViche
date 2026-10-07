@@ -71,11 +71,20 @@ export interface AdminRun {
   quality_missing_evidence: string[]
 }
 
+/** One weighted scorer dimension: `score` earned out of `max`, `penalty` lost. */
+export interface DimensionScore {
+  name: string
+  score: number
+  max: number
+  penalty: number
+  detail: string
+}
+
 export interface QualityScoreResult {
   run_id: string
   totalScore: number
   band: string
-  dimensionScores: Array<{ name: string; score: number; max: number; penalty?: number; detail?: string }>
+  dimensionScores: DimensionScore[]
   flags: string[]
   data_complete: boolean | null
   missing_evidence: string[]
