@@ -871,11 +871,12 @@ LINT_PREVALENCE = {
     # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
     # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
     "split_child_unsourced": 0.01,
-    # record_boundary (X6 class E5, X6-grant in doctor/PRECISION.md): 8 of
-    # 221 distinct stored stage-4 JSON files (the EBYSBC/s7ab/pilot, EOAHMI
-    # and X6 farms, analysis/<uid>, the 2026-09 batches), measured 2026-10-06.
-    # Reads stage 4 only. Same mixed-corpus caveat as above.
-    "record_boundary": 0.036,
+    # record_boundary (X6 class E5, X6-grant in doctor/PRECISION.md): 10 of
+    # 306 distinct stored stage-4 JSON files (the EBYSBC/s7ab/pilot, EOAHMI,
+    # X6 and NDMRSO farms, analysis/<uid>, src/unified_pipeline/outputs and
+    # the _autopsy_artifacts batches), measured 2026-10-07. Reads stage 4
+    # only. Same mixed-corpus caveat as above.
+    "record_boundary": 0.033,
     # citation_field_dropped (X6 KJJVVO-10, UXBHHF-20, VPMMFM-08; X6-cite in
     # doctor/PRECISION.md): 18 of the 111 runs under analysis/ with a stage-4
     # artifact and a stage-6 docx, each over its stored docx, measured
