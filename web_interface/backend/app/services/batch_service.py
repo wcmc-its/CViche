@@ -25,6 +25,7 @@ from sqlalchemy import ColumnElement, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query, Session
 
+from app.database import commit_inserts_retrying_conflict
 from app.errors import not_found
 from app.models import (
     BULK_BATCH_MIN_FILES,
@@ -99,14 +100,15 @@ def create_batch(
     duplicate-key collision. Any other integrity error (a foreign-key
     violation, say) is re-raised at once: no redraw can cure it. Raises
     BatchIdAttemptsExhausted, chained to the last collision, if every draw
-    collides."""
+    collides. A one-off write conflict (MariaDB 1020) is retried once in a
+    fresh transaction (#1285)."""
     last_collision: IntegrityError | None = None
     for _ in range(_BATCH_ID_ATTEMPTS):
         batch = RunBatch(id=generate_batch_id(), user_id=user.id, files_submitted=files_submitted, source=source,
                          notify_on_complete=notify_on_complete)
         db.add(batch)
         try:
-            db.commit()
+            commit_inserts_retrying_conflict(db)
         except IntegrityError as e:
             db.rollback()
             if not _is_duplicate_key(e):

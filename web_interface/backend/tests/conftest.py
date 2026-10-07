@@ -16,9 +16,11 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pymysql
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import StaticPool, create_engine
+from sqlalchemy import StaticPool, create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
@@ -116,6 +118,37 @@ def db():
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture
+def write_conflict_on_insert():
+    """Arm the test engine so the first ``failures`` INSERTs into ``table``
+    fail the way prod's MariaDB rejects them under innodb_snapshot_isolation:
+    an OperationalError carrying pymysql's (1020, "Record has changed since
+    last read ...") -- #1285. Raised from the real flush, so the session goes
+    through its real failed-flush rollback. Returns the list of INSERT
+    statements attempted against ``table``."""
+    listeners = []
+
+    def arm(table: str, failures: int = 1) -> list[str]:
+        attempts: list[str] = []
+        prefix = f"INSERT INTO {table} ("
+
+        def fail_early_inserts(conn, cursor, statement, parameters, context, executemany):
+            if not statement.lstrip().startswith(prefix):
+                return
+            attempts.append(statement)
+            if len(attempts) <= failures:
+                raise OperationalError(statement, parameters, pymysql.err.OperationalError(
+                    1020, f"Record has changed since last read in table '{table}'"))
+
+        event.listen(engine, "before_cursor_execute", fail_early_inserts)
+        listeners.append(fail_early_inserts)
+        return attempts
+
+    yield arm
+    for listener in listeners:
+        event.remove(engine, "before_cursor_execute", listener)
 
 
 def _upsert_config(db, configs: dict):

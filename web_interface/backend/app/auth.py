@@ -22,7 +22,7 @@ from app.audit_events import (
     SESSION_STORE_UNAVAILABLE,
 )
 from app.config_loader import get_config_value
-from app.database import get_db
+from app.database import get_db, is_retryable_write_conflict
 from app.ed_group_lookup import (
     MembershipResult,
     check_ed_membership,
@@ -342,23 +342,6 @@ def _resolve_payload_identity(payload: dict) -> SessionIdentity | None:
     )
 
 
-def _is_retryable_write_conflict(exc: OperationalError) -> bool:
-    """Whether exc is the specific benign concurrent-write conflict
-    _best_effort_persist exists to swallow, not any OperationalError.
-
-    MySQL (prod): pymysql raises error 1020 ("Record has changed since last
-    read") as a 2-tuple (code, message) in .orig.args.
-    SQLite (tests): sqlite3 raises "database is locked" as a plain message,
-    no error code.
-    Anything else -- connection loss, a real outage -- is a different
-    problem and must not be swallowed the same way.
-    """
-    orig_args = getattr(exc.orig, "args", ())
-    if orig_args and orig_args[0] == 1020:
-        return True
-    return "database is locked" in str(exc).lower()
-
-
 def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
     """Persist a non-critical per-request field update (last_active_at bump,
     role sync) through its own short-lived session, isolated from the
@@ -367,7 +350,7 @@ def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
 
     A page load fires several API calls at once, each running this
     dependency and writing the same `users` row; concurrent writers can hit
-    the retryable conflict _is_retryable_write_conflict names, which isn't
+    the retryable conflict is_retryable_write_conflict names, which isn't
     required to serve the current request -- on that specific conflict we
     roll back and continue; the update simply lands on a later request. Any
     other OperationalError (connection loss, a real outage) propagates.
@@ -384,7 +367,7 @@ def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
         return True
     except OperationalError as e:
         session.rollback()
-        if not _is_retryable_write_conflict(e):
+        if not is_retryable_write_conflict(e):
             raise
         logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, e)
         return False

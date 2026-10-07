@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
+from app.database import commit_inserts_retrying_conflict
 from app.errors import bad_request, duplicate_file, internal_error
 from app.models import Run, Step, User, can_view_all_runs
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -371,10 +372,11 @@ def commit_run_or_compensate(
     """Commit the pending Run/Step rows, or compensate the archive and raise
     a 5xx if the commit fails (#802). Shared by /upload and restart_run so a
     commit failure after a successful archive is handled identically on both
-    write paths.
+    write paths. A one-off write conflict (MariaDB 1020) gets one retry in a
+    fresh transaction before it counts as a failure (#1285).
     """
     try:
-        db.commit()
+        commit_inserts_retrying_conflict(db)
     except Exception:
         db.rollback()
         logger.exception(
