@@ -314,10 +314,10 @@ def test_runs_listing_carries_score_evidence(client, db, monkeypatch):
 
 def test_compute_score_returns_score_evidence(client, db, monkeypatch):
     """POST /admin/run/{id}/score returns data_complete and missing_evidence."""
-    from app.api import admin_routes
+    from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
-    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: _INCOMPLETE_SCORE)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: _INCOMPLETE_SCORE)
 
     resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 
@@ -330,13 +330,13 @@ def test_compute_score_returns_score_evidence(client, db, monkeypatch):
 
 def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
     """The rescore endpoint copies score, band and cap onto the run row."""
-    from app.api import admin_routes
+    from app.services import admin_run_service
     from app.models import Run
 
     _seed_mixed_status_runs(db)
     capped = {**_INCOMPLETE_SCORE, "totalScore": 25, "raw_score_before_caps": 80.0,
               "hard_fail_caps_applied": [25]}
-    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: capped)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: capped)
 
     assert _admin_post(client, "/api/admin/run/SF_COMPLETE/score").status_code == 200
 
@@ -347,11 +347,11 @@ def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
 
 def test_compute_score_404s_for_an_unknown_run_and_for_no_scorable_outputs(client, db, monkeypatch):
     """Two distinct 404s; neither writes the quality columns."""
-    from app.api import admin_routes
+    from app.services import admin_run_service
     from app.models import Run
 
     _seed_mixed_status_runs(db)
-    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: None)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: None)
 
     unknown = _admin_post(client, "/api/admin/run/NOSUCH/score")
     unscorable = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
@@ -364,10 +364,10 @@ def test_compute_score_404s_for_an_unknown_run_and_for_no_scorable_outputs(clien
 
 
 def test_compute_score_fills_defaults_for_keys_the_result_lacks(client, db, monkeypatch):
-    from app.api import admin_routes
+    from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
-    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: {"totalScore": 50})
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: {"totalScore": 50})
 
     resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 

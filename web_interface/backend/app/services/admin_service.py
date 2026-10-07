@@ -1,10 +1,16 @@
-"""Admin service functions with O(1) aggregation queries."""
+"""Admin service functions with O(1) aggregation queries, and the admin user update."""
+import json
+import logging
 from datetime import datetime
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
+from app.errors import not_found, validation_error
 from app.models import User, Run, Step, Feedback
-from app.schemas import AdminStepAvg, AdminUser
+from app.schemas import AdminStepAvg, AdminUser, AdminUserUpdate
+from app.services import admin_policy
+
+logger = logging.getLogger(__name__)
 
 
 def get_users_with_stats(db: Session) -> list[AdminUser]:
@@ -81,7 +87,7 @@ def get_users_with_stats(db: Session) -> list[AdminUser]:
 
 
 def get_single_user_stats(user: User, db: Session) -> dict:
-    """Return stats for a single user. Used after update_user to return fresh stats.
+    """Return stats for a single user. Used after apply_user_update to return fresh stats.
 
     Returns dict with keys matching AdminUser stat fields.
     Uses individual queries (not subqueries) since it's for a single user -- the overhead
@@ -122,6 +128,95 @@ def get_single_user_stats(user: User, db: Session) -> dict:
         "feedback_count": feedback_count,
         "completed_run_count": completed_run_count,
     }
+
+
+def _active_admin_count(db: Session, *, excluding: int | None = None) -> int:
+    """Active admins, less the user ``excluding`` names when given."""
+    query = db.query(func.count(User.id)).filter(User.role == "admin", User.status == "active")
+    if excluding is not None:
+        query = query.filter(User.id != excluding)
+    return query.scalar()
+
+
+def _raise_if_refused(refusal: str | None) -> None:
+    """An admin_policy refusal is a 422 carrying its message."""
+    if refusal is not None:
+        raise validation_error(refusal)
+
+
+def apply_user_update(db: Session, user_id: int, update: AdminUserUpdate, admin: User) -> AdminUser:
+    """PUT /api/admin/users/{id}: change a user's role, status or limits as ``admin``.
+
+    The safety rules are admin_policy's; a refusal is a 422 with nothing
+    committed. Commits, writes one admin_user_updated audit line with each
+    changed field's old and new value (none for a no-op), and returns the user
+    with fresh stats.
+    """
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise not_found("User not found.")
+
+    changes: dict[str, dict[str, object]] = {}
+
+    if update.role is not None and update.role != target.role:
+        _raise_if_refused(admin_policy.role_change_refusal(
+            target.role, update.role, is_self=target.id == admin.id,
+            active_admin_count=_active_admin_count(db),
+        ))
+        changes["role"] = {"old": target.role, "new": update.role}
+        target.role = update.role
+
+    # After the role change: the status rule judges the role this request sets.
+    if update.status is not None and update.status != target.status:
+        _raise_if_refused(admin_policy.status_change_refusal(
+            target.role, update.status, is_self=target.id == admin.id,
+            other_active_admin_count=_active_admin_count(db, excluding=target.id),
+        ))
+        changes["status"] = {"old": target.status, "new": update.status}
+        target.status = update.status
+
+    # 0 (or less) resets a limit to the system default.
+    if update.daily_limit is not None:
+        changes["daily_limit"] = {"old": target.daily_limit, "new": update.daily_limit}
+        target.daily_limit = update.daily_limit if update.daily_limit > 0 else None
+
+    if update.monthly_limit is not None:
+        changes["monthly_limit"] = {
+            "old": target.monthly_limit,
+            "new": update.monthly_limit,
+        }
+        target.monthly_limit = update.monthly_limit if update.monthly_limit > 0 else None
+
+    db.commit()
+    db.refresh(target)
+
+    if changes:
+        logger.info(
+            "admin_user_updated: admin=%s target_user=%s changes=%s",
+            admin.email,
+            target.email,
+            json.dumps(changes),
+        )
+
+    stats = get_single_user_stats(target, db)
+
+    return AdminUser(
+        id=target.id,
+        cwid=target.cwid,
+        email=target.email,
+        display_name=target.display_name,
+        role=target.role,
+        status=target.status,
+        daily_limit=target.daily_limit,
+        monthly_limit=target.monthly_limit,
+        runs_today=stats["runs_today"],
+        total_runs=stats["total_runs"],
+        total_cost=stats["total_cost"],
+        feedback_count=stats["feedback_count"],
+        completed_run_count=stats["completed_run_count"],
+        last_active_at=target.last_active_at,
+        created_at=target.created_at,
+    )
 
 
 def get_step_avg_seconds(db: Session) -> list[AdminStepAvg]:

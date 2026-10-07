@@ -261,7 +261,7 @@ def test_admin_delete_complete_run_removes_only_target_and_logs_audit(client, db
 
     fake = _FakeStorage()
     with patch("app.services.run_service.get_storage", return_value=fake), \
-            caplog.at_level(logging.INFO, logger="app.api.admin_routes"):
+            caplog.at_level(logging.INFO, logger="app.services.admin_run_service"):
         resp = _as_admin(client, lambda: client.delete("/api/admin/runs/DONE683"))
     assert resp.status_code == 204
     db.rollback()  # discard uncommitted state: only a committed delete survives
