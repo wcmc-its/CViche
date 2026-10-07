@@ -2448,12 +2448,12 @@ def test_multi_record_one_line_must_carry_the_clause_words_and_years(lines):
 
 
 @pytest.mark.parametrize("first, second", [
-    ("7/05-10/06", "4/08-5/09"),                     # month and two-digit year
+    ("3/02-11/03", "6/09-8/11"),                     # month and two-digit year
     ("Jul \u201896-Jun \u201897", "Jul \u201997-Jun \u201901"),  # curly apostrophe years
     ("Jul '96-Jun '97", "Jul '97-Jun '01"),           # straight apostrophe years
 ])
 def test_multi_record_reads_two_digit_year_dates(first, second):
-    """RCBKFG CAOACN 32 and 64 write every date in two digits, and the lint
+    """Some CVs (RCBKFG) write every date in two digits, and the lint
     read no clause. Each two-digit year takes the shared century pivot, so
     the second clause's years match the rendered four-digit ones. No ';'
     joins the two roles, so only the dates can split them."""
@@ -2461,8 +2461,8 @@ def test_multi_record_reads_two_digit_year_dates(first, second):
             f"Visiting Instructor of Pathology, Lakeside Hospital Institute, {second}")
     findings = _multi_record(text, _FIRST_ROLE)
     assert [f["severity"] for f in findings] == ["WARN"]
-    end = {"4/08-5/09": "2009"}.get(second, "2001")
-    start = {"4/08-5/09": "2008"}.get(second, "1997")
+    end = {"6/09-8/11": "2011"}.get(second, "2001")
+    start = {"6/09-8/11": "2009"}.get(second, "1997")
     findings = _multi_record(text, _FIRST_ROLE, lines=(
         _FIRST_ROLE_ROW,
         f"Visiting Instructor of Pathology | Lakeside Hospital Institute | {start}-{end}"))
@@ -2482,7 +2482,7 @@ def test_multi_record_two_digit_year_needs_a_month_or_an_apostrophe(not_a_date):
     text = (f"Lecturer, Northfield University School of Medicine, {not_a_date} "
             "Visiting Instructor of Pathology, Lakeside Hospital Institute, 6/06-8/08")
     assert _multi_record(text, _FIRST_ROLE, lines=()) == []
-    dated = text.replace(not_a_date, "7/05")
+    dated = text.replace(not_a_date, "3/02")
     assert [f["severity"] for f in _multi_record(dated, _FIRST_ROLE, lines=())] == ["WARN"]
 
 
@@ -4361,10 +4361,10 @@ def test_span_count_flags_separate_years_rendered_as_their_envelope():
 
 
 def test_span_count_reads_terms_two_digit_ends_and_and():
-    """UYFRTL 33's shape, terms written 'Fall 2003', and 'and' as a list
+    """A further-span list (RCBKFG), terms written 'Fall 2003', and 'and' as a list
     separator."""
-    assert _span_count(_span_entry("Reviewer, Example Society 1982-86, 1989-1995, 2004-2012",
-                                   "1982", "2012"), "1982-2012")
+    assert _span_count(_span_entry("Reviewer, Example Society 1976-79, 1984-1990, 2001-2011",
+                                   "1976", "2011"), "1976-2011")
     assert _span_count(_span_entry("Reviewer, Example Society, Fall 2003 and Spring 2013"),
                        "2003-2013")
 
