@@ -4111,14 +4111,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (55), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (56), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 53
+    assert len(payload["findings"]) == 54
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4800,11 +4800,11 @@ def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
 
 
 def test_role_consistency_prevalence_is_the_measured_fraction():
-    """Measured 2026-10-05 (RC-ROLE2) over stored stage-4 JSON and a render
-    of origin/dev 43f84e1e: 8 of the 119 analysis/ runs and 7 of the 126
-    farm/batch runs (#1403); a new measurement updates both sides."""
+    """Measured 2026-10-06 (X6-role) over the stored docx of 125 analysis/
+    runs and a render of origin/dev 05966dac of the 126 farm/batch runs:
+    75 and 31 of them (#1403); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
-    assert LINT_PREVALENCE["role_consistency"] == round(15 / 245, 3)
+    assert LINT_PREVALENCE["role_consistency"] == round(106 / 251, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
@@ -6640,7 +6640,7 @@ def test_run_doctor_wires_split_child_unsourced_with_the_rendered_tables(tmp_pat
         ("INFO", ["Resident, Gadget Surgery | Other County Hospital, Shelbyville"])]
 
 
-# ---------------------------------------- lint 14ab: group_header_context
+# ---------------------------------------- lint 14ac: group_header_context
 # X6 E8/E11: a group header whose context never reached the rows of the
 # lines under it (KJJVVO-01, RINASX-06, RINASX-14, IEUPKK-14/-17/-18).
 # Invented values throughout.
