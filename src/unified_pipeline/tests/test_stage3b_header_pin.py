@@ -19,6 +19,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     content_pin_code,
     is_note_not_record,
     leaf_header_code,
+    mentee_pin_code,
     pinned_header_code,
 )
 
@@ -364,6 +365,91 @@ def test_fallback_entries_get_no_content_pin():
     entry = {**_row("F1", "Basic Life Support, 2031"), "classification_source": "fallback"}
     (out,), n = apply_header_pin([entry], NO_PIN_CTX)
     assert n == 0 and out == entry
+
+
+# --- #1251: a mentee's accomplishments are N4 ----------------------------------
+
+STUDENT_HEADING = ("STUDENT ACCOMPLISHMENTS",)
+
+
+def _mentee_group(*rows):
+    """A named-mentee line followed by `rows` (code, text), all under STUDENT_HEADING."""
+    mentee = _row("N3B", "Alex Example (PhD Committee Chair):", hierarchy=STUDENT_HEADING)
+    return [mentee, *(_row(code, text, hierarchy=STUDENT_HEADING) for code, text in rows)]
+
+
+def test_awards_after_a_named_mentee_become_n4():
+    group = _mentee_group(("H", "Awarded the Example Foundation Dissertation Fellowship (2031)"),
+                          ("K5", "2031 Example Leadership Program Participant"),
+                          ("K4", "Example Transdisciplinary Training Program, 2031"))
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 3
+    assert [e["taxonomy_code"] for e in out] == ["N3B", "N4", "N4", "N4"]
+    assert [e.get("pre_pin_code") for e in out[1:]] == ["H", "K5", "K4"]
+
+
+def test_a_student_awards_heading_with_no_mentee_line_stays_the_owners():
+    # web210 "Student/Trainee Awards": the owner's own awards from training.
+    group = [_row("H", "Example University Doctoral Fellowship, 2031", hierarchy=("Student/Trainee Awards",))]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and out == group
+
+
+def test_rows_before_the_mentee_line_are_left_alone():
+    first = _row("H", "Example Society Award, 2031", hierarchy=STUDENT_HEADING)
+    out, n = apply_header_pin([first, *_mentee_group()], NO_PIN_CTX)
+    assert n == 0 and out[0]["taxonomy_code"] == "H"
+
+
+@pytest.mark.parametrize("code,heading", [
+    ("K5", ("ADVISING", "Undergraduate Research Students")),   # teaching, no accomplishments word
+    ("D1", ("MENTORING", "Trainees")),
+    ("S1", STUDENT_HEADING),                                     # a publication stays a publication
+    ("H", ("PROFESSIONAL ACCOMPLISHMENTS",)),                    # no mentee word in the heading
+])
+def test_mentee_pin_needs_both_the_heading_and_the_code(code, heading):
+    entry = _row(code, "Example row, 2031", hierarchy=heading)
+    assert mentee_pin_code(entry, after_mentee=True) is None
+
+
+def test_a_fallback_mentee_line_still_opens_the_group():
+    mentee = {**_row("N3A", "Alex Example (advisee):", hierarchy=STUDENT_HEADING), "classification_source": "fallback"}
+    award = _row("H", "Example Student Research Award, 2031", hierarchy=STUDENT_HEADING)
+    out, n = apply_header_pin([mentee, award], NO_PIN_CTX)
+    assert n == 1 and out[1]["taxonomy_code"] == "N4"
+
+
+def test_a_named_residents_project_award_under_research_becomes_n4():
+    # KDAZOM "Medical Residency Research": the line opens with the resident's name and degree.
+    entry = _row("H", 'Jordan Example, M.D., Dermatology: "An example assay." 2nd place, resident competition, 2031',
+                 hierarchy=("Medical Residency Research",))
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "N4"
+
+
+@pytest.mark.parametrize("text,heading", [
+    ("Jordan Example, MD Faculty Teaching Award, 2031", ("HONORS AND AWARDS",)),   # eponymous award
+    ("Jordan Example, MD Faculty Teaching Award, 2031", ("Research Awards",)),
+    ("Example Society Young Investigator Award, 2031", ("Medical Residency Research",)),
+    ("Jordan Example, B.S. with Distinction, 2031", ("PUBLICATIONS",)),
+])
+def test_named_lead_needs_a_research_heading_without_an_honors_word(text, heading):
+    assert mentee_pin_code(_row("H", text, hierarchy=heading), after_mentee=False) is None
+
+
+def test_mentee_pin_is_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    out, _ = apply_header_pin(_mentee_group(("H", "Recipient of the Example Memorial Scholarship")), NO_PIN_CTX)
+    (corrected,), _ = apply_reasoning_corrections([{**out[1], "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    assert corrected["taxonomy_code"] == "N4"
+
+
+def test_header_pin_wins_over_the_mentee_pin():
+    entry = _row("H", "Example Society Award, 2031", hierarchy=STUDENT_HEADING)
+    out, _ = apply_header_pin([*_mentee_group(), entry], R_CTX)
+    assert out[-1]["taxonomy_code"] == "R"
 
 
 # --- is_note_not_record ---------------------------------------------------------
