@@ -31,9 +31,10 @@ below), unlike the broker/session store's own fail-open behavior:
 ``SamlReplayCache.check_and_record`` takes exactly one assertion ID, not a
 collection. pysaml2 7.5.5's ``parse_assertion`` (``saml2/response.py``,
 saml2int limitation) raises unless a response carries exactly one plain or
-exactly one encrypted assertion, and the call site in app/api/saml_routes.py
-rejects any response whose assertion_ids() still returns more than one (e.g.
-one plain plus one encrypted), so a multi-key atomic claim is never needed.
+exactly one encrypted assertion, and the call site in
+app/services/saml_service.py rejects any response whose assertion_ids() still
+returns more than one (e.g. one plain plus one encrypted), so a multi-key
+atomic claim is never needed.
 See the ponytail comment there for the upgrade path.
 """
 import calendar
@@ -166,7 +167,7 @@ def assertion_ids(authn_response) -> list[str]:
     module's docstring), so the caller treats an empty result as
     replay-unverifiable (deferring to ``replay_fail_closed()``) and more than
     one as untrustworthy (always rejected) -- see
-    app/api/saml_routes.py:_reject_replayed_assertion.
+    app/services/saml_service.py:_reject_replayed_assertion.
     """
     ids: list[str] = []
     for assertion in _iter_assertions(authn_response):
@@ -311,7 +312,7 @@ class SamlReplayCache:
         than silently treated as "nothing to check" (mrj4001 review, PR #781
         thread r3966507348); callers convert an empty/absent ID into the
         configured fail-closed/fail-open decision themselves (see
-        app/api/saml_routes.py:_reject_replayed_assertion).
+        app/services/saml_service.py:_reject_replayed_assertion).
 
         Returns False ONLY on a genuine replay (the ID already recorded
         within its TTL), or when Valkey is unreachable and this cache was

@@ -372,8 +372,16 @@ class TestGetSamlClient:
 
 # --- SAML endpoint tests (Plan 02) ---
 
-from app.models import User
-from app.auth import COOKIE_NAME
+import logging
+
+from saml2.mdstore import SourceNotFound
+from saml2.sigver import CertificateError
+
+from app.models import SystemConfig, User
+from app.auth import COOKIE_NAME, SESSION_TTL, decode_session_cookie, get_cookie_settings
+from app.ed_group_lookup import EdUnavailableError, MembershipResult
+from app.saml_replay import SamlReplayCache, set_replay_cache
+from app.services.saml_service import SamlLoginFailure
 
 
 def _mock_saml_client(identity_dict=None):
@@ -469,7 +477,7 @@ class TestSamlLogin:
 class TestSamlACS:
     """SAML Assertion Consumer Service tests (SAML-01)."""
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_valid_assertion_sets_cookie(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
         """POST /api/saml/acs with valid assertion returns 302 and sets cviche_session cookie."""
         mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
@@ -483,7 +491,7 @@ class TestSamlACS:
         cookies = {c.name: c for c in response.cookies.jar}
         assert COOKIE_NAME in cookies
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_invalid_assertion_redirects_error(self, mock_get_client, client, seed_saml_mode):
         """POST /api/saml/acs with None authn_response redirects to /login?error=auth_failed."""
         mock_get_client.return_value = _mock_saml_client(identity_dict=None)
@@ -495,7 +503,7 @@ class TestSamlACS:
         assert response.status_code == 302
         assert "error=auth_failed" in response.headers["location"]
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_missing_attributes_redirects_error(self, mock_get_client, client, seed_saml_mode):
         """POST /api/saml/acs with no usable identifier (no mail/ePPN/uid) redirects
         to /login?error=missing_attributes."""
@@ -508,7 +516,7 @@ class TestSamlACS:
         assert response.status_code == 302
         assert "error=missing_attributes" in response.headers["location"]
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_relay_state_preserved(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
         """POST /api/saml/acs with RelayState=/runs/ABC123 redirects to that URL."""
         mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
@@ -520,7 +528,7 @@ class TestSamlACS:
         assert response.status_code == 302
         assert response.headers["location"] == "/runs/ABC123"
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_rejects_offsite_relay_state(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
         """POST /api/saml/acs with an off-site RelayState redirects to '/' not off-site (CWE-601)."""
         for evil in ("https://evil.com", "//evil.com", "/\\evil.com"):
@@ -543,7 +551,7 @@ class TestSamlACS:
         assert response.status_code == 302
         assert "error=saml_not_enabled" in response.headers["location"]
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_general_exception_redirects_error(self, mock_get_client, client, seed_saml_mode):
         """POST /api/saml/acs when get_saml_client raises a config error (RuntimeError,
         as it really does -- see app/saml_client.py) redirects to /login?error=auth_failed."""
@@ -556,7 +564,7 @@ class TestSamlACS:
         assert response.status_code == 302
         assert "error=auth_failed" in response.headers["location"]
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_unexpected_exception_from_parsing_is_caught_and_redirects(
         self, mock_get_client, client, seed_saml_mode
     ):
@@ -580,8 +588,8 @@ class TestSamlACS:
         assert response.headers["location"] == "/login?error=auth_failed"
         assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
 
-    @patch("app.api.saml_routes.provision_user")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.provision_user")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_unexpected_exception_outside_parsing_boundary_still_propagates(
         self, mock_get_client, mock_provision, client, seed_saml_mode, mock_saml_identity
     ):
@@ -613,7 +621,7 @@ class TestSamlAcsExceptionTaxonomy:
         SigverError("bad signature"),
         IncorrectlySigned("not correctly signed"),
     ], ids=["SigverError", "IncorrectlySigned"])
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_signature_failure_redirects_without_cookie_or_user(
         self, mock_get_client, exc, client, db, seed_saml_mode
     ):
@@ -629,7 +637,7 @@ class TestSamlAcsExceptionTaxonomy:
         assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
         assert db.query(User).filter(User.email == "testuser@med.cornell.edu").first() is None
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_expired_assertion_redirects_without_cookie(
         self, mock_get_client, client, db, seed_saml_mode
     ):
@@ -644,7 +652,7 @@ class TestSamlAcsExceptionTaxonomy:
         assert response.headers["location"] == "/login?error=auth_failed"
         assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_audience_restriction_failure_redirects_without_500(
         self, mock_get_client, client, db, seed_saml_mode
     ):
@@ -664,7 +672,7 @@ class TestSamlAcsExceptionTaxonomy:
         assert response.headers["location"] == "/login?error=auth_failed"
         assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_recipient_mismatch_redirects_without_cookie(
         self, mock_get_client, client, db, seed_saml_mode
     ):
@@ -682,7 +690,7 @@ class TestSamlAcsExceptionTaxonomy:
         assert response.headers["location"] == "/login?error=auth_failed"
         assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_destination_mismatch_none_response_redirects(self, mock_get_client, client, seed_saml_mode):
         """#11 (destination): a Destination mismatch makes
         parse_authn_request_response return None rather than raise -- same
@@ -695,7 +703,7 @@ class TestSamlAcsExceptionTaxonomy:
         assert response.status_code == 302
         assert response.headers["location"] == "/login?error=auth_failed"
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_calls_parser_with_no_outstanding_map(
         self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity
     ):
@@ -764,7 +772,7 @@ class TestSamlMetadata:
 class TestSamlUserProvisioning:
     """SAML user auto-provisioning tests (SAML-03)."""
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_new_user_created(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
         """ACS flow creates new User with auth_method=saml and role=user."""
         mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
@@ -780,7 +788,7 @@ class TestSamlUserProvisioning:
         assert user.role == "user"
         assert user.auth_method == "saml"
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_existing_user_updated(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
         """ACS flow updates existing user's display_name and auth_method to saml."""
         # Pre-create user with old data
@@ -806,6 +814,186 @@ class TestSamlUserProvisioning:
         assert user is not None
         assert user.display_name == "Test User"
         assert user.auth_method == "saml"
+
+
+# The login-page error each ACS workflow failure produced before #349.
+_AUTH_FAILED = "/login?error=auth_failed"
+_LOGIN_ERROR_FOR = {
+    SamlLoginFailure.NO_RESPONSE: _AUTH_FAILED,
+    SamlLoginFailure.BAD_SIGNATURE: _AUTH_FAILED,
+    SamlLoginFailure.RESPONSE_REJECTED: _AUTH_FAILED,
+    SamlLoginFailure.PARSER_ERROR: _AUTH_FAILED,
+    SamlLoginFailure.WRONG_DESTINATION: _AUTH_FAILED,
+    SamlLoginFailure.MULTIPLE_ASSERTIONS: _AUTH_FAILED,
+    SamlLoginFailure.REPLAYED: _AUTH_FAILED,
+    SamlLoginFailure.NO_ASSERTION_ID: _AUTH_FAILED,
+    SamlLoginFailure.MISSING_ATTRIBUTES: "/login?error=missing_attributes",
+    SamlLoginFailure.NOT_AUTHORIZED: "/login?error=not_authorized",
+    SamlLoginFailure.DIRECTORY_UNAVAILABLE: "/login?error=directory_unavailable",
+    SamlLoginFailure.SESSION_STORE_UNAVAILABLE: "/login?error=session_store_unavailable",
+    SamlLoginFailure.SESSION_STATE_UNAVAILABLE: "/login?error=session_state_unavailable",
+}
+
+
+class TestSamlAcsContract:
+    """POST /api/saml/acs outcomes pinned before the ACS workflow moved into
+    app/services/saml_service.py (#349, CODING_STANDARDS.md §6.3): the arms the
+    tests above, test_saml_replay.py, test_ed_group.py and
+    test_session_identity_resolution.py did not already pin."""
+
+    _ACS_URL = "https://cviche.med.cornell.edu/api/saml/acs"
+
+    @staticmethod
+    def _post(client, relay_state="/"):
+        return client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": relay_state},
+            follow_redirects=False,
+        )
+
+    @staticmethod
+    def _events(caplog, name):
+        return [r for r in caplog.records if r.getMessage() == name]
+
+    @pytest.mark.parametrize("failure", list(SamlLoginFailure))
+    def test_every_workflow_failure_redirects_to_its_login_error(self, failure, client, seed_saml_mode):
+        """Every check the workflow can refuse on maps to the login-page error
+        it produced before #349 -- and none falls through to a 500."""
+        with patch("app.api.saml_routes.authenticate_saml_response", return_value=failure):
+            response = self._post(client)
+
+        assert (response.status_code, response.headers["location"]) == (302, _LOGIN_ERROR_FOR[failure])
+        assert "set-cookie" not in response.headers
+
+    @patch("app.services.saml_service.get_saml_client")
+    def test_success_sets_the_login_cookie_and_logs_login_success(
+        self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity, caplog
+    ):
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+
+        with caplog.at_level(logging.INFO, logger="app.api.saml_routes"):
+            response = self._post(client, relay_state="/runs/R1")
+
+        assert (response.status_code, response.headers["location"]) == (302, "/runs/R1")
+        user = db.query(User).one()
+        token = response.cookies[COOKIE_NAME]
+        assert decode_session_cookie(token)["user_id"] == user.id
+        secure = "; Secure" if get_cookie_settings()["secure"] else ""
+        assert response.headers["set-cookie"] == (
+            f"{COOKIE_NAME}={token}; HttpOnly; Max-Age={SESSION_TTL}; Path=/; SameSite=lax{secure}"
+        )
+        [event] = self._events(caplog, "LOGIN_SUCCESS")
+        assert (event.name, event.user_id, event.email, event.role, event.auth_method) == (
+            "app.api.saml_routes", user.id, "testuser@med.cornell.edu", "user", "saml",
+        )
+
+    @patch("app.services.saml_service.get_saml_client")
+    def test_unreadable_epoch_redirects_without_a_cookie_after_provisioning(
+        self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity, caplog
+    ):
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").one().value = '"abc"'
+        db.commit()
+
+        with caplog.at_level(logging.INFO, logger="app.api.saml_routes"):
+            response = self._post(client)
+
+        assert response.headers["location"] == "/login?error=session_state_unavailable"
+        assert "set-cookie" not in response.headers
+        [failed] = self._events(caplog, "LOGIN_FAILED")
+        assert (failed.name, failed.cwid, failed.reason) == (
+            "app.api.saml_routes", "testuser", "session_state_unavailable",
+        )
+        assert not self._events(caplog, "LOGIN_SUCCESS")
+        assert db.query(User).one().cwid == "testuser"
+
+    @patch("app.services.saml_service.get_saml_client")
+    def test_ed_disabled_preserves_the_existing_role(
+        self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity
+    ):
+        db.add(User(cwid="testuser", email="testuser@med.cornell.edu", display_name="Old",
+                    role="admin", auth_method="saml"))
+        db.commit()
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+
+        assert self._post(client).headers["location"] == "/"
+
+        db.expire_all()
+        assert db.query(User).one().role == "admin"
+
+    @pytest.mark.parametrize("exc, level, message", [
+        (CertificateError("bad cert"), logging.WARNING,
+         "[SECURITY] SAML signature validation failed: bad cert"),
+        (OSError("metadata unreachable"), logging.ERROR,
+         "SAML ACS processing failed: metadata unreachable"),
+        (SourceNotFound("https://idp/metadata"), logging.ERROR,
+         "SAML ACS processing failed: https://idp/metadata"),
+    ], ids=["CertificateError", "OSError", "SourceNotFound"])
+    @patch("app.services.saml_service.get_saml_client")
+    def test_parse_exception_is_logged_by_its_own_clause(
+        self, mock_get_client, exc, level, message, client, db, seed_saml_mode, caplog
+    ):
+        mock_get_client.return_value.parse_authn_request_response.side_effect = exc
+
+        with caplog.at_level(logging.INFO, logger="app.api.saml_routes"):
+            response = self._post(client)
+
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert "set-cookie" not in response.headers
+        assert [(r.name, r.levelno) for r in caplog.records if r.getMessage() == message] == [
+            ("app.api.saml_routes", level),
+        ]
+
+    @patch("app.services.saml_service.get_saml_client")
+    def test_wrong_destination_is_rejected_before_the_replay_gate_records_the_id(
+        self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity, caplog
+    ):
+        mock_client = _mock_saml_client(mock_saml_identity)
+        authn_response = mock_client.parse_authn_request_response.return_value
+        authn_response.response.destination = "https://evil.test/api/saml/acs"
+        authn_response.return_addrs = [self._ACS_URL]
+        mock_get_client.return_value = mock_client
+        cache = SamlReplayCache("", fail_closed=True)
+        set_replay_cache(cache)
+        try:
+            with caplog.at_level(logging.WARNING, logger="app.api.saml_routes"):
+                response = self._post(client)
+        finally:
+            set_replay_cache(None)
+
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert cache._local == {}
+        assert db.query(User).count() == 0
+        assert any(r.getMessage().startswith(
+            "[SECURITY] SAML response rejected: Destination 'https://evil.test/api/saml/acs'"
+        ) for r in caplog.records)
+
+    @pytest.mark.parametrize("ed_answer, location", [
+        (MembershipResult(in_access_group=False, in_admin_group=False), "/login?error=not_authorized"),
+        (EdUnavailableError("ldap down"), "/login?error=directory_unavailable"),
+    ], ids=["not_in_access_group", "ed_unavailable"])
+    @patch("app.services.saml_service.fetch_ed_department")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
+    def test_ed_denial_provisions_nobody_and_reads_no_department(
+        self, mock_get_client, mock_check_ed, mock_department, ed_answer, location,
+        client, db, seed_ed_enabled, mock_saml_identity, monkeypatch,
+    ):
+        for key, value in {"ED_LDAP_URL": "ldaps://ed.test:636", "ED_LDAP_BIND_DN": "cn=svc",
+                           "ED_LDAP_BIND_PASSWORD": "pw"}.items():
+            monkeypatch.setenv(key, value)
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        if isinstance(ed_answer, Exception):
+            mock_check_ed.side_effect = ed_answer
+        else:
+            mock_check_ed.return_value = ed_answer
+
+        response = self._post(client)
+
+        assert response.headers["location"] == location
+        assert "set-cookie" not in response.headers
+        assert db.query(User).count() == 0
+        mock_department.assert_not_called()
 
 
 class TestSamlLogout:

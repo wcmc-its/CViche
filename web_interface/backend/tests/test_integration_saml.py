@@ -124,7 +124,7 @@ class TestSamlACSWithMockIdP:
         assert "SAMLRequest" in location
         assert "localhost:8443" in location
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_with_mock_idp_identity(self, mock_get_client, client, db, seed_saml_mode):
         """ACS processes an identity matching mock IdP user attributes."""
         # Simulate what the mock IdP would return for testuser
@@ -206,7 +206,7 @@ class TestSamlErrorPaths:
     No Docker required -- all SAML interactions use mocked pysaml2.
     """
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_missing_mail_uses_eppn(self, mock_get_client, client, db, seed_saml_mode):
         """No mail is fine -- cwid comes from ePPN, user provisioned with email=None."""
         mock_get_client.return_value = _mock_saml_client_with_assertion_id(
@@ -223,7 +223,7 @@ class TestSamlErrorPaths:
         assert user is not None
         assert user.email is None
 
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_no_identifier_redirects_error(self, mock_get_client, client, seed_saml_mode):
         """Identity with no mail/ePPN/uid -> nothing to anchor on -> missing_attributes."""
         mock_get_client.return_value = _mock_saml_client_with_assertion_id(
@@ -238,8 +238,8 @@ class TestSamlErrorPaths:
         assert "error=missing_attributes" in response.headers["location"]
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_ed_group_denied(self, mock_get_client, mock_check_ed, client, seed_ed_enabled):
         """POST to ACS with ED enabled, user not in access group -> redirect to /login?error=not_authorized."""
         clear_cache()
@@ -256,8 +256,8 @@ class TestSamlErrorPaths:
         assert "error=not_authorized" in response.headers["location"]
 
     @patch.dict(os.environ, _ED_ENV)
-    @patch("app.api.saml_routes.check_ed_membership")
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.check_ed_membership")
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_ed_unavailable(self, mock_get_client, mock_check_ed, client, seed_ed_enabled):
         """POST to ACS with ED enabled, LDAP raises EdUnavailableError -> redirect to /login?error=directory_unavailable."""
         clear_cache()
@@ -328,8 +328,8 @@ def _mock_saml_client_with_assertion_id(identity_dict, assertion_id):
 
 class TestSamlReplayNoAssertionId:
 
-    @patch("app.api.saml_routes.replay_fail_closed", return_value=True)
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.replay_fail_closed", return_value=True)
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_rejects_assertion_without_id_when_failing_closed(
         self, mock_get_client, _fail_closed, client, seed_saml_mode
     ):
@@ -347,8 +347,8 @@ class TestSamlReplayNoAssertionId:
         assert "error=auth_failed" in response.headers["location"]
         assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
 
-    @patch("app.api.saml_routes.replay_fail_closed", return_value=False)
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.replay_fail_closed", return_value=False)
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_admits_assertion_without_id_when_failing_open(
         self, mock_get_client, _fail_closed, client, seed_saml_mode
     ):
@@ -365,8 +365,8 @@ class TestSamlReplayNoAssertionId:
         assert "error=" not in response.headers["location"]
         assert COOKIE_NAME in {c.name for c in response.cookies.jar}
 
-    @patch("app.api.saml_routes.replay_fail_closed", return_value=True)
-    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.services.saml_service.replay_fail_closed", return_value=True)
+    @patch("app.services.saml_service.get_saml_client")
     def test_acs_admits_assertion_with_id_even_when_failing_closed(
         self, mock_get_client, _fail_closed, client, seed_saml_mode
     ):

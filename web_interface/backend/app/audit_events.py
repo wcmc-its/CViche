@@ -1,10 +1,10 @@
 """Structured audit event names shared across the auth module (#373).
 
 Each of these fires from more than one call site across auth.py,
-auth_routes.py, saml_routes.py and services/auth_service.py -- named per
-CODING_STANDARDS.md's rule on repeated literals (a magic string used for
-classification gets a name),
-the same shape as the "gpt-5.1" precedent that rule is built on.
+auth_routes.py, saml_routes.py and the services/auth_service.py and
+services/saml_service.py workflows they call -- named per CODING_STANDARDS.md's
+rule on repeated literals (a magic string used for classification gets a
+name), the same shape as the "gpt-5.1" precedent that rule is built on.
 """
 LOGIN_SUCCESS = "LOGIN_SUCCESS"
 LOGIN_FAILED = "LOGIN_FAILED"

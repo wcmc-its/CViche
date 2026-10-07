@@ -620,7 +620,7 @@ def _mock_saml_client(identity_dict):
     return mock_client
 
 
-@patch("app.api.saml_routes.get_saml_client")
+@patch("app.services.saml_service.get_saml_client")
 def test_saml_acs_refuses_to_mint_when_the_store_is_unreachable(
     mock_get_client, client, db, seed_saml_mode, broken_store, caplog
 ):

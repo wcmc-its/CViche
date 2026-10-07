@@ -81,7 +81,7 @@ def _no_live_ed_department_lookup(monkeypatch):
     membership check. Tests that enable ED and patch only check_ed_membership
     must not fall through to a real LDAP bind; a test that asserts on the
     department patches this name itself."""
-    monkeypatch.setattr("app.api.saml_routes.fetch_ed_department", lambda cwid, cfg: None)
+    monkeypatch.setattr("app.services.saml_service.fetch_ed_department", lambda cwid, cfg: None)
 
 
 @pytest.fixture(autouse=True)
