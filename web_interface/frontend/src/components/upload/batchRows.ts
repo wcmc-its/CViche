@@ -19,11 +19,11 @@ export function inFlightText(limit: number = MAX_UPLOADS_IN_FLIGHT): string {
 /** File types the batch table submits; the backend accepts the same two (#1273). */
 const ACCEPTED_EXTENSIONS = ['.docx', '.pdf']
 export const UNSUPPORTED_TYPE_REASON = 'Not a .docx or .pdf file'
-/** Client copy of the backend upload cap (CVICHE_MAX_UPLOAD_MB, default 10; MAX_UPLOAD_SIZE in
- *  backend/app/services/config_service.py). The backend does not expose it to the client, so keep the two in step. */
-export const MAX_UPLOAD_MB = 10
-export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-export const TOO_LARGE_REASON = `Larger than ${MAX_UPLOAD_MB} MB`
+/** The backend's per-file upload cap (CVICHE_MAX_UPLOAD_MB) arrives as GET /api/auth/config's max_upload_mb (#109).
+ *  This default, the backend's own, covers the moment before that loads and a backend that predates the field. */
+export const DEFAULT_MAX_UPLOAD_MB = 10
+export const maxUploadBytes = (maxUploadMb: number): number => maxUploadMb * 1024 * 1024
+export const tooLargeReason = (maxUploadMb: number): string => `Larger than ${maxUploadMb} MB`
 export const PERMANENT_FAILURE_SUFFIX = 'Fix it and upload it on its own.'
 /** Reason shown for a failure with no server message (the request never got an answer). */
 export const INTERRUPTED_REASON = 'Upload interrupted'
@@ -66,15 +66,17 @@ export interface BatchRow {
 }
 
 /** Why a chosen file can't be submitted (wrong type, over the size cap); null when it can. */
-export function fileInvalidReason(file: File): string | null {
+export function fileInvalidReason(file: File, maxUploadMb: number = DEFAULT_MAX_UPLOAD_MB): string | null {
   const name = file.name.toLowerCase()
   if (!ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))) return UNSUPPORTED_TYPE_REASON
-  return file.size > MAX_UPLOAD_BYTES ? TOO_LARGE_REASON : null
+  return file.size > maxUploadBytes(maxUploadMb) ? tooLargeReason(maxUploadMb) : null
 }
 
 /** A new row; a file that fails the client checks is marked "won't be submitted" at once. `key` must be unique on the page. */
-export function makeRow(file: File, key: string, estimate: Estimate | null | undefined = undefined): BatchRow {
-  const invalidReason = fileInvalidReason(file)
+export function makeRow(
+  file: File, key: string, estimate: Estimate | null | undefined = undefined, maxUploadMb: number = DEFAULT_MAX_UPLOAD_MB,
+): BatchRow {
+  const invalidReason = fileInvalidReason(file, maxUploadMb)
   return {
     key,
     file,

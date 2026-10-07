@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { ChevronDown } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { DEFAULT_MAX_UPLOAD_MB } from './upload/batchRows'
 import { SUPPORT_EMAIL } from '../utils'
 
 const sections = [
@@ -43,12 +44,12 @@ const intakeLink = (address: string) => (
 )
 
 /** Shown only while email intake (#1298) is on; limits from SPEC-email-cv-intake. */
-const intakeFaq = (address: string) => ({
+const intakeFaq = (address: string, maxUploadMb: number) => ({
   q: 'Can I send CVs by email?',
   a: (
     <>
       Yes. Forward your CVs as attachments to {intakeLink(address)} from your WCM email account. You must have
-      signed in to CViche at least once. Word and PDF files are accepted, up to 50 per email, 10 MB each and about
+      signed in to CViche at least once. Word and PDF files are accepted, up to 50 per email, {maxUploadMb} MB each and about
       30 MB in total. Each attachment is virus-scanned and becomes its own run. Duplicates and files over your quota
       are held in the Emailed to CViche list on the New run page for you to confirm. You'll get an email when
       processing is done.
@@ -120,11 +121,13 @@ export default function HelpPage() {
   const { hash } = useLocation()
   const [activeId, setActiveId] = useState(sections[0].id)
   const [openFaq, setOpenFaq] = useState<number | null>(0)
-  const intake = useAuth().user?.intake_address ?? null
+  const { user, authConfig } = useAuth()
+  const intake = user?.intake_address ?? null
+  const maxUploadMb = authConfig?.max_upload_mb ?? DEFAULT_MAX_UPLOAD_MB
   const tiles: [string, React.ReactNode][] = intake
     ? [...gettingStartedTiles, ['Or email it', <>Forward to {intakeLink(intake)}</>]]
     : gettingStartedTiles
-  const allFaqs = intake ? [faqs[0], intakeFaq(intake), ...faqs.slice(1)] : faqs
+  const allFaqs = intake ? [faqs[0], intakeFaq(intake, maxUploadMb), ...faqs.slice(1)] : faqs
 
   useEffect(() => {
     if (hash) document.getElementById(hash.slice(1))?.scrollIntoView()

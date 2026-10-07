@@ -7,6 +7,7 @@ import { getBatchEstimate, uploadFile } from '../../api/upload'
 import {
   MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
   startFailure, wasStarted,
+  DEFAULT_MAX_UPLOAD_MB,
 } from './batchRows'
 import type { BatchRow, HeldFile } from './batchRows'
 import type { SubmissionType } from './consentText'
@@ -135,7 +136,9 @@ export interface BatchUpload {
 /** State and wire for a batch: the file rows, one estimate call per add, then
  *  POST /batches and each file's upload + start, two at a time. `onFilesChange`
  *  runs whenever the file list changes, so a run held for the previous files is forgotten. */
-export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () => void): BatchUpload {
+export function useBatchUpload(
+  onConsentRequired: () => void, onFilesChange: () => void, maxUploadMb: number = DEFAULT_MAX_UPLOAD_MB,
+): BatchUpload {
   const [rows, setRows] = useState<BatchRow[]>([])
   const [phase, setPhase] = useState<BatchPhase>('edit')
   const [batchId, setBatchId] = useState<string | null>(null)
@@ -158,7 +161,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
   }
 
   const addFiles = (files: File[]) => {
-    const fresh = files.map((file) => makeRow(file, nextKey()))
+    const fresh = files.map((file) => makeRow(file, nextKey(), undefined, maxUploadMb))
     // One estimate call holds at most MAX_BATCH_FILES files; any beyond the room left go unestimated.
     const room = Math.max(0, MAX_BATCH_FILES - rows.filter(isValidRow).length)
     const toEstimate = fresh.filter(isValidRow).slice(0, room)
@@ -230,7 +233,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     addFiles,
     addInbox,
     removeRow: (key) => changeFiles((prev) => prev.filter((r) => r.key !== key)),
-    adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate)]),
+    adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate, maxUploadMb)]),
     submit,
     retryFailed,
     runAgain,

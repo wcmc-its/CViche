@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { useSingleFile, useSingleRun } from './useSingleRun'
-import { MAX_UPLOAD_BYTES } from './batchRows'
+import { DEFAULT_MAX_UPLOAD_MB, maxUploadBytes } from './batchRows'
 import { uploadFile } from '../../api/upload'
 import { getCapacity, startRun } from '../../api/runs'
 import { createBatch } from '../../api/batches'
@@ -117,11 +117,25 @@ describe('useSingleRun', () => {
 describe('useSingleFile', () => {
   it("refuses a file over the size cap without estimating it", async () => {
     const big = new File(['x'], 'big.docx')
-    Object.defineProperty(big, 'size', { value: MAX_UPLOAD_BYTES + 1 })
+    Object.defineProperty(big, 'size', { value: maxUploadBytes(DEFAULT_MAX_UPLOAD_MB) + 1 })
     const onRefused = vi.fn()
     const { result } = renderHook(() => useSingleFile(vi.fn(), onRefused))
     await act(() => result.current.pick(big))
     expect(onRefused).toHaveBeenCalledWith(expect.stringMatching(/Larger than 10 MB/))
     expect(result.current.file).toBeNull()
+  })
+
+  it("follows the backend's cap when it is not the default (#109)", async () => {
+    const mid = new File(['x'], 'mid.docx')
+    Object.defineProperty(mid, 'size', { value: maxUploadBytes(15) })
+    const onRefused = vi.fn()
+    const larger = renderHook(() => useSingleFile(vi.fn(), onRefused, 20))
+    await act(() => larger.result.current.pick(mid))
+    expect(larger.result.current.file).toBe(mid)
+
+    const smaller = renderHook(() => useSingleFile(vi.fn(), onRefused, 12))
+    await act(() => smaller.result.current.pick(mid))
+    expect(onRefused).toHaveBeenCalledWith(expect.stringMatching(/Larger than 12 MB/))
+    expect(smaller.result.current.file).toBeNull()
   })
 })

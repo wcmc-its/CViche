@@ -339,6 +339,7 @@ class AuthConfigResponse(BaseModel):
     """Public auth configuration for frontend mode detection."""
     mode: str  # "simple" or "saml"
     discovery_url: str | None = None  # Only present when mode is "saml"
+    max_upload_mb: int  # The per-file upload cap (CVICHE_MAX_UPLOAD_MB) that /upload enforces
 
 
 class QuotaInfo(BaseModel):

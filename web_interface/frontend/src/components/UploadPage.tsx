@@ -10,6 +10,7 @@ import { DoneCard, UploadingBanner } from './upload/BatchStatus'
 import {
   MAX_BATCH_FILES, countText, estimateMinutes, estimateText, finishText, isValidRow, missingItems, quotaText,
   sendProgress, totalsOf,
+  DEFAULT_MAX_UPLOAD_MB,
 } from './upload/batchRows'
 import type { HeldFile } from './upload/batchRows'
 import ConsentSection from './upload/ConsentSection'
@@ -143,7 +144,9 @@ interface UploadPageProps {
 export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const showCost = useCanSeeCost()
   const navigate = useNavigate()
-  const { user } = useAuth()
+  const { user, authConfig } = useAuth()
+  // The backend's per-file cap (#109); the default covers the moment before the config loads.
+  const maxUploadMb = authConfig?.max_upload_mb ?? DEFAULT_MAX_UPLOAD_MB
   const isAdmin = user?.role === 'admin'
   const intake = user?.intake_address ?? null
   const toConsent = () => navigate('/consent')
@@ -161,10 +164,10 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const [aheadBefore, setAheadBefore] = useState(0)
   const [finishMinutes, setFinishMinutes] = useState<number | null>(null)
   const run = useSingleRun({ stripWcmInstructions, submissionType, notifyOnComplete, onUploadSuccess, onConsentRequired: toConsent })
-  const single = useSingleFile(run.reset, run.setError)
+  const single = useSingleFile(run.reset, run.setError, maxUploadMb)
   // A file added to or removed from the table forgets any run held for the old
   // selection (template warning or failed start), as picking a new single file does.
-  const batch = useBatchUpload(toConsent, run.reset)
+  const batch = useBatchUpload(toConsent, run.reset, maxUploadMb)
   const queueMode = queue?.dispatch_mode === 'queue'
   // Several files only "On behalf of faculty", and only when runs wait in a queue.
   const multi = queueMode && submissionType === 'authorized_admin'

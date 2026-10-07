@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  MAX_UPLOAD_BYTES, TOO_LARGE_REASON, UNSUPPORTED_TYPE_REASON, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
+  DEFAULT_MAX_UPLOAD_MB, UNSUPPORTED_TYPE_REASON, maxUploadBytes, tooLargeReason, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
 } from './batchRows'
 import type { Estimate, QuotaInfo } from '../../types'
 
@@ -71,15 +71,24 @@ describe('makeRow size check', () => {
     return file
   }
 
+  const DEFAULT_BYTES = maxUploadBytes(DEFAULT_MAX_UPLOAD_MB)
+
   it("marks a file over the cap as won't-be-submitted, with no estimate pending", () => {
-    const row = makeRow(sized('big.docx', MAX_UPLOAD_BYTES + 1), 'k')
-    expect(row.invalidReason).toBe(TOO_LARGE_REASON)
+    const row = makeRow(sized('big.docx', DEFAULT_BYTES + 1), 'k')
+    expect(row.invalidReason).toBe('Larger than 10 MB')
     expect(row.estimate).toBeNull()
   })
 
   it('accepts a file exactly at the cap and keeps the wrong-type reason first', () => {
-    expect(makeRow(sized('ok.docx', MAX_UPLOAD_BYTES), 'k').invalidReason).toBeNull()
-    expect(makeRow(sized('big.doc', MAX_UPLOAD_BYTES + 1), 'k').invalidReason).toBe(UNSUPPORTED_TYPE_REASON)
+    expect(makeRow(sized('ok.docx', DEFAULT_BYTES), 'k').invalidReason).toBeNull()
+    expect(makeRow(sized('big.doc', DEFAULT_BYTES + 1), 'k').invalidReason).toBe(UNSUPPORTED_TYPE_REASON)
+  })
+
+  it("checks against the backend's cap when it is not the default (#109)", () => {
+    const fifteenMb = sized('mid.docx', maxUploadBytes(15))
+    expect(makeRow(fifteenMb, 'k', undefined, 20).invalidReason).toBeNull()
+    expect(makeRow(fifteenMb, 'k', undefined, 12).invalidReason).toBe(tooLargeReason(12))
+    expect(tooLargeReason(12)).toBe('Larger than 12 MB')
   })
 })
 
