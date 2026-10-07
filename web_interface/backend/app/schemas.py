@@ -848,5 +848,9 @@ class RunQualityReport(BaseModel):
 
 
 class RunReviewNote(BaseModel):
-    """GET /run/{run_id}/review-note: never carries the score itself."""
+    """GET /run/{run_id}/review-note: never carries the score itself.
+
+    `scored` is false until the run's score is stored (a few seconds after the
+    run turns complete), so the page knows `needs_cleanup` is not final yet."""
     needs_cleanup: bool
+    scored: bool
