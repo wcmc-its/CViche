@@ -647,9 +647,10 @@ class ClinicalPracticeSection:
                         bullet_text = f"{role}, {institution}, {dates}"
                     elif role and dates:
                         bullet_text = f"{role}, {dates}"
-                    elif role and institution:
+                    elif role and _fragment_is_new(institution, role):
                         # Without dates the institution is what tells two
-                        # rows with the same role apart (#1434, UXBHHF 79/84).
+                        # rows with the same role apart (#1434, UXBHHF 79/84);
+                        # left off when the role already says it.
                         bullet_text = f"{role}, {institution}"
                     elif role:
                         bullet_text = role

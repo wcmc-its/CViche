@@ -351,6 +351,17 @@ def test_l3_undated_rows_at_two_institutions_do_not_read_as_duplicates():
         "Medical Director, Harrowgate Hospital", "Medical Director, Birch Hollow Clinic"]
 
 
+def test_l3_undated_row_does_not_repeat_an_institution_the_role_names():
+    """A narrative row whose text already names the institution stays as written."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Grow diagnostic testing with colleagues at Harrowgate Hospital.",
+                leadership_role="Grow diagnostic testing with colleagues at Harrowgate Hospital.",
+                institution="Harrowgate Hospital")])
+    assert [line for line in added if line] == [
+        "Grow diagnostic testing with colleagues at Harrowgate Hospital."]
+
+
 # --- (a1) L3 `unit_program`: the unit the role led reaches the bullet -------
 
 def test_l3_bullet_names_the_unit_program_between_role_and_institution():
