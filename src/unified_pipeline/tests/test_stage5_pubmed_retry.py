@@ -3,9 +3,10 @@ guards for Stage 5 PubMed enrichment (#222).
 
 NCBI E-utilities return 429 when the shared rate limit is hit; previously a
 single 429 aborted the whole efetch batch (catch-all -> {}). These tests pin
-the new behavior: transient failures (429 / 5xx / connection errors) retry up
-to 3 total attempts (idconv: IDCONV_MAX_ATTEMPTS) with exponential backoff (Retry-After honored when
-larger), non-transient HTTP errors still fail immediately, exhausted retries
+the new behavior: transient failures (429 / 5xx / connection errors, and a
+200 whose body won't parse or carries an esearch ERROR, #1387) retry up to
+MAX_ATTEMPTS total attempts with exponential backoff (Retry-After honored when
+larger, summed waits capped at RETRY_TOTAL_WAIT_CAP_SECONDS), non-transient HTTP errors still fail immediately, exhausted retries
 degrade exactly as before, api_key never leaks into logged errors, and the
 fake support@example.com identity is gone (email sent only when configured).
 
@@ -155,26 +156,26 @@ def test_connection_error_then_200_retries(monkeypatch):
 
 # --------------------------------------------------- (b) exhausted -> graceful
 
-def test_three_429s_gives_up_gracefully(monkeypatch, caplog):
-    enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * 3)
+def test_exhausted_429s_give_up_gracefully(monkeypatch, caplog):
+    enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         records = enricher._fetch_pubmed_batch([PMID])
     assert records == {}  # same degraded shape as before
-    assert len(session.calls) == 3
-    assert sleeps == [1.0, 2.0]
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
     assert enricher.stats['api_errors'] == 1
     assert any('❌ API error' in r.getMessage() for r in caplog.records)
 
 
 def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
     enricher, session, sleeps = _make(
-        monkeypatch, [FakeResponse(429)] * stage5.IDCONV_MAX_ATTEMPTS)
+        monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         result = enricher._convert_pmcids_to_pmids(['PMC1234567'])
     assert result == {}
-    assert len(session.calls) == stage5.IDCONV_MAX_ATTEMPTS
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
-    assert sum(sleeps) <= stage5.IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS
+    assert sum(sleeps) <= stage5.RETRY_TOTAL_WAIT_CAP_SECONDS
     assert enricher.stats['api_errors'] == 1
     assert any('❌ ID conversion error' in r.getMessage() for r in caplog.records)
     assert all(r.exc_info is None for r in caplog.records)
@@ -197,7 +198,7 @@ def test_id_converter_honours_retry_after(monkeypatch):
 
 
 def test_id_converter_retry_after_beyond_the_cap_fails_fast(monkeypatch):
-    too_long = str(int(stage5.IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)
+    too_long = str(int(stage5.RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)
     enricher, session, sleeps = _make(
         monkeypatch, [FakeResponse(429, headers={'Retry-After': too_long})])
     assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
@@ -209,7 +210,7 @@ def test_id_converter_summed_retry_after_waits_are_capped(monkeypatch):
     # Each 25 s wait is under the 60 s cap alone; the third would push the sum to 75 s.
     enricher, session, sleeps = _make(
         monkeypatch,
-        [FakeResponse(429, headers={'Retry-After': '25'})] * stage5.IDCONV_MAX_ATTEMPTS)
+        [FakeResponse(429, headers={'Retry-After': '25'})] * stage5.MAX_ATTEMPTS)
     assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
     assert sleeps == [25.0, 25.0]
     assert len(session.calls) == 3
@@ -223,6 +224,118 @@ def test_doi_search_retries_5xx_then_succeeds(monkeypatch):
     ])
     assert enricher._search_pmid_by_doi('10.1000/test.123') == PMID
     assert sleeps == [1.0]
+
+
+# ------------------------- (b2) a 200 that won't parse is transient (#1387)
+
+TRUNCATED_XML = PUBMED_XML[:len(PUBMED_XML) // 2]
+
+
+class BadJSONResponse(FakeResponse):
+    """A 200 whose body is not JSON (truncated / HTML error page)."""
+
+    def json(self):
+        raise json.JSONDecodeError('Expecting value', '', 0)
+
+
+def _esearch_error_json():
+    return {'esearchresult': {'ERROR': 'Search Backend failed: synthetic test error'}}
+
+
+def test_efetch_malformed_xml_then_valid_enriches_the_entry(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, content=TRUNCATED_XML),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    [result] = enricher._enrich_by_pmid([(_titled('A test article.', pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert len(session.calls) == 2
+    assert sleeps == [1.0]  # one backoff sleep
+    assert enricher.stats['api_errors'] == 0
+    assert enricher.stats['failed_lookups'] == 0
+
+
+def test_efetch_malformed_xml_every_attempt_gives_up_and_logs_once(monkeypatch, caplog):
+    enricher, session, _ = _make(
+        monkeypatch, [FakeResponse(200, content=TRUNCATED_XML)] * stage5.MAX_ATTEMPTS)
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        [result] = enricher._enrich_by_pmid([(_titled('A test article.', pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'lookup_failed'
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
+    assert enricher.stats['api_errors'] == 1
+    assert len(caplog.records) == 1
+    assert 'efetch' in caplog.records[0].getMessage()
+
+
+def test_esearch_error_then_idlist_enriches_not_doi_not_in_pubmed(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, json_data=_esearch_error_json()),
+        FakeResponse(200, json_data=ESEARCH_JSON),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    [result] = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['extracted_fields']['pmid'] == PMID
+    assert sleeps[0] == 1.0  # the esearch backoff (later sleeps are rate-limit pauses)
+    assert enricher.stats['failed_lookups'] == 0
+
+
+def test_esearch_error_every_attempt_is_a_lookup_failure_not_a_no_match(monkeypatch):
+    enricher, session, _ = _make(
+        monkeypatch, [FakeResponse(200, json_data=_esearch_error_json())] * stage5.MAX_ATTEMPTS)
+    [result] = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert result['enrichment_status'] == 'doi_lookup_failed'
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_esearch_malformed_json_then_idlist_finds_the_pmid(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        BadJSONResponse(200),
+        FakeResponse(200, json_data=ESEARCH_JSON),
+    ])
+    assert enricher._search_pmid_by_doi(DOI) == PMID
+    assert sleeps == [1.0]
+
+
+def test_title_search_error_is_retried(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, json_data=_esearch_error_json()),
+        FakeResponse(200, json_data=ESEARCH_JSON),
+    ])
+    assert enricher._search_pmids_by_title('A synthetic title for a retry test') == [PMID]
+    assert sleeps == [1.0]
+
+
+def test_id_converter_malformed_json_then_valid_converts(monkeypatch):
+    ok = FakeResponse(200, json_data={'records': [{'pmcid': 'PMC1234567', 'pmid': '7654321'}]})
+    enricher, _, sleeps = _make(monkeypatch, [BadJSONResponse(200), ok])
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {'PMC1234567': '7654321'}
+    assert sleeps == [1.0]
+    assert enricher.stats['api_errors'] == 0
+
+
+def test_efetch_429s_outlasting_the_old_window_now_fetch(monkeypatch):
+    enricher, session, sleeps = _make(
+        monkeypatch, [FakeResponse(429)] * 3 + [FakeResponse(200, content=PUBMED_XML)])
+    assert PMID in enricher._fetch_pubmed_batch([PMID])
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_efetch_total_wait_stays_within_the_cap_on_long_retry_after(monkeypatch):
+    enricher, session, sleeps = _make(
+        monkeypatch,
+        [FakeResponse(429, headers={'Retry-After': '120'})] * stage5.MAX_ATTEMPTS)
+    assert enricher._fetch_pubmed_batch([PMID]) == {}
+    assert sum(sleeps) <= stage5.RETRY_TOTAL_WAIT_CAP_SECONDS
+    assert sleeps == [] and len(session.calls) == 1
+
+
+def test_no_sleep_after_the_last_attempt_even_under_a_loose_cap(monkeypatch):
+    monkeypatch.setattr(stage5, 'RETRY_TOTAL_WAIT_CAP_SECONDS', 10_000.0)
+    enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
+    assert enricher._fetch_pubmed_batch([PMID]) == {}
+    assert len(sleeps) == stage5.MAX_ATTEMPTS - 1  # nothing to wait for after the last try
 
 
 # --------------------------------------------------------- (c) 404 = no retry
@@ -337,16 +450,19 @@ def test_esearch_400_becomes_doi_lookup_failed(monkeypatch, caplog):
 
 
 def test_esearch_exhausted_429s_become_doi_lookup_failed(monkeypatch):
-    enricher, session, _ = _make(monkeypatch, [FakeResponse(429)] * 3)
+    enricher, session, _ = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
     assert results[0]['enrichment_status'] == 'doi_lookup_failed'
-    assert len(session.calls) == 3  # retries still exhausted first
+    assert len(session.calls) == stage5.MAX_ATTEMPTS  # retries still exhausted first
+    assert session.responses == []
 
 
 def test_esearch_connection_error_becomes_doi_lookup_failed(monkeypatch):
-    enricher, _, _ = _make(monkeypatch, [requests.ConnectionError('reset')] * 3)
+    enricher, session, _ = _make(
+        monkeypatch, [requests.ConnectionError('reset')] * stage5.MAX_ATTEMPTS)
     results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
     assert results[0]['enrichment_status'] == 'doi_lookup_failed'
+    assert session.responses == []  # gave up on the error, not an exhausted fake
 
 
 def test_doi_path_success_still_enriches(monkeypatch):
@@ -389,7 +505,7 @@ def test_distinct_failure_classes_each_logged(monkeypatch, caplog):
     enricher, _, _ = _make(
         monkeypatch,
         [FakeResponse(400, content=API_KEY_INVALID_BODY)]
-        + [requests.ConnectionError('reset')] * 3,
+        + [requests.ConnectionError('reset')] * stage5.MAX_ATTEMPTS,
         api_key='dummy-test-key')
     entries = [(_doi_entry(), DOI), (_doi_entry(), DOI)]
     with caplog.at_level(logging.ERROR, logger=stage5.__name__):
@@ -414,7 +530,7 @@ def test_efetch_failure_logged_at_error_with_redaction(monkeypatch, caplog):
 
 
 def test_pmcid_conversion_failure_logged_at_error(monkeypatch, caplog):
-    enricher, _, _ = _make(monkeypatch, [FakeResponse(429)] * stage5.IDCONV_MAX_ATTEMPTS)
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.ERROR, logger=stage5.__name__):
         enricher._convert_pmcids_to_pmids(['PMC1234567'])
     assert len(caplog.records) == 1

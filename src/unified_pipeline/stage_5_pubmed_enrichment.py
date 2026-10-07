@@ -30,9 +30,10 @@ import sys
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 import requests
 
@@ -46,17 +47,22 @@ NCBI_API_KEY = os.getenv('NCBI_API_KEY', os.getenv('PUBMED_API_KEY', ''))
 PUBMED_CONTACT_EMAIL = os.getenv('PUBMED_CONTACT_EMAIL', os.getenv('NCBI_CONTACT_EMAIL', ''))
 RATE_LIMIT_DELAY = 0.1 if NCBI_API_KEY else 0.34  # 10/s with key, 3/s without
 
-# Retry policy for transient NCBI API failures (429 / 5xx / connection errors)
-MAX_ATTEMPTS = 3
+# Retry policy for transient NCBI API failures: 429 / 5xx / connection
+# errors, and a 200 whose body won't parse or carries an esearch ERROR.
+# idconv (#1219): a 429 there outlasted the old 3-attempt, ~3 s window in 2 of
+# 8 batch CVs and failed every PMCID in the CV. Re-probes showed it throttles
+# intermittently (429, 200, 429, 200 at 15 s spacing). #1387 made that policy
+# the default for every NCBI call (efetch and esearch kept the ~3 s window).
+# 6 attempts back off 1+2+4+8+16 = 31 s; the total cap bounds that sum plus
+# any Retry-After, so a server asking for longer than the cap fails fast
+# instead of stalling stage 5. A call that succeeds takes no longer.
+MAX_ATTEMPTS = 6
 BACKOFF_BASE_SECONDS = 1.0  # 1s, 2s, ... doubling; Retry-After honored when larger
+RETRY_TOTAL_WAIT_CAP_SECONDS = 60.0
 
-# idconv (#1219): a 429 there outlasted the 3-attempt, ~3 s window in 2 of 8
-# batch CVs and failed every PMCID in the CV. Re-probes showed it throttles
-# intermittently (429, 200, 429, 200 at 15 s spacing). 6 attempts back off
-# 1+2+4+8+16 = 31 s; the total cap bounds that sum plus any Retry-After, so a
-# server asking for longer than the cap fails fast instead of stalling stage 5.
-IDCONV_MAX_ATTEMPTS = 6
-IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS = 60.0
+# esearch can answer 200 with esearchresult.ERROR set when its backend fails;
+# read as an empty idlist, that was recorded as 'doi_not_in_pubmed' (#1387).
+ESEARCH_ERROR_KEY = 'ERROR'
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
@@ -289,6 +295,39 @@ def _sanitize_error(error: Any) -> str:
     includes api_key as a query parameter.
     """
     return re.sub(r'api_key=[^&\s]+', 'api_key=***', str(error))
+
+
+class NCBIResponseError(ValueError):
+    """A 200 response whose body reports a server-side failure. A ValueError,
+    like a body that won't parse, so _get_with_retry retries both."""
+
+
+_Parsed = TypeVar('_Parsed')
+
+
+class _Attempt(NamedTuple):
+    """One GET's outcome: the parsed body, or the transient error to retry
+    on (with the server's Retry-After, when it sent one)."""
+    value: Any = None
+    error: Exception | None = None
+    retry_after: str | None = None
+
+
+def _parse_xml(response: requests.Response) -> ET.Element:
+    return ET.fromstring(response.content)
+
+
+def _parse_json(response: requests.Response) -> dict[str, Any]:
+    return response.json()
+
+
+def _parse_esearch_idlist(response: requests.Response) -> list[str]:
+    """The esearch idlist; an ERROR in the result raises NCBIResponseError so
+    it is retried, and never read as a no-match."""
+    result = response.json().get('esearchresult', {})
+    if ESEARCH_ERROR_KEY in result:
+        raise NCBIResponseError(f"esearch error: {result[ESEARCH_ERROR_KEY]}")
+    return result.get('idlist', [])
 
 
 class _Acceptance(NamedTuple):
@@ -637,7 +676,8 @@ class PubMedEnricher:
 
         Outcome classes are distinct (#222): 'doi_not_in_pubmed' means esearch
         succeeded with an empty idlist (a normal-vocabulary outcome), while an
-        API failure (non-2xx after retries, connection error) is recorded as
+        API failure (non-2xx after retries, connection error, a body that
+        will not parse or carries an esearch ERROR) is recorded as
         'doi_lookup_failed' so failure lints can surface it.
         """
         results = []
@@ -750,8 +790,7 @@ class PubMedEnricher:
         }
         if self.api_key:
             params['api_key'] = self.api_key
-        response = self._get_with_retry(ESEARCH_URL, params)
-        return response.json().get('esearchresult', {}).get('idlist', [])
+        return self._get_with_retry(ESEARCH_URL, params, _parse_esearch_idlist)
 
     def _record_in_press_resolution(self, entry: dict, phrase: str) -> None:
         enrichment = entry.get('enrichment_data') or {}
@@ -862,48 +901,64 @@ class PubMedEnricher:
         self,
         url: str,
         params: dict[str, Any],
-        max_attempts: int = MAX_ATTEMPTS,
-        total_wait_cap: float | None = None,
-    ) -> requests.Response:
+        parse: Callable[[requests.Response], _Parsed],
+    ) -> _Parsed:
         """
-        HTTP GET with retry on transient failures.
+        HTTP GET, parsed by `parse`, with retry on transient failures.
 
-        Retries 429s, 5xx responses, and connection/timeout errors up to
-        max_attempts total attempts with exponential backoff (1s, 2s, ...),
-        honoring a Retry-After header when larger. When total_wait_cap is set,
-        a retry whose delay would push the summed waits past it is not taken
-        and the last error raises. Other HTTP errors (e.g. 404) raise
-        immediately, exactly as before.
+        Retries 429s, 5xx responses, connection/timeout errors, and a 200
+        whose body `parse` rejects (ET.ParseError / ValueError, which covers
+        a truncated body and NCBIResponseError) up to MAX_ATTEMPTS total
+        attempts with exponential backoff (1s, 2s, ...), honoring a
+        Retry-After header when larger. A retry whose delay would push the
+        summed waits past RETRY_TOTAL_WAIT_CAP_SECONDS is not taken and the
+        last error raises. Other HTTP errors (e.g. 404) raise immediately.
         """
-        last_error = None
+        last_error: Exception | None = None
         waited = 0.0
-        for attempt in range(max_attempts):
-            retry_after = None
-            try:
-                response = self.session.get(url, params=params, timeout=30)
-                if response.status_code == 429 or response.status_code >= 500:
-                    retry_after = response.headers.get('Retry-After')
-                    last_error = requests.HTTPError(
-                        f"{response.status_code} transient error for url: {response.url}",
-                        response=response
-                    )
-                else:
-                    response.raise_for_status()  # non-transient 4xx raises here
-                    return response
-            except (requests.ConnectionError, requests.Timeout) as e:
-                last_error = e
-
-            if attempt < max_attempts - 1:
-                delay = self._retry_delay(attempt, retry_after)
-                if total_wait_cap is not None and waited + delay > total_wait_cap:
-                    break
-                waited += delay
-                if self.verbose:
-                    logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
-                                   f"retry {attempt + 1}/{max_attempts - 1} in {delay:g}s")
-                time.sleep(delay)
+        for attempt in range(MAX_ATTEMPTS):
+            outcome = self._attempt_get(url, params, parse)
+            if outcome.error is None:
+                return outcome.value
+            last_error = outcome.error
+            if attempt == MAX_ATTEMPTS - 1:
+                break
+            delay = self._retry_delay(attempt, outcome.retry_after)
+            if waited + delay > RETRY_TOTAL_WAIT_CAP_SECONDS:
+                break
+            waited += delay
+            if self.verbose:
+                logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
+                               f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
+            time.sleep(delay)
 
         raise last_error
+
+    def _attempt_get(
+        self,
+        url: str,
+        params: dict[str, Any],
+        parse: Callable[[requests.Response], _Parsed],
+    ) -> _Attempt:
+        """One GET. A transient failure comes back as `error`; a
+        non-transient HTTP error (e.g. 404) raises."""
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            return _Attempt(error=e)
+        if response.status_code == 429 or response.status_code >= 500:
+            return _Attempt(
+                error=requests.HTTPError(
+                    f"{response.status_code} transient error for url: {response.url}",
+                    response=response,
+                ),
+                retry_after=response.headers.get('Retry-After'),
+            )
+        response.raise_for_status()  # non-transient 4xx raises here
+        try:
+            return _Attempt(value=parse(response))
+        except (ET.ParseError, ValueError) as e:  # truncated / error body on a 200
+            return _Attempt(error=e)
 
     def _fetch_pubmed_batch(self, pmids: list[str]) -> dict[str, dict]:
         """
@@ -923,9 +978,7 @@ class PubMedEnricher:
             if self.api_key:
                 params['api_key'] = self.api_key
 
-            response = self._get_with_retry(EFETCH_URL, params)
-
-            root = ET.fromstring(response.content)
+            root = self._get_with_retry(EFETCH_URL, params, _parse_xml)
 
             results = {}
             for article in root.findall('.//PubmedArticle'):
@@ -1057,13 +1110,7 @@ class PubMedEnricher:
                 **self._identity_params()
             }
 
-            response = self._get_with_retry(
-                ID_CONVERTER_URL, params,
-                max_attempts=IDCONV_MAX_ATTEMPTS,
-                total_wait_cap=IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS,
-            )
-
-            data = response.json()
+            data = self._get_with_retry(ID_CONVERTER_URL, params, _parse_json)
 
             result = {}
             for record in data.get('records', []):
@@ -1104,10 +1151,7 @@ class PubMedEnricher:
         if self.api_key:
             params['api_key'] = self.api_key
 
-        response = self._get_with_retry(ESEARCH_URL, params)
-
-        data = response.json()
-        id_list = data.get('esearchresult', {}).get('idlist', [])
+        id_list = self._get_with_retry(ESEARCH_URL, params, _parse_esearch_idlist)
 
         if id_list:
             return id_list[0]  # First match
