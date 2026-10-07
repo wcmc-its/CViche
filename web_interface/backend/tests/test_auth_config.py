@@ -1,8 +1,14 @@
 """Tests for MODE-01: auth mode config endpoint, mode guard, and auth_method column."""
 import json
-from unittest.mock import patch
+import logging
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from app.auth import COOKIE_NAME, SESSION_TTL, decode_session_cookie, get_cookie_settings
+from app.login_throttle import LoginThrottle
 from app.models import User, SystemConfig
+from app.services.config_service import LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW
 
 
 def test_config_endpoint_simple(client, seed_simple_mode):
@@ -70,6 +76,155 @@ def test_login_sets_auth_method(client, db, seed_simple_mode):
     user = db.query(User).filter(User.email == "test@example.com").first()
     assert user is not None
     assert user.auth_method == "simple"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auth/login's HTTP contract, pinned before its workflow moved into
+# app/services/auth_service.py (#343, CODING_STANDARDS.md §6.3). The audit
+# lines and the two 503 mint failures are pinned in test_auth_audit_events.py
+# and test_session_identity_resolution.py.
+# ---------------------------------------------------------------------------
+
+_LOGIN = {"email": "test@example.com", "display_name": "Test User"}
+
+
+@pytest.fixture
+def login_throttle(monkeypatch):
+    """A fresh per-test throttle: the process-wide one is shared by every
+    login in the suite (10 per minute per IP), so these tests neither spend
+    nor depend on it."""
+    throttle = LoginThrottle(None, LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW)
+    monkeypatch.setattr("app.api.auth_routes.get_login_throttle", lambda: throttle)
+    return throttle
+
+
+def _set_config(db, **values):
+    for key, value in values.items():
+        db.query(SystemConfig).filter(SystemConfig.key == key).one().value = json.dumps(value)
+    db.commit()
+
+
+def test_login_in_saml_mode_is_refused_before_the_throttle_counts_it(client, seed_saml_mode, monkeypatch):
+    throttle = MagicMock()
+    monkeypatch.setattr("app.api.auth_routes.get_login_throttle", lambda: throttle)
+
+    response = client.post("/api/auth/login", json=_LOGIN)
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "sso_required",
+        "message": "This instance uses SSO. Please use the SSO login button.",
+    }
+    throttle.allow.assert_not_called()
+
+
+def test_throttled_login_is_429_before_the_allowlist_is_read(client, db, seed_simple_mode, monkeypatch, caplog):
+    throttle = MagicMock()
+    throttle.allow.return_value = False
+    monkeypatch.setattr("app.api.auth_routes.get_login_throttle", lambda: throttle)
+
+    with caplog.at_level(logging.INFO, logger="app.api.auth_routes"):
+        response = client.post("/api/auth/login", json=_LOGIN)
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "error": "rate_limited",
+        "message": "Too many login attempts. Please try again later.",
+    }
+    assert "set-cookie" not in response.headers
+    assert db.query(User).count() == 0
+    assert not [r for r in caplog.records if r.getMessage() in ("LOGIN_FAILED", "LOGIN_SUCCESS")]
+
+
+def test_throttle_is_keyed_on_the_last_forwarded_hop(client, seed_simple_mode, monkeypatch):
+    throttle = MagicMock()
+    throttle.allow.return_value = True
+    monkeypatch.setattr("app.api.auth_routes.get_login_throttle", lambda: throttle)
+
+    client.post("/api/auth/login", json=_LOGIN, headers={"X-Forwarded-For": "1.2.3.4, 5.6.7.8"})
+    client.post("/api/auth/login", json=_LOGIN)
+
+    assert [c.args for c in throttle.allow.call_args_list] == [("5.6.7.8",), ("testclient",)]
+
+
+def test_login_not_allowlisted_is_403_with_no_user_and_no_cookie(client, db, seed_simple_mode, login_throttle):
+    response = client.post("/api/auth/login", json={"email": "stranger@example.com", "display_name": "S"})
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "forbidden", "message": "Email not in the allowed users list."}
+    assert "set-cookie" not in response.headers
+    assert db.query(User).count() == 0
+
+
+def test_login_success_body_and_cookie_attributes(client, db, seed_simple_mode, login_throttle):
+    response = client.post("/api/auth/login", json=_LOGIN)
+
+    assert response.status_code == 200
+    user = db.query(User).one()
+    assert response.json() == {
+        "user_id": user.id, "email": "test@example.com", "display_name": "Test User", "role": "user",
+    }
+    token = response.cookies[COOKIE_NAME]
+    assert decode_session_cookie(token)["user_id"] == user.id
+    secure = "; Secure" if get_cookie_settings()["secure"] else ""
+    assert response.headers["set-cookie"] == (
+        f"{COOKIE_NAME}={token}; HttpOnly; Max-Age={SESSION_TTL}; Path=/; SameSite=lax{secure}"
+    )
+
+
+def test_login_normalizes_the_email_and_strips_the_display_name(client, db, seed_simple_mode, login_throttle):
+    response = client.post(
+        "/api/auth/login", json={"email": "  Test@Example.COM ", "display_name": "  Test User  "},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["email"] == "test@example.com"
+    user = db.query(User).one()
+    assert (user.email, user.display_name) == ("test@example.com", "Test User")
+
+
+def test_login_role_follows_admin_users_on_every_login(client, db, seed_simple_mode, login_throttle):
+    """admin_users is read on each login, so removal from it demotes."""
+    _set_config(db, allowed_users=["Boss@Example.com"], admin_users=["boss@example.COM"])
+    first = client.post("/api/auth/login", json={"email": "boss@example.com", "display_name": "Boss"})
+    assert first.json()["role"] == "admin"
+
+    _set_config(db, admin_users=[])
+    second = client.post("/api/auth/login", json={"email": "boss@example.com", "display_name": "Boss"})
+
+    assert second.json()["role"] == "user"
+    assert second.json()["user_id"] == first.json()["user_id"]
+    assert db.query(User).one().role == "user"
+
+
+def test_login_updates_the_existing_user_row(client, db, seed_simple_mode, login_throttle):
+    existing = User(email="test@example.com", display_name="Old Name", role="user", auth_method="saml")
+    db.add(existing)
+    db.commit()
+
+    response = client.post("/api/auth/login", json=_LOGIN)
+
+    assert response.json()["user_id"] == existing.id
+    db.refresh(existing)
+    assert (existing.display_name, existing.auth_method) == ("Test User", "simple")
+    assert db.query(User).count() == 1
+
+
+def test_login_of_a_disabled_user_mints_a_session_the_next_request_refuses(
+    client, db, seed_simple_mode, login_throttle,
+):
+    """Current behaviour, pinned: login does not read User.status. The
+    disabled account is refused by get_current_user on the next request."""
+    db.add(User(email="test@example.com", display_name="Test User", role="user", status="disabled"))
+    db.commit()
+
+    response = client.post("/api/auth/login", json=_LOGIN)
+
+    assert response.status_code == 200
+    assert db.query(User).one().status == "disabled"
+    me = client.get("/api/auth/me", cookies={COOKIE_NAME: response.cookies[COOKIE_NAME]})
+    assert me.status_code == 401
+    assert me.json()["detail"]["error"] == "account_disabled"
 
 
 def test_saml_config_seeded(db):
