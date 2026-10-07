@@ -827,6 +827,123 @@ def claim_goal_rows(grants: list[dict], rows: list[dict]) -> list[tuple[dict, di
     return claimed
 
 
+# A grant row that only points back at an earlier one (#1485): "1979-81 NIH
+# NS-10304 (see above), total $20,350." or "1989-92 NIH NS-21981 Renewal, PI".
+# The key is the label the resolved row's title carries. "competing renewal" is
+# listed before "renewal" so the longer phrase wins the alternation.
+BACK_REFERENCE_KINDS = (
+    ('see above', 'continuation'),
+    ('continuation', 'continuation'),
+    ('competing renewal', 'renewal'),
+    ('renewal', 'renewal'),
+)
+BACK_REFERENCE_RE = re.compile(
+    r'\b(' + '|'.join(re.escape(phrase) for phrase, _ in BACK_REFERENCE_KINDS) + r')\b',
+    re.IGNORECASE,
+)
+_BACK_REFERENCE_LABELS = dict(BACK_REFERENCE_KINDS)
+# A note that is nothing but the back-reference ("see above", "(Renewal)"): it
+# says nothing once the title carries the label, so it is dropped.
+BACK_REFERENCE_NOTE_RE = re.compile(
+    r'^\W*(?:' + '|'.join(re.escape(phrase) for phrase, _ in BACK_REFERENCE_KINDS) + r')\W*$',
+    re.IGNORECASE,
+)
+# A grant-number token identifies the award only when it carries this many
+# digits: "NS-10304" does, a bare activity code like "R01" does not.
+GRANT_ID_MIN_DIGITS = 4
+_GRANT_ID_TOKEN_SPLIT_RE = re.compile(r'[\s,;()\[\]]+')
+_TITLE_KEYS = ('title', 'trial_title', 'study_title')
+
+
+def grant_id_tokens(grant_number: str | None) -> frozenset[str]:
+    """The award identifiers in a grant number, normalized for comparison.
+
+    "NIH NS-21981" and "NS-21981" both give {"NS21981"}: the agency word carries
+    no digits and drops out, and punctuation inside a token is ignored.
+    """
+    tokens = (re.sub(r'[^0-9A-Z]', '', token.upper())
+              for token in _GRANT_ID_TOKEN_SPLIT_RE.split(grant_number or ''))
+    return frozenset(token for token in tokens
+                     if sum(char.isdigit() for char in token) >= GRANT_ID_MIN_DIGITS)
+
+
+def _grant_title(fields: GrantFields) -> str:
+    return next((str(fields.get(key) or '').strip() for key in _TITLE_KEYS
+                 if str(fields.get(key) or '').strip()), '')
+
+
+def _back_reference_label(entry: dict) -> str | None:
+    """'continuation' or 'renewal' for an untitled row that points back, else None."""
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    if _grant_title(fields):
+        return None
+    match = BACK_REFERENCE_RE.search(entry.get('text') or '')
+    return _BACK_REFERENCE_LABELS[match.group(1).lower()] if match else None
+
+
+def _source_start(entry: dict) -> int | None:
+    start = entry.get('element_idx_start')
+    return start if isinstance(start, int) else None
+
+
+def _find_referent(row: dict, titled: list[dict]) -> dict | None:
+    """The nearest earlier titled grant sharing an award identifier with `row`.
+
+    The grant number, not proximity, is the link: in the RINASX record that
+    raised #1485 none of the three back-reference rows points at the grant
+    directly before it. No shared identifier, or no source position, is no match.
+    """
+    row_start = _source_start(row)
+    row_ids = grant_id_tokens(cast(GrantFields, row['extracted_fields']).get('grant_number'))
+    if row_start is None or not row_ids:
+        return None
+    earlier = [
+        (start, grant) for grant in titled
+        if (start := _source_start(grant)) is not None and start < row_start
+        and row_ids & grant_id_tokens(
+            cast(GrantFields, grant['extracted_fields']).get('grant_number'))
+    ]
+    return max(earlier, key=lambda pair: pair[0], default=(None, None))[1]
+
+
+def _attach_to_referent(row: dict, referent: dict, label: str) -> None:
+    """Give a back-reference row its referent's title, and PI when it names none."""
+    fields = cast(GrantFields, row['extracted_fields'])
+    source = cast(GrantFields, referent['extracted_fields'])
+    fields['title'] = f'{_grant_title(source)} ({label})'
+    if not fields.get('pi_name') and not fields.get('pi_role'):
+        fields['pi_name'] = source.get('pi_name')
+        fields['pi_role'] = source.get('pi_role')
+    if BACK_REFERENCE_NOTE_RE.match(str(fields.get('notes') or '')):
+        fields['notes'] = None
+
+
+def resolve_grant_back_references(grants: list[dict]) -> int:
+    """Title each "see above" / "Renewal" grant row after the grant it continues (#1485).
+
+    A CV that lists a continuation or renewal as its own row gives it only a
+    grant number, dates and money. Rendered as is, it is a grant with no title,
+    and the reverse-date sort puts it under an unrelated grant, so "see above"
+    names the wrong project. Such a row -- no title, a back-reference word in
+    its text -- takes the title of the earlier grant with the same award
+    identifier, labelled "(continuation)" or "(renewal)", plus that grant's PI
+    name and role when the row states neither. A row with no such grant is left
+    as it was. Writes land on this section's copies (`copy_entries_for_render`).
+
+    Returns how many rows were resolved.
+    """
+    titled = [grant for grant in grants
+              if _grant_title(cast(GrantFields, grant.get('extracted_fields') or {}))]
+    resolved = 0
+    for row in grants:
+        label = _back_reference_label(row)
+        referent = _find_referent(row, titled) if label else None
+        if label and referent:
+            _attach_to_referent(row, referent, label)
+            resolved += 1
+    return resolved
+
+
 # A grant's own text often names its PI, and `co_investigators` (which resolve_pi_name
 # no longer reads) sometimes held exactly that name. These are the shapes the
 # corpus carries, tried in this order, first hit wins:
@@ -1279,6 +1396,7 @@ class ResearchSupportSection:
 
         grants = m2a_entries + m2b_entries + m2c_entries
         fill_major_goals_from_text(grants)
+        resolve_grant_back_references(grants)
         claimed_goal_rows = claim_goal_rows(grants, entries_by_code.get('T', []))
         rendered_grant_ids: set[int] = set()
 
