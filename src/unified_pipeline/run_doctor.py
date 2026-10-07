@@ -182,8 +182,12 @@ Lints, ranked by the severity of the failure class they catch:
                           one record holding several mentees, degree years or
                           licence/patent numbers (#1243: TAUBPU's concurrent
                           faculty rank, VNUAHA's paragraphs of 2-3 roles).
-                          WARN when a left-out clause, mentee, degree year or
-                          number is on no rendered line, INFO otherwise
+                          On an entry stage 4 did split, a clause whose words
+                          the records hold but whose year no record's span
+                          covers (X6: a membership span kept only as its
+                          offices). WARN when a left-out clause, mentee,
+                          degree year or number is on no rendered line, INFO
+                          otherwise
 14q. year_not_in_source   a stage-4 date-named field whose year, inside
                           implausible_year's band, the entry's text states in
                           no form -- four digits, a two-digit year, a range
