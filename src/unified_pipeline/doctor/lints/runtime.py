@@ -67,20 +67,22 @@ to `doctor.shared`. Bodies are unmodified; `run_doctor` re-exports the name it
 exported before.
 """
 
+from unified_pipeline.llm_provenance import (
+    STAGE4_5_CALL_FAILURES_KEY,
+    STAGE4_5_CALL_SUMMARY,
+)
 from unified_pipeline.quality_score import (
     FATAL_ERROR_PATTERN,
     NO_OUTPUT_CAP,
-    FallbackServedCall,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
     STAGE4_GROUP_FAILURE_CAP,
+    FallbackServedCall,
     iter_error_fields,
     llm_fallback_served,
     no_output_produced,
     stage3b_fallback_ratio_exceeded,
     stage4_group_failures,
 )
-
-from unified_pipeline.llm_provenance import STAGE4_5_CALL_FAILURES_KEY, STAGE4_5_CALL_SUMMARY
 from unified_pipeline.stage_errors import CallFailure, StageError
 
 from ..shared import _finding

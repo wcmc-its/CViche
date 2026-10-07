@@ -422,43 +422,25 @@ from pathlib import Path
 from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
-from unified_pipeline.doctor.precision import precision_payload
-from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
-from unified_pipeline.quality_score import prompt_log_fallback_served, stage3b_fallback_ratios
-from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
-from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
-
-# Lint rules and their primitives now live in the doctor/ package (#493).
-# Re-exported here rather than updating callers: five files import 33 names
-# from this module, including the backend orchestrator, and a moved address
-# that is not re-exported fails at IMPORT time -- which reads as a lost fix.
-# test_run_doctor_contract.py pins that surface.
-from unified_pipeline.doctor.shared import (  # noqa: F401,E402
-    FINDING_STATUSES,
-    STATUS_RAN,
-    STATUS_SKIPPED,
-    STATUS_UNREADABLE,
-    Haystack,
-    RENDER_PIECE_MIN_CHARS,
-    RENDER_PIECE_WINDOW,
-    RENDER_TOKEN_MIN_COUNT,
-    RENDER_TOKEN_OVERLAP,
-    _LINE_SENTINEL,
-    _RENDER_TOKEN_RE,
-    _SECTION_HEADER_RE,
-    _entry_pieces,
-    _finding,
-    _haystacks,
-    _long_word_tokens,
-    _magnitude_severity,
-    _output_section_header,
-    _cell_text,
-    _docx_text,
-    _table_lines,
-    docx_body_blocks,
-    docx_table_rows,
+from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_section_consistency,
+)
+from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
+    lint_contact_slot_lost,
+)
+from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
+    _OWNER_CAP,
+    _OWNER_GATE,
+    lint_enrichment_failures,
+    lint_enrichment_pubtype_mismatch,
+    lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
+    _DEDUP_TOKEN_RE,
+    _FUNDING_SECTIONS,
+    _STATUS_LABEL_RE,
+    _YEAR_EDGE_LINE_RE,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     DEDUP_SAFE_CONTAINMENT,
     INVENTED_RECORD_LICENSURE_CODE,
@@ -466,10 +448,6 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
-    _DEDUP_TOKEN_RE,
-    _FUNDING_SECTIONS,
-    _STATUS_LABEL_RE,
-    _YEAR_EDGE_LINE_RE,
     _alphanumeric_tokens,
     _entry_rendered,
     _entry_status,
@@ -480,41 +458,28 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_grant_boundary,
+    lint_grant_bucket,
     lint_implausible_year,
     lint_invented_records,
     lint_multi_record_coverage,
     lint_offschema_fields,
+    lint_record_boundary,
+    lint_role_consistency,
+    lint_span_count,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
     lint_year_not_in_source,
     unrouted_code_counts,
-    lint_grant_boundary,
-    lint_grant_bucket,
-    lint_record_boundary,
-    lint_span_count,
-    lint_role_consistency,
 )
-from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
-    _OWNER_CAP,
-    _OWNER_GATE,
-    lint_enrichment_failures,
-    lint_owner_contact_missing,
-    lint_pubmed_title_truncated,
-    lint_enrichment_pubtype_mismatch,
+from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
+    lint_teaching_postcheck,
+)
+from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
+    lint_protected_data_in_output,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
-    DEAD_SECTION_MIN_LINES,
-    DUPLICATE_PASSAGE_MIN_BLOCKS,
-    DUPLICATE_PASSAGE_WARN_COUNT,
-    DUPLICATE_RECORD_MIN_CHARS,
-    DUPLICATE_RECORD_WARN_COUNT,
-    DUPLICATE_RECORD_WINDOW,
-    HONORS_NAME_BLOB_CHARS,
-    PIPE_CLUSTER_MIN,
-    PIPE_LEAK_MIN_SEPS,
-    RECORD_DATE_LINE_MIN_CHARS,
-    UNRENDERED_MIN_RECORD_LINES,
     _APPENDIX_ENTRY_RE,
     _APPENDIX_HEADER,
     _BRACKET_CODE_RE,
@@ -526,6 +491,17 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _US_STATE_ABBREVS,
     _VENUE_DATE_RE,
     _YEAR_RE,
+    DEAD_SECTION_MIN_LINES,
+    DUPLICATE_PASSAGE_MIN_BLOCKS,
+    DUPLICATE_PASSAGE_WARN_COUNT,
+    DUPLICATE_RECORD_MIN_CHARS,
+    DUPLICATE_RECORD_WARN_COUNT,
+    DUPLICATE_RECORD_WINDOW,
+    HONORS_NAME_BLOB_CHARS,
+    PIPE_CLUSTER_MIN,
+    PIPE_LEAK_MIN_SEPS,
+    RECORD_DATE_LINE_MIN_CHARS,
+    UNRENDERED_MIN_RECORD_LINES,
     _is_appendix_noise,
     _line_token_sets,
     _names_match,
@@ -534,14 +510,15 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _record_rendered,
     appendix_entry_count,
     honors_table_totals,
+    lint_citation_field_dropped,
     lint_date_cell_shape,
-    lint_dead_sections,
     lint_date_only_lines,
+    lint_dead_sections,
     lint_duplicate_passages,
     lint_duplicate_records,
-    lint_citation_field_dropped,
     lint_etal_added,
     lint_fanout_cell_residue,
+    lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_llm_refusal_in_output,
@@ -549,12 +526,21 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_python_repr_in_output,
-    lint_split_child_unsourced,
-    lint_group_header_context,
     lint_section_lost,
+    lint_split_child_unsourced,
     lint_stage6_warnings,
     lint_table_shape,
     lint_unrendered_records,
+)
+from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_llm_fallback_served,
+    lint_no_output,
+    lint_pipeline_errors,
+    lint_research_summary_call_failed,
+    lint_stage3b_fallback_ratio,
+    lint_stage3b_second_pass_errors,
+    lint_stage4_group_failures,
+    lint_stage_failure_recorded,
 )
 from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     MISSED_HEADERS_WARN_COUNT,
@@ -565,29 +551,52 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_segmentation_collapse,
     lint_table_lost,
 )
-from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
-    lint_section_consistency,
-)
-from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
-    lint_protected_data_in_output,
-)
-from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
-    lint_no_output,
-    lint_pipeline_errors,
-    lint_stage3b_fallback_ratio,
-    lint_stage3b_second_pass_errors,
-    lint_stage4_group_failures,
-    lint_llm_fallback_served,
-    lint_stage_failure_recorded,
-    lint_research_summary_call_failed,
-)
-from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
-    lint_teaching_postcheck,
-)
-from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
-    lint_contact_slot_lost,
-)
+from unified_pipeline.doctor.precision import precision_payload
 
+# Lint rules and their primitives now live in the doctor/ package (#493).
+# Re-exported here rather than updating callers: five files import 33 names
+# from this module, including the backend orchestrator, and a moved address
+# that is not re-exported fails at IMPORT time -- which reads as a lost fix.
+# test_run_doctor_contract.py pins that surface.
+from unified_pipeline.doctor.shared import (  # noqa: F401,E402
+    _LINE_SENTINEL,
+    _RENDER_TOKEN_RE,
+    _SECTION_HEADER_RE,
+    FINDING_STATUSES,
+    RENDER_PIECE_MIN_CHARS,
+    RENDER_PIECE_WINDOW,
+    RENDER_TOKEN_MIN_COUNT,
+    RENDER_TOKEN_OVERLAP,
+    STATUS_RAN,
+    STATUS_SKIPPED,
+    STATUS_UNREADABLE,
+    Haystack,
+    _cell_text,
+    _docx_text,
+    _entry_pieces,
+    _finding,
+    _haystacks,
+    _long_word_tokens,
+    _magnitude_severity,
+    _output_section_header,
+    _table_lines,
+    docx_body_blocks,
+    docx_table_rows,
+)
+from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
+from unified_pipeline.quality_score import (
+    prompt_log_fallback_served,
+    stage3b_fallback_ratios,
+)
+from unified_pipeline.segmentation_regression import (
+    compute_metrics,
+    iter_source_block_lines,
+)
+from unified_pipeline.stage_errors import (
+    StageError,
+    read_stage_errors,
+    stage_errors_path,
+)
 
 logger = logging.getLogger(__name__)
 

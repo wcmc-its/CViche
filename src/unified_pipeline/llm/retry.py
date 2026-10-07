@@ -10,10 +10,10 @@ facade) cannot own it either without an import cycle (llm_client imports the
 provider handler, which needs this module's state).
 """
 
-import time
-import random
 import logging
+import random
 import threading
+import time
 from collections.abc import Callable
 from typing import TypeVar
 

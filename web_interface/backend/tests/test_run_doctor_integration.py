@@ -27,7 +27,6 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import unified_pipeline.run_doctor as run_doctor_mod
-
 from app.services import notifications
 
 
@@ -51,8 +50,8 @@ def _orchestrator(monkeypatch, tmp_path, db, run_id):
     """A run-to-completion orchestrator with the real pipeline stubbed out
     (mirrors test_run_duration_coverage) and pipeline outputs redirected to
     tmp_path so the doctor report never lands in the repo's outputs dir."""
-    from app.pipeline import orchestrator as orch
     from app.models import Run, Step
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id=run_id, filename="cv.docx", file_type="docx", status="running",

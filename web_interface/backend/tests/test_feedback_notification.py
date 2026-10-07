@@ -27,7 +27,7 @@ _VALID_BODY = {
 
 def _seed_run(db, email="reviewer@example.com"):
     """Insert a user + one of their runs, returning the committed user."""
-    from app.models import User, Run
+    from app.models import Run, User
 
     user = User(email=email, display_name="Reviewer", role="user")
     db.add(user)
@@ -45,8 +45,8 @@ def _seed_run(db, email="reviewer@example.com"):
 
 @contextmanager
 def _as_user(user):
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
 
     app.dependency_overrides[get_current_user] = lambda: user
     try:

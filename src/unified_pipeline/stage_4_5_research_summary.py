@@ -14,11 +14,11 @@ Output: Same JSON with M1 entry replaced by generated research summary
 import argparse
 import json
 import logging
-import re
 import os
+import re
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"

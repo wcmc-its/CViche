@@ -15,7 +15,6 @@ application is not a completed award (EBYSBC E7).
 import re
 from datetime import datetime
 
-
 # Current year for comparison
 CURRENT_YEAR = datetime.now().year
 

@@ -47,7 +47,6 @@ from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
     title_word_overlap,
 )
 
-
 PMID = '12345678'
 
 PUBMED_XML = f"""<?xml version="1.0"?>

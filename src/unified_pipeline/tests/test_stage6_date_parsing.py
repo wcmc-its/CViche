@@ -22,15 +22,15 @@ if str(_SRC) not in sys.path:
 
 import pytest  # noqa: E402
 
+import unified_pipeline.stage6.parsing.dates as _parsing_dates  # noqa: E402
 from unified_pipeline.stage6.parsing import _get_entry_date_range  # noqa: E402
+from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     _dates_overlap_or_match,
     _parse_date_components,
     extract_sort_date,
     format_date_for_section,
 )
-import unified_pipeline.stage6.parsing.dates as _parsing_dates  # noqa: E402
-from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES  # noqa: E402
 
 
 def _sort(date_str):

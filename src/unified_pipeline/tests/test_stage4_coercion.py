@@ -65,7 +65,6 @@ from unified_pipeline.stage4.coercion import (  # noqa: E402
     normalize_dates,
 )
 
-
 # --- #3819054910: FTE decimal -> percent conversion ------------------------
 
 @pytest.mark.parametrize(

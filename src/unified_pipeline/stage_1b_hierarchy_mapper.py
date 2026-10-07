@@ -15,18 +15,21 @@ Input: Stage 1 hierarchy JSON + Word document
 Output: Hierarchy with element indices (the "fenceposts" for sections)
 """
 
-import sys
-import json
 import bisect
+import json
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
-from collections.abc import Callable
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from core.docx_structure_extractor import (
+    extract_docx_structure,
+    extract_unified_elements,
+)
 from core.output_manager import OutputManager
-from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
 
 _PREAMBLE_SECTION_ALIASES = frozenset({
     "personal data", "personal information", "contact information",

@@ -26,8 +26,8 @@ def _seed_user(db, email="submitter@example.com", role="user"):
 @contextmanager
 def _as_user(user):
     """Override get_current_user to return a real, committed User row."""
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
 
     app.dependency_overrides[get_current_user] = lambda: user
     try:

@@ -7,8 +7,8 @@ that makes stage 5b an LLM stage -- the only call_llm() site for the stage.
 import json
 import logging
 
-from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 

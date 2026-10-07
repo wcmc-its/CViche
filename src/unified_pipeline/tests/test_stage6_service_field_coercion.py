@@ -81,17 +81,19 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
+from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
+    _cell_text,
+    _committee_cell_text,
+)
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _join_names,
-    _journal_names_contain,
     _journal_name_cell_text,
+    _journal_names_contain,
     _organization_left_in_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Part 1: `_journal_name_cell_text` unit tests (§6.9 case list).

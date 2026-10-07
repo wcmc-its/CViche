@@ -45,8 +45,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
 
-from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_owner
 from .authors import _normalize_author_names
+from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_owner
 
 #: The value `extracted_fields['formatting_source']` carries when stage 5d's
 #: LLM wrote `formatted_citation`. It is the only source the renderer trusts

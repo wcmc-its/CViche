@@ -51,25 +51,28 @@ from docx.oxml.ns import qn  # noqa: E402
 from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
-from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
+import unified_pipeline.stage_6_word_template as s6  # noqa: E402
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    DetachedAnchorError,
+    _insert_after,
+)
 from unified_pipeline.stage6.sections.appendix import CODE_ORIGIN_ENTRY  # noqa: E402
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    N1_HEADING,
+    N2_HEADING,
+    N2_INSTRUCTION,
+    MenteeRecord,
+    _looks_like_training_grant_table,
+    _program_leadership_line,
+    _training_grant_is_sparse,
+    _training_grant_rows,
+)
 from unified_pipeline.stage6.sections.patents import (  # noqa: E402
     DESCRIPTION_LABEL,
     _build_patent_rows,
     _normalize_patent,
     _renderable_patents,
 )
-from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
-    MenteeRecord,
-    N1_HEADING,
-    N2_HEADING,
-    N2_INSTRUCTION,
-    _looks_like_training_grant_table,
-    _program_leadership_line,
-    _training_grant_is_sparse,
-    _training_grant_rows,
-)
-import unified_pipeline.stage_6_word_template as s6  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     GEO_SCOPE_FAILURE_STAT,
     RECLASSIFY_FAILURE_STAT,

@@ -27,9 +27,9 @@ from .context import TaxonomyContext
 from .header_pin import is_note_not_record
 from .io import _safe_float, taxonomy_code_set
 from .prompt import (
-    CLASSIFICATION_RULES_VERSION,
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     _T_VALIDATION_SYSTEM_PROMPT_TEMPLATE,
+    CLASSIFICATION_RULES_VERSION,
     build_taxonomy_codes_for_prompt,
 )
 

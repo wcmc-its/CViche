@@ -38,8 +38,11 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_run,
 )
 from unified_pipeline.run_doctor import read_docx_blocks, run_doctor  # noqa: E402
-from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE, withheld_comment_text  # noqa: E402
 from unified_pipeline.stage6.normalization.pii import WithheldItem  # noqa: E402
+from unified_pipeline.stage6.pii_pass import (  # noqa: E402
+    PII_REDACTED_NOTICE,
+    withheld_comment_text,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 

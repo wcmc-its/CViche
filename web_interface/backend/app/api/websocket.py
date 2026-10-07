@@ -7,8 +7,8 @@ from http.cookies import SimpleCookie
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 
+from app.auth import COOKIE_NAME, authenticate_session_cookie, can_see_cost
 from app.models import Run
-from app.auth import authenticate_session_cookie, can_see_cost, COOKIE_NAME
 from app.origins import origin_permitted
 from app.pipeline.event_emitter import event_emitter
 from app.services.run_service import check_run_access

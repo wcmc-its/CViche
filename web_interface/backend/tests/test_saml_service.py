@@ -37,7 +37,11 @@ from app.auth import decode_session_cookie
 from app.ed_group_lookup import EdUnavailableError, MembershipResult
 from app.models import SystemConfig, User
 from app.saml_replay import SamlReplayCache, set_replay_cache
-from app.services.saml_service import SamlLoginFailure, SamlLoginSession, authenticate_saml_response
+from app.services.saml_service import (
+    SamlLoginFailure,
+    SamlLoginSession,
+    authenticate_saml_response,
+)
 from app.session_idle import IdleSessionStore
 
 _ROUTE_LOGGER = "app.api.saml_routes"

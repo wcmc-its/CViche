@@ -2,6 +2,7 @@
 import os
 import sys
 from pathlib import Path
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 # get_estimated_run_cost imports unified_pipeline lazily and silently falls back
 # to a flat per-token rate when it can't; put src/ on the path so the cost tests
@@ -14,17 +15,28 @@ from datetime import datetime
 import pytest
 from fastapi import HTTPException
 
-from app.services.run_service import check_run_access
-from app.services.user_service import provision_user
-from app.services.config_service import (
-    SESSION_TTL, LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW,
-    MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
-    get_cost_per_1k_tokens, get_estimated_run_cost,
-)
-from app.errors import not_found, bad_request, forbidden, validation_error
+from app.errors import bad_request, forbidden, not_found, validation_error
 from app.models import Run, Step, User
 from app.services import run_service
-from app.services.run_service import ClaimResult, claim_queued, mark_failed, flip_to_queued, revert_queued
+from app.services.config_service import (
+    BASE_OVERHEAD_SECONDS,
+    LOGIN_RATE_LIMIT_MAX,
+    LOGIN_RATE_LIMIT_WINDOW,
+    MAX_UPLOAD_SIZE,
+    SESSION_TTL,
+    TIME_PER_1K_TOKENS,
+    get_cost_per_1k_tokens,
+    get_estimated_run_cost,
+)
+from app.services.run_service import (
+    ClaimResult,
+    check_run_access,
+    claim_queued,
+    flip_to_queued,
+    mark_failed,
+    revert_queued,
+)
+from app.services.user_service import provision_user
 
 
 class TestCheckRunAccess:
@@ -299,6 +311,7 @@ class TestQueueRunTransitions:
         wait, not raise."""
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
+
         from app.database import Base
 
         engine = create_engine(f"sqlite:///{tmp_path}/race.db", connect_args={"timeout": 5})
@@ -462,6 +475,7 @@ class TestProvisionUser:
         case an email-keyed recovery gets wrong.
         """
         from unittest.mock import patch
+
         from sqlalchemy.orm import Query
 
         # A second email-less SSO user, so recovering by email would be ambiguous.
@@ -483,6 +497,7 @@ class TestProvisionUser:
         """Same race on the simple-auth path, where there is no cwid and
         unique(email) is the constraint that fires."""
         from unittest.mock import patch
+
         from sqlalchemy.orm import Query
 
         winner = provision_user(db, display_name="Winner", auth_method="simple",
@@ -590,9 +605,10 @@ class TestErrorHelpers:
 # Admin Service Tests (ARCH-05)
 # ============================================================
 
-from app.services.admin_service import get_users_with_stats, get_single_user_stats
-from app.models import Run, Feedback
 from datetime import datetime
+
+from app.models import Feedback, Run
+from app.services.admin_service import get_single_user_stats, get_users_with_stats
 
 
 class TestAdminService:
@@ -742,9 +758,9 @@ class TestCsvInjectionGuard:
 
 from unittest.mock import patch
 
-from app.consent import get_current_consent_document, get_consent_text, get_consent_hash
-from app.services.consent_service import record_consent
+from app.consent import get_consent_hash, get_consent_text, get_current_consent_document
 from app.models import Consent
+from app.services.consent_service import record_consent
 
 
 def _seed_consent_user(db, email="consent-svc@example.com"):
@@ -840,7 +856,8 @@ def _seed_export_fixture(db):
     """Synthetic rows covering every export type, incl. a formula-trigger cell,
     a comma/quote cell, a null user and null optional columns."""
     from datetime import datetime
-    from app.models import Run, Feedback
+
+    from app.models import Feedback, Run
 
     u1 = User(id=1, email="a@example.com", display_name="=Alpha", role="admin",
               auth_method="simple", daily_limit=5,
@@ -925,8 +942,8 @@ class TestAdminCsvExportStreaming:
     buffering the whole table; the bytes are unchanged."""
 
     def _get(self, client, export_type, role="admin"):
-        from app.main import app
         from app.auth import get_current_user
+        from app.main import app
 
         # Override the session, not the role gate, so the route's real
         # require_view_all_runs dependency and its staff export check both run.
@@ -954,8 +971,9 @@ class TestAdminCsvExportStreaming:
     @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
     def test_response_is_produced_in_multiple_chunks(self, db, export_type, monkeypatch):
         import asyncio
-        from app.api.admin_routes import exports
+
         import app.services.admin_export_service as admin_export_service
+        from app.api.admin_routes import exports
         _seed_export_fixture(db)
         monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
 
@@ -1020,8 +1038,9 @@ class TestAdminCsvExportStreaming:
     def test_rows_are_fetched_in_bounded_batches_not_all_at_once(self, db, monkeypatch):
         """The query must carry yield_per, otherwise .all()-style hydration of
         the whole table returns and only the output side is chunked."""
-        import app.services.admin_export_service as admin_export_service
         from sqlalchemy.orm import Query
+
+        import app.services.admin_export_service as admin_export_service
         _seed_export_fixture(db)
         monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
         seen = []

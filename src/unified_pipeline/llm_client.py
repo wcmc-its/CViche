@@ -33,8 +33,8 @@ web_interface/backend/tests/test_llm_client.py still reaches for them at
 this path -- see that file before renaming or dropping any of them.
 """
 
-import time
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -44,17 +44,17 @@ from unified_pipeline.core.prompt_logger import (
     log_prompt_response,
 )
 from unified_pipeline.llm.bedrock import (
+    DEFAULT_MAX_TOKENS,
     _handle_bedrock,
     _schema_tool_config,
     _strip_markdown_fences,
     _translate_messages,
-    DEFAULT_MAX_TOKENS,
 )
 from unified_pipeline.llm.retry import (
     _call_with_retry,
-    _llm_call_semaphore,
-    _get_max_concurrent_llm_calls,
     _get_llm_timeout_seconds,
+    _get_max_concurrent_llm_calls,
+    _llm_call_semaphore,
 )
 
 # `import time` is otherwise unused here: it exists so

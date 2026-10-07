@@ -2,11 +2,13 @@ import hashlib
 import logging
 import os
 import threading
+from pathlib import Path
+
 import boto3
 import pymysql
-from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
+
 from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)

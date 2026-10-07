@@ -21,13 +21,13 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest
+
 from unified_pipeline.stage3b.context import (
     TaxonomyContext,
     build_mapping_index,
     get_taxonomy_context,
 )
-
-import pytest
 
 
 def _option(code, confidence=0.8):

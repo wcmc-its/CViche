@@ -29,11 +29,11 @@ from unified_pipeline.core.text_norm import norm, squash
 # import them from here unchanged); `_RENDER_TOKEN_RE` is also used directly
 # by `_long_word_tokens` below.
 from unified_pipeline.stage6.render_check import (  # noqa: F401
+    _RENDER_TOKEN_RE,
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
-    _RENDER_TOKEN_RE,
     _entry_pieces,
 )
 
@@ -88,6 +88,7 @@ def _template_haystack() -> str:
     quality_score imports this module.
     """
     from docx import Document
+
     from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH
     doc = Document(_TEMPLATE_DOCX_PATH)
     texts = [p.text for p in doc.paragraphs]

@@ -4,37 +4,70 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
-import redis
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
-from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Query as SAQuery, Session, selectinload
 from pathlib import Path
 
-from app.database import get_db
-from app.models import Run, RunState, Step, User
-from app.schemas import (
-    RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
-    CapacityResponse, RunActionResponse, RestartRunResponse, StatusFilterCounts,
-    RunFeedbackSummary, RunQualityReport, RunReviewNote,
+import redis
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Query as SAQuery
+from sqlalchemy.orm import Session, selectinload
+
+from app.api.upload import UPLOAD_DIR, commit_run_or_compensate, create_run_archive
+from app.auth import (
+    can_view_all_runs,
+    get_current_user,
+    require_view_all_runs,
+    visible_cost,
 )
+from app.database import get_db
+from app.errors import bad_request, conflict, forbidden, not_found
+from app.models import Run, RunState, Step, User
+from app.pipeline import concurrency, run_queue
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.pipeline import concurrency, run_queue
-from app.auth import can_view_all_runs, get_current_user, require_view_all_runs, visible_cost
-from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
-from app.services.run_service import (
-    check_run_access, claim_run_as_running, _materialize_input_if_missing,
-    flip_to_queued, revert_queued, StepSnapshot,
-)
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request, conflict, forbidden
-from app.services.runs_admin_query import (
-    RunScope, StatusFilter, build_filter_options, empty_feedback_summary, feedback_clause,
-    filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
-    my_status_counts, parse_run_filters, parse_status_filter, run_by_summary, status_clause,
+from app.schemas import (
+    CapacityResponse,
+    PaginatedRuns,
+    RestartRunResponse,
+    RunActionResponse,
+    RunFeedbackSummary,
+    RunFilterOptions,
+    RunQualityReport,
+    RunReviewNote,
+    RunStatus,
+    RunSummary,
+    StatusFilterCounts,
+    StepSummary,
 )
 from app.services import batch_completion, batch_service, quality_score_service
-from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
+from app.services.run_quality_report import (
+    build_run_quality_report,
+    columns_need_cleanup,
+)
+from app.services.run_service import (
+    StepSnapshot,
+    _materialize_input_if_missing,
+    check_run_access,
+    claim_run_as_running,
+    flip_to_queued,
+    revert_queued,
+)
+from app.services.runs_admin_query import (
+    RunScope,
+    StatusFilter,
+    build_filter_options,
+    empty_feedback_summary,
+    feedback_clause,
+    filtered_runs_query,
+    load_feedback_summaries,
+    my_status_counts,
+    parse_feedback_filter,
+    parse_run_filters,
+    parse_status_filter,
+    run_by_summary,
+    status_clause,
+)
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)

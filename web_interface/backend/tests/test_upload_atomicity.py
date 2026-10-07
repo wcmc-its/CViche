@@ -29,10 +29,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import object_session
 
 from app.api import upload as upload_module
-from app.services import upload_validation
 from app.api.upload import _extract_text, _validate_docx_magic
-from app.models import User, Run, Step
+from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
+from app.services import upload_validation
 from app.storage.local_storage import LocalRunStorage
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -59,7 +59,7 @@ def _make_user(db, email="test@example.com", **overrides):
 
 
 def _auth(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     # create_session_cookie reads the current epoch from a DB session;
     # `user` was just committed on the test's session, so borrow that one.
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))

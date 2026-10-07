@@ -10,7 +10,6 @@ dispatch) and the enqueue contract are exercised at the wire, not on a helper.
 import os
 import threading
 from datetime import datetime, timezone
-
 from unittest.mock import MagicMock
 
 import fakeredis
@@ -646,6 +645,7 @@ def test_start_in_queue_mode_flips_to_queued_and_enqueues_once(client, db, fake_
 def test_start_in_process_mode_is_untouched(client, db, monkeypatch, as_user_with_input):
     """Default mode still schedules the BackgroundTask and answers 200/running."""
     from starlette.background import BackgroundTasks
+
     from app.pipeline import concurrency
 
     monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
@@ -705,6 +705,7 @@ def test_start_reports_live_status_when_a_revert_loses_to_a_concurrent_claim(cli
     a stale 503 that tells the caller to retry a run that is already
     executing."""
     from sqlalchemy import update as sa_update
+
     from app.models import Run
 
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://fake-valkey:6379/0")
@@ -873,6 +874,7 @@ def test_start_on_a_retry_queued_run_keeps_its_resume_step(client, db, fake_redi
     already-queued branch, no fresh flip) must not touch resume_from_step --
     only a winning flip ever writes it, and start_run's flip nulls it."""
     from sqlalchemy import update as sa_update
+
     from app.models import Run
 
     user, _ = _seed(db, status="queued")
@@ -926,8 +928,9 @@ def test_dispatch_routes_stay_plain_def_not_async():
     (XADD, or the blocking redis-py stats calls) costs a threadpool slot
     instead of stalling the event loop for every other request on the pod."""
     import inspect
-    from app.api.runs import start_run, retry_step
+
     from app.api.admin_routes.runs import get_queue_stats
+    from app.api.runs import retry_step, start_run
 
     assert not inspect.iscoroutinefunction(start_run)
     assert not inspect.iscoroutinefunction(retry_step)

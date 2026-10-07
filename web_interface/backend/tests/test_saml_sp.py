@@ -1,24 +1,23 @@
 """Tests for SAML SP client factory, cert generation, and attribute extraction."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from saml2.sigver import SigverError
+import pytest
 from saml2.response import IncorrectlySigned, VerificationError
+from saml2.sigver import SigverError
 from saml2.validate import ResponseLifetimeExceed
 
 from app.saml_client import (
-    extract_user_attrs,
-    _generate_self_signed_cert,
-    _find_xmlsec1,
-    ATTR_MAIL,
     ATTR_DISPLAY_NAME,
     ATTR_EPPN,
+    ATTR_MAIL,
     ATTR_UID,
+    _find_xmlsec1,
+    _generate_self_signed_cert,
+    extract_user_attrs,
 )
-
 
 # --- Unit tests: extract_user_attrs ---
 
@@ -287,8 +286,9 @@ class TestGetSamlClient:
     def test_acs_endpoints_use_sp_base_url_not_entity_id(self, db, seed_saml_mode, tmp_path):
         """ACS/SLO endpoint URLs are derived from sp_base_url, not entity_id."""
         # Override cert dir to a writable tmp path
-        from app.models import SystemConfig
         import json as _json
+
+        from app.models import SystemConfig
         row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
         row.value = _json.dumps(str(tmp_path / "certs"))
         db.commit()
@@ -319,8 +319,9 @@ class TestGetSamlClient:
 
     def test_raises_when_sp_base_url_missing(self, db, seed_saml_mode, tmp_path):
         """get_saml_client raises if saml_sp_base_url is empty -- fail loud, not silently broken."""
-        from app.models import SystemConfig
         import json as _json
+
+        from app.models import SystemConfig
         row = db.query(SystemConfig).filter(SystemConfig.key == "saml_sp_base_url").first()
         row.value = _json.dumps("")
         db.commit()
@@ -332,8 +333,9 @@ class TestGetSamlClient:
         """sp.crt present but sp.key missing -> fail loud, don't hand pysaml2 a
         key path that does not exist (the failure would surface later in xmlsec1).
         """
-        from app.models import SystemConfig
         import json as _json
+
+        from app.models import SystemConfig
         cert_dir = tmp_path / "certs"
         cert_dir.mkdir()
         (cert_dir / "sp.crt").write_text("-----BEGIN CERTIFICATE-----\n")
@@ -358,8 +360,9 @@ class TestGetSamlClient:
         skips without docker) or a real pysaml2 Server/Client harness like
         test_saml_signature_enforcement.py's -- both outside this ticket's
         write set; see the reply for r3967362882."""
-        from app.models import SystemConfig
         import json as _json
+
+        from app.models import SystemConfig
         row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
         row.value = _json.dumps(str(tmp_path / "certs"))
         db.commit()
@@ -377,9 +380,14 @@ import logging
 from saml2.mdstore import SourceNotFound
 from saml2.sigver import CertificateError
 
-from app.models import SystemConfig, User
-from app.auth import COOKIE_NAME, SESSION_TTL, decode_session_cookie, get_cookie_settings
+from app.auth import (
+    COOKIE_NAME,
+    SESSION_TTL,
+    decode_session_cookie,
+    get_cookie_settings,
+)
 from app.ed_group_lookup import EdUnavailableError, MembershipResult
+from app.models import SystemConfig, User
 from app.saml_replay import SamlReplayCache, set_replay_cache
 from app.services.saml_service import SamlLoginFailure
 

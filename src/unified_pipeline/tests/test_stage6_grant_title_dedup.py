@@ -28,9 +28,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.normalization.content import _deduplicate_repeated_content  # noqa: E402
+from unified_pipeline.stage6.normalization.content import (
+    _deduplicate_repeated_content,  # noqa: E402
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # --------------------------------------------------------------------------
 # The bug, in its sharpest form: two distinct segments, no repetition, the

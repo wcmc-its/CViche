@@ -1,10 +1,12 @@
 """Load auth config from YAML and seed SystemConfig DB table."""
 import json
 import logging
-import yaml
 import os
 from pathlib import Path
+
+import yaml
 from sqlalchemy.orm import Session
+
 from app.models import SystemConfig
 
 logger = logging.getLogger(__name__)

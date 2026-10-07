@@ -20,7 +20,11 @@ import redis.exceptions
 import app.session_idle as session_idle
 from app.auth import decode_session_cookie
 from app.models import SystemConfig, User
-from app.services.auth_service import LoginRejection, LoginSession, authenticate_simple_login
+from app.services.auth_service import (
+    LoginRejection,
+    LoginSession,
+    authenticate_simple_login,
+)
 from app.session_idle import IdleSessionStore
 
 _ROUTE_LOGGER = "app.api.auth_routes"

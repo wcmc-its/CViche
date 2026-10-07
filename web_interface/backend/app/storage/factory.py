@@ -8,8 +8,8 @@ The storage instance is created once (singleton) and reused for the lifetime
 of the process.
 """
 
-import os
 import logging
+import os
 
 from app.storage.base import RunStorage
 

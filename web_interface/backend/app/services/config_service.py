@@ -6,6 +6,7 @@ are collected here. Each constant can be overridden via an environment variable.
 import os
 
 from app.config_loader import get_config
+
 # Session
 # Absolute session lifetime. Lowered from 7 days to 12 hours so a signed cookie
 # can't keep a session alive for a week of inactivity; combined with the
@@ -88,7 +89,7 @@ def get_estimated_run_cost(text_char_count: int) -> tuple[float, float]:
 def get_estimate_model_name() -> str:
     """Friendly name of the model the cost estimate is based on (for display)."""
     try:
-        from unified_pipeline.config import get_stage_config, friendly_model_name
+        from unified_pipeline.config import friendly_model_name, get_stage_config
         return friendly_model_name(get_stage_config("default")["model"])
     except Exception:  # pragma: no cover - defensive fallback
         return "the configured model"

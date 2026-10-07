@@ -27,11 +27,16 @@ from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls, qn  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
-from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output  # noqa: E402
+from unified_pipeline.doctor.lints.protected_data import (
+    lint_protected_data_in_output,  # noqa: E402
+)
 from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
 from unified_pipeline.repair import protected_data as repair  # noqa: E402
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE  # noqa: E402
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    WCMTemplateGenerator,
+    run_stage6,
+)
 
 _UID = "TESTRP"
 _ENTRIES = [

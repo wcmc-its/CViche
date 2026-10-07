@@ -15,7 +15,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from unified_pipeline.stage4 import context_headings as ch  # noqa: E402
-from unified_pipeline.stage4.context_headings import stamp_context_headings  # noqa: E402
+from unified_pipeline.stage4.context_headings import (
+    stamp_context_headings,  # noqa: E402
+)
 
 _H = ["Service", "Institutional Service"]
 

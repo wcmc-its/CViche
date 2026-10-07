@@ -17,7 +17,6 @@ from fastapi import HTTPException
 from app.models import Run, Step
 from app.services import artifact_service as svc
 
-
 # --- #1: validate_run_id boundary lengths, traversal, absolute, control chars ---
 
 

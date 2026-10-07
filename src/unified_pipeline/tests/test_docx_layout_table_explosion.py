@@ -2,11 +2,12 @@
 multi-column (real data) tables must NOT. Deterministic, no LLM."""
 import sys
 from pathlib import Path
+
 _SRC = Path(__file__).resolve().parents[1]  # src/unified_pipeline
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
-from docx import Document  # noqa: E402
 from core.docx_structure_extractor import extract_unified_elements  # noqa: E402
+from docx import Document  # noqa: E402
 
 
 def _build_docx(path):
@@ -48,7 +49,8 @@ def test_layout_table_explodes_but_data_table_stays(tmp_path):
 
 
 if __name__ == "__main__":   # ponytail: runnable without pytest
-    import tempfile, os
+    import os
+    import tempfile
     p = os.path.join(tempfile.mkdtemp(), "cv.docx")
     _build_docx(p)
     texts = _texts(p)

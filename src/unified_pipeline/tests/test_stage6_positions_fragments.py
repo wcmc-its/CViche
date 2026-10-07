@@ -69,7 +69,10 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+)
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _child_position_records,
     _employers_match,
@@ -78,7 +81,6 @@ from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _tab_joined_child_fragments,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # The exact -DAZFA D2 entry text (stage_5_enrichment JSON), en-dash and bullet
 # glyph verbatim.

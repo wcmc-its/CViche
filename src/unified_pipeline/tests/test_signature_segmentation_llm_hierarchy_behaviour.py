@@ -37,7 +37,6 @@ from docx import Document
 
 from unified_pipeline.segmentation import signature_based_segmentation as sbs
 
-
 # --------------------------------------------------------------------------- helpers
 
 def _fmt_sig(**overrides: object) -> sbs.FormatSignature:
@@ -1589,8 +1588,9 @@ def _priced(inner, calls):
 
 
 def test_get_cv_hierarchy_chunked_reports_the_summed_priced_cost_of_every_call(monkeypatch):
-    from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
     import signature_based_segmentation as bare  # the module cce binds by bare name
+
+    from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
 
     calls = []
     stub = _priced(_make_end_to_end_call_llm_stub(), calls)

@@ -89,8 +89,8 @@ def test_execute_persists_duration_on_complete(monkeypatch, tmp_path, db):
 
     _now() is pinned to two fixed values so the assertion is exact.
     """
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     # Seed a real running row in the in-memory DB.
     db.add(Run(
@@ -125,8 +125,8 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     """A run that fails AFTER the pipeline has started (start_time set) records
     a non-NULL total_duration_seconds via the failure branch,
     flips to 'failed', and emits the terminal RUN_FAILED event."""
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id="EXEC_FAIL", filename="cv.docx", file_type="docx", status="running",
@@ -169,8 +169,8 @@ def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path
     Forcing emit_run_start to raise reproduces a failure in emit_run_start, before
     start_time = _now() on the next line.
     """
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id="EXEC_EARLY", filename="cv.docx", file_type="docx", status="running",
@@ -202,8 +202,8 @@ def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path
 
 def _seed_and_wire(monkeypatch, tmp_path, db, run_id, prior, exec_step):
     """Seed a running row with a prior total and wire a stubbed orchestrator."""
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id=run_id, filename="cv.docx", file_type="docx", status="running",
@@ -276,6 +276,7 @@ def test_now_reads_time_monotonic(monkeypatch):
 def test_execute_step_duration_uses_module_clock(monkeypatch, tmp_path):
     """The per-step duration is the _now() delta (start at 100.0, end at 125.0)."""
     from unittest.mock import MagicMock
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "event_emitter", AsyncMock())
@@ -348,8 +349,8 @@ def test_helper_zero_second_persisted_is_kept():
 def test_admin_runs_table_cancelled_and_failed_duration(client, db):
     """The /admin/runs Duration column resolves cancelled & failed rows the
     same way as complete: persisted preferred, wall-clock fallback."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -379,8 +380,8 @@ def test_admin_runs_table_cancelled_and_failed_duration(client, db):
 def test_admin_stats_excludes_cancelled_and_failed_from_aggregates(client, db):
     """avg/p95 are computed over status=='complete' only: adding cancelled and
     failed rows (even with persisted durations) must not move the aggregates."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -424,8 +425,8 @@ def test_admin_stats_excludes_cancelled_and_failed_from_aggregates(client, db):
 def test_admin_stats_single_completed_run(client, db):
     """n=1 nearest-rank: a single completed run is both the avg and the p95
     (pins the index math at len-1 == 0)."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -451,8 +452,8 @@ def test_admin_stats_single_completed_run(client, db):
 def test_admin_stats_counts_zero_second_run(client, db):
     """A persisted 0-second run is a real data point: the aggregate must include
     it (the 'is not None' check, not a falsy drop)."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -483,8 +484,8 @@ def test_admin_stats_counts_zero_second_run(client, db):
 def _run_cancelled_execute(monkeypatch, tmp_path, db, run_id, status, prepare=None):
     """Seed a run in ``status`` and execute() it with a stage that raises the
     cancel exception (no API write happened)."""
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id=run_id, filename="cv.docx", file_type="docx", status=status,

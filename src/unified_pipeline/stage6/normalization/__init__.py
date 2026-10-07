@@ -76,39 +76,39 @@ from .content import (  # noqa: F401
     _deduplicate_repeated_content,
 )
 from .fields import (  # noqa: F401
-    _CELL_PHONE_KEYS,
-    _OFFICE_PHONE_KEYS,
-    _HOME_PHONE_KEYS,
     _ALL_PHONE_SLOT_KEYS,
-    _labels_its_own_phone_slots,
-    _phone_cell_text,
+    _CELL_PHONE_KEYS,
     _HOME_ADDRESS_KEYS,
+    _HOME_PHONE_KEYS,
     _OFFICE_ADDRESS_KEYS,
+    _OFFICE_PHONE_KEYS,
     _address_cell_text,
     _cell_text,
     _committee_cell_text,
     _labels_its_own_address_slots,
+    _labels_its_own_phone_slots,
+    _phone_cell_text,
 )
 from .institutions import (  # noqa: F401
     _get_cleaned_institution_name,
     _strip_org_tail,
 )
 from .pii import (  # noqa: F401
-    _PII_LABEL_RE,
     _PII_FIELD_KEY_RE,
     _PII_FRAGMENT_SPLIT_RE,
+    _PII_LABEL_RE,
     CAT_DEA,
     CAT_HOME_CONTACT,
     CAT_PLACE_OF_BIRTH,
     WithheldItem,
-    _squash,
-    _pii_fragments,
     _from_pii_fragment,
     _pii_category_of,
+    _pii_fragments,
+    _squash,
 )
 from .publication import (  # noqa: F401
-    PubMedEnrichment,
     PublicationFields,
+    PubMedEnrichment,
     ResolvedPublication,
     resolve_publication,
 )

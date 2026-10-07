@@ -518,7 +518,10 @@ def test_the_real_reader_and_stage_2_join_shape_round_trips_to_level_1_children(
     # its own table_index, over a table whose row 0 is the section header and so
     # is dropped from the reader's rows (row_index 0 is source row 1).
     from unified_pipeline.core.docx_structure_extractor import (
-        extract_unified_elements, join_row_cells, row_cell_texts)
+        extract_unified_elements,
+        join_row_cells,
+        row_cell_texts,
+    )
     src = _source_docx(tmp_path, [_HIER, [("A flat row", False)]], header_row=True)
     content = next(e for e in extract_unified_elements(src)["elements"]
                    if e["type"] == "table_content")

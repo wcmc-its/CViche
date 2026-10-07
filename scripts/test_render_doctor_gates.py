@@ -39,7 +39,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import doctor_gate_compare as dgc  # noqa: E402
 import render_gate as rg  # noqa: E402
 import render_gate_compare as rgc  # noqa: E402
-
 from docx import Document  # noqa: E402
 
 
@@ -296,6 +295,7 @@ def test_render_gate_llm_monkeypatch_still_intercepts_stage6():
     with no error -- a "deterministic" gate run could silently make a real
     LLM call (review on #589)."""
     import inspect
+
     import unified_pipeline.stage_6_word_template as s6
 
     src = inspect.getsource(s6)

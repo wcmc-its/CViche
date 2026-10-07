@@ -75,19 +75,19 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
-from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
-    _resolve_licensure,
-)
 from unified_pipeline.stage6.pii_pass import (  # noqa: E402
+    _THIRD_PARTY_PHONE_RE,
     APPENDIX_SECTION_LABEL,
     WITHHELD_COMMENT_FOOTER,
     WITHHELD_COMMENT_HEADER,
     _entry_scope,
     _owner_name_tokens,
-    _THIRD_PARTY_PHONE_RE,
     relocate_withheld,
     run_pii_pass,
     withheld_comment_text,
+)
+from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
+    _resolve_licensure,
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,

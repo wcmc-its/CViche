@@ -12,18 +12,20 @@ Pipeline:
 Key insight: Let the LLM classify ~10-20 format signature groups, not 200+ paragraphs.
 """
 
+import hashlib
 import json
 import logging
-import hashlib
 import re
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from dataclasses import dataclass, asdict
+
 from docx import Document
-from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from unified_pipeline.llm_client import LlmUsage, call_llm
+from docx.shared import Pt, RGBColor
+
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage, call_llm
 
 # Import locked headers for secondary confidence boost
 try:

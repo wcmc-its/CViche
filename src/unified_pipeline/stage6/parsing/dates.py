@@ -15,8 +15,8 @@ deciding what order records go in is `sorting/`. Both import from here, so
 nothing in this file may import from either.
 """
 import datetime
-from types import MappingProxyType
 import re
+from types import MappingProxyType
 
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 

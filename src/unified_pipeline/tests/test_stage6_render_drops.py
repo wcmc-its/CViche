@@ -19,12 +19,12 @@ from pathlib import Path
 
 import pytest
 
+from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 from unified_pipeline.stage6.parsing import (
     _is_mentee_record,
     _is_mentoring_outcome,
     _is_orphan_fragment,
 )
-from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 from unified_pipeline.stage6.sections.other_education import (
     _normalize_other_education_entry,
 )
@@ -32,12 +32,12 @@ from unified_pipeline.stage_6_word_template import (
     _REROUTE_ANCHOR_OVERRIDES,
     _SAME_FAMILY_KIND_FIELDS,
     _TAXONOMY_WARNED_CONFUSIONS,
+    PRECOLLEGIATE_REROUTE_CHECK,
     REROUTE_ACCEPTED_CROSS_FAMILY,
     REROUTE_ACCEPTED_SAME_FAMILY,
     REROUTE_CHECK,
     REROUTE_REFUSED_FIELDS,
     REROUTE_REFUSED_MENTEE,
-    PRECOLLEGIATE_REROUTE_CHECK,
     WCMTemplateGenerator,
 )
 

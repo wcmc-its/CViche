@@ -9,9 +9,9 @@ tests pin that contract.
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.orm import object_session
 
 from app.models import User
-from sqlalchemy.orm import object_session
 
 
 def _make_user(db):
@@ -28,7 +28,7 @@ def _make_user(db):
 
 
 def _auth(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     # create_session_cookie reads the current epoch from a DB session;
     # `user` was just committed on the test's session, so borrow that one.
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))

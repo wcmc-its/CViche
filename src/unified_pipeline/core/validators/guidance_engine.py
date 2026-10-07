@@ -5,7 +5,7 @@ Orchestrates all validators to provide combined guidance
 for classification narrowing before LLM sees entries.
 """
 
-from .base_validator import BaseValidator, ValidatorGuidance, GuidanceResult
+from .base_validator import BaseValidator, GuidanceResult, ValidatorGuidance
 
 
 class GuidanceEngine:

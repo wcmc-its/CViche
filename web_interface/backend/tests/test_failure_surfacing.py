@@ -454,7 +454,11 @@ def test_execute_step_failure_writes_and_mirrors_a_stage_error_record(monkeypatc
     """The orchestrator raises (fails the run) but first records which stage
     broke and how, and mirrors it to outputs/ where the scorer collects it --
     even when the message names no exception type."""
-    from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
+    from unified_pipeline.stage_errors import (
+        StageError,
+        read_stage_errors,
+        stage_errors_path,
+    )
 
     async def boom(stage_id, cv_path):
         raise TypeError("'int' object is not iterable")
@@ -473,7 +477,11 @@ def test_execute_step_success_clears_an_earlier_stage_error(monkeypatch, tmp_pat
     """A retried stage that now succeeds removes its entry, locally and in the
     mirrored copy, so a recovered run is not capped by its own history."""
     from unified_pipeline.stage_errors import (
-        StageError, read_stage_errors, record_stage_outcome, stage_errors_path)
+        StageError,
+        read_stage_errors,
+        record_stage_outcome,
+        stage_errors_path,
+    )
 
     async def ok(stage_id, cv_path):
         return {"cost": 0.0, "output_files": []}

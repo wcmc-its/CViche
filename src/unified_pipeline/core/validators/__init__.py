@@ -18,48 +18,55 @@ Usage:
     # Check guidance.excluded_subsections for hard rules
 """
 
-from .base_validator import (
-    BaseValidator,
-    ValidatorGuidance,
-    GuidanceResult
+from .awards_grants import AwardsGrantsValidator
+from .base_validator import BaseValidator, GuidanceResult, ValidatorGuidance
+from .book_chapter import BookChapterValidator
+from .committee_position_corrector import (
+    CommitteePositionCorrector,
+    apply_committee_corrections,
 )
+from .contact_section import ContactSectionValidator
+from .dataset_cohort import DatasetCohortValidator
+from .education_postdoc import EducationPostdocValidator
+from .fellowship_classifier import FellowshipValidator
+from .grant_structure import GrantStructureValidator
 from .guidance_engine import (
     GuidanceEngine,
+    analyze_entries_for_guidance,
     get_guidance_engine,
     register_validator,
-    analyze_entries_for_guidance
 )
-from .s7_unpublished import S7UnpublishedValidator
-from .education_postdoc import EducationPostdocValidator
-from .awards_grants import AwardsGrantsValidator
-from .contact_section import ContactSectionValidator
-from .url_domain import URLDomainValidator
+from .honors_membership import HonorsMembershipValidator
+from .label_content_conflict import LabelContentConflictValidator
+from .leadership_committee import LeadershipCommitteeValidator
+from .mentee_outcomes import MenteeOutcomesValidator
+
 # NEW: ChatGPT CV 2036 Hoffman feedback validators
 from .mentoring_indicators import MentoringIndicatorsValidator
+from .postdoc_position import PostdocPositionValidator
 from .professional_service import ProfessionalServiceValidator
-from .leadership_committee import LeadershipCommitteeValidator
-from .fellowship_classifier import FellowshipValidator
-from .label_content_conflict import LabelContentConflictValidator
-# NEW: CV 2032 Haendel feedback validators
-from .service_vs_publication import ServiceVsPublicationValidator
-from .mentee_outcomes import MenteeOutcomesValidator
+
 # NEW: S* publication validators (Pass 1.5 deterministic routing)
 from .publication_abstract import PublicationAbstractValidator
-from .publication_preprint import PublicationPreprintValidator
-from .publication_manuscript_in_prep import ManuscriptInPrepValidator
 from .publication_case_report import CaseReportValidator
+from .publication_manuscript_in_prep import ManuscriptInPrepValidator
+from .publication_preprint import PublicationPreprintValidator
+from .reasoning_consistency_checker import (
+    apply_reasoning_corrections,
+    check_reasoning_consistency,
+)
+from .s7_unpublished import S7UnpublishedValidator
+
 # NEW: Structural improvement validators (addressing confusion areas)
 from .section_header_context import SectionHeaderContextValidator
-from .grant_structure import GrantStructureValidator
-from .postdoc_position import PostdocPositionValidator
-from .temporal_patterns import TemporalPatternValidator
-from .book_chapter import BookChapterValidator
-from .honors_membership import HonorsMembershipValidator
-from .dataset_cohort import DatasetCohortValidator
+
+# NEW: CV 2032 Haendel feedback validators
+from .service_vs_publication import ServiceVsPublicationValidator
+
 # NEW: Post-classification auto-correction validators (v11.1)
 from .structural_header import StructuralHeaderValidator, apply_structural_corrections
-from .committee_position_corrector import CommitteePositionCorrector, apply_committee_corrections
-from .reasoning_consistency_checker import apply_reasoning_corrections, check_reasoning_consistency
+from .temporal_patterns import TemporalPatternValidator
+from .url_domain import URLDomainValidator
 
 # Register validators on import
 _s7_validator = S7UnpublishedValidator()

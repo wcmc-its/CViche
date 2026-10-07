@@ -37,8 +37,8 @@ def _seed_mixed_status_runs(db):
 
 
 def _admin_get(client, url):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -141,6 +141,7 @@ def test_queue_stats_enabled_false_with_url_set_but_mode_in_process(client, db, 
     not merely whether the (shared) URL is configured -- and a disabled GET
     must never write to Valkey (point 6)."""
     import fakeredis
+
     from app.pipeline import run_queue
 
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
@@ -176,6 +177,7 @@ def test_queue_stats_reports_valkey_not_configured_in_queue_mode_with_no_url(cli
 
 def test_queue_stats_with_redis_merges_stream_depth_and_pending(client, db, monkeypatch):
     import fakeredis
+
     from app.pipeline import run_queue
 
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
@@ -203,6 +205,7 @@ def test_queue_stats_reports_the_batch_stream_beside_the_single_one(client, db, 
     """#1114: ``queues`` has each stream's depth, pending, lag and
     dead-letter count; the top-level fields stay the single stream's."""
     import fakeredis
+
     from app.pipeline import run_queue
 
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
@@ -239,6 +242,7 @@ def test_queue_stats_answers_200_when_valkey_is_unreachable(client, db, monkeypa
     exception's own text, which can carry a host:port (#701 admin_routes.py
     point 2)."""
     import redis
+
     from app.pipeline import run_queue
 
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
@@ -279,8 +283,8 @@ _INCOMPLETE_SCORE = {
 
 
 def _admin_post(client, url):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -330,8 +334,8 @@ def test_compute_score_returns_score_evidence(client, db, monkeypatch):
 
 def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
     """The rescore endpoint copies score, band and cap onto the run row."""
-    from app.services import admin_run_service
     from app.models import Run
+    from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
     capped = {**_INCOMPLETE_SCORE, "totalScore": 25, "raw_score_before_caps": 80.0,
@@ -347,8 +351,8 @@ def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
 
 def test_compute_score_404s_for_an_unknown_run_and_for_no_scorable_outputs(client, db, monkeypatch):
     """Two distinct 404s; neither writes the quality columns."""
-    from app.services import admin_run_service
     from app.models import Run
+    from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
     monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: None)

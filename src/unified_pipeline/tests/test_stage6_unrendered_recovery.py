@@ -34,18 +34,18 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.stage_6_word_template import (  # noqa: E402
-    WCMTemplateGenerator,
-    _record_lines,
-    run_stage6,
-    segment_already_rendered,
-)
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     _record_rendered,
     _whole_record_rendered,
     segments_cover_source,
+)
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    WCMTemplateGenerator,
+    _record_lines,
+    run_stage6,
+    segment_already_rendered,
 )
 
 

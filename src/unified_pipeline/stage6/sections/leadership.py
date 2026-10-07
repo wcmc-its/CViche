@@ -20,6 +20,12 @@ column for them.
 import logging
 import re
 
+from unified_pipeline.core.render_check import (
+    CELL_SEPARATOR,
+    entry_lines,
+    wrapped_row_text,
+)
+
 from ..formatting import (
     _clear_table_data,
     _set_font,
@@ -29,7 +35,6 @@ from ..formatting import (
 from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import CELL_SEPARATOR, entry_lines, wrapped_row_text
 
 logger = logging.getLogger(__name__)
 

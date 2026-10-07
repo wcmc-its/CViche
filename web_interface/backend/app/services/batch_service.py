@@ -26,10 +26,23 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query, Session
 
 from app.errors import not_found
-from app.models import BULK_BATCH_MIN_FILES, BatchSource, Run, RunBatch, RunState, User, can_view_all_runs
+from app.models import (
+    BULK_BATCH_MIN_FILES,
+    BatchSource,
+    Run,
+    RunBatch,
+    RunState,
+    User,
+    can_view_all_runs,
+)
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
-    BatchDetail, BatchRunRow, BatchStatusCounts, BatchSummary, QueueLane, QueueOverview,
+    BatchDetail,
+    BatchRunRow,
+    BatchStatusCounts,
+    BatchSummary,
+    QueueLane,
+    QueueOverview,
 )
 from app.services import mailer
 from app.services.runs_admin_query import run_by_summary

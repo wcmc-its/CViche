@@ -1,13 +1,15 @@
 """Database configuration and session management."""
 import os
-import boto3
 from pathlib import Path
+
+import boto3
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+
 from app.base_class import Base
-from app.database_factory import create_cviche_engine
 from app.config_loader import get_config
+from app.database_factory import create_cviche_engine
 
 # Read DB_HOST/DB_PORT/DB_NAME/DB_USER via get_config (env, then the
 # auth_config.yaml yaml fallback). There is no SQLite path: create_cviche_engine
@@ -43,5 +45,15 @@ def get_db():
 
 def init_db():
     """Initialize database tables."""
-    from app.models import Run, Step, Log, LLMUsage, RunMetrics, User, SystemConfig, Consent, Feedback  # noqa: F401
+    from app.models import (  # noqa: F401
+        Consent,
+        Feedback,
+        LLMUsage,
+        Log,
+        Run,
+        RunMetrics,
+        Step,
+        SystemConfig,
+        User,
+    )
     Base.metadata.create_all(bind=engine)

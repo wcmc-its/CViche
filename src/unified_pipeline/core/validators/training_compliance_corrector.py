@@ -16,7 +16,6 @@ Rule: Required institutional trainings and compliance courses are B2,
 
 import re
 
-
 # Patterns indicating B2 (training/compliance courses)
 TRAINING_PATTERNS = [
     # Title IX and compliance

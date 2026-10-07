@@ -43,10 +43,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
+    _PII_FIELD_KEY_RE,
     CAT_HOME_CONTACT,
     PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
-    _PII_FIELD_KEY_RE,
 )
 from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_AUTHOR,

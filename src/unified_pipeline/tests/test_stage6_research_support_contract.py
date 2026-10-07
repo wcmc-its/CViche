@@ -46,6 +46,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization import (  # noqa: E402
+    grant_heading_rebucket_target,
+    grant_status_is_empty_section_label,
+    grant_status_rebucket_target,
+)
 from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     ROLE_EFFORT_DIGIT_RE,
@@ -53,6 +58,8 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     ROLE_EFFORT_HEADER_RE,
     ROLE_EFFORT_HEADER_WINDOW,
     UnsupportedRebucketTargetError,
+    _is_cv_owner,
+    _pi_name_from_label,
     apply_effort_to_grants,
     claim_goal_rows,
     fill_major_goals_from_text,
@@ -66,13 +73,6 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
     resolve_pi_name,
-    _is_cv_owner,
-    _pi_name_from_label,
-)
-from unified_pipeline.stage6.normalization import (  # noqa: E402
-    grant_heading_rebucket_target,
-    grant_status_is_empty_section_label,
-    grant_status_rebucket_target,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 

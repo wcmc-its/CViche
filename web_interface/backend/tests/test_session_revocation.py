@@ -111,8 +111,8 @@ def test_cookie_without_epoch_is_rejected(client, db, seed_simple_mode):
 # ---------------------------------------------------------------------------
 
 def _as_admin(client, fn):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
         role="admin", email="admin@example.com", id=999)
     try:
@@ -122,8 +122,8 @@ def _as_admin(client, fn):
 
 
 def _as_user(client, fn):
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         role="user", email="u@example.com", id=1)
     try:
@@ -157,6 +157,7 @@ def test_non_admin_cannot_revoke_all(client, db, seed_simple_mode):
 
 def test_admin_revoke_all_body_audit_line_and_updated_by(client, db, seed_simple_mode, caplog):
     import logging
+
     from app.models import SystemConfig
     _set_epoch(db, 4)
 

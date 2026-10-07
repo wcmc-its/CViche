@@ -32,10 +32,6 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
-from unified_pipeline.stage_6_word_template import (  # noqa: E402
-    RENDER_ROUTED_CODES,
-    WCMTemplateGenerator,
-)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_taxonomy_code_coverage,
 )
@@ -66,7 +62,10 @@ from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _route_q2_entries,
     _split_q2_lines,
 )
-
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    RENDER_ROUTED_CODES,
+    WCMTemplateGenerator,
+)
 
 # ---------------------------------------------------------------------------
 # 1. Licensure: NPI/DEA routing

@@ -22,18 +22,19 @@ Date: 2025-11-29
 """
 
 import copy
-import os
-import sys
 import json
 import logging
+import os
 import re
+import sys
 import time
 import unicodedata
-import requests
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
-from datetime import datetime
+
+import requests
 
 from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
 

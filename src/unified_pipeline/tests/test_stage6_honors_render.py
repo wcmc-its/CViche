@@ -123,7 +123,9 @@ def test_892_a_pii_withheld_award_leaves_no_row_for_the_entry():
     the USCIS org and the year must not render as an honors row."""
     from unified_pipeline.stage6.pii_pass import run_pii_pass
     from unified_pipeline.stage_6_word_template import (
-        RENDER_ROUTED_CODES, TAXONOMY_TO_SECTION)
+        RENDER_ROUTED_CODES,
+        TAXONOMY_TO_SECTION,
+    )
     entry = {"taxonomy_code": "H",
              "text": "2019 Extraordinary Ability in Sciences, O-1 Visa | "
                      "U.S. Citizen & Immigration Service (USCIS)",

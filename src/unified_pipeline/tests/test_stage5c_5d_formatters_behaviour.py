@@ -23,9 +23,9 @@ Covers:
 Self-contained: no DB, no network, no real LLM call, no corpus/PII data.
 """
 
-import io
 import importlib
 import inspect
+import io
 import json
 import logging
 import os

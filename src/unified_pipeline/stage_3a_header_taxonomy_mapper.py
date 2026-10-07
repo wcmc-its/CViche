@@ -14,8 +14,8 @@ providing taxonomy context that Stage 3b uses for entry-level classification.
 import json
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))

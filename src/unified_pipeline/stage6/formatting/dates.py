@@ -16,11 +16,11 @@ only its presentation.
 Parsing the string into components is `parsing/dates.py`, imported below. That
 direction is one-way and must stay so.
 """
+import logging
+import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, NamedTuple
-import logging
-import re
 
 from ..parsing.dates import (
     RANGE_END_KEY,

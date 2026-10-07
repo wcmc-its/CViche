@@ -4,21 +4,22 @@ Pipeline orchestrator - coordinates execution of all 12 pipeline stages.
 Uses run_full_pipeline.py stage functions directly.
 Stages: 1a, 1b, 2, 3a, 3b, 4, 4.5, 5, 5b, 5c, 5d, 6
 """
+import asyncio
 import contextvars
+import io
 import json
 import logging
-import time
-import asyncio
 import os
 import re
 import shutil
-import traceback
 import threading
-import io
-from pathlib import Path
-from datetime import datetime
-from typing import Any
+import time
+import traceback
 from collections.abc import Iterator, Mapping
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,17 +27,18 @@ logger = logging.getLogger(__name__)
 
 # Add parent project to path to import existing pipeline code
 import sys
+
 PARENT_DIR = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(PARENT_DIR))
 sys.path.insert(0, str(PARENT_DIR / 'src'))
 
-from app.models import Run, Step, Log
-from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
+from app.config_loader import get_config
+from app.models import Log, Run, Step
 from app.pipeline.event_emitter import event_emitter
+from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.config_loader import get_config
 
 # The pipeline's prompt_logger writes per-LLM-call transcripts here. We
 # replicate fresh files into per-run storage so they survive container
@@ -45,26 +47,40 @@ PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
 
 
 # Import stage functions from run_full_pipeline.py dependencies
-from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
+from app.services.pdf_sandbox import (
+    PDF_BUSY_RUN_MESSAGE,
+    PDF_TOO_COMPLEX_MESSAGE,
+    ConversionResult,
+    PdfBusyError,
+    PdfTooComplexError,
+    convert_pdf,
+)
+from unified_pipeline.core.prompt_logger import reset_current_run_id, set_current_run_id
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage
+from unified_pipeline.repair.protected_data import (
+    REPAIR_FLAG_ENV,
+    repair_flag_on,
+    repairs_report_path,
+)
+from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+    get_cv_hierarchy_chunked,
+)
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
 from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
 from unified_pipeline.stage_3b_entry_classifier import run_stage_3b
-from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
 from unified_pipeline.stage_4_5_research_summary import run_stage_4_5
+from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
 from unified_pipeline.stage_5_pubmed_enrichment import run_stage5
 from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
-from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on, repairs_report_path
-from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
-from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
-from unified_pipeline.llm.retry import LLMOutageError
-from unified_pipeline.llm_client import LlmUsage
-from app.services.pdf_sandbox import (
-    PDF_BUSY_RUN_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfBusyError,
-    PdfTooComplexError, convert_pdf,
+from unified_pipeline.stage_errors import (
+    StageError,
+    record_stage_outcome,
+    stage_errors_path,
 )
 
 # An upload with this suffix is converted, not copied, into the run's private
@@ -998,7 +1014,10 @@ class PipelineOrchestrator:
             # Best-effort, run off the event loop; never affects run status.
             score = None
             try:
-                from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
+                from app.services.quality_score_service import (
+                    compute_and_cache_score,
+                    persist_score_columns,
+                )
                 score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id
                 )

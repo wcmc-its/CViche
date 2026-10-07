@@ -15,7 +15,12 @@ import pytest
 from docx import Document
 
 from app.models import (
-    InboundFile, InboundFileStatus, InboundMessage, InboundMessageStatus, InboundRejectReason, User,
+    InboundFile,
+    InboundFileStatus,
+    InboundMessage,
+    InboundMessageStatus,
+    InboundRejectReason,
+    User,
 )
 from app.services import ed_access, inbound_service
 from app.services.inbound_mail import AttachmentReject

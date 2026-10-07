@@ -10,16 +10,30 @@ import re
 from dataclasses import dataclass
 
 from app.schemas import (
-    DoctorFindingGroup, DoctorFindingInstance, DoctorSeverityCounts, QualityDimension, QualityGate,
-    RunDoctorReport, RunQualityReport,
+    DoctorFindingGroup,
+    DoctorFindingInstance,
+    DoctorSeverityCounts,
+    QualityDimension,
+    QualityGate,
+    RunDoctorReport,
+    RunQualityReport,
 )
 from app.services import quality_score_service as qss
-from app.services.quality_score_service import DimensionPoints, ScoreColumns, ScoreSnapshot
-
-from unified_pipeline import quality_score as scorer  # noqa: E402  (path set by quality_score_service)
+from app.services.quality_score_service import (
+    DimensionPoints,
+    ScoreColumns,
+    ScoreSnapshot,
+)
+from unified_pipeline import (
+    quality_score as scorer,  # noqa: E402  (path set by quality_score_service)
+)
 from unified_pipeline.doctor.lints.render import CITATION_EVIDENCE_CHARS  # noqa: E402
 from unified_pipeline.doctor.shared import STATUS_RAN  # noqa: E402
-from unified_pipeline.run_doctor import LINT_PREVALENCE, SEVERITY_ORDER, rank_lints  # noqa: E402
+from unified_pipeline.run_doctor import (  # noqa: E402
+    LINT_PREVALENCE,
+    SEVERITY_ORDER,
+    rank_lints,
+)
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
 
 BAND_MEANINGS = {

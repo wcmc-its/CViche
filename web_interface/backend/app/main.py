@@ -4,28 +4,41 @@ import logging
 import os
 import traceback
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 
-
-from fastapi import FastAPI, Request, Depends, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
-from contextlib import asynccontextmanager
 
 # Configure logging BEFORE any module-level loggers are wired. dictConfig
 # reapplies handlers on existing loggers, but doing it first avoids the
 # transient window where boto3 imports might log at default INFO.
 from app.logging_config import configure_logging
+
 configure_logging()
 
 logger = logging.getLogger(__name__)
 
-from app.database import init_db, get_db
-from app.middleware.request_id import RequestIDMiddleware
-from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes, batches, inbox
+from app.api import (
+    admin_routes,
+    auth_routes,
+    batches,
+    consent_routes,
+    feedback_routes,
+    inbox,
+    runs,
+    saml_routes,
+    steps,
+    upload,
+    websocket,
+)
 from app.config_loader import get_config
+from app.database import get_db, init_db
+from app.middleware.request_id import RequestIDMiddleware
+
 # Allowed origins live in app/origins.py so the WebSocket endpoint can share
 # the same allowlist (a WS upgrade gets neither a CORS check nor CSRFMiddleware).
 # Re-imported here under their original names: CSRFMiddleware and the CORS
@@ -34,10 +47,10 @@ from app.config_loader import get_config
 # app.main attributes for anything that already reads them there.
 from app.origins import (  # noqa: F401
     _LOCALHOST_ORIGINS,
-    _resolve_allowed_origins,
+    _allowed_origin_keys,
     _allowed_origins,
     _origin_key,
-    _allowed_origin_keys,
+    _resolve_allowed_origins,
 )
 
 
@@ -157,8 +170,8 @@ async def _stale_run_reaper_loop(interval_seconds: int):
     no-op otherwise) -- the DB-side backstop for a "queued" row whose Valkey
     token was lost, next to the "running" backstop above.
     """
-    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
+    from app.services.run_service import reconcile_queued_runs, reconcile_stale_runs
 
     def _sweep() -> tuple[int, int]:
         db = SessionLocal()
@@ -210,10 +223,10 @@ async def _drain_runs_before_exit(budget_seconds: int) -> None:
     ones already going, then mark the rest failed with a deploy message so the
     user gets a terminal status instead of a timer that climbs forever.
     """
+    from app.database import SessionLocal
     from app.pipeline import concurrency
     from app.pipeline.orchestrator import stop_run_locally
     from app.services.run_service import fail_runs_interrupted_by_shutdown
-    from app.database import SessionLocal
 
     concurrency.begin_draining()
     active = concurrency.active_run_ids()
@@ -375,10 +388,10 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database initialized")
     else:
         logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
-    from app.config_loader import seed_system_config, get_config_value
-    from app.consent import load_consent_text, check_consent_integrity
-    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
+    from app.config_loader import get_config_value, seed_system_config
+    from app.consent import check_consent_integrity, load_consent_text
     from app.database import SessionLocal
+    from app.services.run_service import reconcile_queued_runs, reconcile_stale_runs
     db = SessionLocal()
     try:
         seed_system_config(db)
@@ -424,9 +437,9 @@ async def lifespan(app: FastAPI):
     # Real-time broker: when CVICHE_REDIS_URL is set, pipeline events and
     # cancellation cross worker/replica boundaries via Redis; otherwise the
     # emitter and orchestrator use process-local state (single-worker behavior).
-    from app.pipeline.redis_broker import broker_from_env
-    from app.pipeline.event_emitter import event_emitter
     from app.pipeline import orchestrator as orchestrator_module
+    from app.pipeline.event_emitter import event_emitter
+    from app.pipeline.redis_broker import broker_from_env
     broker = broker_from_env()
     app.state.broker = broker
     event_emitter.set_broker(broker)
@@ -609,8 +622,9 @@ async def health():
 
 
 if __name__ == "__main__":
-    import uvicorn
     import os
+
+    import uvicorn
 
     # Enable auto-reload in development mode
     reload = os.getenv("ENVIRONMENT", "development") == "development"

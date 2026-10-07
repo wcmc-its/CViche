@@ -2,11 +2,12 @@
 import json
 import logging
 from datetime import datetime, timedelta
-from sqlalchemy import func, case
+
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.errors import not_found, validation_error
-from app.models import User, Run, Step, Feedback
+from app.models import Feedback, Run, Step, User
 from app.schemas import AdminStats, AdminStepAvg, AdminUser, AdminUserUpdate
 from app.services import admin_policy
 from app.services.runs_admin_query import submission_split

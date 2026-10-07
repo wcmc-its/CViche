@@ -27,14 +27,28 @@ from app.schemas import UploadResponse
 from app.services.config_service import BASE_OVERHEAD_SECONDS, TIME_PER_1K_TOKENS
 from app.services.input_format import detect_input_format_or_none
 from app.services.pdf_sandbox import (
-    PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
-    PdfBusyError, PdfText, PdfTooComplexError, UnreadablePdfError, read_pdf,
+    PDF_BUSY_MESSAGE,
+    PDF_TOO_COMPLEX_MESSAGE,
+    PDF_UNREADABLE_MESSAGE,
+    EncryptedPdfError,
+    PdfBusyError,
+    PdfText,
+    PdfTooComplexError,
+    UnreadablePdfError,
+    read_pdf,
 )
 from app.services.run_service import UPLOAD_DIR, latest_run_with_hash
 from app.services.template_warning import detect_wcm_template
 from app.services.upload_validation import (
-    ACTIVE_CONTENT_MESSAGE, MIN_EXTRACTED_CHARS, PDF_EXTENSION, SCANNED_PAGE_REJECT_SHARE, _extract_text,
-    _validate_docx_magic, _validate_pdf_magic, docx_active_content, is_mostly_scanned,
+    ACTIVE_CONTENT_MESSAGE,
+    MIN_EXTRACTED_CHARS,
+    PDF_EXTENSION,
+    SCANNED_PAGE_REJECT_SHARE,
+    _extract_text,
+    _validate_docx_magic,
+    _validate_pdf_magic,
+    docx_active_content,
+    is_mostly_scanned,
 )
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists

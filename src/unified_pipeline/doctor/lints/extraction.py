@@ -32,10 +32,6 @@ from types import MappingProxyType
 from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
-from unified_pipeline.core.validators.grant_status_corrector import (
-    _AWARDED_HEADING_RE,
-    _PENDING_HEADING_RE,
-)
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
@@ -44,6 +40,20 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
+)
+from unified_pipeline.core.text_norm import (
+    SUBSTANTIVE_LINE_CHARS,
+    looks_like_record,
+    norm,
+    squash,
+)
+from unified_pipeline.core.two_digit_year import (
+    TWO_DIGIT_YEAR_PIVOT,
+    expand_two_digit_year,
+)
+from unified_pipeline.core.validators.grant_status_corrector import (
+    _AWARDED_HEADING_RE,
+    _PENDING_HEADING_RE,
 )
 from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
@@ -57,36 +67,6 @@ from unified_pipeline.stage4.schemas import (
     NUMBERED_FIELD_RE,
     STAGE4_RECORDS_KEY,
 )
-from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
-from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
-from unified_pipeline.core.text_norm import (
-    SUBSTANTIVE_LINE_CHARS,
-    looks_like_record,
-    norm,
-    squash,
-)
-from unified_pipeline.stage6.formatting.dates import (
-    EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS, format_date_range)
-from unified_pipeline.stage6.normalization.institutions import (
-    _get_cleaned_institution_name,
-)
-from unified_pipeline.stage6.fan_out import (
-    FANNED_OUT_FROM,
-    LAST_STAGE4_RECORD,
-    _FORMATTED_KEYS,
-    _RENDERED_FIELDS,
-    _TEXT_RENDERED_CODES,
-    _is_blank,
-    fan_out_multi_record_entries,
-)
-from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT, expand_two_digit_year
-from unified_pipeline.stage6.normalization.pii import (
-    CAT_HOME_CONTACT,
-    SCOPE_PERSONAL_AND_APPENDIX,
-    WITHHOLD_POLICY,
-    _pii_matches,
-)
-from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.dedup import (
     _PART_NUMBER_RE,
     _TRIAL_PHASE_RE,
@@ -95,6 +75,31 @@ from unified_pipeline.stage6.dedup import (
     _part_numbers,
     _trial_phases,
 )
+from unified_pipeline.stage6.fan_out import (
+    _FORMATTED_KEYS,
+    _RENDERED_FIELDS,
+    _TEXT_RENDERED_CODES,
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+    _is_blank,
+    fan_out_multi_record_entries,
+)
+from unified_pipeline.stage6.formatting.dates import (
+    EXTRA_SPAN_CODES,
+    EXTRA_SPAN_KEYS,
+    format_date_range,
+)
+from unified_pipeline.stage6.normalization.institutions import (
+    _get_cleaned_institution_name,
+)
+from unified_pipeline.stage6.normalization.pii import (
+    CAT_HOME_CONTACT,
+    SCOPE_PERSONAL_AND_APPENDIX,
+    WITHHOLD_POLICY,
+    _pii_matches,
+)
+from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
+from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage6.sections.research_support import (
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
@@ -102,7 +107,8 @@ from unified_pipeline.stage6.sections.research_support import (
     grant_end_year,
     year_at_or_after,
 )
-from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
+from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
     grant_status_rebucket_target,
@@ -110,16 +116,16 @@ from unified_pipeline.stage_6_word_template import (
 )
 
 from ..shared import (
-    Haystack,
-    OWNER_SURNAME_MIN_CHARS,
-    _FieldsEntry,
     _LINE_SENTINEL,
     _NAME_WORD_RE,
+    OWNER_SURNAME_MIN_CHARS,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
+    Haystack,
     _entry_pieces,
     _fields_entries,
+    _FieldsEntry,
     _finding,
     _haystacks,
     _long_word_tokens,
@@ -128,7 +134,6 @@ from ..shared import (
     _owner_surname_words,
     _piece_in_template,
 )
-
 
 # --------------------------------------------------------------------------
 # Grant status vs the funding subsection the grant rendered under.

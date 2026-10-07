@@ -5,8 +5,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import Run, User
 from app.config_loader import get_config_value
+from app.models import Run, User
 
 ET = ZoneInfo("America/New_York")
 

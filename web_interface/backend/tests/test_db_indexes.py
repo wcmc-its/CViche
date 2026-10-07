@@ -45,8 +45,9 @@ def test_index_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
     env.py online mode builds a MySQL+IAM engine via create_cviche_engine; point
     that at a throwaway SQLite file so the real migration path runs without RDS.
     """
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     sqlite_url = f"sqlite:///{tmp_path / 'mig.db'}"
     eng = create_engine(sqlite_url)

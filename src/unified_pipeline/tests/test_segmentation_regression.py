@@ -26,12 +26,12 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.segmentation_regression import (  # noqa: E402
     _COUNT_KEYS,
-    _has_compact_window,
     BODY_BLOCK,
     COVERAGE_DROP_TOLERANCE_PTS,
     COVERAGE_WINDOW_SLACK,
     MEGA_ENTRY_MIN_RECORDS,
     SUBSTANTIVE_LINE_CHARS,
+    _has_compact_window,
     compare_metrics,
     compute_metrics,
     count_mega_entries,
@@ -40,7 +40,6 @@ from unified_pipeline.segmentation_regression import (  # noqa: E402
     iter_source_lines,
     lint_metrics,
 )
-
 
 # ------------------------------------------------------------- source lines
 

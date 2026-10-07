@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
 from unified_pipeline.core.run_id import is_run_id
-from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
+from unified_pipeline.llm_client import LlmUsage, call_llm
 
 logger = logging.getLogger(__name__)
 

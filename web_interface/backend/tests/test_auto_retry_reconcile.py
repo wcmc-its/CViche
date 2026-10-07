@@ -13,6 +13,7 @@ the thread launch (``_launch_resume``) precisely so these tests can assert the
 transition deterministically while stubbing the launch.
 """
 import os
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 from datetime import datetime, timedelta

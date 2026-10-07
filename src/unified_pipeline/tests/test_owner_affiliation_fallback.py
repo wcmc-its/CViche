@@ -12,14 +12,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from unified_pipeline.stage_4_field_extractor import (  # noqa: E402
-    _entry_end_year,
-    _owner_affiliation_lines,
-)
 from unified_pipeline.stage4 import owner_name  # noqa: E402
 from unified_pipeline.stage4.owner_name import (  # noqa: E402
     CURRENT_POSITION_YEAR,
     _rank_owner_affiliations,
+)
+from unified_pipeline.stage_4_field_extractor import (  # noqa: E402
+    _entry_end_year,
+    _owner_affiliation_lines,
 )
 
 

@@ -24,10 +24,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import RENDER_ROUTED_CODES  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
 )
+from unified_pipeline.stage_6_word_template import RENDER_ROUTED_CODES  # noqa: E402
 
 _TAXONOMY_PATH = _SRC / "unified_pipeline" / "core" / "taxonomy_v7.json"
 

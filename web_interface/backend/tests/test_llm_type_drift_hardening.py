@@ -21,7 +21,6 @@ from unified_pipeline.stage_3b_entry_classifier import (
 )
 from unified_pipeline.stage_5b_institution_enrichment import _build_owner_context
 
-
 # ---- A: confidence coercion (_safe_float) ----
 
 def test_safe_float_parses_stringified_number():

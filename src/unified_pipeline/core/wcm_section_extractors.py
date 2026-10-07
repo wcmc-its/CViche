@@ -17,9 +17,9 @@ Usage:
 """
 
 import sys
-from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 # Add legacy production scripts to path
 LEGACY_PRODUCTION = Path(__file__).parent.parent.parent / "legacy" / "stage_based_extraction" / "scripts" / "production"

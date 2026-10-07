@@ -18,14 +18,23 @@ from sqlalchemy import ColumnElement, and_, case, func, select
 from sqlalchemy.orm import Query, Session, contains_eager
 
 from app.errors import validation_error
-from app.services.input_format import INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM
 from app.models import Feedback, Run, RunState, User
-from app.services.quality_score_service import BAND_RED
 from app.schemas import (
-    FacultyOption, FeedbackFilterCounts, InputFormatFilterCounts, FeedbackReviewer, FilterCount,
-    RunByOption, RunBySummary, RunFeedbackSummary, RunFilterOptions, StatusFilterCounts,
-    DepartmentSubmissions, SubmissionSplit,
+    DepartmentSubmissions,
+    FacultyOption,
+    FeedbackFilterCounts,
+    FeedbackReviewer,
+    FilterCount,
+    InputFormatFilterCounts,
+    RunByOption,
+    RunBySummary,
+    RunFeedbackSummary,
+    RunFilterOptions,
+    StatusFilterCounts,
+    SubmissionSplit,
 )
+from app.services.input_format import INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM
+from app.services.quality_score_service import BAND_RED
 
 # Run.submission_type of a faculty member uploading their own CV
 # (upload.py's Literal["own_cv", "authorized_admin"]).

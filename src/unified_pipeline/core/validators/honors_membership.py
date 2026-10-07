@@ -6,6 +6,7 @@ Critical for entries that could be either (elected fellowships, society honors).
 """
 
 import re
+
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

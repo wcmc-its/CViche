@@ -14,13 +14,19 @@ import sys
 from collections.abc import Callable
 
 import pytest
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.services import pdf_sandbox
 from app.services.pdf_sandbox import (
-    PDF_MAX_PAGES, EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError,
-    convert_pdf, extract_pdf_text, read_pdf,
+    PDF_MAX_PAGES,
+    EncryptedPdfError,
+    PdfBusyError,
+    PdfTooComplexError,
+    UnreadablePdfError,
+    convert_pdf,
+    extract_pdf_text,
+    read_pdf,
 )
 
 _TEXT = "Professor of Medicine, Example University"
@@ -139,6 +145,7 @@ def _aes_pdf(revision: int, user_pw: str) -> bytes:
 
 def _pdfminer_text(content: bytes, password: str) -> str:
     import io
+
     import pdfplumber
     with pdfplumber.open(io.BytesIO(content), password=password) as pdf:
         return pdf.pages[0].extract_text()

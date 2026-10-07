@@ -28,13 +28,12 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.coercion import (  # noqa: E402
-    DATE_RANGE_TAXONOMY_CODES,
     _MAX_PLAUSIBLE_YEAR,
     _MIN_PLAUSIBLE_YEAR,
+    DATE_RANGE_TAXONOMY_CODES,
     apply_regex_post_processing,
     reconcile_date_range,
 )
-
 
 # --- positive control: the collapsed {start_date, end_date: None} shape ----
 # with a single closed range in the text is repaired. This mirrors the

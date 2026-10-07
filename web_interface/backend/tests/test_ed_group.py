@@ -4,43 +4,11 @@ import os
 import threading
 import time
 from dataclasses import FrozenInstanceError
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, StaticPool
-from sqlalchemy.orm import sessionmaker
-
-from app.database import Base, get_db
-
-from app.ed_group_lookup import (
-    DEPARTMENT_MAX_LENGTH,
-    fetch_ed_department,
-    pick_department,
-    check_ed_membership,
-    get_cached_membership,
-    set_cached_membership,
-    get_stale_membership,
-    clear_cache,
-    EdUnavailableError,
-    EdConfigurationError,
-    LDAPConfig,
-    MembershipCacheKey,
-    MembershipResult,
-    _bind,
-    _ldap_check_membership,
-    _memberurl_search_filter,
-    _parse_memberurl,
-    _user_matches_memberurl,
-    _dn_in_scope,
-    _validate_ldap_url,
-    validate_startup_config,
-    _group_cache,
-    _stale_cache,
-    _MAX_MEMBERURL_SEARCHES,
-    _STALE_MAX_AGE,
-)
 from ldap3 import BASE, LEVEL, SUBTREE
 from ldap3.core.exceptions import (
     LDAPBindError,
@@ -51,7 +19,37 @@ from ldap3.core.exceptions import (
 )
 from ldap3.utils.conv import escape_filter_chars
 from pydantic import SecretStr
+from sqlalchemy import StaticPool, create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base, get_db
+from app.ed_group_lookup import (
+    _MAX_MEMBERURL_SEARCHES,
+    _STALE_MAX_AGE,
+    DEPARTMENT_MAX_LENGTH,
+    EdConfigurationError,
+    EdUnavailableError,
+    LDAPConfig,
+    MembershipCacheKey,
+    MembershipResult,
+    _bind,
+    _dn_in_scope,
+    _group_cache,
+    _ldap_check_membership,
+    _memberurl_search_filter,
+    _parse_memberurl,
+    _stale_cache,
+    _user_matches_memberurl,
+    _validate_ldap_url,
+    check_ed_membership,
+    clear_cache,
+    fetch_ed_department,
+    get_cached_membership,
+    get_stale_membership,
+    pick_department,
+    set_cached_membership,
+    validate_startup_config,
+)
 
 # Common LDAP connection config for the membership calls. Spread as **LDAP_PARAMS
 # into the (cwid, group_dn(s), ..., cfg) signature -- e.g.
@@ -1243,8 +1241,8 @@ class TestMembershipResultContract:
 # Integration tests: ACS handler ED wiring
 # ---------------------------------------------------------------------------
 
+from app.auth import COOKIE_NAME, create_session_cookie
 from app.models import SystemConfig, User
-from app.auth import create_session_cookie, COOKIE_NAME
 
 
 def _mock_saml_client(identity_dict):

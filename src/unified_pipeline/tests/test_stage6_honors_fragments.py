@@ -97,7 +97,6 @@ from unified_pipeline.stage6.sections.honors import (  # noqa: E402
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
-
 # Genuinely multi-line, farm-derived shapes: entry_lines already returns >1
 # part for each of these, so _entry_parts must return them byte-identical.
 MULTILINE_CASES = [

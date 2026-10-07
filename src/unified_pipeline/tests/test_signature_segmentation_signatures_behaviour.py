@@ -33,8 +33,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.segmentation import signature_based_segmentation as sbs  # noqa: E402
-
+from unified_pipeline.segmentation import (
+    signature_based_segmentation as sbs,  # noqa: E402
+)
 
 # ---------------------------------------------------------------------------
 # Small shared XML helpers (paragraph-level borders and shading are not

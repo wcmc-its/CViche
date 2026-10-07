@@ -11,10 +11,22 @@ import pytest
 from docx import Document
 
 from app.models import (
-    InboundFile, InboundFileStatus, InboundMessage, Run, RunBatch, RunState, User,
+    InboundFile,
+    InboundFileStatus,
+    InboundMessage,
+    Run,
+    RunBatch,
+    RunState,
+    User,
 )
 from app.pipeline import run_queue
-from app.services import batch_completion, batch_service, inbound_autorun, inbound_service, mailer
+from app.services import (
+    batch_completion,
+    batch_service,
+    inbound_autorun,
+    inbound_service,
+    mailer,
+)
 from app.services.pdf_sandbox import PdfText
 from app.storage.local_storage import LocalRunStorage
 from tests.test_inbound_mail import make_eml

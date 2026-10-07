@@ -345,7 +345,9 @@ def test_content_pins_leave_other_rows(code, text, hierarchy):
     ("S2", "Wrote an invited example article (see publication #12).", NO_PIN_CTX),
 ])
 def test_no_new_pin_is_flipped_back_by_the_reasoning_check(code, text, ctx):
-    from unified_pipeline.core.validators.reasoning_consistency_checker import apply_reasoning_corrections
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
     (out,), n = apply_header_pin([_row(code, text, hierarchy=("SECTION", "Example grant review"))], ctx)
     assert n == 1
     (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)

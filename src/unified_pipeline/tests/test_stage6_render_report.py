@@ -24,7 +24,6 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     deduplicate_entries,
 )
 
-
 # ------------------------------------------------------- dedup decision trail
 
 # The 2Q1_ZQ B1 drop shape: distinct degrees whose signature words all overlap

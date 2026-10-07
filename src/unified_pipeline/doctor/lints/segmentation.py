@@ -34,7 +34,6 @@ from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 
 from ..shared import _finding, _magnitude_severity
 
-
 # --------------------------------------------------------------------------
 # Coverage, lost lines, mega-entries and dups, via the regression metrics.
 

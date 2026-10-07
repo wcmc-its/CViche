@@ -38,13 +38,15 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-from unified_pipeline.stage6.sections.bibliography import _citation_author_split  # noqa: E402
+from unified_pipeline.stage6.sections.bibliography import (
+    _citation_author_split,  # noqa: E402
+)
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     CERTIFICATE_NUMBER_PATTERN,
     YEAR_PATTERN,
     _classify_cert_token,
 )
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 # The seven flattened-table line shapes from #572's O-vs-P comparison. Five of
 # them lost their date under P's drifted copy; the last two are the controls.

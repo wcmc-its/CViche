@@ -7,7 +7,7 @@ Covers requirements: CFG-01, CFG-02, CFG-03
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, mock_open
+from unittest.mock import mock_open, patch
 
 import pytest
 

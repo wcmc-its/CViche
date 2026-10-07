@@ -117,8 +117,8 @@ class TestLifespanStartupSweepCallSite:
     out of the mutant's unguarded call instead."""
 
     def test_startup_sweep_survives_reconcile_queued_runs_redis_error(self, monkeypatch):
-        from tests.conftest import TestingSessionLocal
         from app.pipeline.event_emitter import event_emitter
+        from tests.conftest import TestingSessionLocal
 
         # Real init_db()/DB work is exercised elsewhere; here only the guard
         # call site matters, so point the lifespan's own SessionLocal at the
@@ -437,10 +437,9 @@ def test_lifespan_shutdown_runs_the_drain_with_the_configured_budget(monkeypatch
 
     from fastapi.testclient import TestClient
 
-    from tests.conftest import TestingSessionLocal, engine
-
     from app.pipeline import redis_broker
     from app.pipeline.event_emitter import event_emitter
+    from tests.conftest import TestingSessionLocal, engine
 
     # Runs still draining must be able to emit and receive cancels, so the
     # drain has to come before the emitter and the broker are shut down.

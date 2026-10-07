@@ -1,11 +1,10 @@
 """app.services.run_quality_report: cap source, doctor grouping, owner flag."""
 import pytest
 
-from unified_pipeline import quality_score as scorer
-from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_PREVALENCE, lint_surprise
-
 from app.services import quality_score_service as qss
 from app.services import run_quality_report as rqr
+from unified_pipeline import quality_score as scorer
+from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_PREVALENCE, lint_surprise
 
 OWNER_GATE = "CV owner name / contact populated (HARD-FAIL gate)"
 
@@ -69,6 +68,7 @@ def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp
     stage-4 extraction group is capped at 84, and the report names that gate
     and its doctor lint (run through the real scorer, not a hand-copied flag)."""
     import json
+
     from docx import Document
 
     (tmp_path / "T1_fields.json").write_text(json.dumps({
@@ -123,6 +123,7 @@ def test_a_run_with_fused_entries_and_a_failed_stage4_group_points_at_the_fused_
     one failed stage-4 group both cap at 84; the report names the fused-entries
     gate, not the stage-4 one."""
     import json
+
     from docx import Document
 
     fused = {"element_type": "table_row", "text": "\n".join(
@@ -159,6 +160,7 @@ def test_a_fallback_served_call_caps_nothing_through_the_real_scorer(tmp_path):
     """#1174 (Paul, 2026-10-05): the same 85 GREEN run with one fallback-served
     stage-4 group stays 85 GREEN, so the report names no cap."""
     import json
+
     from docx import Document
 
     (tmp_path / "T1_fields.json").write_text(json.dumps({

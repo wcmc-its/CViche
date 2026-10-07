@@ -51,10 +51,10 @@ except ImportError as exc:
 from ..formatting import (
     _format_mentee_duration,
     _insert_after,
-    _source_leaves_year_open,
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
+    _source_leaves_year_open,
     format_date_range,
 )
 from ..normalization import _clean_inline_tabs

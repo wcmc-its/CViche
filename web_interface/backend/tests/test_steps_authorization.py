@@ -8,11 +8,11 @@ import json
 import logging
 
 import pytest
+from sqlalchemy.orm import object_session
 
 import app.services.artifact_service as artifact_service_mod
-from app.models import User, Run, Step
-from app.auth import create_session_cookie, COOKIE_NAME
-from sqlalchemy.orm import object_session
+from app.auth import COOKIE_NAME, create_session_cookie
+from app.models import Run, Step, User
 
 
 def _user_and_run(db, role="user", suffix=""):

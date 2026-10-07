@@ -38,7 +38,6 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
     KIND_DEA,
     KIND_LICENSE,
@@ -47,7 +46,7 @@ from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
     _classify_licensure_entry,
     _resolve_licensure,
 )
-
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 _LICENSE_ENTRY = {
     "text": "New York State Medical License 123456, issued March 2019",

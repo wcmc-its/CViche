@@ -207,7 +207,8 @@ def parse_score(raw: object) -> ScoreSnapshot | None:
 
 def band_key(total: int) -> str:
     """GREEN / YELLOW / RED for a final score, on the scorer's own thresholds."""
-    from unified_pipeline.quality_score import BAND_GREEN as GREEN_MIN, BAND_YELLOW as YELLOW_MIN
+    from unified_pipeline.quality_score import BAND_GREEN as GREEN_MIN
+    from unified_pipeline.quality_score import BAND_YELLOW as YELLOW_MIN
 
     if total >= GREEN_MIN:
         return BAND_GREEN

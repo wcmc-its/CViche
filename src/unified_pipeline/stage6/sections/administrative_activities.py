@@ -48,6 +48,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypedDict
 
+from unified_pipeline.core.render_check import entry_lines
+
 from ..formatting import (
     _clear_table_data,
     _set_font,
@@ -57,7 +59,6 @@ from ..formatting import (
 from ..normalization import _committee_cell_text
 from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
 
 logger = logging.getLogger(__name__)
 

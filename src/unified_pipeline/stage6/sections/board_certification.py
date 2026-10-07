@@ -53,9 +53,10 @@ import re
 from datetime import datetime
 from typing import Literal
 
+from unified_pipeline.core.render_check import entry_lines
+
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
 
 logger = logging.getLogger(__name__)
 

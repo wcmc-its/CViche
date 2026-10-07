@@ -115,18 +115,23 @@ from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 from docx.table import _Row
 
+from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
+from unified_pipeline.core.render_check import (
+    CELL_SEPARATOR,
+    entry_lines,
+    wrapped_row_text,
+)
+
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
     envelope_date_spans,
     extra_date_spans,
     normalize_iso_dates_in_text,
 )
-from ..parsing.dates import _parse_date_components
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
+from ..parsing.dates import _parse_date_components
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
-from unified_pipeline.core.render_check import CELL_SEPARATOR, entry_lines, wrapped_row_text
 
 logger = logging.getLogger(__name__)
 

@@ -13,10 +13,11 @@ Usage:
     python verify_word_document.py <path_to_docx>
 """
 
+import json
 import sys
 from pathlib import Path
+
 from docx import Document
-import json
 
 
 def analyze_table(table, table_num):

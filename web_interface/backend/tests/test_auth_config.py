@@ -5,10 +5,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.auth import COOKIE_NAME, SESSION_TTL, decode_session_cookie, get_cookie_settings
+from app.auth import (
+    COOKIE_NAME,
+    SESSION_TTL,
+    decode_session_cookie,
+    get_cookie_settings,
+)
 from app.login_throttle import LoginThrottle
-from app.models import User, SystemConfig
-from app.services.config_service import LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW, MAX_UPLOAD_MB
+from app.models import SystemConfig, User
+from app.services.config_service import (
+    LOGIN_RATE_LIMIT_MAX,
+    LOGIN_RATE_LIMIT_WINDOW,
+    MAX_UPLOAD_MB,
+)
 
 
 def test_config_endpoint_simple(client, seed_simple_mode):
@@ -358,8 +367,9 @@ def test_ed_staff_group_seeded_from_yaml_and_empty_when_absent(db):
 def _admin_config_call(client, db, method, body=None):
     """Call /api/admin/config as a real, committed admin row."""
     from types import SimpleNamespace
-    from app.main import app
+
     from app.auth import require_admin
+    from app.main import app
 
     boss = db.query(User).filter_by(email="boss@example.com").first()
     if boss is None:

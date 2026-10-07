@@ -6,8 +6,14 @@ from fastapi import HTTPException
 
 from app.models import Run, User
 from app.services.runs_admin_query import (
-    InputFormatFilter, RunFilters, StatusFilter, build_filter_options, filtered_runs_query,
-    my_status_counts, parse_run_filters, submission_split,
+    InputFormatFilter,
+    RunFilters,
+    StatusFilter,
+    build_filter_options,
+    filtered_runs_query,
+    my_status_counts,
+    parse_run_filters,
+    submission_split,
 )
 
 
@@ -246,6 +252,7 @@ class TestSubmissionSplit:
 
     def test_stats_endpoint_carries_the_split_for_admins_only(self, client, db, seeded):
         from types import SimpleNamespace
+
         from app.auth import get_current_user
         from app.main import app
 

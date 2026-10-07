@@ -131,7 +131,9 @@ def test_bump_last_active_does_not_dirty_the_request_session(client, db):
     that side commit and MariaDB (innodb_snapshot_isolation=ON) rejects it
     with 1020 -- the 2026-09-03 prod regression on POST /run/{id}/feedback."""
     from datetime import datetime, timedelta
+
     from sqlalchemy import inspect
+
     from app.auth import _bump_last_active
 
     user = _make_user(db)
