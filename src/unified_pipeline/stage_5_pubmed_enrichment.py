@@ -71,7 +71,21 @@ OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
-ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+# The legacy www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ host 301-redirects
+# here (checked 2026-10-02 and 2026-10-07), so every attempt paid for the
+# redirect (#1219).
+ID_CONVERTER_URL = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
+
+# NCBI's documented per-request ceiling for both idconv and efetch-by-id. A
+# CV's PMCIDs went to idconv in one GET before #1219, so a CV citing more
+# than 200 sent an over-limit request.
+NCBI_MAX_IDS_PER_REQUEST = 200
+
+# idconv throttles intermittently: CHXRBM's request re-sent 15 s apart
+# answered 429, 200, 429, 200 (#1219). A PMCID whose lookup still failed
+# after the retry budget is asked for once more at the end of stage 5, at
+# least this long after the failure.
+PMCID_RERUN_PAUSE_SECONDS = 15.0
 
 # Minimum share of the shorter title's words that the PubMed record's title
 # must share with the source title before the record replaces the citation
@@ -80,9 +94,19 @@ ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
 # (retitled on publication) score 0.45-0.57.
 MIN_TITLE_WORD_OVERLAP = 0.4
 
+# PMCID-path outcomes (#1219), split so that an outage is not read as a
+# missing paper. Not found: idconv answered, with no PMID for the PMCID (not
+# in PMC, or not indexed in PubMed); expected vocabulary, like
+# 'doi_not_in_pubmed'. Lookup failed: the idconv request, or the efetch of the
+# PMID it gave, failed; a *_failed status the doctor's enrichment_failures
+# lint counts, and the one the end-of-stage re-run retries.
+PMCID_NOT_FOUND = 'pmcid_not_found'
+PMCID_LOOKUP_FAILED = 'pmcid_lookup_failed'
+TITLE_CHECK_FAILED = 'title_check_failed'
+
 # Statuses the PMCID path leaves on an entry it could not enrich, which the
 # bare-digits-as-PMID retry (#1219) may still resolve.
-PMCID_PATH_FAILURES = ('pmcid_conversion_failed', 'title_check_failed')
+PMCID_PATH_FAILURES = (PMCID_NOT_FOUND, PMCID_LOOKUP_FAILED, TITLE_CHECK_FAILED)
 
 # Words shorter than this carry no signal ("of", "in", "a"); 3 keeps short
 # content words such as "DNA" and "HIV". Preventive, no incident: a stopword
@@ -368,6 +392,18 @@ def _parse_esearch_idlist(response: requests.Response) -> list[str]:
     return result.get('idlist', [])
 
 
+class _PmcidConversion(NamedTuple):
+    """idconv's answer for a set of PMCIDs: the PMID of each PMCID it mapped,
+    and the PMCIDs whose request failed (so their absence from `pmids` is an
+    outage, not a not-found)."""
+    pmids: dict[str, str]
+    failed: frozenset[str]
+
+
+def _chunks(ids: list[str], size: int) -> list[list[str]]:
+    return [ids[i:i + size] for i in range(0, len(ids), size)]
+
+
 class _Acceptance(NamedTuple):
     """One accepted record, kept until every lookup path has run so that an
     entry sharing its PMID with a better-matching entry can be restored to
@@ -525,6 +561,11 @@ class PubMedEnricher:
             entry['enrichment_status'] = 'no_identifier'
             enriched_entries.append(entry)
 
+        # 4a. PMCIDs whose lookup failed get one more try, now that the DOI
+        # path has given idconv's throttle time to clear. Before 4b, so a
+        # record the re-run accepts is checked for a shared PMID too.
+        self._rerun_failed_pmcid_lookups(by_pmcid)
+
         # 4b. One PMID accepted for two entries: only the paper it names keeps it.
         # Before step 5, whose duplicate check reads the PMIDs entries hold.
         self._release_weaker_shared_pmids()
@@ -599,19 +640,8 @@ class PubMedEnricher:
         """
         results = []
         pmids = list(dict.fromkeys(pmid for _, pmid in entries_with_pmid))
-
-        # Fetch in batches
-        batch_size = 200
-        all_records = {}
-
-        for i in range(0, len(pmids), batch_size):
-            batch = pmids[i:i + batch_size]
-            records = self._fetch_pubmed_batch(batch)
-            all_records.update(records)
-            self.stats['pmid_lookups'] += len(batch)
-
-            if i + batch_size < len(pmids):
-                time.sleep(RATE_LIMIT_DELAY)
+        all_records = self._fetch_pubmed_records(pmids)
+        self.stats['pmid_lookups'] += len(pmids)
 
         # Merge enrichment data into entries
         for entry, pmid in entries_with_pmid:
@@ -632,33 +662,51 @@ class PubMedEnricher:
 
         # Convert PMCIDs to PMIDs using ID converter
         pmcids = [pmcid for _, pmcid in entries_with_pmcid]
-        pmcid_to_pmid = self._convert_pmcids_to_pmids(pmcids)
+        conversion = self._convert_pmcids_to_pmids(pmcids)
         self.stats['pmcid_conversions'] += len(pmcids)
-
-        # Now fetch by PMID (ensure strings)
-        pmids_to_fetch = [str(pmid) for pmid in pmcid_to_pmid.values() if pmid]
-
-        if pmids_to_fetch:
-            records = self._fetch_pubmed_batch(pmids_to_fetch)
-        else:
-            records = {}
+        records = self._fetch_pubmed_records(list(dict.fromkeys(conversion.pmids.values())))
 
         # Merge results
         for entry, pmcid in entries_with_pmcid:
-            pmid = pmcid_to_pmid.get(pmcid)
-            pmid_str = str(pmid) if pmid else None
-            if pmid_str and pmid_str in records:
-                if self._accept_record(entry, records[pmid_str], 'pmcid_conversion'):
+            pmid = conversion.pmids.get(pmcid)
+            if pmid and pmid in records:
+                if self._accept_record(entry, records[pmid], 'pmcid_conversion'):
                     # Also store the PMID we discovered
                     if 'extracted_fields' in entry:
-                        entry['extracted_fields']['pmid'] = pmid_str
+                        entry['extracted_fields']['pmid'] = pmid
             else:
-                entry['enrichment_status'] = 'pmcid_conversion_failed'
+                entry['enrichment_status'] = self._pmcid_failure_status(pmcid, conversion)
                 self.stats['failed_lookups'] += 1
             results.append(entry)
 
         self._retry_bare_pmcids_as_pmids(results)
         return results
+
+    @staticmethod
+    def _pmcid_failure_status(pmcid: str, conversion: _PmcidConversion) -> str:
+        """Not found only when idconv answered for this PMCID and gave no
+        PMID. A failed idconv request, or a PMID whose record efetch did not
+        return, is a lookup failure."""
+        if pmcid in conversion.failed or pmcid in conversion.pmids:
+            return PMCID_LOOKUP_FAILED
+        return PMCID_NOT_FOUND
+
+    def _rerun_failed_pmcid_lookups(self, entries_with_pmcid: list[tuple[dict, str]]) -> None:
+        """Run the PMCID path once more for the entries whose lookup failed
+        (#1219: one idconv 429 that outlasted the retries cost CHXRBM all 40
+        of its PMCID citations). The failure counts the first pass added
+        come off before the re-run adds its own."""
+        rerun = [(entry, pmcid) for entry, pmcid in entries_with_pmcid
+                 if entry.get('enrichment_status') == PMCID_LOOKUP_FAILED]
+        if not rerun:
+            return
+        if self.verbose:
+            logger.info(f"\n🔄 Re-running {len(rerun)} failed PMCID lookups "
+                        f"in {PMCID_RERUN_PAUSE_SECONDS:g}s...")
+        time.sleep(PMCID_RERUN_PAUSE_SECONDS)
+        for _ in rerun:
+            self._shift_failure_counts(PMCID_LOOKUP_FAILED, -1)
+        self._enrich_by_pmcid(rerun)
 
     def _bare_digits_pmid(self, entry: dict) -> str | None:
         """The PMID-length digit run of a "PMCID" value that has no PMC prefix
@@ -675,7 +723,7 @@ class PubMedEnricher:
     def _failure_counts(status: str | None) -> tuple[int, int]:
         """(failed_lookups, title_mismatches) an entry with this status adds."""
         failed = status in PMCID_PATH_FAILURES or status == 'lookup_failed'
-        return (1 if failed else 0, 1 if status == 'title_check_failed' else 0)
+        return (1 if failed else 0, 1 if status == TITLE_CHECK_FAILED else 0)
 
     def _shift_failure_counts(self, status: str | None, sign: int) -> None:
         failed, mismatched = self._failure_counts(status)
@@ -999,6 +1047,15 @@ class PubMedEnricher:
         except (ET.ParseError, ValueError) as e:  # truncated / error body on a 200
             return _Attempt(error=e)
 
+    def _fetch_pubmed_records(self, pmids: list[str]) -> dict[str, dict]:
+        """efetch in requests of at most NCBI_MAX_IDS_PER_REQUEST ids."""
+        records: dict[str, dict] = {}
+        for i, chunk in enumerate(_chunks(pmids, NCBI_MAX_IDS_PER_REQUEST)):
+            if i:
+                time.sleep(RATE_LIMIT_DELAY)
+            records.update(self._fetch_pubmed_batch(chunk))
+        return records
+
     def _fetch_pubmed_batch(self, pmids: list[str]) -> dict[str, dict]:
         """
         Fetch multiple PubMed records via efetch.
@@ -1135,41 +1192,43 @@ class PubMedEnricher:
         found = elem.find(path)
         return found.text.strip() if found is not None and found.text else ''
 
-    def _convert_pmcids_to_pmids(self, pmcids: list[str]) -> dict[str, str]:
+    def _convert_pmcids_to_pmids(self, pmcids: list[str]) -> _PmcidConversion:
         """
-        Convert PMCIDs to PMIDs using NCBI ID converter.
+        Convert PMCIDs to PMIDs using the NCBI ID converter, in requests of
+        at most NCBI_MAX_IDS_PER_REQUEST ids. A request that fails marks
+        only its own PMCIDs failed.
         """
-        if not pmcids:
-            return {}
+        unique = list(dict.fromkeys(pmcids))
+        pmids: dict[str, str] = {}
+        failed: set[str] = set()
+        for i, chunk in enumerate(_chunks(unique, NCBI_MAX_IDS_PER_REQUEST)):
+            if i:
+                time.sleep(RATE_LIMIT_DELAY)
+            try:
+                pmids.update(self._convert_pmcid_chunk(chunk))
+            except Exception as e:
+                failed.update(chunk)
+                self.stats['api_errors'] += 1
+                self._log_api_failure('pmcid_conversion', e)
+                if self.verbose:
+                    # Info, not error: see the note at _enrich_by_doi's DOI search error above.
+                    logger.info(f"    ❌ ID conversion error: {_sanitize_error(e)}")
+        if self.verbose and unique:
+            logger.info(f"    → Converted {len(pmids)}/{len(unique)} PMCIDs to PMIDs")
+        return _PmcidConversion(pmids, frozenset(failed))
 
-        try:
-            params = {
-                'ids': ','.join(pmcids),
-                'format': 'json',
-                **self._identity_params()
-            }
-
-            data = self._get_with_retry(ID_CONVERTER_URL, params, _parse_json)
-
-            result = {}
-            for record in data.get('records', []):
-                pmcid = record.get('pmcid', '')
-                pmid = record.get('pmid', '')
-                if pmcid and pmid:
-                    result[pmcid] = pmid
-
-            if self.verbose:
-                logger.info(f"    → Converted {len(result)}/{len(pmcids)} PMCIDs to PMIDs")
-
-            return result
-
-        except Exception as e:
-            self.stats['api_errors'] += 1
-            self._log_api_failure('pmcid_conversion', e)
-            if self.verbose:
-                # Info, not error: see the note at _enrich_by_doi's DOI search error above.
-                logger.info(f"    ❌ ID conversion error: {_sanitize_error(e)}")
-            return {}
+    def _convert_pmcid_chunk(self, pmcids: list[str]) -> dict[str, str]:
+        """One idconv request: PMCID -> PMID for each record that has both.
+        idconv answers the PMID as a JSON number, so it is stringified."""
+        params = {
+            'ids': ','.join(pmcids),
+            'format': 'json',
+            **self._identity_params()
+        }
+        data = self._get_with_retry(ID_CONVERTER_URL, params, _parse_json)
+        return {record['pmcid']: str(record['pmid'])
+                for record in data.get('records', [])
+                if record.get('pmcid') and record.get('pmid')}
 
     def _search_pmid_by_doi(self, doi: str) -> str | None:
         """
@@ -1231,7 +1290,7 @@ class PubMedEnricher:
         refused kept under `enrichment_rejected` for audit. A refusal because
         another entry matches the record better names that entry's
         element_idx_start."""
-        entry['enrichment_status'] = 'title_check_failed'
+        entry['enrichment_status'] = TITLE_CHECK_FAILED
         entry['enrichment_rejected'] = {
             'source': source,
             'pubmed_pmid': pmid,
