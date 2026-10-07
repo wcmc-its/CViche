@@ -6,11 +6,13 @@ status='created' (uploaded but never started) plus their child rows and leftover
 storage objects (runs/{id}/input/ and the by-submitter index).
 """
 import os
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.orm import Session
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
@@ -364,7 +366,7 @@ def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
 
 
 @pytest.fixture
-def enforced_foreign_keys():
+def enforced_foreign_keys() -> Iterator[None]:
     """Enforce FKs the way MySQL InnoDB does. The suite's SQLite engine leaves
     them off, so a delete that MySQL refuses would otherwise pass here."""
     from sqlalchemy import text
@@ -376,7 +378,7 @@ def enforced_foreign_keys():
         conn.execute(text("PRAGMA foreign_keys=OFF"))
 
 
-def test_delete_run_unlinks_the_inbox_file_it_was_submitted_from(db, enforced_foreign_keys):
+def test_delete_run_unlinks_the_inbox_file_it_was_submitted_from(db: Session, enforced_foreign_keys: None) -> None:
     """#408: inbound_files.run_id references runs.id with no ON DELETE rule.
     Deleting a run submitted from the inbox (#1298) must clear that link, or
     the row delete fails after the run's storage is already gone."""
