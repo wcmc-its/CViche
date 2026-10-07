@@ -1,5 +1,5 @@
 {
-  "2.1 no `db.query(` in `api/`": 17,
+  "2.1 no `db.query(` in `api/`": 9,
   "3.7 dynamic attribute access (non-literal)": 6,
   "3.7 dynamic attribute access (non-literal) [waived]": 0,
   "3.7 no metaprogramming [waived]": 1,
@@ -7,6 +7,6 @@
   "5.4 blind `except Exception` (BLE001)": 80,
   "7.1 print() in library code (T201)": 676,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
-  "8.3 missing annotations (ANN*, RUF012)": 497,
+  "8.3 missing annotations (ANN*, RUF012)": 494,
   "8.3 typing syntax (UP*, RUF013)": 218
 }

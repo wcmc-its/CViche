@@ -293,12 +293,12 @@ def test_runs_listing_carries_score_evidence(client, db, monkeypatch):
     """A cached incomplete score reaches the row as typed fields; a cache
     written before data_complete existed reads as unknown (None), and an
     unscored run carries neither."""
-    from app.api import admin_routes
+    from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
     legacy = {"totalScore": 90, "band": "GREEN (ship)"}
     cache = {"SF_COMPLETE": _INCOMPLETE_SCORE, "SF_FAILED": legacy}
-    monkeypatch.setattr(admin_routes, "get_cached_score", cache.get)
+    monkeypatch.setattr(admin_run_service, "get_cached_score", cache.get)
 
     resp = _admin_get(client, "/api/admin/runs")
 

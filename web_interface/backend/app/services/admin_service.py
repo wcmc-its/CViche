@@ -1,16 +1,83 @@
 """Admin service functions with O(1) aggregation queries, and the admin user update."""
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from app.errors import not_found, validation_error
 from app.models import User, Run, Step, Feedback
-from app.schemas import AdminStepAvg, AdminUser, AdminUserUpdate
+from app.schemas import AdminStats, AdminStepAvg, AdminUser, AdminUserUpdate
 from app.services import admin_policy
+from app.services.runs_admin_query import submission_split
 
 logger = logging.getLogger(__name__)
+
+
+def get_admin_stats(db: Session) -> AdminStats:
+    """Return overview statistics for the admin dashboard."""
+    total_runs = db.query(func.count(Run.id)).scalar() or 0
+
+    thirty_days_ago = datetime.now() - timedelta(days=30)
+    active_users = (
+        db.query(func.count(func.distinct(Run.user_id)))
+        .filter(Run.started_at >= thirty_days_ago, Run.user_id.isnot(None))
+        .scalar()
+        or 0
+    )
+
+    total_cost = db.query(func.sum(Run.total_cost)).scalar() or 0.0
+
+    completed_runs = (
+        db.query(func.count(Run.id)).filter(Run.status == "complete").scalar() or 0
+    )
+    runs_with_feedback = (
+        db.query(func.count(func.distinct(Feedback.run_id))).scalar() or 0
+    )
+    feedback_rate = (
+        (runs_with_feedback / completed_runs * 100) if completed_runs > 0 else 0.0
+    )
+
+    # CV-to-WCM conversion time, aggregated server-side over completed runs and
+    # returned on this existing stats call (the dashboard already makes it), so the
+    # admin overview gets avg/p95 without a second round-trip. The aggregate has to
+    # be computed here rather than on the client because /admin/runs is paginated --
+    # the browser never holds the whole population. Prefer the persisted pipeline
+    # duration; fall back to wall-clock for runs that predate the column.
+    #
+    # Select only the three duration columns rather than hydrating a full Run ORM
+    # object per completed run (#128) -- at scale that was the dominant cost here.
+    # avg/p95 stay in Python: the wall-clock fallback needs a per-dialect timestamp
+    # diff the SQLite test suite can't exercise, and the nearest-rank p95 is already
+    # portable and correct.
+    durations = sorted(
+        total if total is not None
+        else int((completed_at - started_at).total_seconds())
+        for total, started_at, completed_at in db.query(
+            Run.total_duration_seconds, Run.started_at, Run.completed_at
+        )
+        .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
+        .all()
+    )
+    avg_duration_seconds = round(sum(durations) / len(durations), 1) if durations else None
+    # Nearest-rank p95 over the sorted durations (portable; modest run volume).
+    p95_duration_seconds = (
+        durations[min(len(durations) - 1, max(0, round(0.95 * (len(durations) - 1))))]
+        if durations else None
+    )
+
+    step_avg_seconds = get_step_avg_seconds(db)
+
+    return AdminStats(
+        total_runs=total_runs,
+        active_users=active_users,
+        total_cost=round(total_cost, 4),
+        feedback_rate=round(feedback_rate, 1),
+        avg_duration_seconds=avg_duration_seconds,
+        p95_duration_seconds=p95_duration_seconds,
+        step_avg_seconds=step_avg_seconds,
+        submissions=submission_split(db),
+    )
 
 
 def get_users_with_stats(db: Session) -> list[AdminUser]:

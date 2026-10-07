@@ -1,25 +1,120 @@
-"""Admin operations on runs and their feedback rows (#335).
+"""Admin operations on runs and their feedback rows (#335, #336).
 
-Behind the admin runs routes: hard deletes, the orphan reaper, rescoring and
-the run-queue diagnostics. The guards, the error each failure maps to, and
-the audit lines live here; the route handlers parse the request and shape the
-response. The run delete and the reaper's sweep themselves are run_service's.
+Behind the admin runs routes: the paginated runs listing, hard deletes, the
+orphan reaper, rescoring and the run-queue diagnostics. The queries, guards,
+the error each failure maps to, and the audit lines live here; the route
+handlers parse the request and shape the response. The run delete and the
+reaper's sweep themselves are run_service's.
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import redis
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager
 
 from app.audit_events import RUN_DELETED
 from app.config_loader import get_config
 from app.errors import conflict, internal_error, not_found
-from app.models import Feedback, User
+from app.models import Feedback, Run, User
 from app.pipeline import concurrency, run_queue
-from app.schemas import QualityScoreResult, QueueDbView, QueueStatsResponse, QueueStreamStats
-from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
+from app.schemas import (
+    AdminRunEntry, AdminRunsResponse, QualityScoreResult, QueueDbView, QueueStatsResponse, QueueStreamStats,
+)
+from app.services.quality_score_service import compute_and_cache_score, get_cached_score, persist_score_columns
 from app.services.run_service import delete_run_and_artifacts, find_run, queue_db_view, reap_orphaned_created_runs
 
 logger = logging.getLogger(__name__)
+
+
+def list_runs(
+    db: Session, *, offset: int, limit: int, user_email: str | None, status: str | None
+) -> AdminRunsResponse:
+    """One page of every user's runs, newest first, with feedback and cached
+    quality-score fields. ``user_email`` is a case-insensitive substring;
+    ``status`` is an exact status, "all", or None for every status but "created"."""
+    # Eager-load run.user via the outer join (the relationship is
+    # lazy="raise_on_sql"). contains_eager populates run.user from the joined
+    # columns -- one query, no per-row lookup -- while the outer join still
+    # lets us filter by user email.
+    query = db.query(Run).outerjoin(Run.user).options(contains_eager(Run.user))
+
+    if user_email:
+        query = query.filter(User.email.ilike(f"%{user_email}%"))
+
+    # Status filtering. The default admin view hides never-started "created"
+    # runs -- these accumulate as clutter when users upload a blank WCM template
+    # and decline to proceed, leaving a run that is never advanced. An explicit
+    # status filters to exactly that status (including "created" to inspect the
+    # abandoned ones); the "all" sentinel opts back in to every status.
+    if status == "all":
+        pass
+    elif status:
+        query = query.filter(Run.status == status)
+    else:
+        query = query.filter(Run.status != "created")
+
+    total = query.count()
+    rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
+
+    # Build run entries with feedback status
+    run_ids = [run.id for run in rows]
+    feedback_run_ids = set()
+    if run_ids:
+        feedback_rows = (
+            db.query(Feedback.run_id)
+            .filter(Feedback.run_id.in_(run_ids))
+            .distinct()
+            .all()
+        )
+        feedback_run_ids = {row.run_id for row in feedback_rows}
+
+    # Read cached advisory quality scores in parallel (small JSON per run; only
+    # present for runs already scored — None otherwise). Admin-only / paginated.
+    cached_scores: dict[str, dict] = {}
+    if run_ids:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for rid, score in zip(run_ids, pool.map(get_cached_score, run_ids)):
+                if score:
+                    cached_scores[rid] = score
+
+    entries = []
+    for run in rows:
+        # Prefer the persisted pipeline duration so the admin table matches the
+        # run status/history API; fall back to wall-clock for runs that predate
+        # the column. (Still blank for in-flight runs with no completed_at.)
+        if run.total_duration_seconds is not None:
+            duration = run.total_duration_seconds
+        elif run.started_at and run.completed_at:
+            duration = int((run.completed_at - run.started_at).total_seconds())
+        else:
+            duration = None
+
+        score = cached_scores.get(run.id)
+        entries.append(
+            AdminRunEntry(
+                run_id=run.id,
+                user_email=run.user.email if run.user else None,
+                user_display_name=run.user.display_name if run.user else None,
+                filename=run.filename,
+                status=run.status,
+                duration_seconds=duration,
+                total_cost=round(run.total_cost or 0, 4),
+                started_at=run.started_at,
+                has_feedback=run.id in feedback_run_ids,
+                quality_score=score.get("totalScore") if score else None,
+                quality_band=score.get("band") if score else None,
+                quality_data_complete=score.get("data_complete") if score else None,
+                quality_missing_evidence=(score.get("missing_evidence") or []) if score else [],
+            )
+        )
+
+    return AdminRunsResponse(
+        runs=entries,
+        total=total,
+        has_more=(offset + limit) < total,
+        offset=offset,
+        limit=limit,
+    )
 
 
 def hard_delete_feedback(db: Session, feedback_id: int, admin: User) -> None:

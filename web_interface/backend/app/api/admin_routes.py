@@ -1,18 +1,16 @@
 """Admin dashboard API endpoints. All endpoints require admin role."""
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
-from sqlalchemy.orm import Session, contains_eager
+from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User, Run, Feedback
+from app.models import User
 from app.auth import require_admin, require_view_all_runs
 from app.schemas import (
     AdminStats,
     AdminUser,
-    AdminRunEntry,
     AdminRunsResponse,
     AdminConfigResponse,
     AdminConfigUpdate,
@@ -22,18 +20,15 @@ from app.schemas import (
     QualityScoreResult,
     QueueStatsResponse,
 )
-from app.services.runs_admin_query import submission_split
-from app.services.admin_service import apply_user_update, get_step_avg_seconds, get_users_with_stats
+from app.services.admin_service import apply_user_update, get_admin_stats, get_users_with_stats
 from app.services.admin_config_service import (
     bump_session_epoch, consent_publish_preview, load_admin_config, publish_next_consent_version,
     update_admin_config,
 )
 from app.services.admin_export_service import open_export
 from app.services.admin_run_service import (
-    hard_delete_feedback, hard_delete_run, queue_stats, reap_orphans, score_run,
+    hard_delete_feedback, hard_delete_run, list_runs, queue_stats, reap_orphans, score_run,
 )
-from app.services.quality_score_service import get_cached_score
-from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter()
 
@@ -45,70 +40,9 @@ router = APIRouter()
 async def get_stats(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
-):
+) -> AdminStats:
     """Return overview statistics for the admin dashboard."""
-    total_runs = db.query(func.count(Run.id)).scalar() or 0
-
-    thirty_days_ago = datetime.now() - timedelta(days=30)
-    active_users = (
-        db.query(func.count(func.distinct(Run.user_id)))
-        .filter(Run.started_at >= thirty_days_ago, Run.user_id.isnot(None))
-        .scalar()
-        or 0
-    )
-
-    total_cost = db.query(func.sum(Run.total_cost)).scalar() or 0.0
-
-    completed_runs = (
-        db.query(func.count(Run.id)).filter(Run.status == "complete").scalar() or 0
-    )
-    runs_with_feedback = (
-        db.query(func.count(func.distinct(Feedback.run_id))).scalar() or 0
-    )
-    feedback_rate = (
-        (runs_with_feedback / completed_runs * 100) if completed_runs > 0 else 0.0
-    )
-
-    # CV-to-WCM conversion time, aggregated server-side over completed runs and
-    # returned on this existing stats call (the dashboard already makes it), so the
-    # admin overview gets avg/p95 without a second round-trip. The aggregate has to
-    # be computed here rather than on the client because /admin/runs is paginated --
-    # the browser never holds the whole population. Prefer the persisted pipeline
-    # duration; fall back to wall-clock for runs that predate the column.
-    #
-    # Select only the three duration columns rather than hydrating a full Run ORM
-    # object per completed run (#128) -- at scale that was the dominant cost here.
-    # avg/p95 stay in Python: the wall-clock fallback needs a per-dialect timestamp
-    # diff the SQLite test suite can't exercise, and the nearest-rank p95 is already
-    # portable and correct.
-    durations = sorted(
-        total if total is not None
-        else int((completed_at - started_at).total_seconds())
-        for total, started_at, completed_at in db.query(
-            Run.total_duration_seconds, Run.started_at, Run.completed_at
-        )
-        .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
-        .all()
-    )
-    avg_duration_seconds = round(sum(durations) / len(durations), 1) if durations else None
-    # Nearest-rank p95 over the sorted durations (portable; modest run volume).
-    p95_duration_seconds = (
-        durations[min(len(durations) - 1, max(0, round(0.95 * (len(durations) - 1))))]
-        if durations else None
-    )
-
-    step_avg_seconds = get_step_avg_seconds(db)
-
-    return AdminStats(
-        total_runs=total_runs,
-        active_users=active_users,
-        total_cost=round(total_cost, 4),
-        feedback_rate=round(feedback_rate, 1),
-        avg_duration_seconds=avg_duration_seconds,
-        p95_duration_seconds=p95_duration_seconds,
-        step_avg_seconds=step_avg_seconds,
-        submissions=submission_split(db),
-    )
+    return get_admin_stats(db)
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +52,7 @@ async def get_stats(
 async def get_users(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
-):
+) -> list[AdminUser]:
     """Return all users with per-user stats."""
     return get_users_with_stats(db)
 
@@ -255,91 +189,9 @@ async def get_runs(
     ),
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
-):
+) -> AdminRunsResponse:
     """Return all runs paginated, with optional filters."""
-    # Eager-load run.user via the outer join (the relationship is
-    # lazy="raise_on_sql"). contains_eager populates run.user from the joined
-    # columns -- one query, no per-row lookup -- while the outer join still
-    # lets us filter by user email.
-    query = db.query(Run).outerjoin(Run.user).options(contains_eager(Run.user))
-
-    if user:
-        query = query.filter(User.email.ilike(f"%{user}%"))
-
-    # Status filtering. The default admin view hides never-started "created"
-    # runs -- these accumulate as clutter when users upload a blank WCM template
-    # and decline to proceed, leaving a run that is never advanced. An explicit
-    # status filters to exactly that status (including "created" to inspect the
-    # abandoned ones); the "all" sentinel opts back in to every status.
-    if status == "all":
-        pass
-    elif status:
-        query = query.filter(Run.status == status)
-    else:
-        query = query.filter(Run.status != "created")
-
-    total = query.count()
-    rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
-
-    # Build run entries with feedback status
-    run_ids = [run.id for run in rows]
-    feedback_run_ids = set()
-    if run_ids:
-        feedback_rows = (
-            db.query(Feedback.run_id)
-            .filter(Feedback.run_id.in_(run_ids))
-            .distinct()
-            .all()
-        )
-        feedback_run_ids = {row.run_id for row in feedback_rows}
-
-    # Read cached advisory quality scores in parallel (small JSON per run; only
-    # present for runs already scored — None otherwise). Admin-only / paginated.
-    cached_scores: dict[str, dict] = {}
-    if run_ids:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            for rid, score in zip(run_ids, pool.map(get_cached_score, run_ids)):
-                if score:
-                    cached_scores[rid] = score
-
-    entries = []
-    for run in rows:
-        # Prefer the persisted pipeline duration so the admin table matches the
-        # run status/history API; fall back to wall-clock for runs that predate
-        # the column. (Still blank for in-flight runs with no completed_at.)
-        if run.total_duration_seconds is not None:
-            duration = run.total_duration_seconds
-        elif run.started_at and run.completed_at:
-            duration = int((run.completed_at - run.started_at).total_seconds())
-        else:
-            duration = None
-
-        score = cached_scores.get(run.id)
-        entries.append(
-            AdminRunEntry(
-                run_id=run.id,
-                user_email=run.user.email if run.user else None,
-                user_display_name=run.user.display_name if run.user else None,
-                filename=run.filename,
-                status=run.status,
-                duration_seconds=duration,
-                total_cost=round(run.total_cost or 0, 4),
-                started_at=run.started_at,
-                has_feedback=run.id in feedback_run_ids,
-                quality_score=score.get("totalScore") if score else None,
-                quality_band=score.get("band") if score else None,
-                quality_data_complete=score.get("data_complete") if score else None,
-                quality_missing_evidence=(score.get("missing_evidence") or []) if score else [],
-            )
-        )
-
-    return AdminRunsResponse(
-        runs=entries,
-        total=total,
-        has_more=(offset + limit) < total,
-        offset=offset,
-        limit=limit,
-    )
+    return list_runs(db, offset=offset, limit=limit, user_email=user, status=status)
 
 
 # ---------------------------------------------------------------------------
