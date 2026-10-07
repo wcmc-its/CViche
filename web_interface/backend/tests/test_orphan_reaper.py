@@ -361,3 +361,43 @@ def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
             delete_run_and_artifacts(db, run)
     rollback.assert_called_once()
     assert db.query(Run).filter(Run.id == "FAIL683").first() is not None
+
+
+@pytest.fixture
+def enforced_foreign_keys():
+    """Enforce FKs the way MySQL InnoDB does. The suite's SQLite engine leaves
+    them off, so a delete that MySQL refuses would otherwise pass here."""
+    from sqlalchemy import text
+    from tests.conftest import engine
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+    yield
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+
+
+def test_delete_run_unlinks_the_inbox_file_it_was_submitted_from(db, enforced_foreign_keys):
+    """#408: inbound_files.run_id references runs.id with no ON DELETE rule.
+    Deleting a run submitted from the inbox (#1298) must clear that link, or
+    the row delete fails after the run's storage is already gone."""
+    from app.models import InboundFile, InboundFileStatus, InboundMessage, Run
+    from app.services.run_service import delete_run_and_artifacts
+
+    user = _seed_user(db)
+    _seed_run(db, "MAIL408", "complete", datetime.now(), user_id=user.id, steps=2)
+    message = InboundMessage(s3_key="inbound/msg-408", status="accepted", file_count=1, user_id=user.id)
+    db.add(message)
+    db.flush()
+    db.add(InboundFile(inbound_message_id=message.id, user_id=user.id, filename="cv.docx", size_bytes=1,
+                       sha256="0" * 64, storage_key="inbox/408/", status=InboundFileStatus.SUBMITTED,
+                       run_id="MAIL408"))
+    db.commit()
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake):
+        delete_run_and_artifacts(db, db.query(Run).filter(Run.id == "MAIL408").one())
+
+    assert db.query(Run).filter(Run.id == "MAIL408").first() is None
+    inbox_file = db.query(InboundFile).one()
+    assert inbox_file.run_id is None
+    assert inbox_file.status == InboundFileStatus.SUBMITTED
