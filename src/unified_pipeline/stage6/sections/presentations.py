@@ -18,17 +18,23 @@ an entry whose scope has no table falls back to National as well -- an
 unclassifiable talk is published in the middle bucket rather than dropped.
 
 Dates arrive under four different field names and field extraction emits the
-STRING "None" often enough that it is checked for explicitly at both the `year`
-and the `start_date` fallback; a literal "None" in the year column is worse than
-a blank one. A title-less entry is titled by `_untitled_talk_title`: role and
+STRING "None" often enough that it is checked for explicitly on every one; a
+literal "None" in the year column is worse than a blank one. An `end_date`
+makes the Dates cell a range (`_talk_date_cell`). A title-less entry is titled by `_untitled_talk_title`: role and
 event name when the source line holds nothing else, otherwise the source line
 without the list number, year and venue the other two cells already show.
 """
 import logging
 import re
+from collections.abc import Mapping
 
 from ..fan_out import fallback_text
-from ..formatting import _clear_table_data, _set_font, format_date_for_section
+from ..formatting import (
+    _clear_table_data,
+    _set_font,
+    format_date_for_section,
+    format_date_range,
+)
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,37 @@ def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
         # in `_fill_presentations` recognises them in the title.
         return ', '.join(part.strip() for part in (role or '', event_name or '') if part.strip())
     return _SEPARATOR_RUN_RE.sub(r'\1 ', _normalize_space(line)).strip(_TITLE_EDGES)
+
+
+# The field names a talk's date arrives under, most specific first.
+_TALK_DATE_KEYS = ('year', 'date', 'start_date')
+_TALK_END_DATE_KEY = 'end_date'
+_NONE_STRING = 'none'
+
+
+def _date_field(fields: dict, key: str) -> str | Mapping:
+    """`fields[key]`, or '' when it is missing, empty or the string "None"
+    field extraction emits for a missing value."""
+    value = fields.get(key) or ''
+    return '' if str(value).strip().lower() == _NONE_STRING else value
+
+
+def _talk_date_cell(fields: dict) -> str:
+    """The Dates cell (yyyy) of an R entry.
+
+    The first of `year`, `date`, `start_date` is the talk's date. When stage
+    4 also found an `end_date`, the cell is the range: a talk given "2006 to
+    present" renders "2006-Present", not "2006" (OTBUCZ 116/119/125, #1346).
+    A multi-day talk within one year still renders its one year, because the
+    range collapses when both ends format to the same string. A `{start_date,
+    end_date}` mapping (#1233) already carries its own end, so a separate
+    `end_date` is not appended to it.
+    """
+    start = next((v for v in (_date_field(fields, k) for k in _TALK_DATE_KEYS) if v), '')
+    end = _date_field(fields, _TALK_END_DATE_KEY)
+    if start and end and not isinstance(start, Mapping):
+        return format_date_range(start, end, 'R')
+    return format_date_for_section(start, 'R') if start else ''
 
 
 class PresentationsSection:
@@ -195,18 +232,7 @@ class PresentationsSection:
                 title = fields.get('title') or fields.get('presentation_title') or ''
                 institution = fields.get('institution') or fields.get('location') or fields.get('venue') or ''
 
-                # Get date, falling back to start_date/end_date for multi-date entries
-                raw_date = fields.get('year') or fields.get('date') or ''
-                # Handle the string "None" from field extraction
-                if str(raw_date).strip().lower() == 'none':
-                    raw_date = ''
-                if not raw_date:
-                    # Fall back to start_date for entries with date ranges
-                    raw_date = fields.get('start_date') or ''
-                    if str(raw_date).strip().lower() == 'none':
-                        raw_date = ''
-                # Format date as yyyy per WCM template requirements
-                formatted_date = format_date_for_section(raw_date, 'R') if raw_date else ''
+                formatted_date = _talk_date_cell(fields)
 
                 role = str(fields.get('role') or '').strip()
                 if role.lower() == 'none':
