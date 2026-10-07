@@ -228,6 +228,21 @@ def _outage_backoff_wait(outage_retries: int, retry_after: float | None) -> floa
     return base / 2 + random.uniform(0, base / 2)
 
 
+def _redacted_error_label(e: Exception) -> str:
+    """A WARNING-safe description of a provider error (#639): the exception
+    class, plus botocore's error code when the error carries one -- e.g.
+    "ClientError[ThrottlingException]" or "ReadTimeoutError". str(e) is never
+    part of it: a provider message can carry response-body fragments, request
+    URLs, or IDs, so the retry sites log it at DEBUG only.
+    """
+    label = type(e).__name__
+    if isinstance(e, _BotoClientError):
+        code = e.response.get("Error", {}).get("Code", "")
+        if code:
+            label = f"{label}[{code}]"
+    return label
+
+
 # Guards construction of the module-level Bedrock client (llm/bedrock.py).
 # call_llm runs on several threads at once (see _llm_call_semaphore), so two
 # threads can both observe `_client is None`. This is not safe for Bedrock:
@@ -351,8 +366,9 @@ def _call_with_retry(
                 outage_retries += 1
                 logger.warning(
                     "LLM provider outage (%.0fs elapsed / %.0fs budget): %s. Pausing %.1fs...",
-                    elapsed, budget, e, wait,
+                    elapsed, budget, _redacted_error_label(e), wait,
                 )
+                logger.debug("LLM provider outage detail: %s", e)
                 time.sleep(wait)
                 if cancel_check is not None:
                     cancel_check()
@@ -376,9 +392,10 @@ def _call_with_retry(
                     )
                     raise e
                 logger.warning(
-                    f"LLM call failed (attempt {attempt + 1}/{retry_count + 1}): {e}. "
-                    f"Retrying in {wait:.1f}s..."
+                    "LLM call failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                    attempt + 1, retry_count + 1, _redacted_error_label(e), wait,
                 )
+                logger.debug("LLM call failure detail (attempt %d): %s", attempt + 1, e)
                 time.sleep(wait)
                 if cancel_check is not None:
                     cancel_check()
