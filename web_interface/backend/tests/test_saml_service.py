@@ -19,6 +19,7 @@ test (or parametrized row) each:
       partner scope admitted / denied without ED; ED off keeps the stored role
   department read only once authorized, and only with ED on
   store unwritable -> SESSION_STORE_UNAVAILABLE; epoch unreadable -> SESSION_STATE_UNAVAILABLE
+  disabled user -> ACCOUNT_DISABLED, no session minted, LOGIN_FAILED (account_disabled)
 """
 import json
 import logging
@@ -365,3 +366,26 @@ def test_unreadable_epoch_is_session_state_unavailable(db, saml, replay_cache, p
     [failed] = _events(caplog, "LOGIN_FAILED")
     assert (failed.cwid, failed.reason) == ("samluser", "session_state_unavailable")
     assert not _events(caplog, "SESSION_STORE_UNAVAILABLE")
+
+
+# --- a disabled account -------------------------------------------------------
+
+def test_disabled_user_is_refused_before_a_session_is_minted(db, saml, replay_cache, parser, monkeypatch, caplog):
+    """The same rule as simple-auth login: a disabled account gets no session
+    and a LOGIN_FAILED line, not a LOGIN_SUCCESS for a session that every
+    later request would refuse."""
+    from app.services import saml_service
+    db.add(User(cwid="samluser", email="samluser@med.cornell.edu", display_name="SAML User",
+                role="user", status="disabled", auth_method="saml"))
+    db.commit()
+    monkeypatch.setattr(saml_service, "_mint_saml_session",
+                        lambda *a, **k: pytest.fail("no session for a disabled account"))
+
+    with caplog.at_level(logging.INFO, logger=_ROUTE_LOGGER):
+        outcome = _login(db, parser)
+
+    assert outcome is SamlLoginFailure.ACCOUNT_DISABLED
+    assert db.query(User).one().status == "disabled"
+    [failed] = _events(caplog, "LOGIN_FAILED")
+    assert (failed.cwid, failed.reason) == ("samluser", "account_disabled")
+    assert not _events(caplog, "LOGIN_SUCCESS")

@@ -11,7 +11,7 @@ import { createBatch, getQueue } from '../api/batches'
 import { getCurrentUser } from '../api/auth'
 import { discardInboxItem, listInbox, submitInboxItem } from '../api/inbox'
 import { InboxProvider } from '../contexts/InboxContext'
-import type { BatchEstimate, Estimate, InboxItem, InboxSubmitResult, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
+import type { AuthConfig, BatchEstimate, Estimate, InboxItem, InboxSubmitResult, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
 
 vi.mock('../api/upload', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/upload')>()),
@@ -28,8 +28,10 @@ const ADMIN: User = {
   consent_version: '1.0', default_submission_type: 'authorized_admin', quota: null,
 }
 let currentUser: User = ADMIN
+// null = the config not loaded yet, so the page falls back to the default upload cap.
+let currentAuthConfig: AuthConfig | null = null
 vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ user: currentUser }),
+  useAuth: () => ({ user: currentUser, authConfig: currentAuthConfig }),
   useCanSeeCost: () => currentUser.role === 'admin',
 }))
 
@@ -195,6 +197,23 @@ describe('UploadPage batch selection', () => {
     expect(screen.getByText('2 to submit · 1 skipped')).toBeTruthy()
     expect(screen.getByText("Won't be submitted")).toBeTruthy()
     expect(screen.getByText('Not a .docx or .pdf file')).toBeTruthy()
+  })
+
+  it("checks file size against the backend's advertised cap, not a client copy (#109)", async () => {
+    currentAuthConfig = { mode: 'simple', max_upload_mb: 20 }
+    try {
+      await renderPage()
+      const sized = (name: string, mb: number) => {
+        const file = docx(name)
+        Object.defineProperty(file, 'size', { value: mb * 1024 * 1024 })
+        return file
+      }
+      await addFiles([sized('fifteen.docx', 15), sized('twentyfive.docx', 25)])
+      expect(vi.mocked(getBatchEstimate).mock.calls[0][0].map((f) => f.name)).toEqual(['fifteen.docx'])
+      expect(screen.getByText('Larger than 20 MB')).toBeTruthy()
+    } finally {
+      currentAuthConfig = null
+    }
   })
 
   it("shows a PDF row's scanned pages from its estimate (#1282)", async () => {

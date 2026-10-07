@@ -16,6 +16,7 @@ from app.auth import (
     get_current_user,
     resolve_session_identity,
     COOKIE_NAME,
+    ACCOUNT_DISABLED_DETAIL,
     SESSION_STORE_UNAVAILABLE_DETAIL,
     SESSION_STATE_UNAVAILABLE_DETAIL,
 )
@@ -24,6 +25,7 @@ from app.login_throttle import get_login_throttle
 from app.config_loader import INTAKE_ADDRESS, email_intake_enabled, get_config_value
 from app.rate_limiter import get_quota
 from app.services.auth_service import LoginRejection, authenticate_simple_login
+from app.services.config_service import MAX_UPLOAD_MB
 from app.audit_events import (
     SESSION_REVOKED,
     SESSION_STORE_UNAVAILABLE,
@@ -61,7 +63,7 @@ def get_auth_config(db: Session = Depends(get_db)):
     get_current_user dependency, so this keeps the blocking work off the
     event loop with no async infrastructure change needed."""
     mode = get_config_value(db, "auth_mode") or "simple"
-    response = {"mode": mode}
+    response = {"mode": mode, "max_upload_mb": MAX_UPLOAD_MB}
     if mode == "saml":
         response["discovery_url"] = get_config_value(db, "saml_discovery_url") or ""
     return response
@@ -75,6 +77,8 @@ _LOGIN_REJECTION_RESPONSES: dict[LoginRejection, tuple[int, dict[str, str]]] = {
     LoginRejection.NOT_ALLOWLISTED: (
         403, {"error": "forbidden", "message": "Email not in the allowed users list."},
     ),
+    # The body get_current_user refuses a disabled account with, so both read alike.
+    LoginRejection.ACCOUNT_DISABLED: (403, ACCOUNT_DISABLED_DETAIL),
     LoginRejection.SESSION_STORE_UNAVAILABLE: (503, SESSION_STORE_UNAVAILABLE_DETAIL),
     LoginRejection.SESSION_STATE_UNAVAILABLE: (503, SESSION_STATE_UNAVAILABLE_DETAIL),
 }

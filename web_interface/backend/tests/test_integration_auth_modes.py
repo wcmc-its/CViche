@@ -120,11 +120,12 @@ class TestSimpleModeFullCycle:
         assert me_resp.json()["intake_address"] == expected
 
     def test_simple_mode_config_returns_simple(self, client, seed_simple_mode):
-        """GET /api/auth/config returns {"mode": "simple"} with no discovery_url key."""
+        """GET /api/auth/config returns the mode and upload cap, with no discovery_url key."""
+        from app.services.config_service import MAX_UPLOAD_MB
         response = client.get("/api/auth/config")
         assert response.status_code == 200
         data = response.json()
-        assert data == {"mode": "simple"}
+        assert data == {"mode": "simple", "max_upload_mb": MAX_UPLOAD_MB}
         assert "discovery_url" not in data
 
     def test_simple_mode_rejects_saml_login(self, client, seed_simple_mode):

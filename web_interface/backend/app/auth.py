@@ -14,7 +14,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
-from app.models import User, UserRole, can_view_all_runs  # can_view_all_runs re-exported
+from app.models import User, UserRole, UserStatus, can_view_all_runs  # can_view_all_runs re-exported
 from app.config_loader import get_config_value
 from app.services import ed_access
 from app.ed_group_lookup import (
@@ -69,7 +69,7 @@ _USER_NOT_FOUND_DETAIL = {
     "error": "auth_required",
     "message": "User not found. Please log in again.",
 }
-_ACCOUNT_DISABLED_DETAIL = {
+ACCOUNT_DISABLED_DETAIL = {
     "error": "account_disabled",
     "message": "Your account has been disabled. Contact an administrator.",
 }
@@ -431,8 +431,8 @@ def _load_active_user(identity: SessionIdentity, db: Session) -> User:
     user = db.query(User).filter(User.id == identity.user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail=_USER_NOT_FOUND_DETAIL)
-    if user.status != "active":
-        raise HTTPException(status_code=401, detail=_ACCOUNT_DISABLED_DETAIL)
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=401, detail=ACCOUNT_DISABLED_DETAIL)
     return user
 
 

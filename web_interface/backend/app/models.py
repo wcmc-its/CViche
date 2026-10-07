@@ -46,6 +46,18 @@ class UserRole(StrEnum):
     ADMIN = "admin"
 
 
+class UserStatus(StrEnum):
+    """Canonical ``users.status`` vocabulary, same pattern as ``UserRole``.
+
+    Only ACTIVE may hold a session: get_current_user and both login paths
+    refuse anything else. Used where #1496 changed or added a status check;
+    the remaining "active"/"disabled" literals elsewhere are left as they are
+    (no drive-by conversions, CODING STANDARDS section 8.1).
+    """
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
 # ==========================
 # Authentication Models
 # ==========================
@@ -66,7 +78,7 @@ class User(Base):
     # A UserRole value: "user", "staff" or "admin". A plain String with no
     # Enum type or CHECK constraint, so adding a role needs no migration.
     role = Column(String(20), nullable=False, default=UserRole.USER)
-    status = Column(String(20), nullable=False, default="active")  # "active" or "disabled"
+    status = Column(String(20), nullable=False, default=UserStatus.ACTIVE)  # a UserStatus value
     daily_limit = Column(Integer, nullable=True)
     monthly_limit = Column(Integer, nullable=True)
     default_submission_type = Column(String(50), nullable=True)

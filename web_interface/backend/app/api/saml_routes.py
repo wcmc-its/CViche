@@ -55,6 +55,7 @@ _ACS_FAILURE_REDIRECTS: dict[SamlLoginFailure, str] = {
     SamlLoginFailure.DIRECTORY_UNAVAILABLE: "/login?error=directory_unavailable",
     SamlLoginFailure.SESSION_STORE_UNAVAILABLE: _STORE_UNAVAILABLE_REDIRECT,
     SamlLoginFailure.SESSION_STATE_UNAVAILABLE: _STATE_UNAVAILABLE_REDIRECT,
+    SamlLoginFailure.ACCOUNT_DISABLED: "/login?error=account_disabled",
 }
 
 # SAML binding URI (string literal to avoid import coupling); the ACS's POST

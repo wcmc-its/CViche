@@ -8,14 +8,26 @@ import pytest
 from app.auth import COOKIE_NAME, SESSION_TTL, decode_session_cookie, get_cookie_settings
 from app.login_throttle import LoginThrottle
 from app.models import User, SystemConfig
-from app.services.config_service import LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW
+from app.services.config_service import LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW, MAX_UPLOAD_MB
 
 
 def test_config_endpoint_simple(client, seed_simple_mode):
-    """GET /api/auth/config returns {"mode": "simple"} when auth_mode is simple."""
+    """GET /api/auth/config returns the mode and the upload cap when auth_mode is simple."""
     response = client.get("/api/auth/config")
     assert response.status_code == 200
-    assert response.json() == {"mode": "simple"}
+    assert response.json() == {"mode": "simple", "max_upload_mb": MAX_UPLOAD_MB}
+
+
+def test_config_endpoint_advertises_the_cap_the_upload_route_enforces(client, seed_simple_mode):
+    """#109: the frontend checks file size against max_upload_mb instead of
+    its own hard-coded copy, so the value must be the one /upload and email
+    intake enforce (MAX_UPLOAD_SIZE), not a second definition."""
+    from app.api import upload
+    from app.services import inbound_mail
+
+    advertised = client.get("/api/auth/config").json()["max_upload_mb"] * 1024 * 1024
+
+    assert advertised == upload.MAX_UPLOAD_SIZE == inbound_mail.MAX_UPLOAD_SIZE
 
 
 def test_config_endpoint_saml(client, seed_saml_mode):
@@ -210,21 +222,18 @@ def test_login_updates_the_existing_user_row(client, db, seed_simple_mode, login
     assert db.query(User).count() == 1
 
 
-def test_login_of_a_disabled_user_mints_a_session_the_next_request_refuses(
-    client, db, seed_simple_mode, login_throttle,
-):
-    """Current behaviour, pinned: login does not read User.status. The
-    disabled account is refused by get_current_user on the next request."""
+def test_login_of_a_disabled_user_is_refused_with_no_cookie(client, db, seed_simple_mode, login_throttle):
+    """A disabled account gets a 403 carrying the same account_disabled body
+    get_current_user answers with, and no session cookie."""
     db.add(User(email="test@example.com", display_name="Test User", role="user", status="disabled"))
     db.commit()
 
     response = client.post("/api/auth/login", json=_LOGIN)
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["error"] == "account_disabled"
+    assert COOKIE_NAME not in response.cookies
     assert db.query(User).one().status == "disabled"
-    me = client.get("/api/auth/me", cookies={COOKIE_NAME: response.cookies[COOKIE_NAME]})
-    assert me.status_code == 401
-    assert me.json()["detail"]["error"] == "account_disabled"
 
 
 def test_saml_config_seeded(db):
