@@ -28,11 +28,14 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     CERTIFICATE_NUMBER_PATTERN,
     SKIPPED_ROW_CHECK,
+    _attach_bare_years,
+    _bare_year,
     _classify_cert_token,
     _format_certification_date_str,
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
+    _reparse_renders_less_than_structured,
     _split_multi,
     _with_recertification,
 )
@@ -1450,3 +1453,110 @@ class TestRecertificationIsNeverTheRangeEnd:
         gen = _generator()
         gen._fill_board_certification([_certification("Example Board of Testing", "2005", "2015")])
         assert _rows_after_board(gen) == [("Example Board of Testing", "A12345", "2005 (recertified 2015)")]
+
+
+class TestYearLedFusedRowRendersItsStructuredFields:
+    """#1270: a fused entry (its certificate number "1,234" splits in two)
+    whose single text line starts with a year recovers no token, the date
+    backfill then supplies a year, and the row used to be skipped although
+    stage 4 had the board, specialty and number."""
+
+    def test_the_structured_fields_render_instead_of_a_skip(self):
+        gen = _generator()
+        gen._fill_board_certification([{
+            "text": "2010-2021: Example Board of Testing, Sample Medicine (#1,234)",
+            "extracted_fields": {
+                "certifying_board": "Example Board of Testing",
+                "specialty": "Sample Medicine",
+                "certificate_number": "1,234",
+                "year_certified": "2010", "start_date": "2010", "end_date": "2021",
+            },
+        }])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing, Sample Medicine", "1,234", "2010-2021")]
+        assert gen._section_failures == []
+
+    def test_a_row_with_only_a_date_does_not_beat_the_structured_fields(self):
+        assert _reparse_renders_less_than_structured([("", "", "2010")])
+        assert not _reparse_renders_less_than_structured([("Sample Medicine", "", "2010")])
+        assert not _reparse_renders_less_than_structured([("", "1234", "")])
+
+    def test_one_renderable_row_keeps_the_reparse(self):
+        # Only when NO row renders does the structured fallback take over.
+        assert not _reparse_renders_less_than_structured(
+            [("Sample Medicine", "1234", "2010"), ("", "", "2012")])
+
+
+class TestBareYearEntryAttachesToTheEntryAbove:
+    """#1271 (folded into #1270): an entry whose text is only a year, with
+    every stage-4 field empty, becomes the date of the undated entry above it
+    in source order; when that entry already has a date it stays a skipped
+    row with a render warning."""
+
+    def test_the_year_becomes_the_undated_previous_rows_date(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Board of Testing",
+             "extracted_fields": {"certifying_board": "Example Board of Testing"}},
+            {"text": "2004", "extracted_fields": {}},
+        ])
+        assert _rows_after_board(gen) == [("Example Board of Testing", "", "2004")]
+        assert gen._section_failures == []
+
+    def test_a_text_only_previous_entry_takes_the_year_too(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Sample Medicine", "extracted_fields": {}},
+            {"text": "2004", "extracted_fields": {"specialty": ""}},
+        ])
+        assert _rows_after_board(gen) == [("Sample Medicine", "", "2004")]
+        assert gen._section_failures == []
+
+    def test_a_dated_previous_row_keeps_its_date_and_the_year_is_warned(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Board of Testing 2001",
+             "extracted_fields": {"certifying_board": "Example Board of Testing",
+                                  "year_certified": "2001"}},
+            {"text": "2004", "extracted_fields": {}},
+        ])
+        assert _rows_after_board(gen) == [("Example Board of Testing", "", "2001")]
+        assert [w["evidence"] for w in gen._section_failures] == [["year=2004"]]
+
+    def test_a_year_in_the_previous_text_counts_as_a_date(self):
+        entries = [{"text": "Sample Medicine 2001", "extracted_fields": {}},
+                   {"text": "2004", "extracted_fields": {}}]
+        assert _attach_bare_years(entries) == (entries[:1], ["2004"])
+
+    def test_the_previous_entry_is_the_source_order_one_and_is_not_mutated(self):
+        first = {"text": "Sample Medicine", "extracted_fields": {"specialty": "Sample Medicine"}}
+        second = {"text": "Example Medicine", "extracted_fields": {"specialty": "Example Medicine"}}
+        kept, unattached = _attach_bare_years([first, second, {"text": "2004", "extracted_fields": {}}])
+        assert unattached == []
+        assert kept[0] is first
+        assert kept[1]["extracted_fields"] == {"specialty": "Example Medicine", "year_certified": "2004"}
+        assert "year_certified" not in second["extracted_fields"]
+
+    def test_a_second_bare_year_does_not_overwrite_the_first(self):
+        kept, unattached = _attach_bare_years([
+            {"text": "Sample Medicine", "extracted_fields": {}},
+            {"text": "2004", "extracted_fields": {}},
+            {"text": "2009", "extracted_fields": {}},
+        ])
+        assert kept[0]["extracted_fields"] == {"year_certified": "2004"}
+        assert unattached == ["2009"]
+
+    def test_an_entry_with_any_field_or_more_text_is_not_a_bare_year(self):
+        assert _bare_year({"text": "2004", "extracted_fields": {"specialty": "Sample"}}) == ''
+        assert _bare_year({"text": "2004 Sample Medicine", "extracted_fields": {}}) == ''
+        assert _bare_year({"text": "2004\n2005", "extracted_fields": {}}) == ''
+        assert _bare_year({"text": " 2004 ", "extracted_fields": {"specialty": " "}}) == '2004'
+        # The source table's own header line above the year is not data.
+        assert _bare_year({"text": "Dates of Certification\n2004", "extracted_fields": {}}) == '2004'
+
+    def test_a_bare_year_reaches_the_reparse_no_more(self, caplog):
+        # The "counts disagree" line FOKNKW still emitted came from the reparse.
+        gen = _generator()
+        with caplog.at_level(logging.WARNING):
+            gen._fill_board_certification([{"text": "1977", "extracted_fields": {}}])
+        assert "counts disagree" not in caplog.text

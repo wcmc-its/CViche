@@ -11,39 +11,51 @@
  *     or exposed directly where a non-builder string const is required).
  *   - Query-string builders accept already-stringified params where the call site
  *     builds them (admin runs), or typed primitives where it does not.
+ *   - Every string path parameter goes through `seg` (one segment) or `segs` (a
+ *     file name that may span sub-directories), so a `/`, `?`, `#` or `%` in a
+ *     value cannot add a path segment, start a query, or truncate the URL (#298).
+ *     Number parameters need no encoding.
  */
+
+/** Encode one path segment: `/`, `?`, `#` and `%` cannot escape it. */
+const seg = (value: string): string => encodeURIComponent(value)
+
+/** Encode a relative file path segment by segment, keeping its `/` separators
+ *  (the backend's `{filename:path}` routes take sub-directories). */
+const segs = (path: string): string => path.split('/').map(seg).join('/')
+
 
 export const runRoutes = {
   /** GET /api/run/:id/status */
-  status: (id: string) => `/api/run/${id}/status` as const,
+  status: (id: string) => `/api/run/${seg(id)}/status` as const,
   /** GET /api/run/:id/step/:step */
-  step: (id: string, step: number) => `/api/run/${id}/step/${step}` as const,
+  step: (id: string, step: number) => `/api/run/${seg(id)}/step/${step}` as const,
   /** GET /api/run/:id/prompt-logs?step=:step */
   promptLogs: (id: string, step: number) =>
-    `/api/run/${id}/prompt-logs?step=${step}` as const,
+    `/api/run/${seg(id)}/prompt-logs?step=${step}` as const,
   /** GET /api/run/:id/json/:file  (JSON-parsed data file) */
   dataJson: (id: string, file: string) =>
-    `/api/run/${id}/json/${file}` as const,
+    `/api/run/${seg(id)}/json/${segs(file)}` as const,
   /** GET/href /api/run/:id/data/:file  (raw data file download / open) */
   dataFile: (id: string, file: string) =>
-    `/api/run/${id}/data/${file}` as const,
+    `/api/run/${seg(id)}/data/${segs(file)}` as const,
   /** GET/href /api/run/:id/input  (original uploaded CV download) */
-  inputFile: (id: string) => `/api/run/${id}/input` as const,
+  inputFile: (id: string) => `/api/run/${seg(id)}/input` as const,
   /** GET /api/run/:id/input?as_url=true  ({url}: presigned S3 URL, or null on local storage) */
-  inputFileUrl: (id: string) => `/api/run/${id}/input?as_url=true` as const,
+  inputFileUrl: (id: string) => `/api/run/${seg(id)}/input?as_url=true` as const,
   /** POST /api/run/:id/cancel */
-  cancel: (id: string) => `/api/run/${id}/cancel` as const,
+  cancel: (id: string) => `/api/run/${seg(id)}/cancel` as const,
   /** POST /api/run/:id/restart */
-  restart: (id: string) => `/api/run/${id}/restart` as const,
+  restart: (id: string) => `/api/run/${seg(id)}/restart` as const,
   /** POST /api/run/:id/retry/:step */
   retryStep: (id: string, step: number) =>
-    `/api/run/${id}/retry/${step}` as const,
+    `/api/run/${seg(id)}/retry/${step}` as const,
   /** POST /api/run/:id/start */
-  start: (id: string) => `/api/run/${id}/start` as const,
+  start: (id: string) => `/api/run/${seg(id)}/start` as const,
   /** GET /api/run/:id/run-quality  (admin: score breakdown + run doctor) */
-  quality: (id: string) => `/api/run/${id}/run-quality` as const,
+  quality: (id: string) => `/api/run/${seg(id)}/run-quality` as const,
   /** GET /api/run/:id/review-note  (owner or admin: {needs_cleanup, scored}) */
-  reviewNote: (id: string) => `/api/run/${id}/review-note` as const,
+  reviewNote: (id: string) => `/api/run/${seg(id)}/review-note` as const,
   /** GET /api/runs?offset=:offset&limit=:limit[&:extra]  (extra = pre-built
    *  admin scope/filter query string, see buildRunListQuery) */
   list: (offset: number, limit: number, extra = '') =>
@@ -60,11 +72,11 @@ export const runRoutes = {
 
 export const feedbackRoutes = {
   /** GET /api/run/:id/feedback  (existing feedback + run context) */
-  get: (id: string) => `/api/run/${id}/feedback` as const,
+  get: (id: string) => `/api/run/${seg(id)}/feedback` as const,
   /** POST /api/run/:id/feedback  (submit feedback) */
-  submit: (id: string) => `/api/run/${id}/feedback` as const,
+  submit: (id: string) => `/api/run/${seg(id)}/feedback` as const,
   /** GET /api/run/:id/feedback/all  (every reviewer's feedback; owner, admin or staff) */
-  all: (id: string) => `/api/run/${id}/feedback/all` as const,
+  all: (id: string) => `/api/run/${seg(id)}/feedback/all` as const,
 } as const
 
 export const adminRoutes = {
@@ -77,13 +89,13 @@ export const adminRoutes = {
   /** GET /api/admin/runs?:params  (caller passes a pre-built query string) */
   runs: (params: string) => `/api/admin/runs?${params}` as const,
   /** POST /api/admin/run/:runId/score */
-  runScore: (runId: string) => `/api/admin/run/${runId}/score` as const,
+  runScore: (runId: string) => `/api/admin/run/${seg(runId)}/score` as const,
   /** GET/PUT /api/admin/config */
   config: () => `/api/admin/config` as const,
   /** GET (preview) / POST (publish) /api/admin/consent/publish */
   consentPublish: () => `/api/admin/consent/publish` as const,
   /** GET/href /api/admin/export/:type  (csv export; type ∈ runs|users|consent|feedback) */
-  export: (type: string) => `/api/admin/export/${type}` as const,
+  export: (type: string) => `/api/admin/export/${seg(type)}` as const,
   /** Convenience for the single hard-coded feedback export (== export('feedback')) */
   exportFeedback: () => `/api/admin/export/feedback` as const,
   /** DELETE /api/admin/feedback/:feedbackId */
@@ -125,7 +137,7 @@ export const batchRoutes = {
   /** GET/POST /api/batches  (list visible batches / create one before uploading) */
   batches: () => `/api/batches` as const,
   /** GET /api/batches/:id  (the batch view) */
-  detail: (id: string) => `/api/batches/${encodeURIComponent(id)}` as const,
+  detail: (id: string) => `/api/batches/${seg(id)}` as const,
   /** GET /api/queue  (dispatch mode and per-queue wait) */
   queue: () => `/api/queue` as const,
 } as const
@@ -141,7 +153,7 @@ export const inboxRoutes = {
 
 export const wsRoutes = {
   /** WS /ws/run/:id/stream  (live pipeline event stream; passed to getWebSocketUrl) */
-  runStream: (id: string) => `/ws/run/${id}/stream` as const,
+  runStream: (id: string) => `/ws/run/${seg(id)}/stream` as const,
 } as const
 
 /** Aggregate of every route group, for ergonomic single-import access. */

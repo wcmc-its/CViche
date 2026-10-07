@@ -30,11 +30,9 @@ class RunState(StrEnum):
     already names the pydantic response model for a run's status field, and
     the two would collide.
 
-    Used on every line the #701 queue rework adds or changes (the flip/claim/
-    fail transitions in ``app.services.run_service``). Existing status string
-    literals elsewhere in the codebase are intentionally left as they are (no
-    drive-by conversions, CODING STANDARDS section 8.1); the remaining sweep
-    is tracked in issue #701.
+    Every ``Run.status`` comparison and assignment in the backend uses it
+    (#346). ``Step.status`` shares some values ("running", "complete") but is
+    a separate vocabulary and does not.
     """
     CREATED = "created"
     QUEUED = "queued"
@@ -50,9 +48,9 @@ class UserRole(StrEnum):
 
     STAFF is read-only elevated access: every run
     and its pipeline detail, but no cost and no admin writes (see
-    ``can_view_all_runs``, after ``User``). Used on the lines the staff role adds or
-    changes; existing "admin"/"user" literals elsewhere are left as they are
-    (no drive-by conversions, CODING STANDARDS section 8.1).
+    ``can_view_all_runs``, after ``User``). Every role comparison in the
+    backend uses it (#346); ``schemas.AdminUserUpdate`` keeps a pydantic
+    Literal, which a test pins inside this set.
     """
     USER = "user"
     STAFF = "staff"
@@ -63,9 +61,9 @@ class UserStatus(StrEnum):
     """Canonical ``users.status`` vocabulary, same pattern as ``UserRole``.
 
     Only ACTIVE may hold a session: get_current_user and both login paths
-    refuse anything else. Used where #1496 changed or added a status check;
-    the remaining "active"/"disabled" literals elsewhere are left as they are
-    (no drive-by conversions, CODING STANDARDS section 8.1).
+    refuse anything else. Every status comparison in the backend uses it
+    (#346); ``schemas.AdminUserUpdate`` keeps a pydantic Literal, which a test
+    pins inside this set.
     """
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -207,10 +205,10 @@ class Run(Base):
     # already durable.
     FILENAME_MAX_LENGTH = filename.type.length
     file_type = Column(String(20), nullable=False)  # "docx" or "pdf"
-    status = Column(String(20), nullable=False, index=True)  # "running", "complete", "failed", "paused"
+    status = Column(String(20), nullable=False, index=True)  # a RunState value
     # Statuses a run does not transition past. Single definition (CODING
     # STANDARDS §1.5) -- app.services.notifications imports this.
-    TERMINAL_RUN_STATUSES = frozenset({"complete", "failed", "cancelled"})
+    TERMINAL_RUN_STATUSES = frozenset({RunState.COMPLETE, RunState.FAILED, RunState.CANCELLED})
     started_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
     completed_at = Column(DateTime)
     # When this run last entered "queued" via run_service.flip_to_queued
@@ -276,6 +274,11 @@ class Run(Base):
     # executing image wins), not at upload. NULL for runs that predate the
     # column or when the image was built without a tag.
     image_tag = Column(String(128), nullable=True)
+    # Every image the run executed on, oldest first, as a JSON array of tags
+    # (#1239): a tag is appended when the run moves to "running" on an image
+    # other than the last one recorded, so a run resumed across a deploy shows
+    # both. NULL until a tagged image claims the run.
+    image_tag_history = Column(Text, nullable=True)
     # Whether the uploaded CV was written in the WCM faculty CV template ("wcm")
     # or another format ("other"), and the count of template signals behind it
     # (app.services.input_format). NULL when undetermined: runs that predate the

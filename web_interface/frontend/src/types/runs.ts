@@ -8,10 +8,22 @@ export interface StepSummary {
   output_files?: string
 }
 
+/** The `runs.status` vocabulary, mirroring the backend's `app.models.RunState`
+ *  (#298). Named RunState, not RunStatus, for the same reason the backend
+ *  does: `RunStatus` already names the run-status response below. */
+export type RunState =
+  | 'created'
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'complete'
+  | 'failed'
+  | 'cancelled'
+
 export interface RunStatus {
   run_id: string
   filename: string
-  status: string
+  status: RunState
   /** When the run was created (ISO, from GET /run/{id}/status). */
   started_at?: string
   total_cost: number | null

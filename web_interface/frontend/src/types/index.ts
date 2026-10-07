@@ -1,6 +1,6 @@
 export type { User, QuotaInfo, ConsentStatus, AuthConfig } from './auth'
 export type {
-  StepSummary, RunStatus, RunSummary, FeedbackStatus, PaginatedRuns,
+  StepSummary, RunState, RunStatus, RunSummary, FeedbackStatus, PaginatedRuns,
   RunBy, RunListScope, RunListParams, FilterCount, RunByOption, RunFilterOptions,
   QualityBand, DoctorSeverity, QualityDimension, QualityGate, ScoreRowWording, DoctorFindingGroup, DoctorFindingInstance, RunDoctorReport,
   RunQualityReport, RunReviewNote, RunFeedbackSummary, FeedbackReviewer, RunFeedbackFilter,

@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import redis
+import yaml
 from docx import Document
 from sqlalchemy.orm import object_session
 
@@ -529,6 +530,19 @@ def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
 
 # --- #1  per-pod concurrency admission control ------------------------------
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CAP_ENV_VAR = "CVICHE_MAX_CONCURRENT_RUNS"
+
+
+def _overlay_max_concurrent_runs(overlay: str) -> int:
+    """The CVICHE_MAX_CONCURRENT_RUNS value a k8s overlay's backend patch sets."""
+    patch_path = _REPO_ROOT / "k8s" / "overlays" / overlay / "backend-patch.yaml"
+    deployment = yaml.safe_load(patch_path.read_text())
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    backend = next(c for c in containers if c["name"] == "backend")
+    return int(next(e["value"] for e in backend["env"] if e["name"] == _CAP_ENV_VAR))
+
+
 class TestConcurrencyModule:
     """The process-global slot counter that bounds concurrent in-process runs."""
 
@@ -558,6 +572,16 @@ class TestConcurrencyModule:
     def test_nonpositive_cap_falls_back_to_default(self, monkeypatch):
         # A 0/negative cap would wedge the pod; we treat it as the default.
         monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "0")
+        assert concurrency.get_max_concurrent_runs() == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
+
+    @pytest.mark.parametrize("overlay", ["dev", "prod"])
+    def test_default_cap_matches_each_k8s_overlay(self, overlay):
+        # #527: the default was 2 while both overlays set 3, so a pod whose env
+        # var went missing would silently run at two-thirds capacity.
+        assert _overlay_max_concurrent_runs(overlay) == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
+
+    def test_unset_env_uses_default_cap(self, monkeypatch):
+        monkeypatch.delenv("CVICHE_MAX_CONCURRENT_RUNS", raising=False)
         assert concurrency.get_max_concurrent_runs() == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
 
     def test_release_never_goes_negative(self):

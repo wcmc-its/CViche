@@ -27,6 +27,7 @@ from app.models import (
     InboundMessageStatus,
     InboundRejectReason,
     User,
+    UserStatus,
 )
 from app.services import ed_access, mailer
 from app.services.batch_service import MAX_BATCH_FILES
@@ -110,7 +111,7 @@ def _screen_sender(db: Session, parsed: ParsedMessage) -> Verdict:
         return Verdict(None, InboundRejectReason.UNKNOWN_USER)
     if not user.consent_version:
         return Verdict(user, InboundRejectReason.NEVER_CONSENTED)
-    if user.status != "active":
+    if user.status != UserStatus.ACTIVE:
         return Verdict(user, InboundRejectReason.USER_DISABLED)
     if not _passes_access_check(db, user):
         return Verdict(user, InboundRejectReason.NOT_IN_ACCESS_GROUP)
