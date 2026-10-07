@@ -57,6 +57,19 @@ _EMPTY_SECTION_STATUS_RE = re.compile(
 _ACTIVE_HEADING_RE = re.compile(r'\b(?:current|active|ongoing|present)\b')
 # A heading that files its grants as ended without the word "completed".
 _PAST_HEADING_RE = re.compile(r'\b(?:past|previous(?:ly)?|prior)\b')
+# A heading that lists applications without a pending or not-funded word:
+# "GRANTS APPLIED", "Grants Applied For", "Grant Applications" (#1343, ZDCXIV:
+# fifteen applications 3b coded M2B rendered under Past (Completed) Funding as
+# Total award). "Applied" counts only at the end of the heading or before
+# "for", so the adjective in "Applied Research Grants" names no bucket.
+_APPLICATION_HEADING_RE = re.compile(
+    r'\bapplications?\b|\bapplied\b(?=\s*(?:for\b|[^\w\s]|$))')
+# A word that files a heading's grants as awarded, which keeps an application
+# heading from moving them: "Funded Grant Applications", "Applications Awarded",
+# "Current Applications".
+_AWARDED_HEADING_RE = re.compile(
+    r'\b(?:funded|awarded|current|active|ongoing|present|past|previous(?:ly)?|prior'
+    r'|completed?)\b')
 
 # Stage 5d usually puts one citation per line when a block holds several, but in
 # one corpus run (#1237) it joined ten conference presentations on one line with
@@ -192,7 +205,9 @@ def grant_heading_rebucket_target(
     `research_support.explicit_status_target` decides which wins when both name
     a bucket. Same vocabulary as
     `grant_status_rebucket_target`; (None, None) when the heading is silent or
-    names more than one bucket ("Current and Pending Support").
+    names more than one bucket ("Current and Pending Support"). A heading that
+    lists applications and names no award ("GRANTS APPLIED") is Pending too
+    (`grant_heading_files_applications`, #1343).
     """
     heading = ' > '.join(hierarchy or [])
     lowered = heading.lower()
@@ -203,7 +218,19 @@ def grant_heading_rebucket_target(
         return None, None
     if _PENDING_STATUS_RE.search(lowered) and _COMPLETED_STATUS_RE.search(lowered):
         return None, None
-    return grant_status_rebucket_target(heading, label='Section heading')
+    target = grant_status_rebucket_target(heading, label='Section heading')
+    if target[0] or not grant_heading_files_applications(lowered):
+        return target
+    return 'M2C', f"Reclassified to Pending (M2C): section heading '{heading}' lists applications"
+
+
+def grant_heading_files_applications(lowered_heading: str) -> bool:
+    """Whether a lower-cased heading lists grant applications and files none
+    of them as awarded (#1343). Stage 6 has no award signal of its own: an
+    M2A/M2B schema's `total_funding` is filled for an application too, so the
+    heading is what tells an old application from an ended award."""
+    return (bool(_APPLICATION_HEADING_RE.search(lowered_heading))
+            and not _AWARDED_HEADING_RE.search(lowered_heading))
 
 
 def grant_heading_is_past(hierarchy: list[str]) -> bool:
