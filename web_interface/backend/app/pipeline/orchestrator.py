@@ -32,7 +32,7 @@ PARENT_DIR = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(PARENT_DIR))
 sys.path.insert(0, str(PARENT_DIR / 'src'))
 
-from app.config_loader import get_config
+from app.config_loader import current_image_tag, get_config
 from app.models import Log, Run, RunState, Step
 from app.pipeline.event_emitter import event_emitter
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
@@ -250,6 +250,10 @@ USER_CANCEL_MESSAGE = "Cancelled by user"
 #: The research-summary stage: the one stage whose failure does not fail the
 #: run (#1174, `_run_research_summary_stage`).
 RESEARCH_SUMMARY_STAGE_ID = "4.5"
+
+# The doctor report's record of the image that ran its lints (#1239); null when
+# the image was built without a tag.
+DOCTOR_IMAGE_TAG_KEY = "image_tag"
 
 
 class CancelledException(Exception):
@@ -1253,6 +1257,7 @@ class PipelineOrchestrator:
             self.pipeline_output_dir / 'stage_7_doctor'
             / f'{self.document_uid}_doctor.json'
         )
+        payload[DOCTOR_IMAGE_TAG_KEY] = current_image_tag()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, indent=2))
         return payload, out_path
