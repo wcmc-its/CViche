@@ -32,7 +32,13 @@ from pathlib import Path
 from typing import NamedTuple, TypedDict
 
 from unified_pipeline.run_doctor import (
-    FINDING_STATUSES, KNOWN_LINTS, SEVERITY_ORDER, STATUS_SKIPPED, _uid_owns, run_doctor)
+    FINDING_STATUSES,
+    KNOWN_LINTS,
+    SEVERITY_ORDER,
+    STATUS_SKIPPED,
+    _uid_owns,
+    run_doctor,
+)
 
 logger = logging.getLogger(__name__)
 

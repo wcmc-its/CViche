@@ -29,7 +29,9 @@ import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline import stage_1b_hierarchy_mapper as stage1b  # noqa: E402
-from unified_pipeline.core.output_manager import OutputManager as _RealOutputManager  # noqa: E402
+from unified_pipeline.core.output_manager import (
+    OutputManager as _RealOutputManager,  # noqa: E402
+)
 from unified_pipeline.stage_1b_hierarchy_mapper import (  # noqa: E402
     compute_section_boundaries,
     drop_headers_absent_from_document,

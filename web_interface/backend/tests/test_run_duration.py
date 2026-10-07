@@ -67,8 +67,8 @@ def test_not_started_returns_none():
 def test_admin_stats_includes_duration_aggregates(client, db):
     """avg/p95 conversion time ride along on /admin/stats: persisted duration
     preferred, wall-clock fallback for older rows, non-complete runs excluded."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -103,8 +103,8 @@ def test_admin_stats_includes_duration_aggregates(client, db):
 
 def test_admin_stats_duration_aggregates_null_when_no_completed_runs(client, db):
     """No completed runs -> aggregates are null, not a 500."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -121,8 +121,8 @@ def test_admin_stats_duration_aggregates_null_when_no_completed_runs(client, db)
 def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(client, db):
     """step_avg_seconds averages Step.duration_seconds per stage over completed
     runs only, ordered by step_number; failed runs and null durations are excluded."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run, Step
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -173,8 +173,8 @@ def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(clie
 
 def test_admin_stats_step_avg_seconds_empty_without_completed_runs(client, db):
     """No completed runs -> step_avg_seconds is an empty list, not null or a 500."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -187,8 +187,8 @@ def test_admin_stats_step_avg_seconds_empty_without_completed_runs(client, db):
 
 
 def _admin_stats(client):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -241,8 +241,8 @@ def test_admin_stats_totals_are_zero_on_an_empty_database(client, db):
 def test_admin_runs_table_prefers_persisted_duration(client, db):
     """The admin submissions table's Duration column uses the persisted value,
     falling back to wall-clock for older rows -- consistent with the run API."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)

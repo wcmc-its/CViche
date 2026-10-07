@@ -5,11 +5,11 @@ run owner/admin, named as it was uploaded.
 from urllib.parse import quote
 
 import pytest
+from sqlalchemy.orm import object_session
 
 import app.api.steps as steps_mod
-from app.models import User, Run
-from app.auth import create_session_cookie, COOKIE_NAME
-from sqlalchemy.orm import object_session
+from app.auth import COOKIE_NAME, create_session_cookie
+from app.models import Run, User
 
 _ORIGINAL = "Eulho Jung_CV_JUN_2026_USU.docx"
 

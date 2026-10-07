@@ -8,8 +8,8 @@ boto3 is only imported when this module is loaded, so it is not required
 for local-only development.
 """
 
-import os
 import logging
+import os
 from urllib.parse import quote
 
 from app.storage.base import (

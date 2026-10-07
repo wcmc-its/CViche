@@ -50,9 +50,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_4_field_extractor as stage4_facade  # noqa: E402
-from unified_pipeline.stage6.sorting.document_order import element_idx_sort_key  # noqa: E402
+from unified_pipeline.stage6.sorting.document_order import (
+    element_idx_sort_key,  # noqa: E402
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # =============================================================================
 # document_order.element_idx_sort_key

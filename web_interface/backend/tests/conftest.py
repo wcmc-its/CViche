@@ -12,13 +12,14 @@ os.environ["PROMPT_LOG_DIR"] = _PROMPT_LOG_TMPDIR.name
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
-import pytest
 import json
 from pathlib import Path
 from unittest.mock import patch
-from sqlalchemy import create_engine, StaticPool
-from sqlalchemy.orm import sessionmaker
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import StaticPool, create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.models import SystemConfig

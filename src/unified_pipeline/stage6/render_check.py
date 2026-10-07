@@ -33,7 +33,6 @@ from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
 
 from .normalization import _squash
 
-
 # The retired-code map lives in core so stage 3b and this module share one
 # list (#291 added the M4 clinical-trial codes to it).
 

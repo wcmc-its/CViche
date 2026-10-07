@@ -21,18 +21,39 @@ from sqlalchemy.orm import Session
 
 from app.errors import not_found
 from app.models import (
-    InboundFile, InboundFileStatus, InboundMessage, InboundMessageStatus, InboundRejectReason, User,
+    InboundFile,
+    InboundFileStatus,
+    InboundMessage,
+    InboundMessageStatus,
+    InboundRejectReason,
+    User,
 )
 from app.services import ed_access, mailer
-from app.services.inbound_autorun import AutoRunResult, auto_run
 from app.services.batch_service import MAX_BATCH_FILES
+from app.services.inbound_autorun import AutoRunResult, auto_run
 from app.services.inbound_mail import (
-    Attachment, AttachmentReject, ParsedMessage, UnparseableMessage, is_wcm_address, parse_message,
+    Attachment,
+    AttachmentReject,
+    ParsedMessage,
+    UnparseableMessage,
+    is_wcm_address,
+    parse_message,
+)
+from app.services.pdf_sandbox import (
+    EncryptedPdfError,
+    PdfBusyError,
+    PdfTooComplexError,
+    UnreadablePdfError,
+    read_pdf,
 )
 from app.services.upload_validation import (
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, _extract_text, _validate_docx_magic, docx_active_content, is_mostly_scanned,
+    MIN_EXTRACTED_CHARS,
+    PDF_EXTENSION,
+    _extract_text,
+    _validate_docx_magic,
+    docx_active_content,
+    is_mostly_scanned,
 )
-from app.services.pdf_sandbox import EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError, read_pdf
 from app.storage.base import RunStorage
 
 logger = logging.getLogger(__name__)

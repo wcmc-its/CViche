@@ -19,18 +19,18 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-12-02
 """
 
-import os
-import sys
 import json
 import logging
+import os
 import re
+import sys
 from collections.abc import Mapping
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import call_llm
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 
 logger = logging.getLogger(__name__)

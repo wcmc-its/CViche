@@ -17,20 +17,19 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
-import logging
 import functools
-import os
-import sys
 import json
-import traceback
-from types import MappingProxyType
+import logging
+import os
 import re
-from collections.abc import Mapping, Sequence
-from pathlib import Path
-from typing import Any, Literal, NamedTuple
-from collections.abc import Callable
-from datetime import datetime
+import sys
+import traceback
 from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Literal, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +42,50 @@ RECLASSIFY_FAILURE_STAT = 'segment_reclassification_failures'
 try:
     from docx import Document
     from docx.document import Document as DocumentType
-    from docx.shared import Pt, RGBColor, Inches, Twips
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import nsmap, qn
+    from docx.parts.document import DocumentPart
+    from docx.shared import Inches, Pt, RGBColor, Twips
     from docx.table import Table
     from docx.text.paragraph import Paragraph
-    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
-    from docx.oxml.ns import qn, nsmap
-    from docx.oxml import OxmlElement
-    from docx.parts.document import DocumentPart
     from lxml import etree
 except ImportError:
     logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
-from unified_pipeline.llm_client import call_llm
-from unified_pipeline.llm_client import LlmUsage
-from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
+from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
+    is_source_boilerplate,
+    is_template_instruction,
+)
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.stage4.extraction import (
+    UnextractedContentReport,
+    calculate_unextracted_content,
+)
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+from unified_pipeline.stage6.dedup import (  # noqa: F401
+    _STOP_WORDS,
+    DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
+    DEDUP_FUSED_BLOB_RECORD_LINES,
+    _drop_is_safe,
+    _entry_signature_words,
+    _entry_title_words,
+    _significant_words,
+    deduplicate_entries,
+    recovered_row_already_rendered,
+)
+from unified_pipeline.stage6.fan_out import (
+    _RENDERED_FIELDS,
+    fan_out_multi_record_entries,
+    record_scope,
+    record_text,
+)
+
 # Every name below is re-exported from this module by being imported here: it is
 # the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
 # run_full_pipeline.py and the backend orchestrator.py are parallel drivers over
@@ -68,8 +94,8 @@ from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # `noqa: F401` is deliberate -- several of these have no caller left in this file
 # and exist purely to keep that surface intact.
 from unified_pipeline.stage6.formatting import (  # noqa: F401
-    DATE_FORMATS,
     _MONTH_NAMES,
+    DATE_FORMATS,
     _clear_table_data,
     _format_citation,
     _format_currency,
@@ -84,6 +110,33 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     format_date_for_section,
     format_date_range,
     normalize_iso_dates_in_text,
+)
+from unified_pipeline.stage6.normalization import (  # noqa: F401
+    _ALL_PHONE_SLOT_KEYS,
+    _CELL_PHONE_KEYS,
+    _HOME_ADDRESS_KEYS,
+    _HOME_PHONE_KEYS,
+    _OFFICE_ADDRESS_KEYS,
+    _OFFICE_PHONE_KEYS,
+    _PII_FRAGMENT_SPLIT_RE,
+    _TAXONOMY_CODE_PREFIX,
+    _address_cell_text,
+    _clean_inline_tabs,
+    _committee_cell_text,
+    _deduplicate_repeated_content,
+    _from_pii_fragment,
+    _get_cleaned_institution_name,
+    _labels_its_own_address_slots,
+    _labels_its_own_phone_slots,
+    _normalize_author_names,
+    _phone_cell_text,
+    _pii_fragments,
+    _squash,
+    _strip_markdown_for_word,
+    _strip_org_tail,
+    _strip_taxonomy_code,
+    grant_status_rebucket_target,
+    split_fused_citation_entries,
 )
 from unified_pipeline.stage6.parsing import (  # noqa: F401
     _MONTH_NAME_TO_NUM,
@@ -100,69 +153,29 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     _parse_date_components,
     _parse_multi_membership_entry,
 )
-from unified_pipeline.stage6.resolution import (  # noqa: F401
-    _get_cv_owner_name,
-    _get_institution_location,
-    _recover_institution_from_nearby_entries,
-)
-from unified_pipeline.stage6.normalization import (  # noqa: F401
-    _CELL_PHONE_KEYS,
-    _OFFICE_PHONE_KEYS,
-    _HOME_PHONE_KEYS,
-    _ALL_PHONE_SLOT_KEYS,
-    _labels_its_own_phone_slots,
-    _phone_cell_text,
-    _PII_FRAGMENT_SPLIT_RE,
-    _squash,
-    _pii_fragments,
-    _from_pii_fragment,
-    _HOME_ADDRESS_KEYS,
-    _OFFICE_ADDRESS_KEYS,
-    _TAXONOMY_CODE_PREFIX,
-    _address_cell_text,
-    _clean_inline_tabs,
-    _committee_cell_text,
-    _deduplicate_repeated_content,
-    _get_cleaned_institution_name,
-    _labels_its_own_address_slots,
-    _normalize_author_names,
-    _strip_markdown_for_word,
-    _strip_org_tail,
-    _strip_taxonomy_code,
-    grant_status_rebucket_target,
-    split_fused_citation_entries,
-)
-from unified_pipeline.stage6.sorting import (  # noqa: F401
-    element_idx_sort_key,
-    extract_sort_date,
-    sort_entries_reverse_chronological,
-)
-from unified_pipeline.stage6.dedup import (  # noqa: F401
-    DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
-    DEDUP_FUSED_BLOB_RECORD_LINES,
-    _STOP_WORDS,
-    _drop_is_safe,
-    _entry_signature_words,
-    _entry_title_words,
-    _significant_words,
-    deduplicate_entries,
-    recovered_row_already_rendered,
+from unified_pipeline.stage6.pii_pass import (  # noqa: F401
+    PII_REDACTED_NOTICE,
+    WITHHELD_COMMENT_AUTHOR,
+    PiiPassResult,
+    relocate_withheld,
+    run_pii_pass,
+    withheld_comment_text,
 )
 from unified_pipeline.stage6.record_dedup import deduplicate_record_groups
 from unified_pipeline.stage6.render_check import (  # noqa: F401
-    RECORD_DATE_LINE_MIN_CHARS,
-    RENDER_PIECE_MIN_CHARS,
-    RENDER_PIECE_WINDOW,
-    RENDER_TOKEN_MIN_COUNT,
-    RECLASSIFY_MIN_TOKEN_COVERAGE,
-    RENDER_TOKEN_OVERLAP,
-    RETIRED_TAXONOMY_CODES,
-    UNRENDERED_MIN_RECORD_LINES,
     _COLUMN_HEADER_WORDS,
     _IDENTIFYING_FIELDS,
     _MONTH_WORDS,
     _RECORD_DATE_PREFIX_RE,
     _RENDER_TOKEN_RE,
+    RECLASSIFY_MIN_TOKEN_COVERAGE,
+    RECORD_DATE_LINE_MIN_CHARS,
+    RENDER_PIECE_MIN_CHARS,
+    RENDER_PIECE_WINDOW,
+    RENDER_TOKEN_MIN_COUNT,
+    RENDER_TOKEN_OVERLAP,
+    RETIRED_TAXONOMY_CODES,
+    UNRENDERED_MIN_RECORD_LINES,
     _entry_pieces,
     _is_column_header_row,
     _looks_like_record,
@@ -177,21 +190,10 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     segments_cover_source,
     t_recovery_lines,
 )
-from unified_pipeline.stage4.extraction import UnextractedContentReport, calculate_unextracted_content
-from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
-from unified_pipeline.stage6.fan_out import (
-    _RENDERED_FIELDS,
-    fan_out_multi_record_entries,
-    record_scope,
-    record_text,
-)
-from unified_pipeline.stage6.pii_pass import (  # noqa: F401
-    PII_REDACTED_NOTICE,
-    WITHHELD_COMMENT_AUTHOR,
-    PiiPassResult,
-    relocate_withheld,
-    run_pii_pass,
-    withheld_comment_text,
+from unified_pipeline.stage6.resolution import (  # noqa: F401
+    _get_cv_owner_name,
+    _get_institution_location,
+    _recover_institution_from_nearby_entries,
 )
 from unified_pipeline.stage6.sections import (  # noqa: F401
     AdministrativeActivitiesSection,
@@ -212,16 +214,18 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     PositionsSection,
     PostdocTrainingSection,
     PresentationsSection,
+    ResearcherProfilesSection,
     ResearchSummarySection,
     ResearchSupportSection,
-    ResearcherProfilesSection,
     ServiceSection,
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
-    APPENDIX_MAX_CHARS,
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
+)
+from unified_pipeline.stage6.sections.appendix import (
     APPENDIX_INTRO_TEXT,
+    APPENDIX_MAX_CHARS,
     CODE_ORIGIN_ENTRY,
     CODE_ORIGIN_RECONSIDER,
     OwnerTokens,
@@ -234,17 +238,12 @@ from unified_pipeline.stage6.sections.appendix import (
     is_t_validation_recoded_m1,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
-from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
-
-from unified_pipeline.core.template_boilerplate import (
-    is_foreign_template_instruction,
-    is_source_boilerplate,
-    is_template_instruction,
+from unified_pipeline.stage6.sorting import (  # noqa: F401
+    element_idx_sort_key,
+    extract_sort_date,
+    sort_entries_reverse_chronological,
 )
-
-
-
-
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 
 # Keys observed in structured stage-4 `phone` values: cell, office, fax. Stage 4
 # extracts with no schema, so the vocabulary is unbounded -- match on the key
@@ -4005,8 +4004,8 @@ Now analyze the text above:"""
 
         try:
             from docx.opc.constants import CONTENT_TYPE as CT
-            from docx.opc.part import Part
             from docx.opc.packuri import PackURI
+            from docx.opc.part import Part
 
             # Create comments XML content
             comments_xml = self._create_comments_xml()

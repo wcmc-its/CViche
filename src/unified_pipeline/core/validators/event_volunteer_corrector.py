@@ -29,7 +29,6 @@ import re
 
 from .taxonomy_codes import APPENDIX_CODE
 
-
 # The code this corrector reviews: P, internal committees and admin roles.
 INSTITUTIONAL_ADMIN_CODE = 'P'
 

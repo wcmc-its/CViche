@@ -40,7 +40,6 @@ from .hierarchy_mismatch_flagger import (
 )
 from .taxonomy_codes import APPENDIX_CODE
 
-
 # One of these alone is funding evidence. Funders that are also common
 # employers (CDC, DOD, VA) are left out: an appointment there is not a grant. Acronyms and roles are matched
 # case-sensitively ((?-i:...)): lower-case "pi" or "coi" is not a role.

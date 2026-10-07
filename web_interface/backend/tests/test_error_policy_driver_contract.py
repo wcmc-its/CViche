@@ -27,8 +27,8 @@ import pytest
 def _orchestrator(monkeypatch, tmp_path, db, run_id):
     """A run-to-completion orchestrator with the real pipeline stubbed out,
     mirroring test_run_doctor_integration._orchestrator."""
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id=run_id, filename="cv.docx", file_type="docx", status="running",
@@ -122,8 +122,8 @@ def test_stage_6_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
     directory stage 6's SAMPLE_CV_DIR auto-discovery scans, under the same
     uid, from the same CWD. Pass it explicitly, like stages 1b/2/4 do.
     """
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     captured = {}
 

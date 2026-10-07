@@ -17,7 +17,7 @@ fatal, leaving no orphan run -- parity with ``/upload``).
 
 import asyncio
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -103,6 +103,7 @@ def test_restart_of_a_pdf_run_reconverts(db, tmp_path, monkeypatch, cv_pdf):
     file_type "pdf"), so the new run's orchestrator converts it afresh into
     its own docx copy -- no docx from the old run is reused."""
     from docx import Document
+
     from app.api import runs as runs_api
     from app.models import Run
     from app.pipeline import orchestrator as orch

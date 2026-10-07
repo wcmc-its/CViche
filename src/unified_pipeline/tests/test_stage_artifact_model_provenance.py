@@ -73,6 +73,7 @@ def test_5c_usage_carries_the_model_the_api_returned(monkeypatch):
 
 def test_5b_lookup_returns_the_model_the_api_returned(monkeypatch):
     from unified_pipeline import stage_5b_institution_enrichment as s5b
+
     # The #523 split moved lookup_institutions_llm (and its call_llm binding)
     # into stage5b/lookup.py; patching the old facade module would patch a
     # name the moved function no longer reads.
@@ -130,11 +131,12 @@ def test_stage_5_model_parameters_were_removed_not_deprioritized():
     so no caller can believe it is selecting a model. The model comes only
     from config/llm_config.yaml via call_llm(stage=...)."""
     import inspect
-    from unified_pipeline import (stage_5b_institution_enrichment as s5b,
-                                  stage_5c_teaching_formatter as s5c,
-                                  stage_5d_citation_formatter as s5d)
-    from unified_pipeline.stage5b import lookup
+
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline import stage_5c_teaching_formatter as s5c
+    from unified_pipeline import stage_5d_citation_formatter as s5d
     from unified_pipeline.core import candidate_surfacer
+    from unified_pipeline.stage5b import lookup
     for fn in (s5b.run_stage5b, s5c.run_stage_5c, s5d.run_stage_5d,
                lookup.lookup_institutions_llm,
                candidate_surfacer.surface_candidates_for_subsection):
@@ -149,6 +151,7 @@ def test_stage_3b_model_parameter_was_removed_not_deprioritized():
     precisely because callers believe they're selecting a model when they
     aren't). Guards against it quietly coming back as dead weight."""
     import inspect
+
     from unified_pipeline import stage_3b_entry_classifier as s3b
     assert "model" not in inspect.signature(s3b.run_stage_3b).parameters
 

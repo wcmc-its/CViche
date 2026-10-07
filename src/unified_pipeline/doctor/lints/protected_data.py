@@ -26,6 +26,7 @@ scorer cannot disagree about a document.
 import re
 
 from unified_pipeline.stage6.normalization.pii import (
+    _MONTH_NAMES,
     CAT_CHILDREN,
     CAT_DATE_OF_BIRTH,
     CAT_DEA,
@@ -38,7 +39,6 @@ from unified_pipeline.stage6.normalization.pii import (
     CAT_TAX_ID,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
-    _MONTH_NAMES,
     _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE

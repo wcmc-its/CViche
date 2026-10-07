@@ -63,7 +63,10 @@ from typing import Any
 from unified_pipeline.core.text_norm import norm
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 from unified_pipeline.stage6.formatting.dates import format_date_for_section
-from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES, _MONTH_NAME_TO_NUM
+from unified_pipeline.stage6.parsing.dates import (
+    _MONTH_NAME_TO_NUM,
+    CURRENT_DATE_VALUES,
+)
 
 # Provenance key written on every child. Shows which list the record came from
 # and where in it: `{'key': 'awards', 'index': 1, 'count': 3}`.

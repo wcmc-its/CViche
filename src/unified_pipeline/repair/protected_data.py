@@ -61,7 +61,10 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.normalization.records import _is_citation_shaped
-from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE, WITHHELD_COMMENT_AUTHOR
+from unified_pipeline.stage6.pii_pass import (
+    PII_REDACTED_NOTICE,
+    WITHHELD_COMMENT_AUTHOR,
+)
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentType

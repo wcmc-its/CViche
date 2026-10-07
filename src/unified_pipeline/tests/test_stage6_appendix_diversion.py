@@ -60,6 +60,7 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     CODE_ORIGIN_RECONSIDER,
     REASON_NO_RENDER_ROUTE,
@@ -78,7 +79,6 @@ from unified_pipeline.stage6.sections.passthrough import (  # noqa: E402
     PASSTHROUGH_CODES,
     PassthroughSection,
 )
-from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
     WCMTemplateGenerator,
@@ -893,7 +893,9 @@ def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendere
     # records the generated summary left out. Without a summary, every M1
     # entry is there because none rendered.
     from unified_pipeline.stage6.sections.appendix import (
-        REASON_M1_RECORD_NOT_IN_SUMMARY, REASON_T_VALIDATION_RECODED)
+        REASON_M1_RECORD_NOT_IN_SUMMARY,
+        REASON_T_VALIDATION_RECODED,
+    )
     written = [{"taxonomy_code": "M1"}, {"taxonomy_code": "M1"},
                {"taxonomy_code": "M1", "t_validation_applied": True},
                {"taxonomy_code": "H"}]
@@ -916,7 +918,9 @@ def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendere
 
 def test_m1_record_not_in_summary_singular_count_is_grammatical():
     # Both pronouns in the E27 message agree with a count of one.
-    from unified_pipeline.stage6.sections.appendix import REASON_M1_RECORD_NOT_IN_SUMMARY
+    from unified_pipeline.stage6.sections.appendix import (
+        REASON_M1_RECORD_NOT_IN_SUMMARY,
+    )
     [w] = build_appendix_diversion_warnings([{"taxonomy_code": "M1"}], [], RENDER_ROUTED_CODES,
                                             PASSTHROUGH_CODES, summary_rendered=True)
     assert (w["reason"], w["count"]) == (REASON_M1_RECORD_NOT_IN_SUMMARY, 1)

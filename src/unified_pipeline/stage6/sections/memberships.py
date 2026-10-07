@@ -85,6 +85,8 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from unified_pipeline.core.render_check import entry_lines
+
 from ..formatting import (
     _clear_table_data,
     _set_cell_vertical_alignment,
@@ -93,7 +95,6 @@ from ..formatting import (
 )
 from ..parsing import _is_table_header_entry, _parse_multi_membership_entry
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
 
 logger = logging.getLogger(__name__)
 

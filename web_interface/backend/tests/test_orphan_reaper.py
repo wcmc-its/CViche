@@ -112,8 +112,8 @@ def test_reap_dry_run_changes_nothing(db):
 # ---------------------------------------------------------------------------
 
 def _as_admin(client, fn):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
         role="admin", email="admin@example.com")
     try:
@@ -125,8 +125,8 @@ def _as_admin(client, fn):
 def _as_user(client, fn):
     """Override the underlying current-user dep so the REAL require_admin runs
     and returns 403 -- exercises the actual authorization guard."""
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         role="user", email="user@example.com")
     try:
@@ -248,6 +248,7 @@ def _child_counts(db, run_id):
 
 def test_admin_delete_complete_run_removes_only_target_and_logs_audit(client, db, caplog):
     import logging
+
     from app.audit_events import RUN_DELETED
     from app.models import Run
     user = _seed_user(db, email="Withdraw@Example.com")

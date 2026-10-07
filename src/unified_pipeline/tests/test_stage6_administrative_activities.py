@@ -35,8 +35,8 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 from unified_pipeline.stage6.formatting import format_date_range  # noqa: E402
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
 def _generator():
@@ -660,12 +660,14 @@ class TestExtractedInstitutionRendersInNameCell:
 
     def test_unchanged_name_is_not_stripped_when_nothing_is_appended(self):
         from unified_pipeline.stage6.sections.administrative_activities import (
-            _name_with_institution)
+            _name_with_institution,
+        )
         assert _name_with_institution("Panel  ", "") == "Panel  "
 
     def test_helper_never_renders_institution_without_a_name(self):
         from unified_pipeline.stage6.sections.administrative_activities import (
-            _name_with_institution)
+            _name_with_institution,
+        )
         assert _name_with_institution("", "Northgate University") == ""
 
 

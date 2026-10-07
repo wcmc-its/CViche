@@ -22,7 +22,6 @@ and stage 6; until that exists this is where the absence is absorbed.
 
 from typing import Literal
 
-
 # Keys observed carrying the committee's name in a structured stage-4
 # `committee` value, in the order they are tried. 'journal' was added for
 # #812 (service.py's `journal_name` field arriving as a list of

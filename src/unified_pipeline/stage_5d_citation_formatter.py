@@ -17,20 +17,25 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-12-02
 """
 
-import os
-import sys
 import json
 import logging
+import os
 import re
+import sys
 from collections.abc import Callable
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import NamedTuple
 
-from unified_pipeline.llm_client import call_llm
-from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.core.batch_pool import (
+    make_batches,
+    make_progress_printer,
+    map_in_order,
+    workers_from_config,
+)
 from unified_pipeline.core.text_norm import is_placeholder_title
-from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 

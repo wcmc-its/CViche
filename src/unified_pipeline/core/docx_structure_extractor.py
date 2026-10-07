@@ -14,22 +14,24 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TypedDict
+
 from docx import Document
-from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.xmlchemy import BaseOxmlElement
-from docx.oxml.table import CT_Tbl
-from docx.table import _Cell, _Row, Table
+from docx.shared import Pt, RGBColor
+from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
-from unified_pipeline.stage6.render_check import _is_column_header_row
+
 from unified_pipeline.stage6.normalization.pii import (
     PRE_LLM_PLACEHOLDER,
     pre_llm_bare_label_category,
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
+from unified_pipeline.stage6.render_check import _is_column_header_row
 
 logger = logging.getLogger(__name__)
 

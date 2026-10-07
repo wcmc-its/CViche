@@ -9,37 +9,43 @@ Input: Stage 1b hierarchy JSON + Word document
 Output: JSON with extracted entries including full text and hierarchy context
 """
 
-import os
-import sys
+import bisect
 import json
 import logging
-import time
-import bisect
+import os
 import re
+import sys
+import time
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from collections.abc import Callable
 from typing import NamedTuple
+
 from docx import Document
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from unified_pipeline.llm_client import call_llm
-from unified_pipeline.llm.retry import LLMOutageError
-from unified_pipeline.core.batch_pool import make_progress_printer, map_in_order, workers_from_config
-from core.output_manager import OutputManager
 from core.docx_structure_extractor import (
     extract_docx_structure,
     extract_unified_elements,
     join_row_cells,
     row_cell_texts,
 )
+from core.output_manager import OutputManager
 from core.template_boilerplate import (
     is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
 )
+
+from unified_pipeline.core.batch_pool import (
+    make_progress_printer,
+    map_in_order,
+    workers_from_config,
+)
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 

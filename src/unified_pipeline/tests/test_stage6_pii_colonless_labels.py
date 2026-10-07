@@ -37,7 +37,6 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.pii import _pii_fragments  # noqa: E402
 
-
 # --------------------------------------------------------------------------
 # #532's three reproduction lines, plus the shapes named in "the shape a
 # fix has to take".

@@ -8,16 +8,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import User
-from app.schemas import StepDetail, LogEntry
-from app.auth import can_view_all_runs, get_current_user, require_view_all_runs, visible_cost
+from app.auth import (
+    can_view_all_runs,
+    get_current_user,
+    require_view_all_runs,
+    visible_cost,
+)
 from app.config_loader import get_config
+from app.database import get_db
+from app.errors import bad_request, forbidden, internal_error, not_found
+from app.models import User
+from app.schemas import LogEntry, StepDetail
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.errors import bad_request, not_found, internal_error, forbidden
 
 logger = logging.getLogger(__name__)
 

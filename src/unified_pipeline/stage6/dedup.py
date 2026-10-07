@@ -19,12 +19,16 @@ from types import MappingProxyType
 
 from unified_pipeline.core.text_norm import is_placeholder_title
 
-from .fan_out import _FORMATTED_KEYS, _RENDERED_FIELDS, FANNED_OUT_FROM, LAST_STAGE4_RECORD
+from .fan_out import (
+    _FORMATTED_KEYS,
+    _RENDERED_FIELDS,
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
+)
 from .normalization import _squash
 from .normalization.publication import ResolvedPublication, resolve_publication
 from .parsing import _MONTH_NAME_TO_NUM, _dates_overlap_or_match, _parse_date_components
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
-
 
 _STOP_WORDS = frozenset({
     'a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'i', 'in',

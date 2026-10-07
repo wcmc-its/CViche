@@ -21,14 +21,13 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.core.template_boilerplate import (  # noqa: E402
+    filter_template_instructions,
     is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
     is_unanswered_prompt,
-    filter_template_instructions,
 )
-
 
 # --- Boilerplate that leaked into run B2RRRA. MUST be detected (return True). ---
 POSITIVES = [
@@ -454,7 +453,8 @@ def test_foreign_template_instruction_length_cap():
 
 def test_template_section_headers_are_normalized_and_cover_the_template():
     from unified_pipeline.core.template_boilerplate import (
-        normalize_template_text, template_section_headers,
+        normalize_template_text,
+        template_section_headers,
     )
     headers = template_section_headers()
     assert normalize_template_text("1. EMPLOYMENT STATUS:") in headers

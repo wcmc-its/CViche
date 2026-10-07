@@ -46,8 +46,8 @@ from docx.shared import Inches, Pt  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
-    _is_date_column,
     _fold_orphan_date_tail,
+    _is_date_column,
     _is_date_only_text,
     create_simplified_layout_json,
     extract_docx_structure,
@@ -62,7 +62,6 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     normalize_style_name,
     split_merged_cells_in_row,
 )
-
 
 # --------------------------------------------------------------------------
 # get_paragraph_text / get_cell_text

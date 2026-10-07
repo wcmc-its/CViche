@@ -11,9 +11,9 @@ so the emitted instant is unambiguous. These tests pin that contract: every
 datetime the API returns must carry a timezone, while Python-mode access stays a
 real ``datetime`` for internal callers.
 """
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-from app.schemas import RunSummary, AdminUser
+from app.schemas import AdminUser, RunSummary
 
 
 def _run(**overrides):

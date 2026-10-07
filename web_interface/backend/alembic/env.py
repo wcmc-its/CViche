@@ -1,14 +1,13 @@
 import os
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+import boto3
+from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from app.config_loader import get_config
 from app.database_factory import create_cviche_engine
 
-from alembic import context
-import boto3
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
@@ -23,10 +22,20 @@ if config.config_file_name is not None:
 #config.set_main_option("sqlalchemy.url", database_url)
 
 # Import models so Alembic can detect them for autogenerate
-from app.models import User, SystemConfig, Consent, Feedback, Run, Step, Log, LLMUsage, RunMetrics  # noqa: F401, E402
 #from app.database import Base  # noqa: E402
-
 from app.base_class import Base
+from app.models import (  # noqa: F401, E402
+    Consent,
+    Feedback,
+    LLMUsage,
+    Log,
+    Run,
+    RunMetrics,
+    Step,
+    SystemConfig,
+    User,
+)
+
 target_metadata = Base.metadata
 
 

@@ -25,6 +25,15 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline import quality_score as qs  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    _FUNDING_SECTIONS,
+    lint_grant_bucket,
+)
+from unified_pipeline.doctor.lints.render import lint_group_header_context  # noqa: E402
+from unified_pipeline.doctor.shared import (  # noqa: E402
+    docx_body_blocks,
+    docx_table_rows,
+)
 from unified_pipeline.quality_score import (  # noqa: E402
     CAP_ONLY_GATES,
     DIMENSIONS,
@@ -32,14 +41,17 @@ from unified_pipeline.quality_score import (  # noqa: E402
     SCORED_ARTIFACT_COUNT,
     TOTAL_WEIGHT,
     VALID_GATE_MODES,
+    FallbackServedCall,
     _goal_claimed_row_ids,
     _is_placeholder_only_row,
     _load_docx,
     _load_first,
     band_for,
     linear_interp,
+    llm_fallback_served,
     missing_evidence,
     no_output_produced,
+    prompt_log_fallback_served,
     quality_gate,
     score_broken_format,
     score_cv_owner,
@@ -53,16 +65,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_stage4_group_failures,
     score_t_bucket,
     stage4_group_failures,
-    FallbackServedCall,
-    llm_fallback_served,
-    prompt_log_fallback_served,
 )
-from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
-    _FUNDING_SECTIONS,
-    lint_grant_bucket,
-)
-from unified_pipeline.doctor.lints.render import lint_group_header_context  # noqa: E402
-from unified_pipeline.doctor.shared import docx_body_blocks, docx_table_rows  # noqa: E402
 from unified_pipeline.stage4.error_codes import (  # noqa: E402
     LLM_PROVIDER_ERROR,
     LLM_RESPONSE_INVALID,

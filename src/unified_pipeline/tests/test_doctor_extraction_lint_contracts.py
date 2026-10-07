@@ -20,9 +20,9 @@ Run:
 import itertools
 import json
 import re
-from datetime import datetime
-from collections import Counter
 import sys
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -38,65 +38,68 @@ from unified_pipeline.core.template_boilerplate import (  # noqa: E402
     is_near_template_instruction,
     is_template_instruction,
 )
+from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    _FUNDING_SECTIONS,
+    _MIN_EXACT_LEN,
+    _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
+    CLAUSE_SPAN_OUTSIDE,
     DEDUP_SAFE_CONTAINMENT,
+    DEGREE_YEAR_LEAD,
+    FIELD_EVIDENCE_MAX_VALUES,
+    FIELD_EVIDENCE_VALUE_CHARS,
+    GRANT_ORPHAN_MIN_WORDS,
+    GRANT_SOURCE_MIN_CHARS,
+    GRANT_TITLE_MIN_CHARS,
+    IMPLAUSIBLE_YEAR_CEILING,
+    IMPLAUSIBLE_YEAR_FLOOR,
     INVENTED_RECORD_LICENSURE_CODE,
     INVENTED_RECORD_MIN_VALUES,
+    MULTI_RECORD_MIN_NEW,
+    MULTI_RECORD_NEW_SHARE,
+    MULTI_RECORD_PROSE_MIN_LOWERCASE,
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
     _alphanumeric_tokens,
     _entry_rendered,
     _entry_status,
-    _FUNDING_SECTIONS,
     _is_invented_record,
-    _MIN_EXACT_LEN,
     _nonempty_field_values,
-    _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     _rendered_row_value_sets,
     _shared_entry_pieces,
+    _short_end_year,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
-    lint_invented_records,
-    lint_under_extraction,
-    lint_wrong_start_date,
-)
-from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa: E402
-from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
-    DEGREE_YEAR_LEAD,
-    FIELD_EVIDENCE_MAX_VALUES,
-    FIELD_EVIDENCE_VALUE_CHARS,
-    IMPLAUSIBLE_YEAR_CEILING,
-    IMPLAUSIBLE_YEAR_FLOOR,
-    MULTI_RECORD_MIN_NEW,
-    MULTI_RECORD_NEW_SHARE,
-    MULTI_RECORD_PROSE_MIN_LOWERCASE,
-    CLAUSE_SPAN_OUTSIDE,
-    lint_implausible_year,
-    lint_multi_record_coverage,
-    lint_offschema_fields,
-    lint_year_not_in_source,
-)
-from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
-    PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
-from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
-    GRANT_ORPHAN_MIN_WORDS,
-    GRANT_SOURCE_MIN_CHARS,
-    GRANT_TITLE_MIN_CHARS,
-    _short_end_year,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_implausible_year,
+    lint_invented_records,
+    lint_multi_record_coverage,
+    lint_offschema_fields,
     lint_record_boundary,
     lint_role_consistency,
     lint_span_count,
+    lint_under_extraction,
+    lint_wrong_start_date,
+    lint_year_not_in_source,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
-    _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack, docx_body_blocks)
+    _LINE_SENTINEL,
+    _haystacks,
+    _piece_in_template,
+    _template_haystack,
+    docx_body_blocks,
+)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
-
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    PI_NAME_LABEL,
+    PROJECT_TITLE_LABEL,
+    YOUR_ROLE_LABEL,
+)
 
 # ==========================================================================
 # D1 (T1.1) -- lint_dedup_drops returns structured findings, not strings.

@@ -64,8 +64,9 @@ import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline import stage_2_entry_extraction as stage2  # noqa: E402
-from unified_pipeline.core.output_manager import OutputManager as _RealOutputManager  # noqa: E402
-
+from unified_pipeline.core.output_manager import (
+    OutputManager as _RealOutputManager,  # noqa: E402
+)
 
 # --------------------------------------------------------------- shared helpers
 

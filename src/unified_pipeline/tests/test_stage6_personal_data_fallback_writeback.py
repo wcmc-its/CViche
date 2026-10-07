@@ -60,8 +60,13 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.pii import CAT_HOME_CONTACT  # noqa: E402
-from unified_pipeline.stage6.sections import personal_data as personal_data_module  # noqa: E402
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
+from unified_pipeline.stage6.sections import (
+    personal_data as personal_data_module,  # noqa: E402
+)
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    WCMTemplateGenerator,
+    run_stage6,
+)
 
 W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
 

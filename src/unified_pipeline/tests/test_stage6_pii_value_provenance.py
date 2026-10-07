@@ -42,7 +42,6 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     _pii_fragments,
 )
 
-
 # --------------------------------------------------------------------------
 # The behaviour the predicate exists for, which must not regress
 # --------------------------------------------------------------------------

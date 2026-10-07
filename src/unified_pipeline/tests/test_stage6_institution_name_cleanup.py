@@ -22,7 +22,6 @@ from unified_pipeline.stage6.normalization.institutions import (  # noqa: E402
     _strip_org_tail,
 )
 
-
 # --------------------------------------------------------------------------
 # item 4: _get_cleaned_institution_name
 # --------------------------------------------------------------------------

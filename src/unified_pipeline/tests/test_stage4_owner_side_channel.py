@@ -21,8 +21,8 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import unified_pipeline.stage4.owner_name as owner_name  # noqa: E402
 import unified_pipeline.stage4.extraction as extraction  # noqa: E402
+import unified_pipeline.stage4.owner_name as owner_name  # noqa: E402
 import unified_pipeline.stage_4_field_extractor as stage_4_field_extractor  # noqa: E402
 
 

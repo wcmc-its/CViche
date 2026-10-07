@@ -16,11 +16,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest
+
 from unified_pipeline.stage_3b_entry_classifier import (
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
 )
-
-import pytest
 
 # Inclusive: a function at exactly this many lines is still within budget.
 _MAX_CLASSIFY_ENTRIES_BATCH_LINES = 250
@@ -99,11 +99,11 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
     touched _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE. Exercise the real
     function (LLM call mocked out) and assert the system message it sends
     is exactly the template rendered with the same values."""
-    import unified_pipeline.stage_3b_entry_classifier as stage_3b
     # call_llm is stubbed at the module that actually calls it: the #522 split
     # moved every classification call site into stage3b/classify.py, so patching
     # the facade's copy would no longer intercept anything (#496).
     import unified_pipeline.stage3b.classify as stage3b_classify
+    import unified_pipeline.stage_3b_entry_classifier as stage_3b
 
     captured = {}
 
@@ -137,8 +137,8 @@ def test_classify_entries_batch_renders_real_taxonomy_reference(monkeypatch):
     empty string -- it would still pass even if build_taxonomy_codes_for_prompt()
     were bypassed entirely. Exercise a taxonomy with real codes and assert the
     system message contains the exact rendered taxonomy reference."""
-    import unified_pipeline.stage_3b_entry_classifier as stage_3b
     import unified_pipeline.stage3b.classify as stage3b_classify
+    import unified_pipeline.stage_3b_entry_classifier as stage_3b
 
     captured = {}
 

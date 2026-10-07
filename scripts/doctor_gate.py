@@ -67,7 +67,7 @@ def main(argv=None):
     farm, out, source_dir = args.farm, args.out, args.source_dir
     work = out.parent / (out.stem + "_work")
 
-    from unified_pipeline.run_doctor import run_doctor, _uid_owns  # noqa: E402
+    from unified_pipeline.run_doctor import _uid_owns, run_doctor  # noqa: E402
 
     # Fresh WORK every run -- an earlier invocation's symlink views must not
     # leak into this one. A uid dropped from the current farm (or renamed)

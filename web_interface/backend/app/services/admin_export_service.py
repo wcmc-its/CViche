@@ -12,7 +12,8 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import NamedTuple
 
-from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
+from sqlalchemy.orm import Query as SAQuery
+from sqlalchemy.orm import Session, contains_eager
 
 from app.errors import forbidden, validation_error
 from app.models import Consent, Feedback, Run, User

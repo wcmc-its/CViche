@@ -42,8 +42,11 @@ from unified_pipeline.doctor.lints.render import (  # noqa: E402
     lint_duplicate_records,
     lint_unrendered_records,
 )
-from unified_pipeline.run_doctor import _docx_text, read_docx_blocks, run_doctor  # noqa: E402
-
+from unified_pipeline.run_doctor import (  # noqa: E402
+    _docx_text,
+    read_docx_blocks,
+    run_doctor,
+)
 
 _CITATION_A = ("Smith J, Doe K. A study of duplication in rendered CV "
                "documents. Journal of Testing. 2020;12(3):45-50.")

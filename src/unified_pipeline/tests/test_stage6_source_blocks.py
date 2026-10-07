@@ -13,7 +13,9 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6 import source_blocks as sb  # noqa: E402
-from unified_pipeline.stage6.sections.passthrough import _passthrough_letter  # noqa: E402
+from unified_pipeline.stage6.sections.passthrough import (
+    _passthrough_letter,  # noqa: E402
+)
 
 WCM_HEADINGS = ["PERSONAL DATA", "EDUCATION", "PROFESSIONAL POSITIONS & EMPLOYMENT", "EMPLOYMENT STATUS",
                 "LICENSURE, BOARD CERTIFICATION", "INSTITUTIONAL/HOSPITAL AFFILIATION", "HONORS, AWARDS",

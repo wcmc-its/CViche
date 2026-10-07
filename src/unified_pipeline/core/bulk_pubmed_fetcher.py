@@ -10,13 +10,14 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-09
 """
 
-import os
-import json
-import time
 import hashlib
-import requests
+import json
+import os
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+
+import requests
 
 from .pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
 

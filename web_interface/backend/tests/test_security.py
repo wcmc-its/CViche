@@ -1,11 +1,12 @@
 """Security regression tests for SEC-01 through SEC-07."""
+import importlib
 import json
 import logging
 import os
-import importlib
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 from sqlalchemy.orm import object_session
 
 
@@ -132,6 +133,7 @@ class TestSamlSignature:
         calling pysaml2 (which would need IdP metadata and xmlsec1).
         """
         from unittest.mock import call
+
         import app.saml_client as saml_mod
 
         # Capture the config dict passed to Saml2Config.load()
@@ -252,7 +254,7 @@ class TestPathTraversal:
 
     def _create_test_user_and_run(self, db, role="user"):
         """Helper to create a user and run for file access tests."""
-        from app.models import User, Run
+        from app.models import Run, User
         user = User(email="test@example.com", display_name="Test User", role=role)
         db.add(user)
         db.commit()
@@ -271,7 +273,7 @@ class TestPathTraversal:
 
     def _auth_cookie(self, client, user):
         """Set a valid session cookie on the test client."""
-        from app.auth import create_session_cookie, COOKIE_NAME
+        from app.auth import COOKIE_NAME, create_session_cookie
         # create_session_cookie reads the current epoch from a DB session;
         # `user` was just committed on the test's session, so borrow that one.
         cookie_value = create_session_cookie(user, object_session(user))
@@ -635,8 +637,8 @@ class TestUploadValidation:
 
     def _create_auth_user(self, client, db, email="test@example.com", role="user"):
         """Create a user with consent and set auth cookie."""
+        from app.auth import COOKIE_NAME, create_session_cookie
         from app.models import User
-        from app.auth import create_session_cookie, COOKIE_NAME
 
         user = User(
             email=email,
@@ -923,6 +925,7 @@ class TestUploadValidation:
         """#793: both endpoints reject a docx whose declared uncompressed
         size exceeds the expansion cap, before python-docx reads it."""
         import io
+
         from docx import Document
         self._create_auth_user(client, db)
         doc = Document()
@@ -1082,6 +1085,7 @@ class TestUploadValidation:
         and the body is never read (_read_bounded) or parsed (_extract_text,
         _validate_docx_magic) -- the budget is spent before either runs."""
         from unittest.mock import AsyncMock
+
         from app.api import upload as upload_module
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"

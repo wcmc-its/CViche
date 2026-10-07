@@ -20,33 +20,67 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
-from datetime import datetime
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from unified_pipeline.llm_client import call_llm
+from core.validators.adjunct_position_corrector import (
+    apply_adjunct_position_corrections,
+)
+from core.validators.appointment_funding_corrector import (
+    apply_appointment_funding_corrections,
+)
+from core.validators.block_coherence_corrector import apply_block_coherence_corrections
+from core.validators.committee_position_corrector import apply_committee_corrections
+from core.validators.event_volunteer_corrector import apply_event_volunteer_corrections
+from core.validators.grant_position_corrector import apply_grant_position_corrections
+from core.validators.grant_status_corrector import apply_grant_status_corrections
+from core.validators.hierarchy_mismatch_flagger import (
+    flag_hierarchy_mismatches,
+    get_mismatch_summary,
+)
+from core.validators.invited_talk_corrector import apply_invited_talk_corrections
+from core.validators.leadership_level_corrector import (
+    apply_leadership_level_corrections,
+)
+from core.validators.position_subcode_reconciler import (
+    apply_position_subcode_reconciliation,
+)
+from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
+from core.validators.reasoning_consistency_checker import apply_reasoning_corrections
 
 # Post-classification auto-correction validators
 from core.validators.structural_header import apply_structural_corrections
-from core.validators.committee_position_corrector import apply_committee_corrections
-from core.validators.reasoning_consistency_checker import apply_reasoning_corrections
-from core.validators.grant_status_corrector import apply_grant_status_corrections
-from core.validators.hierarchy_mismatch_flagger import flag_hierarchy_mismatches, get_mismatch_summary
-from core.validators.teaching_leadership_corrector import apply_teaching_leadership_corrections
-from core.validators.leadership_level_corrector import apply_leadership_level_corrections
-from core.validators.adjunct_position_corrector import apply_adjunct_position_corrections
-from core.validators.position_subcode_reconciler import apply_position_subcode_reconciliation
-from core.validators.training_compliance_corrector import apply_training_compliance_corrections
-from core.validators.invited_talk_corrector import apply_invited_talk_corrections
-from core.validators.grant_position_corrector import apply_grant_position_corrections
-from core.validators.wcm_table_corrector import apply_wcm_table_corrections
-from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
+from core.validators.teaching_leadership_corrector import (
+    apply_teaching_leadership_corrections,
+)
 from core.validators.template_scaffold import apply_template_scaffold_corrections
-from core.validators.block_coherence_corrector import apply_block_coherence_corrections
-from core.validators.appointment_funding_corrector import apply_appointment_funding_corrections
-from core.validators.event_volunteer_corrector import apply_event_volunteer_corrections
+from core.validators.training_compliance_corrector import (
+    apply_training_compliance_corrections,
+)
+from core.validators.wcm_table_corrector import apply_wcm_table_corrections
+
+from unified_pipeline.core.batch_pool import (
+    make_progress_printer,
+    map_in_order,
+    workers_from_config,
+)
+from unified_pipeline.llm_client import call_llm
+from unified_pipeline.stage3b.classify import (  # noqa: F401
+    NO_HIERARCHY_KEY,
+    ClassificationStats,
+    _BatchStats,
+    _build_taxonomy_ref_for_batch,
+    _classify_one_batch,
+    classify_entries_batch,
+    detect_duplicates,
+    group_entries_by_hierarchy,
+    reconnect_fragments,
+    validate_t_classifications,
+)
 
 # Every name below is re-exported from this module by being imported here: it
 # is the public import surface of stage 3b, pinned by
@@ -66,6 +100,7 @@ from unified_pipeline.stage3b.context import (  # noqa: F401
     build_mapping_index,
     get_taxonomy_context,
 )
+from unified_pipeline.stage3b.header_pin import apply_header_pin
 from unified_pipeline.stage3b.io import (  # noqa: F401
     _normalize_taxonomy_mappings,
     _safe_float,
@@ -76,20 +111,6 @@ from unified_pipeline.stage3b.io import (  # noqa: F401
 from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
-)
-from unified_pipeline.stage3b.header_pin import apply_header_pin
-from unified_pipeline.core.batch_pool import make_progress_printer, map_in_order, workers_from_config
-from unified_pipeline.stage3b.classify import (  # noqa: F401
-    _BatchStats,
-    _build_taxonomy_ref_for_batch,
-    _classify_one_batch,
-    ClassificationStats,
-    classify_entries_batch,
-    detect_duplicates,
-    group_entries_by_hierarchy,
-    NO_HIERARCHY_KEY,
-    reconnect_fragments,
-    validate_t_classifications,
 )
 
 logger = logging.getLogger(__name__)

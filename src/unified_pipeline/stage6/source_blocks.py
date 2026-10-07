@@ -31,8 +31,12 @@ from docx.shared import Pt
 from lxml.etree import _Element
 
 from ..core.template_boilerplate import (
-    is_near_template_instruction, is_template_instruction, is_template_label_line,
-    is_unanswered_prompt, normalize_template_text, template_section_headers,
+    is_near_template_instruction,
+    is_template_instruction,
+    is_template_label_line,
+    is_unanswered_prompt,
+    normalize_template_text,
+    template_section_headers,
 )
 
 logger = logging.getLogger(__name__)

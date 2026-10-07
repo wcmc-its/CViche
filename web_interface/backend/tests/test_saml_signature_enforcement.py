@@ -30,22 +30,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-
 from saml2 import BINDING_HTTP_POST
-from saml2.config import Config
-from saml2.server import Server
+from saml2.assertion import Policy
 from saml2.client import Saml2Client
+from saml2.config import Config
+from saml2.config import Config as _Saml2Config
 from saml2.metadata import entity_descriptor
 from saml2.saml import NAMEID_FORMAT_EMAILADDRESS
+from saml2.server import Server
 
-from saml2.assertion import Policy
-from saml2.config import Config as _Saml2Config
-
-from app.services.saml_service import _reject_wrong_destination
 from app.auth import COOKIE_NAME
 from app.models import SystemConfig
 from app.saml_client import extract_user_attrs
 from app.saml_replay import assertion_ids, set_replay_cache
+from app.services.saml_service import _reject_wrong_destination
 
 _XMLSEC = shutil.which("xmlsec1")
 _OPENSSL = shutil.which("openssl")

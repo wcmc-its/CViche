@@ -17,10 +17,16 @@ from uuid import uuid4
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
-from app.auth import COOKIE_NAME, create_session_cookie, get_cookie_settings, get_cookie_delete_settings
+from itsdangerous import URLSafeTimedSerializer
+
+from app.auth import (
+    COOKIE_NAME,
+    create_session_cookie,
+    get_cookie_delete_settings,
+    get_cookie_settings,
+)
 from app.ed_group_lookup import EdUnavailableError, MembershipResult, clear_cache
 from app.models import SystemConfig, User
-from itsdangerous import URLSafeTimedSerializer
 
 
 def _make_user(db, email="user@example.com", role="user", cwid=None, auth_method="simple",

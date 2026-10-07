@@ -97,6 +97,8 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from unified_pipeline.core.render_check import entry_lines
+
 from ..fan_out import FANNED_OUT_FROM
 from ..formatting import (
     _clear_table_data,
@@ -107,7 +109,6 @@ from ..formatting import (
 from ..normalization import _strip_org_tail
 from ..parsing import _is_table_header_entry
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
 
 logger = logging.getLogger(__name__)
 

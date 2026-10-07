@@ -20,16 +20,16 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
 from unified_pipeline.core.pdf_to_docx import (
+    GUTTER_EDGE_FRAC,
+    LIST_MARKER_RE,
+    _blank_gap_em,
     _column_gaps,
     _is_bold,
-    _Para,
-    GUTTER_EDGE_FRAC,
-    _blank_gap_em,
     _Line,
+    _Para,
     _Run,
     _runs,
     _write_docx,
-    LIST_MARKER_RE,
     convert_pdf_to_docx,
 )
 from unified_pipeline.run_doctor import iter_header_candidates

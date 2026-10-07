@@ -7,7 +7,7 @@ Covers requirements: LLM-01, LLM-02, LLM-04
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
@@ -16,7 +16,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from unified_pipeline.config import reload_config
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,8 +76,8 @@ def reset_state():
 
 def test_normalized_response_cost():
     """cost field is computed via calculate_cost() with correct provider and model."""
-    from unified_pipeline.llm_client import call_llm
     from unified_pipeline.config import calculate_cost
+    from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_bedrock_response(input_tokens=1000, output_tokens=500, total_tokens=1500)
 
@@ -343,8 +342,9 @@ def test_call_llm_bedrock_stop_reason_mapping():
 
 def test_call_llm_bedrock_retry_on_throttle():
     """call_llm retries on Bedrock ThrottlingException and succeeds."""
-    from unified_pipeline.llm_client import call_llm
     from botocore.exceptions import ClientError
+
+    from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_bedrock_response()
 
@@ -377,8 +377,9 @@ def test_call_llm_bedrock_retry_exhausted():
     ModelTimeoutException, not ThrottlingException: since #912 a throttle is
     outage-class and waits out CVICHE_LLM_OUTAGE_BUDGET_SECONDS instead.
     """
-    from unified_pipeline.llm_client import call_llm
     from botocore.exceptions import ClientError
+
+    from unified_pipeline.llm_client import call_llm
 
     throttle_error = ClientError(
         {"Error": {"Code": "ModelTimeoutException", "Message": "Model timed out"}},
@@ -403,8 +404,9 @@ def test_call_llm_bedrock_retry_exhausted():
 
 def test_call_llm_bedrock_no_retry_on_access_denied():
     """call_llm raises AccessDeniedException immediately without retrying."""
-    from unified_pipeline.llm_client import call_llm
     from botocore.exceptions import ClientError
+
+    from unified_pipeline.llm_client import call_llm
 
     access_error = ClientError(
         {"Error": {"Code": "AccessDeniedException", "Message": "Not authorized"}},
@@ -636,8 +638,8 @@ def test_bedrock_json_schema_appends_json_only_hint():
 
 def test_bedrock_client_lazy_init():
     """Importing llm_client does not create a Bedrock client. First Bedrock call does."""
-    import unified_pipeline.llm_client as mod
     import unified_pipeline.llm.bedrock as bedrock_mod
+    import unified_pipeline.llm_client as mod
 
     # After import (and reset in fixture), client should be None
     assert bedrock_mod._bedrock_client is None
@@ -665,8 +667,9 @@ def test_llm_usage_provider_column():
     if backend_path not in sys.path:
         sys.path.insert(0, backend_path)
 
-    from app.models import LLMUsage
     from sqlalchemy import inspect as sa_inspect
+
+    from app.models import LLMUsage
 
     # Check the column exists
     mapper = sa_inspect(LLMUsage)
@@ -697,10 +700,11 @@ def test_max_concurrent_llm_calls_env_override(monkeypatch):
 def test_retry_backoff_uses_equal_jitter(monkeypatch):
     """Backoff waits land in [base/2, base] (equal jitter) so concurrent
     throttled callers don't retry in lockstep."""
-    import unified_pipeline.llm_client as mod
+    import random
+
     from botocore.exceptions import ClientError
 
-    import random
+    import unified_pipeline.llm_client as mod
 
     sleeps = []
     monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
@@ -728,8 +732,9 @@ def test_retry_backoff_uses_equal_jitter(monkeypatch):
 def test_call_semaphore_released_on_success_and_failure(monkeypatch):
     """The in-flight-call slot must be returned whether the call succeeds or
     raises, so a pod can't slowly leak its way to a deadlock."""
-    import unified_pipeline.llm_client as mod
     from botocore.exceptions import ClientError
+
+    import unified_pipeline.llm_client as mod
 
     sem = mod._llm_call_semaphore
     initial = sem._value  # available permits (CPython BoundedSemaphore)
@@ -760,7 +765,7 @@ def test_bedrock_floors_maxtokens_when_none():
     still send a bounded maxTokens (the DEFAULT_MAX_TOKENS floor) instead of
     omitting it -- an omitted maxTokens lets Bedrock apply the model's ~64K
     default ceiling, the runaway tail this floor exists to bound."""
-    from unified_pipeline.llm_client import call_llm, DEFAULT_MAX_TOKENS
+    from unified_pipeline.llm_client import DEFAULT_MAX_TOKENS, call_llm
 
     cfg = _bedrock_config()
     assert cfg["max_tokens"] is None  # precondition: nothing caps this call
@@ -1048,8 +1053,9 @@ def test_call_with_retry_excludes_backoff_from_api_seconds(monkeypatch):
     to just before the dispatch (the fix as originally proposed) would NOT
     have fixed this, since the sleeps happen inside the call being timed.
     """
-    import unified_pipeline.llm_client as mod
     from botocore.exceptions import ClientError
+
+    import unified_pipeline.llm_client as mod
 
     # The backoff must burn REAL time, or a wall-clock implementation would pass
     # this test too. Stand in a short real sleep for the 1s/2s the code asks for
@@ -1109,6 +1115,7 @@ def test_bedrock_json_retry_backs_off_on_throttle():
     immediately instead of backing off.
     """
     from botocore.exceptions import ClientError
+
     from unified_pipeline.llm_client import call_llm
 
     throttle = ClientError(
@@ -1216,6 +1223,7 @@ def test_llm_usage_sums_every_result_it_is_given():
 
 def test_llm_usage_is_exact_under_concurrent_adds():
     import threading
+
     from unified_pipeline.llm_client import LlmUsage
 
     usage = LlmUsage()

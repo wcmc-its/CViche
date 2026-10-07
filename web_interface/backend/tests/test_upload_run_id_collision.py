@@ -16,8 +16,8 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import os
 import logging
+import os
 import re
 import threading
 from datetime import datetime
@@ -28,12 +28,12 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import object_session
 
+from app.api import upload as upload_module
+from app.api.upload import generate_run_id
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.storage.base import StorageError, StorageKeyExists, StorageKeyNotFound
 from app.storage.local_storage import LocalRunStorage
-from app.api import upload as upload_module
-from app.api.upload import generate_run_id
 
 # Threads racing one exclusive create. More than a couple, so a non-atomic
 # implementation loses the race reliably rather than occasionally.
@@ -57,7 +57,7 @@ def _make_user(db, email="collision@example.com"):
 
 
 def _auth(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 

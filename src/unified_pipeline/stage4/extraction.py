@@ -14,17 +14,24 @@ function in play (the #496 split-state lesson).
 import json
 import logging
 from collections import defaultdict
-from typing import Any, NamedTuple, NotRequired, TypedDict
 from collections.abc import Callable
+from typing import Any, NamedTuple, NotRequired, TypedDict
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
-from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.core.batch_pool import (
+    make_batches,
+    make_progress_printer,
+    map_in_order,
+    workers_from_config,
+)
 from unified_pipeline.llm.retry import LLMOutageError
-from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
-
+from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.llm_provenance import (
+    FALLBACK_SERVED_KEY,
+    STAGE4_ENTRY_FALLBACK_KEY,
+)
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
     ReformattedFields,

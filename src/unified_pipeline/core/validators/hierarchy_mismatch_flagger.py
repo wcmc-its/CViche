@@ -17,7 +17,6 @@ These may be CORRECT (content overrides hierarchy), but warrant review.
 
 import re
 
-
 # Map hierarchy keywords to expected taxonomy code families
 HIERARCHY_TO_EXPECTED_CODES = {
     # Publication sections

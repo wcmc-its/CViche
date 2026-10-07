@@ -21,8 +21,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.fields import (
+    _COMMITTEE_NAME_KEYS,
+    _phone_cell_text,
+)
 from unified_pipeline.stage_6_word_template import _committee_cell_text
-from unified_pipeline.stage6.normalization.fields import _COMMITTEE_NAME_KEYS, _phone_cell_text
 
 
 def test_string_and_empty_passthrough():

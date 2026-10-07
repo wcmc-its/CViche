@@ -40,7 +40,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.core.docx_structure_extractor import extract_unified_elements  # noqa: E402
+from unified_pipeline.core.docx_structure_extractor import (
+    extract_unified_elements,  # noqa: E402
+)
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: E402
 from unified_pipeline.stage6.sections import appendix as appendix_module  # noqa: E402
@@ -64,11 +66,11 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_TEMPLATE_LABEL,
     DROP_TOC_LINE,
     DROP_UNANSWERED_PROMPT,
+    OwnerTokens,
     _appendix_drop_reason,
     _describe_dropped,
     _filter_unmapped_entries,
     _group_by_source_heading,
-    OwnerTokens,
     _owner_signature_tokens,
     _truncate_appendix_text,
 )

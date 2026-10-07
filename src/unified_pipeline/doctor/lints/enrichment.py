@@ -37,7 +37,6 @@ from unified_pipeline.stage_5_pubmed_enrichment import NOTICE_PUBTYPES
 
 from ..shared import _finding
 
-
 # --------------------------------------------------------------------------
 # Stage-5 PubMed enrichment: citations that fell back to CV-extracted fields.
 

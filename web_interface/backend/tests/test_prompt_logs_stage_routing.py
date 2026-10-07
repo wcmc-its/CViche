@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.steps import STAGE_TO_PURPOSES, STAGES_WITHOUT_PROMPT_LOGS
+
 # Filename parser/matcher moved to app.services.prompt_log_service (#780
 # review r3965813607#2) -- new tests import it from its actual home; the
 # STAGE_TO_PURPOSES/STAGES_WITHOUT_PROMPT_LOGS import above keeps working
@@ -145,8 +146,8 @@ class TestLegacyFlatDirFallbackRemoved:
             self.LEGACY_DIR.rmdir()
 
     def test_get_prompt_logs_ignores_the_legacy_flat_dir(self, client, db):
-        from app.main import app
         from app.auth import get_current_user
+        from app.main import app
         from app.models import Run, Step
 
         legacy_file = self._seed_legacy_file(purpose="stage_2")

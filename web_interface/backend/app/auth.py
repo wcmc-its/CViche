@@ -1,36 +1,41 @@
 """Authentication middleware using itsdangerous signed cookies."""
 import json
-import os
-import time
-import secrets
 import logging
+import os
+import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from fastapi import Request, HTTPException, Depends
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from fastapi import Depends, HTTPException, Request
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
-from sqlalchemy.exc import OperationalError
 
-from app.database import get_db
-from app.models import User, UserRole, UserStatus, can_view_all_runs  # can_view_all_runs re-exported
-from app.config_loader import get_config_value
-from app.services import ed_access
-from app.ed_group_lookup import (
-    check_ed_membership,
-    MembershipResult,
-)
-from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
-from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.audit_events import (
+    DIRECTORY_UNAVAILABLE,
+    GROUP_MEMBERSHIP_REMOVED,
+    ROLE_CHANGED,
     SESSION_EXPIRED,
     SESSION_REVOKED,
     SESSION_STORE_UNAVAILABLE,
-    ROLE_CHANGED,
-    GROUP_MEMBERSHIP_REMOVED,
-    DIRECTORY_UNAVAILABLE,
 )
+from app.config_loader import get_config_value
+from app.database import get_db
+from app.ed_group_lookup import (
+    MembershipResult,
+    check_ed_membership,
+)
+from app.models import (  # can_view_all_runs re-exported
+    User,
+    UserRole,
+    UserStatus,
+    can_view_all_runs,
+)
+from app.services import ed_access
+from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
+from app.session_idle import SessionStoreUnavailable, get_idle_store
 
 logger = logging.getLogger(__name__)
 

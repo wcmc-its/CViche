@@ -71,11 +71,11 @@ Outputs:
 import contextvars
 import functools
 import hashlib
-import sys
 import json
 import logging
 import logging.config
 import os
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -86,20 +86,26 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from unified_pipeline.core.prompt_logger import set_current_run_id
 from unified_pipeline.llm_client import LlmUsage, format_models_used
-from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
+from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on
+from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+    get_cv_hierarchy_chunked,
+)
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
 from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
 from unified_pipeline.stage_3b_entry_classifier import run_stage_3b
-from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
 from unified_pipeline.stage_4_5_research_summary import run_stage_4_5
+from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
 from unified_pipeline.stage_5_pubmed_enrichment import run_stage5
 from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
-from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on
-from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
+from unified_pipeline.stage_errors import (
+    StageError,
+    record_stage_outcome,
+    stage_errors_path,
+)
 
 logger = logging.getLogger(__name__)
 # "__main__" when this file is run as the CLI, "run_full_pipeline" when a test

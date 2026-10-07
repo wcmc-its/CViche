@@ -56,7 +56,10 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+)
 from unified_pipeline.stage6.sections import teaching  # noqa: E402
 from unified_pipeline.stage6.sections.teaching import (  # noqa: E402
     TEACHING_SECTION_HEADERS,
@@ -67,7 +70,6 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
     WCMTemplateGenerator,
 )
-
 
 MULTILINE_CASES = [
     "First point\nSecond point",

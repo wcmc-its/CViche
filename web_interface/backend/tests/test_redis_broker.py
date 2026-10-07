@@ -14,8 +14,8 @@ import asyncio
 
 import pytest
 
-from app.pipeline.redis_broker import RedisBroker, broker_from_env
 from app.pipeline.event_emitter import EventEmitter
+from app.pipeline.redis_broker import RedisBroker, broker_from_env
 
 
 class FakeWS:

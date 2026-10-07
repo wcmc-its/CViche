@@ -90,8 +90,13 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
-from unified_pipeline.stage6.sections import memberships as memberships_module  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+)
+from unified_pipeline.stage6.sections import (
+    memberships as memberships_module,  # noqa: E402
+)
 from unified_pipeline.stage6.sections.memberships import (  # noqa: E402
     MembershipsRowShapeError,
     _entry_parts,
@@ -100,7 +105,6 @@ from unified_pipeline.stage6.sections.memberships import (  # noqa: E402
     _type_already_named,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # Genuinely multi-line, farm-derived shape (2071_Zuschlag_Cv's actual I
 # entry): entry_lines already returns >1 part, each carrying its own unsplit

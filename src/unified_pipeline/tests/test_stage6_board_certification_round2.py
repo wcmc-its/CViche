@@ -25,10 +25,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
-    SKIPPED_ROW_CHECK,
     CERTIFICATE_NUMBER_PATTERN,
+    SKIPPED_ROW_CHECK,
     _classify_cert_token,
     _format_certification_date_str,
     _is_certification_header_line,
@@ -37,6 +36,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _split_multi,
     _with_recertification,
 )
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
 def _generator():
@@ -657,7 +657,9 @@ class TestTheSourceTablesOwnHeaderRowIsNotACertification:
     def test_header_fields_with_a_real_line_in_the_text_are_kept(self):
         """Header-only fields are not enough: a text line that is real data
         means stage 4 read the wrong line, not that the entry is a header."""
-        from unified_pipeline.stage6.sections.board_certification import _is_header_record
+        from unified_pipeline.stage6.sections.board_certification import (
+            _is_header_record,
+        )
         fields = {"certifying_board": "Full Name of Board", "certificate_number": "Certificate #"}
         assert not _is_header_record(
             fields, self.HEADER + "\nAmerican Board of Fictional Medicine | 24680 | 2015")

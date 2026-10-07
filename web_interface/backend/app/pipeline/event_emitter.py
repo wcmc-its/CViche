@@ -20,8 +20,9 @@ import contextvars
 import json
 import logging
 import uuid
-from fastapi import WebSocket
 from datetime import datetime
+
+from fastapi import WebSocket
 
 from app.pipeline.redis_broker import EVENTS_CHANNEL
 

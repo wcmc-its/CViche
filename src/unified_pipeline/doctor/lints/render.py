@@ -36,25 +36,23 @@ from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
-from .extraction import _is_prose
-
 from ..shared import (
+    _NAME_WORD_RE,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
-    _FieldsEntry,
     _entry_pieces,
     _fields_entries,
+    _FieldsEntry,
     _finding,
     _haystacks,
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
-    _template_haystack,
-    _NAME_WORD_RE,
     _owner_surname_words,
+    _template_haystack,
 )
-
+from .extraction import _is_prose
 
 # Lint 7: a source section with at least this many substantive lines whose
 # output section is empty did not just "have nothing to say".

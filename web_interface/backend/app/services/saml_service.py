@@ -25,13 +25,22 @@ from app.audit_events import LOGIN_FAILED, LOGIN_SUCCESS, SESSION_STORE_UNAVAILA
 from app.auth import SessionEpochUnreadable, create_session_cookie, role_for_membership
 from app.config_loader import get_config_value
 from app.ed_group_lookup import (
-    check_ed_membership, fetch_ed_department, EdUnavailableError, LDAPConfig, MembershipResult,
+    EdUnavailableError,
+    LDAPConfig,
+    MembershipResult,
+    check_ed_membership,
+    fetch_ed_department,
 )
 from app.models import User, UserRole, UserStatus
-from app.saml_client import get_saml_client, extract_user_attrs
-from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
+from app.saml_client import extract_user_attrs, get_saml_client
+from app.saml_replay import (
+    assertion_ids,
+    get_replay_cache,
+    replay_fail_closed,
+    replay_ttl,
+)
 from app.services.ed_access import partner_membership
-from app.services.user_service import provision_user, normalize_email
+from app.services.user_service import normalize_email, provision_user
 from app.session_idle import SessionStoreUnavailable
 
 # Named for the route, not __name__: these lines (the [SECURITY] rejections

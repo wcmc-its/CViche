@@ -20,11 +20,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
-    deduplicate_entries,
+    DEDUP_FUSED_BLOB_RECORD_LINES,
     _drop_is_safe,
     _record_lines,
     _squash,
-    DEDUP_FUSED_BLOB_RECORD_LINES,
+    deduplicate_entries,
 )
 
 # Six distinct presentation records.

@@ -1289,7 +1289,10 @@ def test_stage_6_renders_nothing_for_the_skipped_summary_run_stage_4_5_writes(mo
 def test_run_stage_4_5_records_each_call_the_fallback_served(monkeypatch, tmp_path):
     """#1174: both calls (the M1 relevance score and the generation) are
     served by the fallback here; the artifact lists them, by call name."""
-    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_5_FALLBACK_CALLS_KEY
+    from unified_pipeline.llm_provenance import (
+        FALLBACK_SERVED_KEY,
+        STAGE4_5_FALLBACK_CALLS_KEY,
+    )
 
     def fake_call_llm(*, messages, **_kwargs):
         reply = {"content": '{"score": 0.1, "reasoning": "weak"}'

@@ -1,9 +1,22 @@
 """SQLAlchemy database models."""
 from enum import StrEnum
 
-from sqlalchemy import Boolean, Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, false, text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    text,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
 from app.base_class import Base
 
 # Length of a hex-encoded sha256 digest.

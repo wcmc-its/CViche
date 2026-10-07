@@ -16,7 +16,6 @@ Rule: D1 = Faculty OR research staff positions at academic institutions
 
 import re
 
-
 # Patterns indicating D3 (non-faculty positions)
 D3_POSITION_PATTERNS = [
     # Adjunct positions (usually D3 unless explicitly faculty)

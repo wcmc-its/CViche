@@ -59,13 +59,14 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
 
 try:
     from docx import Document
+
     # The class `Document()` (the factory function above) returns -- aliased
     # so `_recover_contact_fields_from_table_rows` can annotate its
     # `original_doc` parameter without shadowing the factory import (#820 R3).

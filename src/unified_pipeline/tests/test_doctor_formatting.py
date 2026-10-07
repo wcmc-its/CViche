@@ -11,7 +11,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.doctor.lints.formatting import lint_teaching_postcheck  # noqa: E402
+from unified_pipeline.doctor.lints.formatting import (
+    lint_teaching_postcheck,  # noqa: E402
+)
 
 
 def _k(idx, text, fields, formatted, code="K4", hierarchy=("TEACHING",)):

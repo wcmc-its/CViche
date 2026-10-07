@@ -52,7 +52,11 @@ from ..formatting import (
     with_extra_date_spans,
 )
 from ..normalization import _get_cleaned_institution_name
-from ..parsing import _dates_overlap_or_match, _is_table_header_entry, _parse_date_components
+from ..parsing import (
+    _dates_overlap_or_match,
+    _is_table_header_entry,
+    _parse_date_components,
+)
 from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 

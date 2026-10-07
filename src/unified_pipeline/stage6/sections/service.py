@@ -27,15 +27,15 @@ import logging
 import re
 from collections.abc import Sequence
 
+from ..fan_out import fallback_text, is_split_record
 from ..formatting import (
     _clear_table_data,
     _set_font,
     format_date_range,
     with_extra_date_spans,
 )
-from ..fan_out import fallback_text, is_split_record
-from ..sorting import sort_entries_reverse_chronological
 from ..normalization import _cell_text, _squash
+from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.render_check import entry_lines

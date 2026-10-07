@@ -27,7 +27,6 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.doctor.lints.extraction import _funding_haystacks  # noqa: E402
 
-
 _PATENT_LINE = ("Method for Targeted Gene Delivery Using Modified Viral "
                 "Vectors, US Patent 11,234,567, filed 2022, issued 2024")
 

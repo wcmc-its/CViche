@@ -29,11 +29,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
 # call_llm is stubbed at the module that actually calls it: the #522 split
 # moved every classification call site into stage3b/classify.py, so patching
 # the facade's copy would no longer intercept anything (#496).
 import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
+import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
 from unified_pipeline.llm.retry import LLMOutageError  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,

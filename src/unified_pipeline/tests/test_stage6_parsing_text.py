@@ -85,6 +85,7 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
+    ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
     _extract_year_from_text,
@@ -94,9 +95,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
     _strip_appended_initials,
-    ParsedActivityLine,
 )
-
 
 # --- item 1: the strip is a guess and lives at the call site (#665) --------
 

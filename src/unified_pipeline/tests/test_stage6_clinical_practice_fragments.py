@@ -52,9 +52,10 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
-from unified_pipeline.stage6.sections.clinical_practice import _bullet_parts  # noqa: E402
+from unified_pipeline.stage6.sections.clinical_practice import (
+    _bullet_parts,  # noqa: E402
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # --- fixtures ---------------------------------------------------------------
 

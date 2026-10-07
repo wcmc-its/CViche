@@ -37,7 +37,6 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
 )
 from unified_pipeline.doctor.shared import _LINE_SENTINEL, _haystacks  # noqa: E402
 
-
 # The two entries #537 was filed against, verbatim.
 _SHORT_EMAIL = "Email:  mary.mckenna@bcm.edu"
 _SHORT_FULL_NAME = "1. Full Name: David Quach"

@@ -149,7 +149,7 @@ def test_create_session_cookie_stamps_the_current_epoch(db, idle_store):
 # ---------------------------------------------------------------------------
 
 def test_store_enabled_resolves_identity_from_store(client, db, seed_simple_mode, idle_store):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
 
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
@@ -169,7 +169,12 @@ def test_embedded_identity_fields_are_ignored_when_the_store_is_enabled(
     This is the central security property of #368: it guards against a future
     change quietly reintroducing trust in client-controlled identity.
     """
-    from app.auth import _serializer, COOKIE_NAME, create_session_cookie, decode_session_cookie
+    from app.auth import (
+        COOKIE_NAME,
+        _serializer,
+        create_session_cookie,
+        decode_session_cookie,
+    )
     real = _make_user(db, email="real@example.com", role="user")
     other = _make_user(db, email="other@example.com", role="admin")
 
@@ -202,7 +207,7 @@ def test_unversioned_rich_cookie_is_rejected_when_the_store_is_enabled(
     re-login for sessions minted before this change on a store-enabled
     deployment; production has no CVICHE_REDIS_URL, so production is unaffected.
     """
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db)
     sid = "pre-368-sid"
     # A pre-#368 session: the key exists holding the old bare marker, and the
@@ -225,7 +230,7 @@ def test_unversioned_rich_cookie_is_rejected_when_the_store_is_enabled(
 
 
 def test_thin_cookie_with_no_store_record_is_401_not_500(client, db, seed_simple_mode, idle_store):
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     _make_user(db)
 
     client.cookies.set(COOKIE_NAME, _serializer.dumps({"v": 2, "sid": "orphan-sid"}))
@@ -243,7 +248,12 @@ def test_a_revoked_session_cannot_be_revived_by_embedded_fields(
     is presented again. Under the old fallback it authenticated, because a
     deleted record and an unknown one both looked like "resolve returned None".
     """
-    from app.auth import _serializer, COOKIE_NAME, create_session_cookie, decode_session_cookie
+    from app.auth import (
+        COOKIE_NAME,
+        _serializer,
+        create_session_cookie,
+        decode_session_cookie,
+    )
     user = _make_user(db)
     sid = decode_session_cookie(create_session_cookie(user, db))["sid"]
     idle_store.end(sid)                       # explicit server-side revocation
@@ -275,7 +285,7 @@ def test_a_revoked_session_cannot_be_revived_by_embedded_fields(
 def test_malformed_store_record_is_401_not_500(client, db, seed_simple_mode, idle_store, stored):
     """A hand-edited or half-written record is a controlled authentication
     failure, never an unhandled int()/subscript error (threads 19.3, 20.2)."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     _make_user(db)
     sid = "malformed-sid"
     idle_store._client.set(_KEY.format(sid=sid), stored, ex=1200)
@@ -292,7 +302,7 @@ def test_malformed_store_record_is_401_not_500(client, db, seed_simple_mode, idl
 # ---------------------------------------------------------------------------
 
 def test_rich_v1_cookie_is_accepted_when_the_store_is_disabled(client, db, seed_simple_mode):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
@@ -305,7 +315,7 @@ def test_pre_versioning_rich_cookie_is_accepted_when_the_store_is_disabled(
     client, db, seed_simple_mode
 ):
     """Production's live sessions carry no "v" at all; they must keep working."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db)
     client.cookies.set(COOKIE_NAME, _serializer.dumps({
         "user_id": user.id,
@@ -320,7 +330,7 @@ def test_pre_versioning_rich_cookie_is_accepted_when_the_store_is_disabled(
 
 def test_thin_v2_cookie_is_rejected_when_the_store_is_disabled(client, db, seed_simple_mode):
     """A thin cookie has no identity without a store to look it up in."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     _make_user(db)
     client.cookies.set(COOKIE_NAME, _serializer.dumps({"v": 2, "sid": "some-sid"}))
 
@@ -334,7 +344,7 @@ def test_thin_v2_cookie_is_rejected_when_the_store_is_disabled(client, db, seed_
 # ---------------------------------------------------------------------------
 
 def test_epoch_revocation_on_the_store_path(client, db, seed_simple_mode, idle_store, caplog):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
     _set_epoch(db, 0)
 
@@ -381,7 +391,7 @@ def test_get_session_epoch_raises_on_a_non_json_row(db):
 
 
 def test_unreadable_epoch_is_503_not_a_silent_epoch_zero(client, db, seed_simple_mode):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
     _set_epoch(db, 0)
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
@@ -399,7 +409,7 @@ def test_unreadable_epoch_is_503_not_a_silent_epoch_zero(client, db, seed_simple
 # ---------------------------------------------------------------------------
 
 def test_store_outage_during_resolve_is_503(client, db, seed_simple_mode, broken_store, caplog):
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     _make_user(db)
     broken_store._client.get.side_effect = redis.exceptions.ConnectionError("valkey down")
 
@@ -420,7 +430,7 @@ def test_store_outage_during_resolve_grants_no_identity_from_the_cookie(
     """The rich-cookie fallback is what made an outage indistinguishable from
     "session not found". A cookie with perfectly good embedded fields must NOT
     authenticate while the store is down."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db)
     broken_store._client.get.side_effect = redis.exceptions.ConnectionError("valkey down")
 
@@ -441,7 +451,7 @@ def test_store_outage_during_resolve_grants_no_identity_from_the_cookie(
 def test_store_outage_during_touch_is_503(client, db, seed_simple_mode, broken_store, caplog):
     """resolve() answers, then expire() fails: the idle refresh must not be
     read as "still active" (thread 14)."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db)
     broken_store._client.get.return_value = json.dumps(
         {"user_id": user.id, "epoch": 0, "issued_at": int(time.time())}
@@ -464,7 +474,7 @@ def test_store_outage_during_touch_is_503(client, db, seed_simple_mode, broken_s
 # ---------------------------------------------------------------------------
 
 def test_replaying_the_cookie_after_logout_is_rejected(client, db, seed_simple_mode, idle_store):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
     cookie = create_session_cookie(user, db)
 
@@ -481,7 +491,7 @@ def test_replaying_the_cookie_after_logout_is_rejected(client, db, seed_simple_m
 
 def test_logging_out_one_session_leaves_the_other_alive(client, db, seed_simple_mode, idle_store):
     """sid is the unit of revocation: two devices, one logout."""
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
     cookie_a = create_session_cookie(user, db)
     cookie_b = create_session_cookie(user, db)
@@ -544,7 +554,7 @@ def test_login_refuses_to_mint_when_the_epoch_is_unreadable(client, db, seed_sim
 def test_logout_reports_a_failed_revocation(client, db, seed_simple_mode, broken_store, caplog):
     """The cookie is cleared either way, but a revocation that did not happen
     is a 503 -- not a "Logged out." the user has no reason to doubt."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db)
     broken_store._client.get.return_value = json.dumps(
         {"user_id": user.id, "epoch": 0, "issued_at": int(time.time())}
@@ -571,7 +581,7 @@ def test_logout_emits_session_revoked_with_the_resolved_user_id(
     client, db, seed_simple_mode, idle_store, caplog
 ):
     """A thin cookie carries no user_id; the audit line takes it from the store."""
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     user = _make_user(db)
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
@@ -661,7 +671,7 @@ def test_saml_logout_reports_a_failed_revocation(
     but a revocation that did not happen is reported (via the login page's
     error code) instead of being swallowed -- the session stays replayable
     until its absolute TTL otherwise."""
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db, email="samluser@med.cornell.edu")
     broken_store._client.get.return_value = json.dumps(
         {"user_id": user.id, "epoch": 0, "issued_at": int(time.time())}

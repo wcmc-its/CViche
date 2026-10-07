@@ -9,25 +9,28 @@ User-facing failure modes hardened before the non-technical rollout:
 """
 import io
 import os
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 import asyncio
 import time
-from pathlib import Path
 from datetime import datetime, timedelta
-from unittest.mock import patch, AsyncMock
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import redis
 from docx import Document
+from sqlalchemy.orm import object_session
 
 from app.models import Log, Run, Step, User
 from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services.run_service import (
-    DEPLOY_INTERRUPT_MESSAGE, fail_runs_interrupted_by_shutdown, reconcile_stale_runs,
+    DEPLOY_INTERRUPT_MESSAGE,
+    fail_runs_interrupted_by_shutdown,
+    reconcile_stale_runs,
 )
-from sqlalchemy.orm import object_session
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -46,7 +49,7 @@ def _make_user(db, email="user@example.com", role="user", **kwargs):
 
 
 def _auth_cookie(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     # create_session_cookie reads the current epoch from a DB session;
     # `user` was just committed on the test's session, so borrow that one.
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
@@ -461,6 +464,7 @@ class TestRetryStepQueueModeEnqueueFailure:
 
 def test_prepare_resume_preserves_cost_and_loads_prior_outputs(db, tmp_path):
     import shutil
+
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     run = Run(id="RSME01", filename="cv.docx", file_type="docx", status="failed",
@@ -495,6 +499,7 @@ def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
     than a raw filesystem path + errno."""
     import asyncio
     import shutil
+
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     run = Run(id="RSME02", filename="cv.docx", file_type="docx", status="running",
@@ -694,6 +699,7 @@ def _stale_read_after_winner_commits(monkeypatch, run_id, stale_status):
     """
     from sqlalchemy import update
     from sqlalchemy.orm.attributes import set_committed_value
+
     from app.api import runs as runs_api
 
     real = runs_api.check_run_access
@@ -819,6 +825,7 @@ def test_orchestrator_rejects_document_uid_that_differs_from_run_id(db, tmp_path
 
 def test_copy_to_pipeline_input_is_per_run_and_overwrites(db, tmp_path, monkeypatch):
     import shutil
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
@@ -842,6 +849,7 @@ def test_copy_to_pipeline_input_converts_a_pdf(db, tmp_path, monkeypatch, cv_pdf
     """#806: a PDF upload is converted into the run's private docx path; the
     upload itself is left untouched as the original."""
     import shutil
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
@@ -865,6 +873,7 @@ def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload, attempts=(
     Log rows."""
     import shutil
     from types import SimpleNamespace
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
@@ -946,6 +955,7 @@ def test_conversion_runs_off_the_event_loop_thread(db, tmp_path, monkeypatch):
     """#806 review N6: the conversion can wait for a slot and run for
     minutes; it must not block the run's event loop (cancel included)."""
     import threading
+
     from app.pipeline import orchestrator as orch
     seen = {}
     real = orch.PipelineOrchestrator._copy_to_pipeline_input

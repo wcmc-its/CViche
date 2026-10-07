@@ -10,23 +10,23 @@ from saml2.metadata import create_metadata_string
 from saml2.sigver import CertificateError
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.auth import (
-    decode_session_cookie,
-    get_cookie_settings,
-    get_cookie_delete_settings,
-    resolve_session_identity,
-    COOKIE_NAME,
-)
-from app.session_idle import get_idle_store, SessionStoreUnavailable
-from app.config_loader import get_config_value
-from app.saml_client import get_saml_client
-from app.services.saml_service import SamlLoginFailure, authenticate_saml_response
-from app.redirect_safety import safe_relative_path
 from app.audit_events import (
     SESSION_REVOKED,
     SESSION_STORE_UNAVAILABLE,
 )
+from app.auth import (
+    COOKIE_NAME,
+    decode_session_cookie,
+    get_cookie_delete_settings,
+    get_cookie_settings,
+    resolve_session_identity,
+)
+from app.config_loader import get_config_value
+from app.database import get_db
+from app.redirect_safety import safe_relative_path
+from app.saml_client import get_saml_client
+from app.services.saml_service import SamlLoginFailure, authenticate_saml_response
+from app.session_idle import SessionStoreUnavailable, get_idle_store
 
 logger = logging.getLogger(__name__)
 

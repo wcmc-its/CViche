@@ -497,7 +497,10 @@ def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(
     """#1174: a served call is a success, so only this stamp records it. The
     stamp is on the entries of the group the fallback answered, not on other
     groups, and a normal result leaves no key."""
-    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
+    from unified_pipeline.llm_provenance import (
+        FALLBACK_SERVED_KEY,
+        STAGE4_ENTRY_FALLBACK_KEY,
+    )
 
     entries = [
         {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
@@ -536,7 +539,10 @@ def test_extract_fields_batch_folds_out_of_range_items_into_a_one_entry_group(mo
     in index order; the scalar fields are the last, as for any multi-record
     entry, and nothing is stamped because nothing was lost."""
     from unified_pipeline.stage4.schemas import (
-        STAGE4_RECORDS_KEY, STAGE4_RECORDS_RETURNED_KEY, STAGE4_UNPLACED_ITEMS_KEY)
+        STAGE4_RECORDS_KEY,
+        STAGE4_RECORDS_RETURNED_KEY,
+        STAGE4_UNPLACED_ITEMS_KEY,
+    )
 
     monkeypatch.setattr(extraction, "call_llm", _llm_returning([
         {"entry_index": 0, "title": "Rank A", "start_date": "2001"},

@@ -22,19 +22,19 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
-    SPLIT_SIBLING_METRIC,
-    _drop_split_siblings,
     _GROUP_HEADER_RE,
+    SPLIT_SIBLING_METRIC,
     _bare_occasion_apart,
     _carries_record,
-    _decision_fields,
-    _dates_compatible,
     _companion_title,
+    _dates_compatible,
+    _decision_fields,
     _different_book,
     _different_institution,
     _different_rank,
     _distinct_bare_names,
     _drop_is_safe,
+    _drop_split_siblings,
     _lists_name,
     _names_a_sibling,
     _names_record,
@@ -42,12 +42,15 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _part_numbers,
     _place_only_event,
     _record_name,
+    _row_residue,
     _title_only_fragment,
     _verbatim_contained,
     recovered_row_already_rendered,
-    _row_residue,
 )
-from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM, _RENDERED_FIELDS  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    _RENDERED_FIELDS,
+    FANNED_OUT_FROM,
+)
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
 

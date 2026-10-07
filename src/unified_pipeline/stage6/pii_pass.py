@@ -48,6 +48,12 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
+    _BARE_BIRTH_LABEL_RE,
+    _BARE_EMAIL_SHAPE,
+    _BARE_PHONE_SHAPE,
+    _FAMILY_SHAPE_LABEL_RE,
+    _KNOWN_FIELD_LABEL_RE,
+    _PII_FRAGMENT_SPLIT_RE,
     CAT_BIRTH,
     CAT_CHILDREN,
     CAT_DATE_OF_BIRTH,
@@ -60,12 +66,6 @@ from .normalization.pii import (  # noqa: F401
     WITHHOLD_POLICY,
     PiiMatch,
     WithheldItem,
-    _BARE_BIRTH_LABEL_RE,
-    _BARE_EMAIL_SHAPE,
-    _BARE_PHONE_SHAPE,
-    _FAMILY_SHAPE_LABEL_RE,
-    _KNOWN_FIELD_LABEL_RE,
-    _PII_FRAGMENT_SPLIT_RE,
     _is_bare_label_span,
     _merge_matches,
     _pii_field_key_category,

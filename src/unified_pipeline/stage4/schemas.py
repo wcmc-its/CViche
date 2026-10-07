@@ -10,10 +10,10 @@ never sees the lazy initialisation (the #496 split-state lesson). Reach it as
 `unified_pipeline.stage4.schemas._LOADED_SCHEMAS` or not at all.
 """
 
-import re
 import copy
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 

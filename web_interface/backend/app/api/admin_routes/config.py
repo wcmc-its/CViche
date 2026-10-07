@@ -7,9 +7,17 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.database import get_db
 from app.models import User
-from app.schemas import AdminConfigResponse, AdminConfigUpdate, ConsentPublishPreview, ConsentPublishRequest
+from app.schemas import (
+    AdminConfigResponse,
+    AdminConfigUpdate,
+    ConsentPublishPreview,
+    ConsentPublishRequest,
+)
 from app.services.admin_config_service import (
-    bump_session_epoch, consent_publish_preview, load_admin_config, publish_next_consent_version,
+    bump_session_epoch,
+    consent_publish_preview,
+    load_admin_config,
+    publish_next_consent_version,
     update_admin_config,
 )
 

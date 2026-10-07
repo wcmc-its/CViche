@@ -7,18 +7,18 @@ enforcement path (#46), and occasional markdown-fence cleanup on Claude's
 output, none of which the OpenAI adapter needs.
 """
 
-import os
 import json
 import logging
+import os
 import re
 
 from unified_pipeline.config import _normalize_model_id, calculate_cost
-from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
 from unified_pipeline.llm.retry import (
     _call_with_retry,
     _client_init_lock,
     _get_llm_timeout_seconds,
 )
+from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
 
 logger = logging.getLogger(__name__)
 

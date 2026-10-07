@@ -595,6 +595,7 @@ def test_optional_registry_views_are_real_and_never_gate_the_lint(tmp_path, monk
     to the token test, no "skipped: missing stage_4" INFO under its key), and
     receives the loaded stage-4 dict when it is present."""
     import shutil
+
     from test_run_doctor import _UID, _build_clean_run  # noqa: E402 (path set above)
     mod = _module()
     for spec in mod.LINT_REGISTRY:

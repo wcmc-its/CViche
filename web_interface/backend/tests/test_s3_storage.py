@@ -16,9 +16,9 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 boto3 = pytest.importorskip("boto3")
-from botocore.stub import Stubber
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
+from botocore.stub import Stubber
 
 from app.storage import base as storage_base
 from app.storage.base import ArtifactTooLarge, StorageKeyExists, StorageKeyNotFound

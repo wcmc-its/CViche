@@ -41,13 +41,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # contract should not depend on the caller setting that up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import unified_pipeline  # noqa: E402
-import unified_pipeline.stage_6_word_template as _REAL_STAGE6  # noqa: E402
-import unified_pipeline.run_doctor  # noqa: F401,E402
 import render_gate as rg  # noqa: E402
-
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
+
+import unified_pipeline  # noqa: E402
+import unified_pipeline.run_doctor  # noqa: F401,E402
+import unified_pipeline.stage_6_word_template as _REAL_STAGE6  # noqa: E402
 
 _STAGE6_MODULE = "unified_pipeline.stage_6_word_template"
 

@@ -25,7 +25,6 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
@@ -33,28 +32,31 @@ from unified_pipeline.doctor.lints.render import (  # noqa: E402
     IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
-from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
-from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path  # noqa: E402
+from unified_pipeline.doctor.shared import (  # noqa: E402
+    TABLE_ROW_JOINER,
+    docx_body_blocks,
+)
+from unified_pipeline.quality_score import (  # noqa: E402
+    _TEMPLATE_DOCX_PATH,
+    score_cv_owner,
+)
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
+    DUPLICATE_PASSAGE_MIN_BLOCKS,
     MISSED_HEADERS_WARN_COUNT,
-    lint_surprise,
-    rank_lints,
     appendix_entry_count,
     honors_table_totals,
-    unrouted_code_counts,
     iter_header_candidates,
     lint_bucket_status,
+    lint_citation_field_dropped,
     lint_classified_unrendered,
     lint_date_cell_shape,
+    lint_date_only_lines,
     lint_dead_sections,
     lint_dedup_drops,
-    DUPLICATE_PASSAGE_MIN_BLOCKS,
-    lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
-    lint_citation_field_dropped,
     lint_etal_added,
     lint_group_header_context,
     lint_identical_rendered_rows,
@@ -65,31 +67,38 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
-    lint_pubmed_title_truncated,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_pubmed_title_truncated,
     lint_python_repr_in_output,
+    lint_research_summary_call_failed,
     lint_section_lost,
+    lint_segmentation,
+    lint_segmentation_collapse,
     lint_split_child_unsourced,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
-    lint_stage_failure_recorded,
-    lint_research_summary_call_failed,
-    lint_taxonomy_code_coverage,
-    lint_segmentation,
-    lint_segmentation_collapse,
     lint_stage6_warnings,
+    lint_stage_failure_recorded,
+    lint_surprise,
     lint_table_lost,
     lint_table_shape,
+    lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_unrendered_records,
     main,
+    rank_lints,
     read_docx_blocks,
     read_docx_table_rows,
     run_doctor,
+    unrouted_code_counts,
 )
-
+from unified_pipeline.stage_errors import (  # noqa: E402
+    StageError,
+    record_stage_outcome,
+    stage_errors_path,
+)
 
 _GRANT_FSMB = ("Federation of State Medical Boards (FSMB) Foundation Grant | "
                "Shapiro, M. (PI) | Role: Co-PI | Amount: $75,000 | Status: Awarded 2026")
@@ -3933,7 +3942,9 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
     """Both read quality_score.stage4_group_failures, so the lint fires exactly
     when the cap does -- the doctor reports the gate, not a second definition."""
     from unified_pipeline.quality_score import (
-        STAGE4_GROUP_FAILURE_CAP, score_stage4_group_failures)
+        STAGE4_GROUP_FAILURE_CAP,
+        score_stage4_group_failures,
+    )
 
     failed = {"entries": [_failed_group_entry("P", True)], "stats": {"failed_batches": 1}}
     clean = {"entries": [{"taxonomy_code": "P", "extraction_success": True}]}
@@ -4912,7 +4923,10 @@ def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
     JIJRSN 516): a grant table whose role says PI and whose PI cell is empty
     reaches the report as a WARN. Invented values."""
     from unified_pipeline.stage6.sections.research_support import (
-        PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
+        PI_NAME_LABEL,
+        PROJECT_TITLE_LABEL,
+        YOUR_ROLE_LABEL,
+    )
     root = _build_clean_run(tmp_path)
     fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
     data = json.loads(fields.read_text())

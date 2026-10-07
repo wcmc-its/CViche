@@ -269,6 +269,7 @@ def iter_source_block_lines(docx_path: str) -> list[tuple[int, str]]:
     the rest of the document."""
     from docx import Document  # local import: harness is optional tooling
     from docx.table import Table
+
     from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
 
     lines: list[tuple[int, str]] = []
