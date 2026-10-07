@@ -33,6 +33,7 @@ from app.api.upload import _extract_text, _validate_docx_magic
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services import upload_validation
+from app.services.run_creation import RUN_NOT_CREATED_NOTHING_SAVED
 from app.storage.local_storage import LocalRunStorage
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1410,9 +1411,11 @@ def test_upload_compensates_archive_when_commit_fails(client, db, seed_simple_mo
 
 def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed_simple_mode, tmp_path, caplog):
     """#802: when the compensation's OWN storage calls also raise, the
-    response returned to the client is still the original commit-failure
-    5xx, not a compensation-failure one -- and both errors are logged,
-    instead of the second exception replacing or hiding the first."""
+    response returned to the client is still the commit-failure 500, not a
+    compensation-failure one -- and both errors are logged, instead of the
+    second exception replacing or hiding the first. The 500 no longer claims
+    "nothing was saved": the archive survived, so the message says the file
+    was stored, and the log names the run whose archive is left behind."""
     user = _make_user(db)
     _auth(client, user)
 
@@ -1432,8 +1435,8 @@ def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed
     assert resp.json()["detail"] == {
         "error": "internal_error",
         "message": (
-            "We couldn't finish creating your run, so nothing was saved. "
-            "Please try again in a moment."
+            "We couldn't finish creating your run. Your file was stored, but no run "
+            "was created for it. Please try again in a moment."
         ),
     }
 
@@ -1447,6 +1450,71 @@ def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed
     assert any("commit failed" in m for m in messages)
     assert any("delete_run failed" in m for m in messages)
     assert any("delete_global_prefix failed" in m for m in messages)
+    assert any("Compensation incomplete: run CMFAI2" in m for m in messages)
+
+
+@pytest.mark.parametrize("failing_delete", ["delete_run", "delete_global_prefix"])
+def test_upload_partial_compensation_does_not_claim_nothing_was_saved(client, db, seed_simple_mode, tmp_path, failing_delete):
+    """#802: only one of the two compensating deletes fails (the live role
+    lacked s3:DeleteObject, #1216). Something this request archived is still
+    stored -- the run's input or the by-submitter manifest -- so the 500 must
+    not say "nothing was saved"."""
+    user = _make_user(db)
+    _auth(client, user)
+
+    storage = MagicMock()
+    getattr(storage, failing_delete).side_effect = Exception("AccessDenied")
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert "nothing was saved" not in resp.json()["detail"]["message"]
+    storage.delete_run.assert_called_once()
+    storage.delete_global_prefix.assert_called_once()
+
+
+def test_upload_compensates_when_rollback_also_fails(client, db, seed_simple_mode, tmp_path, caplog):
+    """#802 item 1: a dead connection can make db.rollback() raise after the
+    commit failed. That must not skip the compensation: the archive is still
+    deleted, the failed rollback is logged, and the client gets the clean
+    500 rather than a bare one from the rollback's exception."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="RBFAIL"))
+    patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
+    patches.append(patch.object(db, "rollback", side_effect=OperationalError("stmt", {}, Exception("conn gone"))))
+    with caplog.at_level(logging.ERROR):
+        resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"]["message"] == RUN_NOT_CREATED_NOTHING_SAVED
+    assert storage.exists("RBFAIL", "input/manifest.json") is False
+    assert storage.exists("RBFAIL", "input/RBFAIL.docx") is False
+    assert not (tmp_path / "storage" / "by-submitter" / "test@example.com" / "RBFAIL").exists()
+    assert list(upload_dir.iterdir()) == []
+    assert any("rollback failed" in r.getMessage() for r in caplog.records)
+
+
+def test_upload_compensates_failure_before_the_commit(client, db, seed_simple_mode, tmp_path):
+    """#802 item 1: an exception after the archive but before db.commit()
+    (here the duration estimate) is inside the compensated section too: no
+    run row, nothing left under the run id, and a clean 500."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="PREFAI"))
+    patches.append(patch("app.services.run_creation.estimate_run_seconds", side_effect=ValueError("bad estimate")))
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"]["message"] == RUN_NOT_CREATED_NOTHING_SAVED
+    assert db.query(Run).count() == 0
+    assert storage.exists("PREFAI", "input/manifest.json") is False
+    assert not (tmp_path / "storage" / "by-submitter" / "test@example.com" / "PREFAI").exists()
+    assert list(upload_dir.iterdir()) == []
 
 
 # --- #796: filename bound BEFORE the archive --------------------------------

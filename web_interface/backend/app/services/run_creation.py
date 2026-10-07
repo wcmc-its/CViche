@@ -10,7 +10,8 @@ import json
 import logging
 import secrets
 import string
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -338,54 +339,94 @@ def _unlink_best_effort(path: Path) -> None:
         pass
 
 
-def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> None:
-    """Undo a durable archive after the row commit that should have followed
-    it failed (#802). run_id was generated fresh for this request and no row
-    ever referenced it, so deleting its whole storage namespace is safe here
-    -- nothing else can live under it (unlike a general run_id, this one is
-    never reused for another archive).
+# The 500 a run creation that failed after its archive returns (#802). Which
+# one depends on whether the compensation actually removed what was archived:
+# the submitter is told "nothing was saved" only when that is true.
+RUN_NOT_CREATED_NOTHING_SAVED = (
+    "We couldn't finish creating your run, so nothing was saved. "
+    "Please try again in a moment."
+)
+RUN_NOT_CREATED_FILE_KEPT = (
+    "We couldn't finish creating your run. Your file was stored, but no run "
+    "was created for it. Please try again in a moment."
+)
 
-    Called from commit_run_or_compensate below, shared by /upload and
-    restart_run (runs.py imports that).
+
+def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> bool:
+    """Undo a durable archive after creating the run row that should have
+    followed it failed (#802). run_id was generated fresh for this request and
+    no row ever referenced it, so deleting its whole storage namespace is safe
+    here -- nothing else can live under it (unlike a general run_id, this one
+    is never reused for another archive).
+
+    Both deletes are attempted even if the first raises; each failure is
+    logged. Returns True only when both succeeded, i.e. nothing archived for
+    this request is left in storage.
 
     # ponytail: compensation runs in-process; a crash between archive and
     # this block still orphans -- a storage-keyed sweep is the upgrade path
     # (#802 option 2).
     """
     storage = get_storage()
+    removed = True
     try:
         storage.delete_run(run_id)
     except Exception:
+        removed = False
         logger.exception("Compensating delete_run failed for orphaned run %s", run_id)
     try:
         # Mirrors the exact key put_global wrote the index under.
         storage.delete_global_prefix(f"by-submitter/{email.lower()}/{run_id}/")
     except Exception:
+        removed = False
         logger.exception("Compensating delete_global_prefix failed for orphaned run %s", run_id)
     _unlink_best_effort(file_path)
+    if not removed:
+        logger.error(
+            "Compensation incomplete: run %s's input archive is still in storage "
+            "with no run row (#802)", run_id,
+        )
+    return removed
 
 
-def commit_run_or_compensate(
-    db: Session, run_id: str, email: str, file_path: Path,
-) -> None:
-    """Commit the pending Run/Step rows, or compensate the archive and raise
-    a 5xx if the commit fails (#802). Shared by /upload and restart_run so a
-    commit failure after a successful archive is handled identically on both
-    write paths.
+def _rollback_logged(db: Session, run_id: str) -> None:
+    """Roll the session back, logging rather than raising if that fails too.
+
+    A dead connection can make rollback() raise; that must not skip the
+    compensation that follows it (#802), and the original failure is the
+    one the caller reports.
     """
     try:
-        db.commit()
-    except Exception:
         db.rollback()
+    except Exception:
+        logger.exception("Session rollback failed while compensating run %s", run_id)
+
+
+@contextmanager
+def compensated_run_creation(
+    db: Session, run_id: str, email: str, file_path: Path,
+) -> Iterator[None]:
+    """Wrap everything between a durable archive and its row commit (#802).
+
+    The body stages the Run/Step rows; on a clean exit they are committed.
+    If the body or the commit raises, the session is rolled back, the archive
+    is compensated, and a 500 is raised whose message says whether the file
+    is still stored. Shared by /upload and restart_run so both write paths
+    handle a failure after the archive identically.
+    """
+    try:
+        yield
+        db.commit()
+    except Exception as exc:
         logger.exception(
-            "Run row commit failed after a durable archive; compensating (run=%s)",
+            "Run row creation or commit failed after a durable archive; compensating (run=%s)",
             run_id,
         )
-        _compensate_failed_run(run_id, email, file_path)
+        _rollback_logged(db, run_id)
+        removed = _compensate_failed_run(run_id, email, file_path)
         raise internal_error(
-            "We couldn't finish creating your run, so nothing was saved. "
-            "Please try again in a moment."
-        )
+            RUN_NOT_CREATED_NOTHING_SAVED if removed else RUN_NOT_CREATED_FILE_KEPT
+        ) from exc
 
 
 class DuplicateInfo(NamedTuple):
@@ -563,52 +604,52 @@ async def create_run_from_bytes(
     run_id, stored_name, file_path, manifest = _archive_or_502(
         content, file_ext, _build_manifest, _write_local,
     )
-    storage = get_storage()
+    # Everything from here to the commit compensates the archive on failure (#802).
+    with compensated_run_creation(db, run_id, current_user.email, file_path):
+        storage = get_storage()
 
-    # Cross-run, browsable-by-submitter index: the same manifest keyed under the
-    # submitter so runs can be found by who uploaded them in S3 without opening
-    # each run folder. This is a navigation pointer only -- the run and its input
-    # are already durably stored above and the pipeline does not read it. So,
-    # unlike the archive, this stays BEST-EFFORT: a failure here must never fail
-    # the upload or orphan a run.
-    try:
-        storage.put_global(
-            f"by-submitter/{current_user.email.lower()}/{run_id}/manifest.json",
-            manifest,
+        # Cross-run, browsable-by-submitter index: the same manifest keyed under the
+        # submitter so runs can be found by who uploaded them in S3 without opening
+        # each run folder. This is a navigation pointer only -- the run and its input
+        # are already durably stored above and the pipeline does not read it. So,
+        # unlike the archive, this stays BEST-EFFORT: a failure here must never fail
+        # the upload or orphan a run.
+        try:
+            storage.put_global(
+                f"by-submitter/{current_user.email.lower()}/{run_id}/manifest.json",
+                manifest,
+            )
+        except Exception as e:
+            logger.warning("Failed to write by-submitter index (run=%s): %s", run_id, e)
+
+        # Input-scaled wall-clock estimate, stored so the client stall watchdog can
+        # scale its "taking longer than expected" threshold to this CV instead of a
+        # fixed constant (large CVs were false-positiving as "may be stuck"). Same
+        # helper and char count as /estimate.
+        _, estimated_duration_seconds = estimate_run_seconds(_estimate_char_count(extracted))
+
+        # Create run record. Persist the user's output-rendering choices (issue
+        # #153) as the truthy ints the Stage 6 generator reads at render time.
+        run = Run(
+            id=run_id,
+            filename=filename,
+            file_type=file_ext[1:],  # Remove dot
+            status=RunState.CREATED,
+            started_at=datetime.now(),
+            user_id=current_user.id,
+            submission_type=submission_type,
+            estimated_duration_seconds=estimated_duration_seconds,
+            show_track_changes=1 if include_track_changes else 0,
+            show_pipeline_comments=1 if include_classification_comments else 0,
+            strip_template_instructions=1 if strip_wcm_instructions else 0,
+            batch_id=batch_id,
+            input_format=input_format,
+            input_format_score=input_format_score,
+            source_sha256=source_sha256,
+            scanned_pages=",".join(map(str, scanned_pages)) or None,
         )
-    except Exception as e:
-        logger.warning("Failed to write by-submitter index (run=%s): %s", run_id, e)
-
-    # Input-scaled wall-clock estimate, stored so the client stall watchdog can
-    # scale its "taking longer than expected" threshold to this CV instead of a
-    # fixed constant (large CVs were false-positiving as "may be stuck"). Same
-    # helper and char count as /estimate.
-    _, estimated_duration_seconds = estimate_run_seconds(_estimate_char_count(extracted))
-
-    # Create run record. Persist the user's output-rendering choices (issue
-    # #153) as the truthy ints the Stage 6 generator reads at render time.
-    run = Run(
-        id=run_id,
-        filename=filename,
-        file_type=file_ext[1:],  # Remove dot
-        status=RunState.CREATED,
-        started_at=datetime.now(),
-        user_id=current_user.id,
-        submission_type=submission_type,
-        estimated_duration_seconds=estimated_duration_seconds,
-        show_track_changes=1 if include_track_changes else 0,
-        show_pipeline_comments=1 if include_classification_comments else 0,
-        strip_template_instructions=1 if strip_wcm_instructions else 0,
-        batch_id=batch_id,
-        input_format=input_format,
-        input_format_score=input_format_score,
-        source_sha256=source_sha256,
-        scanned_pages=",".join(map(str, scanned_pages)) or None,
-    )
-    db.add(run)
-    _add_pending_steps(db, run_id)
-
-    commit_run_or_compensate(db, run_id, current_user.email, file_path)
+        db.add(run)
+        _add_pending_steps(db, run_id)
 
     return UploadResponse(
         run_id=run_id,
