@@ -22,18 +22,18 @@ build note at its top for which is which and why.
                                                     # in place (never raises a
                                                     # baseline -- see check_function_size.py)
 
-Six of the fourteen rows are a snapshot, not a debt budget -- a row going up
+Six of the sixteen rows are a snapshot, not a debt budget -- a row going up
 is information, not a failure to refuse, and --update always writes the
-fresh number either direction. Eight rows (2.1, 3.7's dynamic-attribute row,
-both 5.4 rows, both 7.1 rows, both 8.3 rows) are ratcheted instead, the same way
+fresh number either direction. Ten rows (2.1, 3.7's dynamic-attribute row,
+both 5.4 rows, both 7.1 rows, both 8.3 rows, both 8.4 rows) are ratcheted instead, the same way
 check_function_size.py ratchets 3.x: scripts/standards-baseline.json holds
 one number per row, --update refuses to write one higher than what's on
 disk, and the bare command fails if a fresh count exceeds its baseline. See
 RATCHETED_ROWS below and CODING_STANDARDS.md's "Closing the loop" section
 for which rows qualify.
 
-Four of the ratcheted rows (5.4's BLE001 row, 7.1's print() row and both
-8.3 rows) are not
+Six of the ratcheted rows (5.4's BLE001 row, 7.1's print() row, both 8.3
+rows and both 8.4 rows) are not
 AST walks here but sums over `ruff check --statistics`, with ruff.toml at the
 repo root as the one definition of what is counted. ruff missing from PATH
 is a hard failure (exit 2, §5.5), never a zero.
@@ -82,6 +82,8 @@ RATCHETED_ROWS = {
     "7.1 print() in library code (T201)",
     "8.3 typing syntax (UP*, RUF013)",
     "8.3 missing annotations (ANN*, RUF012)",
+    "8.4 pyflakes findings (F)",
+    "8.4 bugbear findings (B)",
 }
 
 # Anchored to right after `#` (mod whitespace), not a bare substring search
@@ -448,7 +450,7 @@ def check_python_version_drift():
     return len(hits), hits
 
 
-# 5.4 / 7.1 / 8.3 -- four rows that sum `ruff check --statistics` by rule family.
+# 5.4 / 7.1 / 8.3 / 8.4 -- six rows that sum `ruff check --statistics` by rule family.
 # ruff.toml at the repo root is the one definition of the rule set (§1.5);
 # passing it explicitly turns off ruff's per-directory config discovery so a
 # stray pyproject.toml somewhere below can't widen or narrow one row's count.
@@ -459,7 +461,7 @@ RUFF_CONFIG = os.path.join(ROOT, "ruff.toml")
 
 
 class RuffUnavailable(RuntimeError):
-    """ruff could not be run, so the four ruff-backed rows have no number.
+    """ruff could not be run, so the six ruff-backed rows have no number.
     §5.5: a gate that cannot do its job fails, it does not read zero."""
 
 
@@ -475,7 +477,7 @@ def _ruff_statistics() -> dict[str, int]:
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     except FileNotFoundError as exc:
         raise RuffUnavailable(
-            "ruff is not on PATH; the 7.1/8.3 ratchet rows need it. Install the "
+            "ruff is not on PATH; the 5.4/7.1/8.3/8.4 ratchet rows need it. Install the "
             "version .github/workflows/ci.yml pins for the function-size job."
         ) from exc
     if r.returncode != 0:
@@ -488,6 +490,16 @@ def _ruff_family_count(*prefixes: str) -> tuple[int, list[str]]:
     `prefixes` -- "T201" matches itself, "UP" matches UP006, UP035, ..."""
     stats = _ruff_statistics()
     matched = {code: n for code, n in stats.items() if code.startswith(prefixes)}
+    detail = [f"{code}: {n}" for code, n in sorted(matched.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return sum(matched.values()), detail
+
+
+def _ruff_linter_count(linter: str) -> tuple[int, list[str]]:
+    """(total, per-code detail) for one ruff linter's own codes: the letters
+    then digits only. A bare prefix would not do -- "B" also matches BLE001,
+    which is flake8-blind-except with its own 5.4 row, not bugbear."""
+    stats = _ruff_statistics()
+    matched = {code: n for code, n in stats.items() if re.fullmatch(rf"{linter}\d+", code)}
     detail = [f"{code}: {n}" for code, n in sorted(matched.items(), key=lambda kv: (-kv[1], kv[0]))]
     return sum(matched.values()), detail
 
@@ -519,6 +531,20 @@ def check_missing_annotations() -> tuple[int, list[str]]:
     return _ruff_family_count("ANN", "RUF012")
 
 
+def check_pyflakes() -> tuple[int, list[str]]:
+    """§8.4 -- pyflakes (F): unused imports and variables, undefined names,
+    redefinitions, f-strings with no placeholders."""
+    return _ruff_linter_count("F")
+
+
+def check_bugbear() -> tuple[int, list[str]]:
+    """§8.4 -- flake8-bugbear (B): bug-shaped code such as mutable default
+    arguments, loop variables captured late, `except` clauses that lose the
+    cause. ruff.toml's extend-immutable-calls exempts FastAPI's Depends/
+    File/Query markers, the framework's own idiom."""
+    return _ruff_linter_count("B")
+
+
 # (row label, target text, check fn) -- target is prose ("0", "falling"),
 # not itself the enforcement; RATCHETED_ROWS above decides how a row's
 # count is actually gated.
@@ -537,6 +563,8 @@ ROWS = [
     ("7.9 restated Python version != the build image", "0", check_python_version_drift),
     ("8.3 typing syntax (UP*, RUF013)", "falling", check_typing_syntax),
     ("8.3 missing annotations (ANN*, RUF012)", "falling", check_missing_annotations),
+    ("8.4 pyflakes findings (F)", "falling", check_pyflakes),
+    ("8.4 bugbear findings (B)", "falling", check_bugbear),
 ]
 
 

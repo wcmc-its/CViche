@@ -8,5 +8,7 @@
   "7.1 print() in library code (T201)": 676,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
   "8.3 missing annotations (ANN*, RUF012)": 493,
-  "8.3 typing syntax (UP*, RUF013)": 0
+  "8.3 typing syntax (UP*, RUF013)": 0,
+  "8.4 bugbear findings (B)": 140,
+  "8.4 pyflakes findings (F)": 196
 }
