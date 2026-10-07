@@ -390,7 +390,8 @@ def test_awards_after_a_named_mentee_become_n4():
 
 def test_a_student_awards_heading_with_no_mentee_line_stays_the_owners():
     # web210 "Student/Trainee Awards": the owner's own awards from training.
-    group = [_row("H", "Example University Doctoral Fellowship, 2031", hierarchy=("Student/Trainee Awards",))]
+    group = [_row("H", text, hierarchy=("Student/Trainee Awards",))
+             for text in ("Example University Doctoral Fellowship, 2031", "Second Prize, Example Essay Contest, 2030")]
     out, n = apply_header_pin(group, NO_PIN_CTX)
     assert n == 0 and out == group
 
