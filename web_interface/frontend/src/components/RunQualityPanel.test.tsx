@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, RunQualitySections, seenOn } from './RunQualityPanel'
-import { getRunQuality } from '../api/runs'
-import type { RunQualityReport } from '../types'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
+import { getRunQuality, getRunReviewNote } from '../api/runs'
+import type { RunQualityReport, RunReviewNote } from '../types'
 
 vi.mock('../api/runs', () => ({
   getRunQuality: vi.fn(),
@@ -163,5 +163,44 @@ describe('RunQualitySections', () => {
     const card = screen.getByRole('tooltip').textContent
     expect(card).toContain('If it fires:')
     expect(card).toContain('caps only, no points')
+  })
+})
+
+const UNSCORED_NOTE: RunReviewNote = { needs_cleanup: false, scored: false }
+const CLEANUP_NOTE: RunReviewNote = { needs_cleanup: true, scored: true }
+
+describe('ReviewNote', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.mocked(getRunReviewNote).mockReset() })
+
+  it('asks again while the run is unscored, and shows the note once the score lands (#1199)', async () => {
+    vi.mocked(getRunReviewNote).mockResolvedValueOnce(UNSCORED_NOTE).mockResolvedValueOnce(CLEANUP_NOTE)
+    render(<ReviewNote runId="ABCDEF" />)
+    await flush()
+    expect(screen.queryByRole('note')).toBeNull()
+
+    await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('note')).toBeTruthy()
+
+    await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not ask again once the run is scored, even when no cleanup is needed', async () => {
+    vi.mocked(getRunReviewNote).mockResolvedValue({ needs_cleanup: false, scored: true })
+    render(<ReviewNote runId="ABCDEF" />)
+    await flush()
+    await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('note')).toBeNull()
+  })
+
+  it('stops after EMPTY_REPORT_RETRIES when the run is never scored', async () => {
+    vi.mocked(getRunReviewNote).mockResolvedValue(UNSCORED_NOTE)
+    render(<ReviewNote runId="ABCDEF" />)
+    await flush()
+    for (let i = 0; i < EMPTY_REPORT_RETRIES + 3; i++) await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(1 + EMPTY_REPORT_RETRIES)
   })
 })

@@ -36,11 +36,11 @@ function errorText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? `${fallback} (${err.message})` : fallback
 }
 
-/** How often, and how many times, an empty quality report is fetched again. The
- *  page turns "complete" when the run row is committed, but the score and the
- *  doctor report are written a few seconds after that (orchestrator.execute), so
- *  a page open at completion asks too early. 5 x 3s covers the ~4s seen on run
- *  JCWIFB (2026-10-01) with room to spare. */
+/** How often, and how many times, an empty quality report (or an unscored review
+ *  note, #1199) is fetched again. The page turns "complete" when the run row is
+ *  committed, but the score and the doctor report are written a few seconds after
+ *  that (orchestrator.execute), so a page open at completion asks too early.
+ *  5 x 3s covers the ~4s seen on run JCWIFB (2026-10-01) with room to spare. */
 export const EMPTY_REPORT_RETRY_MS = 3000
 export const EMPTY_REPORT_RETRIES = 5
 
@@ -432,7 +432,7 @@ const REVIEW_FAILURE = 'Could not check whether this draft needs review.'
 
 /** Non-admin note for a draft that may need cleanup. Never shows the score. */
 export function ReviewNote({ runId }: { runId: string }) {
-  const result = useLoad(() => getRunReviewNote(runId), runId, REVIEW_FAILURE)
+  const result = useLoad(() => getRunReviewNote(runId), runId, REVIEW_FAILURE, (note) => !note.scored)
   if (result.state === 'error') {
     return <p role="status" className="m-0 text-[13px] text-gray-500">{REVIEW_FAILURE}</p>
   }

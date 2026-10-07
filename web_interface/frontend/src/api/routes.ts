@@ -54,7 +54,7 @@ export const runRoutes = {
   start: (id: string) => `/api/run/${seg(id)}/start` as const,
   /** GET /api/run/:id/run-quality  (admin: score breakdown + run doctor) */
   quality: (id: string) => `/api/run/${seg(id)}/run-quality` as const,
-  /** GET /api/run/:id/review-note  (owner or admin: {needs_cleanup}) */
+  /** GET /api/run/:id/review-note  (owner or admin: {needs_cleanup, scored}) */
   reviewNote: (id: string) => `/api/run/${seg(id)}/review-note` as const,
   /** GET /api/runs?offset=:offset&limit=:limit[&:extra]  (extra = pre-built
    *  admin scope/filter query string, see buildRunListQuery) */

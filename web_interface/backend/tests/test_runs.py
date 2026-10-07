@@ -626,14 +626,14 @@ def test_review_note_for_the_owner_never_carries_the_score(
     resp = client.get("/api/run/ADM001/review-note")
 
     assert resp.status_code == 200
-    assert resp.json() == {"needs_cleanup": expected}
+    assert resp.json() == {"needs_cleanup": expected, "scored": score is not None}
 
 
 def test_review_note_falls_back_to_the_cached_score_before_backfill(client, db, seed_simple_mode, monkeypatch):
     users = _seed_admin_view(db)
     _patch_quality(monkeypatch, {"totalScore": 70, "hard_fail_caps_applied": []}, None)
     _auth(client, users["alice"])
-    assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True}
+    assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True, "scored": True}
 
 
 def _staff(db):
