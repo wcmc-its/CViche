@@ -989,6 +989,24 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     # A structured role is no text to subtract: the entry text stands as it is.
     ("2001- Fictional Society\tSecretary", [{"role": "Secretary"}], "2001", None,
      "2001- Fictional Society\tSecretary"),
+    # #1437 (KHXOUF 1264 shape): the years go to the Dates cell and the months
+    # around them are no organization -- not "September September".
+    ("Chair, Fictional Committee\tSeptember 1999 \u2013 September 2001",
+     "Chair, Fictional Committee", "1999-09", "2001-09", ""),
+    ("Fictional Society, Treasurer, Jan 2001 - Present", "Treasurer", "2001", None,
+     "Fictional Society"),
+    # A month inside a name is part of the name.
+    ("March of Fictional Dimes\tTreasurer", "Treasurer", None, None,
+     "March of Fictional Dimes"),
+    # #1437: the connective the role was attached by goes with it.
+    ("President of the Fictional Society", "President", None, None, "Fictional Society"),
+    ("Fictional Society Board of\tDirector", "Director", None, None,
+     "Fictional Society Board"),
+    # A leading "The" with no connective before it is the name's own.
+    ("The Fictional Society\tTreasurer", "Treasurer", None, None, "The Fictional Society"),
+    # A year the Dates cell does not show is not a month: it stays.
+    ("Fictional Society\t1995\tTreasurer", "Treasurer", "2001", None,
+     "Fictional Society, 1995"),
     # A century-less end year goes with its range (#665): taking "1992" alone
     # left "93" behind as the whole Organization cell.
     ("1992-93 Vice-President", "Vice-President", "1992", "1993", ""),

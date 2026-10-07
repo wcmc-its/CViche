@@ -19,7 +19,14 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.consent import has_current_consent
-from app.models import BatchSource, InboundFile, InboundFileStatus, RunBatch, User
+from app.models import (
+    BatchSource,
+    InboundFile,
+    InboundFileStatus,
+    RunBatch,
+    RunState,
+    User,
+)
 from app.pipeline import concurrency, run_queue
 from app.rate_limiter import check_rate_limit
 from app.services import batch_completion, batch_service, notifications
@@ -72,7 +79,7 @@ def _queue_created_run(db: Session, run_id: str, batch_id: str) -> bool:
     created -> queued, XADD the token on the queue ``run_queue.queue_for``
     names (single for a one-file batch, batch otherwise), revert the flip if
     the XADD fails."""
-    prior = flip_to_queued(db, run_id, ("created",))
+    prior = flip_to_queued(db, run_id, (RunState.CREATED,))
     if not prior.flipped:
         return False
     try:

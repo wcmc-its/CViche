@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Run statuses /start may move to "running" (the conditional UPDATE's predicate).
-STARTABLE_STATUSES = ("created", "paused")
+STARTABLE_STATUSES = (RunState.CREATED, RunState.PAUSED)
 
 # Largest page /runs serves. The run-history UI asks for exactly this many
 # (RunHistory.tsx PAGE_SIZE), so lowering it breaks that page (#801).
@@ -93,7 +93,7 @@ def _run_duration_seconds(run) -> int | None:
         return run.total_duration_seconds
     if run.started_at and run.completed_at:
         return int((run.completed_at - run.started_at).total_seconds())
-    if run.started_at and run.status == "running":
+    if run.started_at and run.status == RunState.RUNNING:
         # Use datetime.now() to match server_default=func.now() (local time).
         return max(0, int((datetime.now() - run.started_at).total_seconds()))
     return None
@@ -164,7 +164,7 @@ def _dispatch_queue(
         if not run_queue.claim_reenqueue_slot(run.id):
             return JSONResponse(
                 status_code=202,
-                content={"message": f"Run {run.id} already queued", "status": "queued"},
+                content={"message": f"Run {run.id} already queued", "status": RunState.QUEUED},
             )
         try:
             run_queue.enqueue(run.id, queue)
@@ -177,7 +177,7 @@ def _dispatch_queue(
             ) from e
         return JSONResponse(
             status_code=202,
-            content={"message": f"Run {run.id} already queued", "status": "queued"},
+            content={"message": f"Run {run.id} already queued", "status": RunState.QUEUED},
         )
 
     try:
@@ -195,7 +195,7 @@ def _dispatch_queue(
             detail={"error": "queue_unavailable",
                     "message": "The run queue is unavailable right now -- please try again shortly."},
         ) from e
-    return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": "queued"})
+    return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": RunState.QUEUED})
 
 
 @router.get("/capacity", response_model=CapacityResponse)
@@ -491,7 +491,7 @@ def start_run(
 
     background_tasks.add_task(run_pipeline)
 
-    return {"message": f"Pipeline started for run {run_id}", "status": "running"}
+    return {"message": f"Pipeline started for run {run_id}", "status": RunState.RUNNING}
 
 
 @router.post("/run/{run_id}/cancel", response_model=RunActionResponse)
@@ -505,12 +505,12 @@ async def cancel_run(
 
     # A queued run has no orchestrator yet: the status flip alone cancels it,
     # because the worker's claim requires status == "queued" (#701).
-    if run.status not in ("running", "queued"):
+    if run.status not in (RunState.RUNNING, RunState.QUEUED):
         raise bad_request(f"Cannot cancel run in status: {run.status}")
 
     _cancel_run_record(db, run)
 
-    return {"message": f"Run {run_id} cancelled", "status": "cancelled"}
+    return {"message": f"Run {run_id} cancelled", "status": RunState.CANCELLED}
 
 
 @router.post("/run/{run_id}/restart", response_model=RestartRunResponse)
@@ -619,7 +619,7 @@ async def restart_run(
         id=new_run_id,
         filename=original_run.filename,
         file_type=original_run.file_type,
-        status="created",
+        status=RunState.CREATED,
         started_at=datetime.now(),
         user_id=current_user.id,
         submission_type=original_run.submission_type,
@@ -649,7 +649,7 @@ async def restart_run(
     # the original running. Refresh first: the orchestrator may have finished
     # it since check_run_access() read it.
     db.refresh(original_run)
-    if original_run.status == "running":
+    if original_run.status == RunState.RUNNING:
         _cancel_run_record(db, original_run)
 
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
@@ -672,7 +672,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     """
     from app.pipeline.orchestrator import USER_CANCEL_MESSAGE
 
-    run.status = "cancelled"
+    run.status = RunState.CANCELLED
     run.error_message = USER_CANCEL_MESSAGE
     # Naive, matching every other Run timestamp write (orchestrator.py,
     # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
@@ -798,7 +798,7 @@ def retry_step(
         # these resets here unconditionally, before the flip, would persist
         # them on a lost race (a 409) too.
         return _dispatch_queue(
-            run, db, allowed_from=("failed",), start_step=step_number, on_flip=_reset_downstream_steps,
+            run, db, allowed_from=(RunState.FAILED,), start_step=step_number, on_flip=_reset_downstream_steps,
         )
 
     # Atomic -> running (#799): only one of two concurrent retries may claim a
@@ -807,7 +807,7 @@ def retry_step(
     # started_at restarts the stale-run clock: reconcile_stale_runs ages runs by
     # it, so a retry of a run started over an hour ago was reaped mid-run (#145).
     if not claim_run_as_running(
-        db, run_id, Run.status != "running",
+        db, run_id, Run.status != RunState.RUNNING,
         error_message=None, completed_at=None, started_at=datetime.now(),
     ):
         db.rollback()
@@ -832,7 +832,7 @@ def retry_step(
 
     background_tasks.add_task(run_pipeline)
 
-    return {"message": f"Retrying run {run_id} from step {step_number}", "status": "running"}
+    return {"message": f"Retrying run {run_id} from step {step_number}", "status": RunState.RUNNING}
 
 
 @router.get("/run/{run_id}/run-quality", response_model=RunQualityReport)

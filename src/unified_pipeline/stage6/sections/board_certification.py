@@ -544,6 +544,82 @@ def _is_header_record(fields: dict, text: str) -> bool:
             and all(_is_certification_header_line(line) for line in lines))
 
 
+def _reparse_renders_less_than_structured(rows: list[tuple]) -> bool:
+    """True when the reconstructed rows would render less than the entry's
+    own structured fields: no row recovered a certificate number or a date,
+    or no row recovered a specialty or certificate number, so every row
+    would be skipped (#1270). The second arm is what the date backfill used
+    to hide: a single-line text starting with a year ("2010-2021: American
+    Board of ...") classifies as no token at all, the backfill then supplies
+    a date, and the row was skipped although stage 4 had its board name."""
+    no_number_or_date = not any(cert_num or year for _, cert_num, year in rows)
+    no_renderable_row = not any(specialty or cert_num for specialty, cert_num, _ in rows)
+    return no_number_or_date or no_renderable_row
+
+
+# Every F2 field that dates a certification. An entry with none of these, and
+# no year in its text, has no date for a following bare-year entry to clash with.
+_F2_DATE_FIELDS = ('start_date', 'end_date', 'year_certified', 'recertification_date')
+# Any 4-digit token in an entry's text. Deliberately broad: a match only stops
+# a bare year from being attached, so a false hit costs a warning, never a
+# wrong date.
+_ANY_YEAR_IN_TEXT = re.compile(r'\b\d{4}\b')
+
+
+def _bare_year(entry: dict) -> str:
+    """The year of an F2 entry whose text is only a year and whose stage-4
+    fields are all empty, or '' for any other entry (#1271)."""
+    fields = entry.get('extracted_fields') or {}
+    if any(str(value).strip() for value in fields.values() if value):
+        return ''
+    lines = [line.strip() for line in entry_lines(entry.get('text') or '')
+             if not _is_certification_header_line(line)]
+    if len(lines) == 1 and YEAR_PATTERN.match(lines[0]):
+        return lines[0]
+    return ''
+
+
+def _has_any_date(entry: dict) -> bool:
+    """True when an entry already carries a date, in a field or its text."""
+    fields = entry.get('extracted_fields') or {}
+    if any(fields.get(name) for name in _F2_DATE_FIELDS):
+        return True
+    return _ANY_YEAR_IN_TEXT.search(entry.get('text') or '') is not None
+
+
+def _attach_bare_years(entries: list[dict]) -> tuple[list[dict], list[str]]:
+    """Fold each bare-year F2 entry into the entry above it in source order.
+
+    A CV that lists a certification and puts its year on the next line comes
+    out of stage 4 as two records: the certification, and a year with every
+    field empty, which used to be skipped (#1271). The year becomes the
+    previous entry's `year_certified` when that entry has no date of its own.
+    Otherwise (no previous entry, or one that is already dated) the year is
+    returned in the second list, for the caller to record as a skipped row:
+    which of two dates is right is not this function's guess to make.
+
+    Runs on source order, before the reverse-chronological sort, since only
+    there is "the entry above" the line the CV wrote it under. Returns new
+    entry dicts for the ones it changes; the input is not mutated.
+    """
+    kept: list[dict] = []
+    unattached: list[str] = []
+    for entry in entries:
+        year = _bare_year(entry)
+        if not year:
+            kept.append(entry)
+            continue
+        previous = kept[-1] if kept else None
+        if previous is None or _has_any_date(previous):
+            unattached.append(year)
+            continue
+        fields = {**(previous.get('extracted_fields') or {}), 'year_certified': year}
+        kept[-1] = {**previous, 'extracted_fields': fields}
+        logger.info("board certification: attached a bare-year entry to the "
+                    "undated entry above it as its year_certified")
+    return kept, unattached
+
+
 def _is_clean_specialty_only(fields: dict, text: str) -> bool:
     """True when the structured path can render this record without losing
     content: `specialty` is a non-blank string and the entry text holds at
@@ -607,11 +683,15 @@ class BoardCertificationSection:
         # F2 alone, so no other section's order can shift), which is what
         # real board-certification entries actually carry -- a certification
         # issued in 2005 and recertified in 2020 sorts as 2020.
+        entries = [e for e in entries
+                   if not _is_header_record(e.get('extracted_fields') or {}, e.get('text', ''))]
+        entries, unattached_years = _attach_bare_years(entries)
+        for year in unattached_years:
+            self._warn_skipped_certification_row(year)
+
         for entry in sort_entries_reverse_chronological(entries):
             fields = entry.get('extracted_fields', {}) or {}
             original_text = entry.get('text', '')
-            if _is_header_record(fields, original_text):
-                continue
 
             certifying_board = fields.get('certifying_board', '')
             certificate_number = fields.get('certificate_number', '')
@@ -747,12 +827,13 @@ class BoardCertificationSection:
         rows = _backfill_missing_fields_from_structured(rows, fields, structured_cert, text)
 
         # HARD SAFETY NET, continued: a reparse that recovered no
-        # certificate number and no year anywhere is strictly worse than
-        # the structured fields the entry already had -- prefer those over
-        # a specialty-only guess.
-        if has_structured_data and not any(cert_num or year for _, cert_num, year in rows):
+        # certificate number and no year anywhere, or no row that would
+        # render at all (#1270), is strictly worse than the structured
+        # fields the entry already had -- prefer those.
+        if has_structured_data and _reparse_renders_less_than_structured(rows):
             _render_structured_fallback(
-                "reparse recovered no certificate number or year for any row")
+                "reparse recovered no certificate number or year, or no "
+                "specialty or certificate number, for any row")
             return
 
         for specialty, cert_num, year in rows:

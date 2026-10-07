@@ -619,6 +619,17 @@ def _distinct_row_cells(row: _Row) -> list[tuple[int, int, _Cell]]:
     return cells
 
 
+def _is_layout_box(table: Table) -> bool:
+    """Is this table a single-column LAYOUT box: every row one logical cell?
+
+    Counts distinct ``<w:tc>`` per row, not ``row.cells``: python-docx repeats
+    a gridSpan-merged cell once per layout column it spans, so a 1x1 box built
+    on a multi-column grid read as a data row and was not exploded (#1229).
+    Same rule as ``run_doctor._is_single_column`` (#749).
+    """
+    return bool(table.rows) and all(len(_distinct_row_cells(row)) == 1 for row in table.rows)
+
+
 def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
     """
     Extract table structure and content.
@@ -1394,7 +1405,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
             # elements so header detection and stage-2 splitting see them. Multi-column rows
             # are real data (Year | Institution | Degree) and keep the joined path below.
             # A table nested in the cell is exploded the same way, in document order (#1231).
-            if table.rows and all(len(row.cells) == 1 for row in table.rows):
+            if _is_layout_box(table):
                 seen_cells = set()
                 for row in table.rows:
                     cell = row.cells[0]

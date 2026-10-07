@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config_loader import get_config_value
-from app.models import Run, User
+from app.models import Run, User, UserRole
 
 ET = ZoneInfo("America/New_York")
 
@@ -14,7 +14,7 @@ ET = ZoneInfo("America/New_York")
 def get_effective_limits(user: User, db: Session) -> tuple[int | None, int | None]:
     """Return (daily_limit, monthly_limit). None = unlimited (admin).
     Uses per-user overrides if set, otherwise system defaults from SystemConfig."""
-    if user.role == "admin":
+    if user.role == UserRole.ADMIN:
         return (None, None)
 
     # Per-user overrides take precedence
@@ -119,7 +119,7 @@ def get_quota(user: User, db: Session) -> dict:
     """Return quota info for display: daily_limit, daily_used, daily_remaining,
     monthly_limit, monthly_used, monthly_remaining, is_admin, resets_at."""
     daily_limit, monthly_limit = get_effective_limits(user, db)
-    is_admin = user.role == "admin"
+    is_admin = user.role == UserRole.ADMIN
 
     if is_admin:
         return {

@@ -43,7 +43,7 @@ from starlette.websockets import WebSocketDisconnect
 import app.api.websocket as ws_module
 import app.pipeline.event_emitter as emitter_module
 import app.session_idle as session_idle
-from app.models import Run, SystemConfig, User
+from app.models import Run, RunState, SystemConfig, User
 from app.pipeline.event_emitter import EventEmitter
 from app.session_idle import IdleSessionStore
 
@@ -273,6 +273,20 @@ def test_authorized_socket_receives_the_terminal_replay(
     # Stamped like every other emitted event (thread 7).
     assert message["event_id"]
     assert message["timestamp"]
+
+
+@pytest.mark.parametrize("status, expected_event", [
+    (RunState.CANCELLED, "RUN_CANCELLED"),
+    (RunState.FAILED, "RUN_FAILED"),
+    (RunState.COMPLETE, "RUN_COMPLETE"),
+    (RunState.RUNNING, None),
+    (RunState.QUEUED, None),
+])
+def test_terminal_replay_covers_every_terminal_run_state(status, expected_event):
+    """The replay's terminal set is Run.TERMINAL_RUN_STATUSES (#346 removed a
+    second copy here); a cancelled run must replay RUN_CANCELLED, not None."""
+    event = ws_module._terminal_event_for_run(Run(id="TERM01", status=status))
+    assert (event or {}).get("event") == expected_event
 
 
 def test_authorization_and_snapshot_run_off_the_event_loop(

@@ -174,6 +174,9 @@ def test_an_org_that_is_the_object_of_the_last_phrase_is_not_stripped() -> None:
     assert _strip_org_tail(name, "Imaginary Foundation") == name
     name = "Prize awarded by Imaginary Society"
     assert _strip_org_tail(name, "Imaginary Society") == name
+    # #1437 (HJPBEM 271/273 shape): "at" rendered the name as "... room at".
+    name = "First prize of the mock room at Imaginary Residents Meeting (IRM)"
+    assert _strip_org_tail(name, "Imaginary Residents Meeting (IRM)") == name
 
 
 def test_trailing_stray_punctuation_after_the_org_is_absorbed() -> None:

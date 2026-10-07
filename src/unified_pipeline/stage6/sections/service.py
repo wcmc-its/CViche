@@ -139,6 +139,24 @@ _DATE_SPAN = re.compile(rf'(?<!\d){YEAR_OR_OPEN_SPAN}(?!\d)', re.IGNORECASE)
 _TEXT_CELL_SEPARATORS = re.compile(r'[\t\n|]+')
 _EDGE_PUNCTUATION = ' ,;:.-–—|"“”'
 
+# Words that cannot name an organization on their own. Taking the years out of
+# "September 1999 – September 2001" leaves the months behind, and the row
+# rendered "September September" as its Organization (KHXOUF 1264, #1437).
+_MONTH_WORDS = frozenset({
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december',
+    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct',
+    'nov', 'dec', 'present', 'current', 'ongoing'})
+# A connective left at the edge of the residue once the role around it is gone:
+# "Chair of the Fictional Society" less "Chair" is "of the Fictional Society"
+# (#1437). A leading "the" alone is kept -- it is part of "The Fictional Society".
+_CONNECTIVE_WORDS = frozenset({
+    'of', 'the', 'at', 'from', 'by', 'for', 'in', 'to', 'and', 'with', 'on'})
+_LEADING_CONNECTIVE_RE = re.compile(
+    r'^(?:(?:of|at|from|by|for|in|to|and|with|on)\s+)+(?:the\s+)?', re.IGNORECASE)
+_TRAILING_CONNECTIVE_RE = re.compile(
+    r'(?:\s+(?:of|the|at|from|by|for|in|to|and|with|on))+$|\s*&$', re.IGNORECASE)
+
 # A Q2 row with no stage-4 role gets the default 'Member' only when the row is
 # a membership: its source heading, or its own line, names a body one sits on.
 # Under a heading of hospital consultations (EBYSBC CXRYCF-05), duties or grant
@@ -180,7 +198,9 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
     that is not in `start_date`/`end_date` (the Dates cell would not show it)
     and every word outside the role stay, so the row never loses text the
     other columns do not carry. When the role is the whole line the result is
-    '' -- the Role cell already holds it.
+    '' -- the Role cell already holds it. What the removals strand is tidied
+    by `_organization_segment` (#1437): a connective left at a piece's edge,
+    and a piece of nothing but month names.
 
     A `role` that is not a plain string (stage 4 files a list of per-record
     dicts there for a fused entry, and `_cell_text` then renders them with
@@ -201,8 +221,30 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
         if words:
             joined = r'[\W_]*'.join(map(re.escape, words))
             text = re.sub(rf'\b{joined}\b', '', text, flags=re.IGNORECASE)
-    segments = (segment.strip(_EDGE_PUNCTUATION) for segment in _TEXT_CELL_SEPARATORS.split(text))
-    return ', '.join(re.sub(r'\s{2,}', ' ', segment) for segment in segments if segment)
+    segments = (_organization_segment(segment) for segment in _TEXT_CELL_SEPARATORS.split(text))
+    return ', '.join(segment for segment in segments if segment)
+
+
+def _organization_segment(segment: str) -> str:
+    """One separator-delimited piece of `_organization_left_in_text`'s residue,
+    tidied clause by clause (#1437): each comma clause loses the edge
+    punctuation and edge connectives the removals exposed, and a clause made
+    only of months and connectives -- none of which can name an organization --
+    is dropped. A year stays: it may be one the Dates cell does not show."""
+    clauses = (_organization_clause(clause) for clause in segment.split(','))
+    return ', '.join(clause for clause in clauses if clause)
+
+
+def _organization_clause(clause: str) -> str:
+    """One comma clause of an organization residue, tidied; '' when nothing in
+    it could name an organization."""
+    clause = re.sub(r'\s{2,}', ' ', clause.strip(_EDGE_PUNCTUATION))
+    clause = _LEADING_CONNECTIVE_RE.sub('', clause)
+    clause = _TRAILING_CONNECTIVE_RE.sub('', clause).strip(_EDGE_PUNCTUATION)
+    words = {word.lower() for word in re.findall(r'\w+', clause)}
+    if words <= _MONTH_WORDS | _CONNECTIVE_WORDS:
+        return ''
+    return clause
 
 
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:

@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import PipelineHeader from './PipelineHeader'
 import ErrorBanner from './ErrorBanner'
 import { getInputFileUrl } from '../api/runs'
+import type { RunState } from '../types'
 
 vi.mock('../api/runs', () => ({ getInputFileUrl: vi.fn() }))
 vi.mock('../contexts/AuthContext', () => ({ useCanSeeCost: () => false }))
@@ -74,5 +75,33 @@ describe('PipelineHeader "Original file"', () => {
     expect(button.disabled).toBe(true)
     await act(async () => { resolve(PRESIGNED) })
     expect(button.disabled).toBe(false)
+  })
+})
+
+describe('PipelineHeader status pill (#298)', () => {
+  afterEach(cleanup)
+
+  const renderWithStatus = (status: RunState) =>
+    render(
+      <PipelineHeader
+        runId={RUN_ID} filename="cv.docx" status={status} steps={[]} stepProgress={{}}
+        displayProgress={0} totalCost={null} inputTokens={0} outputTokens={0}
+        elapsedSeconds={0} isCancelling={false} onBack={() => {}} onError={() => {}}
+      />,
+    )
+
+  it('labels the cancelled state', () => {
+    renderWithStatus('cancelled')
+    expect(screen.getByText('Cancelled')).toBeTruthy()
+  })
+
+  it('shows a state with no icon of its own as its plain name', () => {
+    renderWithStatus('queued')
+    expect(screen.getByText('queued')).toBeTruthy()
+  })
+
+  it('still renders a value outside the union instead of crashing', () => {
+    renderWithStatus('archived' as RunState)
+    expect(screen.getByText('archived')).toBeTruthy()
   })
 })
