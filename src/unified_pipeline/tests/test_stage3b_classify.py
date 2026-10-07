@@ -647,6 +647,106 @@ def test_m2_preferred_over_t_when_marking_the_duplicate():
     assert "is_duplicate" not in updated[1]
 
 
+# #1435: a talks list grouped under year headings repeats a venue once per
+# year, undated; the year on the group's first line is all that separates them.
+_VENUE = "Grand Rounds, Department of Medicine, Example State University (Springfield, USA)"
+
+
+def _talk(text, hierarchy=("Oral Presentations",)):
+    return {"text": text, "taxonomy_code": "R", "hierarchy": list(hierarchy)}
+
+
+def test_identical_lines_in_different_year_groups_are_not_duplicates():
+    entries = [
+        _talk("2019 Annual Meeting of the Example Society (Springfield, USA)"),
+        _talk(_VENUE),
+        _talk("2017 Example Institute Seminar Series (Springfield, USA)"),
+        _talk(_VENUE),
+    ]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert pairs == []
+    assert not any(e.get("is_duplicate") for e in updated)
+
+
+def test_identical_lines_in_the_same_year_group_are_still_duplicates():
+    entries = [_talk("2019 Annual Meeting of the Example Society (Springfield, USA)"),
+               _talk(_VENUE), _talk(_VENUE)]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1
+    assert updated[2]["is_duplicate"] is True
+
+
+def test_year_group_line_matches_an_ungrouped_copy_in_another_section():
+    """An entry outside any year group still duplicates one inside one: the
+    cross-section repeat detect_duplicates exists for."""
+    entries = [_talk("2019 Annual Meeting of the Example Society (Springfield, USA)"),
+               _talk(_VENUE), _talk(_VENUE, hierarchy=("Invited Lectures",))]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1
+    assert updated[2]["is_duplicate"] is True
+
+
+def test_year_hierarchy_leaves_separate_identical_lines():
+    entries = [_talk(_VENUE, hierarchy=("Talks", "2019")),
+               _talk(_VENUE, hierarchy=("Talks", "2017:"))]
+    _, pairs = classify.detect_duplicates(entries)
+    assert pairs == []
+
+
+def test_year_group_is_per_hierarchy():
+    """A year-led line under another heading does not start a group here."""
+    entries = [_talk("2019 Annual Meeting of the Example Society (Springfield, USA)"),
+               _talk(_VENUE),
+               _talk("2017 Example Institute Seminar Series", hierarchy=("Posters",)),
+               _talk(_VENUE)]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1
+    assert updated[3]["is_duplicate"] is True
+
+
+@pytest.mark.parametrize("text, year", [
+    ("2016  Grand Rounds, Example Hospital", "2016"),
+    ("2016:  03-16: Example lecture title", "2016"),
+    ("2016", "2016"),
+    ("2016-2018 Visiting Professor, Example University", None),
+    ("2016 - 2018 Visiting Professor, Example University", None),
+    ("2013 \u2013 present Visiting Professor, Example University", None),
+    ("2016/17 Visiting Professor, Example University", None),
+    ("2016, Example lecture title", None),
+    ("Example lecture title, 2016", None),
+])
+def test_year_groups_reads_the_leading_year_only(text, year):
+    """The year-led line opens the group; the undated line after it is dated by it."""
+    head, member = classify._year_groups([_talk(text), _talk(_VENUE)])
+    assert head is None  # the year-led line carries a year of its own
+    assert (member.year if member else None) == year
+
+
+def test_cross_section_twins_in_year_groups_are_still_duplicates():
+    """Both sections run year groups, but a pair across sections is the
+    cross-section repeat detect_duplicates exists for."""
+    entries = [_talk("2019 Annual Meeting of the Example Society (Springfield, USA)"),
+               _talk(_VENUE),
+               _talk("2017 Example Institute Seminar Series", hierarchy=("Invited Lectures",)),
+               _talk(_VENUE, hierarchy=("Invited Lectures",))]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1
+    assert updated[3]["is_duplicate"] is True
+
+
+def test_dated_twins_in_different_year_groups_are_still_duplicates():
+    """A line that writes its own dates is not dated by the group heading:
+    its identical twin carries the same dates, so it is one record twice."""
+    dated = "2005-2009 Member, Scientific Committee of the Example Society"
+    entries = [_talk("2019 Annual Meeting of the Example Society (Springfield, USA)"),
+               _talk(dated),
+               _talk("2017 Example Institute Seminar Series (Springfield, USA)"),
+               _talk(dated)]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1
+    assert updated[3]["is_duplicate"] is True
+
+
 def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
     # #651: stage 4's membership check and stage 3b's must be ONE list.
     from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy

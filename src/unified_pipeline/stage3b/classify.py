@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
@@ -1006,6 +1006,68 @@ def _duplicate_key(text: str) -> str:
     return re.sub(r"[^\w]", "", text.lower())
 
 
+#: An entry that opens a year group: a four-digit year, an optional colon,
+#: then whitespace or the end of the text ("2016  Grand Rounds, ...",
+#: "2016:  03-16: ...", a bare "2016"). A year that opens a range, even
+#: spaced ("2016 - 2018", "2013 – present", "2016/17"), is the entry's own
+#: date, not a group heading.
+_YEAR_GROUP_HEAD_RE = re.compile(r"\s*((?:19|20)\d{2})(?!\s*[-–—/])(?:\s*:)?(?:\s|$)")
+
+#: A hierarchy leaf that is a bare year ("2016", "2016:"): the group heading
+#: stage 1b made a level of its own.
+_YEAR_HEADING_RE = re.compile(r"\s*((?:19|20)\d{2})\s*:?\s*")
+
+#: Any four-digit year in an entry's text: an entry that carries a date of
+#: its own is not dated by a group heading.
+_OWN_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+class YearGroup(NamedTuple):
+    """The year group an undated entry sits in (#1435): its section (the
+    hierarchy above any bare-year level) and the group's year."""
+
+    section: tuple[str, ...]
+    year: str
+
+
+def _year_groups(entries: list[dict]) -> list[YearGroup | None]:
+    """The year group each entry sits in, or None (#1435).
+
+    A CV that lists talks under year headings writes each venue once per
+    year, with no date of its own: the year is on the group's first line
+    ("2019 Grand Rounds, ...") or is a hierarchy level of its own. The year
+    is the only thing that tells two such lines apart. A group runs from a
+    year-led entry over the following entries in the same section, up to
+    the next year-led entry. Only an entry with no year in its own text is
+    given one: a dated entry's identical twin carries the same dates.
+    `entries` is in document order within each hierarchy (stage 3b keeps
+    each hierarchy's entries in order).
+    """
+    current: dict[tuple[str, ...], str] = {}
+    groups: list[YearGroup | None] = []
+    for entry in entries:
+        hierarchy = tuple(str(level) for level in entry.get("hierarchy") or [])
+        leaf = _YEAR_HEADING_RE.fullmatch(hierarchy[-1]) if hierarchy else None
+        section = hierarchy[:-1] if leaf else hierarchy
+        text = entry.get("text") if isinstance(entry.get("text"), str) else ""
+        head = _YEAR_GROUP_HEAD_RE.match(text)
+        if head:
+            current[section] = head.group(1)
+        year = leaf.group(1) if leaf else current.get(section)
+        undated = not _OWN_YEAR_RE.search(text)
+        groups.append(YearGroup(section, year) if year and undated else None)
+    return groups
+
+
+def _in_different_year_groups(group1: YearGroup | None, group2: YearGroup | None) -> bool:
+    """True when two undated entries sit in different year groups of one
+    section: the same venue under two years is two talks, not one written
+    twice. A pair across sections, or with an entry outside any year group,
+    is compared as before (a talk listed in two sections is a duplicate)."""
+    return (group1 is not None and group2 is not None
+            and group1.section == group2.section and group1.year != group2.year)
+
+
 def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
     """
     Detect and flag duplicate entries: entries whose text is the same once
@@ -1024,7 +1086,10 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
     each vanished (#945). A near-duplicate that differs by a real letter or
     digit (a citation re-typed with an extra initial, a template label left
     in) is now kept and rendered: a visible repeat the CV owner can delete,
-    instead of a silent drop they never see.
+    instead of a silent drop they never see. For the same reason two
+    identical lines in different year groups are not duplicates
+    (`_year_groups`): an undated "Grand Rounds, X University" under 2019
+    and again under 2017 is two talks (#1435).
 
     Args:
         entries: List of classified entries
@@ -1049,6 +1114,7 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
         if not isinstance(text, str) or len(text) < 20:  # Skip very short/non-string entries
             continue
         candidates.append((idx, entry, _duplicate_key(text)))
+    year_groups = _year_groups(entries)
 
     # Find duplicates
     duplicate_pairs = []
@@ -1062,7 +1128,7 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
             if idx1 in seen_duplicates and idx2 in seen_duplicates:
                 continue
 
-            if key1 == key2:
+            if key1 == key2 and not _in_different_year_groups(year_groups[idx1], year_groups[idx2]):
                 # A duplicate pair is recorded once per (idx1, idx2)
                 # comparison that matches -- the loop above only *skips* a
                 # pair when BOTH sides are already marked duplicate, so one
