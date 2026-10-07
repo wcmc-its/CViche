@@ -101,6 +101,15 @@ PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes 
 # Current by definition (active funding, current mentees) unless the entry's end_date has passed.
 CURRENT_TAXONOMY_CODES = ('M2A', 'N3A')
 RESEARCH_ACTIVITIES_CODE = 'M1'  # an undated M1 narrative is the owner's present research statement
+# The funding status each M2 code means, written into the grant's context line as a word: the
+# model never learns what a bare "GRANT-M2C" means, and summarised pending applications as
+# funded work (KJJVVO, #1484). M2D holds patents, which share the M2 prefix but are not grants.
+GRANT_STATUS_BY_CODE = {
+    'M2A': 'current',
+    'M2B': 'completed',
+    'M2C': 'pending application (not funded)',
+    'M2D': 'patent or innovation (not a grant)',
+}
 
 # Recency (#946 item 6). An entry's recency score is 1.0 when it is ongoing and
 # falls linearly to 0 over RECENCY_WINDOW_YEARS; RECENCY_WEIGHT scales it into
@@ -373,6 +382,12 @@ def is_valid_entry(code: str, entry: dict) -> bool:
     return True
 
 
+def grant_status_segment(code: str) -> str:
+    """' | Status: <word>' for an M2 code GRANT_STATUS_BY_CODE knows, else '' (#1484)."""
+    status = GRANT_STATUS_BY_CODE.get(code)
+    return f" | Status: {status}" if status else ""
+
+
 def format_entry_for_context(code: str, entry: dict) -> str:
     """Format an entry for inclusion in the LLM context (no truncation)."""
     fields = entry.get('extracted_fields', {})
@@ -390,7 +405,7 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         title = fields.get('title', '')
         role = fields.get('pi_role', '') or fields.get('role', '')
         agency = fields.get('agency', '')
-        return f"[GRANT-{code}] {title} | Role: {role} | Agency: {agency}"
+        return f"[GRANT-{code}] {title}{grant_status_segment(code)} | Role: {role} | Agency: {agency}"
 
     elif code == 'M1':  # Research activities
         return f"[RESEARCH] {text}"
@@ -546,30 +561,41 @@ Respond with JSON only:
 # Generation-prompt requirements (#946 item 6), named so tests pin them. Kept next to
 # generate_research_summary rather than the recency constants above: these are prompt
 # content, not recency logic, and NEUTRAL_REFERENCE_REQUIREMENT has nothing to do with dates.
+# The summary is the researcher's own statement, in the first person (Paul, 2026-10-07, #1539).
+FIRST_PERSON_REQUIREMENT = (
+    "Write in the first person, as the researcher describing their own work (\"I\", \"my research\", "
+    "\"my group\")"
+)
 CURRENT_WORK_REQUIREMENT = (
     f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
     "and the most recent years); mention older work only briefly, as background, after the current work"
 )
 NEUTRAL_REFERENCE_REQUIREMENT = (
-    "Refer to the researcher by name or with gender-neutral phrasing (e.g. \"this research program\", \"this work\"); "
-    "never use gendered pronouns (he/she/his/her/him) and never infer gender from the name"
+    "Do not name the researcher or use a title such as \"Dr.\"; "
+    "never use gendered pronouns (he/she/his/her/him) and never infer anyone's gender"
+)
+# Pending applications are not funded work (KJJVVO, #1484); the status word comes from GRANT_STATUS_BY_CODE.
+PENDING_FUNDING_REQUIREMENT = (
+    "Describe a grant whose Status is a pending application as an application under review; "
+    "never describe it as funded, awarded or ongoing work"
 )
 
 
-def generate_research_summary(context: str, cv_owner_name: str) -> tuple[str, dict]:
+def generate_research_summary(context: str) -> tuple[str, dict]:
     """
     Generate a biosketch-style research summary from CV context.
 
     Returns (summary_text, usage_dict).
     """
-    prompt = f"""Generate a concise, NIH biosketch-style research summary paragraph for {cv_owner_name or 'this researcher'}.
+    prompt = f"""Generate a concise, NIH biosketch-style research summary paragraph in the researcher's own voice.
 
 REQUIREMENTS:
 - Write ONE cohesive narrative paragraph of approximately 150-200 words (do NOT exceed 200 words)
 - Focus on research themes, methods, and scientific contributions
 - Mention key funding sources and roles (PI vs Co-I)
+- {PENDING_FUNDING_REQUIREMENT}
 - Highlight impact (clinical translation, policy, mentorship outcomes if relevant)
-- Write in third person
+- {FIRST_PERSON_REQUIREMENT}
 - {CURRENT_WORK_REQUIREMENT}
 - {NEUTRAL_REFERENCE_REQUIREMENT}
 - Do NOT list publications or include citations
@@ -617,16 +643,18 @@ GENERATION_METHOD_LLM_CALL_FAILED = "llm_call_failed"
 # unscored (score 0.0), so a summary is generated from the CV instead (#1174).
 M1_UNSCORED_REASONING = "unscored: the M1 relevance call failed"
 
-# The generation prompt demands third person, so a reply that opens by saying "I do not /
-# cannot / am unable / apologize" is the model declining, not the requested paragraph.
-# Anchored at the start so a real summary that mentions "cannot" later is never matched.
+# The summary is written in the first person (#1539), so a reply opening with "I" is normal
+# ("I study", "I lead", "I have", "My research"). Only an opening that declines -- "I do not /
+# don't / cannot / can't / am unable / am not able / am sorry / apologize" -- is a refusal.
+# A first-person summary does not open on those verbs; tests pin both lists. Anchored at the
+# start so a real summary that mentions "cannot" later is never matched.
 REFUSAL_OPENER_PATTERN = re.compile(
     r"\s*I(?:\s+(?:do\s+not|cannot|apologi[sz]e)|\s+(?:don|can)['’]t|"
     r"\s+am\s+(?:unable|not\s+able|sorry)|['’]m\s+(?:unable|not\s+able|sorry))\b",
     re.IGNORECASE)
 
 
-def generate_summary_unless_withheld(context: str, cv_owner_name: str) -> tuple[str, str, dict]:
+def generate_summary_unless_withheld(context: str) -> tuple[str, str, dict]:
     """Generate the research summary, or return an empty one that stage 6 renders as nothing.
 
     Returns (summary_text, generation_method, usage). A blank context makes no LLM call:
@@ -637,7 +665,7 @@ def generate_summary_unless_withheld(context: str, cv_owner_name: str) -> tuple[
     """
     if not context.strip():
         return "", GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {}
-    summary, usage = generate_research_summary(context, cv_owner_name)
+    summary, usage = generate_research_summary(context)
     if REFUSAL_OPENER_PATTERN.match(summary):
         return "", GENERATION_METHOD_REFUSED, usage
     return summary, GENERATION_METHOD_LLM, usage
@@ -661,11 +689,11 @@ def score_m1_or_unscored(m1_content: str) -> tuple[float, str, dict, CallFailure
                 call_failure(STAGE4_5_CALL_M1_SCORE, e))
 
 
-def generate_summary_or_empty(context: str, cv_owner_name: str) -> tuple[str, str, dict, CallFailure | None]:
+def generate_summary_or_empty(context: str) -> tuple[str, str, dict, CallFailure | None]:
     """generate_summary_unless_withheld, or, when its call fails, an empty
     summary (stage 6 renders none) with GENERATION_METHOD_LLM_CALL_FAILED and the failure."""
     try:
-        return (*generate_summary_unless_withheld(context, cv_owner_name), None)
+        return (*generate_summary_unless_withheld(context), None)
     except LLM_CALL_ERRORS as e:
         logger.warning("Stage 4.5 summary generation call failed (%s); writing an empty summary",
                        type(e).__name__, exc_info=True)
@@ -860,8 +888,7 @@ def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool
         # Generate summary
         # A blank context makes no LLM call, a refusal-shaped reply is withheld (#1224),
         # and a failed call leaves the summary empty (#1174).
-        research_summary, generation_method, gen_usage, gen_failure = generate_summary_or_empty(
-            context, cv_owner_name)
+        research_summary, generation_method, gen_usage, gen_failure = generate_summary_or_empty(context)
         totals.add(STAGE4_5_CALL_SUMMARY, gen_usage, gen_failure)
 
         if verbose:

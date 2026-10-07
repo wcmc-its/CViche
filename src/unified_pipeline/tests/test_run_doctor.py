@@ -4307,7 +4307,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 56
+    assert len(payload["findings"]) == 57
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4372,6 +4372,11 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
         "entries": [
             _entry("Mentored an invented student", taxonomy_code="N3", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
+            # #1256: the yield counts text in the parent, not tags. Of these
+            # two fragments of the entry above, only the first is in it.
+            _entry("A grant tail", taxonomy_code="M2A", start=3),
+            _entry("tail", taxonomy_code="M2A", start=4, is_fragment=True, fragment_of=2),
+            _entry("Lost line", taxonomy_code="M2A", start=5, is_fragment=True, fragment_of=2),
         ],
         "meta": {"stats": {
             "failed_batches": 41, "llm_batches": 83,
@@ -4403,13 +4408,13 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     metrics = _build_metrics(views)
 
     assert metrics["appendix_entries"] == 2
-    assert metrics["appendix_share"] == round(2 / 2, 4)
+    assert metrics["appendix_share"] == round(2 / 5, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
     assert metrics["unrouted_code_entries"] == {"N3": 1}  # N3: #529 routes N2, #291 routes M4
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
-    assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert metrics["fragment_reconnection_yield"] == round(1 / 2, 4)  # not the stats' 3 / 7
     assert metrics["total_post_corrections"] == 5
     assert "source_coverage_pct" in metrics
 

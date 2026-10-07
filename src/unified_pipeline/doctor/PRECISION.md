@@ -194,6 +194,12 @@ The WARN shapes together: 134 of 142 true (94%), at or above the 80% bar on more
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
+| FRAG | 2026-10-07 | `fix/1256-merge-fragment-text` on origin/dev `f103edac`: `lint_orphaned_fragments` run directly over every stored stage-3b JSON as stored (the doctor these runs get today), and again after `stage3b.fragment_merge.merge_fragment_text` has run over it (runs built after #1256) | 125 distinct stored stage-3b JSON files (content-deduplicated): the EBYSBC/s7ab/pilot, NDMRSO, X6 and EOAHMI farms and `analysis/<uid>` | every one of the corpus's 48 `is_fragment` entries read against its neighbours by hand; the pilot autopsy (JNATFN 262, BFSUMA 189) and NDMRSO ND12 (MQJAVH 201) | #1256, #1365 |
+
+FRAG adds `orphaned_fragments`: a stage-3b fragment whose text is not in the text of the entry it belongs to. Stage 4 skips every fragment, so the line reaches no record. WARN, or INFO when stage 3b leaves the line out on purpose (a header, column label or page stamp the fragment pass's reasoning names, or an organisation sub-heading next to a coded record). Reads stage 3b only.
+
+As stored: 41 hits on 22 of 125 runs, 18 WARN and 23 INFO. Of the 18 WARNs, 16 are true (lost content: a title tail, an assignee, four examiner sessions, a location, poster dates, a trial's drug name, a mentee's current position, a numbered item) and 2 partial (ZGLAAD 137/138, an institution line pair pointing at each other: context, not a record). The 23 INFOs are all headers, column labels, year or drug-name dividers and organisation sub-headings, as labelled. After the merge: 29 hits on 17 runs, 6 WARN (WWSEWY 539/543, RBHRFR 468, RWBQKF 94, ZGLAAD 137/138) and the same 23 INFO. In-sample: the merge's skip rules were written from these runs.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -219,6 +225,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `group_header_context`: `parent_dates_lost` | 6 | 0 | none | 21 / 21 hand-checked on the `analysis` runs (100%) | 5 / 6 (83%) | 3 | X6-header |
 | `identical_rendered_rows` | 11 | 11 | none | 21 / 21 hand-checked (100%) | 1 / 11 (9%) | 1 | IDR |
 | `record_boundary` | 5 | 5 | none | 23 / 23 hand-checked (100%) | 4 / 5 (80%) | 1 | X6-grant |
+| `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |

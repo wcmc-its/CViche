@@ -438,6 +438,11 @@ LINT_COPY = {
         "a co-presenter), but its citation in the document does not, usually because the author "
         "list was cut to the first six names and \"et al.\".",
         "Copy the full author list, with the faculty member's name, from the source CV."),
+    "orphaned_fragments": LintCopy(
+        "Line not joined to its entry",
+        "A line in the source CV continues the entry next to it, but could not be safely "
+        "joined to that entry, so its text may be missing from the document.",
+        "Check the named entries against the source CV and add any missing text."),
     "etal_added": LintCopy(
         "Co-authors cut to \"et al.\"",
         "A citation lists its first authors and then \"et al.\", although the source CV lists "

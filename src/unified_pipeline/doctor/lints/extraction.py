@@ -8,8 +8,8 @@ dedup drops that were not duplicates, records fabricated from the template's
 own scaffolding, values filed under a key no renderer reads, years given the
 wrong century, entries holding several records that stage 4 returned as
 one, grant lists cut into records at the wrong line, grants filed under a
-funding heading their own record contradicts, and separate years rendered as
-one range over them.
+funding heading their own record contradicts, separate years rendered as
+one range over them, and stage-3b fragments whose text no record holds.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -54,6 +54,12 @@ from unified_pipeline.core.two_digit_year import (
 from unified_pipeline.core.validators.grant_status_corrector import (
     _AWARDED_HEADING_RE,
     _PENDING_HEADING_RE,
+)
+from unified_pipeline.stage3b.fragment_merge import (
+    SKIP_LABEL,
+    SKIP_ORGANIZATION,
+    fragment_text_in_parent,
+    merge_skip_reason,
 )
 from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
@@ -3643,4 +3649,42 @@ def lint_role_consistency(stage4: dict,
                 [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
     if table_rows is not None:
         findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
+    return findings
+
+
+# --- orphaned_fragments ------------------------------------------------------
+#
+# Stage 3b's fragment pass tags a short line `is_fragment` with the neighbour
+# it belongs to, and stage 4 skips every fragment, so a fragment whose text is
+# not in that neighbour's text reaches no record (#1256: JNATFN's title tail,
+# BFSUMA's assignee, MQJAVH's examiner sessions). `stage3b.fragment_merge`
+# folds the text in at the end of stage 3b and leaves a header, column label
+# or organisation sub-heading out on purpose; those report INFO. Any other
+# fragment left outside its parent is content lost, WARN. Reads stage 3b only:
+# stage 4 extracts from the 3b text, so a line missing there is missing from
+# every field.
+
+#: Merge-skip reasons that leave a line out on purpose: a structural label, or
+#: an organisation sub-heading left to #985's context stamp.
+INTENDED_FRAGMENT_SKIPS = frozenset({SKIP_LABEL, SKIP_ORGANIZATION})
+
+
+def lint_orphaned_fragments(stage3b: dict) -> list[dict]:
+    """One finding per `is_fragment` entry whose text is not in its parent's
+    text: INFO when stage 3b left it out on purpose, else WARN. Silent on a
+    list holding a non-entry: `fragment_of` indexes the list as written."""
+    entries = stage3b.get("entries") or []
+    if not all(isinstance(e, dict) for e in entries):
+        return []
+    findings = []
+    for idx, entry in enumerate(entries):
+        if not entry.get("is_fragment") or fragment_text_in_parent(entries, idx):
+            continue
+        reason = merge_skip_reason(entries, idx) or "never merged"
+        severity = "INFO" if reason in INTENDED_FRAGMENT_SKIPS else "WARN"
+        findings.append(_finding(
+            "orphaned_fragments", severity,
+            f"entry {entry.get('element_idx_start')}: fragment of list index "
+            f"{entry.get('fragment_of')} whose text no record holds ({reason})",
+            [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
