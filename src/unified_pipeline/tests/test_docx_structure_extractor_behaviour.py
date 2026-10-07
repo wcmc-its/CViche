@@ -578,15 +578,105 @@ def _all_lines(rows):
     )
 
 
-def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+def test_split_merged_cells_blank_paragraph_does_not_preempt_aligned_lists_612():
     # #612 shape (invented text): cell 0 holds a blank paragraph, so the \n\n
-    # pass claims max_splits=2 from cell 0 alone; the aligned-line pass never
-    # runs. The 4-line title cell is unsplit and the 4-line date cell is
-    # distributed by the date-column fallback, which used to emit only the
-    # first max_splits (2) dates and drop the other two.
+    # pass splits cell 0 alone into 2 segments. The 4-line rank and date cells
+    # are stacked parallel lists, so the aligned-line pass must win and pair
+    # each rank with its own date. Before the fix, every rank sat on sub-row 0
+    # beside the first date only.
     row = [
         {"text": "Alpha unit one\nAlpha unit two\n\nAlpha unit three", "row": 0, "col": 0},
         {"text": "Rank A\nRank B\nRank C\nRank D", "row": 0, "col": 1},
+        {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [(r[1]["text"], r[2]["text"]) for r in out] == [
+        ("Rank A", "2011 - Present"),
+        ("Rank B", "2009 - 2011"),
+        ("Rank C", "2007 - 2009"),
+        ("Rank D", "2000 - Present"),
+    ]
+    # Cell 0 matches neither list (3 lines), so it stays whole on sub-row 0.
+    assert out[0][0] == row[0]
+    assert [r[0]["text"] for r in out[1:]] == ["", "", ""]
+
+
+def test_split_merged_cells_blank_separated_labels_align_with_single_line_list_612():
+    # A label column whose paragraphs are separated by blank paragraphs beside
+    # an entry column with one entry per line: both hold 3 non-blank lines, so
+    # each label pairs with its own entry instead of every entry on sub-row 0.
+    row = [
+        {"text": "1.\n\n2.\n\n\n3.", "row": 0, "col": 0},
+        {"text": "Entry one text\nEntry two text\nEntry three text", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["1.", "Entry one text"],
+        ["2.", "Entry two text"],
+        ["3.", "Entry three text"],
+    ]
+
+
+def test_split_merged_cells_parallel_blank_line_split_beats_aligned_lines_612():
+    # Two cells agree on 2 blank-separated entries of 2 lines each. They also
+    # share a 4-line count, but the blank-line split is itself parallel, so it
+    # wins and each 2-line entry stays whole.
+    row = [
+        {"text": "Title one\nPlace one\n\nTitle two\nPlace two", "row": 0, "col": 0},
+        {"text": "Note one a\nNote one b\n\nNote two a\nNote two b", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Title one\nPlace one", "Note one a\nNote one b"],
+        ["Title two\nPlace two", "Note two a\nNote two b"],
+    ]
+
+
+def test_split_merged_cells_trailing_blank_paragraph_is_not_a_parallel_split_612():
+    # Each cell ends in a blank paragraph, so the \n\n pass yields ONE
+    # segment per cell. Two one-segment cells are not parallel entries; the
+    # 3-line lists still split by the aligned-line pass.
+    row = [
+        {"text": "Role one\nRole two\nRole three\n\n", "row": 0, "col": 0},
+        {"text": "Place one\nPlace two\nPlace three\n\n", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Role one", "Place one"],
+        ["Role two", "Place two"],
+        ["Role three", "Place three"],
+    ]
+
+
+def test_split_merged_cells_lone_blank_line_split_kept_without_aligned_match_612():
+    # Only one cell has a blank-line split and no two cells share a 3+ line
+    # count: the blank-line split still applies, as before.
+    row = [
+        {"text": "MBA\n\nBS", "row": 0, "col": 0},
+        {"text": "Some school", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [["MBA", "Some school"], ["BS", ""]]
+
+
+def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+    # The \n\n pass splits cell 0 into 2 segments and no two cells share a
+    # 3+ line count, so the 4-line date cell is distributed over 2 sub-rows by
+    # the date-column fallback, which used to drop the last 2 dates.
+    row = [
+        {"text": "Alpha unit one\n\nAlpha unit two", "row": 0, "col": 0},
+        {"text": "Rank A\nRank B", "row": 0, "col": 1},
         {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
     ]
 
