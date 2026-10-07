@@ -360,6 +360,12 @@ Lints, ranked by the severity of the failure class they catch:
                           WARN; INFO for a header, column label or
                           organisation sub-heading stage 3b leaves out on
                           purpose. Reads stage 3b only
+14af. stage4_unplaced_items a stage-4 batch reply item numbered past its
+                          taxonomy group's entries (a group of 2+), which
+                          stage 4 gave to no entry and stamped on the group
+                          (#1243, #1417): the record it holds is in no part
+                          of the output. WARN, one per run, naming each code
+                          and its entries. Reads stage 4 only; no score cap
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -547,6 +553,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_stage3b_fallback_ratio,
     lint_stage3b_second_pass_errors,
     lint_stage4_group_failures,
+    lint_stage4_unplaced_items,
     lint_stage_failure_recorded,
 )
 from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
@@ -702,6 +709,7 @@ KNOWN_LINTS = (
     "citation_field_dropped",
     "group_header_context",
     "orphaned_fragments",
+    "stage4_unplaced_items",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -925,6 +933,11 @@ LINT_PREVALENCE = {
     # stage3b.fragment_merge has run over them, measured 2026-10-07; 22 of 125
     # as stored, before it. Same mixed-corpus caveat as above.
     "orphaned_fragments": 0.136,
+    # stage4_unplaced_items (#1243): the stamp it reads is new (#1417), and
+    # none of the 112 stored analysis/ runs nor the eb/eo/ndm/x6 farms'
+    # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
+    # floor, as for research_summary_call_failed above.
+    "stage4_unplaced_items": 0.001,
 }
 
 
@@ -1479,6 +1492,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
              optional=("blocks",)),
     LintSpec("orphaned_fragments", lint_orphaned_fragments, ("stage_3b",)),
+    LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
 )
 
 
