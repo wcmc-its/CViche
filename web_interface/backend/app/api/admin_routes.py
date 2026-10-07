@@ -34,6 +34,7 @@ from app.schemas import (
 )
 from app.consent import get_current_consent_document
 from app.services.consent_service import count_users_to_reconsent, next_consent_version
+from app.services import admin_policy
 from app.services.runs_admin_query import submission_split
 from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import (
@@ -138,6 +139,20 @@ async def get_users(
 # ---------------------------------------------------------------------------
 # PUT /api/admin/users/{user_id}
 # ---------------------------------------------------------------------------
+def _active_admin_count(db: Session, *, excluding: int | None = None) -> int:
+    """Active admins, less the user ``excluding`` names when given."""
+    query = db.query(func.count(User.id)).filter(User.role == "admin", User.status == "active")
+    if excluding is not None:
+        query = query.filter(User.id != excluding)
+    return query.scalar()
+
+
+def _raise_if_refused(refusal: str | None) -> None:
+    """An admin_policy refusal is a 422 carrying its message."""
+    if refusal is not None:
+        raise validation_error(refusal)
+
+
 @router.put("/admin/users/{user_id}", response_model=AdminUser)
 async def update_user(
     user_id: int,
@@ -152,38 +167,20 @@ async def update_user(
 
     changes = {}
 
-    # Validate: can't remove last admin
     if body.role is not None and body.role != target.role:
-        if target.role == "admin" and body.role == "user":
-            if target.id == admin.id:
-                raise validation_error("Cannot remove your own admin role.")
-            admin_count = (
-                db.query(func.count(User.id))
-                .filter(User.role == "admin", User.status == "active")
-                .scalar()
-            )
-            if admin_count <= 1:
-                raise validation_error("Cannot remove the last admin.")
+        _raise_if_refused(admin_policy.role_change_refusal(
+            target.role, body.role, is_self=target.id == admin.id,
+            active_admin_count=_active_admin_count(db),
+        ))
         changes["role"] = {"old": target.role, "new": body.role}
         target.role = body.role
 
-    # Validate: can't disable yourself
+    # After the role change: the status rule judges the role this request sets.
     if body.status is not None and body.status != target.status:
-        if target.id == admin.id and body.status == "disabled":
-            raise validation_error("Cannot disable your own account.")
-        # If disabling the last admin, block it
-        if target.role == "admin" and body.status == "disabled":
-            active_admin_count = (
-                db.query(func.count(User.id))
-                .filter(
-                    User.role == "admin",
-                    User.status == "active",
-                    User.id != target.id,
-                )
-                .scalar()
-            )
-            if active_admin_count < 1:
-                raise validation_error("Cannot disable the last active admin.")
+        _raise_if_refused(admin_policy.status_change_refusal(
+            target.role, body.status, is_self=target.id == admin.id,
+            other_active_admin_count=_active_admin_count(db, excluding=target.id),
+        ))
         changes["status"] = {"old": target.status, "new": body.status}
         target.status = body.status
 

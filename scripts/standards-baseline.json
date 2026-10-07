@@ -1,5 +1,5 @@
 {
-  "2.1 no `db.query(` in `api/`": 30,
+  "2.1 no `db.query(` in `api/`": 29,
   "3.7 dynamic attribute access (non-literal)": 6,
   "3.7 dynamic attribute access (non-literal) [waived]": 0,
   "3.7 no metaprogramming [waived]": 1,
