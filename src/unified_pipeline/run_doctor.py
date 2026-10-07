@@ -261,7 +261,9 @@ Lints, ranked by the severity of the failure class they catch:
                           record (sponsor or number in one, title in the
                           other), an entry whose first line is a PI or effort
                           line, an entry opening with a label its siblings
-                          carry mid-record, or a stray tail or title. WARN.
+                          carry mid-record, a run of entries opening with a
+                          title then a sponsor line after a titleless one
+                          (X6 RVTAQT), or a stray tail or title. WARN.
                           Reads stage 4 only
 14u. grant_bucket         a grant rendered in a funding subsection its own
                           record contradicts (#1343, EBYSBC E7): Current or
@@ -287,8 +289,15 @@ Lints, ranked by the severity of the failure class they catch:
                           JIJRSN 516), both WARN; pi_name also listed as a
                           co-I, a "with Dr. X" collaborator as pi_name, or the
                           owner first on an unlabelled grant shown only as a
-                          co-I (JIJRSN 150-156, QTATUP 529-537), INFO. Reads
-                          stage 4, and the docx when present
+                          co-I (JIJRSN 150-156, QTATUP 529-537), INFO; the
+                          owner listed as a co-I beside a lead role (X6
+                          IEUPKK 257-342, RVTAQT 223), a PI cell naming the
+                          owner beside an empty role (RVTAQT 260/273) or
+                          beside a co-/site-PI or co-I role (KJJVVO
+                          168-178), WARN; the owner's role inside the title
+                          (RINASX 405) or a title run in the PI cell (RINASX
+                          396), INFO. Reads stage 4, and the docx when
+                          present
 14y. fanout_cell_residue  a record stage 6 fanned out of a multi-record
                           entry (#1406) whose table row prints the parent's
                           leftover text in a name, organization or committee
@@ -313,6 +322,12 @@ Lints, ranked by the severity of the failure class they catch:
                           one range the entry writes fewer times, beside a
                           record with its own range (WYMVGU-02). INFO. Reads stage 4,
                           and the docx when present
+14ab. record_boundary     a non-grant list stage 2 cut one line off (X6
+                          class E5): an entry after the first that opens with
+                          a labelled line its siblings carry mid-record, a
+                          mentee's 'Current position:' opening the next
+                          mentee's entry (IEUPKK 438/444/466/467). WARN.
+                          Reads stage 4 only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -450,6 +465,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_record_boundary,
     lint_span_count,
     lint_role_consistency,
 )
@@ -637,6 +653,7 @@ KNOWN_LINTS = (
     "fanout_cell_residue",
     "identical_rendered_rows",
     "split_child_unsourced",
+    "record_boundary",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -812,12 +829,14 @@ LINT_PREVALENCE = {
     # lint's stage-6 envelope fix, measured 2026-10-05 (66 of 245 on the
     # render without the fix). Same mixed-corpus caveat as above.
     "span_count": 0.261,
-    # role_consistency (#1403, RC-ROLE2 in doctor/PRECISION.md): 15 of 245
-    # runs at any severity, measured 2026-10-05 over each run's stored stage-4
-    # JSON and a render of origin/dev 43f84e1e: 8 of the 119 analysis/ and
-    # analysis/pilot runs and 7 of the 126 farm/batch-3/batch-4 runs. Same
-    # mixed-corpus caveat as above.
-    "role_consistency": 0.061,
+    # role_consistency (#1403, X6-role in doctor/PRECISION.md): 106 of 251
+    # runs at any severity, measured 2026-10-06: 75 of the 125 analysis/ and
+    # analysis/pilot runs over their stored docx, and 31 of the 126 farm/
+    # batch-3/batch-4 runs over a render of origin/dev 05966dac. The X6
+    # shapes owner_pi_role_empty and owner_also_co_i are most of the rise
+    # (37 of 251 before them); runs built before #1410 carry most of it.
+    # Same mixed-corpus caveat as above.
+    "role_consistency": 0.422,
     # fanout_cell_residue (#1445, FAN-RES in doctor/PRECISION.md): 1 of the
     # 102 fresh renders of origin/dev 8b287ec2 (EBYSBC/s7ab/pilot 63, EOAHMI
     # 9, NDMRSO 30), measured 2026-10-05. #1449 fixed the stage-6 fallbacks
@@ -834,6 +853,11 @@ LINT_PREVALENCE = {
     # fresh renders of origin/dev 8b287ec2 of the EBYSBC/s7ab/pilot (63),
     # EOAHMI (9) and NDMRSO (30) farms. Same mixed-corpus caveat as above.
     "split_child_unsourced": 0.01,
+    # record_boundary (X6 class E5, X6-grant in doctor/PRECISION.md): 8 of
+    # 221 distinct stored stage-4 JSON files (the EBYSBC/s7ab/pilot, EOAHMI
+    # and X6 farms, analysis/<uid>, the 2026-09 batches), measured 2026-10-06.
+    # Reads stage 4 only. Same mixed-corpus caveat as above.
+    "record_boundary": 0.036,
 }
 
 
@@ -1382,6 +1406,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              ("stage_4", "table_rows")),
     LintSpec("split_child_unsourced", lint_split_child_unsourced, ("stage_4",),
              optional=("table_rows",)),
+    LintSpec("record_boundary", lint_record_boundary, ("stage_4",)),
 )
 
 

@@ -82,9 +82,12 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     GRANT_ORPHAN_MIN_WORDS,
+    GRANT_SOURCE_MIN_CHARS,
+    GRANT_TITLE_MIN_CHARS,
     _short_end_year,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_record_boundary,
     lint_role_consistency,
     lint_span_count,
 )
@@ -3382,6 +3385,247 @@ def test_grant_boundary_ignores_non_grant_codes():
     assert _boundary(_grant(180, "PI: A. Person\tStudy", code="D1")) == []
 
 
+# Line-order drift (X6 RVTAQT-01): unlabelled records whose sponsor line comes
+# first and title second; from a titleless record on, each entry opens with
+# the title of the record before it and then the next record's sponsor line.
+
+def _ordered(idx, number, title, drifted=False, **extra):
+    """An unlabelled grant: '<number> (PI)  dates' then its title, or, when
+    drifted, the title first and the number line after it."""
+    lines = [title, f"{number} (A. Person)  2001-2004"] if drifted else [
+        f"{number} (A. Person)  2001-2004", title]
+    fields = dict(grant_number=number, title=title, start_date="2001", end_date="2004")
+    fields.update(extra)
+    return _grant(idx, "\t".join(lines), **fields)
+
+
+def _titleless(idx, number):
+    return _grant(idx, f"{number} (A. Person)  2001-2004", grant_number=number,
+                  start_date="2001", end_date="2004")
+
+
+def _drifted_list():
+    return [_ordered(300, "XX 01-001", "Study of the first example things"),
+            _ordered(303, "XX 01-002", "Study of the second example things"),
+            _titleless(306, "XX 01-003"),
+            _ordered(307, "XX 01-004", "Study of the third example things", drifted=True),
+            _ordered(310, "XX 01-005", "Study of the fourth example things", drifted=True)]
+
+
+def test_grant_boundary_flags_a_title_run_after_a_titleless_record():
+    findings = _boundary(*_drifted_list())
+    assert _flagged(findings) == [306, 307, 310]
+    assert "holds no title, and entry 307 opens with one" in findings[0]["message"]
+    assert "the title of the record before it" in findings[1]["message"]
+    assert "like the one before it" in findings[2]["message"]
+
+
+def test_grant_boundary_spares_a_title_first_record_with_no_titleless_one_before():
+    """A record written title-first beside sponsor-first ones (RVTAQT's first
+    grant) is a record of its own: no titleless entry precedes it."""
+    grants = _drifted_list()
+    grants[2] = _ordered(306, "XX 01-003", "Study of the fifth example things")
+    assert _boundary(*grants) == []
+
+
+def test_grant_boundary_needs_the_sponsor_first_order_on_a_third_of_the_list():
+    """One sponsor-first record of six is under the bar: no order to drift from."""
+    grants = [_ordered(400, "XX 01-001", "Study of the first example things"),
+              _titleless(402, "XX 01-002"),
+              *(_ordered(idx, f"XX 01-{idx}", f"Study number {idx} of example things",
+                         drifted=True) for idx in (404, 406, 408, 410))]
+    assert _boundary(*grants) == []
+
+
+def test_grant_boundary_needs_three_entries_for_a_line_order():
+    assert _boundary(_titleless(420, "XX 01-001"),
+                     _ordered(421, "XX 01-002", "Study of the third example things",
+                              drifted=True)) == []
+
+
+def test_grant_boundary_does_not_read_a_title_shorter_than_eight_characters():
+    """A short title ('Pilot') sits inside too many lines to place one: the
+    run never starts."""
+    def run(title):
+        grants = _drifted_list()
+        grants[3] = _ordered(307, "XX 01-004", title, drifted=True)
+        return _flagged(_boundary(*grants))
+    assert GRANT_TITLE_MIN_CHARS == 8
+    assert run("Pilot XY") == []
+    assert run("Pilot XYZ") == [306, 307, 310]
+
+
+def test_grant_boundary_does_not_read_a_sponsor_shorter_than_three_characters():
+    def run(number):
+        grants = _drifted_list()
+        grants[3] = _ordered(307, number, "Study of the third example things", drifted=True)
+        return _flagged(_boundary(*grants))
+    assert GRANT_SOURCE_MIN_CHARS == 3
+    assert run("VA") == []
+    assert run("R01") == [306, 307, 310]
+
+
+def test_grant_boundary_reads_a_title_first_line_only_from_its_start():
+    """A first line holding the title after other words opens with those
+    words, not with the title."""
+    grants = _drifted_list()
+    grants[3] = _grant(307, "Year two of Study of the third example things\tXX 01-004 (A. P.)",
+                       grant_number="XX 01-004", title="Study of the third example things")
+    assert _flagged(_boundary(*grants)) == []
+
+
+def test_grant_boundary_reads_a_titleless_first_entry():
+    grants = [_titleless(500, "XX 01-001"),
+              _ordered(501, "XX 01-002", "Study of the first example things", drifted=True),
+              _ordered(504, "XX 01-003", "Study of the second example things"),
+              _ordered(507, "XX 01-004", "Study of the third example things")]
+    assert _flagged(_boundary(*grants)) == [500, 501]
+
+
+def test_grant_boundary_needs_the_line_order_on_a_third_of_the_list():
+    """Two sponsor-first records of nine is under a third; of six, a third."""
+    grants = [_ordered(600, "XX 01-001", "Study of the first example things"),
+              _ordered(603, "XX 01-002", "Study of the second example things"),
+              _titleless(606, "XX 01-003"),
+              *(_ordered(idx, f"XX 01-{idx}", f"Study number {idx} of example things",
+                         drifted=True) for idx in (607, 610, 613, 616, 619, 622))]
+    assert _boundary(*grants) == []
+    assert _flagged(_boundary(*grants[:-3])) == [606, 607, 610, 613]
+
+
+def test_grant_boundary_reads_a_title_by_its_opening_characters():
+    """Stage 4 trims or re-punctuates a long title's tail: the opening
+    characters place it."""
+    grants = _drifted_list()
+    grants[3] = _grant(307, "Study of the third example things, phase two\tXX 01-004 (A. P.)",
+                       grant_number="XX 01-004", title="Study of the third example things: II")
+    assert _flagged(_boundary(*grants)) == [306, 307, 310]
+
+
+@pytest.mark.parametrize("separator", ["\n", " | "])
+def test_grant_boundary_reads_lines_split_by_newline_or_cell(separator):
+    grants = [_grant(g["element_idx_start"], g["text"].replace("\t", separator),
+                     **g["extracted_fields"]) for g in _drifted_list()]
+    assert _flagged(_boundary(*grants)) == [306, 307, 310]
+
+
+def test_grant_boundary_spares_a_title_line_that_names_its_own_sponsor():
+    """An entry whose first line holds its title and its sponsor is a whole
+    one-line record, even after a titleless one."""
+    grants = _drifted_list()
+    grants[3] = _grant(307, "Study of the third example things, XX 01-004\tXX 01-004 (A. P.)",
+                       grant_number="XX 01-004", title="Study of the third example things")
+    assert 307 not in _flagged(_boundary(*grants))
+
+
+def test_grant_boundary_needs_a_sponsor_on_the_titleless_record():
+    """A sub-heading or year line before a title-first entry names no
+    sponsor: not the record that lost the title."""
+    grants = _drifted_list()
+    grants[2] = _grant(306, "Completed")
+    assert _boundary(*grants) == []
+
+
+def test_grant_boundary_reads_a_title_first_line_only_when_a_sponsor_line_follows():
+    """A titled entry with no sponsor after its title is a stray title, not
+    the drift: the titleless record before it is left to the split-pair test."""
+    grants = _drifted_list()
+    grants[3] = _grant(307, "Study of the third example things\t2001-2004",
+                       title="Study of the third example things", start_date="2001")
+    assert 307 not in _flagged(_boundary(*grants))
+
+
+def test_grant_boundary_reads_the_first_line_after_its_label():
+    """A labelled first line ('Title: ...') is read past its label."""
+    grants = _drifted_list()
+    grants[3] = _grant(307, "Title: Study of the third example things\tXX 01-004 (A. Person)",
+                       grant_number="XX 01-004", title="Study of the third example things")
+    assert 307 in _flagged(_boundary(*grants))
+
+
+# ==========================================================================
+# record_boundary (X6 class E5) -- a non-grant list cut one line off: an
+# entry opens with a labelled line its siblings carry mid-record. Invented
+# mentees; no corpus text.
+
+_MENTEE_HEADING = ["Teaching", "Postdoctoral Fellows"]
+
+
+def _mentee(idx, text, code="N3B", heading=_MENTEE_HEADING):
+    return {"element_idx_start": idx, "taxonomy_code": code, "hierarchy": list(heading),
+            "text": text, "extracted_fields": {}}
+
+
+def _whole_mentee(idx):
+    return _mentee(idx, f"2001 - 2003 Fellow {idx}, PhD\tCurrent position: Professor {idx}")
+
+
+def _tail(idx):
+    """The previous mentee's current position, then this mentee and its own."""
+    return _mentee(idx, f"Current position: Professor {idx} 2004 - 2006 Fellow {idx}, PhD"
+                        f"\tCurrent position: Lecturer {idx}")
+
+
+def _record(*entries):
+    return lint_record_boundary({"entries": list(entries)})
+
+
+def test_record_boundary_flags_an_entry_opening_with_its_siblings_inner_label():
+    findings = _record(_whole_mentee(10), _whole_mentee(12), _tail(14), _whole_mentee(16))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("record_boundary", "WARN")]
+    assert findings[0]["message"].startswith("entry 14 (N3B): record boundary off")
+    assert "'current position:'" in findings[0]["message"]
+    assert "3 of its list's records" in findings[0]["message"]
+
+
+def test_record_boundary_is_silent_on_whole_records():
+    assert _record(*(_whole_mentee(idx) for idx in (10, 12, 14, 16))) == []
+
+
+def test_record_boundary_spares_the_first_entry():
+    assert _record(_tail(9), _whole_mentee(10), _whole_mentee(12), _whole_mentee(14)) == []
+
+
+def test_record_boundary_needs_two_carriers():
+    assert _record(_whole_mentee(10), _mentee(11, "2001 - 2003 Fellow, PhD"), _tail(12)) == []
+
+
+def test_record_boundary_needs_a_third_of_the_list_to_carry_the_label():
+    plain = [_mentee(idx, f"2001 - 2003 Fellow {idx}, PhD") for idx in range(20, 27)]
+    assert _record(_whole_mentee(10), _whole_mentee(12), *plain, _tail(40)) == []
+    assert len(_record(_whole_mentee(10), _whole_mentee(12), *plain[:3], _tail(40))) == 1
+
+
+def test_record_boundary_needs_twice_as_many_carriers_as_openers():
+    """A list whose records open with the label as often as they carry it is
+    written that way. An opener that carries the label again inside is not
+    a carrier: three openers against two carriers."""
+    assert _record(_whole_mentee(10), _whole_mentee(12), _tail(14), _tail(16), _tail(18)) == []
+    assert len(_record(_whole_mentee(10), _whole_mentee(12), _whole_mentee(13),
+                       _whole_mentee(15), _tail(14), _tail(16))) == 2
+
+
+def test_record_boundary_judges_each_heading_on_its_own():
+    other = ["Teaching", "Clinical Fellows"]
+    assert _record(_whole_mentee(10), _whole_mentee(12),
+                   _mentee(14, _tail(14)["text"], heading=other),
+                   _mentee(16, _whole_mentee(16)["text"], heading=other)) == []
+
+
+def test_record_boundary_closes_a_list_at_an_entry_with_no_code():
+    assert _record(_whole_mentee(10), _whole_mentee(12),
+                   {"element_idx_start": 13, "taxonomy_code": None, "text": "",
+                    "hierarchy": list(_MENTEE_HEADING)},
+                   _tail(14)) == []
+
+
+def test_record_boundary_leaves_grant_lists_to_grant_boundary():
+    def grant(idx, text):
+        return _mentee(idx, text, code="M2B")
+    assert _record(grant(10, "Agency: Fund\tTitle: Study"), grant(12, "Agency: Fund\tTitle: Study"),
+                   grant(14, "Title: Study\tAgency: Fund")) == []
+
+
 # ==========================================================================
 # grant_bucket (#1343, EBYSBC E7) -- a grant filed in a subsection its own
 # record contradicts.
@@ -3735,6 +3979,157 @@ def test_role_consistency_reports_the_contradiction_before_a_new_shape():
     entry = _grant(243, "PIs: Testowner A, with Dr. Other B", pi_role="co-I",
                    pi_name="Other B", co_investigators="Third C, Other B")
     assert _shapes(entry) == [("contradicted", "WARN")]
+
+
+# role_consistency, the X6 shapes (#1403, X6 batch class E32: IEUPKK 257-342,
+# RVTAQT 223/260/273, KJJVVO 168-178, RINASX 396/405).
+
+@pytest.mark.parametrize("fields", [
+    {"pi_name": "Other B", "pi_role": "Co-PI", "co_investigators": "Testowner A"},
+    {"pi_name": "Other B", "pi_role": "Mentor", "co_investigators": "Testowner A"},
+    {"pi_role": "MPI", "co_investigators": "Testowner, Other"},
+    {"pi_name": "Other B", "co_investigators": "Testowner (Site PI)"},     # no stated role
+])
+def test_role_consistency_flags_an_owner_lead_listed_as_co_i(fields):
+    assert _shapes(_grant(257, "Role: PI: Other B, Co-PI: Testowner A", **fields)) == [
+        ("owner_also_co_i", "WARN")]
+
+
+@pytest.mark.parametrize("fields", [
+    {"pi_name": "Other B", "pi_role": "Co-Investigator", "co_investigators": "Testowner A"},
+    {"pi_name": "Other B", "pi_role": "Co-Investigator/Mentor", "co_investigators": "Testowner A"},
+    {"pi_name": "Other B", "pi_role": "Co-I and Mentor", "co_investigators": "Testowner A"},
+    {"pi_name": "Other B", "pi_role": "Investigator and Associate Director",
+     "co_investigators": "Testowner A (Investigator and Associate Director)"},
+    {"pi_name": "Other B", "co_investigators": "Testowner A"},             # no lead label
+    {"pi_role": "Program Partner", "co_investigators": "Testowner A, Other B"},
+    {"pi_role": "PI: Other B", "co_investigators": "Testowner A"},         # a label, not a role
+    {"pi_name": "Other B", "pi_role": "Co-PI", "co_investigators": "Other B, Testowner A"},
+    {"pi_name": "Ada Testowner", "pi_role": "Co-PI", "co_investigators": "Testowner A"},
+    {"pi_name": "Other B", "pi_role": "Co-PI", "co_investigators": "Third C"},
+])
+def test_role_consistency_spares_an_owner_co_i_listing_the_role_allows(fields):
+    assert _shapes(_grant(257, "A grant", **fields)) == []
+
+
+def test_role_consistency_owner_also_co_i_reads_role_when_pi_role_is_empty():
+    entry = _grant(257, "A grant", pi_name="Other B", role="Co-PI",
+                   co_investigators="Testowner A")
+    assert _shapes(entry) == [("owner_also_co_i", "WARN")]
+
+
+def test_role_consistency_owner_also_co_i_needs_an_owner_surname():
+    entry = _grant(257, "A grant", pi_name="Other B", pi_role="Co-PI",
+                   co_investigators="Testowner A")
+    assert _shapes(entry, owner={}) == []
+
+
+@pytest.mark.parametrize("title", [
+    "Example Center, Director Core B., Mentor Project IV",
+    "Example Center; Co-Investigator",
+])
+def test_role_consistency_flags_a_role_held_in_the_title(title):
+    assert _shapes(_grant(405, "2004-2009 A grant", title=title, pi_name="Other B")) == [
+        ("role_in_title", "INFO")]
+
+
+@pytest.mark.parametrize("title, fields", [
+    ("Example Center, Director Core B.", {"pi_role": "Director"}),        # a stated role
+    ("Example Center (Pilot project: A study, PI Other)", {}),            # another's PI label
+    ("Example Center, Investigator-Initiated Study", {}),
+    ("Training Program for Clinical Investigators", {}),
+    ("Program Director Training Award", {}),                             # not a list item
+])
+def test_role_consistency_spares_a_title_without_the_owners_role(title, fields):
+    assert _shapes(_grant(405, "A grant", title=title, **fields)) == []
+
+
+def test_role_consistency_flags_an_owner_pi_cell_beside_an_empty_role():
+    entry = _grant(260, "Agency (PI: Testowner)", title="Example Project", pi_name="Testowner")
+    assert _shapes(entry, table_rows=[_grant_table("", "Testowner")]) == [
+        ("owner_pi_role_empty", "WARN")]
+
+
+@pytest.mark.parametrize("pi_name, owner", [
+    ("Other Person", _ROLE_OWNER),
+    ("", _ROLE_OWNER),
+    ("Ada Testowner", {}),
+])
+def test_role_consistency_spares_an_empty_role_beside_another_pi(pi_name, owner):
+    assert _shapes(table_rows=[_grant_table("", pi_name)], owner=owner) == []
+
+
+@pytest.mark.parametrize("role", [
+    "Co-Principal Investigator", "Site Principal Investigator for Multicenter Project",
+    "Site PI", "Co-I", "Subcontract PI", "Principal Investigator of Subcontract",
+    "co-investigator; site PI",
+])
+def test_role_consistency_flags_an_owner_pi_cell_beside_a_role_that_is_not_the_pi(role):
+    assert _shapes(table_rows=[_grant_table(role, "Ada Testowner")]) == [
+        ("owner_pi_other_role", "WARN")]
+
+
+@pytest.mark.parametrize("role, pi_name", [
+    ("PI", "Ada Testowner"),
+    ("Program Director (PI)", "Ada Testowner"),
+    ("PD/PI", "Ada Testowner"),
+    ("MPI", "Ada Testowner"),
+    ("co-investigator; PI of project 2", "Ada Testowner"),
+    ("Co-I; Program Director", "Ada Testowner"),
+    ("Co-Investigator; PD", "Ada Testowner"),
+    ("Co-I; Principle Investigator", "Ada Testowner"),
+    ("Mentor", "Ada Testowner"),                    # not a co-/site-PI or a co-I
+    ("Co-PI", "Ada Testowner, Other Person"),       # the cell names the other co-PI too
+    ("Co-PI", "Other Person"),
+    ("Co-PI", "Li J"),                              # no name word long enough to judge
+])
+def test_role_consistency_spares_an_owner_pi_cell_the_role_allows(role, pi_name):
+    assert _shapes(table_rows=[_grant_table(role, pi_name)]) == []
+
+
+def test_role_consistency_flags_a_pi_cell_cut_from_the_title():
+    entry = _grant(396, "1997 Foundation, \u201cStress\u201d \u2013 Human and Animal Studies, PI",
+                   title="Stress \u2013 Human and Animal Studies", pi_role="PI")
+    table = _grant_table("PI", "Animal Studies", title="Stress \u2013 Human and Animal Studies")
+    assert _shapes(entry, table_rows=[table]) == [("pi_cell_from_title", "INFO")]
+
+
+@pytest.mark.parametrize("pi_cell, title, pi_name", [
+    ("Pat Holder", "Summer Fellowship (Pat Holder)", "Pat Holder"),  # stage 4's own PI
+    ("Lee", "The Lee Cohort", ""),                                   # one word
+    ("Ada Testowner", "Ada Testowner Lab Award", ""),                # the owner
+    ("Other Person", "Example Project", ""),
+    ("Ann Studies", "Johann Studies Program", ""),                   # not whole words
+])
+def test_role_consistency_spares_a_pi_cell_that_is_not_a_title_run(pi_cell, title, pi_name):
+    entry = _grant(118, "A grant", title=title, pi_name=pi_name, pi_role="Mentor")
+    assert _shapes(entry, table_rows=[_grant_table("Mentor", pi_cell, title=title)]) == []
+
+
+def test_role_consistency_places_tables_of_one_title_at_its_first_entry():
+    """Two grants with one title both name the first entry, as pi_cell_empty
+    always has (KJJVVO 176 and 177)."""
+    first = _grant(176, "A grant", title="Example Project", pi_role="Co-PI")
+    second = _grant(177, "A grant", title="Example Project", pi_role="Co-PI")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [first, second]},
+                                     [_grant_table("Co-PI", "Ada Testowner")] * 2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 176"]
+
+
+def test_role_consistency_still_reports_an_empty_pi_cell_beside_an_entry_finding():
+    entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
+                   pi_role="co-I")
+    assert _shapes(entry, table_rows=[_grant_table("PI", "")]) == [
+        ("contradicted", "WARN"), ("pi_cell_empty", "WARN")]
+
+
+def test_role_consistency_reports_a_grant_once_when_its_table_shows_a_render_shape():
+    """An entry finding wins over the X6 render shapes of the same grant's
+    table; pi_cell_empty is still reported beside it, as before."""
+    entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
+                   pi_name="Ada Testowner", pi_role="co-I")
+    assert _shapes(entry, table_rows=[_grant_table("co-I", "Ada Testowner")]) == [
+        ("contradicted", "WARN")]
 
 
 if __name__ == "__main__":

@@ -527,6 +527,11 @@ LINT_COPY = {
         "A line of the CV that was split into several records shows, on one of them, an "
         "institution the line does not name, or dates the line gives only to another record.",
         "Check the institution and dates of each flagged record against the source CV."),
+    "record_boundary": LintCopy(
+        "A line of one entry opens the next",
+        "A labelled line that belongs to one entry, such as a trainee's current position, "
+        "starts the next entry instead, so one entry lacks it and the next shows it.",
+        "Move each flagged line back to the entry above it, as the source CV orders them."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
