@@ -159,6 +159,16 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 # stage module imports the doctor (quality_score.py imports two doctor leaf
 # modules -- #820, pre-#825 -- and is not a stage).
 
+# Owner: this module (the shared definition, #825); provenance and any
+# re-derivation are tracked at #721. Derivation: hand-set, not measured. Both
+# values date from the doctor's first commit (823ef4b7, 2026-07-02), tuned
+# against real CVs during the 89HQVQ forensic (#208-#213); #221 copied them here
+# unchanged. Labelled evidence since: on the 126-CV re-render of 2026-09-30
+# (#717's comment), classified_unrendered fired 25 times -- 10 real losses,
+# 3 false warnings cleared by #890, 1 undetermined, and 11 false warnings
+# from entries rendered as a reformatted citation or a table row, which the
+# 0.7 overlap cannot see. Re-derive against that 10 TP / 11 FP set
+# before changing either value.
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
 # A reclassify reply must carry at least this share of its source entry's
