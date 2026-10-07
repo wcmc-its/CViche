@@ -57,6 +57,8 @@ _CAP_SOURCE_BY_SCORER = {
     scorer.score_owner_missing_from_citation: CapSource(
         "the CV owner was cut from several of their own citations",
         "owner_missing_from_citation"),
+    scorer.score_etal_added: CapSource(
+        "several citations cut their co-authors to \"et al.\"", "etal_added"),
     scorer.score_grant_boundary: CapSource(
         "several grants show another grant's details", "grant_boundary"),
     scorer.score_grant_application_as_award: CapSource(
@@ -194,6 +196,13 @@ _ROW_COPY_BY_SCORER = {
         "whenever the source CV credits them, including as a member of a study group.",
         "Caps the score at 84 when 3 or more citations leave the faculty member out.",
         "Restore the faculty member's name in the citations named in the owner_missing_from_citation "
+        "finding."),
+    scorer.score_etal_added: RowCopy(
+        "Co-authors kept on citations",
+        "Uses the etal_added finding: a publication whose line in the document ends its author list "
+        "with \"et al.\" where the source CV names every author.",
+        "Caps the score at 84 when 3 or more citations are flagged. One or two cut lists do not cap.",
+        "Restore the full author list from the source CV in the citations named in the etal_added "
         "finding."),
     scorer.score_grant_boundary: RowCopy(
         "Grant details kept with their grant",
