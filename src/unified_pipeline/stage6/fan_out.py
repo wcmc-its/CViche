@@ -209,7 +209,7 @@ _MAX_SHORT_RANGE_YEARS = 50
 # may reorder a scrambled line by its fields, but only when they hold exactly
 # the text's words -- `mentoring._outcome_line_from_fields`, #1434.)
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
-    'B1': frozenset({'degree', 'discipline', 'institution', 'year'}),
+    'B1': frozenset({'advisor', 'degree', 'discipline', 'institution', 'year'}),
     'B2': frozenset({'institution', 'program_name', 'year'}),
     'C': frozenset({'end_date', 'institution', 'role', 'specialty', 'start_date', 'training_type'}),
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),

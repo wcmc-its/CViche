@@ -318,13 +318,21 @@ EXTRA_SPAN_END_KEY = 'additional_period_end'
 EXTRA_SPAN_KEYS = frozenset({*EXTRA_SPAN_LIST_KEYS, EXTRA_SPAN_START_KEY,
                              EXTRA_SPAN_END_KEY})
 
+# Stage 4's catch-all remark key. It sometimes holds nothing but the record's
+# spans ("1970-1987, 1995-present", X6 RINASX 430, #1245), and is then read as
+# one more further-span string; any other remark is not a date and is left
+# alone (`_date_only_spans`). Kept out of `EXTRA_SPAN_KEYS`, which the doctor
+# grades as dates whatever they hold.
+EXTRA_SPAN_PROSE_KEY = 'additional_info'
+
 # The codes whose date cell calls `with_extra_date_spans` (or, for K, its
 # `extra_date_spans` core): O (leadership.py), P (administrative_activities.py,
 # one record per entry), Q1 and Q2 (service.py), D1-D3 (positions.py, rows not
-# superseded) and K1-K5 (teaching.py). On any other code (H, say) no renderer
-# reads the span keys at all.
+# superseded), K1-K5 (teaching.py) and, through `further_date_spans`, R
+# (presentations.py). On any other code (H, say) no renderer reads the span
+# keys at all.
 EXTRA_SPAN_CODES = frozenset({'O', 'P', 'Q1', 'Q2', 'D1', 'D2', 'D3',
-                              'K1', 'K2', 'K3', 'K4', 'K5'})
+                              'K1', 'K2', 'K3', 'K4', 'K5', 'R'})
 
 # How the spans of one record are joined in its date cell: "2019-2020, 2021".
 DATE_SPAN_SEPARATOR = ', '
@@ -339,6 +347,11 @@ _EXTRA_DATE_RANGE_ITEM_RE = re.compile(
     r'^(?P<start>\d{4}(?:[-/.]\d{1,2})?)\s*[-\u2013\u2014]\s*'
     rf'(?P<end>\d{{4}}(?:[-/.]\d{{1,2}})?|{"|".join(sorted(CURRENT_DATE_VALUES))})$',
     re.IGNORECASE)
+
+# One item of such a string that is a date and nothing else: a year, a
+# year-month or an ISO day ("1999-09-30"). With `_EXTRA_DATE_RANGE_ITEM_RE`,
+# what `_date_only_spans` accepts.
+_EXTRA_DATE_SINGLE_ITEM_RE = re.compile(r'^\d{4}(?:[-/.]\d{1,2}){0,2}$')
 
 # Upper bound of a span still running ("present"), for `_span_is_covered`.
 _OPEN_END_YEAR = 10_000
@@ -360,8 +373,22 @@ def _string_span(part: str) -> _Span:
     return _Span(match['start'], match['end'])
 
 
+def _date_only_spans(value: object) -> list[_Span]:
+    """The spans of a remark (`EXTRA_SPAN_PROSE_KEY`) that is a list of dates
+    and nothing else: every item a date (`_EXTRA_DATE_SINGLE_ITEM_RE`) or a
+    range (`_EXTRA_DATE_RANGE_ITEM_RE`). Empty for any other remark."""
+    if not isinstance(value, str):
+        return []
+    parts = [part for part in _EXTRA_DATE_STRING_SPLIT_RE.split(value.strip()) if part]
+    if not parts or not all(_EXTRA_DATE_SINGLE_ITEM_RE.match(part)
+                            or _EXTRA_DATE_RANGE_ITEM_RE.match(part) for part in parts):
+        return []
+    return [_string_span(part) for part in parts]
+
+
 def _extra_spans(fields: Mapping[str, Any]) -> list[_Span]:
-    """The spans under `EXTRA_SPAN_KEYS`, in the order stage 4 wrote them."""
+    """The spans under `EXTRA_SPAN_KEYS`, in the order stage 4 wrote them,
+    then those of a date-only remark (`_date_only_spans`)."""
     spans: list[_Span] = []
     for key in EXTRA_SPAN_LIST_KEYS:
         value = fields.get(key)
@@ -376,6 +403,7 @@ def _extra_spans(fields: Mapping[str, Any]) -> list[_Span]:
     if fields.get(EXTRA_SPAN_START_KEY) or fields.get(EXTRA_SPAN_END_KEY):
         spans.append(_Span(fields.get(EXTRA_SPAN_START_KEY) or '',
                            fields.get(EXTRA_SPAN_END_KEY) or ''))
+    spans.extend(_date_only_spans(fields.get(EXTRA_SPAN_PROSE_KEY)))
     return spans
 
 
@@ -496,6 +524,19 @@ def extra_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]
             shown.append(text)
             extras.append(text)
     return extras
+
+
+def further_date_spans(fields: Mapping[str, Any], taxonomy_code: str) -> list[str]:
+    """Every further span of the record (`_extra_spans`), formatted, in
+    stage 4's order less repeats. For a renderer whose own date is a single
+    occasion, not a `start_date`-`end_date` range (R, VPMMFM 531: three talk
+    dates under `additional_dates` and `date` null, #1245)."""
+    shown: list[str] = []
+    for span in _extra_spans(fields):
+        text = _format_span(span, taxonomy_code)
+        if text and text not in shown:
+            shown.append(text)
+    return shown
 
 
 def with_extra_date_spans(dates: str, fields: Mapping[str, Any],
