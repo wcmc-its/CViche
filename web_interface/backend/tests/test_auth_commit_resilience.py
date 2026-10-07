@@ -11,7 +11,8 @@ import pymysql.err
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from app.auth import _best_effort_persist, _is_retryable_write_conflict
+from app.auth import _best_effort_persist
+from app.database import is_retryable_write_conflict
 from app.models import User
 
 
@@ -61,7 +62,7 @@ def test_best_effort_persist_does_not_touch_unrelated_dirty_state(client, db):
 
 
 # ---------------------------------------------------------------------------
-# _is_retryable_write_conflict: real per-backend exception shapes, not
+# is_retryable_write_conflict: real per-backend exception shapes, not
 # string-matched or hand-mocked -- pymysql's is a real (code, message) tuple;
 # sqlite3's is a plain message. Verified against the actual installed
 # libraries, not asserted from memory.
@@ -75,13 +76,13 @@ def test_mysql_1020_conflict_is_retryable():
     exc = _operational_error(
         pymysql.err.OperationalError(1020, "Record has changed since last read in table 'users'")
     )
-    assert _is_retryable_write_conflict(exc) is True
+    assert is_retryable_write_conflict(exc) is True
 
 
 def test_sqlite_database_locked_is_retryable():
     import sqlite3
     exc = _operational_error(sqlite3.OperationalError("database is locked"))
-    assert _is_retryable_write_conflict(exc) is True
+    assert is_retryable_write_conflict(exc) is True
 
 
 def test_unrelated_operational_error_is_not_retryable():
@@ -92,7 +93,7 @@ def test_unrelated_operational_error_is_not_retryable():
     exc = _operational_error(
         pymysql.err.OperationalError(2013, "Lost connection to MySQL server during query")
     )
-    assert _is_retryable_write_conflict(exc) is False
+    assert is_retryable_write_conflict(exc) is False
 
 
 def test_best_effort_persist_reraises_unrelated_operational_error(db, monkeypatch):
