@@ -81,6 +81,11 @@ from unified_pipeline.stage3b.classify import (  # noqa: F401
     reconnect_fragments,
     validate_t_classifications,
 )
+from unified_pipeline.stage3b.context import (  # noqa: F401
+    TaxonomyContext,
+    build_mapping_index,
+    get_taxonomy_context,
+)
 
 # Every name below is re-exported from this module by being imported here: it
 # is the public import surface of stage 3b, pinned by
@@ -95,11 +100,7 @@ from unified_pipeline.stage3b.classify import (  # noqa: F401
 # here. Tests that stub the LLM must patch `unified_pipeline.stage3b.classify`,
 # where every classification call site now lives; patching this module's copy
 # would cover only the flag-gated block-coherence closure in run_stage_3b.
-from unified_pipeline.stage3b.context import (  # noqa: F401
-    TaxonomyContext,
-    build_mapping_index,
-    get_taxonomy_context,
-)
+from unified_pipeline.stage3b.fragment_merge import merge_fragment_text
 from unified_pipeline.stage3b.header_pin import apply_header_pin
 from unified_pipeline.stage3b.io import (  # noqa: F401
     _normalize_taxonomy_mappings,
@@ -665,7 +666,7 @@ def run_stage_3b(
     print(f"Post-correction summary: {total_post_corrections} total corrections applied")
     print("=" * 60)
 
-    # Add to total stats
+    all_classified, total_stats["fragment_merge"] = merge_fragment_text(all_classified)  # #1256: last text-reading pass
     total_stats['post_classification_corrections'] = post_correction_stats
     total_stats['total_post_corrections'] = total_post_corrections
 
