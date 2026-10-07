@@ -7,6 +7,10 @@
 # row (UP*, RUF013) is at a baseline of 0, and a ratchet at 0 is a hard zero --
 # one new hit fails check_standards.py.
 #
+# F, I, B, SIM and RET (added at the reviewer's request) have no §9 row yet:
+# check_standards.py sums only the families its rows name, so CI does not
+# count them; they show in editors and in a local `ruff check`.
+#
 # Not selected on purpose: RUF100 (unused-noqa) strips `# noqa` comments that
 # carry a human justification (stage_6_word_template.py, run_doctor.py, ...).
 target-version = "py314"
@@ -20,6 +24,7 @@ extend-exclude = [
 
 [lint]
 select = [
+    "F",       # unused imports, undefined names, unused variables, imports used incorrectly, redefined/unused symbols
     "UP006",   # list[...] not typing.List[...]
     "UP007",   # X | Y not typing.Union[X, Y]
     "UP035",   # deprecated typing imports (List, Dict, Optional, ...)
@@ -34,6 +39,19 @@ select = [
     "RUF013",  # implicit Optional (`x: int = None`)
     "T201",    # print()
     "BLE001",  # blind `except Exception` (§5.4)
+    "I",       # import-order problems
+    "B",       # Bugbear catches patterns that are often legitimate bugs rather than merely style issues
+    "SIM",     # simplify code
+    "RET",     # return-related issues
+]
+
+# FastAPI's parameter markers are meant to be called in a default argument
+# (`db: Session = Depends(get_db)`), so B008 would flag the framework idiom
+# itself: 107 of its 114 hits when F/I/B/SIM/RET were added.
+[lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Body", "fastapi.Cookie", "fastapi.Depends", "fastapi.File", "fastapi.Form",
+    "fastapi.Header", "fastapi.Path", "fastapi.Query", "fastapi.Security",
 ]
 
 [lint.per-file-ignores]
