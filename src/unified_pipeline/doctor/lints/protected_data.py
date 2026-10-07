@@ -238,6 +238,14 @@ _HOME_LABEL = (r"(?:\b(?i:home|residence)\b"
                r"(?:[ \t]+(?i:phone|telephone|tel|ph|address|addr|number|no|fax)\b\.?)?"
                r"|\((?i:h|home|res)\))")
 _HOME_TAG_AFTER = r"(?:\((?i:h|home|res|residence)\)|\b(?i:home)\b)"
+#: #1426 (NDMRSO MQJAVH 8): a "Current Address" line is the owner's home
+#: address when nothing on it names a workplace -- an institution, a department
+#: or a building. This lint's own word list, kept apart from the renderer's.
+_WORKPLACE_WORD = (r"\b(?i:universit\w*|college|institut\w*|school|hospital|medical|clinic\w*"
+                   r"|cent(?:er|re)|health|medicine|department|dept|division|laborator\w*|lab"
+                   r"|building|bldg|hall|pavilion|tower|floor|room|suite|office|campus)\b")
+_CURRENT_ADDRESS_LABEL = (r"\b(?i:current)[ \t]+(?i:address)\b(?![^\n]*" + _WORKPLACE_WORD + r")"
+                          r"[ \t|]*(?:[:\-–—][ \t|]*)?")
 #: NDMRSO ND1: the owner's institutional or tax ID number. A label naming whose
 #: ID it is, then four or more digits. A bare "ID #" (a board certificate's) or
 #: an institution name before a grant's "#<number>" is not such a label; NPI and
@@ -287,6 +295,7 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
      CAT_HOME_CONTACT),
     (re.compile(r"(?P<value>" + _PHONE + "|" + _STREET + r")[ \t]*[,;:]?[ \t]*" + _HOME_TAG_AFTER),
      CAT_HOME_CONTACT),
+    (re.compile(_CURRENT_ADDRESS_LABEL + r"(?P<value>" + _STREET + ")"), CAT_HOME_CONTACT),
     (re.compile(r"(?<![\w-])" + _INSTITUTIONAL_ID_LABEL + _ID_LABEL_TAIL
                 + r"(?P<value>" + _ID_NUMBER + ")"), CAT_INSTITUTIONAL_ID),
     (re.compile(r"(?<![\w-])" + _TAX_ID_LABEL + _ID_LABEL_TAIL
