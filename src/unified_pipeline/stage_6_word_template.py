@@ -587,9 +587,7 @@ def is_overflow_candidate(entry: Mapping[str, Any]) -> bool:
     code = str(entry.get('taxonomy_code') or '')
     if code.startswith(('K', 'S')) or _has_formatted_text(entry):
         return False
-    coverage = rendered_extraction_coverage(entry)
-    if not isinstance(coverage, dict):
-        return False
+    coverage = rendered_extraction_coverage(entry) or {}
     pct = coverage.get('extraction_coverage_percent', 100)
     if not pct or pct >= LOW_COVERAGE_COMMENT_PCT:
         return False
