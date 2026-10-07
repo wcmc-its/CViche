@@ -191,13 +191,13 @@ def _cell_text_in_order(cell: _Cell, tab_char: str = ' ') -> str:
 
 
 def get_cell_text_with_nested(cell: _Cell) -> str:
-    """`get_cell_text`, plus the rows of any table nested in a cell that has text
-    of its own, in document order (#1231). A cell holding ONLY a nested table
-    returns "" as before, so callers' itertext() fallback is unchanged."""
-    text = get_cell_text(cell)
-    if text.strip() and _cell_has_nested_table(cell):
+    """`get_cell_text`, plus the rows of any table nested in the cell, in document
+    order (#1231). A cell holding ONLY a nested table is read the same way, one
+    line per nested row (#1284); it used to return "" and fall through to the
+    callers' itertext() fallback, which glued the nested paragraphs together."""
+    if _cell_has_nested_table(cell):
         return _cell_text_in_order(cell)
-    return text
+    return get_cell_text(cell)
 
 
 def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, Any]:
