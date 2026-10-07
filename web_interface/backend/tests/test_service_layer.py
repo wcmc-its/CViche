@@ -1,4 +1,5 @@
 """Tests for the service layer (ARCH-01 through ARCH-06 regression)."""
+import json
 import os
 import sys
 from pathlib import Path
@@ -198,7 +199,60 @@ class TestQueueRunTransitions:
         self._seed_run(db, status="created")
         assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is True
         db.commit()
-        assert self._reload(db).image_tag == "dev-2.tag"
+        run = self._reload(db)
+        assert run.image_tag == "dev-2.tag"
+        assert json.loads(run.image_tag_history) == ["dev-2.tag"]
+
+    def test_claim_queued_starts_the_image_history(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.tag")
+        self._seed_run(db)
+        claim_queued("QRT001")
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_claim_on_a_new_image_appends_to_the_history(self, db, monkeypatch):
+        """A run split across a deploy keeps both images, oldest first."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, image_tag="dev-1.tag", image_tag_history=json.dumps(["dev-1.tag"]))
+        claim_queued("QRT001")
+        run = self._reload(db)
+        assert run.image_tag == "dev-2.tag"
+        assert json.loads(run.image_tag_history) == ["dev-1.tag", "dev-2.tag"]
+
+    def test_claim_on_the_same_image_does_not_repeat_it(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.tag")
+        self._seed_run(db, status="failed", image_tag_history=json.dumps(["dev-1.tag"]))
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "failed") is True
+        db.commit()
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_untagged_image_leaves_the_history_alone(self, db, monkeypatch):
+        monkeypatch.delenv("CVICHE_IMAGE_TAG", raising=False)
+        self._seed_run(db, image_tag_history=json.dumps(["dev-1.tag"]))
+        assert claim_queued("QRT001").won is True
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_lost_claim_does_not_touch_the_history(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, status="running", image_tag_history=json.dumps(["dev-1.tag"]))
+        assert claim_queued("QRT001").won is False
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is False
+        db.commit()
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_corrupt_history_is_restarted_not_fatal(self, db, monkeypatch, caplog):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, image_tag_history="{not json")
+        assert claim_queued("QRT001").won is True
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-2.tag"]
+        assert "unreadable image_tag_history" in caplog.text
+
+    @pytest.mark.parametrize("raw", ['{"a": 1}', '["ok", 3]'])
+    def test_parse_image_tag_history_rejects_a_non_list_of_tags(self, raw):
+        with pytest.raises(ValueError):
+            run_service.parse_image_tag_history(raw)
+
+    def test_parse_image_tag_history_reads_null_as_empty(self):
+        assert run_service.parse_image_tag_history(None) == []
 
     def test_claim_queued_reports_none_for_an_unknown_run(self, db):
         result = claim_queued("NOSUCH")

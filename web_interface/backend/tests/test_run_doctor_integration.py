@@ -206,6 +206,24 @@ def test_doctor_source_is_the_runs_private_input_copy(monkeypatch, tmp_path, db)
     assert seen["source"] == copied
 
 
+def test_doctor_report_records_the_executing_image_tag(monkeypatch, tmp_path, db):
+    """#1239: the doctor json names the image that ran its lints."""
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-7.tag")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_TAG")
+    monkeypatch.setattr(
+        run_doctor_mod, "run_doctor",
+        lambda out_dir, uid, source=None, prompt_log_dir=None: _doctor_payload(),
+    )
+
+    payload, out_path = o._doctor_report()
+
+    assert payload["image_tag"] == "dev-7.tag"
+    assert json.loads(out_path.read_text())["image_tag"] == "dev-7.tag"
+
+
 def test_completed_run_gets_its_quality_columns(monkeypatch, tmp_path, db):
     """The run-end score is copied onto runs.quality_* on the orchestrator's thread."""
     from app.models import Run
