@@ -152,7 +152,7 @@ Base and branch differ only in `multi_record_coverage` findings, on every arm: n
 - 126 farm and batch runs, 10: 1FRABQ, CZTMHW and UYZIAG 105 (one CV; a 2017-2018 presidency now also reported lost), web163 158 (a staff post lost beside a directorship), web205 254, web228 166 (a membership span and a treasurer term lost), web32 1106, 1108 and 1132 (member, vice-chair and chair fused into one record dated by the membership; the offices' spans render nowhere): 9 true. web46 387 is partial (a mentee line coded D1; the mentee's name is what is lost).
 - NDMRSO dev render and EOAHMI dev-248 render: only runs already listed (BNYLDF, HUOGDE, SIYORB, VXSDRD, WYMVGU).
 
-38 true, 5 partial, 1 false of 44 (86%); of the 42 WARNs, 38 (90%). 19 of the true hits are the X6 targets and the same CVs' other runs, so those are in-sample; out of sample the WARNs are 19 true of 23 (83%). No base finding was removed: the five base findings whose message changed (BNYLDF 329, 1FRABQ/CZTMHW/UYZIAG 105, web228 166) gained a clause each, every one true. On the 62 labelled runs `multi_record_coverage` goes from 152 hits (103 WARN, matched 85, caught 48) to 165 (115 WARN, matched 90, caught 51), and recall from 261 to 263 of 487.
+38 true, 5 partial, 1 false of 44 (86%); of the 42 WARNs, 38 (90%). 19 of the true hits are the X6 targets and the same CVs' other runs, so those are in-sample. Out of sample the WARNs are 19 true of 23 by run, but 1FRABQ, CZTMHW and UYZIAG are one CV: counted once per CV, about 17 true of 21 (81%), at the 80% bar with n about 21. No base finding was removed: the five base findings whose message changed (BNYLDF 329, 1FRABQ/CZTMHW/UYZIAG 105, web228 166) gained a clause each, every one true. On the 62 labelled runs `multi_record_coverage` goes from 152 hits (103 WARN, matched 85, caught 48) to 165 (115 WARN, matched 90, caught 51), and recall from 261 to 263 of 487.
 
 Recall on X6's 12 E1 findings, on the stored docx: 11 caught. 8 already were on origin/dev (IEUPKK-04, -05; UXBHHF-03, -04, -05; KJJVVO-02, -03; VPMMFM-01, which dev-246 missed and RCB-D's apostrophe years catch); X6-multirec adds RINASX-10 (all 3 entries), RVTAQT-08 and VPMMFM-10. VPMMFM-09 stays missed: an undated DSMB entry naming two studies, whose one record fuses both funders into `organization`; no part names a title, so no clause is read.
 
@@ -179,7 +179,7 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |
 | `missed_headers` | 21 | 0 | 4 / 2 / 2 | 4 / 8 (50%) | names text | 0 | M1 |
-| `multi_record_coverage` | 165 | 115 | none | 22 / 26 hand-checked (85%) | 90 / 165 (55%) | 51 | RCB-D, X6-multirec |
+| `multi_record_coverage` | 165 | 115 | none | 50 / 57 hand-checked (88%): RCB-D's 12 / 13 and X6-multirec's 38 / 44 | 90 / 165 (55%) | 51 | RCB-D, X6-multirec |
 | `offschema_fields` | 47 | 14 | 16 / 2 / 5 | 16 / 23 (70%) | 34 / 47 (72%) | 28 | M1 |
 | `output_hygiene` | 55 | 0 | 30 / 3 / 0 | 30 / 33 (91%) | names text | 0 | M1 |
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
@@ -370,4 +370,4 @@ These come from before this ledger. They are quoted as recorded, on the batch an
 | 2026-10-05 | RCB-D's new shapes (`multi_record_coverage` two-digit dates, `junk_or_header_row` `role_only`, `duplicate_records` one letter apart, `section_consistency` reviewer journals) | 3 of 13 out of sample; the 10 false are fixed in RCB-D2 | 126 farm and batch runs, render of origin/dev `10f18e34` | RCB-D2 |
 | 2026-10-05 | all lints | 167 of 182 judged (92%); 75 of 90 without etal_added; recall 33 of 77 verified defects (43%) | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
 | 2026-10-06 | `grant_boundary` | dev-246 doctor 0 of the X6 E5 records; dev `05966dac` IEUPKK 13 of 14 records and RVTAQT 1 of 7; this branch 14 of 14 and 7 of 7 | X6, 6 CVs, dev-246 `33f53be7` | X6-grant |
-| 2026-10-06 | `multi_record_coverage`, X6-multirec's added and changed findings | 38 of 44 (86%); WARN 38 of 42; out of sample WARN 19 of 23 | 335 runs: `analysis/` stored docx, the 63-run farm, the 126 farm/batch runs, NDMRSO and EOAHMI renders | X6-multirec, above |
+| 2026-10-06 | `multi_record_coverage`, X6-multirec's added and changed findings | 38 of 44 (86%); WARN 38 of 42; out of sample WARN about 17 of 21 by distinct CV (81%) | 335 runs: `analysis/` stored docx, the 63-run farm, the 126 farm/batch runs, NDMRSO and EOAHMI renders | X6-multirec, above |

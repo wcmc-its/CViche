@@ -2043,7 +2043,7 @@ MULTI_RECORD_PROSE_MIN_LOWERCASE = 4
 #: CLAUSE_SPAN_OUTSIDE: the record holds each of its words, but it writes a
 #: year outside every span the record's dates cover. That is a committee's
 #: membership span with an office inside it, where stage 4 kept the office
-#: ("<committee>, 2003-2007, Chair 2006-7"; X6 RINASX-10, three entries), or
+#: ("<committee>, 2011-2016, Chair 2014-15"; X6 RINASX-10, three entries), or
 #: an entry stage 4 split into its offices only (X6 VPMMFM-10). On a one-record
 #: entry the clause the record stands for must also name a role the left-out
 #: clause lacks: the same role written again at another time stays
@@ -2284,7 +2284,7 @@ def _names_title_and_institution(part: str) -> bool:
 def _is_dated_event(part: str, record_words: frozenset[str] | None) -> bool:
     """A part that writes a year and MULTI_RECORD_MIN_NEW or more distinctive
     words, none of them the record's: an event beside a role ("<committee>
-    member; <named> Retreat in December, 2021", X6 RVTAQT-08). A part that
+    member; <named> Symposium in March, 2019", X6 RVTAQT-08). A part that
     shares a word with the record is the record's own head (a mentee's name
     and degree year, a residency's dates beside its director's line).
     `record_words` None judges no part an event."""
@@ -2366,7 +2366,7 @@ def _dated_own_clause(clauses: list[Clause], words: list[set[str]],
     the record holds, the one sharing most words with it. It can differ from
     the clause sharing most words: a committee's membership span shares more
     words with the record than the office inside it whose dates the record
-    holds ("<committee>, 2003-2007, Chair 2006-7")."""
+    holds ("<committee>, 2011-2016, Chair 2014-15")."""
     dated = [i for i, clause in enumerate(clauses)
              if clause.years and clause.years <= record.years]
     return max(dated, key=lambda i: len(words[i] & record.words)) if dated else None
