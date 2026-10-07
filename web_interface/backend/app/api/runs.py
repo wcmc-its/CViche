@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Query as SAQuery
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.upload import UPLOAD_DIR, commit_run_or_compensate, create_run_archive
+from app.api.upload import UPLOAD_DIR, compensated_run_creation, create_run_archive
 from app.auth import (
     can_view_all_runs,
     get_current_user,
@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Run statuses /start may move to "running" (the conditional UPDATE's predicate).
-STARTABLE_STATUSES = ("created", "paused")
+STARTABLE_STATUSES = (RunState.CREATED, RunState.PAUSED)
 
 # Largest page /runs serves. The run-history UI asks for exactly this many
 # (RunHistory.tsx PAGE_SIZE), so lowering it breaks that page (#801).
@@ -93,7 +93,7 @@ def _run_duration_seconds(run) -> int | None:
         return run.total_duration_seconds
     if run.started_at and run.completed_at:
         return int((run.completed_at - run.started_at).total_seconds())
-    if run.started_at and run.status == "running":
+    if run.started_at and run.status == RunState.RUNNING:
         # Use datetime.now() to match server_default=func.now() (local time).
         return max(0, int((datetime.now() - run.started_at).total_seconds()))
     return None
@@ -164,7 +164,7 @@ def _dispatch_queue(
         if not run_queue.claim_reenqueue_slot(run.id):
             return JSONResponse(
                 status_code=202,
-                content={"message": f"Run {run.id} already queued", "status": "queued"},
+                content={"message": f"Run {run.id} already queued", "status": RunState.QUEUED},
             )
         try:
             run_queue.enqueue(run.id, queue)
@@ -177,7 +177,7 @@ def _dispatch_queue(
             ) from e
         return JSONResponse(
             status_code=202,
-            content={"message": f"Run {run.id} already queued", "status": "queued"},
+            content={"message": f"Run {run.id} already queued", "status": RunState.QUEUED},
         )
 
     try:
@@ -195,7 +195,7 @@ def _dispatch_queue(
             detail={"error": "queue_unavailable",
                     "message": "The run queue is unavailable right now -- please try again shortly."},
         ) from e
-    return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": "queued"})
+    return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": RunState.QUEUED})
 
 
 @router.get("/capacity", response_model=CapacityResponse)
@@ -491,7 +491,7 @@ def start_run(
 
     background_tasks.add_task(run_pipeline)
 
-    return {"message": f"Pipeline started for run {run_id}", "status": "running"}
+    return {"message": f"Pipeline started for run {run_id}", "status": RunState.RUNNING}
 
 
 @router.post("/run/{run_id}/cancel", response_model=RunActionResponse)
@@ -505,12 +505,12 @@ async def cancel_run(
 
     # A queued run has no orchestrator yet: the status flip alone cancels it,
     # because the worker's claim requires status == "queued" (#701).
-    if run.status not in ("running", "queued"):
+    if run.status not in (RunState.RUNNING, RunState.QUEUED):
         raise bad_request(f"Cannot cancel run in status: {run.status}")
 
     _cancel_run_record(db, run)
 
-    return {"message": f"Run {run_id} cancelled", "status": "cancelled"}
+    return {"message": f"Run {run_id} cancelled", "status": RunState.CANCELLED}
 
 
 @router.post("/run/{run_id}/restart", response_model=RestartRunResponse)
@@ -598,50 +598,50 @@ async def restart_run(
                 ),
             },
         )
-    storage = get_storage()
+    # Everything from here to the commit compensates the archive on failure (#802).
+    with compensated_run_creation(db, new_run_id, current_user.email, new_file_path):
+        storage = get_storage()
 
-    # Cross-run, browsable-by-submitter index (best-effort; never fail the
-    # restart). Mirrors /upload so restarted runs are findable by submitter too.
-    try:
-        storage.put_global(
-            f"by-submitter/{current_user.email.lower()}/{new_run_id}/manifest.json",
-            manifest,
+        # Cross-run, browsable-by-submitter index (best-effort; never fail the
+        # restart). Mirrors /upload so restarted runs are findable by submitter too.
+        try:
+            storage.put_global(
+                f"by-submitter/{current_user.email.lower()}/{new_run_id}/manifest.json",
+                manifest,
+            )
+        except Exception as e:
+            logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
+
+        # Create new Run record, inheriting submission_type and the user's
+        # output-rendering choices (issues #153, #199) from the original. Without
+        # this the restarted run silently reverts to the column defaults (track
+        # changes ON, classification comments OFF, strip instructions ON),
+        # discarding a choice the user made at upload.
+        new_run = Run(
+            id=new_run_id,
+            filename=original_run.filename,
+            file_type=original_run.file_type,
+            status=RunState.CREATED,
+            started_at=datetime.now(),
+            user_id=current_user.id,
+            submission_type=original_run.submission_type,
+            show_track_changes=original_run.show_track_changes,
+            show_pipeline_comments=original_run.show_pipeline_comments,
+            strip_template_instructions=original_run.strip_template_instructions,
+            scanned_pages=original_run.scanned_pages,  # same file, same pages (#1282)
         )
-    except Exception as e:
-        logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
+        db.add(new_run)
 
-    # Create new Run record, inheriting submission_type and the user's
-    # output-rendering choices (issues #153, #199) from the original. Without
-    # this the restarted run silently reverts to the column defaults (track
-    # changes ON, classification comments OFF, strip instructions ON),
-    # discarding a choice the user made at upload.
-    new_run = Run(
-        id=new_run_id,
-        filename=original_run.filename,
-        file_type=original_run.file_type,
-        status="created",
-        started_at=datetime.now(),
-        user_id=current_user.id,
-        submission_type=original_run.submission_type,
-        show_track_changes=original_run.show_track_changes,
-        show_pipeline_comments=original_run.show_pipeline_comments,
-        strip_template_instructions=original_run.strip_template_instructions,
-        scanned_pages=original_run.scanned_pages,  # same file, same pages (#1282)
-    )
-    db.add(new_run)
-
-    # Create Step records from step registry
-    for step_def in STEP_REGISTRY:
-        step = Step(
-            run_id=new_run_id,
-            step_number=step_def.number,
-            stage_id=step_def.stage_id,
-            step_name=step_def.name,
-            status="pending",
-        )
-        db.add(step)
-
-    commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
+        # Create Step records from step registry
+        for step_def in STEP_REGISTRY:
+            step = Step(
+                run_id=new_run_id,
+                step_number=step_def.number,
+                stage_id=step_def.stage_id,
+                step_name=step_def.name,
+                status="pending",
+            )
+            db.add(step)
 
     # #181: restart replaces a still-running original rather than forking a
     # second copy that keeps spending alongside the new run. Done last, after
@@ -649,7 +649,7 @@ async def restart_run(
     # the original running. Refresh first: the orchestrator may have finished
     # it since check_run_access() read it.
     db.refresh(original_run)
-    if original_run.status == "running":
+    if original_run.status == RunState.RUNNING:
         _cancel_run_record(db, original_run)
 
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
@@ -662,7 +662,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     the run is still running first.
 
     Commit BEFORE signalling, not after: db.commit() can raise (see
-    commit_run_or_compensate's #802 handling above), while orchestrator_cancel
+    compensated_run_creation's #802 handling above), while orchestrator_cancel
     cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
     wraps its body in try/except (redis_broker.py, "best-effort"). A commit
     failure here leaves the run running with nothing told to stop it --
@@ -672,7 +672,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     """
     from app.pipeline.orchestrator import USER_CANCEL_MESSAGE
 
-    run.status = "cancelled"
+    run.status = RunState.CANCELLED
     run.error_message = USER_CANCEL_MESSAGE
     # Naive, matching every other Run timestamp write (orchestrator.py,
     # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
@@ -798,7 +798,7 @@ def retry_step(
         # these resets here unconditionally, before the flip, would persist
         # them on a lost race (a 409) too.
         return _dispatch_queue(
-            run, db, allowed_from=("failed",), start_step=step_number, on_flip=_reset_downstream_steps,
+            run, db, allowed_from=(RunState.FAILED,), start_step=step_number, on_flip=_reset_downstream_steps,
         )
 
     # Atomic -> running (#799): only one of two concurrent retries may claim a
@@ -807,7 +807,7 @@ def retry_step(
     # started_at restarts the stale-run clock: reconcile_stale_runs ages runs by
     # it, so a retry of a run started over an hour ago was reaped mid-run (#145).
     if not claim_run_as_running(
-        db, run_id, Run.status != "running",
+        db, run_id, Run.status != RunState.RUNNING,
         error_message=None, completed_at=None, started_at=datetime.now(),
     ):
         db.rollback()
@@ -832,7 +832,7 @@ def retry_step(
 
     background_tasks.add_task(run_pipeline)
 
-    return {"message": f"Retrying run {run_id} from step {step_number}", "status": "running"}
+    return {"message": f"Retrying run {run_id} from step {step_number}", "status": RunState.RUNNING}
 
 
 @router.get("/run/{run_id}/run-quality", response_model=RunQualityReport)

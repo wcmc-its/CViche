@@ -4,9 +4,12 @@ No database and no FastAPI: every input is a plain value. The HTTP-level
 behaviour (the 422 each refusal becomes, and the counts update_user reads) is
 pinned in test_admin_feedback_delete.py.
 """
+import typing
+
 import pytest
 
-from app.models import UserRole
+from app.models import UserRole, UserStatus
+from app.schemas import AdminUserUpdate
 from app.services.admin_policy import (
     LAST_ACTIVE_ADMIN,
     LAST_ADMIN,
@@ -64,3 +67,20 @@ def test_status_change_refusal(role, new_status, is_self, other_active_admins, e
     assert status_change_refusal(
         role, new_status, is_self=is_self, other_active_admin_count=other_active_admins
     ) == expected
+
+
+def test_status_change_refusal_accepts_the_userstatus_enum():
+    assert status_change_refusal(
+        UserRole.ADMIN, UserStatus.DISABLED, is_self=False, other_active_admin_count=0
+    ) == LAST_ACTIVE_ADMIN
+
+
+@pytest.mark.parametrize("field, vocabulary", [("role", UserRole), ("status", UserStatus)])
+def test_admin_user_update_literals_stay_inside_the_enums(field, vocabulary):
+    """AdminUserUpdate keeps role/status as pydantic Literals (the request
+    body's allowed set), so they can't name the enum. Every value they allow
+    must still be a member, or the policy above compares against a value no
+    enum spells (#346)."""
+    annotation = AdminUserUpdate.model_fields[field].annotation
+    literal = next(arg for arg in typing.get_args(annotation) if typing.get_origin(arg) is typing.Literal)
+    assert set(typing.get_args(literal)) <= {member.value for member in vocabulary}

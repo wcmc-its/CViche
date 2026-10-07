@@ -13,10 +13,7 @@ messages are the API's error text.
 frontend/src/components/adminUserRules.ts mirrors the demotion half
 (demotionBlock) so the UI disables a change the API would refuse.
 """
-from app.models import UserRole
-
-# User.status of an account that cannot sign in (AdminUserUpdate's Literal).
-DISABLED_STATUS = "disabled"
+from app.models import UserRole, UserStatus
 
 SELF_DEMOTION = "Cannot remove your own admin role."
 LAST_ADMIN = "Cannot remove the last admin."
@@ -53,7 +50,7 @@ def status_change_refusal(
     target's role after any role change in the same request (role is applied
     first), and ``other_active_admin_count`` excludes the target.
     """
-    if new_status != DISABLED_STATUS:
+    if new_status != UserStatus.DISABLED:
         return None
     if is_self:
         return SELF_DISABLE

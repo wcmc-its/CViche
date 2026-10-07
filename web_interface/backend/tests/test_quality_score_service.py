@@ -1,4 +1,5 @@
 """Tests for app.services.quality_score_service."""
+import json
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,22 @@ def test_stage_error_record_reaches_the_scorer(monkeypatch):
 
     assert svc.compute_and_cache_score("R1") == {"totalScore": 40}
     assert seen["names"] == ["R1_fields.json", "R1_stage_errors.json"]
+
+
+@pytest.mark.parametrize("env_tag, cached_tag", [("dev-9.tag", "dev-9.tag"), (None, None)])
+def test_cached_score_records_the_scoring_image_tag(monkeypatch, env_tag, cached_tag):
+    """#1239: quality_score.json names the image whose scorer produced it."""
+    storage = _Storage({"outputs/R1_fields.json": b"{}"})
+    if env_tag is None:
+        monkeypatch.delenv("CVICHE_IMAGE_TAG", raising=False)
+    else:
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", env_tag)
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run", lambda _d, _r: {"totalScore": 40})
+
+    svc.compute_and_cache_score("R1")
+
+    assert json.loads(storage.put[svc.CACHE_KEY]) == {"totalScore": 40, "image_tag": cached_tag}
 
 
 def _scored_dir_listing(monkeypatch, storage):

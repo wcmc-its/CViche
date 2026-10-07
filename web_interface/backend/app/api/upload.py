@@ -64,7 +64,7 @@ from app.services.run_creation import (  # noqa: F401 -- re-exported: other modu
     _reject_mostly_scanned_pdf,
     _reject_unconfirmed_duplicate,
     _unlink_best_effort,
-    commit_run_or_compensate,
+    compensated_run_creation,
     create_run_archive,
     create_run_from_bytes,
     duplicate_info,

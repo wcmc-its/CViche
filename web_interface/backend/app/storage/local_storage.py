@@ -109,14 +109,17 @@ class LocalRunStorage(RunStorage):
         Raises:
             ValueError: If the resolved path is not inside the storage base.
         """
-        # ponytail: resolve-then-open, so a symlink planted between the check
-        # and the open would still be followed. Closing that gap needs
-        # dir-relative I/O (os.open with O_NOFOLLOW walking each component
-        # under a dirfd), which is a rewrite of every operation in this class.
-        # Every key this store is asked for is server-built, so the
-        # string-rules + resolved-containment check is the level bought here;
-        # the upgrade path is that dirfd walk, in one place, if the store ever
-        # accepts a caller-shaped key.
+        # Accepted residual (Paul Albert, 2026-09-23, #787): this is a
+        # resolve-then-open check, so a symlink planted between the check and
+        # the open would still be followed out of the base. Accepted, not
+        # fixed, because reaching it needs an attacker who can already create
+        # files in this store's directory on the pod: nothing in app/ creates
+        # a symlink, every key this store is asked for is server-built, and
+        # the prod overlays pin S3RunStorage (keys are opaque, no filesystem
+        # to redirect), so this class is the dev/test backend. Revisit if the
+        # store ever accepts a caller-shaped key or runs on a shared volume;
+        # the fix then is dir-relative I/O (os.open with O_NOFOLLOW walking
+        # each component under a dirfd), in one place, for every operation.
         candidate = self._base.joinpath(*parts)
         probe = candidate
         while not os.path.lexists(probe) and probe != probe.parent:

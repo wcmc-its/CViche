@@ -12,6 +12,7 @@ The DB-state transition (``_transition_run_for_retry``) is kept separate from
 the thread launch (``_launch_resume``) precisely so these tests can assert the
 transition deterministically while stubbing the launch.
 """
+import json
 import os
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
@@ -199,6 +200,22 @@ def test_resume_restamps_the_image_tag_of_the_resuming_process(db, monkeypatch):
 
     db.refresh(run)
     assert run.image_tag == "dev-new.tag"
+
+
+def test_resume_on_a_new_image_keeps_both_in_the_history(db, monkeypatch):
+    """A run resumed after a deploy shows both images, oldest first."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-new.tag")
+    _patch_launch(monkeypatch, [])
+    run = _seed_stale_running_run(db, run_id="RTAG02", attempt_count=1)
+    run.image_tag = "dev-old.tag"
+    run.image_tag_history = json.dumps(["dev-old.tag"])
+    db.commit()
+
+    run_service.reconcile_stale_runs(db)
+
+    db.refresh(run)
+    assert json.loads(run.image_tag_history) == ["dev-old.tag", "dev-new.tag"]
 
 
 def test_sweep_with_a_stale_snapshot_loses_the_claim(db, monkeypatch):

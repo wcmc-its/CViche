@@ -60,6 +60,7 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     get_table_first_cell_text,
     looks_like_section_header,
     normalize_style_name,
+    score_section_header,
     split_merged_cells_in_row,
 )
 
@@ -854,6 +855,71 @@ def test_looks_like_section_header_empty_text():
 
 
 # --------------------------------------------------------------------------
+# score_section_header -- per-signal contributions (#404)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected_signals",
+    [
+        (
+            "Research Interests",
+            {"keyword": 0.4, "title_case": 0.2, "short": 0.1, "short_keyword": 0.2},
+        ),
+        (
+            "PUBLICATIONS",
+            {"keyword": 0.4, "all_caps": 0.3, "title_case": 0.2, "short": 0.1, "short_keyword": 0.2},
+        ),
+        (
+            "Awards:",
+            {"keyword": 0.4, "title_case": 0.2, "trailing_colon": 0.1, "short": 0.1, "short_keyword": 0.2},
+        ),
+        ("Grants and funding for the research program done here", {"keyword": 0.4}),
+        ("1. Introduction", {"short": 0.1}),
+    ],
+)
+def test_score_section_header_names_each_signal_that_fired(text, expected_signals):
+    score = score_section_header(text)
+
+    assert score.signal_scores == pytest.approx(expected_signals)
+    # The tuple API is the same scorer's first two fields, unchanged.
+    assert looks_like_section_header(text) == (score.is_header, score.confidence)
+
+
+def test_score_section_header_contributions_sum_past_the_capped_confidence():
+    # "PUBLICATIONS" fires every signal but the colon: 1.2 in contributions,
+    # reported as the 1.0 cap -- the per-signal view is what shows by how much.
+    score = score_section_header("PUBLICATIONS")
+
+    assert sum(score.signal_scores.values()) == pytest.approx(1.2)
+    assert score.confidence == 1.0
+
+
+def test_score_section_header_confidence_is_the_left_to_right_float_sum():
+    # Exact, not approx: Python 3.12+'s compensated sum() gives 0.9 here where
+    # the scorer has always given 0.9000000000000001 -- a one-ulp move that
+    # a corpus A/B of extract_unified_elements caught on a real table header.
+    expected = 0.0
+    for weight in (0.4, 0.2, 0.1, 0.2):
+        expected += weight
+
+    assert score_section_header("Research Interests").confidence == expected
+    assert expected != 0.9
+
+
+@pytest.mark.parametrize("text", ["", "Education 2020-2024", "Publications (2024)", "Research " * 15])
+def test_score_section_header_rejected_line_has_no_signals(text):
+    assert score_section_header(text) == (False, 0.0, {})
+
+
+def test_score_section_header_rejections_do_not_share_a_signal_dict():
+    first = score_section_header("")
+    first.signal_scores["keyword"] = 0.4
+
+    assert score_section_header("").signal_scores == {}
+
+
+# --------------------------------------------------------------------------
 # get_table_first_cell_text
 # --------------------------------------------------------------------------
 
@@ -1141,6 +1207,27 @@ def test_extract_unified_elements_scans_table_rows_for_subheaders(tmp_path):
     assert "A" * 90 in pre_presentations
     # The final plain content row is flushed after the last header.
     assert any("Talk one at Conference X" in t and "New York" in t for t in content_texts)
+
+
+def test_extract_unified_elements_table_headers_carry_signal_scores(tmp_path):
+    # #404: each table_header -- row 0, embedded, and row-level sub-header --
+    # carries its scorer's per-signal contributions beside header_confidence.
+    docx_path = tmp_path / "subheaders.docx"
+    _build_subheader_fixture_docx(docx_path)
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    headers = {e["style"]: e for e in elements if e["type"] == "table_header"}
+
+    assert headers["TableHeader"]["header_signal_scores"] == pytest.approx(
+        {"keyword": 0.4, "all_caps": 0.3, "title_case": 0.2, "short": 0.1}
+    )
+    assert headers["EmbeddedHeader"]["header_signal_scores"] == pytest.approx(
+        {"all_caps": 0.3, "title_case": 0.2, "short": 0.1}
+    )
+    assert headers["EmbeddedHeader"]["header_confidence"] == pytest.approx(0.6)
+    assert headers["TableSubHeader"]["header_signal_scores"] == pytest.approx(
+        {"keyword": 0.4, "all_caps": 0.3, "title_case": 0.2, "short": 0.1, "short_keyword": 0.2}
+    )
 
 
 # --------------------------------------------------------------------------

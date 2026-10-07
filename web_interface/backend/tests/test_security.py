@@ -612,6 +612,13 @@ class TestDocsGating:
     def test_root_does_not_advertise_docs(self, client, db, seed_simple_mode):
         assert client.get("/").json()["docs"] is None
 
+    def test_root_reports_the_image_tag_as_its_version(self, client, db, seed_simple_mode, monkeypatch):
+        """#1239: GET / names the deployed image, not a static "1.0.0"."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-3.tag")
+        assert client.get("/").json()["version"] == "dev-3.tag"
+        monkeypatch.delenv("CVICHE_IMAGE_TAG")
+        assert client.get("/").json()["version"] is None
+
     def test_enable_docs_env_flag(self, monkeypatch):
         from app.main import _docs_enabled
         monkeypatch.setenv("CVICHE_ENABLE_DOCS", "true")

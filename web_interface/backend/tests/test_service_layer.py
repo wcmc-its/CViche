@@ -1,4 +1,5 @@
 """Tests for the service layer (ARCH-01 through ARCH-06 regression)."""
+import json
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 # exercise the real model whether this file runs alone or in the full suite.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+import logging
 import threading
 from datetime import datetime
 
@@ -197,7 +199,60 @@ class TestQueueRunTransitions:
         self._seed_run(db, status="created")
         assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is True
         db.commit()
-        assert self._reload(db).image_tag == "dev-2.tag"
+        run = self._reload(db)
+        assert run.image_tag == "dev-2.tag"
+        assert json.loads(run.image_tag_history) == ["dev-2.tag"]
+
+    def test_claim_queued_starts_the_image_history(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.tag")
+        self._seed_run(db)
+        claim_queued("QRT001")
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_claim_on_a_new_image_appends_to_the_history(self, db, monkeypatch):
+        """A run split across a deploy keeps both images, oldest first."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, image_tag="dev-1.tag", image_tag_history=json.dumps(["dev-1.tag"]))
+        claim_queued("QRT001")
+        run = self._reload(db)
+        assert run.image_tag == "dev-2.tag"
+        assert json.loads(run.image_tag_history) == ["dev-1.tag", "dev-2.tag"]
+
+    def test_claim_on_the_same_image_does_not_repeat_it(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.tag")
+        self._seed_run(db, status="failed", image_tag_history=json.dumps(["dev-1.tag"]))
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "failed") is True
+        db.commit()
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_untagged_image_leaves_the_history_alone(self, db, monkeypatch):
+        monkeypatch.delenv("CVICHE_IMAGE_TAG", raising=False)
+        self._seed_run(db, image_tag_history=json.dumps(["dev-1.tag"]))
+        assert claim_queued("QRT001").won is True
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_lost_claim_does_not_touch_the_history(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, status="running", image_tag_history=json.dumps(["dev-1.tag"]))
+        assert claim_queued("QRT001").won is False
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is False
+        db.commit()
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_corrupt_history_is_restarted_not_fatal(self, db, monkeypatch, caplog):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, image_tag_history="{not json")
+        assert claim_queued("QRT001").won is True
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-2.tag"]
+        assert "unreadable image_tag_history" in caplog.text
+
+    @pytest.mark.parametrize("raw", ['{"a": 1}', '["ok", 3]'])
+    def test_parse_image_tag_history_rejects_a_non_list_of_tags(self, raw):
+        with pytest.raises(ValueError):
+            run_service.parse_image_tag_history(raw)
+
+    def test_parse_image_tag_history_reads_null_as_empty(self):
+        assert run_service.parse_image_tag_history(None) == []
 
     def test_claim_queued_reports_none_for_an_unknown_run(self, db):
         result = claim_queued("NOSUCH")
@@ -509,6 +564,108 @@ class TestProvisionUser:
 
         assert loser.id == winner.id
         assert db.query(User).filter(User.email == "simple-race@example.com").count() == 1
+
+
+_USER_SERVICE_LOGGER = "app.services.user_service"
+_PROVISIONING_EVENTS = ("USER_CREATED", "USER_IDENTITY_LINKED", "USER_EMAIL_UPDATED", "ROLE_CHANGED")
+
+
+def _provisioning_events(caplog):
+    """(event name, record) for every provisioning audit line caplog captured."""
+    return [(r.getMessage(), r) for r in caplog.records if r.getMessage() in _PROVISIONING_EVENTS]
+
+
+class TestProvisionUserAuditEvents:
+    """#366: provisioning logs a structured audit event for each identity change
+    it actually makes -- never for an unchanged re-login, never a raw email."""
+
+    def test_new_user_logs_user_created(self, db, caplog):
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            user = provision_user(db, display_name="Fresh", auth_method="saml",
+                                  cwid="aud0001", email="fresh@example.org", role="admin")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_CREATED"
+        assert (rec.user_id, rec.cwid, rec.auth_method, rec.role) == (user.id, "aud0001", "saml", "admin")
+        assert rec.source == "provisioning"
+        assert rec.has_email is True
+
+    def test_unchanged_relogin_logs_nothing(self, db, caplog):
+        provision_user(db, display_name="Same", auth_method="saml",
+                       cwid="aud0002", email="same@example.org", role="user")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Same", auth_method="saml",
+                           cwid="aud0002", email="same@example.org", role="user")
+        assert _provisioning_events(caplog) == []
+
+    def test_role_change_logs_old_and_new_role(self, db, caplog):
+        user = provision_user(db, display_name="Promote", auth_method="simple",
+                              email="promote@example.org", role="user")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Promote", auth_method="simple",
+                           email="promote@example.org", role="admin")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "ROLE_CHANGED"
+        assert (rec.user_id, rec.old_role, rec.new_role) == (user.id, "user", "admin")
+        assert (rec.auth_method, rec.source) == ("simple", "provisioning")
+
+    def test_role_none_preserves_role_and_logs_nothing(self, db, caplog):
+        provision_user(db, display_name="Keep", auth_method="saml", cwid="aud0003", role="admin")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Keep", auth_method="saml", cwid="aud0003", role=None)
+        assert _provisioning_events(caplog) == []
+
+    def test_email_change_logged_without_either_address(self, db, caplog):
+        user = provision_user(db, display_name="Mover", auth_method="saml",
+                              cwid="aud0004", email="before@example.org")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Mover", auth_method="saml",
+                           cwid="aud0004", email="after@example.org")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_EMAIL_UPDATED"
+        assert (rec.user_id, rec.cwid, rec.had_email) == (user.id, "aud0004", True)
+        record_text = repr(vars(rec))
+        assert "before@example.org" not in record_text
+        assert "after@example.org" not in record_text
+
+    def test_first_email_on_emailless_user_logged(self, db, caplog):
+        provision_user(db, display_name="NoMail", auth_method="saml", cwid="aud0005", email=None)
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="NoMail", auth_method="saml",
+                           cwid="aud0005", email="first@example.org")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_EMAIL_UPDATED"
+        assert rec.had_email is False
+
+    def test_legacy_row_cwid_link_logged(self, db, caplog):
+        legacy = provision_user(db, display_name="Legacy", auth_method="saml",
+                                email="legacy-aud@example.org")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Legacy", auth_method="saml",
+                           cwid="aud0006", email="legacy-aud@example.org")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_IDENTITY_LINKED"
+        assert (rec.user_id, rec.cwid, rec.old_cwid) == (legacy.id, "aud0006", None)
+
+    def test_concurrent_insert_loser_logs_no_creation(self, db, caplog):
+        """The request that lost the #359 race created nothing; only the winner's
+        USER_CREATED may appear."""
+        from unittest.mock import patch
+
+        from sqlalchemy.orm import Query
+
+        provision_user(db, display_name="Winner", auth_method="saml", cwid="aud0007", role="user")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER), \
+                patch.object(Query, "first", return_value=None):
+            caplog.clear()
+            provision_user(db, display_name="Loser", auth_method="saml", cwid="aud0007", role="user")
+        assert _provisioning_events(caplog) == []
 
 
 class TestConfigService:
