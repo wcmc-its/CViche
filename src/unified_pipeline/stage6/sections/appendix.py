@@ -631,7 +631,6 @@ _MAX_FUSED_INITIALS = 3
 # title> | <owner>". The cells as the reader joins them (tab, " | ") and as
 # `_clean_inline_tabs` rewrites them (": " for the first tab, " — " after it).
 _RUNNING_TITLE_CELL_SPLIT_RE = re.compile(r"\t+|\s*\|\s*|\s+[—–]\s+|:\s+")
-_RUNNING_TITLE_MAX_CELLS = 3
 
 
 def _names_owner(word: str, owner_tokens: OwnerTokens) -> bool:
@@ -671,13 +670,11 @@ def _fold_accents(text: str) -> str:
 
 
 def _is_running_title(text: str, owner_tokens: OwnerTokens) -> bool:
-    """A running title set as two or three cells (#1431): one cell the CV's
-    title (`_CV_TITLE_RE`), at least one other a furniture line (the owner's
-    name, a page), and at most one cell left over, digit-free (the institution).
+    """A running title set as cells (#1431): one cell the CV's title
+    (`_CV_TITLE_RE`), at least one other a furniture line (the owner's name, a
+    page), and at most one cell left over, digit-free (the institution).
     "Example University: Standardized Curriculum Vitae — Jane Q. Doe, MD"."""
     cells = [cell.strip() for cell in _RUNNING_TITLE_CELL_SPLIT_RE.split(text) if cell.strip()]
-    if not 2 <= len(cells) <= _RUNNING_TITLE_MAX_CELLS:
-        return False
     titles = [cell for cell in cells if _CV_TITLE_RE.match(cell)]
     others = [cell for cell in cells if not _CV_TITLE_RE.match(cell)]
     leftover = [cell for cell in others if not _is_furniture_words(cell, owner_tokens)]

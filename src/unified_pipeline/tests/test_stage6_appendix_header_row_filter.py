@@ -1588,8 +1588,10 @@ def test_running_title_cells_are_page_furniture(text):
     # Not the owner's name.
     ("Example University\tCurriculum Vitae\tPat Roe, MD", _OWNER_TOKENS),
     ("Example University\tCurriculum Vitae\tJane Q. Doe, MD", OwnerTokens()),
-    # No CV-title cell, two leftover cells, a digit in the leftover, four cells.
+    # No CV-title cell; no owner or page cell; two cells left over; a digit in
+    # the one left over.
     ("Example University\tSample Department\tJane Q. Doe, MD", _OWNER_TOKENS),
+    ("Example University\tCurriculum Vitae", _OWNER_TOKENS),
     ("Example University\tSample Lab\tCurriculum Vitae\tJane Q. Doe", _OWNER_TOKENS),
     ("Example Hall Room 12\tCurriculum Vitae\tJane Q. Doe", _OWNER_TOKENS),
     ("Sample Department\tExample University\tCurriculum Vitae", _OWNER_TOKENS),
