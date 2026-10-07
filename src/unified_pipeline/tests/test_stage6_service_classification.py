@@ -118,6 +118,23 @@ def test_reviewer_for_still_triggers_the_reroute():
         "reviewer for the annals of pediatrics", "member", "", "") is True
 
 
+def test_abstract_reviewer_is_not_journal_reviewing():
+    """#1428 (DXAGUS 94): a meeting's abstract reviewer stays a Q2 row."""
+    line = "society x, abstract reviewer and session chair, 2009"
+    assert _is_q2_journal_reviewer(line, "abstract reviewer", "", "society x") is False
+    assert _split_q2_lines(["Abstract Reviewer, Society X", "Manuscript reviewer, Journal Y"]) == (
+        ["Manuscript reviewer, Journal Y"], ["Abstract Reviewer, Society X"])
+
+
+def test_reviewer_for_needs_a_journal_on_the_line():
+    """#1428 (VYNARH 96): "reviewer for" a program or a grant is not
+    journal reviewing; "reviewer for" a journal still is."""
+    program = "2006: reviewer for the program x cooperative studies program."
+    assert _is_q2_journal_reviewer(program, "reviewer", "", "program x") is False
+    assert _split_q2_lines(["Reviewer for Agency X grants", "Reviewer for Annals of X"]) == (
+        ["Reviewer for Annals of X"], ["Reviewer for Agency X grants"])
+
+
 # ---------------------------------------------------------------------------
 # 2. `_split_q2_lines`: same two constants, line-by-line
 

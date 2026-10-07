@@ -61,6 +61,10 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
+    code_matches_expected,
+    get_expected_codes_from_hierarchy,
+)
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.stage4.extraction import (
@@ -240,6 +244,8 @@ from unified_pipeline.stage6.sections.appendix import (
     reclassified_structural_reason,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
+from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS
+from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
 from unified_pipeline.stage6.sorting import (  # noqa: F401
     element_idx_sort_key,
     extract_sort_date,
@@ -758,12 +764,35 @@ _SAME_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingProx
     ('S4', 'S1'): frozenset({'book_title', 'editors', 'publisher'}),
 })
 
+# Fields a target's renderer also reads under another schema's name
+# (`_RENDERED_FIELDS` is probed with the target's own schema only): R takes a
+# talk's date from `year` or `start_date`, Q1 its organization from a
+# `journal_name` or `program_name`. A rerouted record keeps these.
+_RENDERED_FIELD_ALIASES: Mapping[str, frozenset[str]] = MappingProxyType({
+    'R': frozenset(_TALK_DATE_KEYS),
+    'Q1': frozenset(EXTRAMURAL_ORGANIZATION_FIELDS),
+})
+# Fields a target states without writing them: R lists the owner's own talks,
+# so its table has no author column, and an abstract moved there under an
+# invited-talks heading loses nothing it would show (MQSUIC 433, EBYSBC farm).
+_REROUTE_IMPLIED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
+    'R': frozenset({'authors'}),
+})
+
+# The section whose rows are memberships, and the role value it already
+# states: a Q1/Q2 row moved there loses its `role` (I writes
+# `membership_type`), which costs nothing when the role is just "Member".
+MEMBERSHIP_CODE = 'I'
+_PLAIN_MEMBER_ROLE_RE = re.compile(r'\s*members?\s*', re.IGNORECASE)
+
 # Outcomes of a hierarchy-mismatch reroute, one render-warnings record each
 # (per assigned -> target pair). A refusal keeps the classifier's code.
 REROUTE_ACCEPTED_SAME_FAMILY = 'accepted_same_family'
 REROUTE_ACCEPTED_CROSS_FAMILY = 'accepted_cross_family'
 REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
 REROUTE_REFUSED_MENTEE = 'refused_mentee_to_owner_record'
+REROUTE_REFUSED_FIELDS_LOST = 'refused_fields_would_be_dropped'
+REROUTE_REFUSED_HEADING = 'refused_heading_names_assigned_code'
 
 # Render-warnings `check` value for every reroute record, and each outcome's
 # severity: an accepted cross-family move is a low-confidence guess that moved
@@ -774,6 +803,8 @@ _REROUTE_SEVERITY = MappingProxyType({
     REROUTE_ACCEPTED_CROSS_FAMILY: 'WARN',
     REROUTE_REFUSED_FIELDS: 'INFO',
     REROUTE_REFUSED_MENTEE: 'INFO',
+    REROUTE_REFUSED_FIELDS_LOST: 'INFO',
+    REROUTE_REFUSED_HEADING: 'INFO',
 })
 
 
@@ -827,15 +858,61 @@ def _fields_fit_reroute_target(entry: Mapping[str, Any], target_code: str) -> bo
     return all(filled & anchors for anchors in anchor_groups)
 
 
+def _fields_lost_in_reroute(entry: Mapping[str, Any], assigned_code: str,
+                           target_code: str) -> frozenset[str]:
+    """The entry's filled fields the assigned code's renderer writes and the
+    target's does not, under any name it reads (#1428): an R talk moved to S8
+    lost its date, event and place (TVZDVF 557), a D3 job moved to I its title
+    (HJPBEM 290). Empty when either code renders the entry's text rather than
+    its fields: a text target carries every field in the text, and a text
+    source has none to lose. A plain "Member" role is not lost to Memberships
+    (`MEMBERSHIP_CODE`)."""
+    assigned_rendered = _RENDERED_FIELDS.get(assigned_code)
+    target_rendered = _RENDERED_FIELDS.get(target_code)
+    if assigned_rendered is None or target_rendered is None:
+        return frozenset()
+    target_keeps = (target_rendered | _RENDERED_FIELD_ALIASES.get(target_code, frozenset())
+                    | _REROUTE_IMPLIED_FIELDS.get(target_code, frozenset()))
+    lost = (_filled_field_names(entry) & assigned_rendered) - target_keeps
+    if target_code == MEMBERSHIP_CODE and _has_plain_member_role(entry):
+        lost -= {'role'}
+    return lost
+
+
+def _has_plain_member_role(entry: Mapping[str, Any]) -> bool:
+    """Whether the entry's stage-4 `role` reads only "Member(s)"."""
+    role = (entry.get('extracted_fields') or {}).get('role')
+    return isinstance(role, str) and bool(_PLAIN_MEMBER_ROLE_RE.fullmatch(role))
+
+
+def _heading_names_assigned_code(entry: Mapping[str, Any], assigned_code: str) -> bool:
+    """Whether the entry's heading path, read by the hierarchy-mismatch
+    flagger's current keyword table, expects the assigned code after all
+    (#1428): stage 3b's stored `expected_codes` predate the table's
+    board-of-directors terms (BNYLDF 285)."""
+    detail = entry.get('hierarchy_mismatch_detail') or {}
+    hierarchy = detail.get('hierarchy') or entry.get('hierarchy') or []
+    if isinstance(hierarchy, str):
+        hierarchy = [hierarchy]
+    expected = get_expected_codes_from_hierarchy([str(level) for level in hierarchy])
+    return bool(expected) and code_matches_expected(assigned_code, expected)
+
+
 def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
                           target_code: str) -> str | None:
-    """The outcome refusing a cross-family reroute, or None to apply it: a
-    mentee never becomes an owner record, and any other record must fit the
-    target (`_fields_fit_reroute_target`)."""
+    """The outcome refusing a cross-family reroute, or None to apply it: the
+    heading must not name the assigned code (`_heading_names_assigned_code`),
+    a mentee never becomes an owner record, and any other record must fit the
+    target (`_fields_fit_reroute_target`) and keep every field the assigned
+    code's renderer writes (`_fields_lost_in_reroute`)."""
+    if _heading_names_assigned_code(entry, assigned_code):
+        return REROUTE_REFUSED_HEADING
     if assigned_code in _MENTEE_CODES and target_code[:1] in _OWNER_RECORD_FAMILIES:
         return REROUTE_REFUSED_MENTEE
     if not _fields_fit_reroute_target(entry, target_code):
         return REROUTE_REFUSED_FIELDS
+    if _fields_lost_in_reroute(entry, assigned_code, target_code):
+        return REROUTE_REFUSED_FIELDS_LOST
     return None
 
 
@@ -1166,6 +1243,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
           mentee, course and committee records rerouted to S8 rendered as
           bare numbered items, 28 of them on 2 of 10 CVs (class 3,
           AUTOPSY-s7ab-batch-2026-10-02).
+          Nor when the heading, read by the flagger's current table, names
+          the assigned code after all, or when the move would drop a field
+          the assigned code's renderer writes and the target's does not
+          (`_fields_lost_in_reroute`, #1428).
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
           heading whose expected codes tie across WCM sections
           (`_pick_mismatch_target`) (#946).
