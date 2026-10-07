@@ -2238,11 +2238,11 @@ def test_etal_added_ignores_an_et_al_in_an_editor_list(editors):
 # ------------- lint 14ab: a field that identifies a citation, left out of its line
 
 _BULLETIN = "Synthetic Pharmacy Bulletin"
-_BULLETIN_LINE = f"{_BULLETIN}. March/April 2004;24(2):4."
+_BULLETIN_LINE = f"{_BULLETIN}. May/June 2011;17(3):9."
 _UNTITLED_TITLE = "Report on pharmacy volunteer outreach programmes for rural clinics"
-_UNTITLED_TEXT = f"{_UNTITLED_TITLE}. {_BULLETIN}. March/April 2004;24(2):4."
-_WEBINAR_URL = "https://events.example.org/index.jsp?eid=3486"
-_WEBINAR_LINE = "Tidal cores explained for clinicians. Webinar; 2018 Mar 28."
+_UNTITLED_TEXT = f"{_UNTITLED_TITLE}. {_BULLETIN}. May/June 2011;17(3):9."
+_WEBINAR_URL = "https://events.example.org/index.jsp?eid=7712"
+_WEBINAR_LINE = "Tidal cores explained for clinicians. Webinar; 2016 Oct 12."
 
 
 def _cited(idx, text, code="S1", **fields):
@@ -2260,7 +2260,7 @@ def test_citation_field_dropped_reports_an_untitled_item_rendered_as_its_venue()
     # KJJVVO-10: the descriptive sentence stage 4 filed as the title is the
     # only thing saying what the item is, and the line is venue, date, pages.
     # "Pharmacy" is on the line, but as the venue's word, not the title's.
-    entry = _cited(60, _UNTITLED_TEXT, code="S5", publication_venue=_BULLETIN, year=2004,
+    entry = _cited(60, _UNTITLED_TEXT, code="S5", publication_venue=_BULLETIN, year=2011,
                    title=_UNTITLED_TITLE)
     findings = lint_citation_field_dropped(_cite_run(entry), _bibliography(_BULLETIN_LINE))
     assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [(

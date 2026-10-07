@@ -320,7 +320,11 @@ Lints, ranked by the severity of the failure class they catch:
                           untitled item rendered as venue, date and pages,
                           X6 KJJVVO-10; WARN), or its link, where the line
                           gives no DOI, PMID or volume and pages either (a
-                          webinar, UXBHHF-20; INFO). No score cap
+                          webinar, UXBHHF-20; INFO), or the source's author
+                          elision ("...", "[...]" before the title), on a
+                          line that is no PubMed or Crossref rebuild and
+                          shows none, so a cut list reads as complete
+                          (VPMMFM-08; INFO). No score cap
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
