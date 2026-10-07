@@ -38,12 +38,13 @@ call the content-filter fallback model served does not cap (#1174, Paul
 2026-10-05): it succeeded, so the doctor's `llm_fallback_served` WARN records
 it and the score does not.
 
-Eight more cap-only gates (#822) cover content the pipeline lost or garbled,
+Nine more cap-only gates (#822) cover content the pipeline lost or garbled,
 a thing no weighted dimension measures: an under-extracted entry, several fused
 entries, a lost source table, the CV owner cut from several of their own
-citations, a grant list cut in the wrong place, a grant application rendered
-as an award, several headers or labels rendered as records, and several group
-headers whose lines render without them. Each caps a run
+citations, co-authors cut from several citations, a grant list cut in the
+wrong place, a grant application rendered as an award, several headers or
+labels rendered as records, and several group headers whose lines render
+without them. Each caps a run
 at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss cannot
 read "ship". They are the doctor's own signals, called
 rather than re-derived, restricted to the ones a batch hand-checked as real: a
@@ -122,6 +123,7 @@ from unified_pipeline.doctor.lints.extraction import (
 )
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.lints.render import (
+    lint_etal_added,
     lint_group_header_context,
     lint_junk_or_header_row,
     lint_owner_missing_from_citation,
@@ -917,6 +919,16 @@ LOST_TABLE_CAP_MIN_LINES = 5
 #: starting count, to be re-set from the harness.
 OWNER_MISSING_CITATIONS_CAP_MIN = 3
 
+#: `etal_added` findings that cap a run (Paul, 2026-10-07): citations whose
+#: rendered author list ends in "et al." where the source names every author,
+#: so co-authors are lost. Three, the owner-missing gate's count: both are
+#: author credit cut from a citation, and one or two such lines are a quick
+#: fix by hand. Precision does not set it: every judged hit so far was true
+#: (204 of 204: RCBKFG 92, NDMRSO 17, X6 95). Before #1404 (dev-248) stage 5d
+#: cut every list past six authors, so the stored runs carry many hits; on the
+#: 9 dev-248 runs the lint fires 0 times (doctor/PRECISION.md, X6-cite cap).
+ETAL_ADDED_CAP_MIN = 3
+
 #: `grant_boundary` findings that cap a run (#1226): a grant list whose stage-2
 #: cut slipped, so grants render with a neighbour's title, PI or dates. Three,
 #: not one: a slipped cut carries down the list (ZCTARO/KUUKNJ 13, CXRYCF 10,
@@ -1071,6 +1083,21 @@ def score_owner_missing_from_citation(outputs_dir: Path) -> tuple[float, str, in
         "owner_missing_citations",
         len(lint_owner_missing_from_citation(data, docx_body_blocks(doc))),
         OWNER_MISSING_CITATIONS_CAP_MIN)
+
+
+def score_etal_added(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: rendered citations that cut the source's full author
+    list to "et al.", on ETAL_ADDED_CAP_MIN or more citations (#1259). The
+    doctor's `etal_added` lint over stage 4 and the rendered docx, called as
+    is; a citation that also lost the owner is the owner-missing gate's."""
+    loaded = _load_fields_and_docx(outputs_dir)
+    if isinstance(loaded, str):
+        return 0.0, loaded, None
+    data, doc = loaded
+    return _content_loss_count_gate(
+        "etal_added_citations",
+        len(lint_etal_added(data, docx_body_blocks(doc))),
+        ETAL_ADDED_CAP_MIN)
 
 
 def score_grant_boundary(outputs_dir: Path) -> tuple[float, str, int | None]:
@@ -1791,7 +1818,8 @@ PROTECTED_DATA_CAP = 25
 #: the delivered docx; the fused-entries gate counts records swallowed in the
 #: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
 #: any finding, including ones that lost nothing; the owner-missing gate names
-#: citations whose credit is gone but whose record is on the page; the grant-boundary,
+#: citations whose credit is gone but whose record is on the page; the et-al gate
+#: names citations that kept the owner but lost co-authors; the grant-boundary,
 #: grant-application, junk-row and group-header gates (#1226, #1343, E8, X6 E8)
 #: name rows that render with wrong details, without their header's context,
 #: or should not render at all; the stage-4 gate (#1174)
@@ -1806,6 +1834,7 @@ CAP_ONLY_GATES = [
      score_fused_entries),
     ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
     ("CV owner cut from their own citations (CAP-ONLY gate)", score_owner_missing_from_citation),
+    ("Co-authors cut from citations (CAP-ONLY gate)", score_etal_added),
     ("Grant details shifted between grants (CAP-ONLY gate)", score_grant_boundary),
     ("Grant applications rendered as awards (CAP-ONLY gate)", score_grant_application_as_award),
     ("Headers or labels rendered as records (CAP-ONLY gate)", score_junk_rows),

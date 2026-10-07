@@ -1956,13 +1956,13 @@ def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
     carries them it is not reported."""
     entry = _fields_entry("O", {
         "leadership_role": "Chair", "institution": "Example College",
-        "start_date": "1982", "end_date": "2012",
-        "additional_date_ranges": "1982-1986; 1989-1995; 2004-2012"})
-    findings = _graded([_table(_row("Chair", "Example College", "1982-2012"))], entry)
+        "start_date": "1981", "end_date": "2011",
+        "additional_date_ranges": "1981-1985; 1988-1994; 2003-2011"})
+    findings = _graded([_table(_row("Chair", "Example College", "1981-2011"))], entry)
     assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
         ("WARN", "additional_date_ranges")]
     assert "its span did not reach the record's date cell" in findings[0]["message"]
-    shown = _table(_row("Chair", "Example College", "1982-1986, 1989-1995, 2004-2012"))
+    shown = _table(_row("Chair", "Example College", "1981-1985, 1988-1994, 2003-2011"))
     assert _graded([shown], entry) == []
 
 
@@ -2448,12 +2448,12 @@ def test_multi_record_one_line_must_carry_the_clause_words_and_years(lines):
 
 
 @pytest.mark.parametrize("first, second", [
-    ("7/05-10/06", "4/08-5/09"),                     # month and two-digit year
+    ("3/02-11/03", "6/09-8/11"),                     # month and two-digit year
     ("Jul \u201896-Jun \u201897", "Jul \u201997-Jun \u201901"),  # curly apostrophe years
     ("Jul '96-Jun '97", "Jul '97-Jun '01"),           # straight apostrophe years
 ])
 def test_multi_record_reads_two_digit_year_dates(first, second):
-    """RCBKFG CAOACN 32 and 64 write every date in two digits, and the lint
+    """Some CVs (RCBKFG) write every date in two digits, and the lint
     read no clause. Each two-digit year takes the shared century pivot, so
     the second clause's years match the rendered four-digit ones. No ';'
     joins the two roles, so only the dates can split them."""
@@ -2461,8 +2461,8 @@ def test_multi_record_reads_two_digit_year_dates(first, second):
             f"Visiting Instructor of Pathology, Lakeside Hospital Institute, {second}")
     findings = _multi_record(text, _FIRST_ROLE)
     assert [f["severity"] for f in findings] == ["WARN"]
-    end = {"4/08-5/09": "2009"}.get(second, "2001")
-    start = {"4/08-5/09": "2008"}.get(second, "1997")
+    end = {"6/09-8/11": "2011"}.get(second, "2001")
+    start = {"6/09-8/11": "2009"}.get(second, "1997")
     findings = _multi_record(text, _FIRST_ROLE, lines=(
         _FIRST_ROLE_ROW,
         f"Visiting Instructor of Pathology | Lakeside Hospital Institute | {start}-{end}"))
@@ -2482,7 +2482,7 @@ def test_multi_record_two_digit_year_needs_a_month_or_an_apostrophe(not_a_date):
     text = (f"Lecturer, Northfield University School of Medicine, {not_a_date} "
             "Visiting Instructor of Pathology, Lakeside Hospital Institute, 6/06-8/08")
     assert _multi_record(text, _FIRST_ROLE, lines=()) == []
-    dated = text.replace(not_a_date, "7/05")
+    dated = text.replace(not_a_date, "3/02")
     assert [f["severity"] for f in _multi_record(dated, _FIRST_ROLE, lines=())] == ["WARN"]
 
 
@@ -3055,9 +3055,9 @@ def test_multi_record_dated_event_needs_a_named_part_a_year_and_words(text):
      {"title": "Example Sleep Study", "agency": "Example Foundation", "pi_role": "Field Manager",
       "start_date": "1993", "end_date": "1996"}),
     # an award line beside the grant's credit line
-    ("Northfield Administrative Supplement 2016-2017\tLakeside Program Director (PI)",
-     {"title": "Predoctoral Training Program", "pi_role": "Program Director (PI)",
-      "start_date": "2016", "end_date": "2017"}),
+    ("Northfield Bridge Supplement 2011-2012\tLakeside Program Director (PI)",
+     {"title": "Scholars Research Program", "pi_role": "Program Director (PI)",
+      "start_date": "2011", "end_date": "2012"}),
     # a split grant entry
     (_SPLIT_OFFICES_TEXT, _SPLIT_OFFICES),
 ])
@@ -3786,6 +3786,15 @@ def test_record_boundary_needs_twice_as_many_carriers_as_openers():
                        _whole_mentee(15), _tail(14), _tail(16))) == 2
 
 
+def test_record_boundary_counts_openers_other_than_the_entry_judged():
+    """At exactly twice as many carriers as openers it fires, and the entry
+    being judged is not one of its own openers: two carriers against each
+    tail's one other opener. Counting the tail itself would make it 2 to 2."""
+    findings = _record(_whole_mentee(10), _whole_mentee(12), _tail(14), _tail(16))
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 14 (N3B)", "entry 16 (N3B)"]
+    assert all("2 of its list's records" in f["message"] for f in findings)
+
+
 def test_record_boundary_judges_each_heading_on_its_own():
     other = ["Teaching", "Clinical Fellows"]
     assert _record(_whole_mentee(10), _whole_mentee(12),
@@ -3938,7 +3947,7 @@ def test_grant_bucket_ignores_non_grant_codes():
 
 
 @pytest.mark.parametrize("end, start, expected", [
-    ("8/30/1", "9/1/07", 2011), ("5/30/13", "5/1/08", 2013), ("6/30/0", "2010", 2010),
+    ("8/30/1", "9/1/07", 2011), ("4/30/12", "4/1/07", 2012), ("6/30/0", "2010", 2010),
     ("2/28/05", "1999", 2005), ("8/30", "2001", 2030), ("", "2001", None),
     ("8/30/1", "", None), ("8-30-1", "2007", 2011), ("8.30.1", "2007", 2011),
     ("6/30/13", "1995", 2013),  # two digits read modulo 100
@@ -3962,7 +3971,7 @@ def _roles(text, pi_role, owner=_ROLE_OWNER, code="M2A", key="pi_role"):
 @pytest.mark.parametrize("text, pi_role, source", [
     ("Source: NIH R01\tRole: PIs: Testowner A, Other B, co-Is: Third C\tTitle: T", "co-I", "PI"),
     ("Source: NIH R01\tRole: PI: Other B, co-Is: Third C, Testowner A\tTitle: T", "PI", "co-I"),
-    ("R01 HL000000 (Testowner, PI)  25%  5/1/08-5/30/13", "Co-Investigator", "PI"),
+    ("R01 HL000000 (Testowner, PI)  25%  4/1/07-3/31/12", "Co-Investigator", "PI"),
     ("Example Foundation 2019-2021, Testowner AB (co-I)", "Principal Investigator", "co-I"),
     ("NIH R01 | 2019-2021 | Principal Investigators: Testowner A", "co-investigator", "PI"),
     ("Role: PIs: Other B, Testowner A, co-Is: Third C", "co-I", "PI"),  # next list's label
@@ -4065,7 +4074,7 @@ def test_role_consistency_spares_a_filled_pi_cell_or_another_role(role, pi_name)
 def test_role_consistency_pi_cell_names_a_table_it_cannot_place():
     """A table whose title no grant entry carries (or an empty title) is
     reported without an entry index rather than matched to a wrong one."""
-    entry = _grant(384, "NIH (see above), total $20,350")
+    entry = _grant(384, "Agency (see above), total $11,500")
     findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [entry]},
                                      [_grant_table("PI", title="")])
     assert findings[0]["message"].startswith("a grant table: 'Your role:' is PI,")
@@ -4078,7 +4087,7 @@ def test_role_consistency_reads_no_render_without_a_docx():
 
 @pytest.mark.parametrize("pi_name, co_investigators", [
     ("Other Person", "Other Person, MD, PI"),               # KDAZOM 380
-    ("O. Juniorname", "O. Juniorname, student Co-P.I."),    # MQSUIC 153
+    ("O. Juniorname", "O. Juniorname, student Co-Lead PI"),  # MQSUIC 153
     ("Other Person", "Third Person; Other Person"),
 ])
 def test_role_consistency_flags_a_pi_also_listed_as_co_i(pi_name, co_investigators):
@@ -4090,7 +4099,7 @@ def test_role_consistency_flags_a_pi_also_listed_as_co_i(pi_name, co_investigato
 @pytest.mark.parametrize("pi_name, co_investigators", [
     ("Other Person", "Other Person"),                       # stage 6 shows one row
     ("Other Person", "Third Person"),                       # not the PI
-    ("Cutter, G.", "Cutter, G., Testowner, A."),            # an author line, PI first
+    ("Other, G.", "Other, G., Testowner, A."),              # an author line, PI first
     ("Ada Testowner", "Ada Testowner, Other Person"),       # the PI is the owner
     ("", "Other Person"),
 ])
@@ -4101,10 +4110,10 @@ def test_role_consistency_spares_a_pi_the_co_i_row_does_not_repeat(pi_name, co_i
 
 
 @pytest.mark.parametrize("text, pi_name", [
-    ("1998: Foundation: \u201cA title,\u201d with Dr. William H. Other; $25,000.",
-     "William H. Other"),
-    ("1986: Foundation: \u201cA title,\u201d with Drs. Bruce Other and Will Third; $20,000.",
-     "Bruce Other"),
+    ("2003: Foundation: \u201cA title,\u201d with Dr. Wendell Q. Other; $14,000.",
+     "Wendell Q. Other"),
+    ("1991: Foundation: \u201cA title,\u201d with Drs. Basil Other and Will Third; $9,500.",
+     "Basil Other"),
 ])
 def test_role_consistency_flags_a_with_collaborator_as_pi(text, pi_name):
     """JIJRSN 156 also lists the PI among co-investigators; the collaborator
@@ -4125,9 +4134,9 @@ def test_role_consistency_spares_a_pi_the_text_supports(text, fields):
 
 
 @pytest.mark.parametrize("text, co_investigators", [
-    ("Testowner AB, Other CD, Third EF.\tA title.\t$22,000 (Sponsor)",
+    ("Testowner AB, Other CD, Third EF.\tA title.\t$31,000 (Sponsor)",
      "Testowner AB, Other CD, Third EF"),                             # QTATUP 529
-    ("Testowner AB.\tA title.\t$13,148 (Sponsor)", "Testowner AB"),  # QTATUP 533, sole
+    ("Testowner AB.\tA title.\t$17,250 (Sponsor)", "Testowner AB"),  # QTATUP 533, sole
 ])
 def test_role_consistency_flags_an_owner_lead_shown_only_as_co_i(text, co_investigators):
     entry = _grant(529, text, co_investigators=co_investigators)
@@ -4140,8 +4149,8 @@ def test_role_consistency_flags_an_owner_lead_shown_only_as_co_i(text, co_invest
     ("Other CD, Testowner AB.\tA title.", {"co_investigators": "Testowner AB, Other CD"}),
     ("Testowner AB, Other CD.\tA title.", {"co_investigators": "Testowner AB",
                                            "pi_name": "Other CD"}),           # a PI
-    ("Program Partner: Drs. Ada Testowner and Other CD",               # NDXXAD 411
-     {"co_investigators": "Drs. Ada Testowner and Other CD", "pi_role": "Program Partner"}),
+    ("Program Liaison: Drs. Ada Testowner and Other CD",               # NDXXAD 411
+     {"co_investigators": "Drs. Ada Testowner and Other CD", "pi_role": "Program Liaison"}),
     ("Testowner AB, Other CD (PI).\tA title.", {"co_investigators": "Testowner AB, Other CD"}),
     ("Testowner AB, Other CD.\tRole: Co-I", {"co_investigators": "Testowner AB, Other CD"}),
 ])
@@ -4178,12 +4187,12 @@ def test_role_consistency_flags_an_owner_lead_listed_as_co_i(fields):
 
 @pytest.mark.parametrize("fields", [
     {"pi_name": "Other B", "pi_role": "Co-Investigator", "co_investigators": "Testowner A"},
-    {"pi_name": "Other B", "pi_role": "Co-Investigator/Mentor", "co_investigators": "Testowner A"},
+    {"pi_name": "Other B", "pi_role": "Mentor/Co-Investigator", "co_investigators": "Testowner A"},
     {"pi_name": "Other B", "pi_role": "Co-I and Mentor", "co_investigators": "Testowner A"},
-    {"pi_name": "Other B", "pi_role": "Investigator and Associate Director",
-     "co_investigators": "Testowner A (Investigator and Associate Director)"},
+    {"pi_name": "Other B", "pi_role": "Investigator and Core Director",
+     "co_investigators": "Testowner A (Investigator and Core Director)"},
     {"pi_name": "Other B", "co_investigators": "Testowner A"},             # no lead label
-    {"pi_role": "Program Partner", "co_investigators": "Testowner A, Other B"},
+    {"pi_role": "Program Liaison", "co_investigators": "Testowner A, Other B"},
     {"pi_role": "PI: Other B", "co_investigators": "Testowner A"},         # a label, not a role
     {"pi_name": "Other B", "pi_role": "Co-PI", "co_investigators": "Other B, Testowner A"},
     {"pi_name": "Ada Testowner", "pi_role": "Co-PI", "co_investigators": "Testowner A"},
@@ -4191,6 +4200,22 @@ def test_role_consistency_flags_an_owner_lead_listed_as_co_i(fields):
 ])
 def test_role_consistency_spares_an_owner_co_i_listing_the_role_allows(fields):
     assert _shapes(_grant(257, "A grant", **fields)) == []
+
+
+@pytest.mark.parametrize("co_investigators, pi_role, expected", [
+    # "/" splits a co_investigators item too: the owner's item keeps only the
+    # role before the slash, so a co-I named first leaves no lead role on it,
+    # as a stated "Co-I/PI" role is spared.
+    ("Testowner A (Co-I/PI)", None, []),
+    ("Testowner A (PI/Co-I)", None, [("owner_also_co_i", "WARN")]),
+    # two people joined by a slash are two people: the PI among them is seen
+    ("Ada Testowner/Other B", "Co-I", [("pi_also_co_i", "INFO")]),
+])
+def test_role_consistency_splits_a_slash_inside_co_investigators(co_investigators, pi_role,
+                                                                 expected):
+    entry = _grant(257, "A grant", pi_name="Other B", pi_role=pi_role,
+                   co_investigators=co_investigators)
+    assert _shapes(entry) == expected
 
 
 def test_role_consistency_owner_also_co_i_reads_role_when_pi_role_is_empty():
@@ -4206,16 +4231,16 @@ def test_role_consistency_owner_also_co_i_needs_an_owner_surname():
 
 
 @pytest.mark.parametrize("title", [
-    "Example Center, Director Core B., Mentor Project IV",
+    "Example Program, Director Unit C, Mentor Track 2",
     "Example Center; Co-Investigator",
 ])
 def test_role_consistency_flags_a_role_held_in_the_title(title):
-    assert _shapes(_grant(405, "2004-2009 A grant", title=title, pi_name="Other B")) == [
+    assert _shapes(_grant(405, "1991-1996 A grant", title=title, pi_name="Other B")) == [
         ("role_in_title", "INFO")]
 
 
 @pytest.mark.parametrize("title, fields", [
-    ("Example Center, Director Core B.", {"pi_role": "Director"}),        # a stated role
+    ("Example Program, Director Unit C", {"pi_role": "Director"}),        # a stated role
     ("Example Center (Pilot project: A study, PI Other)", {}),            # another's PI label
     ("Example Center, Investigator-Initiated Study", {}),
     ("Training Program for Clinical Investigators", {}),
@@ -4241,7 +4266,7 @@ def test_role_consistency_spares_an_empty_role_beside_another_pi(pi_name, owner)
 
 
 @pytest.mark.parametrize("role", [
-    "Co-Principal Investigator", "Site Principal Investigator for Multicenter Project",
+    "Co-Principal Investigator", "Site Principal Investigator for Network Study",
     "Site PI", "Co-I", "Subcontract PI", "Principal Investigator of Subcontract",
     "co-investigator; site PI",
 ])
@@ -4261,6 +4286,8 @@ def test_role_consistency_flags_an_owner_pi_cell_beside_a_role_that_is_not_the_p
     ("Co-I; Principle Investigator", "Ada Testowner"),
     ("Mentor", "Ada Testowner"),                    # not a co-/site-PI or a co-I
     ("Co-PI", "Ada Testowner, Other Person"),       # the cell names the other co-PI too
+    ("Co-PI", "Ada Testowner/Other Person"),        # slash-joined co-PIs
+    ("Co-PI", "Other Person / Ada Testowner"),
     ("Co-PI", "Other Person"),
     ("Co-PI", "Li J"),                              # no name word long enough to judge
 ])
@@ -4269,9 +4296,9 @@ def test_role_consistency_spares_an_owner_pi_cell_the_role_allows(role, pi_name)
 
 
 def test_role_consistency_flags_a_pi_cell_cut_from_the_title():
-    entry = _grant(396, "1997 Foundation, \u201cStress\u201d \u2013 Human and Animal Studies, PI",
-                   title="Stress \u2013 Human and Animal Studies", pi_role="PI")
-    table = _grant_table("PI", "Animal Studies", title="Stress \u2013 Human and Animal Studies")
+    entry = _grant(396, "2001 Example Fund, \u201cSleep\u201d \u2013 Mouse and Rat Trials, PI",
+                   title="Sleep \u2013 Mouse and Rat Trials", pi_role="PI")
+    table = _grant_table("PI", "Rat Trials", title="Sleep \u2013 Mouse and Rat Trials")
     assert _shapes(entry, table_rows=[table]) == [("pi_cell_from_title", "INFO")]
 
 
@@ -4343,10 +4370,10 @@ def test_span_count_flags_separate_years_rendered_as_their_envelope():
 
 
 def test_span_count_reads_terms_two_digit_ends_and_and():
-    """UYFRTL 33's shape, terms written 'Fall 2003', and 'and' as a list
+    """A further-span list (RCBKFG), terms written 'Fall 2003', and 'and' as a list
     separator."""
-    assert _span_count(_span_entry("Reviewer, Example Society 1982-86, 1989-1995, 2004-2012",
-                                   "1982", "2012"), "1982-2012")
+    assert _span_count(_span_entry("Reviewer, Example Society 1976-79, 1984-1990, 2001-2011",
+                                   "1976", "2011"), "1976-2011")
     assert _span_count(_span_entry("Reviewer, Example Society, Fall 2003 and Spring 2013"),
                        "2003-2013")
 
