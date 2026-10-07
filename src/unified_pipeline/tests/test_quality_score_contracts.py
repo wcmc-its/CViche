@@ -61,7 +61,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _FUNDING_SECTIONS,
     lint_grant_bucket,
 )
-from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
+from unified_pipeline.doctor.lints.render import lint_group_header_context  # noqa: E402
+from unified_pipeline.doctor.shared import docx_body_blocks, docx_table_rows  # noqa: E402
 from unified_pipeline.stage4.error_codes import (  # noqa: E402
     LLM_PROVIDER_ERROR,
     LLM_RESPONSE_INVALID,
@@ -2718,7 +2719,8 @@ _JUNK_INSTITUTIONS = ("Example State University", "Sample Valley College",
 
 def _junk_rows_run(tmp_path: Path, headers: int) -> Path:
     """A course list whose first `headers` institution lines each render as a
-    row of their own, with one real course under each."""
+    row of their own, with one real course under each. The course rows name
+    their institution, so `group_header_context` does not also fire."""
     entries, rows = [], []
     for n, name in enumerate(_JUNK_INSTITUTIONS[:headers]):
         course = f"EX10{n} Widget Studies"
@@ -2728,7 +2730,7 @@ def _junk_rows_run(tmp_path: Path, headers: int) -> Path:
                     {"element_idx_start": 41 + 2 * n, "taxonomy_code": "K1",
                      "hierarchy": ["Example Heading"], "text": course,
                      "extracted_fields": {"course_title": course}}]
-        rows += [[name, ""], [course, ""]]
+        rows += [[name, ""], [course, name]]
     _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": entries})
     _make_docx(tables=[rows]).save(tmp_path / "X_wcm.docx")
     return tmp_path
@@ -2752,6 +2754,75 @@ def test_junk_rows_gate_not_evaluated_without_its_artifacts(tmp_path):
     assert qs.score_junk_rows(tmp_path) == (0.0, "no docx found; not evaluated", None)
 
 
+_GROUP_ROLES = ("Module Director", "Workshop Coordinator", "Session Leader",
+                "Course Tutor", "Panel Moderator")
+
+
+def _group_header_run(tmp_path: Path, runs: int, lead_lines: int = 0) -> Path:
+    """`runs` course lines, each over one bare role rendered as the role
+    alone (one `role_without_holder` WARN each), then `lead_lines` undated
+    lead lines over a dated list of another letter, each rendered as a row
+    of its own (one `header_coded_unlike_list` INFO each)."""
+    entries, paragraphs, rows = [], [], []
+    for n, role in enumerate(_GROUP_ROLES[:runs]):
+        year = str(1961 + n)
+        entries += [{"element_idx_start": 60 + 2 * n, "taxonomy_code": "K1",
+                     "hierarchy": ["Example Heading"], "text": f"Widget Course {n} 1950-present",
+                     "extracted_fields": {"course_title": f"Widget Course {n}",
+                                          "start_date": "1950", "end_date": "present"}},
+                    {"element_idx_start": 61 + 2 * n, "taxonomy_code": "K3",
+                     "hierarchy": ["Example Heading"], "text": f"{role} {year}",
+                     "extracted_fields": {"role": role, "start_date": year}}]
+        paragraphs.append(f"{year} - {role}")
+    for n in range(lead_lines):
+        lead = f"Thesis Committees, Example College {n}"
+        entries.append({"element_idx_start": 100 + 10 * n, "taxonomy_code": "K2",
+                        "hierarchy": ["Other Heading"], "text": lead,
+                        "extracted_fields": {"institution": f"Example College {n}",
+                                             "teaching_role": "Thesis Committee Member"}})
+        entries += [{"element_idx_start": 101 + 10 * n + m, "taxonomy_code": "N3B",
+                     "hierarchy": ["Other Heading"], "text": f"1976-1979 Widget Student {m}",
+                     "extracted_fields": {"mentee_name": f"Widget Student {m}",
+                                          "start_date": "1976", "end_date": "1979"}}
+                    for m in range(3)]
+        rows.append([lead, ""])
+    _write_json(tmp_path, "X_fields.json", {**_OWNED_RUN, "entries": entries})
+    _make_docx(paragraphs, tables=[rows] if rows else []).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_group_header_gate_caps_at_the_minimum_count(tmp_path):
+    assert qs.GROUP_HEADER_CAP_MIN == 4
+    run = _group_header_run(tmp_path, qs.GROUP_HEADER_CAP_MIN)
+    assert qs.score_group_header_context(run) == (
+        1.0, f"group_header_warns=4; cap={qs.CONTENT_LOSS_CAP}", qs.CONTENT_LOSS_CAP)
+
+
+def test_group_header_gate_quiet_below_the_minimum_count(tmp_path):
+    run = _group_header_run(tmp_path, qs.GROUP_HEADER_CAP_MIN - 1)
+    assert qs.score_group_header_context(run) == (0.0, "group_header_warns=3", None)
+
+
+def test_group_header_gate_counts_only_warn_findings(tmp_path):
+    """The INFO shapes (a lead line coded unlike its list, a role that lost a
+    block's dates) are reported by the doctor but do not count toward the cap."""
+    run = _group_header_run(tmp_path, qs.GROUP_HEADER_CAP_MIN - 1, lead_lines=2)
+    fields = json.loads((run / "X_fields.json").read_text())
+    doc = Document(str(run / "X_wcm.docx"))
+    severities = sorted(f["severity"] for f in lint_group_header_context(
+        fields, docx_table_rows(doc), docx_body_blocks(doc)))
+    assert severities == ["INFO", "INFO", "WARN", "WARN", "WARN"]
+    assert qs.score_group_header_context(run) == (0.0, "group_header_warns=3", None)
+
+
+def test_group_header_gate_not_evaluated_without_its_artifacts(tmp_path):
+    assert qs.score_group_header_context(tmp_path) == (
+        0.0, "no fields.json found; not evaluated", None)
+    _group_header_run(tmp_path, 4)
+    (tmp_path / "X_wcm.docx").unlink()
+    assert qs.score_group_header_context(tmp_path) == (0.0, "no docx found; not evaluated", None)
+
+
 @pytest.mark.parametrize("gate, flag, build", [
     (qs.score_grant_boundary, "Grant details shifted between grants",
      lambda d: _shifted_grants_run(d, 3)),
@@ -2759,6 +2830,8 @@ def test_junk_rows_gate_not_evaluated_without_its_artifacts(tmp_path):
      lambda d: _grant_rendered_run(d, ["Grants Applied"], "M2B", "M2B")),
     (qs.score_junk_rows, "Headers or labels rendered as records",
      lambda d: _junk_rows_run(d, 5)),
+    (qs.score_group_header_context, "Rows lost the group header above them",
+     lambda d: _group_header_run(d, 4)),
 ])
 def test_score_run_applies_each_zero_fp_lint_gate(tmp_path, gate, flag, build):
     """The wire: registered in CAP_ONLY_GATES, weightless, and score_run

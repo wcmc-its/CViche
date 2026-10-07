@@ -344,6 +344,16 @@ Lints, ranked by the severity of the failure class they catch:
                           line that is no PubMed or Crossref rebuild and
                           shows none, so a cut list reads as complete
                           (VPMMFM-08; INFO). No score cap
+14ad. group_header_context a group header whose context never reached the
+                          rows of the lines under it (X6 E8, E11): a society
+                          or employer line coded as a record, whose lines
+                          render without its name (KJJVVO-01), and a bare
+                          role line ('Chair 2010-2011') rendered as the role
+                          alone (RINASX-06), both WARN; an undated lead line
+                          coded unlike the dated list under it (IEUPKK-18,
+                          RINASX-14) and an undated role under a dated block
+                          rendered with no dates (IEUPKK-14/-17), both INFO.
+                          Reads stage 4 and the docx's rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -540,6 +550,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_pipe_leaks,
     lint_python_repr_in_output,
     lint_split_child_unsourced,
+    lint_group_header_context,
     lint_section_lost,
     lint_stage6_warnings,
     lint_table_shape,
@@ -672,6 +683,7 @@ KNOWN_LINTS = (
     "split_child_unsourced",
     "record_boundary",
     "citation_field_dropped",
+    "group_header_context",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -884,6 +896,11 @@ LINT_PREVALENCE = {
     # Several of the 18 are one CV run more than once. Same mixed-corpus
     # caveat as above.
     "citation_field_dropped": 0.162,
+    # group_header_context (X6 E8/E11, X6-header in doctor/PRECISION.md): 23
+    # of the 63 runs of the EBYSBC/s7ab/pilot farm at any severity, over its
+    # render of origin/dev fb466a0f, measured 2026-10-06 (46 of the 111
+    # stored analysis/ runs). Same mixed-corpus caveat as above.
+    "group_header_context": 0.365,
 }
 
 
@@ -1434,6 +1451,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("table_rows",)),
     LintSpec("record_boundary", lint_record_boundary, ("stage_4",)),
     LintSpec("citation_field_dropped", lint_citation_field_dropped, ("stage_4", "blocks")),
+    # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
+    LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
+             optional=("blocks",)),
 )
 
 

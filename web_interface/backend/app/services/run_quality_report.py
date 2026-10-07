@@ -65,6 +65,8 @@ _CAP_SOURCE_BY_SCORER = {
         "a grant application is listed as funding received", "grant_bucket"),
     scorer.score_junk_rows: CapSource(
         "several headers or labels appear as entries", "junk_or_header_row"),
+    scorer.score_group_header_context: CapSource(
+        "several rows lost the heading they sat under", "group_header_context"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
 }
@@ -228,6 +230,14 @@ _ROW_COPY_BY_SCORER = {
         "so they do not cap.",
         "Delete the rows named in the junk_or_header_row finding, and copy any institution they "
         "named onto the entries beneath them."),
+    scorer.score_group_header_context: RowCopy(
+        "Rows keep the heading they sat under",
+        "Uses the group_header_context finding: a society, employer or course line whose lines "
+        "show without its name, or roles that show without the course, committee or society they "
+        "were held in.",
+        "Caps the score at 84 when 4 or more are flagged. Fewer do not cap.",
+        "Add the society, institution or course from the line above to each row named in the "
+        "group_header_context finding."),
 }
 
 _GATES = (*((n, f) for n, _w, f in scorer.DIMENSIONS), *scorer.CAP_ONLY_GATES)
@@ -547,6 +557,13 @@ LINT_COPY = {
         "item: its title, its web link, or the \"...\" showing that the source left some "
         "authors out, so the shorter list reads as complete.",
         "Add the title or link from the source CV, or put the \"...\" back in the author list."),
+    "group_header_context": LintCopy(
+        "Rows lost the heading they sat under",
+        "The CV groups some lines under a society, an employer, a course or a dated block. "
+        "The rows for those lines don't show it: an organization cell is empty, a role "
+        "appears on its own, a lead line sits apart from its list, or a role has no dates.",
+        "Add the society, institution, course or dates from the line above to each flagged "
+        "row, and delete a lead line that shows as a row of its own."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

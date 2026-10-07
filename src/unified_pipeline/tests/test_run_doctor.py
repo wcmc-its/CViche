@@ -56,6 +56,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_enrichment_pubtype_mismatch,
     lint_citation_field_dropped,
     lint_etal_added,
+    lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_llm_fallback_served,
@@ -4248,14 +4249,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (56), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (57), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 54
+    assert len(payload["findings"]) == 55
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -6775,3 +6776,539 @@ def test_run_doctor_wires_split_child_unsourced_with_the_rendered_tables(tmp_pat
     hits = [f for f in payload["findings"] if f["lint"] == "split_child_unsourced"]
     assert [(f["severity"], f["evidence"]) for f in hits] == [
         ("INFO", ["Resident, Gadget Surgery | Other County Hospital, Shelbyville"])]
+
+
+# ---------------------------------------- lint 14ac: group_header_context
+# X6 E8/E11: a group header whose context never reached the rows of the
+# lines under it (KJJVVO-01, RINASX-06, RINASX-14, IEUPKK-14/-17/-18).
+# Invented values throughout.
+
+def _grp4(text, code, idx, end=None, heading="Example Heading", **fields):
+    """One stage-4 entry with invented content and the given fields."""
+    entry = _entry(text, start=idx, hierarchy=[heading], taxonomy_code=code,
+                   extracted_fields=fields)
+    if end is not None:
+        entry["element_idx_end"] = end
+    return entry
+
+
+def _grp_hits(entries, table_rows, blocks=None):
+    findings = lint_group_header_context({"entries": entries}, table_rows, blocks or [])
+    return [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in findings]
+
+
+def _society_block():
+    """A society line coded I, then a committee and an office under it,
+    neither naming the society (KJJVVO 302-306)."""
+    return [_grp4("Example Widget Society", "I", 10, organization="Example Widget Society"),
+            _grp4("Gadget Council 1985-1994", "Q2", 11, committee_name="Gadget Council",
+                  start_date="1985", end_date="1994"),
+            _grp4("Chair 1988-1990", "Q1", 12, role="Chair",
+                  start_date="1988", end_date="1990")]
+
+
+_SOCIETY_ROWS = [[["Gadget Council", "Member", "1985-1994"], ["", "Chair", "1988-1990"]],
+                 [["Example Widget Society", ""]]]
+
+
+def test_group_header_context_warns_on_lines_that_lost_their_society():
+    findings = lint_group_header_context({"entries": _society_block()}, _SOCIETY_ROWS, [])
+    assert [(f["severity"], f["message"].split(": ")[1]) for f in findings] == [
+        ("WARN", "children_lost_header")]
+    assert findings[0]["message"] == (
+        "entry 10 (I): children_lost_header: a group header's name (an organization or "
+        "institution) is missing from the rows of the lines under it; 2 entries below it")
+    assert findings[0]["evidence"] == ["entry 11 (Q2): Gadget Council | Member | 1985-1994",
+                                       "entry 12 (Q1): Chair | 1988-1990"]
+
+
+@pytest.mark.parametrize("shown, fires", [
+    ("Example Widget Gizmo Society", False),    # all of the name
+    ("Example Widget", False),                  # two of four words: half
+    ("Example Group", True),                    # one of four: under half
+], ids=["whole", "half", "under_half"])
+def test_group_header_context_reads_the_name_at_half_its_words(shown, fires):
+    entries = [_grp4("Example Widget Gizmo Society", "I", 10,
+                     organization="Example Widget Gizmo Society"), _society_block()[1]]
+    rows = [[["Gadget Council", shown, "1985-1994"]]]
+    assert bool(_grp_hits(entries, rows)) is fires
+
+
+def test_group_header_context_spares_a_child_any_of_whose_rows_shows_the_name():
+    """ATUVAL 95: a short title also shows inside another entry's row, and
+    the child's own row, not the tightest one, carries the header's name."""
+    entries = [_grp4("Example State University", "D3", 20,
+                     institution="Example State University"),
+               _grp4("Assistant Professor", "D1", 21, title="Assistant Professor")]
+    rows = [[["Clinical Assistant Professor", ""]],
+            [["Assistant Professor", "Example State University, Widget Campus", ""]]]
+    assert _grp_hits(entries, rows) == []
+
+
+@pytest.mark.parametrize("child", [
+    _grp4("Gadget Council 1985-1994", "Q2", 11, committee_name="Gadget Council",
+          organization="Other Society", start_date="1985", end_date="1994"),
+    _grp4("Gadget Award 1985", "H", 11, award_name="Gadget Award", date="1985"),
+    _grp4("Gadget Council 1985-1994", "Q2", 11, heading="Other Heading",
+          committee_name="Gadget Council", start_date="1985", end_date="1994"),
+    _grp4("Gadget Council", "Q2", 11),
+    _grp4("Other Society", "Q2", 11, organization="Other Society"),
+], ids=["own_holder", "other_family", "other_heading", "no_fields", "next_header"])
+def test_group_header_context_stops_at_a_line_that_is_no_child(child):
+    entries = [_society_block()[0], child]
+    rows = [[["Gadget Council", "Other Society", "1985-1994"], ["Gadget Award", "1985"]]]
+    assert _grp_hits(entries, rows) == []
+
+
+def test_group_header_context_reads_only_bare_roles_under_a_dated_header():
+    """MUHLLD 82, 84: a dated society line is a membership of its own; the
+    committee after it, in one flat membership list, may be another body's.
+    An office under it (KJJVVO 320-324) is still its child."""
+    header = _grp4("1976-1997 Example Widget Society", "I", 10,
+                   organization="Example Widget Society", start_date="1976", end_date="1997")
+    committee, office = _society_block()[1:]
+    rows = [[["Gadget Council", "Member", "1985-1994"], ["", "Chair", "1988-1990"]]]
+    assert [hit for hit in _grp_hits([header, committee, office], rows)
+            if hit[2] == "children_lost_header"] == []
+    assert _grp_hits([header, office], rows) == [
+        ("WARN", "entry 10 (I)", "children_lost_header")]
+
+
+@pytest.mark.parametrize("fields, fires", [
+    ({"date": "1983-04-17"}, False),                        # a session on one day
+    ({"start_date": "1979", "end_date": "1994"}, True),     # a span
+], ids=["one_day", "span"])
+def test_group_header_context_reads_a_dated_header_only_with_a_span(fields, fires):
+    header = _grp4("Example Widget Society", "I", 10,
+                   organization="Example Widget Society", **fields)
+    office = _society_block()[2]
+    rows = [[["", "Chair", "1988-1990"]]]
+    shapes = [shape for _, _, shape in _grp_hits([header, office], rows)]
+    # One dated day is a session of its own, so the office is a bare role
+    # under it rather than its child.
+    assert shapes == (["children_lost_header"] if fires else ["role_without_holder"])
+
+
+@pytest.mark.parametrize("code", ["A", "S1", "T"])
+def test_group_header_context_does_not_read_a_header_it_skips(code):
+    entries = [_grp4("Example Widget Society", code, 10,
+                     organization="Example Widget Society")] + _society_block()[1:2]
+    assert [hit for hit in _grp_hits(entries, _SOCIETY_ROWS)
+            if hit[2] == "children_lost_header"] == []
+
+
+def _course_block():
+    """A course line, then the owner's roles in it, each a bare role
+    (the RINASX-06 shape)."""
+    return [_grp4("Widget Course 1951-present", "K1", 140, course_title="Widget Course",
+                  start_date="1951", end_date="present"),
+            _grp4("Workshop Coordinator 1956-1958", "K3", 141, role="Workshop Coordinator",
+                  start_date="1956", end_date="1958"),
+            _grp4("Module Director 1960-1964, 1979-1992", "K3", 142, role="Module Director",
+                  start_date="1960", end_date="1992", additional_periods="1960-1964; 1979-1992")]
+
+
+_COURSE_BLOCKS = [("p", "1951-present - Widget Course"),
+                  ("p", "1956-1958 - Workshop Coordinator"),
+                  ("p", "1960-1964, 1979-1992 - Module Director")]
+
+
+def test_group_header_context_warns_on_a_role_rendered_alone():
+    findings = lint_group_header_context({"entries": _course_block()}, [], _COURSE_BLOCKS)
+    assert [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in findings] == [("WARN", "entry 140 (K1)", "role_without_holder")]
+    assert findings[0]["message"] == (
+        "entry 140 (K1): role_without_holder: a role renders alone, without the course, "
+        "committee or society it was held in; 2 role lines")
+    assert findings[0]["evidence"] == ["entry 141 (K3): 1956-1958 - Workshop Coordinator",
+                                       "entry 142 (K3): 1960-1964, 1979-1992 - Module Director"]
+
+
+@pytest.mark.parametrize("text, fields", [
+    ("Chair, Search Committee 1988", {"role": "Chair, Search Committee", "start_date": "1988"}),
+    ("Director of Widget Studies 1988", {"role": "Director of Widget Studies",
+                                         "start_date": "1988"}),
+    ("New Widget Gadget Award Reviewer 1988", {"role": "New Widget Gadget Award Reviewer",
+                                               "start_date": "1988"}),
+    ("Widget Session Review 1962-1964", {"teaching_role": "Widget Session Review",
+                                              "start_date": "1962", "end_date": "1964"}),
+    ("Workshop Coordinator for Widget Studies 1956", {"role": "Workshop Coordinator",
+                                                      "start_date": "1956"}),
+    ("Workshop Coordinator 1956", {"role": "Workshop Coordinator", "start_date": "1956",
+                                  "course_title": "Widget Course"}),
+], ids=["comma", "of", "four_other_words", "no_role_word", "more_text", "names_a_course"])
+def test_group_header_context_spares_a_role_that_is_not_bare(text, fields):
+    entries = [_course_block()[0], _grp4(text, "K3", 141, **fields)]
+    blocks = [("p", f"1956 - {fields.get('role') or fields.get('teaching_role')}")]
+    assert _grp_hits(entries, [], blocks) == []
+
+
+@pytest.mark.parametrize("blocks", [
+    [("p", "1956-1958 - Workshop Coordinator, Widget Course")],
+    [],
+], ids=["row_shows_the_course", "no_row"])
+def test_group_header_context_needs_a_row_of_the_role_alone(blocks):
+    assert _grp_hits(_course_block()[:2], [], blocks) == []
+
+
+@pytest.mark.parametrize("above", [None, "other_heading"])
+def test_group_header_context_needs_a_line_above_a_bare_role(above):
+    role = _course_block()[1]
+    entries = [role] if above is None else [
+        _grp4("Widget Course 1951", "K1", 140, heading="Other Heading",
+              course_title="Widget Course", start_date="1951"), role]
+    assert _grp_hits(entries, [], _COURSE_BLOCKS) == []
+
+
+def test_group_header_context_gives_each_role_its_own_row():
+    """Two lines with one role claim two rows, not one row twice."""
+    entries = [_course_block()[0],
+               _grp4("Module Director 1960", "K3", 141, role="Module Director", start_date="1960"),
+               _grp4("Module Director 1966", "K3", 142, role="Module Director", start_date="1966")]
+    one_row = [("p", "1960 - Module Director")]
+    two_rows = one_row + [("p", "1966 - Module Director")]
+    assert lint_group_header_context({"entries": entries}, [], one_row)[0][
+        "message"].endswith("; 1 role line")
+    assert lint_group_header_context({"entries": entries}, [], two_rows)[0][
+        "message"].endswith("; 2 role lines")
+
+
+@pytest.mark.parametrize("above", [
+    _grp4("1962-1964", "T", 140, start_date="1962", end_date="1964"),
+    _grp4("Gizmo Committee member 1951-1960", "P", 140, committee_name="Gizmo Committee",
+          role="Member", start_date="1951", end_date="1960"),
+    _grp4("Gizmo Committee 1951-1960", "Q2", 140, committee_name="Gizmo Committee",
+          start_date="1951", end_date="1960"),
+    _grp4("Gizmo Panel Chair", "Q1", 140, organization="Gizmo Panel", role="Chair"),
+    _grp4("1958; 1960", "T", 140, additional_dates="1958; 1960"),
+    _grp4("Issued 1960", "T", 140, issue_date="1960"),
+], ids=["date_only_line", "sibling_line", "dated_committee_line", "sibling_role_at_a_body",
+        "second_span_only", "one_date_field_only"])
+def test_group_header_context_names_the_role_not_the_line_above(above):
+    """RGUNJV 2987, DTFNOR 31, DUTAVD 78: the line above a bare role may be
+    a date alone, a sibling role line or a dated committee (a membership of
+    its own), not what the role was held in, so the finding names the role
+    itself, and quotes its row once."""
+    role = _grp4("Widget Member 1962", "Q1", 141, role="Widget Member",
+                 start_date="1962")
+    findings = lint_group_header_context({"entries": [above, role]}, [],
+                                         [("p", "1962 - Widget Member")])
+    assert [f["message"].split(": ")[0] for f in findings] == ["entry 141 (Q1)"]
+    assert findings[0]["evidence"] == ["entry 141 (Q1): 1962 - Widget Member"]
+
+
+def test_group_header_context_names_an_undated_committee_as_the_holder():
+    """An undated committee line is a heading over its offices."""
+    above = _grp4("Gizmo Committee", "Q2", 140, committee_name="Gizmo Committee")
+    role = _grp4("Widget Member 1962", "Q1", 141, role="Widget Member", start_date="1962")
+    findings = lint_group_header_context({"entries": [above, role]}, [],
+                                         [("p", "1962 - Widget Member")])
+    assert [f["message"].split(": ")[0] for f in findings] == ["entry 140 (Q2)"]
+
+
+def test_group_header_context_names_a_holder_and_each_role_once():
+    """The RINASX-06 shape: a course line over a run of bare roles. The
+    finding names the course line and quotes the first roles under it; with
+    no holder above, it names the first role and quotes the roles after it,
+    so no entry is named twice either way."""
+    course = _course_block()[0]
+    roles = [_grp4(f"{word} Leader 196{n}", "K3", 141 + n, role=f"{word} Leader",
+                   start_date=f"196{n}")
+             for n, word in enumerate(("Widget", "Gadget", "Gizmo", "Doohickey"))]
+    blocks = [("p", f"196{n} - {word} Leader")
+              for n, word in enumerate(("Widget", "Gadget", "Gizmo", "Doohickey"))]
+
+    def named(finding):
+        return [text.split(":")[0] for text in [finding["message"], *finding["evidence"]]]
+
+    held = lint_group_header_context({"entries": [course, *roles]}, [], blocks)
+    assert [named(f) for f in held] == [
+        ["entry 140 (K1)", "entry 141 (K3)", "entry 142 (K3)", "entry 143 (K3)"]]
+    assert held[0]["message"].endswith("; 4 role lines")
+    date_only = _grp4("1962-1964", "T", 140, start_date="1962", end_date="1964")
+    unheld = lint_group_header_context({"entries": [date_only, *roles]}, [], blocks)
+    assert [named(f) for f in unheld] == [
+        ["entry 141 (K3)", "entry 142 (K3)", "entry 143 (K3)", "entry 144 (K3)"]]
+
+
+def test_group_header_context_reports_a_bare_role_under_a_header_once():
+    """An office under a society line is its child (children_lost_header),
+    not a second finding as a bare role."""
+    hits = _grp_hits(_society_block(), _SOCIETY_ROWS)
+    assert [shape for _, _, shape in hits] == ["children_lost_header"]
+
+
+def _lead_block(lead_text="Thesis Committees, Example State University", code="K2", **fields):
+    """An undated lead line, then three dated mentee lines coded N3B
+    (the IEUPKK-18 shape)."""
+    lead_fields = fields or {"institution": "Example State University",
+                             "teaching_role": "Thesis Committee Member"}
+    return [_grp4(lead_text, code, 610, **lead_fields)] + [
+        _grp4(f"1976-1979 Widget Student {n}, MSc candidate", "N3B", 611 + n,
+              mentee_name=f"Widget Student {n}", start_date="1976", end_date="1979")
+        for n in range(3)]
+
+
+_GRP_LEAD_ROWS = [[["Thesis Committees, Example State University", ""]]]
+
+
+def test_group_header_context_notes_a_lead_line_coded_unlike_its_list():
+    findings = lint_group_header_context({"entries": _lead_block()}, _GRP_LEAD_ROWS, [])
+    assert [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in findings] == [("INFO", "entry 610 (K2)", "header_coded_unlike_list")]
+    assert findings[0]["evidence"][0] == (
+        "entry 610 (K2): Thesis Committees, Example State University")
+    assert findings[0]["evidence"][1].startswith("entry 611 (N3B): 1976-1979 Widget Student 0")
+    assert len(findings[0]["evidence"]) == 3
+
+
+@pytest.mark.parametrize("change", [
+    "two_below", "same_letter", "mixed_codes", "undated_below", "lead_dated", "label",
+    "enumerated", "long", "states_role", "skip_letter", "list_skip_letter", "other_heading",
+    "no_shared_word",
+])
+def test_group_header_context_spares_a_line_that_leads_no_list(change):
+    entries = _lead_block()
+    if change == "two_below":
+        entries = entries[:3]
+    elif change == "same_letter":
+        entries = _lead_block(code="N3A")
+    elif change == "mixed_codes":
+        entries[2]["taxonomy_code"] = "N3A"
+    elif change == "undated_below":
+        entries[3]["text"] = "Widget Student 2, MSc candidate"
+        entries[3]["extracted_fields"] = {"mentee_name": "Widget Student 2"}
+    elif change == "lead_dated":
+        entries[0]["text"] += " 1976"
+    elif change == "label":
+        entries[0]["text"] += ":"
+    elif change == "enumerated":
+        entries[0]["text"] = "3. " + entries[0]["text"]
+    elif change == "long":
+        entries[0]["text"] += " and other widget gadget gizmo committee work"
+    elif change == "states_role":
+        entries = _lead_block("Chair, Example Widget Campaign", code="O",
+                              leadership_role="Chair", organization="Example Widget Campaign")
+    elif change == "skip_letter":
+        entries[0]["taxonomy_code"] = "S8"
+    elif change == "list_skip_letter":
+        for entry in entries[1:]:
+            entry["taxonomy_code"] = "S8"
+    elif change == "no_shared_word":
+        entries[0]["extracted_fields"] = {"teaching_role": "Gizmo Mentor"}
+    else:
+        entries[2]["hierarchy"] = ["Other Heading"]
+    rows = _GRP_LEAD_ROWS + [[["Chair", "Example Widget Campaign"]]]
+    assert [hit for hit in _grp_hits(entries, rows)
+            if hit[2] == "header_coded_unlike_list"] == []
+
+
+@pytest.mark.parametrize("row", [
+    "Thesis Committees, Example State University | 1976-1979",
+    "Thesis Committees, Example State University, Widget Gadget Gizmo Campus",
+], ids=["row_with_a_year", "three_more_words"])
+def test_group_header_context_needs_the_lead_line_on_a_row_of_its_own(row):
+    assert _grp_hits(_lead_block(), [[[cell for cell in row.split(" | ")]]]) == []
+
+
+def test_group_header_context_allows_two_more_words_on_the_lead_row():
+    rows = [[["Thesis Committees (Example State University, Widget Campus)", ""]]]
+    assert _grp_hits(_lead_block(), rows) == [
+        ("INFO", "entry 610 (K2)", "header_coded_unlike_list")]
+
+
+def _dated_block(parent_end=84):
+    """A dated appointment block stage 2 joined from several lines, then an
+    undated attending role under it (the IEUPKK-14 shape)."""
+    return [_grp4("1971-1979 Professor\tDepartment of Widgets\tExample University", "D1", 80,
+                  end=parent_end, title="Professor", institution="Example University",
+                  start_date="1971", end_date="1979"),
+            _grp4("Widget Attending\tExample Hospital", "D2", 85, end=88,
+                  title="Widget Attending", institution="Example Hospital")]
+
+
+_DATED_ROWS = [[["Professor", "Example University", "1971-1979"],
+                ["Widget Attending", "Example Hospital", ""]]]
+
+
+def test_group_header_context_notes_a_role_that_lost_its_block_dates():
+    findings = lint_group_header_context({"entries": _dated_block()}, _DATED_ROWS, [])
+    assert [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
+            for f in findings] == [("INFO", "entry 80 (D1)", "parent_dates_lost")]
+    assert findings[0]["evidence"] == ["entry 85 (D2): Widget Attending | Example Hospital"]
+
+
+def test_group_header_context_follows_undated_roles_up_to_the_block():
+    entries = _dated_block() + [_grp4("Widget Consultant\tOther Hospital", "D2", 89,
+                                      title="Widget Consultant", institution="Other Hospital")]
+    rows = [_DATED_ROWS[0] + [["Widget Consultant", "Other Hospital", ""]]]
+    findings = lint_group_header_context({"entries": entries}, rows, [])
+    assert findings[0]["message"].endswith("; 2 entries below it")
+
+
+def test_group_header_context_reads_a_dated_group_header_as_a_block():
+    """SEKQUI-shaped: an institution and its years, then the roles held there."""
+    entries = [_grp4("Example University (1964-1968)", "K2", 230, institution="Example University",
+                     start_date="1964", end_date="1968"),
+               _grp4("Director, Widget Studies, Example University", "K3", 231,
+                     role="Director", course_title="Widget Studies",
+                     institution="Example University")]
+    rows = [[["Director, Widget Studies", "Example University", ""]]]
+    assert [shape for _, _, shape in _grp_hits(entries, rows)] == ["parent_dates_lost"]
+
+
+@pytest.mark.parametrize("change", [
+    "one_line_parent", "short_date", "row_year", "other_letter", "enumerated_parent",
+    "enumerated_child", "no_institution", "between", "between_other_letter",
+    "between_other_heading",
+])
+def test_group_header_context_spares_a_role_with_no_lost_block_dates(change):
+    """RNKYST 18-21: one dated line above an undated one is a list whose
+    next line has no date in the source. A short month/year date with no
+    four-digit year ('4/93') is still a date of the entry's own."""
+    entries, rows = _dated_block(), [list(_DATED_ROWS[0])]
+    if change == "one_line_parent":
+        entries = _dated_block(parent_end=80)
+    elif change == "short_date":
+        entries[1]["text"] += " 4/93-5/94"
+    elif change == "row_year":
+        rows = [[["Professor", "Example University", "1971-1979"],
+                 ["Widget Attending", "Example Hospital", "1973"]]]
+    elif change == "other_letter":
+        entries[1]["taxonomy_code"] = "G"
+    elif change == "enumerated_parent":
+        entries[0]["text"] = "1. " + entries[0]["text"]
+    elif change == "enumerated_child":
+        entries[1]["text"] = "- " + entries[1]["text"]
+    elif change == "no_institution":
+        del entries[1]["extracted_fields"]["institution"]
+    elif change == "between":
+        entries.insert(1, _grp4("Gadget Lecture", "D1", 82, title="Gadget Lecture"))
+    elif change == "between_other_letter":
+        entries.insert(1, _grp4("Gadget Program", "G", 82, organization="Gadget Program"))
+    else:
+        entries.insert(1, _grp4("Gizmo Attending\tGizmo Hospital", "D2", 82, heading="Other",
+                                title="Gizmo Attending", institution="Gizmo Hospital"))
+    assert _grp_hits(entries, rows) == []
+
+
+def test_run_doctor_wires_group_header_context_with_the_rendered_rows(tmp_path):
+    """The LINT_REGISTRY row hands the lint the docx's table rows and
+    blocks: every shape reads the rendered rows."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].extend(_course_block())
+    fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    for _, text in _COURSE_BLOCKS:
+        output.add_paragraph(text)
+    output.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "group_header_context"]
+    assert [(f["severity"], f["evidence"][0]) for f in hits] == [
+        ("WARN", "entry 141 (K3): 1956-1958 - Workshop Coordinator")]
+
+
+def test_group_header_context_reads_entries_in_source_order():
+    """Stage 4 lists entries by batch; the lint reads them by position, and
+    skips one with no position."""
+    block = _society_block()
+    unplaced = _grp4("Gizmo Council", "Q2", None, committee_name="Gizmo Council")
+    hits = _grp_hits([block[2], unplaced, block[0], block[1]], _SOCIETY_ROWS)
+    assert hits == [("WARN", "entry 10 (I)", "children_lost_header")]
+
+
+def test_group_header_context_reads_an_undated_committee_as_no_header():
+    """KJJVVO 303: a committee with no organization is a line under the
+    society, not a header of the office after it."""
+    block = _society_block()
+    block[1] = _grp4("Gadget Council", "Q2", 11, committee_name="Gadget Council")
+    rows = [[["Gadget Council", "Member"], ["", "Chair", "1988-1990"]]]
+    findings = lint_group_header_context({"entries": block}, rows, [])
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10 (I)"]
+
+
+def test_group_header_context_quotes_the_tightest_row_of_a_short_child():
+    """'Chair' also shows inside a longer row of the same years."""
+    rows = [[["Gadget Council", "Member", "1985-1994"],
+             ["Gizmo Panel", "Chair of the Gizmo Panel", "1988-1990"],
+             ["", "Chair", "1988-1990"]]]
+    findings = lint_group_header_context({"entries": _society_block()}, rows, [])
+    assert findings[0]["evidence"][1] == "entry 12 (Q1): Chair | 1988-1990"
+
+
+def test_group_header_context_reads_a_role_of_three_other_words_as_bare():
+    """A role word and three other words is still a role (the RINASX-06
+    shape); one more word is a name (see the four_other_words case)."""
+    entries = [_course_block()[0],
+               _grp4("Widget Gadget Gizmo Leader 1953", "K2", 143,
+                     teaching_role="Widget Gadget Gizmo Leader", start_date="1953")]
+    blocks = [("p", "1953 - Widget Gadget Gizmo Leader")]
+    assert _grp_hits(entries, [], blocks) == [("WARN", "entry 140 (K1)", "role_without_holder")]
+
+
+def test_group_header_context_reports_each_run_of_bare_roles():
+    """A run of roles ends at the next line that is not one; each run is
+    named by the line above it."""
+    course, director, codirector = _course_block()
+    other = _grp4("Gadget Course 1966-present", "K1", 150, course_title="Gadget Course",
+                  start_date="1966", end_date="present")
+    codirector["element_idx_start"] = codirector["element_idx_end"] = 151
+    entries = [course, director, other, codirector]
+    hits = _grp_hits(entries, [], _COURSE_BLOCKS)
+    assert hits == [("WARN", "entry 140 (K1)", "role_without_holder"),
+                    ("WARN", "entry 150 (K1)", "role_without_holder")]
+
+
+@pytest.mark.parametrize("words, fires", [(12, True), (13, False)])
+def test_group_header_context_reads_a_lead_line_of_up_to_twelve_words(words, fires):
+    text = " ".join(["Thesis", "Committees,", "Example", "State", "University"]
+                    + ["Gizmo"] * (words - 5))
+    entries = _lead_block(lead_text=text)
+    rows = [[[text, ""]]]
+    assert bool(_grp_hits(entries, rows)) is fires
+
+
+def test_group_header_context_quotes_a_list_line_to_eighty_characters():
+    entries = _lead_block()
+    entries[1]["text"] = "1976-1979 " + "Widget " * 20
+    findings = lint_group_header_context({"entries": entries}, _GRP_LEAD_ROWS, [])
+    assert findings[0]["evidence"][1] == "entry 611 (N3B): " + entries[1]["text"][:80]
+
+
+def test_group_header_context_reads_a_stated_role_in_any_role_field():
+    """A lead line with one role field it states and one it does not is
+    still a record ('Chair, <campaign>')."""
+    entries = _lead_block("Chair, Example Widget Campaign", code="O", leadership_role="Chair",
+                          title="Gizmo Office", organization="Example Widget Campaign")
+    rows = [[["Chair", "Example Widget Campaign"]]]
+    assert _grp_hits(entries, rows) == []
+
+
+def test_group_header_context_sorts_string_positions_as_numbers():
+    """Stage 4 may write element_idx_start as a string ('9', '10')."""
+    header, committee, office = _society_block()
+    for entry, idx in ((header, "9"), (committee, "10"), (office, "11")):
+        entry["element_idx_start"] = entry["element_idx_end"] = idx
+    hits = _grp_hits([office, committee, header], _SOCIETY_ROWS)
+    assert hits == [("WARN", "entry 9 (I)", "children_lost_header")]
+
+
+def test_group_header_context_reads_a_child_row_of_its_name_alone():
+    """KJJVVO 303: an undated committee renders as its name and nothing
+    more."""
+    block = _society_block()[:2]
+    block[1] = _grp4("Gadget Council", "Q2", 11, committee_name="Gadget Council")
+    findings = lint_group_header_context({"entries": block}, [[["Gadget Council"]]], [])
+    assert findings[0]["evidence"] == ["entry 11 (Q2): Gadget Council"]
+
+
+def test_group_header_context_reads_a_lead_line_that_is_all_role_as_a_record():
+    entries = _lead_block("Chair, Example Campaign", code="O",
+                          leadership_role="Chair, Example Campaign")
+    assert _grp_hits(entries, [[["Chair, Example Campaign", ""]]]) == []
