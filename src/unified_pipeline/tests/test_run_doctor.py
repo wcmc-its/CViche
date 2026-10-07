@@ -6779,9 +6779,9 @@ _COURSE_BLOCKS = [("p", "1951-present - Widget Course"),
 def test_group_header_context_warns_on_a_role_rendered_alone():
     findings = lint_group_header_context({"entries": _course_block()}, [], _COURSE_BLOCKS)
     assert [(f["severity"], f["message"].split(":")[0], f["message"].split(": ")[1])
-            for f in findings] == [("WARN", "entry 141 (K3)", "role_without_holder")]
+            for f in findings] == [("WARN", "entry 140 (K1)", "role_without_holder")]
     assert findings[0]["message"] == (
-        "entry 141 (K3): role_without_holder: a role renders alone, without the course, "
+        "entry 140 (K1): role_without_holder: a role renders alone, without the course, "
         "committee or society it was held in; 2 role lines")
     assert findings[0]["evidence"] == ["entry 141 (K3): 1956-1958 - Workshop Coordinator",
                                        "entry 142 (K3): 1960-1964, 1979-1992 - Module Director"]
@@ -6838,19 +6838,60 @@ def test_group_header_context_gives_each_role_its_own_row():
 
 @pytest.mark.parametrize("above", [
     _grp4("1962-1964", "T", 140, start_date="1962", end_date="1964"),
-    _grp4("Gizmo Committee 1951-present", "Q2", 140, committee_name="Gizmo Committee",
-          start_date="1951", end_date="present"),
-], ids=["date_only_line", "sibling_line"])
+    _grp4("Gizmo Committee member 1951-1960", "P", 140, committee_name="Gizmo Committee",
+          role="Member", start_date="1951", end_date="1960"),
+    _grp4("Gizmo Committee 1951-1960", "Q2", 140, committee_name="Gizmo Committee",
+          start_date="1951", end_date="1960"),
+    _grp4("Gizmo Panel Chair", "Q1", 140, organization="Gizmo Panel", role="Chair"),
+    _grp4("1958; 1960", "T", 140, additional_dates="1958; 1960"),
+    _grp4("Issued 1960", "T", 140, issue_date="1960"),
+], ids=["date_only_line", "sibling_line", "dated_committee_line", "sibling_role_at_a_body",
+        "second_span_only", "one_date_field_only"])
 def test_group_header_context_names_the_role_not_the_line_above(above):
-    """RGUNJV 2987, DTFNOR 31: the line above a bare role may be a date
-    alone or a sibling, not what the role was held in, so the finding names
-    the role itself."""
+    """RGUNJV 2987, DTFNOR 31, DUTAVD 78: the line above a bare role may be
+    a date alone, a sibling role line or a dated committee (a membership of
+    its own), not what the role was held in, so the finding names the role
+    itself, and quotes its row once."""
     role = _grp4("Widget Member 1962", "Q1", 141, role="Widget Member",
                  start_date="1962")
     findings = lint_group_header_context({"entries": [above, role]}, [],
                                          [("p", "1962 - Widget Member")])
     assert [f["message"].split(": ")[0] for f in findings] == ["entry 141 (Q1)"]
-    assert "line above" not in findings[0]["message"]
+    assert findings[0]["evidence"] == ["entry 141 (Q1): 1962 - Widget Member"]
+
+
+def test_group_header_context_names_an_undated_committee_as_the_holder():
+    """An undated committee line is a heading over its offices."""
+    above = _grp4("Gizmo Committee", "Q2", 140, committee_name="Gizmo Committee")
+    role = _grp4("Widget Member 1962", "Q1", 141, role="Widget Member", start_date="1962")
+    findings = lint_group_header_context({"entries": [above, role]}, [],
+                                         [("p", "1962 - Widget Member")])
+    assert [f["message"].split(": ")[0] for f in findings] == ["entry 140 (Q2)"]
+
+
+def test_group_header_context_names_a_holder_and_each_role_once():
+    """The RINASX-06 shape: a course line over a run of bare roles. The
+    finding names the course line and quotes the first roles under it; with
+    no holder above, it names the first role and quotes the roles after it,
+    so no entry is named twice either way."""
+    course = _course_block()[0]
+    roles = [_grp4(f"{word} Leader 196{n}", "K3", 141 + n, role=f"{word} Leader",
+                   start_date=f"196{n}")
+             for n, word in enumerate(("Widget", "Gadget", "Gizmo", "Doohickey"))]
+    blocks = [("p", f"196{n} - {word} Leader")
+              for n, word in enumerate(("Widget", "Gadget", "Gizmo", "Doohickey"))]
+
+    def named(finding):
+        return [text.split(":")[0] for text in [finding["message"], *finding["evidence"]]]
+
+    held = lint_group_header_context({"entries": [course, *roles]}, [], blocks)
+    assert [named(f) for f in held] == [
+        ["entry 140 (K1)", "entry 141 (K3)", "entry 142 (K3)", "entry 143 (K3)"]]
+    assert held[0]["message"].endswith("; 4 role lines")
+    date_only = _grp4("1962-1964", "T", 140, start_date="1962", end_date="1964")
+    unheld = lint_group_header_context({"entries": [date_only, *roles]}, [], blocks)
+    assert [named(f) for f in unheld] == [
+        ["entry 141 (K3)", "entry 142 (K3)", "entry 143 (K3)", "entry 144 (K3)"]]
 
 
 def test_group_header_context_reports_a_bare_role_under_a_header_once():
@@ -6986,7 +7027,8 @@ def test_group_header_context_reads_a_dated_group_header_as_a_block():
 ])
 def test_group_header_context_spares_a_role_with_no_lost_block_dates(change):
     """RNKYST 18-21: one dated line above an undated one is a list whose
-    next line has no date in the source. QZWBKQ 45: '7/79' is a date."""
+    next line has no date in the source. A short month/year date with no
+    four-digit year ('4/93') is still a date of the entry's own."""
     entries, rows = _dated_block(), [list(_DATED_ROWS[0])]
     if change == "one_line_parent":
         entries = _dated_block(parent_end=80)
@@ -7069,20 +7111,20 @@ def test_group_header_context_reads_a_role_of_three_other_words_as_bare():
                _grp4("Widget Gadget Gizmo Leader 1953", "K2", 143,
                      teaching_role="Widget Gadget Gizmo Leader", start_date="1953")]
     blocks = [("p", "1953 - Widget Gadget Gizmo Leader")]
-    assert _grp_hits(entries, [], blocks) == [("WARN", "entry 143 (K2)", "role_without_holder")]
+    assert _grp_hits(entries, [], blocks) == [("WARN", "entry 140 (K1)", "role_without_holder")]
 
 
 def test_group_header_context_reports_each_run_of_bare_roles():
     """A run of roles ends at the next line that is not one; each run is
-    named by its first role."""
+    named by the line above it."""
     course, director, codirector = _course_block()
     other = _grp4("Gadget Course 1966-present", "K1", 150, course_title="Gadget Course",
                   start_date="1966", end_date="present")
     codirector["element_idx_start"] = codirector["element_idx_end"] = 151
     entries = [course, director, other, codirector]
     hits = _grp_hits(entries, [], _COURSE_BLOCKS)
-    assert hits == [("WARN", "entry 141 (K3)", "role_without_holder"),
-                    ("WARN", "entry 151 (K3)", "role_without_holder")]
+    assert hits == [("WARN", "entry 140 (K1)", "role_without_holder"),
+                    ("WARN", "entry 150 (K1)", "role_without_holder")]
 
 
 @pytest.mark.parametrize("words, fires", [(12, True), (13, False)])

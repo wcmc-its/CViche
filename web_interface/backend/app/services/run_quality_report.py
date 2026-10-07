@@ -63,6 +63,8 @@ _CAP_SOURCE_BY_SCORER = {
         "a grant application is listed as funding received", "grant_bucket"),
     scorer.score_junk_rows: CapSource(
         "several headers or labels appear as entries", "junk_or_header_row"),
+    scorer.score_group_header_context: CapSource(
+        "several rows lost the heading they sat under", "group_header_context"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
 }
@@ -219,6 +221,14 @@ _ROW_COPY_BY_SCORER = {
         "so they do not cap.",
         "Delete the rows named in the junk_or_header_row finding, and copy any institution they "
         "named onto the entries beneath them."),
+    scorer.score_group_header_context: RowCopy(
+        "Rows keep the heading they sat under",
+        "Uses the group_header_context finding: a society, employer or course line whose lines "
+        "show without its name, or roles that show without the course, committee or society they "
+        "were held in.",
+        "Caps the score at 84 when 4 or more are flagged. Fewer do not cap.",
+        "Add the society, institution or course from the line above to each row named in the "
+        "group_header_context finding."),
 }
 
 _GATES = (*((n, f) for n, _w, f in scorer.DIMENSIONS), *scorer.CAP_ONLY_GATES)

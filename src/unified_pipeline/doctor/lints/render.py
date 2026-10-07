@@ -2737,9 +2737,9 @@ def lint_junk_or_header_row(stage4: dict, table_rows: list[list[list[str]]],
 #                             ('Chair 2010-2011') rendered as the role alone,
 #                             without the course, committee or society it was
 #                             a role in (RINASX-06). The finding names the
-#                             first role, not the line above: that line may
-#                             be a date alone or a sibling (RGUNJV 2987,
-#                             DTFNOR 31)
+#                             line above when it can hold them, else the
+#                             first role: that line may be a date alone or
+#                             a sibling (RGUNJV 2987, DTFNOR 31)
 #   header_coded_unlike_list  an undated lead line coded unlike the dated
 #                             list below it, which shares one code: the lead
 #                             line renders alone in one section and its list
@@ -2794,6 +2794,8 @@ _GROUP_FAMILIES = MappingProxyType({
 _GROUP_ROLE_FIELDS = frozenset({"role", "leadership_role", "teaching_role",
                                 "membership_type"})
 _GROUP_EXTRA_DATE_FIELDS = frozenset({"additional_dates", "additional_periods"})
+#: The field that names a committee: dated, a committee line is a membership.
+_GROUP_COMMITTEE_FIELD = "committee_name"
 #: A role's own word: a K2 'teaching_role' of '<session name>'
 #: is a session's name stage 4 filed as a role, and that line names what it
 #: is (RINASX 39).
@@ -2825,7 +2827,7 @@ GROUP_LIST_MIN_ENTRIES = 3
 #: A numbered, lettered or bulleted line is an item of a list, not its lead.
 _GROUP_ENUMERATED_RE = re.compile(r"^\W*(?:\(?\d{1,3}[.)]|\(?[A-Za-z][.)]\s|[-–•·◦*])")
 
-#: A date with no four-digit year: '7/79', '6/83'. An entry that writes one
+#: A date with no four-digit year: '3/91', '11/04'. An entry that writes one
 #: has dates of its own (QZWBKQ 45), whatever stage 4 read from them.
 _GROUP_SHORT_DATE_RE = re.compile(r"\b\d{1,2}/\d{2}\b")
 #: The section letters whose undated roles take a dated block's years, and
@@ -2852,7 +2854,7 @@ class _GroupEntry(NamedTuple):
     fields: dict[str, object]
     #: Whether the text or a date field carries a four-digit year.
     dated: bool
-    #: Whether the text carries any date: a year, or a short form ('7/79').
+    #: Whether the text carries any date: a year, or a short form ('3/91').
     any_date: bool
     #: Whether stage 2 joined more than one source line into the entry.
     multi_line: bool
@@ -3068,11 +3070,17 @@ def _group_message(hit: _GroupHit) -> tuple[str, str, list[str]]:
         count = f"; {len(hit.members)} role line{'s' if plural else ''}"
     else:
         count = f"; {len(hit.members)} entr{'ies' if plural else 'y'} below it"
+    # A role finding named by its first role quotes the roles after it, so
+    # no entry is named twice; a lone role still quotes its own row. A lead
+    # line quotes its own row first, on purpose.
+    quoted = hit.members
+    if hit.shape == GROUP_SHAPE_ROLE_WITHOUT_HOLDER:
+        quoted = [member for member in hit.members if member[0] is not hit.subject] or quoted
     return (GROUP_HEADER_SEVERITY[hit.shape],
             f"entry {hit.subject.element_idx} ({hit.subject.code}): {hit.shape}: "
             f"{_GROUP_SHAPE_MESSAGES[hit.shape]}{count}",
             [f"entry {entry.element_idx} ({entry.code}): {shown}"
-             for entry, shown in hit.members[:GROUP_EVIDENCE_LIMIT]])
+             for entry, shown in quoted[:GROUP_EVIDENCE_LIMIT]])
 
 
 def _children_lost_header_hits(entries: list[_GroupEntry], rows: list[_RenderedRow],
@@ -3096,9 +3104,8 @@ def _children_lost_header_hits(entries: list[_GroupEntry], rows: list[_RenderedR
 def _role_without_holder_hits(entries: list[_GroupEntry], rows: list[_RenderedRow],
                                   reported: set[int]) -> list[_GroupHit]:
     """One finding per run of bare roles under a line of their heading,
-    named by the run's first role. Not by the line above: that line may be
-    a date alone or a sibling of the roles, not what they were held in
-    (RGUNJV 2987, DTFNOR 31)."""
+    named by the line above when it can hold them (a course, committee or
+    society line: RINASX 29 over 30-34), else by the run's first role."""
     hits = []
     taken: set[int] = set()
     above: _GroupEntry | None = None
@@ -3106,15 +3113,33 @@ def _role_without_holder_hits(entries: list[_GroupEntry], rows: list[_RenderedRo
     for index, entry in enumerate(entries):
         if not _is_bare_role(entry) or index in reported:
             if run:
-                hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, run[0][0], run))
+                hits.append(_role_run_hit(above, run))
             above, run = entry, []
             continue
         row = _bare_role_row(entry, rows, taken)
         if row is not None and above is not None and above.heading == entry.heading:
             run.append((entry, row.text))
     if run:
-        hits.append(_GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, run[0][0], run))
+        hits.append(_role_run_hit(above, run))
     return hits
+
+
+def _holds_roles(entry: _GroupEntry) -> bool:
+    """Whether a line can be what the bare roles under it were held in: it
+    names something besides its dates, holds no role of its own, and is no
+    dated committee line. A date-only line (RGUNJV 2987) or a sibling role
+    line (DTFNOR 31) cannot; a dated committee is a membership of its own,
+    and the offices after it may be its society's (DUTAVD 78, PFBSNH 82)."""
+    keys = entry.fields.keys()
+    return (bool(keys - _JUNK_DATE_FIELDS - _JUNK_OTHER_DATE_FIELDS - _GROUP_EXTRA_DATE_FIELDS)
+            and not keys & _GROUP_ROLE_FIELDS
+            and not (entry.dated and _GROUP_COMMITTEE_FIELD in keys))
+
+
+def _role_run_hit(above: _GroupEntry | None,
+                  run: list[tuple[_GroupEntry, str]]) -> _GroupHit:
+    subject = above if above is not None and _holds_roles(above) else run[0][0]
+    return _GroupHit(GROUP_SHAPE_ROLE_WITHOUT_HOLDER, subject, run)
 
 
 def _header_coded_unlike_list_hits(entries: list[_GroupEntry],
