@@ -4025,7 +4025,7 @@ def test_role_consistency_owner_also_co_i_needs_an_owner_surname():
 
 
 @pytest.mark.parametrize("title", [
-    "Example Center, Director Core B., Mentor Project IV",
+    "Example Program, Director Unit C, Mentor Track 2",
     "Example Center; Co-Investigator",
 ])
 def test_role_consistency_flags_a_role_held_in_the_title(title):
@@ -4034,7 +4034,7 @@ def test_role_consistency_flags_a_role_held_in_the_title(title):
 
 
 @pytest.mark.parametrize("title, fields", [
-    ("Example Center, Director Core B.", {"pi_role": "Director"}),        # a stated role
+    ("Example Program, Director Unit C", {"pi_role": "Director"}),        # a stated role
     ("Example Center (Pilot project: A study, PI Other)", {}),            # another's PI label
     ("Example Center, Investigator-Initiated Study", {}),
     ("Training Program for Clinical Investigators", {}),
@@ -4080,6 +4080,8 @@ def test_role_consistency_flags_an_owner_pi_cell_beside_a_role_that_is_not_the_p
     ("Co-I; Principle Investigator", "Ada Testowner"),
     ("Mentor", "Ada Testowner"),                    # not a co-/site-PI or a co-I
     ("Co-PI", "Ada Testowner, Other Person"),       # the cell names the other co-PI too
+    ("Co-PI", "Ada Testowner/Other Person"),        # slash-joined co-PIs
+    ("Co-PI", "Other Person / Ada Testowner"),
     ("Co-PI", "Other Person"),
     ("Co-PI", "Li J"),                              # no name word long enough to judge
 ])
@@ -4088,9 +4090,9 @@ def test_role_consistency_spares_an_owner_pi_cell_the_role_allows(role, pi_name)
 
 
 def test_role_consistency_flags_a_pi_cell_cut_from_the_title():
-    entry = _grant(396, "1997 Foundation, \u201cStress\u201d \u2013 Human and Animal Studies, PI",
-                   title="Stress \u2013 Human and Animal Studies", pi_role="PI")
-    table = _grant_table("PI", "Animal Studies", title="Stress \u2013 Human and Animal Studies")
+    entry = _grant(396, "2001 Example Fund, \u201cSleep\u201d \u2013 Mouse and Rat Trials, PI",
+                   title="Sleep \u2013 Mouse and Rat Trials", pi_role="PI")
+    table = _grant_table("PI", "Rat Trials", title="Sleep \u2013 Mouse and Rat Trials")
     assert _shapes(entry, table_rows=[table]) == [("pi_cell_from_title", "INFO")]
 
 
