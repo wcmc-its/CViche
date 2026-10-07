@@ -594,7 +594,7 @@ def role_for_membership(membership: MembershipResult) -> UserRole:
 def can_see_cost(user: User) -> bool:
     """Processing cost is admin-only (#1111). The UI hides it by role too; the
     API withholding it is what keeps it out of the network tab."""
-    return user.role == "admin"
+    return user.role == UserRole.ADMIN
 
 
 def visible_cost(user: User, cost: float | None) -> float | None:
@@ -603,7 +603,7 @@ def visible_cost(user: User, cost: float | None) -> float | None:
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
+    if user.role != UserRole.ADMIN:
         raise HTTPException(
             status_code=403,
             detail={"error": "forbidden", "message": "Admin access required."}

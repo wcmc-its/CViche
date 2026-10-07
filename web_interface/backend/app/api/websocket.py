@@ -8,16 +8,13 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 
 from app.auth import COOKIE_NAME, authenticate_session_cookie, can_see_cost
-from app.models import Run
+from app.models import Run, RunState
 from app.origins import origin_permitted
 from app.pipeline.event_emitter import event_emitter
 from app.services.run_service import check_run_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-# Terminal run statuses -> the live event the orchestrator emits for each.
-_TERMINAL_STATUSES = {"complete", "failed", "cancelled"}
 
 # Close codes. 1008/1013 are RFC 6455 codes; 4001/4003 are application-defined
 # (the 4000-4999 range) and are what the frontend's socket client already reads.
@@ -85,9 +82,9 @@ def _terminal_event_for_run(run: Run) -> dict | None:
     status poll. Shapes mirror EventEmitter.emit_run_complete / RUN_CANCELLED /
     emit_run_failed exactly so the frontend handles them with no special case.
     """
-    if run.status not in _TERMINAL_STATUSES:
+    if run.status not in Run.TERMINAL_RUN_STATUSES:
         return None
-    if run.status == "complete":
+    if run.status == RunState.COMPLETE:
         duration = None
         if run.started_at and run.completed_at:
             duration = int((run.completed_at - run.started_at).total_seconds())
@@ -97,7 +94,7 @@ def _terminal_event_for_run(run: Run) -> dict | None:
             "total_tokens": run.total_tokens or 0,
             "duration": duration,
         }
-    if run.status == "failed":
+    if run.status == RunState.FAILED:
         return {"event": "RUN_FAILED", "error": run.error_message, "step": None}
     return {"event": "RUN_CANCELLED"}
 

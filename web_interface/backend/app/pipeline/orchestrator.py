@@ -33,7 +33,7 @@ sys.path.insert(0, str(PARENT_DIR))
 sys.path.insert(0, str(PARENT_DIR / 'src'))
 
 from app.config_loader import get_config
-from app.models import Log, Run, Step
+from app.models import Log, Run, RunState, Step
 from app.pipeline.event_emitter import event_emitter
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
@@ -691,7 +691,7 @@ class PipelineOrchestrator:
         self._stage_guard.raise_if_stopped()  # stage 2's intra-stage callback (#590)
         with self.db.get_bind().connect() as conn:
             status = conn.execute(select(Run.status).where(Run.id == self.run_id)).scalar()
-        if status == "cancelled" or is_cancelled(self.run_id):
+        if status == RunState.CANCELLED or is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
     def _pipeline_input_path(self) -> Path:
@@ -996,11 +996,11 @@ class PipelineOrchestrator:
             # worker's in-process flag. Either way we must not flip it back to
             # "complete".
             self.db.refresh(run)
-            if run.status == "cancelled" or is_cancelled(self.run_id):
+            if run.status == RunState.CANCELLED or is_cancelled(self.run_id):
                 raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
             duration = int(_now() - start_time)
-            run.status = "complete"
+            run.status = RunState.COMPLETE
             run.completed_at = datetime.now()
             # Persist the authoritative pipeline duration (previously only emitted
             # over the WebSocket) so historical conversion-time metrics are queryable.
@@ -1061,7 +1061,7 @@ class PipelineOrchestrator:
                 await self._notify_batch_complete(run)
 
         except Exception as e:
-            run.status = "failed"
+            run.status = RunState.FAILED
             run.error_message = user_facing_error(
                 e, resuming=start_step_number is not None
             )
@@ -1113,10 +1113,10 @@ class PipelineOrchestrator:
         here: the drain fails that row instead.
         """
         updated = self.db.query(Run).filter(
-            Run.id == self.run_id, Run.status == "running"
+            Run.id == self.run_id, Run.status == RunState.RUNNING
         ).update(
             {
-                "status": "cancelled",
+                "status": RunState.CANCELLED,
                 "error_message": USER_CANCEL_MESSAGE,
                 "completed_at": datetime.now(),
             },

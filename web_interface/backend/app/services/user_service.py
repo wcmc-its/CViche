@@ -2,7 +2,7 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import User
+from app.models import User, UserRole
 
 
 def normalize_email(email: str | None) -> str | None:
@@ -82,7 +82,7 @@ def provision_user(
         cwid=cwid,
         email=email,
         display_name=display_name,
-        role=role or "user",
+        role=role or UserRole.USER,
         auth_method=auth_method,
         department=department,
     )

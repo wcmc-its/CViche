@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Feedback, Run, Step, User
+from app.models import Feedback, Run, RunState, Step, User
 from app.schemas import (
     FeedbackDetail,
     FeedbackResponse,
@@ -378,7 +378,7 @@ async def get_feedback_status(
     # Get all completed runs for this user
     completed_runs = (
         db.query(Run.id)
-        .filter(Run.user_id == current_user.id, Run.status == "complete")
+        .filter(Run.user_id == current_user.id, Run.status == RunState.COMPLETE)
         .all()
     )
     completed_run_ids = [r.id for r in completed_runs]
