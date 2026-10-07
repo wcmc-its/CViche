@@ -98,6 +98,17 @@ from ..sorting import sort_entries_reverse_chronological
 logger = logging.getLogger(__name__)
 
 
+# A source list number at the start of a line ("8. ", "12) ", "(3) "): list
+# furniture the CV numbered its own items with, not content. The WCM bullet
+# is the item marker, so L1's bullet fallback drops it (#1434, VXHPXT 467).
+_LEADING_LIST_NUMBER_RE = re.compile(r'^[ \t]*(?:\(\d{1,3}\)|\d{1,3}[.)])[ \t]+', re.MULTILINE)
+
+
+def _without_list_numbers(text: str) -> str:
+    """`text` with the list number removed from the start of every line."""
+    return _LEADING_LIST_NUMBER_RE.sub('', text)
+
+
 # List levels for a multi-part entry (#984): the first part is the entry's
 # title bullet, every later part (hours, dates, volume) is a sub-bullet under
 # it. Same scheme as `_insert_overflow_bullet`'s title / context split.
@@ -431,8 +442,9 @@ class ClinicalPracticeSection:
                     # later tab into a bare space -- so a three-part row
                     # rendered as ONE bullet with parts two and three run
                     # together, and the fragment split below never fired at all
-                    # on this path.
-                    bullet_text = original_text
+                    # on this path. Only the source's own list number goes
+                    # (#1434): the bullet is the item marker.
+                    bullet_text = _without_list_numbers(original_text)
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
@@ -635,6 +647,10 @@ class ClinicalPracticeSection:
                         bullet_text = f"{role}, {institution}, {dates}"
                     elif role and dates:
                         bullet_text = f"{role}, {dates}"
+                    elif role and institution:
+                        # Without dates the institution is what tells two
+                        # rows with the same role apart (#1434, UXBHHF 79/84).
+                        bullet_text = f"{role}, {institution}"
                     elif role:
                         bullet_text = role
                     else:

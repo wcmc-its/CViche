@@ -63,6 +63,7 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     N2_INSTRUCTION,
     MenteeRecord,
     _looks_like_training_grant_table,
+    _outcome_line_from_fields,
     _program_leadership_line,
     _training_grant_is_sparse,
     _training_grant_rows,
@@ -388,6 +389,80 @@ def test_mentoring_real_template_body_order():
     assert len(gen.doc.tables) == template_tables - 3 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
+
+
+# --- N4: a scrambled outcome row renders from its fields (#1434) ---------------
+
+# A wrapped four-column outcome row (date | award | project | mentee) the way
+# stage 2 flattens it: each cell's lines interleaved. Synthetic values.
+_SCRAMBLED_OUTCOME_TEXT = ("2021 Kestrel Travel Spray drying of Jane Roe\t"
+                           "Award protein\tformulations")
+_OUTCOME_FIELDS = {'output_type': 'Kestrel Travel Award', 'mentee_name': 'Jane Roe',
+                   'title': 'Spray drying of protein formulations', 'date': '2021'}
+_OUTCOME_LINE = "2021 — Kestrel Travel Award — Spray drying of protein formulations — Jane Roe"
+
+
+def _n4(text: str, **fields) -> dict:
+    return {'taxonomy_code': 'N4', 'text': text, 'extracted_fields': fields}
+
+
+def test_outcome_line_rebuilds_a_scrambled_row_from_its_fields():
+    assert _outcome_line_from_fields(_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS)) == _OUTCOME_LINE
+
+
+def test_outcome_line_reads_start_and_end_dates_when_there_is_no_date():
+    fields = {**_OUTCOME_FIELDS, 'date': None, 'start_date': '2016', 'end_date': '2019'}
+    text = "2016 - Kestrel Travel Spray drying of Jane Roe\t2019 Award protein\tformulations"
+    assert _outcome_line_from_fields(_n4(text, **fields)) == (
+        "2016-2019 — Kestrel Travel Award — Spray drying of protein formulations — Jane Roe")
+
+
+def test_outcome_line_keeps_the_text_when_the_fields_lost_a_word():
+    """A partial extraction: the source says "Graduate", no field does."""
+    text = _SCRAMBLED_OUTCOME_TEXT.replace('Kestrel', 'Kestrel Graduate')
+    assert _outcome_line_from_fields(_n4(text, **_OUTCOME_FIELDS)) is None
+
+
+def test_outcome_line_keeps_the_text_when_a_field_adds_a_word():
+    """A normalised value says something the source does not ("07")."""
+    fields = {**_OUTCOME_FIELDS, 'date': '2021-07'}
+    assert _outcome_line_from_fields(_n4(_SCRAMBLED_OUTCOME_TEXT, **fields)) is None
+
+
+def test_outcome_line_keeps_the_text_when_a_field_is_a_placeholder():
+    fields = {**_OUTCOME_FIELDS, 'title': 'Not specified'}
+    assert _outcome_line_from_fields(_n4(_SCRAMBLED_OUTCOME_TEXT, **fields)) is None
+
+
+def test_outcome_line_leaves_a_row_that_already_reads_in_order():
+    text = "2021\tKestrel Travel Award\tSpray drying of protein formulations\tJane Roe"
+    assert _outcome_line_from_fields(_n4(text, **_OUTCOME_FIELDS)) is None
+
+
+@pytest.mark.parametrize('missing,text', [
+    ('output_type', "2021 Spray drying of Jane Roe\tprotein\tformulations"),
+    ('mentee_name', "2021 Kestrel Travel Spray drying of\tAward protein\tformulations"),
+])
+def test_outcome_line_needs_an_output_and_a_mentee(missing, text):
+    """Even when the remaining fields say exactly what the text says: a row
+    with no outcome or no mentee is not the outcome-table shape."""
+    fields = {**_OUTCOME_FIELDS, missing: ''}
+    assert _outcome_line_from_fields(_n4(text, **fields)) is None
+
+
+def test_outcome_line_is_only_for_outcomes():
+    entry = {**_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS), 'taxonomy_code': 'N3A'}
+    assert _outcome_line_from_fields(entry) is None
+
+
+def test_mentoring_real_template_renders_a_scrambled_outcome_from_its_fields():
+    """End to end: the scrambled row lands under MENTORING as the field line;
+    a narrative outcome beside it is still written verbatim."""
+    gen = _template_generator()
+    gen._fill_mentoring({'N4': [_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS),
+                                _n4('One mentee now leads a lab.')]})
+    assert _body_after(gen.doc, "MENTORING", 2) == [
+        ('p', _OUTCOME_LINE), ('p', 'One mentee now leads a lab.')]
 
 
 # --- N1/N2: pure builders (#529) -------------------------------------------------

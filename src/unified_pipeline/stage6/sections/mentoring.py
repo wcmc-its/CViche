@@ -369,6 +369,73 @@ def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
         part for part in (role, program_name, institution, date_range) if part)
 
 
+# An N4 outcome line rebuilt from its stage-4 fields, in the source table's
+# column order (date, outcome, project, mentee) and joined the way
+# `_clean_inline_tabs` joins a table row's cells (#1434).
+_OUTCOME_PART_SEPARATOR = ' — '
+_OUTCOME_REQUIRED_FIELDS = ('output_type', 'mentee_name')
+_OUTCOME_TITLE_FIELD = 'title'
+_OUTCOME_DATE_FIELD = 'date'
+_OUTCOME_CODE = 'N4'
+
+# A content word for comparing an outcome line with its fields: a run of
+# letters or digits, case-folded, so punctuation and the separators the
+# reader or this module adds never count as a difference.
+_OUTCOME_WORD_RE = re.compile(r'[^\W_]+', re.UNICODE)
+
+
+def _outcome_words(text: str) -> list[str]:
+    """`text` reduced to its case-folded content words, in order."""
+    return _OUTCOME_WORD_RE.findall(str(text or '').casefold())
+
+
+def _is_contiguous_in(words: Sequence[str], source: Sequence[str]) -> bool:
+    """True when `words` occurs in `source` as one unbroken run."""
+    span = len(words)
+    return any(source[i:i + span] == words for i in range(len(source) - span + 1))
+
+
+def _outcome_date(fields: Mapping[str, Any]) -> str:
+    """The outcome's date as stage 4 wrote it, or its start/end range."""
+    date = _plain_text(fields.get(_OUTCOME_DATE_FIELD))
+    if date:
+        return date
+    start = _plain_text(fields.get('start_date'))
+    end = _plain_text(fields.get('end_date'))
+    return format_date_range(start, end, _OUTCOME_CODE) if (start or end) else ''
+
+
+def _outcome_line_from_fields(entry: Mapping[str, Any]) -> str | None:
+    """The N4 line rebuilt from stage-4 fields, or None to render the text.
+
+    A source table whose cells wrap over several lines reaches stage 2 with
+    the cells' lines interleaved ("2021 Travel Award Spray drying of Jane Roe
+    <TAB>Grant protein<TAB>formulations"), and the verbatim text reads as
+    word salad, while stage 4 untangled the columns correctly (#1434). The
+    fields replace the text only when they say EXACTLY what the text says --
+    the same content words, the same number of times -- and at least one
+    field's words are scattered in the text rather than in one run. So a
+    partial extraction (a word the fields lost), a placeholder ("Not
+    specified") or a normalised value (a date rewritten) keeps the text, and
+    a line that already reads in order is left as written.
+    """
+    if not _is_mentoring_outcome(entry):
+        return None
+    fields = entry.get('extracted_fields') or {}
+    output_type, mentee = (_plain_text(fields.get(key)) for key in _OUTCOME_REQUIRED_FIELDS)
+    if not (output_type and mentee):
+        return None
+    parts = [part for part in (_outcome_date(fields), output_type,
+                               _plain_text(fields.get(_OUTCOME_TITLE_FIELD)), mentee)
+             if part]
+    source = _outcome_words(entry.get('text') or '')
+    if sorted(_outcome_words(' '.join(parts))) != sorted(source):
+        return None
+    if all(_is_contiguous_in(_outcome_words(part), source) for part in parts):
+        return None
+    return _OUTCOME_PART_SEPARATOR.join(parts)
+
+
 def _partition_mentoring_entries(
     entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
@@ -909,10 +976,12 @@ class MentoringSection:
 
         Reversed so that, with each insert landing immediately after the anchor
         and pushing the previous one down, the final document order matches
-        ``entries``.
+        ``entries``. An N4 line whose text is a scrambled table row renders
+        from its fields instead (`_outcome_line_from_fields`, #1434).
         """
         for entry in reversed(entries):
-            text = _clean_inline_tabs((entry.get('text') or '').strip())
+            source = _outcome_line_from_fields(entry) or (entry.get('text') or '').strip()
+            text = _clean_inline_tabs(source)
             if text:
                 self._insert_mentoring_line(text, anchor, entry)
 
