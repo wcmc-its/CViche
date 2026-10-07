@@ -125,6 +125,9 @@ _NEVER = {A: ALLOWED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
 #: A dash family label with no `Family` label ahead of it (#1223): withheld in
 #: the Personal Data block only.
 _DASH_PERSONAL_DATA_ONLY = {A: DENIED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
+#: A row withheld only in the Personal Data block (an A-coded entry) -- #1391's
+#: bare marital status word.
+_PERSONAL_DATA_BLOCK_ONLY = _DASH_PERSONAL_DATA_ONLY
 
 PROBE_TABLE = [
     # --- #820's 16 DOB shapes ------------------------------------------
@@ -287,6 +290,47 @@ PROBE_TABLE = [
     ("EIN Number\t12-345-6789", CAT_TAX_ID, _ALL),
     ("NPI: 1234567890", None, _NEVER),
     ("ORCID: 0000-0002-1234-5678", None, _NEVER),
+    # #1391: plural spouse words and the unambiguous partner labels, at the
+    # spouse row's own (every-code) scope.
+    ("Husbands: Pat Example", CAT_SPOUSE, _ALL),
+    ("Wives: Pat Example", CAT_SPOUSE, _ALL),
+    ("Spouses: Pat Example", CAT_SPOUSE, _ALL),
+    ("Domestic Partner: Pat Example", CAT_SPOUSE, _ALL),
+    ("Life partner: Pat Example", CAT_SPOUSE, _ALL),
+    ("Spouse/Partner: Pat Example", CAT_SPOUSE, _ALL),
+    ("Spouse or Partner: Pat Example", CAT_SPOUSE, _ALL),
+    ("Significant other: Pat Example", CAT_SPOUSE, _ALL),
+    ("Fianc\u00e9: Pat Example", CAT_SPOUSE, _ALL),
+    ("Fianc\u00e9e: Pat Example", CAT_SPOUSE, _ALL),
+    ("Husbands - Pat Example", CAT_SPOUSE, _DASH_PERSONAL_DATA_ONLY),
+    # ...a bare "Partner" only before a person's name, Personal Data and Appendix.
+    ("Partner: Pat Example", CAT_SPOUSE, _PERSONAL_ONLY),
+    ("Partner - Pat and Lee Example", CAT_SPOUSE, _PERSONAL_ONLY),
+    # ...the singular "Child:" and "Kids:", wherever "Children:" opens a label.
+    ("Child: Ann", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Kids: Ann and Bob", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Child's name: Ann", CAT_CHILDREN, _PERSONAL_ONLY),
+    # ...a bare marital status word, a whole line or cell of the Personal Data block.
+    ("Divorced", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    ("Widowed", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    ("Separated", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    ("Single.", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    ("\u2022 Married", CAT_MARITAL_STATUS, _PERSONAL_DATA_BLOCK_ONLY),
+    # ...and the dash "Family" label in the Appendix when it names a member.
+    ("Family - Pat (wife), Ann (daughter)", CAT_FAMILY, _PERSONAL_ONLY),
+    ("Family \u2013 wife Pat, two sons", CAT_FAMILY, _PERSONAL_ONLY),
+    # #1391's negative controls: employment, funding and title text.
+    ("Industry partner: Example Pharma", None, _NEVER),
+    ("Partner: Example Pharma", None, _NEVER),
+    ("Partner: Example University", None, _NEVER),
+    ("Partner, Example & Co.", None, _NEVER),
+    ("Partner: The Role of Industry", None, _NEVER),
+    ("Partners: Example Example", None, _NEVER),
+    ("Divorced families and child outcomes", None, _NEVER),
+    ("Single-cell sequencing", None, _NEVER),
+    ("Single cell sequencing", None, _NEVER),
+    ("Spouse Pat Example", None, _NEVER),
+    ("Child: Care, Health and Development", None, _NEVER),
 ]
 
 
@@ -2508,3 +2552,42 @@ def test_1223_ndmrso_the_child_count_row_does_not_backtrack_into_a_long_space_ru
     start = time.perf_counter()
     _pii_matches("Status;" + " " * 16000 + "x")
     assert time.perf_counter() - start < 1.0
+
+
+# --------------------------------------------------------------------------
+# #1391: family and marital label variants
+# --------------------------------------------------------------------------
+
+def test_1391_a_status_word_in_the_cell_after_its_label_is_one_withheld_item():
+    """The status word is the label's value, not a second item: the label's
+    span is widened over it, and the notice counts one marital status."""
+    residual, withheld = _withheld_residual("Marital Status:\tDivorced\tCitizenship: US", code=A)
+    assert "Divorced" not in residual
+    assert "Citizenship: US" in residual
+    assert [item.category for item in withheld] == [CAT_MARITAL_STATUS]
+
+
+def test_1391_a_status_word_in_its_own_cell_of_the_personal_data_block_is_cut_alone():
+    residual, withheld = _withheld_residual("Name: Pat Example\tSingle\tCitizenship: US", code=A)
+    assert residual.split() == ["Name:", "Pat", "Example", "Citizenship:", "US"]
+    assert [item.category for item in withheld] == [CAT_MARITAL_STATUS]
+
+
+def test_1391_a_dash_family_label_naming_a_member_opens_a_family_block_in_the_appendix():
+    text = "Family - Pat (wife)\n     Children - Ann (2001), Bob (2003)\n\nTravel: Example Country"
+    residual, withheld = _withheld_residual(text, code=APPENDIX)
+    assert "Pat" not in residual and "Ann" not in residual and "Bob" not in residual
+    assert "Travel: Example Country" in residual
+    assert [item.category for item in withheld] == [CAT_FAMILY, CAT_CHILDREN]
+
+
+def test_1391_a_dash_family_title_opens_no_block_in_the_appendix():
+    """No member named after the dash label: a title, and the dash child label
+    under it is a title too."""
+    text = "Family- wise error rate in gene association studies\nChildren - A Review"
+    assert _pii_matches(text) == []
+
+
+def test_1391_the_bare_partner_and_status_rows_stay_out_of_the_pre_llm_scrub():
+    for text in ("Partner: Pat Example", "Divorced", "Family - Pat (wife)"):
+        assert redact_pre_llm_values(text) == text

@@ -337,6 +337,69 @@ _FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
     (CAT_CHILDREN, _GRANDCHILDREN_STEM),
 )
 
+# #1391: the spouse words a spouse label opens on. Plurals ("Husbands:",
+# "Wives:") and the partner labels that name nothing but a person ("Domestic
+# partner:", "Life partner:", "Significant other:", "Fiancée:"), with an
+# optional "/partner" or "or partner" ("Spouse/Partner:"). A bare "partner" is
+# not here: "Industry partner:" and "Partner: <firm>" are employment and
+# funding text (`_BARE_PARTNER_SHAPE`).
+_SPOUSE_WORD = r"""(?: spouses? | wife | wives | husbands?
+    | (?: domestic | life ) \s* partner | significant \s+ other | fianc[eé]e? )
+    (?: \s* / \s* partner | \s+ or \s+ partner )?"""
+
+#: #1391: a person's name, as the doctor lint reads one
+#: (`doctor/lints/protected_data.py` `_NAME`): a capitalised word of two or
+#: more letters that is not a title's function word. Case-sensitive inside the
+#: policy's case-insensitive patterns.
+_PERSON_NAME_TOKEN = (r"(?-i: (?! (?: The | An | And | Of | In | On | For | With | From | To | At | By ) \b )"
+                      r" [A-Z] [a-z] [\w'’.-]* )")
+#: Up to five names in a row ("Pat Example", "Pat and Lee Example").
+_PERSON_NAME_MAX_EXTRA_TOKENS = 4
+_PERSON_NAME_RUN = (_PERSON_NAME_TOKEN + r"(?: [ \t]* ,? [ \t]+ (?: and [ \t]+ )? "
+                    + _PERSON_NAME_TOKEN + r"){0,%d}" % _PERSON_NAME_MAX_EXTRA_TOKENS)
+#: Words that make a capitalised run a firm or an institution, not a person
+#: ("Partner: Example Pharma", "Partner: Example University").
+_ORGANISATION_WORD = r"""(?: inc | llc | llp | ltd | co | corp | corporation | company | group
+    | partners | associates | pharma\w* | therapeutics | biotech\w* | labs? | laborator\w+
+    | university | college | institute | hospital | cent(?: er | re ) | foundation | health\w*
+    | medical | medicine | clinic | sciences? | systems | technolog\w+ | solutions | consulting
+    | capital | ventures | fund | network | alliance | council | society | association
+    | department | school | program | project | trust )"""
+#: What ends a whole-fragment value: optional blanks or a full stop, then a hard
+#: delimiter (`_PII_FRAGMENT_SPLIT_RE`) or the end of the text.
+_FRAGMENT_END_AHEAD = r"(?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )"
+#: #1391: "Partner: <name>" -- a bare partner label counts only when its value
+#: is the whole fragment and a person's name (`_PERSON_NAME_RUN`) with no
+#: organisation word in it. Fragment-initial (`anchored`), so "Industry
+#: partner: <name>" opens nothing.
+_BARE_PARTNER_SHAPE = (
+    _STEM_GUARD + r"partner [ \t]* (?: : | [-–—] (?= [ \t] ) ) [ \t]*"
+    + r"(?! [^\n\t|;]*? (?<! [\w-] ) " + _ORGANISATION_WORD + r" (?! [\w-] ) )"
+    + _PERSON_NAME_RUN + _FRAGMENT_END_AHEAD
+)
+
+#: #1391: a marital status word that is a whole line or cell of the Personal
+#: Data block ("Divorced", "• Single."). Personal Data only: elsewhere a line
+#: that is just "Single" or "Married" carries no label to say it is a status.
+_MARITAL_STATUS_WORDS = r"(?: divorced | widowed | separated | single | married )"
+_BARE_MARITAL_STATUS_RE = re.compile(
+    r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ \t]*+ (?: [•·*–—-] [ \t]* )?"
+    + _STEM_GUARD + _MARITAL_STATUS_WORDS + r" (?! [\w-] ) [ \t.]*" + _FRAGMENT_END_AHEAD,
+    re.X | re.I)
+
+#: #1391: what makes a dash "Family" label in the Appendix a family block
+#: rather than a title ("Family- wise error rate ..."): a relation word in
+#: parentheses ("Pat (wife)"), a relation word before a name ("wife Pat"),
+#: "married to", or a child count ("two sons").
+_RELATION_WORD = (r"(?: wife | husband | spouse | partner | sons? | daughters? | child (?: ren )?"
+                  r" | kids? | (?: great \s* [-–—]? \s* )* grand \s* children )")
+_FAMILY_MEMBER_VALUE_RE = re.compile(
+    r"\( [ \t]* " + _RELATION_WORD + r" [ \t]* \)"
+    r"| (?<! [\w-] ) " + _RELATION_WORD + r" [ \t]+ " + _PERSON_NAME_TOKEN
+    + r"| (?<! [\w-] ) married [ \t]+ to (?! [\w-] )"
+    r"| (?<! [\w-] ) " + _CHILD_COUNT + r" [ \t]+ " + _CHILD_NOUN + r" (?! [\w-] )",
+    re.X | re.I)
+
 
 # NDMRSO ND1: an ID number an institution or the tax authority gives the owner
 # ("<institution> ID #: <number>", "EIN Number<tab><number>"). A qualifying
@@ -447,9 +510,11 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # #1103: "Name of Spouse & Children:" opened with "Name of" and joined
     # the children onto the spouse, so neither label matched and the family's
     # names and birth years rendered in the Appendix.
+    # #1391: plural spouse words and the unambiguous partner labels
+    # (`_SPOUSE_WORD`).
     WithholdRule(CAT_SPOUSE, SCOPE_ALL_CODES, DECIDED_820, label=r"""
         (?: names? \s+ of \s+ )?
-        (?: spouse | wife | husband ) (?: [’'] s )? (?: \s* name )?
+        """ + _SPOUSE_WORD + r""" (?: [’'] s )? (?: \s* name )?
         (?: \s* (?: & | and | / | , ) \s* (?: children | child | kids | dependents? ) )?
     """),
     # "Married to <name>" carries no colon and no shaped value -- the phrase
@@ -469,8 +534,13 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"salary | honorarium"),
     # --- ambiguous as a title word: A-coded and Appendix-bound only ---------
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"born"),
+    # #1391: the singular "Child:" and "Kids:" open the same label -- never
+    # the journal title "Child: Care, Health and Development".
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 label=r"(?: names? \s+ of \s+ )? (?: children (?: [’'] s \s* names? )? | dependents? )"),
+                 label=r"""(?: names? \s+ of \s+ )?
+                     (?: children (?: [’'] s \s* names? )?
+                       | child (?! \s* : \s* care \b ) (?: [’'] s \s* names? )?
+                       | kids | dependents? )"""),
     # #1041: a bare child count that is its OWN fragment ("Marital Status:
     # <status>; <n> Children" -- the `;` hard split leaves it behind the
     # marital-status cut, and it rendered in the Appendix). The count must
@@ -504,6 +574,9 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_STEM_GUARD + _GRANDCHILDREN_STEM + r" \s* :", anchored=True,
                  render_only=True),
+    # #1391: "Partner: <person's name>" (see `_BARE_PARTNER_SHAPE`).
+    WithholdRule(CAT_SPOUSE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_BARE_PARTNER_SHAPE, anchored=True, render_only=True),
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
     # #1223: "Family Information:" and "Family Data:" open a family block too.
     # Render-time only, like the shape rows above: this row's span runs to the
@@ -936,12 +1009,26 @@ _FAMILY_LABEL_RE = re.compile("|".join(
 _PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n")
 
 
+def _valued_family_dash_starts(text: str) -> list[int]:
+    """#1391: where a dash `Family` label opens a family block on its own
+    ("Family - Pat (wife), Ann (daughter)"): its fragment names a family
+    member (`_FAMILY_MEMBER_VALUE_RE`). A dash `Family` label with no such
+    value ("Family- wise error rate ...") is a title and opens nothing."""
+    return [start
+            for category, pattern in _FAMILY_DASH_PATTERNS if category == CAT_FAMILY
+            for start, end in _label_spans(text, pattern, category)
+            if _FAMILY_MEMBER_VALUE_RE.search(text, start, end)]
+
+
 def _family_dash_matches(text: str, *, personal_data: bool) -> list[PiiMatch]:
     """Every dash-labelled children/spouse/family fragment of `text` that is
     family data: all of them in an A-coded entry's text (`personal_data`),
-    otherwise those whose paragraph, ahead of them, holds a `Family` label
-    (`_FAMILY_DASH_PATTERNS`)."""
-    family_starts = [start for start, _ in _label_spans(text, _FAMILY_LABEL_RE, CAT_FAMILY)]
+    otherwise those whose paragraph, at or ahead of them, holds a `Family`
+    label -- a colon one, or a dash one that names a family member
+    (`_valued_family_dash_starts`)."""
+    family_starts = sorted(
+        [start for start, _ in _label_spans(text, _FAMILY_LABEL_RE, CAT_FAMILY)]
+        + _valued_family_dash_starts(text))
     if not family_starts and not personal_data:
         return []
     block_starts = [0] + [brk.end() for brk in _PARAGRAPH_BREAK_RE.finditer(text)]
@@ -950,9 +1037,31 @@ def _family_dash_matches(text: str, *, personal_data: bool) -> list[PiiMatch]:
         for start, end in _label_spans(text, pattern, category):
             block_start = block_starts[bisect.bisect_right(block_starts, start) - 1]
             first = bisect.bisect_left(family_starts, block_start)
-            if personal_data or (first < len(family_starts) and family_starts[first] < start):
+            if personal_data or (first < len(family_starts) and family_starts[first] <= start):
                 found.append(PiiMatch(start, end, category))
     return found
+
+
+#: Only blanks and cell delimiters on one line: the gap between a label's span
+#: and the cell that holds its value.
+_SAME_LINE_CELL_GAP_RE = re.compile(r"[ \t|;]*")
+
+
+def _with_bare_marital_status(text: str, matches: list[PiiMatch]) -> list[PiiMatch]:
+    """#1391: `matches` (merged, in order) plus every whole-cell marital status
+    word of a Personal Data block's `text` (`_BARE_MARITAL_STATUS_RE`). A word
+    in the cell right after another span on the same line is that span's value
+    ("Marital Status:<tab>Divorced"), so the span is widened over it instead of
+    being counted as a second withheld item."""
+    result = list(matches)
+    for status in _BARE_MARITAL_STATUS_RE.finditer(text):
+        before = [i for i, m in enumerate(result) if m.end <= status.start()]
+        prev = before[-1] if before else None
+        if prev is not None and _SAME_LINE_CELL_GAP_RE.fullmatch(text, result[prev].end, status.start()):
+            result[prev] = result[prev]._replace(end=status.end())
+        else:
+            result.append(PiiMatch(status.start(), status.end(), CAT_MARITAL_STATUS))
+    return _merge_matches(result)
 
 
 def _merge_matches(spans: list[PiiMatch]) -> list[PiiMatch]:
@@ -981,7 +1090,8 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
     value scrub sees exactly the spans it saw before #1223. `personal_data`
     says `text` is the Personal Data block's (an A-coded entry's), where a
     dash family label needs no `Family` label ahead of it
-    (`_family_dash_matches`)."""
+    (`_family_dash_matches`) and a whole-cell marital status word is
+    withheld (`_with_bare_marital_status`, #1391)."""
     text = str(text or "")
     if not text:
         return []
@@ -997,6 +1107,8 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
                          for m in pattern.finditer(text))
     if scope == SCOPE_PERSONAL_AND_APPENDIX and not for_pre_llm_scrub:
         found.extend(_family_dash_matches(text, personal_data=personal_data))
+        if personal_data:
+            return _with_bare_marital_status(text, _merge_matches(found))
     return _merge_matches(found)
 
 
