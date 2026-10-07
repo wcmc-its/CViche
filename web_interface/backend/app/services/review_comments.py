@@ -9,7 +9,6 @@ the Appendix entries came from goes in stage 6's own Appendix note box. The
 clean document is left as it is; this writes a copy beside it.
 """
 import copy
-import logging
 import re
 import zipfile
 from dataclasses import dataclass
@@ -111,6 +110,14 @@ REVIEW_FLAGS = {
     "orphaned_fragments": "Text from the original CV may be missing from this entry.",
     "stage4_unplaced_items": "Records from the original CV are missing from this section.",
 }
+#: Review-notes group titles where the run page's title is internal wording.
+NOTE_TITLES = {"output_hygiene": "Stray text to delete"}
+PROTECTED_DATA_LINT = "protected_data_in_output"
+#: protected_data_in_output names a category and a section, never the value:
+#: "protected personal data (children / dependents) found in Appendix -- value withheld ...".
+#: Also "a bare date found in the Personal Data block".
+_PROTECTED_WHERE_RE = re.compile(r"(?:\((?P<category>[^)]+)\)|(?P<bare>a bare date)) found in "
+                                 r"(?:the )?(?P<section>.+?)(?: block)?(?:\s+--|$)")
 #: The lint stage 6's Appendix diversions arrive under (lint_stage6_warnings).
 DIVERSION_LINT = "stage6_render_warnings"
 #: Lints whose every quoted item is its own problem, each flagged where it is.
@@ -133,7 +140,6 @@ _DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|r
 #: CViche's voice to the submitter: a one-cell light-gray table, in Arial,
 #: titled "CViche ..." (the stage-6 Appendix note and the review notes).
 REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
-APPENDIX_NOTE_TITLE = "CViche note"
 NOTES_FONT = "Arial"
 BOX_FILL = "E7E6E6"  # stage6/formatting/docx.py CVICHE_BOX_* (#1552)
 BOX_BORDER = "808080"
@@ -144,11 +150,6 @@ KEPT_INDENT = 0.5
 DEDUP_TITLE = "Removed as near-duplicates"
 DEDUP_INSTRUCTION = ("We kept one copy of each. If any of these is a separate entry, "
                      "add it back in the section shown.")
-#: The count stage 6's Appendix note states: "These 6 entries ..." or "This entry ...".
-_NOTE_COUNT_RE = re.compile(r"^(?:These (?P<count>\d+) entries|This entry)\b")
-CAME_FROM_GROUPING = "Each entry is grouped under the heading it had in your original CV."
-MOVED_TITLE = "Moved to the Appendix"
-MOVED_INSTRUCTION = "Move each Appendix entry to the right section or delete it."
 
 #: Squashed characters of a quote matched against the output. Long enough that
 #: a hit is that passage, short enough to survive the doctor's own cuts.
@@ -171,7 +172,6 @@ _TOP_LEVEL_HEADINGS = {
     "J": "PERCENT EFFORT", "T": "APPENDIX",
 }
 _APPENDIX_CODE = "T"
-logger = logging.getLogger(__name__)
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 _QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
 
@@ -311,33 +311,22 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> 
     heading = _heading(_CODE_BY_LABEL.get(inst.section or "", ""), surfaces[0])
     if heading is not None:
         return [Flag(heading, None, label)], []
+    item = _note_item(lint, inst)
+    if item is None:  # nothing to point the submitter at: it stays on the run page
+        return [], []
     copy_ = LINT_COPY.get(lint)
+    title = NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
+    return [], [Note(title, label, item)]
+
+
+def _note_item(lint: str, inst: DoctorFindingInstance) -> str | None:
+    """What a review note points at: its section and quoted text; for
+    protected data, its section and category (the finding never quotes the value)."""
+    if lint == PROTECTED_DATA_LINT:
+        m = _PROTECTED_WHERE_RE.search(inst.detail)
+        return f"{m['section']}: {m['category'] or m['bare']}" if m else None
     quote = f'"{inst.quotes[0]}"' if inst.quotes else None
-    item = ": ".join(x for x in (inst.section, quote) if x) or None
-    return [], [Note(copy_.title if copy_ else lint, label, item)]
-
-
-def _came_from(diverted: list[DoctorFindingInstance]) -> tuple[str, int]:
-    """Where stage 6's Appendix entries came from, from its diversion warnings,
-    which name a count and never the lines (by design: appendix.py
-    AppendixDiversionWarning); and how many that adds up to."""
-    came_from: dict[str, int] = {}
-    for inst in diverted:
-        m = _DIVERTED_RE.search(inst.detail)
-        where = inst.section if inst.section and inst.section != TAXONOMY_LABELS[_APPENDIX_CODE] else ""
-        came_from[where] = came_from.get(where, 0) + (int(m["count"]) if m else 1)
-    text = ", ".join(f"{n} from {where}" if where else f"{n} not under any section"
-                     for where, n in came_from.items())
-    return text, sum(came_from.values())
-
-
-def _appendix_note_cell(doc: Document) -> _Cell | None:
-    """The cell of stage 6's Appendix note box, when the document has one."""
-    for table in doc.tables:
-        cell = table.cell(0, 0)
-        if cell.paragraphs and cell.paragraphs[0].text.startswith(APPENDIX_NOTE_TITLE):
-            return cell
-    return None
+    return ": ".join(x for x in (inst.section, quote) if x) or None
 
 
 def _box(doc: Document, title: str) -> _Cell:
@@ -420,37 +409,19 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
                 _box_line(cell.add_paragraph(), f"Kept: {note.kept}", indent=KEPT_INDENT)
 
 
-def _add_came_from(doc: Document, came_from: str, total: int) -> bool:
-    """Say where the Appendix entries came from inside stage 6's Appendix note
-    box; False when the document has none (rendered before that box existed).
-    Says nothing when the breakdown does not add up to the box's own count:
-    two numbers that disagree are worse than one."""
-    cell = _appendix_note_cell(doc)
-    if cell is None:
-        return False
-    m = _NOTE_COUNT_RE.match(cell.paragraphs[1].text if len(cell.paragraphs) > 1 else "")
-    shown = (int(m["count"]) if m["count"] else 1) if m else None
-    if shown != total:
-        logger.warning("Appendix note counts %s entries but the diversions add up to %d; "
-                       "leaving out where they came from", shown, total)
-        return True
-    _box_line(cell.add_paragraph(), f"Where they came from: {came_from}.")
-    _box_line(cell.add_paragraph(), CAME_FROM_GROUPING)
-    return True
-
-
 def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, int] | None:
     """Write the flagged copy of ``clean_docx``; return its path and how many
     flags (comments and review notes) it carries. None when there is nothing to flag."""
     if not isinstance(doctor_payload, dict):
         return None
-    usable = _usable_findings(doctor_payload)[0]
-    # Every diversion, INFO ones (routine recovered lines) too: stage 6's
-    # Appendix note counts every line, so where they came from must add up to it.
-    diverted = [f for f in usable
-                if f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail)]
-    findings = [f for f in usable if f["severity"] in COMMENTED_SEVERITIES and f not in diverted]
-    if not findings and not diverted:
+    # Stage 6's Appendix diversions say which section CViche first tried, not
+    # the heading the entry had in the CV, which the Appendix groups already
+    # show: a second, different "came from" only contradicts them. Their
+    # counts stay on the run page.
+    findings = [f for f in _usable_findings(doctor_payload)[0]
+                if f["severity"] in COMMENTED_SEVERITIES
+                and not (f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail))]
+    if not findings:
         return None
     doc = Document(str(clean_docx))
     paragraphs = [(p, _norm(_paragraph_text(p)))
@@ -460,10 +431,6 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     surfaces = (paragraphs, _rows(doc))
     flags: list[Flag] = []
     notes: list[Note] = []
-    if diverted:
-        came_from, total = _came_from([_instance(f) for f in diverted])
-        if not _add_came_from(doc, came_from, total):
-            notes.append(Note(MOVED_TITLE, MOVED_INSTRUCTION, came_from))
     per_lint: dict[str, int] = {}
     for f in findings:
         found, noted = _flags(f, surfaces)
@@ -475,6 +442,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     for flag in flags:
         doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
                         author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
+    if not flags and not notes:
+        return None
     _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
     doc.save(str(out))

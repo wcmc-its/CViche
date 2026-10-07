@@ -181,7 +181,10 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     from app.models import Step
 
     monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
-    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: _doctor_payload())
+    payload = _doctor_payload()
+    payload["findings"] = [{"lint": "output_hygiene", "severity": "WARN", "status": "ran",
+                            "message": "1 boilerplate line(s)", "evidence": ["Insert dates here (MM/YYYY)"]}]
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
     clean = _stage6_docx(tmp_path, "DOC_RV")
     o = _orchestrator(monkeypatch, tmp_path, db, "DOC_RV")
     persisted = []
@@ -194,9 +197,9 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     files = json.loads(db.query(Step).filter(Step.run_id == "DOC_RV").first().output_files)
     assert files == ["/x/cv_wcm.docx", str(report), str(review)]
     assert persisted == [str(report), str(review)]
-    # The canned finding quotes nothing, so it is a review note in the box closing the copy.
+    # The quoted text is not in the document, so it is a review note in the box closing the copy.
     notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
-    assert notes[1:] == ["Source CV cut up wrongly (1)", "Text from the original CV may be missing or merged here."]
+    assert notes[1:] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022 "Insert dates here (MM/YYYY)"']
     assert len(list(Document(str(clean)).comments)) == 0
 
 

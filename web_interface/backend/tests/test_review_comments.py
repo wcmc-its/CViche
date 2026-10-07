@@ -204,11 +204,9 @@ def test_findings_with_no_place_are_review_notes_closing_the_document(tmp_path):
         _finding("implausible_year", "entry 9 (K1): date=1905"),  # no Didactic Teaching heading
         _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model"),
         _finding("llm_fallback_served", "stage 4 S5: the content filter blocked the primary model")))
-    assert n == 3 and _comments(out) == []
-    assert _notes(out) == [
-        "Year probably wrong century (1)", _flag("implausible_year"), "\u2022 Didactic Teaching",
-        "Backup AI model wrote part of this (2)", _flag("llm_fallback_served"),
-    ]
+    assert n == 1 and _comments(out) == []
+    # A note with nothing to point at (no quote, no section) stays on the run page.
+    assert _notes(out) == ["Year probably wrong century (1)", _flag("implausible_year"), "\u2022 Didactic Teaching"]
 
 
 _DIVERSIONS = (
@@ -219,42 +217,10 @@ _DIVERSIONS = (
 )
 
 
-def test_where_appendix_entries_came_from_goes_in_stage_6s_appendix_note(tmp_path):
-    out, _ = rc.write_review_docx(_with_appendix_note(tmp_path), _report(*_DIVERSIONS))
-    assert _box_lines(out, rc.APPENDIX_NOTE_TITLE) == [
-        "These 5 entries from your original CV did not fit any section above.",
-        "Where they came from: 2 from Past Research Funding, 3 not under any section.",
-        rc.CAME_FROM_GROUPING,
-    ]
-    assert _comments(out) == [] and _notes(out) == []  # nothing on the Appendix lines themselves
-
-
-def test_where_from_is_left_out_when_it_disagrees_with_the_boxs_count(tmp_path, caplog):
-    """The box says 5; diversions adding up to 6 (an older report beside a
-    newer render, say) must not print a second number that disagrees."""
-    out, _ = rc.write_review_docx(_with_appendix_note(tmp_path), _report(
-        _finding("stage6_render_warnings", "stage 6 self-check: T: 6 entries diverted to the Appendix")))
-    assert _box_lines(out, rc.APPENDIX_NOTE_TITLE) == [
-        "These 5 entries from your original CV did not fit any section above."]
-    assert "leaving out where they came from" in caplog.text
-    assert _notes(out) == []
-
-
-def test_where_from_counts_info_diversions_too(tmp_path):
-    """The note box counts every Appendix line, routine recovered ones (INFO) included."""
-    out, _ = rc.write_review_docx(_with_appendix_note(tmp_path), _report(
-        _DIVERSIONS[0],
-        _finding("stage6_render_warnings", "stage 6 self-check: A: 3 entries classified A were not found "
-                 "in the rendered document and were recovered into the Appendix", severity="INFO")))
-    assert _box_lines(out, rc.APPENDIX_NOTE_TITLE)[1] == (
-        "Where they came from: 2 from Past Research Funding, 3 from Personal/Contact Information.")
-
-
-def test_without_stage_6s_appendix_note_where_from_is_a_review_note(tmp_path):
-    """A document rendered before the Appendix note box existed."""
-    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(*_DIVERSIONS))
-    assert _notes(out) == ["Moved to the Appendix (1)", rc.MOVED_INSTRUCTION,
-                           "\u2022 2 from Past Research Funding, 3 not under any section"]
+def test_appendix_diversions_add_nothing_to_the_review_copy(tmp_path):
+    """They name the section CViche first tried, which contradicts the
+    Appendix group headings (the CV's own); their counts stay on the run page."""
+    assert rc.write_review_docx(_with_appendix_note(tmp_path), _report(*_DIVERSIONS)) is None
 
 
 def test_a_record_printed_across_table_cells_is_found_by_its_row(tmp_path):
@@ -289,9 +255,12 @@ def test_protected_data_flag_never_carries_the_finding_text(tmp_path):
     """The flag is the fixed wording alone: nothing from the finding, which
     names a category and a section, reaches the comment."""
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
-        _finding("protected_data_in_output", "date of birth found in Personal Data", severity="ERROR")))
+        _finding("protected_data_in_output", "protected personal data (children / dependents) found in "
+                 "Appendix -- value withheld from this finding", severity="ERROR"),
+        _finding("protected_data_in_output", "a bare date found in the Personal Data block", severity="ERROR")))
     assert _comments(out) == []
-    assert _notes(out) == ["Protected personal data in document (1)", _flag("protected_data_in_output")]
+    assert _notes(out) == ["Protected personal data in document (2)", _flag("protected_data_in_output"),
+                           "\u2022 Appendix: children / dependents", "\u2022 Personal Data: a bare date"]
 
 
 def test_info_and_skipped_findings_get_no_comment(tmp_path):
@@ -302,8 +271,15 @@ def test_info_and_skipped_findings_get_no_comment(tmp_path):
     assert not (tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}").exists()
 
 
+def test_stray_text_is_titled_plainly_and_quotes_what_to_delete(tmp_path):
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("output_hygiene", "1 boilerplate line(s) rendered in the appendix", ["Insert dates here (MM/YYYY)"])))
+    assert _notes(out) == ["Stray text to delete (1)", _flag("output_hygiene"), '\u2022 "Insert dates here (MM/YYYY)"']
+
+
 def test_review_notes_are_one_gray_arial_box_after_one_blank_line(tmp_path):
-    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("no_output", "none")))
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("enrichment_failures", "1 failed", ["99. Nowhere AB. Unprinted paper. J Example. 2001."])))
     doc = Document(str(out))
     body = [el for el in doc.element.body if el.tag != qn("w:sectPr")]
     assert body[-1].tag == qn("w:tbl")  # the box closes the document: deleting it is one step
@@ -313,6 +289,14 @@ def test_review_notes_are_one_gray_arial_box_after_one_blank_line(tmp_path):
     assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == rc.BOX_FILL
     assert cell.paragraphs[0].text == rc.REVIEW_NOTES_TITLE and cell.paragraphs[0].runs[0].bold
     assert {r.font.name for p in cell.paragraphs for r in p.runs} == {"Arial"}
+
+
+def test_no_review_copy_when_nothing_has_a_place_or_an_item(tmp_path):
+    """A run whose only findings point at nothing gets no review copy: an
+    empty notes box would be one more thing to delete."""
+    assert rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model"))) is None
+    assert not (tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}").exists()
 
 
 def test_one_lints_comments_are_capped(tmp_path):
