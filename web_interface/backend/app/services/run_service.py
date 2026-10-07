@@ -11,7 +11,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics, can_view_all_runs
+from app.models import (
+    Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics, InboundFile, can_view_all_runs,
+)
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
@@ -412,8 +414,12 @@ def _submitter_email(db: Session, run: Run) -> str | None:
 
 def _delete_run_rows(db: Session, run_id: str) -> None:
     """Delete a run and its children in one commit. Children first -- the
-    run_id FKs are bare (no ON DELETE CASCADE). Raises on failure; the caller
-    rolls back."""
+    run_id FKs are bare (no ON DELETE CASCADE). An inbox file the run was
+    submitted from (#1298) outlives it, so its link is cleared rather than the
+    row deleted (#408). Raises on failure; the caller rolls back."""
+    db.query(InboundFile).filter(InboundFile.run_id == run_id).update(
+        {InboundFile.run_id: None}, synchronize_session=False
+    )
     for child in (Step, Log, LLMUsage, Feedback, RunMetrics):
         db.query(child).filter(child.run_id == run_id).delete(synchronize_session=False)
     db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)

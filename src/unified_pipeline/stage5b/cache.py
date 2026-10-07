@@ -9,10 +9,14 @@ module (``cache.INSTITUTION_CACHE``), never via
 ``from ...cache import INSTITUTION_CACHE`` -- a from-import freezes the
 pre-load binding and silently splits state (the #496 lesson).
 
-Single-process, single-thread only: load/modify/save has no locking. Stage 5b
-currently runs one pipeline worker at a time (the Taskiq/Valkey concurrent-
-worker migration hasn't shipped), so a lost-update race isn't reachable yet.
-Add file locking (or move to a transactional store) before that changes.
+The disk cache is for the CLI only (run_full_pipeline.py, one process at a
+time): load/modify/save has no locking. The web drivers run stage 5b with
+persist_cache=False -- several concurrent runs per backend process and one
+per queue-worker pod, on a root-owned, non-writable config/ -- so they never
+load or save this file and never touch INSTITUTION_CACHE; each run uses its
+own empty dict instead (#1238). Making config/ writable for them would trade
+a failed save for lost updates and torn writes across pods. A shared cache
+for the web path would need a transactional store.
 """
 
 import hashlib
@@ -87,9 +91,26 @@ def save_institution_cache():
         logger.warning("Could not save institution cache: %s", e)
 
 
-def lookup(cache_key: str, raw_key: str | None = None):
-    """Look up an institution by its cache key, falling back to a secondary
-    raw_key only when cache_key has no entry at all.
+def store_for_run(persist: bool) -> dict[str, dict | None]:
+    """The dict one stage-5b run reads and writes: the disk cache, freshly
+    loaded, on the CLI (persist=True); an empty dict of its own on the web
+    path (#1238), which never touches the disk or INSTITUTION_CACHE."""
+    if not persist:
+        return {}
+    load_institution_cache()
+    return INSTITUTION_CACHE
+
+
+def save_if_persisted(persist: bool) -> None:
+    """Write INSTITUTION_CACHE back to disk on the CLI; nothing on the web path."""
+    if persist:
+        save_institution_cache()
+
+
+def lookup(store: dict[str, dict | None], cache_key: str, raw_key: str | None = None):
+    """Look up an institution in ``store`` by its cache key, falling back to a
+    secondary raw_key only when cache_key has no entry at all. ``store`` is
+    INSTITUTION_CACHE on the CLI and a per-run dict on the web path (#1238).
 
     Returns (found, value): `found` distinguishes "no entry under either
     key" from a legitimately cached negative result (value=None means
@@ -97,15 +118,15 @@ def lookup(cache_key: str, raw_key: str | None = None):
     wrong -- a None cached under `a` would fall through to `b`'s (possibly
     stale) value instead of respecting the negative result.
     """
-    if cache_key in INSTITUTION_CACHE:
-        return True, INSTITUTION_CACHE[cache_key]
-    if raw_key is not None and raw_key in INSTITUTION_CACHE:
-        return True, INSTITUTION_CACHE[raw_key]
+    if cache_key in store:
+        return True, store[cache_key]
+    if raw_key is not None and raw_key in store:
+        return True, store[raw_key]
     return False, None
 
 
-def set_cached(key: str, value: dict | None) -> None:
-    INSTITUTION_CACHE[key] = value
+def set_cached(store: dict[str, dict | None], key: str, value: dict | None) -> None:
+    store[key] = value
 
 
 def _owner_context_hash(owner_context: str) -> str:

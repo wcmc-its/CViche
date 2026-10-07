@@ -196,6 +196,27 @@ def test_stage_5b_cost_is_added_to_the_run_total(monkeypatch, tmp_path, db):
     assert result["cost"] == pytest.approx(0.25)
 
 
+def test_stage_5b_runs_without_the_on_disk_institution_cache(monkeypatch, tmp_path, db):
+    """#1238: the web path calls stage 5b with persist_cache=False. The cache
+    directory is not writable in the container, and a shared file would race
+    across concurrent runs and worker pods."""
+    from app.pipeline import orchestrator as orch
+
+    captured = {}
+    out = tmp_path / "stage5b.json"
+    out.write_text(json.dumps({"institution_enrichment_stats": {"cost": 0.0}}))
+
+    def fake_run_stage5b(**kwargs):
+        captured.update(kwargs)
+        return str(out)
+
+    monkeypatch.setattr(orch, "run_stage5b", fake_run_stage5b)
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE5BCACHE")
+    asyncio.run(o._execute_stage_logic("5b", str(tmp_path / "cv.docx")))
+
+    assert captured["persist_cache"] is False
+
+
 def test_stage_6_cost_is_added_to_the_run_total(monkeypatch, tmp_path, db):
     """Stage 6 hands its priced call_llm results back through the LlmUsage the
     driver passes in; the orchestrator never read them."""

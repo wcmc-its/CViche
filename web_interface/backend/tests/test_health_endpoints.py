@@ -1,7 +1,10 @@
 """Tests for /livez, /readyz, and the deprecated /health alias."""
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
+from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
@@ -138,6 +141,25 @@ class TestReadyz:
         body = response.json()
         assert body["checks"]["s3"]["ok"] is False
         assert "403" in body["checks"]["s3"]["error"]
+
+    def test_prod_overlay_pins_s3_over_auth_config(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#109: the prod overlay sets CVICHE_STORAGE_BACKEND=s3 as a container
+        env var, which outranks auth_config.yaml. Even when the generated
+        auth_config.yaml says local and names no bucket (an unset CodeBuild
+        variable), /readyz checks S3 and fails on the missing bucket instead of
+        reporting ready with uploads on the pod filesystem."""
+        patch_path = Path(__file__).resolve().parents[3] / "k8s/overlays/prod/backend-patch.yaml"
+        container = yaml.safe_load(patch_path.read_text(encoding="utf-8"))["spec"]["template"]["spec"]["containers"][0]
+        env = {item["name"]: item["value"] for item in container.get("env", [])}
+        assert env.get("CVICHE_STORAGE_BACKEND") == "s3"
+
+        monkeypatch.setenv("CVICHE_STORAGE_BACKEND", env["CVICHE_STORAGE_BACKEND"])
+        monkeypatch.delenv("CVICHE_S3_BUCKET", raising=False)
+        unset_codebuild_config = {"s3": {"CVICHE_STORAGE_BACKEND": "local", "CVICHE_S3_BUCKET": ""}}
+        with patch("app.config_loader.load_yaml_config", return_value=unset_codebuild_config):
+            response = client.get("/readyz")
+        assert response.status_code == 503
+        assert response.json()["checks"]["s3"] == {"ok": False, "error": "CVICHE_S3_BUCKET not set"}
 
 
 class TestHealthAlias:

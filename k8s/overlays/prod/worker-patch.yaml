@@ -17,6 +17,13 @@ spec:
             limits:
               cpu: "2"
               memory: "2Gi"
+          env:
+            # Pinned to s3 to match backend-patch.yaml (#109). worker.main()
+            # already refuses to start on any other backend, since a run's
+            # outputs must reach the backend pod; this keeps the worker from
+            # depending on the CodeBuild variable.
+            - name: CVICHE_STORAGE_BACKEND
+              value: "s3"
           envFrom:
             - secretRef:
                 name: cviche-secrets

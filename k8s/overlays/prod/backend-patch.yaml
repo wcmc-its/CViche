@@ -34,6 +34,13 @@ spec:
           env:
             - name: CVICHE_MAX_CONCURRENT_RUNS
               value: "3"
+            # S3 is the only prod storage backend (#109). An env var outranks
+            # auth_config.yaml's s3 section (config_loader.get_config), so an
+            # unset or wrong CodeBuild CVICHE_STORAGE_BACKEND can no longer put
+            # uploads on the pod filesystem, where a rollout loses them. With
+            # s3 pinned, an unset CVICHE_S3_BUCKET fails /readyz instead.
+            - name: CVICHE_STORAGE_BACKEND
+              value: "s3"
           envFrom:
             - secretRef:
                 name: cviche-secrets
