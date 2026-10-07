@@ -31,6 +31,7 @@ concurrency:
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       # conftest.py uses in-memory SQLite, but app.database builds its engine at
       # import time and the factory raises on incomplete config, so the import
@@ -67,6 +68,7 @@ jobs:
     # They are hermetic -- no DB, no AWS, no network -- so they gate cheaply
     # (~325 tests in a few seconds). Same Python/deps setup as backend-tests.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -109,6 +111,7 @@ jobs:
     # reviewed --update); §9's auto block just has to match current dev, in
     # either direction -- it's a snapshot, not a debt budget.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -133,6 +136,7 @@ jobs:
     # it still works as a required check once branch protection exists (#417):
     # a workflow that never starts leaves a required check pending forever.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: web_interface/frontend
@@ -180,6 +184,7 @@ jobs:
     # in mypy.ini; ignore_missing_imports means no project deps are needed, so
     # this stays fast. Grow mypy.ini's file list as more modules adopt typing.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -197,6 +202,7 @@ jobs:
     # The scheduled full-history baseline scan lives in deps-audit.yml, not
     # here -- see that file for why.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
