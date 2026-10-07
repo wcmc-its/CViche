@@ -161,6 +161,28 @@ def test_an_office_address_is_not_flagged():
     assert lint_protected_data_in_output(blocks) == []
 
 
+@pytest.mark.parametrize("section", ["PERSONAL DATA", "T. APPENDIX"])
+def test_1426_a_current_address_line_naming_no_workplace_is_flagged(section):
+    """#1426 (NDMRSO MQJAVH 8): a verbatim "Current Address" line with a street
+    and no workplace word is the owner's home address."""
+    findings = lint_protected_data_in_output(
+        [_p(section), _p("Current Address\t12 Sample Lane\tExampleton, ZZ 00000")])
+    assert len(findings) == 1
+    assert "(home address / phone)" in findings[0]["message"]
+    assert "Sample Lane" not in findings[0]["message"]
+
+
+@pytest.mark.parametrize("line", [
+    "Current Address: Department of Example, 12 Sample Lane",
+    "Current Address: 12 Sample Lane, Suite 400, Exampleton",
+    "Current Address: Example University, 12 Sample Lane",
+    "Office Address: 12 Sample Lane",
+    "Current Address: Exampleton, ZZ",
+])
+def test_1426_a_current_address_at_a_workplace_or_with_no_street_is_not_flagged(line):
+    assert lint_protected_data_in_output([_p("T. APPENDIX"), _p(line)]) == []
+
+
 def test_a_real_dea_value_reaching_licensure_is_flagged():
     """#821 regression guard: `stage6/sections/licensure.py`'s
     `_fill_dea_npi` never writes a value into this cell any more, so this

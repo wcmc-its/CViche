@@ -102,6 +102,7 @@ from .pii import (  # noqa: F401
     CAT_PLACE_OF_BIRTH,
     WithheldItem,
     _from_pii_fragment,
+    _is_unlabelled_home_address,
     _pii_category_of,
     _pii_fragments,
     _squash,

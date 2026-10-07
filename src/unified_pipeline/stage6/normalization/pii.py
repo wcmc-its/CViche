@@ -651,6 +651,42 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
 # CAT_THIRD_PARTY_CONTACT above).
 
 
+# --- an unlabelled home address (#1426, NDMRSO MQJAVH element 8) ------------
+# "Current Address<tab><street><tab><city> <zip>" in the Personal Data block
+# names no home word, so the Office catch-all in `sections/personal_data.py`
+# rendered the owner's street address as the Office address. The label alone
+# does not say home -- "Current Address: Department of ..., <street>" is a
+# work address -- so it counts as home contact only when nothing in the entry
+# places it at a workplace (`_WORKPLACE_TOKEN_RE`). Not a WithholdRule row:
+# the decision needs the absence of a token across the whole entry, which a
+# label-to-delimiter span cannot express, and the value is already withheld by
+# the home slot it is routed to (`_withhold_home_contact`, DECIDED_821).
+_CURRENT_ADDRESS_LABEL_RE = re.compile(r"\bcurrent \s+ address\b", re.X | re.I)
+#: A word that places an address at an institution, a department or a
+#: building. Any one of them keeps a "Current Address" in the Office slot: the
+#: cost of a miss is an empty Office cell the owner can fill, the cost of a
+#: false home is a work address withheld from the CV.
+_WORKPLACE_TOKEN_RE = re.compile(r"""\b(?:
+      universit\w* | univ | college | institut\w* | school | academy | faculty
+    | hospital | medical | clinic\w* | center | centre | health | medicine
+    | department | dept | division | program | laborator\w* | lab
+    | building | bldg | hall | pavilion | tower | wing | floor | room | rm
+    | suite | ste | office | campus | attn | c/o | inc | llc | corp\w*
+    | foundation | company
+    )\b\.?""", re.X | re.I)
+
+
+def _is_unlabelled_home_address(entry_text: object, address: object) -> bool:
+    """Whether an A-coded entry's address is the owner's home contact though
+    no home word labels it (#1426): the entry is labelled "Current Address"
+    and neither its text nor the address names a workplace
+    (`_WORKPLACE_TOKEN_RE`)."""
+    text, value = str(entry_text or ""), str(address or "")
+    return (_CURRENT_ADDRESS_LABEL_RE.search(text) is not None
+            and _WORKPLACE_TOKEN_RE.search(text) is None
+            and _WORKPLACE_TOKEN_RE.search(value) is None)
+
+
 # Stage-4 field KEYS that name protected data outright (the label pattern
 # cannot see them: stage 4 leaves extracted_fields empty for most PII
 # entries but names some explicitly -- marital_status_spouse, birthplace --
