@@ -76,10 +76,18 @@ JOURNAL_SPECIALTY_KEYWORDS = (
     'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
 )
 JOURNAL_ROLE_PHRASES = ('editorial board', 'ad hoc reviewer', 'manuscript review')
+# Role phrases that name journal reviewing on their own. 'abstract reviewer'
+# is not one: every one of its 24 Q2 lines over the NDMRSO and EBYSBC farms
+# reviews meeting abstracts, not manuscripts (DXAGUS 94, #1428).
 REVIEWER_PATTERNS = (
-    'abstract reviewer', 'reviewer for', 'manuscript reviewer',
-    'peer reviewer', 'ad hoc reviewer',
+    'manuscript reviewer', 'peer reviewer', 'ad hoc reviewer',
 )
+# Role phrases that name journal reviewing only when the line also names a
+# journal (`GENERIC_REVIEWER_JOURNAL_SIGNALS`). "Reviewer for" introduces
+# whatever is reviewed: all 10 such Q2 lines on those farms review grants,
+# abstracts or a study program (VYNARH 96, #1428), none a journal.
+GENERIC_REVIEWER_PHRASES = ('reviewer for',)
+GENERIC_REVIEWER_JOURNAL_SIGNALS = (*JOURNAL_SPECIALTY_KEYWORDS, 'annals')
 BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
@@ -261,6 +269,15 @@ def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
     return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
 
 
+def _names_journal_reviewing(text_lower: str) -> bool:
+    """True when `text_lower` holds a `REVIEWER_PATTERNS` phrase, or a
+    `GENERIC_REVIEWER_PHRASES` one beside a journal signal (#1428)."""
+    if _matches_bounded(text_lower, REVIEWER_PATTERNS):
+        return True
+    return (_matches_bounded(text_lower, GENERIC_REVIEWER_PHRASES)
+            and any(signal in text_lower for signal in GENERIC_REVIEWER_JOURNAL_SIGNALS))
+
+
 def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
     """True when `text_lower` contains one of `keywords` as a stem, at a
     word start, optionally followed by one of `_ROLE_STEM_SUFFIXES` and
@@ -421,7 +438,7 @@ def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
 
     for line in lines:
         line_lower = line.lower()
-        is_reviewer_line = _matches_bounded(line_lower, REVIEWER_PATTERNS)
+        is_reviewer_line = _names_journal_reviewing(line_lower)
         is_board_line = _matches_bounded(line_lower, BOARD_KEYWORDS)
 
         if (not is_reviewer_line and not is_board_line and last_group
@@ -450,7 +467,7 @@ def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
     is_journal_reviewer = (
         (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
         any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
-        _matches_bounded(text_lower, REVIEWER_PATTERNS) or
+        _names_journal_reviewing(text_lower) or
         (role == 'reviewer' and 'j ' in committee) or
         (role == 'reviewer' and 'journal' in org)
     )
