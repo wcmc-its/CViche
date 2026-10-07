@@ -785,6 +785,9 @@ def _alphanumeric_tokens(text) -> Counter:
 # fields worth comparing into the decision (`_decision_fields`).
 # Findings listing this many drops stay readable in the finding message.
 DEDUP_EVIDENCE_LIMIT = 6
+#: Characters of each dropped and kept text a dedup evidence line quotes. The
+#: review copy marks a quote this long as cut (#1388).
+DEDUP_TEXT_CHARS = 80
 
 
 def _identity_conflicts(decision: Mapping) -> list[str]:
@@ -887,7 +890,8 @@ def _drop_evidence(decision: Mapping, index_by_text: Mapping[str, object],
     index = index_by_text.get(" ".join(dropped.split()))
     prefix = f"entry {index}: " if index is not None else ""
     return (f"{prefix}{decision.get('code', '?')} ({detail}): "
-            f"dropped '{dropped[:80]}' vs kept '{str(decision.get('kept_text', ''))[:80]}'")
+            f"dropped '{dropped[:DEDUP_TEXT_CHARS]}' vs kept "
+            f"'{str(decision.get('kept_text', ''))[:DEDUP_TEXT_CHARS]}'")
 
 
 def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:

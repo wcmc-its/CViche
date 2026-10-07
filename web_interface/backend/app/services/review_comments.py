@@ -1,11 +1,12 @@
-"""The finished document with the run doctor's findings flagged in place (#1388 C).
+"""The finished document with the run doctor's findings flagged for review (#1388 C).
 
 A reviewer sees each WARN or ERROR finding as a short Word comment on the text
-it is about: the year that looks wrong, the second copy of a duplicate, each
-Appendix group. A finding with no one place in the document (a citation
-PubMed could not match, a step that fell back) is a bullet in the review
-notes that close the Appendix. The clean document is left as it is; this
-writes a copy beside it.
+it is about: the year that looks wrong, the second copy of a duplicate. A
+finding with no one place in the document (a citation PubMed could not match,
+an entry removed as a near-duplicate, a step that fell back) is an item in the
+review-notes box closing the document, grouped by what to do about it. Where
+the Appendix entries came from goes in stage 6's own Appendix note box. The
+clean document is left as it is; this writes a copy beside it.
 """
 import copy
 import re
@@ -14,12 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from docx import Document
-from docx.enum.style import WD_STYLE_TYPE
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 from docx.oxml.xmlchemy import BaseOxmlElement
-from docx.shared import Pt
-from docx.styles.style import BaseStyle
+from docx.shared import Inches
+from docx.table import _Cell
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from lxml.etree import XMLSyntaxError
@@ -27,11 +27,13 @@ from lxml.etree import XMLSyntaxError
 from app.schemas import DoctorFindingInstance
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX
 from app.services.run_quality_report import (
+    LINT_COPY,
     TRUNCATION_MARK,
     _instance,
     _usable_findings,
 )
 from unified_pipeline.core.text_norm import squash  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import DEDUP_TEXT_CHARS  # noqa: E402
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -110,8 +112,6 @@ REVIEW_FLAGS = {
 }
 #: The lint stage 6's Appendix diversions arrive under (lint_stage6_warnings).
 DIVERSION_LINT = "stage6_render_warnings"
-#: A dedup drop names the entry it removed; on the entry it kept, or as a review note.
-DEDUP_DROPPED_FLAG = "Removed as a near-duplicate; add it back if it is a separate entry"
 #: Lints whose every quoted item is its own problem, each flagged where it is.
 EACH_ITEM_LINTS = frozenset({
     "duplicate_records", "duplicate_passages", "pipe_leaks", "enrichment_failures",
@@ -122,22 +122,29 @@ REPEAT_LINTS = frozenset({"duplicate_records", "duplicate_passages"})
 #: Lints whose problem is one year their detail names ("end_date=1912").
 YEAR_LINTS = frozenset({"implausible_year", "year_not_in_source"})
 _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-#: dedup_drops evidence: "K1 (jaccard=1.00, 89% covered by kept): dropped '<x>' vs kept '<y>'".
-_DEDUP_RE = re.compile(r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'$")
+#: dedup_drops evidence, "[entry N: ]K1 (jaccard=1.00, 89% covered by kept): dropped '<x>' vs
+#: kept '<y>'" (doctor _drop_evidence); the run page may mark it cut with a trailing ellipsis.
+_DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
+                       r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$")
 #: stage 6's appendix_diversion messages, after the code prefix the run page
 #: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
 _DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|recovered into) the Appendix")
-#: Closes the review copy: findings with no one place in the document, one bullet each.
-REVIEW_NOTES_HEADING = "Review notes from CViche (not part of the CV: delete before sending)"
-NOTE_BULLET = "\u2022 "
+#: CViche's voice to the submitter: a one-cell light-gray table, in Arial,
+#: titled "CViche ..." (the stage-6 Appendix note and the review notes).
+REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
+APPENDIX_NOTE_TITLE = "CViche note"
 NOTES_FONT = "Arial"
-NOTES_HEADING_STYLE = "Heading 2"
-NOTES_HEADING_SIZE = Pt(13)
-APPENDIX_LINE_FLAG = "Not filed under any section: move it to the right one or delete it."
-APPENDIX_GROUP_FLAG = "Not filed under any section: move these entries to the right one or delete them."
-#: Stage 6 opens each group of Appendix lines with 'From "<source heading>":'
-#: (stage6/sections/appendix.py, _write_appendix_group); one flag per group.
-APPENDIX_GROUP_PREFIX = 'From "'
+BOX_FILL = "F2F2F2"
+BOX_BORDER = "BFBFBF"
+NOTE_BULLET = "\u2022 "
+ITEM_INDENT = 0.25  # inches
+KEPT_INDENT = 0.5
+DEDUP_TITLE = "Removed as near-duplicates"
+DEDUP_INSTRUCTION = ("We kept one copy of each. If any of these is a separate entry, "
+                     "add it back in the section shown.")
+CAME_FROM_GROUPING = "Each entry is grouped under the heading it had in your original CV."
+MOVED_TITLE = "Moved to the Appendix"
+MOVED_INSTRUCTION = "Move each Appendix entry to the right section or delete it."
 
 #: Squashed characters of a quote matched against the output. Long enough that
 #: a hit is that passage, short enough to survive the doctor's own cuts.
@@ -166,11 +173,21 @@ _QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": 
 
 @dataclass(frozen=True)
 class Flag:
-    """One flag: a comment on ``paragraph`` (on ``span`` of its text, or all
-    of it when None), or, with no paragraph, a bullet in the review notes."""
-    paragraph: Paragraph | None
+    """One comment: the paragraph it sits on, the span of its text it covers
+    (all of it when None) and what it says."""
+    paragraph: Paragraph
     span: tuple[int, int] | None
     text: str
+
+
+@dataclass(frozen=True)
+class Note:
+    """One item in the review-notes box, under the group its title and
+    instruction name. ``kept`` is the copy dedup kept, for a near-duplicate."""
+    title: str
+    instruction: str
+    item: str | None = None
+    kept: str | None = None
 
 
 def review_docx_path(clean_docx: Path) -> Path:
@@ -243,68 +260,101 @@ def _year_span(lint: str, detail: str, para: Paragraph) -> tuple[int, int] | Non
     return (at, at + len(year.group(0))) if year and at >= 0 else None
 
 
-def _dedup_text(dropped: str) -> str:
-    return f'{DEDUP_DROPPED_FLAG}: "{dropped.strip()}"'
-
-
 def _item_flags(lint: str, inst: DoctorFindingInstance, label: str,
                 surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> list[Flag]:
     """Flags on the quoted text itself: every item for EACH_ITEM_LINTS, else the first found."""
     flags: list[Flag] = []
     for item in [*inst.quotes, *inst.notes]:
-        text, target = label, item
-        if lint == "dedup_drops":
-            m = _DEDUP_RE.search(item)
-            if m is None:
-                continue
-            text, target = _dedup_text(m["dropped"]), m["kept"]
-        para = _find(target, surfaces, later_copy=lint in REPEAT_LINTS)
+        para = _find(item, surfaces, later_copy=lint in REPEAT_LINTS)
         if para is not None and all(f.paragraph is not para for f in flags):
-            flags.append(Flag(para, _year_span(lint, inst.detail, para), text))
+            flags.append(Flag(para, _year_span(lint, inst.detail, para), label))
             if lint not in EACH_ITEM_LINTS:
                 break
     return flags
 
 
-def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> list[Flag]:
-    """Where one finding is flagged: on its quoted text; else its section's
-    heading; else a review note saying what and where it was."""
+def _quoted(text: str) -> str:
+    """A dedup text in quotes, marked cut when it is as long as the doctor quotes."""
+    cut = TRUNCATION_MARK if len(text) >= DEDUP_TEXT_CHARS else ""
+    return f'"{text.strip()}{cut}"'
+
+
+def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
+    """One note per entry dedup removed: its section, what went and what stayed."""
+    notes = []
+    for item in [*inst.quotes, *inst.notes]:  # "entry N: ..." reads as a note
+        m = _DEDUP_RE.search(item)
+        if m is not None:
+            section = TAXONOMY_LABELS.get(m["code"])
+            removed = _quoted(m["dropped"])
+            notes.append(Note(DEDUP_TITLE, DEDUP_INSTRUCTION,
+                              f"{section}: {removed}" if section else removed, _quoted(m["kept"])))
+    return notes or [Note(DEDUP_TITLE, DEDUP_INSTRUCTION)]
+
+
+def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> tuple[list[Flag], list[Note]]:
+    """Where one finding goes: a comment on its quoted text; else on its
+    section's heading; else a review note saying what and where it was. A
+    near-duplicate is always a note, since what it removed is not on the page."""
     lint, inst = finding["lint"], _instance(finding)
+    if lint == "dedup_drops":
+        return [], _dedup_notes(inst)
     label = REVIEW_FLAGS.get(lint, inst.detail)
     flags = _item_flags(lint, inst, label, surfaces)
     if flags:
-        return flags
+        return flags, []
     heading = _heading(_CODE_BY_LABEL.get(inst.section or "", ""), surfaces[0])
     if heading is not None:
-        return [Flag(heading, None, label)]
-    where = f" ({inst.section})" if inst.section else ""
-    if lint == "dedup_drops":  # its evidence is the doctor's diagnostic: quote only what was removed
-        drops = [m["dropped"] for q in inst.quotes if (m := _DEDUP_RE.search(q))]
-        return [Flag(None, None, _dedup_text(d) + where) for d in drops] or [
-            Flag(None, None, label + where)]
-    quote = f' "{inst.quotes[0]}"' if inst.quotes else ""
-    return [Flag(None, None, f"{label}{where}{quote}")]
+        return [Flag(heading, None, label)], []
+    copy_ = LINT_COPY.get(lint)
+    quote = f'"{inst.quotes[0]}"' if inst.quotes else None
+    item = ": ".join(x for x in (inst.section, quote) if x) or None
+    return [], [Note(copy_.title if copy_ else lint, label, item)]
 
 
-def _appendix_flags(diverted: list[DoctorFindingInstance], paragraphs: list[tuple[Paragraph, str]],
-                    appendix: Paragraph) -> list[Flag]:
-    """Stage 6's Appendix diversions, which name a count and never the lines
-    (the sidecar carries no entry text, by design: appendix.py
-    AppendixDiversionWarning). A review note says where they came from;
-    each group of lines under the heading gets its own comment."""
+def _came_from(diverted: list[DoctorFindingInstance]) -> str:
+    """Where stage 6's Appendix entries came from, from its diversion warnings,
+    which name a count and never the lines (by design: appendix.py
+    AppendixDiversionWarning)."""
     came_from: dict[str, int] = {}
     for inst in diverted:
         m = _DIVERTED_RE.search(inst.detail)
-        where = inst.section if inst.section and inst.section != TAXONOMY_LABELS[_APPENDIX_CODE] else "no section"
+        where = inst.section if inst.section and inst.section != TAXONOMY_LABELS[_APPENDIX_CODE] else ""
         came_from[where] = came_from.get(where, 0) + (int(m["count"]) if m else 1)
-    summary = ", ".join(f"{n} from {where}" if where != "no section" else f"{n} with no section"
-                        for where, n in came_from.items())
-    at = next(i for i, (p, _) in enumerate(paragraphs) if p is appendix)
-    below = [p for p, body in paragraphs[at + 1:] if body]
-    groups = [p for p in below if _paragraph_text(p).startswith(APPENDIX_GROUP_PREFIX)]
-    lines = [Flag(p, None, APPENDIX_GROUP_FLAG) for p in groups] or [
-        Flag(p, None, APPENDIX_LINE_FLAG) for p in below]
-    return [Flag(None, None, f"Moved to the Appendix: {summary}."), *lines]
+    return ", ".join(f"{n} from {where}" if where else f"{n} not under any section"
+                     for where, n in came_from.items())
+
+
+def _appendix_note_cell(doc: Document) -> _Cell | None:
+    """The cell of stage 6's Appendix note box, when the document has one."""
+    for table in doc.tables:
+        cell = table.cell(0, 0)
+        if cell.paragraphs and cell.paragraphs[0].text.startswith(APPENDIX_NOTE_TITLE):
+            return cell
+    return None
+
+
+def _box(doc: Document, title: str) -> _Cell:
+    """A one-cell, light-gray, bordered table closing the document: CViche's
+    voice, deletable in one step. Returns the cell, holding the bold title."""
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_pr.append(tc_pr.makeelement(qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto",
+                                                  qn("w:fill"): BOX_FILL}))
+    borders = tc_pr.makeelement(qn("w:tcBorders"), {})
+    for side in ("top", "left", "bottom", "right"):
+        borders.append(borders.makeelement(qn(f"w:{side}"), {
+            qn("w:val"): "single", qn("w:sz"): "4", qn("w:color"): BOX_BORDER}))
+    tc_pr.append(borders)
+    _box_line(cell.paragraphs[0], title, bold=True)
+    return cell
+
+
+def _box_line(para: Paragraph, text: str, *, bold: bool = False, indent: float = 0) -> None:
+    run = para.add_run(text)
+    run.font.name, run.font.bold = NOTES_FONT, bold or None
+    if indent:
+        para.paragraph_format.left_indent = Inches(indent)
 
 
 def _split(r: BaseOxmlElement, t: BaseOxmlElement, lo: int, hi: int) -> BaseOxmlElement:
@@ -344,32 +394,35 @@ def _runs(para: Paragraph, span: tuple[int, int] | None) -> list[Run]:
     return [Run(chosen[0], para), Run(chosen[-1], para)]
 
 
-def _heading_style(doc: Document) -> BaseStyle:
-    """Heading 2, in the notes font. The WCM template defines no heading
-    styles (Word only offers its latent built-in), so add it when missing:
-    Word maps a style named "Heading 2" to its built-in, navigation pane included."""
-    try:
-        style = doc.styles[NOTES_HEADING_STYLE]
-    except KeyError:
-        style = doc.styles.add_style(NOTES_HEADING_STYLE, WD_STYLE_TYPE.PARAGRAPH)
-        style.base_style = doc.styles["Normal"]
-        style.next_paragraph_style = doc.styles["Normal"]
-        style.font.bold = True
-        style.font.size = NOTES_HEADING_SIZE
-        style.paragraph_format.keep_with_next = True
-        style.element.get_or_add_pPr().append(style.element.makeelement(qn("w:outlineLvl"), {qn("w:val"): "1"}))
-    style.font.name = NOTES_FONT
-    return style
-
-
-def _add_review_notes(doc: Document, notes: list[str]) -> None:
-    """The review notes closing the document: a blank line, a Heading 2, a bullet per note."""
+def _add_review_notes(doc: Document, notes: list[Note]) -> None:
+    """The review-notes box closing the document, after one blank line: a
+    group per action, with its count and instruction, then an item per finding."""
     if not notes:
         return
-    doc.add_paragraph()
-    doc.add_paragraph(REVIEW_NOTES_HEADING, style=_heading_style(doc)).runs[0].font.name = NOTES_FONT
+    groups: dict[tuple[str, str], list[Note]] = {}
     for note in notes:
-        doc.add_paragraph(f"{NOTE_BULLET}{note}").runs[0].font.name = NOTES_FONT
+        groups.setdefault((note.title, note.instruction), []).append(note)
+    doc.add_paragraph()
+    cell = _box(doc, REVIEW_NOTES_TITLE)
+    for (title, instruction), members in groups.items():
+        _box_line(cell.add_paragraph(), f"{title} ({len(members)})", bold=True)
+        _box_line(cell.add_paragraph(), instruction)
+        for note in dict.fromkeys(members):  # the same item once
+            if note.item:
+                _box_line(cell.add_paragraph(), f"{NOTE_BULLET}{note.item}", indent=ITEM_INDENT)
+            if note.kept:
+                _box_line(cell.add_paragraph(), f"Kept: {note.kept}", indent=KEPT_INDENT)
+
+
+def _add_came_from(doc: Document, came_from: str) -> bool:
+    """Say where the Appendix entries came from inside stage 6's Appendix note
+    box; False when the document has none (rendered before that box existed)."""
+    cell = _appendix_note_cell(doc)
+    if cell is None:
+        return False
+    _box_line(cell.add_paragraph(), f"Where they came from: {came_from}.")
+    _box_line(cell.add_paragraph(), CAME_FROM_GROUPING)
+    return True
 
 
 def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, int] | None:
@@ -386,27 +439,28 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
                   for p in (Paragraph(el, doc._body) for el in doc.element.body.iter(qn("w:p")))]
     if not paragraphs:
         return None
-    appendix = _heading(_APPENDIX_CODE, paragraphs)
     surfaces = (paragraphs, _rows(doc))
+    diverted = [f for f in findings
+                if f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail)]
     flags: list[Flag] = []
-    if appendix is not None:  # else each diversion is flagged like any other finding, below
-        diverted = [f for f in findings
-                    if f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail)]
-        if diverted:
-            findings = [f for f in findings if f not in diverted]
-            flags = _appendix_flags([_instance(f) for f in diverted], paragraphs, appendix)
-            flags = flags[:MAX_FLAGS_PER_LINT]
+    notes: list[Note] = []
+    if diverted:
+        findings = [f for f in findings if f not in diverted]
+        came_from = _came_from([_instance(f) for f in diverted])
+        if not _add_came_from(doc, came_from):
+            notes.append(Note(MOVED_TITLE, MOVED_INSTRUCTION, came_from))
     per_lint: dict[str, int] = {}
     for f in findings:
-        for flag in _flags(f, surfaces):
+        found, noted = _flags(f, surfaces)
+        for flag in found:
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
                 flags.append(flag)
+        notes.extend(noted)
     for flag in flags:
-        if flag.paragraph is not None:
-            doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
-                            author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
-    _add_review_notes(doc, list(dict.fromkeys(f.text for f in flags if f.paragraph is None)))
+        doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
+                        author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
+    _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
     doc.save(str(out))
-    return out, len(flags)
+    return out, len(flags) + len(notes)
