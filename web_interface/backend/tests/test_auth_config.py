@@ -339,3 +339,123 @@ def test_ed_staff_group_seeded_from_yaml_and_empty_when_absent(db):
                return_value={**_yaml(), "ed": {"staff_group": staff_dn}}):
         seed_system_config(db)
     assert json.loads(db.query(SystemConfig).filter_by(key="ed_staff_group").first().value) == staff_dn
+
+
+# ---------------------------------------------------------------------------
+# GET/PUT /api/admin/config: the admin-editable keys, their validation and
+# the audit line, pinned before they move out of the route handlers (#335).
+# ---------------------------------------------------------------------------
+
+def _admin_config_call(client, db, method, body=None):
+    """Call /api/admin/config as a real, committed admin row."""
+    from types import SimpleNamespace
+    from app.main import app
+    from app.auth import require_admin
+
+    boss = db.query(User).filter_by(email="boss@example.com").first()
+    if boss is None:
+        boss = User(email="boss@example.com", display_name="Boss", role="admin")
+        db.add(boss)
+        db.commit()
+    acting = SimpleNamespace(id=boss.id, role="admin", email=boss.email)
+    app.dependency_overrides[require_admin] = lambda: acting
+    try:
+        return getattr(client, method)("/api/admin/config", **({"json": body} if body is not None else {}))
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+
+def _config_row(db, key):
+    return db.query(SystemConfig).filter_by(key=key).first()
+
+
+def test_admin_config_get_reads_each_key_and_defaults_a_missing_one(client, db, seed_simple_mode):
+    for key in ("rate_limit_daily", "auth_mode"):
+        db.delete(_config_row(db, key))
+    db.commit()
+
+    body = _admin_config_call(client, db, "get").json()
+
+    assert body == {"allowed_users": ["test@example.com"], "admin_users": ["admin@example.com"],
+                    "rate_limit_daily": 10, "rate_limit_monthly": 50, "consent_version": "1.0",
+                    "auth_mode": "simple"}
+
+
+@pytest.mark.parametrize("body, message", [
+    ({"admin_users": []}, "At least one admin user is required."),
+    ({"allowed_users": ["a@example.com"], "admin_users": ["b@example.com"]},
+     "Admin user b@example.com must also be in the allowed users list."),
+    # no allowed_users in the body: checked against the stored list
+    ({"admin_users": ["nobody@example.com"]},
+     "Admin user nobody@example.com must also be in the allowed users list."),
+    ({"rate_limit_daily": 0}, "Daily rate limit must be positive."),
+    ({"rate_limit_monthly": 0}, "Monthly rate limit must be positive."),
+    # checked in field order: admin_users before the rate limits
+    ({"admin_users": [], "rate_limit_daily": 0}, "At least one admin user is required."),
+])
+def test_admin_config_put_rejects_and_commits_nothing(client, db, seed_simple_mode, body, message):
+    resp = _admin_config_call(client, db, "put", body)
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["message"] == message
+    db.rollback()  # what the request session's close does: only a commit survives
+    assert json.loads(_config_row(db, "allowed_users").value) == ["test@example.com"]
+    assert json.loads(_config_row(db, "admin_users").value) == ["admin@example.com"]
+
+
+def test_admin_config_put_writes_changed_keys_audits_them_and_returns_the_config(
+        client, db, seed_simple_mode, caplog):
+    """Admin emails match the allowed list case-insensitively; a key whose value
+    is unchanged is neither rewritten nor logged."""
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        resp = _admin_config_call(client, db, "put", {
+            "allowed_users": ["admin@example.com", "new@example.com"],
+            "admin_users": ["ADMIN@Example.com"],
+            "rate_limit_daily": 10,
+            "rate_limit_monthly": 60,
+        })
+
+    assert resp.status_code == 200
+    assert resp.json() == {"allowed_users": ["admin@example.com", "new@example.com"],
+                           "admin_users": ["ADMIN@Example.com"], "rate_limit_daily": 10,
+                           "rate_limit_monthly": 60, "consent_version": "1.0", "auth_mode": "simple"}
+    boss_id = db.query(User).filter_by(email="boss@example.com").one().id
+    db.rollback()  # only a committed write survives
+    assert _config_row(db, "allowed_users").updated_by == boss_id
+    assert _config_row(db, "rate_limit_monthly").updated_by == boss_id
+    assert _config_row(db, "rate_limit_daily").updated_by is None
+    audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_config_changed")]
+    assert audit == [
+        "admin_config_changed: admin=boss@example.com changes="
+        '{"allowed_users": {"old": ["test@example.com"], "new": ["admin@example.com", "new@example.com"]}, '
+        '"admin_users": {"old": ["admin@example.com"], "new": ["ADMIN@Example.com"]}, '
+        '"rate_limit_monthly": {"old": 50, "new": 60}}'
+    ]
+
+
+def test_admin_config_put_checks_admins_against_the_stored_allowed_list(client, db, seed_simple_mode):
+    resp = _admin_config_call(client, db, "put", {"admin_users": ["TEST@example.com"]})
+
+    assert resp.status_code == 200
+    assert resp.json()["admin_users"] == ["TEST@example.com"]
+
+
+def test_admin_config_put_creates_a_missing_key_and_skips_the_log_when_nothing_changed(
+        client, db, seed_simple_mode, caplog):
+    import logging
+
+    db.delete(_config_row(db, "consent_version"))
+    db.commit()
+
+    with caplog.at_level(logging.INFO):
+        created = _admin_config_call(client, db, "put", {"consent_version": "2.0"})
+        unchanged = _admin_config_call(client, db, "put", {"consent_version": "2.0", "rate_limit_daily": 10})
+
+    assert (created.status_code, unchanged.status_code) == (200, 200)
+    db.expire_all()
+    row = _config_row(db, "consent_version")
+    assert (json.loads(row.value), row.updated_by is not None) == ("2.0", True)
+    audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_config_changed")]
+    assert audit == ['admin_config_changed: admin=boss@example.com changes={"consent_version": {"old": null, "new": "2.0"}}']

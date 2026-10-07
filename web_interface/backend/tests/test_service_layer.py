@@ -995,6 +995,27 @@ class TestAdminCsvExportStreaming:
 
         assert resp.status_code == 403
 
+    @pytest.mark.parametrize("role", ["admin", "staff"])
+    def test_unknown_type_is_a_422_before_the_role_check(self, client, db, role):
+        resp = self._get(client, "bogus", role=role)
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["message"] == \
+            "Invalid export type: bogus. Must be one of: runs, users, consent, feedback."
+
+    def test_download_filename_and_audit_line(self, client, db, caplog):
+        import logging
+        from datetime import datetime
+        _seed_export_fixture(db)
+
+        with caplog.at_level(logging.INFO):
+            resp = self._get(client, "users")
+
+        stamp = datetime.now().strftime("%Y%m%d")
+        assert resp.headers["content-disposition"] == f'attachment; filename="cviche_users_{stamp}.csv"'
+        audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_export")]
+        assert audit == ["admin_export: user=admin@example.com role=admin export_type=users"]
+
     def test_rows_are_fetched_in_bounded_batches_not_all_at_once(self, db, monkeypatch):
         """The query must carry yield_per, otherwise .all()-style hydration of
         the whole table returns and only the output side is chunked."""

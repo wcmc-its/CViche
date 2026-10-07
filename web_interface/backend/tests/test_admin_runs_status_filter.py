@@ -343,3 +343,100 @@ def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
     db.expire_all()
     run = db.get(Run, "SF_COMPLETE")
     assert (run.quality_score, run.quality_band, run.quality_cap) == (25, "RED", 25)
+
+
+def test_compute_score_404s_for_an_unknown_run_and_for_no_scorable_outputs(client, db, monkeypatch):
+    """Two distinct 404s; neither writes the quality columns."""
+    from app.api import admin_routes
+    from app.models import Run
+
+    _seed_mixed_status_runs(db)
+    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: None)
+
+    unknown = _admin_post(client, "/api/admin/run/NOSUCH/score")
+    unscorable = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
+
+    assert unknown.json()["detail"] == {"error": "not_found", "message": "Run not found"}
+    assert unscorable.json()["detail"] == {
+        "error": "not_found", "message": "No scorable outputs available for this run"}
+    db.expire_all()
+    assert db.get(Run, "SF_COMPLETE").quality_score is None
+
+
+def test_compute_score_fills_defaults_for_keys_the_result_lacks(client, db, monkeypatch):
+    from app.api import admin_routes
+
+    _seed_mixed_status_runs(db)
+    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: {"totalScore": 50})
+
+    resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
+
+    assert resp.json() == {"run_id": "SF_COMPLETE", "totalScore": 50, "band": "", "dimensionScores": [],
+                           "flags": [], "data_complete": None, "missing_evidence": []}
+
+
+# --- GET /api/admin/runs: user filter, row fields, pagination ----------------
+
+def _seed_owned_runs(db):
+    """Three runs, newest first R3 > R2 > R1; R1 and R3 are Alice's, R2 is
+    Bob's, and only R3 has feedback."""
+    from app.models import Feedback, Run, User
+
+    alice = User(email="Alice@Example.com", display_name="Alice", role="user")
+    bob = User(email="bob@example.com", display_name="Bob", role="user")
+    db.add_all([alice, bob])
+    db.flush()
+    base = datetime(2026, 6, 4, 12, 0, 0)
+    db.add_all([
+        Run(id="R1", filename="one.docx", file_type="docx", status="complete", user_id=alice.id,
+            started_at=base, completed_at=base + timedelta(seconds=90), total_cost=0.123456),
+        Run(id="R2", filename="two.docx", file_type="docx", status="failed", user_id=bob.id,
+            started_at=base + timedelta(minutes=1)),
+        Run(id="R3", filename="three.docx", file_type="docx", status="complete", user_id=alice.id,
+            started_at=base + timedelta(minutes=2), completed_at=base + timedelta(minutes=3),
+            total_duration_seconds=42),
+        Feedback(run_id="R3", user_id=bob.id, reviewer_role="staff", overall_usefulness=3,
+                 manual_conversion_effort="1 hour", correction_effort="1 hour",
+                 biggest_issue="none", likelihood_to_recommend=3),
+    ])
+    db.commit()
+
+
+def test_runs_listing_row_fields_and_newest_first_order(client, db):
+    _seed_owned_runs(db)
+
+    body = _admin_get(client, "/api/admin/runs").json()
+
+    assert [r["run_id"] for r in body["runs"]] == ["R3", "R2", "R1"]
+    rows = {r["run_id"]: r for r in body["runs"]}
+    assert rows["R3"]["has_feedback"] is True and rows["R1"]["has_feedback"] is False
+    assert (rows["R1"]["user_email"], rows["R1"]["user_display_name"]) == ("Alice@Example.com", "Alice")
+    assert rows["R1"]["total_cost"] == 0.1235 and rows["R2"]["total_cost"] == 0.0
+    # persisted duration first, then wall-clock, then nothing
+    assert (rows["R3"]["duration_seconds"], rows["R1"]["duration_seconds"],
+            rows["R2"]["duration_seconds"]) == (42, 90, None)
+
+
+def test_runs_listing_user_filter_is_a_case_insensitive_substring(client, db):
+    """A fragment from the middle of the address, in the other case. (SQLite's
+    LIKE is itself case-insensitive for ASCII, so this cannot tell ilike from
+    like; it does pin the substring match.)"""
+    _seed_owned_runs(db)
+
+    body = _admin_get(client, "/api/admin/runs?user=LICE@EXAMPLE").json()
+
+    assert [r["run_id"] for r in body["runs"]] == ["R3", "R1"]
+    assert body["total"] == 2
+
+
+def test_runs_listing_paginates_with_total_and_has_more(client, db):
+    _seed_owned_runs(db)
+
+    first = _admin_get(client, "/api/admin/runs?limit=2").json()
+    to_the_end = _admin_get(client, "/api/admin/runs?offset=1&limit=2").json()
+    last = _admin_get(client, "/api/admin/runs?offset=2&limit=2").json()
+
+    assert ([r["run_id"] for r in first["runs"]], first["total"], first["has_more"]) == (["R3", "R2"], 3, True)
+    assert (first["offset"], first["limit"]) == (0, 2)
+    assert ([r["run_id"] for r in to_the_end["runs"]], to_the_end["has_more"]) == (["R2", "R1"], False)
+    assert ([r["run_id"] for r in last["runs"]], last["has_more"]) == (["R1"], False)
