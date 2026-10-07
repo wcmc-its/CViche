@@ -788,6 +788,46 @@ def test_client_has_bounded_connect_read_timeout_and_retries():
 
 
 # ---------------------------------------------------------------------------
+# #298: client injection
+# ---------------------------------------------------------------------------
+
+def test_injected_client_is_used_and_no_default_client_is_built(monkeypatch):
+    """#298 (PR #287 review): a caller-supplied client replaces the default
+    one, and boto3.client is never called to build the unused default."""
+    injected = boto3.client("s3", region_name="us-east-1")
+
+    def _no_default_client(*_args, **_kwargs):
+        raise AssertionError("boto3.client must not be called when a client is injected")
+
+    monkeypatch.setattr(boto3, "client", _no_default_client)
+    storage = S3RunStorage(bucket="test-bucket", prefix="cviche", client=injected)
+    assert storage._s3 is injected
+
+
+def test_injected_client_receives_the_storage_calls():
+    """The store routes its S3 calls through the injected client: a Stubber
+    on that client, not on a client the store built, sees the put_object."""
+    injected = boto3.client("s3", region_name="us-east-1")
+    storage = S3RunStorage(bucket="test-bucket", prefix="cviche", client=injected)
+    stub = Stubber(injected)
+    stub.add_response(
+        "put_object",
+        {},
+        {"Bucket": "test-bucket", "Key": "cviche/runs/run1/input/cv.docx", "Body": b"x"},
+    )
+    with stub:
+        storage.put_file("run1", "input/cv.docx", b"x")
+    stub.assert_no_pending_responses()
+
+
+def test_injected_client_does_not_bypass_the_bucket_guard():
+    """Injecting a client does not excuse an unset bucket (#109)."""
+    injected = boto3.client("s3", region_name="us-east-1")
+    with pytest.raises(ValueError, match="bucket not configured"):
+        S3RunStorage(bucket="", client=injected)
+
+
+# ---------------------------------------------------------------------------
 # #792: LocalRunStorage.list_files literal-prefix parity with S3
 # ---------------------------------------------------------------------------
 
