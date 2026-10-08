@@ -28,9 +28,11 @@ from .header_pin import is_note_not_record
 from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
+    _PER_CV_USER_PREFIX,
     _T_VALIDATION_SYSTEM_PROMPT_TEMPLATE,
     CLASSIFICATION_RULES_VERSION,
     build_taxonomy_codes_for_prompt,
+    per_cv_context_str,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,9 @@ logger = logging.getLogger(__name__)
 # call_llm kwarg that drops the Bedrock cachePoint for one call (#50). The
 # stage default (llm_config.yaml enable_prompt_caching: true) applies otherwise.
 _NO_PROMPT_CACHE = {"enable_prompt_caching": False}
+
+# Entries per classification call (classify_entries_batch's batch_size).
+CLASSIFY_BATCH_SIZE = 15
 
 # Taxonomy code prefixes for duplicate-pair resolution (see docs/CODING_STANDARDS.md §8.2):
 # an "M"-series classification (grants etc.) is preferred over the unclassified "T" (Appendix) fallback.
@@ -78,6 +83,17 @@ class _BatchStats:
     llm_batches: int = 0  # 1 if this batch attempted an LLM call, else 0
     observed_model: str | None = None  # model id the API actually served (#459)
     failed_batches: int = 0  # 1 if this batch's LLM call raised, else 0
+
+
+@dataclass(frozen=True)
+class SharedSystemPrompt:
+    """One group's view of the per-CV system prompt (#50): the system prompt
+    every group of the CV sends, the user-message prefix naming this group,
+    and whether to keep the cachePoint (False only when the whole CV is a
+    single call, so a cache write would never be read)."""
+    system_prompt: str
+    user_prefix: str
+    cache: bool
 
 
 class ClassificationStats(TypedDict):
@@ -196,6 +212,39 @@ def _build_taxonomy_ref_for_batch(
     return all_suggested_codes, taxonomy_ref
 
 
+def build_per_cv_prompts(
+    groups: dict[str, tuple[TaxonomyContext, int]],
+    taxonomy: dict,
+    batch_size: int = CLASSIFY_BATCH_SIZE,
+) -> dict[str, SharedSystemPrompt]:
+    """The per-CV layout (#50): one system prompt for all of a CV's groups.
+
+    ``groups`` maps each hierarchy key to its context and entry count, in the
+    order the groups are numbered. The system prompt carries every group's
+    context and the full code list, with disambiguation notes for every code
+    any group suggests, so it is byte-identical across groups and Bedrock
+    reads it from cache after the first call. Returns each key's view.
+    """
+    suggested: list[str] = []
+    for context, _count in groups.values():
+        for code in context.get_all_suggested_codes():
+            if isinstance(code, str) and code and code not in suggested:
+                suggested.append(code)
+    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=per_cv_context_str([c.format_context_string() for c, _ in groups.values()]),
+        taxonomy_ref=build_taxonomy_codes_for_prompt(taxonomy, context_codes=suggested),
+    )
+    calls = sum(-(-count // batch_size) for _context, count in groups.values())
+    return {
+        key: SharedSystemPrompt(
+            system_prompt=system_prompt,
+            user_prefix=_PER_CV_USER_PREFIX.format(group_number=group_number),
+            cache=calls > 1,
+        )
+        for group_number, key in enumerate(groups, 1)
+    }
+
+
 def _index_classifications_by_position(classifications: list[dict], batch_start: int) -> dict[int, dict]:
     """Build an index -> raw-classification-object lookup for one batch's
     LLM response (pulled out of _classify_one_batch as a pure move, #810).
@@ -251,6 +300,7 @@ def _classify_one_batch(
     system_prompt: str,
     valid_codes: set[str],
     cache_system_prompt: bool = True,
+    user_prefix: str = "",
 ) -> tuple[list[dict], _BatchStats]:
     """Classify a single batch against a system prompt built once by the caller.
 
@@ -292,7 +342,7 @@ def _classify_one_batch(
         entries_lines.append(f"[{i}] (Section: {hierarchy_path}) {e['text'][:500]}")
     entries_text = "\n".join(entries_lines)
 
-    user_message = f"""Classify these {len(entries_with_text)} entries:
+    user_message = user_prefix + f"""Classify these {len(entries_with_text)} entries:
 
 {entries_text}
 
@@ -444,7 +494,8 @@ def classify_entries_batch(
     entries: list[dict],
     taxonomy_context: TaxonomyContext,
     taxonomy: dict,
-    batch_size: int = 15
+    batch_size: int = CLASSIFY_BATCH_SIZE,
+    shared_prompt: SharedSystemPrompt | None = None,
 ) -> tuple[list[dict], ClassificationStats]:
     """
     Classify a batch of entries with the same taxonomy context.
@@ -454,6 +505,8 @@ def classify_entries_batch(
         taxonomy_context: Shared taxonomy context for these entries
         taxonomy: Full taxonomy reference
         batch_size: Max entries per LLM call
+        shared_prompt: This group's view of the per-CV system prompt
+            (build_per_cv_prompts, #50). None sends the group's own prompt.
 
     Returns:
         Tuple of (classified_entries, stats)
@@ -482,7 +535,12 @@ def classify_entries_batch(
 
     # A group that fits in one batch never re-sends its system prompt, so a
     # cache write would be paid (1.25x) and never read (#50).
-    multi_batch = len(entries) > batch_size
+    cache_system_prompt = len(entries) > batch_size
+    user_prefix = ""
+    if shared_prompt is not None:
+        system_prompt = shared_prompt.system_prompt
+        cache_system_prompt = shared_prompt.cache
+        user_prefix = shared_prompt.user_prefix
 
     # Process in batches
     for batch_start in range(0, len(entries), batch_size):
@@ -490,7 +548,8 @@ def classify_entries_batch(
 
         batch_results, batch_stats = _classify_one_batch(
             batch_entries, batch_start, all_suggested_codes,
-            system_prompt, valid_codes, cache_system_prompt=multi_batch
+            system_prompt, valid_codes, cache_system_prompt=cache_system_prompt,
+            user_prefix=user_prefix,
         )
         all_results.extend(batch_results)
         total_input_tokens += batch_stats.input_tokens
