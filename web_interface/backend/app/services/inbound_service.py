@@ -43,6 +43,7 @@ from app.services.inbound_mail import (
 from app.services.pdf_sandbox import (
     EncryptedPdfError,
     PdfBusyError,
+    PdfInterruptedError,
     PdfTooComplexError,
     UnreadablePdfError,
     read_pdf,
@@ -134,8 +135,8 @@ def _readable_reject(att: Attachment) -> AttachmentReject | None:
             text = pdf.text
         else:
             text = _extract_text(att.content, ext)
-    except PdfBusyError as e:
-        raise TransientIntakeError("pdf sandbox busy") from e
+    except (PdfBusyError, PdfInterruptedError) as e:
+        raise TransientIntakeError(f"pdf sandbox transient failure: {e}") from e
     except (EncryptedPdfError, PdfTooComplexError, UnreadablePdfError):
         return AttachmentReject.UNREADABLE
     if text is not None and len(text.strip()) < MIN_EXTRACTED_CHARS:

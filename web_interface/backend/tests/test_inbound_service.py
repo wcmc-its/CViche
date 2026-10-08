@@ -25,7 +25,7 @@ from app.models import (
 from app.services import ed_access, inbound_service
 from app.services.inbound_mail import AttachmentReject
 from app.services.mailer import MailKind
-from app.services.pdf_sandbox import PdfText
+from app.services.pdf_sandbox import PdfBusyError, PdfInterruptedError, PdfText
 from app.storage.local_storage import LocalRunStorage
 from tests.conftest import TestingSessionLocal
 from tests.test_inbound_mail import PDF, SES_FAIL, SES_PASS, make_eml
@@ -357,13 +357,15 @@ def test_one_bad_message_does_not_stop_the_others(db, storage, sent, monkeypatch
     assert inbound_service.poll_once(TestingSessionLocal, storage) == 0
 
 
-def test_a_busy_pdf_sandbox_defers_the_message_to_the_next_poll(db, storage, sent, monkeypatch):
-    from app.services.pdf_sandbox import PdfBusyError
+@pytest.mark.parametrize("transient", [PdfBusyError, PdfInterruptedError])
+def test_a_busy_pdf_sandbox_defers_the_message_to_the_next_poll(db, storage, sent, monkeypatch, transient):
+    """A full sandbox, or a child stopped by a signal (#1566), is transient:
+    the message is retried, not rejected as unreadable."""
     _user(db)
     _put(storage, "m1", make_eml(attachments=[("a.pdf", PDF)]))
 
     def busy(content):
-        raise PdfBusyError("full")
+        raise transient("transient")
 
     monkeypatch.setattr(inbound_service, "read_pdf", busy)
     inbound_service.poll_once(TestingSessionLocal, storage)

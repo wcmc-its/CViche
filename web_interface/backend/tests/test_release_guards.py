@@ -955,6 +955,29 @@ def test_pdf_over_a_parse_limit_fails_the_run_with_its_message(db, tmp_path, mon
     assert run.error_message == PDF_TOO_COMPLEX_MESSAGE
 
 
+def test_pdf_conversion_child_sigtermed_does_not_blame_the_file(db, tmp_path, monkeypatch, cv_pdf):
+    """#1566: a conversion child killed by SIGTERM (the pod draining) fails
+    the run with a retry message, never "too large or complex". The action
+    it names must be one the viewer shows for this run: no step is in
+    'error', so "Retry failed step" is hidden and only "Restart with file"
+    is offered."""
+    from app.services import pdf_sandbox
+    src = tmp_path / "SIGT01.pdf"
+    src.write_bytes(cv_pdf())
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP",
+                        "import os, signal; os.kill(os.getpid(), signal.SIGTERM)")
+    db.add(Step(run_id="SIGT01", step_number=1, step_name="1a", status="pending"))
+    _execute_one_noop_step(db, monkeypatch, tmp_path, "SIGT01", src)
+    db.expire_all()
+    run = db.get(Run, "SIGT01")
+    assert run.status == "failed"
+    assert run.error_message == pdf_sandbox.PDF_INTERRUPTED_RUN_MESSAGE
+    assert "too large" not in run.error_message
+    steps = db.query(Step).filter(Step.run_id == "SIGT01").all()
+    assert [s.status for s in steps] == ["pending"]
+    assert run.error_message.split('"')[1::2] == ["Restart with file"]
+
+
 def test_run_waiting_too_long_for_a_pdf_slot_fails_with_its_message(db, tmp_path, monkeypatch, cv_pdf):
     """#806 review B1: the run's conversion waits a bounded time for a PDF
     child slot, then fails the run with a message that says why."""

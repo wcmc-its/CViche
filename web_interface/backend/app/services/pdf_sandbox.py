@@ -29,7 +29,10 @@ and the run's PDF->docx conversion both go through `run_pdf_job`, which:
 - exchanges only JSON with the child, never pickle: the child parses
   untrusted input.
 
-A limit hit is PdfTooComplexError, never a fail-open.
+A limit hit is PdfTooComplexError, never a fail-open. A child stopped from
+outside -- a termination signal, say the pod draining -- is
+PdfInterruptedError, and a wall-clock timeout is PdfTimeoutError: neither
+says the file is too large (#1566).
 
 Concurrency. At most PDF_CHILD_SLOTS children run at once per process (one
 uvicorn process per backend pod, one worker process per worker pod). The
@@ -67,6 +70,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -97,6 +101,16 @@ PDF_UNREADABLE_MESSAGE = (
 PDF_BUSY_MESSAGE = (
     "The server is busy processing other PDFs — please try again in a moment."
 )
+PDF_INTERRUPTED_RUN_MESSAGE = (
+    "Converting this PDF was interrupted because the server restarted or "
+    'was under heavy load; the file itself is fine. Please try "Restart '
+    'with file" in a few minutes.'
+)
+PDF_TIMEOUT_RUN_MESSAGE = (
+    "Converting this PDF took too long and was stopped. This is often "
+    'temporary, so please try "Restart with file" in a few minutes; if it '
+    "happens again, upload the CV as a .docx."
+)
 PDF_BUSY_RUN_MESSAGE = (
     "The server was too busy processing other PDFs to start this run. "
     'Please try "Restart with file" in a few minutes.'
@@ -109,6 +123,12 @@ _slots = threading.BoundedSemaphore(PDF_CHILD_SLOTS)
 
 # The child's exit code when it runs out of memory but survives to report it.
 _EXIT_OUT_OF_MEMORY = 3
+# Signals that stop a child from outside -- a pod shutdown, a Ctrl-C -- and
+# say nothing about the PDF. Every other signal stays a limit: SIGKILL comes
+# from the kernel's OOM killer (a pod-level SIGKILL kills this parent too, so
+# it never sees the child's exit), SIGSEGV/SIGABRT from an allocation failing
+# under RLIMIT_AS outside Python's control.
+_INTERRUPT_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _SRC_DIR = _BACKEND_DIR.parents[1] / "src"
@@ -134,6 +154,17 @@ _OPS = (_OP_TEXT, _OP_CONVERT)
 
 class PdfTooComplexError(Exception):
     """The PDF hit a page, memory or time limit."""
+
+
+class PdfTimeoutError(PdfTooComplexError):
+    """The child ran past its wall-clock limit. Still a limit on the request
+    path, but ambiguous: a CPU-starved node times out on a file that converts
+    in seconds elsewhere, so the run does not blame the file for it."""
+
+
+class PdfInterruptedError(Exception):
+    """The child was stopped by a termination signal (_INTERRUPT_SIGNALS),
+    not by anything in the PDF; retrying the same file can succeed."""
 
 
 class EncryptedPdfError(Exception):
@@ -198,11 +229,13 @@ def run_pdf_job(op: str, args: list[str], timeout_seconds: float,
     Takes one of PDF_CHILD_SLOTS first: without blocking when
     slot_wait_seconds is 0 (the request path), else waiting up to that long.
 
-    Raises PdfBusyError (no slot), PdfTooComplexError (a page, memory or
-    time limit), EncryptedPdfError, UnreadablePdfError (any other failure
-    of the parse, or a reply that cannot be read), or RuntimeError when the
-    child exits non-zero for a reason that is not a limit -- a deployment
-    fault such as RLIMIT_AS failing to apply on Linux, surfaced as a 500.
+    Raises PdfBusyError (no slot), PdfTooComplexError (a page or memory
+    limit; its subclass PdfTimeoutError for the time limit),
+    PdfInterruptedError (the child was stopped by a termination signal),
+    EncryptedPdfError, UnreadablePdfError (any other failure of the parse,
+    or a reply that cannot be read), or RuntimeError when the child exits
+    non-zero for a reason that is not a limit -- a deployment fault such as
+    RLIMIT_AS failing to apply on Linux, surfaced as a 500.
     """
     acquired = (_slots.acquire(blocking=False) if slot_wait_seconds <= 0
                 else _slots.acquire(timeout=slot_wait_seconds))
@@ -214,9 +247,14 @@ def run_pdf_job(op: str, args: list[str], timeout_seconds: float,
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, timeout=timeout_seconds,
                                   check=False, env=_child_env())
         except subprocess.TimeoutExpired as e:  # subprocess.run has already killed it
-            raise PdfTooComplexError(f"PDF {op} exceeded {timeout_seconds}s") from e
+            # The load average tells a starved node from a heavy file (#1566).
+            logger.warning("PDF %s child exceeded %ss; load average %s",
+                           op, timeout_seconds, os.getloadavg())
+            raise PdfTimeoutError(f"PDF {op} exceeded {timeout_seconds}s") from e
     finally:
         _slots.release()
+    if -proc.returncode in _INTERRUPT_SIGNALS:
+        raise PdfInterruptedError(f"PDF {op} child stopped by signal {-proc.returncode}")
     if proc.returncode == _EXIT_OUT_OF_MEMORY or proc.returncode < 0:
         # < 0: killed by a signal -- SIGKILL from the kernel or SIGSEGV/SIGABRT
         # when an allocation fails under RLIMIT_AS outside Python's control.

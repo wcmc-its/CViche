@@ -34,6 +34,7 @@ from app.services.pdf_sandbox import (
     PDF_UNREADABLE_MESSAGE,
     EncryptedPdfError,
     PdfBusyError,
+    PdfInterruptedError,
     PdfText,
     PdfTooComplexError,
     UnreadablePdfError,
@@ -147,7 +148,7 @@ async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | Non
     except UnreadablePdfError as e:
         logger.warning("Rejected unreadable PDF: %s", e)
         raise bad_request(PDF_UNREADABLE_MESSAGE)
-    except PdfBusyError:
+    except (PdfBusyError, PdfInterruptedError):  # both transient: try again
         raise HTTPException(
             status_code=503,
             detail={"error": "pdf_busy", "message": PDF_BUSY_MESSAGE},
