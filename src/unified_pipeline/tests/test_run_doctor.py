@@ -4583,9 +4583,10 @@ def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
 
 
 def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
-    """#666: the INFO tier needs the rendered document. `dedup_drops` is
-    registered with `blocks` optional; dropping that wiring leaves the WARN
-    tier working and the INFO tier silently dead, so drive run_doctor()."""
+    """#666: a journal-name drop is read against the rendered document.
+    `dedup_drops` is registered with `blocks` optional; dropping that wiring
+    leaves the coverage test working and the name tests silently dead, so
+    drive run_doctor(). Another journal's name, off the page, is a WARN."""
     root = _build_clean_run(tmp_path)
     _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
                  {"document_uid": _UID, "warnings": [],
@@ -4597,7 +4598,7 @@ def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
                        "kept_fields": {"journal_name": "European Example Optics"}}]})
     payload = run_doctor(root, _UID)
     drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
-    assert [f["severity"] for f in drops] == ["INFO"]
+    assert [f["severity"] for f in drops] == ["WARN"]
 
 
 def test_run_doctor_wires_stage_5d_into_dedup_drops_entry_index(tmp_path):

@@ -201,7 +201,8 @@ HOME_ONLY_IMPORTS = {
                                       "_YEAR_RE", "_is_subsequence", "_is_word_run", "_ordered_words",
                                       "_rank_qualifiers",
                                       "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases",
-                                      "SPLIT_SIBLING_METRIC", "_drop_split_siblings"),
+                                      "SPLIT_SIBLING_METRIC", "_drop_split_siblings",
+                                      "_citation_identity_text"),
 }
 
 _RELOCATED_CASES = [

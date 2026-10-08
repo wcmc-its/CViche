@@ -76,6 +76,7 @@ from unified_pipeline.stage4.schemas import (
 from unified_pipeline.stage6.dedup import (
     _PART_NUMBER_RE,
     _TRIAL_PHASE_RE,
+    _citation_identity_text,
     _dates_compatible,
     _different_rank,
     _part_numbers,
@@ -104,6 +105,7 @@ from unified_pipeline.stage6.normalization.pii import (
     WITHHOLD_POLICY,
     _pii_matches,
 )
+from unified_pipeline.stage6.normalization.publication import resolve_publication
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage6.sections.research_support import (
@@ -783,7 +785,9 @@ def _alphanumeric_tokens(text) -> Counter:
 # #666): the words alone cannot tell them apart. What can is the extracted name
 # the two entries carry and what the page shows. Stage 6 writes only the name
 # fields worth comparing into the decision (`_decision_fields`).
-# Findings listing this many drops stay readable in the finding message.
+# An INFO finding listing this many drops stays readable; a WARN lists every
+# drop, since each is a record the reader may have to restore (#666: one run's
+# five lost yearly awards would crowd out the rest).
 DEDUP_EVIDENCE_LIMIT = 6
 #: Characters of each dropped and kept text a dedup evidence line quotes:
 #: enough for the whole of a one-line record, since the review copy shows the
@@ -851,10 +855,44 @@ _OCCASION_MARKS = (("part", _part_numbers), ("phase", _trial_phases),
                    ("numeral", _standalone_numerals))
 
 
+# A class label ("Class of 2031") names the cohort an award honours, not the
+# year it was given, so two awards of one name differ when their classes do,
+# and a year inside the label vouches for no award year (#666, YUYVIG
+# LTTYWI-02: five of 28 yearly teaching awards dropped beside another class's).
+_CLASS_YEAR_RE = re.compile(r"\bclass\s+of\s+((?:19|20)\d{2})\b", re.IGNORECASE)
+_DASH = "-\u2013\u2014"
+# A year that opens a range with no end year after the dash ("2031 - Board
+# certified", "2031-present"), and a closed range's end year ("2020 - 2031").
+_OPEN_RANGE_START_RE = re.compile(
+    rf"\b((?:19|20)\d{{2}})\s*[{_DASH}](?!\s*(?:19|20)?\d{{2}}\b)")
+_CLOSED_RANGE_END_RE = re.compile(rf"\b(?:19|20)\d{{2}}\s*[{_DASH}]\s*((?:19|20)\d{{2}})\b")
+
+
+def _class_years(text: str) -> set[str]:
+    return set(_CLASS_YEAR_RE.findall(text))
+
+
+_BARE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _reopened_years(dropped_text: str, kept_text: str) -> set[str]:
+    """Years the dropped text opens a range at where the kept text only
+    closes one: a certification renewed in 2031 and still current, beside
+    the term that ended in 2031 (#666, YUYVIG HXBPCT-01). `_dates_compatible`
+    reads the open start as a bare year inside the kept range. A kept text
+    that also states the year on its own ("... 2031.") vouches for it."""
+    kept_elsewhere = set(_BARE_YEAR_RE.findall(_CLOSED_RANGE_END_RE.sub(" ", kept_text)))
+    return ((set(_OPEN_RANGE_START_RE.findall(dropped_text))
+             & set(_CLOSED_RANGE_END_RE.findall(kept_text)))
+            - set(_OPEN_RANGE_START_RE.findall(kept_text)) - kept_elsewhere)
+
+
 def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
     """Why the dropped text names another occasion than the kept text: a
-    date stated to the month or a year the kept text does not carry, or a
-    part, phase or numeral it lacks. None when nothing tells them apart.
+    date stated to the month or a year the kept text does not carry, another
+    class label or a year it carries only inside one, a range left open where
+    the kept one closes, or a part, phase or numeral it lacks. None when
+    nothing tells them apart.
 
     The same predicate stage 6 now refuses a drop on (`_dates_compatible`,
     `_part_numbers`, `_trial_phases`), re-checked here because a sidecar may
@@ -862,6 +900,15 @@ def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
     KDAZOM-03, XWNZWW-03)."""
     if not _dates_compatible(dropped_text, kept_text):
         return "a date the kept entry does not carry"
+    classes = _class_years(dropped_text) ^ _class_years(kept_text)
+    if classes:
+        return f"class of {', '.join(sorted(classes))} on one entry only"
+    if not _dates_compatible(_CLASS_YEAR_RE.sub(" ", dropped_text),
+                             _CLASS_YEAR_RE.sub(" ", kept_text)):
+        return "a year the kept entry carries only as a class"
+    reopened = _reopened_years(dropped_text, kept_text)
+    if reopened:
+        return f"a range open from {', '.join(sorted(reopened))} where the kept one ends"
     for mark, read in _OCCASION_MARKS:
         missing = read(dropped_text) - read(kept_text)
         if missing:
@@ -885,11 +932,14 @@ def _entry_index_by_text(stage_5d: Mapping | None) -> dict[str, object]:
 
 
 def _drop_evidence(decision: Mapping, index_by_text: Mapping[str, object],
-                   detail: str) -> str:
+                   detail: str, entries: list[object] | None = None) -> str:
     """One evidence line for a drop, led by `entry N` when the dropped text
-    names exactly one entry, so the precision harness can match it."""
+    names exactly one entry, or by every entry in `entries` when it does not,
+    so the precision harness and the review copy can locate it."""
     dropped = str(decision.get("dropped_text", ""))
     index = index_by_text.get(" ".join(dropped.split()))
+    if index is None and entries:
+        index = ", ".join(map(str, entries))
     prefix = f"entry {index}: " if index is not None else ""
     return (f"{prefix}{decision.get('code', '?')} ({detail}): "
             f"dropped '{dropped[:DEDUP_TEXT_CHARS]}' vs kept "
@@ -909,15 +959,171 @@ def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:
     return rendered_items is not None and bool(_unrendered_identity(decision, rendered_items))
 
 
+# Words two extracted names may differ by and still be one name ("The Example
+# Journal" beside "Example Journal"), and a parenthetical, which is most often
+# an acronym ("Example Society (ES)").
+_NAME_FILLER_WORDS = frozenset({"a", "an", "and", "at", "for", "in", "of", "on", "the", "to"})
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+#: The name field of a code whose entry is a bare name, so a dropped entry
+#: without the field is named by its text (a journal list, YUYVIG WPJHYT-03).
+_BARE_NAME_FIELD = "journal_name"
+
+
+def _name_words(name: str) -> list[str]:
+    """The words of an extracted name that tell it from another, in order,
+    a parenthetical and filler words left out."""
+    words = _DEDUP_TOKEN_RE.findall(norm(_PARENTHETICAL_RE.sub(" ", name)))
+    return [word for word in words if word not in _NAME_FILLER_WORDS]
+
+
+def _same_word(word: str, other: str) -> bool:
+    """One word, or one the start of the other: an abbreviation ("Prof" for
+    "Professor") or a plural ("Committees" beside "Committee")."""
+    return word.startswith(other) or other.startswith(word)
+
+
+def _words_lacking(words: list[str], other: list[str]) -> set[str]:
+    """Words of `words` that no word of `other` matches (`_same_word`)."""
+    return {word for word in words if not any(_same_word(word, o) for o in other)}
+
+
+def _inserts_a_word(dropped: list[str], kept: list[str]) -> bool:
+    """The kept name holds every dropped word with a word of its own between
+    two of them, not at either end: "Example Operations Committee" beside
+    "Example Committee" is a narrower body (YUYVIG BLBVPD-04), where
+    "Example Society, Example Chapter" extends the same name. Each dropped word is read where it first occurs, so a kept name
+    that repeats the dropped one later ("X, formerly Y") inserts nothing."""
+    positions = [next((i for i, other in enumerate(kept) if _same_word(word, other)), None)
+                 for word in dropped]
+    if not positions or None in positions:
+        return False
+    return any(_words_lacking([word], dropped)
+               for word in kept[min(positions) + 1:max(positions)])
+
+
+def _name_pairs(decision: Mapping) -> list[tuple[str, str, str]]:
+    """(field, dropped name, kept name) for each name field both entries
+    fill. A bare-name code's dropped entry without the field is named by its
+    text when the text is words of the kept name ("Cell" beside "Cancer
+    Cell"); a text sharing none is a stray fragment ("Reviewer"), no name."""
+    dropped = dict(decision.get("dropped_fields") or {})
+    kept = decision.get("kept_fields") or {}
+    text = str(decision.get("dropped_text") or "")
+    if (_BARE_NAME_FIELD in kept and not dropped.get(_BARE_NAME_FIELD)
+            and _name_words(text)
+            and not _words_lacking(_name_words(text), _name_words(str(kept[_BARE_NAME_FIELD])))):
+        dropped[_BARE_NAME_FIELD] = text
+    return [(key, str(dropped[key]), str(kept[key]))
+            for key in dropped if key in kept and str(dropped[key]).strip()]
+
+
+def _distinct_name(decision: Mapping, rendered_items: set[str] | None) -> str | None:
+    """The field whose dropped value names another record than the kept
+    one, and that is not on the page as an item of its own: two names each
+    carrying a word the other lacks (another department, another award,
+    YUYVIG OKRTPJ-01, IZABPD-06), a word inserted inside the dropped name
+    (a text drop only: a record rule matched the two on purpose despite
+    rewording), or another bare journal name (WPJHYT-03). None otherwise."""
+    field_matched = str(decision.get("metric", "")).startswith(RECORD_RULE_METRIC_PREFIX)
+    for key, dropped_name, kept_name in _name_pairs(decision):
+        dropped, kept = _name_words(dropped_name), _name_words(kept_name)
+        if key == _BARE_NAME_FIELD:
+            apart = set(dropped) != set(kept)
+        else:
+            apart = ((_words_lacking(dropped, kept) and _words_lacking(kept, dropped))
+                     or (not field_matched and _inserts_a_word(dropped, kept)))
+        on_page = (rendered_items is not None
+                   and " ".join(_DEDUP_TOKEN_RE.findall(norm(dropped_name))) in rendered_items)
+        if apart and not on_page and (key != _BARE_NAME_FIELD or rendered_items is not None):
+            return key
+    return None
+
+
+#: Fields that tell two deliveries of one talk apart when its title, venue
+#: and year match (YUYVIG LTTYWI-01: one talk given in three cities in 2006).
+_DELIVERY_FIELDS = ("date", "location")
+_CITATION_METRIC_PREFIX = "citation_"
+
+
+#: The two texts stage 6 writes for a citation drop (`_citation_identity_text`):
+#: the formatted citation for a `citation` match, title and year for the rest.
+_CITATION_IDENTITY_KINDS = ("citation", "title_journal_year")
+
+
+def _citation_copies(stage_5d: Mapping | None) -> dict[tuple[str, str], list[_FieldsEntry]]:
+    """(code, identity text) -> the stage-5d entries carrying it, so a
+    citation drop is checked against every copy it matched, not only the two
+    the decision quotes."""
+    copies: dict[tuple[str, str], list[_FieldsEntry]] = {}
+    if not stage_5d:
+        return copies
+    for raw, entry in zip(stage_5d.get("entries", []), _fields_entries(stage_5d),
+                          strict=True):
+        pub = resolve_publication(raw)
+        for text in {_citation_identity_text(kind, pub) for kind in _CITATION_IDENTITY_KINDS}:
+            copies.setdefault((entry.code, text), []).append(entry)
+    return copies
+
+
+def _deliveries_apart(decision: Mapping, copies: Mapping[tuple[str, str], list[_FieldsEntry]]) -> list[object]:
+    """The entries a citation drop matched on, when they state different
+    dates or places, so they are deliveries of one talk, not one record
+    listed twice. Empty for a non-citation drop or copies that agree."""
+    if not str(decision.get("metric", "")).startswith(_CITATION_METRIC_PREFIX):
+        return []
+    group = copies.get((decision.get("code"), decision.get("dropped_text")), [])
+    for key in _DELIVERY_FIELDS:
+        values = {" ".join(_DEDUP_TOKEN_RE.findall(norm(e.fields.get(key))))
+                  for e in group if isinstance(e.fields.get(key), str) and e.fields[key].strip()}
+        if len(values) > 1:
+            return [e.element_idx for e in group]
+    return []
+
+
+def _drop_suspicion(decision: Mapping, rendered_items: set[str] | None,
+                    copies: Mapping) -> tuple[str, str, list[object]] | None:
+    """(severity, detail, entries) for one dedup decision, or None when it
+    reads as a duplicate. `entries` names the matched copies when the drop's
+    own text names no single entry."""
+    dropped = _alphanumeric_tokens(decision.get("dropped_text", ""))
+    kept = _alphanumeric_tokens(decision.get("kept_text", ""))
+    if not dropped:
+        return None
+    coverage = sum((dropped & kept).values()) / sum(dropped.values())
+    metric = decision.get("metric", "?")
+    field_matched = str(metric).startswith(RECORD_RULE_METRIC_PREFIX)
+    if coverage < DEDUP_SAFE_CONTAINMENT and not field_matched:
+        return "WARN", f"{metric}, {coverage:.0%} covered by kept", []
+    occasion = _occasion_apart(str(decision.get("dropped_text", "")),
+                               str(decision.get("kept_text", "")))
+    if occasion:
+        return "WARN", f"{metric}, {occasion}", []
+    deliveries = _deliveries_apart(decision, copies)
+    if deliveries:
+        return "WARN", f"{metric}, copies differ in date or place", deliveries
+    name = _distinct_name(decision, rendered_items)
+    if name:
+        return "WARN", f"{metric}, {name} names another record", []
+    if _named_apart(decision, rendered_items):
+        return "INFO", str(metric), []
+    return None
+
+
 def lint_dedup_drops(report: dict,
                      blocks: list[tuple[str, str]] | None = None,
                      stage_5d: Mapping | None = None) -> list[dict]:
     """Stage-6 dedup decisions that may have dropped a distinct record.
 
-    WARN: the dropped text is NOT near-fully contained in the kept entry, so at
-    these loose similarity thresholds it is a distinct record, not a duplicate
-    (#227); or it names another occasion than the kept entry, a date, part,
-    phase or numeral the kept text lacks (`_occasion_apart`, #666).
+    WARN, one evidence line per drop with none left out (`_drop_suspicion`):
+    - the dropped text is NOT near-fully contained in the kept entry, so at
+      these loose similarity thresholds it is a distinct record, not a
+      duplicate (#227);
+    - it names another occasion than the kept entry: a date, class, open
+      range, part, phase or numeral the kept text lacks (`_occasion_apart`,
+      #666);
+    - a citation drop whose matched copies in stage 5d state different dates
+      or places (`_deliveries_apart`, needs `stage_5d`);
+    - the two entries' extracted names name two records (`_distinct_name`).
 
     INFO (#666): the dropped text IS contained, but the two entries carry
     different names, and either the dropped name is on the page as no cell of
@@ -935,30 +1141,22 @@ def lint_dedup_drops(report: dict,
     named_apart = []
     rendered_items = _rendered_item_set(blocks) if blocks is not None else None
     index_by_text = _entry_index_by_text(stage_5d)
+    copies = _citation_copies(stage_5d)
     for d in report.get("dedup_decisions", []):
-        dropped = _alphanumeric_tokens(d.get("dropped_text", ""))
-        kept = _alphanumeric_tokens(d.get("kept_text", ""))
-        if not dropped:
+        verdict = _drop_suspicion(d, rendered_items, copies)
+        if verdict is None:
             continue
-        coverage = sum((dropped & kept).values()) / sum(dropped.values())
-        metric = d.get("metric", "?")
-        field_matched = str(metric).startswith(RECORD_RULE_METRIC_PREFIX)
-        occasion = _occasion_apart(str(d.get("dropped_text", "")), str(d.get("kept_text", "")))
-        if coverage < DEDUP_SAFE_CONTAINMENT and not field_matched:
-            suspect.append(_drop_evidence(d, index_by_text,
-                                          f"{metric}, {coverage:.0%} covered by kept"))
-        elif occasion:
-            suspect.append(_drop_evidence(d, index_by_text, f"{metric}, {occasion}"))
-        elif _named_apart(d, rendered_items):
-            named_apart.append(_drop_evidence(d, index_by_text, str(metric)))
+        severity, detail, entries = verdict
+        evidence = _drop_evidence(d, index_by_text, detail, entries)
+        (suspect if severity == "WARN" else named_apart).append(evidence)
     findings = []
     if suspect:
         findings.append(_finding(
             "dedup_drops", "WARN",
-            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry or "
-            f"naming another date, part or numeral — possible distinct records "
-            f"lost (#227, #666)",
-            suspect[:DEDUP_EVIDENCE_LIMIT]))
+            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry, "
+            f"naming another date, class, part or numeral, or another record "
+            f"by name — possible distinct records lost (#227, #666)",
+            suspect))
     if named_apart:
         findings.append(_finding(
             "dedup_drops", "INFO",
