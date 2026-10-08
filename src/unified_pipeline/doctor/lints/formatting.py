@@ -9,6 +9,10 @@ reaches the document.
 post-check (`stage_5c_teaching_formatter.postcheck_line`, #1349) to every
 teaching line that renders, and reads the rejections 5c records in its
 artifact. It does not re-implement the post-check: the checks are imported.
+
+`citation_grounding` (#1570) applies stage 5d's grounding check
+(`stage_5d_citation_formatter.ungrounded_reason`) to every citation 5d
+wrote: an author, an initial or an ordinal the entry's source line lacks.
 """
 import re
 from collections.abc import Mapping
@@ -25,6 +29,10 @@ from unified_pipeline.stage_5c_teaching_formatter import (
     entry_records,
     postcheck_line,
 )
+from unified_pipeline.stage_5d_citation_formatter import (
+    citation_owner,
+    ungrounded_reason,
+)
 
 from ..shared import _finding
 
@@ -35,6 +43,11 @@ _FORMATTING_SOURCE_KEY = "formatting_source"
 _STAGE_5C_SOURCE = "stage_5c_llm"
 _STAGE_5C_META_KEY = "stage_5c"
 _REJECTED_KEY = "entries_rejected"
+# What stage 5d writes onto a publication it formatted, and where the
+# artifact names the CV owner.
+_FORMATTED_CITATION_KEY = "formatted_citation"
+_STAGE_5D_SOURCE = "stage_5d_llm"
+_CV_OWNER_KEY = "cv_owner"
 
 # Post-check reasons are "<shape>" or "<shape>:<detail>".
 _REASON_SEPARATOR = ":"
@@ -164,4 +177,34 @@ def lint_teaching_postcheck(stage_5d: dict) -> list[dict]:
             f"{', '.join(reasons)} -- the stage 5c line that renders misstates "
             f"its stage-4 record",
             [str(fields[_FORMATTED_TEXT_KEY])[:_EVIDENCE_CHARS]]))
+    return findings
+
+
+def lint_citation_grounding(stage_5d: dict) -> list[dict]:
+    """Stage-5d citations that name an author, an initial or an ordinal the
+    entry's source line lacks (#1570, YUYVIG FLBFRK 25, SIJYJZ 732, QQGKXR
+    481 and 483): an initial given to an author the source gives none, a
+    bare initials token joined to the next surname, an author the line
+    does not name, a CV list number "10." printed as "10th Annual Meeting".
+    One INFO finding per citation, naming the first author or ordinal that
+    fails. INFO, not WARN: about half the hits are such an invention; the
+    rest are mostly 5d spelling out a name the source misspells or garbles,
+    or an entry whose source line is a fragment of a split citation
+    (`doctor/PRECISION.md`, YUY-CG). So the run page never shows it and the
+    score never counts it: the review copy comments the citation as a
+    possibility to check (`review_comments`, REVIEW_COPY_ONLY_LINTS)."""
+    owner = citation_owner(stage_5d.get(_CV_OWNER_KEY))
+    findings = []
+    for entry in stage_5d.get("entries") or []:
+        fields = entry.get("extracted_fields") or {}
+        citation = fields.get(_FORMATTED_CITATION_KEY)
+        if fields.get(_FORMATTING_SOURCE_KEY) != _STAGE_5D_SOURCE or not isinstance(citation, str):
+            continue
+        reason = ungrounded_reason(citation, str(entry.get("text") or ""), owner)
+        if reason:
+            findings.append(_finding(
+                "citation_grounding", "INFO",
+                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+                f"{reason} -- the stage 5d citation names text its source line lacks",
+                [citation[:_EVIDENCE_CHARS]]))
     return findings

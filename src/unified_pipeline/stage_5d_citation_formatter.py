@@ -17,11 +17,14 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-12-02
 """
 
+import difflib
+import itertools
 import json
 import logging
 import os
 import re
 import sys
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -219,6 +222,313 @@ def _without_placeholder(citation: str, placeholder: str) -> str:
     """`citation` with the placeholder title cut out, or '' when nothing is left."""
     cleaned = _REPEATED_PERIODS_RE.sub('.', citation.replace(placeholder, '')).strip(' .')
     return f"{cleaned}." if cleaned else ''
+
+
+# #1570: the grounding check. Stage 6 prints a 5d citation in place of the
+# CV's own line, so a citation naming an author, an initial or a meeting
+# ordinal the line does not hold puts invented text in the document
+# (YUYVIG: FLBFRK 25, SIJYJZ 732, QQGKXR 481/483). The doctor's
+# `citation_grounding` lint applies it to every 5d citation that renders.
+# Stage 5d does not yet reject on it: the stage-4 render a rejected entry
+# would fall back to drops an S8 entry's meeting and place (#1570).
+
+# One Vancouver author: surname, 1-4 capital initials, optional generational suffix.
+_VANCOUVER_AUTHOR_RE = re.compile(
+    r"^(?P<surname>[^\W\d_][^\d,;:.]*?)\s+(?P<initials>[A-Z]{1,4})"
+    r"(?:\s+(?:Jr|Sr|II|III|IV|2nd|3rd|4th))?$")
+_ET_AL_ITEM_RE = re.compile(r"^et\.?\s+al\.?$", re.IGNORECASE)
+# The author segment ends at the first period followed by a space or the end.
+_AUTHOR_SEGMENT_END_RE = re.compile(r"\.(?:\s|$)")
+# Lowercase words a surname may hold ("de Quill", "van der Rook"). Any other
+# lowercase word, or a capitalised acronym, means the segment is a title or
+# a venue, not an author list, and the author check does not apply.
+_SURNAME_PARTICLES = frozenset({
+    'al', 'bin', 'da', 'de', 'del', 'della', 'den', 'der', 'di', 'dos', 'du',
+    'e', 'la', 'le', 'ten', 'ter', 'van', 'von', 'y'})
+_SURNAME_MAX_WORDS = 4
+# Source tokens: letter runs, digit runs, and the separators that end a name.
+# Periods, hyphens, quotes and brackets are not tokens, so "M.C. Rookery",
+# "J-H" and "Quill (Sable)" read as plain words.
+_SOURCE_TOKEN_RE = re.compile(r"[^\W\d_]+|\d+|[,;:&]")
+_NAME_BREAK_WORDS = frozenset({'and'})
+# A suffix the source may write between a surname and its initials ("Rook
+# Jr., J.M."); it may stand for no initial at all.
+_GENERATIONAL_SUFFIXES = frozenset({'jr', 'sr', 'ii', 'iii', 'iv'})
+# Given names or initials read on each side of a surname.
+_GIVEN_NAME_RUN_MAX = 4
+# A source word this short may be initials written together ("ZQ", "BWCA"),
+# or initials with a footnote or role marker of up to two letters after
+# them ("AEf", "JTr", "MJRF", "PEJr").
+_GLUED_INITIALS_MAX_LEN = 4
+_INITIALS_MARKER_MAX_LEN = 2
+# A number this short between a surname and its initials is an affiliation
+# marker ("Quill1 R", "Rook 3S"), not part of the name.
+_NAME_MARKER_MAX_DIGITS = 2
+# Consecutive source words one surname may span: "Mc Rookery", "M.C. Rookery",
+# "Quill Sable De Rook".
+_SURNAME_MAX_SOURCE_WORDS = 5
+# ponytail: a surname glued to the word beside it ("AnnaRook",
+# "TBQuill") is matched by containment, and one the source holds only
+# misspelt ("Sabel" for "Sable") by similarity -- the latter only when no
+# exact or glued match exists, so an exact "Rook" is never read through a
+# "Brook" beside it. Calibrated on YUYVIG and 238
+# held-out runs (doctor/PRECISION.md, YUY-CG); if either ever admits an
+# invented author, drop it rather than tune it.
+_SURNAME_FUZZY_MIN_RATIO = 0.8
+_SURNAME_LOOSE_MIN_LEN = 4
+_ORDINAL_RE = re.compile(r"\b(\d+)\s*(?:st|nd|rd|th)\b", re.IGNORECASE)
+_NEXT_WORD_RE = re.compile(r"\s*([^\W\d_]+)")
+# How a source may write ordinal N, folded: with any ordinal suffix, misspelt
+# or glued to the next word ("35rd", "21th", "106h", "58thAnnual"), as edition
+# shorthand ("2ed", "2E"), or with a Spanish indicator ("2ª", "3º" fold to
+# "2a", "3o").
+_SOURCE_ORDINAL_TEMPLATE = r"(?<!\d){n}(?:st|nd|rd|th|h|\s+(?:st|nd|rd|th)\b|\s*(?:ed|edn)\b|[eao]\b)"
+# An edition written after its label: "ed 6", "(ed. 5)", "Edition 2".
+_SOURCE_EDITION_TEMPLATE = r"\b(?:ed|edn|edition)\.?\s*{n}(?!\d)"
+_ORDINAL_UNITS = (
+    '', 'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth',
+    'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth',
+    'seventeenth', 'eighteenth', 'nineteenth')
+_CARDINAL_TENS = ('', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety')
+_ORDINAL_TENS = ('', '', 'twentieth', 'thirtieth', 'fortieth', 'fiftieth', 'sixtieth',
+                 'seventieth', 'eightieth', 'ninetieth')
+# "Rook R 2nd" for the source's "R. Rook II".
+_ORDINAL_ROMAN = {2: 'ii', 3: 'iii', 4: 'iv'}
+
+
+def _fold(text: str) -> str:
+    """`text` casefolded, with accents removed ("Quillé" -> "quille")."""
+    decomposed = unicodedata.normalize('NFKD', text)
+    return ''.join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _is_surname(text: str) -> bool:
+    """Whether `text` reads as a surname rather than a title or a venue."""
+    words = text.split()
+    if len(words) > _SURNAME_MAX_WORDS:
+        return False
+    for word in words:
+        core = word.strip('()')
+        if not core:
+            return False
+        if core.casefold() in _SURNAME_PARTICLES:
+            continue
+        if not core[0].isupper() or (len(core) > 1 and core.isupper()):
+            return False
+    return True
+
+
+def _vancouver_authors(citation: str) -> list[tuple[str, str]] | None:
+    """`(surname, initials)` per author in `citation`'s author segment, or
+    None when the segment is not a Vancouver author list (a citation that
+    opens with its title, a group author, initials written with periods).
+    A closing "et al." is not an author."""
+    end = _AUTHOR_SEGMENT_END_RE.search(citation)
+    if end is None:
+        return None
+    items = [item.strip() for item in citation[:end.start()].split(',')]
+    if _ET_AL_ITEM_RE.match(items[-1]):
+        items.pop()
+    authors = []
+    for item in items:
+        match = _VANCOUVER_AUTHOR_RE.match(item)
+        if match is None or not _is_surname(match['surname']):
+            return None
+        authors.append((match['surname'], match['initials']))
+    return authors or None
+
+
+class CitationOwner(NamedTuple):
+    """The CV owner as a Vancouver author: folded surname, and the initials
+    of their given names."""
+    surname: str
+    initials: str
+
+
+def citation_owner(cv_owner: object) -> CitationOwner | None:
+    """The owner from an artifact's `cv_owner` block, or None without a
+    last name."""
+    if not isinstance(cv_owner, dict) or not isinstance(cv_owner.get('last_name'), str):
+        return None
+    given = ' '.join(str(cv_owner.get(key) or '') for key in ('first_name', 'middle_name'))
+    initials = ''.join(word[0] for word in _SOURCE_TOKEN_RE.findall(_fold(given)) if word[0].isalpha())
+    surname = ''.join(_SOURCE_TOKEN_RE.findall(_fold(cv_owner['last_name'])))
+    return CitationOwner(surname, initials) if surname else None
+
+
+def _is_name_word(token: str) -> bool:
+    return token[0].isalpha() and token not in _NAME_BREAK_WORDS
+
+
+def _is_name_marker(token: str) -> bool:
+    return token.isdigit() and len(token) <= _NAME_MARKER_MAX_DIGITS
+
+
+def _initials_readings(words: list[str]) -> set[str]:
+    """Every initials string `words` (given names or initials, in order) can
+    stand for: each word gives its first letter, or, when short enough to be
+    initials written together, all its letters (less a marker); a
+    generational suffix may give nothing."""
+    options = []
+    for word in words:
+        readings = {word[0]}
+        if len(word) <= _GLUED_INITIALS_MAX_LEN:
+            readings.update(word[:len(word) - cut] for cut in range(min(_INITIALS_MARKER_MAX_LEN, len(word) - 1) + 1))
+        if word in _GENERATIONAL_SUFFIXES:
+            readings.add('')
+        options.append(readings)
+    return {''.join(parts) for parts in itertools.product(*options)}
+
+
+class _SurnameSpan(NamedTuple):
+    """Where the source writes a surname: tokens `start` to `stop`, and the
+    letters glued before or after it in the same word ("Anna" of
+    "AnnaRook"), which are name words of their own."""
+    start: int
+    stop: int
+    glued_before: str = ''
+    glued_after: str = ''
+
+
+def _surname_spans(surname: str, tokens: list[str]) -> list[_SurnameSpan]:
+    """Where `tokens` spell `surname` (letters only, spaces ignored), or a
+    word holds it glued to another; a misspelt match only when neither."""
+    target = ''.join(_SOURCE_TOKEN_RE.findall(_fold(surname)))
+    found, misspelt = [], []
+    for start in range(len(tokens)):
+        joined = ''
+        for stop in range(start + 1, min(start + _SURNAME_MAX_SOURCE_WORDS, len(tokens)) + 1):
+            if not _is_name_word(tokens[stop - 1]):
+                break
+            joined += tokens[stop - 1]
+            if joined == target:
+                found.append(_SurnameSpan(start, stop))
+            elif len(target) < _SURNAME_LOOSE_MIN_LEN:
+                continue
+            elif stop == start + 1 and target in joined:
+                before, _, after = joined.partition(target)
+                found.append(_SurnameSpan(start, stop, before, after))
+            elif difflib.SequenceMatcher(None, joined, target).ratio() >= _SURNAME_FUZZY_MIN_RATIO:
+                misspelt.append(_SurnameSpan(start, stop))
+    return found or misspelt
+
+
+def _given_names_before(tokens: list[str], start: int) -> list[str]:
+    """The name words just before `tokens[start]` ("ZQ Rook", "S, Rook")."""
+    index = start - 1
+    while index >= 0 and tokens[index] == ',':
+        index -= 1
+    run: list[str] = []
+    while index >= 0 and _is_name_word(tokens[index]) and len(run) < _GIVEN_NAME_RUN_MAX:
+        run.insert(0, tokens[index])
+        index -= 1
+    return run
+
+
+def _given_names_after(tokens: list[str], stop: int) -> list[str]:
+    """The name words just after a surname ending before `tokens[stop]`
+    ("Rook, J.A.", "de Rook, C.,S.", "Rook, Jr, R", "Rook1 R")."""
+    index = stop
+    while index < len(tokens) and (tokens[index] == ',' or _is_name_marker(tokens[index])):
+        index += 1
+    run: list[str] = []
+    while index < len(tokens) and len(run) < _GIVEN_NAME_RUN_MAX:
+        token = tokens[index]
+        if _is_name_word(token):
+            run.append(token)
+        elif not (token == ',' and run and _comma_inside_initials(run[-1], tokens, index)):
+            break
+        index += 1
+    return run
+
+
+def _comma_inside_initials(previous: str, tokens: list[str], comma: int) -> bool:
+    """Whether the comma at `tokens[comma]` sits inside one author's initials:
+    after a generational suffix, or between two single letters."""
+    following = tokens[comma + 1] if comma + 1 < len(tokens) else ''
+    return previous in _GENERATIONAL_SUFFIXES or (
+        len(previous) == 1 and len(following) == 1 and following.isalpha())
+
+
+def _author_reason(position: int, surname: str, initials: str, tokens: list[str],
+                   owner: CitationOwner | None) -> str | None:
+    """Why the source (`tokens`) does not ground author `position`, or None.
+
+    Grounded means the source holds the surname, and holds `initials` in the
+    given names or initials written next to it, on either side ("Rook ZQ"
+    from "ZQ Rook", "Quill JA" from "Quill, John A."). Initials the source
+    gives with fewer letters ("Sable SR" from "Sable, Sven"), or gives to
+    a neighbouring author ("Dale BG" from "BG, H Dale"), are not.
+
+    The CV owner is exempt: a line of the owner's own CV that names nobody
+    ("Letter to the Editor, ...") is still the owner's, and 5d crediting
+    them with their own initials invents nothing."""
+    wanted = initials.casefold()
+    folded = ''.join(_SOURCE_TOKEN_RE.findall(_fold(surname)))
+    if owner and folded == owner.surname and owner.initials.startswith(wanted):
+        return None
+    spans = _surname_spans(surname, tokens)
+    if not spans:
+        return f'author_{position}:surname_not_in_source'
+    for span in spans:
+        before = _given_names_before(tokens, span.start) + [span.glued_before] * bool(span.glued_before)
+        if any(wanted in _initials_readings(before[cut:]) for cut in range(len(before))):
+            return None
+        after = [span.glued_after] * bool(span.glued_after) + _given_names_after(tokens, span.stop)
+        if any(wanted in _initials_readings(after[:cut]) for cut in range(1, len(after) + 1)):
+            return None
+    return f'author_{position}:initials_not_in_source'
+
+
+def _ordinal_words(number: int) -> str | None:
+    """`number` as an English ordinal ("tenth", "thirty fourth"), below 100."""
+    if number < len(_ORDINAL_UNITS):
+        return _ORDINAL_UNITS[number] or None
+    if number >= 100:
+        return None
+    tens, units = divmod(number, 10)
+    return _ORDINAL_TENS[tens] if units == 0 else f'{_CARDINAL_TENS[tens]} {_ORDINAL_UNITS[units]}'
+
+
+def _ordinal_in_source(number: str, next_word: str, source: str) -> bool:
+    """Whether `source` (folded) holds ordinal `number`: with a suffix
+    (`_SOURCE_ORDINAL_TEMPLATE`), after an edition label, as a bare number
+    before the word the citation puts after it ("124 Annual Meeting"), as
+    words ("Third Edition"), or as a roman suffix ("Rook II"). "10. Annual
+    Meeting" is none of these: there the number is the CV's list number."""
+    patterns = [_SOURCE_ORDINAL_TEMPLATE.format(n=number), _SOURCE_EDITION_TEMPLATE.format(n=number)]
+    if next_word:
+        patterns.append(rf"(?<!\d){number}\s+{re.escape(next_word)}\b")
+    if any(re.search(pattern, source) for pattern in patterns):
+        return True
+    spelled = _ordinal_words(int(number))
+    if spelled and spelled.replace(' ', '') in re.sub(r'[^a-z]', '', source):  # "FirstEdition"
+        return True
+    roman = _ORDINAL_ROMAN.get(int(number))
+    return bool(roman and f' {roman} ' in f" {' '.join(re.findall(r'[a-z]+', source))} ")
+
+
+def ungrounded_reason(citation: str, source_text: str, owner: CitationOwner | None = None) -> str | None:
+    """Why a stage-5d `citation` adds text its entry's `source_text` lacks,
+    or None when it adds none that this checks (#1570).
+
+    Two checks. Every ordinal ("10th", "34th") must be in the source: a CV
+    list number "10." must not become "10th Annual Meeting", and a meeting
+    the source does not number must not gain one. And when the citation
+    opens with a Vancouver author list, every author but the CV `owner`
+    must be grounded (`_author_reason`). A citation whose author segment
+    does not parse as one is checked for ordinals only."""
+    source = _fold(source_text)
+    for match in _ORDINAL_RE.finditer(citation):
+        following = _NEXT_WORD_RE.match(citation, match.end())
+        if not _ordinal_in_source(match[1], _fold(following[1]) if following else '', source):
+            return f'ordinal_not_in_source:{match[0]}'
+    tokens = _SOURCE_TOKEN_RE.findall(source)
+    for position, (surname, initials) in enumerate(_vancouver_authors(citation) or [], start=1):
+        reason = _author_reason(position, surname, initials, tokens, owner)
+        if reason:
+            return reason
+    return None
 
 
 def apply_formatted_fields(entry: dict, formatted_data: dict) -> bool:

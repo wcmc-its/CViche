@@ -1,4 +1,5 @@
-"""teaching_postcheck (doctor/lints/formatting.py, EBYSBC E20).
+"""teaching_postcheck (EBYSBC E20) and citation_grounding (#1570),
+doctor/lints/formatting.py.
 
 Synthetic fixtures only: invented titles, places and years.
 
@@ -11,8 +12,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.doctor.lints.formatting import (
-    lint_teaching_postcheck,  # noqa: E402
+from unified_pipeline.doctor.lints.formatting import (  # noqa: E402
+    lint_citation_grounding,
+    lint_teaching_postcheck,
 )
 
 
@@ -168,3 +170,51 @@ def test_indented_sub_bullets_are_not_record_lines():
 def test_an_empty_formatted_text_is_not_read():
     entry = _k(11, "2014 Example Workshop", {"activity_title": "Example Workshop", "date": "2014"}, "")
     assert _run(entry) == []
+
+
+def _s(idx, text, citation, code="S1", source="stage_5d_llm"):
+    """One stage-5d publication entry whose citation stage 5d wrote."""
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+            "extracted_fields": {"formatted_citation": citation, "formatting_source": source}}
+
+
+def test_citation_grounding_reports_a_merged_initials_token():
+    # FLBFRK 25: the bare initials "BG" joined to the next author's surname.
+    entry = _s(25, "Ash, X, ZQ Birch, BG, H Cole, and D Dale. A study. Nat Imag (2026).",
+               "Ash X, Birch ZQ, Cole BG, Dale D. A study. Nat Imag. 2026.")
+    [finding] = lint_citation_grounding({"entries": [entry]})
+    assert finding["lint"] == "citation_grounding"
+    assert finding["severity"] == "INFO"
+    assert finding["message"] == (
+        "entry 25 (S1): author_3:initials_not_in_source -- the stage 5d citation "
+        "names text its source line lacks")
+    assert finding["evidence"] == [entry["extracted_fields"]["formatted_citation"]]
+
+
+def test_citation_grounding_reports_a_list_number_read_as_an_ordinal():
+    # SIJYJZ 732.
+    entry = _s(732, "10. Annual Meeting of the Imaginary Society, Springfield, 2004.",
+               "10th Annual Meeting of the Imaginary Society; 2004; Springfield.", code="S8")
+    [finding] = lint_citation_grounding({"entries": [entry]})
+    assert finding["message"].startswith("entry 732 (S8): ordinal_not_in_source:10th -- ")
+
+
+def test_citation_grounding_is_quiet_on_a_faithful_citation_and_on_other_formatters():
+    faithful = _s(1, "Quill, A., Rook, B. A study. J Imag 2001.", "Quill A, Rook B. A study. J Imag. 2001.")
+    by_5c = _s(2, "Quill. A course.", "Quill AB. A course.", source="stage_5c_llm")
+    unformatted = {"element_idx_start": 3, "taxonomy_code": "S1", "text": "Quill. A study.",
+                   "extracted_fields": {"formatted_citation": "Quill AB. A study."}}
+    not_text = _s(4, "Quill. A study.", ["Quill AB. A study."])
+    no_text = {**_s(5, "", "Quill AB. A study."), "text": None}
+    assert lint_citation_grounding({"entries": [faithful, by_5c, unformatted, not_text]}) == []
+    [finding] = lint_citation_grounding({"entries": [no_text]})
+    assert finding["message"].startswith("entry 5 (S1): author_1:surname_not_in_source")
+
+
+def test_citation_grounding_exempts_the_owner_the_artifact_names():
+    entry = _s(9, "Letter to the Editor, Imaginary Gazette, 1991.",
+               "Quill AB. Letter to the editor. Imaginary Gazette. 1991.", code="S6")
+    assert len(lint_citation_grounding({"entries": [entry]})) == 1
+    artifact = {"entries": [entry], "cv_owner": {"first_name": "Ann", "middle_name": "B", "last_name": "Quill"}}
+    assert lint_citation_grounding(artifact) == []
+
