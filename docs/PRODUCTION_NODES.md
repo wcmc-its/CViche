@@ -53,6 +53,8 @@ aws ec2 describe-subnets --subnet-ids <asg subnets> \
   --query 'Subnets[].[SubnetId,AvailabilityZone,AvailableIpAddressCount]' --output text
 ```
 
+**Expect an AZ rebalance afterwards.** Once the old instance's addresses free up, the ASG may launch into the emptied zone and then terminate a healthy node to balance zones. `safe-to-evict` does not stop the ASG. Check for running runs before replacing a node, and see #82 on suspending `AZRebalance`.
+
 Then confirm both nodes are `Ready` and no pod in `cviche-dev` is `Pending` or `Terminating`. Restart any run that failed while the node was down. Runs resume from their last completed stage.
 
 ## Measure worker memory
@@ -73,4 +75,4 @@ First reading, 2026-10-08: an idle worker that hasn't run anything peaks at ~0.2
 
 ## Incident log
 
-- **2026-10-08, batch YUYVIG.** Node `ip-10-46-134-78` stopped reporting at ~03:09 UTC, mid-batch, and stayed down ~9.5 h until it was terminated by hand. Two runs lost (BCTOGR, SZHPJW). Auto repair was enabled the same day. The manual termination at 12:41 UTC hit `InsufficientFreeAddressesInSubnet` in us-east-1a six times. The ASG then launched the replacement into a us-east-1b subnet, and all workers were Running by 12:57. Both nodes are now in us-east-1b. Details on #82.
+- **2026-10-08, batch YUYVIG.** Node `ip-10-46-134-78` stopped reporting at ~03:09 UTC, mid-batch, and stayed down ~9.5 h until it was terminated by hand. Two runs lost (BCTOGR, SZHPJW). Auto repair was enabled the same day. The manual termination at 12:41 UTC hit `InsufficientFreeAddressesInSubnet` in us-east-1a six times. The ASG then launched the replacement into a us-east-1b subnet, and all workers were Running by 12:57. At 13:04 AZ rebalancing launched a new us-east-1a node, which reused the freed IP and so the name `ip-10-46-134-78`. It then terminated the healthy 1b node hosting every worker. No run was in flight, so nothing was lost. Details on #82.

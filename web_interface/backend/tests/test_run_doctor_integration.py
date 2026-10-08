@@ -302,3 +302,73 @@ def test_completed_run_gets_its_quality_columns(monkeypatch, tmp_path, db):
     db.expire_all()
     run = db.query(Run).filter(Run.id == "DOC_SCORE").first()
     assert (run.quality_score, run.quality_band, run.quality_cap) == (62, "YELLOW", None)
+
+
+class _ScoreStorage:
+    """Durable storage holding one scorable output; records what is put."""
+
+    def __init__(self):
+        self.files = {"outputs/DOC_fields.json": b"{}"}
+
+    def list_files(self, run_id, prefix=""):
+        return [k for k in self.files if k.startswith(prefix)]
+
+    def get_file(self, run_id, key):
+        return self.files[key]
+
+    def put_file(self, run_id, key, data):
+        self.files[key] = data
+
+
+def _score_against(monkeypatch, storage):
+    """Real compute_and_cache_score over ``storage``, with the scorer stubbed."""
+    from app.services import quality_score_service
+
+    monkeypatch.setattr(quality_score_service, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run",
+                        lambda _d, _r: {"totalScore": 97, "data_complete": True})
+
+
+def test_a_run_whose_doctor_raises_is_scored_not_checked(monkeypatch, tmp_path, db):
+    """#1593 (IXJMKS): a run the doctor never checked must not read as a clean
+    GREEN -- its cached score says not checked and incomplete, and so does the card."""
+    from app.services import quality_score_service as svc
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    storage = _ScoreStorage()
+    _score_against(monkeypatch, storage)
+    posts = _capture_posts(monkeypatch)
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_UNCK")
+    monkeypatch.setattr(o, "_run_doctor", AsyncMock(side_effect=RuntimeError("doctor exploded")))
+    asyncio.run(o.execute())
+
+    cached = json.loads(storage.files[svc.CACHE_KEY])
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_NOT_CHECKED
+    assert cached["data_complete"] is False
+    notifications.flush()
+    assert "not checked" in _facts(posts[-1])["Quality score"]
+
+
+def test_the_score_sees_the_report_the_doctor_just_stored(monkeypatch, tmp_path, db):
+    """#1593: the doctor runs before the score, so a run it checked is scored checked."""
+    from app.services import quality_score_service as svc
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+    storage = _ScoreStorage()
+    _score_against(monkeypatch, storage)
+
+    async def _doctor_stores_its_report():
+        storage.files[f"outputs/DOC{svc.DOCTOR_SUFFIX}"] = b"{}"
+        return _doctor_payload()
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_CHKD")
+    monkeypatch.setattr(o, "_run_doctor", _doctor_stores_its_report)
+    asyncio.run(o.execute())
+
+    cached = json.loads(storage.files[svc.CACHE_KEY])
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_CHECKED
+    assert cached["data_complete"] is True

@@ -1139,6 +1139,75 @@ def test_real_summary_is_never_mistaken_for_a_refusal(monkeypatch, reply):
     assert method == stage_4_5.GENERATION_METHOD_LLM
 
 
+_WRAPPED_SUMMARY = "My research focuses on widget signalling in the developing heart."
+
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"research_summary": _WRAPPED_SUMMARY}),
+    json.dumps({"summary": _WRAPPED_SUMMARY}),
+    json.dumps({"paragraph": _WRAPPED_SUMMARY}),                       # the only value, any key
+    json.dumps({"research_summary": _WRAPPED_SUMMARY, "word_count": 10}),  # a named key wins
+    "  " + json.dumps({"research_summary": "  " + _WRAPPED_SUMMARY + " "}) + "\n",
+])
+def test_json_wrapped_reply_renders_its_inner_summary(monkeypatch, reply):
+    """#1582: ECXGAT's reply was {"research_summary": "..."} although the prompt
+    asks for plain prose, and stage 6 rendered the JSON verbatim. The wrapped
+    string is the summary."""
+    _stub_reply(monkeypatch, reply)
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == _WRAPPED_SUMMARY
+    assert method == stage_4_5.GENERATION_METHOD_LLM
+    assert usage["cost"] == 0.003
+
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"research_summary": ["a", "b"]}),        # named key, not a string
+    json.dumps({"first": "a", "second": "b"}),           # two strings, no named key
+    json.dumps({"research_summary": ""}),                # wraps an empty summary
+    json.dumps({"count": 3}),
+    json.dumps({}),
+    json.dumps([_WRAPPED_SUMMARY]),
+    json.dumps(_WRAPPED_SUMMARY),                        # a bare JSON string
+    "null",
+    "42",
+])
+def test_json_reply_wrapping_no_summary_is_withheld_but_its_cost_is_kept(monkeypatch, reply):
+    """#1582: JSON of any other shape has no prose to render, so it is withheld
+    like a refusal, under its own generation_method."""
+    _stub_reply(monkeypatch, reply)
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == ""
+    assert method == stage_4_5.GENERATION_METHOD_NON_PROSE
+    assert usage["cost"] == 0.003
+
+
+def test_json_wrapped_refusal_is_withheld_as_a_refusal(monkeypatch):
+    """The refusal check reads the unwrapped text, so a wrapper cannot hide one."""
+    _stub_reply(monkeypatch, json.dumps({"research_summary": "I cannot write this summary."}))
+
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == ""
+    assert method == stage_4_5.GENERATION_METHOD_REFUSED
+
+
+@pytest.mark.parametrize("reply", [
+    "{Widget} signalling is the focus of my research.",  # opens with a brace, not JSON
+    "My research spans [three] areas of widget biology.",
+])
+def test_prose_that_merely_looks_bracketed_is_kept_verbatim(monkeypatch, reply):
+    _stub_reply(monkeypatch, reply)
+
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == reply
+    assert method == stage_4_5.GENERATION_METHOD_LLM
+
+
 # --- run_stage_4_5 end-to-end (call_llm stubbed) ----------------------------------
 
 def _write_fields_json(tmp_path, document_uid, entries, cv_owner=None):
