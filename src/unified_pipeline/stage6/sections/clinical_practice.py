@@ -55,6 +55,12 @@ That table is pinned by test_stage6_clinical_practice_fragments.py, which
 asserts the "same" rows against the real `entry_lines` rather than a copy of
 its rules.
 
+One more divergence, on either separator: parts that read as one paragraph
+cut at its printed lines (`_refold_shattered`, #1583) are joined back at each
+mid-sentence boundary, so a prose description whose source lines arrived as
+separate paragraphs is not printed one bullet per printed line. None of the
+rows above reads that way.
+
 All three subsections hand their raw entry text straight to this helper. They
 did not always: L1 and L2 welded every tab away first and L3 kept only
 `split('\\t')[0]`, so the fragment split was dormant on L1/L2 and L3 deleted
@@ -92,7 +98,7 @@ from ..formatting import (
     format_date_range,
 )
 from ..normalization import _committee_cell_text
-from ..parsing import _is_structural_label
+from ..parsing import _is_structural_label, _refold_shattered
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -133,6 +139,11 @@ def _bullet_parts(text: str) -> list[str]:
     file's bullet-fallback branches now pass their raw entry text in, so this
     split reaches production; see the module docstring for the exact table of
     where this contract diverges from `entry_lines`.
+
+    Except where the parts read as one paragraph cut at its printed lines
+    (`_refold_shattered`, #1583): a source whose lines arrived as separate
+    paragraphs is joined back at each mid-sentence boundary, so a prose
+    description is not printed one bullet per printed line.
     """
     parts = []
     for line in str(text or "").split("\n"):
@@ -140,7 +151,7 @@ def _bullet_parts(text: str) -> list[str]:
             cell = cell.strip()
             if cell:
                 parts.append(cell)
-    return parts
+    return _refold_shattered(parts)
 
 
 # A "content word" for the duplication check below: a run of letters or

@@ -157,6 +157,7 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     _is_table_header_entry,
     _parse_date_components,
     _parse_multi_membership_entry,
+    _refold_shattered,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
@@ -3056,6 +3057,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if not clean_segments:
                 clean_segments = [text.replace('\t', ' ')]
+            # A paragraph whose printed lines arrived as separate source
+            # paragraphs is joined back at each mid-sentence tab (#1583).
+            clean_segments = _refold_shattered(clean_segments)
 
             # Assign levels using a state machine that mirrors the original CV structure:
             #   ilvl=0: title (first segment)

@@ -420,6 +420,42 @@ def test_l3_unit_program_is_not_rendered_again_as_a_source_fragment():
     assert added == ["", "Medical Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
 
 
+# --- (a1b) #1583: a paragraph whose printed lines arrived as parts ----------
+
+# One prose paragraph whose source lines each became their own paragraph (a
+# PDF the converter did not fold), joined with tabs by stage 2, then a dated
+# institution line. Over 300 characters, so it can reach the overflow router.
+SHATTERED_LINES = [
+    "Division Chief, Example Pathology. I led the establishment",
+    "of a new clinical division providing molecular diagnostics for",
+    "infectious diseases at Example Hospital. I have also integrated",
+    "many translational research tests into our clinical service",
+    "including whole genome sequencing of pathogens and metagenomic",
+    "sequencing for the hospital laboratories of the region.",
+    "Example Hospital, 2015-2023",
+]
+SHATTERED_CASE = "\t".join(SHATTERED_LINES)
+SHATTERED_FOLDED = [" ".join(SHATTERED_LINES[:6]), SHATTERED_LINES[6]]
+
+
+@pytest.mark.parametrize("filler", ["_fill_clinical_practice_l1", "_fill_clinical_practice_l2"])
+def test_shattered_paragraph_renders_as_one_bullet_not_one_per_line(filler):
+    gen, added = _render_through_template(filler, [_entry(SHATTERED_CASE)])
+    assert gen.stats["tables_populated"] == 0
+    assert added == ["", *SHATTERED_FOLDED]
+
+
+def test_shattered_l3_overflow_renders_as_one_bullet_not_one_per_line():
+    """IZABPD 477's path: the L3 bullet is composed from stage-4 fields,
+    coverage is low, so the overflow router re-emits the source text."""
+    entry = _low_coverage_entry(SHATTERED_CASE, "L3")
+    entry["extracted_fields"] = {"leadership_role": "Division Chief", "institution": "Example Hospital",
+                                 "start_date": "2015", "end_date": "2023"}
+    gen, added = _render_through_template("_fill_clinical_practice_l3", [entry], route_overflow=True)
+    assert gen.stats["overflow_bullets_added"] == 1
+    assert added == ["", *SHATTERED_FOLDED]
+
+
 # --- (a2) the overflow router: does the split make stage 6 render it twice? --
 
 def _low_coverage_entry(text, code):
