@@ -36,8 +36,10 @@ re-emits about twenty unrelated stage-6 checks, so it is split by `_STAGE6_SHAPE
 
 Recall: the verified findings carrying an element_idx_start that at least one
 hit matched, overall and by severity, batch, batch_class (a batch synthesis's
-own class: EBYSBC's E1..E36, s7ab's s7ab-1..s7ab-21) and class_ref (the
-cross-batch class it cites). A null class is grouped as "(none)".
+own class: EBYSBC's E1..E36, s7ab's s7ab-1..s7ab-21), class_ref (the
+cross-batch class it cites; YUYVIG cites an issue, "#1403", or "NEW") and stage
+(the pipeline stage the verifier blamed first, "3b"; #1586 ranks misses by it).
+A null class or stage is grouped as "(none)".
 A finding with no index (`element_idx_start: null`) is counted apart: no hit
 can match it. The autopsy's own `doctor_caught` verdicts are tallied beside it.
 
@@ -46,6 +48,7 @@ Label schema, one `<uid>.json` per run. Ids, codes and counts only -- no CV text
     {"uid": "ABCDEF", "batch": "EBYSBC",
      "findings": [{"id": "ABCDEF-01", "class": "whole_record_lost",
                    "class_ref": "s7ab-4" | null, "batch_class": "E1" | null,
+                   "stage": "3b" | null,  # optional
                    "severity": "high" | "medium" | "low",
                    "element_idx_start": 32 | [32, 64] | null, "records": 5 | null,
                    "doctor_caught": {"verdict": "yes" | "partial" | "no",
@@ -76,7 +79,7 @@ FAILED_KEY = "_failed"  # doctor_gate.py's top-level failure map
 LOUD_SEVERITIES = frozenset({"WARN", "ERROR"})
 VERDICTS = ("TP", "partial", "FP")
 NO_CLASS = "(none)"
-CLASS_GROUPS = ("batch_class", "class_ref")
+CLASS_GROUPS = ("batch_class", "class_ref", "stage")
 CLASS_TEXT_MIN = 3  # the text table lists a class with this many findings; --json lists all
 EXIT_INPUT_ERROR = 2
 
@@ -143,6 +146,7 @@ class Verified:
     severity: str
     class_ref: str
     batch_class: str
+    stage: str
     idxs: frozenset[int]
     autopsy_credit: str | None  # doctor_caught verdict: yes / partial / no / None
 
@@ -243,7 +247,7 @@ def _label_findings(uid: str, label: dict) -> list[Verified]:
     batch = label.get("batch") or ""
     return [Verified(uid, f["id"], batch, f["severity"],
                      f.get("class_ref") or NO_CLASS, f.get("batch_class") or NO_CLASS,
-                     as_idx_set(f["element_idx_start"]),
+                     f.get("stage") or NO_CLASS, as_idx_set(f["element_idx_start"]),
                      (f.get("doctor_caught") or {}).get("verdict"))
             for f in label["findings"]]
 
