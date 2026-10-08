@@ -1015,14 +1015,60 @@ _QUALIFIED_PI_PHRASE_RE = re.compile(
     re.IGNORECASE)
 _NAME_JOINER_RE = re.compile(r" (?:&|and) ")
 _NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
+# Words that name a sponsor, an award, a programme or a role, never a person.
+# A label capture holding one is the text before the owner's own "(PI)" or
+# ", Principal Investigator" label: "Society. Research Scholar Award (PI)",
+# "Acme Foundation, Principal Investigator" (#1571, SLYBST and DYLJXC). Matched
+# case-folded against whole tokens with a trailing period removed. "Grant" is
+# left out on purpose: it is a given name and a surname, and every corpus
+# capture it would catch already carries another word here or a sentence break.
+SPONSOR_OR_AWARD_WORDS = frozenset({
+    'award', 'awards', 'fellowship', 'fellowships', 'scholar', 'scholars',
+    'scholarship', 'foundation', 'society', 'association', 'institute',
+    'institutes', 'initiative', 'supplement', 'program', 'programs', 'project',
+    'projects', 'study', 'studies', 'hospital', 'university', 'center', 'centre',
+    'college', 'health', 'pharmacy', 'fund', 'trust', 'council', 'extramural',
+    'intramural', 'investigator', 'officer',
+})
+# Period-ended tokens longer than an initial that still belong inside a name:
+# "Mrs. Ann Lee", "Prof. Bo Li", "Drs. Lee & Park". "Dr.", "Mr.", "St." and an
+# initial are two letters or fewer and pass on length.
+_NAME_TITLE_ABBREVIATIONS = frozenset({'mrs', 'drs', 'prof', 'rev', 'hon'})
+
+
+def _is_sentence_break(token: str) -> bool:
+    """True when `token` ends a sentence: "Society." but not "M.", "Dr." or "Ph.D."."""
+    bare = token[:-1]
+    return (token.endswith('.') and '.' not in bare and len(bare) > 2
+            and bare.casefold() not in _NAME_TITLE_ABBREVIATIONS)
+
+
+def _is_person_name_capture(capture: str) -> bool:
+    """False when a label capture is sponsor, award or role text, not people.
+
+    That is when a token is in SPONSOR_OR_AWARD_WORDS, or a token before the
+    last ends a sentence ("Foundation. Junior Faculty Award"). The whole
+    capture is tested, so a joined one ("Leukemia and Lymphoma Society.
+    Postdoctoral Fellowship") fails when either side does.
+    """
+    tokens = capture.split()
+    if any(t.rstrip('.').casefold() in SPONSOR_OR_AWARD_WORDS for t in tokens):
+        return False
+    return not any(_is_sentence_break(t) for t in tokens[:-1])
 
 
 def _pi_name_from_label(raw_text: str) -> str:
-    """The PI a grant's own text names, or '' when it names none."""
+    """The PI a grant's own text names, or '' when it names none.
+
+    A capture that is sponsor or award text (`_is_person_name_capture`) is
+    skipped and the search goes on, so the caller falls through to its next
+    source when nothing else matches (#1571).
+    """
     for pattern in PI_LABEL_PATTERNS:
-        match = pattern.search(raw_text or '')
-        if match:
-            return match.group(1).strip()
+        for match in pattern.finditer(raw_text or ''):
+            capture = match.group(1).strip()
+            if _is_person_name_capture(capture):
+                return capture
     return ''
 
 
