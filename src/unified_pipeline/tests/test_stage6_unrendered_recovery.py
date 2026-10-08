@@ -1016,6 +1016,13 @@ def test_remaining_appendix_opens_with_the_shared_cviche_note_box():
                    "".join(t.text or "" for t in el.iter(qn("w:t"))) == "T. APPENDIX")
     assert body[heading + 1] is box._tbl
 
+    # No blank paragraph around the box: the heading carries the space above
+    # it and the first line after it the space below (#1388).
+    assert body[heading].find(qn("w:pPr")).find(qn("w:spacing")).get(qn("w:after")) == "120"
+    after = body[heading + 2]
+    assert "".join(t.text or "" for t in after.iter(qn("w:t"))) == "Example Leftover Committee, 2019-2021"
+    assert after.find(qn("w:pPr")).find(qn("w:spacing")).get(qn("w:before")) == "120"
+
     gen._set_appendix_note_count(7)
     assert box.cell(0, 0).paragraphs[1].text == appendix_note_text(7)
 
@@ -1025,7 +1032,10 @@ def test_the_appendix_note_counts_numbered_lines_and_every_recovered_bullet():
     the unrendered-record recovery add bullets after it, and the box must say
     the total (the sidecar's appendix_diversion counts sum to the same)."""
     from unified_pipeline.stage6.formatting import is_cviche_box
-    from unified_pipeline.stage6.sections.appendix import RecoveredLine, appendix_note_text
+    from unified_pipeline.stage6.sections.appendix import (
+        RecoveredLine,
+        appendix_note_text,
+    )
 
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()

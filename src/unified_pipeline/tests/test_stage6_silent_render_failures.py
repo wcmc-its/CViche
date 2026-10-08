@@ -57,6 +57,10 @@ from unified_pipeline.stage6.formatting import (  # noqa: E402
     DetachedAnchorError,
     _insert_after,
     add_cviche_box,
+    cviche_box_group,
+    cviche_box_item,
+    cviche_box_pair,
+    cviche_box_text,
     is_cviche_box,
 )
 from unified_pipeline.stage6.sections.appendix import CODE_ORIGIN_ENTRY  # noqa: E402
@@ -1357,9 +1361,39 @@ def test_a_cviche_box_is_one_light_gray_cell_titled_cviche_and_nothing_else_is()
     assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
     top = cell._tc.tcPr.find(qn("w:tcBorders")).find(qn("w:top"))
     assert (top.get(qn("w:color")), top.get(qn("w:sz"))) == ("808080", "6")
-    assert cell.paragraphs[0].runs[0].bold and cell.paragraphs[0].runs[0].font.name == "Arial"
+    title = cell.paragraphs[0].runs[0]
+    assert title.bold and title.font.small_caps and title.font.name == "Arial"
+    assert title.font.size.pt == 9 and str(title.font.color.rgb) == "595959"
     one_cell = doc.add_table(rows=1, cols=1)
     one_cell.cell(0, 0).text = "Example Foundation grant"
     two_cells = doc.add_table(rows=1, cols=2)
     two_cells.cell(0, 0).text = "CViche-looking start"
     assert not is_cviche_box(one_cell) and not is_cviche_box(two_cells)
+
+
+def test_a_cviche_box_spans_the_column_with_padding_and_its_own_type_scale():
+    """#1388: 6pt/8pt cell padding, the full text width, and 10pt text in
+    distinct levels: group label bold with space above (none when first),
+    "Removed:"/"Kept:" in italic with the quote hanging, the pair kept together."""
+    doc = Document()
+    cell = add_cviche_box(doc, "CViche review notes: delete this box before sending")
+    tbl_pr = doc.tables[0]._tbl.tblPr
+    assert tbl_pr.find(qn("w:tblW")).get(qn("w:type")) == "pct"
+    assert tbl_pr.find(qn("w:tblW")).get(qn("w:w")) == "5000"
+    mar = tbl_pr.find(qn("w:tblCellMar"))
+    assert {e.tag.split("}")[1]: e.get(qn("w:w")) for e in mar} == {
+        "top": "120", "bottom": "120", "left": "160", "right": "160"}
+    first = cviche_box_group(cell, "Removed as near-duplicates (1)", first=True)
+    second = cviche_box_group(cell, "PubMed lookup failed (1)", first=False)
+    text = cviche_box_text(cell, "We kept one copy of each.")
+    item = cviche_box_item(cell, "Didactic Teaching")
+    removed = cviche_box_pair(cell, "Removed:", '"a"', last=False)
+    kept = cviche_box_pair(cell, "Kept:", '"b"', last=True)
+    assert first.paragraph_format.space_before.pt == 0 and second.paragraph_format.space_before.pt == 6
+    assert first.runs[0].bold and first.runs[0].font.size.pt == 10
+    assert text.runs[0].font.size.pt == 10 and text.paragraph_format.space_after.pt == 3
+    assert item.paragraph_format.first_line_indent < 0  # hanging bullet
+    assert removed.runs[0].italic and removed.runs[0].text == "Removed:\t"
+    assert removed.paragraph_format.space_after.pt == 0 and removed.paragraph_format.keep_with_next
+    assert kept.paragraph_format.space_after.pt == 3
+    assert removed.paragraph_format.first_line_indent < 0  # the quote hangs under its opening mark

@@ -22,7 +22,7 @@ try:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.oxml.xmlchemy import BaseOxmlElement
-    from docx.shared import Pt
+    from docx.shared import Inches, Pt, RGBColor
     from docx.table import Table, _Cell
     from docx.text.paragraph import Paragraph
 except ImportError:  # pragma: no cover - mirrors stage_6_word_template
@@ -189,26 +189,140 @@ def _set_cell_text(cell, text: str, bold: bool = False):
 #: Arial whose first line starts "CViche" (#1388). One table, so deleting it
 #: removes the whole note. Fill and border are dark enough to survive print,
 #: a projector and dark mode (F2F2F2 with a 0.5pt BFBFBF border washed out).
+#: Its text is smaller than the CV's 11pt, so it reads as a note beside it.
 CVICHE_BOX_PREFIX = "CViche"
 CVICHE_BOX_FILL = "E7E6E6"
 CVICHE_BOX_BORDER = "808080"
 CVICHE_BOX_BORDER_SIZE = "6"  # eighths of a point: 0.75pt
+CVICHE_BOX_TITLE_PT = 9
+CVICHE_BOX_TITLE_COLOR = RGBColor(0x59, 0x59, 0x59)
+CVICHE_BOX_TEXT_PT = 10
+#: Cell padding in twips: 6pt top and bottom, 8pt left and right.
+CVICHE_BOX_PADDING = {"top": 120, "bottom": 120, "left": 160, "right": 160}
+CVICHE_BOX_FULL_WIDTH = "5000"  # fiftieths of a percent: the whole text column
+#: Space outside a box, on the paragraphs either side of it (a table has none).
+CVICHE_BOX_OUTSIDE_PT = 6
+CVICHE_BOX_LINE_AFTER_PT = 3
+CVICHE_BOX_TITLE_AFTER_PT = 6
+CVICHE_BOX_GROUP_BEFORE_PT = 6
+CVICHE_BOX_GROUP_AFTER_PT = 2
+CVICHE_BOX_ITEM_INDENT = Inches(0.25)
+CVICHE_BOX_BULLET_HANG = Inches(0.15)
+#: "Removed:" / "Kept:" start here, and the quote hangs at the second indent.
+#: 0.75" rather than 0.5": "Removed:" in 10pt italic Arial is about 0.63".
+CVICHE_BOX_PAIR_LABEL_INDENT = Inches(0.5)
+CVICHE_BOX_PAIR_TEXT_INDENT = Inches(1.25)
+CVICHE_BOX_BULLET = "\u2022\t"
 
 
 def add_cviche_box(container: Document | _Cell, title: str) -> _Cell:
-    """Append a CViche box to *container* (a Document or a cell); return its
-    cell, whose first paragraph holds *title* in bold. Add lines with
-    `cviche_box_line`."""
-    cell = container.add_table(rows=1, cols=1).cell(0, 0)
+    """Append a CViche box to *container* (a Document or a cell), the full
+    width of the text column; return its cell, whose first paragraph holds
+    *title* small, bold, gray and in small caps."""
+    table = container.add_table(rows=1, cols=1)
+    _set_cviche_box_geometry(table)
+    cell = table.cell(0, 0)
     _set_cell_background(cell, CVICHE_BOX_FILL)
     _set_cell_borders(cell, CVICHE_BOX_BORDER, CVICHE_BOX_BORDER_SIZE)
-    cviche_box_line(cell.paragraphs[0], title, bold=True)
+    title_para = cell.paragraphs[0]
+    _cviche_box_spacing(title_para, after=CVICHE_BOX_TITLE_AFTER_PT)
+    run = title_para.add_run(title)
+    _set_font(run, size=CVICHE_BOX_TITLE_PT, bold=True)
+    run.font.small_caps = True
+    run.font.color.rgb = CVICHE_BOX_TITLE_COLOR
     return cell
 
 
-def cviche_box_line(para: Paragraph, text: str, bold: bool = False) -> None:
-    """Write *text* into a CViche box paragraph, in the box's Arial."""
-    _set_font(para.add_run(text), bold=bold)
+def _set_cviche_box_geometry(table: Table) -> None:
+    """Full text-column width and the box's cell padding."""
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:type"), "pct")
+    tbl_w.set(qn("w:w"), CVICHE_BOX_FULL_WIDTH)
+    margins = OxmlElement("w:tblCellMar")
+    for side, twips in CVICHE_BOX_PADDING.items():
+        edge = OxmlElement(f"w:{side}")
+        edge.set(qn("w:w"), str(twips))
+        edge.set(qn("w:type"), "dxa")
+        margins.append(edge)
+    look = tbl_pr.find(qn("w:tblLook"))
+    if look is not None:
+        look.addprevious(margins)  # schema order: tblCellMar before tblLook
+    else:
+        tbl_pr.append(margins)
+    tc_w = table.cell(0, 0)._tc.get_or_add_tcPr().find(qn("w:tcW"))
+    if tc_w is not None:
+        tc_w.set(qn("w:type"), "pct")
+        tc_w.set(qn("w:w"), CVICHE_BOX_FULL_WIDTH)
+
+
+def _cviche_box_spacing(para: Paragraph, before: float = 0,
+                        after: float = CVICHE_BOX_LINE_AFTER_PT) -> None:
+    fmt = para.paragraph_format
+    fmt.space_before, fmt.space_after, fmt.line_spacing = Pt(before), Pt(after), 1.0
+
+
+def _box_run(para: Paragraph, text: str, bold: bool = False, italic: bool = False) -> None:
+    _set_font(para.add_run(text), size=CVICHE_BOX_TEXT_PT, bold=bold, italic=italic)
+
+
+def cviche_box_text(cell: _Cell, text: str) -> Paragraph:
+    """A plain line of the box: 10pt."""
+    para = cell.add_paragraph()
+    _cviche_box_spacing(para)
+    _box_run(para, text)
+    return para
+
+
+def cviche_box_group(cell: _Cell, text: str, first: bool) -> Paragraph:
+    """A group label: 10pt bold, with space above unless it opens the box."""
+    para = cell.add_paragraph()
+    _cviche_box_spacing(para, before=0 if first else CVICHE_BOX_GROUP_BEFORE_PT,
+                        after=CVICHE_BOX_GROUP_AFTER_PT)
+    _box_run(para, text, bold=True)
+    para.paragraph_format.keep_with_next = True
+    return para
+
+
+def cviche_box_item(cell: _Cell, text: str) -> Paragraph:
+    """A bulleted item, its wrapped lines hanging under its text."""
+    para = cell.add_paragraph()
+    _cviche_box_spacing(para)
+    fmt = para.paragraph_format
+    fmt.left_indent = CVICHE_BOX_ITEM_INDENT + CVICHE_BOX_BULLET_HANG
+    fmt.first_line_indent = -CVICHE_BOX_BULLET_HANG
+    _box_run(para, f"{CVICHE_BOX_BULLET}{text}")
+    return para
+
+
+def cviche_box_pair(cell: _Cell, label: str, text: str, last: bool) -> Paragraph:
+    """One line of a "Removed:" / "Kept:" pair: the label in italic, the
+    quote at the second indent, its wrapped lines hanging under the opening
+    quote mark. Only the last line of a pair has space after it."""
+    para = cell.add_paragraph()
+    _cviche_box_spacing(para, after=CVICHE_BOX_LINE_AFTER_PT if last else 0)
+    fmt = para.paragraph_format
+    fmt.left_indent = CVICHE_BOX_PAIR_TEXT_INDENT
+    fmt.first_line_indent = CVICHE_BOX_PAIR_LABEL_INDENT - CVICHE_BOX_PAIR_TEXT_INDENT
+    fmt.tab_stops.add_tab_stop(CVICHE_BOX_PAIR_TEXT_INDENT)
+    if not last:
+        fmt.keep_with_next = True
+    _box_run(para, f"{label}\t", italic=True)
+    _box_run(para, text)
+    return para
+
+
+def space_around_cviche_box(before: Paragraph | None, after: Paragraph | None) -> None:
+    """The space outside a box, set on the paragraphs either side of it: a
+    table carries none of its own, and a blank paragraph would survive
+    deleting the box."""
+    if before is not None:
+        before.paragraph_format.space_after = Pt(CVICHE_BOX_OUTSIDE_PT)
+    if after is not None:
+        after.paragraph_format.space_before = Pt(CVICHE_BOX_OUTSIDE_PT)
 
 
 def is_cviche_box(table: Table) -> bool:

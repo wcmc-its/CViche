@@ -1121,6 +1121,8 @@ def test_appendix_note_is_a_cviche_box_with_the_final_count(tmp_path, caplog):
     assert lines == [appendix_module.APPENDIX_NOTE_TITLE, appendix_module.appendix_note_text(2)]
     assert box.cell(0, 0)._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
     assert "Some may already appear above" in lines[1]
+    # generate()'s closing table passes leave the box's own spacing alone.
+    assert box.cell(0, 0).paragraphs[0].paragraph_format.space_after.pt == 6
     assert "successfully mapped" not in _output_text(tmp_path / "out.docx")
 
 

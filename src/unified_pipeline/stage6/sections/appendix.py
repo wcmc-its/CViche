@@ -182,7 +182,13 @@ from ...core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
-from ..formatting import _set_font, add_cviche_box, cviche_box_line, is_cviche_box
+from ..formatting import (
+    _set_font,
+    add_cviche_box,
+    cviche_box_text,
+    is_cviche_box,
+    space_around_cviche_box,
+)
 from ..normalization import _clean_inline_tabs
 from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from ..render_check import _is_column_header_row
@@ -1438,6 +1444,10 @@ def _describe_dropped(dropped: Counter[str]) -> str:
 class AppendixSection:
     """Section T writers, mixed into `WCMTemplateGenerator`."""
 
+    # Set when the Appendix note box was just written: the next line written
+    # carries the space below the box (a table has none of its own).
+    _appendix_note_awaits_space = False
+
     def _fill_appendix(
         self,
         unmapped_entries: Sequence[UnmappedEntry],
@@ -1485,9 +1495,10 @@ class AppendixSection:
             self._add_word_comment(note, _describe_dropped(dropped), author="Template Filter")
 
     def _write_appendix_header(self, count: int) -> Paragraph:
-        """"T. APPENDIX", then the CViche note box for *count* entries, then a
-        blank line; returns the box's instruction paragraph. Both appendix
-        writers open the section this way."""
+        """"T. APPENDIX", then the CViche note box for *count* entries; returns
+        the box's instruction paragraph. Both appendix writers open the
+        section this way; the first line after the box takes the space below
+        it (`_after_appendix_note`)."""
         # Blank paragraph before the header, matching BIBLIOGRAPHY.
         self.doc.add_paragraph()
 
@@ -1496,12 +1507,17 @@ class AppendixSection:
         _set_font(run, bold=True)
         run.underline = True
 
-        note = add_cviche_box(self.doc, APPENDIX_NOTE_TITLE).add_paragraph()
-        cviche_box_line(note, appendix_note_text(count))
-
-        # Blank paragraph after the note box.
-        self.doc.add_paragraph()
+        note = cviche_box_text(add_cviche_box(self.doc, APPENDIX_NOTE_TITLE), appendix_note_text(count))
+        space_around_cviche_box(appendix_para, None)
+        self._appendix_note_awaits_space = True
         return note
+
+    def _after_appendix_note(self, para: Paragraph) -> None:
+        """Give *para* the space below the Appendix note box, if it is the
+        first line written after it."""
+        if self._appendix_note_awaits_space:
+            space_around_cviche_box(None, para)
+            self._appendix_note_awaits_space = False
 
     def _set_appendix_note_count(self, count: int) -> None:
         """Restate the Appendix note box's instruction for the final *count*
@@ -1540,6 +1556,7 @@ class AppendixSection:
         header_para = self.doc.add_paragraph()
         run = header_para.add_run(appendix_group_heading(heading))
         _set_font(run, bold=True)
+        self._after_appendix_note(header_para)
 
         for number, (entry, text) in enumerate(lines, start=1):
             entry_para = self.doc.add_paragraph()

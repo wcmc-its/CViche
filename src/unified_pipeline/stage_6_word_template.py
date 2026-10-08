@@ -2056,6 +2056,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         - Paragraph spacing: 4pt before and 4pt after
         """
         for table in self.doc.tables:
+            if is_cviche_box(table):  # its own padding and paragraph spacing (#1388)
+                continue
             for row in table.rows:
                 for cell in row.cells:
                     _set_cell_vertical_alignment(cell, 'center')
@@ -3421,6 +3423,7 @@ Now analyze the text above:"""
             run = entry_para.add_run(segment_text)
             _set_font(run)
             self._apply_list_bullet(entry_para, level=0)
+            self._after_appendix_note(entry_para)
             if segment_text == PII_REDACTED_NOTICE:
                 # The A-820 addendum: ONE sidebar comment on the notice
                 # saying what the policy removed -- categories, counts and
