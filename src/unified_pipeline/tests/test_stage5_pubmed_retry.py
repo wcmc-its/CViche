@@ -1373,7 +1373,7 @@ def test_one_pmcid_cited_for_two_papers_stays_with_the_paper_it_names(tmp_path, 
 ])
 def test_second_holder_of_a_shared_pmid_is_released_even_as_the_same_paper(tmp_path, monkeypatch,
                                                                          second_title):
-    # #1598: one PMID ends on one entry. A paper listed twice (once retitled
+    # #1598: a weaker holder that is not tied is released. A paper listed twice (once retitled
     # slightly) used to keep it on both from MIN_TITLE_SEARCH_OVERLAP up.
     entries = [_paper_entry(SHARED_TITLE, 10), _paper_entry(second_title, 11)]
     results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)

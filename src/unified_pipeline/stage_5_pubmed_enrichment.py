@@ -1386,7 +1386,7 @@ class PubMedEnricher:
         self.stats['reply_targets_rejected'] += 1
 
     def _release_weaker_shared_pmids(self) -> None:
-        """One PMID ends on at most one entry of a document (#1598). When it
+        """One PMID ends on at most one citation of a document (#1598). When it
         was accepted for several, the holder with the strongest
         `_match_strength` keeps it and every other holder is put back as it
         was before the record was merged. Two shapes: a different paper that
