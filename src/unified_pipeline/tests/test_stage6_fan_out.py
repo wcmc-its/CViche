@@ -1197,21 +1197,28 @@ def _meeting(place, year):
 
 class TestInheritedScope:
     """EBYSBC E34 (BZZNRL 137): a fanned child keeps its heading's scope
-    unless the classifier, asked about that record alone, puts it abroad."""
+    unless the classifier, asked about that record alone, puts it abroad.
+    #1579 (YUYVIG): any other entry under a scope heading takes it, and the
+    classifier is not asked."""
 
     @pytest.mark.parametrize('hierarchy,scope', [
         (['SERVICE', 'National'], 'National'), (['NATIONAL SERVICE ROLES'], 'National'),
         (['International', 'Talks'], 'International'), (['Regional'], 'Regional'),
         (['International Activities', 'National'], 'National'),
-        (['Talks: National, International'], None), (['Editorial Work'], None), ([], None)])
+        (['Talks: National, International'], None), (['Editorial Work'], None), ([], None),
+        # #1579: the heading forms the YUYVIG CVs file their talks and committees under.
+        (['R. INVITED TALKS', 'Regional*'], 'Regional'), (['R. INVITED TALKS', 'National*'], 'National'),
+        (['R. INVITED TALKS', 'International*'], 'International'), (['INVITED LECTURER', 'STATE'], 'Regional'),
+        (['Scholarship', 'Presentations (State & Local)'], 'Regional'), (['LOCAL'], 'Regional'),
+        (['Statewide Review Panels'], 'Regional'), (['Provincial Committees'], 'Regional'),
+        (['Federal Advisory Boards'], 'National'), (['Talks', 'International/National'], None),
+        (['Committees for State and Federal Agencies'], None)])
     def test_the_nearest_heading_naming_one_scope(self, hierarchy, scope):
-        assert fan_out.inherited_scope({FANNED_OUT_FROM: {}, 'hierarchy': hierarchy}) == scope
+        assert fan_out.inherited_scope({'hierarchy': hierarchy}) == scope
 
-    def test_the_last_stage4_record_inherits_too(self):
+    def test_a_fanned_out_record_inherits_too(self):
+        assert fan_out.inherited_scope({FANNED_OUT_FROM: {}, 'hierarchy': ['National']}) == 'National'
         assert fan_out.inherited_scope({LAST_STAGE4_RECORD: {}, 'hierarchy': ['National']}) == 'National'
-
-    def test_an_entry_that_was_not_fanned_out_inherits_nothing(self):
-        assert fan_out.inherited_scope({'hierarchy': ['National']}) is None
 
     @pytest.mark.parametrize('marker,heading,own,scope', [
         (FANNED_OUT_FROM, 'National', 'Regional', 'National'),
@@ -1220,11 +1227,28 @@ class TestInheritedScope:
         (FANNED_OUT_FROM, 'Regional', 'National', 'Regional'),
         (FANNED_OUT_FROM, 'International', 'National', 'International'),
         (FANNED_OUT_FROM, 'Editorial Work', 'Regional', 'Regional'),
-        (None, 'National', 'Regional', 'Regional')])
+        (None, 'Editorial Work', 'International', 'International')])
     def test_a_record_keeps_its_heading_unless_the_classifier_puts_it_abroad(
             self, marker, heading, own, scope):
         entry = {'hierarchy': ['SERVICE', heading], **({marker: {}} if marker else {})}
-        assert fan_out.record_scope(entry, own) == scope
+        assert fan_out.record_scope(entry, lambda _: own) == scope
+
+    @pytest.mark.parametrize('heading,scope', [
+        ('Regional*', 'Regional'), ('National', 'National'), ('International*', 'International'),
+        ('STATE', 'Regional'), ('Presentations (State & Local)', 'Regional')])
+    def test_an_entry_under_a_scope_heading_takes_it_without_the_classifier(self, heading, scope):
+        # #1579 IZABPD h0041, SQMWHM h1322, SXPHOG h1271: the classifier's
+        # distance answer re-bucketed talks the CV had already sorted.
+        asked = []
+        entry = {'hierarchy': ['R. INVITED TALKS', heading]}
+        assert fan_out.record_scope(entry, lambda e: asked.append(e) or 'International') == scope
+        assert asked == []
+
+    def test_an_ambiguous_heading_falls_back_to_the_classifier(self):
+        asked = []
+        entry = {'hierarchy': ['R. INVITED TALKS', 'International/National']}
+        assert fan_out.record_scope(entry, lambda e: asked.append(e) or 'Regional') == 'Regional'
+        assert asked == [entry]
 
     def test_the_last_stage4_record_is_its_own_fields_not_the_whole_line(self):
         entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text='Glade Board\tFern Council and Moss Panel')
@@ -1243,9 +1267,11 @@ class TestInheritedScope:
         generator = _scope_generator(monkeypatch, abroad='Varnor')
         assert [generator._classify_geographic_scope(c) for c in children] == [
             'International', 'National', 'National']
-        # Classified on the whole line, as the parent was, the last record goes abroad.
+        # Classified on the whole line, as the parent was, the last record goes
+        # abroad; under its National heading it now takes that heading (#1579).
         whole = {key: value for key, value in children[-1].items() if key != LAST_STAGE4_RECORD}
-        assert generator._classify_geographic_scope(whole) == 'International'
+        assert generator._classify_geographic_scope({**whole, 'hierarchy': ['SERVICE']}) == 'International'
+        assert generator._classify_geographic_scope(whole) == 'National'
 
     def test_a_listed_child_keeps_the_heading_unless_it_is_abroad(self, monkeypatch):
         entry = {'taxonomy_code': 'Q2', 'hierarchy': ['SERVICE', 'National'],
@@ -1256,8 +1282,11 @@ class TestInheritedScope:
         generator = _scope_generator(monkeypatch, abroad='Varnor')
         assert [generator._classify_geographic_scope(c) for c in _fan(entry)] == [
             'National', 'International']
-        # An entry that was not fanned out takes the classifier's answer.
-        assert generator._classify_geographic_scope({**entry, 'text': 'Spring Forum, Ashby'}) == 'Regional'
+        # An entry that was not fanned out takes its heading, even where the
+        # classifier would put it abroad (#1579), and its own answer without one.
+        assert generator._classify_geographic_scope({**entry, 'text': 'Spring Forum, Varnor'}) == 'National'
+        assert generator._classify_geographic_scope(
+            {**entry, 'hierarchy': ['SERVICE'], 'text': 'Spring Forum, Ashby'}) == 'Regional'
 
 
 @pytest.mark.parametrize('context', ['', '\tUnit of Kestrel Studies\tAshby University'],
