@@ -2009,6 +2009,198 @@ def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
     return findings
 
 
+# Lint 14ah, owner_attribution (#1573; #1251 records that it was missing):
+# another person's content rendered as the CV owner's. Batch YUYVIG
+# (2026-10-08) verified it on 4 of 37 CVs and the doctor caught none of the
+# HIGH instances: papers by other groups listed under an acknowledgements
+# line, rendered as the owner's publications (ECXGAT 2156-2204), and the
+# applicants of a grant-review panel and a laboratory's technical staff,
+# rendered as the owner's past mentees (ECXGAT 1293-1299, IZIXVF 284-298).
+# Two shapes, both read off stage 4; the first also needs the bibliography
+# line each publication rendered as, so it judges only what rendered there.
+
+OWNER_ATTRIBUTION_SHAPE_UNCREDITED = "citation_without_owner"
+OWNER_ATTRIBUTION_SHAPE_NOT_MENTEES = "mentee_under_non_mentee_heading"
+
+#: Publication codes left unjudged: S0 holds profile links and metrics, and
+#: S9 (other media) holds interviews and news items, whose `authors` stage 4
+#: fills with the reporter (ECXGAT: about 60 of them).
+OWNER_ATTRIBUTION_SKIPPED_CODES = frozenset({"S0", "S9"})
+
+#: A source credited to a group, a consortium or a committee: the owner may
+#: be a member the author list does not print (a site PI of a trial group).
+_GROUP_CREDIT_RE = re.compile(
+    r"\b(?:(?:work\s?)?group|consortium|investigators|collaborat\w*|network|committee"
+    r"|society|association|task\s+force|working)\b", re.IGNORECASE)
+#: An author list naming an agency, an academy or no one: a report the owner
+#: contributed to. Read in `authors` only, since a title or a journal names
+#: these words too (ECXGAT 2168's title names an institute).
+_CORPORATE_AUTHOR_RE = re.compile(
+    r"\b(?:anonymous|department|office|national|academ(?:y|ies)|centers?|program(?:me)?"
+    r"|institutes?|editors?)\b", re.IGNORECASE)
+
+#: A heading or lead line saying that what follows is other people's work
+#: about or crediting the owner: an acknowledgements list (ECXGAT 2154).
+_ACKNOWLEDGED_CONTEXT_RE = re.compile(r"acknowledg|\bcit(?:ed|ing)\b", re.IGNORECASE)
+
+#: The mentee codes (N3 all, N3A current, N3B past).
+MENTEE_CODES = frozenset({"N3", "N3A", "N3B"})
+
+#: A heading or lead line naming people the owner reviewed or employed, not
+#: trained: a grant-review panel's applicants, a lab's technical staff.
+_NON_MENTEE_CONTEXT_RE = re.compile(
+    r"\breview(?:s|er|ers|ing)?\b|\bapplicants?\b|\bpanels?\b|\bstaff\b"
+    r"|\btechnicians?\b|\blab(?:oratory)?\s+managers?\b", re.IGNORECASE)
+#: Words that name trainees. A heading with one of them is a mentee heading,
+#: whatever else it names ('Postdoctoral fellows and staff'), and so is a
+#: thesis or dissertation review, which section_consistency files as N3A/N3B.
+_MENTEE_CONTEXT_RE = re.compile(
+    r"student|fellow|trainee|mentee|post-?doc|resident|scholar|advisee|thes[ie]s"
+    r"|dissertation|supervis", re.IGNORECASE)
+
+#: Entries a finding names in its evidence, and characters of each quoted.
+OWNER_ATTRIBUTION_EVIDENCE_LIMIT = 3
+OWNER_ATTRIBUTION_EVIDENCE_CHARS = 80
+
+
+class _AttributionEntry(NamedTuple):
+    """The stage-4 fields this lint reads off one entry, taken once."""
+    element_idx: object
+    code: str
+    text: str
+    heading: tuple[str, ...]
+
+
+def _attribution_entries(stage4: dict) -> list[_AttributionEntry]:
+    """The entries with a position, in source order."""
+    positioned = []
+    for raw in stage4.get("entries", []):
+        position = _entry_position(raw)
+        if position is None:
+            continue
+        hierarchy = raw.get("hierarchy")
+        positioned.append((position, _AttributionEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
+            str(raw.get("text") or "").strip(),
+            tuple(str(h) for h in hierarchy) if isinstance(hierarchy, list) else ())))
+    return [entry for _, entry in sorted(positioned, key=lambda pair: pair[0])]
+
+
+def _is_attribution_lead(entry: _AttributionEntry) -> bool:
+    """A line that heads the entries after it: undated, short, no list item,
+    and no mentee itself. On a run whose headings stage 1b lost (ECXGAT
+    placed none), this is where a heading survives."""
+    return (entry.code not in MENTEE_CODES and not _FOUR_DIGIT_YEAR_RE.search(entry.text)
+            and len(entry.text.split()) <= GROUP_LEAD_MAX_WORDS
+            and not _GROUP_ENUMERATED_RE.match(entry.text))
+
+
+def _attribution_contexts(entries: list[_AttributionEntry]) -> dict[object, tuple[str, str]]:
+    """element_idx_start -> (leaf heading, the nearest lead line above it
+    under the same heading path, or '')."""
+    contexts: dict[object, tuple[str, str]] = {}
+    lead: dict[tuple[str, ...], str] = {}
+    for entry in entries:
+        contexts.setdefault(entry.element_idx,
+                            (entry.heading[-1] if entry.heading else "", lead.get(entry.heading, "")))
+        if _is_attribution_lead(entry):
+            lead[entry.heading] = entry.text
+    return contexts
+
+
+def _non_mentee_context(leaf: str, lead: str) -> str | None:
+    """The heading or lead line naming reviewers or staff that a mentee
+    entry sits under, or None. A leaf heading that names trainees settles it."""
+    for context in (leaf, lead):
+        if _MENTEE_CONTEXT_RE.search(context):
+            return None
+        if _NON_MENTEE_CONTEXT_RE.search(context):
+            return context
+    return None
+
+
+def _evidence_lines(items: list[tuple[object, str, str]]) -> list[str]:
+    return [f"entry {idx} ({code}): {text[:OWNER_ATTRIBUTION_EVIDENCE_CHARS]}"
+            for idx, code, text in items[:OWNER_ATTRIBUTION_EVIDENCE_LIMIT]]
+
+
+def _uncredited_runs(stage4: dict, blocks: list[tuple[str, str]],
+                     owner: frozenset[str]) -> list[list[RenderedCitation]]:
+    """Runs of rendered publications whose author list and source never name
+    the owner (`_owner_credit`; in the source, not even one letter off a long
+    surname, `_shows_owner`: EQADVR 147 misspells it), unbroken by one that
+    does. A citation with no stage-4 authors, a skipped code, or a group or
+    corporate credit is not judged and breaks no run. One whose source elides authors may hide the owner, so it
+    joins a run but cannot start a finding: a run of only those is dropped."""
+    runs: list[list[RenderedCitation]] = [[]]
+    for citation in _rendered_citations(stage4, blocks):
+        if (citation.code in OWNER_ATTRIBUTION_SKIPPED_CODES or not citation.authors.strip()
+                or _CORPORATE_AUTHOR_RE.search(citation.authors)
+                or _GROUP_CREDIT_RE.search(citation.source)):
+            continue
+        if (_owner_credit(citation, owner) is not None
+                or _shows_owner(_EMAIL_OR_URL_RE.sub(" ", citation.source), owner)):
+            runs.append([])
+        else:
+            runs[-1].append(citation)
+    return [run for run in runs
+            if any(not _SOURCE_ELISION_RE.search(c.source) for c in run)]
+
+
+def _uncredited_finding(run: list[RenderedCitation],
+                        contexts: dict[object, tuple[str, str]]) -> tuple[str, str, list[str]]:
+    """(severity, message, evidence) of one run: WARN when a run sits under an acknowledgements heading or lead line,
+    the verified shape; INFO otherwise, where most hits are the owner's own
+    group-authored papers (doctor/PRECISION.md, YUY-OA)."""
+    acknowledged = next((context for c in run for context in contexts.get(c.element_idx, ())
+                         if _ACKNOWLEDGED_CONTEXT_RE.search(context)), None)
+    codes = ", ".join(sorted({c.code for c in run}))
+    where = f" under '{acknowledged}'" if acknowledged else ""
+    return (
+        "WARN" if acknowledged else "INFO",
+        f"{OWNER_ATTRIBUTION_SHAPE_UNCREDITED}: {len(run)} publication(s) rendered in the "
+        f"bibliography, entries {run[0].element_idx}-{run[-1].element_idx} ({codes}){where}, "
+        f"whose author list and source never name the CV owner",
+        _evidence_lines([(c.element_idx, c.code, c.line) for c in run]))
+
+
+def _non_mentee_findings(entries: list[_AttributionEntry],
+                         contexts: dict[object, tuple[str, str]]) -> list[tuple[str, str, list[str]]]:
+    """(severity, message, evidence): one WARN per heading or lead line naming reviewers or staff that has
+    mentee entries under it."""
+    groups: dict[str, list[_AttributionEntry]] = defaultdict(list)
+    for entry in entries:
+        context = (_non_mentee_context(*contexts[entry.element_idx])
+                   if entry.code in MENTEE_CODES else None)
+        if context is not None:
+            groups[context].append(entry)
+    return [(
+        "WARN",
+        f"{OWNER_ATTRIBUTION_SHAPE_NOT_MENTEES}: {len(members)} entr"
+        f"{'y' if len(members) == 1 else 'ies'} coded "
+        f"{', '.join(sorted({e.code for e in members}))} as the CV owner's mentees "
+        f"under '{context}', which names reviewers or staff, not trainees",
+        _evidence_lines([(e.element_idx, e.code, e.text) for e in members]))
+        for context, members in groups.items()]
+
+
+def lint_owner_attribution(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """Other people's content rendered as the CV owner's (#1573): a run of
+    bibliography publications that never credit the owner, and mentee
+    entries under a heading naming reviewers or staff. A trainee's award
+    under a publications heading (ULHCAP-01) and a host's title read as the
+    owner's role (DYLJXC-03) are not reached yet."""
+    entries = _attribution_entries(stage4)
+    contexts = _attribution_contexts(entries)
+    shown = _non_mentee_findings(entries, contexts)
+    owner = _owner_surname_words(stage4)
+    if owner:
+        shown += [_uncredited_finding(run, contexts)
+                  for run in _uncredited_runs(stage4, blocks, owner)]
+    return [_finding("owner_attribution", severity, message, evidence)
+            for severity, message, evidence in shown]
+
+
 # Lint 14n's third sibling, citation_field_dropped (X6 KJJVVO-10, UXBHHF-20):
 # a stage-4 field that identifies the item and that its rendered citation
 # leaves out. Stage 5d rewrites every non-PubMed citation from stage 4's
