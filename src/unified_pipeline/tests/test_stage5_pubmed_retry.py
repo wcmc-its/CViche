@@ -1605,17 +1605,20 @@ def test_one_citation_holds_for_every_pair_of_tied_holders():
     assert not enricher._one_citation([_held(**same), _held(**same), _held(**other)])
 
 
-def test_published_holder_keeps_a_pmid_tied_with_an_in_press_one(tmp_path, monkeypatch):
+@pytest.mark.parametrize('in_press_year', ['in press', '2025'])
+def test_published_holder_keeps_a_pmid_tied_with_an_in_press_one(tmp_path, monkeypatch, in_press_year):
     # Two citations (no identifier in common, different years), so the tie is
     # not kept as one: the published entry, matched by title search with a
-    # year that is not PubMed's, ties the in-press DOI holder on overlap and
-    # year, and only the in-press rank keeps it. Releasing it would leave the
+    # year that is not PubMed's, ties the in-press DOI holder on overlap, and
+    # the in-press rank keeps it, ahead of the year even when the in-press
+    # entry gives PubMed's year ('2025'). Releasing it would leave the
     # in-press entry to be printed as the published paper.
     published = _paper_entry(INPRESS_TITLE, 10, doi=None)
     published['extracted_fields']['year'] = '2023'
+    in_press = _in_press_with_doi(INPRESS_TITLE)
+    in_press['extracted_fields']['year'] = in_press_year
     responses = [_hits(PMID), FakeResponse(200, content=_published_xml())] * 2
-    results, _, _ = _run_entries(tmp_path, monkeypatch,
-                                 [published, _in_press_with_doi(INPRESS_TITLE)], responses)
+    results, _, _ = _run_entries(tmp_path, monkeypatch, [published, in_press], responses)
     kept, in_press = results
     assert kept['enrichment_status'] == 'enriched'
     assert kept['enrichment_data']['pubmed_pmid'] == PMID
