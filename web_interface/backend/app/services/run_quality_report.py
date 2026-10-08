@@ -605,6 +605,15 @@ LINT_COPY = {
         "applicants you reviewed or for laboratory staff.",
         "Check each flagged item against the source CV, and delete it or move it to the "
         "section where it belongs."),
+    # Proposed in #1570's PR; awaiting Paul's approval.
+    "citation_grounding": LintCopy(
+        "Citation names an author or meeting the CV does not",
+        "A publication your CV lists without a standard citation was rewritten into one, and "
+        "the rewrite names an author, an initial or a meeting number that your CV's line does "
+        "not: an initial added to a co-author, two co-authors merged into one, or a list number "
+        "printed as the meeting's number.",
+        "Compare the flagged citation with the line in your CV and correct its authors or "
+        "meeting name in Word."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

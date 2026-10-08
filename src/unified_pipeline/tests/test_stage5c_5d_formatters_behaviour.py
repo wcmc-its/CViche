@@ -1596,3 +1596,134 @@ def test_apply_formatted_fields_leaves_the_reply_unchanged():
     snapshot = dict(reply)
     assert s5d.apply_formatted_fields(entry, reply) is False
     assert reply == snapshot
+
+
+# ---------------------------------------------------------------------------
+# stage_5d: ungrounded_reason -- a citation must not add authors, initials
+# or ordinals the source line lacks (#1570). Names are synthetic.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source, citation, reason", [
+    # FLBFRK 25: a bare initials token "BG" is joined to the next author.
+    ("Ash, X, ZQ Birch, W Cole, BG, H Dale, M Eade, and D Fern. A study. Nat Imag (2026).",
+     "Ash X, Birch ZQ, Cole W, Dale BG, Eade M, Fern D. A study. Nat Imag. 2026.",
+     "author_4:initials_not_in_source"),
+    # QQGKXR 481: an author the source gives no initial gains a neighbour's.
+    ("Quill, F. Rook, A. Sable, M.E. Tarn. (November 2023). A poster. Imaginary Meeting.",
+     "Quill F, Rook A, Sable M, Tarn M. A poster. Imaginary Meeting; 2023 Nov.",
+     "author_4:initials_not_in_source"),
+    # BCTOGR 1286: an author with no initial in the source gains one.
+    ("Quill, Rook, EE and Sable, JA: A study. J Imag, 250:3199, 1983",
+     "Quill D, Rook EE, Sable JA. A study. J Imag. 1983;250:3199.",
+     "author_1:initials_not_in_source"),
+    # XNWSZN 520: a given name becomes two initials.
+    ("Quill, Anna K.; Rook, Sven. A method. J Imag 2003.",
+     "Quill AK, Rook SR. A method. J Imag. 2003.",
+     "author_2:initials_not_in_source"),
+    # BCTOGR 2022: an author the source does not name at all.
+    ("Quill, EE, Rook, TH, and Sable, J: A scale. Imag Clin 75:293, 1995",
+     "Quill EE, Rook TH, Tarn JA. A scale. Imag Clin. 1995;75:293.",
+     "author_3:surname_not_in_source"),
+    # SIJYJZ 732: the CV's list number "10." becomes a meeting ordinal.
+    ("10. Annual Meeting of the Society for Imaginary Studies, Springfield, 2004, \"A talk\".",
+     "10th Annual Meeting of the Society for Imaginary Studies. A talk; 2004; Springfield.",
+     "ordinal_not_in_source:10th"),
+    # ECXGAT 859: a meeting the source does not name gains a numbered one.
+    ("Quill A, Rook B. A sampler for viral aerosols.",
+     "Quill A, Rook B. A sampler for viral aerosols. IAAR 34th Annual Conference; 2015.",
+     "ordinal_not_in_source:34th"),
+    # A list number before a meeting is not its ordinal ("48. Annual").
+    ("48. Annual Meeting, Imaginary Society, 1986. A talk.",
+     "Quill A. A talk. 48th Annual Meeting, Imaginary Society; 1986.",
+     "ordinal_not_in_source:48th"),
+    # A generational suffix the source does not give.
+    ("Quill, W.J.A., Rook, B. A study.", "Quill WJA 2nd, Rook B. A study.",
+     "ordinal_not_in_source:2nd"),
+    # A surname particle does not hide the author from the check.
+    ("van der Quill, A., Rook, B. A study.", "van der Quill AB, Rook B. A study.",
+     "author_1:initials_not_in_source"),
+    # A surname this short is never found inside another word.
+    ("Quill A, Shuman B. A study.", "Quill A, Hu B. A study.", "author_2:surname_not_in_source"),
+    # A closing "et al." does not hide the authors before it.
+    ("Quill A, R. Rook, et al. A study.", "Quill AB, Rook R, et al. A study.",
+     "author_1:initials_not_in_source"),
+    # An exact surname is never read through a misspelt one beside it.
+    ("Quill, M. and E.F. Quil. A study. J Imag 2001.",
+     "Quill M, Quil M. A study. J Imag. 2001.",
+     "author_2:initials_not_in_source"),
+])
+def test_5d_ungrounded_reason_rejects_text_the_source_lacks(source, citation, reason):
+    assert s5d.ungrounded_reason(citation, source) == reason
+
+
+@pytest.mark.parametrize("source, citation", [
+    # Initials before the surname, after it, or as given names.
+    ("Ash, X, ZQ Birch, Jon Arne Cole. A study. Nat Imag (2026).",
+     "Ash X, Birch ZQ, Cole JA. A study. Nat Imag. 2026."),
+    ("Quill, J.A., Rook, B. A study. J Imag 2001.", "Quill JA, Rook B. A study. J Imag. 2001."),
+    # Initials the source parts from their surname with a comma ("S, Rook").
+    ("Quill A, S, Rook. A study.", "Quill A, Rook S. A study."),
+    # Initials split by a comma, and a generational suffix between.
+    ("Quill, C.,S., Rook Jr., J.M. and Sable, Jr, R. A study.", "Quill CS, Rook JM, Sable R. A study."),
+    # Surname and initials written as one word, even where another word
+    # holds the surname too; markers after the initials or by the name.
+    ("Quill A, Cole-Rook B and RookJM. A study.", "Quill A, Cole-Rook B, Rook JM. A study."),
+    ("Quill AEf, Rook JTr& and Sable BCRF. A study.", "Quill AE, Rook JT, Sable BC. A study."),
+    ("Quill1 A, Rook 3B, and Sable PEJr. A study.", "Quill A, Rook B, Sable PE. A study."),
+    # A surname glued to the word beside it, or behind a one-letter marker.
+    ("Quill B, AnnaRook, and MSable W.D. A study.", "Quill B, Rook A, Sable WD. A study."),
+    # A surname the source splits ("Mc Rook", "M.C. Rook") or misspells,
+    # the first letter included ("Asable" for "Sable").
+    ("Quill, A, M.C. Rookery, BL, and Sabel, JR. A study.", "Quill A, McRookery BL, Sable JR. A study."),
+    ("Quill, A, and Asable, B. A study.", "Quill A, Sable B. A study."),
+    # Accents, apostrophes, particles and hyphens.
+    ("Quillé, A, D’Ash, B, van der Birch, C, Cole-Dale, E-F. A study.",
+     "Quille A, D'Ash B, van der Birch C, Cole-Dale EF. A study."),
+    # "et al." where the source has it; a generational suffix in the citation.
+    ("Quill A, R. Rook II, et al. A study.", "Quill A, Rook R 2nd, et al. A study."),
+    # An ordinal the source spells out, abbreviates, or numbers.
+    ("Quill A (Ed). Imaginary Medicine, Third Edition. 1998.", "Quill A, ed. Imaginary Medicine. 3rd ed. 1998."),
+    ("Quill A. Imaginary Medicine. 2ed. 2002.", "Quill A. Imaginary Medicine. 2nd ed. 2002."),
+    ("Quill A, in Rook B (eds), Imaginary Medicine, ed 5. 1998.",
+     "Quill A. In: Rook B, eds. Imaginary Medicine. 5th ed. 1998."),
+    ("Quill A. Manual de Medicina, 2\u00aa Edici\u00f3n. 2017.", "Quill A. Manual de medicina. 2nd ed. 2017."),
+    ("Quill A. A talk. 35rd Annual Meeting of the Imaginary Society, 1995.",
+     "Quill A. A talk. 35th Annual Meeting of the Imaginary Society; 1995."),
+    ("Quill A. A talk. Imaginary Society 124 Annual Meeting, 1996.",
+     "Quill A. A talk. Imaginary Society 124th Annual Meeting; 1996."),
+    ("Quill A. A talk. Thirty-Fourth Annual Meeting, 1999.", "Quill A. A talk. 34th Annual Meeting; 1999."),
+    ("Quill A. A talk. 37th Annual Meeting of the Imaginary Society, 2004.",
+     "Quill A. A talk. 37th Annual Meeting of the Imaginary Society; 2004."),
+    # A group author makes the segment no Vancouver list: nothing is checked.
+    ("WHO Writing Group. A report.", "WHO Writing Group B. A report."),
+    ("Great Lakes Imaginary Science Forum. A talk.", "Great Lakes Imaginary Science Forum B. A talk."),
+    # Accents fold away even on a surname too short to match loosely.
+    ("Quill, A, \u00d1u, B. A study.", "Quill A, Nu B. A study."),
+    ("Imaginary Writing Group. A study.", "Imaginary Writing Group, Quill A. A study."),
+    # A citation that opens with its title has no author list to check.
+    ("A Talk Given; Imaginary Society, 1986", "A talk given. Imaginary Society; 1986."),
+])
+def test_5d_ungrounded_reason_accepts_a_faithful_citation(source, citation):
+    assert s5d.ungrounded_reason(citation, source) is None
+
+
+def test_5d_ungrounded_reason_exempts_the_cv_owner():
+    # A line of the owner's own CV that names nobody is still the owner's.
+    owner = s5d.citation_owner({"first_name": "Ann", "middle_name": "B.", "last_name": "Qu\u00efll"})
+    assert owner == s5d.CitationOwner("quill", "ab")
+    citation = "Quill AB, Rook C. Letter to the editor. Imaginary Gazette. 1991."
+    source = "Letter to the Editor, with C. Rook, Imaginary Gazette, 1991."
+    assert s5d.ungrounded_reason(citation, source) == "author_1:surname_not_in_source"
+    assert s5d.ungrounded_reason(citation, source, owner) is None
+    assert s5d.ungrounded_reason("Quill A, Rook C. A letter.", source, owner) is None
+    # Initials the owner does not have, and other authors, are still checked.
+    assert s5d.ungrounded_reason("Quill AC, Rook C. A letter.", source, owner) == (
+        "author_1:surname_not_in_source")
+    assert s5d.ungrounded_reason("Quill AB, Rook CD. A letter.", source, owner) == (
+        "author_2:initials_not_in_source")
+
+
+@pytest.mark.parametrize("cv_owner", [None, "Ann Quill", {}, {"last_name": None}, {"last_name": ""}])
+def test_5d_citation_owner_is_none_without_a_last_name(cv_owner):
+    assert s5d.citation_owner(cv_owner) is None
+
