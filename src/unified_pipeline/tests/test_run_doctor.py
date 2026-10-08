@@ -968,6 +968,21 @@ def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
     assert non_paragraph[0]["message"].startswith("1 ")
 
 
+def test_output_hygiene_does_not_count_stage_6s_cviche_note_box():
+    """#1388: the Appendix opens with stage 6's own note to the submitter, a
+    one-cell table; it is not an entry block hiding from the scan."""
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("table", "CViche note: delete this box before sending These 2 entries from your original CV did not fit"),
+        ("p", "Grant Support"),
+        ("p", "1. Real leftover grant content | Role: PI | Status: Under review"),
+        ("p", "2. Another leftover grant | Role: Co-I"),
+    ]
+    findings = lint_output_hygiene(blocks)
+    assert not [f for f in findings if "non-paragraph" in f["message"]]
+    assert any(f["message"] == "appendix holds 2 unmapped entries" for f in findings)
+
+
 def test_output_hygiene_quiet_on_clean_output():
     blocks = [
         ("p", "D. GRANTS"),

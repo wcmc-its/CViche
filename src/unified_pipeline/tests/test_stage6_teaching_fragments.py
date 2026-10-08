@@ -1004,3 +1004,86 @@ def test_the_spans_skip_a_start_year_that_opens_a_longer_number():
     assert _teaching_entry_lines(fields, "Fictional Course 19905 1990-94, 1997-2001",
                                  taxonomy_code="K3") == [
         "Fictional Course 19905 (1990-1994, 1997-2001)"]
+
+
+
+def _records(count):
+    """`count` stage-4 records, as `extracted_fields['stage4_records']`."""
+    return [{"course_title": f"Fictional Course {n}"} for n in range(count)]
+
+
+class TestEachFormattedRecordIsItsOwnBullet:
+    """#1556 c: stage 5c joins a multi-record entry's lines one per record
+    (`accepted_formatted_text`), and stage 6 put them all in ONE bullet,
+    apart only by soft line breaks, where the section renders separate
+    records as separate bullets (OIEPQD TVQZIP, entries 135-143)."""
+
+    RAW = "2001 - 2003 Fictional Block, Lecturer: i. Topic A\tii. Topic B\tiii. Topic C"
+    FORMATTED = ("**2001-2003** - Fictional Block: Topic A, Lecturer\n"
+                 "**2001-2003** - Fictional Block: Topic B, Lecturer\n"
+                 "**2001-2003** - Fictional Block: Topic C, Lecturer")
+    EXPECTED = ("2001-2003 - Fictional Block: Topic A, Lecturer",
+                "2001-2003 - Fictional Block: Topic B, Lecturer",
+                "2001-2003 - Fictional Block: Topic C, Lecturer")
+
+    def test_each_record_line_is_one_bullet(self):
+        fields = {"formatted_text": self.FORMATTED, "stage4_records": _records(3)}
+        assert _teaching_entry_lines(fields, self.RAW) == list(self.EXPECTED)
+
+    def test_the_render_has_one_paragraph_per_record(self):
+        gen = _generator("Didactic teaching", "SENTINEL-END")
+        gen._fill_teaching({"K1": [_entry("K1", self.RAW, formatted_text=self.FORMATTED,
+                                          stage4_records=_records(3))]})
+        assert _visible(gen) == ["Didactic teaching", *self.EXPECTED, "SENTINEL-END"]
+
+    def test_a_line_count_that_is_not_the_record_count_stays_one_bullet(self):
+        """A one-record entry whose 5c text ends in a source sub-heading after
+        a blank line (the farm's case) is not one line per record: it keeps
+        its one bullet rather than bulleting the heading."""
+        formatted = "**2010** - Fictional Seminar, Lecturer\n\nFictional Heading:"
+        assert _teaching_entry_lines({"formatted_text": formatted}, "2010 Fictional Seminar") == [
+            "2010 - Fictional Seminar, Lecturer\nFictional Heading:"]
+        assert _teaching_entry_lines(
+            {"formatted_text": self.FORMATTED, "stage4_records": _records(2)}, self.RAW) == [
+            "\n".join(self.EXPECTED)]
+
+    def test_a_sub_line_stays_in_its_records_bullet(self):
+        """One record with its notes is still one bullet, as before."""
+        expected = ["2010 - Fictional Seminar, Lecturer\nTopics: Alpha; Beta"]
+        for formatted in ("**2010** - Fictional Seminar, Lecturer\n  - Topics: Alpha; Beta",
+                          "**2010** - Fictional Seminar, Lecturer\n\n  - Topics: Alpha; Beta"):
+            assert _teaching_entry_lines(
+                {"formatted_text": formatted}, "2010 Fictional Seminar") == expected
+
+    def test_each_record_keeps_its_own_sub_line(self):
+        formatted = ("**2010** - Fictional Seminar One\n  - Notes: First note\n"
+                     "**2011** - Fictional Seminar Two\n  - Notes: Second note")
+        expected = ["2010 - Fictional Seminar One\nFirst note",
+                    "2011 - Fictional Seminar Two\nSecond note"]
+        for text in (formatted, formatted.replace("\n  - Notes: First", "\n\n  - Notes: First")):
+            fields = {"formatted_text": text, "stage4_records": _records(2)}
+            assert _teaching_entry_lines(fields, "Fictional Seminars") == expected
+
+    def test_a_blank_record_line_adds_no_bullet(self):
+        formatted = "**2010** - Fictional Seminar One\n   \n**  **\n**2011** - Fictional Seminar Two"
+        fields = {"formatted_text": formatted, "stage4_records": _records(2)}
+        assert _teaching_entry_lines(fields, "Fictional Seminars") == [
+            "2010 - Fictional Seminar One", "2011 - Fictional Seminar Two"]
+
+    def test_further_spans_go_on_the_record_holding_the_own_date(self):
+        """The spans went on the first line holding the start year when the
+        records shared one bullet; they still do, and only once."""
+        fields = {"formatted_text": ("**1985** - Fictional Talk\n"
+                                     "**1990-1994** - Fictional Course\n"
+                                     "**1990-1994** - Fictional Course Two"),
+                  "start_date": "1990", "end_date": "1994", "stage4_records": _records(3),
+                  "additional_periods": [{"start_date": "1997", "end_date": "2001"}]}
+        assert _teaching_entry_lines(fields, "Fictional Courses", taxonomy_code="K1") == [
+            "1985 - Fictional Talk",
+            "1990-1994, 1997-2001 - Fictional Course",
+            "1990-1994 - Fictional Course Two"]
+
+    def test_the_records_key_is_stage_4s(self):
+        """Spelled out in `teaching` because `stage6/` may not import `stage4`."""
+        from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+        assert teaching._STAGE4_RECORDS_KEY == STAGE4_RECORDS_KEY

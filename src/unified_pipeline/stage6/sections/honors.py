@@ -99,7 +99,7 @@ except ImportError as exc:
 
 from unified_pipeline.core.render_check import entry_lines
 
-from ..fan_out import FANNED_OUT_FROM
+from ..fan_out import fallback_text as record_fallback_text, is_split_record
 from ..formatting import (
     _clear_table_data,
     _set_font,
@@ -937,10 +937,13 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     extracted fields, falling back to parsing the raw text.
 
     Three things keep one stage-4 record from splitting into several rows
-    (#1245, EBYSBC E15). A fan-out child (`FANNED_OUT_FROM`) is one record
+    (#1245, EBYSBC E15). A fan-out child (`is_split_record`) is one record
     by construction, and its text can be the ' | ' line fan-out built from
     its own fields, so it is never split (ZCTARO-04: "Award | Org | YYYY-MM |
-    YYYY-MM" rendered as four rows). A line that is only the granting body
+    YYYY-MM" rendered as four rows). The last of stage 4's records is one
+    too, though its text is the parent's whole line: it reads its own line
+    (`fan_out.fallback_text`), or every sibling's line rendered again under
+    it (#1556 a: three records rendered as five rows). A line that is only the granting body
     is that record's organization, not an award. And lines that are one
     award written over several lines are read as that award, not as a list
     (`_is_one_award_over_lines`, ZDCXIV-02).
@@ -958,8 +961,11 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     # #476: '\n' and '|' boundaries; the extracted column cells are passed so
     # a single award's own "Award | Organization | Year" cell join is not
     # mistaken for two awards -- see _entry_parts.
-    if entry.get(FANNED_OUT_FROM):
-        parts = [original_text]  # one record by construction: never split
+    if is_split_record(entry):
+        # One record by construction: never split. The last of stage 4's
+        # records carries the parent's whole text, so it reads its own line
+        # instead, or re-parsing would print every sibling again (#1556 a).
+        parts = [record_fallback_text(entry)]
     else:
         parts = _entry_parts(original_text, (granting_body, stated_date))
     awards, years = _parse_honor_lines(parts)

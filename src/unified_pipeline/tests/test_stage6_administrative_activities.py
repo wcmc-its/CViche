@@ -35,6 +35,8 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
+from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
 from unified_pipeline.stage6.formatting import format_date_range  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -210,6 +212,31 @@ class TestUnresolvedPipeRoutesThroughSharedParser:
 
         expected_dates = format_date_range("1996", "Present", "P")
         assert rows == [("Quality Improvement Committee", "", expected_dates)]
+
+
+class TestFanOutBuiltTextIsNotReparsedAsAPipe:
+    """#1556 e: a fan-out child whose text is the line built from its fields
+    ("Glade Board | Member") is not a source pipe column. Re-parsing it put
+    the role inside the name cell and left Role empty (OIEPQD BMYYOX 63)."""
+
+    def test_undated_child_renders_its_name_and_role_from_its_fields(self):
+        records = [{"committee_name": "Glade Board", "role": "Member"},
+                   {"committee_name": "Fern Council", "role": "Chair"}]
+        parent = {"taxonomy_code": "P", "element_idx_start": 3,
+                  "text": "Glade Board member and Fern Council chair",
+                  "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+        children = fan_out_multi_record_entries(
+            [parent], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+        assert children[0]["text"] == "Glade Board | Member"
+
+        assert _rows(children[0]) == [("Glade Board", "Member", "")]
+
+    def test_a_source_pipe_on_an_unsplit_entry_is_still_reparsed(self):
+        entry = {"text": "Glade Board | 2001-2003",
+                 "extracted_fields": {"committee_name": "Glade Board"},
+                 "taxonomy_code": "P"}
+
+        assert _rows(entry) == [("Glade Board", "", format_date_range("2001", "2003", "P"))]
 
 
 class TestTwoLineNonPipeEmptyExtractionBoundary:

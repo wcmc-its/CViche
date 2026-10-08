@@ -444,11 +444,12 @@ def test_date_keys_never_count_as_a_parents_identity(key, expected):
 _NEUTRAL_TEXT = 'Xyneutral probe line'
 
 
-def _rendered_markers(tmp_path, code):
-    """The schema fields of `code` whose marker reaches the .docx when one entry
-    of that code is rendered with a unique marker in every field, and whether
-    the entry's own (neutral) text reaches it. The text must not carry the
-    markers: a section that writes the text would then "render" every field."""
+def _rendered_markers(tmp_path, code, extra_fields=frozenset()):
+    """The schema fields of `code` (and `extra_fields`) whose marker reaches the
+    .docx when one entry of that code is rendered with a unique marker in every
+    field, and whether the entry's own (neutral) text reaches it. The text must
+    not carry the markers: a section that writes the text would then "render"
+    every field."""
     import json
 
     from docx import Document
@@ -456,7 +457,7 @@ def _rendered_markers(tmp_path, code):
     from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
 
     markers = {name: 'Zq' + name.replace('_', 'x') + 'Z'
-               for name in FIELD_SCHEMAS[code]['fields'] if name != 'narrative'}
+               for name in {*FIELD_SCHEMAS[code]['fields'], *extra_fields} if name != 'narrative'}
     entry = {'taxonomy_code': code, 'element_idx_start': 0, 'text': _NEUTRAL_TEXT,
              'extracted_fields': dict(markers)}
     source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
@@ -476,6 +477,39 @@ def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
     coverage test pass on content the output drops (web240's `institution`),
     and one it omits would needlessly keep entries whole."""
     assert _rendered_markers(tmp_path, code) == (set(fan_out._RENDERED_FIELDS[code]), False)
+
+
+def _offschema_date_fields(code):
+    """The date fields stage 4 may emit for `code` that its `FIELD_SCHEMAS`
+    entry does not name: the active (config-file) schema's and the field
+    descriptions' (#1556 d: Q4D's start/end)."""
+    from unified_pipeline.stage4.schemas import FIELD_DESCRIPTIONS, get_active_schemas
+
+    active = get_active_schemas().get(code, {}).get('fields', [])
+    named = set(active) | set(FIELD_DESCRIPTIONS.get(code, {}))
+    return {key for key in named - set(FIELD_SCHEMAS[code]['fields']) if fan_out._is_date_key(key)}
+
+
+@pytest.mark.parametrize('code', sorted(
+    code for code in fan_out._RENDERED_FIELDS if _offschema_date_fields(code)))
+def test_offschema_date_fields_a_section_writes_are_the_ones_fan_out_counts(tmp_path, code):
+    """A date field outside the schema that the section writes must be a
+    written date to `_is_written_date`, or `_repeated_rows` reads two spans of
+    one name as one row (#1556 d); one it does not write must not be."""
+    extra = _offschema_date_fields(code)
+    written = _rendered_markers(tmp_path, code, extra)[0] & extra
+    markers = {key: 'Zq' + key for key in extra}
+    assert written == {key for key in extra
+                       if fan_out._is_written_date(code, key, markers[key], markers)}
+
+
+@pytest.mark.parametrize('code', ['B2', 'Q4D'])
+def test_only_b1_writes_a_nested_dates_attended(code):
+    """B2 and Q4D write a flat start/end only; a `dates_attended` on one of
+    their records is not in the row, so it must not tell two rows apart."""
+    nested = {'start_date': '1990', 'end_date': '1992'}
+    assert not fan_out._is_written_date(code, 'dates_attended', nested, {})
+    assert fan_out._is_written_date('B1', 'dates_attended', nested, {})
 
 
 @pytest.mark.parametrize('code', sorted(fan_out._TEXT_RENDERED_CODES))
@@ -1298,6 +1332,42 @@ class TestStage4RecordOwnText:
         assert not fan_out.is_split_record({'text': 'Glade Board'})
 
 
+class TestBuiltTextIsMarked:
+    """#1556 e: a child whose text is the line built from its fields says so
+    (`has_built_text`), so a renderer does not re-parse the built line's
+    separators as a source pipe column. A child that keeps a line of the CV
+    -- its tab segment, or the parent's whole text -- does not."""
+
+    def test_stage4_children_with_built_lines_are_marked_and_the_last_is_not(self):
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES)))
+        assert [fan_out.has_built_text(c) for c in children] == [True, True, False]
+
+    def test_stage4_children_with_their_own_tab_segments_are_not_marked(self):
+        text = 'Chair, Glade Board 1999-2001\tMember, Fern Council 2001-2003\tMember, Moss Panel 2004-2006'
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))
+        assert not any(fan_out.has_built_text(c) for c in children)
+
+    def test_generic_children_follow_the_same_rule(self):
+        assert not any(fan_out.has_built_text(c) for c in _fan(_THREE_HONORS))
+        wrapped = _honors('Alpha Prize, Hollis College\tGraduate School\tBeta Prize',
+                          [_award('Alpha Prize Graduate School'), _award('Beta Prize')])
+        assert [fan_out.has_built_text(c) for c in _fan(wrapped)] == [True, True]
+
+    def test_a_lone_record_keeps_the_whole_text_unmarked(self):
+        # Two tab segments, one record: the child's text is the CV's own text.
+        entry = {'taxonomy_code': 'D1',
+                 'text': 'Varnor College, School of Botany\tLecturer in Botany, 1977-1979',
+                 'extracted_fields': {'appointments': [_appointment(
+                     'Lecturer in Botany', '1977', '1979', 'Varnor College, School of Botany')],
+                     'start_date': '1977', 'end_date': '1979'}}
+        (child,) = _fan(entry)
+        assert child['text'] == entry['text']
+        assert not fan_out.has_built_text(child)
+
+    def test_an_entry_that_was_not_split_is_not_marked(self):
+        assert not fan_out.has_built_text({'text': 'Glade Board | Member'})
+
+
 class TestStage4RecordDates:
     _BOARD_TEXT = ('1993-2004 Member, Zqboard, Ashby Clinic\t1996-97 Vice-President\t'
                    '1997-99 President\tPast-President')
@@ -1374,6 +1444,32 @@ class TestStage4RepeatedRows:
         records[1]['start_date'] = '2001-09'
         records[1]['end_date'] = '2002-06'
         assert len(_fan4(_stage4_entry(records, code='C', text='Resident, Ashby Hospital'))) == 2
+
+    # #1556 (d), OIEPQD XAYKXA entry 134: Q4D's and B2's schema names no
+    # start/end, but their sections write the range, so two spans are two rows.
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name')])
+    def test_two_spans_the_date_column_shows_keep_both_records(self, code, name_key):
+        records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2009', 'end_date': 'present'},
+                   {name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}]
+        children = _fan4(_stage4_entry(
+            records, code=code, text='Zqjournal of Lanterns reviewer since 2009, board 2016-2019'))
+        assert [(c['extracted_fields']['start_date'], c['extracted_fields']['end_date'])
+                for c in children] == [('2009', 'present'), ('2016', '2019')]
+
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name')])
+    def test_one_span_listed_twice_still_renders_once(self, code, name_key):
+        records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}] * 2
+        children = _fan4(_stage4_entry(
+            copy.deepcopy(records), code=code, text='Zqjournal of Lanterns 2016-2019'))
+        assert len(children) == 1
+
+    def test_two_b1_attendance_spans_keep_both_records(self):
+        records = [{'degree': 'Zqcertificate', 'institution': 'Ashby College', 'year': None,
+                    'dates_attended': {'start_date': start, 'end_date': end}}
+                   for start, end in (('1990', '1992'), ('1995', '1997'))]
+        children = _fan4(_stage4_entry(
+            records, code='B1', text='Zqcertificate, Ashby College, 1990-1992 and 1995-1997'))
+        assert len(children) == 2
 
 
 # --- #1243: stage 5d's one citation on an entry stage 4 split into records ---

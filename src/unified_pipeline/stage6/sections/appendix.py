@@ -156,23 +156,26 @@ merge-and-renumber scenario this key risks). Only one of the three,
 2068_Yount ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
 inputs, and its current appendix has a single entry under that heading, so
 `_group_by_source_heading` has not yet been exercised on a real collision.
-Numbering restarts under each heading. Bodies of entries diverted here from
-another code are capped at `APPENDIX_MAX_CHARS` characters, the marker that
-shows the cut included: such an appendix line is a pointer back to the original
-document, not a second copy of it. A T-coded body is NOT capped
-(`AppendixSection._appendix_body`, #1230) unless the low-coverage overflow
-re-splits it: the Appendix is the only place a T entry renders, so its cut
-tail reached no page. The cut lost undated lines the recovery pass
-cannot tell from template text (a competency list, a duty bullet) and sibling
-rows that differ from a kept one only in a short word or a digit, and where
-recovery did re-add a cut line, the entry printed twice: cut, then whole.
+Numbering restarts under each heading. A body renders whole
+(`AppendixSection._appendix_body`) unless the low-coverage overflow re-splits
+the entry: only then is it capped at `APPENDIX_MAX_CHARS` characters, the
+marker that shows the cut included, as a pointer to the segments the
+reconsider pass routes. Every other numbered line -- a T entry (#1230), or one
+diverted from another code because no section placed it (#1555: M1 research
+records the summary does not reproduce, a code with no render route, a
+renderer's decline) -- is the only place that entry renders, so a cut tail
+reached no page. The cut lost undated lines the recovery pass cannot tell from
+template text (a competency list, a duty bullet), sibling rows that differ
+from a kept one only in a short word or a digit, and a record's affiliations
+and description bullets; where recovery did re-add a cut line, the entry
+printed twice: cut, then whole.
 """
 import logging
 import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from typing import NamedTuple, TypedDict
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from ...core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -182,10 +185,19 @@ from ...core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
-from ..formatting import _set_font
+from ..formatting import (
+    _set_font,
+    add_cviche_box,
+    cviche_box_text,
+    is_cviche_box,
+    space_around_cviche_box,
+)
 from ..normalization import _clean_inline_tabs
 from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from ..render_check import _is_column_header_row
+
+if TYPE_CHECKING:
+    from docx.text.paragraph import Paragraph
 
 logger = logging.getLogger(__name__)
 
@@ -199,15 +211,45 @@ _TRUNCATION_MARKER = "..."
 # Group label for an entry that carries no source hierarchy at all.
 _UNKNOWN_SECTION = "Unknown Section"
 
-# The one explanatory line under "T. APPENDIX", written by both appendix
-# writers. It must not claim the entries appear nowhere else: stage 6 cannot
-# prove that (#534 -- some numbered lines repeat content a section rendered,
-# and some carry content a renderer dropped).
-APPENDIX_INTRO_TEXT = (
-    "These entries from your original CV could not be matched to a section of "
-    "the WCM format. Some may repeat content shown in the sections above; "
-    "please review before relying on it."
-)
+# The CViche note box under "T. APPENDIX", written by both appendix writers
+# (#1388): what the entries are and what to do with them. It must not claim
+# the entries appear nowhere else: stage 6 cannot prove that (#534 -- some
+# numbered lines repeat content a section rendered, and some carry content a
+# renderer dropped). The count is the final one, set once both writers ran.
+APPENDIX_NOTE_TITLE = "CViche note: delete this box before sending"
+APPENDIX_NOTE_TEXT = {
+    True: ("This entry from your original CV did not fit any section above. Move it to "
+           "the right section or delete it. It may already appear above."),
+    False: ("These {count} entries from your original CV did not fit any section above. "
+            "For each one, move it to the right section or delete it. Some may already "
+            "appear above."),
+}
+
+
+_SOURCE_SECTION_NUMBER_RE = re.compile(r"^(?:[IVXLCDM]+|[A-Z]|\d+)[.)]\s+")
+# Words an Appendix group heading keeps lower-case in Title Case, after its first.
+_HEADING_MINOR_WORDS = frozenset({"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with"})
+
+
+def appendix_group_heading(heading: str) -> str:
+    """The source CV's section heading as an Appendix group heading: its own
+    words, without its section number, in Title Case when it was ALL CAPS
+    ("V. GRANT SUPPORT" -> "Grant Support"). An ALL-CAPS line reads as a WCM section header, to a reader
+    and to the doctor's `_output_section_header`, so it would seem to end the
+    Appendix (#1388)."""
+    # The source's own section number ("V. ", "XI. ", "3) ") reads as a WCM
+    # section letter ("A. ") beside the Appendix's other headings: drop it.
+    heading = _SOURCE_SECTION_NUMBER_RE.sub("", heading).strip() or heading
+    if heading != heading.upper():
+        return heading
+    parts = re.split(r"([\s/-]+)", heading.lower())  # words, and what separates them
+    return "".join(w if i and w in _HEADING_MINOR_WORDS else w[:1].upper() + w[1:]
+                   for i, w in enumerate(parts))
+
+
+def appendix_note_text(count: int) -> str:
+    """The Appendix note box's instruction for *count* entries."""
+    return APPENDIX_NOTE_TEXT[count == 1].format(count=count)
 
 # Why an entry did not reach the appendix, named for the check that caught it.
 # These are the words the summary Word comment and the log line report, in
@@ -1405,6 +1447,10 @@ def _describe_dropped(dropped: Counter[str]) -> str:
 class AppendixSection:
     """Section T writers, mixed into `WCMTemplateGenerator`."""
 
+    # Set when the Appendix note box was just written: the next line written
+    # carries the space below the box (a table has none of its own).
+    _appendix_note_awaits_space = False
+
     def _fill_appendix(
         self,
         unmapped_entries: Sequence[UnmappedEntry],
@@ -1437,16 +1483,25 @@ class AppendixSection:
         if self.verbose:
             logger.info("Adding Appendix (%d unmapped entries)...", len(lines))
 
-        self._write_appendix_intro(dropped)
+        self._write_appendix_intro(dropped, len(lines))
         groups = _group_by_source_heading(lines)
         for position, (heading, group) in enumerate(groups.items()):
             self._write_appendix_group(heading, group, first=position == 0)
 
         return [entry for entry, _ in lines]
 
-    def _write_appendix_intro(self, dropped: Counter[str]) -> None:
-        """The section header, its explanatory sentence and, when anything was
+    def _write_appendix_intro(self, dropped: Counter[str], count: int) -> None:
+        """The section header, its CViche note box and, when anything was
         dropped, the ONE summary comment saying what and why."""
+        note = self._write_appendix_header(count)
+        if dropped:
+            self._add_word_comment(note, _describe_dropped(dropped), author="Template Filter")
+
+    def _write_appendix_header(self, count: int) -> Paragraph:
+        """"T. APPENDIX", then the CViche note box for *count* entries; returns
+        the box's instruction paragraph. Both appendix writers open the
+        section this way; the first line after the box takes the space below
+        it (`_after_appendix_note`)."""
         # Blank paragraph before the header, matching BIBLIOGRAPHY.
         self.doc.add_paragraph()
 
@@ -1455,44 +1510,57 @@ class AppendixSection:
         _set_font(run, bold=True)
         run.underline = True
 
-        intro_para = self.doc.add_paragraph()
-        run = intro_para.add_run(
-            APPENDIX_INTRO_TEXT
-        )
-        _set_font(run, italic=True)
-        if dropped:
-            self._add_word_comment(
-                intro_para, _describe_dropped(dropped), author="Template Filter"
-            )
+        note = cviche_box_text(add_cviche_box(self.doc, APPENDIX_NOTE_TITLE), appendix_note_text(count))
+        space_around_cviche_box(appendix_para, None)
+        self._appendix_note_awaits_space = True
+        return note
 
-        # Blank paragraph after the intro text.
-        self.doc.add_paragraph()
+    def _after_appendix_note(self, para: Paragraph) -> None:
+        """Give *para* the space below the Appendix note box, if it is the
+        first line written after it."""
+        if self._appendix_note_awaits_space:
+            space_around_cviche_box(None, para)
+            self._appendix_note_awaits_space = False
+
+    def _set_appendix_note_count(self, count: int) -> None:
+        """Restate the Appendix note box's instruction for the final *count*
+        of entries: numbered lines and recovered bullets both."""
+        for table in self.doc.tables:
+            if is_cviche_box(table) and table.cell(0, 0).paragraphs[0].text == APPENDIX_NOTE_TITLE:
+                note = table.cell(0, 0).paragraphs[1]
+                for run in note.runs[1:]:
+                    run._r.getparent().remove(run._r)
+                note.runs[0].text = appendix_note_text(count)
+                return
 
     def _appendix_body(self, entry: UnmappedEntry, text: str) -> str:
-        """The body an Appendix line shows for *entry*: its whole *text* when
-        it is T-coded, otherwise capped by `_truncate_appendix_text` (#1230).
+        """The body an Appendix line shows for *entry*: its whole *text*,
+        whatever its code (#1230 for T, #1555 for a diverted code), unless the
+        low-coverage overflow takes the entry (`is_overflow_candidate`).
 
-        The Appendix is a T entry's only render, so a cut there lost its tail.
-        The exception is a T entry the low-coverage overflow takes
-        (`is_overflow_candidate`): the reconsider pass re-splits it and routes
-        its segments, and a whole copy here would repeat them.
+        A numbered Appendix line is the entry's only render, so a cut there
+        lost its tail. An overflow candidate is the exception: the reconsider
+        pass re-splits it and routes its segments, so its line stays a capped
+        pointer (`_truncate_appendix_text`) and a whole copy does not repeat
+        them.
         """
-        if (entry.get("taxonomy_code") == _APPENDIX_TAXONOMY_CODE
-                and not self._is_overflow_candidate(entry)):
-            return text
-        return _truncate_appendix_text(text)
+        if self._is_overflow_candidate(entry):
+            return _truncate_appendix_text(text)
+        return text
 
     def _write_appendix_group(
         self, heading: str, lines: Sequence[AppendixLine], first: bool
     ) -> None:
-        """One `From "<heading>":` block with its lines numbered from 1."""
+        """One block under the source CV's own section heading, in its own
+        wording and in bold, with its lines numbered from 1."""
         # Blank paragraph between groups (not before the first).
         if not first:
             self.doc.add_paragraph()
 
         header_para = self.doc.add_paragraph()
-        run = header_para.add_run(f'From "{heading}":')
+        run = header_para.add_run(appendix_group_heading(heading))
         _set_font(run, bold=True)
+        self._after_appendix_note(header_para)
 
         for number, (entry, text) in enumerate(lines, start=1):
             entry_para = self.doc.add_paragraph()

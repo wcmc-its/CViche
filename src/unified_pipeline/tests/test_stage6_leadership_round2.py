@@ -53,6 +53,8 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
+from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
 from unified_pipeline.stage6.formatting import format_date_range  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -287,6 +289,24 @@ class TestUnresolvedPipeRoutesThroughSharedParser:
             ("Chair, Faculty Council", "", expected_dates),
             ("Second unrelated line", "", ""),
         ]
+
+
+class TestFanOutBuiltTextIsNotReparsedAsAPipe:
+    """#1556 e: mirrors sibling P. A fan-out child's built line ("Chair |
+    Ashby University") is not a source pipe column, so the role and the
+    institution render in their own cells from the child's fields."""
+
+    def test_undated_child_renders_role_and_institution_from_its_fields(self):
+        records = [{"leadership_role": "Chair", "institution": "Ashby University"},
+                   {"leadership_role": "Dean", "institution": "Varnor College"}]
+        parent = {"taxonomy_code": "O", "element_idx_start": 3,
+                  "text": "Chair at Ashby University, later Dean at Varnor College",
+                  "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+        children = fan_out_multi_record_entries(
+            [parent], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+        assert children[0]["text"] == "Chair | Ashby University"
+
+        assert _o_rows(children[0]) == [("Chair", "Ashby University", "")]
 
 
 class TestTableShapeValidation:

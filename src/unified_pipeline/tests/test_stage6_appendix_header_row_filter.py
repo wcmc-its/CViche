@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.oxml.ns import qn
 from lxml import etree
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -42,6 +43,10 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.core.docx_structure_extractor import (
     extract_unified_elements,  # noqa: E402
+)
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    CVICHE_BOX_FILL,
+    is_cviche_box,
 )
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: E402
@@ -102,12 +107,18 @@ def _output_text(docx_path: Path) -> str:
     return "\n".join(parts)
 
 
+def _after_appendix_note(paragraphs: list[str]) -> list[str]:
+    """Body paragraph texts from the first group heading to the end: past
+    "T. APPENDIX", its note box (a table, so not a body paragraph) and the
+    blank line under it. The appendix is the last thing `generate()` writes."""
+    if "T. APPENDIX" not in paragraphs:
+        return []
+    rest = paragraphs[paragraphs.index("T. APPENDIX") + 1:]
+    return rest[next((i for i, t in enumerate(rest) if t), len(rest)):]
+
+
 def _appendix_paragraphs(docx_path: Path) -> list[str]:
-    """Body paragraph texts from the first `From "...":` label to the end --
-    the appendix is the last thing `generate()` writes."""
-    paragraphs = [p.text for p in Document(str(docx_path)).paragraphs]
-    starts = [i for i, t in enumerate(paragraphs) if t.startswith('From "')]
-    return paragraphs[starts[0]:] if starts else []
+    return _after_appendix_note([p.text for p in Document(str(docx_path)).paragraphs])
 
 
 def _comment_texts(docx_path: Path) -> list[str]:
@@ -550,7 +561,7 @@ def test_mixed_header_and_genuine_entries_numbering_does_not_shift(tmp_path, cap
                _t_entry(GENUINE_TWO, ["Service"], 3)]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "Service":',
+        'Service',
         f"1. {GENUINE_ONE}",
         f"2. {GENUINE_TWO}",
     ]
@@ -566,11 +577,11 @@ def test_numbering_restarts_per_source_heading(tmp_path, caplog):
                _t_entry(GENUINE_TWO, ["Service"], 4)]
     out = _render(tmp_path, entries, caplog)
     assert _appendix_paragraphs(out) == [
-        'From "Education":',
+        'Education',
         "1. EDU_ONE bachelor of arts, some college",
         "2. EDU_TWO master of science, some university",
         "",
-        'From "Service":',
+        'Service',
         f"1. {GENUINE_ONE}",
         f"2. {GENUINE_TWO}",
     ]
@@ -586,21 +597,25 @@ def _fill_appendix_paragraphs(entries: list[dict[str, object]]) -> list[str]:
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document(gen.template_path)
     gen._fill_appendix(entries)
-    paragraphs = [p.text for p in gen.doc.paragraphs]
-    starts = [i for i, t in enumerate(paragraphs) if t.startswith('From "')]
-    return paragraphs[starts[0]:]
+    return _after_appendix_note([p.text for p in gen.doc.paragraphs])
 
 
-def test_over_limit_diverted_entry_renders_at_exactly_the_limit():
-    """A >200-character entry diverted from another code renders as exactly
-    200 characters after the number, marker included -- the old
+def _overflow_entry(text: str, code: str, idx: int) -> dict[str, object]:
+    """An entry the low-coverage overflow takes (`is_overflow_candidate`)."""
+    return {**_t_entry(text, ["Service"], idx), "taxonomy_code": code,
+            "extraction_coverage": {"extraction_coverage_percent": 5.0}}
+
+
+def test_over_limit_overflow_diverted_entry_renders_at_exactly_the_limit():
+    """A long diverted entry the overflow re-splits keeps a capped pointer of
+    exactly 200 characters after the number, marker included -- the old
     `text[:200] + '...'` gave 203."""
-    long_text = "LONG_ENTRY " + " ".join(f"word{i}" for i in range(60))
+    long_text = "LONG_ENTRY " + " ".join(f"overflowword{i}" for i in range(90))
     assert len(long_text) > APPENDIX_MAX_CHARS
     exact_text = "EXACT_ENTRY " + "y" * (APPENDIX_MAX_CHARS - len("EXACT_ENTRY "))
     assert len(exact_text) == APPENDIX_MAX_CHARS
     paragraphs = _fill_appendix_paragraphs(
-        [_diverted_entry(long_text, 1), _diverted_entry(exact_text, 2)])
+        [_overflow_entry(long_text, "Z9", 1), _diverted_entry(exact_text, 2)])
     rendered_long = paragraphs[1]
     assert rendered_long.startswith("1. ")
     body = rendered_long[len("1. "):]
@@ -608,6 +623,21 @@ def test_over_limit_diverted_entry_renders_at_exactly_the_limit():
     assert body.endswith("...")
     assert body[:-3] == long_text[:APPENDIX_MAX_CHARS - 3]
     assert paragraphs[2] == f"2. {exact_text}"  # at the limit: untouched
+
+
+def test_over_limit_diverted_entry_renders_whole():
+    """#1555 (OIEPQD XACIVX 104-109 shape): a dated research record diverted
+    to the Appendix from M1 renders nowhere else, so its affiliation and its
+    description bullets past 200 characters reach the page whole."""
+    long_text = ("Research Assistant, Synthetic Lab of Imaginary Studies, "
+                 "Example Institute, Sometown\n"
+                 "Supervisor: Placeholder Person, Department of Invented Science\n"
+                 "- Studied an imaginary compound in a made-up assay\n"
+                 "- Built a fictional screening protocol for invented targets")
+    assert len(long_text) > APPENDIX_MAX_CHARS
+    entry = {**_diverted_entry(long_text, 1), "taxonomy_code": "M1"}
+    paragraphs = _fill_appendix_paragraphs([entry])
+    assert paragraphs[1] == f"1. {long_text}"
 
 
 def test_over_limit_t_entry_renders_whole(tmp_path, caplog):
@@ -669,7 +699,7 @@ def test_real_source_table_header_row_is_dropped_but_data_row_survives(tmp_path,
     ]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "EDUCATION":',
+        'Education',
         "1. 2010 — MD — Medicine — Weill Cornell Medicine, New York, NY",
     ]
     assert "Year — Degree" not in _output_text(out)
@@ -695,7 +725,7 @@ def test_web210_shape_bare_years_and_status_markers_dropped(tmp_path, caplog):
     # (Completed) Funding"), so a whole-document substring check would be
     # vacuous here.
     assert _appendix_paragraphs(out) == [
-        'From "PRESENTATIONS":',
+        'Presentations',
         f"1. {GENUINE_ONE}",
     ]
     comment = _appendix_log(caplog)
@@ -713,7 +743,7 @@ def test_web181_shape_toc_lines_dropped(tmp_path, caplog):
                _t_entry("EDUCATION AND TRAINING", ["APPOINTMENTS"], 3)]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "APPOINTMENTS":',
+        'Appointments',
         "1. EDUCATION AND TRAINING",
     ]
     assert "2 non-content blocks removed (toc-line 2)" in _comment_texts(out)
@@ -727,7 +757,7 @@ def test_a_year_next_to_real_content_is_not_dropped(tmp_path, caplog):
                         ["Positions"], 1)]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "Positions":',
+        'Positions',
         "1. 2021 Assistant Professor, Weill Cornell Medicine",
     ]
     assert "removed" not in _appendix_log(caplog)
@@ -1100,17 +1130,25 @@ def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
     )
 
 
-def test_appendix_intro_is_the_shared_accurate_banner(tmp_path, caplog):
-    # #534: _fill_appendix writes the shared intro line, italic, and the old
-    # "not successfully mapped" claim is gone.
-    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7)]
+def test_appendix_note_is_a_cviche_box_with_the_final_count(tmp_path, caplog):
+    # #1388: under T. APPENDIX, one light-gray CViche box saying what the
+    # entries are and what to do (#534: never that they appear nowhere else),
+    # counted once both writers ran; the old "successfully mapped" claim is gone.
+    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7),
+               _t_entry("Example Leftover Hobby Club, 2016", ["OTHER"], 8)]
     doc = Document(str(_render(tmp_path, entries, caplog)))
-    paragraphs = doc.paragraphs
-    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
-    intro = paragraphs[header + 1]
-    assert intro.text == appendix_module.APPENDIX_INTRO_TEXT
-    assert all(run.italic for run in intro.runs)
+    [box] = [t for t in doc.tables if is_cviche_box(t)]
+    lines = [p.text for p in box.cell(0, 0).paragraphs]
+    assert lines == [appendix_module.APPENDIX_NOTE_TITLE, appendix_module.appendix_note_text(2)]
+    assert box.cell(0, 0)._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
+    assert "Some may already appear above" in lines[1]
+    # generate()'s closing table passes leave the box's own spacing alone.
+    assert box.cell(0, 0).paragraphs[0].paragraph_format.space_after.pt == 6
     assert "successfully mapped" not in _output_text(tmp_path / "out.docx")
+
+
+def test_appendix_note_text_reads_for_one_entry():
+    assert appendix_module.appendix_note_text(1).startswith("This entry from your original CV")
 
 
 # ---------------------------------------------------- #1221: signature, date, rule
@@ -1646,3 +1684,19 @@ def test_running_title_needs_a_title_cell_and_an_owner_or_page_cell(text, tokens
 ])
 def test_labelled_email_reads_only_a_lone_address(text, email):
     assert appendix_module.labelled_email(text) == email
+
+
+@pytest.mark.parametrize("source, shown", [
+    ("GRANT SUPPORT", "Grant Support"),
+    ("LICENSES, REGISTRATIONS AND CERTIFICATIONS", "Licenses, Registrations and Certifications"),
+    ("GRAND ROUNDS, INVITED/VISITING LECTURES", "Grand Rounds, Invited/Visiting Lectures"),
+    ("XI. BIBLIOGRAPHY", "Bibliography"),
+    ("V. FUNDING", "Funding"),
+    ("Research & Clinical Trials", "Research & Clinical Trials"),
+    ("Dr. Example Lab", "Dr. Example Lab"),
+])
+def test_appendix_group_heading_is_the_sources_words_never_a_section_header(source, shown):
+    """#1388: the source CV's heading, plain: no section number and no ALL
+    CAPS, either of which reads as a WCM section header (to a reader, and to
+    the doctor's _output_section_header, which would end the Appendix there)."""
+    assert appendix_module.appendix_group_heading(source) == shown

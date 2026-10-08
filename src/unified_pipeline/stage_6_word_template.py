@@ -113,6 +113,7 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     _set_table_border,
     format_date_for_section,
     format_date_range,
+    is_cviche_box,
     normalize_iso_dates_in_text,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: F401
@@ -229,7 +230,6 @@ from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
 )
 from unified_pipeline.stage6.sections.appendix import (
-    APPENDIX_INTRO_TEXT,
     APPENDIX_MAX_CHARS,
     CODE_ORIGIN_ENTRY,
     CODE_ORIGIN_RECONSIDER,
@@ -587,9 +587,10 @@ def is_overflow_candidate(entry: Mapping[str, Any]) -> bool:
 
     K and S entries never qualify (free-form teaching text; bibliography uses
     enrichment), nor does one stage 5c formatted. A coverage of 0 or None reads
-    as unknown and does not qualify. The Appendix also reads this: a T entry
+    as unknown and does not qualify. The Appendix also reads this: an entry
     that qualifies is re-split by the reconsider pass, so its Appendix line
-    stays a capped pointer (#1230).
+    stays a capped pointer; every other Appendix line renders whole (#1230,
+    #1555).
     """
     code = str(entry.get('taxonomy_code') or '')
     if code.startswith(('K', 'S')) or _has_formatted_text(entry):
@@ -1876,8 +1877,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # then recover unrendered records (#221, after reconsider so its
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
-        recovered_appendix_lines = list(self._reconsider_appendix_entries() or [])
-        recovered_appendix_lines += self._recover_unrendered_records(pre_dedup_entries_by_code, cv_owner) or []
+        recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -2058,6 +2058,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         - Paragraph spacing: 4pt before and 4pt after
         """
         for table in self.doc.tables:
+            if is_cviche_box(table):  # its own padding and paragraph spacing (#1388)
+                continue
             for row in table.rows:
                 for cell in row.cells:
                     _set_cell_vertical_alignment(cell, 'center')
@@ -2076,7 +2078,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         gray_color = "D9D9D9"
 
         for table in self.doc.tables:
-            if not table.rows:
+            if not table.rows or is_cviche_box(table):  # CViche's note keeps its own lighter gray
                 continue
 
             # Apply header row background color (first row). The PERSONAL DATA
@@ -3236,8 +3238,8 @@ Now analyze the text above:"""
         if not section_header:
             return False
 
-        # Never anchor inside the appendix: its bold 'From "SECTION":' group
-        # heads echo source section names and would swallow content meant for
+        # Never anchor inside the appendix: its bold group heads (the source
+        # CV's own section headings) echo source section names and would swallow content meant for
         # the real section (the appendix always sits at document end, and
         # _fill_appendix runs before this).
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
@@ -3365,6 +3367,17 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
+    def _recover_appendix_lines(self, written: list[UnmappedEntry],
+                                pre_dedup_entries_by_code: dict[str, list[dict]],
+                                cv_owner: Mapping[str, object] | None) -> list[RecoveredLine]:
+        """The reconsider pass, then the unrendered-record recovery, each
+        bulleting leftovers into the Appendix; returns those bullets. The
+        Appendix note box then states the total, *written* numbered lines included."""
+        recovered = list(self._reconsider_appendix_entries() or [])
+        recovered += self._recover_unrendered_records(pre_dedup_entries_by_code, cv_owner) or []
+        self._set_appendix_note_count(len(written) + len(recovered))
+        return recovered
+
     def _add_remaining_to_appendix(self, remaining: list[tuple[str, str, float]],
                                    origins: Sequence[str] = ()) -> list[RecoveredLine]:
         """Add remaining unmappable segments to the appendix as bullet lines.
@@ -3400,17 +3413,8 @@ Now analyze the text above:"""
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
 
         if appendix_idx is None:
-            # Create the appendix section
-            self.doc.add_paragraph()
-            appendix_para = self.doc.add_paragraph()
-            run = appendix_para.add_run("T. APPENDIX")
-            _set_font(run, bold=True)
-            run.underline = True
-
-            intro_para = self.doc.add_paragraph()
-            run = intro_para.add_run(APPENDIX_INTRO_TEXT)
-            _set_font(run, italic=True)
-            self.doc.add_paragraph()
+            # Create the appendix section; generate() restates the note's count.
+            self._write_appendix_header(len(lines))
 
         # Add each remaining segment. The taxonomy code is an internal
         # pipeline identifier — keep it in a reviewer comment, never in the
@@ -3421,6 +3425,7 @@ Now analyze the text above:"""
             run = entry_para.add_run(segment_text)
             _set_font(run)
             self._apply_list_bullet(entry_para, level=0)
+            self._after_appendix_note(entry_para)
             if segment_text == PII_REDACTED_NOTICE:
                 # The A-820 addendum: ONE sidebar comment on the notice
                 # saying what the policy removed -- categories, counts and
