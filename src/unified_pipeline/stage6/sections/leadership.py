@@ -26,6 +26,7 @@ from unified_pipeline.core.render_check import (
     wrapped_row_text,
 )
 
+from ..fan_out import has_built_text
 from ..formatting import (
     _clear_table_data,
     _set_font,
@@ -208,7 +209,8 @@ class LeadershipSection:
             # never rerouted (and its institution, which the multiline path
             # cannot carry for a non-pipe row, lost) just because its raw
             # text happens to contain a `|`.
-            has_unresolved_pipe = not fields_complete and '|' in original_text
+            has_unresolved_pipe = (not fields_complete and '|' in original_text
+                                   and not has_built_text(entry))
             # #987: a row whose cells merely wrap is ONE role, not several
             # lines; each branch below that would split it renders the rejoined
             # text as the one row instead.
