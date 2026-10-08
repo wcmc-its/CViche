@@ -240,6 +240,10 @@ Labels, v2. The v1 labels (`_labels_yuyvig`, which Y1585 and YUY-OA scored) read
 
 The render stubs the LLM (`render_gate.py`), as every render gate does. On the 36 runs with a stored report, every lint's hit count matches that report except: the lints #1607, #1611 and #1616 change (above); three stage-6 shapes (`appendix_no_route` 8 to 3 after #1621 routes bare N3, `appendix_m1_not_in_summary` 6 to 8 after #1615, `appendix_passthrough_refused` 1 to 2, IZABPD's J entry); the INFO shape `other` 2 to 7 (#1621's new "bare mentee code resolved" message); `llm_fallback_served` 25 to 12 (the farm has no prompt logs); and `missed_headers` 20 to 19.
 
+| YUY-SP | 2026-10-08 | `fix/1583-shattered-prose` on origin/dev `fb575e23`, against `fb575e23`, both over one fresh render of `fb575e23` (`scripts/render_gate.py`, 272 of 309 rendered: the wave-1 farm's 37 IPXFBA artifacts are not on disk; `scripts/doctor_gate.py` per farm, no `--source-dir`) | 272: YUYVIG 38 (dev-259, with BCTOGR), the EBYSBC/s7ab/pilot farm 63, NDMRSO 30, EOAHMI 9, X6 6, the wave-1 farm 126 | YUYVIG's verified per-run autopsies (`_labels_yuyvig`); every hit hand-read | #1583 |
+
+YUY-SP adds `shattered_prose`: a stage-4 entry whose `\t` parts break mid-sentence (at least 2 joins and 30% of them, at least one opening lowercase) and at least 3 of which render as whole paragraphs, which is one source paragraph printed one bullet per printed line. It changes no other lint's findings on any of the 272 runs, and adds 15 WARN findings on 3 of them, all true on reading the render: IZABPD 430, 436, 441, 445, 450, 455 (L2), 468, 477, 488 (L3) and RLADNC 530, 540, 567 (L3), which are YUYVIG's IZABPD-02 and RLADNC-04, and the pilot farm's JNATFN 680, 686, 699 (L1, a docx source). Neither YUYVIG label carries an entry index, so matched is 0 by index; by hand the lint catches both. Over the 185 stored runs under `analysis/` (stored renders, mixed images), it also fires on OIEPQD VECUUM 21 (L2), true. A first version without the lowercase-opening rule also fired on wave-1 web228 457, a three-line practice address broken at commas, false. The thresholds were fitted on these runs, so the precision is in-sample. Not reached: the same prose rendered inline as `': '` / `' — '` welds (`_clean_inline_tabs`), about 59 entries on IZABPD.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -268,6 +272,7 @@ The render stubs the LLM (`render_gate.py`), as every render gate does. On the 3
 | `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
 | `owner_attribution`: `mentee_under_non_mentee_heading` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (0%) | 0 | YUY-OA |
 | `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |
+| `shattered_prose` | 15 | 15 | none | 15 / 15 hand-checked (100%) | 0 / 12 on labelled runs (no label carries an entry index) | 0 by index, 2 by hand | YUY-SP |
 | `summary_unsupported_claim` | 11 | 11 | none | 14 / 14 hand-checked (100%) | 11 / 11 by sentence (100%) | 11 | OIE-SUM |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |

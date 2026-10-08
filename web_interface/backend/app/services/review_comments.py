@@ -117,6 +117,7 @@ REVIEW_FLAGS = {
     "stage4_unplaced_items": "Records from the original CV are missing from this section.",
     "summary_unsupported_claim": "The summary says something the original CV does not: check it.",
     "owner_attribution": "May be someone else's work, not yours: check it.",
+    "shattered_prose": "One paragraph split into a bullet per line: join these lines.",
 }
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete"}

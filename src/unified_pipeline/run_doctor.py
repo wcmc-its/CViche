@@ -386,6 +386,12 @@ Lints, ranked by the severity of the failure class they catch:
                           elsewhere, where most hits are the owner's own
                           group-authored papers or the owner under another
                           surname. Reads stage 4 and the docx
+14ai. shattered_prose     one source paragraph rendered one bullet per
+                          printed line, broken mid-sentence (#1583, YUYVIG:
+                          IZABPD L2/L3, RLADNC L3): a stage-4 entry whose
+                          '\\t' parts break mid-sentence and at least three
+                          of which are whole rendered paragraphs. WARN, one
+                          per entry. Reads stage 4 and the docx
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -561,6 +567,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_pipe_leaks,
     lint_python_repr_in_output,
     lint_section_lost,
+    lint_shattered_prose,
     lint_split_child_unsourced,
     lint_stage6_warnings,
     lint_table_shape,
@@ -736,6 +743,7 @@ KNOWN_LINTS = (
     "stage4_unplaced_items",
     "summary_unsupported_claim",
     "owner_attribution",
+    "shattered_prose",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -982,6 +990,11 @@ LINT_PREVALENCE = {
     # origin/dev a65857e7, measured 2026-10-08. Same mixed-corpus caveat as
     # above.
     "owner_attribution": 0.248,
+    # shattered_prose (#1583, YUY-SP in doctor/PRECISION.md): 3 of the 272
+    # runs of the YUYVIG (38), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI
+    # (9), X6 (6) and wave-1 (126) farms, over fresh renders of origin/dev
+    # fb575e23, measured 2026-10-08. Same mixed-corpus caveat as above.
+    "shattered_prose": 0.011,
 }
 
 
@@ -1540,6 +1553,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,
              ("stage_4_5", "stage_4"), optional=("source_lines",)),
     LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
+    LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
 )
 
 
