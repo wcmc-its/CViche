@@ -220,7 +220,7 @@ async def _drain_runs_before_exit(budget_seconds: int) -> None:
     the run dies with it and, before this, its row stayed "running" with
     nothing executing it (runs 6O6Q2V and U2MUQ5 were orphaned by releases on
     2026-09-29). Stop admitting runs, wait up to ``budget_seconds`` for the
-    ones already going, then mark the rest failed with a deploy message so the
+    ones already going, then mark the rest failed with a shutdown message so the
     user gets a terminal status instead of a timer that climbs forever.
     """
     from app.database import SessionLocal

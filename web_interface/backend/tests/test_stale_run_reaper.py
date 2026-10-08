@@ -395,7 +395,7 @@ def test_drain_waits_for_active_runs_then_returns(monkeypatch):
 
 def test_drain_fails_runs_still_executing_at_the_budget(monkeypatch):
     from app.models import Run
-    from app.services.run_service import DEPLOY_INTERRUPT_MESSAGE
+    from app.services.run_service import SHUTDOWN_INTERRUPT_MESSAGE
 
     db, concurrency = _drain_fixture_runs(monkeypatch)
 
@@ -414,7 +414,7 @@ def test_drain_fails_runs_still_executing_at_the_budget(monkeypatch):
     long_run = db.query(Run).filter(Run.id == "LONG01").one()
     quick_run = db.query(Run).filter(Run.id == "QUICK2").one()
     assert long_run.status == "failed"
-    assert long_run.error_message == DEPLOY_INTERRUPT_MESSAGE
+    assert long_run.error_message == SHUTDOWN_INTERRUPT_MESSAGE
     assert quick_run.status == "complete"
     assert quick_run.error_message is None
     # The leftover run's executor is told to stop; the finished one is not.
@@ -496,7 +496,7 @@ def test_drain_survives_a_db_error_marking_runs_failed(monkeypatch, caplog):
 
 def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monkeypatch, tmp_path):
     """If the process outlives the drain, the run's still-running executor must
-    not write "complete" over the deploy failure (a user told to restart would
+    not write "complete" over the shutdown failure (a user told to restart would
     otherwise get a duplicate run)."""
     from datetime import datetime
     from types import SimpleNamespace
@@ -505,7 +505,7 @@ def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monke
     from app.models import Run
     from app.pipeline import concurrency
     from app.pipeline import orchestrator as orch
-    from app.services.run_service import DEPLOY_INTERRUPT_MESSAGE
+    from app.services.run_service import SHUTDOWN_INTERRUPT_MESSAGE
     from tests.conftest import TestingSessionLocal
 
     monkeypatch.setattr("app.database.SessionLocal", TestingSessionLocal)
@@ -532,7 +532,7 @@ def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monke
     db.expire_all()
     run = db.query(Run).filter(Run.id == "FLIP01").one()
     assert run.status == "failed"
-    assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
+    assert run.error_message == SHUTDOWN_INTERRUPT_MESSAGE
     db.close()
 
 
