@@ -173,10 +173,6 @@ KIND_LICENSE = 'license'
 KIND_NPI = 'npi'
 KIND_DEA = 'dea'
 
-# How much of an unstructured entry's raw text becomes the state cell when
-# there is no jurisdiction and no number to render instead.
-_FALLBACK_TEXT_CHARS = 100
-
 
 @dataclass(frozen=True)
 class LicensureEntry:
@@ -395,7 +391,9 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
                 last_registration, entry.status, last_registration),
         )
     if entry.original_text:
-        return LicenseRecord(state=entry.original_text[:_FALLBACK_TEXT_CHARS])
+        # The whole raw text, never a slice: a silent 100-character cut
+        # dropped the tail of every long credential mid-word (#1576).
+        return LicenseRecord(state=entry.original_text)
     return None
 
 
