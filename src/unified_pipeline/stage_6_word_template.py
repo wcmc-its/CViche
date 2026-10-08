@@ -1793,7 +1793,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # section -- including passthrough and the appendix below -- runs
         # through _render_section, so one section raising costs that section
         # only; the rest still render and the run still produces a document.
-        self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
+        self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path,
+                                 records_key=STAGE4_RECORDS_KEY)
 
         # (label, codes, callable), SAME order as the flat dispatch this
         # replaced (order pinned by test_stage6_section_boundary.py); codes are dropped from mapped_codes on failure (#842).
