@@ -597,6 +597,14 @@ LINT_COPY = {
         "or a named funder such as NIH.",
         "Read the Research Activities paragraph and delete or correct each flagged sentence, "
         "since you sign this document."),
+    # Proposed in #1573's PR; awaiting Paul's approval.
+    "owner_attribution": LintCopy(
+        "Someone else's work shown as yours",
+        "Some items in the document may belong to other people: publications whose authors "
+        "do not include you, or people listed as your mentees under a heading for grant "
+        "applicants you reviewed or for laboratory staff.",
+        "Check each flagged item against the source CV, and delete it or move it to the "
+        "section where it belongs."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

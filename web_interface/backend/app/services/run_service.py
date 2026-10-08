@@ -171,10 +171,13 @@ RESTART_INTERRUPT_MESSAGE = (
     "progress. Please restart it with the same file."
 )
 
-# Shown on a run still executing when a deploy's drain budget ran out (#116).
-DEPLOY_INTERRUPT_MESSAGE = (
-    "Run interrupted — the server was shut down for a deploy while this run "
-    "was in progress. Please restart it with the same file."
+# Shown on a run still executing when the pod's shutdown drain budget ran out
+# (#116). Names no cause: the drain runs on every SIGTERM -- a release, but
+# also a node failure, an eviction or a scale-down -- and the pod cannot tell
+# which (#1565).
+SHUTDOWN_INTERRUPT_MESSAGE = (
+    "Run interrupted — the server running it was shut down while it was in "
+    "progress. Please restart it with the same file."
 )
 
 
@@ -787,8 +790,8 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
         if not _claim_stale_run(db, run, run.started_at, status=RunState.FAILED):
             continue
-        _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
-        db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=DEPLOY_INTERRUPT_MESSAGE))
+        _mark_run_failed(run, db, now, message=SHUTDOWN_INTERRUPT_MESSAGE)
+        db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=SHUTDOWN_INTERRUPT_MESSAGE))
         failed.append(run)
     db.commit()
     # The failure card is sent from here, not by the run: the process exits

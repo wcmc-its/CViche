@@ -347,3 +347,75 @@ def test_dated_m1_record_whose_title_a_summary_shares_reaches_the_appendix(tmp_p
     assert text.count(PROJECT_TOKEN) == 1, "the M1 project record rendered nowhere"
     assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
         ("M1", "m1_record_not_in_summary", 1)]
+
+
+# #1572 (AUTOPSY-YUYVIG-batch-2026-10-08): stage 4 extracted a date from some
+# items of an M1 list and nothing but `narrative` from the rest, so only the
+# dated items counted as records and the undated ones were suppressed as prose
+# the summary restates (ECXGAT's virus isolates, LTTYWI's numbered projects).
+# "Brindlewort", "Quellmoss", "Sarnicle", "Ottervane" and "Kelpridge" are invented.
+LIST_HEADING = ["Isolates Characterized"]
+UNDATED_ITEM_TOKEN = "Brindlewort"
+CREDITED_PROJECT_TOKEN = "Quellmoss"
+OTHER_HEADING_PROSE_TOKEN = "Sarnicle"
+
+
+def _dated_list_item() -> dict:
+    return {"text": "Ottervane widget strain OV-7. Isolated from a gearbox outbreak in June 2004 "
+                    "and fully sequenced by the laboratory",
+            "taxonomy_code": "M1", "hierarchy": LIST_HEADING, "element_idx_start": 30,
+            "extracted_fields": {"narrative": "Isolated from a gearbox outbreak", "date": "2004-06"}}
+
+
+def _undated_list_item() -> dict:
+    return {"text": f"{UNDATED_ITEM_TOKEN} widget strain BW-2. First isolation of the strain "
+                    "outside a laboratory setting, with complete genome sequence",
+            "taxonomy_code": "M1", "hierarchy": LIST_HEADING, "element_idx_start": 32,
+            "extracted_fields": {"narrative": "First isolation of the strain outside a laboratory"}}
+
+
+def _other_heading_prose() -> dict:
+    return {"text": f"My {OTHER_HEADING_PROSE_TOKEN} program asks how widget gears wear and fail "
+                    "under sustained cyclic loading in the field",
+            "taxonomy_code": "M1", "hierarchy": ["Research Interests"], "element_idx_start": 4,
+            "extracted_fields": {"narrative": "how widget gears wear and fail"}}
+
+
+def test_undated_m1_list_item_under_a_record_heading_reaches_the_appendix(tmp_path):
+    """The undated sibling of a dated M1 record is an item of the same record
+    list; the generated summary never names it, so it reaches the Appendix. A
+    prose statement under another heading still feeds the summary only."""
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    entries = _record_entries(_other_heading_prose(), _dated_list_item(), _undated_list_item())
+    text, diversions = _render_with_sidecar(tmp_path, entries, summary)
+    assert text.count(UNDATED_ITEM_TOKEN) == 1, "the undated M1 list item rendered nowhere, or twice"
+    assert text.count("Ottervane") == 1
+    for token in (OWN_M1_TOKEN, OTHER_HEADING_PROSE_TOKEN):
+        assert token not in text, f"a prose M1 entry ({token}) leaked to the Appendix"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "m1_record_not_in_summary", 2)]
+
+
+def test_undated_m1_list_item_the_summary_reproduces_is_not_repeated(tmp_path):
+    """The sibling rule only makes the item a record; a record the page already
+    carries, the summary paragraph included, still stays out."""
+    summary = _summary("llm_generated",
+                       f"Dr. Public's group reported {UNDATED_ITEM_TOKEN} widget strain BW-2, the first "
+                       "isolation of the strain outside a laboratory setting, with complete genome sequence.")
+    text = _render(tmp_path, _record_entries(_dated_list_item(), _undated_list_item()), summary)
+    assert text.count(UNDATED_ITEM_TOKEN) == 1
+
+
+def test_m1_project_with_only_narrative_but_an_investigator_credit_is_a_record(tmp_path):
+    """A numbered project whose title, investigators and years stage 4 filed
+    under `narrative` alone is a record by its credit line, with no dated sibling."""
+    project = {"text": f"7. Thermal Evaluation of {CREDITED_PROJECT_TOKEN} Gear Degeneration.\t"
+                       "Investigators: Drs. Kelpridge and Public, 1988-1990.",
+               "taxonomy_code": "M1", "hierarchy": ["Research Projects"], "element_idx_start": 40,
+               "extracted_fields": {"narrative": "Thermal Evaluation of Gear Degeneration"}}
+    summary = _summary("llm_generated",
+                       f"Dr. Public leads a {SUMMARY_TOKEN} program on widget dynamics and their control.")
+    text = _render(tmp_path, _record_entries(project), summary)
+    assert text.count(CREDITED_PROJECT_TOKEN) == 1, "the credited M1 project rendered nowhere"
+

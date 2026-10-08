@@ -795,6 +795,52 @@ def test_a_grant_whose_title_tail_matches_the_pi_shape_renders_the_owner_not_tit
     assert cells['Your role:'] == 'PI'
 
 
+_SPONSOR_LABEL_LINES = (
+    '2015-2017 Acme Cancer Society. Research Scholar Award (PI)',
+    'Anemia and Lymphoma Society. Postdoctoral Fellowship (PI)',
+    'Hospital Patient Care Award, Principal Investigator',
+    'Acme Foundation, Principal Investigator',
+    '2018-2020 Acme Rowe. Junior Faculty (PI)',
+)
+
+
+@pytest.mark.parametrize('raw', _SPONSOR_LABEL_LINES)
+def test_a_label_capturing_sponsor_or_award_text_is_not_a_pi(raw):
+    """#1571 (SLYBST, DYLJXC): the text before the owner's own "(PI)" or
+    ", Principal Investigator" label is the sponsor or award, not a person.
+    A sponsor word, or a sentence break inside the capture ("Rowe. Junior",
+    the last line, which carries no sponsor word), refuses it; an "and" join
+    is refused when either side is."""
+    assert _pi_name_from_label(raw) == ''
+    assert resolve_pi_name({}, raw, '', 'Ada Testowner') == ''
+
+
+@pytest.mark.parametrize('raw', _SPONSOR_LABEL_LINES)
+def test_a_refused_sponsor_capture_falls_through_to_the_owner_auto_fill(raw):
+    assert resolve_pi_name({}, raw, 'PI', 'Ada Testowner') == 'Ada Testowner'
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ('Mrs. Ann Lee (PI)', 'Mrs. Ann Lee'),
+    ('Prof. Bo Li, Principal Investigator', 'Prof. Bo Li'),
+    ('Dr. J.R. Lee (PI)', 'Dr. J.R. Lee'),
+    ('Example Society (PI); Lee (PI)', 'Lee'),
+])
+def test_titles_initials_and_a_later_person_capture_still_name_the_pi(raw, expected):
+    """A title or initial is not a sentence break, and a refused capture does
+    not hide a later person the same shape names."""
+    assert resolve_pi_name({}, raw, '', '') == expected
+
+
+def test_a_grant_whose_sponsor_precedes_the_owners_pi_label_renders_the_owner():
+    """The rendered wire: the PI cell never holds the sponsor text."""
+    table = _generator()._create_grant_table(
+        {'title': 'Target RNA turnover', 'agency': 'Acme Cancer Society', 'pi_role': 'PI',
+         'start_date': '2015'},
+        'M2B', entry={'text': _SPONSOR_LABEL_LINES[0]}, owner_name='Ada Testowner')
+    assert _cells(table)['Name of Principal Investigator:'] == 'Ada Testowner'
+
+
 def test_a_null_source_text_resolves_to_no_pi_rather_than_raising():
     """`entry['text']` can be a JSON null; the label parse must not hand it to `re`."""
     assert resolve_pi_name({}, None, '', 'Ada Testowner') == ''

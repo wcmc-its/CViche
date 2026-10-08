@@ -84,6 +84,7 @@ from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _is_known_org_line,
     _is_q2_journal_reviewer,
     _matches_word_start,
+    _route_q2_grant_reviews,
     _split_q2_lines,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -536,3 +537,93 @@ def test_q2_date_only_continuation_reads_the_shared_grammar(dates):
 ])
 def test_leading_date_cell_is_stripped_whole(raw, expected):
     assert _LEADING_DATE_CELL_RE.sub("", raw) == expected
+
+
+# ---------------------------------------------------------------------------
+# #1580: Q2 ad hoc grant reviews render under Grant Reviewing, not as boards
+
+
+def _q2(text, heading, **fields):
+    return {"text": text, "taxonomy_code": "Q2", "hierarchy": ["Service", heading],
+            "extracted_fields": fields, "element_idx_start": 7}
+
+
+@pytest.mark.parametrize("entry", [
+    # a funder alone under an ad hoc review heading (WPJHYT 140-147's shape)
+    _q2("Zorblax Research Trust", "Ad Hoc Review Panels", organization="Zorblax Research Trust"),
+    # the role says so under a generic heading (SLYBST 74's shape)
+    _q2("2024 Zorblax Society, Zorblax Program, ad hoc reviewer", "External",
+        role="Ad hoc reviewer", organization="Zorblax Society", committee_name="Zorblax Program"),
+    # a pre-review of a training grant (SIJYJZ 216's shape)
+    _q2("2014 Zorblax University, external pre-review for T32 submission", "Outside Service",
+        role="External Pre-Reviewer", organization="Zorblax University"),
+    # a reviewer row under a grant-review heading
+    _q2("2018 Reviewer, Zorblax Pilot Award", "Service as grant reviewer", role="Reviewer"),
+    _q2("1999 Zorblax Foundation", "Review of Grants and Contracts", role="Reviewer"),
+    _q2("2010 Reviewer, Zorblax Panel", "Study Sections", role="Reviewer"),
+    # only the line names the review
+    _q2("2019 Ad hoc review, Zorblax Trust", "External", organization="Zorblax Trust"),
+    # only the role names the review
+    _q2("2019 Zorblax Foundation", "External", role="Ad hoc reviewer"),
+    _q2("2010 Grant reviewer, Zorblax Foundation", "Professional Service", role="Grant reviewer"),
+    # a bare "ad hoc" role under a grant-review heading
+    _q2("Zorblax pilot program 2014, ad hoc", "Grant Reviews", role="ad hoc"),
+])
+def test_q2_grant_review_is_rerouted_to_q3(entry):
+    to_grants, board = _route_q2_grant_reviews([entry])
+    assert board == []
+    assert [e["taxonomy_code"] for e in to_grants] == ["Q3"]
+    assert to_grants[0]["rerouted_from_q2"] is True
+    assert entry["taxonomy_code"] == "Q2", "the stage-3b code stays on the original"
+
+
+@pytest.mark.parametrize("entry", [
+    # a seat on a body under a grant-review heading stays a committee row
+    _q2("2009 Zorblax Institute, Promotion Committee, Ad Hoc Member", "Grant Review Panels",
+        role="Ad Hoc Member", committee_name="Promotion Committee"),
+    _q2("2002 Member, Zorblax Advisory Committee", "Grant Review", role="Member",
+        committee_name="Zorblax Advisory Committee"),
+    # no role, but a named committee
+    _q2("2014-2018 External Advisory Committee, Zorblax Program", "Service as grant reviewer",
+        committee_name="External Advisory Committee"),
+    # reviewing that is not grant reviewing
+    _q2("2020 Reviewer, All Abstracts, Zorblax Annual Meeting", "Service as grant reviewer",
+        role="Reviewer"),
+    _q2("2015 Zorblax Subject Examination", "Peer Review Groups/Grant Study sections",
+        role="Reviewer"),
+    # a multi-line entry can fuse a committee row with the review (#573)
+    _q2("2016 Ad hoc reviewer, Zorblax Trust\n2017 Member, Zorblax Steering Committee",
+        "External", role="Ad hoc reviewer"),
+    # control: an ordinary committee row
+    _q2("2010 Member, Zorblax Program Committee", "National Committees", role="Member"),
+])
+def test_q2_committee_or_other_review_stays_on_boards(entry):
+    to_grants, board = _route_q2_grant_reviews([entry])
+    assert (to_grants, board) == ([], [entry])
+
+
+def test_rerouted_committee_name_becomes_the_q3_panel_name():
+    entry = _q2("2024 Zorblax Society, Zorblax Program, ad hoc reviewer", "External",
+                role="Ad hoc reviewer", organization="Zorblax Society",
+                committee_name="Zorblax Program")
+    (rerouted,), _ = _route_q2_grant_reviews([entry])
+    assert rerouted["extracted_fields"]["panel_name"] == "Zorblax Program"
+    assert "panel_name" not in entry["extracted_fields"]
+
+
+def _table_rows_after_label(gen, label):
+    table = gen._find_table_after_paragraph(gen._find_template_label(label))
+    return [[cell.text for cell in row.cells] for row in table.rows[1:]]
+
+
+def test_fill_service_renders_a_q2_grant_review_under_grant_reviewing():
+    """End to end through the router: the row lands in the Grant Reviewing
+    table, and no "Member" is invented for it (WPJHYT-02)."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_service({"Q2": [
+        _q2("Zorblax Research Trust", "Ad Hoc Review Panels", organization="Zorblax Research Trust"),
+    ]})
+
+    assert ["", "Zorblax Research Trust", ""] in _table_rows_after_label(gen, "Grant Reviewing")

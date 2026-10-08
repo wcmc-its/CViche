@@ -66,6 +66,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
+    lint_owner_attribution,
     lint_owner_contact_missing,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
@@ -2261,6 +2262,212 @@ def test_etal_added_ignores_an_et_al_in_an_editor_list(editors):
     assert lint_etal_added(stage4, _bibliography(line)) == []
 
 
+# ------------------- lint 14ah: other people's content shown as the owner's
+
+#: Three citations by other groups, none naming the owner `_CITE_OWNER`.
+_OTHERS = (
+    "Holloway H, Ivesdale I. Glacial varves of a model lake. Synth Limnol. 2004;3:1-9.",
+    "Jessop J, Kettering K. Sand ripple migration in a flume. Synth Sediment. 2006;8:10-19.",
+    "Larchmont L, Mossgrove M. Peat accretion on a test marsh. Synth Wetl. 2008;5:20-29.",
+)
+_OWNED = "Thornquist R, Garrow G. Silt plumes of a model delta. Synth Geol. 2010;4:30-39."
+
+
+def _authored(idx, citation, code="S1", hierarchy=None):
+    """A publication whose stage-4 authors are its citation's author list."""
+    entry = _publication(idx, citation, authors=citation.split(". ")[0], code=code)
+    if hierarchy is not None:
+        entry["hierarchy"] = hierarchy
+    return entry
+
+
+def _line_entry(idx, text, code="T", hierarchy=None):
+    entry = {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+             "extracted_fields": {}}
+    if hierarchy is not None:
+        entry["hierarchy"] = hierarchy
+    return entry
+
+
+def _attribution(stage4, *lines):
+    return [(f["severity"], f["message"]) for f in lint_owner_attribution(
+        stage4, _bibliography(*lines))]
+
+
+def _runs(findings):
+    """'<count> in <first>-<last>' of each citation_without_owner finding."""
+    return [" in ".join(re.search(r": (\d+) publication.*entries (\S+) ", message).groups())
+            for _, message in findings]
+
+
+def test_owner_attribution_warns_on_a_run_of_papers_under_an_acknowledgements_line():
+    # ECXGAT 2154-2204: stage 1b placed no headings, so the acknowledgements
+    # heading survives only as a T-coded entry above the papers.
+    stage4 = _cite_run(_line_entry(10, "ACKNOWLEDGEMENTS (partial list)"),
+                       *(_authored(11 + i, text) for i, text in enumerate(_OTHERS)))
+    findings = lint_owner_attribution(stage4, _bibliography(*_OTHERS))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "WARN", "citation_without_owner: 3 publication(s) rendered in the bibliography, "
+        "entries 11-13 (S1) under 'ACKNOWLEDGEMENTS (partial list)', whose author list "
+        "and source never name the CV owner")]
+    assert findings[0]["evidence"][0] == f"entry 11 (S1): {_OTHERS[0][:80]}"
+
+
+def test_owner_attribution_reports_a_run_elsewhere_at_info():
+    # RLADNC 2267-2535: most runs with no acknowledgements line are the
+    # owner's own group-authored papers, so they are not WARN.
+    stage4 = _cite_run(*(_authored(11 + i, text) for i, text in enumerate(_OTHERS)))
+    assert [severity for severity, _ in _attribution(stage4, *_OTHERS)] == ["INFO"]
+
+
+def test_owner_attribution_heading_names_acknowledgements_too():
+    hierarchy = ["Bibliography", "Publications citing my work"]
+    stage4 = _cite_run(_authored(11, _OTHERS[0], hierarchy=hierarchy))
+    assert _attribution(stage4, _OTHERS[0])[0][0] == "WARN"
+
+
+def test_owner_attribution_a_credited_citation_ends_a_run():
+    stage4 = _cite_run(_authored(11, _OTHERS[0]), _authored(12, _OWNED),
+                       _authored(13, _OTHERS[1]), _authored(14, _OTHERS[2]))
+    assert _runs(_attribution(stage4, _OTHERS[0], _OWNED, *_OTHERS[1:])) == ["1 in 11-11", "2 in 13-14"]
+
+
+def test_owner_attribution_quiet_when_every_citation_credits_the_owner():
+    stage4 = _cite_run(_authored(11, _OWNED))
+    assert _attribution(stage4, _OWNED) == []
+
+
+@pytest.mark.parametrize("credit", [
+    "Thornqvist R",  # one letter off a long surname: EQADVR 147 misspells it
+    "Garrow G, Thornquist R",
+])
+def test_owner_attribution_counts_the_owner_named_in_the_source(credit):
+    citation = f"{credit}. Silt plumes of a model delta. Synth Geol. 2010;4:30-39."
+    stage4 = _cite_run(_publication(11, citation, authors="Garrow G"))
+    assert _attribution(stage4, citation) == []
+
+
+def test_owner_attribution_an_elided_citation_joins_a_run_but_cannot_start_one():
+    # ECXGAT 2162 (an "et al." citation) sits inside the acknowledgements
+    # run; a lone "et al." citation may hide the owner (ECXGAT 627).
+    elided = "Nettleford N, et al. Loess deposition in a wind tunnel. Synth Aeol. 2005;2:1-8."
+    alone = _cite_run(_authored(11, elided))
+    assert _attribution(alone, elided) == []
+    within = _cite_run(_authored(11, _OTHERS[0]), _authored(12, elided), _authored(13, _OTHERS[1]))
+    assert _runs(_attribution(within, _OTHERS[0], elided, _OTHERS[1])) == ["3 in 11-13"]
+
+
+@pytest.mark.parametrize(("entry", "line"), [
+    # S9: a reporter stage 4 filed as the author of an interview (ECXGAT 1546).
+    (_authored(12, "Quarrie Q. Interview on sediment cores. Synth Daily News. 2012.", code="S9"),
+     "Quarrie Q. Interview on sediment cores. Synth Daily News. 2012."),
+    # A group credit the owner may belong to, outside stage 4's authors
+    # (RLADNC's trial papers).
+    (_publication(12, "Quarrie Q, for the Delta Study Group. Ten-year delta outcomes. "
+                      "Synth Geol. 2011;9:1-9.", authors="Quarrie Q"),
+     "Quarrie Q, for the Delta Study Group. Ten-year delta outcomes. Synth Geol. 2011;9:1-9."),
+    # An agency as author (MVUREJ 971).
+    (_authored(12, "National Office of Synthetic Surveys. Delta survey report. Larkspur: 2013."),
+     "National Office of Synthetic Surveys. Delta survey report. Larkspur: 2013."),
+    # No stage-4 authors at all.
+    (_publication(12, "Delta survey report of a model estuary, Larkspur, 2013.", code="S5"),
+     "Delta survey report of a model estuary, Larkspur, 2013."),
+])
+def test_owner_attribution_skips_what_it_cannot_judge_without_breaking_the_run(entry, line):
+    stage4 = _cite_run(_authored(11, _OTHERS[0]), entry, _authored(13, _OTHERS[1]))
+    assert _runs(_attribution(stage4, _OTHERS[0], line, _OTHERS[1])) == ["2 in 11-13"]
+
+
+def test_owner_attribution_judges_only_citations_that_rendered_in_the_bibliography():
+    stage4 = _cite_run(_authored(11, _OTHERS[0]))
+    appendix = [("p", "T. APPENDIX"), ("p", f"1. {_OTHERS[0]}")]
+    assert lint_owner_attribution(stage4, appendix) == []
+
+
+@pytest.mark.parametrize("owner", [None, {}, {"last_name": "Wu"}])
+def test_owner_attribution_judges_no_citation_without_a_usable_owner_surname(owner):
+    stage4 = _cite_run(_authored(11, _OTHERS[0]), owner=owner)
+    assert _attribution(stage4, _OTHERS[0]) == []
+
+
+_STAFF_PATH = ["Laboratory Staff: Students, Post-docs and Technical Staff", "C. Technical Staff"]
+
+
+def _mentee(idx, text, code="N3B", hierarchy=None):
+    return _line_entry(idx, text, code=code, hierarchy=hierarchy)
+
+
+def test_owner_attribution_warns_on_mentees_under_a_staff_heading():
+    # IZIXVF 284-305: a lab's technicians coded as past mentees (N3B) and
+    # mentees (N3); the post-doctoral fellows under the same parent are mentees.
+    postdocs = ["Laboratory Staff: Students, Post-docs and Technical Staff", "B. Post-doctoral Fellows"]
+    stage4 = _cite_run(_mentee(280, "23. Ivy Example. Now a research scientist.", hierarchy=postdocs),
+                       _mentee(284, "1. Ada Example, Laboratory technician", hierarchy=_STAFF_PATH),
+                       _mentee(285, "2. Ben Example, Laboratory technician", hierarchy=_STAFF_PATH),
+                       _mentee(299, "16. Cy Example, Lab manager", code="N3", hierarchy=_STAFF_PATH))
+    findings = lint_owner_attribution(stage4, [])
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "WARN", "mentee_under_non_mentee_heading: 3 entries coded N3, N3B as the CV owner's "
+        "mentees under 'C. Technical Staff', which names reviewers or staff, not trainees")]
+    assert findings[0]["evidence"] == [
+        "entry 284 (N3B): 1. Ada Example, Laboratory technician",
+        "entry 285 (N3B): 2. Ben Example, Laboratory technician",
+        "entry 299 (N3): 16. Cy Example, Lab manager"]
+
+
+def test_owner_attribution_reads_a_lead_line_when_the_heading_is_lost():
+    # ECXGAT 1288-1299: under the one synthetic heading, an undated lead line
+    # (coded Q3) heads two proposals coded P and two coded N3B.
+    path = ["Personal Data"]
+    proposal = ("Example Applicant – A long proposal title about synthetic sediment cores "
+                "and their modelling across seasons (12 Dec-2019)")
+    stage4 = _cite_run(_line_entry(1288, "Example University Internal Grant Review (partial list)",
+                                   code="Q3", hierarchy=path),
+                       _line_entry(1289, proposal, code="P", hierarchy=path),
+                       _mentee(1293, proposal, hierarchy=path),
+                       _mentee(1295, proposal, hierarchy=path))
+    assert _attribution(stage4) == [(
+        "WARN", "mentee_under_non_mentee_heading: 2 entries coded N3B as the CV owner's mentees "
+        "under 'Example University Internal Grant Review (partial list)', which names "
+        "reviewers or staff, not trainees")]
+
+
+@pytest.mark.parametrize("heading", [
+    "Postdoctoral fellows and staff",  # names trainees too
+    "Thesis reviewer",                 # section_consistency's N3A/N3B shape
+    "Graduate students supervised",
+])
+def test_owner_attribution_quiet_under_a_heading_naming_trainees(heading):
+    stage4 = _cite_run(_mentee(5, "Ada Example, 2019", hierarchy=["Mentoring", heading]))
+    assert _attribution(stage4) == []
+
+
+@pytest.mark.parametrize("lead", [
+    "Grant review panel, 2018",          # dated: a record, not a lead line
+    "1. Grant review panel",             # a list item
+])
+def test_owner_attribution_a_dated_or_numbered_line_leads_nothing(lead):
+    path = ["Mentoring"]
+    stage4 = _cite_run(_line_entry(4, lead, code="Q3", hierarchy=path),
+                       _mentee(5, "Ada Example, PhD 2019", hierarchy=path))
+    assert _attribution(stage4) == []
+
+
+def test_owner_attribution_a_mentee_entry_leads_nothing():
+    # A short undated mentee line naming a staff title is a mentee, not a
+    # heading over the mentees after it.
+    path = ["Mentoring"]
+    stage4 = _cite_run(_mentee(4, "Ada Example, research staff", hierarchy=path),
+                       _mentee(5, "Ben Example, PhD 2019", hierarchy=path))
+    assert _attribution(stage4) == []
+
+
+def test_owner_attribution_a_lead_line_stays_under_its_own_heading():
+    stage4 = _cite_run(_line_entry(4, "Grant review panel", code="Q3", hierarchy=["Service"]),
+                       _mentee(5, "Ada Example, PhD 2019", hierarchy=["Mentoring"]))
+    assert _attribution(stage4) == []
+
+
 # ------------- lint 14ab: a field that identifies a citation, left out of its line
 
 _BULLETIN = "Synthetic Pharmacy Bulletin"
@@ -4315,14 +4522,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (60), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (61), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 58
+    assert len(payload["findings"]) == 59
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

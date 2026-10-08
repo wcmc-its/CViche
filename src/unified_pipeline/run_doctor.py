@@ -374,6 +374,18 @@ Lints, ranked by the severity of the failure class they catch:
                           DoD, ...) no entry or source line names. WARN, one
                           per kind; no score cap. Reads stage 4.5 and 4, and
                           the source when present
+14ah. owner_attribution   other people's content rendered as the CV owner's
+                          (#1573, YUYVIG): mentee entries (N3, N3A, N3B)
+                          under a heading or lead line naming reviewers or
+                          staff -- a grant-review panel's applicants (ECXGAT
+                          1293-1299), a lab's technical staff (IZIXVF
+                          284-298) -- WARN; a run of bibliography
+                          publications whose author list and source never
+                          name the owner, WARN under an acknowledgements
+                          heading or lead line (ECXGAT 2156-2204) and INFO
+                          elsewhere, where most hits are the owner's own
+                          group-authored papers or the owner under another
+                          surname. Reads stage 4 and the docx
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -544,6 +556,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_junk_or_header_row,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
+    lint_owner_attribution,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_python_repr_in_output,
@@ -722,6 +735,7 @@ KNOWN_LINTS = (
     "orphaned_fragments",
     "stage4_unplaced_items",
     "summary_unsupported_claim",
+    "owner_attribution",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -957,6 +971,12 @@ LINT_PREVALENCE = {
     # 2026-10-07. The farm rate is the one before #1542; same mixed-corpus
     # caveat as above.
     "summary_unsupported_claim": 0.028,
+    # owner_attribution (#1573, YUY-OA in doctor/PRECISION.md): 36 of the 145
+    # runs of the YUYVIG (37), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI (9)
+    # and X6 (6) farms at any severity, 3 at WARN, over fresh renders of
+    # origin/dev a65857e7, measured 2026-10-08. Same mixed-corpus caveat as
+    # above.
+    "owner_attribution": 0.248,
 }
 
 
@@ -1514,6 +1534,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
     LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,
              ("stage_4_5", "stage_4"), optional=("source_lines",)),
+    LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
 )
 
 
