@@ -32,6 +32,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
 
@@ -427,10 +428,25 @@ class _Acceptance(NamedTuple):
     overlap: float | None
 
 
+def cv_publication_year(cv_year: str | int | None) -> int | None:
+    """The first four-digit year the CV gives, or None."""
+    match = re.search(r'(?:19|20)\d\d', str(cv_year or ''))
+    return int(match.group()) if match else None
+
+
 def cv_year_is(cv_year: str | int | None, pubmed_year: int | None) -> bool:
     """Whether the CV gives exactly PubMed's year for the paper."""
-    match = re.search(r'(?:19|20)\d\d', str(cv_year or ''))
-    return bool(match and pubmed_year and int(match.group()) == pubmed_year)
+    return bool(pubmed_year) and cv_publication_year(cv_year) == pubmed_year
+
+
+def cv_title(fields: dict) -> str:
+    """The title an entry is matched to PubMed by."""
+    return fields.get('title') or fields.get('chapter_title') or ''
+
+
+def _cv_fields(accepted: _Acceptance) -> dict:
+    """An accepted record's entry as the CV gave it, before the merge."""
+    return accepted.before.get('extracted_fields') or {}
 
 
 def _match_strength(accepted: _Acceptance) -> tuple[float, bool, bool, bool]:
@@ -442,7 +458,7 @@ def _match_strength(accepted: _Acceptance) -> tuple[float, bool, bool, bool]:
     exact-title holders: in the #1598 measurement two such holders were
     hand-checked as a different paper (BLBVPD e848, BCTOGR e2519), and each
     was the one whose CV year was not PubMed's."""
-    fields = accepted.before.get('extracted_fields') or {}
+    fields = _cv_fields(accepted)
     return (accepted.overlap or 0.0,
             not listed_in_press(accepted.before),
             cv_year_is(fields.get('year'), accepted.pubmed_year),
@@ -883,7 +899,7 @@ class PubMedEnricher:
             logger.info(f"\n🔍 Searching PubMed by title for {len(candidates)} articles...")
         for searched, entry in enumerate(candidates, 1):
             fields = entry.get('extracted_fields') or {}
-            self._enrich_by_title(entry, fields.get('title') or fields.get('chapter_title') or '')
+            self._enrich_by_title(entry, cv_title(fields))
             if self.verbose:
                 logger.info("[%d/%d] publications searched by title", searched, len(candidates))
 
@@ -1380,14 +1396,18 @@ class PubMedEnricher:
         a title search matched to a paper another entry already holds (the
         #1598 measurement: 71 PMIDs on two or more entries of 7 runs, mostly
         an abstract and its paper, or one paper listed twice). When the
-        strongest holders tie, nothing tells which entry the record names, so
-        all of them are released. Order-independent, so it runs once every ID
-        path and the article title search are done. An untitled entry has no
-        overlap to compare and is left alone. An entry the CV lists as in
-        press can keep the PMID but is never released: the in-press step
-        marks it superseded when a published entry holds the PMID (a paper
-        retitled after acceptance), and a release would promote it to a
-        second copy of that paper."""
+        strongest holders tie, they keep the PMID if they are one citation
+        (`_one_citation`): one paper listed twice, which stage 6 dedup
+        collapses (stage6/dedup.py). Tied holders that are different
+        citations (title or year differs) are all released, since nothing
+        tells which one the record names.
+        Order-independent, so it runs once every ID path and the article
+        title search are done. An untitled entry has no overlap to compare
+        and is left alone. An entry the CV lists as in press can keep the
+        PMID but is never released: the in-press step marks it superseded
+        when a published entry holds the PMID (a paper retitled after
+        acceptance), and a release would promote it to a second copy of that
+        paper."""
         holders: dict[str, list[_Acceptance]] = {}
         for accepted in self._acceptances:
             if accepted.overlap is not None:
@@ -1396,13 +1416,34 @@ class PubMedEnricher:
             if len(group) < 2:
                 continue
             ranked = sorted(group, key=_match_strength, reverse=True)
-            tied = _match_strength(ranked[0]) == _match_strength(ranked[1])
-            keeper = None if tied else ranked[0]
-            for accepted in ranked:
-                if accepted is keeper or listed_in_press(accepted.before):
+            strongest = [accepted for accepted in ranked
+                         if _match_strength(accepted) == _match_strength(ranked[0])]
+            kept = len(strongest) if self._one_citation(strongest) else 0
+            for accepted in ranked[kept:]:
+                if listed_in_press(accepted.before):
                     continue
                 stronger = ranked[1] if accepted is ranked[0] else ranked[0]
                 self._restore_and_reject(accepted, stronger)
+
+    def _one_citation(self, holders: list[_Acceptance]) -> bool:
+        """Whether every pair of these holders is one citation as the CV gave
+        it: an identifier in common, or the same title (`_same_title`) and
+        the same year. In the #1598 measurement all 11 tied holder pairs on
+        7 YUYVIG runs were this shape (ECXGAT e182/e287 and SQMWHM e84/e86
+        give one DOI or PMID twice)."""
+        return all(self._cv_identifiers(a) & self._cv_identifiers(b)
+                   or (_same_title(cv_title(_cv_fields(a)), cv_title(_cv_fields(b)))
+                       and cv_publication_year(_cv_fields(a).get('year'))
+                       == cv_publication_year(_cv_fields(b).get('year')))
+                   for a, b in combinations(holders, 2))
+
+    def _cv_identifiers(self, accepted: _Acceptance) -> set[tuple[str, str]]:
+        """The identifiers the CV gave for an accepted record's entry."""
+        fields = _cv_fields(accepted)
+        ids = {('pmid', self._clean_pmid(fields.get('pmid'))),
+               ('pmcid', self._clean_pmcid(fields.get('pmcid'))),
+               ('doi', (self._clean_doi(fields.get('doi')) or '').lower())}
+        return {(kind, value) for kind, value in ids if value}
 
     def _restore_and_reject(self, accepted: _Acceptance, keeper: _Acceptance) -> None:
         entry = accepted.entry
