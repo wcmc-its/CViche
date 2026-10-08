@@ -719,6 +719,8 @@ def test_5d_prompt_asks_for_source_authors_not_one_initial_per_author():
     # source does not give (QQGKXR 481, 483) and join a bare initials token to
     # the next surname (FLBFRK 25).
     prompt = s5d.CITATION_FORMATTER_PROMPT
+    assert "1. Authors: copy each author as the source writes them." in prompt
+    assert '"Smith, J.A., M.B. Jones, Brown" becomes Smith JA, Jones MB, Brown' in prompt
     assert "Never add an initial the source does not give" in prompt
     assert "never split one into two" in prompt
     assert "Example: Smith JA, Jones MB, Brown CK" not in prompt
