@@ -1606,14 +1606,20 @@ def test_one_citation_holds_for_every_pair_of_tied_holders():
 
 
 def test_published_holder_keeps_a_pmid_tied_with_an_in_press_one(tmp_path, monkeypatch):
-    # Same title, neither giving PubMed's year: releasing the published entry
-    # would leave the in-press one to be printed as the published paper.
-    published = _paper_entry(INPRESS_TITLE, 10)
+    # Two citations (no identifier in common, different years), so the tie is
+    # not kept as one: the published entry, matched by title search with a
+    # year that is not PubMed's, ties the in-press DOI holder on overlap and
+    # year, and only the in-press rank keeps it. Releasing it would leave the
+    # in-press entry to be printed as the published paper.
+    published = _paper_entry(INPRESS_TITLE, 10, doi=None)
+    published['extracted_fields']['year'] = '2023'
     responses = [_hits(PMID), FakeResponse(200, content=_published_xml())] * 2
     results, _, _ = _run_entries(tmp_path, monkeypatch,
                                  [published, _in_press_with_doi(INPRESS_TITLE)], responses)
     kept, in_press = results
     assert kept['enrichment_status'] == 'enriched'
+    assert kept['enrichment_data']['pubmed_pmid'] == PMID
+    assert kept['enrichment_source'] == stage5.TITLE_SEARCH_SOURCE
     assert (in_press['taxonomy_code'], in_press['in_press_superseded']) == ('S7', True)
 
 
@@ -1624,6 +1630,8 @@ def test_cv_year_is_pubmeds_year():
     assert not stage5.cv_year_is('in press', 2025)
     assert not stage5.cv_year_is(None, 2025) and not stage5.cv_year_is('2025', None)
     assert not stage5.cv_year_is(None, None)
+    # A page range or volume ahead of the year is not read as one.
+    assert stage5.cv_publication_year('1123-9, 2025') == 2025
 
 
 # OIYKZE (dev-242): PubMed's list for the owner's paper held the first ten of

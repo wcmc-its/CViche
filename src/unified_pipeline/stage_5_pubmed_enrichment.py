@@ -1413,8 +1413,6 @@ class PubMedEnricher:
             if accepted.overlap is not None:
                 holders.setdefault(accepted.pmid, []).append(accepted)
         for group in holders.values():
-            if len(group) < 2:
-                continue
             ranked = sorted(group, key=_match_strength, reverse=True)
             strongest = [accepted for accepted in ranked
                          if _match_strength(accepted) == _match_strength(ranked[0])]
