@@ -272,6 +272,29 @@ def test_info_and_skipped_findings_get_no_comment(tmp_path):
     assert not (tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}").exists()
 
 
+def test_a_citation_grounding_finding_is_a_comment_on_its_citation_though_info(tmp_path):
+    """#1570 at 50% precision: never a run-page row, but a possibility
+    commented on the citation it names, whatever its severity."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("citation_grounding", "entry 14 (S1): author_2:initials_not_in_source -- the stage 5d "
+                 "citation names text its source line lacks", [SECOND[4:]], severity="INFO"),
+        # Another lint's INFO finding quoting a line that IS in the document:
+        # the exception is this lint's, so this one still gets no comment.
+        _finding("owner_attribution", "entry 12 (S1): 1 publication(s) never name the owner",
+                 [CITATION[4:]], severity="INFO")))
+    assert n == 1
+    assert _comments(out) == [(_flag("citation_grounding"), SECOND)]
+    assert "may" in _flag("citation_grounding")
+
+
+def test_a_citation_grounding_finding_not_in_the_document_flags_nothing(tmp_path):
+    """No heading comment, no review note: a possibility only reads on the citation."""
+    assert rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("citation_grounding", "entry 3 (S8): ordinal_not_in_source:10th -- the stage 5d "
+                 "citation names text its source line lacks",
+                 ["Quill A. A talk nobody printed. 10th Annual Meeting; 2004."], severity="INFO"))) is None
+
+
 def test_stray_text_is_titled_plainly_and_quotes_what_to_delete(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("output_hygiene", "1 boilerplate line(s) rendered in the appendix", ["Insert dates here (MM/YYYY)"])))

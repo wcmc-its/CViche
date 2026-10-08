@@ -615,6 +615,12 @@ LINT_COPY = {
 FATAL_ERROR_LINT = "pipeline_errors_present"
 STAGE_FAILURE_LINT = "stage_failure_recorded"
 
+#: Lints that are a review-copy comment only: never a run-page row, so no
+#: LINT_COPY wording. citation_grounding (#1570) is right about half the time
+#: (doctor/PRECISION.md, YUY-CG), too often to show as a problem; Paul,
+#: 2026-10-08: "share the possible citation as a comment" instead.
+REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding"})
+
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 
 
@@ -806,7 +812,7 @@ def summarize_doctor(payload: object, cap_lint: str | None = None) -> RunDoctorR
     if not isinstance(payload, dict):
         return None
     ran, not_run = _usable_findings(payload)
-    groups = _doctor_groups(ran, cap_lint)
+    groups = _doctor_groups([f for f in ran if f["lint"] not in REVIEW_COPY_ONLY_LINTS], cap_lint)
     by_severity = {s: sum(1 for g in groups if g.severity == s) for s in SEVERITY_ORDER}
     return RunDoctorReport(
         counts=DoctorSeverityCounts(
