@@ -40,6 +40,7 @@ def _generator():
     gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
     gen.doc = docx.Document()
     gen.verbose = False
+    gen.emit_comments = False  # the constructor default; a narrative would otherwise reach it
     return gen
 
 
@@ -231,3 +232,29 @@ def test_an_empty_template_supervision_row_falls_back_to_inference():
 def test_without_a_role_line_supervision_type_is_inferred_as_before():
     entry = {"text": "Jane Roe, PhD student; her role: none", "extracted_fields": {"mentee_level": "PhD"}}
     assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"
+
+
+# --- #1574: a bare N3 rendered as a mentee keeps its thesis and its note ------
+# The N3 schema writes `thesis_title` and `narrative`, which the N3A/N3B
+# schemas do not; the Appendix line printed both (YUYVIG RLADNC, EBYSBC
+# MQSUIC). Invented values.
+
+def test_n3_thesis_title_is_the_project():
+    rows = _mentee(thesis_title="Example thesis on widgets")
+    assert rows["Project/Accomplishments:"] == "Example thesis on widgets"
+
+
+def test_research_focus_still_wins_over_a_thesis_title():
+    rows = _mentee(research_focus="Example focus", thesis_title="Example thesis")
+    assert rows["Project/Accomplishments:"] == "Example focus"
+
+
+def test_n3_narrative_follows_the_project():
+    rows = _mentee(thesis_title="Example thesis", narrative="Example scholar program note")
+    assert rows["Project/Accomplishments:"] == "Example thesis\nExample scholar program note"
+    assert _mentee(narrative="Example note")["Project/Accomplishments:"] == "Example note"
+
+
+def test_narrative_already_in_the_project_is_not_repeated():
+    rows = _mentee(research_focus="Example thesis, example note", narrative="example note")
+    assert rows["Project/Accomplishments:"] == "Example thesis, example note"

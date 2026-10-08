@@ -49,7 +49,10 @@ _KNOWN_GAPS = frozenset({
     # 'M4'/'M4A'/'M4B'/'M4C' are NOT here: #291 removed them from the taxonomy
     # (clinical trials file as M2A/M2B).
     'M2',                                # parent container code; 3b assigns M2A/M2B/M2C
-    'N3',                                # no separately-filed issue found; parent container code, never itself assigned
+    # 'N3' has no code route, but 3b does assign it: stage 6 resolves each
+    # N3 that names a mentee or states a year to N3A/N3B per entry
+    # (`_route_bare_mentee`, #1574), and the rest still reach the Appendix.
+    'N3',
 })
 
 
