@@ -1858,16 +1858,52 @@ def _year_written(year: int, text: str) -> bool:
             or year in _range_shorthand_ends(text))
 
 
+#: A month or term word, as dates write it.
+_MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
+                  r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
+                  r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
+#: Two-digit year shapes only `_year_in_source` reads (#1585, batch YUYVIG:
+#: 40 of its 44 false positives). Looser than `_two_digit_years`, whose
+#: tokens also vouch for a century in implausible_year; here a wrongly read
+#: token can only silence a finding. A dash-joined m-d-yy date ("3-30-00"),
+#: alone, so "3-24-11-26" (Mar 2024 to Nov 2026) still has no year "11".
+_DASHED_DATE_YEAR_RE = re.compile(r"(?<![\d\-/.])\d{1,2}-\d{1,2}-\s?(\d{2})(?![\d\-/])")
+#: The two-digit tails of a list after a four-digit year or a two-digit
+#: range: "2014,15,16", "1975, 76, 78", "98-00,02,04" (`_RANGE_SHORTHAND_RE`
+#: reads only the first).
+_YEAR_LIST_TAILS_RE = re.compile(r"(?<!\d)(?:\d{4}|\d{2}-\d{2})((?:\s*,\s*\d{2}(?!\d))+)")
+#: A two-digit year after a month or term word ("Oct. 98", "June 05"), not
+#: a day: one a comma or a four-digit year follows ("May 13,", "June 05 2010").
+_MONTH_TWO_DIGIT_YEAR_RE = re.compile(
+    rf"(?<![a-z]){_MONTH_PATTERN}\s*(\d{{2}})(?!\d|\s*,|\s*\d{{4}})", re.IGNORECASE)
+#: A two-digit year opening a range left open: "16- present", "16-".
+_OPEN_TWO_DIGIT_YEAR_RE = re.compile(
+    r"(?<![\d\-/.])(\d{2})\s*[-–—](?!\s*\d)")
+_SOURCE_ONLY_TWO_DIGIT_YEAR_RES = (_DASHED_DATE_YEAR_RE, _MONTH_TWO_DIGIT_YEAR_RE,
+                                   _OPEN_TWO_DIGIT_YEAR_RE)
+
+
+def _source_two_digit_years(text: str) -> set[int]:
+    """`_two_digit_years`, plus the shapes only `_year_in_source` reads."""
+    years = _two_digit_years(text)
+    years |= {int(yy) for pattern in _SOURCE_ONLY_TWO_DIGIT_YEAR_RES
+              for yy in pattern.findall(text)}
+    for tails in _YEAR_LIST_TAILS_RE.findall(text):
+        years |= {int(yy) for yy in re.findall(r"\d{2}", tails)}
+    return years
+
+
 def _year_in_source(year: int, text: str) -> bool:
     """The entry's text states this year in any century -- whether the
     century is right is implausible_year's question: its four digits
     anywhere, a scanned "l987" included, so a year fused into a longer digit
     run on either side counts ("04/081997", "Example20232024Total"); its
-    last two digits as a two-digit year token or a stand-alone two-digit
-    range ("5/31/34" states 2034, "64-66" both years); or a range
-    shorthand's end ("2011-2")."""
+    last two digits as a two-digit year token, a stand-alone two-digit
+    range or one of `_source_two_digit_years`'s shapes ("5/31/34" states
+    2034, "64-66" both years, "3-30-00" 2000); or a range shorthand's end
+    ("2011-2")."""
     text = _OCR_LEADING_ONE_RE.sub("1", text)
-    return (str(year) in text or year % 100 in _two_digit_years(text)
+    return (str(year) in text or year % 100 in _source_two_digit_years(text)
             or year in _range_shorthand_ends(text))
 
 
@@ -2102,9 +2138,6 @@ _DATE_YEAR_RE = re.compile(
     r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
     r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
     r"|(?<!\w)['\u2018\u2019](?P<apostrophe_yy>\d{2})(?!\d)")
-_MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
-                  r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
-                  r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
 #: A word that belongs to a date, not to what the record is.
 _DATE_WORD_RE = re.compile(rf"^(?:{_MONTH_PATTERN}|present|current|ongoing|date|now)$",
                            re.IGNORECASE)
@@ -3082,9 +3115,11 @@ _WRITTEN_SPAN_RE = re.compile(
     r"|present|current|ongoing|now))?", re.IGNORECASE)
 #: A month or term word, and the day after it, read past so "Fall 2014 -
 #: Spring 2018" is one span; with the short term names ("Spr 2015") course
-#: lists use.
+#: lists use. A comma straight after the word goes with it: "June, 2018" is
+#: no list (#1585, batch YUYVIG: 14 of its 22 false positives).
 _SPAN_MONTH_RE = re.compile(
-    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])\s*(?:\d{{1,2}}(?:st|nd|rd|th)?\b,?)?",
+    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])"
+    r"(?:,|\s*(?:\d{1,2}(?:st|nd|rd|th)?\b,?)?)",
     re.IGNORECASE)
 #: Words that join the two ends of one span: "1980 to 1987", "between 1978
 #: and 1988".
@@ -3135,6 +3170,36 @@ def _written_spans(text: str) -> list[WrittenSpan]:
     return spans
 
 
+#: The gap between two lone years of one range: a dash right after the first
+#: that no end follows ("2007– Professor of X, Y\t2012"), or one right before
+#: the second that no start precedes ("2014 Professor of X, Y\tto 2019",
+#: once `_span_source` has made "to" a dash).
+_SPAN_WRAPPED_GAP_RE = re.compile(rf"^\s*{_SPAN_DASH}|{_SPAN_DASH}\s*$")
+#: A dash right after a lone year: the year opens a span of its own.
+_SPAN_OPEN_DASH_RE = re.compile(rf"\s*{_SPAN_DASH}")
+
+
+def _join_wrapped_ranges(text: str, spans: list[WrittenSpan]) -> list[WrittenSpan]:
+    """`spans` with a range a table cell or line wrapped joined into one: two
+    consecutive lone years, the later second, whose dash sits in the gap with
+    no year on its other side (`_SPAN_WRAPPED_GAP_RE`), the later one opening
+    no dash of its own ("2011 - Talk, 2013 - Talk" is two items). Nothing
+    lies between them that `_WRITTEN_SPAN_RE` reads as a year (#1585, batch
+    YUYVIG: 12 of its 22 false positives). Source text only: a rendered
+    "2011 - Title 2013 - Title" line is that list."""
+    joined: list[WrittenSpan] = []
+    for span in spans:
+        before = joined[-1] if joined else None
+        if (before is not None and before.first == before.last
+                and span.first == span.last and span.first > before.first
+                and _SPAN_WRAPPED_GAP_RE.search(text[before.end:span.start])
+                and not _SPAN_OPEN_DASH_RE.match(text, span.end)):
+            joined[-1] = WrittenSpan(before.first, span.last, before.start, span.end)
+        else:
+            joined.append(span)
+    return joined
+
+
 def _is_a_list(text: str, spans: list[WrittenSpan]) -> bool:
     """Whether consecutive spans of `text` are separated as items of one list."""
     return all(_SPAN_LIST_SEPARATOR_RE.search(text[before.end:after.start])
@@ -3155,7 +3220,7 @@ def _envelope_of_separate_spans(text: str) -> tuple[tuple[int, int], int] | None
     """The min-max of the text's spans and how many there are, when the text
     lists two or more spans that leave a year of that min-max uncovered."""
     source = _span_source(text)
-    spans = _written_spans(source)
+    spans = _join_wrapped_ranges(source, _written_spans(source))
     years = list(dict.fromkeys((span.first, span.last) for span in spans))
     if not years:
         return None

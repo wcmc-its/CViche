@@ -3279,6 +3279,38 @@ def test_year_not_in_source_silent_when_the_text_states_the_year(fields, text):
     assert _not_in_source(_fields_entry("C", fields, text=text)) == []
 
 
+@pytest.mark.parametrize("fields, text", [
+    # Batch YUYVIG (#1585): XNWSZN's talks and grant periods, m-d-yy with dashes.
+    ({"date": "2000-03-30"}, "Example talk, Example City, 3-30-00."),
+    ({"date": "1999-05-04"}, "Example talk, 5-4-99"),
+    ({"start_date": "1983-03-01", "end_date": "1986-02-28"},
+     "Example grant 3-1-83 to 2-28- 86, $1,000"),
+    # SIJYJZ, ECXGAT: the later two-digit tails of a list.
+    ({"end_date": "2016"}, "Example reviewer 2014,15,16"),
+    ({"start_date": "1978"}, "Example award 1975, 76, 78"),
+    ({"start_date": "2004"}, "Example committee 98-00,02,04"),
+    # TYGUXX: a month abbreviation and a two-digit year.
+    ({"start_date": "1998", "end_date": "1999"}, "Example fellow Oct. 98 - Oct. 99"),
+    # SIJYJZ: a two-digit year opening an open range.
+    ({"start_date": "2016"}, "Example member 16- present"),
+])
+def test_year_not_in_source_reads_dashed_dates_list_tails_and_month_years(fields, text):
+    assert _not_in_source(_fields_entry("C", fields, text=text)) == []
+
+
+@pytest.mark.parametrize("fields, text", [
+    # A day before a four-digit year is not a year: 2005 is not stated.
+    ({"start_date": "2005"}, "Example talk, June 05, 2010"),
+    ({"start_date": "2005"}, "Example talk, June 05 2010"),
+    # A day whose year the entry lost: "13" is not 2013.
+    ({"start_date": "2013-05-13"}, "Example lecture: Example Hall, May 13,"),
+    # A dash-joined run of numbers states no m-d-yy year.
+    ({"start_date": "2011"}, "Co-I Example contract 3-24-11-26"),
+])
+def test_year_not_in_source_new_shapes_do_not_vouch_for_a_day_or_a_number_run(fields, text):
+    assert len(_not_in_source(_fields_entry("C", fields, text=text))) == 1
+
+
 def test_year_not_in_source_skips_personal_data_and_publications():
     """Code A is personal data. A citation's year renders through 5d and
     PubMed; on the farm each publication hit was a split citation or a
@@ -4414,6 +4446,50 @@ def test_span_count_spares_one_range_written_with_words_or_split_across_cells():
                  "Reviewer, Example Society, Jan 2003 - Dec 2013",
                  "Reviewer 2003\tExample Society 2013"):
         assert _span_count(_span_entry(text), "2003-2013") == [], text
+
+
+@pytest.mark.parametrize("text", [
+    # Batch YUYVIG (#1585): a comma after the month or term word.
+    "Reviewer, Example Society, September, 2003 - June, 2013",
+    "Reviewer, Example Society, Fall, 2003 to Summer, 2013",
+    "Reviewer, October 31, 2003 Example Society, Example\tto June, 2013 Example",
+    # A range a table cell wrapped, a comma in the title between its ends.
+    "2003\u2013 Reviewer, Example Society\t2013",
+    "2003 Reviewer of X, Example Society\tto 2013",
+])
+def test_span_count_spares_month_comma_and_wrapped_ranges(text):
+    assert _span_count(_span_entry(text), "2003-2013") == [], text
+
+
+@pytest.mark.parametrize("text, start, end", [
+    ("Reviewer, Example Society, 2015, 2017", "2015", "2017"),
+    ("Reviewer, Example Society, 2011, 2012, 2013, 2015", "2011", "2015"),
+    ("Reviewer, Example Society, 2018,2020", "2018", "2020"),
+    ("Reviewer, Example Society, 1998-1998, 2000-2000", "1998", "2000"),
+    # An open start and a later range are two spans, not one wrapped range.
+    ("2003\u2013 Reviewer, Example Society\t2009-2013", "2003", "2013"),
+    ("2003-2005 Reviewer, Example Society\t- 2013", "2003", "2013"),
+    # Nor is a later year and an earlier one.
+    ("2013\u2013 Reviewer, Example Society\t2003, 2007", "2003", "2013"),
+    # Nor two items that each open with "year -".
+    ("2003 - Reviewer, Example Society; 2013 - Reviewer, Example Board", "2003", "2013"),
+])
+def test_span_count_still_flags_yuyvig_true_lists(text, start, end):
+    """The batch's true hits (#1585) keep firing."""
+    assert _span_count(_span_entry(text, start, end), f"{start}-{end}"), text
+
+
+def test_span_count_reads_a_rendered_year_dash_title_line_as_a_list():
+    """The wrapped-range join reads the source only: a rendered line of
+    "year - title" items shows the separate years, whether or not the later
+    year opens a dash of its own (#1585)."""
+    entry = _fields_entry("K1", {"course_title": "Example Course", "start_date": "2003",
+                                 "end_date": "2013"},
+                          text="Example Course, Fall 2003, Fall 2013")
+    assert lint_span_count({"entries": [entry]}, [
+        ("p", "2003 - Example Course, Example School 2013 - Example Course")]) == []
+    assert lint_span_count({"entries": [entry]}, [
+        ("p", "2003 - Example Course, Example School 2013 Edition")]) == []
 
 
 def test_span_count_skips_mentoring_codes():
