@@ -92,8 +92,10 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _is_structural_label,
     _is_table_header_entry,
     _looks_like_multiple_records,
+    _mid_sentence_joins,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    _refold_shattered,
     _strip_appended_initials,
     is_membership_date_part,
 )
@@ -603,3 +605,76 @@ def test_membership_date_part_is_the_shared_grammar(part, expected):
 ])
 def test_committee_range_may_end_in_a_century_less_year(line, expected):
     assert _parse_flattened_committee_lines([line]) == [expected]
+
+
+# --- #1583: one paragraph cut at its printed lines ---------------------------
+
+_PRINTED_LINES = ["Division Chief, Example Unit. I led the establishment",
+                  "of a new clinical division providing molecular tests for",
+                  "Infectious Diseases at Example Hospital. I also integrated",
+                  "sequencing into routine care.",
+                  "Example Hospital, 2015-2023"]
+
+
+def test_refold_joins_mid_sentence_lines_and_keeps_a_sentence_end():
+    # 'of' opens lowercase, 'for' is a connector, 'sequencing' opens
+    # lowercase; the line after 'care.' starts a new part.
+    assert _refold_shattered(_PRINTED_LINES) == [" ".join(_PRINTED_LINES[:4]), _PRINTED_LINES[4]]
+
+
+@pytest.mark.parametrize("parts", [
+    pytest.param(["Chair, Example Committee.", "member, other board.", "reviewer, journal."],
+                 id="every line ends a sentence"),
+    pytest.param(["Example Team,", "Example Building, Example Clinic,", "100 Example St, Suite 5"],
+                 id="an address broken at commas"),
+    pytest.param(["Director, Example Lab. I built", "the lab.", "Chair, Board."],
+                 id="one mid-sentence join"),
+    pytest.param(["Attending Physician", "Example Hospital", "2015-2020"],
+                 id="a flattened row"),
+])
+def test_refold_leaves_parts_that_are_not_one_cut_paragraph(parts):
+    assert _refold_shattered(parts) == parts
+
+
+@pytest.mark.parametrize("sentences, folds", [(4, True), (5, False)])
+def test_refold_needs_thirty_percent_of_the_joins_mid_sentence(sentences, folds):
+    # Two mid-sentence joins, then whole sentences: 2 of 6 joins fold, 2 of 7 do not.
+    parts = [*_PRINTED_LINES[:3], *(f"Sentence {i}." for i in range(sentences))]
+    assert (_refold_shattered(parts) != parts) is folds
+
+
+@pytest.mark.parametrize("end", list(".!?;:)]\"\u201d"))
+def test_a_line_ending_a_sentence_is_no_mid_sentence_join(end):
+    # Even before a lowercase opening, which otherwise marks a join.
+    assert _mid_sentence_joins([f"the example clinic{end}", "member of the board"]) == [False]
+
+
+@pytest.mark.parametrize("end", [",", "-", "\u2013", " and", " or", " of", " the", " for",
+                                 " to", " in", " with", " a", " an", " at", " by", " on",
+                                 " from", " as", " that", " which", " including", " into",
+                                 " our", " my", " their", " its"])
+def test_a_line_ending_on_a_connector_joins_mid_sentence(end):
+    # Even before a capitalised opening, which otherwise marks no join.
+    assert _mid_sentence_joins([f"the example clinic{end}", "Example Hospital"]) == [True]
+
+
+def test_a_capitalised_connector_still_joins():
+    assert _mid_sentence_joins(["the Department Of", "Example Hospital"]) == [True]
+
+
+def test_refold_counts_lowercase_openings_only_at_mid_sentence_joins():
+    # Two joins at connectors, both capitalised; the one lowercase opening
+    # follows a sentence end, so no join opens lowercase and nothing folds.
+    parts = ["Director of", "Example Lab and", "Example Unit.", "member of the board."]
+    assert _refold_shattered(parts) == parts
+
+
+def test_refold_at_exactly_thirty_percent_of_the_joins_mid_sentence():
+    # 3 of 10 joins mid-sentence: the share is a floor, met exactly.
+    parts = ["I led the", "establishment of a", "new clinical", "division.",
+             *(f"Sentence {i}." for i in range(7))]
+    assert _refold_shattered(parts) == [" ".join(parts[:4]), *parts[4:]]
+
+
+def test_a_capitalised_opening_after_a_plain_word_is_no_join():
+    assert _mid_sentence_joins(["the example clinic", "Example Hospital"]) == [False]

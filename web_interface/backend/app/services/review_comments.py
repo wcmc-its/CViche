@@ -124,6 +124,8 @@ REVIEW_FLAGS = {
     "owner_attribution": "May be someone else's work, not yours: check it.",
     "citation_grounding": ("This rewritten citation may name an author, an initial or a meeting "
                            "number that the line in the original CV does not. Check it against the CV."),
+    "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
+                        "column mixed in: check it against your CV."),
 }
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete"}

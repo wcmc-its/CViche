@@ -724,3 +724,63 @@ def _looks_like_multiple_records(lines: list[str]) -> bool:
     """
     dated = sum(1 for line in lines if _line_carries_record_date(line))
     return dated >= _MULTI_RECORD_MIN_DATED_LINES
+
+
+# #1583: one source paragraph whose printed lines arrived as separate
+# paragraphs, which stage 2 joined with '\t'. A boundary between two parts
+# falls inside a sentence when the part before it ends none and the next part
+# opens lowercase or the part before ends on a connector, comma or hyphen.
+# ponytail: thresholds fitted on YUYVIG (dev-259): 12 of 12 hand-verified
+# records, no other hit over its 37 runs; 3 more hits, all true, over the 235
+# runs of the older farms (doctor/PRECISION.md, YUY-SP). A 50% share misses
+# RLADNC 540 (2 of 6 joins). Ceiling: a real comma-chained list whose items
+# open lowercase reads as shattered (none seen). Upgrade path: read the
+# converter's line geometry instead of the text.
+SHATTERED_MIN_MID_JOINS = 2
+SHATTERED_MIN_MID_SHARE = 0.3
+#: Mid-sentence joins whose next part opens lowercase. An address or a
+#: comma-ended list of names breaks at commas but opens every line capitalised
+#: (wave-1 web228 457, a three-line practice address), and is not prose.
+SHATTERED_MIN_LOWERCASE_JOINS = 1
+_PART_SENTENCE_END_RE = re.compile(r"[.!?;:)\]\"”]$")
+_PART_CONNECTOR_END_RE = re.compile(
+    r"(?:\b(?:and|or|of|the|for|to|in|with|a|an|at|by|on|from|as|that|which|"
+    r"including|into|our|my|their|its)|[,\-–])$", re.IGNORECASE)
+
+
+def _joins_mid_sentence(before: str, after: str) -> bool:
+    """Whether the boundary between two parts falls inside a sentence."""
+    return not _PART_SENTENCE_END_RE.search(before) and (
+        after[:1].islower() or bool(_PART_CONNECTOR_END_RE.search(before)))
+
+
+def _mid_sentence_joins(parts: list[str]) -> list[bool]:
+    """For each boundary between consecutive parts, `_joins_mid_sentence`."""
+    return [_joins_mid_sentence(a, b) for a, b in itertools.pairwise(parts)]
+
+
+def _is_shattered(parts: list[str]) -> bool:
+    """`parts` read as one paragraph cut at its printed lines: enough of its
+    boundaries fall mid-sentence, and at least one opens lowercase."""
+    joins = _mid_sentence_joins(parts)
+    mid = sum(joins)
+    if mid < SHATTERED_MIN_MID_JOINS or mid < SHATTERED_MIN_MID_SHARE * len(joins):
+        return False
+    lowercase = sum(1 for after, is_mid in zip(parts[1:], joins, strict=True)
+                    if is_mid and after[:1].islower())
+    return lowercase >= SHATTERED_MIN_LOWERCASE_JOINS
+
+
+def _refold_shattered(parts: list[str]) -> list[str]:
+    """`parts` with each mid-sentence boundary joined back with a space when
+    they read as one paragraph cut at its printed lines (`_is_shattered`);
+    unchanged otherwise. A boundary that ends a sentence stays a boundary."""
+    if not _is_shattered(parts):
+        return parts
+    folded = [parts[0]]
+    for part, is_mid in zip(parts[1:], _mid_sentence_joins(parts), strict=True):
+        if is_mid:
+            folded[-1] = f"{folded[-1]} {part}"
+        else:
+            folded.append(part)
+    return folded
