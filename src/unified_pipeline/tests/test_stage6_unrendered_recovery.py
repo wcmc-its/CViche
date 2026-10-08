@@ -995,21 +995,57 @@ def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):
     assert seen["llm_usage"] is usage
 
 
-def test_remaining_appendix_intro_is_the_shared_accurate_banner():
-    # #534: the bullet writer creates T. APPENDIX with the same one-line intro
-    # as _fill_appendix -- italic, and never claiming the entries appear
-    # nowhere else (stage 6 cannot prove that).
-    from unified_pipeline.stage6.sections.appendix import APPENDIX_INTRO_TEXT
+def test_remaining_appendix_opens_with_the_shared_cviche_note_box():
+    # #534/#1388: the bullet writer creates T. APPENDIX with the same CViche
+    # note box as _fill_appendix -- never claiming the entries appear nowhere
+    # else (stage 6 cannot prove that) -- and generate() restates its count.
+    from unified_pipeline.stage6.formatting import is_cviche_box
+    from unified_pipeline.stage6.sections.appendix import (
+        APPENDIX_NOTE_TITLE,
+        appendix_note_text,
+    )
 
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     gen._add_remaining_to_appendix([("Example Leftover Committee, 2019-2021", "T", 0.0)])
+    [box] = [t for t in gen.doc.tables if is_cviche_box(t)]
+    assert [p.text for p in box.cell(0, 0).paragraphs] == [APPENDIX_NOTE_TITLE, appendix_note_text(1)]
+    # The box sits right after the heading, before the bullet.
+    body = list(gen.doc.element.body)
+    heading = next(i for i, el in enumerate(body) if el.tag.endswith("}p") and
+                   "".join(t.text or "" for t in el.iter(qn("w:t"))) == "T. APPENDIX")
+    assert body[heading + 1] is box._tbl
 
-    paragraphs = gen.doc.paragraphs
-    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
-    intro = paragraphs[header + 1]
-    assert intro.text == APPENDIX_INTRO_TEXT
-    assert all(run.italic for run in intro.runs)
+    # No blank paragraph around the box: the heading carries the space above
+    # it and the first line after it the space below (#1388).
+    assert body[heading].find(qn("w:pPr")).find(qn("w:spacing")).get(qn("w:after")) == "120"
+    after = body[heading + 2]
+    assert "".join(t.text or "" for t in after.iter(qn("w:t"))) == "Example Leftover Committee, 2019-2021"
+    assert after.find(qn("w:pPr")).find(qn("w:spacing")).get(qn("w:before")) == "120"
+
+    gen._set_appendix_note_count(7)
+    assert box.cell(0, 0).paragraphs[1].text == appendix_note_text(7)
+
+
+def test_the_appendix_note_counts_numbered_lines_and_every_recovered_bullet():
+    """#1388: the box is written by the first writer; the reconsider pass and
+    the unrendered-record recovery add bullets after it, and the box must say
+    the total (the sidecar's appendix_diversion counts sum to the same)."""
+    from unified_pipeline.stage6.formatting import is_cviche_box
+    from unified_pipeline.stage6.sections.appendix import (
+        RecoveredLine,
+        appendix_note_text,
+    )
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen._write_appendix_header(1)
+    gen._reconsider_appendix_entries = lambda: [RecoveredLine("T", "a"), RecoveredLine("T", "b")]
+    gen._recover_unrendered_records = lambda entries_by_code, cv_owner: [RecoveredLine("D1", "c")]
+    recovered = gen._recover_appendix_lines([{"text": "x", "taxonomy_code": "T"}], {}, None)
+    assert len(recovered) == 3
+    [box] = [t for t in gen.doc.tables if is_cviche_box(t)]
+    assert box.cell(0, 0).paragraphs[1].text == appendix_note_text(4)
 
 
 # ------------------------------------ #530: foreign scaffolding never recovered

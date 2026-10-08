@@ -1446,6 +1446,194 @@ def test_child_may_partial_match_its_mapped_parents_own_line():
     assert mapped["children"][0]["element_idx"] == 2
 
 
+# ------------------------------------------------------ parent range bound (#916)
+
+def _run_stage_1b_on(tmp_path, monkeypatch, lines: list[str], hierarchy: list[dict]) -> dict:
+    """run_stage_1b over a docx of plain `lines` and the given hierarchy."""
+    _redirect_output_manager(monkeypatch, tmp_path)
+    doc = Document()
+    for line in lines:
+        doc.add_paragraph(line)
+    docx_path = tmp_path / "range_cv.docx"
+    doc.save(docx_path)
+    hierarchy_path = tmp_path / "range_hierarchy.json"
+    hierarchy_path.write_text(json.dumps({"document_uid": "RANGE", "hierarchy": hierarchy}))
+    output_data, _ = stage1b.run_stage_1b(str(docx_path), str(hierarchy_path))
+    return output_data
+
+
+def _mapped_children(output_data: dict, top_level_position: int) -> list[int | None]:
+    node = output_data["hierarchy_with_indices"][top_level_position]
+    return [c["element_idx"] for c in node["children"]]
+
+
+def test_parent_range_end_is_the_next_follower_line():
+    elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001"), _elem(2, "Service:"), _elem(3, "Panel")]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"service"}), frozenset({"honors"})
+    ) == 2
+
+
+def test_parent_range_end_ignores_a_follower_sharing_a_descendants_text():
+    # "Regional" also labels a later section, but it is this parent's own
+    # child: the line is the child's, not the end of the parent's range.
+    elements = [_elem(0, "Honors"), _elem(1, "Regional"), _elem(2, "Prize, 2001")]
+    assert stage1b._parent_range_end(
+        elements, 0, frozenset({"regional"}), frozenset({"honors", "regional"})
+    ) == 3
+
+
+def test_parent_range_end_runs_to_the_document_end_without_a_follower_line():
+    elements = [_elem(0, "Honors"), _elem(1, "Prize, 2001")]
+    assert stage1b._parent_range_end(elements, 0, frozenset({"service"}), frozenset()) == 2
+
+
+def test_child_is_not_mapped_past_its_parents_range(tmp_path, monkeypatch):
+    # VYICGW shape: "University" has no line inside Honors; the forward
+    # search used to run on into Service and take "University Committees".
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Honors",
+        "Regional",
+        "Prize, 2001",
+        "Service",
+        "University Committees",
+        "Committee member, 2005",
+    ], [
+        {"text": "Honors", "level": "H1", "children": [
+            {"text": "Regional", "level": "H2"},
+            {"text": "University", "level": "H2"},
+        ]},
+        {"text": "Service", "level": "H1", "children": []},
+    ])
+    assert _mapped_children(output_data, 0) == [1, None]
+
+
+def test_child_is_mapped_inside_its_parents_range_before_a_same_label_later(tmp_path, monkeypatch):
+    # The bare "National" under Honors has no line of its own; the same
+    # label under Speaking does, and an exact forward line used to win even
+    # past the parent's range.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Honors",
+        "Regional",
+        "Prize, 2001",
+        "Speaking",
+        "National",
+        "Talk, 2002",
+        "Regional",
+        "Talk, 2003",
+    ], [
+        {"text": "Honors", "level": "H1", "children": [
+            {"text": "National", "level": "H2"},
+            {"text": "Regional", "level": "H2"},
+        ]},
+        {"text": "Speaking", "level": "H1", "children": [
+            {"text": "National", "level": "H2"},
+            {"text": "Regional", "level": "H2"},
+        ]},
+    ])
+    assert _mapped_children(output_data, 0) == [None, 1]
+    assert _mapped_children(output_data, 1) == [4, 6]
+
+
+def test_synthetic_parent_child_sequence_stops_at_the_inherited_range_end():
+    # A synthetic parent's child is placed by the sequence search; it must
+    # stop at the range end inherited from the nearest mapped ancestor too.
+    elements = [
+        _elem(0, "Group"),
+        _elem(1, "body line"),
+        _elem(2, "Next Section"),
+        _elem(3, "Talks"),
+    ]
+    node = {
+        "text": "Group",
+        "level": "H2",
+        "text_metadata": {"synthetic": True},
+        "children": [{"text": "Talks", "level": "H3"}],
+    }
+    mapped, _ = map_hierarchy_node(
+        node, elements, [], 0, scope=stage1b.ForwardScope(end=2)
+    )
+    assert mapped["children"][0]["element_idx"] is None
+    unbounded, _ = map_hierarchy_node(node, elements, [], 0)
+    assert unbounded["children"][0]["element_idx"] == 3
+
+
+def test_synthetic_parent_child_partial_is_floored_at_the_last_placed_sibling():
+    # web228 shape: headings wrapped over two lines. The third child's only
+    # fragment before its own lines is the first child's "Committees:" line.
+    elements = [
+        _elem(0, "Service on Grant Panels,"),
+        _elem(1, "Committees:"),
+        _elem(2, "Service on School Committees:"),
+        _elem(3, "body line"),
+        _elem(4, "Service on Hospital"),
+        _elem(5, "Committees:"),
+        _elem(6, "body line"),
+    ]
+    node = {
+        "text": "Service",
+        "level": "H1",
+        "text_metadata": {"synthetic": True},
+        "children": [
+            {"text": "Service on Grant Panels, Committees", "level": "H2"},
+            {"text": "Service on School Committees", "level": "H2"},
+            {"text": "Service on Hospital Committees", "level": "H2"},
+        ],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert [c["element_idx"] for c in mapped["children"]] == [0, 2, 4]
+
+
+def test_child_partial_does_not_take_another_headers_exact_line(tmp_path, monkeypatch):
+    # A stage-1a "Papers" node with no line of its own used to take the
+    # "Other Papers" line that is another node's own heading.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Works",
+        "Paper A, 2001",
+        "Other Papers",
+        "Paper B, 2002",
+    ], [
+        {"text": "Works", "level": "H1", "children": [
+            {"text": "Papers", "level": "H2"},
+            {"text": "Other Papers", "level": "H2"},
+        ]},
+    ])
+    assert _mapped_children(output_data, 0) == [None, 2]
+
+
+def test_synthetic_parent_anchor_does_not_send_the_child_to_another_headers_line(tmp_path, monkeypatch):
+    # CHHFNQ shape: the synthetic parent's text is the child's own line, so
+    # the sequence anchored there and the child took "Teaching Education".
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Education",
+        "Degree, 2001",
+        "Teaching Education",
+        "Course, 2002",
+    ], [
+        {"text": "EDUCATION", "level": "H1", "text_metadata": {"synthetic": True},
+         "children": [{"text": "Education", "level": "H2"}]},
+        {"text": "TEACHING", "level": "H1", "text_metadata": {"synthetic": True},
+         "children": [{"text": "Teaching Education", "level": "H2"}]},
+    ])
+    assert _mapped_children(output_data, 0) == [0]
+    assert _mapped_children(output_data, 1) == [2]
+
+
+def test_top_level_node_may_still_partial_match_another_headers_line(tmp_path, monkeypatch):
+    # The exact-line exclusion is for children only; a top-level node keeps
+    # the old partial match.
+    output_data = _run_stage_1b_on(tmp_path, monkeypatch, [
+        "Intro",
+        "Other Papers",
+        "Paper B, 2002",
+    ], [
+        {"text": "Papers", "level": "H1", "children": []},
+        {"text": "Misc", "level": "H1", "text_metadata": {"synthetic": True},
+         "children": [{"text": "Other Papers", "level": "H2"}]},
+    ])
+    assert output_data["hierarchy_with_indices"][0]["element_idx"] == 1
+
+
 # ------------------------------------------------------ drop_headers_absent_from_document
 
 def _absent_fixture_elements() -> list[dict]:

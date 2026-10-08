@@ -2436,7 +2436,8 @@ def test_multi_column_nested_text_reaches_cell_data_when_first_cell_is_not_a_hea
     assert data[0][0]["text"] == "Lead-in text for the host cell, 2019 2020.\nNested only line."
 
 
-def test_nested_only_cell_keeps_itertext_fallback(tmp_path):
+def _nested_only_outer_table(tmp_path):
+    """1x2 outer table whose first cell holds only a 2x1 nested table (#1284)."""
     doc = Document()
     outer = doc.add_table(rows=1, cols=2)
     nested = outer.cell(0, 0).add_table(rows=2, cols=1)
@@ -2445,9 +2446,18 @@ def test_nested_only_cell_keeps_itertext_fallback(tmp_path):
     outer.cell(0, 1).text = "Right cell"
     path = tmp_path / "only.docx"
     doc.save(str(path))
-    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
-    text = data[0][0]["text"]
-    assert "Alpha line" in text and "Beta line" in text and "\n" not in text
+    return Document(str(path)).tables[0]
+
+
+def test_nested_only_cell_reads_one_line_per_nested_row(tmp_path):
+    table = _nested_only_outer_table(tmp_path)
+    assert get_cell_text(table.cell(0, 0)).strip() == ""  # no host text of its own
+    data = extract_table_metadata(table, "table_0")["data"]
+    assert data[0][0]["text"] == "Alpha line\nBeta line"
+
+
+def test_nested_only_first_cell_reads_one_line_per_nested_row(tmp_path):
+    assert get_table_first_cell_text(_nested_only_outer_table(tmp_path)) == "Alpha line\nBeta line"
 
 
 def test_nested_multi_cell_row_is_one_space_joined_line(tmp_path):

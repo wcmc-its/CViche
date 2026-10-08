@@ -34,6 +34,7 @@ from unified_pipeline.core.text_norm import (
 )
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
+from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from ..shared import (
@@ -258,7 +259,8 @@ def _appendix_contents(blocks: list[tuple[str, str]]
                 continue
             if in_appendix and _output_section_header(stripped):
                 in_appendix = False
-        elif in_appendix:
+        elif in_appendix and not stripped.startswith(CVICHE_BOX_PREFIX):
+            # Stage 6's own note to the submitter is a one-cell table (#1388).
             non_paragraph_count += 1
 
     entries = []

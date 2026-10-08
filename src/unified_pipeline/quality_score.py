@@ -146,6 +146,7 @@ from unified_pipeline.segmentation_regression import (
     iter_source_block_lines,
 )
 from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
+from unified_pipeline.stage6.formatting import is_cviche_box
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
@@ -1360,7 +1361,7 @@ def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
     if doc is None:
         return 0.5, reason, None
 
-    tables = doc.tables
+    tables = [t for t in doc.tables if not is_cviche_box(t)]  # CViche's own note, not CV content (#1388)
     total_tables = len(tables)
     if total_tables == 0:
         # Not perfect quality (#724 review item 6): the WCM template always

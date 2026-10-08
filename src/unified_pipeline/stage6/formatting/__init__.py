@@ -29,6 +29,15 @@ from .dates import (  # noqa: F401
     with_extra_date_spans,
 )
 from .docx import (  # noqa: F401
+    CVICHE_BOX_BORDER,
+    CVICHE_BOX_BORDER_SIZE,
+    CVICHE_BOX_FILL,
+    CVICHE_BOX_FULL_WIDTH,
+    CVICHE_BOX_OUTSIDE_PT,
+    CVICHE_BOX_PADDING,
+    CVICHE_BOX_PREFIX,
+    CVICHE_BOX_TEXT_PT,
+    CVICHE_BOX_TITLE_PT,
     DetachedAnchorError,
     _clear_table_data,
     _insert_after,
@@ -39,6 +48,13 @@ from .docx import (  # noqa: F401
     _set_font,
     _set_paragraph_spacing,
     _set_table_border,
+    add_cviche_box,
+    cviche_box_group,
+    cviche_box_item,
+    cviche_box_pair,
+    cviche_box_text,
+    is_cviche_box,
+    space_around_cviche_box,
 )
 from .values import (  # noqa: F401
     _format_citation,

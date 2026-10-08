@@ -72,6 +72,7 @@ from unified_pipeline.stage4.error_codes import (  # noqa: E402
     LLM_TIMEOUT,
     NO_MATCHING_EXTRACTION,
 )
+from unified_pipeline.stage6.formatting import add_cviche_box  # noqa: E402
 
 docx = pytest.importorskip("docx")
 from docx import Document  # noqa: E402
@@ -370,6 +371,15 @@ def test_sparse_tables_nonzero_tables_still_scored_normally(tmp_path):
     _make_docx(tables=[[["Alice", "PI"], ["Bob", "Co-I"]]]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_sparse_tables(tmp_path)
     assert fraction == 0.0
+    assert "total_tables=1" in detail
+
+
+def test_sparse_tables_ignores_stage_6s_cviche_note_box(tmp_path):
+    """#1388: the Appendix note box is CViche talking, not a CV table."""
+    doc = _make_docx(tables=[[["Alice", "PI"], ["Bob", ""]]])
+    add_cviche_box(doc, "CViche note: delete this box before sending")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, _ = score_sparse_tables(tmp_path)
     assert "total_tables=1" in detail
 
 

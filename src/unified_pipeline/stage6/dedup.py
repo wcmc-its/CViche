@@ -159,6 +159,24 @@ _PART_NUMBER_RE = re.compile(
     re.IGNORECASE)
 
 
+# #666 (VGHNZD): a count with its unit tells two occasions of one activity
+# apart the way a date does -- "Tobacco Cessation 3 hrs, 143 students" beside
+# "... 4 hrs, 143 students" is the course another year -- and is as invisible
+# to token containment (a digit is too short to be a word). Only a number
+# carrying a unit counts: a bare one is often a list number a renumbered copy
+# changes ("(9)" beside "(11)").
+_COUNT_RE = re.compile(
+    r'\b(\d+(?:\.\d+)?)\s*(hrs?|hours?|students?|lectures?|sessions?|residents?|'
+    r'fellows?|trainees?|participants?|attendees?|learners?|credits?|weeks?|days?)\b',
+    re.IGNORECASE)
+
+
+def _counts(text: str) -> set[tuple[str, str]]:
+    """Every count the text states, as (number, unit), the unit singular and lower-case."""
+    return {(n, 'hour' if unit.lower().startswith('h') else unit.lower().rstrip('s'))
+            for n, unit in _COUNT_RE.findall(text)}
+
+
 def _part_numbers(text: str) -> set[str]:
     """Every part number the text names, Roman numerals as digits."""
     return {_ROMAN_NUMERALS.get(n.lower(), n.lstrip('0') or n)
@@ -985,6 +1003,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return False  # #1106: a different trial phase is a different trial
     if not _part_numbers(dropped_text) <= _part_numbers(kept_text):
         return False  # #666: a different part is a different record
+    if not _counts(dropped_text) <= _counts(kept_text):
+        return False  # #666: a different hours or student count is another occasion
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)
