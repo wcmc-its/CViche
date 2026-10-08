@@ -50,6 +50,7 @@ from typing import TypedDict
 
 from unified_pipeline.core.render_check import entry_lines
 
+from ..fan_out import has_built_text
 from ..formatting import (
     _clear_table_data,
     _set_font,
@@ -389,7 +390,8 @@ class AdministrativeActivitiesSection:
             #     this last case: a fully-resolved record from extraction
             #     never gets rerouted just because its raw text happens to
             #     contain a `|`.
-            has_unresolved_pipe = not structured_complete and '|' in original_text
+            has_unresolved_pipe = (not structured_complete and '|' in original_text
+                                   and not has_built_text(entry))
             multiline_burst = not structured_complete and len(lines) >= 3
             if multiline_burst or (len(lines) > 1 and not extracted_activity) or has_unresolved_pipe:
                 parsed_rows = self._multiline_committee_rows(lines)

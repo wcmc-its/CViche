@@ -120,6 +120,13 @@ _JOINED_VALUE_SEPARATOR = ';'
 # to `_recover_unrendered_records`, which verifies pipe/tab record lines.
 _BUILT_TEXT_SEPARATOR = ' | '
 
+# Set True on a child whose text is that built line (`_child_texts`), not a
+# line of the CV. Its pipes are `_BUILT_TEXT_SEPARATOR`, so a renderer that
+# re-parses a source pipe column out of the text (#627) must not: the fields
+# the line was built from are the record (#1556 e: OIEPQD BMYYOX 63, the
+# role rendered inside the name cell). Read it through `has_built_text`.
+BUILT_TEXT_KEY = 'text_built_from_fields'
+
 # A child renders from its fields, so a token no RENDERED field holds is lost:
 # a paragraph on committee service that stage 4 reduced to six committees
 # (web185), a service entry that also describes a grant (web240), or a field
@@ -644,6 +651,12 @@ def _built_text(record: Mapping[str, Any]) -> str:
         if isinstance(value, (str, int, float)) and str(value).strip())
 
 
+def _texts_are_built(text: object, records: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether `_child_texts` builds each record's text from its values: two
+    or more records whose count the text's tab segments do not match."""
+    return len(records) > 1 and len(_segments(text)) != len(records)
+
+
 def _child_texts(text: object, records: Sequence[Mapping[str, Any]]) -> list[str]:
     """Each record's text: its own tab segment when the segments line up one to
     one with the records, else a line built from the record's values (a record
@@ -652,18 +665,20 @@ def _child_texts(text: object, records: Sequence[Mapping[str, Any]]) -> list[str
     record -- a one-item list the parent adds nothing to -- is the whole text."""
     if len(records) == 1:
         return [str(text or '')]
-    segments = _segments(text)
-    if len(segments) == len(records):
-        return segments
-    return [_built_text(record) for record in records]
+    if _texts_are_built(text, records):
+        return [_built_text(record) for record in records]
+    return _segments(text)
 
 
 def _child(entry: Mapping[str, Any], fields: dict[str, Any], text: str,
-           key: str, index: int, count: int) -> dict[str, Any]:
+           key: str, index: int, count: int, *, built: bool) -> dict[str, Any]:
+    """One record of `entry`; `built` says its text is `_built_text` (`BUILT_TEXT_KEY`)."""
     child = copy.deepcopy(dict(entry))
     child['text'] = text
     child['extracted_fields'] = fields
     child[FANNED_OUT_FROM] = {'key': key, 'index': index, 'count': count}
+    if built:
+        child[BUILT_TEXT_KEY] = True
     return child
 
 
@@ -828,6 +843,7 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     if fields.get(_FORMATTED_CITATION_KEY) and cited is None:
         return None
     texts = _child_texts(entry.get('text'), records)
+    built = _texts_are_built(entry.get('text'), records)
     own_text = texts[-1] if _fields_carry_text(entry, records) else None
     unsourced = _unsourced_date_records(records, entry.get('text'), code)
     records = [_without_dates(record) if i in unsourced else dict(record)
@@ -836,7 +852,7 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     citation = {key: fields[key] for key in _CITATION_KEYS if key in fields}
     bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
     earlier = [_child(bare, {**copy.deepcopy(record), **(citation if i == cited else {})},
-                      text, records_key, i, len(records))
+                      text, records_key, i, len(records), built=built)
                for i, (record, text) in enumerate(zip(records[:-1], texts))
                if i not in repeated]
     last = copy.deepcopy(dict(entry))
@@ -910,7 +926,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str],
     if not _fields_carry_text(entry, child_fields):
         return None
     texts = _child_texts(entry.get('text'), records)
-    return [_child(entry, fields, text, _path_name(paths[0]), i, len(records))
+    built = _texts_are_built(entry.get('text'), records)
+    return [_child(entry, fields, text, _path_name(paths[0]), i, len(records), built=built)
             for i, (fields, text) in enumerate(zip(child_fields, texts))]
 
 
@@ -954,6 +971,12 @@ def fallback_text(entry: Mapping[str, Any]) -> str:
 def is_split_record(entry: Mapping[str, Any]) -> bool:
     """Whether `entry` is one record fanned out of a multi-record entry."""
     return FANNED_OUT_FROM in entry or LAST_STAGE4_RECORD in entry
+
+
+def has_built_text(entry: Mapping[str, Any]) -> bool:
+    """Whether `entry`'s text is a line built from its record's fields
+    (`BUILT_TEXT_KEY`), whose pipes separate field values, not CV columns."""
+    return entry.get(BUILT_TEXT_KEY) is True
 
 
 def record_text(entry: Mapping[str, Any]) -> str:

@@ -1298,6 +1298,42 @@ class TestStage4RecordOwnText:
         assert not fan_out.is_split_record({'text': 'Glade Board'})
 
 
+class TestBuiltTextIsMarked:
+    """#1556 e: a child whose text is the line built from its fields says so
+    (`has_built_text`), so a renderer does not re-parse the built line's
+    separators as a source pipe column. A child that keeps a line of the CV
+    -- its tab segment, or the parent's whole text -- does not."""
+
+    def test_stage4_children_with_built_lines_are_marked_and_the_last_is_not(self):
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES)))
+        assert [fan_out.has_built_text(c) for c in children] == [True, True, False]
+
+    def test_stage4_children_with_their_own_tab_segments_are_not_marked(self):
+        text = 'Chair, Glade Board 1999-2001\tMember, Fern Council 2001-2003\tMember, Moss Panel 2004-2006'
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))
+        assert not any(fan_out.has_built_text(c) for c in children)
+
+    def test_generic_children_follow_the_same_rule(self):
+        assert not any(fan_out.has_built_text(c) for c in _fan(_THREE_HONORS))
+        wrapped = _honors('Alpha Prize, Hollis College\tGraduate School\tBeta Prize',
+                          [_award('Alpha Prize Graduate School'), _award('Beta Prize')])
+        assert [fan_out.has_built_text(c) for c in _fan(wrapped)] == [True, True]
+
+    def test_a_lone_record_keeps_the_whole_text_unmarked(self):
+        # Two tab segments, one record: the child's text is the CV's own text.
+        entry = {'taxonomy_code': 'D1',
+                 'text': 'Varnor College, School of Botany\tLecturer in Botany, 1977-1979',
+                 'extracted_fields': {'appointments': [_appointment(
+                     'Lecturer in Botany', '1977', '1979', 'Varnor College, School of Botany')],
+                     'start_date': '1977', 'end_date': '1979'}}
+        (child,) = _fan(entry)
+        assert child['text'] == entry['text']
+        assert not fan_out.has_built_text(child)
+
+    def test_an_entry_that_was_not_split_is_not_marked(self):
+        assert not fan_out.has_built_text({'text': 'Glade Board | Member'})
+
+
 class TestStage4RecordDates:
     _BOARD_TEXT = ('1993-2004 Member, Zqboard, Ashby Clinic\t1996-97 Vice-President\t'
                    '1997-99 President\tPast-President')
