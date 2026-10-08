@@ -632,15 +632,26 @@ def test_user_facing_error_missing_input_only_special_on_resume():
 def test_user_facing_error_messages_name_real_buttons():
     """Every message's quoted action must be a button PipelineViewer renders."""
     from app.pipeline import orchestrator as orch
+    from app.services import pdf_sandbox
 
     viewer = (
         Path(__file__).parents[2] / "frontend" / "src" / "components" / "PipelineViewer.tsx"
     ).read_text()
+    pre_step_messages = (
+        pdf_sandbox.PDF_INTERRUPTED_RUN_MESSAGE,
+        pdf_sandbox.PDF_TIMEOUT_RUN_MESSAGE,
+        pdf_sandbox.PDF_BUSY_RUN_MESSAGE,
+    )
     for msg in (
         orch.RESUME_INPUT_MISSING_MESSAGE,
         orch.LLM_OUTAGE_MESSAGE,
         orch.STAGE_TIMEOUT_MESSAGE,
         orch.GENERIC_FAILURE_MESSAGE,
+        *pre_step_messages,
     ):
         for label in msg.split('"')[1::2]:
             assert label in viewer, f"{label!r} is not a PipelineViewer button"
+    # #1566: PDF conversion fails before any step runs, so no step is in
+    # 'error' and the viewer hides "Retry failed step" for these runs.
+    for msg in pre_step_messages:
+        assert msg.split('"')[1::2] == ["Restart with file"], msg

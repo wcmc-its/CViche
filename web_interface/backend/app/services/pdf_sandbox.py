@@ -103,12 +103,12 @@ PDF_BUSY_MESSAGE = (
 )
 PDF_INTERRUPTED_RUN_MESSAGE = (
     "Converting this PDF was interrupted because the server restarted or "
-    'was under heavy load; the file itself is fine. Please try "Retry failed '
-    'step" in a few minutes.'
+    'was under heavy load; the file itself is fine. Please try "Restart '
+    'with file" in a few minutes.'
 )
 PDF_TIMEOUT_RUN_MESSAGE = (
     "Converting this PDF took too long and was stopped. This is often "
-    'temporary, so please try "Retry failed step" in a few minutes; if it '
+    'temporary, so please try "Restart with file" in a few minutes; if it '
     "happens again, upload the CV as a .docx."
 )
 PDF_BUSY_RUN_MESSAGE = (
