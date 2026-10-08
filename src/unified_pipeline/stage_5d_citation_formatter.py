@@ -83,8 +83,10 @@ Each entry includes a taxonomy code indicating the publication type:
 - S9: Other publication (media coverage, podcast, etc.)
 
 VANCOUVER FORMAT RULES:
-1. Authors: LastName INITIALS (no periods, no commas between last name and initials)
-   - Example: Smith JA, Jones MB, Brown CK
+1. Authors: copy each author as the source writes them. Where the source gives initials, write LastName INITIALS (no periods, no commas between last name and initials)
+   - Example: "Smith, J.A., M.B. Jones, Brown" becomes Smith JA, Jones MB, Brown
+   - Never add an initial the source does not give: an author the source names by surname alone stays a surname alone
+   - Never join two of the source's author tokens into one author, and never split one into two: a bare initials token such as "BG" stays its own author
    - List every author the source lists, in the source's order. Never shorten the list: write "et al." only where the source itself does
 2. Title: Sentence case, ending with period
 3. Journal/Book: Title case or official abbreviation
@@ -136,6 +138,8 @@ IMPORTANT:
 - If a field is not present, omit it (don't guess)
 - The formatted_citation should be the complete Vancouver-style citation
 - Preserve author names exactly as they appear (don't invent initials)
+- Keep every number and ordinal the source states (e.g. "72nd Annual Meeting", "2nd edition", an abstract number), and never add one it does not state
+- A number such as "10." or "10)" at the very start of a raw line is the CV's list number, not part of the citation
 - For book chapters, include "In:" before the book title
 
 Now format these citations:
@@ -145,9 +149,18 @@ Now format these citations:
 RAW_CITATIONS>>>'''
 
 
+# A CV's own list number at the start of an entry's line: "10. ", "10) ",
+# "(10) ". 5d read it as content and printed "10." as "10th Annual Meeting"
+# (#1570, YUYVIG SIJYJZ 732). Up to three digits, so a leading year
+# ("2004. ") is never taken for one; whitespace must follow, so a DOI
+# ("10.1016/...") is not either.
+_LEADING_LIST_NUMBER_RE = re.compile(r'^\s*(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
+
+
 def build_raw_content(entries: list[dict]) -> tuple[str, dict[str, dict]]:
     """
     Build raw content string for LLM prompt and a mapping of entry IDs to entries.
+    Each line goes without its leading CV list number (_LEADING_LIST_NUMBER_RE).
 
     Returns:
         Tuple of (raw_content_string, id_to_entry_mapping)
@@ -160,7 +173,7 @@ def build_raw_content(entries: list[dict]) -> tuple[str, dict[str, dict]]:
         id_to_entry[entry_id] = entry
 
         code = entry.get('taxonomy_code', 'S1')
-        raw_text = entry.get('text', '')
+        raw_text = _LEADING_LIST_NUMBER_RE.sub('', entry.get('text', ''), count=1)
 
         # Include publication type description for better LLM context
         type_desc = PUBLICATION_TYPE_DESCRIPTIONS.get(code, 'Publication')
