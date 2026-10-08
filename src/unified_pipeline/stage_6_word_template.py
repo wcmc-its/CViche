@@ -2125,12 +2125,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def _classify_geographic_scope(self, entry: dict) -> str:
         """Classify an entry's geographic scope as Regional, National, or International.
 
-        A record fanned out of a multi-record entry keeps the scope its CV
-        heading names unless the classifier, asked about that record alone,
-        puts it in another country (`fan_out.record_scope`, EBYSBC E34). Any
-        other entry takes the classifier's answer.
+        An entry takes the scope its CV heading names without a classifier
+        call (#1579). A record fanned out of a multi-record entry keeps that
+        scope unless the classifier, asked about that record alone, puts it in
+        another country (EBYSBC E34). Any other entry takes the classifier's
+        answer (`fan_out.record_scope`).
         """
-        return record_scope(entry, self._classify_activity_scope(entry))
+        return record_scope(entry, self._classify_activity_scope)
 
     def _classify_activity_scope(self, entry: dict) -> str:
         """Classify one activity's geographic scope as Regional, National, or International.
