@@ -104,12 +104,37 @@ RESEARCH_ACTIVITIES_CODE = 'M1'  # an undated M1 narrative is the owner's presen
 # The funding status each M2 code means, written into the grant's context line as a word: the
 # model never learns what a bare "GRANT-M2C" means, and summarised pending applications as
 # funded work (KJJVVO, #1484). M2D holds patents, which share the M2 prefix but are not grants.
+# For a funded grant (M2A/M2B) the code's word is only the fallback: grant_status() reads the
+# status from the grant's own end date, then its CV heading, and says "not stated" when neither
+# gives one (#1554).
+GRANT_STATUS_CURRENT = 'current'
+GRANT_STATUS_COMPLETED = 'completed'
 GRANT_STATUS_BY_CODE = {
-    'M2A': 'current',
-    'M2B': 'completed',
+    'M2A': GRANT_STATUS_CURRENT,
+    'M2B': GRANT_STATUS_COMPLETED,
     'M2C': 'pending application (not funded)',
     'M2D': 'patent or innovation (not a grant)',
 }
+# A funded grant's status when neither its end date nor its CV heading states one. The 3b code
+# alone wrote "current" or "completed" here, and the summary repeated it as fact: undated grants
+# coded M2B became "completed" (FMIGLR-07), an undated trial coded M2A became "I currently serve"
+# (RLADNC-10), and a 2007 honors line coded M2A became "I continue work" (ZDOAZO-01) (YUYVIG, #1554).
+GRANT_STATUS_NOT_STATED = 'not stated in the CV'
+# A grant the CV marks as declined, withdrawn or not funded was never received, whatever its
+# code: "three consecutive Fellowship Training Awards" counted a DECLINED year (ATRKVV-02, #1554).
+GRANT_STATUS_NOT_RECEIVED = 'not received (declined, withdrawn or not funded)'
+GRANT_SOURCE_STATUS_FIELD = 'status'
+NOT_RECEIVED_STATUS_PATTERN = re.compile(r'\b(?:declined|withdrawn|not\s+funded|rejected)\b', re.IGNORECASE)
+# CV heading words that state a grant's status, read from the grant's deepest heading that names
+# any: "Ongoing Research Grants", "Past (Completed) Funding", "Pending Research Grants (under
+# review)", "Submitted, Not Funded". A heading mixing them ("Present/Pending", "Current Support
+# and Recently Completed") states none. A pending or not-funded heading outranks the grant's dates:
+# 3b coded some applications M2B, and their proposed period would otherwise read as current.
+HEADING_CURRENT_PATTERN = re.compile(r'\b(?:current|ongoing|active|present)\b', re.IGNORECASE)
+HEADING_COMPLETED_PATTERN = re.compile(r'\b(?:completed|past|prior|previous|former)\b', re.IGNORECASE)
+HEADING_PENDING_PATTERN = re.compile(r'\b(?:pending|submitted|under\s+review|in\s+review)\b', re.IGNORECASE)
+HEADING_STATUS_PATTERNS = (HEADING_CURRENT_PATTERN, HEADING_COMPLETED_PATTERN, HEADING_PENDING_PATTERN,
+                           NOT_RECEIVED_STATUS_PATTERN)
 # Grant date fields written into the grant's context line, so an old application or a long-ended
 # grant does not read as current (UNKNBU, #1554). M2C applications carry a submission date instead.
 GRANT_START_FIELD = 'start_date'
@@ -180,16 +205,26 @@ def resolve_current_year(current_year: int | None) -> int:
     return datetime.now().year if current_year is None else current_year
 
 
-def ended_before(entry: dict, current_year: int) -> bool:
-    """True when the entry's end_date names a year earlier than current_year.
-    An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
-    whatever year it names, so an open-ended M2A/N3A stays current."""
+def end_date_state(entry: dict, current_year: int) -> bool | None:
+    """Whether the entry's end_date has passed: True when it names only years
+    earlier than current_year; False when it matches ONGOING_PATTERN ("2024 -
+    Present"), whatever year it names, or names current_year or later; None
+    when it names neither (no end_date, or one with no year)."""
     fields = entry.get('extracted_fields') or {}
     end_date = str(fields.get('end_date') or '')
     if ONGOING_PATTERN.search(end_date):
         return False
     end_years = [int(y) for y in YEAR_PATTERN.findall(end_date)]
-    return bool(end_years) and max(end_years) < current_year
+    if not end_years:
+        return None
+    return max(end_years) < current_year
+
+
+def ended_before(entry: dict, current_year: int) -> bool:
+    """True when the entry's end_date names a year earlier than current_year.
+    An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
+    whatever year it names, so an open-ended M2A/N3A stays current."""
+    return end_date_state(entry, current_year) is True
 
 
 def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_year: int | None = _UNCOMPUTED) -> bool:
@@ -221,6 +256,9 @@ class EntryRecency:
     is_current: bool
     latest_year: int | None
     score: float
+    # end_date_state(): True ended, False ongoing, None when the end date states neither.
+    # grant_status() reads it, so a grant line's status follows its dates, not its code (#1554).
+    ended: bool | None = None
 
 
 def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> EntryRecency:
@@ -233,7 +271,8 @@ def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) ->
         score = 0.0
     else:
         score = min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
-    return EntryRecency(is_current=current, latest_year=year, score=score)
+    return EntryRecency(is_current=current, latest_year=year, score=score,
+                        ended=end_date_state(entry, current_year))
 
 
 def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
@@ -394,9 +433,57 @@ def is_valid_entry(code: str, entry: dict) -> bool:
     return True
 
 
-def grant_status_segment(code: str) -> str:
-    """' | Status: <word>' for an M2 code GRANT_STATUS_BY_CODE knows, else '' (#1484)."""
-    status = GRANT_STATUS_BY_CODE.get(code)
+def status_heading(entry: dict) -> str:
+    """The entry's deepest CV heading that names a status word (HEADING_STATUS_PATTERNS), else ''."""
+    for heading in reversed(entry.get('hierarchy') or []):
+        heading = str(heading)
+        if any(pattern.search(heading) for pattern in HEADING_STATUS_PATTERNS):
+            return heading
+    return ''
+
+
+def heading_grant_status(heading: str) -> str | None:
+    """The status a status_heading() states on its own: GRANT_STATUS_NOT_RECEIVED for a
+    not-funded heading, the pending-application word for a pending one, else current or
+    completed; None when it mixes them or names none (#1554)."""
+    if NOT_RECEIVED_STATUS_PATTERN.search(heading):
+        return GRANT_STATUS_NOT_RECEIVED
+    current = bool(HEADING_CURRENT_PATTERN.search(heading))
+    completed = bool(HEADING_COMPLETED_PATTERN.search(heading))
+    pending = bool(HEADING_PENDING_PATTERN.search(heading))
+    if current + completed + pending != 1:
+        return None
+    if pending:
+        return GRANT_STATUS_BY_CODE[PENDING_GRANT_CODE]
+    return GRANT_STATUS_CURRENT if current else GRANT_STATUS_COMPLETED
+
+
+def grant_status(code: str, entry: dict, ended: bool | None) -> str | None:
+    """The status word for a grant's context line, or None for a code GRANT_STATUS_BY_CODE
+    does not know (#1484). `ended` is the entry's end_date_state().
+
+    A grant the CV marks declined, withdrawn or not funded (its status field or its heading) is
+    GRANT_STATUS_NOT_RECEIVED. M2C and M2D otherwise keep their code's word. A funded grant
+    (M2A/M2B) under a pending heading is a pending application; otherwise its status comes from
+    its end date, else from its heading, else it is GRANT_STATUS_NOT_STATED: the code alone is the
+    3b bucket, which defaults an undated grant to one side (#1554)."""
+    if code not in GRANT_STATUS_BY_CODE:
+        return None
+    source_status = _field_text(entry.get('extracted_fields') or {}, GRANT_SOURCE_STATUS_FIELD)
+    heading_status = heading_grant_status(status_heading(entry))
+    if NOT_RECEIVED_STATUS_PATTERN.search(source_status) or heading_status == GRANT_STATUS_NOT_RECEIVED:
+        return GRANT_STATUS_NOT_RECEIVED
+    if code not in FUNDED_GRANT_CODES:
+        return GRANT_STATUS_BY_CODE[code]
+    if heading_status == GRANT_STATUS_BY_CODE[PENDING_GRANT_CODE]:
+        return heading_status
+    if ended is not None:
+        return GRANT_STATUS_COMPLETED if ended else GRANT_STATUS_CURRENT
+    return heading_status or GRANT_STATUS_NOT_STATED
+
+
+def grant_status_segment(status: str | None) -> str:
+    """' | Status: <word>' for a grant_status() word, else '' (#1484)."""
     return f" | Status: {status}" if status else ""
 
 
@@ -434,8 +521,15 @@ def generic_context_tag(code: str) -> str:
     return f"[{code}]"
 
 
-def format_entry_for_context(code: str, entry: dict) -> str:
-    """Format an entry for inclusion in the LLM context (no truncation)."""
+# What a grant line says for a Role or Agency the entry does not give. A blank "Role: " let the
+# model supply one ("I led several state-funded initiatives", FCAAUV-07), and a literal
+# "Agency: None" left the funder open to the next line's (WPJHYT-05) (#1554).
+GRANT_FIELD_NOT_STATED = 'not stated'
+
+
+def format_entry_for_context(code: str, entry: dict, ended: bool | None = None) -> str:
+    """Format an entry for inclusion in the LLM context (no truncation). `ended` is the
+    entry's end_date_state(), which a grant line's status reads (#1554)."""
     fields = entry.get('extracted_fields', {})
     text = entry.get('text', '')  # No truncation
 
@@ -449,9 +543,9 @@ def format_entry_for_context(code: str, entry: dict) -> str:
 
     elif code.startswith(GRANT_TAXONOMY_PREFIX):  # Grant
         title = fields.get('title', '')
-        role = fields.get('pi_role', '') or fields.get('role', '')
-        agency = fields.get('agency', '')
-        return (f"{grant_context_tag(code)} {title}{grant_status_segment(code)}"
+        role = _field_text(fields, 'pi_role') or _field_text(fields, 'role') or GRANT_FIELD_NOT_STATED
+        agency = _field_text(fields, 'agency') or GRANT_FIELD_NOT_STATED
+        return (f"{grant_context_tag(code)} {title}{grant_status_segment(grant_status(code, entry, ended))}"
                 f"{grant_period_segment(fields)} | Role: {role} | Agency: {agency}")
 
     elif code == 'M1':  # Research activities
@@ -468,6 +562,16 @@ def format_entry_for_context(code: str, entry: dict) -> str:
     else:
         # Generic format - no truncation
         return f"{generic_context_tag(code)} {text}"
+
+
+def is_tagged_current(code: str, entry: dict, recency: EntryRecency) -> bool:
+    """Whether the entry's context line opens with CURRENT_CONTEXT_TAG: a funded grant only
+    when its line's status is current, so the tag never contradicts the status (an undated
+    honors line coded M2A was tagged current, ZDOAZO-01, #1554); any other entry when it is
+    ongoing (recency.is_current)."""
+    if code in FUNDED_GRANT_CODES:
+        return grant_status(code, entry, recency.ended) == GRANT_STATUS_CURRENT
+    return recency.is_current
 
 
 def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]],
@@ -497,8 +601,8 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRec
     valid_entries.sort(key=lambda x: x[2], reverse=True)
 
     for code, entry, weight, recency in valid_entries:
-        formatted = format_entry_for_context(code, entry)
-        if recency.is_current:
+        formatted = format_entry_for_context(code, entry, recency.ended)
+        if is_tagged_current(code, entry, recency):
             formatted = f"{CURRENT_CONTEXT_TAG} {formatted}"
 
         if total_chars + len(formatted) > max_chars:
@@ -617,6 +721,20 @@ CURRENT_WORK_REQUIREMENT = (
     f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
     "and the most recent years); mention older work only briefly, as background, after the current work"
 )
+# YUYVIG, after #1558: the summary called ongoing protocols "completed" (SPINJC-05), a 2019-only
+# item current (OKRTPJ-13) and a 2007 line continuing (ZDOAZO-01) (#1554).
+STATUS_REQUIREMENT = (
+    f"Call work current, ongoing or continuing only when its line is tagged {CURRENT_CONTEXT_TAG} or its "
+    "dates run to the present, and completed only when its dates have ended; when a line gives neither, "
+    "do not say whether the work is current or completed"
+)
+# YUYVIG, after #1558: "led", "founded" and "direct" for roles the CV gives as co-founder, lecturer,
+# a committee seat or no role at all (XVSQFF-08, FCAAUV-07, OKRTPJ-13, XNWSZN-15, LTTYWI-16, #1554).
+ROLE_WORDS_REQUIREMENT = (
+    "Describe the researcher's roles only in the context's own role words, and never upgrade one: do not "
+    "write led, leading, founded, directed or coordinated unless the context gives the researcher that "
+    "role, and a co-founder or co-director did not do it alone"
+)
 NEUTRAL_REFERENCE_REQUIREMENT = (
     "Do not name the researcher or use a title such as \"Dr.\"; "
     "never use gendered pronouns (he/she/his/her/him) and never infer anyone's gender"
@@ -630,9 +748,13 @@ FACTS_ONLY_REQUIREMENT = (
     "does not cover something, leave it out"
 )
 # Asked only when the context has a funded (current or completed) grant line (#1554).
+# YUYVIG, after #1558: a funder carried over from the next grant line (WPJHYT-05), "in collaboration
+# with" read as "funded by" (DYLJXC-16), and a declined award counted as received (ATRKVV-02) (#1554).
 FUNDING_REQUIREMENT = (
     "Mention key funding sources and the researcher's role on them, using exactly the Status, Role and Agency each "
-    "grant line states; never call a current or completed grant an application"
+    "grant line states; never call a current or completed grant an application. Name a funder only for the "
+    "grant whose own line gives it as the Agency; when a line's Status, Role or Agency is not stated, do not "
+    "state or imply one; a grant whose Status is not received was not awarded, so never count it as funding"
 )
 # Pending applications are not funded work (KJJVVO, #1484). Asked only when the context has a
 # pending-application line: on a CV without one, the line primed "application under review" (#1554).
@@ -671,6 +793,8 @@ def summary_requirements(context: str) -> list[str]:
     requirements += [
         FIRST_PERSON_REQUIREMENT,
         CURRENT_WORK_REQUIREMENT,
+        STATUS_REQUIREMENT,
+        ROLE_WORDS_REQUIREMENT,
         NEUTRAL_REFERENCE_REQUIREMENT,
         "Do NOT list publications or include citations",
         "Do NOT include education or job titles",
