@@ -278,7 +278,10 @@ def test_a_citation_grounding_finding_is_a_comment_on_its_citation_though_info(t
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("citation_grounding", "entry 14 (S1): author_2:initials_not_in_source -- the stage 5d "
                  "citation names text its source line lacks", [SECOND[4:]], severity="INFO"),
-        _finding("missed_headers", "1 header", severity="INFO")))
+        # Another lint's INFO finding quoting a line that IS in the document:
+        # the exception is this lint's, so this one still gets no comment.
+        _finding("owner_attribution", "entry 12 (S1): 1 publication(s) never name the owner",
+                 [CITATION[4:]], severity="INFO")))
     assert n == 1
     assert _comments(out) == [(_flag("citation_grounding"), SECOND)]
     assert "may" in _flag("citation_grounding")
