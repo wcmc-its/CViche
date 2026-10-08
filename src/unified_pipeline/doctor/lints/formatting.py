@@ -190,7 +190,9 @@ def lint_citation_grounding(stage_5d: dict) -> list[dict]:
     fails. INFO, not WARN: about half the hits are such an invention; the
     rest are mostly 5d spelling out a name the source misspells or garbles,
     or an entry whose source line is a fragment of a split citation
-    (`doctor/PRECISION.md`, YUY-CG)."""
+    (`doctor/PRECISION.md`, YUY-CG). So the run page never shows it and the
+    score never counts it: the review copy comments the citation as a
+    possibility to check (`review_comments`, REVIEW_COPY_ONLY_LINTS)."""
     owner = citation_owner(stage_5d.get(_CV_OWNER_KEY))
     findings = []
     for entry in stage_5d.get("entries") or []:

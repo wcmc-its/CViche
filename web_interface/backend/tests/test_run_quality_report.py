@@ -186,7 +186,12 @@ def test_a_fallback_served_call_caps_nothing_through_the_real_scorer(tmp_path):
 
 
 def test_every_known_lint_has_plain_wording():
-    assert set(KNOWN_LINTS) <= set(rqr.LINT_COPY)
+    assert set(KNOWN_LINTS) - rqr.REVIEW_COPY_ONLY_LINTS <= set(rqr.LINT_COPY)
+
+
+def test_review_copy_only_lints_are_known_and_have_no_run_page_wording():
+    assert rqr.REVIEW_COPY_ONLY_LINTS <= set(KNOWN_LINTS)
+    assert not rqr.REVIEW_COPY_ONLY_LINTS & set(rqr.LINT_COPY)
 
 
 def test_every_scorer_row_has_plain_wording():
@@ -287,6 +292,17 @@ def test_doctor_groups_collapse_instances_and_order_rarest_first():
     surprises = [lint_surprise(g.lint) for g in report.findings]
     assert surprises == sorted(surprises, reverse=True)
     assert (report.counts.error, report.counts.warn, report.counts.info) == (0, 2, 1)
+
+
+def test_a_review_copy_only_lint_is_no_row_and_no_count_on_the_run_page():
+    """citation_grounding (#1570) is right about half the time: Paul,
+    2026-10-08, a review-copy comment, never a run-page finding."""
+    report = rqr.summarize_doctor({"findings": [
+        _finding("citation_grounding", "INFO"), _finding("citation_grounding", "WARN"),
+        _finding("table_shape", "INFO"),
+    ]})
+    assert [g.lint for g in report.findings] == ["table_shape"]
+    assert (report.counts.error, report.counts.warn, report.counts.info) == (0, 0, 1)
 
 
 def test_doctor_unmeasured_lint_has_null_prevalence_and_falls_back_to_the_doctor_message():

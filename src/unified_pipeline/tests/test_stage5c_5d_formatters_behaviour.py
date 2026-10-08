@@ -1651,6 +1651,10 @@ def test_apply_formatted_fields_leaves_the_reply_unchanged():
     ("Quill, M. and E.F. Quil. A study. J Imag 2001.",
      "Quill M, Quil M. A study. J Imag. 2001.",
      "author_2:initials_not_in_source"),
+    # A near-but-different surname is another author: "Ashford" against the
+    # source's "Ashworth" is 0.67 similar, under _SURNAME_FUZZY_MIN_RATIO.
+    ("Quill, A, and Ashworth, B. A study.", "Quill A, Ashford B. A study.",
+     "author_2:surname_not_in_source"),
 ])
 def test_5d_ungrounded_reason_rejects_text_the_source_lacks(source, citation, reason):
     assert s5d.ungrounded_reason(citation, source) == reason

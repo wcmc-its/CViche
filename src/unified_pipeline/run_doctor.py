@@ -392,8 +392,9 @@ Lints, ranked by the severity of the failure class they catch:
                           the next surname (FLBFRK 25), a CV list number
                           printed as a meeting ordinal (SIJYJZ 732). INFO:
                           about half the hits are inventions, the rest
-                          mostly spelling fixes or split source lines.
-                          Reads stage 5d
+                          mostly spelling fixes or split source lines, so
+                          it is no run-page row, only a review-copy
+                          comment on the citation. Reads stage 5d
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
