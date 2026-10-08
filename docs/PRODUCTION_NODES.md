@@ -55,6 +55,22 @@ aws ec2 describe-subnets --subnet-ids <asg subnets> \
 
 Then confirm both nodes are `Ready` and no pod in `cviche-dev` is `Pending` or `Terminating`. Restart any run that failed while the node was down. Runs resume from their last completed stage.
 
+## Measure worker memory
+
+The workers run on cgroup v2. The kernel keeps each container's exact high-water mark in `memory.peak` from the moment the container starts, so no sampler is needed. Read it after a batch, before anything restarts the pods:
+
+```bash
+for p in $(kubectl get pods -n cviche-dev -o name | grep worker); do
+  echo "$p $(kubectl exec -n cviche-dev $p -- sh -c \
+    'echo peak=$(cat /sys/fs/cgroup/memory.peak) now=$(cat /sys/fs/cgroup/memory.current) $(grep ^oom_kill /sys/fs/cgroup/memory.events)')"
+done
+kubectl get pods -n cviche-dev -o custom-columns=N:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount,LAST:.status.containerStatuses[0].lastState.terminated.reason
+```
+
+Values are in bytes. The limit is 2147483648 (2 GiB). A non-zero `oom_kill`, or `OOMKilled` under LAST, means the limit was hit.
+
+First reading, 2026-10-08: an idle worker that hasn't run anything peaks at ~0.2 GiB. The worker that ran one docx CV (BCTOGR) peaked at 1.37 GiB and still held 1.34 GiB after the run finished. That memory is anonymous memory in the `python -m app.worker` process, so a worker keeps about 1.1 GiB per run it has done. Six such workers need more memory than two t3.medium nodes have.
+
 ## Incident log
 
 - **2026-10-08, batch YUYVIG.** Node `ip-10-46-134-78` stopped reporting at ~03:09 UTC, mid-batch, and stayed down ~9.5 h until it was terminated by hand. Two runs lost (BCTOGR, SZHPJW). Auto repair was enabled the same day. The manual termination at 12:41 UTC hit `InsufficientFreeAddressesInSubnet` in us-east-1a six times. The ASG then launched the replacement into a us-east-1b subnet, and all workers were Running by 12:57. Both nodes are now in us-east-1b. Details on #82.
