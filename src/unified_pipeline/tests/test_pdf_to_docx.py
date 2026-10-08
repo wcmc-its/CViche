@@ -1308,6 +1308,21 @@ def test_right_margin_ignores_a_few_lines_that_stick_out(tmp_path):
     assert _texts(doc)[-1].endswith(f"{short} tail")
 
 
+def test_right_margin_counts_each_printed_line_of_a_table_row(tmp_path):
+    """50 printed lines, one sticking out 30pt: the margin ignores it. Two
+    of them are one reassembled table row; counted as one line, the stray
+    line would set the margin (#1583)."""
+    base = 72 + _width(tmp_path, _LONG)
+    lines = [(False, 10, 72 + (30 if i == 25 else 0), 760 - 12 * i, _LONG) for i in range(46)]
+    row = (_table_row(200, [(72, "2019"), (150, "Title of"), (400, "Boston")])
+           + _table_row(188, [(150, "the award")]))
+    short = _LONG[:-12]
+    page2 = [(False, 10, base - 10 - _width(tmp_path, short), 700, short), (False, 10, 72, 688, "tail")]
+    _, doc = _convert(tmp_path, [lines + row, page2])
+    assert "2019\tTitle of the award\tBoston" in _texts(doc)
+    assert _texts(doc)[-1].endswith(f"{short} tail")
+
+
 def _table_row(y, cells):
     return [(False, 10, x, y, text) for x, text in cells if text]
 
@@ -1330,6 +1345,81 @@ def test_row_with_an_empty_first_cell_is_its_own_row(tmp_path):
             + _table_row(676, [(150, "Lecturer"), (400, "1998-2001")]) + [_FILL])
     _, doc = _convert(tmp_path, [page])
     assert _texts(doc)[:2] == ["Alpha Inst\tProfessor\t2001-2005", "\tLecturer\t1998-2001"]
+
+
+def test_cells_wrapping_mid_sentence_stay_in_their_row(tmp_path):
+    """#1583: every cell of a row wraps, so each printed line after the first
+    has an empty first cell. Where the cells it fills continue the row's
+    cells mid-sentence, it is the same row, not the next one."""
+    page = (_table_row(700, [(72, "2007"), (150, "Sample"), (260, "Leader in the"),
+                             (380, "Method:")])
+            + _table_row(688, [(150, "tracking"), (260, "design,"), (380, "supports the")])
+            + _table_row(676, [(150, "Program"), (260, "Review"),
+                               (380, "review of results.")])
+            + _table_row(664, [(72, "2009"), (150, "Second item"), (260, "Built"),
+                               (380, "A new method.")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == [
+        "2007\tSample tracking Program\tLeader in the design, Review"
+        "\tMethod: supports the review of results.",
+        "2009\tSecond item\tBuilt\tA new method."]
+
+
+def test_cell_empty_in_the_row_does_not_count_as_continued(tmp_path):
+    """The second row leaves its third cell empty. The line below fills that
+    cell lowercase, but an empty cell has no text to continue, so the line
+    continues none of the row's cells and is the next row."""
+    page = (_table_row(700, [(72, "2019"), (150, "Prize."), (260, "Lead."), (400, "Boston.")])
+            + _table_row(688, [(150, "Medal."), (400, "Paris.")])
+            + _table_row(676, [(150, "Gold"), (260, "co-lead")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == ["2019\tPrize.\tLead.\tBoston.", "\tMedal.\t\tParis.", "\tGold\tco-lead"]
+
+
+@pytest.mark.parametrize("range_above, year_below, same_row", [
+    ("2011-", "2014", True), ("2011-", "2014-", False), ("since 2011-", "2014-", False)])
+def test_open_year_range_cell_continues_only_into_its_end(tmp_path, range_above, year_below,
+                                                         same_row):
+    """"2011-" over "2014" is one range wrapped; over "2014-" it is the next
+    row's own open range, under the same first cell. The range is found at
+    the end of a cell of several words too ("since 2011-")."""
+    page = (_table_row(700, [(72, "Example Org"), (200, range_above), (300, "Faculty")])
+            + _table_row(688, [(200, year_below), (300, "Coach")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    expected = ([f"Example Org\t{range_above} {year_below}\tFaculty Coach"] if same_row
+                else [f"Example Org\t{range_above}\tFaculty", f"\t{year_below}\tCoach"])
+    assert _texts(doc)[:len(expected)] == expected
+
+
+def test_cell_row_continuing_under_half_its_cells_is_the_next_row(tmp_path):
+    page = (_table_row(700, [(72, "2007"), (150, "Sample"), (260, "Leader"), (380, "Uses the")])
+            + _table_row(688, [(150, "Program"), (260, "Lead"), (380, "results.")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2007\tSample\tLeader\tUses the", "\tProgram\tLead\tresults."]
+
+
+def test_lowercase_line_continues_a_cell_with_no_connector_end(tmp_path):
+    """"Senior research" ends on no connector and no sentence end; "fellow"
+    below it opens lowercase, so that cell wraps. It is one of the line's two
+    filled cells, half, so the line is the row's own wrap."""
+    page = (_table_row(700, [(72, "2019"), (150, "Senior research"), (400, "Lead")])
+            + _table_row(688, [(150, "fellow"), (400, "Boston")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "2019\tSenior research fellow\tLead Boston"
+
+
+def test_cell_ending_a_sentence_is_not_wrapped_by_a_lowercase_line(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Award."), (400, "Boston.")])
+            + _table_row(688, [(150, "runner up"), (400, "and Paris")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tAward.\tBoston.", "\trunner up\tand Paris"]
+
+
+def test_cell_ending_in_a_colon_is_wrapped_by_the_line_below(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Role:"), (400, "Site:")])
+            + _table_row(688, [(150, "co-lead"), (400, "Boston")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "2019\tRole: co-lead\tSite: Boston"
 
 
 def test_indented_note_across_cells_is_not_spread_into_them(tmp_path):
