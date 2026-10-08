@@ -244,6 +244,8 @@ The render stubs the LLM (`render_gate.py`), as every render gate does. On the 3
 
 YUY-SP adds `shattered_prose`: a stage-4 entry whose `\t` parts break mid-sentence (at least 2 joins and 30% of them, at least one opening lowercase) and at least 3 of which render as whole paragraphs, which is one source paragraph printed one bullet per printed line. It changes no other lint's findings on any of the 272 runs, and adds 15 WARN findings on 3 of them, all true on reading the render: IZABPD 430, 436, 441, 445, 450, 455 (L2), 468, 477, 488 (L3) and RLADNC 530, 540, 567 (L3), which are YUYVIG's IZABPD-02 and RLADNC-04, and the pilot farm's JNATFN 680, 686, 699 (L1, a docx source). Neither YUYVIG label carries an entry index, so matched is 0 by index; by hand the lint catches both. Over the 185 stored runs under `analysis/` (stored renders, mixed images), it also fires on OIEPQD VECUUM 21 (L2), true. A first version without the lowercase-opening rule also fired on wave-1 web228 457, a three-line practice address broken at commas, false. The thresholds were fitted on these runs, so the precision is in-sample. Not reached: the same prose rendered inline as `': '` / `' — '` welds (`_clean_inline_tabs`), about 59 entries on IZABPD.
 
+The same PR folds these parts back in stage 6 (`stage6.parsing._refold_shattered`, which the lint's own test `_is_shattered` gates). Re-rendered with it, the lint fires on 1 of the 15: RLADNC 540, whose remaining boundaries open on the interleaved role column ("Director, …", "Department of …"), which only the converter can separate.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |

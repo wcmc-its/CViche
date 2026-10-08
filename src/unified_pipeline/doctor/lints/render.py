@@ -16,7 +16,6 @@ import json
 import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
@@ -36,6 +35,7 @@ from unified_pipeline.core.text_norm import (
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
+from unified_pipeline.stage6.parsing import _is_shattered, _mid_sentence_joins
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from ..shared import (
@@ -1626,36 +1626,14 @@ def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
 # paragraphs with '\t'; where those paragraphs were one per printed line (a
 # PDF the converter did not fold, a docx table cell of line paragraphs), stage
 # 6's L2 bullet fallback and the L3 overflow writer split on '\t' and print
-# each printed line as its own bullet, broken mid-sentence.
-# ponytail: thresholds fitted on YUYVIG (dev-259): 12 of 12 hand-verified
-# records, no other hit over its 37 runs; 3 more hits, all true, over the 235
-# runs of the older farms (doctor/PRECISION.md, YUY-SP). A 50% share misses
-# RLADNC 540 (2 of 6 joins). Ceiling: a real comma-chained list whose items
-# open lowercase would fire (none seen). Upgrade path: read the converter's
-# line geometry instead of the text.
-SHATTERED_MIN_MID_JOINS = 2
-SHATTERED_MIN_MID_SHARE = 0.3
-#: Mid-sentence joins whose next line opens lowercase. An address or a
-#: comma-ended list of names breaks at commas but opens every line capitalised
-#: (wave-1 web228 457, a three-line practice address), and is not prose.
-SHATTERED_MIN_LOWERCASE_JOINS = 1
+# each printed line as its own bullet, broken mid-sentence. What reads as
+# shattered is stage 6's own test (`stage6.parsing._is_shattered`), which it
+# uses to fold those parts back, so the lint reports what stage 6 left split.
 #: Parts that must each be a whole rendered paragraph. Exact equality keeps
-#: field-rendered rows, 5c/5d rewrites and folded paragraphs out. Two
-#: mid-sentence joins already need three parts, so no part floor of its own.
+#: field-rendered rows, 5c/5d rewrites and folded paragraphs out.
 SHATTERED_MIN_RENDERED = 3
 SHATTERED_EXCERPT_CHARS = 60
 SHATTERED_EXCERPT_PARTS = 2
-_SENTENCE_END_RE = re.compile(r"[.!?;:)\]\"”]$")
-_JOIN_CONNECTOR_RE = re.compile(
-    r"(?:\b(?:and|or|of|the|for|to|in|with|a|an|at|by|on|from|as|that|which|"
-    r"including|into|our|my|their|its)|[,\-–])$", re.IGNORECASE)
-
-
-def _joins_mid_sentence(before: str, after: str) -> bool:
-    """Whether a part boundary falls inside a sentence: `before` does not
-    end one, and `after` opens lowercase or `before` ends on a connector."""
-    return not _SENTENCE_END_RE.search(before) and (
-        after[:1].islower() or bool(_JOIN_CONNECTOR_RE.search(before)))
 
 
 def lint_shattered_prose(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
@@ -1666,12 +1644,9 @@ def lint_shattered_prose(stage4: dict, blocks: list[tuple[str, str]]) -> list[di
     findings = []
     for entry in _fields_entries(stage4):
         parts = [" ".join(p.split()) for p in entry.text.split("\t") if p.strip()]
-        mids = [b for a, b in pairwise(parts) if _joins_mid_sentence(a, b)]
-        mid = len(mids)
-        if mid < SHATTERED_MIN_MID_JOINS or mid < SHATTERED_MIN_MID_SHARE * (len(parts) - 1):
+        if not _is_shattered(parts):
             continue
-        if sum(b[:1].islower() for b in mids) < SHATTERED_MIN_LOWERCASE_JOINS:
-            continue
+        mid = sum(_mid_sentence_joins(parts))
         rendered = sum(part in paragraphs for part in parts)
         if rendered < SHATTERED_MIN_RENDERED:
             continue

@@ -391,7 +391,9 @@ Lints, ranked by the severity of the failure class they catch:
                           IZABPD L2/L3, RLADNC L3): a stage-4 entry whose
                           '\\t' parts break mid-sentence and at least three
                           of which are whole rendered paragraphs. WARN, one
-                          per entry. Reads stage 4 and the docx
+                          per entry. Stage 6 folds such parts back by the
+                          same test, so a hit is what it left split (an
+                          interleaved column). Reads stage 4 and the docx
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
