@@ -50,9 +50,13 @@ PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
 # Import stage functions from run_full_pipeline.py dependencies
 from app.services.pdf_sandbox import (
     PDF_BUSY_RUN_MESSAGE,
+    PDF_INTERRUPTED_RUN_MESSAGE,
+    PDF_TIMEOUT_RUN_MESSAGE,
     PDF_TOO_COMPLEX_MESSAGE,
     ConversionResult,
     PdfBusyError,
+    PdfInterruptedError,
+    PdfTimeoutError,
     PdfTooComplexError,
     convert_pdf,
 )
@@ -160,6 +164,12 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
     chain = list(_exception_chain(exc))
     if any(isinstance(e, LLMOutageError) for e in chain):
         return LLM_OUTAGE_MESSAGE
+    # A signal or a timeout is not the file's fault (#1566); PdfTimeoutError
+    # is a PdfTooComplexError, so it is tested first.
+    if isinstance(exc, PdfInterruptedError):
+        return PDF_INTERRUPTED_RUN_MESSAGE
+    if isinstance(exc, PdfTimeoutError):
+        return PDF_TIMEOUT_RUN_MESSAGE
     if isinstance(exc, PdfTooComplexError):
         return PDF_TOO_COMPLEX_MESSAGE
     if isinstance(exc, PdfBusyError):

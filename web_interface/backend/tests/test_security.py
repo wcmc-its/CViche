@@ -776,6 +776,24 @@ class TestUploadValidation:
         assert db.query(Run).count() == 0
         assert list(tmp_path.iterdir()) == []
 
+    def test_pdf_child_stopped_by_sigterm_gets_503_not_400(self, client, db, seed_simple_mode, tmp_path,
+                                                         cv_pdf, monkeypatch):
+        """#1566: a PDF check whose child is SIGTERMed (the pod draining) is
+        transient -- a 503 to retry, never the "too large" 400."""
+        from app.models import Run
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+        monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP",
+                            "import os, signal; os.kill(os.getpid(), signal.SIGTERM)")
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                "/api/upload", files={"file": ("cv.pdf", cv_pdf(), "application/pdf")},
+                data={"submission_type": "own_cv"},
+            )
+        assert response.status_code == 503, response.text
+        assert int(response.headers["retry-after"]) > 0
+        assert db.query(Run).count() == 0
+
     def test_unreadable_pdf_child_reply_is_a_400_not_a_500(self, client, db, seed_simple_mode, cv_pdf, monkeypatch):
         """#806 review N1: whatever goes wrong inside the PDF job short of an
         ops fault, the request gets a 400."""

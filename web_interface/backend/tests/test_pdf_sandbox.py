@@ -22,6 +22,8 @@ from app.services.pdf_sandbox import (
     PDF_MAX_PAGES,
     EncryptedPdfError,
     PdfBusyError,
+    PdfInterruptedError,
+    PdfTimeoutError,
     PdfTooComplexError,
     UnreadablePdfError,
     convert_pdf,
@@ -237,6 +239,17 @@ def test_child_death_by_memory_is_a_limit(monkeypatch, child):
         pdf_sandbox.run_pdf_job("text", ["/nonexistent.pdf"], 30)
 
 
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGINT", "SIGHUP"])
+def test_child_stopped_by_a_termination_signal_is_not_a_limit(monkeypatch, signame):
+    """#1566: a pod draining SIGTERMs the child; that says nothing about the
+    PDF, so it must not surface as PdfTooComplexError ("too large")."""
+    child = f"import os, signal; os.kill(os.getpid(), signal.{signame})"
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", child)
+    with pytest.raises(PdfInterruptedError, match="stopped by signal") as caught:
+        pdf_sandbox.run_pdf_job("convert", ["/nonexistent.pdf", "/nonexistent.docx"], 30)
+    assert not isinstance(caught.value, PdfTooComplexError)
+
+
 def test_wrapped_memory_error_in_the_child_is_a_limit(monkeypatch, cv_pdf):
     """End to end through the real child and reply protocol: pdfplumber
     surfaces a bomb's MemoryError wrapped in PdfminerException (measured on
@@ -265,8 +278,10 @@ def test_page_cap_applies_to_conversion(tmp_path):
 
 
 def test_timeout_kills_the_child(cv_pdf, monkeypatch):
+    """A timeout is its own type (#1566): the run must not call the file too
+    large for it, while the upload check still refuses it as a limit."""
     monkeypatch.setattr(pdf_sandbox, "PDF_TEXT_TIMEOUT_SECONDS", 0.01)
-    with pytest.raises(PdfTooComplexError, match="exceeded"):
+    with pytest.raises(PdfTimeoutError, match="exceeded"):
         extract_pdf_text(cv_pdf())
 
 
