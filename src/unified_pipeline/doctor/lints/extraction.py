@@ -3662,8 +3662,9 @@ def lint_role_consistency(stage4: dict,
                           table_rows: list[list[list[str]]] | None = None) -> list[dict]:
     """A grant table that misstates who led the grant (#1403). One finding
     per grant entry, for the first shape it shows (see the shapes above),
-    plus one per rendered grant table for the first render shape it shows
-    (only when the docx was read; see `_table_role_findings`). The owner is
+    plus, only when the docx was read, one per grant entry and render shape
+    its rendered tables show, counting the tables (`_table_role_findings`,
+    #1590). The owner is
     `cv_owner.last_name`; with none, no shape that names the owner fires.
     Not judged from stage 4: an empty `pi_role` against the source's label
     (the render shape owner_pi_role_empty reads that off the table), a

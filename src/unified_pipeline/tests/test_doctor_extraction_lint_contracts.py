@@ -4341,6 +4341,17 @@ def test_role_consistency_places_tables_of_one_title_at_their_own_entries():
     assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 177"]
 
 
+def test_role_consistency_places_tables_whose_role_reads_differently_at_their_own_entries():
+    """A stated role the table renders in other words ("Co-Principal
+    Investigator" as "Co-PI") matches no table by role, so the tables still
+    take the unmatched same-title entries in order (#1590)."""
+    first = _grant(176, "A grant", title="Example Project", pi_role="Co-Principal Investigator")
+    second = _grant(177, "A grant", title="Example Project", pi_role="Co-Principal Investigator")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [first, second]},
+                                     [_grant_table("Co-PI", "Ada Testowner")] * 2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 177"]
+
+
 def test_role_consistency_matches_a_shared_title_table_to_the_entry_with_its_role():
     """Grants sharing a title render in date order, not stage-4 order: a table
     with an empty role is the entry with no role, never the first entry with
