@@ -35,7 +35,11 @@ from unified_pipeline.core.text_norm import (
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
 from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
-from unified_pipeline.stage6.parsing import _is_shattered, _mid_sentence_joins
+from unified_pipeline.stage6.parsing import (
+    _is_shattered,
+    _mid_sentence_joins,
+    _refold_shattered,
+)
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from ..shared import (
@@ -1628,33 +1632,69 @@ def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
 # 6's L2 bullet fallback and the L3 overflow writer split on '\t' and print
 # each printed line as its own bullet, broken mid-sentence. What reads as
 # shattered is stage 6's own test (`stage6.parsing._is_shattered`), which it
-# uses to fold those parts back, so the lint reports what stage 6 left split.
+# uses to fold those parts back (`_refold_shattered`). Folding mends a
+# single-column paragraph, but where the printed lines ran across a
+# multi-column row, each line also carries a neighbouring column's words, and
+# the folded paragraph keeps them mid-sentence. So the lint reports both: the
+# parts still rendered one per paragraph, and a folded paragraph that still
+# carries a neighbouring column's dates.
 #: Parts that must each be a whole rendered paragraph. Exact equality keeps
 #: field-rendered rows, 5c/5d rewrites and folded paragraphs out.
 SHATTERED_MIN_RENDERED = 3
 SHATTERED_EXCERPT_CHARS = 60
 SHATTERED_EXCERPT_PARTS = 2
+#: A dates column printed at the end of a line that is not the entry's last
+#: ('..., 2015-2023', '2020 – Present'): the row's dates, spliced into the
+#: sentence that runs on in the next line.
+_COLUMN_DATE_RANGE_END_RE = re.compile(
+    r"(?:19|20)\d{2}\s*[-–—]\s*(?:(?:19|20)\d{2}|present|current)$", re.IGNORECASE)
+#: A year column opening the entry's first line ahead of a capitalised title
+#: column ('2007 Clinical ...'): the row's year, spliced into the paragraph.
+_COLUMN_YEAR_START_RE = re.compile(r"(?:19|20)\d{2}\s+[A-Z]")
+
+
+def _spliced_column_date(parts: list[str]) -> bool:
+    """Whether a printed line carries a neighbouring column's date, which a
+    fold leaves inside the paragraph. ponytail: reads dates only; a role or
+    place column without a date is not seen (none seen on the 15 YUY-SP
+    records, every one of which carries a date). Ceiling: a paragraph whose
+    own heading line ends in its dates and whose prose then folds reads as
+    spliced (none seen over the 272 runs of YUY-SP)."""
+    return bool(_COLUMN_YEAR_START_RE.match(parts[0])) or any(
+        _COLUMN_DATE_RANGE_END_RE.search(part) for part in parts[:-1])
+
+
+def _shattered_render(parts: list[str], paragraphs: set[str]) -> str:
+    """What is still wrong with a shattered entry's render, or '' when it
+    rendered as whole paragraphs with no spliced column."""
+    rendered = sum(part in paragraphs for part in parts)
+    if rendered >= SHATTERED_MIN_RENDERED:
+        mid = sum(_mid_sentence_joins(parts))
+        return (f"{rendered} of {len(parts)} printed lines render as separate paragraphs, "
+                f"{mid} break mid-sentence")
+    folded = [part for part in _refold_shattered(parts) if part not in parts]
+    if _spliced_column_date(parts) and any(part in paragraphs for part in folded):
+        return (f"{len(parts)} printed lines fold back, but a line carries a neighbouring "
+                f"column's dates, so the columns are still interleaved")
+    return ""
 
 
 def lint_shattered_prose(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
-    """A stage-4 entry whose '\t' parts break mid-sentence and render as
-    separate whole paragraphs: one source paragraph printed one bullet per
-    printed line (#1583: IZABPD L2/L3, RLADNC L3). WARN, one per entry."""
+    """A stage-4 entry whose '\t' parts break mid-sentence and either render
+    as separate whole paragraphs (one source paragraph printed one bullet per
+    printed line) or fold into a paragraph that still carries a neighbouring
+    column's dates (#1583: IZABPD L2/L3, RLADNC L3). WARN, one per entry."""
     paragraphs = {" ".join(text.split()) for kind, text in blocks if kind == "p"}
     findings = []
     for entry in _fields_entries(stage4):
         parts = [" ".join(p.split()) for p in entry.text.split("\t") if p.strip()]
         if not _is_shattered(parts):
             continue
-        mid = sum(_mid_sentence_joins(parts))
-        rendered = sum(part in paragraphs for part in parts)
-        if rendered < SHATTERED_MIN_RENDERED:
-            continue
-        findings.append(_finding(
-            "shattered_prose", "WARN",
-            f"entry {entry.element_idx} ({entry.code}): {rendered} of {len(parts)} "
-            f"printed lines render as separate paragraphs, {mid} break mid-sentence",
-            [part[:SHATTERED_EXCERPT_CHARS] for part in parts[:SHATTERED_EXCERPT_PARTS]]))
+        wrong = _shattered_render(parts, paragraphs)
+        if wrong:
+            findings.append(_finding(
+                "shattered_prose", "WARN", f"entry {entry.element_idx} ({entry.code}): {wrong}",
+                [part[:SHATTERED_EXCERPT_CHARS] for part in parts[:SHATTERED_EXCERPT_PARTS]]))
     return findings
 
 

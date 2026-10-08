@@ -399,10 +399,11 @@ Lints, ranked by the severity of the failure class they catch:
                           printed line, broken mid-sentence (#1583, YUYVIG:
                           IZABPD L2/L3, RLADNC L3): a stage-4 entry whose
                           '\\t' parts break mid-sentence and at least three
-                          of which are whole rendered paragraphs. WARN, one
-                          per entry. Stage 6 folds such parts back by the
-                          same test, so a hit is what it left split (an
-                          interleaved column). Reads stage 4 and the docx
+                          of which are whole rendered paragraphs, or that
+                          stage 6 folded back (same test) into a paragraph
+                          while a line carries a neighbouring column's
+                          dates, so the columns are still interleaved. WARN,
+                          one per entry. Reads stage 4 and the docx
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -1010,8 +1011,10 @@ LINT_PREVALENCE = {
     "citation_grounding": 0.185,
     # shattered_prose (#1583, YUY-SP in doctor/PRECISION.md): 3 of the 272
     # runs of the YUYVIG (38), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI
-    # (9), X6 (6) and wave-1 (126) farms, over fresh renders of origin/dev
-    # fb575e23, measured 2026-10-08. Same mixed-corpus caveat as above.
+    # (9), X6 (6) and wave-1 (126) farms, over fresh renders of this branch
+    # with stage 6's fold (origin/dev 64bb4541 merged) -- the post-fold rate,
+    # the same 3 runs as before the fold, since the fold mends none of their
+    # 15 entries -- measured 2026-10-08. Same mixed-corpus caveat as above.
     "shattered_prose": 0.011,
 }
 

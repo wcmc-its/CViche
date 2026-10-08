@@ -1752,6 +1752,71 @@ def test_shattered_prose_needs_two_mid_sentence_joins():
     assert lint_shattered_prose(_shattered_stage4(lines), _as_bullets(lines)) == []
 
 
+@pytest.mark.parametrize("bullets, fires", [(3, True), (2, False)])
+def test_shattered_prose_three_whole_paragraphs_is_the_boundary(bullets, fires):
+    # The rest of the lines are not rendered at all, so only the count decides.
+    findings = lint_shattered_prose(_shattered_stage4(), _as_bullets(_SHATTERED_LINES[:bullets]))
+    assert [f["message"] for f in findings] == (
+        ["entry 477 (L3): 3 of 4 printed lines render as separate paragraphs, "
+         "3 break mid-sentence"] if fires else [])
+
+
+# The same paragraph printed beside a dates column, as IZABPD 477 and RLADNC
+# 530/567 were: a line carries the row's dates. Stage 6 folds the lines back,
+# but the dates stay inside the paragraph.
+_INTERLEAVED_FOLDED = "entry 477 (L3): 4 printed lines fold back, but a line carries a " \
+                      "neighbouring column's dates, so the columns are still interleaved"
+
+
+def _folded(lines):
+    return [("p", "C. CLINICAL PRACTICE"), ("p", " ".join(lines) + " ")]
+
+
+@pytest.mark.parametrize("dated", [
+    "Division Chief, Example Unit. I led the establishment Example Hospital, 2015-2023",
+    "Division Chief, Example Unit. I led the establishment 2020 – Present",
+    "Division Chief, Example Unit. I led the establishment 2020-present",
+    "Division Chief, Example Unit. I led the establishment 2019 — current",
+    "2007 Example Unit Division Chief I led the establishment",
+])
+def test_shattered_prose_warns_when_the_fold_keeps_a_column_date(dated):
+    lines = (dated, *_SHATTERED_LINES[1:])
+    findings = lint_shattered_prose(_shattered_stage4(lines), _folded(lines))
+    assert [(f["severity"], f["message"]) for f in findings] == [("WARN", _INTERLEAVED_FOLDED)]
+
+
+@pytest.mark.parametrize("dated", [
+    pytest.param("Division Chief, Example Unit. I led the establishment in 2015",
+                 id="a year, not a range"),
+    pytest.param("Division Chief, Example Unit. I led the establishment 2015-2023 of",
+                 id="a range inside the line"),
+    pytest.param("In 2007 Example Unit Division Chief I led the establishment",
+                 id="a year after the line opens"),
+    pytest.param("2007, Example Unit Division Chief I led the establishment",
+                 id="a year opening the sentence"),
+    pytest.param("2007 was the year Example Unit Division Chief I led the establishment",
+                 id="a year opening a lowercase word"),
+    pytest.param("2007Example Unit Division Chief I led the establishment",
+                 id="a year glued to a word"),
+])
+def test_shattered_prose_quiet_when_the_fold_keeps_no_column_date(dated):
+    lines = (dated, *_SHATTERED_LINES[1:])
+    assert lint_shattered_prose(_shattered_stage4(lines), _folded(lines)) == []
+
+
+def test_shattered_prose_a_date_ending_the_last_line_is_not_spliced():
+    lines = (*_SHATTERED_LINES[:3], "sequencing into routine care since 2015-2023")
+    assert lint_shattered_prose(_shattered_stage4(lines), _folded(lines)) == []
+
+
+def test_shattered_prose_a_column_date_alone_is_no_finding():
+    # A dated line that the fold keeps apart renders, but no folded paragraph
+    # does: the entry's prose went elsewhere, so this lint has nothing to say.
+    lines = ("Division Chief, Example Hospital, 2015-2023", *_SHATTERED_LINES)
+    unrendered = [("p", "C. CLINICAL PRACTICE"), ("p", lines[0])]
+    assert lint_shattered_prose(_shattered_stage4(lines), unrendered) == []
+
+
 def test_date_only_lines_ignores_table_cells():
     blocks = [_EDU_HEADER] + [("table", "June 2019")] * 10
     assert lint_date_only_lines(blocks) == []
@@ -4597,14 +4662,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (62), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (63), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 60
+    assert len(payload["findings"]) == 61
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

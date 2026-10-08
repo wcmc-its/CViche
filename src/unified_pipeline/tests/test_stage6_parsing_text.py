@@ -92,6 +92,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _is_structural_label,
     _is_table_header_entry,
     _looks_like_multiple_records,
+    _mid_sentence_joins,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
     _refold_shattered,
@@ -640,3 +641,40 @@ def test_refold_needs_thirty_percent_of_the_joins_mid_sentence(sentences, folds)
     # Two mid-sentence joins, then whole sentences: 2 of 6 joins fold, 2 of 7 do not.
     parts = [*_PRINTED_LINES[:3], *(f"Sentence {i}." for i in range(sentences))]
     assert (_refold_shattered(parts) != parts) is folds
+
+
+@pytest.mark.parametrize("end", list(".!?;:)]\"\u201d"))
+def test_a_line_ending_a_sentence_is_no_mid_sentence_join(end):
+    # Even before a lowercase opening, which otherwise marks a join.
+    assert _mid_sentence_joins([f"the example clinic{end}", "member of the board"]) == [False]
+
+
+@pytest.mark.parametrize("end", [",", "-", "\u2013", " and", " or", " of", " the", " for",
+                                 " to", " in", " with", " a", " an", " at", " by", " on",
+                                 " from", " as", " that", " which", " including", " into",
+                                 " our", " my", " their", " its"])
+def test_a_line_ending_on_a_connector_joins_mid_sentence(end):
+    # Even before a capitalised opening, which otherwise marks no join.
+    assert _mid_sentence_joins([f"the example clinic{end}", "Example Hospital"]) == [True]
+
+
+def test_a_capitalised_connector_still_joins():
+    assert _mid_sentence_joins(["the Department Of", "Example Hospital"]) == [True]
+
+
+def test_refold_counts_lowercase_openings_only_at_mid_sentence_joins():
+    # Two joins at connectors, both capitalised; the one lowercase opening
+    # follows a sentence end, so no join opens lowercase and nothing folds.
+    parts = ["Director of", "Example Lab and", "Example Unit.", "member of the board."]
+    assert _refold_shattered(parts) == parts
+
+
+def test_refold_at_exactly_thirty_percent_of_the_joins_mid_sentence():
+    # 3 of 10 joins mid-sentence: the share is a floor, met exactly.
+    parts = ["I led the", "establishment of a", "new clinical", "division.",
+             *(f"Sentence {i}." for i in range(7))]
+    assert _refold_shattered(parts) == [" ".join(parts[:4]), *parts[4:]]
+
+
+def test_a_capitalised_opening_after_a_plain_word_is_no_join():
+    assert _mid_sentence_joins(["the example clinic", "Example Hospital"]) == [False]

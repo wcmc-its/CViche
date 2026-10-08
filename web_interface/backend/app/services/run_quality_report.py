@@ -607,12 +607,12 @@ LINT_COPY = {
         "section where it belongs."),
     # Proposed in #1583's PR; awaiting Paul's approval.
     "shattered_prose": LintCopy(
-        "Paragraphs split into one bullet per line",
-        "Some paragraphs from your CV appear as a list of short bullets, one per printed "
-        "line, broken mid-sentence. Dates or places from a neighbouring column may be "
-        "mixed into those lines.",
-        "Join each flagged run of bullets back into one paragraph, and move any date or "
-        "place that landed inside the sentence back to its entry."),
+        "Paragraphs broken at their printed lines",
+        "Some paragraphs from your CV were broken at their printed lines. They appear as "
+        "short bullets, one per line, or as one paragraph with words from a neighbouring "
+        "column, such as a date, role or place, mixed into the sentence.",
+        "Check each flagged paragraph against your CV: join its lines into one paragraph, "
+        "and move any date, role or place that landed inside the sentence back to its entry."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
