@@ -4331,14 +4331,41 @@ def test_role_consistency_spares_a_pi_cell_that_is_not_a_title_run(pi_cell, titl
     assert _shapes(entry, table_rows=[_grant_table("Mentor", pi_cell, title=title)]) == []
 
 
-def test_role_consistency_places_tables_of_one_title_at_its_first_entry():
-    """Two grants with one title both name the first entry, as pi_cell_empty
-    always has (KJJVVO 176 and 177)."""
+def test_role_consistency_places_tables_of_one_title_at_their_own_entries():
+    """Two grants with one title each name their own entry, not both the
+    first (KJJVVO 176 and 177; #1590)."""
     first = _grant(176, "A grant", title="Example Project", pi_role="Co-PI")
     second = _grant(177, "A grant", title="Example Project", pi_role="Co-PI")
     findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [first, second]},
                                      [_grant_table("Co-PI", "Ada Testowner")] * 2)
-    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 176"]
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 177"]
+
+
+def test_role_consistency_matches_a_shared_title_table_to_the_entry_with_its_role():
+    """Grants sharing a title render in date order, not stage-4 order: a table
+    with an empty role is the entry with no role, never the first entry with
+    the title, which states one (#1590, YUYVIG SQMWHM 1325)."""
+    stated = _grant(10, "A grant", title="Example Project", pi_name="Testowner", pi_role="PI")
+    unstated = [_grant(idx, "A grant", title="Example Project", pi_name="Testowner")
+                for idx in (11, 12)]
+    tables = [_grant_table("", "Testowner"), _grant_table("PI", "Testowner"),
+              _grant_table("", "Testowner")]
+    findings = lint_role_consistency(
+        {"cv_owner": _ROLE_OWNER, "entries": [stated, *unstated]}, tables)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 11", "entry 12"]
+    assert len({(f["message"], tuple(f["evidence"])) for f in findings}) == len(findings)
+
+
+def test_role_consistency_reports_an_entry_once_for_all_its_tables():
+    """More tables than entries with their title: the tables left over fall
+    back to the first entry, and its repeats are one finding that counts them
+    (#1590)."""
+    entry = _grant(30, "A grant", title="Example Project", pi_name="Testowner")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [entry]},
+                                     [_grant_table("", "Testowner")] * 3)
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith("entry 30: ")
+    assert " in 3 grant tables (owner_pi_role_empty, #1403)" in findings[0]["message"]
 
 
 def test_role_consistency_still_reports_an_empty_pi_cell_beside_an_entry_finding():

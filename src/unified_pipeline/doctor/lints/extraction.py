@@ -3558,16 +3558,41 @@ def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
     return tables
 
 
-def _grant_entry_by_title(stage4: dict) -> dict[str, Mapping[str, object]]:
-    """The first grant entry per normalised title."""
-    by_title: dict[str, Mapping[str, object]] = {}
+def _grant_entries_by_title(stage4: dict) -> dict[str, list[Mapping[str, object]]]:
+    """Every grant entry per normalised title, in stage-4 order."""
+    by_title: dict[str, list[Mapping[str, object]]] = {}
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") in GRANT_CODES and isinstance(fields, Mapping):
             title = norm(str(fields.get("title") or fields.get("study_title") or ""))
             if title:
-                by_title.setdefault(title, entry)
+                by_title.setdefault(title, []).append(entry)
     return by_title
+
+
+def _table_entries(stage4: dict,
+                   tables: list[dict[str, str]]) -> list[Mapping[str, object]]:
+    """The grant entry each rendered table renders, matched by title. Several
+    entries can share a title (an organisation's name as the title of each
+    of its grants, YUYVIG SQMWHM: seven), and stage 6 renders them in date
+    order, so each table takes the first entry with its title it has not
+    already matched, preferring one whose stated role is the table's "Your
+    role:" cell. A table left with no unmatched entry (more tables than
+    entries) falls back to the first entry with its title, and to {} when
+    no entry has it."""
+    by_title = _grant_entries_by_title(stage4)
+    matched: set[int] = set()
+    resolved = []
+    for cells in tables:
+        candidates = by_title.get(norm(cells.get(PROJECT_TITLE_LABEL, "")), [])
+        free = [entry for entry in candidates if id(entry) not in matched]
+        role = norm(cells.get(YOUR_ROLE_LABEL, ""))
+        same_role = [entry for entry in free
+                     if norm(_stated_role_text(entry["extracted_fields"])) == role]
+        entry = (same_role or free or candidates or [{}])[0]
+        matched.add(id(entry))
+        resolved.append(entry)
+    return resolved
 
 
 def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
@@ -3606,24 +3631,29 @@ def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
 
 def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
                          owner: frozenset[str], reported: set[object]) -> list[dict]:
-    """A finding per rendered grant table that shows a role shape. A table
-    whose entry already has an entry finding is reported only for
-    pi_cell_empty, which predates the others and was always reported beside
-    them."""
-    by_title = _grant_entry_by_title(stage4)
-    findings = []
-    for cells in _grant_tables(table_rows):
-        title = cells.get(PROJECT_TITLE_LABEL, "")
-        entry = by_title.get(norm(title), {})
+    """A finding per grant entry whose rendered table shows a role shape
+    (each table matched to its entry by `_table_entries`). Tables that
+    still resolve to one entry and show one shape give one finding that
+    counts them (#1590). A table whose entry already has an entry finding is
+    reported only for pi_cell_empty, which predates the others and was
+    always reported beside them."""
+    tables = _grant_tables(table_rows)
+    hits: dict[tuple[object, tuple[str, str], str], int] = {}
+    for cells, entry in zip(tables, _table_entries(stage4, tables)):
         fields = entry.get("extracted_fields", {})
         shape = _table_role_shape(cells, owner, str(fields.get("pi_name") or ""))
         idx = entry.get("element_idx_start")
         if not shape or (idx in reported and shape[0] != ROLE_SHAPE_PI_CELL_EMPTY):
             continue
+        key = (idx, shape, cells.get(PROJECT_TITLE_LABEL, ""))
+        hits[key] = hits.get(key, 0) + 1
+    findings = []
+    for (idx, shape, title), tables_hit in hits.items():
         where = f"entry {idx}" if idx is not None else "a grant table"
+        count = f" in {tables_hit} grant tables" if tables_hit > 1 else ""
         findings.append(_finding(
             "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-            f"{where}: {shape[1]} ({shape[0]}, #1403)",
+            f"{where}: {shape[1]}{count} ({shape[0]}, #1403)",
             [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
 
