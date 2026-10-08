@@ -17,6 +17,7 @@ from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
 from unified_pipeline.run_doctor import read_docx_blocks  # noqa: E402
+from unified_pipeline.stage6.formatting import CVICHE_BOX_FILL  # noqa: E402
 
 HEADER = "Example Medical College"
 PAST_FUNDING_HEADING = "Past (Completed) Funding"
@@ -293,7 +294,7 @@ def test_review_notes_box_closes_the_document_in_its_own_type_and_spacing(tmp_pa
     assert {e.tag.split("}")[1]: e.get(qn("w:w")) for e in tbl_pr.find(qn("w:tblCellMar"))} == {
         "top": "120", "bottom": "120", "left": "160", "right": "160"}
     cell = doc.tables[-1].cell(0, 0)
-    assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == rc.BOX_FILL
+    assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
     title, group, instruction, item = cell.paragraphs[:4]
     assert title.text == rc.REVIEW_NOTES_TITLE and title.runs[0].font.small_caps
     assert title.runs[0].font.size.pt == 9 and str(title.runs[0].font.color.rgb) == "595959"
