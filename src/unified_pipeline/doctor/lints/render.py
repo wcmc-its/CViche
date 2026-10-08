@@ -1622,7 +1622,7 @@ def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
         [line[:100] for line in lines[:DATE_ONLY_LINES_SAMPLES]])]
 
 
-# Lint 14ai: shattered_prose (#1583). Stage 2 joins an entry's source
+# Lint 14aj: shattered_prose (#1583). Stage 2 joins an entry's source
 # paragraphs with '\t'; where those paragraphs were one per printed line (a
 # PDF the converter did not fold, a docx table cell of line paragraphs), stage
 # 6's L2 bullet fallback and the L3 overflow writer split on '\t' and print

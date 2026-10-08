@@ -386,7 +386,16 @@ Lints, ranked by the severity of the failure class they catch:
                           elsewhere, where most hits are the owner's own
                           group-authored papers or the owner under another
                           surname. Reads stage 4 and the docx
-14ai. shattered_prose     one source paragraph rendered one bullet per
+14ai. citation_grounding  a citation stage 5d wrote that names an author,
+                          an initial or an ordinal its source line lacks
+                          (#1570, YUYVIG): a bare initials token joined to
+                          the next surname (FLBFRK 25), a CV list number
+                          printed as a meeting ordinal (SIJYJZ 732). INFO:
+                          about half the hits are inventions, the rest
+                          mostly spelling fixes or split source lines, so
+                          it is no run-page row, only a review-copy
+                          comment on the citation. Reads stage 5d
+14aj. shattered_prose     one source paragraph rendered one bullet per
                           printed line, broken mid-sentence (#1583, YUYVIG:
                           IZABPD L2/L3, RLADNC L3): a stage-4 entry whose
                           '\\t' parts break mid-sentence and at least three
@@ -515,6 +524,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     unrouted_code_counts,
 )
 from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
+    lint_citation_grounding,
     lint_teaching_postcheck,
 )
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
@@ -745,6 +755,7 @@ KNOWN_LINTS = (
     "stage4_unplaced_items",
     "summary_unsupported_claim",
     "owner_attribution",
+    "citation_grounding",
     "shattered_prose",
     "owner_contact_missing",
     "pipeline_errors_present",
@@ -992,6 +1003,11 @@ LINT_PREVALENCE = {
     # origin/dev a65857e7, measured 2026-10-08. Same mixed-corpus caveat as
     # above.
     "owner_attribution": 0.248,
+    # citation_grounding (#1570, YUY-CG in doctor/PRECISION.md): 51 of 276
+    # runs at INFO -- 14 of the 38 YUYVIG runs (dev-259 artifacts, BCTOGR's
+    # retry included) and 37 of 238 held-out runs' stored stage-5d JSON --
+    # measured 2026-10-08. Same mixed-corpus caveat as above.
+    "citation_grounding": 0.185,
     # shattered_prose (#1583, YUY-SP in doctor/PRECISION.md): 3 of the 272
     # runs of the YUYVIG (38), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI
     # (9), X6 (6) and wave-1 (126) farms, over fresh renders of origin/dev
@@ -1555,6 +1571,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,
              ("stage_4_5", "stage_4"), optional=("source_lines",)),
     LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
+    LintSpec("citation_grounding", lint_citation_grounding, ("stage_5d",)),
     LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
 )
 

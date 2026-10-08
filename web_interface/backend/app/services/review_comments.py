@@ -7,6 +7,10 @@ an entry removed as a near-duplicate, a step that fell back) is an item in the
 review-notes box closing the document, grouped by what to do about it. Where
 the Appendix entries came from goes in stage 6's own Appendix note box. The
 clean document is left as it is; this writes a copy beside it.
+
+One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
+is commented whatever its severity, but only on the text it quotes, never on
+a heading or as a review note. It is a possibility to check, not a problem.
 """
 import copy
 import re
@@ -26,6 +30,7 @@ from app.schemas import DoctorFindingInstance
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX
 from app.services.run_quality_report import (
     LINT_COPY,
+    REVIEW_COPY_ONLY_LINTS,
     TRUNCATION_MARK,
     _instance,
     _usable_findings,
@@ -117,6 +122,8 @@ REVIEW_FLAGS = {
     "stage4_unplaced_items": "Records from the original CV are missing from this section.",
     "summary_unsupported_claim": "The summary says something the original CV does not: check it.",
     "owner_attribution": "May be someone else's work, not yours: check it.",
+    "citation_grounding": ("This rewritten citation may name an author, an initial or a meeting "
+                           "number that the line in the original CV does not. Check it against the CV."),
     "shattered_prose": "One paragraph split into a bullet per line: join these lines.",
 }
 #: Review-notes group titles where the run page's title is internal wording.
@@ -307,7 +314,7 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> 
         return [], _dedup_notes(inst)
     label = REVIEW_FLAGS.get(lint, inst.detail)
     flags = _item_flags(lint, inst, label, surfaces)
-    if flags:
+    if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
         return flags, []
     heading = _heading(_CODE_BY_LABEL.get(inst.section or "", ""), surfaces[0])
     if heading is not None:
@@ -400,7 +407,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     # show: a second, different "came from" only contradicts them. Their
     # counts stay on the run page.
     findings = [f for f in _usable_findings(doctor_payload)[0]
-                if f["severity"] in COMMENTED_SEVERITIES
+                if (f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS)
                 and not (f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail))]
     if not findings:
         return None
