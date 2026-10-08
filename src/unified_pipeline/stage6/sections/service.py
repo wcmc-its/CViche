@@ -16,7 +16,8 @@ is the section's actual logic.
 
 `_fill_service` reroutes before it dispatches: a Q2 entry whose text is really
 journal reviewing is moved to Q4D, and a multi-line Q2 entry mixing both is
-split line by line. Separating the writers into four modules would put the
+split line by line; a single-line Q2 entry that is an ad hoc grant review is
+moved to Q3 (#1580). Separating the writers into four modules would put the
 dispatcher in one file and the thing it corrects in another, which is the split
 that would have to be undone first to understand either.
 
@@ -95,6 +96,27 @@ BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
 )
+
+# Q2 -> Q3 reroute vocabulary (#1580). Stage 3b codes ad hoc and external
+# grant reviews Q2, as the taxonomy's own Q2 example tells it to, and each one
+# rendered as a Service on Boards row: a funder in the committee columns and,
+# under "Ad Hoc Review Panels", an invented "Member" role (WPJHYT 140-147,
+# SLYBST 74/81, SIJYJZ 216). An entry is a grant review when its nearest
+# heading names grant review, or its own line or role does.
+GRANT_REVIEW_HEADING_RE = re.compile(
+    r'\bgrants?\b[^>]*\breview|\breview\w*\b[^>]*\bgrants?\b'
+    r'|\bad[- ]?hoc\s+review|\bstudy\s+sections?\b', re.IGNORECASE)
+GRANT_REVIEW_LINE_RE = re.compile(
+    r'\bad[- ]?hoc\s+(?:grant\s+)?review|\bgrant\s+review|\bpre-?review',
+    re.IGNORECASE)
+# The entry's own role must say reviewer, or be empty. Any other role
+# ("Member", "Co-Chair", "Organizer", "Ad Hoc Member") is a seat on a body
+# and stays a committee row, whatever the heading says (JUTBUZ 111-123).
+REVIEWER_ROLE_RE = re.compile(r'review|^\s*ad[- ]?hoc\s*$', re.IGNORECASE)
+# Reviewing that is not grant reviewing, under a grant-review heading:
+# meeting abstracts (BMAMWE 625), board examinations, a task-group report.
+NOT_GRANT_REVIEW_RE = re.compile(
+    r'\b(?:abstracts?|exam(?:ination)?s?|task\s+group)\b', re.IGNORECASE)
 
 # Role indicators used by `_is_known_org_line`'s veto and the sibling
 # `is_role` check in `_parse_extramural_leadership_lines`, both matched with
@@ -542,6 +564,56 @@ def _route_q2_entries(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
     return rerouted_to_journal, actual_board_entries
 
 
+def _is_q2_grant_review(entry: dict) -> bool:
+    """True when a single-line Q2 entry is an ad hoc or external grant
+    review rather than a seat on a committee or board (#1580).
+
+    A multi-line entry is never one: it can fuse several activities under one
+    set of fields (#573), so moving it whole could carry a committee row
+    along with it."""
+    text = str(entry.get('text') or '')
+    if len(entry_lines(text)) > 1 or NOT_GRANT_REVIEW_RE.search(text):
+        return False
+    fields = entry.get('extracted_fields') or {}
+    role = _cell_text(fields.get('role') or '')
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    nearest_heading = str(headings[-1]) if headings else ''
+    if not (GRANT_REVIEW_HEADING_RE.search(nearest_heading)
+            or GRANT_REVIEW_LINE_RE.search(text)
+            or GRANT_REVIEW_LINE_RE.search(role)):
+        return False
+    if role:
+        return bool(REVIEWER_ROLE_RE.search(role))
+    # No role: a named committee or board is still a seat on it
+    # (QZWBKQ 1192, "External Advisory Committee").
+    return not _cell_text(fields.get('committee_name') or '')
+
+
+def _route_q2_grant_reviews(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split Q2 entries into grant reviews, rerouted to Q3, and the rest.
+
+    A rerouted entry is a copy with `taxonomy_code` Q3 and
+    `rerouted_from_q2` set, so the stage-3b code stays on the original.
+    Its `committee_name` is carried as the Q3 `panel_name`, which the Grant
+    Reviewing writer appends to the organization; the Q3 table has no
+    committee column."""
+    rerouted_to_grants: list[dict] = []
+    board_entries: list[dict] = []
+    for entry in q2_entries:
+        if not _is_q2_grant_review(entry):
+            board_entries.append(entry)
+            continue
+        fields = dict(entry.get('extracted_fields') or {})
+        if fields.get('committee_name') and not fields.get('panel_name'):
+            fields['panel_name'] = fields['committee_name']
+        rerouted_to_grants.append({
+            **entry, 'taxonomy_code': GRANT_REVIEWING_CODE,
+            'rerouted_from_q2': True, 'extracted_fields': fields})
+    return rerouted_to_grants, board_entries
+
+
 # Specific, multi-word organization names/acronyms used by
 # `_parse_extramural_leadership_lines`. Matched as a plain substring
 # anywhere in the line -- safe because each is specific enough that no
@@ -842,7 +914,7 @@ class ServiceSection:
             logger.info("  Rerouted %s Q2 entries/lines to Journal Reviewing", len(rerouted_to_journal))
 
         q4d_entries.extend(rerouted_to_journal)
-        q2_entries = actual_board_entries
+        rerouted_to_grants, q2_entries = _route_q2_grant_reviews(actual_board_entries)
 
         # Q2 entries go to "Service on Boards and/or Committees" - use National table by default
         if q2_entries:
@@ -856,6 +928,7 @@ class ServiceSection:
         other_q_entries = []
         for code in ['Q1', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C']:
             other_q_entries.extend(entries_by_code.get(code, []))
+        other_q_entries.extend(rerouted_to_grants)
 
         if other_q_entries:
             self._fill_other_service(other_q_entries)
