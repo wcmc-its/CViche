@@ -3289,6 +3289,7 @@ def test_year_not_in_source_silent_when_the_text_states_the_year(fields, text):
     ({"end_date": "2016"}, "Example reviewer 2014,15,16"),
     ({"start_date": "1978"}, "Example award 1975, 76, 78"),
     ({"start_date": "2004"}, "Example committee 98-00,02,04"),
+    ({"start_date": "2016"}, "Example course 2005-06, 16- Example Course"),
     # TYGUXX: a month abbreviation and a two-digit year.
     ({"start_date": "1998", "end_date": "1999"}, "Example fellow Oct. 98 - Oct. 99"),
     # SIJYJZ: a two-digit year opening an open range.
@@ -3306,6 +3307,10 @@ def test_year_not_in_source_reads_dashed_dates_list_tails_and_month_years(fields
     ({"start_date": "2013-05-13"}, "Example lecture: Example Hall, May 13,"),
     # A dash-joined run of numbers states no m-d-yy year.
     ({"start_date": "2011"}, "Co-I Example contract 3-24-11-26"),
+    # A day a word follows, and a number before a dash that opens a title.
+    ({"start_date": "2013"}, "Board meeting May 13 at Example Hall"),
+    ({"start_date": "2020"}, "Volume 20 - Example Title"),
+    ({"start_date": "2012"}, "Chapter 12- Example Title"),
 ])
 def test_year_not_in_source_new_shapes_do_not_vouch_for_a_day_or_a_number_run(fields, text):
     assert len(_not_in_source(_fields_entry("C", fields, text=text))) == 1
@@ -4473,6 +4478,9 @@ def test_span_count_spares_month_comma_and_wrapped_ranges(text):
     ("2013\u2013 Reviewer, Example Society\t2003, 2007", "2003", "2013"),
     # Nor two items that each open with "year -".
     ("2003 - Reviewer, Example Society; 2013 - Reviewer, Example Board", "2003", "2013"),
+    # A semicolon, or a comma straight after the dash, ends the first item.
+    ("2003 - Reviewer, Example Society; 2013", "2003", "2013"),
+    ("Reviewer 2003 -, 2013", "2003", "2013"),
 ])
 def test_span_count_still_flags_yuyvig_true_lists(text, start, end):
     """The batch's true hits (#1585) keep firing."""

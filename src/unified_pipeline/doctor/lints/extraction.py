@@ -1868,17 +1868,22 @@ _MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june
 #: token can only silence a finding. A dash-joined m-d-yy date ("3-30-00"),
 #: alone, so "3-24-11-26" (Mar 2024 to Nov 2026) still has no year "11".
 _DASHED_DATE_YEAR_RE = re.compile(r"(?<![\d\-/.])\d{1,2}-\d{1,2}-\s?(\d{2})(?![\d\-/])")
-#: The two-digit tails of a list after a four-digit year or a two-digit
-#: range: "2014,15,16", "1975, 76, 78", "98-00,02,04" (`_RANGE_SHORTHAND_RE`
-#: reads only the first).
-_YEAR_LIST_TAILS_RE = re.compile(r"(?<!\d)(?:\d{4}|\d{2}-\d{2})((?:\s*,\s*\d{2}(?!\d))+)")
+#: The two-digit tails of a list after a four-digit year, its range
+#: shorthand or a two-digit range: "2014,15,16", "1975, 76, 78",
+#: "2005-06, 16", "98-00,02,04" (`_RANGE_SHORTHAND_RE` reads only the first).
+_YEAR_LIST_TAILS_RE = re.compile(
+    r"(?<!\d)(?:\d{4}(?:-\d{2})?|\d{2}-\d{2})((?:\s*,\s*\d{2}(?!\d))+)")
 #: A two-digit year after a month or term word ("Oct. 98", "June 05"), not
-#: a day: one a comma or a four-digit year follows ("May 13,", "June 05 2010").
+#: a day: one a comma, a four-digit year or a word follows ("May 13,",
+#: "June 05 2010", "May 13 at").
 _MONTH_TWO_DIGIT_YEAR_RE = re.compile(
-    rf"(?<![a-z]){_MONTH_PATTERN}\s*(\d{{2}})(?!\d|\s*,|\s*\d{{4}})", re.IGNORECASE)
-#: A two-digit year opening a range left open: "16- present", "16-".
+    rf"(?<![a-z]){_MONTH_PATTERN}\s*(\d{{2}})(?!\d|\s*,|\s*\d{{4}})(?=\s*(?:$|[^\w\s]))",
+    re.IGNORECASE)
+#: A two-digit year opening a range left open: "16- present", "16-", not a
+#: number before a dash that opens a title ("Volume 20 - Title").
 _OPEN_TWO_DIGIT_YEAR_RE = re.compile(
-    r"(?<![\d\-/.])(\d{2})\s*[-–—](?!\s*\d)")
+    r"(?<![\d\-/.])(\d{2})\s*[-–—]\s*(?:present|current|now|date|today|$|\))",
+    re.IGNORECASE)
 _SOURCE_ONLY_TWO_DIGIT_YEAR_RES = (_DASHED_DATE_YEAR_RE, _MONTH_TWO_DIGIT_YEAR_RE,
                                    _OPEN_TWO_DIGIT_YEAR_RE)
 
@@ -3173,8 +3178,10 @@ def _written_spans(text: str) -> list[WrittenSpan]:
 #: The gap between two lone years of one range: a dash right after the first
 #: that no end follows ("2007– Professor of X, Y\t2012"), or one right before
 #: the second that no start precedes ("2014 Professor of X, Y\tto 2019",
-#: once `_span_source` has made "to" a dash).
-_SPAN_WRAPPED_GAP_RE = re.compile(rf"^\s*{_SPAN_DASH}|{_SPAN_DASH}\s*$")
+#: once `_span_source` has made "to" a dash). Not a gap a semicolon ends an
+#: item in, or whose dash a comma follows ("2003 - Talk; 2013", "2003 -, 2013").
+_SPAN_WRAPPED_GAP_RE = re.compile(
+    rf"^(?!.*;)(?:\s*{_SPAN_DASH}(?!\s*,)|.*{_SPAN_DASH}\s*$)", re.DOTALL)
 #: A dash right after a lone year: the year opens a span of its own.
 _SPAN_OPEN_DASH_RE = re.compile(rf"\s*{_SPAN_DASH}")
 
