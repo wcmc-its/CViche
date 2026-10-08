@@ -288,12 +288,14 @@ class _FieldsEntry(NamedTuple):
     (§8.1).
     `fields` is empty when `extracted_fields` is absent or not an object.
     `element_idx_end` completes the span a later stage's copy of the entry
-    is found by (`_span`)."""
+    is found by (`_span`). `hierarchy` is the entry's heading path, empty
+    when absent."""
     element_idx: object
     code: str
     text: str
     fields: Mapping[str, object]
     element_idx_end: object = None
+    hierarchy: tuple[str, ...] = ()
 
 
 def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
@@ -307,5 +309,6 @@ def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
             raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
             str(raw.get("text") or ""),
             fields if isinstance(fields, Mapping) else {},
-            raw.get("element_idx_end")))
+            raw.get("element_idx_end"),
+            tuple(str(h) for h in raw.get("hierarchy") or ())))
     return entries

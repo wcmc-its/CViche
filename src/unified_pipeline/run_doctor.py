@@ -366,6 +366,14 @@ Lints, ranked by the severity of the failure class they catch:
                           (#1243, #1417): the record it holds is in no part
                           of the output. WARN, one per run, naming each code
                           and its entries. Reads stage 4 only; no score cap
+14ag. summary_unsupported_claim a sentence of the research summary stage 4.5
+                          generated that claims something of a kind the CV
+                          has none of (#1554, OIEPQD): a pending application
+                          with no pending grant, funding with no grant,
+                          mentoring with no mentoring, or a funder (NIH, NSF,
+                          DoD, ...) no entry or source line names. WARN, one
+                          per kind; no score cap. Reads stage 4.5 and 4, and
+                          the source when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -565,6 +573,9 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_segmentation_collapse,
     lint_table_lost,
 )
+from unified_pipeline.doctor.lints.summary import (  # noqa: F401,E402
+    lint_summary_unsupported_claim,
+)
 from unified_pipeline.doctor.precision import precision_payload
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
@@ -710,6 +721,7 @@ KNOWN_LINTS = (
     "group_header_context",
     "orphaned_fragments",
     "stage4_unplaced_items",
+    "summary_unsupported_claim",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -938,6 +950,13 @@ LINT_PREVALENCE = {
     # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
     # floor, as for research_summary_call_failed above.
     "stage4_unplaced_items": 0.001,
+    # summary_unsupported_claim (#1554, OIE-SUM in doctor/PRECISION.md): 3 of
+    # the 107 stored stage-4.5 summaries of the EBYSBC/s7ab/pilot (63),
+    # NDMRSO (29), EOAHMI (9) and X6 (6) farms, and 9 of the 14 OIEPQD runs
+    # (dev-258, after #1542's pending-application prompt line), measured
+    # 2026-10-07. The farm rate is the one before #1542; same mixed-corpus
+    # caveat as above.
+    "summary_unsupported_claim": 0.028,
 }
 
 
@@ -1493,6 +1512,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("orphaned_fragments", lint_orphaned_fragments, ("stage_3b",)),
     LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
+    LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,
+             ("stage_4_5", "stage_4"), optional=("source_lines",)),
 )
 
 
