@@ -727,6 +727,13 @@ GENERATION_METHOD_REFUSED = "refused_by_model"
 # The generation call raised LLM_CALL_ERRORS on every model tried (#1174); the
 # artifact's STAGE4_5_CALL_FAILURES_KEY record says how.
 GENERATION_METHOD_LLM_CALL_FAILED = "llm_call_failed"
+# The reply parsed as JSON that wraps no summary string, so there is no prose to
+# render (#1582). A JSON object that does wrap one is unwrapped instead.
+GENERATION_METHOD_NON_PROSE = "non_prose_reply"
+
+# The keys a JSON-wrapped reply has carried its summary under (#1582: ECXGAT's
+# reply was {"research_summary": "..."} though the prompt asks for plain prose).
+JSON_REPLY_SUMMARY_KEYS = ("research_summary", "summary")
 
 # score_reasoning when the M1 relevance call failed: the M1 text is treated as
 # unscored (score 0.0), so a summary is generated from the CV instead (#1174).
@@ -743,18 +750,41 @@ REFUSAL_OPENER_PATTERN = re.compile(
     re.IGNORECASE)
 
 
+def unwrap_json_reply(reply: str) -> str | None:
+    """*reply* as the prose stage 6 renders: *reply* itself when it is not JSON;
+    the summary string a JSON object wraps (under a `JSON_REPLY_SUMMARY_KEYS` key,
+    or as its only value); None for JSON of any other shape (#1582)."""
+    try:
+        parsed = json.loads(reply)
+    except json.JSONDecodeError:
+        return reply
+    if not isinstance(parsed, dict):
+        return None
+    for key in JSON_REPLY_SUMMARY_KEYS:
+        if isinstance(parsed.get(key), str):
+            return parsed[key].strip()
+    values = list(parsed.values())
+    if len(values) == 1 and isinstance(values[0], str):
+        return values[0].strip()
+    return None
+
+
 def generate_summary_unless_withheld(context: str) -> tuple[str, str, dict]:
     """Generate the research summary, or return an empty one that stage 6 renders as nothing.
 
     Returns (summary_text, generation_method, usage). A blank context makes no LLM call:
     the model has nothing to summarize and answers with a refusal that would otherwise be
     rendered as the owner's Research Activities paragraph (MYAXRH, #1224). A reply that
-    opens as a refusal is withheld the same way. Stage 6 skips a summary under its length
-    floor, so the section stays the template's own empty heading.
+    opens as a refusal is withheld the same way. A JSON-wrapped reply is unwrapped to its
+    summary string, or withheld when it wraps none (#1582). Stage 6 skips a summary under
+    its length floor, so the section stays the template's own empty heading.
     """
     if not context.strip():
         return "", GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {}
-    summary, usage = generate_research_summary(context)
+    reply, usage = generate_research_summary(context)
+    summary = unwrap_json_reply(reply)
+    if not summary:
+        return "", GENERATION_METHOD_NON_PROSE, usage
     if REFUSAL_OPENER_PATTERN.match(summary):
         return "", GENERATION_METHOD_REFUSED, usage
     return summary, GENERATION_METHOD_LLM, usage

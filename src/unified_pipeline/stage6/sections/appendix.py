@@ -224,6 +224,11 @@ APPENDIX_NOTE_TEXT = {
             "For each one, move it to the right section or delete it. Some may already "
             "appear above."),
 }
+# A count of 0: a box is only written for a line, so the Appendix holds nothing
+# but the personal-data withheld notice, which is not an entry (#1582).
+APPENDIX_NOTE_WITHHELD_ONLY_TEXT = (
+    "Personal data from your original CV was withheld here. The comment on the "
+    "notice below says what was withheld.")
 
 
 _SOURCE_SECTION_NUMBER_RE = re.compile(r"^(?:[IVXLCDM]+|[A-Z]|\d+)[.)]\s+")
@@ -249,6 +254,8 @@ def appendix_group_heading(heading: str) -> str:
 
 def appendix_note_text(count: int) -> str:
     """The Appendix note box's instruction for *count* entries."""
+    if count == 0:
+        return APPENDIX_NOTE_WITHHELD_ONLY_TEXT
     return APPENDIX_NOTE_TEXT[count == 1].format(count=count)
 
 # Why an entry did not reach the appendix, named for the check that caught it.
