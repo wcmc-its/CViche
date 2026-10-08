@@ -18,7 +18,7 @@ from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 from docx.oxml.xmlchemy import BaseOxmlElement
-from docx.shared import Inches
+from docx.shared import Inches, Pt, RGBColor
 from docx.table import _Cell
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
@@ -141,12 +141,26 @@ _DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|r
 #: titled "CViche ..." (the stage-6 Appendix note and the review notes).
 REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
 NOTES_FONT = "Arial"
-BOX_FILL = "E7E6E6"  # stage6/formatting/docx.py CVICHE_BOX_* (#1552)
+BOX_FILL = "E7E6E6"  # these mirror stage6/formatting/docx.py CVICHE_BOX_* (#1552)
 BOX_BORDER = "808080"
 BOX_BORDER_SIZE = "6"  # eighths of a point: 0.75pt
-NOTE_BULLET = "\u2022 "
-ITEM_INDENT = 0.25  # inches
-KEPT_INDENT = 0.5
+BOX_FULL_WIDTH = "5000"  # fiftieths of a percent: the whole text column
+BOX_PADDING = {"top": 120, "bottom": 120, "left": 160, "right": 160}  # twips: 6pt and 8pt
+BOX_TITLE_PT = 9
+BOX_TITLE_COLOR = RGBColor(0x59, 0x59, 0x59)
+BOX_TEXT_PT = 10
+BOX_OUTSIDE_PT = 6
+BOX_LINE_AFTER_PT = 3
+BOX_TITLE_AFTER_PT = 6
+BOX_GROUP_BEFORE_PT = 6
+BOX_GROUP_AFTER_PT = 2
+NOTE_BULLET = "\u2022\t"
+ITEM_INDENT = Inches(0.25)
+BULLET_HANG = Inches(0.15)
+#: "Removed:" / "Kept:" start at the first indent, the quote hangs at the
+#: second: 0.75" apart, since "Removed:" in 10pt italic Arial is about 0.63".
+PAIR_LABEL_INDENT = Inches(0.5)
+PAIR_TEXT_INDENT = Inches(1.25)
 DEDUP_TITLE = "Removed as near-duplicates"
 DEDUP_INSTRUCTION = ("We kept one copy of each. If any of these is a separate entry, "
                      "add it back in the section shown.")
@@ -188,10 +202,11 @@ class Flag:
 @dataclass(frozen=True)
 class Note:
     """One item in the review-notes box, under the group its title and
-    instruction name. ``kept`` is the copy dedup kept, for a near-duplicate."""
+    instruction name. ``removed`` and ``kept`` are a near-duplicate's two copies."""
     title: str
     instruction: str
     item: str | None = None
+    removed: str | None = None
     kept: str | None = None
 
 
@@ -290,10 +305,8 @@ def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
     for item in [*inst.quotes, *inst.notes]:  # "entry N: ..." reads as a note
         m = _DEDUP_RE.search(item)
         if m is not None:
-            section = TAXONOMY_LABELS.get(m["code"])
-            removed = _quoted(m["dropped"])
-            notes.append(Note(DEDUP_TITLE, DEDUP_INSTRUCTION,
-                              f"{section}: {removed}" if section else removed, _quoted(m["kept"])))
+            notes.append(Note(DEDUP_TITLE, DEDUP_INSTRUCTION, TAXONOMY_LABELS.get(m["code"]),
+                              _quoted(m["dropped"]), _quoted(m["kept"])))
     return notes or [Note(DEDUP_TITLE, DEDUP_INSTRUCTION)]
 
 
@@ -330,10 +343,32 @@ def _note_item(lint: str, inst: DoctorFindingInstance) -> str | None:
 
 
 def _box(doc: Document, title: str) -> _Cell:
-    """A one-cell, light-gray, bordered table closing the document: CViche's
-    voice, deletable in one step. Returns the cell, holding the bold title."""
-    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    """A one-cell, light-gray, bordered table the full width of the text
+    column, closing the document: CViche's voice, deletable in one step.
+    Returns the cell, holding the title (9pt bold gray small caps). Mirrors
+    stage 6's add_cviche_box (#1552), which replaces this once merged."""
+    table = doc.add_table(rows=1, cols=1)
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = tbl_pr.makeelement(qn("w:tblW"), {})
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:type"), "pct")
+    tbl_w.set(qn("w:w"), BOX_FULL_WIDTH)
+    margins = tbl_pr.makeelement(qn("w:tblCellMar"), {})
+    for side, twips in BOX_PADDING.items():
+        margins.append(margins.makeelement(qn(f"w:{side}"), {qn("w:w"): str(twips), qn("w:type"): "dxa"}))
+    look = tbl_pr.find(qn("w:tblLook"))
+    if look is not None:
+        look.addprevious(margins)  # schema order: tblCellMar before tblLook
+    else:
+        tbl_pr.append(margins)
+    cell = table.cell(0, 0)
     tc_pr = cell._tc.get_or_add_tcPr()
+    tc_w = tc_pr.find(qn("w:tcW"))
+    if tc_w is not None:
+        tc_w.set(qn("w:type"), "pct")
+        tc_w.set(qn("w:w"), BOX_FULL_WIDTH)
     tc_pr.append(tc_pr.makeelement(qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto",
                                                   qn("w:fill"): BOX_FILL}))
     borders = tc_pr.makeelement(qn("w:tcBorders"), {})
@@ -341,15 +376,59 @@ def _box(doc: Document, title: str) -> _Cell:
         borders.append(borders.makeelement(qn(f"w:{side}"), {
             qn("w:val"): "single", qn("w:sz"): BOX_BORDER_SIZE, qn("w:color"): BOX_BORDER}))
     tc_pr.append(borders)
-    _box_line(cell.paragraphs[0], title, bold=True)
+    title_para = cell.paragraphs[0]
+    _spacing(title_para, after=BOX_TITLE_AFTER_PT)
+    run = _run(title_para, title, size=BOX_TITLE_PT, bold=True)
+    run.font.small_caps, run.font.color.rgb = True, BOX_TITLE_COLOR
     return cell
 
 
-def _box_line(para: Paragraph, text: str, *, bold: bool = False, indent: float = 0) -> None:
+def _spacing(para: Paragraph, before: float = 0, after: float = BOX_LINE_AFTER_PT) -> None:
+    fmt = para.paragraph_format
+    fmt.space_before, fmt.space_after, fmt.line_spacing = Pt(before), Pt(after), 1.0
+
+
+def _run(para: Paragraph, text: str, size: float = BOX_TEXT_PT, bold: bool = False,
+         italic: bool = False) -> Run:
     run = para.add_run(text)
-    run.font.name, run.font.bold = NOTES_FONT, bold or None
-    if indent:
-        para.paragraph_format.left_indent = Inches(indent)
+    run.font.name, run.font.size = NOTES_FONT, Pt(size)
+    run.font.bold, run.font.italic = bold or None, italic or None
+    return run
+
+
+def _box_group(cell: _Cell, text: str, first: bool) -> None:
+    para = cell.add_paragraph()
+    _spacing(para, before=0 if first else BOX_GROUP_BEFORE_PT, after=BOX_GROUP_AFTER_PT)
+    para.paragraph_format.keep_with_next = True
+    _run(para, text, bold=True)
+
+
+def _box_text(cell: _Cell, text: str) -> None:
+    para = cell.add_paragraph()
+    _spacing(para)
+    _run(para, text)
+
+
+def _box_item(cell: _Cell, text: str) -> None:
+    """A bulleted item, its wrapped lines hanging under its text."""
+    para = cell.add_paragraph()
+    _spacing(para)
+    para.paragraph_format.left_indent = ITEM_INDENT + BULLET_HANG
+    para.paragraph_format.first_line_indent = -BULLET_HANG
+    _run(para, f"{NOTE_BULLET}{text}")
+
+
+def _box_pair(cell: _Cell, label: str, text: str, last: bool) -> None:
+    """A "Removed:" / "Kept:" line: the label italic, the quote hanging under
+    its opening mark; only the pair's last line has space after it."""
+    para = cell.add_paragraph()
+    _spacing(para, after=BOX_LINE_AFTER_PT if last else 0)
+    fmt = para.paragraph_format
+    fmt.left_indent, fmt.first_line_indent = PAIR_TEXT_INDENT, PAIR_LABEL_INDENT - PAIR_TEXT_INDENT
+    fmt.tab_stops.add_tab_stop(PAIR_TEXT_INDENT)
+    fmt.keep_with_next = not last or None
+    _run(para, f"{label}\t", italic=True)
+    _run(para, text)
 
 
 def _split(r: BaseOxmlElement, t: BaseOxmlElement, lo: int, hi: int) -> BaseOxmlElement:
@@ -390,23 +469,27 @@ def _runs(para: Paragraph, span: tuple[int, int] | None) -> list[Run]:
 
 
 def _add_review_notes(doc: Document, notes: list[Note]) -> None:
-    """The review-notes box closing the document, after one blank line: a
-    group per action, with its count and instruction, then an item per finding."""
+    """The review-notes box closing the document: a group per action, with
+    its count and instruction, then an item per finding. The space above the
+    box is set on the document's last paragraph, not a blank one."""
     if not notes:
         return
     groups: dict[tuple[str, str], list[Note]] = {}
     for note in notes:
         groups.setdefault((note.title, note.instruction), []).append(note)
-    doc.add_paragraph()
+    if doc.paragraphs:
+        doc.paragraphs[-1].paragraph_format.space_after = Pt(BOX_OUTSIDE_PT)
     cell = _box(doc, REVIEW_NOTES_TITLE)
-    for (title, instruction), members in groups.items():
-        _box_line(cell.add_paragraph(), f"{title} ({len(members)})", bold=True)
-        _box_line(cell.add_paragraph(), instruction)
+    for n, ((title, instruction), members) in enumerate(groups.items()):
+        _box_group(cell, f"{title} ({len(members)})", first=n == 0)
+        _box_text(cell, instruction)
         for note in dict.fromkeys(members):  # the same item once
             if note.item:
-                _box_line(cell.add_paragraph(), f"{NOTE_BULLET}{note.item}", indent=ITEM_INDENT)
+                _box_item(cell, note.item)
+            if note.removed:
+                _box_pair(cell, "Removed:", note.removed, last=not note.kept)
             if note.kept:
-                _box_line(cell.add_paragraph(), f"Kept: {note.kept}", indent=KEPT_INDENT)
+                _box_pair(cell, "Kept:", note.kept, last=True)
 
 
 def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, int] | None:

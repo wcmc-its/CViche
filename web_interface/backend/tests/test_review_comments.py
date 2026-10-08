@@ -163,9 +163,9 @@ def test_near_duplicates_are_one_group_naming_section_removed_and_kept(tmp_path)
     assert n == 2 and _comments(out) == []
     assert _notes(out) == [
         "Removed as near-duplicates (2)", rc.DEDUP_INSTRUCTION,
-        f'\u2022 Didactic Teaching: "{dropped}"', f'Kept: "{TEACHING}"',
-        '\u2022 Non-peer-reviewed Publications: "(9) Quill AB. Squid optics."',
-        'Kept: "(11) Quill AB. Squid optics."',
+        "\u2022\tDidactic Teaching", f'Removed:\t"{dropped}"', f'Kept:\t"{TEACHING}"',
+        "\u2022\tNon-peer-reviewed Publications", 'Removed:\t"(9) Quill AB. Squid optics."',
+        'Kept:\t"(11) Quill AB. Squid optics."',
     ]
     assert "jaccard" not in "".join(_notes(out))
 
@@ -190,7 +190,7 @@ def test_a_window_that_recurs_across_records_does_not_anchor(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("enrichment_failures", "1 publication(s) failed PubMed enrichment", [other])))
     assert _comments(out) == []
-    assert _notes(out) == ["PubMed lookup failed (1)", _flag("enrichment_failures"), f'\u2022 "{other}"']
+    assert _notes(out) == ["PubMed lookup failed (1)", _flag("enrichment_failures"), f'\u2022\t"{other}"']
 
 
 def test_no_quote_falls_back_to_the_sections_template_heading(tmp_path):
@@ -206,7 +206,7 @@ def test_findings_with_no_place_are_review_notes_closing_the_document(tmp_path):
         _finding("llm_fallback_served", "stage 4 S5: the content filter blocked the primary model")))
     assert n == 1 and _comments(out) == []
     # A note with nothing to point at (no quote, no section) stays on the run page.
-    assert _notes(out) == ["Year probably wrong century (1)", _flag("implausible_year"), "\u2022 Didactic Teaching"]
+    assert _notes(out) == ["Year probably wrong century (1)", _flag("implausible_year"), "\u2022\tDidactic Teaching"]
 
 
 _DIVERSIONS = (
@@ -239,7 +239,7 @@ def test_a_dedup_drop_led_by_its_entry_number_and_cut_at_the_doctors_length(tmp_
     kept = ("Squid Optics Seminar Leader, Example School of Marine Biology, eight lectures yearly; " * 5)[:rc.DEDUP_TEXT_CHARS]
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("dedup_drops", "1 drop", [
         f"entry 12: K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Optics Seminar' vs kept '{kept}'"])))
-    assert _notes(out)[2:] == ['\u2022 Didactic Teaching: "Squid Optics Seminar"', f'Kept: "{kept}\u2026"']
+    assert _notes(out)[2:] == ["\u2022\tDidactic Teaching", 'Removed:\t"Squid Optics Seminar"', f'Kept:\t"{kept}\u2026"']
 
 
 def test_a_dedup_quote_the_doctor_cut_still_reads(tmp_path):
@@ -248,7 +248,7 @@ def test_a_dedup_quote_the_doctor_cut_still_reads(tmp_path):
                 "vs kept 'Core Squid Curriculum b Coordinator, Lecturer, Workshop Facilitator, Squid Opti'")
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("dedup_drops", "1 dedup drop(s)", [evidence + "\u2026"])))
-    assert _notes(out)[2] == '\u2022 Didactic Teaching: "Core Squid Curriculum b Lecturer"'
+    assert _notes(out)[3] == 'Removed:\t"Core Squid Curriculum b Lecturer"'
 
 
 def test_protected_data_flag_never_carries_the_finding_text(tmp_path):
@@ -260,7 +260,7 @@ def test_protected_data_flag_never_carries_the_finding_text(tmp_path):
         _finding("protected_data_in_output", "a bare date found in the Personal Data block", severity="ERROR")))
     assert _comments(out) == []
     assert _notes(out) == ["Protected personal data in document (2)", _flag("protected_data_in_output"),
-                           "\u2022 Appendix: children / dependents", "\u2022 Personal Data: a bare date"]
+                           "\u2022\tAppendix: children / dependents", "\u2022\tPersonal Data: a bare date"]
 
 
 def test_info_and_skipped_findings_get_no_comment(tmp_path):
@@ -274,21 +274,45 @@ def test_info_and_skipped_findings_get_no_comment(tmp_path):
 def test_stray_text_is_titled_plainly_and_quotes_what_to_delete(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("output_hygiene", "1 boilerplate line(s) rendered in the appendix", ["Insert dates here (MM/YYYY)"])))
-    assert _notes(out) == ["Stray text to delete (1)", _flag("output_hygiene"), '\u2022 "Insert dates here (MM/YYYY)"']
+    assert _notes(out) == ["Stray text to delete (1)", _flag("output_hygiene"), '\u2022\t"Insert dates here (MM/YYYY)"']
 
 
-def test_review_notes_are_one_gray_arial_box_after_one_blank_line(tmp_path):
+def test_review_notes_box_closes_the_document_in_its_own_type_and_spacing(tmp_path):
+    """One table, last in the document (deleting it is one step); the space
+    above it sits on the last CV paragraph, not a blank one; full width, 6/8pt
+    padding, a 9pt gray small-caps title and 10pt text."""
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("enrichment_failures", "1 failed", ["99. Nowhere AB. Unprinted paper. J Example. 2001."])))
     doc = Document(str(out))
     body = [el for el in doc.element.body if el.tag != qn("w:sectPr")]
-    assert body[-1].tag == qn("w:tbl")  # the box closes the document: deleting it is one step
-    assert body[-2].tag == qn("w:p") and not "".join(t.text for t in body[-2].iter(qn("w:t")))
-    assert body[-3].tag == qn("w:p") and "".join(t.text for t in body[-3].iter(qn("w:t"))) == APPENDIX_LINES[-1]
+    assert body[-1].tag == qn("w:tbl")
+    last_text = doc.paragraphs[-1]
+    assert last_text.text == APPENDIX_LINES[-1] and last_text.paragraph_format.space_after.pt == 6
+    tbl_pr = doc.tables[-1]._tbl.tblPr
+    assert (tbl_pr.find(qn("w:tblW")).get(qn("w:type")), tbl_pr.find(qn("w:tblW")).get(qn("w:w"))) == ("pct", "5000")
+    assert {e.tag.split("}")[1]: e.get(qn("w:w")) for e in tbl_pr.find(qn("w:tblCellMar"))} == {
+        "top": "120", "bottom": "120", "left": "160", "right": "160"}
     cell = doc.tables[-1].cell(0, 0)
     assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == rc.BOX_FILL
-    assert cell.paragraphs[0].text == rc.REVIEW_NOTES_TITLE and cell.paragraphs[0].runs[0].bold
+    title, group, instruction, item = cell.paragraphs[:4]
+    assert title.text == rc.REVIEW_NOTES_TITLE and title.runs[0].font.small_caps
+    assert title.runs[0].font.size.pt == 9 and str(title.runs[0].font.color.rgb) == "595959"
+    assert group.runs[0].bold and group.runs[0].font.size.pt == 10
+    assert group.paragraph_format.space_before.pt == 0  # the first group
+    assert instruction.runs[0].font.size.pt == 10 and not instruction.runs[0].bold
+    assert item.paragraph_format.first_line_indent < 0  # hanging bullet
     assert {r.font.name for p in cell.paragraphs for r in p.runs} == {"Arial"}
+
+
+def test_removed_and_kept_are_parallel_italic_labels_with_hanging_quotes(tmp_path):
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("dedup_drops", "1 drop", [
+        "K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Lecture 5 hrs' vs kept 'Squid Lecture 4 hrs'"])))
+    removed, kept = Document(str(out)).tables[-1].cell(0, 0).paragraphs[-2:]
+    for para, label in ((removed, "Removed:\t"), (kept, "Kept:\t")):
+        assert para.runs[0].text == label and para.runs[0].italic
+        assert para.paragraph_format.first_line_indent < 0
+    assert removed.paragraph_format.space_after.pt == 0 and removed.paragraph_format.keep_with_next
+    assert kept.paragraph_format.space_after.pt == 3
 
 
 def test_no_review_copy_when_nothing_has_a_place_or_an_item(tmp_path):

@@ -199,7 +199,7 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     assert persisted == [str(report), str(review)]
     # The quoted text is not in the document, so it is a review note in the box closing the copy.
     notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
-    assert notes[1:] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022 "Insert dates here (MM/YYYY)"']
+    assert notes[1:] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
     assert len(list(Document(str(clean)).comments)) == 0
 
 
