@@ -587,9 +587,10 @@ def is_overflow_candidate(entry: Mapping[str, Any]) -> bool:
 
     K and S entries never qualify (free-form teaching text; bibliography uses
     enrichment), nor does one stage 5c formatted. A coverage of 0 or None reads
-    as unknown and does not qualify. The Appendix also reads this: a T entry
+    as unknown and does not qualify. The Appendix also reads this: an entry
     that qualifies is re-split by the reconsider pass, so its Appendix line
-    stays a capped pointer (#1230).
+    stays a capped pointer; every other Appendix line renders whole (#1230,
+    #1555).
     """
     code = str(entry.get('taxonomy_code') or '')
     if code.startswith(('K', 'S')) or _has_formatted_text(entry):
