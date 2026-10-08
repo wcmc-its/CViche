@@ -688,6 +688,46 @@ def test_5d_build_raw_content_defaults_missing_code_to_s1_description():
     assert "(S1: Peer-reviewed research article (journal article))" in raw
 
 
+@pytest.mark.parametrize("text, sent", [
+    # #1570 SIJYJZ 732 shape: the CV's "10." became "10th Annual Meeting".
+    ("10. Annual Meeting of the Society, Quilltown, 2004", "Annual Meeting of the Society, Quilltown, 2004"),
+    ("3) Rook A. A title. J Med. 2001.", "Rook A. A title. J Med. 2001."),
+    ("(12) Rook A. A title. J Med. 2001.", "Rook A. A title. J Med. 2001."),
+    ("  7.\tRook A. A title. J Med. 2001.", "Rook A. A title. J Med. 2001."),
+    ("123. Rook A. A title. J Med. 2001.", "Rook A. A title. J Med. 2001."),
+    # Not a list number: a year, a DOI, a four-digit count, a number mid-line.
+    ("2004. Annual Meeting of the Society", "2004. Annual Meeting of the Society"),
+    ("10.1000/xyz123 Rook A. A title.", "10.1000/xyz123 Rook A. A title."),
+    ("1234. Rook A. A title.", "1234. Rook A. A title."),
+    ("Rook A. 10. Annual Meeting", "Rook A. 10. Annual Meeting"),
+    ("10 Annual Meeting of the Society", "10 Annual Meeting of the Society"),
+])
+def test_5d_build_raw_content_sends_the_line_without_its_list_number(text, sent):
+    entry = {"taxonomy_code": "S8", "text": text}
+    raw, id_map = s5d.build_raw_content([entry])
+    assert raw.split("\n")[1] == sent
+    assert id_map["CIT-0001"]["text"] == text  # the entry itself keeps its line
+
+
+def test_5d_build_raw_content_strips_only_the_first_list_number():
+    raw, _ = s5d.build_raw_content([{"taxonomy_code": "S1", "text": "4. 5. Rook A. A title."}])
+    assert raw.split("\n")[1] == "5. Rook A. A title."
+
+
+def test_5d_prompt_asks_for_source_authors_not_one_initial_per_author():
+    # #1570: "LastName INITIALS" for every author made 5d write an initial the
+    # source does not give (QQGKXR 481, 483) and join a bare initials token to
+    # the next surname (FLBFRK 25).
+    prompt = s5d.CITATION_FORMATTER_PROMPT
+    assert "Never add an initial the source does not give" in prompt
+    assert "never split one into two" in prompt
+    assert "Example: Smith JA, Jones MB, Brown CK" not in prompt
+    assert "never \"10th Annual Meeting\"" in prompt
+    assert "is the CV's list number, not part of the citation" in prompt
+    # The template still formats: no stray brace in the new text.
+    assert "[CIT-0001] x" in prompt.format(raw_content="[CIT-0001] x")
+
+
 # ---------------------------------------------------------------------------
 # stage_5d: parse_llm_output
 # ---------------------------------------------------------------------------
