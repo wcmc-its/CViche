@@ -462,6 +462,49 @@ def test_a_fanned_out_child_is_one_row_with_its_own_dates():
     ]
 
 
+
+def test_the_last_stage4_record_does_not_reparse_its_siblings_lines():
+    """#1556 a (OIEPQD UNKNBU 277): the last of stage 4's records keeps the
+    parent's whole text, one award per line. Re-parsed, it printed every
+    sibling again: three records rendered as five rows."""
+    from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+    records = [{"award_name": name, "granting_body": "Imaginary Society",
+                "date": year}
+               for name, year in (("Pretend Medal", "2015"),
+                                  ("Made-up Prize", "2014"),
+                                  ("Fictional Fellowship", "2013"))]
+    entry = {"taxonomy_code": "H", "element_idx_start": 7,
+             "text": "Pretend Medal, Imaginary Society, 2015\n"
+                     "Made-up Prize, Imaginary Society, 2014\n"
+                     "Fictional Fellowship, Imaginary Society, 2013",
+             "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    grouped = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    assert _render_honors(grouped["H"]) == [
+        ["Pretend Medal", "Imaginary Society", "2015"],
+        ["Made-up Prize", "Imaginary Society", "2014"],
+        ["Fictional Fellowship", "Imaginary Society", "2013"],
+    ]
+
+
+def test_the_last_stage4_record_falls_back_to_its_own_line():
+    """#1556 a: a last record with no award name falls back to its own line
+    for the name cell, not to the parent's whole text, which would print
+    the sibling award inside that cell."""
+    from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+    records = [{"award_name": "Pretend Medal",
+                "granting_body": "Imaginary Society", "date": "2015"},
+               {"award_name": None, "granting_body": "Fictional Board",
+                "date": "2013"}]
+    entry = {"taxonomy_code": "H", "element_idx_start": 7,
+             "text": "Pretend Medal, Imaginary Society, 2015\n"
+                     "Fictional Board, 2013",
+             "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    grouped = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    rows = _render_honors(grouped["H"])
+    assert len(rows) == 2
+    assert [row for row in rows if "Pretend Medal" in " ".join(row)] == [
+        ["Pretend Medal", "Imaginary Society", "2015"]]
+
 def test_a_date_only_fragment_keeps_an_empty_name_cell():
     """A stage-2 date continuation coded H: the range now comes from stage
     4's fields, and the fragment is still peeled off the name cell rather
