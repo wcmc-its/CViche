@@ -1136,6 +1136,61 @@ def _contact_records(fields: dict, records_key: str | None) -> list[dict]:
     return [*records[:-1], {key: value for key, value in fields.items() if key != records_key}]
 
 
+#: The cv_owner fields whose words are the owner's name. Credentials are left
+#: out, so a "PhD" cannot make a third party's name read as the owner's.
+_OWNER_NAME_KEYS = ('first_name', 'middle_name', 'last_name', 'full_name')
+#: The shortest word compared, so an initial or "Jr" cannot match a name.
+_MIN_NAME_WORD_CHARS = 3
+_NAME_WORD_RE = re.compile(r'[^\W\d_]+')
+#: A staff role that labels a contact block as someone else's: the assistant
+#: or coordinator a CV lists for scheduling (#1578, YUYVIG DYLJXC 17 and 21).
+#: A faculty title that starts with one of these words is the owner's own
+#: ("Assistant Professor", "Assistant Dean"), so those are not staff labels.
+_STAFF_ROLE_RE = re.compile(
+    r'\b(?:assistant|coordinator|administrator|secretary|scheduler)\b'
+    r'(?!\s+(?:professor|prof\b|dean|director|chief|chair|attending|clinical|research'
+    r'|investigator|scientist|physician|editor|member))', re.IGNORECASE)
+
+
+def _name_words(value: _JsonValue) -> frozenset[str]:
+    """The lowercased words of a name, without initials or periods."""
+    if not isinstance(value, str):
+        return frozenset()
+    return frozenset(word for word in _NAME_WORD_RE.findall(value.replace('.', '').lower())
+                     if len(word) >= _MIN_NAME_WORD_CHARS)
+
+
+def _owner_name_words(cv_owner: dict | None) -> frozenset[str]:
+    """Every word of the owner's name (`_OWNER_NAME_KEYS`). All of them, not
+    just `last_name`: stage 4's surname is not ground truth for a compound
+    surname, and a wider set only ever spares a record."""
+    owner = cv_owner or {}
+    return frozenset(word for key in _OWNER_NAME_KEYS for word in _name_words(owner.get(key)))
+
+
+def _is_third_party_record(fields: dict, text: str, owner_words: frozenset[str]) -> bool:
+    """Whether a record is someone else's contact block (#1578): stage 4 names
+    a person who shares no word with the owner, and the entry's text labels
+    the block with a staff role (`_STAFF_ROLE_RE`). Both are needed: the
+    corpus has owner blocks named for an endowed chair or a hospital, with no
+    staff label. With no owner name known, nothing is judged a third party's."""
+    other_name = _name_words(fields.get('name'))
+    return (bool(owner_words) and bool(other_name) and not other_name & owner_words
+            and _STAFF_ROLE_RE.search(text) is not None)
+
+
+def _email_in_text(entry: dict, ctx: _RoutingContext, slots: _ContactSlots) -> None:
+    """Offer the first email in the entry's text when no email row is filled
+    yet and the pii pass did not cut it from a protected fragment. Lifted out
+    of `_fill_personal_data` (#1578) unchanged."""
+    if slots.work_email or slots.personal_email:
+        return
+    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
+    if email_match and not _from_pii_fragment(email_match.group(0), ctx.pii_fragments):
+        slots.work_email, slots.personal_email = _route_email(
+            email_match.group(0), ctx.text, None, slots.work_email, slots.personal_email)
+
+
 def _route_contact_record(fields: dict, ctx: _RoutingContext, slots: _ContactSlots,
                           ranks: tuple[_SlotRank, _SlotRank]
                           ) -> tuple[list[tuple[_AddressFate, str]], str | None]:
@@ -1494,6 +1549,7 @@ class PersonalDataSection:
 
         slots = _ContactSlots()
         ranks = _office_slot_ranks(unconsumed)
+        owner_words, third_party_entries = _owner_name_words(cv_owner), []
         for entry in entries:
             # Values stage 4 lifted out of a protected-personal-data fragment
             # are not contact details and must not reach the template (web07:
@@ -1508,7 +1564,11 @@ class PersonalDataSection:
             records = _contact_records(entry.get('extracted_fields', {}) or {}, records_key)
             address_fates: list[tuple[_AddressFate, str]] = []
             orcids: list[str] = []
-            for fields in records:
+            # #1578: a third party's record fills no owner row (`_is_third_party_record`).
+            owned = [fields for fields in records
+                     if not _is_third_party_record(fields, ctx.text, owner_words)]
+            third_party_entries += [entry] if len(owned) < len(records) else []
+            for fields in owned:
                 fates, orcid = _route_contact_record(fields, ctx, slots, ranks)
                 address_fates.extend(fates)
                 orcids.extend([orcid] if orcid else [])
@@ -1518,15 +1578,8 @@ class PersonalDataSection:
                     self._a_researcher_profiles.append(profile)
                     s0_text += ' ' + profile['text']
 
-            # Also check entry text for email pattern (fallback)
-            if not slots.work_email and not slots.personal_email:
-                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
-                if email_match and not _from_pii_fragment(email_match.group(0),
-                                                          ctx.pii_fragments):
-                    slots.work_email, slots.personal_email = _route_email(
-                        email_match.group(0), ctx.text, None, slots.work_email,
-                        slots.personal_email)
-
+            if len(owned) == len(records):
+                _email_in_text(entry, ctx, slots)
             unrouted = _unrouted_record_values(records, ctx, slots) if len(records) > 1 else []
             recovered = _entry_for_recovery(entry, address_fates, bool(orcids) or (
                 slots.rendered() != slots_before), unrouted)
@@ -1555,6 +1608,8 @@ class PersonalDataSection:
         # already pins that path and caught this one the moment it went live.
         if not work_email and all_entries:
             for entry in all_entries:
+                if any(entry is third_party for third_party in third_party_entries):
+                    continue  # #1578: a third party's email is never the owner's
                 text = entry.get('text', '')
                 # Read from the #820 pass, not recomputed -- see the
                 # per-entry loop above for why.
