@@ -123,6 +123,8 @@ export interface BatchUpload {
   /** Add emailed CVs (#1298) to the table; they are submitted from the server, not uploaded. */
   addInbox: (items: HeldFile[]) => void
   removeRow: (key: string) => void
+  /** Include a file flagged as far above the rest of the batch's estimate (#1599). */
+  includeOutlier: (key: string) => void
   /** Start the table from a file already chosen in the single-file picker. */
   adopt: (file: File, estimate: Estimate | null) => void
   /** `notifyOnComplete`: the batch asks for one email when every run is finished (#1335). */
@@ -233,6 +235,7 @@ export function useBatchUpload(
     addFiles,
     addInbox,
     removeRow: (key) => changeFiles((prev) => prev.filter((r) => r.key !== key)),
+    includeOutlier: (key) => patch(key, { costConfirmed: true }),
     adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate, maxUploadMb)]),
     submit,
     retryFailed,

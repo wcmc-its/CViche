@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_MAX_UPLOAD_MB, UNSUPPORTED_TYPE_REASON, maxUploadBytes, tooLargeReason, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
+  COST_OUTLIER_RATIO, DEFAULT_MAX_UPLOAD_MB, UNSUPPORTED_TYPE_REASON, costOutliers, missingItems, maxUploadBytes, tooLargeReason, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
 } from './batchRows'
 import type { Estimate, QuotaInfo } from '../../types'
 
@@ -141,5 +141,30 @@ describe('emailed CV rows (#1298)', () => {
     expect(inboxFailure({ ...base, error: 'rate_limited', message: 'Daily limit reached' }).retryable).toBe(true)
     expect(inboxFailure({ ...base, error: 'file_missing', message: null }))
       .toEqual({ reason: "Couldn't submit the emailed file", retryable: false })
+  })
+})
+
+describe('costOutliers (#1599)', () => {
+  const weighed = (weights: (number | undefined)[]) =>
+    weights.map((w, i) => makeRow(new File(['x'], `cv${i}.docx`), `k${i}`, { ...EST_BASE, cost_weight: w }))
+
+  it('compares each file with the median of the others, an even count averaging the middle two', () => {
+    // big's others are 1, 1, 2, 4: median 1.5, so 4.5 is exactly COST_OUTLIER_RATIO.
+    const flagged = costOutliers(weighed([1, 1, 2, 4, 4.5]))
+    expect([...flagged.keys()]).toEqual(['k4'])
+    expect(flagged.get('k4')?.ratio).toBe(COST_OUTLIER_RATIO)
+  })
+
+  it('flags nothing in a one-file batch, or for an estimate without a weight (an older backend)', () => {
+    expect(costOutliers(weighed([9])).size).toBe(0)
+    expect(costOutliers(weighed([1, undefined, 1, 9])).has('k3')).toBe(true)
+    expect(costOutliers(weighed([undefined, undefined, 9])).size).toBe(0)
+  })
+
+  it('blocks submitting until each flagged file is included', () => {
+    const rows = weighed([1, 1, 9])
+    const input = { rows, multi: true, attested: true, quota: null }
+    expect(missingItems(input)).toEqual(['Include or remove 1 unusually large CV'])
+    expect(missingItems({ ...input, rows: rows.map((r) => ({ ...r, costConfirmed: true })) })).toEqual([])
   })
 })

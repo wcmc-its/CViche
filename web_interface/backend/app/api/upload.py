@@ -231,6 +231,10 @@ class EstimateResponse(BaseModel):
     # (#1282). Fewer than SCANNED_PAGE_REJECT_SHARE of its pages, or the
     # file would have been refused.
     scanned_pages: list[int] = []
+    # The file's estimated cost in "typical CVs" (#1599): unitless, so a
+    # non-admin's batch table can compare files without seeing a dollar
+    # figure (#1111). Only ratios between files are meaningful.
+    cost_weight: float = 0.0
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -357,6 +361,19 @@ def _check_estimate_limits(current_user: User, db: Session) -> None:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
 
+# The text length one "typical CV" is taken to have when cost_weight is
+# expressed in typical CVs (#1599): about the median of YUYVIG's 38 CVs
+# (64,906 characters). It only sets the scale; the batch table compares
+# weights with each other, so any fixed value gives the same flags.
+_COST_WEIGHT_REFERENCE_CHARS = 65_000
+
+
+def _cost_weight(cost_min: float, cost_max: float) -> float:
+    """A cost range in units of a typical CV's estimated cost (#1599)."""
+    ref_min, ref_max = get_estimated_run_cost(_COST_WEIGHT_REFERENCE_CHARS)
+    return round((cost_min + cost_max) / (ref_min + ref_max), 2)
+
+
 async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> EstimateResponse:
     """Read, validate and size one file for /estimate; raises the same 400s
     /upload would for an unreadable or mislabeled file."""
@@ -422,6 +439,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
         scanned_pages=scanned_pages,
+        cost_weight=_cost_weight(cost_min, cost_max),
     )
 
 

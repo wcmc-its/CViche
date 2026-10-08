@@ -60,7 +60,8 @@ function BatchFiles({ batch, showCost, onRunAgain, intake }: BatchFilesProps) {
       )}
       {editable && intake && <IntakeEmailLine address={intake} multi />}
       {batch.rows.length > 0 && (
-        <BatchFileTable rows={batch.rows} showCost={showCost} editable={editable} onRemove={batch.removeRow} onRunAgain={batch.phase === 'done' ? onRunAgain : undefined} />
+        <BatchFileTable rows={batch.rows} showCost={showCost} editable={editable} onRemove={batch.removeRow}
+          onRunAgain={batch.phase === 'done' ? onRunAgain : undefined} onInclude={batch.includeOutlier} />
       )}
     </>
   )
