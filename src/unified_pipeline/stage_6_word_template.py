@@ -24,7 +24,7 @@ import os
 import re
 import sys
 import traceback
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -158,6 +158,7 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     _parse_date_components,
     _parse_multi_membership_entry,
 )
+from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -1052,6 +1053,91 @@ def precollegiate_reroute_warnings(moved: list[object]) -> list[dict[str, Any]]:
     }]
 
 
+# #1574 (YUYVIG RLADNC-07, LTTYWI-06, SQMWHM-11, IZIXVF-01): stage 3b still
+# codes some trainees with the bare parent N3, which has no renderer -- only
+# its children N3A (current) and N3B (past) do -- so they went to the
+# Appendix, and one list coded partly N3B and partly N3 split between Past
+# Mentees and the Appendix. A bare N3 entry that names a mentee, or states a
+# year (an aggregate line such as a supervision period), takes the code most
+# of its N3A/N3B siblings under the same heading carry, so one list renders in
+# one place. With no clear sibling majority it is N3A, and
+# `_partition_mentoring_entries` moves it to Past when its own dates ended:
+# the past/current rule every N3A already gets. A bare N3 that does neither --
+# a column-header row, a lead-in label, "Not applicable" -- is not a mentee
+# and stays N3, so it still reaches the Appendix. Nor is a line that is only
+# its dates ("2014 - 2016", split from its record at stage 2: EBYSBC VGHNZD),
+# which would render as a bare date under Past Mentees.
+BARE_MENTEE_CODE = 'N3'
+CURRENT_MENTEE_CODE = 'N3A'
+PAST_MENTEE_CODE = 'N3B'
+BARE_MENTEE_RESOLVE_CHECK = 'bare_mentee_code_resolved'
+_MENTEE_DATE_FIELDS = ('start_date', 'end_date')
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_DATE_WORDS = frozenset(_MONTH_NAME_TO_NUM) | _SEASON_TOKENS | CURRENT_DATE_VALUES
+
+
+def _heading_path(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The entry's stage-2 heading path, the key its siblings share."""
+    return tuple(str(heading) for heading in entry.get('hierarchy') or ())
+
+
+def _mentee_sibling_codes(entries: Sequence[Mapping[str, Any]]) -> dict[tuple[str, ...], Counter[str]]:
+    """{heading path: how many N3A and N3B entries stage 3b coded under it}."""
+    siblings: dict[tuple[str, ...], Counter[str]] = defaultdict(Counter)
+    for entry in entries:
+        code = entry.get('taxonomy_code')
+        if code in (CURRENT_MENTEE_CODE, PAST_MENTEE_CODE):
+            siblings[_heading_path(entry)][code] += 1
+    return siblings
+
+
+def _states_a_mentee_year(entry: Mapping[str, Any]) -> bool:
+    """Whether stage 4 wrote a start or end date with a readable year, and
+    the entry's text says something besides its dates."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return False
+    words = _WORD_RE.findall(str(entry.get('text') or ''))
+    return (any(word.lower() not in _DATE_WORDS for word in words)
+            and any(_parse_date_components(str(fields.get(key) or ''))[0] is not None
+                    for key in _MENTEE_DATE_FIELDS))
+
+
+def _route_bare_mentee(entry: dict[str, Any], code: str,
+                       siblings: Mapping[tuple[str, ...], Counter[str]],
+                       resolved: list[tuple[object, str]]) -> str:
+    """The code to group *entry* under: N3A or N3B for a bare N3 that names a
+    mentee or states a year (see the comment above), whose element_idx_start
+    and new code are appended to *resolved*; *code* otherwise."""
+    if code != BARE_MENTEE_CODE or not (_is_mentee_record(entry) or _states_a_mentee_year(entry)):
+        return code
+    ranked = siblings.get(_heading_path(entry), Counter()).most_common(2)
+    has_majority = bool(ranked) and (len(ranked) == 1 or ranked[0][1] > ranked[1][1])
+    target = ranked[0][0] if has_majority else CURRENT_MENTEE_CODE
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = target
+    resolved.append((entry.get('element_idx_start'), target))
+    return target
+
+
+def bare_mentee_resolution_warnings(resolved: list[tuple[object, str]]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record per target code naming the bare N3
+    entries `_route_bare_mentee` resolved to it, by element_idx_start only
+    (never CV text); none when nothing was resolved."""
+    by_target: dict[str, list[str]] = defaultdict(list)
+    for idx, target in resolved:
+        by_target[target].append(f"element_idx_start {idx}")
+    return [{
+        'check': BARE_MENTEE_RESOLVE_CHECK,
+        'code': BARE_MENTEE_CODE,
+        'section': None,
+        'message': (f"bare mentee code resolved {BARE_MENTEE_CODE}->{target}: "
+                    f"{len(evidence)} entr{'y' if len(evidence) == 1 else 'ies'}"),
+        'evidence': evidence,
+        'severity': 'INFO',
+    } for target, evidence in sorted(by_target.items())]
+
+
 def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
     """One render-warnings record per (outcome, assigned, target), naming the
     entries by element_idx_start only (never CV text). Sorted, so the sidecar
@@ -1570,18 +1656,22 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         mismatch_corrections = 0
         reroutes: list[RerouteDecision] = []
         precollegiate_moved: list[object] = []
+        bare_mentees_resolved: list[tuple[object, str]] = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY)
+        mentee_siblings = _mentee_sibling_codes(entries)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code, reroutes)
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
+            code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
         self._section_failures.extend(reroute_warnings(reroutes))
         self._section_failures.extend(precollegiate_reroute_warnings(precollegiate_moved))
+        self._section_failures.extend(bare_mentee_resolution_warnings(bare_mentees_resolved))
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")

@@ -211,10 +211,11 @@ _MAX_SHORT_RANGE_YEARS = 50
 # .docx while the entry's own text is a neutral line
 # (`test_rendered_fields_match_what_each_section_writes` repeats that probe, so a
 # renderer that starts or stops reading a field fails it). `narrative` is in no
-# set: nothing writes it. A code missing here is never fanned out. That includes
-# every code whose section writes the entry's TEXT and no field (E, G, J, K2-K5,
-# L1, L2, M1, M2, N1, N3, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would
-# render only its built text, which does not carry the parent's scalars. (N4
+# set: the probe leaves it unmarked, and only the mentee table writes it. A
+# code missing here is never fanned out. That includes every code whose
+# section writes the entry's TEXT and no field (E, G, J, K2-K5, L1, L2, M1, M2,
+# N1, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would render only its
+# built text, which does not carry the parent's scalars. (N4
 # may reorder a scrambled line by its fields, but only when they hold exactly
 # the text's words -- `mentoring._outcome_line_from_fields`, #1434.)
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
@@ -235,8 +236,10 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'M2C': frozenset({'agency', 'grant_number', 'notes', 'pi_name', 'pi_role', 'status', 'submission_date', 'title', 'total_funding_requested'}),
     'M2D': frozenset({'assignee', 'filing_date', 'inventors', 'issue_date', 'patent_number', 'status', 'title'}),
     'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
+    # A bare N3 that names a mentee renders as one (`_route_bare_mentee`, #1574).
+    'N3': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
     'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),
-    'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date'}),
+    'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
     'O': frozenset({'division_department', 'end_date', 'institution', 'leadership_role', 'start_date'}),
     'P': frozenset({'committee_name', 'end_date', 'institution', 'role', 'start_date'}),
     'Q1': frozenset({'end_date', 'organization', 'role', 'start_date'}),
@@ -261,7 +264,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
 
 # The codes whose section renders the entry's text, not its fields (see above).
 # Pinned by `test_text_rendered_codes_write_the_text_and_no_field`.
-_TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', 'L2', 'M1', 'M2', 'N1', 'N3', 'N4', 'S0', 'T'})
+_TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', 'L2', 'M1', 'M2', 'N1', 'N4', 'S0', 'T'})
 
 # Keys a stage-5 formatter writes for the WHOLE entry (5c teaching prose, 5d
 # citation). An entry that carries one already has a rendering of all its
