@@ -312,17 +312,29 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
 # corpus CVs.
 _LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'Q1', 'Q2'})
 
+# Date fields a section writes on top of its `_RENDERED_FIELDS`, which names
+# schema fields only: stage 4 emits these from the active (config-file) schema
+# or a field description, not from `FIELD_SCHEMAS`.
 # #1187: the attendance dates `sections/education.py` writes into B1's Dates
-# column on top of `_RENDERED_FIELDS['B1']`: flat, generic, and the nested
-# `dates_attended: {start_date, end_date}` dict. A STRING `dates_attended` is
-# written too, but only when no start/end builds a range (`_is_written_date`). Without these a degree child whose dates the text also
-# names would always be refused by `_fields_carry_text`, and the entry would
-# still vanish.
+# column: flat, generic, and the nested `dates_attended: {start_date,
+# end_date}` dict. A STRING `dates_attended` is written too, but only when no
+# start/end builds a range (`_is_written_date`). Without these a degree child
+# whose dates the text also names would always be refused by
+# `_fields_carry_text`, and the entry would still vanish.
+# #1556 (d): the start/end range `sections/other_education.py` (B2) and
+# `sections/service.py` `_fill_journal_reviewing` (Q4D) write into their Dates
+# column. Without them two records of one journal with different spans
+# (OIEPQD XAYKXA entry 134) printed alike to `_repeated_rows`, and the earlier
+# span was dropped.
 _RENDERED_DATE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'B1': frozenset({'dates_attended_start_date', 'dates_attended_end_date',
                      'start_date', 'end_date'}),
+    'B2': frozenset({'start_date', 'end_date'}),
+    'Q4D': frozenset({'start_date', 'end_date'}),
 })
 _NESTED_DATES_KEY = 'dates_attended'
+# The one code whose section writes a nested or string `dates_attended`.
+_NESTED_DATES_CODE = 'B1'
 
 # Entry-level keys a stage-5 pass writes about the entry's own scalar fields:
 # the institution 5b cleaned and located, the publication record stage 5
@@ -488,13 +500,14 @@ def _rendered_text(key: str, value: object, code: str) -> str:
 
 def _is_written_date(code: str, key: str, value: object,
                      fields: Mapping[str, Any]) -> bool:
-    """Whether B1's renderer writes this attendance-date field (#1187). A
-    string `dates_attended` is written only when no flat or generic start/end
-    is there to build the range from."""
+    """Whether the code's renderer writes this date field outside its
+    `_RENDERED_FIELDS` (`_RENDERED_DATE_FIELDS`). B1's string
+    `dates_attended` is written only when no flat or generic start/end is
+    there to build the range from (#1187)."""
     bounds = _RENDERED_DATE_FIELDS.get(code, frozenset())
     if key in bounds:
         return True
-    if code not in _RENDERED_DATE_FIELDS or key != _NESTED_DATES_KEY:
+    if code != _NESTED_DATES_CODE or key != _NESTED_DATES_KEY:
         return False
     if isinstance(value, Mapping):
         return True
@@ -770,10 +783,13 @@ def _without_dates(fields: Mapping[str, Any]) -> dict[str, Any]:
 def _row_identity(record: Mapping[str, Any], rendered: frozenset[str],
                   code: str) -> tuple[tuple[str, str], ...]:
     """What a record's row shows: every rendered value as its cell writes it,
-    a date as the code's date column shows it."""
+    a date as the code's date column shows it -- the written dates outside
+    `rendered` included (`_is_written_date`, #1556 d), so two spans of one
+    journal are two rows."""
     return tuple(sorted((key, norm(_rendered_text(key, value, code)))
                         for key, value in record.items()
-                        if key in rendered and not _is_blank(value)))
+                        if (key in rendered or _is_written_date(code, key, value, record))
+                        and not _is_blank(value)))
 
 
 def _repeated_rows(records: Sequence[Mapping[str, Any]], rendered: frozenset[str],
