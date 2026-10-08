@@ -307,6 +307,9 @@ class _Line:
     block_start: bool = False
     #: A reassembled table row: never re-laid-out, never merged.
     is_row: bool = False
+    #: A reassembled row's printed lines' right edges, which the document's
+    #: right margin is measured over; empty for a printed line.
+    printed_x1: tuple[float, ...] = ()
 
     @property
     def text(self) -> str:
@@ -656,6 +659,42 @@ def _is_cell_row(line: _Line, anchors: list[float]) -> bool:
     return all(any(abs(x - a) <= OUTDENT_TOLERANCE_PT for a in anchors[1:]) for x in starts)
 
 
+def _cell_texts(lines: list[_Line], anchors: list[float]) -> list[str]:
+    """Each cell's text over `lines`, words in reading order, '' if empty."""
+    cells: list[list[str]] = [[] for _ in anchors]
+    for ln in lines:
+        for w in ln.words:
+            cells[_cell_of(w, anchors)].append(w["text"])
+    return [" ".join(cell) for cell in cells]
+
+
+def _cell_continues(before: str, after: str) -> bool:
+    """A cell's next printed line `after` continues its text `before`
+    mid-sentence: `before` does not end a sentence, and `after` opens
+    lowercase or `before` ends like a connector. An open year range
+    ("2011-") continues only into the range's end ("2014", "present"), not
+    into another open range, which is the next row's date."""
+    if not before:
+        return False
+    if OPEN_RANGE_RE.search(before):
+        return RANGE_CONTINUATION_RE.match(after) is not None and OPEN_RANGE_RE.search(after) is None
+    connector = CONNECTOR_END_RE.search(before) is not None
+    return (SENTENCE_END_RE.search(before) is None or connector) and (after[0].islower() or connector)
+
+
+def _wraps_row(row: list[_Line], line: _Line, anchors: list[float]) -> bool:
+    """`line`, a close line with an empty first cell, is the row's cells
+    wrapping rather than the next row (#1583): at least half of the cells it
+    fills continue the row's text in that cell (`_cell_continues`). A
+    vertically merged next row opens its cells afresh ("Lecturer",
+    "1998-2001")."""
+    before = _cell_texts(row, anchors)
+    after = _cell_texts([line], anchors)
+    filled = [(a, b) for a, b in zip(before, after, strict=True) if b]
+    wraps = sum(1 for a, b in filled if _cell_continues(a, b))
+    return 2 * wraps >= len(filled)
+
+
 def _row_line(lines: list[_Line], anchors: list[float]) -> _Line:
     """One tab-separated line from a row's printed lines: each word goes to
     the cell whose anchor range contains its x0. An empty cell stays empty
@@ -684,6 +723,7 @@ def _row_line(lines: list[_Line], anchors: list[float]) -> _Line:
     row.runs[0].text = "\t" * lead + row.runs[0].text
     row.is_row = True
     row.block_start = lines[0].block_start
+    row.printed_x1 = tuple(ln.x1 for ln in lines)
     return row
 
 
@@ -700,8 +740,10 @@ def _join_table_rows(lines: list[_Line]) -> list[_Line]:
     """Reassemble table rows whose cells wrapped onto several printed lines
     into one `cell\\tcell` line per row. After a line with at least two
     column gaps, a close line that fits inside one cell continues its row;
-    a close line whose own cells sit on the row's anchors is the next row
-    (first cell empty); anything else ends the table."""
+    a close line whose own cells sit on the row's anchors continues it too
+    when its cells wrap the row's mid-sentence (`_wraps_row`), and is
+    otherwise the next row (first cell empty); anything else ends the
+    table."""
     out: list[_Line] = []
     row: list[_Line] = []
     anchors: list[float] | None = None
@@ -711,6 +753,9 @@ def _join_table_rows(lines: list[_Line]) -> list[_Line]:
                 row.append(line)
                 continue
             if _is_cell_row(line, anchors):
+                if _wraps_row(row, line, anchors):
+                    row.append(line)
+                    continue
                 _emit_row(out, row, anchors)
                 row = [line]
                 continue
@@ -886,9 +931,11 @@ def _continues(prev: _Line, line: _Line, left: float, right: float,
 
 def _margins(pages: list[list[_Line]]) -> tuple[float, float]:
     """Left edge over every kept line; right edge ignoring the few lines
-    that stick out past the text block's right margin."""
+    that stick out past the text block's right margin, counted over printed
+    lines (a reassembled table row counts each of its lines), so how rows
+    are joined cannot move the margin (#1583)."""
     lines = [ln for page in pages for ln in page]
-    rights = sorted(ln.x1 for ln in lines)
+    rights = sorted(x1 for ln in lines for x1 in (ln.printed_x1 or (ln.x1,)))
     return min(ln.x0 for ln in lines), rights[-1 - int(RIGHT_MARGIN_OUTLIER_FRAC * len(rights))]
 
 
