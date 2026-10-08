@@ -47,6 +47,7 @@ import requests
 
 from app.config_loader import get_config
 from app.models import Run, is_bulk_batch
+from app.services.quality_score_service import DOCTOR_NOT_CHECKED, DOCTOR_STATUS_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ _STATUS_COLOR = {
     "started": "accent",      # blue -- a run just started processing
 }
 _DEFAULT_COLOR = "default"
+
+# Appended to the Quality score fact when no doctor report was stored (#1593).
+_NOT_CHECKED_TEXT = " — not checked (no doctor report)"
 
 # POST timeout (seconds) per attempt. Kept short so one attempt never sits on
 # the delivery worker for long; _deliver bounds the total worst case anyway
@@ -348,6 +352,9 @@ class ScoreSummary(TypedDict, total=False):
     # written before #724 added it -- read as "unknown", never as incomplete.
     data_complete: bool
     missing_evidence: list[str]
+    # quality_score_service.DOCTOR_STATUS_KEY (#1593). Absent on a cache
+    # written before it -- read as "unknown", never as unchecked.
+    doctor_status: str
 
 
 class DoctorFinding(TypedDict, total=False):
@@ -475,14 +482,21 @@ def _score_text(score: ScoreSummary | None) -> str:
     (#745), so a reader does not take it for a measured result. Only the
     count goes on the card, never the missing_evidence strings: an
     "ambiguous" entry names the matched files, and those are CV filenames.
+    A score with no doctor report beside it says "not checked" (#1593).
     """
     if not score or score.get("totalScore") is None:
         return "n/a"
     text = f"{score.get('totalScore')} ({score.get('band') or 'n/a'})"
+    unchecked = score.get(DOCTOR_STATUS_KEY) == DOCTOR_NOT_CHECKED
     if score.get("data_complete") is False:
         missing = score.get("missing_evidence")
         count = len(missing) if isinstance(missing, list) else 0
-        text += f" — incomplete: {count} file(s) missing or unreadable" if count else " — incomplete"
+        if count:
+            text += f" — incomplete: {count} file(s) missing or unreadable"
+        elif not unchecked:
+            text += " — incomplete"
+    if unchecked:
+        text += _NOT_CHECKED_TEXT
     return text
 
 

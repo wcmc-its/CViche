@@ -40,7 +40,7 @@ def test_stage_error_record_reaches_the_scorer(monkeypatch):
     monkeypatch.setattr(svc, "get_storage", lambda: storage)
     monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
 
-    assert svc.compute_and_cache_score("R1") == {"totalScore": 40}
+    assert svc.compute_and_cache_score("R1")["totalScore"] == 40
     assert seen["names"] == ["R1_fields.json", "R1_stage_errors.json"]
 
 
@@ -77,7 +77,41 @@ def test_cached_score_records_the_scoring_image_tag(monkeypatch, env_tag, cached
 
     svc.compute_and_cache_score("R1")
 
-    assert json.loads(storage.put[svc.CACHE_KEY]) == {"totalScore": 40, "image_tag": cached_tag}
+    assert json.loads(storage.put[svc.CACHE_KEY])[svc.IMAGE_TAG_KEY] == cached_tag
+
+
+def test_a_score_with_no_doctor_report_is_marked_not_checked(monkeypatch):
+    """#1593: a run scored GREEN with no doctor report beside it was never
+    checked; the cached score says so and is not data_complete."""
+    storage = _Storage({"outputs/R1_fields.json": b"{}"})
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run",
+                        lambda _d, _r: {"totalScore": 97, "data_complete": True})
+
+    result = svc.compute_and_cache_score("R1")
+
+    cached = json.loads(storage.put[svc.CACHE_KEY])
+    for score in (result, cached):
+        assert score[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_NOT_CHECKED
+        assert score["data_complete"] is False
+
+
+def test_a_score_beside_a_doctor_report_is_marked_checked(monkeypatch):
+    """#1593: the stored report is what marks a score checked; it leaves the
+    scorer's own data_complete alone."""
+    storage = _Storage({
+        "outputs/R1_fields.json": b"{}",
+        f"outputs/R1{svc.DOCTOR_SUFFIX}": b"{}",
+    })
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run",
+                        lambda _d, _r: {"totalScore": 97, "data_complete": True})
+
+    svc.compute_and_cache_score("R1")
+
+    cached = json.loads(storage.put[svc.CACHE_KEY])
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_CHECKED
+    assert cached["data_complete"] is True
 
 
 def _scored_dir_listing(monkeypatch, storage):
@@ -92,7 +126,7 @@ def _scored_dir_listing(monkeypatch, storage):
 
     monkeypatch.setattr(svc, "get_storage", lambda: storage)
     monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
-    assert svc.compute_and_cache_score("R1") == {"totalScore": 40}
+    assert svc.compute_and_cache_score("R1")["totalScore"] == 40
     return seen["tree"]
 
 
