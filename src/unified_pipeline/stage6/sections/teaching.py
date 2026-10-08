@@ -81,9 +81,10 @@ sources of text, in order:
 
 - `formatted_text` from stage 5c, when the raw entry is a single item. ISO dates
   the LLM left behind are normalized first, and markdown is stripped, since Word
-  runs have no markdown. A `formatted_text` that strips down to nothing is not
-  bulleted blank; the raw line is used instead, and the entry is reported when
-  there is no raw line either.
+  runs have no markdown. Each record 5c wrote a line for is its own bullet,
+  its sub-lines kept with it (`_record_bullets`, #1556 c). A `formatted_text`
+  that strips down to nothing is not bulleted blank; the raw line is used
+  instead, and the entry is reported when there is no raw line either.
 - the RAW lines, when the raw entry has several of them. Stage 5c routinely
   merges a multi-item teaching block into one sentence, so the original line
   breaks are the more faithful record; only one of the bullets carries the
@@ -246,6 +247,52 @@ def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) ->
     return DATE_SPAN_SEPARATOR.join([text[:cut], *extras]) + text[cut:]
 
 
+# Stage 5c's prefix for a line that belongs to the record above it ("  - Notes:
+# ...", "  - Topics: ..."), as opposed to a line that opens a record of its own.
+_SUB_LINE_PREFIX = '- '
+
+
+def _record_blocks(formatted_text: str) -> list[str]:
+    """Stage 5c's `formatted_text` cut into one block per record (#1556 c).
+
+    5c joins a multi-record entry's lines one per record
+    (`accepted_formatted_text`), and a record's own line may carry its
+    sub-lines under it. A line that does not start with `_SUB_LINE_PREFIX`
+    opens a block; a sub-line stays in the block above it, so a one-record
+    entry with notes is still one block. Blank lines are dropped.
+    """
+    blocks: list[list[str]] = []
+    for line in formatted_text.split('\n'):
+        if not line.strip():
+            continue
+        if blocks and line.strip().startswith(_SUB_LINE_PREFIX):
+            blocks[-1].append(line)
+        else:
+            blocks.append([line])
+    return ['\n'.join(block) for block in blocks]
+
+
+def _record_bullets(formatted_text: str, fields: _TeachingFields,
+                    taxonomy_code: str) -> list[str]:
+    """One bullet per record of Stage 5c's text, markdown stripped (#1556 c).
+
+    Each record used to share ONE bullet, its lines kept apart only by soft
+    line breaks, where the section renders separate records as separate
+    bullets. A block that strips to nothing is dropped, so the result is []
+    when the whole text had no words. The record's further date spans
+    (`_with_extra_spans`) go on the first block that holds its own date, the
+    line they went on when the blocks shared one bullet.
+    """
+    bullets = [stripped for block in _record_blocks(formatted_text)
+               if (stripped := _strip_markdown_for_word(block, preserve_newlines=True)).strip()]
+    for i, bullet in enumerate(bullets):
+        extended = _with_extra_spans(bullet, fields, taxonomy_code)
+        if extended != bullet:
+            bullets[i] = extended
+            break
+    return bullets
+
+
 def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
                           row_text: str | None = None,
                           taxonomy_code: str = '') -> list[str]:
@@ -281,9 +328,9 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
         original_lines = entry_lines(original_text)
         if len(original_lines) > 1:
             return [row_text] if row_text else original_lines
-        stripped = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
-        if stripped.strip():
-            return [_with_extra_spans(stripped, fields, taxonomy_code)]
+        bullets = _record_bullets(formatted_text, fields, taxonomy_code)
+        if bullets:
+            return bullets
         # Stage 5c sent a formatted_text with no words in it ("   ", "**  **").
         # Bulleting it renders an empty list paragraph and throws away the raw
         # line this entry still has, so take the raw line instead; when the raw
