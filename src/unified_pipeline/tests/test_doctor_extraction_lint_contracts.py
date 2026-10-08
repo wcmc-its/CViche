@@ -122,7 +122,6 @@ def test_lint_dedup_drops_returns_structured_findings():
     assert isinstance(finding["message"], str)
     assert isinstance(finding["evidence"], list)
     assert all(isinstance(item, str) for item in finding["evidence"])
-    assert len(finding["evidence"]) <= 6
 
     # No suspects at all -> [].
     assert lint_dedup_drops({"dedup_decisions": []}) == []
@@ -134,7 +133,7 @@ def test_lint_dedup_drops_returns_structured_findings():
     ]}
     assert lint_dedup_drops(well_covered) == []
 
-    # 7 suspects: evidence caps at 6, the message still counts all 7.
+    # 7 suspects: a WARN lists every one (#666), the message counts all 7.
     seven = {"dedup_decisions": [
         {"code": f"N{i}", "metric": "jaccard",
          "dropped_text": f"alpha{i} beta{i} gamma{i} delta{i}",
@@ -143,7 +142,7 @@ def test_lint_dedup_drops_returns_structured_findings():
     ]}
     result7 = lint_dedup_drops(seven)
     assert len(result7) == 1
-    assert len(result7[0]["evidence"]) == 6
+    assert len(result7[0]["evidence"]) == 7
     assert "7 dedup drop(s)" in result7[0]["message"]
 
 
@@ -701,13 +700,57 @@ def _named_decision(dropped_name, kept_name):
             "kept_fields": {"journal_name": kept_name}}
 
 
+def _committee_decision(dropped_name, kept_name, metric="containment=1.00"):
+    return {"code": "P", "metric": metric,
+            "dropped_text": dropped_name, "kept_text": kept_name,
+            "dropped_fields": {"committee_name": dropped_name},
+            "kept_fields": {"committee_name": kept_name}}
+
+
 def test_dedup_drops_info_when_dropped_name_absent_from_page():
-    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
-    blocks = [("p", "Reviewer"), ("table", "European Example Optics\nJournal Reviewer")]
+    """A name the kept one extends at its end may be the same body
+    reworded, so it stays INFO."""
+    report = {"dedup_decisions": [_committee_decision(
+        "Example Committee", "Example Committee, Example Chapter")]}
+    blocks = [("p", "Member"), ("table", "Example Committee, Example Chapter\nMember")]
     result = lint_dedup_drops(report, blocks)
     assert len(result) == 1
     assert result[0]["severity"] == "INFO" and result[0]["lint"] == "dedup_drops"
-    assert "Q4D" in result[0]["evidence"][0]
+    assert result[0]["evidence"][0].startswith("P (")
+
+
+def test_dedup_drops_warns_on_another_journal_absent_from_page():
+    """A journal list's entry is a bare name: a shorter name is another
+    journal (YUYVIG WPJHYT-03), also when the dropped entry filled no field."""
+    blocks = [("p", "Reviewer"), ("table", "European Example Optics\nJournal Reviewer")]
+    named = _named_decision("Example Optics", "European Example Optics")
+    unnamed = dict(named, dropped_fields={})
+    for decision in (named, unnamed):
+        result = lint_dedup_drops({"dedup_decisions": [decision]}, blocks)
+        assert [f["severity"] for f in result] == ["WARN"]
+        assert "journal_name names another record" in result[0]["evidence"][0]
+    # a fragment sharing no word with the kept journal names no journal
+    fragment = dict(unnamed, dropped_text="Reviewer",
+                    kept_text="European Example Optics. Reviewer.")
+    assert lint_dedup_drops({"dedup_decisions": [fragment]}, blocks[1:]) == []
+    # nor does a leading article: it stays the INFO a reworded name gets
+    article = _named_decision("Example Optics", "The Example Optics")
+    result = lint_dedup_drops({"dedup_decisions": [article]}, blocks)
+    assert [f["severity"] for f in result] == ["INFO"]
+    # a blank extracted name is no name either, so it names no other journal
+    blank = dict(fragment, dropped_fields={"journal_name": " "})
+    assert "WARN" not in [f["severity"] for f in
+                          lint_dedup_drops({"dedup_decisions": [blank]}, blocks[1:])]
+
+
+def test_dedup_drops_quiet_on_a_name_of_filler_words_only():
+    """A dropped name with no word but filler gives the insertion test
+    nothing to place; it must not raise (run_doctor would drop the lint)."""
+    decision = _drop("2031 Example Committee", "2031 Example Committee", code="P",
+                     metric="containment=1.00", dropped_fields={"committee_name": "of the"},
+                     kept_fields={"committee_name": "Example Committee"})
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert "WARN" not in [f["severity"] for f in result]
 
 
 def test_dedup_drops_quiet_when_dropped_name_is_its_own_cell():
@@ -733,11 +776,11 @@ def test_dedup_drops_info_needs_rendered_blocks_and_fields():
 def test_dedup_drops_info_uses_institution_for_appointments():
     decision = {"code": "D2", "metric": "jaccard=0.82",
                 "dropped_text": "Example Hospital Example Title 2001",
-                "kept_text": "Sample Hospital Example Hospital Example Title 2001",
+                "kept_text": "Example Hospital Center Example Title 2001",
                 "dropped_fields": {"institution": "Example Hospital"},
-                "kept_fields": {"institution": "Sample Hospital"}}
+                "kept_fields": {"institution": "Example Hospital Center"}}
     result = lint_dedup_drops({"dedup_decisions": [decision]},
-                              [("table", "Sample Hospital\nExample Title")])
+                              [("table", "Example Hospital Center\nExample Title")])
     assert [f["severity"] for f in result] == ["INFO"]
 
 
@@ -749,7 +792,7 @@ def test_dedup_drops_quiet_when_only_the_dropped_entry_fills_a_name():
 
 def test_dedup_drops_info_evidence_is_capped():
     report = {"dedup_decisions": [
-        _named_decision(f"Example Optics {n}", f"European Example Optics {n} Letters")
+        _committee_decision(f"Example Committee {n}", f"Example Committee {n} Letters")
         for n in range(extraction_lints.DEDUP_EVIDENCE_LIMIT + 3)]}
     result = lint_dedup_drops(report, [("p", "x")])
     assert len(result[0]["evidence"]) == extraction_lints.DEDUP_EVIDENCE_LIMIT
@@ -759,7 +802,8 @@ def test_dedup_drops_info_evidence_is_capped():
 def test_dedup_drops_reports_warn_and_info_together():
     poorly = {"code": "N1", "metric": "jaccard",
               "dropped_text": "alpha beta gamma delta", "kept_text": "alpha"}
-    report = {"dedup_decisions": [poorly, _named_decision("Example Optics", "European Example Optics")]}
+    report = {"dedup_decisions": [poorly, _committee_decision(
+        "Example Committee", "Example Committee, Example Chapter")]}
     result = lint_dedup_drops(report, [("p", "x")])
     assert [f["severity"] for f in result] == ["WARN", "INFO"]
 
@@ -801,6 +845,35 @@ def test_occasion_apart_reads_parts_and_numerals(dropped, kept, reason):
     assert extraction_lints._occasion_apart(dropped, kept) == f"{reason} the kept entry lacks"
 
 
+@pytest.mark.parametrize("dropped, kept, reason", [
+    # LTTYWI-02's shapes: another class, and the award year only a class label carries
+    ("Example teaching award 2029", "Example teaching award (Class of 2031) 2029",
+     "class of 2031 on one entry only"),
+    ("Example teaching award (Class of 2031) 2031", "Example teaching award (Class of 2031) 2029",
+     "a year the kept entry carries only as a class"),
+    # HXBPCT-01's shape: renewed and current, beside the term that ended that year
+    ("2031 \u2013 Example board certification", "2021 \u2013 2031 Example board certification",
+     "a range open from 2031 where the kept one ends"),
+])
+def test_occasion_apart_reads_classes_and_reopened_ranges(dropped, kept, reason):
+    assert extraction_lints._occasion_apart(dropped, kept) == reason
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    ("Example award (Class of 2031) 2029", "Example award, Class of 2031, 2029"),
+    ("2031-present Example board certification", "2031 - present Example board"
+     " certification, Example Board"),
+    ("2021 - 2031 Example role", "2021-2031 Example role, Example Hospital"),
+    # the kept range is reopened in the same year it ends, as the dropped one is
+    ("2031 - Example board certification", "Example board certification 2021 - 2031 - present"),
+    # the kept text states the year on its own too: a dash after it is a separator
+    ("2031 - Example lecture, Example Symposium", "Example Survey 1990- 2031. "
+     "Example lecture, Example Symposium, 2031."),
+])
+def test_occasion_apart_quiet_on_one_class_and_one_open_range(dropped, kept):
+    assert extraction_lints._occasion_apart(dropped, kept) is None
+
+
 @pytest.mark.parametrize("dropped, kept", [
     ("I taught an example course", "Taught an example course"),     # a pronoun
     ("Doe V, Roe X. Example paper", "Doe V. Example paper"),       # initials
@@ -831,6 +904,74 @@ def test_dedup_drops_info_on_a_rank_word_even_when_the_name_renders():
     result = lint_dedup_drops({"dedup_decisions": [decision]}, blocks)
     assert [f["severity"] for f in result] == ["INFO"]
     assert lint_dedup_drops({"dedup_decisions": [decision]}) == result
+
+
+@pytest.mark.parametrize("key, dropped_name, kept_name", [
+    # OKRTPJ-01: one rank, another department
+    ("title", "Assistant Professor, Department of Example",
+     "Assistant Professor, Department of Sample"),
+    # IZABPD-06: another award of one body and year
+    ("award_name", "Example Ministry Scholarship", "Gold Medal (Example Exams)"),
+    # BLBVPD-04: a word inside the name, a narrower body
+    ("committee_name", "Example Chairs Committee", "Example Chairs Operations Committee"),
+])
+def test_dedup_drops_warns_when_names_name_two_records(key, dropped_name, kept_name):
+    decision = _drop(f"2031 {dropped_name}", f"2031 {dropped_name} {kept_name}",
+                     code="P", metric="containment=1.00",
+                     dropped_fields={key: dropped_name}, kept_fields={key: kept_name})
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert [f["severity"] for f in result] == ["WARN"]
+    assert f"{key} names another record" in result[0]["evidence"][0]
+    # the same name on the page as an item of its own was not lost
+    assert lint_dedup_drops({"dedup_decisions": [decision]}, [("p", dropped_name)]) == []
+
+
+@pytest.mark.parametrize("dropped_name, kept_name, metric", [
+    ("Example Program Steering Committee", "Steering Committee of the Example Program",
+     "jaccard=0.88"),                                                   # reordered
+    ("Example Neuroscience Program Committee", "Example Neuroscience Program (ENP) Committee",
+     "jaccard=0.89"),                                                   # an acronym
+    ("Example Equity - Workplace Committee", "Example Equity Committees: Workplace Committee",
+     "jaccard=0.91"),                                                   # a plural
+    ("Associate Professor of Example", "Associate Prof., Department of Example",
+     "record=undated_appointment"),                                     # a record rule's rewording
+    ("Example Society of Medicine", "Example Society of Medicine (ESM), formerly Example "
+     "Society of Sample Medicine", "containment=1.00"),                 # a former name after it
+    ("Associate Prof. of Example", "Associate Professor, Department of Example",
+     "record=undated_appointment"),                                     # the dropped name abbreviates
+])
+def test_dedup_drops_not_warn_on_a_reworded_name(dropped_name, kept_name, metric):
+    decision = _committee_decision(dropped_name, kept_name, metric)
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert "WARN" not in [f["severity"] for f in result]
+
+
+def _talk(idx, location):
+    return {"element_idx_start": idx, "taxonomy_code": "S8", "text": f"{idx}. Example talk",
+            "extracted_fields": {"title": "Example talk", "year": "2031",
+                                 "location": location,
+                                 "formatted_citation": f"Example talk. Example Society; 2031; {location}."}}
+
+
+def test_dedup_drops_warns_on_one_talk_given_in_two_places():
+    """LTTYWI-01: a citation drop matched on title and year; stage 5d shows
+    the copies were given in different places, and names each."""
+    decision = _drop("Example talk. 2031", "Example talk. 2031", code="S8",
+                     metric="citation_title_journal_year")
+    apart = {"entries": [_talk(12, "Example City"), _talk(14, "Sample City")]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, apart)
+    assert [f["severity"] for f in result] == ["WARN"]
+    assert result[0]["evidence"][0].startswith("entry 12, 14: S8 (")
+    same = {"entries": [_talk(12, "Example City"), _talk(14, "Example City")]}
+    assert lint_dedup_drops({"dedup_decisions": [decision]}, None, same) == []
+    # a dropped text one entry carries names that entry, not every copy
+    own = {"entries": [_talk(12, "Example City"),
+                       dict(_talk(14, "Sample City"), text="Example talk. 2031")]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, own)
+    assert result[0]["evidence"][0].startswith("entry 14: S8 (")
+    # only a citation drop is read as a delivery: a text match is a text match
+    worded = dict(decision, metric="jaccard=0.95")
+    assert lint_dedup_drops({"dedup_decisions": [worded]}, None, apart) == []
 
 
 def test_dedup_drops_evidence_names_the_dropped_entry_from_stage_5d():

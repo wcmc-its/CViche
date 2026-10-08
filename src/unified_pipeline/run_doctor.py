@@ -760,7 +760,12 @@ LINT_PREVALENCE = {
     # batches section_lost was calibrated on (#259).
     "date_only_lines": 0.254,
     "stage6_render_warnings": 0.123,
-    "dedup_drops": 0.110,
+    # #666: 60 of 227 runs fire at any severity (38 YUYVIG dev-259 live, 63
+    # EBYSBC farm live, the 126-CV wave-1 farm re-rendered at dev), measured
+    # 2026-10-08 with the class/range/name/delivery WARN rules; origin/dev's
+    # rules fire on 55 of the same 227 (0.242). The 0.110 it replaces was the
+    # 2026-07-25 batch's 73 runs, under the older lint.
+    "dedup_drops": 0.264,
     "segmentation": 0.082,
     # 30 of 165 corpus runs (farm + 2026-09-11/-17 batches, stored stage-2
     # artifacts, measured 2026-09-29); 19 of the 30 also trip `segmentation`.
