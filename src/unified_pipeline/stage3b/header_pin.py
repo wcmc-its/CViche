@@ -139,8 +139,13 @@ _HONORIFIC_FELLOW = re.compile(
 # appointment, and "Resident Veterinarian, <horse farm>" is employment. A resident
 # veterinarian, artist or scholar is training only at a college, university,
 # hospital or school ("Resident Veterinarian: <college> animal hospital").
+# The role must BE the title's qualifier, the first words of the parenthetical or
+# comma clause, and end that clause (or go on "to ..."): a row naming its
+# supervisor ("..., <institution>, Faculty Advisor: Dr <N>") is training and pins.
 _NON_TRAINING_ROLE_AFTER_TITLE = re.compile(
-    r"^\s*[(,][^)]*?\b(?:faculty\s+advis[eo]rs?|residential\s+college)\b", re.I
+    r"^\s*[(,]\s*(?:[\w'\u2019-]+\s+){0,3}?"
+    r"faculty\s+advis[eo]r(?=\s*(?:[),]|to\b))",
+    re.I,
 )
 _RESIDENT_PROFESSION_AFTER_TITLE = re.compile(r"^\s+(?:veterinarian|artist|scholar)s?\b", re.I)
 _TRAINING_SETTING = re.compile(r"\b(?:college|universit(?:y|ies)|hospital|school|residency)\b", re.I)

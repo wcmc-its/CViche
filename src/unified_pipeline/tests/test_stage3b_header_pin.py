@@ -379,6 +379,12 @@ NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))
     ("D1", "2031-2033 Research Fellow in Example Medicine, Example School of Medicine", ("Appointments",), "C"),
     # A veterinary residency at a college or hospital is still training (#1581).
     ("D2", "2031-2033 Resident Veterinarian: Example Animal Hospital, Example College", ("Experience",), "C"),
+    # A trainee row naming its supervisor is training, not a faculty-advisor role (#1581).
+    ("D3", "2031-2033 Postdoctoral Fellow, Example University, Faculty Advisor: Dr. Doe", ("Appointments",), "C"),
+    ("D3", "2031-2033 Postdoctoral Fellow (faculty advisor: Dr Doe), Example University", ("Appointments",), "C"),
+    ("D1", "Clinical Fellow, Example Hospital, faculty advisors J Doe", ("Appointments",), "C"),
+    ("D3", "2031 Intern, Example University (Advisor: Prof. Doe)", ("Appointments",), "C"),
+    ("D3", "2031-2033 Postdoctoral Fellow, Example University, faculty advisor, J. Doe", ("Appointments",), "C"),
     ("K4", "Example Society Meeting, 2031 (attendee)", ("Teaching",), "B2"),
     ("K4", "Attendance at the Example Review Course, 2031", ("Teaching",), "B2"),
     ("F1", "ACLS certification, 2031-2033", ("Credentials",), "B2"),
@@ -426,6 +432,8 @@ def test_content_pins_recode_whatever_the_heading(code, text, hierarchy, expecte
     # outside a college, university, hospital or school, are positions (#1581).
     ("D1", "2031-present Fellow (undergraduate faculty advisor), Example College", ("Appointments",)),
     ("D1", "2031-present Fellow, faculty advisor to undergraduates, Example House", ("Appointments",)),
+    ("D1", "2031-present Fellow, faculty advisor, Example House", ("Appointments",)),
+    ("D1", "2031-present Fellow (resident faculty adviser), Example College", ("Appointments",)),
     ("D3", "Resident Veterinarian, Example Farm, Springfield, 2031-2033", ("Experience",)),
     ("F1", "Example State Medical License, Example Teaching Hospital, 2031", ("Licensure",)),
     ("F1", "Example State Medical License #12345, 2031", ("Licensure",)),
