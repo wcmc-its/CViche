@@ -42,10 +42,15 @@ export function DocxDownloadCard({ runId, filename }: { runId: string; filename:
   )
 }
 
-// Stage JSON files are internal pipeline artifacts -- admin and staff only (the
+// Stage JSON files are internal pipeline artifacts, and the review copy carries
+// the run doctor's findings as Word comments (#1388) -- admin and staff only (the
 // backend enforces this too). Hide them entirely from everyone else; the final
 // .docx and other outputs stay visible to the run owner.
 const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
+/** artifact_service.REVIEW_DOCX_SUFFIX */
+export const isReviewDocx = (f: string) => f.endsWith('_wcm_review.docx')
+/** The finished document, never its review copy. */
+export const isFinalDocx = (f: string) => f.endsWith('.docx') && !isReviewDocx(f)
 
 /** The step's output files this user will actually see listed. */
 export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_files'>, canSeeStageJson: boolean): string[] {
@@ -55,7 +60,7 @@ export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_
   } catch {
     files = []
   }
-  return files.filter(f => canSeeStageJson || !isJsonName(f))
+  return files.filter(f => canSeeStageJson || !(isJsonName(f) || isReviewDocx(f)))
 }
 
 export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput = true }: OutputFilesProps) {
@@ -66,7 +71,7 @@ export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput =
   }
 
   const isFinalStep = step.stage_id === '6'
-  const docxFile = outputFiles.find(f => f.endsWith('.docx'))
+  const docxFile = outputFiles.find(isFinalDocx)
 
   // For the final step, exclude the docx from the additional files list
   // since it's already shown prominently in the Final Output section

@@ -194,6 +194,24 @@ class TestDataFileAuthorization:
         resp = client.get(f"/api/run/{run.id}/data/stage1a.json")
         assert resp.status_code == 403
 
+    def test_owner_cannot_download_the_review_copy(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
+        """#1388: the doctor's findings as Word comments are staff-only, like the run page's."""
+        user, run = _user_and_run(db, suffix="-data-review-owner")
+        _auth(client, user)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "DOC_wcm_review.docx")
+        resp = client.get(f"/api/run/{run.id}/data/DOC_wcm_review.docx")
+        assert resp.status_code == 403
+
+    def test_staff_can_download_the_review_copy(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
+        _, run = _user_and_run(db, suffix="-data-review-s-owner")
+        staff, _ = _user_and_run(db, role="staff", suffix="-data-review-staff")
+        _auth(client, staff)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "DOC_wcm_review.docx")
+        resp = client.get(f"/api/run/{run.id}/data/DOC_wcm_review.docx")
+        assert resp.status_code == 200
+
     def test_non_admin_json_preview_forbidden(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
         user, run = _user_and_run(db, suffix="-data-json-prev")
         _auth(client, user)

@@ -159,6 +159,68 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     assert _facts(posts[-1])["Doctor"] == "1 findings (top: segmentation)"
 
 
+def _stage6_docx(tmp_path, uid, content=None):
+    from docx import Document
+
+    path = tmp_path / "outputs" / "stage_6_wcm_documents" / f"{uid}_wcm.docx"
+    path.parent.mkdir(parents=True)
+    if content is None:
+        doc = Document()
+        doc.add_paragraph("Example Medical College")
+        doc.save(str(path))
+    else:
+        path.write_bytes(content)
+    return path
+
+
+def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_path, db):
+    """#1388: the doctor's findings as Word comments, attached after the
+    report and mirrored to storage with it; the clean document is untouched."""
+    from docx import Document
+
+    from app.models import Step
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    payload = _doctor_payload()
+    payload["findings"] = [{"lint": "output_hygiene", "severity": "WARN", "status": "ran",
+                            "message": "1 boilerplate line(s)", "evidence": ["Insert dates here (MM/YYYY)"]}]
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    clean = _stage6_docx(tmp_path, "DOC_RV")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_RV")
+    persisted = []
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", persisted.extend)
+
+    asyncio.run(o._run_doctor())
+
+    report = tmp_path / "outputs" / "stage_7_doctor" / "DOC_RV_doctor.json"
+    review = clean.with_name("DOC_RV_wcm_review.docx")
+    files = json.loads(db.query(Step).filter(Step.run_id == "DOC_RV").first().output_files)
+    assert files == ["/x/cv_wcm.docx", str(report), str(review)]
+    assert persisted == [str(report), str(review)]
+    # The quoted text is not in the document, so it is a review note in the box closing the copy.
+    notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
+    assert notes[1:] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
+    assert len(list(Document(str(clean)).comments)) == 0
+
+
+def test_an_unreadable_document_still_publishes_the_report(monkeypatch, tmp_path, db, caplog):
+    from app.models import Step
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: _doctor_payload())
+    _stage6_docx(tmp_path, "DOC_BAD", content=b"not a zip")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_BAD")
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda files: None)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(o._run_doctor())
+
+    report = tmp_path / "outputs" / "stage_7_doctor" / "DOC_BAD_doctor.json"
+    files = json.loads(db.query(Step).filter(Step.run_id == "DOC_BAD").first().output_files)
+    assert files == ["/x/cv_wcm.docx", str(report)]
+    assert any("Review-comment docx failed" in r.message for r in caplog.records)
+
+
 def test_doctor_crash_never_fails_run(monkeypatch, tmp_path, db, caplog):
     """A doctor exception is logged and swallowed: the run stays complete and
     the terminal notification still goes out, just without a Doctor fact."""

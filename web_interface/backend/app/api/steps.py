@@ -109,15 +109,15 @@ def get_data_file(
 
     check_run_access(run_id, current_user, db, read_only=True)
 
-    # Stage JSON files are internal pipeline artifacts -- restrict to admins and
+    # Stage JSON files are internal pipeline artifacts, and the review copy
+    # carries the run doctor's findings (#1388) -- restrict both to admins and
     # staff (can_view_all_runs).
-    # The final .docx (and any other non-JSON output) stays available to the
-    # run owner. This single gate deliberately sits ABOVE every branch below --
+    # The final .docx (and any other output) stays available to the run owner. This single gate deliberately sits ABOVE every branch below --
     # before the storage short-circuit AND before `preview` is ever read -- so it
     # covers the S3 redirect, the download and the ?preview=true JSON viewer
     # alike. Do not move it into a branch or duplicate it per-branch.
-    if artifact_service.is_json_artifact(filename) and not can_view_all_runs(current_user):
-        raise forbidden("Admin or staff access required to access stage JSON.")
+    if artifact_service.is_staff_only_artifact(filename) and not can_view_all_runs(current_user):
+        raise forbidden("Admin or staff access required to access this file.")
 
     resolved = artifact_service.resolve_artifact(db, run_id, filename)
     download_name = resolved.basename

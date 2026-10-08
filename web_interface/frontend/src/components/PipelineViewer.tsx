@@ -9,7 +9,7 @@ import PipelineHeader from './PipelineHeader'
 import StepSidebar, { StepStatusIcon } from './StepSidebar'
 import LogViewer from './LogViewer'
 import PromptLogViewer from './PromptLogViewer'
-import OutputFiles, { DocxDownloadCard, visibleOutputFiles } from './OutputFiles'
+import OutputFiles, { DocxDownloadCard, isFinalDocx, visibleOutputFiles } from './OutputFiles'
 import JsonViewerModal from './JsonViewerModal'
 import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
@@ -256,7 +256,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       if (!raw) continue
       try {
         const files: string[] = JSON.parse(raw)
-        const docx = files.find((f) => f.endsWith('.docx'))
+        const docx = files.find(isFinalDocx)
         if (docx) return docx.split('/').pop() || docx
       } catch { /* parse error safe ignore */ }
     }
