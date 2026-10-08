@@ -45,19 +45,28 @@ from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     FACTS_ONLY_REQUIREMENT,
     FIRST_PERSON_REQUIREMENT,
     FUNDING_REQUIREMENT,
+    GRANT_FIELD_NOT_STATED,
     GRANT_STATUS_BY_CODE,
+    GRANT_STATUS_COMPLETED,
+    GRANT_STATUS_CURRENT,
+    GRANT_STATUS_NOT_RECEIVED,
+    GRANT_STATUS_NOT_STATED,
     MENTORING_REQUIREMENT,
     NEUTRAL_REFERENCE_REQUIREMENT,
     ONGOING_PATTERN,
     PENDING_FUNDING_REQUIREMENT,
     PI_BONUS,
     RECENCY_WEIGHT,
+    ROLE_WORDS_REQUIREMENT,
     SENIOR_AUTHOR_BONUS,
+    STATUS_REQUIREMENT,
     EntryRecency,
     build_context_string,
     compute_entry_recency,
+    end_date_state,
     format_entry_for_context,
     gather_context_entries,
+    grant_status,
     is_current_entry,
     is_valid_entry,
     latest_entry_year,
@@ -672,7 +681,7 @@ def test_format_entry_for_context_publication():
 
 def test_format_entry_for_context_grant():
     entry = {"extracted_fields": {"title": "Grant T", "pi_role": "PI", "agency": "NIH"}, "text": ""}
-    assert format_entry_for_context("M2A", entry) == (
+    assert format_entry_for_context("M2A", entry, ended=False) == (
         "[GRANT-M2A] Grant T | Status: current | Role: PI | Agency: NIH")
 
 
@@ -685,7 +694,8 @@ def test_format_entry_for_context_grant():
 def test_format_entry_for_context_grant_states_its_funding_status_as_a_word(code, status):
     """#1484: a bare GRANT-M2C told the model nothing, and it summarised pending
     applications as funded studies. Each M2 code now carries its status word."""
-    entry = {"extracted_fields": {"title": "Widget trial", "pi_role": "PI", "agency": "NIH"}, "text": ""}
+    entry = {"extracted_fields": {"title": "Widget trial", "pi_role": "PI", "agency": "NIH"},
+             "hierarchy": [f"{status.split()[0].title()} Funding"], "text": ""}
     assert format_entry_for_context(code, entry) == (
         f"[GRANT-{code}] Widget trial | Status: {status} | Role: PI | Agency: NIH")
     assert GRANT_STATUS_BY_CODE[code] == status
@@ -709,9 +719,128 @@ def test_format_entry_for_context_grant_line_carries_its_period(code, dates, seg
     intent read as a current application. The period (or submission date) follows
     the status; a blank or literal 'None' date adds nothing."""
     entry = {"extracted_fields": {"title": "Gadget study", "pi_role": "PI", "agency": "Example Fund", **dates},
-             "text": ""}
-    assert format_entry_for_context(code, entry) == (
+             "hierarchy": ["Current Funding" if code == "M2A" else "Completed Funding"], "text": ""}
+    ended = end_date_state(entry, 2026)
+    assert format_entry_for_context(code, entry, ended) == (
         f"[GRANT-{code}] Gadget study | Status: {GRANT_STATUS_BY_CODE[code]}{segment} | Role: PI | Agency: Example Fund")
+
+
+@pytest.mark.parametrize("end_date, expected", [
+    ("2019", True),
+    ("2019-06-30", True),
+    ("2026", False),
+    ("2031", False),
+    ("present", False),
+    ("2014 - Present", False),
+    (None, None),
+    ("None", None),
+    ("TBD", None),
+])
+def test_end_date_state_reads_ended_ongoing_or_unstated(end_date, expected):
+    """#1554: a grant line's status follows its end date; an end date with no year
+    and no ongoing word states nothing (None), which is not the same as ongoing."""
+    entry = {"extracted_fields": {"end_date": end_date}, "text": ""}
+    assert end_date_state(entry, 2026) is expected
+
+
+@pytest.mark.parametrize("code, ended, hierarchy, expected", [
+    # The end date decides a funded grant's status, whatever the 3b code (SPINJC-05).
+    ("M2B", False, ["Completed Funding"], GRANT_STATUS_CURRENT),
+    ("M2A", True, ["Current Funding"], GRANT_STATUS_COMPLETED),
+    # Undated: the deepest heading naming a status word decides it.
+    ("M2B", None, ["Research", "Ongoing Research Grants"], GRANT_STATUS_CURRENT),
+    ("M2A", None, ["Research Support", "Past (Completed) Funding"], GRANT_STATUS_COMPLETED),
+    ("M2B", None, ["Current and Completed Support", "Completed Funding"], GRANT_STATUS_COMPLETED),
+    # Undated under a heading that states none, both, or a pending word: not stated
+    # (FMIGLR-07, RLADNC-10, and the 2007 honors line coded M2A of ZDOAZO-01).
+    ("M2B", None, ["Contracts and Grants"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Research", "Clinical Trials"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Post-Degree Honors and Awards"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Current Support and Recently Completed"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Present/Pending"], GRANT_STATUS_NOT_STATED),
+    # The deepest status heading decides even when it states none: no fall-back to a parent.
+    ("M2A", None, ["Completed Grants", "Present/Pending"], GRANT_STATUS_NOT_STATED),
+    ("M2B", None, ["Grant Support", "Past Support"], GRANT_STATUS_COMPLETED),
+    # A deeper heading with no status word passes the decision up to its parent.
+    ("M2B", None, ["Past Support", "Federal Grants"], GRANT_STATUS_COMPLETED),
+    ("M2B", None, [], GRANT_STATUS_NOT_STATED),
+    # A pending heading outranks the dates: 3b coded applications M2B, and their proposed
+    # period read as current; a mixed heading is not a pending one.
+    ("M2B", False, ["Grant Support", "Pending Research Grants (under review)"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2A", None, ["Grant Applications in Review"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2B", True, ["Submitted Applications"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2A", False, ["Present/Pending"], GRANT_STATUS_CURRENT),
+    # A not-funded heading is not received, whatever the code.
+    ("M2B", False, ["Submitted, Not Funded"], GRANT_STATUS_NOT_RECEIVED),
+    ("M2C", None, ["Examples of grants submitted but not funded"], GRANT_STATUS_NOT_RECEIVED),
+    ("M2C", None, ["Pending Funding"], GRANT_STATUS_BY_CODE["M2C"]),
+    # M2C and M2D keep their code's word, and an unknown code has none.
+    ("M2C", False, ["Current Funding"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2D", None, [], GRANT_STATUS_BY_CODE["M2D"]),
+    ("M2Z", False, [], None),
+])
+def test_grant_status_reads_dates_then_heading_not_the_code(code, ended, hierarchy, expected):
+    """#1554 (YUYVIG): the code alone wrote 'current' or 'completed' into the grant line,
+    and the summary repeated it. A funded grant's status now comes from its end date,
+    then its CV heading, and is 'not stated' when neither gives one."""
+    entry = {"extracted_fields": {"title": "Widget study"}, "hierarchy": hierarchy, "text": ""}
+    assert grant_status(code, entry, ended) == expected
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+@pytest.mark.parametrize("source_status", ["DECLINED", "Withdrawn", "Not Funded", "rejected"])
+def test_grant_status_marks_a_declined_grant_not_received(code, source_status):
+    """ATRKVV-02: a DECLINED award line read as completed, and the summary counted
+    'three consecutive' awards. A declined, withdrawn or not-funded grant is not received."""
+    entry = {"extracted_fields": {"title": "Fellowship award", "status": source_status},
+             "hierarchy": ["Current Funding"], "text": ""}
+    assert grant_status(code, entry, ended=False) == GRANT_STATUS_NOT_RECEIVED
+
+
+def test_grant_status_keeps_a_funded_source_status_on_its_dates():
+    """A source status that is not a refusal ('Funded') leaves the date-derived status."""
+    entry = {"extracted_fields": {"title": "Widget study", "status": "Funded"}, "hierarchy": [], "text": ""}
+    assert grant_status("M2B", entry, ended=True) == GRANT_STATUS_COMPLETED
+
+
+@pytest.mark.parametrize("fields", [
+    {"pi_role": "", "agency": ""},
+    {"pi_role": None, "agency": None},
+    {"pi_role": "None", "agency": "None"},
+    {},
+])
+def test_format_entry_for_context_grant_says_a_missing_role_or_agency_is_not_stated(fields):
+    """#1554: a blank 'Role: ' let the model supply 'I led' (FCAAUV-07), and a literal
+    'Agency: None' left the funder open to the next line's (WPJHYT-05)."""
+    entry = {"extracted_fields": {"title": "Widget study", **fields}, "hierarchy": [], "text": ""}
+    assert format_entry_for_context("M2B", entry, ended=True) == (
+        f"[GRANT-M2B] Widget study | Status: {GRANT_STATUS_COMPLETED} "
+        f"| Role: {GRANT_FIELD_NOT_STATED} | Agency: {GRANT_FIELD_NOT_STATED}")
+
+
+def test_format_entry_for_context_grant_role_falls_back_to_the_role_field():
+    entry = {"extracted_fields": {"title": "Widget study", "pi_role": None, "role": "Co-I", "agency": "Fund"},
+             "hierarchy": [], "text": ""}
+    assert format_entry_for_context("M2B", entry, ended=True).endswith("| Role: Co-I | Agency: Fund")
+
+
+def test_build_context_string_grant_tag_and_status_agree():
+    """#1554: an undated honors line coded M2A was tagged current with Status 'current'
+    (ZDOAZO-01), and an ongoing grant coded M2B was tagged current with Status
+    'completed' (SPINJC-05). The tag now follows the line's own status."""
+    undated = {"extracted_fields": {"title": "Consensus grant", "start_date": "2007", "agency": "Fund"},
+               "hierarchy": ["Honors and Awards"], "text": "x"}
+    ongoing = {"extracted_fields": {"title": "Cohort study", "start_date": "2017", "end_date": "present",
+                                    "pi_role": "Co-I", "agency": "Fund"},
+               "hierarchy": ["Research Projects"], "text": "y"}
+    weighted = [("M2A", undated, 0.0, compute_entry_recency(undated, "M2A", 2026)),
+                ("M2B", ongoing, -0.1, compute_entry_recency(ongoing, "M2B", 2026))]
+
+    assert build_context_string(weighted, max_tokens=200) == (
+        f"[GRANT-M2A] Consensus grant | Status: {GRANT_STATUS_NOT_STATED} | Period: from 2007 "
+        f"| Role: {GRANT_FIELD_NOT_STATED} | Agency: Fund\n"
+        f"{CURRENT_CONTEXT_TAG} [GRANT-M2B] Cohort study | Status: {GRANT_STATUS_CURRENT} "
+        "| Period: 2017 to present | Role: Co-I | Agency: Fund")
 
 
 def test_format_entry_for_context_research_activities():
@@ -813,8 +942,9 @@ def test_build_context_string_tag_follows_recency_computed_at_a_year_other_than_
         [("M2A", current_grant, 0.0, current_recency), ("M2A", past_grant, 0.0, past_recency)],
         max_tokens=100)
 
-    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Status: current | Period: until 2045 | Role:  | Agency: "
-                       "\n[GRANT-M2A] R21 | Status: current | Period: until 2035 | Role:  | Agency: ")
+    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Status: current | Period: until 2045 "
+                       "| Role: not stated | Agency: not stated"
+                       "\n[GRANT-M2A] R21 | Status: completed | Period: until 2035 | Role: not stated | Agency: not stated")
 
 
 # --- score_existing_m1 (call_llm stubbed) -----------------------------------------
@@ -1032,6 +1162,22 @@ def test_summary_requirements_keep_first_person_and_neutral_reference_whatever_t
         assert FIRST_PERSON_REQUIREMENT in requirements
         assert NEUTRAL_REFERENCE_REQUIREMENT in requirements
         assert CURRENT_WORK_REQUIREMENT in requirements
+        assert STATUS_REQUIREMENT in requirements
+        assert ROLE_WORDS_REQUIREMENT in requirements
+
+
+def test_requirements_pin_the_yuyvig_status_role_and_funder_rules():
+    """#1554 (YUYVIG, after #1558): wrong status, upgraded role verbs, funders carried
+    to the wrong grant, and a declined award counted. Each rule names what it forbids."""
+    assert CURRENT_CONTEXT_TAG in STATUS_REQUIREMENT
+    for word in ("current", "completed", "do not say"):
+        assert word in STATUS_REQUIREMENT
+    for verb in ("led", "founded", "directed", "coordinated", "co-founder"):
+        assert verb in ROLE_WORDS_REQUIREMENT
+    assert "own line gives it as the Agency" in FUNDING_REQUIREMENT
+    assert "not stated" in FUNDING_REQUIREMENT
+    assert "not received" in FUNDING_REQUIREMENT
+    assert GRANT_STATUS_NOT_RECEIVED.startswith("not received")
 
 
 def test_current_context_tag_appears_in_current_work_requirement():
