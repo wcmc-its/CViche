@@ -568,7 +568,10 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     row reads "Optional: List publications, awards, grants ... arising
     directly from the mentoring activity", and stage 4 writes them to
     awards/funding_source, which nothing read before -- 133 corpus values
-    were extracted and then dropped.
+    were extracted and then dropped. A bare N3 entry rendered as a mentee
+    (#1574) carries the N3 schema's `thesis_title` and `narrative` instead:
+    the thesis is the project, and the narrative (a program or scholarship
+    note) follows it, as the Appendix line it came from printed both.
     """
     fields = entry.get('extracted_fields') or {}
 
@@ -580,10 +583,14 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
         site_position = site_pos_raw or mentee_level
     site_position = _with_site_extras(site_position, fields)
 
-    project = _text(fields.get('research_focus') or fields.get('dissertation_title'))
+    project = _text(fields.get('research_focus') or fields.get('dissertation_title')
+                    or fields.get('thesis_title'))
     mentee_awards = _text(fields.get('awards') or fields.get('funding_source')).strip()
     if mentee_awards and mentee_awards.casefold() not in project.casefold():
         project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
+    narrative = _text(fields.get('narrative')).strip()
+    if narrative and narrative.casefold() not in project.casefold():
+        project = f"{project}\n{narrative}" if project else narrative
 
     supervision_type = _text(fields.get('supervision_type'))
     if not supervision_type:

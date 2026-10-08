@@ -1028,10 +1028,10 @@ def test_an_unanswered_visa_row_leaves_the_placeholder_alone(tmp_path):
 # slot ranking and phone-type keywords (#1222)
 # --------------------------------------------------------------------------
 
-def _contact_rows(tmp_path, entries) -> dict[str, str]:
+def _contact_rows(tmp_path, entries, cv_owner=None) -> dict[str, str]:
     """The Personal Data table as {label cell: value cell}, read from raw
     w:t nodes so tracked insertions count."""
-    _render(tmp_path, entries)
+    _render(tmp_path, entries, cv_owner)
     rows = {}
     for table in Document(str(tmp_path / "out.docx")).tables:
         for row in table.rows:
@@ -2084,3 +2084,69 @@ def test_1556b_a_single_record_entry_keeps_its_fax_out_of_the_appendix(tmp_path)
     entry renders as it did before #1556 b."""
     text = _render(tmp_path, [_a("Tel: 555-0101\tFax: 555-0103", {"phone": "555-0101"})])
     assert "555-0103" not in text
+
+
+# --------------------------------------------------------------------------
+# #1578: a third party's contact block never fills the owner's rows
+# --------------------------------------------------------------------------
+
+_STAFF_BLOCK = _a("Division Executive Assistant\tRiley Example-Other\tFax: 555-0177\t"
+                  "Email: rother@example.edu",
+                  {"name": "Riley Example-Other", "email": "rother@example.edu",
+                   "phone": "555-0177 (Fax)"}, idx=17)
+_OWNER_EMAIL = _a("jsample@example.edu", {"email": "jsample@example.edu"}, idx=25)
+
+
+def test_1578_a_staff_contact_block_does_not_fill_the_owner_work_email(tmp_path):
+    """YUYVIG DYLJXC 17/25: an assistant's block ahead of the owner's own
+    unnamed email line filled Work email, first-wins. The owner's email
+    fills it now, and the assistant's block goes to the Appendix."""
+    rows = _contact_rows(tmp_path, [_STAFF_BLOCK, _OWNER_EMAIL], _SAMPLE_OWNER)
+    assert rows["Work email:"] == "jsample@example.edu"
+    assert not any("rother@example.edu" in value or "555-0177" in value
+                   for value in rows.values())
+    assert _all_text(tmp_path / "out.docx").count("rother@example.edu") == 1
+
+
+def test_1578_a_staff_block_is_not_the_owner_email_when_the_owner_gives_none(tmp_path):
+    """Neither the entry-text fallback nor the all-entries scan may take the
+    third party's address when no other email exists."""
+    rows = _contact_rows(tmp_path, [_STAFF_BLOCK], _SAMPLE_OWNER)
+    assert rows["Work email:"] == ""
+
+
+def test_1578_a_staff_record_of_a_multi_record_entry_reaches_the_appendix(tmp_path):
+    entry = _multi_record_a(
+        "Program Assistant: Riley Other, rother@example.edu\tEmail: jsample@example.edu",
+        [{"name": "Riley Other", "email": "rother@example.edu"},
+         {"name": None, "email": "jsample@example.edu"}])
+    rows = _contact_rows(tmp_path, [entry], _SAMPLE_OWNER)
+    assert rows["Work email:"] == "jsample@example.edu"
+    assert _all_text(tmp_path / "out.docx").count("rother@example.edu") == 1
+
+
+@pytest.mark.parametrize("entry, cv_owner", [
+    # The owner's own block, named for an endowed chair (QZWBKQ's shape):
+    # another person's name and no staff label. This is why a stage-4 name
+    # alone does not make a block a third party's, and why no doctor lint
+    # keys on the name alone (#1578).
+    (_a("Riley Other Professor, Division of Examples\tEmail: jsample@example.edu",
+        {"name": "Riley Other", "email": "jsample@example.edu"}), _SAMPLE_OWNER),
+    # A faculty rank that starts with a staff word is the owner's own title.
+    (_a("Assistant Professor of Examples\tRiley Other Scholar\tEmail: jsample@example.edu",
+        {"name": "Riley Other Scholar", "email": "jsample@example.edu"}), _SAMPLE_OWNER),
+    # The block names the owner.
+    (_a("Jane Sample, Program Coordinator\tEmail: jsample@example.edu",
+        {"name": "Jane Sample", "email": "jsample@example.edu"}), _SAMPLE_OWNER),
+    # The block names the owner by a compound surname's other word, which
+    # stage 4's last_name lacks.
+    (_a("Program Coordinator\tJ. Roe\tEmail: jsample@example.edu",
+        {"name": "J. Roe", "email": "jsample@example.edu"}),
+     {"first_name": "Jane", "last_name": "Sample", "full_name": "Jane Roe Sample"}),
+    # No owner name known: nothing is judged a third party's.
+    (_a("Program Assistant\tRiley Other\tEmail: jsample@example.edu",
+        {"name": "Riley Other", "email": "jsample@example.edu"}), None),
+])
+def test_1578_an_owner_block_still_fills_work_email(tmp_path, entry, cv_owner):
+    rows = _contact_rows(tmp_path, [entry], cv_owner)
+    assert rows["Work email:"] == "jsample@example.edu"

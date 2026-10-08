@@ -17,6 +17,7 @@ disagrees (`leaf_header_code`); and `content_pin_code`, a handful of shapes
 whose code does not depend on the heading at all. `is_note_not_record` names
 the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
 (#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
+An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
@@ -82,6 +83,27 @@ _NOT_A_GRANT_REVIEW = re.compile(
     r"(?<!review\s)\bcommittees?\b|\badvisory\b|\bworking\s+group\b|\bco-?chair\b"
     r"|\bsession\b|\bboard\b|\babstracts?\b",
     re.I,
+)
+
+# --- YUYVIG (#1577): an award under an honors heading is not current funding ---
+#
+# Under a heading 3a pins to H, an unsure grant answer (M2, M2A/B/C) on a line
+# that carries no grant marker is the author's award: a "1997 Example Investigator
+# Award" or "2007 Example Group Grant, Example Fund" rendered as a one-year Current
+# Research Funding table with no title and no PI (UVZNIC, ZDOAZO, IXJMKS; model
+# confidence 0.50-0.55). A grant or activity number, a dollar amount, a period
+# with two ends, or a PI role at the head of the row keeps the model's grant code.
+_GRANT_CODES = frozenset({"M2", "M2A", "M2B", "M2C"})
+_H_PIN_MAX_MODEL_CONFIDENCE = 0.80
+_GRANT_MARKER = re.compile(
+    r"\b[A-Z]\d{2}\b"                                                       # R01, K23, T32
+    r"|\b(?=[A-Z0-9]*\d{2})(?=[A-Z0-9]*[A-Z]{2})[A-Z0-9]{6,}\b"            # 2T32GM000000
+    r"|\$\s?\d|\b\d[\d,.]*\s?(?i:USD|dollars)\b"                            # an amount
+    r"|\b(?:19|20)\d{2}\s*(?:[-\u2013\u2014]|\b(?i:to)\b)\s*(?:\d{1,2}/)?"  # two-ended period
+    r"(?:[A-Za-z]{3,9}\.?\s*)?(?:(?:19|20)\d{2}\b|\d{2}\b(?!/)|(?i:present|current|date)\b)"
+)
+_PI_ROLE_LEAD = re.compile(
+    r"^[\s\d/\-\u2013\u2014,.:;*\u2022]*(?:(?i:(?:principal|co-?)\s*investigator)\b|(?i:co-?)?PI\b)"
 )
 
 # Content pins: shapes whose code does not depend on the heading they sit under.
@@ -250,6 +272,17 @@ def _is_grant_review(entry: dict) -> bool:
     return bool(_GRANT_HEADING.search(heading) or _GRANT_REVIEW_TEXT.search(text))
 
 
+def _h_pin_takes(entry: dict) -> bool:
+    """Whether an H pin recodes this model answer: an unsure grant code on a row with no grant marker."""
+    text = entry.get("text") or ""
+    return (
+        entry.get("taxonomy_code") in _GRANT_CODES
+        and _safe_confidence(entry) <= _H_PIN_MAX_MODEL_CONFIDENCE
+        and not _GRANT_MARKER.search(text)
+        and not _PI_ROLE_LEAD.match(text)
+    )
+
+
 def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | None:
     """The code the group's header pins this model answer to, or None to keep it."""
     code = entry.get("taxonomy_code")
@@ -257,6 +290,8 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | Non
         return "R"
     if pin and pin != "R" and code in HEADER_PIN_OVERRIDES.get(pin, ()):
         return pin
+    if pin == _HONOR_CODE and _h_pin_takes(entry):
+        return _HONOR_CODE
     if leaf == _GRANT_REVIEW_PIN and code in _GRANT_REVIEW_OVERRIDABLE and _is_grant_review(entry):
         return _GRANT_REVIEW_PIN
     return None

@@ -266,6 +266,101 @@ def test_q3_sub_heading_overrides_only_q2():
     assert n == 0 and out == entry
 
 
+# --- YUYVIG (#1577): an unsure grant answer under an H pin --------------------------
+
+H_CTX = _ctx(meta=_node("Awards and Honors", "H"))
+HONORS = ("Awards and Honors",)
+
+
+@pytest.mark.parametrize("code", ["M2", "M2A", "M2B", "M2C"])
+@pytest.mark.parametrize("text", [
+    "2031 Example Investigator Award, Example Alliance for Research",
+    "2031 Example Consensus Group Grant, Example Fund",
+    "Example Foundation Young Investigator Award (2031)",
+    "• Designed experiments as P.I. that led Example Agency to sponsor a study",
+])
+def test_unsure_grant_code_without_a_grant_marker_under_h_becomes_h(code, text):
+    (out,), n = apply_header_pin([_row(code, text, confidence=0.55, hierarchy=HONORS)], H_CTX)
+    assert n == 1 and out["taxonomy_code"] == "H" and out["pre_pin_code"] == code
+
+
+@pytest.mark.parametrize("text", [
+    "2031 Example Agency R01 Grant, Example signals in tissue",                 # activity code
+    "Supported by Example training grant 2T32GM000000-11, 2031",                # grant number
+    "Example Student Traineeship Grant (EXMPL31H0), 2031",                      # award id
+    "2031 Example Research and Creative Grant funded for $1,000",               # amount
+    "2031 Example Seed Grant, 5000 USD",                                        # amount
+    "Example Grant-in-Aid, 2031-2033",                                          # two-ended period
+    "Example Career Development Award, May 2031 to May 2033",
+    "Example Fellow, supported 7/2031-6/2033",
+    "Example Scholar Award, fall 2031-spring 2033",
+    "Example Pilot Award 2031-33",
+    "Example Pilot Award 2031 - present",
+    "Principal Investigator. Example Society Research Grant, 2031",             # PI role at the head
+    "2031 Co-Investigator, Example Foundation Grant",
+    "PI, Example Foundation Grant, 2031",
+])
+def test_unsure_grant_code_with_a_grant_marker_under_h_stays(text):
+    entry = _row("M2A", text, confidence=0.55, hierarchy=HONORS)
+    (out,), n = apply_header_pin([entry], H_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("text", [
+    "Pi Kappa Example Award, 2031",                 # "Pi" is not a PI role
+    "Example COVID-19 Response Award, 2031",        # a hyphenated name is not a grant id
+])
+def test_lookalike_markers_do_not_keep_a_grant_code(text):
+    (out,), n = apply_header_pin([_row("M2A", text, confidence=0.55, hierarchy=HONORS)], H_CTX)
+    assert n == 1 and out["taxonomy_code"] == "H"
+
+
+def test_h_pin_breaks_a_tie_and_does_not_overrule_a_firm_grant_answer():
+    text = "2031 Example Investigator Award, Example Alliance for Research"
+    (at_ceiling,), _ = apply_header_pin([_row("M2A", text, confidence=0.80, hierarchy=HONORS)], H_CTX)
+    assert at_ceiling["taxonomy_code"] == "H"
+    firm = _row("M2A", text, confidence=0.85, hierarchy=HONORS)
+    (out,), n = apply_header_pin([firm], H_CTX)
+    assert n == 0 and out == firm
+
+
+@pytest.mark.parametrize("code,text", [
+    ("I", "2031 Fellow, Example College of Examples"),     # a fellowship stays the model's call
+    ("M2D", "2031 Example dataset deposit"),
+    ("K4", "2031 Example teaching award lecture"),
+])
+def test_h_pin_recodes_only_grant_codes(code, text):
+    entry = _row(code, text, confidence=0.55, hierarchy=HONORS)
+    (out,), n = apply_header_pin([entry], H_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("ctx", [
+    _ctx(meta=_node("Awards and Honors", "H", HEADER_PIN_MIN_CONFIDENCE - 0.01)),
+    _ctx(meta=_node("Awards and Grants", "M2", 1.0), section=_node("Honors", "H", 1.0)),
+    _ctx(meta=_node("Research Support", "M2A", 1.0)),
+])
+def test_no_h_pin_leaves_an_unsure_grant_code(ctx):
+    entry = _row("M2A", "2031 Example Investigator Award", confidence=0.55, hierarchy=HONORS)
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+def test_h_pin_is_not_flipped_back_by_the_reasoning_or_grant_status_checks():
+    from unified_pipeline.core.validators.grant_status_corrector import (
+        apply_grant_status_corrections,
+    )
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    entry = {**_row("M2A", "2031 Example Investigator Award", confidence=0.55, hierarchy=HONORS),
+             "classification_reasoning": "an investigator award is research funding (M2A)"}
+    (out,), _ = apply_header_pin([entry], H_CTX)
+    (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    (status,), _ = apply_grant_status_corrections([corrected])
+    assert out["taxonomy_code"] == corrected["taxonomy_code"] == status["taxonomy_code"] == "H"
+
+
 # --- EBYSBC E11 (#312): content pins --------------------------------------------
 
 NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))

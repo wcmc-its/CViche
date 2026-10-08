@@ -602,6 +602,174 @@ def test_extract_fields_batch_stamps_a_larger_group_with_items_no_entry_can_take
     assert "2 reply item(s) at entry_index [-1, 5] fit no entry of the 2-entry group" in caplog.text
 
 
+# --- #1575: a group reply gives one entry another entry's values ---------------
+
+_GRANT_A = "Example Cancer Institute R01CA000001 (MPI, Effort: 20%) Total award: $326,020/year 04/21/17-03/31/23"
+_GRANT_B = "Example Foundation award (PI, Effort: 30%) Total award: $30,000/year 07/01/1997-06/30/1999"
+_GRANT_C = "Example Society pilot grant (PI) Total award: $150,000 04/01/98-12/31/02"
+
+
+def _m2b_at(text, idx):
+    return {"text": text, "taxonomy_code": "M2B", "element_idx_start": idx, "element_idx_end": idx}
+
+
+def _grant_group():
+    return [_m2b_at(_GRANT_A, 10), _m2b_at(_GRANT_C, 11), _m2b_at(_GRANT_B, 12)]
+
+
+# UVZNIC 592's shape: entry 0 keeps its own grant number and title, but its
+# dates, amount, effort and role are entry 2's.
+_CONTAMINATED_REPLY = [
+    {"entry_index": 0, "grant_number": "R01CA000001", "pi_role": "PI", "start_date": "1997-07-01",
+     "end_date": "1999-06-30", "total_funding": "$30,000/year", "percent_effort": "30%"},
+    {"entry_index": 1, "pi_role": "PI", "start_date": "1998-04-01", "end_date": "2002-12-31",
+     "total_funding": "$150,000"},
+    {"entry_index": 2, "pi_role": "PI", "start_date": "1997-07-01", "end_date": "1999-06-30",
+     "total_funding": "$30,000/year", "percent_effort": "30%"},
+]
+
+_ALONE_REPLY = [
+    {"entry_index": 0, "grant_number": "R01CA000001", "pi_role": "MPI", "start_date": "2017-04-21",
+     "end_date": "2023-03-31", "total_funding": "$326,020/year", "percent_effort": "20%"},
+]
+
+
+def _llm_by_group_size(replies_by_size, calls, fail_alone=False):
+    """A call_llm stub answering by how many entries the prompt holds, so the
+    group call and an entry's call of its own get different replies."""
+    def fake_call_llm(*, messages, **_kwargs):
+        size = messages[1]["content"].count("\n[Entry ")
+        calls.append(size)
+        if fail_alone and size == 1:
+            raise RuntimeError("provider error")
+        return {"content": json.dumps({"entries": replies_by_size[size]}), "cost": 0.01 * size,
+                "total_tokens": 100 * size}
+    return fake_call_llm
+
+
+def test_an_entry_given_another_entrys_values_is_extracted_again_alone(monkeypatch, caplog):
+    """UVZNIC 592: an active R01 rendered another grant's 1997-99 dates,
+    amount, effort and role. The borrowed values are not kept: the entry is
+    extracted again in a call of its own and carries that call's fields, with
+    the stamp naming what the group reply borrowed. The other entries keep
+    the group's fields, and the batch's cost counts both calls."""
+    from unified_pipeline.stage4.schemas import STAGE4_BORROWED_FIELDS_KEY
+
+    calls = []
+    monkeypatch.setattr(extraction, "call_llm",
+                        _llm_by_group_size({3: _CONTAMINATED_REPLY, 1: _ALONE_REPLY}, calls))
+
+    with caplog.at_level("WARNING"):
+        result = extraction.extract_fields_batch(_grant_group(), 0, 1)
+
+    by_idx = {e["element_idx_start"]: e for e in result["entries"]}
+    fields = by_idx[10]["extracted_fields"]
+    assert (fields["start_date"], fields["end_date"]) == ("2017-04-21", "2023-03-31")
+    assert (fields["total_funding"], fields["percent_effort"], fields["pi_role"]) == ("$326,020/year", "20%", "MPI")
+    assert by_idx[10][STAGE4_BORROWED_FIELDS_KEY] == ["end_date", "percent_effort", "start_date", "total_funding"]
+    assert by_idx[12]["extracted_fields"]["start_date"] == "1997-07-01"
+    assert STAGE4_BORROWED_FIELDS_KEY not in by_idx[11] and STAGE4_BORROWED_FIELDS_KEY not in by_idx[12]
+    assert calls == [3, 1]
+    assert result["cost"] == pytest.approx(0.04)
+    assert result["tokens"] == 400
+    assert "held another entry's end_date, percent_effort, start_date, total_funding" in caplog.text
+
+
+def test_when_the_call_of_its_own_fails_the_borrowed_values_are_still_not_kept(monkeypatch):
+    """The re-extraction failing does not bring the borrowed values back: the
+    entry keeps the group's fields with them None (the regex pass may refill
+    one from the entry's own text) and is stamped with the call's error. The
+    group's own call succeeded, so the batch is not failed."""
+    from unified_pipeline.stage4.schemas import STAGE4_REEXTRACT_ERROR_KEY
+
+    monkeypatch.setattr(extraction, "call_llm",
+                        _llm_by_group_size({3: _CONTAMINATED_REPLY}, [], fail_alone=True))
+
+    result = extraction.extract_fields_batch(_grant_group(), 0, 1)
+
+    entry = next(e for e in result["entries"] if e["element_idx_start"] == 10)
+    values = {str(value) for value in entry["extracted_fields"].values()}
+    assert not values & {"1997-07-01", "1999-06-30", "$30,000/year", "30%"}
+    assert entry["extracted_fields"]["grant_number"] == "R01CA000001"
+    assert entry[STAGE4_REEXTRACT_ERROR_KEY] == extraction.LLM_PROVIDER_ERROR
+    assert result["success"] is True
+
+
+def test_a_record_that_is_another_entrys_is_removed_from_the_entry(monkeypatch):
+    """UVZNIC 559: the reply gave entry 1 a second record that was entry 2's
+    mentee and gave entry 2 nothing. The record is removed from entry 1, which
+    is stamped with the count; entry 2 is left to the recovery pass as any
+    unmatched entry is. Removing a record calls nothing more."""
+    from unified_pipeline.stage4.schemas import (
+        STAGE4_BORROWED_FIELDS_KEY,
+        STAGE4_FOREIGN_RECORDS_KEY,
+        STAGE4_RECORDS_KEY,
+    )
+
+    calls = []
+    entries = [{"text": t, "taxonomy_code": "N3B", "element_idx_start": i, "element_idx_end": i}
+               for i, t in enumerate(["Mentee A, 2016-2018", "Mentee B, 2017-18", "Mentee C (2021-2022)"])]
+    monkeypatch.setattr(extraction, "call_llm", _llm_by_group_size({3: [
+        {"entry_index": 0, "mentee_name": "Mentee A", "start_date": "2016", "end_date": "2018"},
+        {"entry_index": 1, "mentee_name": "Mentee B", "start_date": "2017", "end_date": "2018"},
+        {"entry_index": 1, "mentee_name": "Mentee C", "start_date": "2021", "end_date": "2022"},
+    ]}, calls))
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    by_idx = {e["element_idx_start"]: e for e in result["entries"]}
+    assert by_idx[1]["extracted_fields"]["mentee_name"] == "Mentee B"
+    assert STAGE4_RECORDS_KEY not in by_idx[1]["extracted_fields"]
+    assert by_idx[1][STAGE4_FOREIGN_RECORDS_KEY] == 1
+    assert STAGE4_BORROWED_FIELDS_KEY not in by_idx[1]
+    assert by_idx[2]["extraction_error"] == extraction.NO_MATCHING_EXTRACTION
+    assert calls == [3]
+
+
+def test_a_reply_whose_values_are_each_entrys_own_is_kept_as_is(monkeypatch):
+    """The control: values each entry states itself, even ones another entry
+    also states (both grants run to 1999 here), are kept, and no entry is
+    stamped or called again."""
+    from unified_pipeline.stage4.schemas import STAGE4_BORROWED_FIELDS_KEY
+
+    calls = []
+    entries = [_m2b_at("Grant one (PI, Effort: 10%) $50,000 1995-1999", 0),
+               _m2b_at("Grant two (PI, Effort: 30%) $30,000 1997-1999", 1)]
+    monkeypatch.setattr(extraction, "call_llm", _llm_by_group_size({2: [
+        {"entry_index": 0, "start_date": "1995", "end_date": "1999", "total_funding": "$50,000",
+         "percent_effort": "10%"},
+        {"entry_index": 1, "start_date": "1997", "end_date": "1999", "total_funding": "$30,000",
+         "percent_effort": "30%"},
+    ]}, calls))
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert calls == [2]
+    assert [e["extracted_fields"]["total_funding"] for e in result["entries"]] == ["$50,000", "$30,000"]
+    assert not any(STAGE4_BORROWED_FIELDS_KEY in e for e in result["entries"])
+
+
+def test_a_year_from_the_entrys_own_context_heading_is_its_own(monkeypatch):
+    """The prompt shows a stamped entry under its heading (#985), so a year
+    the heading states is the entry's own, even when another entry states it
+    too."""
+    from unified_pipeline.stage4.schemas import STAGE4_BORROWED_FIELDS_KEY
+
+    calls = []
+    entries = [{**_d1_at("Visiting lecturer", 0), "context_heading": "Example University, 2019"},
+               _d1_at("Lecturer, 2019-2020", 1)]
+    monkeypatch.setattr(extraction, "call_llm", _llm_by_group_size({2: [
+        {"entry_index": 0, "title": "Visiting lecturer", "start_date": "2019"},
+        {"entry_index": 1, "title": "Lecturer", "start_date": "2019", "end_date": "2020"},
+    ]}, calls))
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert calls == [2]
+    assert result["entries"][0]["extracted_fields"]["start_date"] == "2019"
+    assert STAGE4_BORROWED_FIELDS_KEY not in result["entries"][0]
+
+
 @pytest.mark.parametrize("timeout_error", [
     ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
     ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
