@@ -28,7 +28,7 @@ from app.models import Log, Run, Step, User
 from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services.run_service import (
-    DEPLOY_INTERRUPT_MESSAGE,
+    SHUTDOWN_INTERRUPT_MESSAGE,
     fail_runs_interrupted_by_shutdown,
     reconcile_stale_runs,
 )
@@ -131,7 +131,7 @@ def notified(monkeypatch):
 
 
 class TestFailRunsInterruptedByShutdown:
-    def test_still_running_run_is_failed_with_the_deploy_message(self, db, notified):
+    def test_still_running_run_is_failed_with_the_shutdown_message(self, db, notified):
         user = _make_user(db, email="Owner@Example.com")
         run = Run(id="DPLY01", filename="a.docx", file_type="docx", status="running",
                   started_at=datetime.now() - timedelta(minutes=30), user_id=user.id)
@@ -143,13 +143,17 @@ class TestFailRunsInterruptedByShutdown:
 
         db.refresh(run)
         assert run.status == "failed"
-        assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
+        assert run.error_message == SHUTDOWN_INTERRUPT_MESSAGE
+        # #1565: the drain runs on every SIGTERM (node failure, eviction,
+        # scale-down, release); the pod can't tell which, so the message
+        # names no cause.
+        assert "deploy" not in run.error_message.lower()
         assert run.completed_at is not None
         assert db.query(Step).filter(Step.run_id == "DPLY01").one().status == "error"
         # #116: the run's own log says why it ended, and exactly one failure
         # card goes out -- the run's thread never gets to send one.
         assert [(log.level, log.message) for log in db.query(Log).filter(Log.run_id == "DPLY01")] \
-            == [("ERROR", DEPLOY_INTERRUPT_MESSAGE)]
+            == [("ERROR", SHUTDOWN_INTERRUPT_MESSAGE)]
         assert notified == [("DPLY01", "failed", "owner@example.com")]
 
     def test_a_failed_submitter_lookup_still_sends_every_card(self, db, notified, monkeypatch):

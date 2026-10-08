@@ -16,7 +16,7 @@ Memory is overcommitted: workers request 512 Mi with a 2 Gi limit, and on 2026-1
 
 ## Symptoms
 
-- Runs fail with "the server was shut down for a deploy" when no deploy happened (#1565).
+- Runs fail with "the server running it was shut down while it was in progress". Before #1565 the same failure read "the server was shut down for a deploy", even when no deploy happened.
 - A PDF run's retry fails with "This PDF is too large or complex" although its first attempt converted the file (#1566, #1567).
 - Throughput halves: worker pods sit `Terminating` on the dead node, and their replacements stay `Pending` with `Insufficient memory` / `max node group size reached`.
 
