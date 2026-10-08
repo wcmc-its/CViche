@@ -45,6 +45,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     _PII_FIELD_KEY_RE,
     CAT_HOME_CONTACT,
+    CAT_PLACE_OF_BIRTH,
     PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
 )
@@ -1955,3 +1956,131 @@ def test_labelled_email_the_page_does_not_show_is_still_recovered(tmp_path):
                 {"email": "jq.other@example.org", "institutional_email": "jq.other@example.org"}, idx=47)
     items = _list_item_texts_after(tmp_path, [contact, footer], _SAMPLE_OWNER)
     assert "Email: jq.other@example.org" in items
+
+
+# --------------------------------------------------------------------------
+# #1556 b: every record of a multi-record contact entry
+# --------------------------------------------------------------------------
+
+_RECORDS_KEY = "stage4_records"
+
+
+def _multi_record_a(text, records, idx=0):
+    """An A entry as stage 4 writes one with several records: every record
+    under `_RECORDS_KEY`, the last one also the entry's own fields."""
+    return _a(text, {**records[-1], _RECORDS_KEY: records}, idx=idx)
+
+
+_TWO_LINE_CONTACT = _multi_record_a(
+    "Tel: 555-0101 Cell: 555-0102\tFax: 555-0103\t"
+    "E-mail: alpha@example.edu Email: beta@example.org",
+    [{"phone": "555-0101", "email": "alpha@example.edu"},
+     {"phone": "555-0102", "email": "beta@example.org"}])
+
+
+def test_1556b_every_record_of_a_contact_entry_fills_its_row(tmp_path):
+    """OIEPQD TVQZIP 22: the entry's own fields are its LAST record, so the
+    office number and the first email rendered nowhere."""
+    rows = _contact_rows(tmp_path, [_TWO_LINE_CONTACT])
+    assert rows["Office telephone:"] == "555-0101"
+    assert rows["Cell phone:"] == "555-0102"
+    assert rows["Work email:"] == "alpha@example.edu"
+
+
+def test_1556b_a_record_value_no_row_takes_reaches_the_appendix_once(tmp_path):
+    """The second email has no row left, and no row takes a fax: both go to
+    the Appendix, and nothing a row already shows is printed again."""
+    text = _render(tmp_path, [_TWO_LINE_CONTACT])
+    assert text.count("beta@example.org") == 1
+    assert text.count("Fax: 555-0103") == 1
+    assert text.count("555-0101") == 1
+    assert text.count("alpha@example.edu") == 1
+
+
+def test_1556b_a_value_two_records_share_is_recovered_once(tmp_path):
+    entry = _multi_record_a(
+        "Email: alpha@example.edu\tEmail: beta@example.org\tEmail: beta@example.org",
+        [{"email": "alpha@example.edu"}, {"email": "beta@example.org"},
+         {"email": "beta@example.org"}])
+    text = _render(tmp_path, [entry])
+    assert text.count("beta@example.org") == 1
+
+
+def test_1556b_every_address_record_is_placed(tmp_path):
+    """OIEPQD TVQZIP 17: two addresses, one Office address row. The first
+    record's address fills it and the other reaches the Appendix."""
+    entry = _multi_record_a(
+        "Lab Address Clinic Address\t1 Sample Way, Exampleton, ZZ 00000\t"
+        "2 Other Road, Exampleton, ZZ 00000",
+        [{"address": "1 Sample Way, Exampleton, ZZ 00000"},
+         {"address": "2 Other Road, Exampleton, ZZ 00000"}])
+    rows = _contact_rows(tmp_path, [entry])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert _all_text(tmp_path / "out.docx").count("2 Other Road") == 1
+
+
+@pytest.mark.parametrize("text, records, home_value", [
+    ("Home: 9 Hidden Lane, Exampleton, ZZ 00000\tOffice: 1 Sample Way, Exampleton, ZZ 00000",
+     [{"address": "9 Hidden Lane, Exampleton, ZZ 00000"},
+      {"address": "1 Sample Way, Exampleton, ZZ 00000"}], "9 Hidden Lane"),
+    ("Home phone: 555-0199\tOffice phone: 555-0100",
+     [{"phone": "555-0199"}, {"phone": "555-0100"}], "555-0199"),
+    ("Tel: 555-0100\tFax (h): 555-0198",
+     [{"phone": "555-0100"}, {"phone": "555-0100"}], "555-0198"),
+    ("Tel: 555-0100\tResidence fax: 555-0197",
+     [{"phone": "555-0100"}, {"phone": "555-0100"}], "555-0197"),
+])
+def test_1556b_a_home_record_is_still_withheld(tmp_path, text, records, home_value):
+    """#821: routing every record must not surface a home address or
+    number, in a row or in the Appendix."""
+    _render(tmp_path, [_multi_record_a(text, records)])
+    assert home_value not in _all_text(tmp_path / "out.docx")
+
+
+def _withheld_after(tmp_path, entries) -> list:
+    """The withheld list a render of `entries` leaves on its generator."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": entries}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    return gen._pii_result.withheld
+
+
+def test_1556b_a_birthplace_record_is_recorded_withheld_once(tmp_path):
+    """Finding the values no row takes routes each record a second time; that
+    pass must not record the birthplace on the withheld list again."""
+    entry = _multi_record_a(
+        "Born 1970\tSampleville, QQ\tE-mail: alpha@example.edu",
+        [{"address": "Sampleville, QQ"}, {"email": "alpha@example.edu"}])
+    withheld = _withheld_after(tmp_path, [entry])
+    assert [item.category for item in withheld].count(CAT_PLACE_OF_BIRTH) == 1
+
+
+def test_1556b_a_record_value_cut_from_a_protected_fragment_fills_no_row(tmp_path):
+    """Only the entry's own fields pass through the pii pass's field checks;
+    an earlier record's value is held back by its provenance alone."""
+    entry = _multi_record_a(
+        "Place of Birth: Sampleville, QQ 11111\tOffice: 1 Sample Way, Exampleton, ZZ 00000",
+        [{"address": "Sampleville, QQ 11111"},
+         {"address": "1 Sample Way, Exampleton, ZZ 00000"}])
+    rows = _contact_rows(tmp_path, [entry])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert "Sampleville" not in _all_text(tmp_path / "out.docx")
+
+
+def test_1556b_the_entry_own_fields_stand_for_its_last_record(tmp_path):
+    """A value written to the entry's own fields after stage 4 kept its
+    records is read: those fields are the last record."""
+    entry = _a("Tel: 555-0101\tMobile: 555-0102",
+               {"phone": "555-0101", "cell_phone": "555-0102",
+                _RECORDS_KEY: [{"phone": "555-0101"}, {"phone": "555-0101"}]})
+    rows = _contact_rows(tmp_path, [entry])
+    assert rows["Cell phone:"] == "555-0102"
+
+
+def test_1556b_a_single_record_entry_keeps_its_fax_out_of_the_appendix(tmp_path):
+    """The Appendix takes a fax only from a multi-record entry; a one-record
+    entry renders as it did before #1556 b."""
+    text = _render(tmp_path, [_a("Tel: 555-0101\tFax: 555-0103", {"phone": "555-0101"})])
+    assert "555-0103" not in text
