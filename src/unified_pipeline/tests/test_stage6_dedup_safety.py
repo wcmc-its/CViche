@@ -698,7 +698,7 @@ _NAME_FIELD_BY_CODE = {
     "D2": "title", "D3": "title", "F1": "state_country", "F2": "specialty", "H": "award_name",
     "I": "organization", "K1": "course_title", "L3": "leadership_role", "M2A": "title",
     "M2B": "title", "M2C": "title", "M2D": "title", "N2": "grant_title",
-    "N3A": "mentee_name", "N3B": "mentee_name", "O": "leadership_role",
+    "N3": "mentee_name", "N3A": "mentee_name", "N3B": "mentee_name", "O": "leadership_role",
     "P": "committee_name", "Q1": "organization", "Q2": "committee_name", "Q3": "panel_name",
     "Q4": "journal_name", "Q4A": "journal_name", "Q4B": "journal_name",
     "Q4C": "journal_name", "Q4D": "journal_name", "R": "title", "S1": "title",

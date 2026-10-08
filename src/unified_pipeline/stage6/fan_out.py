@@ -58,7 +58,7 @@ from __future__ import annotations
 import copy
 import re
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -211,10 +211,11 @@ _MAX_SHORT_RANGE_YEARS = 50
 # .docx while the entry's own text is a neutral line
 # (`test_rendered_fields_match_what_each_section_writes` repeats that probe, so a
 # renderer that starts or stops reading a field fails it). `narrative` is in no
-# set: nothing writes it. A code missing here is never fanned out. That includes
-# every code whose section writes the entry's TEXT and no field (E, G, J, K2-K5,
-# L1, L2, M1, M2, N1, N3, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would
-# render only its built text, which does not carry the parent's scalars. (N4
+# set: the probe leaves it unmarked, and only the mentee table writes it. A
+# code missing here is never fanned out. That includes every code whose
+# section writes the entry's TEXT and no field (E, G, J, K2-K5, L1, L2, M1, M2,
+# N1, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would render only its
+# built text, which does not carry the parent's scalars. (N4
 # may reorder a scrambled line by its fields, but only when they hold exactly
 # the text's words -- `mentoring._outcome_line_from_fields`, #1434.)
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
@@ -235,8 +236,10 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'M2C': frozenset({'agency', 'grant_number', 'notes', 'pi_name', 'pi_role', 'status', 'submission_date', 'title', 'total_funding_requested'}),
     'M2D': frozenset({'assignee', 'filing_date', 'inventors', 'issue_date', 'patent_number', 'status', 'title'}),
     'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
+    # A bare N3 that names a mentee renders as one (`_route_bare_mentee`, #1574).
+    'N3': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
     'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),
-    'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date'}),
+    'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
     'O': frozenset({'division_department', 'end_date', 'institution', 'leadership_role', 'start_date'}),
     'P': frozenset({'committee_name', 'end_date', 'institution', 'role', 'start_date'}),
     'Q1': frozenset({'end_date', 'organization', 'role', 'start_date'}),
@@ -261,7 +264,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
 
 # The codes whose section renders the entry's text, not its fields (see above).
 # Pinned by `test_text_rendered_codes_write_the_text_and_no_field`.
-_TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', 'L2', 'M1', 'M2', 'N1', 'N3', 'N4', 'S0', 'T'})
+_TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', 'L2', 'M1', 'M2', 'N1', 'N4', 'S0', 'T'})
 
 # Keys a stage-5 formatter writes for the WHOLE entry (5c teaching prose, 5d
 # citation). An entry that carries one already has a rendering of all its
@@ -371,8 +374,16 @@ _EVIDENCE_KEYS_SHOWN = 8
 # record is the meeting abroad, and a US meeting went under International. A
 # record keeps the scope its heading names unless the classifier, asked about
 # that record alone, puts it in another country (`_ABROAD_SCOPE`).
-_SCOPES = ('Regional', 'National', 'International')
-_SCOPE_RES = tuple((scope, re.compile(rf'\b{scope}\b', re.IGNORECASE)) for scope in _SCOPES)
+# #1579 (YUYVIG IZABPD, SXPHOG, SQMWHM): a CV also files talks under "State",
+# "Local" and "Presentations (State & Local)", which the template's Regional
+# table holds; "Federal" names a national reach. A heading word -> the table.
+_SCOPE_WORDS = {
+    'Regional': ('regional', 'local', 'state', 'statewide', 'provincial'),
+    'National': ('national', 'federal'),
+    'International': ('international',),
+}
+_SCOPE_RES = tuple((scope, re.compile(rf"\b(?:{'|'.join(words)})\b", re.IGNORECASE))
+                   for scope, words in _SCOPE_WORDS.items())
 _ABROAD_SCOPE = 'International'
 
 _DATE_KEY_SUFFIX = '_date'
@@ -948,13 +959,10 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str],
 
 
 def inherited_scope(entry: Mapping[str, Any]) -> str | None:
-    """The geographic scope a fanned-out child takes from its parent: the one
-    scope its nearest CV heading names ("National", "NATIONAL SERVICE ROLES").
-    Every child counts, the last of stage 4's records included. None when the
-    entry is not a child, or when that heading names two scopes
-    ("International/National") or none does."""
-    if not is_split_record(entry):
-        return None
+    """The geographic scope an entry takes from the CV: the one scope its
+    nearest heading naming any names ("National", "NATIONAL SERVICE ROLES",
+    "Presentations (State & Local)"). None when that heading names two scopes
+    ("International/National") or no heading names one."""
     for heading in reversed(entry.get('hierarchy') or []):
         named = [scope for scope, pattern in _SCOPE_RES if pattern.search(str(heading))]
         if named:
@@ -962,12 +970,16 @@ def inherited_scope(entry: Mapping[str, Any]) -> str | None:
     return None
 
 
-def record_scope(entry: Mapping[str, Any], own_scope: str) -> str:
-    """The scope `entry` files under, given `own_scope`, the classifier's
-    answer about its `record_text`: a child keeps the scope its heading names
-    (`inherited_scope`) unless the classifier puts the record abroad; any
-    other entry takes `own_scope`."""
+def record_scope(entry: Mapping[str, Any], classify: Callable[[Mapping[str, Any]], str]) -> str:
+    """The scope `entry` files under. An entry the CV files under a scope
+    heading (`inherited_scope`) takes it, and `classify` is not asked (#1579).
+    A record fanned out of a multi-record entry keeps its heading too, unless
+    `classify`, asked about that record alone, puts it abroad (EBYSBC E34). Any
+    other entry takes `classify`'s answer."""
     heading = inherited_scope(entry)
+    if heading is not None and not is_split_record(entry):
+        return heading
+    own_scope = classify(entry)
     if heading is None or own_scope == _ABROAD_SCOPE:
         return own_scope
     return heading
