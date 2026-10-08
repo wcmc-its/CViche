@@ -134,6 +134,21 @@ _HONORIFIC_FELLOW = re.compile(
     r"(?:[\w&'\u2019-]+\s+){0,4}(?:college|academy|society)\b",
     re.I,
 )
+# A trainee title qualified as a non-training role is a position (#1581, YUYVIG):
+# "Fellow (undergraduate faculty advisor), <residential college>" is a faculty
+# appointment, and "Resident Veterinarian, <horse farm>" is employment. A resident
+# veterinarian, artist or scholar is training only at a college, university,
+# hospital or school ("Resident Veterinarian: <college> animal hospital").
+# The role must BE the title's qualifier, the first words of the parenthetical or
+# comma clause, and end that clause (or go on "to ..."): a row naming its
+# supervisor ("..., <institution>, Faculty Advisor: Dr <N>") is training and pins.
+_NON_TRAINING_ROLE_AFTER_TITLE = re.compile(
+    r"^\s*[(,]\s*(?:[\w'\u2019-]+\s+){0,3}?"
+    r"faculty\s+advis[eo]r(?=\s*(?:[),]|to\b))",
+    re.I,
+)
+_RESIDENT_PROFESSION_AFTER_TITLE = re.compile(r"^\s+(?:veterinarian|artist|scholar)s?\b", re.I)
+_TRAINING_SETTING = re.compile(r"\b(?:college|universit(?:y|ies)|hospital|school|residency)\b", re.I)
 _POSITION_CODES = frozenset({"D1", "D2", "D3"})
 _LIFE_SUPPORT = re.compile(
     r"\b(?:BCLS|BLS|ACLS|PALS|NRP|ATLS|basic\s+life\s+support"
@@ -288,9 +303,18 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | Non
 
 
 def _is_trainee_title(text: str) -> bool:
-    """An intern, resident or fellow title at the head of the row, not an affiliate or honorific one."""
+    """An intern, resident or fellow title at the head of the row, not an affiliate, honorific or other role."""
     trainee = _TRAINEE_TITLE.match(text)
-    return bool(trainee) and not _SENIOR_FELLOW.search(trainee.group(0)) and not _HONORIFIC_FELLOW.match(text)
+    if not trainee or _SENIOR_FELLOW.search(trainee.group(0)) or _HONORIFIC_FELLOW.match(text):
+        return False
+    return not _is_non_training_role(text[trainee.end():], text)
+
+
+def _is_non_training_role(after_title: str, text: str) -> bool:
+    """A title qualified as a faculty-advisor role, or a resident professional outside a training setting."""
+    if _NON_TRAINING_ROLE_AFTER_TITLE.match(after_title):
+        return True
+    return bool(_RESIDENT_PROFESSION_AFTER_TITLE.match(after_title)) and not _TRAINING_SETTING.search(text)
 
 
 def content_pin_code(entry: dict) -> tuple[str, str] | None:
