@@ -1,7 +1,7 @@
 import { AlertCircle, CheckCircle2, Circle, Loader2, X, XCircle } from 'lucide-react'
 import { formatCost, formatMinutes } from '../../utils'
-import { estimateCost, estimateMinutes, rowNote, rowSize } from './batchRows'
-import type { BatchRow, RowState } from './batchRows'
+import { costOutliers, estimateCost, estimateMinutes, outlierText, rowNote, rowSize } from './batchRows'
+import type { BatchRow, CostOutlier, RowState } from './batchRows'
 import { formatFileSize } from './SingleFileRow'
 
 const GRID = 'grid grid-cols-[28px_minmax(0,1fr)_64px_76px_minmax(130px,190px)_28px] gap-3'
@@ -39,9 +39,34 @@ interface RowProps {
   editable: boolean
   onRemove: (key: string) => void
   onRunAgain?: (key: string) => void
+  /** Set when the file's estimate is far above the rest of the batch's (#1599). */
+  outlier?: CostOutlier
+  onInclude?: (key: string) => void
 }
 
-function FileRow({ row, index, showCost, editable, onRemove, onRunAgain }: RowProps) {
+interface OutlierNoteProps {
+  row: BatchRow
+  outlier: CostOutlier
+  showCost: boolean
+  editable: boolean
+  onInclude?: (key: string) => void
+}
+
+/** The outlier's note and, until the user includes it, the one-click "Include it" (#1599). */
+function OutlierNote({ row, outlier, showCost, editable, onInclude }: OutlierNoteProps) {
+  return (
+    <>
+      <span className="pl-[22px] text-xs text-warning-800" data-testid="cost-outlier">{outlierText(outlier, showCost)}</span>
+      {editable && onInclude && !row.costConfirmed && (
+        <button type="button" onClick={() => onInclude(row.key)} className="pl-[22px] text-left text-xs font-medium text-primary-700 hover:underline">
+          Include it
+        </button>
+      )}
+    </>
+  )
+}
+
+function FileRow({ row, index, showCost, editable, onRemove, onRunAgain, outlier, onInclude }: RowProps) {
   const status = STATUS[row.invalidReason ? 'invalid' : row.state]
   const note = rowNote(row)
   const bg = row.state === 'failed' ? 'bg-error-50' : row.state === 'uploading' ? 'bg-primary-50' : 'bg-white'
@@ -54,6 +79,7 @@ function FileRow({ row, index, showCost, editable, onRemove, onRunAgain }: RowPr
       <span className="flex min-w-0 flex-col gap-px">
         <span className={`flex items-center gap-1.5 text-[13px] font-medium ${status.text}`}>{status.icon}{status.label}</span>
         {note && <span className={`pl-[22px] text-xs ${row.state === 'failed' ? 'text-error-700' : 'text-warning-800'}`}>{note}</span>}
+        {outlier && <OutlierNote row={row} outlier={outlier} showCost={showCost} editable={editable} onInclude={onInclude} />}
         {row.failure?.duplicate && onRunAgain && (
           <button type="button" onClick={() => onRunAgain(row.key)} className="pl-[22px] text-left text-xs font-medium text-primary-700 hover:underline">
             Run it again
@@ -84,10 +110,13 @@ interface BatchFileTableProps {
   onRemove: (key: string) => void
   /** Confirms re-running a row the server refused as already processed (#1286). */
   onRunAgain?: (key: string) => void
+  /** Includes a row flagged as far above the rest of the batch's estimate (#1599). */
+  onInclude?: (key: string) => void
 }
 
 /** Step 2's file table: #, File, Size, Estimate (+ cost for admins), Status, remove. */
-export default function BatchFileTable({ rows, showCost, editable, onRemove, onRunAgain }: BatchFileTableProps) {
+export default function BatchFileTable({ rows, showCost, editable, onRemove, onRunAgain, onInclude }: BatchFileTableProps) {
+  const outliers = costOutliers(rows)
   return (
     <div className="overflow-x-auto rounded-[10px] border border-sand-200">
       <div className="min-w-[520px]">
@@ -97,7 +126,10 @@ export default function BatchFileTable({ rows, showCost, editable, onRemove, onR
         </div>
         <ul className={rows.length > SCROLL_AFTER_ROWS ? 'max-h-[520px] overflow-y-auto' : ''} aria-label="Files">
           {rows.map((row, i) => (
-            <FileRow key={row.key} row={row} index={i} showCost={showCost} editable={editable} onRemove={onRemove} onRunAgain={onRunAgain} />
+            <FileRow
+              key={row.key} row={row} index={i} showCost={showCost} editable={editable} onRemove={onRemove} onRunAgain={onRunAgain}
+              outlier={outliers.get(row.key)} onInclude={onInclude}
+            />
           ))}
         </ul>
       </div>
