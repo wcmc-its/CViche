@@ -737,6 +737,20 @@ def test_dedup_drops_warns_on_another_journal_absent_from_page():
     article = _named_decision("Example Optics", "The Example Optics")
     result = lint_dedup_drops({"dedup_decisions": [article]}, blocks)
     assert [f["severity"] for f in result] == ["INFO"]
+    # a blank extracted name is no name either, so it names no other journal
+    blank = dict(fragment, dropped_fields={"journal_name": " "})
+    assert "WARN" not in [f["severity"] for f in
+                          lint_dedup_drops({"dedup_decisions": [blank]}, blocks[1:])]
+
+
+def test_dedup_drops_quiet_on_a_name_of_filler_words_only():
+    """A dropped name with no word but filler gives the insertion test
+    nothing to place; it must not raise (run_doctor would drop the lint)."""
+    decision = _drop("2031 Example Committee", "2031 Example Committee", code="P",
+                     metric="containment=1.00", dropped_fields={"committee_name": "of the"},
+                     kept_fields={"committee_name": "Example Committee"})
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert "WARN" not in [f["severity"] for f in result]
 
 
 def test_dedup_drops_quiet_when_dropped_name_is_its_own_cell():
@@ -850,6 +864,8 @@ def test_occasion_apart_reads_classes_and_reopened_ranges(dropped, kept, reason)
     ("2031-present Example board certification", "2031 - present Example board"
      " certification, Example Board"),
     ("2021 - 2031 Example role", "2021-2031 Example role, Example Hospital"),
+    # the kept range is reopened in the same year it ends, as the dropped one is
+    ("2031 - Example board certification", "Example board certification 2021 - 2031 - present"),
     # the kept text states the year on its own too: a dash after it is a separator
     ("2031 - Example lecture, Example Symposium", "Example Survey 1990- 2031. "
      "Example lecture, Example Symposium, 2031."),
@@ -921,6 +937,8 @@ def test_dedup_drops_warns_when_names_name_two_records(key, dropped_name, kept_n
      "record=undated_appointment"),                                     # a record rule's rewording
     ("Example Society of Medicine", "Example Society of Medicine (ESM), formerly Example "
      "Society of Sample Medicine", "containment=1.00"),                 # a former name after it
+    ("Associate Prof. of Example", "Associate Professor, Department of Example",
+     "record=undated_appointment"),                                     # the dropped name abbreviates
 ])
 def test_dedup_drops_not_warn_on_a_reworded_name(dropped_name, kept_name, metric):
     decision = _committee_decision(dropped_name, kept_name, metric)
@@ -946,6 +964,14 @@ def test_dedup_drops_warns_on_one_talk_given_in_two_places():
     assert result[0]["evidence"][0].startswith("entry 12, 14: S8 (")
     same = {"entries": [_talk(12, "Example City"), _talk(14, "Example City")]}
     assert lint_dedup_drops({"dedup_decisions": [decision]}, None, same) == []
+    # a dropped text one entry carries names that entry, not every copy
+    own = {"entries": [_talk(12, "Example City"),
+                       dict(_talk(14, "Sample City"), text="Example talk. 2031")]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, own)
+    assert result[0]["evidence"][0].startswith("entry 14: S8 (")
+    # only a citation drop is read as a delivery: a text match is a text match
+    worded = dict(decision, metric="jaccard=0.95")
+    assert lint_dedup_drops({"dedup_decisions": [worded]}, None, apart) == []
 
 
 def test_dedup_drops_evidence_names_the_dropped_entry_from_stage_5d():
