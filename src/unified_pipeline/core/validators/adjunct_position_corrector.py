@@ -12,21 +12,28 @@ Problem: LLM often classifies all teaching positions as D1 (faculty),
 Rule: D1 = Faculty OR research staff positions at academic institutions
       D3 = Adjunct, instructor, lab manager, teaching-only roles at
            community colleges or positions without faculty rank.
+      An adjunct/part-time instructor or community-college row under the
+      entry's own academic, faculty or teaching heading stays D1 (#1581).
 """
 
 import re
 
-# Patterns indicating D3 (non-faculty positions)
-D3_POSITION_PATTERNS = [
-    # Adjunct positions (usually D3 unless explicitly faculty)
+# Instructor titles stage 3b's prompt rule 12 puts in D1 (adjunct faculty,
+# Instructor). They recode to D3 only when the entry's own heading is not an
+# academic, faculty or teaching heading (#1581): "Adjunct Instructor, <community
+# college>" under "Teaching Experience" is the author's academic appointment, the
+# same row under "Other Employment" is not.
+HEADING_GATED_D3_PATTERNS = [
     r'\bAdjunct\s+Instructor\b',
     r'\bAdjunct\s+Lecturer\b',
     r'\bPart-time\s+Instructor\b',
-
-    # Community college positions (almost always D3)
     r'\bCommunity\s+College\b',
     r'\bCounty\s+Community\s+College\b',
+]
+ACADEMIC_HEADING = re.compile(r'(?<!non-)\b(?:academic|faculty|teaching)\b', re.IGNORECASE)
 
+# Patterns indicating D3 (non-faculty positions) whatever the heading
+D3_POSITION_PATTERNS = [
     # Lab and technical positions
     r'\bLab\s+Manager\b',
     r'\bLaboratory\s+Manager\b',
@@ -60,12 +67,16 @@ D1_POSITION_PATTERNS = [
 
 # Compile patterns
 D3_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in D3_POSITION_PATTERNS]
+HEADING_GATED_D3_COMPILED = [re.compile(p, re.IGNORECASE) for p in HEADING_GATED_D3_PATTERNS]
 D1_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in D1_POSITION_PATTERNS]
 
 
-def is_d3_position(text: str) -> tuple[bool, str]:
-    """Check if text indicates a D3 (non-faculty) position."""
-    for pattern in D3_PATTERNS_COMPILED:
+def is_d3_position(text: str, heading: str = "") -> tuple[bool, str]:
+    """Check if text indicates a D3 (non-faculty) position; an instructor title under an academic heading does not."""
+    patterns = D3_PATTERNS_COMPILED
+    if not ACADEMIC_HEADING.search(heading):
+        patterns = HEADING_GATED_D3_COMPILED + patterns
+    for pattern in patterns:
         match = pattern.search(text)
         if match:
             return True, match.group()
@@ -104,7 +115,8 @@ def correct_adjunct_position(entry: dict) -> dict:
         return entry  # Keep as D1
 
     # Check if it's a D3 position (adjunct/instructor/lab manager)
-    is_d3, d3_match = is_d3_position(text)
+    heading = " ".join(str(h) for h in entry.get('hierarchy') or [])
+    is_d3, d3_match = is_d3_position(text, heading)
     if is_d3:
         entry = entry.copy()
         entry['taxonomy_code'] = 'D3'

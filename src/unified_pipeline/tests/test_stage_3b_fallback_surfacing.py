@@ -809,6 +809,34 @@ def test_946_correctors_run_in_their_documented_order(monkeypatch, tmp_path):
     assert calls == list(_CORRECTOR_ORDER)
 
 
+_1581_MAPPINGS = [
+    {"title": title, "taxonomy_options": [{"code": code, "confidence": 0.9}], "children": []}
+    for title, code in (("TEACHING EXPERIENCE", "K1"), ("NON-ACADEMIC EMPLOYMENT", "D3"))
+]
+
+
+def test_1581_adjunct_corrector_keeps_an_instructor_under_an_academic_heading(monkeypatch, tmp_path):
+    """Prompt rule 12 puts adjunct faculty and Instructor in D1. The adjunct
+    corrector recoded every D1 "Adjunct Instructor" or community-college row
+    to D3, even under the author's own teaching heading (#1581, HNQBOI-05).
+    Under a non-academic employment heading it still does."""
+    row = "2031-2033 Adjunct Instructor, Example Anatomy, Example Community College"
+    entries = [{"element_type": "text", "hierarchy": [m["title"]], "text": row} for m in _1581_MAPPINGS]
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **_: _ok_response([0], code="D1"))
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, _1581_MAPPINGS)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    by_heading = {e["hierarchy"][0]: e for e in output["entries"]}
+    teaching, employment = by_heading["TEACHING EXPERIENCE"], by_heading["NON-ACADEMIC EMPLOYMENT"]
+    assert teaching["taxonomy_code"] == "D1" and "adjunct_position_correction" not in teaching
+    assert employment["taxonomy_code"] == "D3" and employment["original_taxonomy_code"] == "D1"
+
+
 # --- run_stage_3b: helpers carved out of it (#946, function-size offset) --------
 
 def test_missing_stage_input_raises_with_the_stage_label(tmp_path):

@@ -282,6 +282,8 @@ NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))
     ("D3", "2031-2033 Postdoctoral Research Fellow, Example University", ("Appointments",), "C"),
     ("D3", "2031-2033 Clinical Fellow, Example College of Medicine", ("Appointments",), "C"),
     ("D1", "2031-2033 Research Fellow in Example Medicine, Example School of Medicine", ("Appointments",), "C"),
+    # A veterinary residency at a college or hospital is still training (#1581).
+    ("D2", "2031-2033 Resident Veterinarian: Example Animal Hospital, Example College", ("Experience",), "C"),
     ("K4", "Example Society Meeting, 2031 (attendee)", ("Teaching",), "B2"),
     ("K4", "Attendance at the Example Review Course, 2031", ("Teaching",), "B2"),
     ("F1", "ACLS certification, 2031-2033", ("Credentials",), "B2"),
@@ -325,6 +327,11 @@ def test_content_pins_recode_whatever_the_heading(code, text, hierarchy, expecte
     ("D3", "2031-present Senior Fellow, Example Policy Institute", ("Appointments",)),
     ("D3", "2031-present Senior Research Fellow, Example Policy Institute", ("Appointments",)),
     ("D1", "2031-2034 Resident Director, Example College House", ("Appointments",)),
+    # A fellow title qualified as a faculty-advisor role, and a resident professional
+    # outside a college, university, hospital or school, are positions (#1581).
+    ("D1", "2031-present Fellow (undergraduate faculty advisor), Example College", ("Appointments",)),
+    ("D1", "2031-present Fellow, faculty advisor to undergraduates, Example House", ("Appointments",)),
+    ("D3", "Resident Veterinarian, Example Farm, Springfield, 2031-2033", ("Experience",)),
     ("F1", "Example State Medical License, Example Teaching Hospital, 2031", ("Licensure",)),
     ("F1", "Example State Medical License #12345, 2031", ("Licensure",)),
     ("S2", "Doe J. Example rhythms. Example Journal 2031;1:1-2.", ("Publications",)),
