@@ -156,16 +156,19 @@ merge-and-renumber scenario this key risks). Only one of the three,
 2068_Yount ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
 inputs, and its current appendix has a single entry under that heading, so
 `_group_by_source_heading` has not yet been exercised on a real collision.
-Numbering restarts under each heading. Bodies of entries diverted here from
-another code are capped at `APPENDIX_MAX_CHARS` characters, the marker that
-shows the cut included: such an appendix line is a pointer back to the original
-document, not a second copy of it. A T-coded body is NOT capped
-(`AppendixSection._appendix_body`, #1230) unless the low-coverage overflow
-re-splits it: the Appendix is the only place a T entry renders, so its cut
-tail reached no page. The cut lost undated lines the recovery pass
-cannot tell from template text (a competency list, a duty bullet) and sibling
-rows that differ from a kept one only in a short word or a digit, and where
-recovery did re-add a cut line, the entry printed twice: cut, then whole.
+Numbering restarts under each heading. A body renders whole
+(`AppendixSection._appendix_body`) unless the low-coverage overflow re-splits
+the entry: only then is it capped at `APPENDIX_MAX_CHARS` characters, the
+marker that shows the cut included, as a pointer to the segments the
+reconsider pass routes. Every other numbered line -- a T entry (#1230), or one
+diverted from another code because no section placed it (#1555: M1 research
+records the summary does not reproduce, a code with no render route, a
+renderer's decline) -- is the only place that entry renders, so a cut tail
+reached no page. The cut lost undated lines the recovery pass cannot tell from
+template text (a competency list, a duty bullet), sibling rows that differ
+from a kept one only in a short word or a digit, and a record's affiliations
+and description bullets; where recovery did re-add a cut line, the entry
+printed twice: cut, then whole.
 """
 import logging
 import re
@@ -1469,18 +1472,19 @@ class AppendixSection:
         self.doc.add_paragraph()
 
     def _appendix_body(self, entry: UnmappedEntry, text: str) -> str:
-        """The body an Appendix line shows for *entry*: its whole *text* when
-        it is T-coded, otherwise capped by `_truncate_appendix_text` (#1230).
+        """The body an Appendix line shows for *entry*: its whole *text*,
+        whatever its code (#1230 for T, #1555 for a diverted code), unless the
+        low-coverage overflow takes the entry (`is_overflow_candidate`).
 
-        The Appendix is a T entry's only render, so a cut there lost its tail.
-        The exception is a T entry the low-coverage overflow takes
-        (`is_overflow_candidate`): the reconsider pass re-splits it and routes
-        its segments, and a whole copy here would repeat them.
+        A numbered Appendix line is the entry's only render, so a cut there
+        lost its tail. An overflow candidate is the exception: the reconsider
+        pass re-splits it and routes its segments, so its line stays a capped
+        pointer (`_truncate_appendix_text`) and a whole copy does not repeat
+        them.
         """
-        if (entry.get("taxonomy_code") == _APPENDIX_TAXONOMY_CODE
-                and not self._is_overflow_candidate(entry)):
-            return text
-        return _truncate_appendix_text(text)
+        if self._is_overflow_candidate(entry):
+            return _truncate_appendix_text(text)
+        return text
 
     def _write_appendix_group(
         self, heading: str, lines: Sequence[AppendixLine], first: bool

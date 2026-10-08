@@ -591,16 +591,22 @@ def _fill_appendix_paragraphs(entries: list[dict[str, object]]) -> list[str]:
     return paragraphs[starts[0]:]
 
 
-def test_over_limit_diverted_entry_renders_at_exactly_the_limit():
-    """A >200-character entry diverted from another code renders as exactly
-    200 characters after the number, marker included -- the old
+def _overflow_entry(text: str, code: str, idx: int) -> dict[str, object]:
+    """An entry the low-coverage overflow takes (`is_overflow_candidate`)."""
+    return {**_t_entry(text, ["Service"], idx), "taxonomy_code": code,
+            "extraction_coverage": {"extraction_coverage_percent": 5.0}}
+
+
+def test_over_limit_overflow_diverted_entry_renders_at_exactly_the_limit():
+    """A long diverted entry the overflow re-splits keeps a capped pointer of
+    exactly 200 characters after the number, marker included -- the old
     `text[:200] + '...'` gave 203."""
-    long_text = "LONG_ENTRY " + " ".join(f"word{i}" for i in range(60))
+    long_text = "LONG_ENTRY " + " ".join(f"overflowword{i}" for i in range(90))
     assert len(long_text) > APPENDIX_MAX_CHARS
     exact_text = "EXACT_ENTRY " + "y" * (APPENDIX_MAX_CHARS - len("EXACT_ENTRY "))
     assert len(exact_text) == APPENDIX_MAX_CHARS
     paragraphs = _fill_appendix_paragraphs(
-        [_diverted_entry(long_text, 1), _diverted_entry(exact_text, 2)])
+        [_overflow_entry(long_text, "Z9", 1), _diverted_entry(exact_text, 2)])
     rendered_long = paragraphs[1]
     assert rendered_long.startswith("1. ")
     body = rendered_long[len("1. "):]
@@ -608,6 +614,21 @@ def test_over_limit_diverted_entry_renders_at_exactly_the_limit():
     assert body.endswith("...")
     assert body[:-3] == long_text[:APPENDIX_MAX_CHARS - 3]
     assert paragraphs[2] == f"2. {exact_text}"  # at the limit: untouched
+
+
+def test_over_limit_diverted_entry_renders_whole():
+    """#1555 (OIEPQD XACIVX 104-109 shape): a dated research record diverted
+    to the Appendix from M1 renders nowhere else, so its affiliation and its
+    description bullets past 200 characters reach the page whole."""
+    long_text = ("Research Assistant, Synthetic Lab of Imaginary Studies, "
+                 "Example Institute, Sometown\n"
+                 "Supervisor: Placeholder Person, Department of Invented Science\n"
+                 "- Studied an imaginary compound in a made-up assay\n"
+                 "- Built a fictional screening protocol for invented targets")
+    assert len(long_text) > APPENDIX_MAX_CHARS
+    entry = {**_diverted_entry(long_text, 1), "taxonomy_code": "M1"}
+    paragraphs = _fill_appendix_paragraphs([entry])
+    assert paragraphs[1] == f"1. {long_text}"
 
 
 def test_over_limit_t_entry_renders_whole(tmp_path, caplog):
