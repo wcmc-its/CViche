@@ -186,11 +186,11 @@ def test_a_fallback_served_call_caps_nothing_through_the_real_scorer(tmp_path):
 
 
 def test_every_known_lint_has_plain_wording():
-    assert set(KNOWN_LINTS) - rqr.REVIEW_COPY_ONLY_LINTS <= set(rqr.LINT_COPY)
+    assert not set(KNOWN_LINTS) - rqr.REVIEW_COPY_ONLY_LINTS - set(rqr.LINT_COPY)
 
 
 def test_review_copy_only_lints_are_known_and_have_no_run_page_wording():
-    assert rqr.REVIEW_COPY_ONLY_LINTS <= set(KNOWN_LINTS)
+    assert rqr.REVIEW_COPY_ONLY_LINTS.issubset(KNOWN_LINTS)
     assert not rqr.REVIEW_COPY_ONLY_LINTS & set(rqr.LINT_COPY)
 
 
