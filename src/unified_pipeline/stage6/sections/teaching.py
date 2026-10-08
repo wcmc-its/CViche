@@ -158,6 +158,7 @@ class _TeachingFields(TypedDict, total=False):
     course_title: str | list[str]
     institution: str
     role: str
+    stage4_records: list[dict]
 
 
 class _TeachingEntry(TypedDict, total=False):
@@ -251,6 +252,19 @@ def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) ->
 # ...", "  - Topics: ..."), as opposed to a line that opens a record of its own.
 _SUB_LINE_PREFIX = '- '
 
+# Where stage 4 keeps an entry's 2+ records (`stage4.schemas.STAGE4_RECORDS_KEY`).
+# Spelled out, not imported: nothing under `stage6/` may import `stage4`
+# (`test_stage6_normalization_import_direction.py`); the teaching tests pin the
+# two spellings equal.
+_STAGE4_RECORDS_KEY = 'stage4_records'
+
+
+def _record_count(fields: _TeachingFields) -> int:
+    """How many records stage 5c wrote a line for: the entry's 2+ stage-4
+    records, or the one record its fields hold."""
+    records = fields.get(_STAGE4_RECORDS_KEY)
+    return len(records) if isinstance(records, list) and len(records) > 1 else 1
+
 
 def _record_blocks(formatted_text: str) -> list[str]:
     """Stage 5c's `formatted_text` cut into one block per record (#1556 c).
@@ -279,12 +293,20 @@ def _record_bullets(formatted_text: str, fields: _TeachingFields,
     Each record used to share ONE bullet, its lines kept apart only by soft
     line breaks, where the section renders separate records as separate
     bullets. A block that strips to nothing is dropped, so the result is []
-    when the whole text had no words. The record's further date spans
+    when the whole text had no words.
+
+    The blocks are bullets only when there is one per record. Any other count
+    is not 5c's one-line-per-record shape, and the text stays one bullet, as
+    before: the farm's case is a one-record entry whose text ends in a source
+    sub-heading 5c carried over after a blank line, which would otherwise
+    render as a bullet of its own. The record's further date spans
     (`_with_extra_spans`) go on the first block that holds its own date, the
     line they went on when the blocks shared one bullet.
     """
     bullets = [stripped for block in _record_blocks(formatted_text)
                if (stripped := _strip_markdown_for_word(block, preserve_newlines=True)).strip()]
+    if len(bullets) != _record_count(fields):
+        bullets = ['\n'.join(bullets)] if bullets else []
     for i, bullet in enumerate(bullets):
         extended = _with_extra_spans(bullet, fields, taxonomy_code)
         if extended != bullet:
