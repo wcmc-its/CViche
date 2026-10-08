@@ -117,5 +117,8 @@ spec:
       # (a fixed-size nodegroup -- no spot interruption to race, and Cluster
       # Autoscaler, which runs in kube-system with no Karpenter, has no room
       # to scale it in or out). safe-to-evict=false above is kept anyway as
-      # defense-in-depth if that nodegroup sizing ever changes.
+      # defense-in-depth if that nodegroup sizing ever changes. Since
+      # 2026-10-08 EKS node auto repair is on: a NotReady node (whose pods
+      # get no graceful drain at all) is replaced rather than left down --
+      # see docs/PRODUCTION_NODES.md (#82).
       terminationGracePeriodSeconds: 5700
