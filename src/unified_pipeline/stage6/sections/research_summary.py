@@ -52,7 +52,7 @@ class ResearchSummarySection:
                 - research_summary.text: The generated summary
                 - research_summary.generation_method: "llm_generated" or "existing_content";
                   "skipped_empty_context" and "refused_by_model" carry empty text (#1224),
-                  and so does "llm_call_failed" (#1174)
+                  and so do "llm_call_failed" (#1174) and "non_prose_reply" (#1582)
                 - research_summary.word_count: Word count of summary
 
         Returns:

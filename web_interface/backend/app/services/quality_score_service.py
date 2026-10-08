@@ -59,6 +59,14 @@ IMAGE_TAG_KEY = "image_tag"
 # The run doctor report's file suffix (orchestrator._doctor_report).
 DOCTOR_SUFFIX = "_doctor.json"
 
+# The cached score's record of whether a doctor report was stored when it was
+# computed (#1593). A score with no report beside it was never checked: the
+# doctor failed, was switched off, or its pod died first (IXJMKS scored 97
+# GREEN that way), so it is also marked data_complete false.
+DOCTOR_STATUS_KEY = "doctor_status"
+DOCTOR_CHECKED = "checked"
+DOCTOR_NOT_CHECKED = "not_checked"
+
 BAND_GREEN = "GREEN"
 BAND_YELLOW = "YELLOW"
 BAND_RED = "RED"
@@ -104,7 +112,8 @@ def _stage_source_docx(storage: RunStorage, run_id: str, dest: Path) -> None:
 def compute_and_cache_score(run_id: str) -> dict | None:
     """Score a completed run from its persisted outputs and cache the result.
 
-    Best-effort: returns None on any failure and never raises.
+    The result records whether a doctor report was stored (DOCTOR_STATUS_KEY),
+    so the orchestrator runs the doctor first. Best-effort: returns None on any failure and never raises.
     """
     try:
         from unified_pipeline.quality_score import score_run
@@ -127,6 +136,12 @@ def compute_and_cache_score(run_id: str) -> dict | None:
             result = score_run(str(tmp), run_id)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+        if any(k.endswith(DOCTOR_SUFFIX) for k in keys):
+            result[DOCTOR_STATUS_KEY] = DOCTOR_CHECKED
+        else:
+            result[DOCTOR_STATUS_KEY] = DOCTOR_NOT_CHECKED
+            result["data_complete"] = False
 
         cached = {**result, IMAGE_TAG_KEY: current_image_tag()}
         storage.put_file(run_id, CACHE_KEY, json.dumps(cached).encode("utf-8"))

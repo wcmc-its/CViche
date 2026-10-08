@@ -350,11 +350,11 @@ def test_license_record_leaves_absent_dates_blank():
     assert (record.issue_date, record.last_registration_date) == ("", "")
 
 
-def test_license_record_falls_back_to_truncated_raw_text():
-    """No jurisdiction and no number: the raw line becomes the state cell,
-    capped, and the other three columns stay blank."""
+def test_license_record_falls_back_to_the_whole_raw_text():
+    """No jurisdiction and no number: the whole raw line becomes the state
+    cell -- never cut (#1576) -- and the other three columns stay blank."""
     record = _license_record(LicensureEntry(original_text="x" * 150))
-    assert record == LicenseRecord(state="x" * 100)
+    assert record == LicenseRecord(state="x" * 150)
 
 
 def test_license_record_is_none_when_there_is_nothing_to_render():

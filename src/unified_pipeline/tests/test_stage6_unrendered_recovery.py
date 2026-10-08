@@ -1048,6 +1048,52 @@ def test_the_appendix_note_counts_numbered_lines_and_every_recovered_bullet():
     assert box.cell(0, 0).paragraphs[1].text == appendix_note_text(4)
 
 
+def _withheld_generator():
+    from unified_pipeline.stage6.normalization.pii import WithheldItem
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen._pii_result.withheld = [WithheldItem("DEA registration number", "Personal Data", 0)]
+    gen._reconsider_appendix_entries = lambda: []
+    return gen
+
+
+def _appendix_note(gen):
+    from unified_pipeline.stage6.formatting import is_cviche_box
+
+    [box] = [t for t in gen.doc.tables if is_cviche_box(t)]
+    return box.cell(0, 0).paragraphs[1].text
+
+
+def test_an_appendix_holding_only_the_withheld_notice_states_no_entry_count():
+    """#1582: with nothing written or recovered, the withheld notice alone
+    opens the Appendix; it is not an entry, so the box restated a count of 0
+    as "These 0 entries ..." above no entries. It now says what is there."""
+    from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
+    from unified_pipeline.stage6.sections.appendix import APPENDIX_NOTE_WITHHELD_ONLY_TEXT
+
+    gen = _withheld_generator()
+    recovered = gen._recover_appendix_lines([], {}, None)
+
+    assert recovered == []
+    note = _appendix_note(gen)
+    assert note == APPENDIX_NOTE_WITHHELD_ONLY_TEXT
+    assert "0 entries" not in note
+    assert PII_REDACTED_NOTICE in [p.text for p in gen.doc.paragraphs]
+
+
+def test_the_withheld_notice_is_not_counted_beside_a_real_appendix_entry():
+    """#1582: the notice beside one numbered line keeps the one-entry wording."""
+    from unified_pipeline.stage6.sections.appendix import appendix_note_text
+
+    gen = _withheld_generator()
+    gen._write_appendix_header(1)
+    gen._recover_appendix_lines([{"text": "x", "taxonomy_code": "T"}], {}, None)
+
+    assert _appendix_note(gen) == appendix_note_text(1)
+    assert _appendix_note(gen).startswith("This entry from your original CV")
+
+
 # ------------------------------------ #530: foreign scaffolding never recovered
 
 def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():

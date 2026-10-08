@@ -658,3 +658,30 @@ def test_status_and_type_reach_the_document(tmp_path):
             for row in table.rows if row.cells and "77001" in row.cells[min(1, len(row.cells) - 1)].text]
     assert rows and rows[0][0] == "Wrenshire (Pilot certificate)"
     assert rows[0][-1] == "06/30/2015 (Lapsed by request)"
+
+
+# --- #1576: the raw-text fallback carries the whole text, never a slice ------
+
+# Over 100 characters, with a tail that the old `[:100]` cut dropped mid-word.
+_LONG_UNSTRUCTURED = ("Wrenshire Board certificate in tidal-turbine maintenance for low, "
+                      "medium and high flow sites, later extended to the graded-zone survey protocol")
+
+
+def test_unstructured_entry_tail_reaches_the_document(tmp_path):
+    """HXBPCT 145-155: an F1 entry with no state and no number printed its
+    raw text in the State cell cut silently at 100 characters mid-word."""
+    import json
+
+    assert len(_LONG_UNSTRUCTURED) > 100
+    entry = {"taxonomy_code": "F1", "element_idx_start": 0, "text": _LONG_UNSTRUCTURED,
+             "extracted_fields": {"state_country": None, "license_number": None}}
+    source, target = tmp_path / "in.json", tmp_path / "out.docx"
+    source.write_text(json.dumps({"document_uid": "TESTAA", "entries": [entry]}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    (table,) = [t for t in Document(str(target)).tables
+                if any("Wrenshire Board" in c.text for r in t.rows for c in r.cells)]
+    # Read every w:t, including text inside tracked insertions (w:ins).
+    cells = ["".join(node.text or "" for node in cell._tc.iter()
+                     if node.tag.endswith("}t"))
+             for row in table.rows for cell in row.cells]
+    assert _LONG_UNSTRUCTURED in cells

@@ -1025,22 +1025,6 @@ class PipelineOrchestrator:
 
             await event_emitter.emit_run_complete(self.run_id, run.total_cost, run.total_tokens, duration)
 
-            # Compute & cache the advisory quality score for the admin view.
-            # Best-effort, run off the event loop; never affects run status.
-            score = None
-            try:
-                from app.services.quality_score_service import (
-                    compute_and_cache_score,
-                    persist_score_columns,
-                )
-                score = await asyncio.get_running_loop().run_in_executor(
-                    None, compute_and_cache_score, self.run_id
-                )
-                # On this thread: self.db must not be touched from the executor.
-                persist_score_columns(self.db, self.run_id, score)
-            except Exception as e:
-                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
-
             # Post-run artifact doctor: cross-stage lints over the stage
             # outputs just written (pure local file reads, no LLM). Gated by
             # CVICHE_RUN_DOCTOR and best-effort: the run is already committed
@@ -1056,6 +1040,24 @@ class PipelineOrchestrator:
                     self.db.rollback()
                 except Exception:
                     pass
+
+            # Compute & cache the advisory quality score for the admin view.
+            # Best-effort, run off the event loop; never affects run status.
+            # After the doctor: the score records whether its report was
+            # stored, and marks the run unchecked when it was not (#1593).
+            score = None
+            try:
+                from app.services.quality_score_service import (
+                    compute_and_cache_score,
+                    persist_score_columns,
+                )
+                score = await asyncio.get_running_loop().run_in_executor(
+                    None, compute_and_cache_score, self.run_id
+                )
+                # On this thread: self.db must not be touched from the executor.
+                persist_score_columns(self.db, self.run_id, score)
+            except Exception as e:
+                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
             # Notify on terminal success, passing the freshly-computed score so
             # the Teams message includes it. Fully decoupled and best-effort:
