@@ -1,7 +1,8 @@
 """Tests for core/pdf_to_docx.py and scripts/pdf_to_docx.py (#806).
 
 No PDF writer is a dependency, so fixtures are built from hand-written PDF
-bytes (`_make_pdf`): base-14 Helvetica / Helvetica-Bold, optional 1x1 image.
+bytes (`_make_pdf`): base-14 Helvetica / Helvetica-Bold / Courier, optional
+1x1 image.
 """
 
 import hashlib
@@ -74,6 +75,12 @@ def _encrypt_dict(user_password: str, obj_num: int) -> tuple[bytes, bytes]:
     return body, f"/Encrypt {obj_num} 0 R /ID [<{doc_id.hex()}> <{doc_id.hex()}>]".encode()
 
 
+#: `bold` in a `_make_pdf` op picks the font: False Helvetica, True
+#: Helvetica-Bold, COURIER Courier.
+COURIER = "courier"
+_FONT_NUMBER = {False: 1, True: 2, COURIER: 3}
+
+
 def _make_pdf(pages, image_pages=(), user_password=None) -> bytes:
     """pages: list of lists of (bold, size, x, y, text). image_pages: 0-based
     indexes of pages that also carry a 1x1 image."""
@@ -84,13 +91,14 @@ def _make_pdf(pages, image_pages=(), user_password=None) -> bytes:
         5: (b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
             b"/ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\n"
             b"stream\n\x80\nendstream"),
+        6: b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
     }
     kids = []
     for i, ops in enumerate(pages):
-        page_id, content_id = 6 + 2 * i, 7 + 2 * i
+        page_id, content_id = 7 + 2 * i, 8 + 2 * i
         kids.append(f"{page_id} 0 R")
         body = "".join(
-            f"BT /F{2 if bold else 1} {size} Tf {x} {y} Td ({text}) Tj ET\n"
+            f"BT /F{_FONT_NUMBER[bold]} {size} Tf {x} {y} Td ({text}) Tj ET\n"
             for bold, size, x, y, text in ops)
         if i in image_pages:
             body += "q 200 0 0 200 100 300 cm /Im0 Do Q\n"
@@ -100,7 +108,7 @@ def _make_pdf(pages, image_pages=(), user_password=None) -> bytes:
         objs[page_id] = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             f"/Contents {content_id} 0 R /Resources << /Font << /F1 3 0 R "
-            f"/F2 4 0 R >> /XObject << /Im0 5 0 R >> >> >>").encode()
+            f"/F2 4 0 R /F3 6 0 R >> /XObject << /Im0 5 0 R >> >> >>").encode()
     trailer_extra = b""
     if user_password is not None:
         # xref subsections are contiguous, so the object takes the next number.
@@ -208,6 +216,35 @@ def test_repeated_body_line_is_kept(tmp_path):
     pages = [[(False, 10, 72, 400, "Present")] for _ in range(3)]
     _, doc = _convert(tmp_path, pages)
     assert " ".join(p.text for p in doc.paragraphs).split() == ["Present"] * 3
+
+
+def _footer_page(number, two_column):
+    """A body, and a footer printed as "November 2020", a column gap, and
+    the page number."""
+    body = _two_column_page(right_offset=5) if two_column else [(False, 10, 72, 600, f"Body {number}")]
+    return body + [(False, 9, 72, 25, "November 2020"), (False, 9, 500, 25, str(number))]
+
+
+def test_running_footer_cut_by_a_gutter_is_still_furniture(tmp_path):
+    """RLADNC (#1584): the footer prints whole on pages 1 and 3; the gutter
+    of two-column page 2 cuts it into "November 2020" and "2", each on
+    one page only. Both parts still match the whole footer's copies."""
+    pages = [_footer_page(1, False), _footer_page(2, True), _footer_page(3, False)]
+    _, doc = _convert(tmp_path, pages)
+    texts = [t for t in _texts(doc) if t]
+    assert "November" not in " ".join(texts) and "2" not in texts
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+def test_top_band_line_cut_by_a_gutter_keeps_both_parts_on_page_one(tmp_path):
+    """A running header cut at page 1's gutter keeps both of its parts
+    there, once; its whole copies on later pages go."""
+    header = [(False, 9, 72, 765, "Running Name"), (False, 9, 400, 765, "Curriculum Vitae")]
+    pages = [header + _two_column_page(right_offset=5)] + [
+        header + [(False, 10, 72, 600, f"Body {n}")] for n in (1, 2)]
+    _, doc = _convert(tmp_path, pages)
+    text = " ".join(_texts(doc))
+    assert (text.count("Running Name"), text.count("Curriculum Vitae")) == (1, 1)
 
 
 def test_single_page_is_never_treated_as_furniture(tmp_path):
@@ -581,6 +618,41 @@ def test_real_dash_list_splits_and_a_lone_dash_wrap_merges(tmp_path):
 @pytest.mark.parametrize("char", ["\uf0b7", "\u2500", "\u2022"])
 def test_bullet_glyphs_are_list_markers(char):
     assert LIST_MARKER_RE.match(f"{char} item")
+
+
+def _bulleted_items(font, glyph, x, drop):
+    """A heading, then two items at x=90 whose bullet `glyph` sits at `x`,
+    `drop` points below the item's baseline."""
+    page = [(True, 12, 72, 700, "SERVICE")]
+    for i, item in enumerate(("First item", "Second item")):
+        y = 650 - 14 * i
+        page += [(font, 10, x, y - drop, glyph), (False, 10, 90, y, item)]
+    return page
+
+
+@pytest.mark.parametrize("font, glyph, drop, first, second", [
+    # Word's level-2 bullet on its item's line (XACIVX, DYLJXC) ...
+    (COURIER, "o", 0.5, "\u25e6 First item", "\u25e6 Second item"),
+    # ... and 4.5pt lower, its own line cluster (SXPHOG, #1584).
+    (COURIER, "o", 4.5, "\u25e6 First item", "\u25e6 Second item"),
+    # A bullet glyph off its item's baseline is that item's marker too.
+    (False, "\267", 4.5, "\u2022 First item", "\u2022 Second item"),
+    # A Helvetica "o" is a word, not Word's bullet.
+    (False, "o", 0.5, "o First item", "o Second item"),
+])
+def test_bullet_glyph_marks_the_item_it_sits_left_of(tmp_path, font, glyph, drop, first, second):
+    _, doc = _convert(tmp_path, [_bulleted_items(font, glyph, 72, drop)])
+    assert [t for t in _texts(doc) if t] == ["SERVICE", first, second]
+
+
+@pytest.mark.parametrize("x, drop", [
+    (300, 4.5),  # right of its neighbour line's first word: not its marker
+    (72, 8.0),   # overlaps the line above by under half its own height
+])
+def test_bullet_glyph_that_marks_no_line_stays_as_printed(tmp_path, x, drop):
+    _, doc = _convert(tmp_path, [_bulleted_items(COURIER, "o", x, drop)])
+    words = " ".join(_texts(doc)).split()
+    assert words.count("o") == 2 and "\u25e6" not in words
 
 
 def test_first_line_indent_paragraph_is_not_split(tmp_path):

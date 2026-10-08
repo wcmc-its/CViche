@@ -20,6 +20,7 @@ import re
 import statistics
 import unicodedata
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,6 +81,22 @@ SUPERSCRIPT_ATTACH_EM = 0.25
 #: pdfplumber split on a font or size change ("Word" bold + "," regular):
 #: joined with no space. A real word space measures ~0.25em.
 FONT_CHANGE_JOIN_EM = 0.1
+#: Single-character list bullets (U+F0B7 is Word's Symbol-font bullet,
+#: U+2500 a box-drawing dash).
+BULLET_GLYPHS = "•▪◦‣●○■□\uf0b7\u2500"
+#: Word sets its level-2 list bullet as a lowercase "o" in Courier New. As
+#: the first word of a line it is read as the white bullet it prints as, so
+#: LIST_MARKER_RE sees a marker and no later stage reads it as text (#1584:
+#: 97 such glyphs on one CV, six of them rendered as an Organization).
+COURIER_BULLET = "o"
+COURIER_FONT_RE = re.compile(r"courier", re.IGNORECASE)
+WHITE_BULLET = "◦"
+#: A line cluster of nothing but bullet glyphs is the marker of the
+#: neighbour line it overlaps vertically by at least this fraction of its
+#: own height, if it ends left of that line's first word (measured: a
+#: Courier "o" whose bottom sits 4.0pt below its Calibri item's, the edge
+#: of LINE_BOTTOM_TOLERANCE_PT, so it clustered as a line of its own).
+BULLET_MIN_OVERLAP_FRAC = 0.5
 
 # --- Two-column pages ----------------------------------------------------
 
@@ -154,7 +171,7 @@ TAB_FEW_GAPS_MAX = 2
 #: a bullet glyph (U+F0B7 is Word's Symbol-font bullet), or a
 #: dash/asterisk/hyphen followed by whitespace. Exceptions below.
 LIST_MARKER_RE = re.compile(
-    r"^(?:\d{1,3}[.)](?:\s|(?=[A-Z]))|\[\d{1,3}\]|[•▪◦‣●○■□\uf0b7\u2500]|[–—*-]\s)")
+    rf"^(?:\d{{1,3}}[.)](?:\s|(?=[A-Z]))|\[\d{{1,3}}\]|[{BULLET_GLYPHS}]|[–—*-]\s)")
 #: The dash/asterisk markers, captured. A lone "- present" is a wrapped
 #: range, so these only veto a merge when the paragraph itself began with
 #: the same marker (a real dash list is consistent).
@@ -307,6 +324,10 @@ class _Line:
     block_start: bool = False
     #: A reassembled table row: never re-laid-out, never merged.
     is_row: bool = False
+    #: Text of the whole printed line a gutter cut this line out of, else
+    #: "": a running footer cut in two on a two-column page still matches
+    #: its uncut copies on the other pages as furniture.
+    uncut_text: str = ""
 
     @property
     def text(self) -> str:
@@ -438,12 +459,50 @@ def _superscript_host(clusters: list[list[dict]], index: int) -> int | None:
     return best
 
 
-def _fold_superscripts(clusters: list[list[dict]]) -> list[list[dict]]:
-    """Fold each small-font cluster that overlaps a neighbour line into it."""
+def _is_courier_bullet(word: dict) -> bool:
+    return word["text"] == COURIER_BULLET and COURIER_FONT_RE.search(word["fontname"]) is not None
+
+
+def _bullet_host(clusters: list[list[dict]], index: int) -> int | None:
+    """Index of the neighbour line that cluster `index`, nothing but bullet
+    glyphs, is the marker of: it overlaps that line vertically by at least
+    BULLET_MIN_OVERLAP_FRAC of its own height and ends left of the line's
+    first word. None for any other cluster."""
+    glyphs = clusters[index]
+    if not all(w["text"] in BULLET_GLYPHS or _is_courier_bullet(w) for w in glyphs):
+        return None
+    top, bottom = min(w["top"] for w in glyphs), max(w["bottom"] for w in glyphs)
+    right = max(w["x1"] for w in glyphs)
+    best, best_overlap = None, BULLET_MIN_OVERLAP_FRAC * (bottom - top)
+    for host in (index - 1, index + 1):
+        if not 0 <= host < len(clusters):
+            continue
+        words = clusters[host]
+        if min(w["x0"] for w in words) < right:
+            continue
+        overlap = min(bottom, max(w["bottom"] for w in words)) - max(top, min(w["top"] for w in words))
+        if overlap >= best_overlap:
+            best, best_overlap = host, overlap
+    return best
+
+
+def _courier_bullet_as_marker(words: list[dict]) -> list[dict]:
+    """A line's words, left to right; a first word that is Word's Courier
+    "o" bullet, with text after it, reads as WHITE_BULLET."""
+    words = sorted(words, key=lambda w: w["x0"])
+    if len(words) > 1 and _is_courier_bullet(words[0]):
+        words[0] = dict(words[0], text=WHITE_BULLET)
+    return words
+
+
+def _fold(clusters: list[list[dict]],
+          host_of: Callable[[list[list[dict]], int], int | None]) -> list[list[dict]]:
+    """Fold each cluster that `host_of` finds a neighbour line for (a raised
+    superscript, a bullet glyph off its item's baseline) into that line."""
     clusters = [list(c) for c in clusters]
     index = 0
     while index < len(clusters):
-        host = _superscript_host(clusters, index)
+        host = host_of(clusters, index)
         if host is None:
             index += 1
             continue
@@ -454,7 +513,8 @@ def _fold_superscripts(clusters: list[list[dict]]) -> list[list[dict]]:
 def _page_lines(page: Page) -> list[_Line]:
     words = _page_words(page)
     clusters = cluster_objects(words, lambda w: w["bottom"], LINE_BOTTOM_TOLERANCE_PT)
-    lines = [_build_line(c) for c in _fold_superscripts(clusters)]
+    clusters = _fold(_fold(clusters, _bullet_host), _superscript_host)
+    lines = [_build_line(_courier_bullet_as_marker(c)) for c in clusters]
     gutter = _find_gutter(lines, float(page.height))
     if gutter is not None:
         lines = _column_order(lines, gutter, float(page.height))
@@ -514,7 +574,11 @@ def _split_at(line: _Line, gutter: tuple[float, float]) -> tuple[_Line | None, _
         edge = gutter[1] - OUTDENT_TOLERANCE_PT
         cut = sum(1 for w in line.words if w["x0"] < edge)
     left, right = line.words[:cut], line.words[cut:]
-    return (_build_line(left) if left else None), (_build_line(right) if right else None)
+    parts = (_build_line(left) if left else None), (_build_line(right) if right else None)
+    if None not in parts:
+        for part in parts:
+            part.uncut_text = line.text
+    return parts
 
 
 def _row_aligned(left: list[_Line], right: list[_Line]) -> bool:
@@ -727,9 +791,20 @@ def _join_table_rows(lines: list[_Line]) -> list[_Line]:
 
 # --- Page furniture ------------------------------------------------------
 
-def _furniture_text(line: _Line) -> str:
+def _furniture_text(text: str) -> str:
     # Digits are masked so "Page 3 of 9" repeats as one line across pages.
-    return _DIGITS_RE.sub("#", line.text.strip())
+    return _DIGITS_RE.sub("#", text.strip())
+
+
+def _furniture_keys(line: _Line) -> list[str]:
+    """The line's masked text and, for a column part a gutter cut out of a
+    whole printed line, that line's masked text: a footer "November
+    2020\t26" cut in two on six two-column pages is still the footer the
+    other 71 pages print uncut (#1584)."""
+    keys = [_furniture_text(line.text)]
+    if line.uncut_text:
+        keys.append(_furniture_text(line.uncut_text))
+    return keys
 
 
 def _furniture_windows(pages: list[list[_Line]], heights: list[float]) -> dict[str, list[tuple[float, float]]]:
@@ -739,7 +814,8 @@ def _furniture_windows(pages: list[list[_Line]], heights: list[float]) -> dict[s
     for number, (lines, height) in enumerate(zip(pages, heights)):
         for ln in lines:
             if _in_edge_band(ln, height):
-                seen[_furniture_text(ln)].append((ln.top, number))
+                for key in _furniture_keys(ln):
+                    seen[key].append((ln.top, number))
     needed = max(FURNITURE_MIN_PAGES, math.ceil(FURNITURE_PAGE_FRACTION * len(pages)))
     windows: defaultdict[str, list[tuple[float, float]]] = defaultdict(list)
     for text, hits in seen.items():
@@ -750,9 +826,13 @@ def _furniture_windows(pages: list[list[_Line]], heights: list[float]) -> dict[s
     return windows
 
 
-def _is_furniture(line: _Line, height: float, windows: dict[str, list[tuple[float, float]]]) -> bool:
-    return _in_edge_band(line, height) and any(
-        lo <= line.top <= hi for lo, hi in windows.get(_furniture_text(line), ()))
+def _furniture_key(line: _Line, height: float,
+                   windows: dict[str, list[tuple[float, float]]]) -> str | None:
+    """The key under which `line` is running furniture, or None."""
+    if not _in_edge_band(line, height):
+        return None
+    return next((key for key in _furniture_keys(line)
+                 if any(lo <= line.top <= hi for lo, hi in windows.get(key, ()))), None)
 
 
 def _drop_furniture(pages: list[list[_Line]], heights: list[float]) -> list[list[_Line]]:
@@ -760,18 +840,18 @@ def _drop_furniture(pages: list[list[_Line]], heights: list[float]) -> list[list
     can match, so a body line is never dropped. A running line in the TOP
     band keeps its first copy: the owner's name and CV title usually sit
     there on page 1, and later stages read the name from body text. Bottom
-    band repeats (page numbers, footers) are dropped on every page."""
+    band repeats (page numbers, footers) are dropped on every page. Both
+    parts of a top-band line a gutter cut stay on that first page."""
     windows = _furniture_windows(pages, heights)
-    first_kept: set[str] = set()
+    first_kept: dict[str, int] = {}  # key -> the page its copies are kept on
     out = []
-    for lines, height in zip(pages, heights):
+    for number, (lines, height) in enumerate(zip(pages, heights)):
         page = []
         for ln in lines:
-            if _is_furniture(ln, height, windows):
-                text = _furniture_text(ln)
-                if ln.top >= FURNITURE_BAND_FRAC * height or text in first_kept:
-                    continue
-                first_kept.add(text)
+            key = _furniture_key(ln, height, windows)
+            if key is not None and (ln.top >= FURNITURE_BAND_FRAC * height
+                                    or first_kept.setdefault(key, number) != number):
+                continue
             page.append(ln)
         out.append(page)
     return out
