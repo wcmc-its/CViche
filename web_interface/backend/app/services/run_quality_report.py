@@ -589,6 +589,14 @@ LINT_COPY = {
         "to any entry, so they are not in the document.",
         "Check the entries in the named categories against the source CV and add any missing "
         "records."),
+    # Proposed in #1554's PR; awaiting Paul's approval.
+    "summary_unsupported_claim": LintCopy(
+        "Research summary claims something the CV does not list",
+        "The Research Activities paragraph was written for you from your CV, and it mentions "
+        "something your CV does not list: an application under review, funding, mentoring, "
+        "or a named funder such as NIH.",
+        "Read the Research Activities paragraph and delete or correct each flagged sentence, "
+        "since you sign this document."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

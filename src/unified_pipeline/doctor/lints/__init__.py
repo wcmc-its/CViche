@@ -9,8 +9,8 @@
     protected_data.py protected personal data reaching the rendered document
     runtime.py        whether the run itself completed, rather than what it made
     segmentation.py   how stages 1a/1b/2 cut the source into a hierarchy
+    summary.py        claims the stage-4.5 research summary makes that the CV lacks
 
-Every lint in `run_doctor.KNOWN_LINTS` now lives in one of these eight; what
-Every lint in `run_doctor.KNOWN_LINTS` now lives in one of these seven; what
+Every lint in `run_doctor.KNOWN_LINTS` now lives in one of these ten; what
 stays in `run_doctor.py` is orchestration, artifact discovery and the report.
 """
