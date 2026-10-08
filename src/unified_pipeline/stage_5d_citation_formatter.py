@@ -135,7 +135,7 @@ IMPORTANT:
 - If a field is not present, omit it (don't guess)
 - The formatted_citation should be the complete Vancouver-style citation
 - Preserve author names exactly as they appear (don't invent initials)
-- Never add a number or ordinal the source does not state: "Annual Meeting" stays "Annual Meeting", never "10th Annual Meeting"
+- Keep every number and ordinal the source states (e.g. "72nd Annual Meeting", "2nd edition", an abstract number), and never add one it does not state
 - A number such as "10." or "10)" at the very start of a raw line is the CV's list number, not part of the citation
 - For book chapters, include "In:" before the book title
 

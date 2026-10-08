@@ -722,7 +722,11 @@ def test_5d_prompt_asks_for_source_authors_not_one_initial_per_author():
     assert "Never add an initial the source does not give" in prompt
     assert "never split one into two" in prompt
     assert "Example: Smith JA, Jones MB, Brown CK" not in prompt
-    assert "never \"10th Annual Meeting\"" in prompt
+    # The ordinal rule keeps the source's own ordinals: a first wording ("never
+    # 10th Annual Meeting") made 5d drop "17th", "53rd" and "72nd" the source
+    # states (paid A/B, 2026-10-08).
+    assert "Keep every number and ordinal the source states" in prompt
+    assert "10th Annual Meeting" not in prompt
     assert "is the CV's list number, not part of the citation" in prompt
     # The template still formats: no stray brace in the new text.
     assert "[CIT-0001] x" in prompt.format(raw_content="[CIT-0001] x")
