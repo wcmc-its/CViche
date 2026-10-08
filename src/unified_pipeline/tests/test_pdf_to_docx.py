@@ -653,6 +653,10 @@ def test_bullet_glyph_that_marks_no_line_stays_as_printed(tmp_path, x, drop):
     _, doc = _convert(tmp_path, [_bulleted_items(COURIER, "o", x, drop)])
     words = " ".join(_texts(doc)).split()
     assert words.count("o") == 2 and "\u25e6" not in words
+    # Not folded into the item's line: at x=300 a fold lands the glyph after
+    # the item ("First item\to"), which the word count above cannot see.
+    texts = _texts(doc)
+    assert "First item" in texts and not any("item\to" in t for t in texts)
 
 
 def test_first_line_indent_paragraph_is_not_split(tmp_path):
