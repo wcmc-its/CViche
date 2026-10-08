@@ -1131,7 +1131,9 @@ def _published_entry(**fields):
 
 def test_in_press_entry_already_listed_as_published_is_marked_superseded(tmp_path, monkeypatch):
     # web200: the same paper listed both as published and as "in press".
-    enricher, _, _ = _make(monkeypatch, _found())
+    # The published entry's own title search (#1598) finds nothing here, so
+    # the duplicate is told by title and year.
+    enricher, _, _ = _make(monkeypatch, _NO_HITS + _found())
     path = tmp_path / 's4.json'
     published = _published_entry(title=INPRESS_TITLE, year='2025')
     path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), published]}))
@@ -1145,13 +1147,14 @@ def test_in_press_entry_already_listed_as_published_is_marked_superseded(tmp_pat
 
 
 def test_same_pmid_elsewhere_is_a_duplicate_but_similar_title_other_year_is_not(tmp_path, monkeypatch):
-    # A PMID on the other entry costs one efetch before the title search.
+    # A PMID on the other entry costs one efetch before the title search; an
+    # S1 entry without one is title-searched first (#1598), finding nothing.
     pmid_lookup = [FakeResponse(200, content=_published_xml())]
     for other, superseded, extra in (
             (_published_entry(title=INPRESS_TITLE, pmid=PMID), True, pmid_lookup),
-            (_published_entry(title=INPRESS_TITLE, year='2019'), False, []),
+            (_published_entry(title=INPRESS_TITLE, year='2019'), False, _NO_HITS),
             # web228: a shorter title nested in the in-press one, same year.
-            (_published_entry(title='Statin adherence in older adults', year='2025'), False, []),
+            (_published_entry(title='Statin adherence in older adults', year='2025'), False, _NO_HITS),
             (dict(_published_entry(title=INPRESS_TITLE, year='2025'), taxonomy_code='S8'), False, [])):
         enricher, _, _ = _make(monkeypatch, extra + _found())
         path = tmp_path / 's4.json'
@@ -1364,17 +1367,18 @@ def test_one_pmcid_cited_for_two_papers_stays_with_the_paper_it_names(tmp_path, 
     assert 'pmid' not in results[0]['extracted_fields']
 
 
-@pytest.mark.parametrize('second_title, status', [
-    ('Heron migration along northern beaches', 'enriched'),  # 4 of 5 words: 0.8
-    ('Heron migration along wetlands', 'title_check_failed'),  # 3 of 4: 0.75
+@pytest.mark.parametrize('second_title', [
+    'Heron migration along northern beaches',  # 4 of 5 words: 0.8
+    'Heron migration along wetlands',  # 3 of 4: 0.75
 ])
-def test_second_holder_keeps_a_shared_pmid_only_as_the_same_paper(tmp_path, monkeypatch,
-                                                                   second_title, status):
-    # From MIN_TITLE_SEARCH_OVERLAP up it is the same paper listed twice (a CV
-    # listing a paper in two sections, retitled slightly).
+def test_second_holder_of_a_shared_pmid_is_released_even_as_the_same_paper(tmp_path, monkeypatch,
+                                                                         second_title):
+    # #1598: a weaker holder that is not tied is released. A paper listed twice (once retitled
+    # slightly) used to keep it on both from MIN_TITLE_SEARCH_OVERLAP up.
     entries = [_paper_entry(SHARED_TITLE, 10), _paper_entry(second_title, 11)]
     results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
-    assert [r['enrichment_status'] for r in results] == ['enriched', status]
+    assert [r['enrichment_status'] for r in results] == ['enriched', 'title_check_failed']
+    assert results[1]['enrichment_rejected']['shared_pmid_with'] == 10
 
 
 def test_untitled_entry_sharing_a_pmid_is_left_alone(tmp_path, monkeypatch):
@@ -1434,8 +1438,9 @@ def test_in_press_holder_of_a_shared_pmid_still_counts_as_its_best_match(tmp_pat
     assert (in_press['taxonomy_code'], in_press.get('in_press_superseded')) == ('S1', None)
 
 
-def test_equal_weak_matches_both_keep_a_shared_pmid():
-    # Two holders at the same overlap: nothing tells which paper it names.
+def test_equal_weak_matches_of_one_citation_both_keep_a_shared_pmid():
+    # Two holders at the same strength giving one DOI and title: the same
+    # citation listed twice keeps the PMID on both, for stage 6 dedup (#1598).
     enricher = PubMedEnricher(verbose=False)
     record = {'pmid': PAPER_PMID, 'title': SHARED_TITLE, 'vernacular_title': '', 'authors': []}
     entries = [_paper_entry(OTHER_PAPER_TITLE, i) for i in (10, 11)]
@@ -1443,6 +1448,193 @@ def test_equal_weak_matches_both_keep_a_shared_pmid():
         assert enricher._accept_record(entry, record, 'doi_search')
     enricher._release_weaker_shared_pmids()
     assert [e['enrichment_status'] for e in entries] == ['enriched', 'enriched']
+    assert enricher.stats['enriched'] == 2
+
+
+# ------------- #1598: every article without an identifier is searched by title
+
+def _article_entry(idx, code='S1', title=SHARED_TITLE, year='2025', **ids):
+    return {'element_idx_start': idx, 'taxonomy_code': code, 'text': f'Garcia M. {title}. {year}.',
+            'extracted_fields': {'title': title, 'authors': 'Garcia M', 'year': year, **ids}}
+
+
+@pytest.mark.parametrize('code', ['S1', 'S2', 'S6'])
+def test_article_without_an_identifier_is_found_by_title(tmp_path, monkeypatch, code):
+    [result], session, enricher = _run_entries(tmp_path, monkeypatch, [_article_entry(10, code)],
+                                               _doi_found())
+    assert session.calls[0][1]['term'] == f'{SHARED_TITLE}[ti]'
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+    assert result['extracted_fields']['pmid'] == PAPER_PMID
+    assert result['taxonomy_code'] == code
+    assert 'in_press_note' not in result
+    assert (enricher.stats['title_searches'], enricher.stats['enriched']) == (1, 1)
+
+
+def test_article_with_only_a_chapter_title_is_searched_by_it(tmp_path, monkeypatch):
+    entry = _article_entry(10)
+    entry['extracted_fields']['chapter_title'] = entry['extracted_fields'].pop('title')
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [entry], _doi_found())
+    assert session.calls[0][1]['term'] == f'{SHARED_TITLE}[ti]'
+    assert result['enrichment_status'] == 'enriched'
+
+
+@pytest.mark.parametrize('code', ['S4', 'S5', 'S8', 'S9'])
+def test_non_article_publication_is_not_searched_by_title(tmp_path, monkeypatch, code):
+    # S4/S8/S9 matches were about half wrong in the #1598 measurement: an
+    # abstract or chapter matched to the same group's later article.
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10, code)], [])
+    assert session.calls == []
+    assert result['enrichment_status'] == 'no_identifier'
+
+
+def test_article_whose_doi_pubmed_lacks_is_searched_by_title(tmp_path, monkeypatch):
+    entry = _article_entry(10, doi=DOI)
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [entry],
+                                        [_hits()] + _doi_found())
+    assert session.calls[1][1]['term'] == f'{SHARED_TITLE}[ti]'
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+
+
+def test_article_title_search_keeps_the_author_guard(tmp_path, monkeypatch):
+    found = [_hits(PAPER_PMID), _article_set(_article(PAPER_PMID, SHARED_TITLE, authors=('Okonkwo A',)))]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)], found)
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'enrichment_data' not in result
+
+
+def test_in_press_article_is_searched_once_by_the_in_press_step(tmp_path, monkeypatch):
+    entry = _inpress_entry(code='S1')
+    result, session, enricher = _run_stage5(tmp_path, monkeypatch, entry, _found())
+    assert len(session.calls) == 2  # one esearch, one efetch
+    assert enricher.stats['title_searches'] == 1
+    assert result['in_press_note'].startswith(f'Found in PubMed as PMID {PMID}')
+
+
+def test_in_press_article_is_left_to_the_in_press_step(tmp_path, monkeypatch):
+    # A published entry whose DOI names the paper under its pre-acceptance
+    # title (0.57) keeps it: the in-press listing, matched by title after the
+    # shared-PMID release as before #1598, is the stale duplicate.
+    published = _paper_entry(RETITLED_IN_PRESS, 10)
+    in_press = dict(_inpress_entry(code='S1'), element_idx_start=20)
+    responses = [_hits(PMID), FakeResponse(200, content=_published_xml())] + _found()
+    results, _, _ = _run_entries(tmp_path, monkeypatch, [published, in_press], responses)
+    kept, superseded = results
+    assert kept['enrichment_status'] == 'enriched'
+    assert superseded['in_press_superseded'] is True
+
+
+def test_title_match_of_a_paper_the_cv_cites_by_doi_is_released(tmp_path, monkeypatch):
+    # An abstract or duplicate listing found by title gives way to the entry
+    # whose CV identifier names the paper, at the same overlap and year.
+    entries = [_article_entry(11), _paper_entry(SHARED_TITLE, 10)]
+    entries[1]['extracted_fields']['year'] = '2025'
+    results, _, enricher = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    titled, cited = results
+    assert cited['enrichment_status'] == 'enriched'
+    assert titled['enrichment_status'] == 'title_check_failed'
+    assert titled['enrichment_rejected']['shared_pmid_with'] == 10
+    assert titled['extracted_fields'] == _article_entry(11)['extracted_fields']
+    assert enricher.stats['enriched'] == 1
+
+
+def test_shared_pmid_stays_with_the_entry_giving_pubmeds_year(tmp_path, monkeypatch):
+    # BLBVPD e848 (#1598): an exact-title holder a year off PubMed's was a
+    # different paper; the holder giving PubMed's year was the paper.
+    entries = [_article_entry(10, year='2024'), _article_entry(11, year='2025')]
+    results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == ['title_check_failed', 'enriched']
+    assert results[0]['enrichment_rejected']['shared_pmid_with'] == 11
+
+
+@pytest.mark.parametrize('years, status', [
+    (('2025', '2025'), 'enriched'),  # one paper listed twice (YUYVIG, 11 groups)
+    (('2023', '2024'), 'title_check_failed'),  # two citations, neither PubMed's year
+])
+def test_equal_title_matches_keep_a_shared_pmid_only_as_one_citation(tmp_path, monkeypatch,
+                                                                     years, status):
+    entries = [_article_entry(10, year=years[0]), _article_entry(11, year=years[1])]
+    results, _, enricher = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == [status] * 2
+    assert enricher.stats['enriched'] == (2 if status == 'enriched' else 0)
+    if status != 'enriched':
+        assert [r['enrichment_rejected']['shared_pmid_with'] for r in results] == [11, 10]
+
+
+NESTED_TITLE = 'Heron migration along the coast'  # overlap 1.0, not _same_title
+
+
+@pytest.mark.parametrize('dois, status', [
+    ((DOI, DOI.upper()), 'enriched'),  # ECXGAT e182/e287: one DOI cited twice
+    ((None, None), 'title_check_failed'),
+])
+def test_tied_holders_with_different_titles_keep_a_pmid_only_by_one_identifier(
+        tmp_path, monkeypatch, dois, status):
+    entries = [dict(_article_entry(10), extracted_fields={
+                   **_article_entry(10)['extracted_fields'], 'doi': dois[0]}),
+               dict(_article_entry(11, title=NESTED_TITLE), extracted_fields={
+                   **_article_entry(11, title=NESTED_TITLE)['extracted_fields'], 'doi': dois[1]})]
+    results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == [status] * 2
+
+
+def _held(**fields):
+    return stage5._Acceptance({}, {'extracted_fields': fields}, PAPER_PMID, SHARED_TITLE,
+                              2025, 'doi_search', 1.0)
+
+
+@pytest.mark.parametrize('pair, one', [
+    (({'title': SHARED_TITLE, 'year': '2025'}, {'title': SHARED_TITLE, 'year': '2025'}), True),
+    (({'title': SHARED_TITLE}, {'title': SHARED_TITLE}), True),
+    (({'title': SHARED_TITLE, 'year': '2025'}, {'title': SHARED_TITLE, 'year': '2024'}), False),
+    (({'title': SHARED_TITLE}, {'title': NESTED_TITLE}), False),
+    (({'title': SHARED_TITLE}, {'chapter_title': SHARED_TITLE}), True),
+    (({'title': SHARED_TITLE, 'doi': DOI}, {'title': NESTED_TITLE, 'doi': DOI.upper()}), True),
+    (({'title': SHARED_TITLE, 'doi': DOI}, {'title': NESTED_TITLE, 'doi': '10.1000/x.9'}), False),
+    (({'title': SHARED_TITLE, 'pmid': 'PMID: 23456789'}, {'title': NESTED_TITLE, 'pmid': '23456789'}),
+     True),
+    (({'title': SHARED_TITLE, 'pmcid': 'PMC123456'}, {'title': NESTED_TITLE, 'pmcid': '123456'}), True),
+])
+def test_one_citation_is_one_identifier_or_one_title_and_year(pair, one):
+    assert PubMedEnricher(verbose=False)._one_citation([_held(**f) for f in pair]) is one
+
+
+def test_one_citation_holds_for_every_pair_of_tied_holders():
+    same, other = {'title': SHARED_TITLE, 'year': '2025'}, {'title': NESTED_TITLE, 'year': '2025'}
+    enricher = PubMedEnricher(verbose=False)
+    assert enricher._one_citation([_held(**same)])
+    assert not enricher._one_citation([_held(**same), _held(**same), _held(**other)])
+
+
+@pytest.mark.parametrize('in_press_year', ['in press', '2025'])
+def test_published_holder_keeps_a_pmid_tied_with_an_in_press_one(tmp_path, monkeypatch, in_press_year):
+    # Two citations (no identifier in common, different years), so the tie is
+    # not kept as one: the published entry, matched by title search with a
+    # year that is not PubMed's, ties the in-press DOI holder on overlap, and
+    # the in-press rank keeps it, ahead of the year even when the in-press
+    # entry gives PubMed's year ('2025'). Releasing it would leave the
+    # in-press entry to be printed as the published paper.
+    published = _paper_entry(INPRESS_TITLE, 10, doi=None)
+    published['extracted_fields']['year'] = '2023'
+    in_press = _in_press_with_doi(INPRESS_TITLE)
+    in_press['extracted_fields']['year'] = in_press_year
+    responses = [_hits(PMID), FakeResponse(200, content=_published_xml())] * 2
+    results, _, _ = _run_entries(tmp_path, monkeypatch, [published, in_press], responses)
+    kept, in_press = results
+    assert kept['enrichment_status'] == 'enriched'
+    assert kept['enrichment_data']['pubmed_pmid'] == PMID
+    assert kept['enrichment_source'] == stage5.TITLE_SEARCH_SOURCE
+    assert (in_press['taxonomy_code'], in_press['in_press_superseded']) == ('S7', True)
+
+
+def test_cv_year_is_pubmeds_year():
+    assert stage5.cv_year_is('2025', 2025) and stage5.cv_year_is(2025, 2025)
+    assert stage5.cv_year_is('2024-2025', 2024)
+    assert not stage5.cv_year_is('2024', 2025)
+    assert not stage5.cv_year_is('in press', 2025)
+    assert not stage5.cv_year_is(None, 2025) and not stage5.cv_year_is('2025', None)
+    assert not stage5.cv_year_is(None, None)
+    # A page range or volume ahead of the year is not read as one.
+    assert stage5.cv_publication_year('1123-9, 2025') == 2025
 
 
 # OIYKZE (dev-242): PubMed's list for the owner's paper held the first ten of

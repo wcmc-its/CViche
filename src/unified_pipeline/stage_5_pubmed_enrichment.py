@@ -32,6 +32,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
 
@@ -210,6 +211,16 @@ REPLY_TARGET_STATUS = 'reply_resolved_to_replied_item'
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
+# The journal-article codes searched by title whether or not the CV calls the
+# entry in press (#1598). Measured offline over 7 YUYVIG runs (2026-10-08):
+# 43% of S1/S2/S6 entries without an identifier matched, and 96-99% of the
+# hand-checked matches were the right paper. S4/S8/S9 matched 3-8%, and about
+# half of those were wrong: an abstract, talk or chapter matched to the same
+# group's later article of near-identical title, which every guard passes.
+TITLE_SEARCH_CODES = PUBLISHED_ARTICLE_CODES
+# The `enrichment_source` of a record found by title search, not by an
+# identifier the CV gave.
+TITLE_SEARCH_SOURCE = 'title_search'
 
 
 def in_press_phrase(text: str, title: str = '') -> str | None:
@@ -412,8 +423,46 @@ class _Acceptance(NamedTuple):
     before: dict
     pmid: str
     pubmed_title: str
+    pubmed_year: int | None
     source: str
     overlap: float | None
+
+
+def cv_publication_year(cv_year: str | int | None) -> int | None:
+    """The first four-digit year the CV gives, or None."""
+    match = re.search(r'(?:19|20)\d\d', str(cv_year or ''))
+    return int(match.group()) if match else None
+
+
+def cv_year_is(cv_year: str | int | None, pubmed_year: int | None) -> bool:
+    """Whether the CV gives exactly PubMed's year for the paper."""
+    return bool(pubmed_year) and cv_publication_year(cv_year) == pubmed_year
+
+
+def cv_title(fields: dict) -> str:
+    """The title an entry is matched to PubMed by."""
+    return fields.get('title') or fields.get('chapter_title') or ''
+
+
+def _cv_fields(accepted: _Acceptance) -> dict:
+    """An accepted record's entry as the CV gave it, before the merge."""
+    return accepted.before.get('extracted_fields') or {}
+
+
+def _match_strength(accepted: _Acceptance) -> tuple[float, bool, bool, bool]:
+    """How strongly an accepted record names its entry's paper, compared
+    between entries holding the same PMID: title overlap first; then a
+    published listing over one the CV calls in press (the in-press step marks
+    that one superseded); then the CV giving PubMed's own year; then an
+    identifier the CV gave over a title search. The year decides between two
+    exact-title holders: in the #1598 measurement two such holders were
+    hand-checked as a different paper (BLBVPD e848, BCTOGR e2519), and each
+    was the one whose CV year was not PubMed's."""
+    fields = _cv_fields(accepted)
+    return (accepted.overlap or 0.0,
+            not listed_in_press(accepted.before),
+            cv_year_is(fields.get('year'), accepted.pubmed_year),
+            accepted.source != TITLE_SEARCH_SOURCE)
 
 
 class PubMedEnricher:
@@ -524,7 +573,7 @@ class PubMedEnricher:
             logger.info(f"  - {len(by_pmid)} with PMID (direct lookup)")
             logger.info(f"  - {len(by_pmcid)} with PMCID only (needs conversion)")
             logger.info(f"  - {len(by_doi)} with DOI only (needs search)")
-            logger.info(f"  - {len(no_id)} without identifiers (skip)")
+            logger.info(f"  - {len(no_id)} without identifiers (articles searched by title)")
 
         # Process each category
         enriched_entries = []
@@ -566,7 +615,11 @@ class PubMedEnricher:
         # record the re-run accepts is checked for a shared PMID too.
         self._rerun_failed_pmcid_lookups(by_pmcid)
 
-        # 4b. One PMID accepted for two entries: only the paper it names keeps it.
+        # 4b. Articles still without a record: guarded title search (#1598).
+        # Before 4c, so a title match that shares a PMID is weighed there too.
+        self._enrich_articles_by_title(pub_entries)
+
+        # 4c. One PMID accepted for two entries: only the paper it names keeps it.
         # Before step 5, whose duplicate check reads the PMIDs entries hold.
         self._release_weaker_shared_pmids()
 
@@ -833,6 +886,23 @@ class PubMedEnricher:
             else:
                 self._record_in_press_resolution(entry, phrase)
 
+    def _enrich_articles_by_title(self, pub_entries: list[dict]) -> None:
+        """Search PubMed by title for every TITLE_SEARCH_CODES entry with no
+        usable identifier (#1598), under `_enrich_by_title`'s guards. An entry
+        the CV lists as in press is left to `_resolve_in_press`, which
+        searches it as before."""
+        candidates = [entry for entry in pub_entries
+                      if entry.get('taxonomy_code') in TITLE_SEARCH_CODES
+                      and entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES
+                      and not listed_in_press(entry)]
+        if self.verbose and candidates:
+            logger.info(f"\n🔍 Searching PubMed by title for {len(candidates)} articles...")
+        for searched, entry in enumerate(candidates, 1):
+            fields = entry.get('extracted_fields') or {}
+            self._enrich_by_title(entry, cv_title(fields))
+            if self.verbose:
+                logger.info("[%d/%d] publications searched by title", searched, len(candidates))
+
     def _enrich_by_title(self, entry: dict, title: str) -> None:
         """Accept the best of the top title-search hits when its title
         overlap clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the
@@ -865,7 +935,7 @@ class PubMedEnricher:
         if (overlap >= MIN_TITLE_SEARCH_OVERLAP
                 and shares_an_author(fields.get('authors'), best['authors'])
                 and plausible_publication_year(fields.get('year'), best['year'])):
-            self._accept_record(entry, best, 'title_search')
+            self._accept_record(entry, best, TITLE_SEARCH_SOURCE)
 
     def _search_pmids_by_title(self, title: str) -> list[str]:
         params = {
@@ -1276,7 +1346,7 @@ class PubMedEnricher:
             return False
         self._acceptances.append(_Acceptance(
             entry, copy.deepcopy(entry), pubmed_record.get('pmid'),
-            pubmed_record.get('title'), source, overlap))
+            pubmed_record.get('title'), pubmed_record.get('year'), source, overlap))
         self._merge_pubmed_data(entry, pubmed_record)
         entry['enrichment_status'] = 'enriched'
         entry['enrichment_source'] = source
@@ -1316,29 +1386,62 @@ class PubMedEnricher:
         self.stats['reply_targets_rejected'] += 1
 
     def _release_weaker_shared_pmids(self) -> None:
-        """When one PMID was accepted for several entries, the entry whose
-        title matches it best keeps it, and so does any other whose title
-        clears MIN_TITLE_SEARCH_OVERLAP (the same paper listed twice). Any
-        other holder is a different paper that cleared the ID paths' looser
-        MIN_TITLE_WORD_OVERLAP on shared topic words, and is put back as it
-        was before the record was merged (AQCLHS, dev-242: a CV gave two
-        consecutive papers one DOI, and the second, at 0.43, was replaced by
-        a copy of the first). Order-independent, so it runs once every ID
-        path is done. An untitled entry has no overlap to compare and is
-        left alone. An entry the CV lists as in press can keep the PMID but
-        is never released: the in-press step marks it superseded when a
-        published entry holds the PMID (a paper retitled after acceptance),
-        and a release would promote it to a second copy of that paper."""
+        """One PMID ends on at most one citation of a document (#1598). When it
+        was accepted for several, the holder with the strongest
+        `_match_strength` keeps it and every other holder is put back as it
+        was before the record was merged. Two shapes: a different paper that
+        cleared the ID paths' looser MIN_TITLE_WORD_OVERLAP on shared topic
+        words (AQCLHS, dev-242: a CV gave two consecutive papers one DOI, and
+        the second, at 0.43, was replaced by a copy of the first), and an item
+        a title search matched to a paper another entry already holds (the
+        #1598 measurement: 71 PMIDs on two or more entries of 7 runs, mostly
+        an abstract and its paper, or one paper listed twice). When the
+        strongest holders tie, they keep the PMID if they are one citation
+        (`_one_citation`): one paper listed twice, which stage 6 dedup
+        collapses (stage6/dedup.py). Tied holders that are different
+        citations (title or year differs) are all released, since nothing
+        tells which one the record names.
+        Order-independent, so it runs once every ID path and the article
+        title search are done. An untitled entry has no overlap to compare
+        and is left alone. An entry the CV lists as in press can keep the
+        PMID but is never released: the in-press step marks it superseded
+        when a published entry holds the PMID (a paper retitled after
+        acceptance), and a release would promote it to a second copy of that
+        paper."""
         holders: dict[str, list[_Acceptance]] = {}
         for accepted in self._acceptances:
             if accepted.overlap is not None:
                 holders.setdefault(accepted.pmid, []).append(accepted)
         for group in holders.values():
-            best = max(group, key=lambda accepted: accepted.overlap)
-            for accepted in group:
-                if (accepted.overlap < min(best.overlap, MIN_TITLE_SEARCH_OVERLAP)
-                        and not listed_in_press(accepted.before)):
-                    self._restore_and_reject(accepted, best)
+            ranked = sorted(group, key=_match_strength, reverse=True)
+            strongest = [accepted for accepted in ranked
+                         if _match_strength(accepted) == _match_strength(ranked[0])]
+            kept = len(strongest) if self._one_citation(strongest) else 0
+            for accepted in ranked[kept:]:
+                if listed_in_press(accepted.before):
+                    continue
+                stronger = ranked[1] if accepted is ranked[0] else ranked[0]
+                self._restore_and_reject(accepted, stronger)
+
+    def _one_citation(self, holders: list[_Acceptance]) -> bool:
+        """Whether every pair of these holders is one citation as the CV gave
+        it: an identifier in common, or the same title (`_same_title`) and
+        the same year. In the #1598 measurement all 11 tied holder pairs on
+        7 YUYVIG runs were this shape (ECXGAT e182/e287 and SQMWHM e84/e86
+        give one DOI or PMID twice)."""
+        return all(self._cv_identifiers(a) & self._cv_identifiers(b)
+                   or (_same_title(cv_title(_cv_fields(a)), cv_title(_cv_fields(b)))
+                       and cv_publication_year(_cv_fields(a).get('year'))
+                       == cv_publication_year(_cv_fields(b).get('year')))
+                   for a, b in combinations(holders, 2))
+
+    def _cv_identifiers(self, accepted: _Acceptance) -> set[tuple[str, str]]:
+        """The identifiers the CV gave for an accepted record's entry."""
+        fields = _cv_fields(accepted)
+        ids = {('pmid', self._clean_pmid(fields.get('pmid'))),
+               ('pmcid', self._clean_pmcid(fields.get('pmcid'))),
+               ('doi', (self._clean_doi(fields.get('doi')) or '').lower())}
+        return {(kind, value) for kind, value in ids if value}
 
     def _restore_and_reject(self, accepted: _Acceptance, keeper: _Acceptance) -> None:
         entry = accepted.entry
