@@ -631,6 +631,66 @@ describe('UploadPage cost is for admins only', () => {
   })
 })
 
+describe('UploadPage batch cost outlier (#1599)', () => {
+  /** Each file's estimate scaled by its weight: cost_weight w, cost $w-$2w (midpoint $1.5w). */
+  function weighted(weights: Record<string, number>) {
+    vi.mocked(getBatchEstimate).mockImplementation(async (files) => ({
+      ...batchEstimate(files),
+      files: files.map((f) => {
+        const w = weights[f.name]
+        return { filename: f.name, error: null, estimate: { ...EST, cost_weight: w, estimated_cost_min: w, estimated_cost_max: 2 * w } }
+      }),
+    }))
+  }
+  const flaggedRows = () => screen.getAllByTestId('batch-row').filter((row) => within(row).queryByTestId('cost-outlier'))
+  const rowNamed = (name: string) => screen.getAllByTestId('batch-row').find((row) => row.textContent?.includes(name)) as HTMLElement
+
+  it('flags a file at 3x the median of the others, and not one just under', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'c.docx': 1, 'under.docx': 2.99, 'over.docx': 3 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'c.docx', 'under.docx', 'over.docx'].map(docx))
+    expect(flaggedRows()).toEqual([rowNamed('over.docx')])
+    expect(within(rowNamed('over.docx')).getByTestId('cost-outlier').textContent)
+      .toBe('About 3× larger than the others in this batch: estimated $4.50 against a median of $1.50.')
+  })
+
+  it('will not submit a flagged file until it is included, then submits every file', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1.2, 'big.docx': 7 })
+    uploadsSucceed()
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    tickAttestation()
+    expect(button('Submit 3 CVs').disabled).toBe(true)
+    expect(screen.getByText('Include or remove 1 unusually large CV')).toBeTruthy()
+
+    fireEvent.click(within(rowNamed('big.docx')).getByRole('button', { name: 'Include it' }))
+    expect(within(rowNamed('big.docx')).queryByRole('button', { name: 'Include it' })).toBeNull()
+    expect(button('Submit 3 CVs').disabled).toBe(false)
+    fireEvent.click(button('Submit 3 CVs'))
+    await flush()
+    expect(vi.mocked(uploadFile).mock.calls.map(([f]) => f.name)).toEqual(['a.docx', 'b.docx', 'big.docx'])
+  })
+
+  it('lifts the block when the flagged file is removed instead', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'big.docx': 7 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    tickAttestation()
+    fireEvent.click(button('Remove big.docx'))
+    expect(button('Submit 2 CVs').disabled).toBe(false)
+  })
+
+  it('flags the file for a non-admin too, without a dollar figure', async () => {
+    currentUser = MEMBER
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...MEMBER, quota: QUOTA_LEFT })
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'big.docx': 7 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    expect(within(rowNamed('big.docx')).getByTestId('cost-outlier').textContent).toBe('About 7× larger than the others in this batch.')
+    expect(screen.queryByText(/\$/)).toBeNull()
+  })
+})
+
 describe('UploadPage quota', () => {
   it('re-reads the runs left before another batch', async () => {
     currentUser = MEMBER

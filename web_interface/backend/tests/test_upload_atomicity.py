@@ -33,6 +33,7 @@ from app.api.upload import _extract_text, _validate_docx_magic
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services import upload_validation
+from app.services.config_service import get_estimated_run_cost
 from app.services.run_creation import RUN_NOT_CREATED_NOTHING_SAVED
 from app.storage.local_storage import LocalRunStorage
 
@@ -1718,6 +1719,29 @@ def test_estimate_many_files_returns_a_row_per_file_and_totals(client, db, seed_
     else:
         assert (body["estimated_cost_min"], body["estimated_cost_max"], one["estimated_cost_min"]) == (None, None, None)
         assert body["pricing_model"] is None
+
+
+@pytest.mark.parametrize("role", ["admin", "user"])
+def test_estimate_many_files_gives_each_a_cost_weight_even_with_cost_hidden(client, db, seed_simple_mode, role):
+    """#1599: each row carries its cost in typical CVs, so the batch table can
+    flag an outlier for a non-admin too, who sees no dollars (#1111). The
+    weights keep the costs' ratio."""
+    user = _make_user(db, role=role)
+    _auth(client, user)
+    small_chars, large_chars = 65_000, 577_000
+    patches = [
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", side_effect=["x" * small_chars, "x" * large_chars]),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "small.docx", "large.docx"))
+
+    assert resp.status_code == 200, resp.text
+    small, large = (row["estimate"] for row in resp.json()["files"])
+    assert small["cost_weight"] == pytest.approx(1.0)
+    expected = sum(get_estimated_run_cost(large_chars)) / sum(get_estimated_run_cost(small_chars))
+    assert large["cost_weight"] == pytest.approx(expected, abs=0.01)
+    assert large["cost_weight"] > 3
 
 
 def test_estimate_many_files_reports_a_bad_file_on_its_row_and_totals_the_rest(client, db, seed_simple_mode):

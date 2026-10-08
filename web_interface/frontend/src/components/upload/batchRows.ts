@@ -1,7 +1,7 @@
 import type { ApiError } from '../../api/client'
 import { isDuplicateError } from '../../api/upload'
 import type { Estimate, InboxItem, InboxSubmitResult, QueueLane, QuotaInfo } from '../../types'
-import { formatMinutes } from '../../utils'
+import { formatCost, formatMinutes } from '../../utils'
 
 /** Most files one batch may hold; POST /api/batches enforces the same cap. */
 export const MAX_BATCH_FILES = 50
@@ -63,6 +63,8 @@ export interface BatchRow {
   /** Set for an emailed CV (#1298): its bytes are on the server, so "upload" is POST /inbox/submit.
    *  `file` is then a name-only placeholder and `sizeBytes` the real size. */
   inbox: { id: number; sizeBytes: number } | null
+  /** The user chose to include this file although its estimate is far above the rest of the batch's (#1599). */
+  costConfirmed: boolean
 }
 
 /** Why a chosen file can't be submitted (wrong type, over the size cap); null when it can. */
@@ -86,6 +88,7 @@ export function makeRow(
     runId: null,
     failure: null,
     inbox: null,
+    costConfirmed: false,
   }
 }
 
@@ -163,6 +166,55 @@ export function estimateMinutes(estimate: Estimate): number {
 export function estimateCost(estimate: Estimate): number | null {
   if (estimate.estimated_cost_min === null || estimate.estimated_cost_max === null) return null
   return (estimate.estimated_cost_min + estimate.estimated_cost_max) / 2
+}
+
+/** A file whose estimated cost is at least this many times the median of the rest of the batch
+ *  is flagged and needs a click to be included (#1599). The issue's own acceptance figure. */
+export const COST_OUTLIER_RATIO = 3
+
+export interface CostOutlier {
+  /** The file's estimated cost over the median of the other files'. */
+  ratio: number
+  /** The file's estimated dollars and the others' median; null when cost is hidden (non-admin). */
+  cost: number | null
+  medianCost: number | null
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/** The batch's cost outliers by row key: each valid row whose cost_weight is COST_OUTLIER_RATIO times or more
+ *  the median of the other estimated rows'. A row needs at least one other to be compared with. */
+export function costOutliers(rows: BatchRow[]): Map<string, CostOutlier> {
+  const weighed = rows.filter((r) => isValidRow(r) && (r.estimate?.cost_weight ?? 0) > 0)
+  const outliers = new Map<string, CostOutlier>()
+  weighed.forEach((row, i) => {
+    const others = weighed.filter((_, j) => j !== i)
+    if (!others.length) return
+    const ratio = (row.estimate?.cost_weight ?? 0) / median(others.map((r) => r.estimate?.cost_weight ?? 0))
+    if (ratio < COST_OUTLIER_RATIO) return
+    const costs = others.map((r) => (r.estimate ? estimateCost(r.estimate) : null))
+    const cost = row.estimate ? estimateCost(row.estimate) : null
+    const known = costs.filter((c): c is number => c !== null)
+    outliers.set(row.key, { ratio, cost, medianCost: cost !== null && known.length === costs.length ? median(known) : null })
+  })
+  return outliers
+}
+
+/** "About 9× larger than the others in this batch: estimated $23.10 against a median of $2.67."
+ *  The dollars only with `showCost` (admins, #1111). */
+export function outlierText({ ratio, cost, medianCost }: CostOutlier, showCost: boolean): string {
+  const dollars = showCost && cost !== null && medianCost !== null ? `: estimated ${formatCost(cost)} against a median of ${formatCost(medianCost)}` : ''
+  return `About ${Math.round(ratio)}× larger than the others in this batch${dollars}.`
+}
+
+/** Flagged rows the user has not yet chosen to include. */
+export function unconfirmedOutliers(rows: BatchRow[]): number {
+  const flagged = costOutliers(rows)
+  return rows.filter((r) => flagged.has(r.key) && !r.costConfirmed).length
 }
 
 export interface Totals {
@@ -250,6 +302,8 @@ export function missingItems({ rows, multi, attested, quota }: MissingInput): st
   if (valid > MAX_BATCH_FILES) missing.push(`Batches are limited to ${MAX_BATCH_FILES} files. Remove ${valid - MAX_BATCH_FILES}.`)
   const shortfall = valid ? quotaShortfall(valid, quota) : ''
   if (shortfall) missing.push(shortfall)
+  const outliers = unconfirmedOutliers(rows)
+  if (outliers) missing.push(`Include or remove ${outliers} unusually large ${plural(outliers, 'CV', 'CVs')}`)
   if (!attested) missing.push('Agree to the upload terms')
   return missing
 }

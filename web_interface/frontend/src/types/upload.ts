@@ -11,4 +11,6 @@ export interface Estimate {
   pricing_model: string | null
   text_characters_is_guess: boolean
   scanned_pages?: number[]
+  /** Estimated cost in typical CVs (#1599), shown to every role; absent from a backend that predates it. */
+  cost_weight?: number
 }

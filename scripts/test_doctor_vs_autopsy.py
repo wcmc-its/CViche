@@ -28,9 +28,10 @@ def _finding(lint, message, evidence=(), severity="WARN", status="ran"):
             "evidence": list(evidence), "status": status, "reason": ""}
 
 
-def _verified(fid, idx, severity="high", class_ref="cls-1", batch_class="E1", credit="no"):
+def _verified(fid, idx, severity="high", class_ref="cls-1", batch_class="E1", credit="no",
+              stage="4"):
     return {"id": fid, "class": "whole_record_lost", "class_ref": class_ref,
-            "batch_class": batch_class, "severity": severity, "element_idx_start": idx,
+            "batch_class": batch_class, "stage": stage, "severity": severity, "element_idx_start": idx,
             "records": 1, "doctor_caught": {"verdict": credit, "lints": []}}
 
 
@@ -166,7 +167,7 @@ def _scoring_inputs(tmp):
     labels = [
         {"uid": UID_A, "batch": "BATCH1",
          "findings": [_verified("TSTAAA-01", [10, 11], credit="yes"),
-                      _verified("TSTAAA-02", 21.0, severity="low", class_ref="cls-2"),
+                      _verified("TSTAAA-02", 21.0, severity="low", class_ref="cls-2", stage="6"),
                       _verified("TSTAAA-03", None, credit=None)],
          "doctor_review": [
              {"lint": "offschema_fields", "shape": None, "severity": "WARN", "verdict": "TP",
@@ -176,7 +177,8 @@ def _scoring_inputs(tmp):
              {"lint": "pipe_leaks", "shape": None, "severity": "WARN", "verdict": "FP",
               "element_idx_start": None}]},
         # TSTBBB-02 shares index 99 with an unmatched TSTAAA hit: a hit matches only its own uid
-        {"uid": UID_B, "batch": "BATCH2", "findings": [_verified("TSTBBB-01", 6, batch_class=None),
+        {"uid": UID_B, "batch": "BATCH2", "findings": [_verified("TSTBBB-01", 6, batch_class=None,
+                                                                 stage=None),
                                                        _verified("TSTBBB-02", 99, class_ref="cls-3")],
          "doctor_review": [{"lint": "stage6_render_warnings", "shape": "reroute_refused",
                             "severity": "INFO", "verdict": "partial", "element_idx_start": [5]}]},
@@ -215,6 +217,9 @@ def test_recall_groups_and_no_idx_findings():
     assert recall["by_batch"] == {"BATCH1": {"findings": 2, "caught": 2}, "BATCH2": {"findings": 2, "caught": 0}}
     assert recall["by_class_ref"]["cls-2"] == {"findings": 1, "caught": 1}
     assert recall["by_batch_class"][dva.NO_CLASS] == {"findings": 1, "caught": 0}
+    # the stage the verifier blamed: what #1586 ranks misses by; a label without one is "(none)"
+    assert recall["by_stage"] == {"4": {"findings": 2, "caught": 1}, "6": {"findings": 1, "caught": 1},
+                                  dva.NO_CLASS: {"findings": 1, "caught": 0}}
     assert recall["autopsy_credit"] == {"judged": 4, "yes": 1, "no": 3}
 
 
@@ -245,6 +250,8 @@ def test_main_prints_the_table_and_writes_the_same_numbers_as_json():
     assert line.split()[1:8] == ["1", "1", "1", "1", "0", "0", "1"], line  # match != unmat
     assert "recall: 2/4 (50%)" in out
     assert "  by_class_ref: 3 smaller groups 2/4 (each in --json)" in out.splitlines(), out
+    assert written["recall"]["by_stage"]["6"] == {"findings": 1, "caught": 1}
+    assert "  by_stage: 3 smaller groups 2/4 (each in --json)" in out.splitlines(), out
 
 
 def _unclassed_inputs(tmp):

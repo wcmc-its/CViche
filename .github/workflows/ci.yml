@@ -101,6 +101,8 @@ jobs:
         run: python3 scripts/test_doctor_vs_autopsy.py
       - name: score_vs_autopsy self-tests
         run: python3 scripts/test_score_vs_autopsy.py
+      - name: stage3b_layout_ab self-tests
+        run: python3 scripts/test_stage3b_layout_ab.py
       - name: run_corpus_batch.sh self-tests
         # Nothing else in this workflow ran these -- #810's skip-rule fix
         # (a docx alone no longer proves a CV's run is done) needs a shell

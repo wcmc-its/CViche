@@ -908,3 +908,42 @@ def test_312_header_pin_runs_in_the_stage_3b_group_pass(monkeypatch, tmp_path):
     assert "pre_pin_code" not in by_section["Local"]
     # The pin is not a fallback: stage 3b's zero-LLM-classification gate still counts these.
     assert output["meta"]["classification_stats"]["llm_classified"] == 3
+
+
+# --- run_stage_3b: the per-CV prompt flag (#50) --------------------------------
+
+def _run_capturing_classification_calls(monkeypatch, tmp_path, flag):
+    """Run stage 3b over the two-group fixture; return its classification calls."""
+    if flag is None:
+        monkeypatch.delenv(stage_3b.PER_CV_PROMPT_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(stage_3b.PER_CV_PROMPT_FLAG, flag)
+    calls = []
+
+    def _record(**kwargs):
+        calls.append(kwargs)
+        return _ok_response([0], code="H")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _record)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES, _MAPPINGS)
+    stage_3b.run_stage_3b("9999_Doe_Jane_CV", stage_2_path=str(stage_2),
+                          stage_3a_path=str(stage_3a), output_dir=str(tmp_path / "out"), workers=1)
+    return calls
+
+
+@pytest.mark.parametrize("flag", [None, "0"])
+def test_per_cv_flag_off_sends_each_group_its_own_prompt(monkeypatch, tmp_path, flag):
+    calls = _run_capturing_classification_calls(monkeypatch, tmp_path, flag)
+    assert len(calls) == 2
+    assert calls[0]["messages"][0] != calls[1]["messages"][0]
+    assert all(c["messages"][1]["content"].startswith("Classify these ") for c in calls)
+    assert all(c["enable_prompt_caching"] is False for c in calls)  # single-batch groups
+
+
+def test_per_cv_flag_on_sends_every_group_one_cached_prompt(monkeypatch, tmp_path):
+    calls = _run_capturing_classification_calls(monkeypatch, tmp_path, "1")
+    assert len(calls) == 2
+    assert calls[0]["messages"][0] == calls[1]["messages"][0]
+    assert [c["messages"][1]["content"].split(" (")[0] for c in calls] == [
+        "These entries come from GROUP 1", "These entries come from GROUP 2"]
+    assert all("enable_prompt_caching" not in c for c in calls)  # stage default: cachePoint kept
