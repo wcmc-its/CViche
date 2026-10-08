@@ -110,6 +110,18 @@ GRANT_STATUS_BY_CODE = {
     'M2C': 'pending application (not funded)',
     'M2D': 'patent or innovation (not a grant)',
 }
+# Grant date fields written into the grant's context line, so an old application or a long-ended
+# grant does not read as current (UNKNBU, #1554). M2C applications carry a submission date instead.
+GRANT_START_FIELD = 'start_date'
+GRANT_END_FIELD = 'end_date'
+GRANT_SUBMITTED_FIELD = 'submission_date'
+# The context tags the generation prompt's conditional requirements key on (#1554): funded grant
+# lines, pending-application lines, and mentee lines. The prompt asks about funding, pending
+# applications or mentoring only when the context holds such a line, so the model is never asked
+# for content the CV does not have.
+FUNDED_GRANT_CODES = ('M2A', 'M2B')
+PENDING_GRANT_CODE = 'M2C'
+MENTORING_TAXONOMY_CODES = ('N3A', 'N3B', 'N4')
 
 # Recency (#946 item 6). An entry's recency score is 1.0 when it is ongoing and
 # falls linearly to 0 over RECENCY_WINDOW_YEARS; RECENCY_WEIGHT scales it into
@@ -388,6 +400,40 @@ def grant_status_segment(code: str) -> str:
     return f" | Status: {status}" if status else ""
 
 
+def _field_text(fields: dict, name: str) -> str:
+    """The field's value as stripped text; '' when missing, blank, or the literal 'None'."""
+    value = str(fields.get(name) or '').strip()
+    return '' if value.lower() == 'none' else value
+
+
+def grant_period_segment(fields: dict) -> str:
+    """' | Period: <start> to <end>' and/or ' | Submitted: <date>' from the grant's date
+    fields, else '' (#1554): an undated grant line let an old application read as current."""
+    start = _field_text(fields, GRANT_START_FIELD)
+    end = _field_text(fields, GRANT_END_FIELD)
+    submitted = _field_text(fields, GRANT_SUBMITTED_FIELD)
+    segment = ''
+    if start and end:
+        segment = f" | Period: {start} to {end}"
+    elif start:
+        segment = f" | Period: from {start}"
+    elif end:
+        segment = f" | Period: until {end}"
+    if submitted:
+        segment += f" | Submitted: {submitted}"
+    return segment
+
+
+def grant_context_tag(code: str) -> str:
+    """The tag that opens a grant's context line, e.g. '[GRANT-M2A]'."""
+    return f"[GRANT-{code}]"
+
+
+def generic_context_tag(code: str) -> str:
+    """The tag that opens a context line in the generic format, e.g. '[N3A]'."""
+    return f"[{code}]"
+
+
 def format_entry_for_context(code: str, entry: dict) -> str:
     """Format an entry for inclusion in the LLM context (no truncation)."""
     fields = entry.get('extracted_fields', {})
@@ -405,7 +451,8 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         title = fields.get('title', '')
         role = fields.get('pi_role', '') or fields.get('role', '')
         agency = fields.get('agency', '')
-        return f"[GRANT-{code}] {title}{grant_status_segment(code)} | Role: {role} | Agency: {agency}"
+        return (f"{grant_context_tag(code)} {title}{grant_status_segment(code)}"
+                f"{grant_period_segment(fields)} | Role: {role} | Agency: {agency}")
 
     elif code == 'M1':  # Research activities
         return f"[RESEARCH] {text}"
@@ -420,7 +467,7 @@ def format_entry_for_context(code: str, entry: dict) -> str:
 
     else:
         # Generic format - no truncation
-        return f"[{code}] {text}"
+        return f"{generic_context_tag(code)} {text}"
 
 
 def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]],
@@ -574,11 +621,63 @@ NEUTRAL_REFERENCE_REQUIREMENT = (
     "Do not name the researcher or use a title such as \"Dr.\"; "
     "never use gendered pronouns (he/she/his/her/him) and never infer anyone's gender"
 )
-# Pending applications are not funded work (KJJVVO, #1484); the status word comes from GRANT_STATUS_BY_CODE.
-PENDING_FUNDING_REQUIREMENT = (
-    "Describe a grant whose Status is a pending application as an application under review; "
-    "never describe it as funded, awarded or ongoing work"
+# The paragraph is signed by the researcher, so a claim the CV does not make is the worst defect it
+# can have: OIEPQD invented pending applications, funders, mentees and impact on 11 of 14 runs (#1554).
+FACTS_ONLY_REQUIREMENT = (
+    "State ONLY facts that the CV CONTEXT below contains. Never add a grant, application, funder, "
+    "role, mentee, collaborator, outcome or impact (clinical, policy, commercial or other) that the "
+    "context does not state, and never name a funder the context does not name; when the context "
+    "does not cover something, leave it out"
 )
+# Asked only when the context has a funded (current or completed) grant line (#1554).
+FUNDING_REQUIREMENT = (
+    "Mention key funding sources and the researcher's role on them, using exactly the Status, Role and Agency each "
+    "grant line states; never call a current or completed grant an application"
+)
+# Pending applications are not funded work (KJJVVO, #1484). Asked only when the context has a
+# pending-application line: on a CV without one, the line primed "application under review" (#1554).
+PENDING_FUNDING_REQUIREMENT = (
+    "A grant line whose Status is a pending application is an application, not funded work: if you "
+    "mention it, say it was submitted (with its Submitted date, when the line gives one), and never describe it as funded, "
+    "awarded or ongoing work"
+)
+# Asked only when the context has a mentee line; mentorship was invented on 5 OIEPQD runs (#1554).
+MENTORING_REQUIREMENT = "Mention mentorship only as the mentee lines in the context describe it"
+
+
+def context_has_any_tag(context: str, tags: list[str]) -> bool:
+    """True when any context line opens with one of the tags, after an optional CURRENT_CONTEXT_TAG."""
+    for line in context.splitlines():
+        line = line.removeprefix(CURRENT_CONTEXT_TAG).lstrip()
+        if any(line.startswith(tag) for tag in tags):
+            return True
+    return False
+
+
+def summary_requirements(context: str) -> list[str]:
+    """The generation prompt's REQUIREMENTS lines, with the funding, pending-application and
+    mentoring asks included only when the context has a line they apply to (#1554)."""
+    requirements = [
+        FACTS_ONLY_REQUIREMENT,
+        "Write ONE cohesive narrative paragraph of approximately 150-200 words (do NOT exceed 200 words)",
+        "Focus on research themes, methods, and scientific contributions",
+    ]
+    if context_has_any_tag(context, [grant_context_tag(code) for code in FUNDED_GRANT_CODES]):
+        requirements.append(FUNDING_REQUIREMENT)
+    if context_has_any_tag(context, [grant_context_tag(PENDING_GRANT_CODE)]):
+        requirements.append(PENDING_FUNDING_REQUIREMENT)
+    if context_has_any_tag(context, [generic_context_tag(code) for code in MENTORING_TAXONOMY_CODES]):
+        requirements.append(MENTORING_REQUIREMENT)
+    requirements += [
+        FIRST_PERSON_REQUIREMENT,
+        CURRENT_WORK_REQUIREMENT,
+        NEUTRAL_REFERENCE_REQUIREMENT,
+        "Do NOT list publications or include citations",
+        "Do NOT include education or job titles",
+        "Be specific about research areas, not generic",
+        "Keep it concise - prioritize quality over comprehensiveness",
+    ]
+    return requirements
 
 
 def generate_research_summary(context: str) -> tuple[str, dict]:
@@ -587,21 +686,11 @@ def generate_research_summary(context: str) -> tuple[str, dict]:
 
     Returns (summary_text, usage_dict).
     """
+    requirement_lines = '\n'.join(f"- {requirement}" for requirement in summary_requirements(context))
     prompt = f"""Generate a concise, NIH biosketch-style research summary paragraph in the researcher's own voice.
 
 REQUIREMENTS:
-- Write ONE cohesive narrative paragraph of approximately 150-200 words (do NOT exceed 200 words)
-- Focus on research themes, methods, and scientific contributions
-- Mention key funding sources and roles (PI vs Co-I)
-- {PENDING_FUNDING_REQUIREMENT}
-- Highlight impact (clinical translation, policy, mentorship outcomes if relevant)
-- {FIRST_PERSON_REQUIREMENT}
-- {CURRENT_WORK_REQUIREMENT}
-- {NEUTRAL_REFERENCE_REQUIREMENT}
-- Do NOT list publications or include citations
-- Do NOT include education or job titles
-- Be specific about research areas, not generic
-- Keep it concise - prioritize quality over comprehensiveness
+{requirement_lines}
 
 CV CONTEXT (ranked by relevance; ongoing entries tagged {CURRENT_CONTEXT_TAG}):
 {context}

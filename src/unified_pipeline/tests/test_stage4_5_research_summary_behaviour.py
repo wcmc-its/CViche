@@ -42,8 +42,11 @@ from unified_pipeline.llm_provenance import (  # noqa: E402
 from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     CURRENT_CONTEXT_TAG,
     CURRENT_WORK_REQUIREMENT,
+    FACTS_ONLY_REQUIREMENT,
     FIRST_PERSON_REQUIREMENT,
+    FUNDING_REQUIREMENT,
     GRANT_STATUS_BY_CODE,
+    MENTORING_REQUIREMENT,
     NEUTRAL_REFERENCE_REQUIREMENT,
     ONGOING_PATTERN,
     PENDING_FUNDING_REQUIREMENT,
@@ -62,6 +65,7 @@ from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     run_stage_4_5,
     score_entry_recency,
     score_entry_seniority,
+    summary_requirements,
 )
 
 # Placeholder EntryRecency for build_context_string tests that exercise the
@@ -692,6 +696,24 @@ def test_format_entry_for_context_unknown_grant_code_has_no_status_segment():
     assert format_entry_for_context("M2Z", entry) == "[GRANT-M2Z] Grant T | Role: PI | Agency: NIH"
 
 
+@pytest.mark.parametrize("code, dates, segment", [
+    ("M2A", {"start_date": "2021", "end_date": "present"}, " | Period: 2021 to present"),
+    ("M2B", {"start_date": "2010-07", "end_date": "2014-06"}, " | Period: 2010-07 to 2014-06"),
+    ("M2B", {"start_date": "2011"}, " | Period: from 2011"),
+    ("M2B", {"end_date": "2016"}, " | Period: until 2016"),
+    ("M2C", {"submission_date": "2012"}, " | Submitted: 2012"),
+    ("M2B", {"start_date": "None", "end_date": "  "}, ""),
+])
+def test_format_entry_for_context_grant_line_carries_its_period(code, dates, segment):
+    """#1554: a grant line carried its status but no date, so a long-ago letter of
+    intent read as a current application. The period (or submission date) follows
+    the status; a blank or literal 'None' date adds nothing."""
+    entry = {"extracted_fields": {"title": "Gadget study", "pi_role": "PI", "agency": "Example Fund", **dates},
+             "text": ""}
+    assert format_entry_for_context(code, entry) == (
+        f"[GRANT-{code}] Gadget study | Status: {GRANT_STATUS_BY_CODE[code]}{segment} | Role: PI | Agency: Example Fund")
+
+
 def test_format_entry_for_context_research_activities():
     entry = {"extracted_fields": {}, "text": "research text"}
     assert format_entry_for_context("M1", entry) == "[RESEARCH] research text"
@@ -791,8 +813,8 @@ def test_build_context_string_tag_follows_recency_computed_at_a_year_other_than_
         [("M2A", current_grant, 0.0, current_recency), ("M2A", past_grant, 0.0, past_recency)],
         max_tokens=100)
 
-    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Status: current | Role:  | Agency: "
-                       "\n[GRANT-M2A] R21 | Status: current | Role:  | Agency: ")
+    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Status: current | Period: until 2045 | Role:  | Agency: "
+                       "\n[GRANT-M2A] R21 | Status: current | Period: until 2035 | Role:  | Agency: ")
 
 
 # --- score_existing_m1 (call_llm stubbed) -----------------------------------------
@@ -925,23 +947,91 @@ def test_generate_research_summary_prompt_asks_for_first_person_without_naming_t
     assert "by name" not in NEUTRAL_REFERENCE_REQUIREMENT
 
 
-def test_generate_research_summary_prompt_says_pending_applications_are_not_funded(monkeypatch):
-    """#1484: the prompt tells the model that a pending application is an
-    application, never funded work; the status word it keys on is the one
-    format_entry_for_context writes for M2C."""
+def _captured_generation_prompt(monkeypatch, context: str) -> str:
+    """The prompt generate_research_summary sends for this context (call_llm stubbed)."""
     captured = {}
 
     def fake_call_llm(**kwargs):
         captured["prompt"] = kwargs["messages"][0]["content"]
         return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+    stage_4_5.generate_research_summary(context)
+    return captured["prompt"]
 
-    stage_4_5.generate_research_summary("[GRANT-M2C] R01 Widgets | Status: pending application (not funded)")
 
-    assert f"- {PENDING_FUNDING_REQUIREMENT}" in captured["prompt"]
+_PENDING_LINE = "[GRANT-M2C] R01 Widgets | Status: pending application (not funded) | Submitted: 2024"
+_FUNDED_LINE = "[GRANT-M2B] Gizmo cohort | Status: completed | Period: 2015 to 2019 | Role: PI | Agency: Example Fund"
+_MENTEE_LINE = "[N3A] Postdoctoral fellow, gizmo modelling"
+_RESEARCH_LINE = "[RESEARCH] I study widget folding with imaging methods."
+
+
+def test_generate_research_summary_prompt_says_pending_applications_are_not_funded(monkeypatch):
+    """#1484: with a pending-application line in the context, the prompt tells the
+    model that it is an application, never funded work; the status word it keys on
+    is the one format_entry_for_context writes for M2C."""
+    prompt = _captured_generation_prompt(monkeypatch, _PENDING_LINE)
+
+    assert f"- {PENDING_FUNDING_REQUIREMENT}" in prompt
     assert "pending application" in PENDING_FUNDING_REQUIREMENT
     assert "pending application" in GRANT_STATUS_BY_CODE["M2C"]
     assert "never describe it as funded" in PENDING_FUNDING_REQUIREMENT
+
+
+def test_generate_research_summary_prompt_always_carries_the_facts_only_rule(monkeypatch):
+    """#1554: the summary invented funders, applications, mentees and impact. Every
+    prompt opens its requirements with the rule to state only what the context holds."""
+    prompt = _captured_generation_prompt(monkeypatch, _RESEARCH_LINE)
+
+    assert prompt.split("REQUIREMENTS:\n", 1)[1].startswith(f"- {FACTS_ONLY_REQUIREMENT}\n")
+    assert "ONLY facts that the CV CONTEXT below contains" in FACTS_ONLY_REQUIREMENT
+    for invented in ("grant", "application", "funder", "mentee", "impact"):
+        assert invented in FACTS_ONLY_REQUIREMENT
+
+
+def test_generate_research_summary_prompt_without_grants_or_mentees_asks_for_none(monkeypatch):
+    """#1554: on a context with no grant or mentee line, the prompt does not ask for
+    funding, pending applications, mentoring or impact -- the asks the model met by
+    inventing them -- and does not prime the 'application under review' phrase."""
+    prompt = _captured_generation_prompt(monkeypatch, _RESEARCH_LINE)
+
+    for requirement in (FUNDING_REQUIREMENT, PENDING_FUNDING_REQUIREMENT, MENTORING_REQUIREMENT):
+        assert requirement not in prompt
+    assert "Highlight impact" not in prompt
+    assert "application under review" not in prompt
+    assert "funding sources" not in prompt
+    assert "mentorship" not in prompt
+
+
+@pytest.mark.parametrize("line, expected", [
+    (_FUNDED_LINE, {"funding"}),
+    (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] Gizmo trial | Status: current | Role: Co-I | Agency: Example Fund",
+     {"funding"}),
+    (_PENDING_LINE, {"pending"}),
+    (_MENTEE_LINE, {"mentoring"}),
+    ("[N3B] Former student, widget assays", {"mentoring"}),
+    ("[N4] Mentee awards and outputs", {"mentoring"}),
+    ("[GRANT-M2D] Widget patent | Status: patent or innovation (not a grant) | Role:  | Agency: ", set()),
+    ("[RESEARCH] My grants and mentees are listed elsewhere.", set()),
+    ("[RESEARCH] A tag inside free text, [GRANT-M2C] or [N3A], is not a line.", set()),
+    ("\n".join([_FUNDED_LINE, _PENDING_LINE, _MENTEE_LINE]), {"funding", "pending", "mentoring"}),
+])
+def test_summary_requirements_include_each_conditional_ask_only_for_its_line(line, expected):
+    """#1554: each conditional ask is keyed on the context line it applies to; a
+    patent line is not funding, and a word in free text is not a tagged line."""
+    by_name = {"funding": FUNDING_REQUIREMENT, "pending": PENDING_FUNDING_REQUIREMENT,
+               "mentoring": MENTORING_REQUIREMENT}
+    requirements = summary_requirements(line)
+
+    assert {name for name, text in by_name.items() if text in requirements} == expected
+
+
+def test_summary_requirements_keep_first_person_and_neutral_reference_whatever_the_context():
+    """#1539's first-person and no-name rules hold with and without conditional asks."""
+    for context in (_RESEARCH_LINE, "\n".join([_FUNDED_LINE, _PENDING_LINE, _MENTEE_LINE])):
+        requirements = summary_requirements(context)
+        assert FIRST_PERSON_REQUIREMENT in requirements
+        assert NEUTRAL_REFERENCE_REQUIREMENT in requirements
+        assert CURRENT_WORK_REQUIREMENT in requirements
 
 
 def test_current_context_tag_appears_in_current_work_requirement():
