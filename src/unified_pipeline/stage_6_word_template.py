@@ -738,12 +738,36 @@ def _summary_paraphrases_m1(mapped_codes: set[str], research_summary_data: dict 
     return summary_info.get('generation_method') != _SUMMARY_METHOD_VERBATIM_M1
 
 
+# A credit line naming who ran the work -- "Investigators: ...", "(co-investigator)",
+# "My role: ...", "Mentor: ...", "Study Title: ..." -- marks a project record even
+# when stage 4 filed every word of it under `narrative` (#1572: LTTYWI's projects).
+_M1_CREDIT_LABEL_RE = re.compile(
+    r'\b(?:co-?)?investigators?\s*:|\((?:co-?)?investigator\)|\bmentors?\s*:'
+    r'|\brole\s*:|\bstudy title\s*:|\bPI\s*:', re.IGNORECASE)
+
+
 def _is_m1_record(entry: Mapping[str, Any]) -> bool:
-    """True when an M1 entry is a dated record (a position, a project) rather
-    than research-statement prose: stage 4 extracted a populated field outside
-    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184)."""
+    """True when an M1 entry is a record (a position, a project) rather than
+    research-statement prose: stage 4 extracted a populated field outside
+    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184), or its text carries a
+    credit line (`_M1_CREDIT_LABEL_RE`)."""
     fields = entry.get('extracted_fields') or {}
-    return any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+    return (any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+            or bool(_M1_CREDIT_LABEL_RE.search(str(entry.get('text') or ''))))
+
+
+def _m1_record_ids(m1_entries: list[dict]) -> set[int]:
+    """`id()` of every M1 entry that is a record: one `_is_m1_record` accepts,
+    and every other entry under the same heading, as an item of that record
+    list (#1572). Stage 4 often extracts dates from some items of a list and
+    nothing but `narrative` from the rest: ECXGAT's 22 virus isolates, of which
+    4 carried a date, and LTTYWI's numbered research projects. An entry with no
+    heading is judged on its own."""
+    records = [entry for entry in m1_entries if _is_m1_record(entry)]
+    record_headings = {tuple(entry.get('hierarchy') or ()) for entry in records}
+    return ({id(entry) for entry in records}
+            | {id(entry) for entry in m1_entries
+               if entry.get('hierarchy') and tuple(entry['hierarchy']) in record_headings})
 
 
 def _paragraph_text(paragraph: Paragraph, include_tracked_insertions: bool) -> str:
@@ -1690,8 +1714,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         the Appendix in source order. Empty unless `_summary_paraphrases_m1`.
 
         Two kinds. Every entry stage 3b's T-validation recoded from T
-        (AUTOPSY-s7ab-batch-2026-10-02 class 11). And every dated record
-        (`_is_m1_record`) that no part of the document rendered so far carries,
+        (AUTOPSY-s7ab-batch-2026-10-02 class 11). And every record
+        (`_m1_record_ids`) that no part of the document rendered so far carries,
         the summary paragraph included (AUTOPSY-EBYSBC-batch-2026-10-02 E27: a
         generated summary that never mentions a position or a project). The
         render check is `m1_record_rendered`: a record that surfaces as a
@@ -1708,9 +1732,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         lines = self._rendered_output_lines(exclude_instruction_box=True, include_tracked_insertions=True)
         haystack = "\x00".join(_squash(line) for line in lines)
         line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in lines]
+        record_ids = _m1_record_ids(m1_entries)
         return [entry for entry in m1_entries
                 if is_t_validation_recoded_m1(entry)
-                or (_is_m1_record(entry)
+                or (id(entry) in record_ids
                     and m1_record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
 
     def generate(self, input_path: str, output_path: str | None = None, research_summary_path: str | None = None,
