@@ -72,9 +72,11 @@ from unified_pipeline.llm_client import call_llm
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     NO_HIERARCHY_KEY,
     ClassificationStats,
+    SharedSystemPrompt,
     _BatchStats,
     _build_taxonomy_ref_for_batch,
     _classify_one_batch,
+    build_per_cv_prompts,
     classify_entries_batch,
     detect_duplicates,
     group_entries_by_hierarchy,
@@ -121,6 +123,11 @@ logger = logging.getLogger(__name__)
 # (#881). Knob: CVICHE_STAGE3B_GROUP_WORKERS, env var or llm yaml key.
 STAGE3B_GROUP_WORKERS = workers_from_config("CVICHE_STAGE3B_GROUP_WORKERS")
 
+# "1" sends every group of a CV one shared, cacheable system prompt (#50,
+# stage3b/prompt.py's per-CV layout). Off by default: it changes what the
+# model sees, and needs a live classification A/B before it is turned on.
+PER_CV_PROMPT_FLAG = "CVICHE_STAGE3B_PER_CV_PROMPT"
+
 
 _GroupResult = tuple[list[dict], ClassificationStats, list[str]]
 
@@ -142,6 +149,7 @@ def _classify_group(
     group_entries: list[dict],
     mapping_index: dict,
     taxonomy: dict,
+    shared_prompt: SharedSystemPrompt | None = None,
 ) -> _GroupResult:
     """Classify one hierarchy group; the per-group body of run_stage_3b's loop.
 
@@ -154,11 +162,11 @@ def _classify_group(
     lines itself, from ``on_result``, which map_in_order guarantees runs on
     the calling thread.
     """
-    hierarchy = [] if hierarchy_key == NO_HIERARCHY_KEY else hierarchy_key.split(" > ")
-    context = get_taxonomy_context(hierarchy, mapping_index)
+    context = get_taxonomy_context(_hierarchy_of(hierarchy_key), mapping_index)
     primary_codes = context.get_primary_codes()
 
-    classified, stats = classify_entries_batch(group_entries, context, taxonomy)
+    classified, stats = classify_entries_batch(
+        group_entries, context, taxonomy, shared_prompt=shared_prompt)
     classified, _pinned = apply_header_pin(classified, context)
 
     lines = [f"    Entries: {len(group_entries)}"]
@@ -169,6 +177,31 @@ def _classify_group(
         lines.append(f"    Suggested codes: {codes_display}")
     lines.append(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
     return classified, stats, lines
+
+
+def _hierarchy_of(hierarchy_key: str) -> list[str]:
+    """The hierarchy path a group_entries_by_hierarchy key stands for."""
+    return [] if hierarchy_key == NO_HIERARCHY_KEY else hierarchy_key.split(" > ")
+
+
+def _shared_prompts(groups: dict[str, list[dict]], mapping_index: dict,
+                    taxonomy: dict) -> dict[str, SharedSystemPrompt]:
+    """Each group's view of the per-CV system prompt when PER_CV_PROMPT_FLAG
+    is "1", else an empty dict (every group sends its own prompt)."""
+    if os.getenv(PER_CV_PROMPT_FLAG, "0") != "1":
+        return {}
+    return build_per_cv_prompts(
+        {key: (get_taxonomy_context(_hierarchy_of(key), mapping_index), len(entries))
+         for key, entries in groups.items()},
+        taxonomy,
+    )
+
+
+def _group_args(groups: dict[str, list[dict]], mapping_index: dict, taxonomy: dict) -> list[tuple]:
+    """_classify_group's arguments for each group, in group order."""
+    shared_prompts = _shared_prompts(groups, mapping_index, taxonomy)
+    return [(key, group_entries, mapping_index, taxonomy, shared_prompts.get(key))
+            for key, group_entries in groups.items()]
 
 
 def _resolve_stage_input(stage_label: str, given: str | None, default: Path) -> Path:
@@ -273,7 +306,7 @@ def run_stage_3b(
 
     results = map_in_order(
         _classify_group,
-        [(key, group_entries, mapping_index, taxonomy) for key, group_entries in groups.items()],
+        _group_args(groups, mapping_index, taxonomy),
         workers,
         on_result=_group_progress_printer(list(groups)),
     )

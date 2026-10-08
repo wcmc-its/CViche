@@ -894,6 +894,35 @@ _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.
 )
 
 
+# The per-CV layout of the template above (#50; off unless
+# CVICHE_STAGE3B_PER_CV_PROMPT=1). The default layout fills {context_str} with
+# ONE group's hierarchy context and {taxonomy_ref} with that group's code
+# subset, so every group sends a different system prompt and Bedrock's
+# cachePoint after it is read only within a group. The per-CV layout fills
+# {context_str} with EVERY group's context, numbered, and {taxonomy_ref} with
+# the full code list, so all of a CV's classification calls share one system
+# prompt and read it from cache across groups. Each user message then starts
+# with _PER_CV_USER_PREFIX to name its group. The per-group context stays
+# ahead of the rules: #1021 put it after them and shifted classification
+# (reverted by #1089). This changes what the model sees, so it stays off until
+# a live A/B (several runs per arm) shows classification is unchanged.
+_PER_CV_CONTEXT_INTRO = (
+    "  This CV's entries are classified in {group_count} hierarchy groups. Each user message\n"
+    "  names the GROUP its entries come from: use that group's labels below as the\n"
+    "  batch-level hierarchy, and ignore the other groups'."
+)
+_PER_CV_GROUP_HEADER = "  GROUP {group_number}:"
+_PER_CV_USER_PREFIX = "These entries come from GROUP {group_number} (see HIERARCHY CONTEXT).\n\n"
+
+
+def per_cv_context_str(group_context_strs: list[str]) -> str:
+    """The {context_str} slot of the per-CV layout: every group's
+    format_context_string(), numbered from 1 in the order given."""
+    blocks = [_PER_CV_CONTEXT_INTRO.format(group_count=len(group_context_strs))]
+    for group_number, context_str in enumerate(group_context_strs, 1):
+        blocks.append(f"{_PER_CV_GROUP_HEADER.format(group_number=group_number)}\n{context_str}")
+    return "\n\n".join(blocks)
+
 # T-validation gate's system prompt (moved from an inline f-string in
 # classify.py's validate_t_classifications -- the #601 hoist pattern applied
 # here too). .format(taxonomy_ref=...) fills the one placeholder; every other
