@@ -4029,19 +4029,32 @@ def _entry_role_shapes(stage4: dict, owner: frozenset[str]) -> list[tuple[dict, 
     return shaped
 
 
-def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> dict[int, str]:
-    """The grant tables lint_role_consistency reports as owner_pi_role_empty
-    (the PI cell names the CV owner and "Your role:" is empty), by their
-    index among the document's top-level tables, each with the message of
-    the finding that reports it. The review copy suggests "PI" there as a
-    tracked insertion (#1591): the shape's certain fix. A finding can
-    report several tables, so its comment goes only once all are fixed."""
+def _role_shape_tables(stage4: dict, table_rows: list[list[list[str]]],
+                      shape_name: str) -> dict[int, str]:
+    """The grant tables lint_role_consistency reports as ``shape_name``, by
+    their index among the document's top-level tables, each with the
+    message of the finding that reports it. A finding can report several
+    tables, so a fix replaces its comment only once all are fixed."""
     owner = _owner_surname_words(stage4)
     reported = {entry.get("element_idx_start") for entry, _ in _entry_role_shapes(stage4, owner)}
     groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
     return dict(sorted((hit.table, _table_role_message(idx, shape, len(group)))
                        for (idx, shape, _), group in groups.items()
-                       if shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY for hit in group))
+                       if shape[0] == shape_name for hit in group))
+
+
+def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> dict[int, str]:
+    """The tables reported as owner_pi_role_empty (the PI cell names the CV
+    owner and "Your role:" is empty). The review copy suggests "PI" there as
+    a tracked insertion (#1591): the shape's certain fix."""
+    return _role_shape_tables(stage4, table_rows, ROLE_SHAPE_OWNER_PI_ROLE_EMPTY)
+
+
+def pi_cell_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> dict[int, str]:
+    """The tables reported as pi_cell_empty ("Your role:" says PI and the PI
+    cell is empty). The review copy suggests the CV owner's name there as a
+    tracked insertion (#1591): the shape's suggestion."""
+    return _role_shape_tables(stage4, table_rows, ROLE_SHAPE_PI_CELL_EMPTY)
 
 
 # --- orphaned_fragments ------------------------------------------------------

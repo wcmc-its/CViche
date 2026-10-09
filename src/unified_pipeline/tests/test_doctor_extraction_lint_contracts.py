@@ -85,6 +85,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_record_boundary,
     lint_role_consistency,
     owner_pi_role_empty_tables,
+    pi_cell_empty_tables,
     lint_span_count,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -4644,6 +4645,34 @@ def test_owner_pi_role_empty_tables_skips_a_table_whose_entry_has_its_own_findin
 def test_owner_pi_role_empty_tables_needs_an_owner():
     entry = _grant(260, "A grant", title="Example Project", pi_name="Testowner")
     assert owner_pi_role_empty_tables({"entries": [entry]}, [_grant_table("", "Testowner")]) == {}
+
+
+
+def test_pi_cell_empty_tables_names_the_tables_the_shape_reports():
+    """#1591's suggestion acts on exactly the tables the lint reports as
+    pi_cell_empty: a PI role beside an empty PI cell. An empty PI cell with
+    another role, or none, is not one."""
+    entries = [_grant(idx, "A grant", title=title)
+               for idx, title in ((20, "First Project"), (21, "Second Project"))]
+    tables = [[["Name:", "Ada Testowner"]],  # not a grant table
+              _grant_table("PI", "", title="First Project"),
+              _grant_table("Co-I", "", title="Second Project"),
+              _grant_table("", "", title="Second Project"),
+              _grant_table("PI", "Other Person", title="Second Project")]
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": entries}
+    reported = pi_cell_empty_tables(stage4, tables)
+    assert list(reported) == [1]
+    shapes = [f["message"] for f in lint_role_consistency(stage4, tables)]
+    assert list(reported.values()) == [m for m in shapes if "(pi_cell_empty," in m]
+
+
+def test_pi_cell_empty_tables_keeps_a_table_whose_entry_has_its_own_finding():
+    """The lint reports pi_cell_empty beside an entry finding, so the
+    suggestion goes there too."""
+    entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
+                   pi_role="co-I")
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": [entry]}
+    assert list(pi_cell_empty_tables(stage4, [_grant_table("PI", "")])) == [0]
 
 
 if __name__ == "__main__":

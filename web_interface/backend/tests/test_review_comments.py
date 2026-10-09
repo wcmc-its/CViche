@@ -677,3 +677,89 @@ def test_the_fix_leaves_every_other_cell_as_delivered(tmp_path):
                for r, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
     assert changed == [(0, 3)]
     assert after[0][3] == [YOUR_ROLE_LABEL, "PI"]
+
+
+# --- #1591: the pi_cell_empty suggestion as a tracked change -------------------
+
+
+def _pi_cells(path: Path) -> list:
+    """Each grant table's "Name of Principal Investigator:" value cell element."""
+    return [row.cells[1]._tc for table in Document(str(path)).tables for row in table.rows
+            if row.cells[0].text == PI_NAME_LABEL]
+
+
+def _pi_cell_empty_findings(clean: Path, stage4: dict) -> list[dict]:
+    return [f for f in _role_findings(clean, stage4) if "(pi_cell_empty," in f["message"]]
+
+
+def test_an_empty_pi_cell_beside_a_pi_role_gets_the_owner_as_a_tracked_insertion(tmp_path):
+    clean = _with_grant_tables(tmp_path, ("", "PI"))
+    stage4 = _stage4("")
+    (finding,) = _pi_cell_empty_findings(clean, stage4)
+    out, n = rc.write_review_docx(clean, _report(finding), stage4)
+    assert n == 1
+    (cell,) = _pi_cells(out)
+    assert _reviewed(cell, accept=True) == "Ada Testowner"  # as stage 6 fills it
+    assert _reviewed(cell, accept=False) == ""  # the delivered text
+    (ins,) = cell.iter(qn("w:ins"))
+    assert ins.get(qn("w:author")) == rc.COMMENT_AUTHOR and ins.get(qn("w:id")) == "91"
+    # The suggestion replaces the comment; the clean document is untouched.
+    assert _comments(out) == [] and _reviewed(_pi_cells(clean)[0], accept=True) == ""
+
+
+def test_without_an_owner_name_an_empty_pi_cell_stays_a_comment(tmp_path):
+    """pi_cell_empty fires with no owner; the suggestion needs one."""
+    clean = _with_grant_tables(tmp_path, ("", "PI"))
+    stage4 = {**_stage4(""), "cv_owner": {}}
+    (finding,) = _pi_cell_empty_findings(clean, stage4)
+    out, n = rc.write_review_docx(clean, _report(finding), stage4)
+    assert n == 1
+    assert _comments(out) == [(_flag("role_consistency"), GRANT_TITLE)]
+    assert [_reviewed(c, accept=True) for c in _pi_cells(out)] == [""]
+
+
+def test_the_certain_fix_and_the_suggestion_go_in_one_copy(tmp_path):
+    """Both shapes in one document: each fix in its own cell, under its own
+    revision id, and neither finding left as a comment."""
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""), ("", "PI"))
+    stage4 = _stage4("Testowner", "")
+    findings = [f for f in _role_findings(clean, stage4)
+                if "(pi_cell_empty," in f["message"] or "(owner_pi_role_empty," in f["message"]]
+    assert len(findings) == 2
+    out, n = rc.write_review_docx(clean, _report(*findings), stage4)
+    assert n == 2 and _comments(out) == []
+    assert [_reviewed(c, accept=True) for c in _pi_cells(out)] == ["Ada Testowner", "Ada Testowner"]
+    assert [_reviewed(c, accept=True) for c in _role_cells(out)] == ["PI", "PI"]
+    ids = sorted(ins.get(qn("w:id")) for table in Document(str(out)).tables
+                 for ins in table._tbl.iter(qn("w:ins")))
+    assert ids == ["91", "92"]
+
+
+def test_the_suggestion_leaves_every_other_cell_as_delivered(tmp_path):
+    clean = _with_grant_tables(tmp_path, ("", "PI"), ("Other Person", ""))
+    stage4 = _stage4("", "Other Person")
+    out, _ = rc.write_review_docx(clean, _report(*_pi_cell_empty_findings(clean, stage4)), stage4)
+    before, after = read_docx_table_rows(str(clean)), read_docx_table_rows(str(out))
+    assert len(after) == len(before) + 1  # the review-notes box (#1589)
+    changed = [(t, r) for t, (a, b) in enumerate(zip(before, after[:len(before)], strict=True))
+               for r, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
+    assert changed == [(0, 2)]
+    assert after[0][2] == [PI_NAME_LABEL, "Ada Testowner"]
+
+
+def test_each_fix_reads_the_tables_as_delivered(tmp_path):
+    """Two grants share a title, so the lint matches each table to an entry
+    by its "Your role:" cell. Were the suggestion to read the tables after
+    the certain fix filled a role, it would match them differently, find a
+    finding the doctor did not report, and leave the doctor's as a comment."""
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""), ("", "PI"))
+    stage4 = {"cv_owner": OWNER, "entries": [
+        {"taxonomy_code": "M2B", "element_idx_start": 5, "text": "A grant",
+         "extracted_fields": {"title": GRANT_TITLE, "pi_role": "PI"}},
+        {"taxonomy_code": "M2B", "element_idx_start": 6, "text": "A grant",
+         "extracted_fields": {"title": GRANT_TITLE}}]}
+    findings = [f for f in _role_findings(clean, stage4)
+                if "(pi_cell_empty," in f["message"] or "(owner_pi_role_empty," in f["message"]]
+    assert len(findings) == 2
+    out, n = rc.write_review_docx(clean, _report(*findings), stage4)
+    assert n == 2 and _comments(out) == []

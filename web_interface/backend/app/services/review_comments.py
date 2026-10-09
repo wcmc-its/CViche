@@ -26,8 +26,10 @@ have lost, so it has no place on the page: each quoted line is a review note.
 A finding whose fix is certain is not a comment but the fix itself, as a
 Word tracked change: accepting it gives the corrected text, rejecting it the
 delivered text (#1591). Which findings qualify is the "Repair tiers" table in
-doctor/PRECISION.md; today one does, owner_pi_role_empty ("PI" in an empty
-"Your role:" cell beside a PI cell naming the CV owner).
+doctor/PRECISION.md. Two do today: the certain fix for owner_pi_role_empty
+("PI" in an empty "Your role:" cell beside a PI cell naming the CV owner), and
+the suggestion for pi_cell_empty (the CV owner's name in an empty "Name of
+Principal Investigator:" cell beside a PI role).
 """
 import copy
 import re
@@ -58,7 +60,9 @@ from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEDUP_TEXT_CHARS,
     ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
+    ROLE_SHAPE_PI_CELL_EMPTY,
     owner_pi_role_empty_tables,
+    pi_cell_empty_tables,
 )
 from unified_pipeline.doctor.precision import (  # noqa: E402
     LintPrecision,
@@ -76,11 +80,13 @@ from unified_pipeline.stage6.formatting import (  # noqa: E402
     cviche_box_text,
     space_around_cviche_box,
 )
+from unified_pipeline.stage6.resolution import _get_cv_owner_name  # noqa: E402
 from unified_pipeline.stage6.sections.bibliography import (  # noqa: E402
     TRACKED_INSERTION_FONT_NAME,
     TRACKED_INSERTION_FONT_SIZE_HALF_POINTS,
 )
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    PI_NAME_LABEL,
     YOUR_ROLE_LABEL,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -172,6 +178,10 @@ REVIEW_FLAGS = {
 OWNER_PI_ROLE_FIX = "PI"
 #: The role_consistency message token that names the shape the fix repairs.
 _OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
+#: The role_consistency message token that names the shape the pi_cell_empty
+#: suggestion repairs: the CV owner's name, as stage 6 writes it when it
+#: fills that cell itself (`_get_cv_owner_name`), in the empty PI cell.
+_PI_CELL_EMPTY_TOKEN = f"({ROLE_SHAPE_PI_CELL_EMPTY},"
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",
                "source_line_coverage": "Text from your CV that may be missing"}
@@ -526,29 +536,66 @@ def _tracked_insertion(text: str, revision_id: int) -> BaseOxmlElement:
     return ins
 
 
-def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]]:
-    """Insert OWNER_PI_ROLE_FIX, tracked, in the empty "Your role:" cell of
-    every grant table role_consistency reports as owner_pi_role_empty; return
-    how many, and the messages of the findings now fixed on every table they
-    report. A table with no "Your role:" row is skipped, and its finding
-    stays a comment. Reads the tables before the review notes add theirs."""
-    if not isinstance(stage4, dict):
-        return 0, set()
+def _suggest_in_cells(doc: Document, reported: dict[int, str], label: str,
+                      text: str) -> tuple[int, set[str]]:
+    """Insert ``text``, tracked, in the value cell of the ``label`` row of
+    each table in ``reported`` (document table index: finding message);
+    return how many, and the messages of the findings now fixed on every
+    table they report. A table with no ``label`` row is skipped, and its
+    finding stays a comment. Reads the tables before the review notes add
+    theirs."""
     tables = doc.tables
     revision_id = _next_revision_id(doc)
     inserted = 0
     unfixed: set[str] = set()
-    reported = owner_pi_role_empty_tables(stage4, docx_table_rows(doc))
     for at, message in reported.items():
         cell = next((row.cells[1] for row in tables[at].rows
-                     if len(row.cells) > 1 and row.cells[0].text.strip() == YOUR_ROLE_LABEL), None)
+                     if len(row.cells) > 1 and row.cells[0].text.strip() == label), None)
         if cell is None:
             unfixed.add(message)
             continue
-        cell.paragraphs[0]._p.append(_tracked_insertion(OWNER_PI_ROLE_FIX, revision_id))
+        cell.paragraphs[0]._p.append(_tracked_insertion(text, revision_id))
         revision_id += 1
         inserted += 1
     return inserted, set(reported.values()) - unfixed
+
+
+def _suggest_owner_pi_role(doc: Document, stage4: dict,
+                           rows: list[list[list[str]]]) -> tuple[int, set[str]]:
+    """The certain fix: OWNER_PI_ROLE_FIX in the empty "Your role:" cell of
+    every grant table role_consistency reports as owner_pi_role_empty."""
+    reported = owner_pi_role_empty_tables(stage4, rows)
+    return _suggest_in_cells(doc, reported, YOUR_ROLE_LABEL, OWNER_PI_ROLE_FIX)
+
+
+def _suggest_pi_name(doc: Document, stage4: dict,
+                     rows: list[list[list[str]]]) -> tuple[int, set[str]]:
+    """The suggestion: the CV owner's name in the empty PI cell of every
+    grant table role_consistency reports as pi_cell_empty. None without an
+    owner name, so the finding stays a comment."""
+    owner = stage4.get("cv_owner")
+    name = _get_cv_owner_name(owner if isinstance(owner, dict) else None)
+    if not name:
+        return 0, set()
+    reported = pi_cell_empty_tables(stage4, rows)
+    return _suggest_in_cells(doc, reported, PI_NAME_LABEL, name)
+
+
+def _tracked_fixes(doc: Document, findings: list[dict], stage4: object) -> tuple[int, set[str]]:
+    """Each fix tier's tracked changes, for the shapes the doctor reported;
+    how many were written, and the messages of the findings they fixed.
+    Every fix reads the tables as delivered, so one fix cannot change which
+    tables another finds."""
+    fixed, messages = 0, set()
+    if not isinstance(stage4, dict):
+        return fixed, messages
+    rows = docx_table_rows(doc)
+    for token, suggest in ((_OWNER_PI_ROLE_TOKEN, _suggest_owner_pi_role),
+                           (_PI_CELL_EMPTY_TOKEN, _suggest_pi_name)):
+        if any(token in str(f.get("message")) for f in findings):
+            count, done = suggest(doc, stage4, rows)
+            fixed, messages = fixed + count, messages | done
+    return fixed, messages
 
 
 def _add_review_notes(doc: Document, notes: list[Note]) -> None:
@@ -584,8 +631,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     flags (comments, review notes and tracked fixes) it carries, which may be
     none. None when ``doctor_payload`` is not a doctor report or the document
     is empty. ``stage4`` is the run's stage-4 artifact, which the
-    owner_pi_role_empty fix needs to know the owner; without it that finding
-    is a comment. ``rows`` is the precision ledger (`load_gate_ledger` when
+    owner_pi_role_empty and pi_cell_empty fixes need to know the owner;
+    without it those findings are comments. ``rows`` is the precision ledger (`load_gate_ledger` when
     None)."""
     if not isinstance(doctor_payload, dict):
         return None
@@ -598,9 +645,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     if not paragraphs:
         return None
     surfaces = (paragraphs, _rows(doc))
-    fixed, fixed_messages = (_suggest_owner_pi_role(doc, stage4)
-                             if any(_OWNER_PI_ROLE_TOKEN in str(f.get("message")) for f in findings)
-                             else (0, set()))
+    fixed, fixed_messages = _tracked_fixes(doc, findings, stage4)
     # The fix replaces the comment only where it was written on every table.
     findings = [f for f in findings if f.get("message") not in fixed_messages]
     flags: list[Flag] = []

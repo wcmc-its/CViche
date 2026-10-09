@@ -426,7 +426,7 @@ Overfit, held out: `span_count` and `year_not_in_source`, both since fixed by #1
 What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's findings, chosen from the precision above. From most to least certain:
 
 - **Certain fix**: the doctor can derive the corrected text from the run's own artifacts, and the shape is right at least 99% of the time on at least 100 judged findings. The fix is written as a Word tracked change: accepting it gives the corrected text, rejecting it gives the delivered text, and either choice is a verdict for #1587.
-- **Suggestion**: a fix the doctor can derive, right at least 80% of the time on at least 20 judged findings (the #822 / #813 bar). It is meant to be a tracked change too. None is built yet, so these are comments today.
+- **Suggestion**: a fix the doctor can derive, right at least 80% of the time on at least 20 judged findings (the #822 / #813 bar). It is written as a tracked change too. One is built, `pi_cell_empty`; the others are comments today.
 - **Comment**: a Word comment on the text the finding is about (`review_comments.py`).
 - **Review note**: an item in the box closing the copy, when `precision.shown_in_place` (#1589) keeps the finding off the text, i.e. its gate row is below 50% (`IN_PLACE_MIN_PRECISION`).
 - **Section re-run**: #813, for a lint `precision.remediation_allowed` admits. None does.
@@ -446,12 +446,13 @@ What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's fi
 **Built today:**
 
 - The certain fix for `owner_pi_role_empty`. `review_comments._suggest_owner_pi_role` inserts "PI" in the empty "Your role:" cell of every grant table the lint reports (`doctor/lints/extraction.owner_pi_role_empty_tables`), and a finding fixed on every table it reports gets no comment. A reported table with no "Your role:" row is left as delivered, and its finding stays a comment.
+- The suggestion for `role_consistency: pi_cell_empty`. `review_comments._suggest_pi_name` inserts the CV owner's name, as stage 6 writes it when it fills that cell itself (`stage6.resolution._get_cv_owner_name`), in the empty "Name of Principal Investigator:" cell of every grant table the lint reports (`doctor/lints/extraction.pi_cell_empty_tables`). As with the certain fix, a finding fixed on every table it reports gets no comment. With no owner name in stage 4, the finding stays a comment. It was built first because it has the highest combined precision of the suggestion rows with a deterministic fix, at 156 / 158. The two rows above it at 100% have none. `identical_rendered_rows` is almost all `distinct_records` (14 of its 15 findings on the 37 YUYVIG runs): the identical rows stand for records that differ, so deleting a copy deletes a record, and where the field that tells them apart belongs in the row is a judgement. `pubmed_title_truncated` would rewrite text inside stage 6's own tracked replacement of the citation, and it fires on no YUYVIG run, since #1358 stopped stage 5 cutting titles. On a "Contact PI" or "MPI" role (#1446 leaves that cell empty on purpose), accepting it names the owner alone. The doctor does not know the other PIs, so the reviewer adds them or rejects the change.
 - Separately, `protected_data_in_output` is auto-applied upstream: stage 6's #1389 repair (`CVICHE_RUN_REPAIR=1`) withholds the value and records it in `<uid>_repairs.json`.
 
 **Not built:**
 
 - The certain fix for `etal_added`.
-- Every suggestion row.
+- Every suggestion row but `pi_cell_empty`.
 - Applying certain fixes to the delivered `<uid>_wcm.docx`; they reach the review copy only.
 
 Any lint not listed here has no verdicts and is a comment.
