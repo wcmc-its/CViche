@@ -83,6 +83,7 @@ from unified_pipeline.stage6.sections.patents import (  # noqa: E402
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     GEO_SCOPE_FAILURE_STAT,
+    NAMED_REACH_SYSTEM_PROMPT,
     RECLASSIFY_FAILURE_STAT,
     WCMTemplateGenerator,
 )
@@ -1193,6 +1194,188 @@ def test_geo_scope_failure_reaches_the_render_warnings_sidecar(
     assert len(found) == 1
     assert found[0]['severity'] == 'WARN'
     assert found[0]['evidence'] == [f'{GEO_SCOPE_FAILURE_STAT}=1']
+
+
+# ---- named reach before distance (#1579 item 4) ----
+
+_STATE_OWNER_LOCATION = {
+    'inference_success': True,
+    'primary_location': {'institution': 'Example University', 'city': 'Springfield',
+                         'state': 'Westland', 'country': 'USA'},
+    'locations': [],
+    'metro_area': 'Springfield',
+}
+
+
+class _ScopeLLM:
+    """Answers the named-reach step with `reach` and the distance step with
+    `distance`, recording every prompt it is asked."""
+
+    def __init__(self, reach, distance='National'):
+        self.reach, self.distance = reach, distance
+        self.asked: list[tuple[str, str]] = []
+
+    def __call__(self, *args, **kwargs):
+        system, user = (m['content'] for m in kwargs['messages'])
+        step = 'reach' if system == NAMED_REACH_SYSTEM_PROMPT else 'distance'
+        self.asked.append((step, user))
+        if step == 'reach':
+            return {'content': json.dumps({'reach': self.reach})}
+        return {'content': json.dumps({'scope': self.distance})}
+
+    def steps(self):
+        return [step for step, _ in self.asked]
+
+
+def _reach_generator(monkeypatch, llm) -> WCMTemplateGenerator:
+    monkeypatch.setattr(s6, 'call_llm', llm)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.cv_owner_location = _STATE_OWNER_LOCATION
+    return gen
+
+
+@pytest.mark.parametrize('reach', ['International', 'National', 'Regional'])
+def test_a_named_reach_wins_and_distance_is_not_asked(monkeypatch, reach):
+    # ATRKVV 90: a talk at a society's International Conference held in the
+    # owner's own metro went Regional by distance.
+    llm = _ScopeLLM(reach=reach, distance='Regional' if reach != 'Regional' else 'International')
+    gen = _reach_generator(monkeypatch, llm)
+    assert gen._classify_geographic_scope(_PRESENTATION) == reach
+    assert llm.steps() == ['reach']
+
+
+@pytest.mark.parametrize('reach', ['none', 'Statewide', None])
+def test_no_named_reach_keeps_the_distance_answer(monkeypatch, reach):
+    # FMIGLR 286 and its siblings: a bare "Nominating Committee, 1996-1997"
+    # names no reach, so it keeps the distance prompt's answer.
+    llm = _ScopeLLM(reach=reach, distance='Regional')
+    gen = _reach_generator(monkeypatch, llm)
+    assert gen._classify_geographic_scope(_PRESENTATION) == 'Regional'
+    assert llm.steps() == ['reach', 'distance']
+
+
+def test_the_distance_step_sees_the_prompt_stage6_always_used(monkeypatch):
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    distance_prompt = llm.asked[1][1]
+    assert distance_prompt.startswith('Classify the geographic scope of this academic activity')
+    assert '**Activity Location/Organization**: Sample Institute\n' in distance_prompt
+    assert '**CV Owner\'s Institution(s)**: Example University, Springfield, Westland\n' in distance_prompt
+    assert 'Activity Text' not in distance_prompt
+
+
+def test_the_named_reach_step_sees_the_owners_state_and_the_records_text(monkeypatch):
+    # The other-state error (FMIGLR 687, OKRTPJ 966): the state rule is the
+    # owner's own state only. SXPHOG 553: the text is shown even when an
+    # organization is present.
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    entry = {'text': 'Talk, Westland Society of Examples Annual Meeting, 2019', 'taxonomy_code': 'R',
+             'extracted_fields': {'organization': 'Sample Institute'}}
+    gen._classify_geographic_scope(entry)
+    reach_prompt = llm.asked[0][1]
+    assert "**CV Owner's Home State/Province and Country**: Westland, USA" in reach_prompt
+    assert "owner's own state or province (Westland)" in reach_prompt
+    assert '**Activity Location/Organization**: Sample Institute' in reach_prompt
+    assert '**Activity Text**: Talk, Westland Society of Examples Annual Meeting, 2019' in reach_prompt
+
+
+def test_national_and_international_are_tied_to_the_owners_country(monkeypatch):
+    # YUYVIG round 2: a foreign country's national society (BCTOGR 142,
+    # OKRTPJ 870) went International -> National.
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert "meeting of a country other than the owner's (USA)" in reach_prompt
+    assert "college of the owner's own country (USA)" in reach_prompt
+
+
+def test_another_states_regional_society_is_national_not_regional(monkeypatch):
+    # YUYVIG round 2: chapter societies outside the owner's state filed
+    # Regional (BCTOGR 184, XNWSZN 922).
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert 'chapter society of the owner\'s country whose area does not include the owner\'s state' in reach_prompt
+    assert 'a regional society whose area includes the owner\'s state or province' in reach_prompt
+
+
+def test_a_title_audience_company_or_own_institution_names_no_reach(monkeypatch):
+    # YUYVIG round 2: ECXGAT 1147 (audience), FMIGLR 681 (title word),
+    # IXJMKS 904 (a company named International).
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert "A talk's title, topic or audience is never the body" in reach_prompt
+    assert 'a company or product whose name contains "International" or "National" names no reach' in reach_prompt
+    assert "including any talk at the owner's own institution(s)" in reach_prompt
+
+
+def test_the_named_reach_is_asked_again_for_another_owner_country(monkeypatch):
+    llm = _ScopeLLM(reach='National')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    primary = _STATE_OWNER_LOCATION['primary_location'] | {'country': 'Canada'}
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'primary_location': primary}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert llm.steps() == ['reach', 'reach']
+    assert "and Country**: Westland, Canada" in llm.asked[1][1]
+
+
+def test_an_unknown_owner_state_is_said_so(monkeypatch):
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen.cv_owner_location = _OWNER_LOCATION | {'primary_location': {'institution': 'Example University'}}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert "**CV Owner's Home State/Province and Country**: Unknown, Unknown" in llm.asked[0][1]
+
+
+def test_the_named_reach_is_asked_once_per_activity_and_text(monkeypatch):
+    llm = _ScopeLLM(reach='National')
+    gen = _reach_generator(monkeypatch, llm)
+    other_text = dict(_PRESENTATION, text='Panel at Sample Institute')
+    assert [gen._classify_geographic_scope(e) for e in (_PRESENTATION, _PRESENTATION, other_text)] == [
+        'National'] * 3
+    assert llm.steps() == ['reach', 'reach']
+
+
+def test_an_owner_affiliation_listed_twice_is_named_once(monkeypatch):
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    primary = _STATE_OWNER_LOCATION['primary_location']
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'locations': [primary]}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert llm.asked[1][1].count('Example University, Springfield, Westland') == 1
+
+
+def test_no_owner_institution_files_national_without_asking(monkeypatch):
+    llm = _ScopeLLM(reach='Regional')
+    gen = _reach_generator(monkeypatch, llm)
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'primary_location': {'city': 'Springfield'}}
+    assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+    assert llm.asked == []
+
+
+def test_an_unknown_distance_answer_files_national(monkeypatch):
+    gen = _reach_generator(monkeypatch, _ScopeLLM(reach='none', distance='Continental'))
+    assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+
+
+def test_a_distance_failure_after_no_named_reach_warns_and_counts_once(monkeypatch, caplog):
+    def reach_then_outage(*args, **kwargs):
+        if kwargs['messages'][0]['content'] == NAMED_REACH_SYSTEM_PROMPT:
+            return {'content': json.dumps({'reach': 'none'})}
+        raise RuntimeError('simulated LLM outage')
+
+    gen = _reach_generator(monkeypatch, reach_then_outage)
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+    assert len(_warnings(caplog, S6_LOGGER)) == 1
+    assert gen.stats[GEO_SCOPE_FAILURE_STAT] == 1
 
 
 # ---- segment-reclassification failure (#652) ----

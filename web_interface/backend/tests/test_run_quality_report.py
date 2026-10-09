@@ -4,9 +4,13 @@ import pytest
 from app.services import quality_score_service as qss
 from app.services import run_quality_report as rqr
 from unified_pipeline import quality_score as scorer
+from unified_pipeline.doctor import precision
+from unified_pipeline.doctor.blind_spots import blind_spots
+from unified_pipeline.doctor.precision import LintPrecision
 from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_PREVALENCE, lint_surprise
 
 OWNER_GATE = "CV owner name / contact populated (HARD-FAIL gate)"
+DOCTOR_ROW = "Doctor findings: estimated cleanup, precision-weighted"
 
 
 def _score(total=25, raw=80.0, caps=(25,), flags=None):
@@ -32,7 +36,47 @@ def test_every_scorer_gate_has_a_cap_source():
     assert gate_names
     assert all(name in rqr.CAP_SOURCE_BY_GATE_NAME for name in gate_names)
     assert OWNER_GATE in rqr.CAP_SOURCE_BY_GATE_NAME
-    assert all(s.lint in KNOWN_LINTS for s in rqr.CAP_SOURCE_BY_GATE_NAME.values())
+    assert all(s.lint is None or s.lint in KNOWN_LINTS for s in rqr.CAP_SOURCE_BY_GATE_NAME.values())
+
+
+def _complete_run(tmp_path, *, doctor=True, failed_group=False):
+    """A run dir holding every artifact the real scorer reads."""
+    import json
+
+    from docx import Document
+
+    fields = {
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"taxonomy_code": "P", "extraction_success": True,
+                     "extracted_fields": {"email": "j@x.org"}}]}
+    if failed_group:
+        fields["stats"] = {"failed_batches": 1}
+        fields["entries"][0]["extraction_error"] = "llm_response_invalid"
+    (tmp_path / "T1_fields.json").write_text(json.dumps(fields))
+    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
+        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
+    (tmp_path / "T1_entries.json").write_text(json.dumps({"coverage": {"coverage_percentage": 100}}))
+    if doctor:
+        (tmp_path / "T1_doctor.json").write_text(json.dumps({"findings": []}))
+    doc = Document()
+    doc.add_paragraph("clean")
+    doc.save(tmp_path / "T1_wcm.docx")
+    return tmp_path
+
+
+def test_an_unchecked_runs_cap_names_the_missing_doctor_report_and_no_lint(tmp_path):
+    """#1595/#1593: no doctor report caps the run at 84 through the doctor
+    row. The page gives the reason and points at no doctor lint, since there
+    is no report to point into."""
+    result = scorer.score_run(_complete_run(tmp_path, doctor=False), "T1")
+    assert result["totalScore"] == scorer.NOT_CHECKED_CAP
+
+    report = rqr.build_run_quality_report("T1", result, None)
+
+    assert (report.cap, report.cap_reason, report.cap_lint) == (
+        84, "the doctor did not check this run", None)
+    assert report.band == qss.BAND_YELLOW
 
 
 def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
@@ -45,143 +89,33 @@ def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
         "No rendered output produced at all (HARD-FAIL gate)"]
 
 
-@pytest.mark.parametrize("gate, lint", [
-    (scorer.score_under_extracted_records, "under_extraction"),
-    (scorer.score_fused_entries, "segmentation"),
-    (scorer.score_lost_source_table, "table_lost"),
-    (scorer.score_etal_added, "etal_added"),
-    (scorer.score_group_header_context, "group_header_context"),
-])
-def test_each_content_loss_cap_points_at_the_lint_that_reports_it(gate, lint):
-    """#822: a content-loss cap on the run page names its own gate and the doctor
-    lint to read next, recovered from the flag text the scorer really writes."""
-    name = next(n for n, fn in scorer.CAP_ONLY_GATES if fn is gate)
-    flag = f"HARD-FAIL cap={scorer.CONTENT_LOSS_CAP}: {name} (detail)"
-    snapshot = qss.parse_score(_score(total=scorer.CONTENT_LOSS_CAP, raw=92.0,
-                                      caps=(scorer.CONTENT_LOSS_CAP,), flags=[flag]))
-    source = rqr.cap_source(snapshot)
-    assert source is not None and source.lint == lint
-
-
 def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp_path):
-    """#1174: a run that would score exactly 85 GREEN but for one failed
-    stage-4 extraction group is capped at 84, and the report names that gate
-    and its doctor lint (run through the real scorer, not a hand-copied flag)."""
-    import json
-
-    from docx import Document
-
-    (tmp_path / "T1_fields.json").write_text(json.dumps({
-        "cv_owner": {"full_name": "Jane Q. Public"},
-        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
-        "stats": {"failed_batches": 1},
-        "entries": [{"taxonomy_code": "P", "extraction_success": True,
-                     "extraction_error": "llm_response_invalid",
-                     "extracted_fields": {"email": "j@x.org"}}]}))
-    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
-        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
-    (tmp_path / "T1_entries.json").write_text(json.dumps({"coverage": {"coverage_percentage": 100}}))
-    doc = Document()
-    doc.add_paragraph("clean")
-    row = doc.add_table(rows=1, cols=2).rows[0]
-    row.cells[0].text, row.cells[1].text = "a", "b"
-    doc.save(tmp_path / "T1_wcm.docx")
-
-    result = scorer.score_run(tmp_path, "T1")
+    """#1174: a clean, checked run with one failed stage-4 extraction group is
+    capped at 84, and the report names that gate and its doctor lint (run
+    through the real scorer, not a hand-copied flag)."""
+    result = scorer.score_run(_complete_run(tmp_path, failed_group=True), "T1")
     source = rqr.cap_source(qss.parse_score(result))
 
-    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 84)
+    assert (result["raw_score_before_caps"], result["totalScore"]) == (100.0, 84)
     assert source == rqr.CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures")
     assert source in rqr.CAP_SOURCE_BY_GATE_NAME.values()
 
 
-@pytest.mark.parametrize("fired, lint", [
-    ((scorer.score_fused_entries, scorer.score_stage4_group_failures), "segmentation"),
-    ((scorer.score_under_extracted_records, scorer.score_fused_entries), "segmentation"),
-    ((scorer.score_lost_source_table, scorer.score_under_extracted_records), "table_lost"),
-    ((scorer.score_lost_source_table, scorer.score_fused_entries), "table_lost"),
-    ((scorer.score_under_extracted_records, scorer.score_stage4_group_failures),
-     "under_extraction"),
-])
-def test_when_gates_tie_at_the_same_cap_the_pointer_names_the_most_specific(fired, lint):
-    """#822: the content-loss caps and the stage-4 cap all sit at 84, and the
-    pointer is the first matching flag. Flags are written in CAP_ONLY_GATES
-    order, as score_run writes them, so this pins that order."""
-    assert scorer.CONTENT_LOSS_CAP == scorer.STAGE4_GROUP_FAILURE_CAP
-    cap = scorer.CONTENT_LOSS_CAP
-    flags = [f"HARD-FAIL cap={cap}: {name} (detail)"
-             for name, fn in scorer.CAP_ONLY_GATES if fn in fired]
-    assert len(flags) == 2
-    snapshot = qss.parse_score(_score(total=cap, raw=92.0, caps=(cap, cap), flags=flags))
-    source = rqr.cap_source(snapshot)
-    assert source is not None and source.lint == lint
-
-
-def test_a_run_with_fused_entries_and_a_failed_stage4_group_points_at_the_fused_entries(tmp_path):
-    """The same tie through the real scorer (#822, #1174): two fused entries and
-    one failed stage-4 group both cap at 84; the report names the fused-entries
-    gate, not the stage-4 one."""
-    import json
-
-    from docx import Document
-
-    fused = {"element_type": "table_row", "text": "\n".join(
-        f"Example Grant {i} Title Words Here | Example Agency | 2011-2014 | Role: PI"
-        for i in range(3))}
-    (tmp_path / "T1_fields.json").write_text(json.dumps({
-        "cv_owner": {"full_name": "Jane Q. Public"},
-        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
-        "stats": {"failed_batches": 1},
-        "entries": [{"taxonomy_code": "P", "extraction_success": True,
-                     "extraction_error": "llm_response_invalid",
-                     "extracted_fields": {"email": "j@x.org"}}]}))
-    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
-        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
-    (tmp_path / "T1_entries.json").write_text(json.dumps({
-        "coverage": {"coverage_percentage": 100}, "entries": [fused, fused]}))
-    doc = Document()
-    doc.add_paragraph("clean")
-    row = doc.add_table(rows=1, cols=2).rows[0]
-    row.cells[0].text, row.cells[1].text = "a", "b"
-    doc.save(tmp_path / "T1_wcm.docx")
-
-    result = scorer.score_run(tmp_path, "T1")
-    source = rqr.cap_source(qss.parse_score(result))
-
-    assert [f.split(": ")[1].split(" (")[0].split(":")[0] for f in result["flags"]] == [
-        "Source records fused", "Stage-4 extraction group failed"]
-    assert result["hard_fail_caps_applied"] == [84, 84] and result["totalScore"] == 84
-    assert source == rqr.CapSource(
-        "several records were fused into one entry", "segmentation")
-
-
 def test_a_fallback_served_call_caps_nothing_through_the_real_scorer(tmp_path):
-    """#1174 (Paul, 2026-10-05): the same 85 GREEN run with one fallback-served
-    stage-4 group stays 85 GREEN, so the report names no cap."""
+    """#1174 (Paul, 2026-10-05): a clean, checked run with one fallback-served
+    stage-4 group stays 100 GREEN, so the report names no cap."""
     import json
 
-    from docx import Document
+    run = _complete_run(tmp_path)
+    fields = json.loads((run / "T1_fields.json").read_text())
+    fields["entries"][0]["llm_fallback_model"] = "example.fallback-model-1"
+    (run / "T1_fields.json").write_text(json.dumps(fields))
 
-    (tmp_path / "T1_fields.json").write_text(json.dumps({
-        "cv_owner": {"full_name": "Jane Q. Public"},
-        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
-        "entries": [{"taxonomy_code": "S1", "extraction_success": True,
-                     "llm_fallback_model": "example.fallback-model-1",
-                     "extracted_fields": {"email": "j@x.org"}}]}))
-    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
-        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
-    (tmp_path / "T1_entries.json").write_text(json.dumps({"coverage": {"coverage_percentage": 100}}))
-    doc = Document()
-    doc.add_paragraph("clean")
-    row = doc.add_table(rows=1, cols=2).rows[0]
-    row.cells[0].text, row.cells[1].text = "a", "b"
-    doc.save(tmp_path / "T1_wcm.docx")
-
-    result = scorer.score_run(tmp_path, "T1")
+    result = scorer.score_run(run, "T1")
     source = rqr.cap_source(qss.parse_score(result))
 
-    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 85)
+    assert (result["raw_score_before_caps"], result["totalScore"]) == (100.0, 100)
     assert result["hard_fail_caps_applied"] == [] and source is None
 
 
@@ -203,29 +137,33 @@ def test_dimension_rows_carry_their_wording_and_whether_they_can_cap():
     raw = _score(total=90, raw=90.0, caps=[], flags=[])
     raw["dimensionScores"] = [
         {"name": OWNER_GATE, "score": 15.0, "max": 15},
-        {"name": "Duplicate-entry ratio (de-dup / fragmentation health)", "score": 8.0, "max": 10},
+        {"name": "Doctor findings: estimated cleanup, precision-weighted", "score": 30.0, "max": 40},
         {"name": "Duplicate entries", "score": 8.0, "max": 10},  # an older scorer's name
     ]
 
     dims = rqr.build_run_quality_report("R1", raw, None).dimensions
 
     assert [(d.label, d.can_cap) for d in dims] == [
-        ("Faculty name and contact", True), ("No duplicate entries", False), (None, False)]
-    assert dims[1].if_lost.startswith("Check that repeated entries")
+        ("Faculty name and contact", True), ("Problems the checker found", True), (None, False)]
+    assert dims[1].if_lost.startswith("Work through the Run Doctor findings")
 
 
 def test_fired_zero_weight_gates_are_listed_and_weighted_caps_are_not():
     flags = [
+        f"HARD-FAIL cap=84: {DOCTOR_ROW} (fraction=0.00)",
         f"HARD-FAIL cap=25: {OWNER_GATE} (fraction=1.00)",
+        "HARD-FAIL cap=25: Protected personal data absent from rendered docx (HARD-FAIL gate) (x)",
+        # A score cached before #1595 retired the content-loss caps: no row.
         "HARD-FAIL cap=84: Source table lost before extraction (CAP-ONLY gate) (worst=6)",
         # A score cached before #1174 dropped the fallback-served gate: no row.
         "HARD-FAIL cap=84: Call served by the content-filter fallback model (caps below GREEN) (x)",
         "HARD-FAIL cap=99: unknown gate",
     ]
-    report = rqr.build_run_quality_report("R1", _score(caps=[25, 84, 84], flags=flags), None)
+    report = rqr.build_run_quality_report("R1", _score(caps=[84, 25, 25, 84, 84], flags=flags), None)
 
     assert [(g.label, g.cap, g.lint) for g in report.gates_fired] == [
-        ("Source tables read in full", 84, "table_lost"),
+        ("Faculty name and contact", 25, "owner_contact_missing"),
+        ("No protected personal data", 25, "protected_data_in_output"),
     ]
 
 
@@ -482,3 +420,164 @@ def test_report_degrades_each_part_to_null_independently():
     nothing = rqr.build_run_quality_report("R1", None, None)
     assert nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"}) == {
         k: None for k in nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"})}
+
+
+# --- the Fix list (#1589) -----------------------------------------------------
+
+
+def _ledger(**rows):
+    """{lint: (tp, judged)} as the gate's ledger rows, one per lint."""
+    return {(lint, None): LintPrecision(lint, tp, judged, "M9") for lint, (tp, judged) in rows.items()}
+
+
+def _fix_list(findings, rows=None):
+    return rqr.summarize_doctor({"findings": findings}, rows=rows or {})
+
+
+def _fix_list_titles(report):
+    return [p.title for g in report.fix_list for i in g.items for p in i.problems]
+
+
+def test_fix_list_merges_an_entrys_findings_and_quotes_the_real_under_extraction_text():
+    """SQMWHM entry 29's shape: under_extraction names the entry but no code;
+    another finding on the same entry names the section. Runs the real lint, so
+    a reworded "entry N:" prefix fails here instead of splitting the item."""
+    from unified_pipeline.doctor.lints.extraction import lint_under_extraction
+
+    lines = [f"Visiting Lecturer in Medicine, Northfield University School of Medicine, {1990 + i}-{1991 + i}"
+             for i in range(10)]
+    entry = {"element_type": "paragraph", "element_idx_start": 29, "taxonomy_code": "H",
+             "text": "\n".join(lines), "extracted_fields": {"title": "Visiting Lecturer"},
+             "extraction_coverage": {"extraction_coverage_percent": 13.1}}
+    [under] = lint_under_extraction({"entries": [entry]})
+    junk = {**_finding("junk_or_header_row", message="entry 29 (H): a lead-in label prints as a record"),
+            "evidence": ["Honors:"]}
+
+    report = _fix_list([junk, under])
+
+    [group] = report.fix_list
+    assert group.section == "Honors & Awards"
+    [item] = group.items
+    assert [p.title for p in item.problems] == [
+        rqr.LINT_COPY["junk_or_header_row"].title, rqr.LINT_COPY["under_extraction"].title]
+    assert item.quotes == ["Honors:", under["evidence"][0] + rqr.TRUNCATION_MARK]
+
+
+def test_fix_list_item_lists_each_lint_once_worst_first():
+    report = _fix_list([
+        _finding("junk_or_header_row", message="entry 7 (D1): a"),
+        _finding("under_extraction", message="entry 7: b"),
+        _finding("under_extraction", "ERROR", message="entry 7: c"),
+    ])
+    [item] = report.fix_list[0].items
+    assert [(p.title, p.severity) for p in item.problems] == [
+        (rqr.LINT_COPY["under_extraction"].title, "ERROR"),
+        (rqr.LINT_COPY["junk_or_header_row"].title, "WARN")]
+
+
+def test_fix_list_is_in_document_order():
+    """No-section findings first, then template order (D1 before H before S1),
+    entries by index within a section, entry-less findings last."""
+    report = _fix_list([
+        _finding("junk_or_header_row", message="entry 40 (S1): x"),
+        _finding("junk_or_header_row", message="entry 9 (H): x"),
+        _finding("dead_sections", message="taxonomy code H: empty"),
+        _finding("junk_or_header_row", message="entry 3 (H): x"),
+        _finding("junk_or_header_row", message="entry 50 (D1): x"),
+        _finding("no_output", "ERROR", message="no document"),
+    ])
+    assert [g.section for g in report.fix_list] == [
+        None, "Academic Appointments", "Honors & Awards", "Peer-Reviewed Research Articles"]
+    honors = report.fix_list[2].items
+    assert [i.problems[0].title for i in honors] == [
+        rqr.LINT_COPY["junk_or_header_row"].title, rqr.LINT_COPY["junk_or_header_row"].title,
+        rqr.LINT_COPY["dead_sections"].title]
+
+
+def test_fix_list_holds_back_low_precision_info_and_unworded_findings():
+    ledger = _ledger(dedup_drops=(2, 8), junk_or_header_row=(105, 107))
+    report = _fix_list([
+        _finding("dedup_drops", message="entry 1 (D1): x"),  # 25%: Diagnostics only
+        _finding("brand_new_lint", message="entry 2 (D1): x"),  # no plain wording yet
+        _finding("table_shape", "INFO", message="entry 3 (D1): x"),  # INFO: not counted
+        _finding("junk_or_header_row", message="entry 4 (D1): x"),
+    ], ledger)
+    assert _fix_list_titles(report) == [rqr.LINT_COPY["junk_or_header_row"].title]
+    assert report.fix_list_held_back == 2
+    # Diagnostics still lists every lint.
+    assert {g.lint for g in report.findings} == {
+        "dedup_drops", "brand_new_lint", "table_shape", "junk_or_header_row"}
+
+
+@pytest.mark.parametrize("tp, judged, confidence", [
+    (105, 107, "high"),
+    (9, 9, "medium"),  # right every time, but too few checked
+    (5, 9, "medium"),
+    (0, 0, "unmeasured"),
+])
+def test_fix_list_confidence_comes_from_the_ledger(tp, judged, confidence):
+    report = _fix_list([_finding("junk_or_header_row")], _ledger(junk_or_header_row=(tp, judged)))
+    [problem] = report.fix_list[0].items[0].problems
+    assert (problem.confidence, problem.effort) == (confidence, rqr.EFFORT_QUICK)
+
+
+def test_fix_list_carries_no_lint_key_stage_entry_index_or_issue_number():
+    report = _fix_list([
+        {**_finding("role_consistency",
+                    message="entry 1515 (M2A): pi role empty (owner_pi_role_empty, #1403)"),
+         "evidence": ["entry 16", "R01 Cardiac Imaging"]},
+        _finding("stage6_render_warnings", message="stage 6 self-check: T: 6 entries diverted"),
+    ])
+    wire = report.model_dump_json(include={"fix_list"})
+    for leak in ("role_consistency", "owner_pi_role_empty", "1515", "#1403", "entry 16", "stage 6",
+                 "stage6_render_warnings"):
+        assert leak not in wire
+    assert "R01 Cardiac Imaging" in wire
+
+
+def test_fix_list_cuts_at_its_cap_and_counts_the_rest(monkeypatch):
+    monkeypatch.setattr(rqr, "MAX_FIX_LIST_ITEMS", 2)
+    report = _fix_list([_finding("junk_or_header_row", message=f"entry {i} (D1): x") for i in range(5)])
+    assert sum(len(g.items) for g in report.fix_list) == 2
+    assert report.fix_list_more == 3
+
+
+def test_every_run_says_what_the_doctor_does_not_check():
+    """The review copy's "What CViche does not check" sentences, from
+    doctor/COVERAGE.md, so the two views cannot drift."""
+    assert _fix_list([]).not_checked == [spot.sentence for spot in blind_spots()] != []
+
+
+def test_fix_list_gate_is_the_review_copys_per_shape_gate():
+    """Two shapes of one lint on the committed gate ledger: owner_attribution's
+    uncredited-citation shape is right under half the time and stays in
+    Diagnostics; its mentee-heading shape reaches the Fix list. Each finding is
+    shown exactly when the review copy would mark it in place."""
+    findings = [
+        _finding("owner_attribution", message="entry 4 (D1): no owner (citation_without_owner)"),
+        _finding("owner_attribution",
+                 message="entry 5 (N3): mentees under another heading (mentee_under_non_mentee_heading)"),
+    ]
+    report = rqr.summarize_doctor({"findings": findings})
+    assert [precision.shown_in_place(f["lint"], f["message"]) for f in findings] == [False, True]
+    assert sum(len(g.items) for g in report.fix_list) == 1
+    assert report.fix_list_held_back == 1
+
+
+def test_fix_list_reads_held_out_verdicts_folded_in():
+    """appendix_recovered_A is 3 / 20 in-sample but 18 / 35 with YUYVIG's
+    held-out verdicts: the gate's combined row shows it, at medium confidence.
+    appendix_no_route_T stays under half combined (15 / 34) and is held back."""
+    recovered = _finding("stage6_render_warnings",
+                         message="stage 6 self-check: A: 2 entries recovered into the Appendix")
+    no_route = _finding("stage6_render_warnings",
+                        message="stage 6 self-check: T: 3 entries, no stage 6 section is routed")
+    report = rqr.summarize_doctor({"findings": [recovered, no_route]})
+    [problem] = [p for g in report.fix_list for i in g.items for p in i.problems]
+    assert problem.title == rqr.LINT_COPY["stage6_render_warnings"].title
+    assert problem.confidence == "medium"
+    assert report.fix_list_held_back == 1
+
+
+def test_every_effort_names_a_known_worded_lint():
+    assert set(rqr.LINT_EFFORT) <= set(rqr.LINT_COPY) <= set(KNOWN_LINTS)

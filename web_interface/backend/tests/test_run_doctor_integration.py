@@ -199,8 +199,99 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     assert persisted == [str(report), str(review)]
     # The quoted text is not in the document, so it is a review note in the box closing the copy.
     notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
-    assert notes[1:] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
+    assert notes[1:4] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
     assert len(list(Document(str(clean)).comments)) == 0
+
+
+def test_the_review_copy_reads_the_runs_stage4_artifact_for_the_owner_role_fix(monkeypatch, tmp_path, db):
+    """#1591: the orchestrator hands the run's stage-4 artifact to the review
+    copy, so a grant table naming the owner as PI gets "PI" as a tracked
+    insertion in its empty role cell."""
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    payload = {**_doctor_payload(), "findings": [{
+        "lint": "role_consistency", "severity": "WARN", "status": "ran", "evidence": ["Example Project"],
+        "message": "entry 5: 'Name of Principal Investigator:' names the CV owner, and 'Your role:' "
+                   "is empty (owner_pi_role_empty, #1403)"}]}
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    clean = _stage6_docx(tmp_path, "DOC_PI")
+    doc = Document(str(clean))
+    table = doc.add_table(rows=3, cols=2)
+    for row, (label, value) in zip(table.rows, [("Project title:", "Example Project"),
+                                                ("Name of Principal Investigator:", "Ada Testowner"),
+                                                ("Your role:", "")], strict=True):
+        row.cells[0].text, row.cells[1].text = label, value
+    doc.save(str(clean))
+    stage4 = tmp_path / "outputs" / "stage_4_field_extraction" / "DOC_PI_fields.json"
+    stage4.parent.mkdir(parents=True)
+    stage4.write_text(json.dumps({"cv_owner": {"first_name": "Ada", "last_name": "Testowner"}, "entries": [
+        {"taxonomy_code": "M2B", "element_idx_start": 5, "text": "A grant",
+         "extracted_fields": {"title": "Example Project", "pi_name": "Testowner"}}]}))
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_PI")
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda files: None)
+
+    asyncio.run(o._run_doctor())
+
+    review = Document(str(clean.with_name("DOC_PI_wcm_review.docx")))
+    role_cell = review.tables[0].rows[2].cells[1]._tc
+    assert ["".join(t.text for t in ins.iter(qn("w:t"))) for ins in role_cell.iter(qn("w:ins"))] == ["PI"]
+
+
+def test_a_corrupt_stage4_artifact_leaves_the_review_copy_comments_only(monkeypatch, tmp_path, db, caplog):
+    """#1591: a stage-4 JSON that does not parse costs only the tracked fix;
+    the review copy is still written, with the finding as a comment."""
+    from docx import Document
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    payload = {**_doctor_payload(), "findings": [{
+        "lint": "role_consistency", "severity": "WARN", "status": "ran", "evidence": ["Example Project"],
+        "message": "entry 5: 'Name of Principal Investigator:' names the CV owner, and 'Your role:' "
+                   "is empty (owner_pi_role_empty, #1403)"}]}
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    clean = _stage6_docx(tmp_path, "DOC_BAD4")
+    doc = Document(str(clean))
+    doc.add_paragraph("Example Project")
+    doc.save(str(clean))
+    stage4 = tmp_path / "outputs" / "stage_4_field_extraction" / "DOC_BAD4_fields.json"
+    stage4.parent.mkdir(parents=True)
+    stage4.write_text('{"cv_owner": ')
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_BAD4")
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda files: None)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(o._run_doctor())
+
+    review = Document(str(clean.with_name("DOC_BAD4_wcm_review.docx")))
+    assert len(list(review.comments)) == 1
+    assert any("Stage-4 JSON unreadable" in r.message for r in caplog.records)
+    assert not any("Review-comment docx failed" in r.message for r in caplog.records)
+
+
+def test_a_run_with_nothing_to_flag_still_publishes_its_review_copy(monkeypatch, tmp_path, db):
+    """#1589: no WARN finding is not a clean document; the copy is attached
+    and mirrored anyway, closing with what CViche does not check."""
+    from docx import Document
+
+    from app.models import Step
+    from app.services.review_comments import NOT_CHECKED_TITLE
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    payload = {**_doctor_payload(), "findings": []}
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    clean = _stage6_docx(tmp_path, "DOC_QT")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_QT")
+    persisted = []
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", persisted.extend)
+
+    asyncio.run(o._run_doctor())
+
+    review = clean.with_name("DOC_QT_wcm_review.docx")
+    files = json.loads(db.query(Step).filter(Step.run_id == "DOC_QT").first().output_files)
+    assert str(review) in files and str(review) in persisted
+    box = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
+    assert box[1] == NOT_CHECKED_TITLE
 
 
 def test_an_unreadable_document_still_publishes_the_report(monkeypatch, tmp_path, db, caplog):

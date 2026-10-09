@@ -953,8 +953,10 @@ _PRICED_LLM_RESULT = {"content": '{"scope": "National"}', "cost": 0.125,
 
 @pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
 def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
-    """#1177: stage 6 reported no cost at all; both of its call_llm sites now
-    feed the generator's LlmUsage."""
+    """#1177: stage 6 reported no cost at all; every one of its call_llm sites
+    now feeds the generator's LlmUsage. The scope decision makes two calls when
+    the activity names no reach of its own (#1579): the named-reach step, then
+    the distance step."""
     gen = _generator()
     gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
                                                   "city": "Springfield", "state": "ZZ"}}
@@ -967,11 +969,12 @@ def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
     else:
         gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
 
-    assert gen.llm_usage.cost == pytest.approx(0.125)
-    assert gen.llm_usage.prompt_tokens == 11
-    assert gen.llm_usage.completion_tokens == 5
-    assert gen.llm_usage.cache_read_tokens == 2
-    assert gen.llm_usage.cache_write_tokens == 1
+    calls = 2 if call == "geographic_scope" else 1
+    assert gen.llm_usage.cost == pytest.approx(0.125 * calls)
+    assert gen.llm_usage.prompt_tokens == 11 * calls
+    assert gen.llm_usage.completion_tokens == 5 * calls
+    assert gen.llm_usage.cache_read_tokens == 2 * calls
+    assert gen.llm_usage.cache_write_tokens == 1 * calls
 
 
 def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):

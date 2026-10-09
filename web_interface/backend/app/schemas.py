@@ -806,10 +806,41 @@ class DoctorFindingGroup(BaseModel):
     instances: list[DoctorFindingInstance] = []
 
 
+FixConfidence = Literal["high", "medium", "unmeasured"]
+FixEffort = Literal["quick", "minutes", "longer"]
+
+
+class FixListProblem(BaseModel):
+    """One finding as the Fix list words it (#1589): plain title and action
+    only, never a lint key, stage, entry index or issue number."""
+    severity: DoctorSeverity
+    title: str
+    what_to_do: str
+    confidence: FixConfidence  # from the lint's hand-checked precision (doctor/PRECISION.md)
+    effort: FixEffort
+
+
+class FixListItem(BaseModel):
+    """Every finding about one entry (or one finding that names no entry)."""
+    problems: list[FixListProblem]  # worst first
+    quotes: list[str] = []  # the text at stake, as the doctor quotes it
+
+
+class FixListGroup(BaseModel):
+    """One document location; groups come in the document's section order."""
+    section: str | None = None  # None: the finding names no section
+    items: list[FixListItem]
+
+
 class RunDoctorReport(BaseModel):
     counts: DoctorSeverityCounts
     findings: list[DoctorFindingGroup]  # rarest lint first
     not_run: int = 0  # lints skipped or unreadable (an input artifact was absent)
+    fix_list: list[FixListGroup] = []  # the CV runner's view (#1589)
+    # ERROR/WARN findings left to Diagnostics: below the precision bar, or no plain wording yet.
+    fix_list_held_back: int = 0
+    fix_list_more: int = 0  # items past MAX_FIX_LIST_ITEMS, listed in Diagnostics only
+    not_checked: list[str] = []  # what the doctor cannot see, on every run
 
 
 class RunQualityReport(BaseModel):

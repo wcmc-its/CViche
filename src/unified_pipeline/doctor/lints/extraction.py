@@ -106,8 +106,10 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.normalization.publication import resolve_publication
+from unified_pipeline.stage6.parsing import split_appointment_title
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
+from unified_pipeline.stage6.sections.positions import POSITION_TAXONOMY_CODES
 from unified_pipeline.stage6.sections.research_support import (
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
@@ -3273,9 +3275,9 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
     grant; a grant too short to locate in the document is not judged.
     `current_year` defaults to this year, as stage 6's own rebucket does, so
     re-doctoring an old render can newly flag a grant that ended since.
-    `check_end_date=False` judges the heading only: the quality score's
-    grant-bucket cap reads that shape alone (`quality_score.
-    score_grant_application_as_award`), so a later rescore cannot move it."""
+    `check_end_date=False` judges the heading only, the shape the quality
+    score's grant-bucket cap read until #1595 retired it; no caller in the
+    pipeline passes it now."""
     year = None
     if check_end_date:
         year = current_year if current_year is not None else datetime.now().year
@@ -3817,14 +3819,14 @@ def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
     return None
 
 
-def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
-    """Each rendered grant table as {row label: value}: the tables that have
-    a PI row."""
+def _grant_tables(table_rows: list[list[list[str]]]) -> list[tuple[int, dict[str, str]]]:
+    """Each rendered grant table (a table with a PI row) as its index among
+    the document's tables and {row label: value}."""
     tables = []
-    for table in table_rows:
+    for at, table in enumerate(table_rows):
         cells = {row[0]: (row[1] if len(row) > 1 else "") for row in table if row}
         if PI_NAME_LABEL in cells:
-            tables.append(cells)
+            tables.append((at, cells))
     return tables
 
 
@@ -3899,33 +3901,61 @@ def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
     return None
 
 
-def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
-                         owner: frozenset[str], reported: set[object]) -> list[dict]:
-    """A finding per grant entry whose rendered table shows a role shape
-    (each table matched to its entry by `_table_entries`). Tables that
-    still resolve to one entry and show one shape give one finding that
-    counts them (#1590). A table whose entry already has an entry finding is
-    reported only for pi_cell_empty, which predates the others and was
-    always reported beside them."""
+class _TableRoleHit(NamedTuple):
+    """One rendered grant table the lint reports: its index among the
+    document's tables, its entry's index, its shape and what it says, and
+    its title."""
+    table: int
+    idx: object
+    shape: tuple[str, str]
+    title: str
+
+
+def _table_role_hits(stage4: dict, table_rows: list[list[list[str]]],
+                     owner: frozenset[str], reported: set[object]) -> list[_TableRoleHit]:
+    """Each rendered grant table that shows a role shape (each table matched
+    to its entry by `_table_entries`). A table whose entry already has an
+    entry finding counts only for pi_cell_empty, which predates the others
+    and was always reported beside them."""
     tables = _grant_tables(table_rows)
-    hits: dict[tuple[object, tuple[str, str], str], int] = {}
-    for cells, entry in zip(tables, _table_entries(stage4, tables)):
+    hits = []
+    for (at, cells), entry in zip(tables, _table_entries(stage4, [cells for _, cells in tables])):
         fields = entry.get("extracted_fields", {})
         shape = _table_role_shape(cells, owner, str(fields.get("pi_name") or ""))
         idx = entry.get("element_idx_start")
         if not shape or (idx in reported and shape[0] != ROLE_SHAPE_PI_CELL_EMPTY):
             continue
-        key = (idx, shape, cells.get(PROJECT_TITLE_LABEL, ""))
-        hits[key] = hits.get(key, 0) + 1
-    findings = []
-    for (idx, shape, title), tables_hit in hits.items():
-        where = f"entry {idx}" if idx is not None else "a grant table"
-        count = f" in {tables_hit} grant tables" if tables_hit > 1 else ""
-        findings.append(_finding(
-            "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-            f"{where}: {shape[1]}{count} ({shape[0]}, #1403)",
-            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
-    return findings
+        hits.append(_TableRoleHit(at, idx, shape, cells.get(PROJECT_TITLE_LABEL, "")))
+    return hits
+
+
+def _table_role_groups(hits: list[_TableRoleHit]) -> dict[tuple[object, tuple[str, str], str],
+                                                          list[_TableRoleHit]]:
+    """The hits one finding reports: those whose tables still resolve to one
+    entry and show one shape (#1590), keyed by entry index, shape and title."""
+    groups: dict[tuple[object, tuple[str, str], str], list[_TableRoleHit]] = {}
+    for hit in hits:
+        groups.setdefault((hit.idx, hit.shape, hit.title), []).append(hit)
+    return groups
+
+
+def _table_role_message(idx: object, shape: tuple[str, str], tables_hit: int) -> str:
+    """What the finding for one group of `_table_role_groups` says."""
+    where = f"entry {idx}" if idx is not None else "a grant table"
+    count = f" in {tables_hit} grant tables" if tables_hit > 1 else ""
+    return f"{where}: {shape[1]}{count} ({shape[0]}, #1403)"
+
+
+def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
+                         owner: frozenset[str], reported: set[object]) -> list[dict]:
+    """A finding per grant entry whose rendered table shows a role shape.
+    Tables that still resolve to one entry and show one shape give one
+    finding that counts them (#1590)."""
+    groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
+    return [_finding("role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+                     _table_role_message(idx, shape, len(group)),
+                     [title[:FIELD_EVIDENCE_VALUE_CHARS]])
+            for (idx, shape, title), group in groups.items()]
 
 
 def lint_role_consistency(stage4: dict,
@@ -3940,23 +3970,44 @@ def lint_role_consistency(stage4: dict,
     (the render shape owner_pi_role_empty reads that off the table), a
     co-PI, or text that gives the owner both roles."""
     owner = _owner_surname_words(stage4)
-    findings = []
-    reported: set[object] = set()
+    shaped = _entry_role_shapes(stage4, owner)
+    findings = [_finding(
+        "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+        f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+        f"{shape[1]} ({shape[0]}, #1403)",
+        [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]) for entry, shape in shaped]
+    if table_rows is not None:
+        reported = {entry.get("element_idx_start") for entry, _ in shaped}
+        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
+    return findings
+
+
+def _entry_role_shapes(stage4: dict, owner: frozenset[str]) -> list[tuple[dict, tuple[str, str]]]:
+    """Each grant entry whose stage-4 fields show a role shape, with the shape."""
+    shaped = []
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
             continue
         shape = _entry_role_shape(entry, fields, owner)
         if shape:
-            reported.add(entry.get("element_idx_start"))
-            findings.append(_finding(
-                "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
-                f"{shape[1]} ({shape[0]}, #1403)",
-                [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
-    if table_rows is not None:
-        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
-    return findings
+            shaped.append((entry, shape))
+    return shaped
+
+
+def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> dict[int, str]:
+    """The grant tables lint_role_consistency reports as owner_pi_role_empty
+    (the PI cell names the CV owner and "Your role:" is empty), by their
+    index among the document's top-level tables, each with the message of
+    the finding that reports it. The review copy suggests "PI" there as a
+    tracked insertion (#1591): the shape's certain fix. A finding can
+    report several tables, so its comment goes only once all are fixed."""
+    owner = _owner_surname_words(stage4)
+    reported = {entry.get("element_idx_start") for entry, _ in _entry_role_shapes(stage4, owner)}
+    groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
+    return dict(sorted((hit.table, _table_role_message(idx, shape, len(group)))
+                       for (idx, shape, _), group in groups.items()
+                       if shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY for hit in group))
 
 
 # --- orphaned_fragments ------------------------------------------------------
@@ -3994,4 +4045,53 @@ def lint_orphaned_fragments(stage3b: dict) -> list[dict]:
             f"entry {entry.get('element_idx_start')}: fragment of list index "
             f"{entry.get('fragment_of')} whose text no record holds ({reason})",
             [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- appointment_title_overlong ----------------------------------------------
+#
+# Section D's schema has no description field, so stage 4 can write an
+# appointment's duties into `title`, and the appointments table's Title column
+# then carries the role plus a paragraph (#1205: YUYVIG DYLJXC 661/668, 310
+# and 433 characters, which nothing flagged). Stage 6 moves the duty prose to
+# a row under the appointment when it can find where the role ends
+# (`split_appointment_title`); this lint reports the title either way, since
+# the stage-4 record is wrong whether or not the render recovered from it.
+
+#: An appointment role longer than this is not a role (#1205, owner decision
+#: 2026-10-08). Measured on 1,763 D1-D3 titles over six farms (YUYVIG,
+#: EBYSBC, NDMRSO, X6, EOAHMI, the 66-CV local farm): 6 are longer, and the
+#: three a ';'-list of roles explains (EBYSBC QNZADH 0/35/39: a rank, a
+#: deanship and a directorship, each under 100 characters) are judged by
+#: their longest role instead, which is under it.
+APPOINTMENT_TITLE_WARN_CHARS = 150
+
+#: CVs list several concurrent roles in one title with this separator.
+_APPOINTMENT_ROLE_SEPARATOR = ";"
+
+
+def lint_appointment_title_overlong(stage4: dict) -> list[dict]:
+    """A D1-D3 `title` one of whose ';'-separated roles is over
+    `APPOINTMENT_TITLE_WARN_CHARS`: duty prose stage 4 packed into the role.
+    WARN, one finding per entry. Says whether stage 6 can move the duties
+    under the row or renders the title whole in the Title column."""
+    findings = []
+    for entry in _fields_entries(stage4):
+        if entry.code not in POSITION_TAXONOMY_CODES:
+            continue
+        title = str(entry.fields.get("title") or "").strip()
+        longest = max(len(role.strip()) for role in title.split(_APPOINTMENT_ROLE_SEPARATOR))
+        if longest <= APPOINTMENT_TITLE_WARN_CHARS:
+            continue
+        role, duties = split_appointment_title(title)
+        outcome = (f"stage 6 shows '{role[:FIELD_EVIDENCE_VALUE_CHARS]}' in the Title "
+                   f"column and the rest on a row under it" if duties
+                   else "rendered whole in the Title column")
+        findings.append(_finding(
+            "appointment_title_overlong", "WARN",
+            f"entry {entry.element_idx} ({entry.code}): title is {len(title)} "
+            f"characters, its longest '{_APPOINTMENT_ROLE_SEPARATOR}' part {longest}, "
+            f"over {APPOINTMENT_TITLE_WARN_CHARS} -- duty prose in the role "
+            f"field; {outcome}",
+            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

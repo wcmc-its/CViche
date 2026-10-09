@@ -42,6 +42,7 @@ from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _FUNDING_SECTIONS,
     _MIN_EXACT_LEN,
+    APPOINTMENT_TITLE_WARN_CHARS,
     _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     CLAUSE_SPAN_OUTSIDE,
@@ -70,6 +71,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _rendered_row_value_sets,
     _shared_entry_pieces,
     _short_end_year,
+    lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
@@ -82,6 +84,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_orphaned_fragments,
     lint_record_boundary,
     lint_role_consistency,
+    owner_pi_role_empty_tables,
     lint_span_count,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -4573,6 +4576,41 @@ def test_role_consistency_reports_a_grant_once_when_its_table_shows_a_render_sha
         ("contradicted", "WARN")]
 
 
+def test_owner_pi_role_empty_tables_names_the_tables_the_shape_reports():
+    """#1591's certain fix acts on exactly the tables the lint reports, by
+    their index among the document's tables (a non-grant table counts)."""
+    entries = [_grant(idx, "A grant", title=title, pi_name="Testowner")
+               for idx, title in ((20, "First Project"), (21, "Second Project"))]
+    tables = [[["Name:", "Ada Testowner"]],  # not a grant table
+              _grant_table("", "Testowner", title="First Project"),
+              _grant_table("PI", "Testowner", title="Second Project"),
+              _grant_table("", "Other Person", title="Second Project"),
+              _grant_table("", "Ada Testowner", title="Second Project"),
+              _grant_table("PI", "", title="Second Project")]  # pi_cell_empty: another shape
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": entries}
+    reported = owner_pi_role_empty_tables(stage4, tables)
+    assert list(reported) == [1, 4]
+    shapes = [f["message"] for f in lint_role_consistency(stage4, tables)]
+    # Each table carries the message of the finding that reports it.
+    assert sorted(reported.values()) == sorted(m for m in shapes if "(owner_pi_role_empty," in m)
+    assert len(set(reported.values())) == 2
+    assert any("(pi_cell_empty," in m for m in shapes)
+
+
+def test_owner_pi_role_empty_tables_skips_a_table_whose_entry_has_its_own_finding():
+    """The lint reports such a table only through the entry finding, so the
+    fix is not suggested there either."""
+    entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
+                   pi_name="Ada Testowner", pi_role="co-I")
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": [entry]}
+    assert owner_pi_role_empty_tables(stage4, [_grant_table("", "Ada Testowner")]) == {}
+
+
+def test_owner_pi_role_empty_tables_needs_an_owner():
+    entry = _grant(260, "A grant", title="Example Project", pi_name="Testowner")
+    assert owner_pi_role_empty_tables({"entries": [entry]}, [_grant_table("", "Testowner")]) == {}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
 
@@ -4763,3 +4801,61 @@ def test_orphaned_fragments_warns_on_a_skip_that_loses_content():
 
 def test_orphaned_fragments_is_silent_on_a_list_holding_a_non_entry():
     assert lint_orphaned_fragments({"entries": [None, _orphan("tail", 1)]}) == []
+
+
+# lint_appointment_title_overlong (#1205): duty prose packed into a D1-D3 role.
+
+_OVERLONG_ROLE = "Example Fellow, Example Policy Office"
+
+
+def _overlong(*entries):
+    return lint_appointment_title_overlong({"entries": list(entries)})
+
+
+def _title_of(length, tail=" to help plan"):
+    """A title of exactly `length` characters: a role, then duty prose."""
+    head = f"{_OVERLONG_ROLE} - 50% FTE{tail}"
+    return head + "x" * (length - len(head))
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3"])
+def test_appointment_title_overlong_fires_over_the_limit(code):
+    title = _title_of(APPOINTMENT_TITLE_WARN_CHARS + 1)
+    findings = _overlong(_fields_entry(code, {"title": title}, idx=661))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "appointment_title_overlong"
+    assert findings[0]["severity"] == "WARN"
+    assert f"entry 661 ({code}): title is {APPOINTMENT_TITLE_WARN_CHARS + 1} characters" \
+        in findings[0]["message"]
+    assert f"'{_OVERLONG_ROLE}' in the Title column" in findings[0]["message"]
+    assert findings[0]["evidence"] == [title[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def test_appointment_title_overlong_limit_is_150_and_exclusive():
+    assert APPOINTMENT_TITLE_WARN_CHARS == 150
+    assert _overlong(_fields_entry("D3", {"title": _title_of(150)})) == []
+    assert len(_overlong(_fields_entry("D3", {"title": _title_of(151)}))) == 1
+
+
+def test_appointment_title_overlong_says_when_stage_6_renders_it_whole():
+    title = _title_of(160, tail=" performing evaluations ")
+    findings = _overlong(_fields_entry("D3", {"title": title}))
+    assert "rendered whole in the Title column" in findings[0]["message"]
+
+
+def test_appointment_title_overlong_judges_a_role_list_by_its_longest_role():
+    roles = "; ".join(f"Example Role {i}, Department of Example Studies" for i in range(5))
+    assert len(roles) > APPOINTMENT_TITLE_WARN_CHARS
+    assert _overlong(_fields_entry("D1", {"title": roles})) == []
+    longer = roles + "; " + "y" * (APPOINTMENT_TITLE_WARN_CHARS + 1)
+    assert len(_overlong(_fields_entry("D1", {"title": longer}))) == 1
+
+
+@pytest.mark.parametrize("entry", [
+    _fields_entry("O", {"title": "z" * 400}),                 # not an appointment
+    _fields_entry("D1", {"institution": "z" * 400}),          # not the title
+    _fields_entry("D1", {}),
+    _fields_entry("D1", "not an object"),
+])
+def test_appointment_title_overlong_silent(entry):
+    assert _overlong(entry) == []

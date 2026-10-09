@@ -587,10 +587,9 @@ def test_the_word_comment_text_is_clean_and_lives_outside_the_body(tmp_path):
 
 def test_protected_data_is_a_cap_only_gate_not_a_dimension():
     """Round-2 finding: the gate was a weight-15 dimension, inflating every
-    clean run's raw score (TOTAL_WEIGHT 100 -> 115). It is a cap only."""
+    clean run's raw score. It is a cap only, so it adds no weight."""
     assert score_protected_data not in [scorer for _, _, scorer in DIMENSIONS]
     assert score_protected_data in [gate for _, gate in CAP_ONLY_GATES]
-    assert TOTAL_WEIGHT == 100
 
 
 def test_score_run_caps_a_leaking_docx_red_without_moving_the_raw_score(tmp_path):
@@ -600,7 +599,7 @@ def test_score_run_caps_a_leaking_docx_red_without_moving_the_raw_score(tmp_path
     _write_flat_docx(tmp_path, ["Office address: 123 Main St"])
     clean = score_run(tmp_path)
     assert leaking["raw_score_before_caps"] == clean["raw_score_before_caps"]
-    assert leaking["total_weight"] == clean["total_weight"] == 100
+    assert leaking["total_weight"] == clean["total_weight"] == TOTAL_WEIGHT
     assert len(leaking["dimensionScores"]) == len(clean["dimensionScores"])
     assert PROTECTED_DATA_CAP in leaking["hard_fail_caps_applied"]
     assert leaking["totalScore"] <= PROTECTED_DATA_CAP
