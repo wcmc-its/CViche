@@ -128,13 +128,11 @@ REVIEW_FLAGS = {
                            "number that the line in the original CV does not. Check it against the CV."),
     "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
                         "column mixed in: check it against your CV."),
-    # Proposed in #1588's PR; awaiting Paul's approval.
     "source_line_coverage": ("This line from your CV may be missing from this document, or only "
                              "partly here. Check it and add it where it belongs."),
 }
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",
-               # Proposed in #1588's PR; awaiting Paul's approval.
                "source_line_coverage": "Text from your CV that may be missing"}
 #: A review-copy-only lint whose quotes are source text the page does not hold.
 MISSING_SOURCE_LINT = "source_line_coverage"
