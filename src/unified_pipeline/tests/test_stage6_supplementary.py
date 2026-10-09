@@ -63,9 +63,9 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_and_appointments_only():
+def test_the_codes_are_teaching_grants_appointments_and_extramural_service_only():
     assert sorted(sp.SUBPOINT_CODES) == ["D1", "D2", "D3", "K1", "K2", "K3", "K4", "K5",
-                                         "M2A", "M2B", "M2C", "M2D"]
+                                         "M2A", "M2B", "M2C", "M2D", "Q1", "Q2"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
                                     "L2", "F1", "Q4D", "B2"}
