@@ -34,6 +34,24 @@ OWNER_SIDE_CHANNEL_MAX_CHARS = 200
 OWNER_NAME_WINDOW_ENTRIES = 12
 OWNER_NAME_ENTRY_MAX_CHARS = 500
 
+# #1655: the header/footer owner-contact entry (`header_footer_contact_entry`).
+PERSONAL_DATA_CODE = 'A'
+# It has no body element, so it carries an index below every real one: it
+# sorts first, where a contact block belongs, and its (start, end) pair -- the
+# key stage 4's recovery pass merges on -- collides with no body entry.
+HEADER_FOOTER_ELEMENT_IDX = -1
+# Stamped on that entry, so a reader of the stage-4 artifact can tell it from
+# a body entry.
+OWNER_CONTACT_SOURCE_KEY = 'owner_contact_source'
+OWNER_CONTACT_SOURCE_HEADER_FOOTER = 'header_footer'
+# An email or a phone number: the #1655 census's own test of a header that
+# carries contact. Phone shape as `quality_score._SOURCE_PHONE_RE` (#822).
+# ponytail: a header whose only contact is a postal address or a non-US
+# number sends nothing; widen this if such a CV turns up.
+OWNER_CONTACT_SIGNAL_RE = re.compile(
+    r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+    r"|(?<![\w/.\-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)[ .-]?|\d{3}[ .-])\d{3}[ .-]\d{4}(?!\d)")
+
 
 class _OwnerNameResponse(BaseModel):
     """Expected shape of the name-extraction LLM response.
@@ -145,13 +163,18 @@ def _run_owner_name_llm(
 
 
 def _owner_side_channel_content_lines(document_uid: str, docx_path: str) -> tuple[list[str], str]:
-    """The #456 side-channel tier's input: sdt_lines, then header_lines, then
+    """The #456 side-channel tier's input: header_lines, then sdt_lines, then
     footer_lines, capped at OWNER_SIDE_CHANNEL_MAX_LINES total lines each
     truncated to OWNER_SIDE_CHANNEL_MAX_CHARS. Also returns which channel
     contributed the first line, for the tier's log line (never the name
     itself) -- an approximation where more than one channel has content,
     since all three feed one combined prompt rather than three separate LLM
     calls.
+
+    The header goes first (#1655): a header that holds the owner's name is a
+    letterhead far more often than a body content control is, and a body
+    `w:sdt` of 20+ paragraphs (licences, courses) used to fill the whole
+    line budget, so the header never reached the prompt (RSFOYB).
 
     Returns ([], '') when `docx_path` exists (the caller already checked
     `Path.is_file()`) but is not a readable/valid .docx package -- a CV owner
@@ -167,18 +190,60 @@ def _owner_side_channel_content_lines(document_uid: str, docx_path: str) -> tupl
         logger.warning("%s: owner side channel unreadable: %s", document_uid, exc)
         return [], ''
 
-    if channel['sdt_lines']:
-        first_channel = 'sdt'
-    elif channel['header_lines']:
+    if channel['header_lines']:
         first_channel = 'header'
+    elif channel['sdt_lines']:
+        first_channel = 'sdt'
     elif channel['footer_lines']:
         first_channel = 'footer'
     else:
         first_channel = ''
 
-    combined = channel['sdt_lines'] + channel['header_lines'] + channel['footer_lines']
+    combined = channel['header_lines'] + channel['sdt_lines'] + channel['footer_lines']
     lines = [line[:OWNER_SIDE_CHANNEL_MAX_CHARS] for line in combined[:OWNER_SIDE_CHANNEL_MAX_LINES]]
     return lines, first_channel
+
+
+def header_footer_contact_entry(document_uid: str, docx_path: str | None) -> dict[str, Any] | None:
+    """A synthetic Personal Data (A) entry holding the distinct header and
+    footer lines of `docx_path`, for stage 4 to extract the owner's contact
+    from when the body gave none (#1655); None when there is nothing to send.
+
+    The letterhead is often the only place a CV states the owner's office
+    address, phone, fax and email. The main body walk never opens a header
+    part, and the #456 side channel used it for the name alone, so the
+    contact block never reached a field or the Personal Data table. Built as
+    an entry rather than injected into the stage-1 element stream: see
+    `extract_owner_side_channel` for why that would desync stage 2's
+    `para_idx` fallback. As an A entry it takes the same path as a body
+    contact block -- stage 4 extraction, then stage 6's PII pass and routing,
+    which withholds a home address or phone exactly as for body contact.
+
+    The lines are already #847-scrubbed (`extract_owner_side_channel`). Only
+    header and footer lines are sent: a body content control is document
+    content, not a letterhead. None unless one of the lines carries an email
+    or a phone number (`OWNER_CONTACT_SIGNAL_RE`), so a header holding only a
+    name or a running title costs no LLM call and adds no entry.
+    """
+    if not docx_path or not Path(docx_path).is_file():
+        return None
+    try:
+        channel = extract_owner_side_channel(docx_path)
+    except (PackageNotFoundError, BadZipFile, OSError) as exc:
+        logger.warning("%s: header/footer unreadable for owner contact: %s", document_uid, exc)
+        return None
+    # A first-page and a default header often repeat the same letterhead.
+    lines = list(dict.fromkeys(channel['header_lines'] + channel['footer_lines']))
+    lines = lines[:OWNER_SIDE_CHANNEL_MAX_LINES]
+    if not any(OWNER_CONTACT_SIGNAL_RE.search(line) for line in lines):
+        return None
+    return {
+        'text': '\n'.join(lines),
+        'taxonomy_code': PERSONAL_DATA_CODE,
+        'element_idx_start': HEADER_FOOTER_ELEMENT_IDX,
+        'element_idx_end': HEADER_FOOTER_ELEMENT_IDX,
+        OWNER_CONTACT_SOURCE_KEY: OWNER_CONTACT_SOURCE_HEADER_FOOTER,
+    }
 
 
 def _owner_name_window(mapped_entries: list[dict[str, Any]]) -> list[str]:
