@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
-import { AlertCircle, Info, Lock, XCircle } from 'lucide-react'
+import { AlertCircle, EyeOff, Info, Lock, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { getRunQuality, getRunReviewNote } from '../api/runs'
-import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, QualityDimension, QualityGate, RunDoctorReport, RunQualityReport, ScoreRowWording } from '../types'
+import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, FixConfidence, FixEffort, FixListGroup, FixListItem, FixListProblem, QualityDimension, QualityGate, RunDoctorReport, RunQualityReport, ScoreRowWording } from '../types'
 import { BAND_STYLE } from './runs/runQuality'
 
 const CARD = 'flex flex-col bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6'
 const MONO = 'font-mono'
+/** A quote of CV or output text. */
+const QUOTE = 'block whitespace-pre-wrap border-l-2 border-sand-300 pl-2.5 text-gray-600 [overflow-wrap:anywhere] before:content-none after:content-none'
 const FULL_SCORE = 100
 const PERCENT = 100
 /** The mockup collapses INFO findings until asked: they fire on most runs. */
@@ -260,7 +262,7 @@ function InstanceItem({ instance }: { instance: DoctorFindingInstance }) {
         {instance.detail}
       </span>
       {instance.quotes.map((quote, i) => (
-        <q key={i} className="block whitespace-pre-wrap border-l-2 border-sand-300 pl-2.5 text-gray-600 [overflow-wrap:anywhere] before:content-none after:content-none">{quote}</q>
+        <q key={i} className={QUOTE}>{quote}</q>
       ))}
       {instance.notes.map((note, i) => (
         <span key={i} className="whitespace-pre-wrap text-xs text-gray-500 [overflow-wrap:anywhere]">{note}</span>
@@ -371,18 +373,127 @@ function SeverityPills({ counts }: { counts: RunDoctorReport['counts'] }) {
   )
 }
 
-function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null; capValue: number | null }) {
-  const [hidden, setHidden] = useState<Record<DoctorSeverity, boolean>>({ ERROR: false, WARN: false, INFO: true })
-  const blurb = 'Specific problems found in this output. Unusual ones are listed first; minor ones most runs have are under Info.'
-  const groups = SEVERITIES.map((s) => ({ s, items: (doctor?.findings ?? []).filter((f) => f.severity === s) })).filter((g) => g.items.length > 0)
+const CHIP = 'rounded-full bg-gray-100 px-2 py-px text-xs font-medium text-gray-500'
+
+const CONFIDENCE_LABEL: Record<FixConfidence, string> = {
+  high: 'High confidence',
+  medium: 'Medium confidence',
+  unmeasured: 'Confidence not yet measured',
+}
+const EFFORT_LABEL: Record<FixEffort, string> = {
+  quick: 'Quick fix',
+  minutes: 'A few minutes',
+  longer: 'Longer job',
+}
+/** A Fix-list group whose findings name no section. */
+const WHOLE_DOCUMENT = 'Across the document'
+
+function FixProblemLine({ problem }: { problem: FixListProblem }) {
+  const style = SEVERITY_STYLE[problem.severity]
+  const { Icon } = style
   return (
-    <section aria-label="Run Doctor" className={`${CARD} gap-3.5`}>
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <SectionHeading title="Run Doctor" blurb={blurb} />
-        {doctor && <SeverityPills counts={doctor.counts} />}
+    <div className="grid grid-cols-[16px_minmax(0,1fr)] items-start gap-3">
+      <Icon className={`mt-0.5 h-4 w-4 flex-none ${style.text}`} aria-label={style.one} />
+      <div className="flex min-w-0 flex-col gap-[3px]">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]">{problem.title}</span>
+          <span className={CHIP}>{CONFIDENCE_LABEL[problem.confidence]}</span>
+          <span className={CHIP}>{EFFORT_LABEL[problem.effort]}</span>
+        </div>
+        <span className="text-[13px] text-gray-700 [overflow-wrap:anywhere]"><strong className="font-semibold">What to do:</strong> {problem.what_to_do}</span>
       </div>
-      {!doctor && <p className="m-0 text-[13px] text-gray-500">No Run Doctor report is stored for this run.</p>}
-      {doctor && groups.length === 0 && <p className="m-0 text-[13px] text-gray-500">The doctor found nothing to report.</p>}
+    </div>
+  )
+}
+
+function FixItem({ item }: { item: FixListItem }) {
+  return (
+    <li className="flex min-w-0 flex-col gap-2.5 border-t border-sand-200 px-3.5 py-3 first:border-t-0">
+      {item.problems.map((problem, i) => <FixProblemLine key={i} problem={problem} />)}
+      {item.quotes.length > 0 && (
+        <div className="flex flex-col gap-1.5 pl-7 text-[13px]">
+          {item.quotes.map((quote, i) => <q key={i} className={QUOTE}>{quote}</q>)}
+        </div>
+      )}
+    </li>
+  )
+}
+
+function FixGroup({ group }: { group: FixListGroup }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="m-0 text-[13px] font-semibold text-gray-700">{group.section ?? WHOLE_DOCUMENT}</h3>
+      <ul className="m-0 flex list-none flex-col overflow-hidden rounded-[10px] border border-sand-200 pl-0">
+        {group.items.map((item, i) => <FixItem key={i} item={item} />)}
+      </ul>
+    </div>
+  )
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+function FixList({ doctor }: { doctor: RunDoctorReport }) {
+  const notes = [
+    doctor.fix_list_more > 0 && `${plural(doctor.fix_list_more, 'more item is', 'more items are')} listed under Diagnostics.`,
+    doctor.fix_list_held_back > 0 && `${plural(doctor.fix_list_held_back, 'finding that is', 'findings that are')} wrong too often to act on ${doctor.fix_list_held_back === 1 ? 'is' : 'are'} only under Diagnostics.`,
+  ].filter(Boolean)
+  return (
+    <div className="flex flex-col gap-4">
+      {doctor.fix_list.length === 0 ? (
+        <p className="m-0 text-[13px] text-gray-500">Nothing to fix was found. Some problems can't be checked, so read the list below too.</p>
+      ) : (
+        <p className="m-0 text-[13px] text-gray-500">In the order the document reads. Each item quotes the text in question.</p>
+      )}
+      {doctor.fix_list.map((group, i) => <FixGroup key={i} group={group} />)}
+      {notes.map((note, i) => <p key={i} className="m-0 text-xs text-gray-500">{note}</p>)}
+    </div>
+  )
+}
+
+function NotChecked({ items }: { items: string[] }) {
+  if (items.length === 0) return null
+  return (
+    <div className="flex flex-col gap-1.5 rounded-[10px] border border-sand-200 bg-sand-50 px-3.5 py-3 text-[13px] text-gray-700">
+      <span className="flex items-center gap-2 font-semibold text-gray-900">
+        <EyeOff className="h-4 w-4 flex-none text-gray-500" aria-hidden="true" />
+        Not checked on any run
+      </span>
+      <ul className="m-0 flex list-disc flex-col gap-1 pl-5">
+        {items.map((item, i) => <li key={i} className="[overflow-wrap:anywhere]">{item}</li>)}
+      </ul>
+    </div>
+  )
+}
+
+type DoctorTab = 'fix' | 'diagnostics'
+
+/** The cap banner and gate rows link to `#doctor-lint-<lint>`, a Diagnostics row. */
+const pointsAtDiagnostics = (hash: string) => hash.startsWith(`#${doctorRowId('')}`)
+
+/** Fix list by default; Diagnostics when the URL points at one of its rows, and
+ *  whenever a cap link is followed later. */
+function useDoctorTab(): [DoctorTab, (tab: DoctorTab) => void] {
+  const [tab, setTab] = useState<DoctorTab>(() => (pointsAtDiagnostics(window.location.hash) ? 'diagnostics' : 'fix'))
+  useEffect(() => {
+    const onHash = () => {
+      if (!pointsAtDiagnostics(window.location.hash)) return
+      setTab('diagnostics')
+      // The row was hidden when the browser tried to scroll to it.
+      requestAnimationFrame(() => document.getElementById(window.location.hash.slice(1))?.scrollIntoView())
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+  return [tab, setTab]
+}
+
+function DiagnosticsList({ doctor, capValue }: { doctor: RunDoctorReport; capValue: number | null }) {
+  const [hidden, setHidden] = useState<Record<DoctorSeverity, boolean>>({ ERROR: false, WARN: false, INFO: true })
+  const groups = SEVERITIES.map((s) => ({ s, items: doctor.findings.filter((f) => f.severity === s) })).filter((g) => g.items.length > 0)
+  return (
+    <div className="flex flex-col gap-3.5">
+      <p className="m-0 text-[13px] text-gray-500">Every finding, by check. Unusual ones are listed first; minor ones most runs have are under Info.</p>
+      {groups.length === 0 && <p className="m-0 text-[13px] text-gray-500">The doctor found nothing to report.</p>}
       {groups.map(({ s, items }) => (
         <FindingGroup
           key={s}
@@ -393,11 +504,68 @@ function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null
           onToggle={() => setHidden((prev) => ({ ...prev, [s]: !prev[s] }))}
         />
       ))}
-      {doctor && doctor.not_run > 0 && (
+      {doctor.not_run > 0 && (
         <p className="m-0 text-xs text-gray-500">
           {doctor.not_run} {doctor.not_run === 1 ? 'check' : 'checks'} could not run because an input file was missing.
         </p>
       )}
+    </div>
+  )
+}
+
+function DoctorTabs({ doctor, capValue }: { doctor: RunDoctorReport; capValue: number | null }) {
+  const [tab, setTab] = useDoctorTab()
+  const fixCount = doctor.fix_list.reduce((n, g) => n + g.items.length, 0)
+  const tabs: { key: DoctorTab; label: string }[] = [
+    { key: 'fix', label: `Fix list (${fixCount + doctor.fix_list_more})` },
+    { key: 'diagnostics', label: 'Diagnostics' },
+  ]
+  return (
+    <>
+      <div className="flex gap-[18px] border-b border-sand-200" role="tablist" aria-label="Run Doctor views">
+        {tabs.map((t) => {
+          const selected = tab === t.key
+          return (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              id={`doctor-tab-${t.key}`}
+              aria-selected={selected}
+              aria-controls={`doctor-panel-${t.key}`}
+              onClick={() => setTab(t.key)}
+              className={`-mb-px border-b-2 px-0.5 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
+                selected ? 'border-ink text-gray-900' : 'border-transparent text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              {t.label}
+            </button>
+          )
+        })}
+      </div>
+      {/* Both panels stay mounted, so the cap banner's anchors always resolve. */}
+      <div role="tabpanel" id="doctor-panel-fix" aria-labelledby="doctor-tab-fix" hidden={tab !== 'fix'}>
+        <FixList doctor={doctor} />
+      </div>
+      <div role="tabpanel" id="doctor-panel-diagnostics" aria-labelledby="doctor-tab-diagnostics" hidden={tab !== 'diagnostics'}>
+        <DiagnosticsList doctor={doctor} capValue={capValue} />
+      </div>
+      <NotChecked items={doctor.not_checked} />
+    </>
+  )
+}
+
+function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null; capValue: number | null }) {
+  const blurb = 'Specific problems found in this output. The Fix list is what to correct in the Word file; Diagnostics lists every finding by check.'
+  return (
+    <section aria-label="Run Doctor" className={`${CARD} gap-3.5`}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <SectionHeading title="Run Doctor" blurb={blurb} />
+        {doctor && <SeverityPills counts={doctor.counts} />}
+      </div>
+      {doctor
+        ? <DoctorTabs doctor={doctor} capValue={capValue} />
+        : <p className="m-0 text-[13px] text-gray-500">No Run Doctor report is stored for this run.</p>}
     </section>
   )
 }

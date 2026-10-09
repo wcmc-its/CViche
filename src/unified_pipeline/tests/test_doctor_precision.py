@@ -17,6 +17,7 @@ from unified_pipeline.doctor.precision import (  # noqa: E402
     precision_label,
     precision_payload,
     remediation_allowed,
+    user_visible,
 )
 from unified_pipeline.run_doctor import KNOWN_LINTS  # noqa: E402
 
@@ -135,6 +136,29 @@ def test_no_lint_may_remediate_on_the_committed_ledger():
     """M1: missed_headers is 4 / 8; segmentation and under_extraction have no
     verdicts. #813 stays closed until a re-measure clears the bar."""
     assert not any(remediation_allowed(lint) for lint in precision.REMEDIATION_CANDIDATE_LINTS)
+
+
+# --- #1589's user-visibility gate --------------------------------------------
+
+def test_user_visible_at_the_bar():
+    assert user_visible("dedup_drops", _ledger("dedup_drops", 4, 8))
+
+
+def test_user_visible_refused_below_the_bar():
+    assert not user_visible("dedup_drops", _ledger("dedup_drops", 3, 8))
+
+
+def test_user_visible_for_an_unmeasured_or_unlisted_lint():
+    assert user_visible("no_output", _ledger("no_output", 0, 0))
+    assert user_visible("no_output", {})
+
+
+def test_user_visible_on_the_committed_ledger_pools_shapes():
+    """stage6_render_warnings pools its Appendix shapes to well under 50%
+    (appendix_no_route_T 2 / 20, appendix_recovered_A 3 / 20); role_consistency
+    pools to 99%."""
+    assert not user_visible("stage6_render_warnings")
+    assert user_visible("role_consistency")
 
 
 # --- the report block and its label ------------------------------------------

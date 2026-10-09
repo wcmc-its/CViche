@@ -21,7 +21,7 @@ A missing or unreadable file is logged and yields an empty ledger: the doctor
 still runs, and every lint reads as unmeasured.
 
 Imports: the standard library only. Nothing in the pipeline imports this
-module except `run_doctor`.
+module except `run_doctor`; the web backend's run page reads `user_visible`.
 """
 from __future__ import annotations
 
@@ -60,6 +60,11 @@ REMEDIATION_MIN_PRECISION = 0.80
 #: ... and only on at least this many hand-checked findings, so one lucky
 #: finding cannot open the gate.
 REMEDIATION_MIN_JUDGED = 20
+
+#: #1589's visibility gate: a lint hand-checked below this precision is shown
+#: to developers only (the run page's Diagnostics tab), never to the person
+#: fixing the CV, since it is wrong at least as often as it is right.
+USER_VISIBLE_MIN_PRECISION = 0.50
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,18 @@ def remediation_allowed(lint: str, ledger: dict[str, LintPrecision] | None = Non
     if entry is None or entry.judged < REMEDIATION_MIN_JUDGED:
         return False
     return entry.precision is not None and entry.precision >= REMEDIATION_MIN_PRECISION
+
+
+def user_visible(lint: str, ledger: dict[str, LintPrecision] | None = None) -> bool:
+    """#1589's gate: may this lint's findings be shown to the person fixing the
+    CV? False only for a lint hand-checked below USER_VISIBLE_MIN_PRECISION. An
+    unmeasured lint is shown: the ledger has no evidence it is unreliable, and
+    hiding it would hide the rare lints (no_output, protected data) nobody has
+    had a hit of to judge."""
+    entry = (load_ledger() if ledger is None else ledger).get(lint)
+    if entry is None or entry.precision is None:
+        return True
+    return entry.precision >= USER_VISIBLE_MIN_PRECISION
 
 
 def precision_label(entry: LintPrecision | None) -> str:
