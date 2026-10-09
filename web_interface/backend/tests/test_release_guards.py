@@ -937,8 +937,8 @@ def test_image_only_pdf_page_is_a_run_warning(db, tmp_path, monkeypatch, cv_pdf)
 
 
 def test_image_only_warning_is_not_repeated_on_retry(db, tmp_path, monkeypatch, cv_pdf):
-    """A retry/resume re-converts the PDF, but the step-1 log already
-    carries the warning from the first attempt (Log rows are never deleted)."""
+    """A retry/resume reuses the first attempt's conversion (#1567), and the
+    step-1 log already carries its warning (Log rows are never deleted)."""
     src = tmp_path / "SCAN02.pdf"
     src.write_bytes(cv_pdf(image_pages=(1,)))
     logs = _execute_one_noop_step(db, monkeypatch, tmp_path, "SCAN02", src, attempts=(None, 1))
