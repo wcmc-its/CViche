@@ -17,6 +17,7 @@ from docx.oxml.ns import qn  # noqa: E402
 from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.precision import LintPrecision  # noqa: E402
 from unified_pipeline.run_doctor import read_docx_blocks  # noqa: E402
 from unified_pipeline.stage6.formatting import CVICHE_BOX_FILL  # noqa: E402
@@ -411,6 +412,33 @@ def test_a_citation_grounding_finding_not_in_the_document_flags_nothing(tmp_path
     assert n == 0 and _comments(out) == [] and _notes(out) == []
 
 
+def test_a_source_line_coverage_finding_is_one_review_note_per_line_though_info(tmp_path):
+    """#1588: the quoted source lines are not on the page, so each one is a
+    review note under its own title, never a comment, whatever the severity."""
+    lost = ("Visiting lecturer in comparative squid anatomy, Example Polytechnic",
+            "Organised the annual squid optics colloquium for graduate students")
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("source_line_coverage", "entry 31: 2 source line(s) with under 50% of their word pairs "
+                 "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")))
+    assert n == 2 and _comments(out) == []
+    assert _notes(out) == ["Text from your CV that may be missing (2)", _flag("source_line_coverage"),
+                           *(f'•\t"{line}"' for line in lost)]
+
+
+def test_a_source_line_coverage_finding_below_the_bar_is_still_its_notes(tmp_path):
+    """Its lines are notes already, never on the text, so the precision gate
+    has nothing to move: a measured precision under 50% (PRECISION.md, YUY-SLC)
+    must not drop them as it drops a less certain possibility."""
+    lost = ("Visiting lecturer in comparative squid anatomy, Example Polytechnic",)
+    rows = {("source_line_coverage", None): LintPrecision("source_line_coverage", 1, 4, "T")}
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("source_line_coverage", "entry 31: 1 source line(s) with under 50% of their word pairs "
+                 "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")), rows=rows)
+    assert n == 1 and _comments(out) == []
+    assert _notes(out) == ["Text from your CV that may be missing (1)", _flag("source_line_coverage"),
+                           f'•\t"{lost[0]}"']
+
+
 def test_stray_text_is_titled_plainly_and_quotes_what_to_delete(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("output_hygiene", "1 boilerplate line(s) rendered in the appendix", ["Insert dates here (MM/YYYY)"])))
@@ -465,7 +493,8 @@ def test_a_copy_with_nothing_to_flag_is_written_and_says_what_is_not_checked(tmp
     assert out == tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}" and n == 0
     assert _comments(out) == [] and _notes(out) == []
     assert _not_checked(out) == [rc.NOT_CHECKED_TITLE, rc.NOT_CHECKED_INSTRUCTION,
-                                 *(f"\u2022\t{item}" for item in rc.NOT_CHECKED_ITEMS)]
+                                 *(f"\u2022\t{spot.sentence}" for spot in blind_spots())]
+    assert len(_not_checked(out)) > 2  # COVERAGE.md lists at least one blind spot
 
 
 def test_what_is_not_checked_closes_a_box_that_has_notes(tmp_path):
@@ -473,7 +502,7 @@ def test_what_is_not_checked_closes_a_box_that_has_notes(tmp_path):
         _finding("output_hygiene", "1 boilerplate line(s)", ["Insert dates here (MM/YYYY)"])))
     lines = _box_lines(out, rc.REVIEW_NOTES_TITLE)
     assert lines[0] == "Stray text to delete (1)"
-    assert lines[-len(rc.NOT_CHECKED_ITEMS) - 2:] == _not_checked(out)
+    assert lines[-len(blind_spots()) - 2:] == _not_checked(out)
 
 
 def test_one_lints_comments_are_capped(tmp_path):
@@ -495,3 +524,15 @@ def test_comments_leave_the_body_the_doctor_reads_unchanged(tmp_path):
 
 def test_not_a_doctor_report_writes_nothing(tmp_path):
     assert rc.write_review_docx(_clean_docx(tmp_path), None) is None
+
+
+def test_source_line_coverage_notes_are_capped_per_document(tmp_path):
+    """Up to 3 lines a finding, up to 57 findings a run on YUYVIG: the notes
+    stop at MAX_FLAGS_PER_LINT, as a comment-placing lint's flags do."""
+    findings = [_finding("source_line_coverage", f"entry {i}: 3 source line(s) with under 50% of their "
+                         "word pairs anywhere in the output, Appendix included (lowest 0%)",
+                         [f"Squid optics seminar number {i} line {j} for graduate students" for j in range(3)])
+                for i in range(20)]
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(*findings))
+    assert n == rc.MAX_FLAGS_PER_LINT
+    assert _notes(out)[0] == f"Text from your CV that may be missing ({rc.MAX_FLAGS_PER_LINT})"

@@ -20,6 +20,8 @@ with what CViche does not check, since a quiet doctor is not a clean document.
 One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
 is commented whatever its severity, but only on the text it quotes, never on
 a heading or as a review note. It is a possibility to check, not a problem.
+The other, source_line_coverage (#1588), quotes source text the document may
+have lost, so it has no place on the page: each quoted line is a review note.
 """
 import copy
 import re
@@ -45,6 +47,7 @@ from app.services.run_quality_report import (
     _usable_findings,
 )
 from unified_pipeline.core.text_norm import squash  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import DEDUP_TEXT_CHARS  # noqa: E402
 from unified_pipeline.doctor.precision import (  # noqa: E402
     LintPrecision,
@@ -141,9 +144,14 @@ REVIEW_FLAGS = {
                            "number that the line in the original CV does not. Check it against the CV."),
     "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
                         "column mixed in: check it against your CV."),
+    "source_line_coverage": ("This line from your CV may be missing from this document, or only "
+                             "partly here. Check it and add it where it belongs."),
 }
 #: Review-notes group titles where the run page's title is internal wording.
-NOTE_TITLES = {"output_hygiene": "Stray text to delete"}
+NOTE_TITLES = {"output_hygiene": "Stray text to delete",
+               "source_line_coverage": "Text from your CV that may be missing"}
+#: A review-copy-only lint whose quotes are source text the page does not hold.
+MISSING_SOURCE_LINT = "source_line_coverage"
 #: Said after a finding the precision gate kept off the text (#1589).
 LESS_CERTAIN_NOTE = "This check is often wrong, so it is listed here, not marked in the text."
 #: An Appendix diversion, on the heading of the section it was meant for.
@@ -155,20 +163,11 @@ DIVERSION_TITLE = "Entries placed in the Appendix"
 DIVERSION_NOTE = "Entries meant for this section are in the Appendix: move any that belong there."
 #: The same, for a diversion naming no section of this document.
 DIVERSION_UNPLACED_NOTE = "Some entries are in the Appendix: move any that belong in a section."
-#: The review notes' last group, on every copy: what the doctor cannot see.
-#: Until #1588's coverage contract names its blind cells, these are the blind
-#: classes #1588 and #1589 give as examples.
+#: The review notes' last group, on every copy: what the doctor cannot see,
+#: one item per BLIND cell of doctor/COVERAGE.md (`blind_spots()`, #1588).
 NOT_CHECKED_TITLE = "What CViche does not check"
 NOT_CHECKED_INSTRUCTION = ("CViche cannot see these problems, or sees only some of them. "
                            "Check them yourself against your original CV:")
-NOT_CHECKED_ITEMS = (
-    "Dates and years that are wrong but look plausible.",
-    "Journal names, volumes and page numbers.",
-    "Duties or details left out of an appointment or position.",
-    "Entries removed as repeats that were in fact separate entries.",
-    "Whether every entry is your own work, not someone else's paper or grant.",
-    "Whether every statement in the research summary is supported by your CV.",
-)
 PROTECTED_DATA_LINT = "protected_data_in_output"
 #: protected_data_in_output names a category and a section, never the value:
 #: "protected personal data (children / dependents) found in Appendix -- value withheld ...".
@@ -403,6 +402,8 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
     lint, inst = finding["lint"], _instance(finding)
     if lint == "dedup_drops":
         return [], _dedup_notes(inst)
+    if lint == MISSING_SOURCE_LINT:  # never on the page, so never gated: a note per line
+        return [], [Note(NOTE_TITLES[lint], REVIEW_FLAGS[lint], f'"{quote}"') for quote in inst.quotes]
     diverted_from = _diversion_code(lint, inst)
     if diverted_from == _APPENDIX_CODE:  # stage 6's Appendix note explains these
         return [], []
@@ -493,8 +494,8 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
                 cviche_box_pair(cell, "Kept:", note.kept, last=True)
     cviche_box_group(cell, NOT_CHECKED_TITLE, first=not groups)
     cviche_box_text(cell, NOT_CHECKED_INSTRUCTION)
-    for item in NOT_CHECKED_ITEMS:
-        cviche_box_item(cell, item)
+    for spot in blind_spots():
+        cviche_box_item(cell, spot.sentence)
 
 
 def write_review_docx(clean_docx: Path, doctor_payload: object,
@@ -523,6 +524,10 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
                 flags.append(flag)
+        if f["lint"] == MISSING_SOURCE_LINT:  # its notes are its flags: one per line, capped
+            room = MAX_FLAGS_PER_LINT - per_lint.get(f["lint"], 0)
+            noted = noted[:max(room, 0)]
+            per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + len(noted)
         notes.extend(noted)
     for flag in flags:
         doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
