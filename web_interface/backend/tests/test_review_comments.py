@@ -263,6 +263,30 @@ def test_a_single_diverted_entry_reads_in_the_singular(tmp_path):
         "1 entry meant for this section is in the Appendix: move any that belong here."]
 
 
+def test_a_diversion_with_no_heading_to_sit_on_is_a_note(tmp_path):
+    """#1639: a diversion whose section has no heading in this document, or
+    that names no section, is listed in the box rather than vanishing."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("stage6_render_warnings", "stage 6 self-check: K1: 2 entries diverted to the "
+                 "Appendix — declined by the renderer"),  # no Didactic Teaching heading
+        _finding("stage6_render_warnings", "stage 6 self-check: 1 entry diverted to the "
+                 "Appendix — no section named")))
+    assert n == 2 and _comments(out) == []
+    assert _notes(out) == [f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_NOTE, "•\tDidactic Teaching",
+                           f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_UNPLACED_NOTE]
+
+
+def test_a_less_certain_finding_with_nothing_to_name_is_still_a_note(tmp_path):
+    """#1639: off the text, the box is the only place the copy says it."""
+    rows = {("llm_fallback_served", None): LintPrecision("llm_fallback_served", 0, 3, "M1")}
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model")),
+        rows=rows)
+    assert n == 1 and _comments(out) == []
+    assert _notes(out) == [f"{rc._note_title('llm_fallback_served')} (1)",
+                           f"{_flag('llm_fallback_served')} {rc.LESS_CERTAIN_NOTE}"]
+
+
 _GATE_ROWS = {
     ("pipe_leaks", None): LintPrecision("pipe_leaks", 0, 2, "M1"),
     ("duplicate_records", None): LintPrecision("duplicate_records", 9, 10, "M1"),

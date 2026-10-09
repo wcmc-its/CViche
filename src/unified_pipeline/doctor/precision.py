@@ -27,8 +27,10 @@ lint's pooled rows.
 A missing or unreadable file is logged and yields an empty ledger: the doctor
 still runs, and every lint reads as unmeasured.
 
-Imports: the standard library only. Nothing in the pipeline imports this
-module except `run_doctor`.
+Imports: the standard library only. Imported by `run_doctor`, by the review
+copy (`web_interface/backend/app/services/review_comments.py`, for
+`shown_in_place`), by `scripts/doctor_vs_autopsy.py` (for `stage6_shape`)
+and by `scripts/doctor_one.py`.
 """
 from __future__ import annotations
 

@@ -153,6 +153,8 @@ DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move an
 #: (the run page's "Document builder warnings" is internal wording).
 DIVERSION_TITLE = "Entries placed in the Appendix"
 DIVERSION_NOTE = "Entries meant for this section are in the Appendix: move any that belong there."
+#: The same, for a diversion naming no section of this document.
+DIVERSION_UNPLACED_NOTE = "Some entries are in the Appendix: move any that belong in a section."
 #: The review notes' last group, on every copy: what the doctor cannot see.
 #: Until #1588's coverage contract names its blind cells, these are the blind
 #: classes #1588 and #1589 give as examples.
@@ -347,7 +349,7 @@ def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
 def _diversion(code: str, inst: DoctorFindingInstance,
                paragraphs: list[tuple[Paragraph, str]]) -> list[Flag]:
     """An Appendix diversion from section ``code``: a comment on that
-    section's heading, saying how many entries went. None where the section
+    section's heading, saying how many entries went. Empty where the section
     has no heading."""
     m = _DIVERTED_RE.search(inst.detail)
     heading = _heading(code, paragraphs)
@@ -366,14 +368,22 @@ def _note_title(lint: str) -> str:
 def _less_certain(lint: str, inst: DoctorFindingInstance) -> list[Note]:
     """A finding the precision gate keeps off the text, as a review note: its
     run-page title, its flag and why it is here. A possibility (a
-    REVIEW_COPY_ONLY_LINTS lint) is never a note; nor is a finding with no
-    section or quote to name."""
-    item = _note_item(lint, inst)
-    if lint in REVIEW_COPY_ONLY_LINTS or item is None:
+    REVIEW_COPY_ONLY_LINTS lint) is never a note. A finding with no section
+    or quote to name is still listed, without an item: off the text, the box
+    is the only place the copy says it."""
+    if lint in REVIEW_COPY_ONLY_LINTS:
         return []
     if _diversion_code(lint, inst) is not None:
-        return [Note(DIVERSION_TITLE, f"{DIVERSION_NOTE} {LESS_CERTAIN_NOTE}", item)]
-    return [Note(_note_title(lint), f"{REVIEW_FLAGS.get(lint, inst.detail)} {LESS_CERTAIN_NOTE}", item)]
+        return [_diversion_note(lint, inst, f" {LESS_CERTAIN_NOTE}")]
+    return [Note(_note_title(lint), f"{REVIEW_FLAGS.get(lint, inst.detail)} {LESS_CERTAIN_NOTE}",
+                 _note_item(lint, inst))]
+
+
+def _diversion_note(lint: str, inst: DoctorFindingInstance, suffix: str = "") -> Note:
+    """An Appendix diversion as a review note naming its section; one naming
+    no section says only that entries are in the Appendix."""
+    item = _note_item(lint, inst)
+    return Note(DIVERSION_TITLE, f"{DIVERSION_NOTE if item else DIVERSION_UNPLACED_NOTE}{suffix}", item)
 
 
 def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
@@ -398,8 +408,9 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
         return [], []
     if not shown_in_place(lint, str(finding.get("message") or ""), rows):
         return [], _less_certain(lint, inst)
-    if diverted_from is not None:
-        return _diversion(diverted_from, inst, surfaces[0]), []
+    if diverted_from is not None:  # no heading to sit on: a note, never nothing
+        flags = _diversion(diverted_from, inst, surfaces[0])
+        return (flags, []) if flags else ([], [_diversion_note(lint, inst)])
     label = REVIEW_FLAGS.get(lint, inst.detail)
     flags = _item_flags(lint, inst, label, surfaces)
     if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
