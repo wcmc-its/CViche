@@ -250,6 +250,25 @@ def test_corrected_docx_upload_stores_the_copy_and_its_diff_and_returns_one_line
     assert rerun["document_uid"] == _RUN_ID and rerun["artifacts"]["stage_6_docx"]
 
 
+def test_corrected_docx_upload_confirms_before_the_review_pass_runs(client, db, run_storage, monkeypatch):
+    """#1654: the verdicts and the doctor's re-run are a background task, after the response."""
+    from starlette.background import BackgroundTasks
+
+    queued = []
+    monkeypatch.setattr(BackgroundTasks, "add_task", lambda self, func, *args: queued.append((func, args)))
+    user = _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", _docx(_DELIVERED[0]))})
+    assert resp.status_code == 200
+    assert run_storage.list_files(_RUN_ID, "corrected/") == [
+        f"corrected/{_RUN_ID}_corrected.docx", f"corrected/{_RUN_ID}_diff.json"]
+    (func, args), = queued
+    func(*args)
+    assert f"corrected/{_RUN_ID}_verdicts.json" in run_storage.list_files(_RUN_ID, "corrected/")
+
+
 def test_corrected_docx_upload_confirms_though_the_review_pass_fails(client, db, run_storage, monkeypatch):
     """#1654: the copy and its diff are stored; a failing verdict or re-run step is logged only."""
     def boom(*_args):

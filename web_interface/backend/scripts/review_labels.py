@@ -68,12 +68,19 @@ def _verdicts(db: Session, run_id: str) -> dict:
 
 
 def run_label(db: Session, run_id: str) -> dict | None:
-    """The run's review label; None when it has no stored corrected-copy diff."""
+    """The run's review label; None when it has no stored corrected-copy diff,
+    or no verdicts and none could be made (logged, and the other runs go on)."""
     try:
         diff = json.loads(get_storage().get_file(run_id, corrected_diff_key(run_id)))
     except FileNotFoundError:
         return None
-    return to_label(run_id, from_report(diff), doctor_review(_verdicts(db, run_id)["findings"]))
+    try:
+        verdicts = _verdicts(db, run_id)
+    except FileNotFoundError:
+        logger.warning("Run %s has a corrected-copy diff but no verdicts, and none could be made; skipped",
+                       run_id)
+        return None
+    return to_label(run_id, from_report(diff), doctor_review(verdicts["findings"]))
 
 
 def verdict_counts(labels: list[dict]) -> dict[ShapeKey, dict[str, int]]:

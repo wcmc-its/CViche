@@ -673,6 +673,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
         marked.append(asdict(_comment_finding(comment.comment_id, f, rows)))
     _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
-    doc.save(str(out))
+    # The map first: a map that cannot be written raises before the copy is
+    # saved, so no copy is left on disk that the caller reports as failed.
     comment_map_path(out).write_text(json.dumps(marked, indent=1), encoding="utf-8")
+    doc.save(str(out))
     return out, len(flags) + len(notes) + fixed

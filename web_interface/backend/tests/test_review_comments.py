@@ -710,3 +710,12 @@ def test_a_comments_wording_names_its_lint_only_when_one_lint_words_it_so():
     assert rc.lint_of_flag(_flag("grant_bucket")) is None
     assert rc.lint_of_flag(rc.DIVERSION_FLAG.format(count="2 entries", verb="are")) == rc.DIVERSION_LINT
     assert rc.lint_of_flag("A finding's own message, with no flag of its own.") is None
+
+
+def test_a_comment_map_that_cannot_be_written_leaves_no_review_copy(tmp_path):
+    """The map is written before the copy, so its failure never strands a saved copy."""
+    clean = _clean_docx(tmp_path)
+    rc.comment_map_path(rc.review_docx_path(clean)).mkdir()
+    with pytest.raises(rc.REVIEW_DOCX_ERRORS):
+        rc.write_review_docx(clean, _report())
+    assert not rc.review_docx_path(clean).exists()

@@ -215,7 +215,7 @@ def test_the_doctor_reruns_on_the_corrected_copy_and_counts_what_cleared(db, sto
     assert "output_hygiene" not in {f["lint"] for f in rerun["findings"]}
     rows = {r["lint"]: r for r in comparison["lints"]}
     assert (rows["output_hygiene"]["cleared"], rows["output_hygiene"]["new"]) == (1, 0)
-    assert rows["owner_contact_missing"]["persisting"] == 1
+    assert "owner_contact_missing" not in rows and "owner_contact_missing" in comparison["not_compared"]
     assert json.loads(store.get_file(_RUN, svc.corrected_doctor_compare_key(_RUN))) == comparison
 
 
@@ -244,6 +244,16 @@ def test_compare_counts_only_lints_that_ran_in_both_reports():
     assert comparison["not_compared"] == ["segmentation"]
     assert comparison["lints"] == [{"lint": "pipe_leaks", "shape": None, "delivered": 1, "corrected": 1,
                                     "persisting": 0, "cleared": 1, "new": 1}]
+
+
+def test_a_lint_that_reads_no_document_is_never_counted_cleared():
+    """The re-run has no prompt logs: llm_fallback_served's prompt-log finding
+    is absent from it whatever the reviewer did, and must not read as cleared."""
+    served = {"lint": "llm_fallback_served", "severity": "WARN", "status": "ran",
+              "message": "stage 3b served a fallback model on 1 call"}
+    comparison = svc.compare_doctor({"findings": [served]}, {"findings": []})
+    assert comparison["not_compared"] == ["llm_fallback_served"]
+    assert comparison["lints"] == [] and comparison["totals"]["cleared"] == 0
 
 
 def test_a_failing_step_is_logged_and_the_other_still_runs(db, store, monkeypatch, caplog):

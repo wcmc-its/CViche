@@ -5764,6 +5764,16 @@ def test_artifact_layout_is_where_the_doctor_finds_each_artifact(tmp_path):
         assert _find_artifact(tmp_path, "web05", key) == path
 
 
+def test_document_independent_lints_are_those_reading_no_stage6_docx():
+    """#1654: what a corrected copy's re-run cannot change."""
+    from unified_pipeline.run_doctor import DOCUMENT_INDEPENDENT_LINTS
+
+    assert {"llm_fallback_served", "stage_failure_recorded", "owner_contact_missing",
+            "pipeline_errors_present", "wrong_start_date"} <= DOCUMENT_INDEPENDENT_LINTS
+    # blocks, an optional docx view, a table_rows view, and the docx-path gate
+    assert not {"output_hygiene", "dedup_drops", "table_shape", "no_output"} & DOCUMENT_INDEPENDENT_LINTS
+
+
 def test_artifacts_are_named_tuples_readable_by_attribute():
     """_ARTIFACTS values are ArtifactSpec, not bare positional tuples -- so a
     call site can read .stage_dir/.suffix by name instead of by position."""

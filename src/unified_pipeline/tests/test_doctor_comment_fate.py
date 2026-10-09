@@ -110,6 +110,51 @@ def test_a_comment_deleted_with_its_text_untouched_is_not_a_problem(tmp_path):
                                                 2: cf.REVIEW_NOT_A_PROBLEM, 3: cf.REVIEW_UNKNOWN}
 
 
+def _resolve(doc: Document, *comment_ids: int) -> None:
+    """What Word does on "Resolve": the comment stays in comments.xml, and a
+    w15:commentEx marks it done in word/commentsExtended.xml, linked by the
+    w14:paraId of the comment's last paragraph. Synthetic part, built here."""
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
+
+    w14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+    w15 = "http://schemas.microsoft.com/office/word/2012/wordml"
+    entries = []
+    for n, comment in enumerate(doc.comments):
+        para_id = f"{n + 1:08X}"
+        comment._comment_elm.findall(qn("w:p"))[-1].set(f"{{{w14}}}paraId", para_id)
+        done = "1" if comment.comment_id in comment_ids else "0"
+        entries.append(f'<w15:commentEx w15:paraId="{para_id}" w15:done="{done}"/>')
+    blob = (f'<w15:commentsEx xmlns:w15="{w15}">{"".join(entries)}</w15:commentsEx>').encode()
+    part = Part(PackURI(cf.COMMENTS_EXTENDED_PART),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml",
+                blob, doc.part.package)
+    doc.part.relate_to(part, "http://schemas.microsoft.com/office/2011/relationships/commentsExtended")
+
+
+def test_a_resolved_comment_on_unchanged_text_is_not_a_problem(tmp_path):
+    """Comment 2 resolved, its text untouched; the others are left open."""
+    doc = _document(comments=True)
+    _resolve(doc, 2)
+    assert _verdicts(_fates(tmp_path, doc)) == {0: cf.REVIEW_UNKNOWN, 1: cf.REVIEW_UNKNOWN,
+                                                2: cf.REVIEW_NOT_A_PROBLEM, 3: cf.REVIEW_UNKNOWN}
+
+
+def test_a_resolved_comment_on_changed_text_is_fixed(tmp_path):
+    """B's year corrected and comment 1 resolved, not deleted."""
+    doc = _document(comments=True)
+    _paragraph(doc, "Quorvane T, Abernoth").runs[1].text = "2012"
+    _resolve(doc, 1)
+    assert _verdicts(_fates(tmp_path, doc))[1] == cf.REVIEW_FIXED
+
+
+def test_resolution_is_read_through_the_saved_file(tmp_path):
+    doc = _document(comments=True)
+    _resolve(doc, 0, 3)
+    assert cf.resolved_comment_ids(Document(str(_save(doc, tmp_path / "r.docx")))) == {0, 3}
+    assert cf.resolved_comment_ids(_document(comments=True)) == set()
+
+
 def test_a_record_deleted_with_its_comment_is_fixed(tmp_path):
     doc = _document(comments=True)
     p = _paragraph(doc, "Quorvane T, Lisk")._p

@@ -6,8 +6,12 @@ review_comments.py) marks each doctor finding as a Word comment on the text it
 is about. The corrected copy shows what happened there:
 
     fixed          the anchored text changed: edited, deleted or moved away
-    not_a_problem  the comment is gone and the anchored text is unchanged
-    unknown        the comment is still there and the text is unchanged
+                   (whether the comment was then resolved, deleted or kept)
+    not_a_problem  the anchored text is unchanged and the comment is gone, or
+                   resolved: Word's "Resolve" keeps it in comments.xml and
+                   marks it done in word/commentsExtended.xml
+    unknown        the comment is still there, unresolved, and the text is
+                   unchanged
 
 A reviewer may upload the clean document instead, or a review copy with every
 comment deleted. Then no comment of the review copy's author is left to
@@ -26,7 +30,6 @@ block.
 PII: the anchored text and the comment wording never leave this module. A
 `CommentFate` is a comment id and a verdict.
 """
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,6 +55,12 @@ if TYPE_CHECKING:
 _W_RANGE_START = f"{_W_NS}commentRangeStart"
 _W_RANGE_END = f"{_W_NS}commentRangeEnd"
 _W_ID = f"{_W_NS}id"
+_W_P = f"{_W_NS}p"
+_W14_PARA_ID = "{http://schemas.microsoft.com/office/word/2010/wordml}paraId"
+_W15_NS = "{http://schemas.microsoft.com/office/word/2012/wordml}"
+#: The part where Word records a comment as resolved: a w15:commentEx with
+#: w15:done="1" whose w15:paraId is the comment's last paragraph's w14:paraId.
+COMMENTS_EXTENDED_PART = "/word/commentsExtended.xml"
 
 
 #: A verdict as doctor_vs_autopsy.py's `doctor_review` reads it. `unknown`
@@ -64,11 +73,12 @@ class Anchor:
     """One comment and the text it is on. ``label`` is the comment's own
     wording and ``text`` the anchored text, collapsed; neither leaves this
     module. ``block`` indexes the file's `read_blocks`; None when the comment
-    has no range in a block that is read."""
+    has no range in a block that is read. ``resolved``: marked done in Word."""
     comment_id: int
     label: str
     block: int | None
     text: str
+    resolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,10 +96,30 @@ class FateReport:
     fates: list[CommentFate]
 
 
+def resolved_comment_ids(doc: DocumentType) -> set[int]:
+    """The ids of the comments Word marks resolved (COMMENTS_EXTENDED_PART);
+    none when the document has no such part."""
+    from lxml import etree
+
+    part = next((p for p in doc.part.package.iter_parts() if p.partname == COMMENTS_EXTENDED_PART), None)
+    if part is None:
+        return set()
+    done = {e.get(f"{_W15_NS}paraId") for e in etree.fromstring(part.blob).iter(f"{_W15_NS}commentEx")
+            if e.get(f"{_W15_NS}done") == "1"}
+    resolved = set()
+    for comment in doc.comments:
+        paragraphs = list(comment._comment_elm.iter(_W_P))
+        if paragraphs and paragraphs[-1].get(_W14_PARA_ID) in done:
+            resolved.add(comment.comment_id)
+    return resolved
+
+
 def read_anchors(doc: DocumentType, author: str) -> tuple[list[Block], list[Anchor]]:
     """The document's blocks, and each comment by ``author`` with the block
-    its range starts in and the accepted text inside its range."""
+    its range starts in, the accepted text inside its range and whether it
+    is resolved."""
     labels = {c.comment_id: c.text for c in doc.comments if c.author == author}
+    resolved = resolved_comment_ids(doc)
     blocks = read_block_elements(doc)
     start: dict[int, int] = {}
     texts: dict[int, list[str]] = {}
@@ -108,15 +138,16 @@ def read_anchors(doc: DocumentType, author: str) -> tuple[list[Block], list[Anch
                 texts.setdefault(cid, [])
             elif cid in open_ids:
                 open_ids.remove(cid)
-    anchors = [Anchor(cid, label, start.get(cid), _collapse("".join(texts.get(cid, []))))
+    anchors = [Anchor(cid, label, start.get(cid), _collapse("".join(texts.get(cid, []))), cid in resolved)
                for cid, label in labels.items()]
     return [block for block, _element in blocks], anchors
 
 
 def _verdict(anchor: Anchor, counterpart: int | None, after: list[Block],
-             left: Counter[tuple[int, str]], tracked: bool) -> str:
-    """One comment's verdict; ``left`` counts the corrected copy's comments
-    by (block, wording) not yet claimed by an earlier comment."""
+             left: dict[tuple[int, str], list[bool]], tracked: bool) -> str:
+    """One comment's verdict; ``left`` holds the corrected copy's comments
+    by (block, wording) not yet claimed by an earlier comment, each as
+    whether it is resolved."""
     # ponytail: a comment on a section heading (an Appendix diversion, a
     # finding with no quote) reads `fixed` only if the heading itself
     # changes, so moving entries into that section reads not_a_problem or
@@ -130,9 +161,9 @@ def _verdict(anchor: Anchor, counterpart: int | None, after: list[Block],
         return REVIEW_FIXED
     if not tracked:
         return REVIEW_UNKNOWN
-    if left[(counterpart, anchor.label)] > 0:
-        left[(counterpart, anchor.label)] -= 1
-        return REVIEW_UNKNOWN
+    kept = left.get((counterpart, anchor.label))
+    if kept:
+        return REVIEW_NOT_A_PROBLEM if kept.pop(0) else REVIEW_UNKNOWN
     return REVIEW_NOT_A_PROBLEM
 
 
@@ -144,7 +175,10 @@ def comment_fates(review: Path, corrected: Path, author: str) -> FateReport:
     before, anchors = read_anchors(Document(str(review)), author)
     after, kept = read_anchors(Document(str(corrected)), author)
     counterparts = block_counterparts(before, after)
-    left = Counter((a.block, a.label) for a in kept if a.block is not None)
+    left: dict[tuple[int, str], list[bool]] = {}
+    for a in kept:
+        if a.block is not None:
+            left.setdefault((a.block, a.label), []).append(a.resolved)
     tracked = bool(kept)
     fates = [CommentFate(a.comment_id,
                          _verdict(a, counterparts[a.block] if a.block is not None else None,

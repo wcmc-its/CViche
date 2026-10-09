@@ -1641,6 +1641,17 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
 )
 
+#: The views read from the stage-6 docx.
+_DOCX_VIEWS = frozenset(view for view, label in _VIEW_LABELS.items() if label == "stage_6_docx")
+#: Lints that read no stage-6 docx, by any input: the registry rows with no
+#: docx view, and two of the hand-dispatched gates (no_output reads the docx's
+#: path). A reviewer's corrected copy cannot change what they find, so its
+#: doctor re-run (#1654) compares them with nothing: a difference there is the
+#: re-run's inputs (no prompt logs, no PDF-converted source), not the review.
+DOCUMENT_INDEPENDENT_LINTS = frozenset(
+    {spec.lint_id for spec in LINT_REGISTRY if not _DOCX_VIEWS & {*spec.inputs, *spec.optional}}
+    | {"owner_contact_missing", "pipeline_errors_present"})
+
 
 def _build_metrics(views: dict) -> dict:
     """Batch-trend numbers, as distinct from the per-run findings above

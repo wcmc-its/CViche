@@ -101,6 +101,19 @@ def test_a_copy_uploaded_before_its_verdicts_gets_them_on_the_way(db, store, tmp
     assert store.get_file("LBL003", svc.corrected_doctor_key("LBL003"))
 
 
+def test_a_run_whose_verdicts_are_missing_is_skipped_and_logged(db, store, tmp_path, caplog):
+    """LBL005 has a diff but neither verdicts nor the copy to make them from."""
+    _seed_runs(db, "LBL001", "LBL005")
+    for run_id in ("LBL001", "LBL005"):
+        store.put_file(run_id, svc.corrected_diff_key(run_id), json.dumps(_DIFF).encode())
+    store.put_file("LBL001", svc.corrected_verdicts_key("LBL001"), json.dumps(_VERDICTS).encode())
+
+    labels = script.write_labels(db, tmp_path / "labels")
+
+    assert [label["uid"] for label in labels] == ["LBL001"]
+    assert "LBL005" in caplog.text and "skipped" in caplog.text
+
+
 def test_precision_lines_show_the_gate_beside_the_verdicts_folded_in(monkeypatch):
     from unified_pipeline.doctor.precision import LintPrecision
 

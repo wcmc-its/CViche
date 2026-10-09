@@ -192,6 +192,18 @@ def review_corrected_copy(db: Session, run_id: str, corrected: bytes) -> None:
             logger.exception("Corrected copy of run %s: %s failed", run_id, name)
 
 
+def review_corrected_copy_in_background(run_id: str, corrected: bytes) -> None:
+    """`review_corrected_copy` with a DB session of its own, for the upload
+    route's background task: the request's session is closed by then."""
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        review_corrected_copy(db, run_id, corrected)
+    finally:
+        db.close()
+
+
 def _comment_findings(db: Session, run_id: str, review: Path) -> tuple[dict[int, CommentFinding], str]:
     """The finding each review-copy comment marks, by comment id, and where
     that came from (FINDINGS_FROM_MAP or FINDINGS_FROM_WORDING)."""
@@ -291,11 +303,16 @@ def _source_docx(run_id: str, root: Path) -> Path | None:
 def compare_doctor(delivered: dict, corrected: dict) -> dict:
     """The delivered run's findings against the corrected copy's, counted per
     lint and shape: how many cleared, persist (the same message in both) and
-    are new. A lint either report did not run (skipped or unreadable) is
-    listed apart, never counted as cleared."""
+    are new. A lint either report did not run (skipped or unreadable), and a
+    lint that reads no document (DOCUMENT_INDEPENDENT_LINTS: the re-run has no
+    prompt logs, so llm_fallback_served's prompt-log findings would read as
+    cleared), is listed apart, never counted as cleared."""
+    from unified_pipeline.run_doctor import DOCUMENT_INDEPENDENT_LINTS
+
     findings = [p.get("findings") if isinstance(p.get("findings"), list) else []
                 for p in (delivered, corrected)]
-    not_run = sorted({f["lint"] for fs in findings for f in fs if f.get("status", STATUS_RAN) != STATUS_RAN})
+    not_run = sorted({f["lint"] for fs in findings for f in fs
+                      if f.get("status", STATUS_RAN) != STATUS_RAN or f["lint"] in DOCUMENT_INDEPENDENT_LINTS})
     by_message: list[Counter[tuple[str, str | None, str]]] = []
     for fs in findings:
         by_message.append(Counter(
