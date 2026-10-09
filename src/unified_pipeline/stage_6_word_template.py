@@ -284,6 +284,48 @@ from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 
 
 
+# ---- geographic scope of an R / Q2 entry (#1579) ----
+# The scopes an entry files under, and the answer when nothing settles it.
+GEO_SCOPES = ('Regional', 'National', 'International')
+GEO_SCOPE_DEFAULT = 'National'
+# The named-reach step's answer when the activity names no reach of its own.
+NO_NAMED_REACH = 'none'
+# How much of the record's own text the named-reach step sees.
+NAMED_REACH_TEXT_CHARS = 300
+
+NAMED_REACH_SYSTEM_PROMPT = (
+    "You read which reach an academic activity's own name states. Return only valid JSON.")
+# Step one of the scope decision (#1579 item 4): a body or meeting that names
+# its reach files there, wherever it met. A state rule is the owner's own state
+# only, and a line that names no reach answers "none", so the distance prompt
+# below decides it exactly as before (YUYVIG A/B, 2026-10-08).
+NAMED_REACH_PROMPT = """Does this academic activity name its own reach? Answer from the body or meeting the text names, not from where it was held.
+
+**CV Owner's Home State/Province and Country**: {owner_home}
+**CV Owner's Institution(s)**: {owner_institutions}
+
+**Activity Location/Organization**: {activity}
+**Activity Text**: {text}
+
+**Answer**:
+- "International": an international or world body, or a meeting whose own name says International or World.
+- "National": a national association, society or college, or its national meeting; a federal agency (NIH, NSF, FDA, CDC, VA, ...) or one of its panels, boards or study sections.
+- "Regional": a body of the owner's own state or province ({owner_state}), or of a county, city or town in it; a local school or community group in the owner's area.
+- "none": anything else. That includes a body of a different state or province from the owner's (or any state body when the owner's state is Unknown); a university, hospital, department, company or foundation; grand rounds, a seminar or a lecture at an institution; and a line that names no body or meeting at all (e.g. "Board of Directors, 2008-2009", "Awards Committee").
+
+Return ONLY a JSON object: {{"reach": "International" | "National" | "Regional" | "none"}}"""
+
+
+class ScopeActivity(NamedTuple):
+    """What the scope steps see of one R / Q2 record and its owner."""
+    location: str                  # the record's organization, else its location, else its text
+    text: str                      # the record's own text (`fan_out.record_text`)
+    owner_institutions: list[str]  # "Institution, City, State" per owner affiliation
+    metro_area: str
+    owner_state: str
+    owner_country: str
+
+
 # XML namespaces for Word documents
 WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
@@ -1334,6 +1376,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
         self._geographic_scope_cache = {}
+        # Memoizes _named_reach's LLM calls, keyed on (activity, its text,
+        # owner state, owner institutions) (#1579).
+        self._named_reach_cache: dict[tuple[str, ...], str | None] = {}
 
         # Statistics
         # Tables already cleared this render, by element id. Guards against one
@@ -2227,63 +2272,96 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def _classify_activity_scope(self, entry: dict) -> str:
         """Classify one activity's geographic scope as Regional, National, or International.
 
-        Uses LLM (gpt-5.1) to intelligently determine if an activity is in the same
-        metropolitan area as the CV owner's institution(s), leveraging the model's
-        geographic knowledge.
-
-        Args:
-            entry: Entry dict with text and extracted_fields
-
-        Returns:
-            'Regional', 'National', or 'International'
+        Two LLM steps. A body or meeting that names its own reach files there
+        (`_named_reach`, #1579 item 4). Otherwise the activity is classified by
+        its distance from the owner's institution(s) (`_distance_scope`), the
+        prompt stage 6 has always used. Either step failing leaves the entry
+        National, warned and counted (#547).
         """
-        if not self.cv_owner_location:
-            return 'National'  # Default if no location context
+        activity = self._scope_activity(entry)
+        if activity is None:
+            return GEO_SCOPE_DEFAULT
+        try:
+            reach = self._named_reach(activity)
+            return reach if reach is not None else self._distance_scope(activity)
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
+        except Exception:
+            # Never gated on verbose (#547): production runs are not verbose,
+            # and an LLM outage would otherwise refile every presentation as
+            # National with no record. The default itself is kept.
+            logger.warning("Geographic scope classification failed; "
+                           "defaulting to National", exc_info=True)
+            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
+            return GEO_SCOPE_DEFAULT
 
-        # Extract activity location/organization from entry
+    def _scope_activity(self, entry: dict) -> ScopeActivity | None:
+        """What the scope steps see of `entry`, or None when there is no owner
+        location or nothing to classify (the entry then files National)."""
+        if not self.cv_owner_location:
+            return None
         fields = entry.get('extracted_fields', {}) or {}
         entry_location = fields.get('location', '') or fields.get('city', '') or ''
         entry_org = fields.get('organization', '') or fields.get('institution', '') or ''
         # A fanned-out record's own text, not its parent's (`fan_out.record_text`).
         entry_text = record_text(entry)
+        location = entry_org or entry_location or entry_text[:200]
+        if not location.strip():
+            return None
 
-        # Build a location string for the activity
-        activity_location = entry_org or entry_location or entry_text[:200]
-        if not activity_location.strip():
-            return 'National'  # Can't classify without location info
-
-        # Get CV owner's institutions
         owner_institutions = []
         primary = self.cv_owner_location.get('primary_location', {})
-        if primary.get('institution'):
-            inst = primary.get('institution')
-            city = primary.get('city', '')
-            state = primary.get('state', '')
-            owner_institutions.append(f"{inst}, {city}, {state}" if city else inst)
-
-        # Add all affiliations
-        for loc in self.cv_owner_location.get('locations', []):
+        for loc in [primary, *self.cv_owner_location.get('locations', [])]:
             if loc.get('institution'):
                 inst = loc.get('institution')
                 city = loc.get('city', '')
-                state = loc.get('state', '')
-                loc_str = f"{inst}, {city}, {state}" if city else inst
+                loc_str = f"{inst}, {city}, {loc.get('state', '')}" if city else inst
                 if loc_str not in owner_institutions:
                     owner_institutions.append(loc_str)
-
-        metro_area = self.cv_owner_location.get('metro_area', '')
-
         if not owner_institutions:
-            return 'National'
+            return None
+        return ScopeActivity(location=location, text=entry_text, owner_institutions=owner_institutions,
+                             metro_area=self.cv_owner_location.get('metro_area', ''),
+                             owner_state=primary.get('state', '') or '',
+                             owner_country=primary.get('country', '') or '')
 
+    def _named_reach(self, activity: ScopeActivity) -> str | None:
+        """The scope the activity's own body or meeting names (a national
+        society, a federal panel, the owner's own state's agency), or None
+        when it names none (#1579 item 4)."""
+        text = activity.text[:NAMED_REACH_TEXT_CHARS]
+        cache_key = (activity.location[:100], text, activity.owner_state, *activity.owner_institutions[:2])
+        if cache_key in self._named_reach_cache:
+            return self._named_reach_cache[cache_key]
+        owner_state = activity.owner_state or 'Unknown'
+        prompt = NAMED_REACH_PROMPT.format(
+            owner_home=f"{owner_state}, {activity.owner_country or 'Unknown'}",
+            owner_institutions='; '.join(activity.owner_institutions),
+            activity=activity.location, text=text, owner_state=owner_state)
+        llm_result = call_llm(
+            stage="stage_6",
+            messages=[{"role": "system", "content": NAMED_REACH_SYSTEM_PROMPT},
+                      {"role": "user", "content": prompt}],
+            temperature=0.0,
+            response_format={"type": "json_object"})
+        self.llm_usage.add(llm_result)
+        reach = json.loads(llm_result["content"]).get('reach')
+        named = reach if reach in GEO_SCOPES else None
+        self._named_reach_cache[cache_key] = named
+        return named
+
+    def _distance_scope(self, activity: ScopeActivity) -> str:
+        """The activity's scope by its distance from the owner's institution(s):
+        same metro area Regional, same country National, abroad International."""
+        owner_institutions = activity.owner_institutions
+        activity_location = activity.location
+        metro_area = activity.metro_area
         # Create cache key to avoid repeated LLM calls for same location
         cache_key = f"{activity_location[:100]}|{','.join(owner_institutions[:2])}"
         if cache_key in self._geographic_scope_cache:
             return self._geographic_scope_cache[cache_key]
 
-        # Use LLM to classify
-        try:
-            prompt = f"""Classify the geographic scope of this academic activity relative to the CV owner's institution(s).
+        prompt = f"""Classify the geographic scope of this academic activity relative to the CV owner's institution(s).
 
 **CV Owner's Institution(s)**: {'; '.join(owner_institutions)}
 **CV Owner's Metro Area**: {metro_area or 'Unknown'}
@@ -2301,40 +2379,23 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
 Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}}"""
 
-            llm_result = call_llm(
-                stage="stage_6",
-                messages=[
-                    {"role": "system", "content": "You are a geographic classification system. Use your knowledge of institution locations to classify scope. Return only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                response_format={"type": "json_object"}
-            )
-            self.llm_usage.add(llm_result)
+        llm_result = call_llm(
+            stage="stage_6",
+            messages=[
+                {"role": "system", "content": "You are a geographic classification system. Use your knowledge of institution locations to classify scope. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        self.llm_usage.add(llm_result)
 
-            result = json.loads(llm_result["content"])
-            scope = result.get('scope', 'National')
-
-            # Validate response
-            if scope not in ('Regional', 'National', 'International'):
-                scope = 'National'
-
-            # Cache the result
-            self._geographic_scope_cache[cache_key] = scope
-
-            return scope
-
-        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
-            raise
-        except Exception:
-            # Never gated on verbose (#547): production runs are not verbose,
-            # and an LLM outage would otherwise refile every presentation as
-            # National with no record. The default itself is kept.
-            logger.warning("Geographic scope classification failed; "
-                           "defaulting to National", exc_info=True)
-            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
-            return 'National'  # Default on error
-
+        result = json.loads(llm_result["content"])
+        scope = result.get('scope', GEO_SCOPE_DEFAULT)
+        if scope not in GEO_SCOPES:
+            scope = GEO_SCOPE_DEFAULT
+        self._geographic_scope_cache[cache_key] = scope
+        return scope
 
 
 
