@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
-import { getRunQuality, getRunReviewNote } from '../api/runs'
-import type { RunDoctorReport, RunQualityReport, RunReviewNote } from '../types'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, OwnerFixList, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
+import { getRunFixList, getRunQuality, getRunReviewNote } from '../api/runs'
+import type { RunDoctorReport, RunFixList, RunQualityReport, RunReviewNote } from '../types'
 
 vi.mock('../api/runs', () => ({
+  getRunFixList: vi.fn(),
   getRunQuality: vi.fn(),
   getRunReviewNote: vi.fn(),
 }))
@@ -252,6 +253,69 @@ describe('Run Doctor Fix list (#1589)', () => {
     await act(async () => { await Promise.resolve() })
     expect(screen.getByText("Nothing to fix was found. Some problems can't be checked, so read the list below too.")).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'Fix list (0)' })).toBeTruthy()
+  })
+})
+
+describe('OwnerFixList: the run owner sees the Fix list only (#1589)', () => {
+  const quote = 'Visiting Lecturer in Medicine, Northfield University, 1990-1991'
+  const FIX: RunFixList = {
+    fix_list: [{ section: 'Honors & Awards', items: [{
+      problems: [{ severity: 'WARN', title: 'Heading printed as a record', what_to_do: 'Delete the quoted row.', confidence: 'high', effort: 'quick' }],
+      quotes: [quote],
+    }] }],
+    fix_list_more: 2,
+    not_checked: ['Journal names, volumes and pages in citations.'],
+  }
+
+  afterEach(() => { cleanup(); vi.mocked(getRunFixList).mockReset(); window.location.hash = '' })
+
+  const renderOwner = async (fix: RunFixList | null = FIX) => {
+    vi.mocked(getRunFixList).mockResolvedValue(fix)
+    render(<OwnerFixList runId="ABCDEF" />)
+    await act(async () => { await Promise.resolve() })
+  }
+
+  it('shows one tab, the Fix list, with no Diagnostics and no score', async () => {
+    await renderOwner()
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Fix list (3)'])
+    const fix = within(screen.getByRole('tabpanel', { name: 'Fix list (3)' }))
+    expect(fix.getByText('Heading printed as a record')).toBeTruthy()
+    expect(fix.getByText(quote).tagName).toBe('Q')
+    expect(fix.getByText('High confidence')).toBeTruthy()
+    expect(fix.getByText('Quick fix')).toBeTruthy()
+    // The cut is named without pointing at a Diagnostics tab the owner lacks.
+    expect(fix.getByText("2 more items were found but aren't listed here.")).toBeTruthy()
+    expect(screen.queryByText(/Diagnostics/)).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Quality score' })).toBeNull()
+    expect(screen.getByText('Journal names, volumes and pages in citations.')).toBeTruthy()
+    expect(getRunQuality).not.toHaveBeenCalled()
+  })
+
+  it('stays on the Fix list when a link points at a Diagnostics row', async () => {
+    window.location.hash = '#doctor-lint-under_extraction'
+    await renderOwner()
+    expect(screen.getByRole('tabpanel', { name: 'Fix list (3)' })).toBeTruthy()
+  })
+
+  it('asks again while no report is stored, and shows the list once it is written', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(getRunFixList).mockResolvedValueOnce(null).mockResolvedValueOnce(FIX)
+      render(<OwnerFixList runId="ABCDEF" />)
+      await flush()
+      expect(screen.getByText('No Run Doctor report is stored for this run.')).toBeTruthy()
+      await tick()
+      expect(getRunFixList).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole('tab', { name: 'Fix list (3)' })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says when no Run Doctor report is stored', async () => {
+    await renderOwner(null)
+    expect(screen.getByText('No Run Doctor report is stored for this run.')).toBeTruthy()
+    expect(screen.queryByRole('tab')).toBeNull()
   })
 })
 

@@ -703,6 +703,54 @@ def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mo
     assert client.get("/api/run/ADM001/review-note").status_code == 200
 
 
+# The run-quality report's developer-facing keys: none may reach the owner (#1589).
+_DIAGNOSTICS_KEYS = {"findings", "counts", "fix_list_held_back", "not_run", "score", "band",
+                     "cap", "cap_lint", "dimensions", "gates_fired", "doctor"}
+
+
+def test_fix_list_gives_the_owner_the_fix_list_and_no_diagnostics(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["alice"])  # alice owns ADM001
+
+    resp = client.get("/api/run/ADM001/fix-list")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"fix_list", "fix_list_more", "not_checked"}
+    assert not _DIAGNOSTICS_KEYS & set(body)
+    assert [p["title"] for g in body["fix_list"] for i in g["items"] for p in i["problems"]] == [
+        "Owner name not found"]
+    assert body["not_checked"]
+    # No lint key anywhere in the payload, nor the score.
+    assert "owner_contact_missing" not in resp.text and "table_shape" not in resp.text
+    assert '"totalScore"' not in resp.text
+
+
+def test_fix_list_is_null_when_no_doctor_report_was_stored(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, None)
+    _auth(client, users["alice"])
+    resp = client.get("/api/run/ADM001/fix-list")
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_fix_list_refuses_another_member_and_stays_open_to_staff_and_admins(
+        client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["bob"])  # bob does not own ADM001
+    assert client.get("/api/run/ADM001/fix-list").status_code == 403
+    _auth(client, _staff(db))
+    assert client.get("/api/run/ADM001/fix-list").status_code == 200
+    # Staff keep the full report, Diagnostics and score included.
+    assert client.get("/api/run/ADM001/run-quality").json()["doctor"]["findings"]
+    _auth(client, users["admin"])
+    assert client.get("/api/run/ADM001/fix-list").status_code == 200
+    assert client.get("/api/run/NOSUCH/fix-list").status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # #1114: batch_id on every /runs row, and the batch_id filter.
 # ---------------------------------------------------------------------------

@@ -54,6 +54,8 @@ export const runRoutes = {
   start: (id: string) => `/api/run/${seg(id)}/start` as const,
   /** GET /api/run/:id/run-quality  (admin: score breakdown + run doctor) */
   quality: (id: string) => `/api/run/${seg(id)}/run-quality` as const,
+  /** GET /api/run/:id/fix-list  (owner, admin or staff: the Fix list alone, #1589) */
+  fixList: (id: string) => `/api/run/${seg(id)}/fix-list` as const,
   /** GET /api/run/:id/review-note  (owner or admin: {needs_cleanup, scored}) */
   reviewNote: (id: string) => `/api/run/${seg(id)}/review-note` as const,
   /** GET /api/runs?offset=:offset&limit=:limit[&:extra]  (extra = pre-built

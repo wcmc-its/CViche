@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isFinalDocx, visibleOutputFiles } from './OutputFiles'
+import { finalDocuments, isFinalDocx, visibleOutputFiles } from './OutputFiles'
 
 const STEP = {
   output_files: JSON.stringify([
@@ -26,5 +26,16 @@ describe('isFinalDocx', () => {
   it('is the finished document, never its review copy, whatever the order', () => {
     const files = ['/o/ABC_wcm_review.docx', '/o/ABC_wcm.docx']
     expect(files.find(isFinalDocx)).toBe('/o/ABC_wcm.docx')
+  })
+})
+
+describe('finalDocuments', () => {
+  it('names the document and its review copy by base name (#1589)', () => {
+    expect(finalDocuments([{ output_files: undefined }, STEP])).toEqual({ docx: 'ABC_wcm.docx', review: 'ABC_wcm_review.docx' })
+  })
+
+  it('gives no review copy when none was written, and nothing before the document exists', () => {
+    expect(finalDocuments([{ output_files: JSON.stringify(['/o/ABC_wcm.docx']) }])).toEqual({ docx: 'ABC_wcm.docx', review: null })
+    expect(finalDocuments([{ output_files: 'not json' }])).toBeNull()
   })
 })

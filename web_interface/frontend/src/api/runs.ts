@@ -3,7 +3,7 @@ import type { ApiError } from './client'
 import { runRoutes } from './routes'
 import type {
   RunStatus, PaginatedRuns, FeedbackStatus, RunListParams, RunFilterOptions,
-  RunQualityReport, RunReviewNote, StatusFilterCounts,
+  RunFixList, RunQualityReport, RunReviewNote, StatusFilterCounts,
 } from '../types'
 
 export async function getRunStatus(runId: string): Promise<RunStatus> {
@@ -113,6 +113,12 @@ export async function getCapacity(): Promise<Capacity> {
  *  is null when its artifact was never stored. */
 export async function getRunQuality(runId: string): Promise<RunQualityReport> {
   return api.get<RunQualityReport>(runRoutes.quality(runId))
+}
+
+/** Run owner, admin or staff: the Run Doctor's Fix list alone (#1589). Null
+ *  when no doctor report was stored. */
+export async function getRunFixList(runId: string): Promise<RunFixList | null> {
+  return api.get<RunFixList | null>(runRoutes.fixList(runId))
 }
 
 /** Run owner or admin: whether the run may need cleanup. Never the score. */

@@ -21,6 +21,7 @@ from app.schemas import (
     QualityDimension,
     QualityGate,
     RunDoctorReport,
+    RunFixList,
     RunQualityReport,
 )
 from app.services import quality_score_service as qss
@@ -884,6 +885,17 @@ def summarize_doctor(payload: object, cap_lint: str | None = None,
         findings=groups, not_run=not_run,
         fix_list=fix_list, fix_list_held_back=held_back, fix_list_more=more,
         not_checked=[spot.sentence for spot in blind_spots()])
+
+
+def build_owner_fix_list(doctor_raw: object) -> RunFixList | None:
+    """The Fix list and not-checked list alone, for the run's owner (#1589);
+    None when no doctor report was stored."""
+    doctor = summarize_doctor(doctor_raw)
+    if doctor is None:
+        return None
+    return RunFixList(
+        fix_list=doctor.fix_list, fix_list_more=doctor.fix_list_more,
+        not_checked=doctor.not_checked)
 
 
 def doctor_lint_for_cap(lint: str | None, doctor_raw: object) -> str | None:
