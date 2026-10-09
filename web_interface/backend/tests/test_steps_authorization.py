@@ -194,10 +194,23 @@ class TestDataFileAuthorization:
         resp = client.get(f"/api/run/{run.id}/data/stage1a.json")
         assert resp.status_code == 403
 
-    def test_owner_cannot_download_the_review_copy(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
-        """#1388: the doctor's findings as Word comments are staff-only, like the run page's."""
+    def test_owner_can_download_the_review_copy(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
+        """#1591: the run owner gets the review copy, like the finished document."""
         user, run = _user_and_run(db, suffix="-data-review-owner")
         _auth(client, user)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "DOC_wcm_review.docx")
+        resp = client.get(f"/api/run/{run.id}/data/DOC_wcm_review.docx")
+        assert resp.status_code == 200
+
+    def test_non_owner_member_cannot_download_the_review_copy(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path
+    ):
+        """#1591: opening the review copy to owners goes through check_run_access,
+        so another member still cannot read it."""
+        _, run = _user_and_run(db, suffix="-data-review-o2")
+        other, _ = _user_and_run(db, suffix="-data-review-other")
+        _auth(client, other)
         monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
         _seed_local_file(monkeypatch, tmp_path, run.id, "DOC_wcm_review.docx")
         resp = client.get(f"/api/run/{run.id}/data/DOC_wcm_review.docx")
