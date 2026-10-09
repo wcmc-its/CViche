@@ -72,6 +72,7 @@ from unified_pipeline.stage4.extraction import (
     calculate_unextracted_content,
 )
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+from unified_pipeline.stage6 import supplementary
 from unified_pipeline.stage6.dedup import (  # noqa: F401
     _STOP_WORDS,
     DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
@@ -1259,7 +1260,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
                  recover_unrendered_records: bool = True,
-                 llm_usage: LlmUsage | None = None):
+                 llm_usage: LlmUsage | None = None,
+                 supplementary_subpoints: bool = False):
         # Priced result of every call_llm this render makes (geographic scope,
         # appendix reclassification). The caller passes its own to read the
         # total back; run_stage6 returns a path, so there is no other channel
@@ -1290,6 +1292,16 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # surface anywhere in the document (the structured-fields-only render
         # paths keep the extracted record and drop the remainder).
         self.recover_unrendered_records = recover_unrendered_records
+
+        # #1205: an entry's prose no section renders, written under it as a
+        # tracked deletion (stage6/supplementary.py). Off by default; a
+        # deletion means nothing without track changes, so it also needs
+        # emit_track_changes.
+        self.supplementary_subpoints = supplementary_subpoints
+        # Each written sub-point with its line, for the #221 recovery, and
+        # the entries it was written for, which the overflow pass skips.
+        self._subpoint_lines: list[str] = []
+        self._subpoint_entry_ids: set[int] = set()
 
         # CV owner location context for geographic scope classification
         self.cv_owner_location = None
@@ -1986,8 +1998,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             written_appendix_entries = self._render_section(
                 'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries, cv_owner)) or []
 
-        # Route content-overflow entries as tracked-change bullets
-        self._route_overflow_entries()
+        # #1205 sub-points, then content-overflow entries as tracked-change bullets
+        self._place_unrendered_prose(pre_dedup_entries_by_code)
 
         # Reconsider appendix entries (reclassify segments to other sections)
         # then recover unrendered records (#221, after reconsider so its
@@ -2965,8 +2977,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         for entry, para, taxonomy_code in self._overflow_entries:
             original_text = entry.get('text', '').strip()
-            if not original_text:
-                continue
+            if not original_text or id(entry) in self._subpoint_entry_ids:
+                continue  # #1205: a sub-point already carries its prose
 
             # Get coverage for the comment
             extraction_coverage = rendered_extraction_coverage(entry)
@@ -3488,6 +3500,60 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
+    def _place_unrendered_prose(self, entries_by_code: dict[str, list[dict]]) -> None:
+        """#1205: tracked-deleted sub-points first, then the content-overflow
+        routing, which skips an entry a sub-point now carries, so its prose is
+        not re-emitted whole as a blue bullet or into the Appendix. The #221
+        recovery after this reads the sub-points too (`_subpoint_lines`)."""
+        self._add_supplementary_subpoints(entries_by_code)
+        self._route_overflow_entries()
+
+    def _add_supplementary_subpoints(self, entries_by_code: dict[str, list[dict]]) -> None:
+        """#1205: write each `SUBPOINT_CODES` entry's provably-unrendered prose
+        under its rendered line as a tracked deletion (stage6/supplementary.py).
+        Skipped unless `supplementary_subpoints` and `emit_track_changes` are
+        both on: with track changes off a deletion is already accepted."""
+        self._subpoint_lines = []
+        self._subpoint_entry_ids = set()
+        if not (self.supplementary_subpoints and self.emit_track_changes):
+            return
+        haystack = supplementary.rendered_haystack(self._rendered_output_lines(), self.doc)
+        appendix_idx = self._find_header_paragraph("T. APPENDIX")
+        appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
+        candidates = list(supplementary.anchor_candidates(self.doc, appendix))
+        planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
+                                               self._subpoint_section_spans())
+        revision = supplementary.Revision(
+            self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+        for subpoint in planned:
+            subpoint = subpoint._replace(paragraphs=tuple(
+                self._sanitize_run_text(text) for text in subpoint.paragraphs))
+            supplementary.write_subpoint(subpoint, revision)
+            self._subpoint_lines.append(subpoint.as_rendered_line())
+            self._subpoint_entry_ids.add(subpoint.entry_id)
+        self._revision_id = revision.next_id
+        self.stats['supplementary_subpoints'] = len(planned)
+        self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)
+
+    def _subpoint_section_spans(self) -> dict[str, supplementary.SectionSpan]:
+        """Per `SUBPOINT_CODES` code, the body span of its WCM section: from the
+        heading `_get_wcm_section_header` names to the next major heading
+        (`_find_section_end_paragraph_idx`). A code whose heading is not in the
+        document has no span, and its prose is not placed."""
+        body = list(self.doc.element.body.iterchildren())
+        position = {id(element): i for i, element in enumerate(body)}
+        paragraphs = self.doc.paragraphs
+        spans = {}
+        for code in sorted(supplementary.SUBPOINT_CODES):
+            header_idx = self._find_header_paragraph(self._get_wcm_section_header(code))
+            if header_idx is None:
+                continue
+            end_idx = self._find_section_end_paragraph_idx(header_idx)
+            spans[code] = supplementary.SectionSpan(
+                position[id(paragraphs[header_idx]._p)],
+                position[id(paragraphs[end_idx]._p)] if end_idx is not None else None)
+        return spans
+
     def _recover_appendix_lines(self, written: list[UnmappedEntry],
                                 pre_dedup_entries_by_code: dict[str, list[dict]],
                                 cv_owner: Mapping[str, object] | None) -> list[RecoveredLine]:
@@ -3666,7 +3732,8 @@ Now analyze the text above:"""
         lets the A-orphan recovery recognise the owner's own running header
         (#1221).
         """
-        out_lines = self._rendered_output_lines()
+        # #1205: a sub-point is the entry's prose, written under it.
+        out_lines = self._rendered_output_lines() + self._subpoint_lines
         haystack = "\x00".join(_squash(line) for line in out_lines)
 
         appendix_batch = []   # (text, code, coverage) for _add_remaining_to_appendix
@@ -4449,7 +4516,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                original_doc_path: str | None = None,
                discover_original_doc: bool = True,
                llm_usage: LlmUsage | None = None,
-               repair_protected_data: bool = False) -> str:
+               repair_protected_data: bool = False,
+               supplementary_subpoints: bool = False) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -4525,6 +4593,9 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             data the doctor's `protected_data_in_output` lint still finds in the
             document and write `<uid>_repairs.json` beside it (#1389; default
             False). Both drivers pass it from CVICHE_RUN_REPAIR.
+        supplementary_subpoints: Write each entry's unrendered prose under
+            it as a tracked deletion (#1205, stage6/supplementary.py; default
+            False). Both drivers pass it from CVICHE_SUPPLEMENTARY_SUBPOINTS.
 
     Returns:
         Path to generated document
@@ -4536,6 +4607,7 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
         llm_usage=llm_usage,
+        supplementary_subpoints=supplementary_subpoints,
     )
     output = generator.generate(input_path, output_path, original_doc_path=original_doc_path,
                                 discover_original_doc=discover_original_doc)

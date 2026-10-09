@@ -90,6 +90,7 @@ from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
     get_cv_hierarchy_chunked,
 )
+from unified_pipeline.stage6.supplementary import SUBPOINT_FLAG_ENV, subpoints_enabled
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
 from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
@@ -951,7 +952,9 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
                              # #1389: off unless "1". The env var only: the web driver's
                              # get_config also reads auth_config.yaml's "repair" section,
                              # and that loader is backend code this CLI does not import.
-                             repair_protected_data=repair_flag_on(os.environ.get(REPAIR_FLAG_ENV)))
+                             repair_protected_data=repair_flag_on(os.environ.get(REPAIR_FLAG_ENV)),
+                             # #1205: off unless "1", read from the env var as above.
+                             supplementary_subpoints=subpoints_enabled(os.environ.get(SUBPOINT_FLAG_ENV)))
     logger.info("")
     logger.info("Stage 6 Complete")
     logger.info("  Output: %s", output_path)
