@@ -150,9 +150,11 @@ class SubPoint(NamedTuple):
         return ' '.join((self.anchor.text, *self.paragraphs))
 
 
-def subpoints_enabled(value: str | None) -> bool:
-    """`SUBPOINT_FLAG_ENV`'s value read as the switch: on only for "1"."""
-    return (value or '').strip() == '1'
+def subpoints_enabled(value: object) -> bool:
+    """`SUBPOINT_FLAG_ENV`'s value read as the switch: on only for "1". A
+    config file can hand it an unquoted YAML int or bool, so it is read as
+    text first."""
+    return str(value if value is not None else '').strip() == '1'
 
 
 def _tokens(text: str) -> set[str]:
@@ -317,18 +319,23 @@ class Revision:
         return elem
 
 
-def _deleted_paragraph(text: str, revision: Revision,
-                       ppr: BaseOxmlElement | None = None) -> BaseOxmlElement:
-    """A w:p whose paragraph mark and one run are tracked deletions, so
-    accepting it removes the whole paragraph."""
-    p = OxmlElement('w:p')
+def _deleted_mark_ppr(ppr: BaseOxmlElement | None, revision: Revision) -> BaseOxmlElement:
+    """A copy of `ppr` (or a bare w:pPr) whose paragraph mark is a tracked deletion."""
     ppr = copy.deepcopy(ppr) if ppr is not None else OxmlElement('w:pPr')
     for old in ppr.findall(qn('w:rPr')):
         ppr.remove(old)
     mark = OxmlElement('w:rPr')
     mark.append(revision.element('w:del'))
     ppr.append(mark)
-    p.append(ppr)
+    return ppr
+
+
+def _deleted_paragraph(text: str, revision: Revision,
+                       ppr: BaseOxmlElement | None = None) -> BaseOxmlElement:
+    """A w:p whose paragraph mark and one run are tracked deletions, so
+    accepting it removes the whole paragraph."""
+    p = OxmlElement('w:p')
+    p.append(_deleted_mark_ppr(ppr, revision))
     deletion = revision.element('w:del')
     run = OxmlElement('w:r')
     rpr = OxmlElement('w:rPr')
@@ -350,17 +357,18 @@ def _deleted_paragraph(text: str, revision: Revision,
 
 
 def _is_subpoint(elem: BaseOxmlElement | None) -> bool:
-    """A paragraph or row this module wrote: its mark or row is deleted by
-    `SUBPOINT_AUTHOR`."""
+    """A paragraph or row this module wrote: its mark, row or run is deleted
+    by `SUBPOINT_AUTHOR`."""
     if elem is None:
         return False
     if elem.tag == qn('w:p'):
-        mark = elem.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}")
+        marks = [elem.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}"), elem.find(qn('w:del'))]
     elif elem.tag == qn('w:tr'):
-        mark = elem.find(f"{qn('w:trPr')}/{qn('w:del')}")
+        marks = [elem.find(f"{qn('w:trPr')}/{qn('w:del')}")]
     else:
         return False
-    return mark is not None and mark.get(qn('w:author')) == SUBPOINT_AUTHOR
+    return any(mark is not None and mark.get(qn('w:author')) == SUBPOINT_AUTHOR
+               for mark in marks)
 
 
 def _after_subpoints(elem: BaseOxmlElement) -> BaseOxmlElement:
@@ -371,20 +379,42 @@ def _after_subpoints(elem: BaseOxmlElement) -> BaseOxmlElement:
     return elem
 
 
+def _has_deleted_mark(p: BaseOxmlElement) -> bool:
+    return p.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+
+
+def _keep_mark(p: BaseOxmlElement) -> None:
+    """Undelete `p`'s mark and drop its numbering. Accepting a deleted mark
+    merges the paragraph into the next one; with a table or the section
+    properties next there is none, so the last sub-point keeps its mark and
+    accepting leaves one empty plain paragraph, never an empty bullet."""
+    ppr = p.find(qn('w:pPr'))
+    for tag in ('w:rPr', 'w:numPr'):
+        for old in ppr.findall(qn(tag)):
+            ppr.remove(old)
+
+
 def _insert_after_paragraph(anchor: Paragraph, texts: tuple[str, ...],
                             revision: Revision) -> None:
     """Deleted paragraphs after `anchor`, with its paragraph properties; a
-    list paragraph goes one level deeper, so it reads as a sub-bullet."""
+    list paragraph goes one level deeper, so it reads as a sub-bullet. The
+    last one keeps its mark when no paragraph follows it (`_keep_mark`)."""
     ppr = copy.deepcopy(anchor._p.pPr) if anchor._p.pPr is not None else None
     if ppr is not None:
         level = ppr.find(f"{qn('w:numPr')}/{qn('w:ilvl')}")
         if level is not None:
             level.set(qn('w:val'), str(int(level.get(qn('w:val'), '0')) + 1))
     after = _after_subpoints(anchor._p)
+    if after is not anchor._p and not _has_deleted_mark(after):
+        # An earlier sub-point kept its mark; one now follows it, so delete it again.
+        after.replace(after.find(qn('w:pPr')), _deleted_mark_ppr(ppr, revision))
     for text in texts:
         p = _deleted_paragraph(text, revision, ppr)
         after.addnext(p)
         after = p
+    following = after.getnext()
+    if following is None or following.tag != qn('w:p'):
+        _keep_mark(after)
 
 
 def _first_cell_text(row: BaseOxmlElement) -> str:

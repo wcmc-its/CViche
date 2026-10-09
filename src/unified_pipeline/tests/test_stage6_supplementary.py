@@ -53,7 +53,8 @@ def _deleted_marks(element):
 # --- the switch ---------------------------------------------------------------
 
 @pytest.mark.parametrize("value, on", [("1", True), (" 1 ", True), ("0", False), ("", False),
-                                       (None, False), ("true", False), ("yes", False)])
+                                       (None, False), ("true", False), ("yes", False),
+                                       (1, True), (0, False), (True, False), (False, False)])
 def test_the_flag_is_on_only_for_1(value, on):
     assert sp.subpoints_enabled(value) is on
 
@@ -303,6 +304,51 @@ def test_a_second_sub_point_under_one_line_follows_the_first():
     sp.write_subpoint(_subpoint(anchor, OTHER_PROSE), revision)
     assert _reject_all_texts(doc.element.body)[:4] == [
         "Course Director, Example Course", PROSE, OTHER_PROSE, "Next line"]
+
+
+def _followed_by(doc, neighbour):
+    """A bullet anchor with a table or the section properties straight after it."""
+    anchor = _numbered_paragraph(doc, "Course Director, Example Course")
+    if neighbour == "table":
+        table = doc.add_table(rows=1, cols=1)
+        table.rows[0].cells[0].text = "Table cell text"
+        doc.add_paragraph("After the table")
+    return anchor
+
+
+@pytest.mark.parametrize("neighbour", ["table", "sectPr"])
+def test_a_sub_point_before_a_table_or_the_section_end_keeps_its_last_mark(neighbour):
+    doc = Document()
+    anchor = _followed_by(doc, neighbour)
+    before = _texts(doc.element.body)
+    assert anchor._p.getnext().tag == qn("w:tbl" if neighbour == "table" else "w:sectPr")
+
+    sp.write_subpoint(_subpoint(anchor, PROSE, OTHER_PROSE), sp.Revision(0, _DATE))
+
+    first, last = anchor._p.getnext(), anchor._p.getnext().getnext()
+    assert first.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+    assert last.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is None
+    assert last.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+    assert _reject_all_texts(doc.element.body)[1:3] == [PROSE, OTHER_PROSE]
+    accepted = _accept_all(doc.element.body)
+    # One empty plain paragraph is left, not an empty bullet, and the table text is its own.
+    assert _texts(accepted) == before[:1] + [""] + before[1:]
+    assert accepted.findall(qn("w:p"))[1].find(f"{qn('w:pPr')}/{qn('w:numPr')}") is None
+
+
+def test_a_second_sub_point_before_a_table_deletes_the_first_ones_kept_mark():
+    doc = Document()
+    anchor = _followed_by(doc, "table")
+    before = _texts(doc.element.body)
+    revision = sp.Revision(0, _DATE)
+    sp.write_subpoint(_subpoint(anchor, PROSE), revision)
+    sp.write_subpoint(_subpoint(anchor, OTHER_PROSE), revision)
+    assert _reject_all_texts(doc.element.body)[:3] == [
+        "Course Director, Example Course", PROSE, OTHER_PROSE]
+    first = anchor._p.getnext()
+    assert first.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:del')}") is not None
+    assert first.find(f"{qn('w:pPr')}/{qn('w:numPr')}/{qn('w:ilvl')}").get(qn("w:val")) == "1"
+    assert _texts(_accept_all(doc.element.body)) == before[:1] + [""] + before[1:]
 
 
 def _appointments_table(doc):

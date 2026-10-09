@@ -204,6 +204,25 @@ def test_stage_6_writes_sub_points_only_under_the_flag(monkeypatch, tmp_path, db
     assert captured["supplementary_subpoints"] is subpoints
 
 
+@pytest.mark.parametrize("value, subpoints", [(1, True), (0, False), (True, False), (None, False)])
+def test_the_sub_point_switch_reads_an_unquoted_yaml_value(monkeypatch, tmp_path, db, value, subpoints):
+    """#1205: a config file's unquoted `1` or `true` reaches the switch as an
+    int or bool, not text; it is read, not raised on."""
+    from app.pipeline import orchestrator as orch
+
+    real_get_config = orch.get_config
+
+    def fake_get_config(section, key, default=None):
+        if key == "CVICHE_SUPPLEMENTARY_SUBPOINTS":
+            return value, "yaml"
+        return real_get_config(section, key, default=default)
+
+    monkeypatch.setattr(orch, "get_config", fake_get_config)
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE6YAML")
+
+    assert o._stage6_switches()["supplementary_subpoints"] is subpoints
+
+
 # -- #1177: every stage that calls the LLM adds its cost to the run ---------
 
 
