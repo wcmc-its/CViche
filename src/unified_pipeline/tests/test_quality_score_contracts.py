@@ -1114,9 +1114,10 @@ def test_stage4_group_failures_ignores_a_per_entry_miss_in_a_successful_call():
 
 
 def _ledger(**precisions):
-    """A stand-in for doctor/PRECISION.md: lint -> (true positives, judged)."""
+    """A stand-in for the gate's ledger (`precision.load_gate_ledger`):
+    lint -> (true positives, judged), one lint-level row each."""
     from unified_pipeline.doctor.precision import LintPrecision
-    return lambda: {lint: LintPrecision(lint, tp, judged, "test")
+    return lambda: {(lint, None): LintPrecision(lint, tp, judged, "test")
                     for lint, (tp, judged) in precisions.items()}
 
 
@@ -1132,7 +1133,7 @@ def test_every_doctor_lint_states_its_fix_minutes():
 
 
 def test_a_findings_cost_is_precision_times_severity_times_fix_minutes(monkeypatch):
-    monkeypatch.setattr(qs, "load_ledger", _ledger(multi_record_coverage=(3, 4)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(3, 4)))
     costs = qs.estimate_cleanup([_finding("multi_record_coverage")] * 2)
     assert [(c.lint, c.findings, c.precision) for c in costs] == [("multi_record_coverage", 2, 0.75)]
     assert costs[0].minutes == pytest.approx(2 * 0.75 * qs.FIX_MINUTES_RECORD_LOST)
@@ -1146,12 +1147,12 @@ def test_a_findings_cost_is_precision_times_severity_times_fix_minutes(monkeypat
     "not a finding",
 ])
 def test_findings_that_name_no_defect_cost_nothing(monkeypatch, finding):
-    monkeypatch.setattr(qs, "load_ledger", _ledger(multi_record_coverage=(1, 1)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(1, 1)))
     assert qs.estimate_cleanup([finding]) == []
 
 
 def test_an_error_finding_counts_like_a_warning(monkeypatch):
-    monkeypatch.setattr(qs, "load_ledger", _ledger(junk_or_header_row=(1, 1)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(junk_or_header_row=(1, 1)))
     warn, = qs.estimate_cleanup([_finding("junk_or_header_row")])
     error, = qs.estimate_cleanup([_finding("junk_or_header_row", severity="ERROR")])
     assert error.minutes == warn.minutes == pytest.approx(qs.FIX_MINUTES_DUPLICATE)
@@ -1164,7 +1165,7 @@ def test_an_unmeasured_lint_gets_the_stated_prior(monkeypatch):
     The expected minutes are literals, not derived from the constant, so a
     change to the prior has to change this test too."""
     assert 0.0 < qs.UNMEASURED_PRECISION_PRIOR < 1.0
-    monkeypatch.setattr(qs, "load_ledger", _ledger(missed_headers=(0, 0)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(missed_headers=(0, 0)))
     # One WARN each: 0.5 prior x 1.0 severity x the lint's fix minutes
     # (missed_headers 0.5, dedup_drops 1.0).
     for lint, expected_minutes in (("missed_headers", 0.25), ("dedup_drops", 0.5)):
@@ -1173,22 +1174,53 @@ def test_an_unmeasured_lint_gets_the_stated_prior(monkeypatch):
         assert cost.minutes == pytest.approx(expected_minutes), lint
 
 
+def test_a_findings_weight_is_the_row_of_its_own_shape(monkeypatch):
+    """The score reads a finding's precision as the review copy's gate does
+    (`finding_precision`): a stage-6 warning reads its shape's row, not the
+    lint pooled, and the lint's cost is the mean over its findings."""
+    from unified_pipeline.doctor.precision import STAGE6_LINT, LintPrecision
+    rows = {(STAGE6_LINT, "reroute_refused"): LintPrecision(STAGE6_LINT, 1, 1, "t", "reroute_refused"),
+            (STAGE6_LINT, "appendix_recovered"): LintPrecision(STAGE6_LINT, 1, 5, "t", "appendix_recovered")}
+    monkeypatch.setattr(qs, "load_gate_ledger", lambda: rows)
+    refused = _finding(STAGE6_LINT, message="stage 6 self-check: reroute of X refused")
+    recovered = _finding(STAGE6_LINT, message="stage 6 self-check: 2 entries recovered into the Appendix")
+    assert qs.lint_precision_weight(STAGE6_LINT, refused["message"]) == 1.0
+    assert qs.lint_precision_weight(STAGE6_LINT, recovered["message"]) == pytest.approx(0.2)
+    cost, = qs.estimate_cleanup([refused, recovered])
+    assert cost.precision == pytest.approx(0.6)
+    assert cost.minutes == pytest.approx(1.2 * qs.LINT_FIX_MINUTES[STAGE6_LINT])
+
+
+def test_the_score_weights_with_the_gates_held_out_fold():
+    """Paul, 2026-10-08: the score's weights are the gate's combined numbers,
+    YUY-HO folded in. On the real ledger, a lint whose held-out verdicts were
+    folded weighs its combined precision, not its in-sample one."""
+    from unified_pipeline.doctor.precision import load_gate_ledger, load_shape_ledger
+    in_sample, gate = load_shape_ledger(), load_gate_ledger()
+    folded = [key for key, row in gate.items()
+              if row.precision is not None and key[1] is None
+              and (key not in in_sample or in_sample[key].precision != row.precision)]
+    assert folded, "no lint-level row of the gate's ledger differs from the in-sample one"
+    for lint, _shape in folded:
+        assert qs.lint_precision_weight(lint, "") == pytest.approx(gate[(lint, None)].precision), lint
+
+
 def test_a_lint_newer_than_this_scorer_costs_the_default_minutes(monkeypatch):
-    monkeypatch.setattr(qs, "load_ledger", _ledger(brand_new_lint=(1, 1)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(brand_new_lint=(1, 1)))
     cost, = qs.estimate_cleanup([_finding("brand_new_lint")])
     assert cost.minutes == pytest.approx(qs.DEFAULT_FIX_MINUTES)
 
 
 def test_a_mostly_wrong_lint_counts_less_than_a_precise_one(monkeypatch):
     """#1595's point: year_not_in_source-like lints barely count."""
-    monkeypatch.setattr(qs, "load_ledger", _ledger(year_not_in_source=(1, 10), grant_boundary=(10, 10)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(year_not_in_source=(1, 10), grant_boundary=(10, 10)))
     sloppy, = qs.estimate_cleanup([_finding("year_not_in_source")])
     precise, = qs.estimate_cleanup([_finding("grant_boundary")])
     assert sloppy.minutes == pytest.approx(precise.minutes / 10)
 
 
 def test_a_process_finding_costs_no_cleanup(monkeypatch):
-    monkeypatch.setattr(qs, "load_ledger", _ledger(llm_fallback_served=(1, 1)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(llm_fallback_served=(1, 1)))
     cost, = qs.estimate_cleanup([_finding("llm_fallback_served")])
     assert cost.minutes == 0.0
 
@@ -1207,7 +1239,7 @@ def test_a_run_the_doctor_did_not_check_is_capped_out_of_green(tmp_path, write, 
 
 
 def test_the_penalty_rises_with_the_estimate_and_never_reaches_the_weight(tmp_path, monkeypatch):
-    monkeypatch.setattr(qs, "load_ledger", _ledger(multi_record_coverage=(1, 1)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(1, 1)))
     fractions = []
     for n in (0, 1, 5, 500):
         _write_json(tmp_path, "X_doctor.json", {"findings": [_finding("multi_record_coverage")] * n})
@@ -1222,7 +1254,7 @@ def test_the_penalty_rises_with_the_estimate_and_never_reaches_the_weight(tmp_pa
 
 def _run_with_minutes(tmp_path, minutes, monkeypatch):
     """A complete run whose doctor findings cost exactly `minutes`."""
-    monkeypatch.setattr(qs, "load_ledger", _ledger(multi_record_coverage=(1, 1)))
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(1, 1)))
     _complete_run_dir(tmp_path)
     n = round(minutes / qs.FIX_MINUTES_RECORD_LOST)
     _write_json(tmp_path, "X_doctor.json", {"findings": [_finding("multi_record_coverage")] * n})

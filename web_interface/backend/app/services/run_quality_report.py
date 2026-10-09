@@ -96,7 +96,7 @@ class RowCopy:
 # quality_score.DIMENSIONS / CAP_ONLY_GATES needs one (the contract test pins
 # that).
 _ROW_COPY_BY_SCORER = {
-    # Proposed in #1595's PR; awaiting Paul's approval. The score's one
+    # Wording approved by Paul, 2026-10-08 (#1595). The score's one
     # weighted row since #1595.
     scorer.score_doctor_findings: RowCopy(
         "Problems the checker found",
@@ -105,9 +105,9 @@ _ROW_COPY_BY_SCORER = {
         "About 3 minutes of estimated cleanup or less keeps the run at Ship. More lowers the "
         "score toward 60, never below it. A run the Run Doctor did not check is capped at 84.",
         "Work through the Run Doctor findings below, most costly first."),
-    # The next two rows' scoring sentences: proposed in #1595's PR (their
-    # points were retired; only the cap remains); the rest is Paul's
-    # 2026-10-02 wording.
+    # The next two rows' scoring sentences: approved by Paul, 2026-10-08
+    # (#1595; their points were retired, only the cap remains); the rest is
+    # Paul's 2026-10-02 wording.
     scorer.score_pipeline_errors: RowCopy(
         "Processing ran without errors",
         "Looks through the run's saved records for error messages from CViche or the AI service, "

@@ -25,9 +25,12 @@ weight w costs w * fraction points::
 
 Since #1595 the score is built from the run doctor's findings
 (``score_doctor_findings``, weight 40): each WARN or ERROR finding costs its
-lint's hand-checked precision (``doctor/PRECISION.md``) times the minutes its
-kind of defect typically takes to fix (``LINT_FIX_MINUTES``), and the
-estimated minutes set the penalty. A run with no readable doctor report was
+hand-checked precision times the minutes its kind of defect typically takes to
+fix (``LINT_FIX_MINUTES``), and the estimated minutes set the penalty. The
+precision is the one the review copy's gate reads
+(``doctor.precision.finding_precision`` over ``load_gate_ledger``): the
+``doctor/PRECISION.md`` row of the finding's own shape, with YUYVIG's held-out
+verdicts folded in for lints unchanged since dev-259. A run with no readable doctor report was
 not checked and is capped out of GREEN (``NOT_CHECKED_CAP``, #1593). The seven
 weighted dimensions the score had before (pipeline errors, owner contact,
 T-bucket share, sparse tables, raw formatting, field sparseness, duplicate
@@ -87,7 +90,7 @@ if TYPE_CHECKING:
 # run_doctor -> doctor.lints.enrichment -> quality_score` would (run_doctor.py
 # itself is never imported here).
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
-from unified_pipeline.doctor.precision import load_ledger
+from unified_pipeline.doctor.precision import finding_precision, load_gate_ledger
 from unified_pipeline.doctor.shared import (
     docx_body_blocks,
 )
@@ -891,7 +894,8 @@ LINT_FIX_MINUTES = {
     **dict.fromkeys((
         "classified_unrendered", "dead_sections", "dedup_drops", "multi_record_coverage",
         "orphaned_fragments", "section_lost", "segmentation", "segmentation_collapse",
-        "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
+        "source_line_coverage", "stage4_unplaced_items", "table_lost", "under_extraction",
+        "unrendered_records",
     ), FIX_MINUTES_RECORD_LOST),
     **dict.fromkeys((
         "bucket_status", "grant_bucket", "group_header_context", "invented_records",
@@ -899,7 +903,7 @@ LINT_FIX_MINUTES = {
         "stage6_render_warnings", "taxonomy_code_coverage", "teaching_postcheck",
     ), FIX_MINUTES_MISPLACED),
     **dict.fromkeys((
-        "citation_field_dropped", "citation_grounding", "date_cell_shape",
+        "appointment_title_overlong", "citation_field_dropped", "citation_grounding", "date_cell_shape",
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "grant_boundary",
         "implausible_year", "owner_missing_from_citation", "pubmed_title_truncated",
         "record_boundary", "role_consistency", "shattered_prose", "span_count",
@@ -929,8 +933,8 @@ DEFAULT_FIX_MINUTES = FIX_MINUTES_FIELD_WRONG
 #: WARN count was the signal that tracked defects on batch YUYVIG (#1595).
 SEVERITY_WEIGHT = {"ERROR": 1.0, "WARN": 1.0, "INFO": 0.0}
 
-#: The precision a lint is given when `doctor/PRECISION.md` records no
-#: hand-checked verdict for it: a stated prior, not a measurement. On the
+#: The precision a finding is given when the gate's ledger records no
+#: hand-checked verdict for its shape or lint: a stated prior, not a measurement. On the
 #: EBYSBC fit set the rank correlation moved by under 0.02 between 0.25 and
 #: 0.75, so the value is not load-bearing there.
 UNMEASURED_PRECISION_PRIOR = 0.5
@@ -977,14 +981,16 @@ class LintCost:
     """One lint's share of a run's estimated cleanup."""
     lint: str
     findings: int
-    precision: float
+    precision: float  # the lint's counted findings' mean precision, severity-weighted
     minutes: float
 
 
-def lint_precision_weight(lint: str) -> float:
-    """The lint's hand-checked precision from `doctor/PRECISION.md`, or
-    UNMEASURED_PRECISION_PRIOR when nothing was judged."""
-    measured = load_ledger().get(lint)
+def lint_precision_weight(lint: str, message: str) -> float:
+    """One finding's hand-checked precision, as the review copy's gate reads
+    it (#1589): `finding_precision` over `load_gate_ledger`, so the row of the
+    finding's own shape, held-out verdicts folded in. UNMEASURED_PRECISION_PRIOR
+    when nothing was judged."""
+    measured = finding_precision(lint, message, load_gate_ledger())
     if measured is None or measured.precision is None:
         return UNMEASURED_PRECISION_PRIOR
     return measured.precision
@@ -992,7 +998,7 @@ def lint_precision_weight(lint: str) -> float:
 
 def estimate_cleanup(findings: Iterable[object]) -> list[LintCost]:
     """Each lint's estimated cleanup minutes over a doctor report's findings,
-    costliest first: per finding, precision x severity weight x fix minutes.
+    costliest first: per finding, its precision x severity weight x fix minutes.
 
     A finding counts only if its lint ran and its severity is one
     SEVERITY_WEIGHT weights; anything else in the list (a malformed entry, a
@@ -1000,6 +1006,7 @@ def estimate_cleanup(findings: Iterable[object]) -> list[LintCost]:
     """
     counts: Counter[str] = Counter()
     weighted: Counter[str] = Counter()
+    trusted: Counter[str] = Counter()  # sum of precision x severity
     for finding in findings:
         if not isinstance(finding, dict) or not isinstance(finding.get("lint"), str):
             continue
@@ -1008,13 +1015,15 @@ def estimate_cleanup(findings: Iterable[object]) -> list[LintCost]:
         severity = SEVERITY_WEIGHT.get(finding.get("severity"), 0.0)
         if not severity:
             continue
-        counts[finding["lint"]] += 1
-        weighted[finding["lint"]] += severity
+        lint = finding["lint"]
+        message = finding.get("message")
+        counts[lint] += 1
+        weighted[lint] += severity
+        trusted[lint] += severity * lint_precision_weight(lint, message if isinstance(message, str) else "")
     costs = []
     for lint, n in counts.items():
-        precision = lint_precision_weight(lint)
-        minutes = precision * weighted[lint] * LINT_FIX_MINUTES.get(lint, DEFAULT_FIX_MINUTES)
-        costs.append(LintCost(lint, n, precision, minutes))
+        minutes = trusted[lint] * LINT_FIX_MINUTES.get(lint, DEFAULT_FIX_MINUTES)
+        costs.append(LintCost(lint, n, trusted[lint] / weighted[lint], minutes))
     return sorted(costs, key=lambda c: (-c.minutes, c.lint))
 
 

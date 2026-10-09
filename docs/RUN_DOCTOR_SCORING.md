@@ -34,7 +34,7 @@ The doctor and the score exist for the person reviewing a converted CV. They sho
 | 1 | **Catch what matters.** Every serious defect is flagged, on the entry where it occurs. | Share of verified HIGH defects that a finding names, by entry | 4 of 53 fully caught, 6 partly; 121 of 444 defects at any severity (27%) | Half of HIGH (approved 2026-10-08, Paul) | 19 of 53 HIGH caught; 13 of them out of sample, the other 6 from lints written from these runs |
 | 2 | **Don't waste the reviewer's time.** What the reviewer is shown is right. | Precision of findings shown to users (WARN and above, and Word comments in the review copy) | 279 of 397 WARN (70%); about 67 of 401 review-copy comments come from two lints that are mostly false positives (#1585) | 90% of what is shown (approved 2026-10-08, Paul) | 278 of 396 WARN true (70%) on the dev-259 doctor; about 282 of 338 (83%) on the current doctor, not re-judged and partly in-sample |
 | 3 | **A quiet doctor means something.** No finding never reads as "checked and fine" when the doctor couldn't check. | Every run has a doctor outcome, and every run lists what the doctor can't see | IXJMKS scored GREEN 97 with no doctor report (#1593). Runs with nothing to flag get no review copy, and no "not checked" list exists (#1589) | Every run | |
-| 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | 16 of 24 GREEN runs carry a HIGH with the #1595 score (held out); bounded by goal 1, see "Measured (#1595)" |
+| 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | 16 of 24 GREEN runs carry a HIGH with the #1595 score (YUYVIG, whose verdicts now feed the weights); bounded by goal 1, see "Measured (#1595)" |
 | 5 | **Point to the fix.** A finding sits where the problem is and shows what's wrong. | Findings anchored to the document text, quoting the source text at stake; certain fixes applied or suggested as tracked changes | Comments are anchored (#1543) but don't quote the source; no fix is applied or suggested (#1591) | Every shown finding quotes its source | |
 | 6 | **Measured, not asserted.** Every lint's precision and recall are known. | `PRECISION.md` has a held-out row for every lint that fires; labels grow from each batch autopsy and from reviewer verdicts | In-sample only (62 runs) until #1586; no reviewer verdicts (#1587) | Every lint, held-out | |
 | 7 | **Feed the pipeline.** Findings rank pipeline fixes by the cleanup they cause. | Each finding names the stage that caused it; a corpus Pareto by cause | Stage named in autopsies only, not in findings | Every finding names its stage | |
@@ -135,13 +135,17 @@ score = round(max(0, final))
 minutes of cleanup it names:
 
 ```python
-minutes  = sum(precision(lint) * severity_weight * fix_minutes(lint)  for each finding)
+minutes  = sum(precision(finding) * severity_weight * fix_minutes(lint)  for each finding)
 fraction = minutes / (minutes + 5)
 ```
 
-- **precision** is the lint's hand-checked TP / judged from the per-lint table
-  in `doctor/PRECISION.md` (the same parse `doctor/precision.py` gives the
-  Teams card). A lint with no verdicts gets `UNMEASURED_PRECISION_PRIOR`, 0.5.
+- **precision** is the finding's hand-checked TP / judged as the review copy's
+  gate reads it (#1589): `doctor.precision.finding_precision` over
+  `load_gate_ledger()`, so the `doctor/PRECISION.md` row of the finding's own
+  shape, with YUYVIG's held-out verdicts (YUY-HO) folded in for lints whose
+  code is unchanged since dev-259 (`HELD_OUT_CHANGED` lists the rest). The score
+  and the gate read the same numbers (Paul, 2026-10-08). A finding with no
+  verdicts gets `UNMEASURED_PRECISION_PRIOR`, 0.5.
 - **severity weight** is 1 for WARN and ERROR, 0 for INFO. INFO findings are not
   shown as problems.
 - **fix minutes** come from `LINT_FIX_MINUTES`, #822's strawman unit costs per
@@ -330,8 +334,17 @@ Base is origin/dev `8e29dd24` re-scored over the same artifacts.
 | Batch | Doctor | Score rank r with cost, base → #1595 | GREEN with a verified HIGH, base → #1595 |
 |---|---|---|---|
 | EBYSBC/s7ab/pilot, 62 runs (fit set) | current | -0.35 → -0.69 | 4 of 6 → 0 of 4 |
-| YUYVIG, 37 runs (held out) | dev-259 as stored, PRECISION.md as of dev-259 | -0.14 → -0.63 | 22 of 31 → 16 of 24 |
+| YUYVIG, 37 runs (held out for everything but the weights) | dev-259 as stored, gate ledger (YUY-HO folded) | -0.14 → -0.63 | 22 of 31 → 16 of 24 |
 | YUYVIG, 37 runs (lints partly written from it) | current | -0.14 → -0.67 | 22 of 31 → 15 of 24 |
+
+The first and third rows were measured with the in-sample per-lint weights,
+before the score switched to the gate's ledger. On the YUYVIG held-out row the
+switch moves 14 of 37 runs by 1 or 2 points, changes no band, and leaves the
+rank r (-0.63), GREEN with a HIGH (16 of 24) and the caps as they were. Since
+the switch, YUYVIG's own verdicts feed the precision weights, so YUYVIG is no
+longer fully held out for this score: the minutes, the prior, the GREEN line
+and the curve were still fixed before it was scored, but the weights were not.
+The next labelled batch is the clean held-out test.
 
 The held-out rank correlation passes #1595's bar (the doctor WARN count's
 +0.59). GREEN with a HIGH does not meet goal 4 (under 1 in 10), and no GREEN
@@ -343,7 +356,7 @@ which had no doctor report (#1593).
 ### Calibration caveat (read this before trusting an absolute number)
 
 The minutes are a ranking, not a stopwatch: the fix minutes are strawman
-costs, the precision weights come from batches measured before YUYVIG, and the
+costs, the precision weights include YUYVIG's own verdicts, and the
 GREEN line is fitted to one labelled set. Treat GREEN as "nothing the doctor
 reliably flags", never "human-verified correct". Refit on each labelled batch
 with `scripts/score_vs_autopsy.py`, and against correction times once #1587
