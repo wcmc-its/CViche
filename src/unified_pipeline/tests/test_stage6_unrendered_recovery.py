@@ -1582,3 +1582,126 @@ def test_sub_point_anchors_stop_at_the_appendix_heading(monkeypatch):
     monkeypatch.setattr(supplementary, "anchor_candidates", spy)
     gen._add_supplementary_subpoints({"D1": [_duty_appointment()]})
     assert seen == [appendix]
+
+
+# --- #1205: Q1/Q2 extramural service, the next code family -------------------
+# Both render as table rows in Q's tables, so the prose is a deleted row under
+# the entry's own row, spanning that table's columns.
+
+_SERVICE_PROSE = ("Advised the society on regional workforce planning and drafted "
+                  "the annual training standards for member programmes")
+
+
+def _board_service():
+    """A Q2 row whose source line goes on past its committee, role and
+    organization into the committee's remit, as YUYVIG ECXGAT 2129's did."""
+    return {
+        "element_idx_start": 2129,
+        "taxonomy_code": "Q2",
+        "text": f"2015-2018\tMember, Example Advisory Committee, Example Society\t{_SERVICE_PROSE}",
+        "extracted_fields": {"committee_name": "Example Advisory Committee", "role": "Member",
+                             "organization": "Example Society",
+                             "start_date": "2015", "end_date": "2018"},
+    }
+
+
+def _extramural_leadership():
+    """A Q1 row whose source holds the organization's mission, as EBYSBC
+    RGUNJV 3057's did."""
+    return {
+        "element_idx_start": 3057,
+        "taxonomy_code": "Q1",
+        "text": f"2009-2014\tExample Foundation, President\t{_SERVICE_PROSE}",
+        "extracted_fields": {"organization": "Example Foundation", "role": "President",
+                             "start_date": "2009", "end_date": "2014"},
+    }
+
+
+def _texts_of(body):
+    return ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in body.iter(qn("w:p"))]
+
+
+def _render_service(code, entry, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_service({code: [entry]})
+    gen._add_supplementary_subpoints({code: [entry]})
+    return gen
+
+
+@pytest.mark.parametrize("code, entry, anchor_text, columns", [
+    ("Q2", _board_service, "Example Advisory Committee", 4),
+    ("Q1", _extramural_leadership, "Example Foundation", 3),
+])
+def test_service_prose_is_a_deleted_row_under_its_own_row(code, entry, anchor_text, columns):
+    gen = _render_service(code, entry(), supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert anchor_text in "".join(t.text for t in above.iter(qn("w:t")))
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _SERVICE_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == str(columns)
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+@pytest.mark.parametrize("code, entry", [("Q2", _board_service), ("Q1", _extramural_leadership)])
+def test_service_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(code, entry):
+    off = _render_service(code, entry(), supplementary_subpoints=False)
+    on = _render_service(code, entry(), supplementary_subpoints=True)
+
+    # Reject All: the deleted text is the reader's again.
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _SERVICE_PROSE in rejected
+    assert _SERVICE_PROSE not in "".join(_texts_of(off.doc.element.body))
+    # Accept All: the deleted row goes, and the document is the flag-off one,
+    # empty paragraphs included.
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+def test_service_prose_already_in_its_cell_is_not_offered_again():
+    """A Q2 row with no committee field shows the entry's whole text in its
+    cell (`_fill_service_boards`' fallback): nothing is left to offer."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _board_service()
+    entry["extracted_fields"] = {"start_date": "2015", "end_date": "2018"}
+    gen = _render_service("Q2", entry, supplementary_subpoints=True)
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "Q2", haystack) == []
+
+
+def test_journal_reviewing_q4d_stays_excluded():
+    entry = dict(_board_service(), taxonomy_code="Q4D")
+    entry["extracted_fields"] = {"journal_name": "Example Journal of Training", "role": "Reviewer"}
+    gen = _render_service("Q4D", entry, supplementary_subpoints=True)
+    assert _subpoint_rows(gen) == []
+
+
+def _journal_reviewer_coded_q2():
+    """A Q2 entry `_route_q2_entries` reroutes to Journal Reviewing: its
+    rendered line is a Q4D row, but its own code stays Q2."""
+    return {
+        "element_idx_start": 1514,
+        "taxonomy_code": "Q2",
+        "text": f"2015-2018\tReviewer, Example Journal of Training\t{_SERVICE_PROSE}",
+        "extracted_fields": {"role": "Reviewer", "organization": "Example Journal of Training",
+                             "start_date": "2015", "end_date": "2018"},
+    }
+
+
+def test_a_q2_entry_rendered_as_journal_reviewing_gets_no_sub_point():
+    """The 2026-10-02 decision excludes journal reviewing. A Q2 entry the
+    section writes into the Journal Reviewing table is that, whatever its
+    code says, so it is excluded by where it rendered."""
+    from unified_pipeline.stage6.sections.service import _route_q2_entries
+
+    entry = _journal_reviewer_coded_q2()
+    assert len(_route_q2_entries([entry])[0]) == 1
+    gen = _render_service("Q2", entry, supplementary_subpoints=True)
+    assert "Example Journal of Training" in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    assert _SERVICE_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
