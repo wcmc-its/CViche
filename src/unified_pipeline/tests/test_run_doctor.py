@@ -5885,6 +5885,7 @@ _RENDER_OVERLAP_MODULES = (
     "unified_pipeline.doctor.shared",
     "unified_pipeline.doctor.lints.render",
     "unified_pipeline.doctor.lints.extraction",
+    "unified_pipeline.doctor.docx_diff",
     "unified_pipeline.run_doctor",
 )
 

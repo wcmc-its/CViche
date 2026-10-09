@@ -500,7 +500,7 @@ LINT_COPY = {
         "applicants you reviewed or for laboratory staff.",
         "Check each flagged item against the source CV, and delete it or move it to the "
         "section where it belongs."),
-    # Proposed in #1583's PR; awaiting Paul's approval.
+    # Wording approved by Paul, 2026-10-08 (#1583).
     "shattered_prose": LintCopy(
         "Paragraphs broken at their printed lines",
         "Some paragraphs from your CV were broken at their printed lines. They appear as "
