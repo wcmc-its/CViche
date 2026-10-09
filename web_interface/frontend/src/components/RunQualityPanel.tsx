@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import { AlertCircle, EyeOff, Info, Lock, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { getRunQuality, getRunReviewNote } from '../api/runs'
-import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, FixConfidence, FixEffort, FixListGroup, FixListItem, FixListProblem, QualityDimension, QualityGate, RunDoctorReport, RunQualityReport, ScoreRowWording } from '../types'
+import { getRunFixList, getRunQuality, getRunReviewNote } from '../api/runs'
+import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, FixConfidence, FixEffort, FixListGroup, FixListItem, FixListProblem, QualityDimension, QualityGate, RunDoctorReport, RunFixList, RunQualityReport, ScoreRowWording } from '../types'
 import { BAND_STYLE } from './runs/runQuality'
 
 const CARD = 'flex flex-col bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6'
@@ -432,20 +433,41 @@ function FixGroup({ group }: { group: FixListGroup }) {
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
-function FixList({ doctor }: { doctor: RunDoctorReport }) {
-  const notes = [
-    doctor.fix_list_more > 0 && `${plural(doctor.fix_list_more, 'more item is', 'more items are')} listed under Diagnostics.`,
-    doctor.fix_list_held_back > 0 && `${plural(doctor.fix_list_held_back, 'finding that is', 'findings that are')} wrong too often to act on ${doctor.fix_list_held_back === 1 ? 'is' : 'are'} only under Diagnostics.`,
-  ].filter(Boolean)
+/** What the Fix list tab shows; the owner (#1589) and staff views differ only
+ *  in the notes under it. */
+interface FixListView {
+  groups: FixListGroup[]
+  /** Every item is listed (no cap since 2026-10-09): the tab's count. */
+  total: number
+  notes: string[]
+  notChecked: string[]
+}
+
+const countItems = (groups: FixListGroup[]) => groups.reduce((n, g) => n + g.items.length, 0)
+
+/** Staff: the held-back findings are named, pointing at Diagnostics. */
+function staffFixListView(doctor: RunDoctorReport): FixListView {
+  const notes = doctor.fix_list_held_back > 0
+    ? [`${plural(doctor.fix_list_held_back, 'finding that is', 'findings that are')} wrong too often to act on ${doctor.fix_list_held_back === 1 ? 'is' : 'are'} only under Diagnostics.`]
+    : []
+  return { groups: doctor.fix_list, total: countItems(doctor.fix_list), notes, notChecked: doctor.not_checked }
+}
+
+/** The run's owner: the whole list, with no notes. */
+function ownerFixListView(fix: RunFixList): FixListView {
+  return { groups: fix.fix_list, total: countItems(fix.fix_list), notes: [], notChecked: fix.not_checked }
+}
+
+function FixList({ view }: { view: FixListView }) {
   return (
     <div className="flex flex-col gap-4">
-      {doctor.fix_list.length === 0 ? (
+      {view.groups.length === 0 ? (
         <p className="m-0 text-[13px] text-gray-500">Nothing to fix was found. Some problems can't be checked, so read the list below too.</p>
       ) : (
         <p className="m-0 text-[13px] text-gray-500">In the order the document reads. Each item quotes the text in question.</p>
       )}
-      {doctor.fix_list.map((group, i) => <FixGroup key={i} group={group} />)}
-      {notes.map((note, i) => <p key={i} className="m-0 text-xs text-gray-500">{note}</p>)}
+      {view.groups.map((group, i) => <FixGroup key={i} group={group} />)}
+      {view.notes.map((note, i) => <p key={i} className="m-0 text-xs text-gray-500">{note}</p>)}
     </div>
   )
 }
@@ -513,12 +535,14 @@ function DiagnosticsList({ doctor, capValue }: { doctor: RunDoctorReport; capVal
   )
 }
 
-function DoctorTabs({ doctor, capValue }: { doctor: RunDoctorReport; capValue: number | null }) {
-  const [tab, setTab] = useDoctorTab()
-  const fixCount = doctor.fix_list.reduce((n, g) => n + g.items.length, 0)
+/** The Fix list tab, and a Diagnostics tab when `diagnostics` is given (staff
+ *  and admins; never the run's owner, #1589). */
+function DoctorTabs({ view, diagnostics }: { view: FixListView; diagnostics: ReactNode | null }) {
+  const [chosen, setTab] = useDoctorTab()
+  const tab: DoctorTab = diagnostics ? chosen : 'fix'
   const tabs: { key: DoctorTab; label: string }[] = [
-    { key: 'fix', label: `Fix list (${fixCount + doctor.fix_list_more})` },
-    { key: 'diagnostics', label: 'Diagnostics' },
+    { key: 'fix', label: `Fix list (${view.total})` },
+    ...(diagnostics ? [{ key: 'diagnostics' as const, label: 'Diagnostics' }] : []),
   ]
   return (
     <>
@@ -545,15 +569,19 @@ function DoctorTabs({ doctor, capValue }: { doctor: RunDoctorReport; capValue: n
       </div>
       {/* Both panels stay mounted, so the cap banner's anchors always resolve. */}
       <div role="tabpanel" id="doctor-panel-fix" aria-labelledby="doctor-tab-fix" hidden={tab !== 'fix'}>
-        <FixList doctor={doctor} />
+        <FixList view={view} />
       </div>
-      <div role="tabpanel" id="doctor-panel-diagnostics" aria-labelledby="doctor-tab-diagnostics" hidden={tab !== 'diagnostics'}>
-        <DiagnosticsList doctor={doctor} capValue={capValue} />
-      </div>
-      <NotChecked items={doctor.not_checked} />
+      {diagnostics && (
+        <div role="tabpanel" id="doctor-panel-diagnostics" aria-labelledby="doctor-tab-diagnostics" hidden={tab !== 'diagnostics'}>
+          {diagnostics}
+        </div>
+      )}
+      <NotChecked items={view.notChecked} />
     </>
   )
 }
+
+const NO_DOCTOR_REPORT = 'No Run Doctor report is stored for this run.'
 
 function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null; capValue: number | null }) {
   const blurb = 'Specific problems found in this output. The Fix list is what to correct in the Word file; Diagnostics lists every finding by check.'
@@ -564,8 +592,8 @@ function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null
         {doctor && <SeverityPills counts={doctor.counts} />}
       </div>
       {doctor
-        ? <DoctorTabs doctor={doctor} capValue={capValue} />
-        : <p className="m-0 text-[13px] text-gray-500">No Run Doctor report is stored for this run.</p>}
+        ? <DoctorTabs view={staffFixListView(doctor)} diagnostics={<DiagnosticsList doctor={doctor} capValue={capValue} />} />
+        : <p className="m-0 text-[13px] text-gray-500">{NO_DOCTOR_REPORT}</p>}
     </section>
   )
 }
@@ -574,7 +602,7 @@ const QUALITY_FAILURE = 'Could not load the quality score and Run Doctor finding
 
 const reportIsEmpty = (report: RunQualityReport) => report.score == null && report.doctor == null
 
-/** Admin only: the Quality score and Run Doctor cards of a finished run. */
+/** Admins and staff: the Quality score and Run Doctor cards of a finished run. */
 export function RunQualitySections({ runId }: { runId: string }) {
   const result = useLoad(() => getRunQuality(runId), runId, QUALITY_FAILURE, reportIsEmpty)
   if (result.state === 'loading') {
@@ -593,6 +621,27 @@ export function RunQualitySections({ runId }: { runId: string }) {
       <QualityScoreSection report={report} />
       <RunDoctorSection key={runId} doctor={report.doctor} capValue={report.cap} />
     </>
+  )
+}
+
+const FIX_LIST_FAILURE = 'Could not load the Fix list.'
+const NO_OWNER_REPORT = 'No check results are stored for this run yet.'
+
+/** The run owner's "Things to check" card (#1589; renamed from Run Doctor
+ *  2026-10-09): the Fix list and what is not checked. No score, no
+ *  Diagnostics; admins and staff get RunQualitySections. */
+export function OwnerFixList({ runId }: { runId: string }) {
+  const result = useLoad(() => getRunFixList(runId), runId, FIX_LIST_FAILURE, (fix) => fix == null)
+  const blurb = 'Specific problems found in this output, and what to correct in the Word file.'
+  return (
+    <section aria-label="Things to check" className={`${CARD} gap-3.5`}>
+      <SectionHeading title="Things to check" blurb={blurb} />
+      {result.state === 'loading' && <p role="status" className="m-0 text-[13px] text-gray-500">Loading the Fix list...</p>}
+      {result.state === 'error' && <p role="alert" className="m-0 text-[13px] text-error-800">{result.message}</p>}
+      {result.state === 'ready' && (result.data
+        ? <DoctorTabs view={ownerFixListView(result.data)} diagnostics={null} />
+        : <p className="m-0 text-[13px] text-gray-500">{NO_OWNER_REPORT}</p>)}
+    </section>
   )
 }
 

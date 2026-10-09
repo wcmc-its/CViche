@@ -535,11 +535,11 @@ def test_fix_list_carries_no_lint_key_stage_entry_index_or_issue_number():
     assert "R01 Cardiac Imaging" in wire
 
 
-def test_fix_list_cuts_at_its_cap_and_counts_the_rest(monkeypatch):
-    monkeypatch.setattr(rqr, "MAX_FIX_LIST_ITEMS", 2)
-    report = _fix_list([_finding("junk_or_header_row", message=f"entry {i} (D1): x") for i in range(5)])
-    assert sum(len(g.items) for g in report.fix_list) == 2
-    assert report.fix_list_more == 3
+def test_fix_list_lists_every_item_with_no_cap():
+    """Paul, 2026-10-09: the full list, however long (X6 carried 277 findings of one lint)."""
+    report = _fix_list([_finding("junk_or_header_row", message=f"entry {i} (D1): x") for i in range(300)])
+    assert sum(len(g.items) for g in report.fix_list) == 300
+    assert "fix_list_more" not in report.model_dump()
 
 
 def test_every_run_says_what_the_doctor_does_not_check():

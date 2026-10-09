@@ -846,7 +846,14 @@ class RunDoctorReport(BaseModel):
     fix_list: list[FixListGroup] = []  # the CV runner's view (#1589)
     # ERROR/WARN findings left to Diagnostics: below the precision bar, or no plain wording yet.
     fix_list_held_back: int = 0
-    fix_list_more: int = 0  # items past MAX_FIX_LIST_ITEMS, listed in Diagnostics only
+    not_checked: list[str] = []  # what the doctor cannot see, on every run
+
+
+class RunFixList(BaseModel):
+    """GET /run/{run_id}/fix-list: the Run Doctor's Fix list for the run's owner
+    (#1589). Only what the Fix list tab shows, plus the not-checked list: no
+    lint key, score, Diagnostics finding or held-back count."""
+    fix_list: list[FixListGroup] = []
     not_checked: list[str] = []  # what the doctor cannot see, on every run
 
 

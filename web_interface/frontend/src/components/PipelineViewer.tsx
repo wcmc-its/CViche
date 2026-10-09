@@ -9,12 +9,12 @@ import PipelineHeader from './PipelineHeader'
 import StepSidebar, { StepStatusIcon } from './StepSidebar'
 import LogViewer from './LogViewer'
 import PromptLogViewer from './PromptLogViewer'
-import OutputFiles, { DocxDownloadCard, isFinalDocx, visibleOutputFiles } from './OutputFiles'
+import OutputFiles, { DocxDownloadCard, finalDocuments, visibleOutputFiles } from './OutputFiles'
 import JsonViewerModal from './JsonViewerModal'
 import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
-import { RunQualitySections, ReviewNote } from './RunQualityPanel'
+import { OwnerFixList, RunQualitySections, ReviewNote } from './RunQualityPanel'
 import { canActOnRun, useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 
 interface PipelineViewerProps {
@@ -249,19 +249,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
   const currentStepData = runStatus?.steps[currentStep - 1]
 
-  const finalDocxName = (() => {
-    if (runStatus?.status !== 'complete' || !runStatus.steps) return null
-    for (let i = runStatus.steps.length - 1; i >= 0; i--) {
-      const raw = runStatus.steps[i].output_files
-      if (!raw) continue
-      try {
-        const files: string[] = JSON.parse(raw)
-        const docx = files.find(isFinalDocx)
-        if (docx) return docx.split('/').pop() || docx
-      } catch { /* parse error safe ignore */ }
-    }
-    return null
-  })()
+  const finalDocs = runStatus?.status === 'complete' && runStatus.steps ? finalDocuments(runStatus.steps) : null
 
   const supportHref = (reason: string) =>
     `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(`CViche: ${reason} (run ${runId})`)}&body=${encodeURIComponent(`Run ID: ${runId}\nFile: ${runStatus?.filename}\n\nPlease describe what happened:\n`)}`
@@ -448,7 +436,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           <p role="status" aria-live="polite" className="sr-only">
             {isComplete ? 'Your CV is ready to download.' : ''}
           </p>
-          {isComplete && finalDocxName && <DocxDownloadCard runId={runId} filename={finalDocxName} />}
+          {isComplete && finalDocs && <DocxDownloadCard runId={runId} filename={finalDocs.docx} reviewFilename={finalDocs.review} />}
           {isComplete && !canViewAllRuns && <ReviewNote runId={runId} />}
         </PipelineHeader>
 
@@ -550,7 +538,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         )}
 
         {/* Below the step details, so "Pipeline details" opens them under the header, not past the score. */}
-        {isComplete && canViewAllRuns && <RunQualitySections runId={runId} />}
+        {isComplete && (canViewAllRuns ? <RunQualitySections runId={runId} /> : <OwnerFixList runId={runId} />)}
 
         {isComplete && canAct && (
           <section id="feedback-section">

@@ -21,6 +21,7 @@ from app.schemas import (
     QualityDimension,
     QualityGate,
     RunDoctorReport,
+    RunFixList,
     RunQualityReport,
 )
 from app.services import quality_score_service as qss
@@ -735,10 +736,6 @@ def _usable_findings(payload: dict) -> tuple[list[dict], int]:
 #: Only these reach the Fix list; INFO findings fire on most runs and stay in
 #: Diagnostics.
 FIX_LIST_SEVERITIES = frozenset({"ERROR", "WARN"})
-#: Items listed before the rest are left to Diagnostics. A run can carry
-#: hundreds (277 owner_pi_role_empty on X6); collapsing those into one decision
-#: is #1591.
-MAX_FIX_LIST_ITEMS = 60
 #: "High" confidence: hand-checked right at least this often, on at least this
 #: many findings, so one lucky check cannot earn it. Below it, and at or above
 #: doctor/precision.py's IN_PLACE_MIN_PRECISION, reads "medium". Both read the
@@ -848,14 +845,13 @@ def _document_order(draft: _FixDraft) -> tuple:
     return section_rank, entry_rank
 
 
-def build_fix_list(ran: list[dict], rows: GateRows) -> tuple[list[FixListGroup], int, int]:
-    """The Fix list's groups, the findings held back for Diagnostics, and how
-    many items were cut at MAX_FIX_LIST_ITEMS."""
+def build_fix_list(ran: list[dict], rows: GateRows) -> tuple[list[FixListGroup], int]:
+    """The Fix list's groups, every item listed (Paul, 2026-10-09: no cap), and
+    the findings held back for Diagnostics."""
     drafts, held_back = _fix_list_drafts(ran, rows)
     drafts.sort(key=_document_order)
-    shown = drafts[:MAX_FIX_LIST_ITEMS]
     groups: list[FixListGroup] = []
-    for draft in shown:
+    for draft in drafts:
         item = FixListItem(
             problems=sorted(draft.problems.values(), key=lambda p: _SEVERITY_RANK[p.severity]),
             quotes=draft.quotes)
@@ -863,7 +859,7 @@ def build_fix_list(ran: list[dict], rows: GateRows) -> tuple[list[FixListGroup],
             groups[-1].items.append(item)
         else:
             groups.append(FixListGroup(section=draft.section, items=[item]))
-    return groups, held_back, len(drafts) - len(shown)
+    return groups, held_back
 
 
 def summarize_doctor(payload: object, cap_lint: str | None = None,
@@ -876,14 +872,24 @@ def summarize_doctor(payload: object, cap_lint: str | None = None,
     shown = [f for f in ran if f["lint"] not in REVIEW_COPY_ONLY_LINTS]
     groups = _doctor_groups(shown, cap_lint)
     by_severity = {s: sum(1 for g in groups if g.severity == s) for s in SEVERITY_ORDER}
-    fix_list, held_back, more = build_fix_list(
+    fix_list, held_back = build_fix_list(
         shown, lint_precision.load_gate_ledger() if rows is None else rows)
     return RunDoctorReport(
         counts=DoctorSeverityCounts(
             error=by_severity["ERROR"], warn=by_severity["WARN"], info=by_severity["INFO"]),
         findings=groups, not_run=not_run,
-        fix_list=fix_list, fix_list_held_back=held_back, fix_list_more=more,
+        fix_list=fix_list, fix_list_held_back=held_back,
         not_checked=[spot.sentence for spot in blind_spots()])
+
+
+def build_owner_fix_list(doctor_raw: object) -> RunFixList | None:
+    """The Fix list and not-checked list alone, for the run's owner (#1589);
+    None when no doctor report was stored."""
+    doctor = summarize_doctor(doctor_raw)
+    if doctor is None:
+        return None
+    return RunFixList(
+        fix_list=doctor.fix_list, not_checked=doctor.not_checked)
 
 
 def doctor_lint_for_cap(lint: str | None, doctor_raw: object) -> str | None:

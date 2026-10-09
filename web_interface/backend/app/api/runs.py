@@ -32,6 +32,7 @@ from app.schemas import (
     RestartRunResponse,
     RunActionResponse,
     RunFeedbackSummary,
+    RunFixList,
     RunFilterOptions,
     RunQualityReport,
     RunReviewNote,
@@ -42,6 +43,7 @@ from app.schemas import (
 )
 from app.services import batch_completion, batch_service, quality_score_service
 from app.services.run_quality_report import (
+    build_owner_fix_list,
     build_run_quality_report,
     columns_need_cleanup,
 )
@@ -852,6 +854,19 @@ def get_run_quality(
         quality_score_service.get_cached_score(run_id),
         quality_score_service.get_doctor_report(run_id),
     )
+
+
+@router.get("/run/{run_id}/fix-list", response_model=RunFixList | None)
+def get_run_fix_list(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> RunFixList | None:
+    """The Run Doctor's Fix list for the run's owner (#1589); admins and staff
+    may read it too. Never the score or the Diagnostics findings: those stay
+    on /run-quality. Null when no doctor report was stored."""
+    check_run_access(run_id, current_user, db, read_only=True)
+    return build_owner_fix_list(quality_score_service.get_doctor_report(run_id))
 
 
 @router.get("/run/{run_id}/review-note", response_model=RunReviewNote)

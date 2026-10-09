@@ -15,8 +15,12 @@ interface OutputFilesProps {
   showFinalOutput?: boolean
 }
 
-/** Sand panel with a DOCX tile, the file name and a primary Download button. */
-export function DocxDownloadCard({ runId, filename }: { runId: string; filename: string }) {
+/** Label of the review copy's download beside the main one (#1589). */
+export const REVIEW_COPY_LABEL = "Review copy (with CViche's notes)"
+
+/** Sand panel with a DOCX tile, the file name and a primary Download button,
+ *  plus the review copy (#1591) beside it when the run has one. */
+export function DocxDownloadCard({ runId, filename, reviewFilename = null }: { runId: string; filename: string; reviewFilename?: string | null }) {
   return (
     <div className="flex flex-wrap items-center gap-4 p-4 rounded-[10px] bg-sand-50 border border-sand-200">
       <div
@@ -29,15 +33,28 @@ export function DocxDownloadCard({ runId, filename }: { runId: string; filename:
         <div className="font-semibold text-gray-900 break-all">{filename}</div>
         <div className="text-[13px] text-gray-500">WCM institutional format Word document</div>
       </div>
-      <a
-        href={runRoutes.dataFile(runId, filename)}
-        download
-        aria-label={`Download final output file ${filename}`}
-        className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
-      >
-        <Download className="w-4 h-4" aria-hidden="true" />
-        <span>Download</span>
-      </a>
+      <div className="flex flex-wrap items-center gap-2.5">
+        {reviewFilename && (
+          <a
+            href={runRoutes.dataFile(runId, reviewFilename)}
+            download
+            title={reviewFilename}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-sand-400 hover:bg-sand-50 text-gray-900 font-medium rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
+          >
+            <Download className="w-4 h-4" aria-hidden="true" />
+            <span>{REVIEW_COPY_LABEL}</span>
+          </a>
+        )}
+        <a
+          href={runRoutes.dataFile(runId, filename)}
+          download
+          aria-label={`Download final output file ${filename}`}
+          className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
+        >
+          <Download className="w-4 h-4" aria-hidden="true" />
+          <span>Download</span>
+        </a>
+      </div>
     </div>
   )
 }
@@ -50,6 +67,21 @@ const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
 export const isReviewDocx = (f: string) => f.endsWith('_wcm_review.docx')
 /** The finished document, never its review copy. */
 export const isFinalDocx = (f: string) => f.endsWith('.docx') && !isReviewDocx(f)
+
+const baseName = (f: string) => f.split('/').pop() || f
+
+/** A finished run's document and its review copy (null when none was
+ *  written), by base name: the latest step that lists a final .docx. */
+export function finalDocuments(steps: Pick<OutputFilesProps['step'], 'output_files'>[]): { docx: string; review: string | null } | null {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const files = visibleOutputFiles(steps[i], false)
+    const docx = files.find(isFinalDocx)
+    if (!docx) continue
+    const review = files.find(isReviewDocx)
+    return { docx: baseName(docx), review: review ? baseName(review) : null }
+  }
+  return null
+}
 
 /** The step's output files this user will actually see listed. */
 export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_files'>, canSeeStageJson: boolean): string[] {

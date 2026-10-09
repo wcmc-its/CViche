@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
-import { getRunQuality, getRunReviewNote } from '../api/runs'
-import type { RunDoctorReport, RunQualityReport, RunReviewNote } from '../types'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, OwnerFixList, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
+import { getRunFixList, getRunQuality, getRunReviewNote } from '../api/runs'
+import type { RunDoctorReport, RunFixList, RunQualityReport, RunReviewNote } from '../types'
 
 vi.mock('../api/runs', () => ({
+  getRunFixList: vi.fn(),
   getRunQuality: vi.fn(),
   getRunReviewNote: vi.fn(),
 }))
@@ -19,7 +20,7 @@ const SCORED: RunQualityReport = { ...EMPTY, score: 87, band: 'GREEN', band_mean
 
 const NO_SCORE = 'No quality score is stored for this run.'
 /** A doctor report's Fix-list fields, empty. */
-const NO_FIX = { fix_list: [], fix_list_held_back: 0, fix_list_more: 0, not_checked: [] }
+const NO_FIX = { fix_list: [], fix_list_held_back: 0, not_checked: [] }
 
 // Lets the resolved getRunQuality promise and the resulting state update land.
 const flush = () => act(async () => { await Promise.resolve() })
@@ -186,7 +187,7 @@ describe('Run Doctor Fix list (#1589)', () => {
         quotes: [quote],
       }] },
     ],
-    fix_list_held_back: 2, fix_list_more: 1,
+    fix_list_held_back: 2,
     not_checked: ['Journal names, volumes and pages in citations.'],
   }
 
@@ -201,8 +202,8 @@ describe('Run Doctor Fix list (#1589)', () => {
 
   it('opens on the Fix list, grouped by location, merged per entry, quoting the text at stake', async () => {
     await renderDoctor()
-    expect(screen.getByRole('tab', { name: 'Fix list (3)' }).getAttribute('aria-selected')).toBe('true')
-    const fix = within(panel('Fix list (3)'))
+    expect(screen.getByRole('tab', { name: 'Fix list (2)' }).getAttribute('aria-selected')).toBe('true')
+    const fix = within(panel('Fix list (2)'))
     expect(fix.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Across the document', 'Honors & Awards'])
     const [, honors] = fix.getAllByRole('list')
     const item = within(within(honors).getByRole('listitem'))
@@ -212,7 +213,6 @@ describe('Run Doctor Fix list (#1589)', () => {
     expect(item.getByText('High confidence')).toBeTruthy()
     expect(item.getByText('Quick fix')).toBeTruthy()
     expect(fix.getByText('Confidence not yet measured')).toBeTruthy()
-    expect(fix.getByText('1 more item is listed under Diagnostics.')).toBeTruthy()
     expect(fix.getByText('2 findings that are wrong too often to act on are only under Diagnostics.')).toBeTruthy()
     // Developer language stays in Diagnostics.
     expect(fix.queryByText('under_extraction')).toBeNull()
@@ -226,7 +226,7 @@ describe('Run Doctor Fix list (#1589)', () => {
     const diagnostics = within(panel('Diagnostics'))
     expect(diagnostics.getByText('under_extraction')).toBeTruthy()
     expect(diagnostics.getByText('Seen on 3% of runs')).toBeTruthy()
-    expect(screen.queryByRole('tabpanel', { name: 'Fix list (3)' })).toBeNull()
+    expect(screen.queryByRole('tabpanel', { name: 'Fix list (2)' })).toBeNull()
   })
 
   it('lists what the doctor does not check under either tab', async () => {
@@ -247,11 +247,74 @@ describe('Run Doctor Fix list (#1589)', () => {
   })
 
   it('says a quiet doctor is not a clean bill of health', async () => {
-    vi.mocked(getRunQuality).mockResolvedValue({ ...SCORED, doctor: { ...DOCTOR, fix_list: [], fix_list_held_back: 0, fix_list_more: 0 } })
+    vi.mocked(getRunQuality).mockResolvedValue({ ...SCORED, doctor: { ...DOCTOR, fix_list: [], fix_list_held_back: 0 } })
     render(<RunQualitySections runId="ABCDEF" />)
     await act(async () => { await Promise.resolve() })
     expect(screen.getByText("Nothing to fix was found. Some problems can't be checked, so read the list below too.")).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'Fix list (0)' })).toBeTruthy()
+  })
+})
+
+describe('OwnerFixList: the run owner sees the Fix list only (#1589)', () => {
+  const quote = 'Visiting Lecturer in Medicine, Northfield University, 1990-1991'
+  const FIX: RunFixList = {
+    fix_list: [{ section: 'Honors & Awards', items: [{
+      problems: [{ severity: 'WARN', title: 'Heading printed as a record', what_to_do: 'Delete the quoted row.', confidence: 'high', effort: 'quick' }],
+      quotes: [quote],
+    }] }],
+    not_checked: ['Journal names, volumes and pages in citations.'],
+  }
+
+  afterEach(() => { cleanup(); vi.mocked(getRunFixList).mockReset(); window.location.hash = '' })
+
+  const renderOwner = async (fix: RunFixList | null = FIX) => {
+    vi.mocked(getRunFixList).mockResolvedValue(fix)
+    render(<OwnerFixList runId="ABCDEF" />)
+    await act(async () => { await Promise.resolve() })
+  }
+
+  it('shows one tab, the Fix list, with no Diagnostics and no score', async () => {
+    await renderOwner()
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Fix list (1)'])
+    const fix = within(screen.getByRole('tabpanel', { name: 'Fix list (1)' }))
+    expect(fix.getByText('Heading printed as a record')).toBeTruthy()
+    expect(fix.getByText(quote).tagName).toBe('Q')
+    expect(fix.getByText('High confidence')).toBeTruthy()
+    expect(fix.getByText('Quick fix')).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Things to check' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Things to check' })).toBeTruthy()
+    expect(screen.queryByText(/Run Doctor|more items? (was|were|is|are)/)).toBeNull()
+    expect(screen.queryByText(/Diagnostics/)).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Quality score' })).toBeNull()
+    expect(screen.getByText('Journal names, volumes and pages in citations.')).toBeTruthy()
+    expect(getRunQuality).not.toHaveBeenCalled()
+  })
+
+  it('stays on the Fix list when a link points at a Diagnostics row', async () => {
+    window.location.hash = '#doctor-lint-under_extraction'
+    await renderOwner()
+    expect(screen.getByRole('tabpanel', { name: 'Fix list (1)' })).toBeTruthy()
+  })
+
+  it('asks again while no report is stored, and shows the list once it is written', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(getRunFixList).mockResolvedValueOnce(null).mockResolvedValueOnce(FIX)
+      render(<OwnerFixList runId="ABCDEF" />)
+      await flush()
+      expect(screen.getByText('No check results are stored for this run yet.')).toBeTruthy()
+      await tick()
+      expect(getRunFixList).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole('tab', { name: 'Fix list (1)' })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says when no Run Doctor report is stored', async () => {
+    await renderOwner(null)
+    expect(screen.getByText('No check results are stored for this run yet.')).toBeTruthy()
+    expect(screen.queryByRole('tab')).toBeNull()
   })
 })
 
