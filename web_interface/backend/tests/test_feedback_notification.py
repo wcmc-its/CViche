@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import Mock
 
+import pytest
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 _RUN_ID = "_FDBK1"
@@ -191,3 +193,121 @@ def test_feedback_all_matches_the_single_feedback_serialisation(client, db):
 
     listed.pop("display_name")
     assert listed == single
+
+
+# --- the review loop (#1587): the corrected copy -------------------------------
+
+
+def _docx(*paragraphs):
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    for text in paragraphs:
+        doc.add_paragraph(text)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# Synthetic entries: nothing here is from a real CV.
+_DELIVERED = ("Fellowship in Quorvane studies, Northfield Institute, 2011-2013",
+              "Brennic Foundation Award for Saltwick lattice modelling, 2015",
+              "Lecturer in Heliotropic Drift, Plesk College, 2016-2019")
+
+
+@pytest.fixture
+def run_storage(tmp_path, monkeypatch):
+    from app.storage.local_storage import LocalRunStorage
+
+    store = LocalRunStorage(str(tmp_path / "store"))
+    monkeypatch.setattr("app.services.review_loop_service.get_storage", lambda: store)
+    return store
+
+
+def test_corrected_docx_upload_stores_the_copy_and_its_diff_and_returns_one_line(client, db, run_storage):
+    user = _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    corrected = _docx(_DELIVERED[0], _DELIVERED[2])  # the reviewer deleted the award
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", corrected)})
+    assert resp.status_code == 200
+    assert resp.json() == {"changes": 1, "summary": "1 change recorded"}
+
+    import json
+    assert run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_corrected.docx") == corrected
+    report = json.loads(run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_diff.json"))
+    assert report["by_type"]["deleted"] == 1
+    assert "Brennic" not in json.dumps(report)  # positions and counts only, no CV text
+    # Never under outputs/: downloads and the scorer read only that prefix.
+    assert run_storage.list_files(_RUN_ID, "outputs/") == [f"outputs/{_RUN_ID}_wcm.docx"]
+
+
+@pytest.mark.parametrize("name, message", [
+    ("corrected.pdf", "Word (.docx) file"),  # a valid Word file, but not named .docx
+    ("corrected.docx", "does not match .docx format"),  # over the zip-bomb entry bound (patched to 1)
+])
+def test_corrected_docx_upload_refuses_what_the_cv_upload_refuses(
+        client, db, run_storage, monkeypatch, name, message):
+    if name.endswith(".docx"):
+        monkeypatch.setattr("app.services.upload_validation._DOCX_MAX_ENTRIES", 1)
+    user = _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": (name, _docx(_DELIVERED[0]))})
+    assert resp.status_code == 400
+    assert message in resp.json()["detail"]["message"]
+    assert run_storage.list_files(_RUN_ID, "corrected/") == []
+
+
+def test_corrected_docx_upload_is_bounded_by_the_upload_size_cap(client, db, run_storage, monkeypatch):
+    corrected = _docx(_DELIVERED[0])
+    monkeypatch.setattr("app.api.feedback_routes.MAX_UPLOAD_SIZE", len(corrected) - 1)  # one byte over
+    user = _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", corrected)})
+    assert resp.status_code == 400
+    assert "too large" in resp.json()["detail"]["message"]
+    assert run_storage.list_files(_RUN_ID, "corrected/") == []
+
+
+def test_corrected_docx_upload_refuses_a_macro_carrying_docx(client, db, run_storage):
+    import io
+    import zipfile
+
+    buf = io.BytesIO(_docx(*_DELIVERED))
+    with zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr("word/vbaProject.bin", b"\x00")
+    user = _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", buf.getvalue())})
+    assert resp.status_code == 400
+    assert "macros" in resp.json()["detail"]["message"]
+    assert run_storage.list_files(_RUN_ID, "corrected/") == []
+
+
+def test_corrected_docx_upload_needs_a_delivered_document(client, db, run_storage):
+    user = _seed_run(db)
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", _docx("x"))})
+    assert resp.status_code == 409
+    assert run_storage.list_files(_RUN_ID, "corrected/") == []
+
+
+def test_corrected_docx_upload_is_closed_to_read_only_staff(client, db, run_storage):
+    """Same access as submitting feedback: staff may read a run, not upload to it."""
+    _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    with _as_user(_staff(db)):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", _docx(*_DELIVERED))})
+    assert resp.status_code == 403
+    assert run_storage.list_files(_RUN_ID, "corrected/") == []

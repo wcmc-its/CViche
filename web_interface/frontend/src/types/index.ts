@@ -6,7 +6,7 @@ export type {
   RunQualityReport, RunReviewNote, RunFeedbackSummary, FeedbackReviewer, RunFeedbackFilter,
   RunInputFormatFilter, RunStatusFilter, StatusFilterCounts,
 } from './runs'
-export type { FeedbackFormData, FeedbackDetail, WcmSection } from './feedback'
+export type { FeedbackFormData, FeedbackDetail, WcmSection, CorrectedDocxResult } from './feedback'
 export type { Stats, SubmissionSplit, DepartmentSubmissions, ConsentPublishPreview, AdminUser, AdminRun, AdminRunsResponse, QualityScoreResult, SystemConfig, FeedbackData, AggregatedScores } from './admin'
 export type { Estimate } from './upload'
 export type {

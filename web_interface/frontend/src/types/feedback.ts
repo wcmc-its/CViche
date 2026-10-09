@@ -52,3 +52,9 @@ export interface FeedbackDetail {
   likelihood_to_recommend: number
   submitted_at: string | null
 }
+
+/** POST /api/run/:id/feedback/corrected-docx: a one-line confirmation only. */
+export interface CorrectedDocxResult {
+  changes: number
+  summary: string
+}

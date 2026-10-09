@@ -19,6 +19,7 @@ describe('path parameters are encoded (#298)', () => {
     expect(runRoutes.status('../admin')).toBe('/api/run/..%2Fadmin/status')
     expect(runRoutes.inputFileUrl('a?b')).toBe('/api/run/a%3Fb/input?as_url=true')
     expect(feedbackRoutes.get('a#b')).toBe('/api/run/a%23b/feedback')
+    expect(feedbackRoutes.correctedDocx('a?b')).toBe('/api/run/a%3Fb/feedback/corrected-docx')
     expect(adminRoutes.runScore('a/b')).toBe('/api/admin/run/a%2Fb/score')
     expect(wsRoutes.runStream('a/b')).toBe('/ws/run/a%2Fb/stream')
   })

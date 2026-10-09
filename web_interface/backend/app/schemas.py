@@ -414,6 +414,13 @@ class FeedbackSubmit(BaseModel):
     likelihood_to_recommend: int  # 1-5, required
 
 
+class CorrectedDocxResponse(BaseModel):
+    """POST /run/{id}/feedback/corrected-docx: a one-line confirmation only;
+    the typed diff itself is stored with the run, never returned."""
+    changes: int
+    summary: str
+
+
 class FeedbackResponse(BaseModel):
     """Response after feedback submission."""
     id: int
