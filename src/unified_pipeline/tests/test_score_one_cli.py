@@ -105,40 +105,53 @@ def test_artifacts_are_flattened_out_of_stage_subdirs(tmp_path, monkeypatch):
     ], seen
 
 
-def test_source_docx_is_staged_under_the_scorers_source_subdir(tmp_path, monkeypatch):
-    """#822: --source reaches the scorer as source/<name>, beside (not among)
-    the flat artifacts, so the lost-source-table gate can read it."""
+def test_the_local_runs_doctor_report_is_collected_for_the_scorer(tmp_path, monkeypatch):
+    """#1595: the score is built from the doctor report, which a local run
+    writes to stage_7_doctor/; it reaches the scorer beside the stage JSON."""
     cli = _load_cli()
     seen = {}
 
     def _capture(outputs_dir, run_id):
         seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
-        seen["source"] = sorted(p.name for p in (Path(outputs_dir) / "source").iterdir())
         return _REPORT
 
     monkeypatch.setattr(cli, "score_run", _capture)
     _stage_artifacts(tmp_path)
-    source = tmp_path / "original_cv.docx"
-    source.write_bytes(b"docx bytes")
+    (tmp_path / "stage_7_doctor").mkdir()
+    (tmp_path / "stage_7_doctor" / "web05_doctor.json").write_text('{"findings": []}')
 
-    assert cli.main([str(tmp_path), "web05", "--source", str(source)]) == 0
-    assert seen["source"] == ["original_cv.docx"]
-    assert "source" in seen["names"]
+    assert cli.main([str(tmp_path), "web05"]) == 0
+    assert "web05_doctor.json" in seen["names"], seen
 
 
-def test_without_source_the_scorer_gets_no_source_subdir(tmp_path, monkeypatch):
+def test_an_explicit_doctor_report_replaces_the_local_one(tmp_path, monkeypatch):
+    """--doctor (run_corpus_batch.sh's doctor_one.py output) is the one the
+    scorer reads, and the stage_7_doctor/ copy is not also collected: two
+    reports would make the scorer call the doctor evidence ambiguous."""
     cli = _load_cli()
     seen = {}
 
     def _capture(outputs_dir, run_id):
-        seen["has_source"] = (Path(outputs_dir) / "source").exists()
+        seen["reports"] = {p.name: p.read_text() for p in Path(outputs_dir).glob("*_doctor.json")}
         return _REPORT
 
     monkeypatch.setattr(cli, "score_run", _capture)
     _stage_artifacts(tmp_path)
+    (tmp_path / "stage_7_doctor").mkdir()
+    (tmp_path / "stage_7_doctor" / "web05_doctor.json").write_text('{"findings": ["local"]}')
+    explicit = tmp_path / "batch_doctor.json"
+    explicit.write_text('{"findings": ["explicit"]}')
 
-    assert cli.main([str(tmp_path), "web05"]) == 0
-    assert seen["has_source"] is False
+    assert cli.main([str(tmp_path), "web05", "--doctor", str(explicit)]) == 0
+    assert seen["reports"] == {"web05_doctor.json": '{"findings": ["explicit"]}'}
+
+
+def test_a_missing_explicit_doctor_report_is_a_usage_error(tmp_path):
+    cli = _load_cli()
+    _stage_artifacts(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cli.main([str(tmp_path), "web05", "--doctor", str(tmp_path / "nope.json")])
+    assert exc.value.code == 2
 
 
 def test_stage_error_record_is_collected_for_the_scorer(tmp_path, monkeypatch):

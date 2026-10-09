@@ -171,12 +171,23 @@ for f in "$INPUT_DIR"/*.docx; do
   [ -f "$wcm" ] || wcm="$(ls "$WCM_SRC"/*"${stem}"*[wW][cC][mM]*.docx 2>/dev/null | head -1)"
   out="—"; kb=""
   if [ -n "$wcm" ] && [ -f "$wcm" ]; then cp "$wcm" "$OUTDIR/${stem}_wcm.docx"; out="${stem}_wcm.docx"; kb=$(( $(wc -c < "$wcm") / 1024 )); fi
+  # optional: run the deterministic doctor over this run's stage artifacts and record findings.
+  # Before the score: the score is built from the doctor's report (#1595).
+  if [ "$DOCTOR" = "1" ]; then
+    dline=$(PYTHONPATH=src python3 scripts/doctor_one.py "$OUTPUTS_ROOT" "$stem" "$f" "$DOCTOR_DIR/${stem}.json" --metrics-tsv "$METRICS_TSV" 2>>"$log") || dline=$'error\t\t\t\t'
+    printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$dline" >> "$DOCTOR_TSV"
+    echo "   doctor: $(printf '%s' "$dline" | cut -f1) (E/W/I $(printf '%s' "$dline" | cut -f2-4 | tr '\t' '/'))"
+  fi
+
   # Score from the stage artifacts. This used to `cp` a quality_score.json out of
   # the outputs dir, but nothing in the local CLI pipeline writes that file --
   # only the web backend does, into storage -- so with stderr suppressed it was a
-  # silent no-op and no batch ever captured a score (#435).
+  # silent no-op and no batch ever captured a score (#435). Without --doctor
+  # (DOCTOR=0) the run reads as not checked and is capped below GREEN.
+  doctor_arg=()
+  [ "$DOCTOR" = "1" ] && doctor_arg=(--doctor "$DOCTOR_DIR/${stem}.json")
   sline=$(PYTHONPATH=src python3 scripts/score_one.py "$OUTPUTS_ROOT" "$stem" \
-            "$OUTDIR/${stem}_wcm.docx" "$OUTDIR/${stem}_quality.json" --source "$f" 2>>"$log") \
+            "$OUTDIR/${stem}_wcm.docx" "$OUTDIR/${stem}_quality.json" ${doctor_arg[@]+"${doctor_arg[@]}"} 2>>"$log") \
     || sline=$'error\t\t\t'
   printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$sline" >> "$SCORES_TSV"
   echo "   score: $(printf '%s' "$sline" | cut -f1) $(printf '%s' "$sline" | cut -f2)"
@@ -195,13 +206,6 @@ for f in "$INPUT_DIR"/*.docx; do
   mdl=$(grep -oE '^Models: .*' "$log" | tail -1 | sed 's/^Models: //' | tr '\t' ' ')
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$ts" "$SHA" "${mdl:-$MODEL_LABEL}" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" "${dft:-}" >> "$SUMMARY"
-
-  # optional: run the deterministic doctor over this run's stage artifacts and record findings
-  if [ "$DOCTOR" = "1" ]; then
-    dline=$(PYTHONPATH=src python3 scripts/doctor_one.py "$OUTPUTS_ROOT" "$stem" "$f" "$DOCTOR_DIR/${stem}.json" --metrics-tsv "$METRICS_TSV" 2>>"$log") || dline=$'error\t\t\t\t'
-    printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$dline" >> "$DOCTOR_TSV"
-    echo "   doctor: $(printf '%s' "$dline" | cut -f1) (E/W/I $(printf '%s' "$dline" | cut -f2-4 | tr '\t' '/'))"
-  fi
 
   if [ "$rc" -ne 0 ] || [ "$out" = "—" ]; then failed=$((failed+1)); echo "   ! $stem rc=$rc output=$out (see $log)"; fi
   sleep 3

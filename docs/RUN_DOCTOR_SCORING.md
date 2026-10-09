@@ -6,19 +6,19 @@ answer different questions.
 | | `run_doctor.py` | `quality_score.py` |
 |---|---|---|
 | Output | findings + `worst_severity` (ERROR/WARN/INFO) | integer 0-100 + band |
-| Input | stage 1a/2/3b/4/5/6 JSON + source docx + output docx | `*_entries/_classified/_fields.json` + output docx |
+| Input | stage 1a/2/3b/4/5/6 JSON + source docx + output docx | the doctor's report + `*_entries/_classified/_fields.json` + output docx |
 | Number? | **no number at all** | yes |
 | Where it runs | orchestrator post-run, `stage_7_doctor/<uid>_doctor.json` | `quality_score_service`, cached at `runs/{id}/quality_score.json` |
 
-The doctor does not compute a 0-100 score. It reports all five of the quality
-score's hard-fail gates, each as an ERROR lint that calls the scorer's own
-predicate, so the two cannot drift apart — that is the whole overlap. A sixth
-cap, stage 4's failed extraction groups (below), stops short of RED and so is a
-WARN lint on the same shared predicate. A call the content-filter fallback
-served is a WARN lint too, but caps nothing (#1174, below). Three more caps (#822, below) cover
-source content lost before the document was written; they also stop one point
-under GREEN, and each calls the signal behind an existing doctor lint
-(`under_extraction`, `segmentation`, `table_lost`).
+The doctor does not compute a 0-100 score, but since #1595 the score is built
+from the doctor's report: its WARN and ERROR findings, weighted by each lint's
+measured precision and typical fix minutes, are the score's one weighted
+dimension, and a run with no report cannot be GREEN. The doctor also reports
+all five of the score's hard-fail gates, each as an ERROR lint that calls the
+scorer's own predicate, so the two cannot drift apart. A sixth cap, stage 4's
+failed extraction groups (below), stops short of RED and so is a WARN lint on
+the same shared predicate. A call the content-filter fallback served is a WARN
+lint too, but caps nothing (#1174, below).
 
 ## Goals
 
@@ -34,7 +34,7 @@ The doctor and the score exist for the person reviewing a converted CV. They sho
 | 1 | **Catch what matters.** Every serious defect is flagged, on the entry where it occurs. | Share of verified HIGH defects that a finding names, by entry | 4 of 53 fully caught, 6 partly; 121 of 444 defects at any severity (27%) | Half of HIGH (approved 2026-10-08, Paul) | 19 of 53 HIGH caught; 13 of them out of sample, the other 6 from lints written from these runs |
 | 2 | **Don't waste the reviewer's time.** What the reviewer is shown is right. | Precision of findings shown to users (WARN and above, and Word comments in the review copy) | 279 of 397 WARN (70%); about 67 of 401 review-copy comments come from two lints that are mostly false positives (#1585) | 90% of what is shown (approved 2026-10-08, Paul) | 278 of 396 WARN true (70%) on the dev-259 doctor; about 282 of 338 (83%) on the current doctor, not re-judged and partly in-sample |
 | 3 | **A quiet doctor means something.** No finding never reads as "checked and fine" when the doctor couldn't check. | Every run has a doctor outcome, and every run lists what the doctor can't see | IXJMKS scored GREEN 97 with no doctor report (#1593). Runs with nothing to flag get no review copy, and no "not checked" list exists (#1589) | Every run | |
-| 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | not re-measured; the baseline stands |
+| 4 | **GREEN means ship.** The score predicts the cleanup a run needs. | Share of GREEN runs carrying a verified HIGH; fit of the score to the review form's correction-time answers | 22 of 31 GREEN runs carry a verified HIGH, including all 6 runs at 100 (#822) | Under 1 in 10 GREEN runs with a HIGH (approved 2026-10-08, Paul) | 16 of 24 GREEN runs carry a HIGH with the #1595 score (held out); bounded by goal 1, see "Measured (#1595)" |
 | 5 | **Point to the fix.** A finding sits where the problem is and shows what's wrong. | Findings anchored to the document text, quoting the source text at stake; certain fixes applied or suggested as tracked changes | Comments are anchored (#1543) but don't quote the source; no fix is applied or suggested (#1591) | Every shown finding quotes its source | |
 | 6 | **Measured, not asserted.** Every lint's precision and recall are known. | `PRECISION.md` has a held-out row for every lint that fires; labels grow from each batch autopsy and from reviewer verdicts | In-sample only (62 runs) until #1586; no reviewer verdicts (#1587) | Every lint, held-out | |
 | 7 | **Feed the pipeline.** Findings rank pipeline fixes by the cleanup they cause. | Each finding names the stage that caused it; a corpus Pareto by cause | Stage named in autopsies only, not in findings | Every finding names its stage | |
@@ -120,37 +120,77 @@ the ones that fire many times, so they consumed half the report.
 
 `src/unified_pipeline/quality_score.py`
 
-Each dimension returns a penalty fraction in `[0, 1]`. Weighted, normalized
-against total weight (100), so a fully-penalized run scores 0 and a clean run
-scores 100:
+Since #1595 the score is built from the doctor's findings. Each dimension
+returns a penalty fraction in `[0, 1]` and costs `weight * fraction` points:
 
 ```python
-raw   = 100 * (1 - sum(weight_i * fraction_i) / 100)
-final = min(raw, *hard_fail_caps)     # caps only ever lower it
+raw   = 100 - sum(weight_i * fraction_i)
+final = min(raw, *caps)     # caps only ever lower it
 score = round(max(0, final))
 ```
 
-### Dimensions and weights
+### The doctor-findings dimension (weight 40)
 
-| Weight | Dimension | Penalty fraction |
-|---:|---|---|
-| 25 | Pipeline/API errors **(HARD-FAIL, cap 40)** | 1.0 on a fatal pattern; else `min(1, nonnull_errors / 3)` |
-| 15 | CV owner name/contact **(HARD-FAIL, cap 25)** | 1.0 if name missing or no `*_fields.json`; else 0.4 no location inference + 0.3 no primary location + 0.3 no contact field |
-| 15 | T-bucket share (3b catch-all) | 0 at ratio ≤0.03, linear to 0.4 at 0.08, to 0.8 at 0.15, 1.0 above; +0.2 if `t_validation.error` |
-| 12 | Sparse tables in output docx | `0.6*(sparse_table_ratio/0.25) + 0.4*((global_empty_ratio-0.10)/0.40)`, over tables carrying CV content only: a table whose every non-empty cell is template text is skipped, and 0 if none remain (#452) |
-| 10 | Duplicate-entry ratio | 0 at ≤0.10, linear to 0.4 at 0.30, to 0.8 at 0.50, 1.0 above; +0.1 if entries coverage >130% |
-| 10 | Raw-tab / prompt-echo artifacts | `0.6*(raw_tab_paragraphs/20) + 0.4*(echo_paragraphs/15)` |
-| 13 | Field-extraction sparseness | `0.5*((allnull_or_zerocov/total)/0.10) + 0.5*((1-success_rate)/0.10)` |
+`score_doctor_findings` reads the run's `<uid>_doctor.json` and estimates the
+minutes of cleanup it names:
 
-All fractions clamp to `[0, 1]`. A dimension whose artifact is missing scores
-1.0 (full penalty); a missing docx scores 0.5.
+```python
+minutes  = sum(precision(lint) * severity_weight * fix_minutes(lint)  for each finding)
+fraction = minutes / (minutes + 5)
+```
+
+- **precision** is the lint's hand-checked TP / judged from the per-lint table
+  in `doctor/PRECISION.md` (the same parse `doctor/precision.py` gives the
+  Teams card). A lint with no verdicts gets `UNMEASURED_PRECISION_PRIOR`, 0.5.
+- **severity weight** is 1 for WARN and ERROR, 0 for INFO. INFO findings are not
+  shown as problems.
+- **fix minutes** come from `LINT_FIX_MINUTES`, #822's strawman unit costs per
+  kind of defect: protected data 5, owner contact block 2, a lost record 1, an
+  entry in the wrong place 0.5, a wrong field 0.3, a duplicate or a header row
+  0.2, a formatting artifact 0.1, and 0 for a finding that reports how the run
+  went (a fallback model, a failed call) rather than a defect. They are asserted,
+  not measured: refit them once #1587 records reviewers' correction times.
+- **The 5** (`DOCTOR_HALF_WEIGHT_MINUTES`) is derived, not chosen: it makes
+  `GREEN_MAX_CLEANUP_MINUTES` (3) cost exactly the 15 points between 100 and
+  the GREEN line. The penalty never reaches the full 40 points, so more cleanup
+  always scores lower, and estimates alone never take a run below YELLOW. RED is
+  left to the hard-fail caps ("nothing below YELLOW", Paul on #822, 2026-10-02).
+- **No report, no GREEN (#1593).** With no readable doctor report the dimension
+  costs nothing and caps the run at `NOT_CHECKED_CAP` (84), and
+  `missing_evidence` names the missing report, so `data_complete` is false.
+
+The detail string names the five costliest lints, with their count, precision
+and minutes, so each point traces to findings the reviewer can see.
+
+### Retired weights (#1595)
+
+The seven dimensions the score was built from until #1595 were tuned in June
+2026, when every run was RED. On the two labelled batches none tracked the
+verified defects:
+
+Rank correlation of each penalty with label cost (a penalty should correlate
+positively):
+
+| Dimension | Old weight | EBYSBC/s7ab/pilot (62 runs) | YUYVIG (37 runs) |
+|---|---:|---|---|
+| Pipeline/API errors | 25 | 0 on every run | 0 on every run |
+| CV owner name/contact | 15 | -0.16 | -0.08 |
+| T-bucket share | 15 | -0.08 | -0.13 |
+| Sparse tables | 12 | +0.14 | -0.08 |
+| Raw-tab / prompt-echo artifacts | 10 | +0.17 | +0.12 |
+| Field-extraction sparseness | 13 | +0.07 | +0.06 |
+| Duplicate-entry ratio | 10 | 0 on every run | 0 on every run |
+
+A dimension at zero on every run of a batch, or uncorrelated across two
+labelled batches, earns no weight (#1595, item 8). The two that carry a
+hard-fail cap (pipeline errors, owner name) stay as weight-0 gates; the other
+five were deleted with their tests.
 
 ### The five hard-fail caps
 
 A cap is a ceiling on the final score, applied after the weighted sum. When
-several fire, the lowest wins. Only the first two (owner, fatal error) also
-carry weight as dimensions; the other three are weight-0 gates, so adding them
-moved no clean run's raw score.
+several fire, the lowest wins. All five are weight-0 gates since #1595 (the
+owner and fatal-error rows used to carry weight too).
 
 - **cap 20** — `no_output_produced()`: no rendered docx at all. Nothing to
   deliver (#745). Doctor lint: `no_output`.
@@ -246,63 +286,68 @@ doctor runs only after a terminal success. Whether a missing summary
 should fail a web run at all is a separate decision (#1174) and is not made
 here.
 
-### The three content-loss caps (#822)
+### The retired content-loss caps (#822, #1595)
 
-Cap-only gates like protected data (`CAP_ONLY_GATES`, weight 0, so no run's raw
-score moves), but soft: each caps a run at `CONTENT_LOSS_CAP` (84, one point
-under GREEN), so a run that lost source content cannot read "ship" and is not
-pushed toward RED. No weighted dimension measures lost content; these call the
-doctor's own signals, restricted to the ones batch IPXFBA hand-checked as real.
+Until #1595 nine cap-only gates held a run at 84 for content the pipeline lost
+or garbled: an under-extracted entry, fused entries, a lost source table, the
+owner cut from citations, co-authors cut to "et al.", grant details shifted,
+an application rendered as an award, header rows rendered as records, and rows
+that lost their group header. On YUYVIG they decided the band almost at random:
+six runs capped, all at 84, by five different caps; MVUREJ was capped for one
+true MED finding with 0 HIGH while 8 uncapped runs carried 3 or more HIGH.
 
-- `score_under_extracted_records()` — the doctor's `under_extraction` lint, any
-  finding (in IPXFBA all 4 findings were true positives, but only 2 lost
-  records outright; outside IPXFBA a finding can fire with nothing lost).
-- `score_fused_entries()` — `mega_entries` (`count_mega_entries`) at
-  `MEGA_ENTRIES_CAP_MIN` (2) or more entries; one fused entry is common and
-  harmless, so the threshold is a count (7 of 9 flagged entries were real).
-- `score_lost_source_table()` — the primitive behind `table_lost`
-  (`find_lost_blocks`), worst lost table at `LOST_TABLE_CAP_MIN_LINES` (5) or
-  more lines. It reads the original uploaded `.docx` from the
-  `SOURCE_DOCX_SUBDIR` (`source/`) of the scored directory; the web service
-  stages `input/*.docx` there and `score_one.py --source` does the same. With no
-  readable source the gate is not evaluated, so a score computed without it can
-  sit above the web app's.
-
-Both thresholds were fitted to one batch and are named in the code to be revisited.
-
-Which cap the run page names when several sit at 84: the three content-loss caps
-and the stage-4 cap share a value, and the run page's reason and doctor-lint
-pointer (`run_quality_report.cap_source`) is the first matching flag, in
-`CAP_ONLY_GATES` order. The order is most specific first: lost table (the loss
-is measured against the delivered docx), fused entries (a count of swallowed
-records), under-extraction (fires on any finding, including ones that lost
-nothing), then stage 4's failed group (a call failed and was retried; no loss is
-measured). The score and band do not depend on the order, only the pointer.
-In batch IPXFBA it decides two runs: EKGTXD (under-extraction and fused entries)
-and PBSGQZ (fused entries and a stage-4 failure) both point at the fused-entries
-reason, which is where their verified loss is (EKGTXD's two under-extraction
-findings lost no records).
+Each of them was a doctor lint, so each now costs its findings' precision-weighted
+minutes in the doctor dimension instead of flipping the band (Paul approved the
+redesign on #1595, 2026-10-08). A cap is kept only for a must-fix class with a
+measured precision: protected personal data (RED). No lost-record or attribution
+lint has a measured precision of 80% on 20 judged findings outside the batches
+it was written from, except `multi_record_coverage`, which also fires on runs
+with no verified HIGH (2 of the 14 zero-HIGH runs of the fit set), so it does not
+cap either.
 
 ### Bands
 
 | Score | Band | `quality_gate` verdict |
 |---|---|---|
-| ≥ 85 | GREEN (ship) | PASS |
+| ≥ 85 | GREEN (ship): about 3 minutes of estimated cleanup or less, and checked | PASS |
 | ≥ 60 | YELLOW (human cleanup needed) | REVIEW |
-| < 60 | RED (re-run / do-not-deliver) | BLOCK |
+| < 60 | RED (re-run / do-not-deliver): a hard-fail cap only | BLOCK |
 
 Gate modes: `off` (always passes), `advisory` (computes, never blocks —
 **default**), `block` (RED fails). The gate never raises on a low score.
 
+`GREEN_MAX_CLEANUP_MINUTES = 3` was set on the fit set, batches EBYSBC, s7ab and
+pilot (62 runs; labels converted from their verified autopsies). 48 of the 62
+carry a verified HIGH, so GREEN can only be honest if it is rare. Runs under
+3.5 estimated minutes: 5, none with a HIGH; under 4: 8, 1 with a HIGH; under 5:
+14, 5 with a HIGH. The 85/60 lines themselves are unchanged.
+
+### Measured (#1595)
+
+`scripts/score_vs_autopsy.py`, label cost = 3 x HIGH + 1 x MED + 0.25 x LOW.
+Base is origin/dev `8e29dd24` re-scored over the same artifacts.
+
+| Batch | Doctor | Score rank r with cost, base → #1595 | GREEN with a verified HIGH, base → #1595 |
+|---|---|---|---|
+| EBYSBC/s7ab/pilot, 62 runs (fit set) | current | -0.35 → -0.69 | 4 of 6 → 0 of 4 |
+| YUYVIG, 37 runs (held out) | dev-259 as stored, PRECISION.md as of dev-259 | -0.14 → -0.63 | 22 of 31 → 16 of 24 |
+| YUYVIG, 37 runs (lints partly written from it) | current | -0.14 → -0.67 | 22 of 31 → 15 of 24 |
+
+The held-out rank correlation passes #1595's bar (the doctor WARN count's
++0.59). GREEN with a HIGH does not meet goal 4 (under 1 in 10), and no GREEN
+line can: three YUYVIG runs with a verified HIGH have no WARN finding at all
+(0 estimated minutes), so a score built from the doctor is bounded by the
+doctor's recall (goal 1). The one cap on a zero-HIGH YUYVIG run is IXJMKS's,
+which had no doctor report (#1593).
+
 ### Calibration caveat (read this before trusting an absolute number)
 
-From the module docstring (2026-06-02): scored against 8 production runs, **all
-scored 25-40 — every run was RED.** Two systemic causes dominated the whole
-distribution: the stage 3b `name 'response' is not defined` bug (tripped the
-cap-40 gate on ~100% of runs) and systemic raw-tab / prompt-echo artifacts. The
-score discriminates *within* that range, but the 85/60 thresholds have not been
-re-baselined since. Treat GREEN as "no detected problems", never
-"human-verified correct".
+The minutes are a ranking, not a stopwatch: the fix minutes are strawman
+costs, the precision weights come from batches measured before YUYVIG, and the
+GREEN line is fitted to one labelled set. Treat GREEN as "nothing the doctor
+reliably flags", never "human-verified correct". Refit on each labelled batch
+with `scripts/score_vs_autopsy.py`, and against correction times once #1587
+collects them.
 
 ## Running them
 
@@ -315,7 +360,8 @@ PYTHONPATH=src python3 scripts/doctor_one.py <outputs_root> <uid>   # one-line T
 # doctor, across a corpus, aggregated by lint
 PYTHONPATH=src python3 scripts/corpus_doctor_sweep.py <corpus_dir>
 
-# score
+# score (the directory must hold the run's <uid>_doctor.json, or the run reads
+# as not checked and is capped at 84)
 python3 src/unified_pipeline/quality_score.py <run_output_dir> [run_id]
 python3 src/unified_pipeline/quality_score.py <run_output_dir> --gate   # exit 1 if RED
 ```

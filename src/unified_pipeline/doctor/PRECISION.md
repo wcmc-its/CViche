@@ -398,6 +398,8 @@ Overfit, held out: `span_count` and `year_not_in_source`, both since fixed by #1
 
 ## Score cap inputs (M3)
 
+#1595 (2026-10-08) retired the content-loss caps this section qualified: each lint now lowers the score by its findings' precision-weighted fix minutes instead of capping it (`quality_score.score_doctor_findings`, docs/RUN_DOCTOR_SCORING.md). The rows below are kept as the measurements those caps were set on.
+
 The quality score caps a run at 84 on more lints only while this table records the cap's own findings at 80% precision or more on 20 or more of them (Paul's decision on #822, 2026-10-02). Each row measures the subset of the lint's findings that would cap, not the whole lint. **matched** is M1's index match; every unmatched hit was hand-checked against the rendered docx (`w:ins` text included) and the stage-4 entry. A partial is a real defect other than the one the cap claims, and counts against precision.
 
 | cap input | caps when | hits | matched | hand-checked: TP / partial / FP | precision | caps? |

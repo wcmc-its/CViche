@@ -3273,9 +3273,9 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
     grant; a grant too short to locate in the document is not judged.
     `current_year` defaults to this year, as stage 6's own rebucket does, so
     re-doctoring an old render can newly flag a grant that ended since.
-    `check_end_date=False` judges the heading only: the quality score's
-    grant-bucket cap reads that shape alone (`quality_score.
-    score_grant_application_as_award`), so a later rescore cannot move it."""
+    `check_end_date=False` judges the heading only, the shape the quality
+    score's grant-bucket cap read until #1595 retired it; no caller in the
+    pipeline passes it now."""
     year = None
     if check_end_date:
         year = current_year if current_year is not None else datetime.now().year

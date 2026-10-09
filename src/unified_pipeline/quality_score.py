@@ -4,9 +4,7 @@ CViche run quality scorer.
 
 Computes a deterministic 0-100 quality score for a completed pipeline run by
 reading the stage output artifacts only -- NO additional LLM calls. Intended as
-a post-pipeline gate: surface low-quality runs (broken docx, over-use of the
-``T`` catch-all class, missing CV owner, pipeline errors, duplicate-entry
-fragmentation) before they are delivered.
+a post-pipeline gate: surface runs that need cleanup before they are delivered.
 
 Usage (CLI):
     python3 quality_score.py <run_output_dir> [run_id]
@@ -19,70 +17,52 @@ Usage (import):
 
 Scoring model
 -------------
-Each dimension returns a penalty fraction in [0, 1]. The weighted penalty is
-normalized against the total available weight so a perfectly bad run scores 0
-and a clean run scores 100::
+Each dimension returns a penalty fraction in [0, 1], and a dimension of
+weight w costs w * fraction points::
 
-    raw = 100 * (1 - sum(weight_i * fraction_i) / sum(weight_i))
+    raw   = 100 - sum(weight_i * fraction_i)
+    final = min(raw, *caps)
 
-The weights sum to 100, so a dimension of weight w costs exactly w * fraction
-points of the raw score.
+Since #1595 the score is built from the run doctor's findings
+(``score_doctor_findings``, weight 40): each WARN or ERROR finding costs its
+lint's hand-checked precision (``doctor/PRECISION.md``) times the minutes its
+kind of defect typically takes to fix (``LINT_FIX_MINUTES``), and the
+estimated minutes set the penalty. A run with no readable doctor report was
+not checked and is capped out of GREEN (``NOT_CHECKED_CAP``, #1593). The seven
+weighted dimensions the score had before (pipeline errors, owner contact,
+T-bucket share, sparse tables, raw formatting, field sparseness, duplicate
+ratio) did not track verified defects on either labelled batch, so their
+weights are retired; the ones that carry a hard-fail cap keep it at weight 0.
 
-Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
-owner name caps the final score regardless of the other dimensions. A third
-gate -- protected personal data in the rendered docx (#820) -- caps the score
-the same way but carries NO weight (``CAP_ONLY_GATES``), so a clean run's raw
-score is unchanged by its existence. A fourth, also cap-only, keeps a run in
-which a stage-4 extraction group failed outright out of GREEN (#1174). A
-call the content-filter fallback model served does not cap (#1174, Paul
-2026-10-05): it succeeded, so the doctor's `llm_fallback_served` WARN records
-it and the score does not.
-
-Nine more cap-only gates (#822) cover content the pipeline lost or garbled,
-a thing no weighted dimension measures: an under-extracted entry, several fused
-entries, a lost source table, the CV owner cut from several of their own
-citations, co-authors cut from several citations, a grant list cut in the
-wrong place, a grant application rendered as an award, several headers or
-labels rendered as records, and several group headers whose lines render
-without them. Each caps a run
-at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss cannot
-read "ship". They are the doctor's own signals, called
-rather than re-derived, restricted to the ones a batch hand-checked as real: a
-lint feeds this cap only while `doctor/PRECISION.md` records its precision at
-80% or more on 20 or more hits (Paul's decision on #822, 2026-10-02).
+Hard-fail caps, unchanged: no rendered output (20), a missing CV owner name
+(25), protected personal data in the docx (25, ``CAP_ONLY_GATES``), a fatal
+pipeline error or a stage-3b batch-fallback ratio over threshold (40). A
+stage-4 extraction group that failed keeps a run out of GREEN (#1174). The
+nine content-loss caps at 84 (#822) are retired: their lints are doctor
+findings, so they now lower the estimate instead of flipping the band.
 
 The result also says what the score was computed *without*: ``data_complete``
 is False and ``missing_evidence`` names each scored artifact that was absent,
 unreadable, or ambiguous (and a ``EVIDENCE INCOMPLETE`` flag repeats it), so a
 score over an incomplete output directory is recognizable as missing evidence
-rather than read as a precise measurement (#724 review item 2). The score
-itself is unchanged by it.
+rather than read as a precise measurement (#724 review item 2). Of those
+artifacts only the doctor report moves the score: without it the run is capped
+at NOT_CHECKED_CAP.
 
-Bands (PROVISIONAL -- see calibration note below):
-    >= 85  GREEN   ship
+Bands:
+    >= 85  GREEN   ship: about 3 minutes of estimated cleanup or less
+                   (GREEN_MAX_CLEANUP_MINUTES), and checked by the doctor
     >= 60  YELLOW  human cleanup needed
-    <  60  RED     re-run / do-not-deliver
+    <  60  RED     re-run / do-not-deliver: reached only through a hard-fail cap
 
-CALIBRATION NOTE (2026-06-02): scored against 8 production runs from S3
-(9TUVGW, 0GX6RA, B7TFKA, M2D90G, EVZ1YW, P2ZP1A, 7RHKJQ, VFFDCA). ALL scored
-25-40 -- i.e. every current run is RED. Two systemic causes dominate the whole
-distribution and must be fixed before the GREEN band is meaningful or the gate
-is run in "block" mode:
-  1. The stage_3b ``name 'response' is not defined`` bug records an error on
-     ~100% of runs, tripping the pipeline-error hard-fail cap (40) on every run
-     (so nothing can exceed 40). Fixed alongside this scorer.
-  2. Systemic docx raw-tab / prompt-echo artifacts and high duplicate-entry
-     ratios penalize every run.
-The score IS discriminating within this range, but the absolute bands are not
-yet trustworthy. SHIP ADVISORY-ONLY (the default); re-baseline the 85/60
-thresholds against fresh runs once causes (1) and (2) are fixed and at least
-one human-confirmed clean run exists. Treat GREEN as "no detected problems,"
-never "human-verified correct."
+The 85/60 lines date from June 2026; what GREEN means in minutes was set on
+labelled batches (see GREEN_MAX_CLEANUP_MINUTES). The fix minutes are #822's
+strawman unit costs, not measured, so treat the minutes as a ranking and GREEN
+as "nothing the doctor reliably flags", never "human-verified correct".
 """
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import re
@@ -97,9 +77,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from docx.document import Document as DocumentType
-    from docx.oxml.table import CT_Tc
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
 
 # #820/#825: the doctor's protected_data_in_output lint and this module's
 # score_protected_data must not diverge, so the scorer CALLS the lint on
@@ -109,30 +86,10 @@ if TYPE_CHECKING:
 # imports this module, so this does not create the cycle `quality_score ->
 # run_doctor -> doctor.lints.enrichment -> quality_score` would (run_doctor.py
 # itself is never imported here).
-from unified_pipeline.core.template_boilerplate import (
-    is_foreign_template_instruction,
-    is_near_template_instruction,
-    is_template_instruction,
-    is_template_label_line,
-    is_unanswered_prompt,
-)
-from unified_pipeline.doctor.lints.extraction import (
-    lint_grant_boundary,
-    lint_grant_bucket,
-    lint_under_extraction,
-)
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
-from unified_pipeline.doctor.lints.render import (
-    lint_etal_added,
-    lint_group_header_context,
-    lint_junk_or_header_row,
-    lint_owner_missing_from_citation,
-)
+from unified_pipeline.doctor.precision import load_ledger
 from unified_pipeline.doctor.shared import (
-    _cell_text,
-    _docx_text,
     docx_body_blocks,
-    docx_table_rows,
 )
 from unified_pipeline.llm_provenance import (
     FALLBACK_SERVED_KEY,
@@ -140,13 +97,7 @@ from unified_pipeline.llm_provenance import (
     STAGE4_5_FALLBACK_CALLS_KEY,
     STAGE4_ENTRY_FALLBACK_KEY,
 )
-from unified_pipeline.segmentation_regression import (
-    count_mega_entries,
-    find_lost_blocks,
-    iter_source_block_lines,
-)
 from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
-from unified_pipeline.stage6.formatting import is_cviche_box
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
@@ -154,6 +105,17 @@ logger = logging.getLogger(__name__)
 # --- band thresholds (provisional; see module docstring) --------------------
 BAND_GREEN = 85
 BAND_YELLOW = 60
+
+#: The suffix of the run doctor's report (`<uid>_doctor.json`), which the
+#: doctor-findings dimension reads (#1595).
+DOCTOR_REPORT_SUFFIX = "_doctor.json"
+
+#: The review copy stage 7 writes beside the clean document (#1543): the same
+#: document with the doctor's findings as Word comments. Never scored: a
+#: second ``*.docx`` would make the docx evidence ambiguous (#1595). Mirrors
+#: ``app.services.artifact_service.REVIEW_DOCX_SUFFIX``, which a backend test
+#: pins equal: that module cannot import the pipeline package.
+REVIEW_DOCX_SUFFIX = "_wcm_review.docx"
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +200,8 @@ def _load_docx(outputs_dir: Path) -> tuple[DocumentType | None, str | None]:
         from lxml.etree import XMLSyntaxError
     except ImportError:
         return None, "python-docx not available"
-    docx_files = sorted(outputs_dir.glob("*.docx"))
+    docx_files = sorted(p for p in outputs_dir.glob("*.docx")
+                        if not p.name.endswith(REVIEW_DOCX_SUFFIX))
     if not docx_files:
         return None, "no docx found"
     if len(docx_files) > 1:
@@ -262,6 +225,7 @@ SCORED_JSON_ARTIFACTS = (
     ("fields.json", "*_fields.json"),
     ("classified.json", "*_classified.json"),
     ("entries.json", "*_entries.json"),
+    ("doctor report", f"*{DOCTOR_REPORT_SUFFIX}"),
 )
 #: Number of artifacts the inventory checks: the JSON patterns above plus the docx.
 SCORED_ARTIFACT_COUNT = len(SCORED_JSON_ARTIFACTS) + 1
@@ -397,8 +361,8 @@ def cv_owner_name_missing(fields_data) -> bool:
 
 #: The hard-fail cap for a run that produced no rendered docx at all (#745
 #: comment, 2026-09-12: web204 lost stage 6 to #812 and scored 88 GREEN
-#: because score_sparse_tables/score_broken_format's neutral 0.5-with-no-docx
-#: fraction is exactly as good as a mediocre-but-real docx). Set BELOW
+#: because the then-weighted docx dimensions scored a missing docx no worse
+#: than a mediocre real one). Set BELOW
 #: score_cv_owner's 25 and score_pipeline_errors' 40: "nothing to deliver" is
 #: more severe than either -- both of those caps still describe a run that
 #: produced *something* a human could look at.
@@ -409,9 +373,8 @@ def no_docx_produced(outputs_dir: Path) -> bool:
     """True only when the run's output directory has NO docx at all -- the
     absent case _load_docx reports as ``"no docx found"``. Deliberately
     narrower than "doc is None": an ambiguous match (more than one *.docx) or
-    a present-but-corrupt file is a different failure, already scored by
-    score_sparse_tables/score_broken_format's own 0.5 neutral fraction, and
-    is not "nothing was produced" the way a genuinely missing file is."""
+    a present-but-corrupt file is a different failure (``missing_evidence``
+    names it), not "nothing was produced" the way a genuinely missing file is."""
     _, reason = _load_docx(outputs_dir)
     return reason == "no docx found"
 
@@ -745,6 +708,8 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
     unreadable_files = []
 
     for json_file in sorted(outputs_dir.glob("*.json")):
+        if json_file.name.endswith(DOCTOR_REPORT_SUFFIX):
+            continue  # the doctor's report quotes errors; it records none of its own
         try:
             with open(json_file, encoding="utf-8") as f:
                 data = json.load(f)
@@ -892,863 +857,203 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     return 0.0, "protected_data_hits=0", None
 
 
-#: The cap the content-loss gates apply (#822): one point under GREEN, so a run
-#: with a verified loss cannot read "ship" but is not pushed toward RED -- none
-#: of these signals says the document is undeliverable, only that source
-#: content did not reach it. Derived from BAND_GREEN so the two cannot drift.
-#: Not shared with `STAGE4_GROUP_FAILURE_CAP` (#1174): that is a separate
-#: policy for a separate signal that happens to land on the same value, and
-#: retuning one should not silently move the other.
-CONTENT_LOSS_CAP = BAND_GREEN - 1
+# ---------------------------------------------------------------------------
+# The doctor-findings dimension (#1595): the score is built from the doctor's
+# own findings, each weighted by how often its lint is right and by how long
+# the defect it names takes to fix by hand.
+# ---------------------------------------------------------------------------
 
-#: Fused entries cap a run only at this count. One fused entry is common and
-#: can be harmless (batch IPXFBA: CTXOTY's single fused entry kept every
-#: mentee); the runs that lost records had several (EKGTXD 4, PBSGQZ 3 flagged).
-#: A threshold fitted to one batch: revisit with more data.
-MEGA_ENTRIES_CAP_MIN = 2
+#: Typical minutes to fix one finding by hand, by the kind of defect its lint
+#: names. These are #822's strawman unit costs (a source record lost: retype
+#: it; an entry in the wrong place: cut and paste it; ...), asserted, not
+#: fitted: no review data times a fix yet (#1587 collects it). Refit them
+#: against reviewer correction times once that data exists.
+FIX_MINUTES_PROTECTED_DATA = 5.0
+FIX_MINUTES_CONTACT_BLOCK = 2.0
+FIX_MINUTES_RECORD_LOST = 1.0
+FIX_MINUTES_MISPLACED = 0.5
+FIX_MINUTES_FIELD_WRONG = 0.3
+FIX_MINUTES_DUPLICATE = 0.2
+FIX_MINUTES_FORMATTING = 0.1
+#: A finding that reports how the run went (a fallback model, a retried
+#: call, a failed stage) rather than a defect a reviewer fixes in the
+#: document. Its cost reaches the score through the defects it leaves, or
+#: through the hard-fail caps.
+FIX_MINUTES_NONE = 0.0
 
-#: A lost source table caps a run only when its worst table lost this many
-#: lines. The doctor's own `table_lost` floor is 3 lines, and the short lost
-#: tables the corpus shows are template labels (#1102's noise class); the one
-#: loss verified in batch IPXFBA (TALVAE) was far larger. Fitted to one batch.
-LOST_TABLE_CAP_MIN_LINES = 5
+#: Each doctor lint's fix minutes. Every lint in `run_doctor.KNOWN_LINTS` has
+#: a row (a test pins it), so a new lint states what its finding costs.
+LINT_FIX_MINUTES = {
+    "protected_data_in_output": FIX_MINUTES_PROTECTED_DATA,
+    **dict.fromkeys((
+        "owner_contact_missing", "contact_slot_lost",
+    ), FIX_MINUTES_CONTACT_BLOCK),
+    **dict.fromkeys((
+        "classified_unrendered", "dead_sections", "dedup_drops", "multi_record_coverage",
+        "orphaned_fragments", "section_lost", "segmentation", "segmentation_collapse",
+        "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
+    ), FIX_MINUTES_RECORD_LOST),
+    **dict.fromkeys((
+        "bucket_status", "grant_bucket", "group_header_context", "invented_records",
+        "missed_headers", "offschema_fields", "owner_attribution", "section_consistency",
+        "stage6_render_warnings", "taxonomy_code_coverage", "teaching_postcheck",
+    ), FIX_MINUTES_MISPLACED),
+    **dict.fromkeys((
+        "citation_field_dropped", "citation_grounding", "date_cell_shape",
+        "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "grant_boundary",
+        "implausible_year", "owner_missing_from_citation", "pubmed_title_truncated",
+        "record_boundary", "role_consistency", "shattered_prose", "span_count",
+        "split_child_unsourced", "stage4_group_failures", "summary_unsupported_claim",
+        "wrong_start_date", "year_not_in_source",
+    ), FIX_MINUTES_FIELD_WRONG),
+    **dict.fromkeys((
+        "duplicate_passages", "duplicate_records", "identical_rendered_rows", "junk_or_header_row",
+    ), FIX_MINUTES_DUPLICATE),
+    **dict.fromkeys((
+        "date_only_lines", "llm_refusal_in_output", "output_hygiene", "pipe_leaks",
+        "python_repr_in_output", "table_shape",
+    ), FIX_MINUTES_FORMATTING),
+    **dict.fromkeys((
+        "enrichment_failures", "llm_fallback_served", "no_output", "pipeline_errors_present",
+        "research_summary_call_failed", "stage3b_fallback_ratio", "stage3b_second_pass_error",
+        "stage_failure_recorded",
+    ), FIX_MINUTES_NONE),
+}
 
-#: The owner cut from this many of their own citations caps a run (Paul's
-#: decision on #822, 2026-10-02). `owner_missing_from_citation` measured 27 of
-#: 29 hits real on the 63-run EBYSBC/s7ab/pilot farm (doctor/PRECISION.md, M3);
-#: one or two cut citations are left to the finding alone, the decision's own
-#: starting count, to be re-set from the harness.
-OWNER_MISSING_CITATIONS_CAP_MIN = 3
+#: A lint missing from LINT_FIX_MINUTES (a report written by a newer doctor)
+#: costs what a wrong field does, the most common kind of finding.
+DEFAULT_FIX_MINUTES = FIX_MINUTES_FIELD_WRONG
 
-#: `etal_added` findings that cap a run (Paul, 2026-10-07): citations whose
-#: rendered author list ends in "et al." where the source names every author,
-#: so co-authors are lost. Three, the owner-missing gate's count: both are
-#: author credit cut from a citation, and one or two such lines are a quick
-#: fix by hand. Precision does not set it: every judged hit so far was true
-#: (204 of 204: RCBKFG 92, NDMRSO 17, X6 95). Before #1404 (dev-248) stage 5d
-#: cut every list past six authors, so the stored runs carry many hits; on the
-#: 9 dev-248 runs the lint fires 0 times (doctor/PRECISION.md, X6-cite cap).
-ETAL_ADDED_CAP_MIN = 3
+#: The doctor severities a finding counts at, as a multiplier. INFO findings
+#: are notes the run page does not show as problems, so they cost nothing; the
+#: WARN count was the signal that tracked defects on batch YUYVIG (#1595).
+SEVERITY_WEIGHT = {"ERROR": 1.0, "WARN": 1.0, "INFO": 0.0}
 
-#: `grant_boundary` findings that cap a run (#1226): a grant list whose stage-2
-#: cut slipped, so grants render with a neighbour's title, PI or dates. Three,
-#: not one: a slipped cut carries down the list (ZCTARO/KUUKNJ 13, CXRYCF 10,
-#: CTWLTR 8, DXAGUS 6, VGHNZD 5, VYRDHN 4 in the stored runs), while a lone
-#: hit is one grant's edge, and both false positives measured so far sit on
-#: runs with 1 or 2 hits (RXYBVF 502, VYNARH 648). At 3 or more: 59 of 59
-#: hand-checked or matched to a verified finding (doctor/PRECISION.md, M4-cap).
-GRANT_BOUNDARY_CAP_MIN = 3
+#: The precision a lint is given when `doctor/PRECISION.md` records no
+#: hand-checked verdict for it: a stated prior, not a measurement. On the
+#: EBYSBC fit set the rank correlation moved by under 0.02 between 0.25 and
+#: 0.75, so the value is not load-bearing there.
+UNMEASURED_PRECISION_PRIOR = 0.5
 
-#: `grant_bucket` application-as-award findings that cap a run (#1343): one,
-#: because a single application rendered as a funded award already misstates
-#: the faculty member's funding. 30 of 30 (ZDCXIV-01 and its RCBKFG re-run
-#: FLYBMX, one CV; doctor/PRECISION.md, M4-cap). The lint's other shape (a
-#: Current grant whose end date has passed) does not cap: 2 judged hits, and
-#: it reads today's date, so rescoring a stored run next year would move it.
-GRANT_APPLICATION_AS_AWARD_CAP_MIN = 1
+#: The doctor's per-finding status for a lint that ran (`doctor.shared.STATUS_RAN`).
+#: A skipped or unreadable lint's placeholder finding names no defect.
+_DOCTOR_STATUS_RAN = "ran"
 
-#: `junk_or_header_row` findings that cap a run (EBYSBC E8/E10/E29): a group
-#: header, lead-in label or date fragment rendered as a record. No content is
-#: lost, but the document needs cleanup. Five: one to three such rows take a
-#: minute to delete, and the lint's out-of-sample false positives (batch
-#: NDMRSO) all sit on runs with 1 to 3 hits (EHGXAL 3 of 3 false, UYQRUN 2 of
-#: 3, TVZDVF 1 of 3, REOYVH and SVYSGY 1 of 1). At 5 or more: 100 of 105
-#: (95%) over the EBYSBC farm and NDMRSO; no RCBKFG run reaches 5
-#: (doctor/PRECISION.md, M4-cap).
-JUNK_ROWS_CAP_MIN = 5
+#: The points the doctor-findings dimension can take. It is the only weighted
+#: dimension, so no estimate of cleanup time alone can take a run below
+#: YELLOW: RED is left to the hard-fail caps, as Paul decided for the
+#: content-loss caps on #822 (2026-10-02, "nothing below YELLOW").
+DOCTOR_FINDINGS_WEIGHT = 100 - BAND_YELLOW
 
-#: `group_header_context` WARN findings that cap a run (X6 E8; Paul approved
-#: feeding the cap 2026-10-07): a society, employer or course line coded as a
-#: record, whose lines render without its name (`children_lost_header`), or a
-#: run of bare roles rendered without what they were held in
-#: (`role_without_holder`). One finding is one header or one run of roles,
-#: however many rows it names. Only the WARN shapes count: the INFO shapes
-#: (a lead line coded unlike its list, a role that lost a block's dates) are
-#: n=22 and n=21 on two CVs. Four, not one: a header coded as a record
-#: repeats down a CV's society and employer lists, while at 3 two runs would
-#: cap on one true hit beside two partials (SDEBQJ, ZQJVRN). At 4 or more:
-#: 95 of 99 true over the stored `analysis` runs (KHXOUF 106 false; UYQRUN
-#: 176 and IZJADE/WYMVGU 479 partial), and 4 runs move out of GREEN, each
-#: hand-read (doctor/PRECISION.md, X6-header-cap).
-GROUP_HEADER_CAP_MIN = 4
+#: The estimated cleanup a GREEN run may need, in minutes. Set on the fit set
+#: (batches EBYSBC, s7ab and pilot, 62 runs with verified defects; #1595): 48
+#: of the 62 carry a verified HIGH, so GREEN can only be honest if it is rare.
+#: Under 3.5 minutes, 5 runs and none with a HIGH; under 4, 8 runs and 1 with a
+#: HIGH; under 5, 14 and 5. Goal 4 in docs/RUN_DOCTOR_SCORING.md asks for under
+#: 1 in 10 GREEN runs with a HIGH, so 3. Refit on each labelled batch.
+GREEN_MAX_CLEANUP_MINUTES = 3.0
 
-#: Subdirectory of the scored directory that holds the run's original uploaded
-#: .docx. Optional: `score_lost_source_table` reads the source to find tables
-#: that never reached stage 2, and is simply not evaluated without it.
-SOURCE_DOCX_SUBDIR = "source"
+#: The estimated minutes at which the dimension takes half its weight. The
+#: penalty fraction is ``minutes / (minutes + DOCTOR_HALF_WEIGHT_MINUTES)``: 0
+#: with no counted finding, rising ever more slowly and never reaching 1, so
+#: more cleanup always scores lower and long runs stay apart (an exponential
+#: with the same GREEN line rounds every run over about 28 minutes to 60).
+#: Derived so that GREEN_MAX_CLEANUP_MINUTES costs exactly the points between
+#: 100 and the GREEN line: 5 minutes with the constants above.
+DOCTOR_HALF_WEIGHT_MINUTES = GREEN_MAX_CLEANUP_MINUTES * (
+    DOCTOR_FINDINGS_WEIGHT - (100 - BAND_GREEN)) / (100 - BAND_GREEN)
 
+#: The cap on a run with no readable doctor report (#1593: IXJMKS scored 97
+#: GREEN with none). The score is built from the doctor's findings, so a run
+#: the doctor did not check has no estimate and cannot read "ship".
+NOT_CHECKED_CAP = BAND_GREEN - 1
 
-def score_under_extracted_records(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: a large multi-record entry whose stage-4 extraction covered
-    under 40% of it, so its other records vanish (#822). The doctor's
-    `under_extraction` lint, called as is. In batch IPXFBA its 4 findings were
-    all true positives, but only 2 lost records outright (MYAXRH, ZGNARO); the
-    other 2 (EKGTXD) were garbled or recovered by stage 6, and that run's lost
-    records reach the cap through the fused-entries gate. All 3 runs carrying a
-    finding had verified loss somewhere. Outside IPXFBA a finding can fire with
-    nothing lost; any finding still caps (a judgement call)."""
-    data, reason = _load_first(outputs_dir, "*_fields.json")
-    if data is None:
-        return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
-    findings = len(lint_under_extraction(data))
-    if findings:
-        return 1.0, f"under_extraction_findings={findings}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
-    return 0.0, "under_extraction_findings=0", None
-
-
-def score_fused_entries(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: stage 2 fused several records into one entry, in
-    MEGA_ENTRIES_CAP_MIN or more entries (#822). Counted by the same function
-    as the doctor's `mega_entries` flag; 7 of the 9 flagged entries in batch
-    IPXFBA were real, which is why the cap needs a count and not one entry."""
-    data, reason = _load_first(outputs_dir, "*_entries.json")
-    if data is None:
-        return 0.0, f"{_missing_or_unreadable_detail('entries.json', reason)}; not evaluated", None
-    fused = count_mega_entries(data.get("entries", []))
-    if fused >= MEGA_ENTRIES_CAP_MIN:
-        return 1.0, f"mega_entries={fused}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
-    return 0.0, f"mega_entries={fused}", None
+#: How many lints the detail string names, costliest first.
+_DETAIL_TOP_LINTS = 5
 
 
-def _source_block_lines(outputs_dir: Path) -> list[tuple[int, str]] | None:
-    """The source docx's lines tagged by table, or None when no usable source
-    was supplied under SOURCE_DOCX_SUBDIR (absent, ambiguous or unreadable)."""
-    from docx.opc.exceptions import PackageNotFoundError
-    from lxml.etree import XMLSyntaxError
-
-    candidates = sorted((outputs_dir / SOURCE_DOCX_SUBDIR).glob("*.docx"))
-    if len(candidates) != 1:
-        if candidates:
-            logger.warning("quality_score found multiple source docx in %s: %s",
-                           outputs_dir, ", ".join(c.name for c in candidates))
-        return None
-    try:
-        return iter_source_block_lines(str(candidates[0]))
-    except (OSError, zipfile.BadZipFile, KeyError, ValueError, PackageNotFoundError,
-            XMLSyntaxError) as e:
-        logger.warning("quality_score could not read source docx %s (%s: %s)",
-                       candidates[0], type(e).__name__, e)
-        return None
+@dataclass(frozen=True)
+class LintCost:
+    """One lint's share of a run's estimated cleanup."""
+    lint: str
+    findings: int
+    precision: float
+    minutes: float
 
 
-def score_lost_source_table(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: a source table whose text stage 2 mostly lost, at
-    LOST_TABLE_CAP_MIN_LINES or more lost lines (#822). The primitive behind the
-    doctor's `table_lost` lint. Needs the source docx (SOURCE_DOCX_SUBDIR): the
-    scorer's other artifacts cannot show a table the reader never saw (TALVAE,
-    batch IPXFBA: a 39-line nested table, the one verified `table_lost`)."""
-    data, reason = _load_first(outputs_dir, "*_entries.json")
-    if data is None:
-        return 0.0, f"{_missing_or_unreadable_detail('entries.json', reason)}; not evaluated", None
-    block_lines = _source_block_lines(outputs_dir)
-    if block_lines is None:
-        return 0.0, "no readable source docx; not evaluated", None
-    worst = max((len(b["lost_lines"]) for b in find_lost_blocks(block_lines, data)), default=0)
-    if worst >= LOST_TABLE_CAP_MIN_LINES:
-        return 1.0, f"worst_lost_table_lines={worst}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
-    return 0.0, f"worst_lost_table_lines={worst}", None
+def lint_precision_weight(lint: str) -> float:
+    """The lint's hand-checked precision from `doctor/PRECISION.md`, or
+    UNMEASURED_PRECISION_PRIOR when nothing was judged."""
+    measured = load_ledger().get(lint)
+    if measured is None or measured.precision is None:
+        return UNMEASURED_PRECISION_PRIOR
+    return measured.precision
 
 
-def _content_loss_count_gate(label: str, count: int,
-                             minimum: int) -> tuple[float, str, int | None]:
-    """A cap-only gate's verdict on a doctor lint's finding count: the
-    content-loss cap at `minimum` findings or more, else nothing."""
-    if count >= minimum:
-        return 1.0, f"{label}={count}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
-    return 0.0, f"{label}={count}", None
+def estimate_cleanup(findings: Iterable[object]) -> list[LintCost]:
+    """Each lint's estimated cleanup minutes over a doctor report's findings,
+    costliest first: per finding, precision x severity weight x fix minutes.
 
-
-def _load_fields_and_docx(outputs_dir: Path) -> tuple[dict, DocumentType] | str:
-    """Stage 4's fields and the rendered docx, or the "not evaluated" detail
-    naming the first one that is absent or unreadable."""
-    data, reason = _load_first(outputs_dir, "*_fields.json")
-    if data is None:
-        return f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated"
-    doc, reason = _load_docx(outputs_dir)
-    if doc is None:
-        return f"{reason}; not evaluated"
-    return data, doc
-
-
-def score_owner_missing_from_citation(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: the source credits the CV owner on a publication and its
-    own rendered bibliography line does not name them, on
-    OWNER_MISSING_CITATIONS_CAP_MIN or more citations (#822, #1259). The
-    doctor's `owner_missing_from_citation` lint over stage 4 and the rendered
-    docx, called as is."""
-    loaded = _load_fields_and_docx(outputs_dir)
-    if isinstance(loaded, str):
-        return 0.0, loaded, None
-    data, doc = loaded
-    return _content_loss_count_gate(
-        "owner_missing_citations",
-        len(lint_owner_missing_from_citation(data, docx_body_blocks(doc))),
-        OWNER_MISSING_CITATIONS_CAP_MIN)
-
-
-def score_etal_added(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: rendered citations that cut the source's full author
-    list to "et al.", on ETAL_ADDED_CAP_MIN or more citations (#1259). The
-    doctor's `etal_added` lint over stage 4 and the rendered docx, called as
-    is; a citation that also lost the owner is the owner-missing gate's."""
-    loaded = _load_fields_and_docx(outputs_dir)
-    if isinstance(loaded, str):
-        return 0.0, loaded, None
-    data, doc = loaded
-    return _content_loss_count_gate(
-        "etal_added_citations",
-        len(lint_etal_added(data, docx_body_blocks(doc))),
-        ETAL_ADDED_CAP_MIN)
-
-
-def score_grant_boundary(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: a grant list stage 2 cut in the wrong place, so grants
-    render with each other's details, on GRANT_BOUNDARY_CAP_MIN or more grants
-    (#1226). The doctor's `grant_boundary` lint over stage 4, called as is."""
-    data, reason = _load_first(outputs_dir, "*_fields.json")
-    if data is None:
-        return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
-    return _content_loss_count_gate("grant_boundary_findings", len(lint_grant_boundary(data)),
-                                    GRANT_BOUNDARY_CAP_MIN)
-
-
-def score_grant_application_as_award(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: a grant the CV files under an applications heading,
-    rendered as current or completed funding, on
-    GRANT_APPLICATION_AS_AWARD_CAP_MIN or more grants (#1343). The doctor's
-    `grant_bucket` lint over stage 4 and the rendered docx, with its end-date
-    shape off (`check_end_date=False`): that shape reads today's date."""
-    loaded = _load_fields_and_docx(outputs_dir)
-    if isinstance(loaded, str):
-        return 0.0, loaded, None
-    data, doc = loaded
-    return _content_loss_count_gate(
-        "applications_rendered_as_awards",
-        len(lint_grant_bucket(data, docx_body_blocks(doc), check_end_date=False)),
-        GRANT_APPLICATION_AS_AWARD_CAP_MIN)
-
-
-def score_group_header_context(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: lines a group header's context never reached (X6 E8),
-    on GROUP_HEADER_CAP_MIN or more WARN findings. The doctor's
-    `group_header_context` lint over stage 4 and the rendered docx's table
-    rows and blocks, called as is; its INFO findings do not count."""
-    loaded = _load_fields_and_docx(outputs_dir)
-    if isinstance(loaded, str):
-        return 0.0, loaded, None
-    data, doc = loaded
-    findings = lint_group_header_context(data, docx_table_rows(doc), docx_body_blocks(doc))
-    return _content_loss_count_gate(
-        "group_header_warns", sum(1 for f in findings if f["severity"] == "WARN"),
-        GROUP_HEADER_CAP_MIN)
-
-
-def score_junk_rows(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """Cap-only gate: stage-4 entries that are no record of their own (a group
-    header, a lead-in label, a date fragment, a dateless repeat of a dated
-    appointment) rendered as records, on JUNK_ROWS_CAP_MIN or more entries
-    (EBYSBC E8/E10/E29). The doctor's `junk_or_header_row` lint over stage 4
-    and the rendered docx's table rows and blocks, called as is."""
-    loaded = _load_fields_and_docx(outputs_dir)
-    if isinstance(loaded, str):
-        return 0.0, loaded, None
-    data, doc = loaded
-    return _content_loss_count_gate(
-        "junk_or_header_rows",
-        len(lint_junk_or_header_row(data, docx_table_rows(doc), docx_body_blocks(doc))),
-        JUNK_ROWS_CAP_MIN)
-
-
-#: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
-#: table row reaches stage 3b joined by "|", and a wrapped source line by a
-#: tab or newline. `is_unanswered_prompt` itself only splits on "|", so a
-#: tab/newline-wrapped row is normalized onto pipes with this before being
-#: handed to it (see `_is_placeholder_only_row`).
-_PLACEHOLDER_CELL_SPLIT_RE = re.compile(r"[|\t\n]")
-
-
-def _is_placeholder_only_row(text: str | None) -> bool:
-    """True when *text* carries no content an editor could act on (#822
-    finding 2, second exclusion): an unfilled template prompt ("N/A",
-    "Not Applicable", a known label whose answer cell is one of those), or
-    every cell is blank -- a bare ``| |`` row (YTPMZK's own example).
-
-    Reuses `core.template_boilerplate.is_unanswered_prompt` for the first
-    case -- the same "answer cell says nothing" check stage 6's own
-    `_appendix_drop_reason` already uses -- rather than a second, narrower
-    token set that would drift from it (an earlier version of this function
-    kept its own ``{"n/a", "not applicable", "none"}`` constant, which
-    already disagreed with `is_unanswered_prompt`'s own vocabulary by
-    missing "na" and "listed above"; CODING_STANDARDS.md #1.5). A bare-
-    separator row has no non-empty cell at all, so it can never satisfy
-    `is_unanswered_prompt`'s own "at least one cell says N/A" guard --
-    that shape is handled by the explicit check below instead, not folded
-    into the reused helper.
+    A finding counts only if its lint ran and its severity is one
+    SEVERITY_WEIGHT weights; anything else in the list (a malformed entry, a
+    skipped lint's placeholder) is ignored.
     """
-    stripped = (text or "").strip()
-    if not stripped:
-        return False
-    pieces = _PLACEHOLDER_CELL_SPLIT_RE.split(stripped)
-    if all(not p.strip() for p in pieces):
-        return True
-    return is_unanswered_prompt("|".join(pieces))
-
-
-def _has_nothing_to_extract(entry: dict) -> bool:
-    """True when stage 4 had no fields to find in *entry* (#427): stage 4
-    skipped it (`extraction_skipped`, too short to extract), or its text is a
-    placeholder-only row or the WCM template's own words -- the same
-    `core.template_boilerplate` helpers `score_t_bucket` uses. Not keyed on
-    taxonomy code: stage 4 does extract T entries, so a T miss still counts."""
-    text = entry.get("text")
-    if not isinstance(text, str):
-        text = None
-    if entry.get("extraction_skipped") or _is_placeholder_only_row(text):
-        return True
-    if (is_template_instruction(text) or is_near_template_instruction(text)
-            or is_foreign_template_instruction(text)):
-        return True
-    # ponytail: is_template_label_line is Appendix-only and "100%" is a label,
-    # so "Clinical | 100%" (a real J effort record) would match; a label-only
-    # header row carries no digit. Tighten if a digit-free real record appears.
-    return is_template_label_line(text) and not any(c.isdigit() for c in text)
-
-
-def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
-    """``id()`` of every T entry stage 6 claims into an M2 grant's table as
-    its major-goals row (#963/#1002; #822 finding 2). Reuses stage 6's
-    `research_support.claim_goal_rows` instead of copying
-    `MAJOR_GOALS_LABEL_RE` (CODING_STANDARDS.md §1.5).
-
-    Not a faithful replay of stage 6, in two ways:
-    - stage 6 first runs `fill_major_goals_from_text` on stage-4
-      `extracted_fields` and skips a row whose goal conflicts with one already
-      set; classified.json grants carry no `extracted_fields`, so that guard
-      never fires here (making it faithful changed 0 of 215 farm files);
-    - it ignores `rendered_grant_ids`, i.e. whether the grant found a
-      template slot. A claimed row is scaffolding either way.
-
-    Layering (CODING_STANDARDS.md §1): this reaches past stage6's public
-    import surface into `stage6/sections/research_support.py`, judged better
-    than a hand-copied regex. The import is function-local because that
-    module needs python-docx, which quality_score treats as optional; without
-    it this exclusion claims nothing and the other dimensions still run.
-    """
-    try:
-        from unified_pipeline.stage6.sections.research_support import (
-            RESEARCH_SUPPORT_SECTIONS,
-            claim_goal_rows,
-            copy_entries_for_render,
-        )
-    except ImportError:
-        return set()
-
-    grant_codes = {code for code, _header in RESEARCH_SUPPORT_SECTIONS}
-    grants = copy_entries_for_render(
-        [e for e in entries if e.get("taxonomy_code") in grant_codes])
-    # Rows are passed uncopied, on purpose: claim_goal_rows never writes
-    # through a row (only through the grant it claims into), and identity
-    # here is what lets the caller map a claim back to the ORIGINAL entry.
-    t_rows = [e for e in entries if e.get("taxonomy_code") == "T"]
-    claimed = claim_goal_rows(grants, t_rows)
-    return {id(row) for row, _grant in claimed}
-
-
-def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
-    """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits').
-
-    #822 finding 2: a T entry the pipeline correctly diverted -- template
-    scaffolding, a placeholder row, or a grant's own goal statement that
-    stage 6 renders into that grant's table -- costs an editor nothing, so it
-    should not count as catch-all OVER-USE. Three exclusions, each matched
-    against the T entry's own text in the classified.json ``entries`` list
-    (not ``meta``, which has no per-entry text to match against):
-
-      1. a grant's own major-goals row that stage 6 claims into that grant's
-         table (`_goal_claimed_row_ids`).
-      2. template instruction / near-template / label-only text, via the
-         same `core.template_boilerplate` helpers stage 6 itself uses to
-         drop this text -- no new phrase list (CODING_STANDARDS.md #1.5).
-      3. a placeholder-only row (`_is_placeholder_only_row`).
-
-    Each T entry is excluded by at most one of the three (checked in the
-    order above -- the goal-claim check runs first because a row can
-    otherwise satisfy both it and the template check at once, e.g. the
-    template's own major-goals LABEL with real goal text appended; see
-    `test_t_bucket_a_row_matching_two_reasons_is_excluded_only_once`), so a
-    row matching more than one reason is not double-subtracted.
-
-    The denominator (`total`) is deliberately UNCHANGED: an excluded entry is
-    still real output the run produced, and total_entries is what the 3%/
-    8%/15% ramp calibrates against as "how much this document contains," not
-    "how much of it needs a human." Only the NUMERATOR -- what counts as
-    unresolved catch-all -- shrinks. Judgement call (#822): re-scoring the
-    farm is what tests whether the ramp still separates good runs from bad
-    under this narrower numerator; see the PR description.
-    """
-    data, reason = _load_first(outputs_dir, "*_classified.json")
-    if data is None:
-        return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
-
-    meta = data.get("meta", {}) or {}
-    code_dist = meta.get("code_distribution", {}) or {}
-    total_entries_meta = meta.get("total_entries")
-    if total_entries_meta is not None and total_entries_meta < 0:
-        return _invalid_metadata_result(
-            "t_bucket", "total_entries < 0", total_entries=total_entries_meta)
-    if "code_distribution" in meta and total_entries_meta is not None:
-        code_dist_sum = sum(code_dist.values())
-        if code_dist_sum != total_entries_meta:
-            return _invalid_metadata_result(
-                "t_bucket", "sum(code_distribution) != total_entries",
-                code_distribution_sum=code_dist_sum, total_entries=total_entries_meta)
-
-    total = sum(code_dist.values()) or meta.get("total_entries", 1) or 1
-    t_count_raw = code_dist.get("T", 0)
-
-    entries = data.get("entries")
-    entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
-    excluded_template = excluded_placeholder = excluded_goal_claim = 0
-    if entries:
-        goal_claimed_ids = _goal_claimed_row_ids(entries)
-        for entry in entries:
-            if entry.get("taxonomy_code") != "T":
-                continue
-            text = entry.get("text")
-            if id(entry) in goal_claimed_ids:
-                excluded_goal_claim += 1
-            elif (is_template_instruction(text) or is_near_template_instruction(text)
-                    or is_foreign_template_instruction(text)
-                    or is_template_label_line(text)):
-                excluded_template += 1
-            elif _is_placeholder_only_row(text):
-                excluded_placeholder += 1
-
-    t_count = max(t_count_raw - excluded_template - excluded_placeholder - excluded_goal_claim, 0)
-    t_ratio = t_count / total
-
-    if t_ratio <= 0.03:
-        fraction = 0.0
-    elif t_ratio <= 0.08:
-        fraction = linear_interp(t_ratio, 0.03, 0.08, 0.0, 0.4)
-    elif t_ratio <= 0.15:
-        fraction = linear_interp(t_ratio, 0.08, 0.15, 0.4, 0.8)
-    else:
-        fraction = 1.0
-
-    stats = meta.get("stats", {}) or {}
-    tv = stats.get("t_validation", {}) or {}
-    tv_error = tv.get("error") or ""
-    if tv_error:
-        fraction = clamp(fraction + 0.2)
-
-    detail = (
-        f"T_count_raw={t_count_raw}; T_excluded_template={excluded_template}; "
-        f"T_excluded_placeholder={excluded_placeholder}; "
-        f"T_excluded_goal_claim={excluded_goal_claim}; T_count={t_count}; total={total}; "
-        f"t_ratio={t_ratio:.4f}; t_validation_error={tv_error!r}; fraction={fraction:.3f}"
-    )
-    return fraction, detail, None
-
-
-#: A table at least this share empty counts as sparse.
-SPARSE_TABLE_EMPTY_SHARE = 0.5
-
-
-def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
-    """Sparse / under-filled tables in the generated docx."""
-    doc, reason = _load_docx(outputs_dir)
-    if doc is None:
-        return 0.5, reason, None
-
-    tables = [t for t in doc.tables if not is_cviche_box(t)]  # CViche's own note, not CV content (#1388)
-    total_tables = len(tables)
-    if total_tables == 0:
-        # Not perfect quality (#724 review item 6): the WCM template always
-        # renders tables, so a docx with none is not our template's output --
-        # worst-case fraction, not a false GREEN. Farm: 0 of 65 rendered docx
-        # have zero tables, so this never fires on real output today.
-        return 1.0, "no tables in docx (template always renders tables)", None
-
-    template_cells = _template_cell_texts()
-    total_cells = empty_cells = sparse_count = scored_tables = 0
-    for tbl in tables:
-        texts = [_normalize_whitespace(_cell_text(cell)) for row in tbl.rows for cell in row.cells]
-        filled = [t for t in texts if t]
-        # #452: a table holding nothing but the template's own cell text is
-        # scaffolding for a section the source never had -- the blank
-        # template scored the full 12-point penalty on 31 such tables. A
-        # section emptied by a misroute is the doctor's `section_lost`.
-        if all(t in template_cells for t in filled):
+    counts: Counter[str] = Counter()
+    weighted: Counter[str] = Counter()
+    for finding in findings:
+        if not isinstance(finding, dict) or not isinstance(finding.get("lint"), str):
             continue
-        scored_tables += 1
-        total_cells += len(texts)
-        empty_cells += len(texts) - len(filled)
-        if len(texts) - len(filled) >= SPARSE_TABLE_EMPTY_SHARE * len(texts):
-            sparse_count += 1
-
-    if scored_tables == 0:
-        return 0.0, f"total_tables={total_tables}; no table carries CV content", None
-    sparse_table_ratio = sparse_count / scored_tables
-    global_empty_ratio = empty_cells / total_cells if total_cells else 0.0
-    a = 0.6 * (sparse_table_ratio / 0.25)
-    b = 0.4 * ((global_empty_ratio - 0.10) / 0.40)
-    fraction = clamp(a + b)
-
-    detail = (
-        f"total_tables={total_tables}; scored_tables={scored_tables}; sparse_tables={sparse_count}; "
-        f"sparse_table_ratio={sparse_table_ratio:.3f}; empty_cells={empty_cells}/{total_cells}; "
-        f"global_empty_ratio={global_empty_ratio:.3f}; fraction={fraction:.3f}"
-    )
-    return fraction, detail, None
+        if finding.get("status", _DOCTOR_STATUS_RAN) != _DOCTOR_STATUS_RAN:
+            continue
+        severity = SEVERITY_WEIGHT.get(finding.get("severity"), 0.0)
+        if not severity:
+            continue
+        counts[finding["lint"]] += 1
+        weighted[finding["lint"]] += severity
+    costs = []
+    for lint, n in counts.items():
+        precision = lint_precision_weight(lint)
+        minutes = precision * weighted[lint] * LINT_FIX_MINUTES.get(lint, DEFAULT_FIX_MINUTES)
+        costs.append(LintCost(lint, n, precision, minutes))
+    return sorted(costs, key=lambda c: (-c.minutes, c.lint))
 
 
-#: The pristine WCM template's own incidental tab: table 16 row 1 col 0's
-#: "Project title:\t\t" label cell (confirmed by scanning
-#: `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly). It
-#: IS reachable from rendered CV content -- 27 of 65 farm docx contain this
-#: exact cell text, and for all 27 it is their ONLY raw-tab cell (#724
-#: follow-up review) -- so it is excluded by exact text match, the smallest
-#: equivalent of the INSTRUCTION_MARKERS exclusion `score_broken_format`
-#: already applies for the same reason: penalizing the template's own
-#: boilerplate is not a genuine raw-formatting artifact.
-_TEMPLATE_TAB_CELL_TEXT = "Project title:\t\t"
+def score_doctor_findings(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """The run's estimated cleanup, from its doctor report (#1595).
 
-
-def _count_raw_tab_cells(
-        tables: Iterable[Table], _depth: int = 0,
-        _seen_tc: set[CT_Tc] | None = None) -> int:
-    """Raw-tab paragraphs inside every cell of `tables`, nested tables one
-    level deep via `cell.tables` (#724 follow-up review, D7'); the recursion
-    is bounded by `_depth` so a table nested inside a table nested inside a
-    table is not walked a third level down, matching this docstring. A
-    paragraph whose text is exactly `_TEMPLATE_TAB_CELL_TEXT` is excluded:
-    it is the template's own boilerplate, not a rendering defect.
-
-    A cell merged across columns (gridSpan) is repeated once per spanned
-    column in `row.cells` -- python-docx does not collapse it -- so counting
-    every `row.cells` entry would count one physical cell's tab once per
-    spanned column. Dedupe by the underlying `w:tc` element so each physical
-    cell is visited once (#724 second follow-up review, F3).
-
-    The dedupe set holds the `cell._tc` elements themselves, not `id(...)`
-    of them: `id()` alone is a memory address, and without a live reference
-    keeping the element's temporary python-docx wrapper alive, a later,
-    unrelated cell's wrapper can be allocated at the same freed address and
-    collide -- confirmed against a real farm docx, where an `id()`-only set
-    silently dropped a genuine tab-containing cell as a false "already seen"
-    duplicate. Storing the element itself in the set keeps it alive for the
-    whole walk, so identity stays meaningful.
+    The penalty fraction is ``minutes / (minutes + DOCTOR_HALF_WEIGHT_MINUTES)``
+    over `estimate_cleanup`'s total. With no readable report the run was not
+    checked: no penalty, and NOT_CHECKED_CAP keeps it out of GREEN.
     """
-    if _seen_tc is None:
-        _seen_tc = set()
-    count = 0
-    for table in tables:
-        for row in table.rows:
-            for cell in row.cells:
-                tc = cell._tc
-                if tc in _seen_tc:
-                    continue
-                _seen_tc.add(tc)
-                for p in cell.paragraphs:
-                    text = _paragraph_text(p)
-                    if "\t" in text and text != _TEMPLATE_TAB_CELL_TEXT:
-                        count += 1
-                if _depth < 1:
-                    count += _count_raw_tab_cells(cell.tables, _depth + 1, _seen_tc)
-    return count
+    report, reason = _load_first(outputs_dir, f"*{DOCTOR_REPORT_SUFFIX}")
+    findings = report.get("findings") if isinstance(report, dict) else None
+    if not isinstance(findings, list):
+        why = _missing_or_unreadable_detail("doctor report", reason) if report is None \
+            else "doctor report has no findings list"
+        return 0.0, f"{why}: not checked; cap={NOT_CHECKED_CAP}", NOT_CHECKED_CAP
+    costs = estimate_cleanup(findings)
+    minutes = sum(c.minutes for c in costs)
+    top = "; ".join(f"{c.lint} {c.findings}x p={c.precision:.2f} {c.minutes:.1f}min"
+                    for c in costs[:_DETAIL_TOP_LINTS])
+    detail = (f"estimated_cleanup_minutes={minutes:.1f} from "
+              f"{sum(c.findings for c in costs)} findings" + (f" ({top})" if top else ""))
+    return minutes / (minutes + DOCTOR_HALF_WEIGHT_MINUTES), detail, None
 
-
-#: The most the raw-tab half of `score_broken_format` may take, as a fraction
-#: of the dimension: 0.3 of its 10 points is 3 points, reached at 10 raw tabs
-#: (Paul's decision on #822, 2026-10-02). Raw tabs are cosmetic; uncapped, they
-#: cost VVRTUC (batch EBYSBC) all 10 points while no run lost a point for a
-#: lost record.
-RAW_TAB_MAX_FRACTION = 0.3
-
-#: Template instruction text left standing in a rendered CV ("prompt echo").
-#: Each alternation is a phrase the pristine WCM template
-#: (`key_files/wcm_cv_template_faculty_october_2022_final.docx`) itself uses
-#: in an instruction line -- every "please" there is "Please include / list /
-#: summarize / annotate / provide / choose / keep / do not / also include",
-#: every "e.g.," is "e.g., 50%" / "(e.g., sessions" / "(e.g., drugs", and
-#: "bedside" appears only as "(bedside teaching, teaching rounds, ...)" --
-#: rather than the bare words. The bare words were the #724 review's item 8:
-#: "please" and "e.g.," occur in ordinary academic prose and "bedside" in
-#: citation titles. Measured on the 65-docx farm (22,546 body paragraphs)
-#: before narrowing: the bare pattern hit 1,312 paragraphs, this one 1,300;
-#: the 12 dropped are 10 citation titles containing "bedside", one teaching
-#: bullet ("including Bedside Teaching") and one research summary with
-#: "e.g.," -- every one legitimate content -- and it gains nothing the bare
-#: pattern missed (strict subset). Every one of the template's 20 body
-#: instruction paragraphs still matches (pinned by a test that reads the
-#: template). Score effect, measured with score_run over all 66 farm uids:
-#: the dimension's fraction is clamp(0.6 * tabs/20 + 0.4 * echoes/15) with
-#: the clamp on the sum, so an echo count above 15 still counts; the six
-#: docx that lost 1-3 false positives drop 0.027-0.080 on this dimension,
-#: three totals rise by one point (77->78, 78->79 twice), no band changes.
-INSTRUCTION_MARKERS = re.compile(
-    r"(please (?:include|list|summarize|annotate|provide|choose|keep|do not|also include)"
-    r"|delete the others|list here|choose one"
-    r"|bedside teaching, teaching rounds"
-    r"|e\.g\., (?:50%|sessions|drugs)"
-    r"|yyyy-yyyy|\(optional\)|\(Research, clinical)",
-    re.IGNORECASE,
-)
 
 #: The WCM template stage 6 renders every CV into (`TEMPLATE_PATH` in
 #: `stage_6_word_template.py`). Not imported from there: that module
 #: `sys.exit`s at import when python-docx is missing, which would defeat this
-#: scorer's graceful degradation. The 2020/2012 files in `key_files/` are not
-#: render targets, so only this revision's paragraphs are excluded.
+#: scorer's graceful degradation. Read by `doctor.shared`'s template-text index.
 _TEMPLATE_DOCX_PATH = (
     Path(__file__).resolve().parent.parent.parent
     / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 )
 
 
-def _paragraph_text(paragraph: Paragraph) -> str:
-    """The accepted-changes text of one paragraph, tabs and line breaks kept
-    as python-docx's ``.text`` renders them (#461). ``Paragraph.text`` skips
-    runs inside ``<w:ins>`` -- where stage 6 writes enriched citations,
-    institution locations and the research summary -- so it under-reports
-    what the deliverable contains; this is the reader the doctor's lints use
-    (`doctor.shared._docx_text`), not a second walker."""
-    return _docx_text(paragraph._p, with_whitespace=True)
-
-
-def _normalize_whitespace(text: str) -> str:
-    """Collapse whitespace runs to one space and strip the ends."""
-    return " ".join(text.split())
-
-
-@functools.cache
-def _template_body_paragraph_texts() -> frozenset[str]:
-    """Whitespace-normalized text of every non-blank body paragraph of the
-    template stage 6 renders into (#822 finding 1).
-
-    Stage 6 keeps the template's own instruction paragraphs on purpose, so a
-    rendered paragraph identical to one of these is not a prompt echo.
-    A missing template raises (python-docx's own FileNotFoundError): it is a
-    checked-in asset, and an empty set would silently undo the exclusion.
-    """
-    from docx import Document
-    template_doc = Document(_TEMPLATE_DOCX_PATH)
-    return frozenset(
-        _normalize_whitespace(_paragraph_text(p))
-        for p in template_doc.paragraphs if _paragraph_text(p).strip()
-    )
-
-
-@functools.cache
-def _template_cell_texts() -> frozenset[str]:
-    """Whitespace-normalized text of every non-blank table cell of the
-    template stage 6 renders into (#452): labels, column headers and
-    placeholders like "DEA number: (optional)". Missing template raises, as
-    `_template_body_paragraph_texts` does."""
-    from docx import Document
-    template_doc = Document(_TEMPLATE_DOCX_PATH)
-    return frozenset(
-        text for tbl in template_doc.tables for row in tbl.rows for cell in row.cells
-        if (text := _normalize_whitespace(_cell_text(cell)))
-    )
-
-
-def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
-    """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
-
-    Two different scans, two different scopes, on purpose:
-
-    - Prompt-echo (``INSTRUCTION_MARKERS``) scans body paragraphs ONLY. A
-      #724 follow-up review probe confirmed every marker this pattern
-      checks ("please provide", "yyyy-yyyy", "(optional)", "(Research,
-      clinical") occurs verbatim in the pristine WCM template's own table cells --
-      table 1 row 7 col 0 "If yes, please provide Visa type (Examples: J-1,
-      H-1B, E-3, TN, etc.):", table 9 rows 0-1 col 0 "DEA number:
-      (optional)" / "NPI number: (optional)", table 13 row 0 col 1 "Date
-      (yyyy-yyyy)" (and the same label repeated in tables 19-29), table
-      17/18 row 5 col 0 "Type of Supervision (research, clinical, teaching,
-      leadership)" -- confirmed against
-      `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly,
-      independent of any rendered CV. Scanning cells for these markers would
-      therefore false-positive on the template's own label text in every
-      one of the 65 farm docx (65/65), not catch an echoed-into-content
-      defect, so the instruction-marker check stays paragraph-only and is
-      deliberately never applied to cells.
-    - The raw-tab check DOES scan every paragraph of every table cell
-      (nested tables one level deep), in addition to body paragraphs. A raw
-      ``\\t`` is not template boilerplate the way the instruction markers
-      are -- the pristine template contains exactly one incidental tab, a
-      static "Project title:" label row, and it IS reachable from rendered
-      CV content: 27 of 65 farm docx contain that exact cell text as their
-      only raw-tab cell (#724 follow-up review), so `_count_raw_tab_cells`
-      excludes that one cell text by exact match (`_TEMPLATE_TAB_CELL_TEXT`)
-      the same way the instruction markers above are excluded from cells --
-      versus the instruction markers' dozens of legitimate hits -- so any
-      other tab inside a cell is still a meaningful signal of a
-      raw-formatting artifact leaking into the docx.
-    - A body paragraph that matches ``INSTRUCTION_MARKERS`` is still not
-      counted as an echo if its whitespace-normalized text exactly equals
-      one of the template's own body paragraphs
-      (`_template_body_paragraph_texts`, #822 finding 1). Stage 6 keeps the
-      template's 20 instruction paragraphs verbatim in every rendered CV on
-      purpose, and every one of them matches ``INSTRUCTION_MARKERS`` by
-      construction (that is how the pattern was narrowed) -- without this
-      exclusion, every run counts the template's own kept text as a defect.
-      A marker hit that is NOT byte-identical to a template paragraph still
-      counts: a marker phrase originating in the template's own table cells
-      (e.g. "Date (yyyy-yyyy)") landing as a body paragraph, or a template
-      instruction line altered by the pipeline before being kept, are both
-      still genuine signals, not the template's own untouched text.
-    - The same exclusion applies to raw-tab body paragraphs (#822): the
-      template's own signature-block and employment lines ("Signature:
-      \\t\\t\\t\\t", "Name of Current Employer(s):\\t", ...) carry tabs and
-      stage 6 keeps them, so a tabbed paragraph whose whitespace-normalized
-      text equals a template body paragraph's is reported as
-      ``template_tab_excluded``, not counted. A tabbed line carrying any
-      text of its own (a filled-in value) still counts.
-
-    Headers and footers are not scanned either way: stage 6 never writes to
-    them.
-    """
-    doc, reason = _load_docx(outputs_dir)
-    if doc is None:
-        return 0.5, reason, None
-
-    template_paragraphs = _template_body_paragraph_texts()
-
-    raw_tab_paragraphs = echo_count = template_echo_excluded = template_tab_excluded = 0
-    for p in doc.paragraphs:
-        text = _paragraph_text(p)
-        in_template = _normalize_whitespace(text) in template_paragraphs
-        if "\t" in text:
-            if in_template:
-                template_tab_excluded += 1
-            else:
-                raw_tab_paragraphs += 1
-        if INSTRUCTION_MARKERS.search(text):
-            if in_template:
-                template_echo_excluded += 1
-            else:
-                echo_count += 1
-
-    raw_tab_cells = _count_raw_tab_cells(doc.tables)
-    total_raw_tab = raw_tab_paragraphs + raw_tab_cells
-
-    raw_tab_fraction = min(0.6 * (total_raw_tab / 20), RAW_TAB_MAX_FRACTION)
-    fraction = clamp(raw_tab_fraction + 0.4 * (echo_count / 15))
-    detail = (
-        f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
-        f"template_tab_excluded={template_tab_excluded}; "
-        f"echo_paragraphs={echo_count}; template_echo_excluded={template_echo_excluded}; "
-        f"fraction={fraction:.3f}"
-    )
-    return fraction, detail, None
-
-
-def score_field_sparseness(outputs_dir: Path) -> tuple[float, str, None]:
-    """Entry-level field-extraction sparseness.
-
-    Deliberate double-signal, not an accident (#724 review item 9):
-    ``success_rate`` measures the extractor (how many entries the extraction
-    call reported success on), while allnull_or_zero measures the entries
-    (how many carry no usable fields regardless of what the extractor
-    claimed). An entry that fails both is meant to weigh on both terms --
-    that is the calibration, not a double-count of one failure.
-
-    #427: an entry with nothing to extract (`_has_nothing_to_extract`) counts
-    on neither term -- its all-null fields or skipped extraction are correct
-    output, not a miss. As in `score_t_bucket`, only the numerators
-    shrink; the denominator stays every entry the run produced.
-    """
-    data, reason = _load_first(outputs_dir, "*_fields.json")
-    if data is None:
-        return 1.0, _missing_or_unreadable_detail("fields.json", reason), None
-
-    entries = data.get("entries", [])
-    total = len(entries)
-    if total == 0:
-        return 1.0, "no entries", None
-
-    allnull_or_zero = failed_count = nothing_to_extract = 0
-    for e in entries:
-        if _has_nothing_to_extract(e):
-            nothing_to_extract += 1
-            continue
-        ef = e.get("extracted_fields", {}) or {}
-        cov = e.get("extraction_coverage", {}) or {}
-        cov_pct = cov.get("extraction_coverage_percent", None)
-        if not e.get("extraction_success", False):
-            failed_count += 1
-        all_null = all(v is None for v in ef.values()) if ef else True
-        zero_cov = (cov_pct is not None and cov_pct == 0)
-        if all_null or zero_cov:
-            allnull_or_zero += 1
-
-    success_rate = 1 - failed_count / total
-    a = 0.5 * ((allnull_or_zero / total) / 0.10)
-    b = 0.5 * ((1 - success_rate) / 0.10)
-    fraction = clamp(a + b)
-    detail = (
-        f"total_entries={total}; nothing_to_extract={nothing_to_extract}; "
-        f"allnull_or_zerocov={allnull_or_zero}; "
-        f"success_rate={success_rate:.3f}; fraction={fraction:.3f}"
-    )
-    return fraction, detail, None
-
-
-def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
-    """Duplicate-entry ratio (de-dup / fragmentation health)."""
-    data, reason = _load_first(outputs_dir, "*_classified.json")
-    if data is None:
-        return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
-
-    meta = data.get("meta", {}) or {}
-    total = meta.get("total_entries", 0) or 0
-    dup = meta.get("duplicate_entries", 0) or 0
-    if total < 0:
-        return _invalid_metadata_result(
-            "duplicate_ratio", "total_entries < 0", total_entries=total)
-    if dup < 0:
-        return _invalid_metadata_result(
-            "duplicate_ratio", "duplicate_entries < 0", duplicate_entries=dup)
-    if dup > total:
-        return _invalid_metadata_result(
-            "duplicate_ratio", "duplicate_entries > total_entries",
-            duplicate_entries=dup, total_entries=total)
-    if total == 0:
-        return 0.0, "total_entries=0", None
-
-    dup_ratio = dup / total
-    if dup_ratio <= 0.10:
-        fraction = 0.0
-    elif dup_ratio <= 0.30:
-        fraction = linear_interp(dup_ratio, 0.10, 0.30, 0.0, 0.4)
-    elif dup_ratio <= 0.50:
-        fraction = linear_interp(dup_ratio, 0.30, 0.50, 0.4, 0.8)
-    else:
-        fraction = 1.0
-
-    edata, edata_reason = _load_first(outputs_dir, "*_entries.json")
-    coverage_pct = (edata or {}).get("coverage", {}).get("coverage_percentage") if edata else None
-
-    entries_note = f"; {_missing_or_unreadable_detail('entries.json', edata_reason)}" if edata_reason else ""
-    detail = (
-        f"total_entries={total}; duplicate_entries={dup}; dup_ratio={dup_ratio:.3f}; "
-        f"entries_coverage_pct={coverage_pct}; fraction={fraction:.3f}{entries_note}"
-    )
-    return fraction, detail, None
-
-
 def score_no_output(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Whether the run produced a rendered docx AT ALL -- 'nothing to
     deliver', the single most severe outcome a run can have (#745). Weight 0:
-    this is a pure gate, not a scored dimension -- score_sparse_tables and
-    score_broken_format already assign their own (unchanged) 0.5 neutral
-    fraction when there is no docx to inspect, so giving this a nonzero
-    weight would raise the score of every OTHER run in the corpus (a bigger
-    TOTAL_WEIGHT denominator with no matching penalty) purely because this
-    dimension was added, not because anything about those runs changed.
+    a pure gate, not a scored dimension.
     """
     has_docx = not no_docx_produced(outputs_dir)
     if no_output_produced(has_docx=has_docx):
@@ -1758,9 +1063,9 @@ def score_no_output(outputs_dir: Path) -> tuple[float, str, int | None]:
 
 def score_stage3b_fallback_ratio(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Stage 3b's batch-fallback ratio (#810): hard-fail like
-    score_pipeline_errors, same reasoning as score_no_output for weight 0 --
-    this does not re-score classification quality (score_t_bucket already
-    does), it only gates the case where a large share of it never happened.
+    score_pipeline_errors, and weight 0 like score_no_output -- it does not
+    score classification quality, it only gates the case where a large share
+    of it never happened.
     """
     data, reason = _load_first(outputs_dir, "*_classified.json")
     exceeded, detail = stage3b_fallback_ratio_exceeded(data)
@@ -1791,13 +1096,15 @@ def score_stage4_group_failures(outputs_dir: Path) -> tuple[float, str, int | No
 # ---------------------------------------------------------------------------
 
 DIMENSIONS = [
-    ("Pipeline/API errors present (HARD-FAIL gate)", 25, score_pipeline_errors),
-    ("CV owner name / contact populated (HARD-FAIL gate)", 15, score_cv_owner),
-    ("T-bucket share (stage_3b catch-all over-use)", 15, score_t_bucket),
-    ("Sparse / under-filled tables in generated docx", 12, score_sparse_tables),
-    ("Broken table / raw formatting artifacts in docx", 10, score_broken_format),
-    ("Field-extraction sparseness (entry-level)", 13, score_field_sparseness),
-    ("Duplicate-entry ratio (de-dup / fragmentation health)", 10, score_duplicate_ratio),
+    ("Doctor findings: estimated cleanup, precision-weighted", DOCTOR_FINDINGS_WEIGHT,
+     score_doctor_findings),
+    # Retired to weight 0 by #1595, kept for their caps: on the two labelled
+    # batches (EBYSBC/s7ab/pilot, 62 runs; YUYVIG, 37) the pipeline-error
+    # penalty was 0 on every run, and the owner/contact penalty correlated
+    # with the verified defects' cost at rank -0.16 and -0.08 (wrong sign).
+    # docs/RUN_DOCTOR_SCORING.md has the table for all seven retired weights.
+    ("Pipeline/API errors present (HARD-FAIL gate)", 0, score_pipeline_errors),
+    ("CV owner name / contact populated (HARD-FAIL gate)", 0, score_cv_owner),
     ("No rendered output produced at all (HARD-FAIL gate)", 0, score_no_output),
     ("Stage-3b batch-fallback ratio (HARD-FAIL gate)", 0, score_stage3b_fallback_ratio),
 ]
@@ -1806,40 +1113,16 @@ TOTAL_WEIGHT = sum(w for _, w, _ in DIMENSIONS)
 #: The cap a protected-data leak applies (`score_protected_data`).
 PROTECTED_DATA_CAP = 25
 
-#: Gates that CAP the final score but carry no weight (#820 round 2): they
-#: are not in DIMENSIONS, so TOTAL_WEIGHT and every clean run's raw score
-#: are exactly what they were before the gate existed -- a batch scored
-#: last month is still comparable to one scored today. Same (fraction,
-#: detail, cap) contract as a dimension scorer; only the cap is read.
-#:
-#: ORDER MATTERS for the caps that sit at the same value (84): the run
-#: page's "why is this capped" pointer (`run_quality_report.cap_source`) names
-#: the FIRST flag at the binding cap, and flags are written in this order. They
-#: are listed most specific first: the lost-table gate measures the loss against
-#: the delivered docx; the fused-entries gate counts records swallowed in the
-#: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
-#: any finding, including ones that lost nothing; the owner-missing gate names
-#: citations whose credit is gone but whose record is on the page; the et-al gate
-#: names citations that kept the owner but lost co-authors; the grant-boundary,
-#: grant-application, junk-row and group-header gates (#1226, #1343, E8, X6 E8)
-#: name rows that render with wrong details, without their header's context,
-#: or should not render at all; the stage-4 gate (#1174)
-#: reports that a call failed and was retried and measures no loss. So a run
-#: that trips several is pointed at the signal most likely to name what it
-#: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
-#: PBSGQZ fires fused and stage-4; the verified loss in both is the fused entry).
+#: Gates that CAP the final score but carry no weight (#820 round 2). Same
+#: (fraction, detail, cap) contract as a dimension scorer; only the cap is
+#: read. #1595 retired the nine content-loss caps at 84 (#822): each was a
+#: doctor lint, so its findings now lower the score through
+#: `score_doctor_findings` in proportion to their precision and fix time
+#: instead of flipping the band. A cap stays only for a must-fix class with a
+#: measured precision: protected personal data (RED, Paul on #822). The
+#: stage-4 failed-group cap is #1174's separate decision and is unchanged.
 CAP_ONLY_GATES = [
     ("Protected personal data absent from rendered docx (HARD-FAIL gate)", score_protected_data),
-    ("Source table lost before extraction (CAP-ONLY gate)", score_lost_source_table),
-    ("Source records fused: several entries swallowed multiple records (CAP-ONLY gate)",
-     score_fused_entries),
-    ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
-    ("CV owner cut from their own citations (CAP-ONLY gate)", score_owner_missing_from_citation),
-    ("Co-authors cut from citations (CAP-ONLY gate)", score_etal_added),
-    ("Grant details shifted between grants (CAP-ONLY gate)", score_grant_boundary),
-    ("Grant applications rendered as awards (CAP-ONLY gate)", score_grant_application_as_award),
-    ("Headers or labels rendered as records (CAP-ONLY gate)", score_junk_rows),
-    ("Rows lost the group header above them (CAP-ONLY gate)", score_group_header_context),
     ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
 ]
 
@@ -1887,8 +1170,10 @@ def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
             hard_fail_caps.append(cap)
             flags.append(f"HARD-FAIL cap={cap}: {name} ({detail})")
 
-    # Normalized so a fully-penalized run scores 0 and a clean run scores 100.
-    raw = 100.0 * (1 - penalty / TOTAL_WEIGHT)
+    # A dimension of weight w costs w * fraction points. Not normalized by
+    # TOTAL_WEIGHT (#1595): the weights sum to 40, so that no weighted penalty
+    # alone takes a run below YELLOW.
+    raw = 100.0 - penalty
     final = raw
     for cap in hard_fail_caps:
         final = min(final, cap)
