@@ -57,16 +57,26 @@ def lint_table_lost(source_block_lines: list[tuple[int, str]],
     document covered (#815): web207 lost its whole personal-data table at
     99.1% document coverage. One finding per run, not per table -- a run
     whose stage 2 failed loses dozens of tables, and a per-table count
-    would double as severity (#438). Evidence is the worst table's lines."""
+    would double as severity (#438). Evidence is the worst table's lines.
+
+    A body-level content control that stage 2 mostly lost gets its own
+    finding, worded for a control (#1656: stage 1 skipped RSFOYB's whole
+    889-paragraph control and nothing flagged it). Still one per run for
+    each kind of container, never one per control."""
     lost_blocks = find_lost_blocks(source_block_lines, stage2)
-    if not lost_blocks:
-        return []
-    worst = max(lost_blocks, key=lambda b: len(b["lost_lines"]))
-    return [_finding(
-        "table_lost", "WARN",
-        f"{len(lost_blocks)} source table(s) mostly lost; worst: "
-        f"{len(worst['lost_lines'])} of {worst['substantive_lines']} lines",
-        [line[:100] for line in worst["lost_lines"][:5]])]
+    findings = []
+    for kind, noun in (("table", "source table(s)"),
+                       ("content_control", "body content control(s)")):
+        lost = [b for b in lost_blocks if b["kind"] == kind]
+        if not lost:
+            continue
+        worst = max(lost, key=lambda b: len(b["lost_lines"]))
+        findings.append(_finding(
+            "table_lost", "WARN",
+            f"{len(lost)} {noun} mostly lost; worst: "
+            f"{len(worst['lost_lines'])} of {worst['substantive_lines']} lines",
+            [line[:100] for line in worst["lost_lines"][:5]]))
+    return findings
 
 
 # --------------------------------------------------------------------------

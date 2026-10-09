@@ -1,15 +1,13 @@
-"""#456: `extract_owner_side_channel` reads text the main body walk drops --
-a body-level `w:sdt` (Word content-control) wrapping whole paragraphs, and
-`word/header*.xml` / `word/footer*.xml` letterhead -- as a SEPARATE structure
-stage 4's owner-name pass may consult, never merged into the element stream.
+"""#456: `extract_owner_side_channel` reads the paragraphs of every Word
+content control (`w:sdt`) and the `word/header*.xml` / `word/footer*.xml`
+letterhead as a SEPARATE structure stage 4's owner-name pass may consult,
+never merged into the element stream.
 
-The landmine this file's last test guards against: the issue's own comment
-warns that the "obvious fix" (descending into `w:sdt` and emitting its
-paragraphs inline into `extract_unified_elements`/`extract_docx_structure`)
-silently corrupts every CV, because `doc.paragraphs` -- which
-`stage_2_entry_extraction.py:1118/1153/1226/1245` indexes as a fallback --
-only enumerates direct-body `CT_P` children. `sdt_lines` must never change
-what those two functions emit.
+Since #1656 the element stream carries a body-level content control's
+paragraphs too (`open_source_docx` unwraps it). This file's last test pins
+what that must not break: the side channel still reads the control, and
+`para_idx` still indexes the paragraphs of the document every reader opens
+(`open_source_docx(path).paragraphs`), so stage 2's fallback index agrees.
 
     python3 -m pytest src/unified_pipeline/tests/test_docx_owner_side_channel.py -p no:cacheprovider
 
@@ -31,6 +29,7 @@ from docx.oxml.ns import nsdecls, qn  # noqa: E402
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     extract_owner_side_channel,
     extract_unified_elements,
+    open_source_docx,
 )
 
 
@@ -386,44 +385,28 @@ def test_a_plain_docx_with_none_of_the_three_returns_all_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# THE landmine test: the element stream must be byte-identical with vs
-# without a body-level sdt. This is the test that stops someone "fixing"
-# #456 by inlining sdt paragraphs into the main body walk.
+# #1656: a body-level sdt's paragraph enters the element stream in place, and
+# para_idx keeps indexing the paragraphs every reader opens.
 # ---------------------------------------------------------------------------
 
-def test_element_stream_is_unchanged_by_a_body_level_sdt(tmp_path):
-    doc_without = Document()
-    doc_without.add_paragraph("before")
-    doc_without.add_paragraph("after")
-    path_without = _save(doc_without, tmp_path, "without_sdt.docx")
+def test_a_body_level_sdt_paragraph_enters_the_stream_in_place(tmp_path):
+    doc = Document()
+    doc.add_paragraph("before")
+    after = doc.add_paragraph("after")
+    _splice_body_level_sdt(after, ["Synthetic Owner Name"])
+    path = _save(doc, tmp_path, "with_sdt.docx")
 
-    doc_with = Document()
-    doc_with.add_paragraph("before")
-    after_with = doc_with.add_paragraph("after")
-    _splice_body_level_sdt(after_with, ["Synthetic Owner Name"])
-    path_with = _save(doc_with, tmp_path, "with_sdt.docx")
+    result = extract_unified_elements(path)
 
-    result_without = extract_unified_elements(path_without)
-    result_with = extract_unified_elements(path_with)
-
-    def _stream(result):
-        return [
-            (el.get("type"), el.get("text"), el.get("unified_idx"), el.get("para_idx"))
-            for el in result["elements"]
-        ]
-
-    assert _stream(result_with) == _stream(result_without)
-    assert result_with["meta"]["num_elements"] == result_without["meta"]["num_elements"]
-    assert result_with["meta"]["num_paragraphs"] == result_without["meta"]["num_paragraphs"]
-    assert "Synthetic Owner Name" not in [el.get("text") for el in result_with["elements"]]
-
-    # para_idx must still line up with doc.paragraphs (the #456 issue
-    # comment's own verified probe, reproduced as a permanent regression
-    # guard): the sdt paragraph is not one of doc.paragraphs' direct-body
-    # CT_P children, so it must not have shifted any subsequent para_idx.
-    reopened = Document(path_with)
-    para_idxs = [
-        el["para_idx"] for el in result_with["elements"]
-        if el.get("type") in ("paragraph", "empty")
+    assert [(el.get("type"), el.get("text"), el.get("unified_idx"), el.get("para_idx"))
+            for el in result["elements"]] == [
+        ("paragraph", "before", 0, 0),
+        ("paragraph", "Synthetic Owner Name", 1, 1),
+        ("paragraph", "after", 2, 2),
     ]
-    assert para_idxs == list(range(len(reopened.paragraphs)))
+    # The side channel still reads the control: it opens its own copy.
+    assert extract_owner_side_channel(path)["sdt_lines"] == ["Synthetic Owner Name"]
+    # para_idx lines up with the paragraphs of the document as every
+    # pipeline reader opens it (stage 2's fallback index among them).
+    reopened = open_source_docx(path)
+    assert [el["text"] for el in result["elements"]] == [p.text for p in reopened.paragraphs]

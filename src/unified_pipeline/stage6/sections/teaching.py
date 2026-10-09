@@ -111,12 +111,14 @@ import re
 import zipfile
 from typing import TypedDict
 
-from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 from docx.table import _Row
 
-from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
+from unified_pipeline.core.docx_structure_extractor import (
+    get_paragraph_text,
+    open_source_docx,
+)
 from unified_pipeline.core.render_check import (
     CELL_SEPARATOR,
     entry_lines,
@@ -480,7 +482,9 @@ class SourceCellLevels:
     def _table_rows(self, table_index: int) -> list[tuple[list[str], list[bool]]]:
         if table_index not in self._rows_by_table:
             if self._doc is None:
-                self._doc = Document(self._path)
+                # Opened as stage 1 opened it, so `table_index` names the same
+                # table when one sits in a body content control (#1656).
+                self._doc = open_source_docx(self._path)
             seen_cells = set()
             rows = []
             for row in self._doc.tables[table_index].rows:

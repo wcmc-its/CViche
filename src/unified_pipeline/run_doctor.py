@@ -13,6 +13,8 @@ Lints, ranked by the severity of the failure class they catch:
                           into one table-cell entry); its sibling
                           `table_lost` scopes the same coverage to each
                           source table (web207's lost personal-data table)
+                          and each body content control (RSFOYB's lost
+                          889-paragraph control, #1656)
 2. missed_headers         ALL-CAPS bold header-like source lines absent from
                           the 1a hierarchy AND every entry hierarchy path
                           ('PROFESSIONAL EXPERIENCE' demoted to content); a
@@ -1206,7 +1208,14 @@ def iter_header_candidates(docx_path: str) -> list[str]:
                 for nested in cell.tables:
                     walk_table(nested)
 
+    from unified_pipeline.core.docx_structure_extractor import (
+        unwrap_body_content_controls,
+    )
+
     doc = Document(docx_path)
+    # Read as stage 1 reads it: a body content control's paragraphs and
+    # tables are body paragraphs and tables (#1656).
+    unwrap_body_content_controls(doc)
     for para in doc.paragraphs:
         consider(para)
     for tbl in doc.tables:

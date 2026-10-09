@@ -29,6 +29,7 @@ from unified_pipeline.segmentation_regression import (  # noqa: E402
     BODY_BLOCK,
     COVERAGE_DROP_TOLERANCE_PTS,
     COVERAGE_WINDOW_SLACK,
+    FIRST_CONTENT_CONTROL_BLOCK,
     MEGA_ENTRY_MIN_RECORDS,
     SUBSTANTIVE_LINE_CHARS,
     _has_compact_window,
@@ -516,6 +517,62 @@ def test_iter_source_block_lines_tags_each_table_and_matches_flat_lines(tmp_path
     assert iter_source_lines(str(path)) == [line for _, line in pairs]
 
 
+def _sdt_xml(inner_xml: str) -> str:
+    return f"<w:sdt><w:sdtContent>{inner_xml}</w:sdtContent></w:sdt>"
+
+
+def _p_xml(text: str) -> str:
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def test_iter_source_block_lines_reads_body_content_controls_with_their_own_block(tmp_path):
+    """#1656: a body-level content control's paragraphs are read (a nested
+    control's included) and tagged with that control's block, so the block
+    view can scope coverage to it; a table inside one keeps a table block."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    def control(inner_xml: str):
+        return parse_xml(_sdt_xml(inner_xml).replace("<w:sdt>", f'<w:sdt {nsdecls("w")}>', 1))
+
+    table_xml = ('<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>'
+                 + _p_xml("table cell inside the second control") + "</w:tc></w:tr></w:tbl>")
+    doc = Document()
+    doc.add_paragraph("Body paragraph before the controls")
+    middle = doc.add_paragraph("Body paragraph between the controls")
+    end = doc.add_paragraph("Body paragraph after the controls")
+    middle._p.addprevious(control(_p_xml("First control line one") + _p_xml("First control line two")
+                                  + _sdt_xml(_p_xml("Nested control line"))))
+    end._p.addprevious(control(_p_xml("Second control line") + table_xml))
+    path = tmp_path / "controls.docx"
+    doc.save(path)
+
+    pairs = iter_source_block_lines(str(path))
+    assert pairs == [
+        (BODY_BLOCK, "Body paragraph before the controls"),
+        (FIRST_CONTENT_CONTROL_BLOCK, "First control line one"),
+        (FIRST_CONTENT_CONTROL_BLOCK, "First control line two"),
+        (FIRST_CONTENT_CONTROL_BLOCK, "Nested control line"),
+        (BODY_BLOCK, "Body paragraph between the controls"),
+        (FIRST_CONTENT_CONTROL_BLOCK - 1, "Second control line"),
+        (BODY_BLOCK, "Body paragraph after the controls"),
+        (0, "table cell inside the second control"),
+    ]
+    assert iter_source_lines(str(path)) == [line for _, line in pairs]
+
+
+def test_a_content_control_lost_whole_is_a_lost_block_of_its_own_kind():
+    covered = [_covered_line(i) for i in range(200)]
+    lost = [_lost_line(i) for i in range(5)]
+    block_lines = ([(BODY_BLOCK, line) for line in covered]
+                   + [(FIRST_CONTENT_CONTROL_BLOCK, line) for line in lost]
+                   + [(FIRST_CONTENT_CONTROL_BLOCK - 1, line) for line in covered[:4]])
+    stage2 = {"entries": [_entry(line, start=i) for i, line in enumerate(covered)]}
+    assert find_lost_blocks(block_lines, stage2) == [
+        {"block": FIRST_CONTENT_CONTROL_BLOCK, "kind": "content_control",
+         "substantive_lines": 5, "lost_lines": lost}]
+
+
 def _covered_line(i):
     return f"covered record line number {i} alpha"
 
@@ -537,11 +594,11 @@ def test_small_table_lost_whole_is_found_despite_high_document_coverage():
     assert not any(f.startswith("coverage") for f in lint_metrics(metrics))
 
     assert find_lost_blocks(block_lines, stage2) == [
-        {"block": 1, "substantive_lines": 5, "lost_lines": lost}]
+        {"block": 1, "kind": "table", "substantive_lines": 5, "lost_lines": lost}]
     # Exactly half of a table lost is already a lost block.
     half = [(2, covered[0]), (2, covered[1]), (2, lost[0]), (2, lost[1])]
     assert find_lost_blocks(half, stage2) == [
-        {"block": 2, "substantive_lines": 4, "lost_lines": lost[:2]}]
+        {"block": 2, "kind": "table", "substantive_lines": 4, "lost_lines": lost[:2]}]
 
 
 def test_lost_lines_scattered_across_tables_or_in_body_are_not_a_lost_block():

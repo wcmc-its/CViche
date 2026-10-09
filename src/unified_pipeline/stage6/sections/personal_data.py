@@ -25,8 +25,8 @@ almost nothing about a CV's contact block is structured. The work is in order:
 4. Fill the template's PERSONAL DATA table, located by its "Work email:" cell
    rather than by index.
 
-This is the only section writer that reads the source document directly, which
-is why `Document` and `Path` are imported here and nowhere else in this package.
+This section writer reads the source document directly, through
+`open_source_docx` (#1656), as `teaching.py`'s `SourceCellLevels` does.
 
 Step 3 runs on a live CV because both drivers hand `run_stage6()` the resolved
 source path (`run_full_pipeline.py` `_stage_6`, `orchestrator.py` stage `'6'`;
@@ -67,11 +67,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 try:
-    from docx import Document
-
-    # The class `Document()` (the factory function above) returns -- aliased
-    # so `_recover_contact_fields_from_table_rows` can annotate its
-    # `original_doc` parameter without shadowing the factory import (#820 R3).
+    # The class `Document()` returns -- aliased so
+    # `_recover_contact_fields_from_table_rows` can annotate its
+    # `original_doc` parameter (#820 R3).
     from docx.document import Document as _WordDocument
     from docx.opc.exceptions import PackageNotFoundError
     from docx.table import _Row as _TableRow
@@ -81,6 +79,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from ...core.docx_structure_extractor import open_source_docx
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import (
     CAT_HOME_CONTACT,
@@ -1793,7 +1792,9 @@ class PersonalDataSection:
             return given
 
         try:
-            original_doc = Document(original_doc_path)
+            # Opened as stage 1 opened it: a body content control's
+            # paragraphs and tables are scanned too (#1656).
+            original_doc = open_source_docx(original_doc_path)
         except _UNREADABLE_SOURCE_ERRORS as e:
             # Ungated -- was verbose-only, so a parsing failure on this
             # fallback left no trace at all outside a verbose run (#550).
