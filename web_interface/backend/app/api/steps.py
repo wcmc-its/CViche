@@ -109,10 +109,9 @@ def get_data_file(
 
     check_run_access(run_id, current_user, db, read_only=True)
 
-    # Stage JSON files are internal pipeline artifacts, and the review copy
-    # carries the run doctor's findings (#1388) -- restrict both to admins and
-    # staff (can_view_all_runs).
-    # The final .docx (and any other output) stays available to the run owner. This single gate deliberately sits ABOVE every branch below --
+    # Stage JSON files are internal pipeline artifacts -- restrict them to
+    # admins and staff (can_view_all_runs). The final .docx, its review copy
+    # (#1591) and any other output stay available to the run owner. This single gate deliberately sits ABOVE every branch below --
     # before the storage short-circuit AND before `preview` is ever read -- so it
     # covers the S3 redirect, the download and the ?preview=true JSON viewer
     # alike. Do not move it into a branch or duplicate it per-branch.

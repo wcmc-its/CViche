@@ -84,9 +84,12 @@ REVIEW_DOCX_SUFFIX = "_wcm_review.docx"
 
 
 def is_staff_only_artifact(name: str) -> bool:
-    """Stage JSON, and the review copy carrying the doctor's findings, which
-    the run page shows to admins and staff only."""
-    return is_json_artifact(name) or name.lower().endswith(REVIEW_DOCX_SUFFIX)
+    """Stage JSON, which the run page shows to admins and staff only.
+
+    The review copy (``REVIEW_DOCX_SUFFIX``) is not: since #1591 the run's
+    owner gets it like the finished document, once #1639's precision gate has
+    kept the false-alarm findings out of it."""
+    return is_json_artifact(name)
 
 
 def is_json_artifact(name: str) -> bool:

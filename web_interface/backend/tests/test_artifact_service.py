@@ -407,11 +407,13 @@ class TestIsJsonArtifact:
 
 
 class TestIsStaffOnlyArtifact:
-    def test_stage_json_and_the_review_copy_are_staff_only(self):
-        """#1388: the review copy carries the run doctor's findings."""
+    def test_stage_json_is_staff_only(self):
         assert svc.is_staff_only_artifact("ABC123_fields.json") is True
-        assert svc.is_staff_only_artifact(f"ABC123{svc.REVIEW_DOCX_SUFFIX}") is True
-        assert svc.is_staff_only_artifact("ABC123_WCM_REVIEW.DOCX") is True
+
+    def test_the_review_copy_is_not(self):
+        """#1591: the owner gets the review copy, as staff do."""
+        assert svc.is_staff_only_artifact(f"ABC123{svc.REVIEW_DOCX_SUFFIX}") is False
+        assert svc.is_staff_only_artifact("ABC123_WCM_REVIEW.DOCX") is False
 
     def test_the_finished_document_is_not(self):
         assert svc.is_staff_only_artifact("ABC123_wcm.docx") is False

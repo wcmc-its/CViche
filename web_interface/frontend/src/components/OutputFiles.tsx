@@ -42,10 +42,9 @@ export function DocxDownloadCard({ runId, filename }: { runId: string; filename:
   )
 }
 
-// Stage JSON files are internal pipeline artifacts, and the review copy carries
-// the run doctor's findings as Word comments (#1388) -- admin and staff only (the
+// Stage JSON files are internal pipeline artifacts -- admin and staff only (the
 // backend enforces this too). Hide them entirely from everyone else; the final
-// .docx and other outputs stay visible to the run owner.
+// .docx, its review copy (#1591) and other outputs stay visible to the run owner.
 const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
 /** artifact_service.REVIEW_DOCX_SUFFIX */
 export const isReviewDocx = (f: string) => f.endsWith('_wcm_review.docx')
@@ -60,7 +59,7 @@ export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_
   } catch {
     files = []
   }
-  return files.filter(f => canSeeStageJson || !(isJsonName(f) || isReviewDocx(f)))
+  return files.filter(f => canSeeStageJson || !isJsonName(f))
 }
 
 export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput = true }: OutputFilesProps) {
