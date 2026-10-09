@@ -126,6 +126,7 @@ REVIEW_FLAGS = {
                            "number that the line in the original CV does not. Check it against the CV."),
     "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
                         "column mixed in: check it against your CV."),
+    "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
 }
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete"}

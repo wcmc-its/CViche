@@ -404,6 +404,11 @@ Lints, ranked by the severity of the failure class they catch:
                           while a line carries a neighbouring column's
                           dates, so the columns are still interleaved. WARN,
                           one per entry. Reads stage 4 and the docx
+14ak. appointment_title_overlong a D1-D3 title role (one ';'-separated
+                          part) over 150 characters: duty prose stage 4
+                          packed into the role (#1205, YUYVIG DYLJXC
+                          661/668). WARN, one per entry; says whether stage 6
+                          moved the duties under the row. Reads stage 4
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -505,6 +510,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     _is_invented_record,
     _nonempty_field_values,
     _rendered_row_value_sets,
+    lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
@@ -758,6 +764,7 @@ KNOWN_LINTS = (
     "owner_attribution",
     "citation_grounding",
     "shattered_prose",
+    "appointment_title_overlong",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1016,6 +1023,11 @@ LINT_PREVALENCE = {
     # the same 3 runs as before the fold, since the fold mends none of their
     # 15 entries -- measured 2026-10-08. Same mixed-corpus caveat as above.
     "shattered_prose": 0.011,
+    # appointment_title_overlong (#1205, YUY-AT in doctor/PRECISION.md): 2 of
+    # the 132 runs of the YUYVIG (39), EBYSBC/s7ab/pilot (63) and NDMRSO (30)
+    # farms (scripts/doctor_gate.py, measured 2026-10-08). Same mixed-corpus
+    # caveat as above.
+    "appointment_title_overlong": 0.015,
 }
 
 
@@ -1576,6 +1588,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
     LintSpec("citation_grounding", lint_citation_grounding, ("stage_5d",)),
     LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
+    LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
 )
 
 
