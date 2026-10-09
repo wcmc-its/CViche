@@ -37,7 +37,7 @@ from app.models import Log, Run, RunState, Step
 from app.pipeline.event_emitter import event_emitter
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
-from app.services.review_comments import REVIEW_DOCX_ERRORS, write_review_docx
+from app.services.review_comments import REVIEW_DOCX_ERRORS, comment_map_path, write_review_docx
 from app.storage import get_storage
 from app.storage.base import RunStorage
 
@@ -1308,7 +1308,7 @@ class PipelineOrchestrator:
         new_files = [str(out_path)]
         review_path = await loop.run_in_executor(None, self._review_docx, payload)
         if review_path is not None:
-            new_files.append(str(review_path))
+            new_files += [str(review_path), str(comment_map_path(review_path))]
 
         # Attach the report to the last step's output_files here, on the
         # orchestrator's thread (like _submitter_label: the session must not
