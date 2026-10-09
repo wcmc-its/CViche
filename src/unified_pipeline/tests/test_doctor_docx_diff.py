@@ -299,6 +299,7 @@ def test_cli_label_loads_in_the_autopsy_label_store(tmp_path):
         (f"{UID}-R02", dd.REVIEW_LABEL_BATCH, "high", (474,))]
     label = json.loads((labels / f"{UID}.json").read_text())
     assert {f["class"] for f in label["findings"]} == {"review_deleted", "review_added"}
+    assert {f["batch_class"] for f in label["findings"]} == {"deleted", "added"}
     sva = _load_script("score_vs_autopsy")
     run = sva.Run(uid=UID, score=0.0, raw=0.0, band="", caps=[], penalties={}, lint_counts={})
     sva.apply_label(run, label, labels / f"{UID}.json")  # raises on an unknown severity

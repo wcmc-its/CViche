@@ -409,7 +409,8 @@ def to_label(uid: str, diff: DocxDiff) -> dict:
     `class` and its `REVIEW_SEVERITY`) and the entry index. No section, no
     positions, no text (#1587's PII rule for the label store)."""
     findings = [{"id": f"{uid}-R{n:02d}", "class": f"{REVIEW_CLASS_PREFIX}{c.change_type}",
-                 "class_ref": None, "batch_class": None, "stage": None,
+                 # batch_class too: doctor_vs_autopsy.py groups recall by it, never by class
+                 "class_ref": None, "batch_class": c.change_type, "stage": None,
                  "severity": REVIEW_SEVERITY[c.change_type],
                  "element_idx_start": c.element_idx, "records": None, "doctor_caught": None}
                 for n, c in enumerate(diff.changes, start=1)]
