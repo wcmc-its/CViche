@@ -245,10 +245,17 @@ def _verdict(item: object, expected_index: int) -> Verdict:
     return verdict
 
 
+#: The model's reasoning, when it writes some before its answer.
+_LEADING_THINK_RE = re.compile(r"\A\s*<think>.*?</think>", re.DOTALL)
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
 def parse_reply(reply: str, sentence_count: int) -> list[Verdict]:
-    """One Verdict per sentence from the model's JSON reply; ReplyError otherwise."""
-    text = reply.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    """One Verdict per sentence from the model's JSON reply; ReplyError otherwise.
+    A leading <think> block is dropped first: 2 of YUYVIG's 37 replies (OKRTPJ,
+    QQGKXR) opened with one before a valid fenced JSON block (#1592)."""
+    text = _LEADING_THINK_RE.sub("", reply, count=1).strip()
+    fenced = _FENCED_JSON_RE.fullmatch(text)
     try:
         data = json.loads(fenced.group(1) if fenced else text)
     except ValueError as e:
