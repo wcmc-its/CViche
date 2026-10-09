@@ -1705,3 +1705,148 @@ def test_a_q2_entry_rendered_as_journal_reviewing_gets_no_sub_point():
     assert _subpoint_rows(gen) == []
     assert _SERVICE_PROSE not in "".join(
         t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+# --- #1205: H honors, the next code family -----------------------------------
+# The honors section writes every H entry as a row of its three-column table
+# (`_add_honors_row`), so the prose is a deleted row under the award's row.
+
+_HONOR_PROSE = ("Awarded annually to an early career investigator whose published "
+                "research advanced clinical understanding of respiratory infections")
+
+
+def _honor():
+    """An H row whose source line goes on past the award, its granting body
+    and year into the award's criteria, as EBYSBC QITQWH 39-53's did."""
+    return {
+        "element_idx_start": 39,
+        "taxonomy_code": "H",
+        "text": f"2019\tYoung Investigator Award, Example Thoracic Society\t{_HONOR_PROSE}",
+        "extracted_fields": {"award_name": "Young Investigator Award",
+                             "granting_body": "Example Thoracic Society", "date": "2019"},
+    }
+
+
+def _render_honors(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_honors(entries)
+    gen._add_supplementary_subpoints({"H": entries})
+    return gen
+
+
+def test_honor_prose_is_a_deleted_row_under_the_award_row():
+    gen = _render_honors([_honor()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = "".join(t.text for t in row.getprevious().iter(qn("w:t")))
+    assert "Young Investigator Award" in above
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _HONOR_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_honor_prose_goes_under_its_own_award_among_several():
+    other = {"element_idx_start": 41, "taxonomy_code": "H",
+             "text": "2015\tOutstanding Mentor Award, Example Medical College",
+             "extracted_fields": {"award_name": "Outstanding Mentor Award",
+                                  "granting_body": "Example Medical College", "date": "2015"}}
+    gen = _render_honors([other, _honor()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = "".join(t.text for t in row.getprevious().iter(qn("w:t")))
+    assert "Young Investigator Award" in above and "Mentor" not in above
+    below = row.getnext()
+    assert below is not None and "Outstanding Mentor Award" in "".join(
+        t.text for t in below.iter(qn("w:t")))
+
+
+def test_honor_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_honors([_honor()], supplementary_subpoints=False)
+    on = _render_honors([_honor()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _HONOR_PROSE in rejected
+    assert _HONOR_PROSE not in "".join(_texts_of(off.doc.element.body))
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+def test_honor_prose_already_in_its_award_cell_is_not_offered_again():
+    """With no award field, the award cell shows the entry's whole text
+    (`parse_honor_entry`'s fallback): nothing is left to offer."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _honor()
+    entry["extracted_fields"] = {"date": "2019"}
+    gen = _render_honors([entry], supplementary_subpoints=True)
+    assert _HONOR_PROSE in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "H", haystack) == []
+
+
+def _rerouted(entry, expected_code, heading):
+    """`entry` flagged by stage 3b's hierarchy check, at low confidence, under
+    a heading that expects `expected_code`: `_correct_mismatch_if_needed`
+    moves it across families."""
+    return dict(entry, taxonomy_confidence=0.5, hierarchy_mismatch_flag=True,
+                hierarchy_mismatch_detail={"expected_codes": [expected_code],
+                                           "hierarchy": [heading]})
+
+
+def _render_grouped(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_honors(grouped.get("H", []))
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def test_an_honor_rerouted_out_of_h_follows_its_destination_and_gets_no_sub_point():
+    """An H entry rendered as another code is that code's record: N1 is
+    excluded, so neither its own row nor another award's carries its prose."""
+    other = {"element_idx_start": 41, "taxonomy_code": "H",
+             "text": "2015\tYoung Investigator Award, Example Thoracic Society",
+             "extracted_fields": {"award_name": "Young Investigator Award",
+                                  "granting_body": "Example Thoracic Society", "date": "2015"}}
+    moved = _rerouted(_honor(), "N1", "MENTORING PROGRAMS")
+    gen, grouped = _render_grouped([other, moved], supplementary_subpoints=True)
+
+    assert grouped["N1"] == [moved] and grouped["H"] == [other]
+    assert _subpoint_rows(gen) == []
+    assert _HONOR_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+def test_a_record_rerouted_into_h_follows_the_honors_rule():
+    """A society fellowship stage 3b coded I under an honors heading renders
+    as an award: its prose is a deleted row under that award's row."""
+    fellowship = dict(_honor(), taxonomy_code="I")
+    gen, grouped = _render_grouped([_rerouted(fellowship, "H", "HONORS")],
+                                   supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["H"]] == [39]
+    (row,) = _subpoint_rows(gen)
+    assert "Young Investigator Award" in "".join(t.text for t in row.getprevious().iter(qn("w:t")))
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _HONOR_PROSE
+
+
+def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass dropped the award's name, so the honors writer
+    renders no row for what is left. Its prose is not offered either, under
+    another award of the same granting body or anywhere else."""
+    other = {"element_idx_start": 41, "taxonomy_code": "H",
+             "text": "2015\tOutstanding Mentor Award, Example Thoracic Society",
+             "extracted_fields": {"award_name": "Outstanding Mentor Award",
+                                  "granting_body": "Example Thoracic Society", "date": "2015"}}
+    withheld = _honor()
+    del withheld["extracted_fields"]["award_name"]
+    withheld["_pii_dropped_fields"] = ["award_name"]
+    gen = _render_honors([other, withheld], supplementary_subpoints=True)
+
+    assert "Young Investigator Award" not in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    assert _HONOR_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))

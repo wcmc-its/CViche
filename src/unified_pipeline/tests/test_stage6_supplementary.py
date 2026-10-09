@@ -63,8 +63,8 @@ def test_the_flag_is_on_unless_turned_off(value, on):
     assert sp.subpoints_enabled(value) is on
 
 
-def test_the_codes_are_teaching_grants_appointments_and_extramural_service_only():
-    assert sorted(sp.SUBPOINT_CODES) == ["D1", "D2", "D3", "K1", "K2", "K3", "K4", "K5",
+def test_the_codes_are_teaching_grants_appointments_extramural_service_and_honors_only():
+    assert sorted(sp.SUBPOINT_CODES) == ["D1", "D2", "D3", "H", "K1", "K2", "K3", "K4", "K5",
                                          "M2A", "M2B", "M2C", "M2D", "Q1", "Q2"]
     # The owner decision's exclusions stay out.
     assert not sp.SUBPOINT_CODES & {"A", "T", "M1", "E", "G", "J", "N1", "N4", "S0", "L1",
@@ -202,8 +202,8 @@ def test_plan_skips_a_code_with_no_section_and_a_code_out_of_scope():
     line = _candidate("Associate Professor | Example University | 2010-2015", position=5)
     entry = _appointment()
     assert sp.plan_subpoints({"D1": [entry]}, _haystack(line.text), [line], {}) == []
-    assert sp.plan_subpoints({"H": [{**entry, "taxonomy_code": "H"}]}, _haystack(line.text),
-                             [line], {"H": sp.SectionSpan(0, None)}) == []
+    assert sp.plan_subpoints({"Q4D": [{**entry, "taxonomy_code": "Q4D"}]}, _haystack(line.text),
+                             [line], {"Q4D": sp.SectionSpan(0, None)}) == []
 
 
 def test_plan_offers_a_fragment_once():
