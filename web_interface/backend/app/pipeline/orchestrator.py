@@ -93,6 +93,12 @@ from unified_pipeline.stage_errors import (
 # docx (#806); upload.py stores a PDF as {run_id}.pdf.
 _PDF_SUFFIX = ".pdf"
 
+# Durable home of a PDF run's converted docx, so a resume reuses it instead of
+# converting again (#1567). Not input/ (the quality scorer's source-docx gate
+# lists that prefix) and not outputs/ (downloads and the scorer read every key
+# there).
+_CONVERTED_INPUT_PREFIX = "converted/"
+
 
 def _now() -> float:
     """Monotonic clock for elapsed-duration measurement (#598).
@@ -725,18 +731,77 @@ class PipelineOrchestrator:
         """
         dest_path = self._pipeline_input_path()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        if Path(self.file_path).suffix.lower() == _PDF_SUFFIX:
-            self.pdf_conversion = convert_pdf(self.file_path, dest_path)
+        if self._upload_is_pdf():
+            # Converted beside the destination and moved into place, so a
+            # failed conversion never leaves a partial docx that a later
+            # resume would reuse (#1567).
+            partial = dest_path.with_name(f"{dest_path.stem}.converting.docx")
+            try:
+                self.pdf_conversion = convert_pdf(self.file_path, partial)
+                os.replace(partial, dest_path)
+            finally:
+                partial.unlink(missing_ok=True)
+            self._persist_converted_input(dest_path)
         else:
             shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
+
+    def _upload_is_pdf(self) -> bool:
+        return Path(self.file_path).suffix.lower() == _PDF_SUFFIX
+
+    def _converted_input_key(self) -> str:
+        return f"{_CONVERTED_INPUT_PREFIX}{self.document_uid}.docx"
+
+    def _persist_converted_input(self, path: Path) -> None:
+        """Mirror a freshly converted docx to durable storage (#1567).
+        Best-effort: without the copy, a resume on another pod converts again,
+        which is the behaviour before #1567 -- not a reason to fail the run."""
+        try:
+            get_storage().put_file(self.run_id, self._converted_input_key(), path.read_bytes())
+        except Exception:
+            logger.warning(
+                "Could not persist the converted docx for run %s; a resume on "
+                "another pod will convert the PDF again", self.run_id, exc_info=True)
+
+    def _reuse_converted_input(self) -> str | None:
+        """The docx an earlier attempt of this PDF run converted, or None when
+        no copy survives (#1567). The pod-local copy first, then durable
+        storage. Stages 1b, 2, 4 and 6 and the doctor all open this docx, so
+        reusing it also gives them the same bytes stage 1a segmented."""
+        dest = self._pipeline_input_path()
+        if dest.is_file():
+            return str(dest)
+        try:
+            data = get_storage().get_file(self.run_id, self._converted_input_key())
+        except FileNotFoundError:
+            return None  # attempt 1 predates #1567, or its persist failed
+        except Exception:
+            logger.warning(
+                "Could not rehydrate the converted docx for run %s; converting "
+                "the PDF again", self.run_id, exc_info=True)
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        logger.info("Rehydrated the converted docx for run %s from storage", self.run_id)
+        return str(dest)
+
+    def _materialize_pipeline_input(self, resuming: bool) -> str:
+        """This run's private docx. A resumed PDF run reuses its earlier
+        conversion (#1567): converting again costs a sandbox slot and up to
+        PDF_CONVERT_TIMEOUT_SECONDS, and a failure then failed a run whose
+        remaining stages only needed that same docx."""
+        if resuming and self._upload_is_pdf():
+            reused = self._reuse_converted_input()
+            if reused is not None:
+                return reused
+        return self._copy_to_pipeline_input()
 
     async def _warn_image_only_pages(self) -> None:
         """Name a converted PDF's image-only pages in the run log (#536):
         their text never reaches the pipeline, so the output silently lacks
         it otherwise. Logged under the first stage, which the user sees first,
-        and on a run's first attempt only: a retry or resume re-converts but
-        the step-1 log already carries the warning."""
+        and on a run's first attempt only: a retry or resume reuses that
+        conversion (#1567), and the step-1 log already carries the warning."""
         if self.pdf_conversion is None or not self.pdf_conversion.image_only_pages:
             return
         pages = ", ".join(str(n) for n in self.pdf_conversion.image_only_pages)
@@ -978,10 +1043,12 @@ class PipelineOrchestrator:
             if start_step_number is None:
                 await self._notify_started(run)
 
-            # Copy (or, for a PDF, convert) the upload to the pipeline input dir
+            # Copy (or, for a PDF, convert; on a resume, reuse) the upload to
+            # the pipeline input dir.
             # Off the loop: a PDF conversion can wait for a sandbox slot and
             # then run for minutes, and the loop must keep serving events.
-            cv_path = await asyncio.to_thread(self._copy_to_pipeline_input)
+            cv_path = await asyncio.to_thread(
+                self._materialize_pipeline_input, start_step_number is not None)
             if start_step_number is None:
                 await self._warn_image_only_pages()
 
