@@ -11,6 +11,8 @@ clean document is left as it is; this writes a copy beside it.
 One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
 is commented whatever its severity, but only on the text it quotes, never on
 a heading or as a review note. It is a possibility to check, not a problem.
+The other, source_line_coverage (#1588), quotes source text the document may
+have lost, so it has no place on the page: each quoted line is a review note.
 """
 import copy
 import re
@@ -126,9 +128,14 @@ REVIEW_FLAGS = {
                            "number that the line in the original CV does not. Check it against the CV."),
     "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
                         "column mixed in: check it against your CV."),
+    "source_line_coverage": ("This line from your CV may be missing from this document, or only "
+                             "partly here. Check it and add it where it belongs."),
 }
 #: Review-notes group titles where the run page's title is internal wording.
-NOTE_TITLES = {"output_hygiene": "Stray text to delete"}
+NOTE_TITLES = {"output_hygiene": "Stray text to delete",
+               "source_line_coverage": "Text from your CV that may be missing"}
+#: A review-copy-only lint whose quotes are source text the page does not hold.
+MISSING_SOURCE_LINT = "source_line_coverage"
 PROTECTED_DATA_LINT = "protected_data_in_output"
 #: protected_data_in_output names a category and a section, never the value:
 #: "protected personal data (children / dependents) found in Appendix -- value withheld ...".
@@ -314,6 +321,8 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> 
     if lint == "dedup_drops":
         return [], _dedup_notes(inst)
     label = REVIEW_FLAGS.get(lint, inst.detail)
+    if lint == MISSING_SOURCE_LINT:  # not on the page by definition: one note per line
+        return [], [Note(NOTE_TITLES[lint], label, f'"{quote}"') for quote in inst.quotes]
     flags = _item_flags(lint, inst, label, surfaces)
     if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
         return flags, []
@@ -427,6 +436,10 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
                 flags.append(flag)
+        if f["lint"] == MISSING_SOURCE_LINT:  # its notes are its flags: one per line, capped
+            room = MAX_FLAGS_PER_LINT - per_lint.get(f["lint"], 0)
+            noted = noted[:max(room, 0)]
+            per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + len(noted)
         notes.extend(noted)
     for flag in flags:
         doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,

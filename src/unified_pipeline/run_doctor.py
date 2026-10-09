@@ -404,6 +404,15 @@ Lints, ranked by the severity of the failure class they catch:
                           while a line carries a neighbouring column's
                           dates, so the columns are still interleaved. WARN,
                           one per entry. Reads stage 4 and the docx
+14ak. source_line_coverage a source line under half of whose word pairs
+                          (3+-letter words, both on one rendered line) the
+                          output holds anywhere, Appendix and tracked
+                          deletions included (#1588): a record or detail lost
+                          at any stage. INFO, one per stage-3b entry, and a
+                          review-copy note only, never a run-page row: under
+                          half of a held-out sample is wholly missing text.
+                          Reads the source docx and the docx; stage 1a and
+                          3b when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -477,6 +486,9 @@ from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
 )
 from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
     lint_contact_slot_lost,
+)
+from unified_pipeline.doctor.lints.coverage import (  # noqa: F401,E402
+    lint_source_line_coverage,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -758,6 +770,7 @@ KNOWN_LINTS = (
     "owner_attribution",
     "citation_grounding",
     "shattered_prose",
+    "source_line_coverage",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1016,6 +1029,11 @@ LINT_PREVALENCE = {
     # the same 3 runs as before the fold, since the fold mends none of their
     # 15 entries -- measured 2026-10-08. Same mixed-corpus caveat as above.
     "shattered_prose": 0.011,
+    # source_line_coverage (#1588, YUY-SLC in doctor/PRECISION.md): 89 of 100
+    # runs with a source docx -- 34 of the 37 YUYVIG runs and 55 of the 63 of
+    # the EBYSBC/s7ab/pilot farm -- over fresh renders of origin/dev
+    # 8e29dd24, measured 2026-10-08. Same mixed-corpus caveat as above.
+    "source_line_coverage": 0.89,
 }
 
 
@@ -1576,6 +1594,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
     LintSpec("citation_grounding", lint_citation_grounding, ("stage_5d",)),
     LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
+    # `deleted_blocks` reads the same docx as `blocks`, as for
+    # protected_data_in_output.
+    LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
+             optional=("deleted_blocks", "stage_1a", "stage_3b")),
 )
 
 
