@@ -1493,6 +1493,46 @@ def test_a_duty_title_shows_only_the_role_and_the_duties_on_a_row_under_it(code)
     assert gen.stats["appointment_title_duties_split"] == 1
 
 
+_SUBPOINT_AUTHOR = "CViche: source text with no template field"
+
+
+def _deleted_rows(table):
+    return [tr for tr in table._tbl.findall(qn("w:tr"))
+            if (d := tr.find(f"{qn('w:trPr')}/{qn('w:del')}")) is not None
+            and d.get(qn("w:author")) == _SUBPOINT_AUTHOR]
+
+
+def test_with_sub_points_on_the_duties_row_is_a_tracked_deletion():
+    """#1205: with the sub-points on, the duties split off the title are the
+    entry's tracked-deleted sub-point -- a deleted row spanning the table --
+    and are recorded so the sub-point pass, overflow and recovery skip them."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen.supplementary_subpoints = True
+    entry = _duty_title_entry()
+    gen._fill_positions({"D3": [entry]})
+
+    deleted = _deleted_rows(table)
+    assert len(deleted) == 1 and deleted[0].getprevious() is table.rows[1]._tr
+    assert "".join(t.text for t in deleted[0].iter(qn("w:delText"))) == DUTY_TITLE_DUTIES
+    assert deleted[0].find(f".//{qn('w:t')}") is None  # nothing left once accepted
+    assert _row_spans(table) == [[1, 1, 1], [3]]
+    assert gen._subpoint_lines == [
+        f"{DUTY_TITLE_ROLE} Example Institute for Science 2013-2015 {DUTY_TITLE_DUTIES}"]
+    assert gen._subpoint_entry_ids == {id(entry)}
+    assert gen.stats["appointment_title_duties_split"] == 1
+
+
+def test_with_track_changes_off_the_duties_stay_a_plain_row():
+    """A deletion means nothing without track changes, so the #1641 plain row stays."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen.supplementary_subpoints, gen.emit_track_changes = True, False
+    gen._fill_positions({"D3": [_duty_title_entry()]})
+
+    assert _deleted_rows(table) == []
+    assert _rendered_rows(table)[1] == [DUTY_TITLE_DUTIES] * 3
+    assert gen._subpoint_lines == [] and gen._subpoint_entry_ids == set()
+
+
 def test_a_title_without_duty_prose_gets_no_continuation_row():
     entry = _duty_title_entry()
     entry["extracted_fields"]["title"] = DUTY_TITLE_ROLE

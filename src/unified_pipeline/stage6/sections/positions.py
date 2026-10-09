@@ -34,6 +34,7 @@ reached only from this module.
 import logging
 import re
 from collections.abc import Mapping
+from datetime import datetime
 from types import MappingProxyType
 
 try:
@@ -61,6 +62,7 @@ from ..parsing import (
 )
 from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
+from ..supplementary import Revision, write_row_subpoint
 
 logger = logging.getLogger(__name__)
 
@@ -1133,14 +1135,14 @@ class PositionsSection:
     def _add_position_row(self, table: Table, entry: dict, superseded: bool = False,
                           latest_rank: bool = False) -> None:
         """Render one normalized position record as one table row, plus a
-        continuation row when its title holds duties.
+        row of duties when its title holds them.
 
         Renders unconditionally: every record `_normalized_positions` yields
         becomes exactly one record row (#476 review item 7). Whether a record
         yields a row at all is decided there, against these same cells. A
         record whose title holds duty prose (#1205) also gets one full-width
-        continuation row under it, holding the duties split off the title
-        (`_add_continuation_row`); that row is part of the record, not another.
+        row under it, holding the duties split off the title
+        (`_add_title_duties`); that row is part of the record, not another.
         """
         self._add_table_row_with_mixed_content(
             table,
@@ -1149,6 +1151,24 @@ class PositionsSection:
             )
         _role, duties = _appointment_title_parts(entry)
         if duties:
-            _add_continuation_row(table, duties)
+            self._add_title_duties(table, entry, duties)
             self.stats['appointment_title_duties_split'] = (
                 self.stats.get('appointment_title_duties_split', 0) + 1)
+
+    def _add_title_duties(self, table: Table, entry: dict, duties: str) -> None:
+        """The duties split off `entry`'s title, on a row under its appointment
+        row (the table's last row). With sub-points on (`supplementary_subpoints`
+        and track changes, as `_add_supplementary_subpoints` requires) the row
+        is the entry's tracked-deleted sub-point, recorded in `_subpoint_lines`
+        and `_subpoint_entry_ids`, so the sub-point pass, the overflow routing
+        and the #221 recovery all read the duties as already offered.
+        Otherwise it is a plain continuation row (#1641)."""
+        if not (self.supplementary_subpoints and self.emit_track_changes):
+            _add_continuation_row(table, duties)
+            return
+        revision = Revision(self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+        self._subpoint_lines.append(write_row_subpoint(
+            table.rows[-1]._tr, (self._sanitize_run_text(duties),), revision))
+        self._subpoint_entry_ids.add(id(entry))
+        self._revision_id = revision.next_id
+        self.stats['track_changes_added'] += 1

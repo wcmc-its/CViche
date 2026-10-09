@@ -953,7 +953,7 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
                              # get_config also reads auth_config.yaml's "repair" section,
                              # and that loader is backend code this CLI does not import.
                              repair_protected_data=repair_flag_on(os.environ.get(REPAIR_FLAG_ENV)),
-                             # #1205: off unless "1", read from the env var as above.
+                             # #1205: on unless "0", read from the env var as above.
                              supplementary_subpoints=subpoints_enabled(os.environ.get(SUBPOINT_FLAG_ENV)))
     logger.info("")
     logger.info("Stage 6 Complete")

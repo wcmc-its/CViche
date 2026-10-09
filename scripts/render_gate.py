@@ -41,10 +41,11 @@ repair_protected_data=True to run_stage6(), which writes <uid>_repairs.json
 beside each docx. Off by default, and when off the keyword is not passed at
 all, so the gate still renders an arm whose run_stage6() predates it.
 
---subpoints renders as a driver does with CVICHE_SUPPLEMENTARY_SUBPOINTS=1
-(#1205): it passes supplementary_subpoints=True to run_stage6(), which writes
-each entry's unrendered prose under it as a tracked deletion. Off by default,
-and when off the keyword is not passed, as for --repair.
+Sub-points (#1205): by default the keyword is not passed, so each arm renders
+with its own run_stage6() default -- on since the sub-points became the
+default, absent in an arm that predates them. --no-subpoints renders as a
+driver does with CVICHE_SUPPLEMENTARY_SUBPOINTS=0: it passes
+supplementary_subpoints=False, for a flag-off arm of an A/B.
 
 A requested uid (positional or --uids-file) that matches no artifact fails the
 run non-zero. --uids-file lines lose only their line terminator: trailing
@@ -151,8 +152,9 @@ def _parse_args(argv):
                         help="directory holding <uid>*.docx (see docstring)")
     parser.add_argument("--repair", action="store_true",
                         help="run stage 6's protected-data repair (see docstring)")
-    parser.add_argument("--subpoints", action="store_true",
-                        help="write unrendered prose as tracked-deleted sub-points (see docstring)")
+    parser.add_argument("--no-subpoints", dest="subpoints", action="store_false",
+                        help="do not write unrendered prose as tracked-deleted sub-points "
+                             "(see docstring)")
     args = parser.parse_args(argv)
     if not (args.arm_outputs / "stage_4_field_extraction").is_dir():
         parser.error(f"no stage_4_field_extraction under {args.arm_outputs} -- point this at "
@@ -320,7 +322,7 @@ def _llm_disabled(s6):
 
 
 def _render_uid(s6, src: Path, dest: Path, source_path, repair: bool = False,
-                subpoints: bool = False) -> dict:
+                subpoints: bool = True) -> dict:
     """Render one uid and return its _render_index entry.
 
     All four outcomes a uid can have are decided here -- crashed, returned
@@ -336,8 +338,8 @@ def _render_uid(s6, src: Path, dest: Path, source_path, repair: bool = False,
     # uid is allowed to fail. A run is not allowed to disappear.
     # Only when asked: an arm whose run_stage6 predates #1389 rejects the keyword.
     repair_kwargs = {"repair_protected_data": True} if repair else {}
-    if subpoints:  # likewise: an arm that predates #1205 rejects this keyword
-        repair_kwargs["supplementary_subpoints"] = True
+    if not subpoints:  # likewise: an arm that predates #1205 rejects this keyword
+        repair_kwargs["supplementary_subpoints"] = False
     try:
         s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False,
                       original_doc_path=str(source_path) if source_path else None,
@@ -358,7 +360,7 @@ def _render_uid(s6, src: Path, dest: Path, source_path, repair: bool = False,
 
 
 def _render_all(s6, arm_outputs: Path, out: Path, source_dir, uids, repair: bool = False,
-                subpoints: bool = False) -> dict:
+                subpoints: bool = True) -> dict:
     """Render every uid in order into the index dict.
 
     A uid with no resolvable input artifact is recorded and skipped without a

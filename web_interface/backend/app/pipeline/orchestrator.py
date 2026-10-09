@@ -71,7 +71,11 @@ from unified_pipeline.repair.protected_data import (
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
     get_cv_hierarchy_chunked,
 )
-from unified_pipeline.stage6.supplementary import SUBPOINT_FLAG_ENV, subpoints_enabled
+from unified_pipeline.stage6.supplementary import (
+    SUBPOINT_FLAG_DEFAULT,
+    SUBPOINT_FLAG_ENV,
+    subpoints_enabled,
+)
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
 from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
@@ -1629,8 +1633,10 @@ class PipelineOrchestrator:
 
     def _supplementary_subpoints(self) -> bool:
         """Whether stage 6 writes unrendered prose as tracked-deleted sub-points
-        (#1205): off unless CVICHE_SUPPLEMENTARY_SUBPOINTS=1."""
-        return subpoints_enabled(get_config("stage6", SUBPOINT_FLAG_ENV, default="0")[0])
+        (#1205): on unless CVICHE_SUPPLEMENTARY_SUBPOINTS is "0" (or another
+        off word, `subpoints_enabled`)."""
+        return subpoints_enabled(get_config("stage6", SUBPOINT_FLAG_ENV,
+                                            default=SUBPOINT_FLAG_DEFAULT)[0])
 
     def _stage6_switches(self) -> dict[str, bool]:
         """The env-switched run_stage6 options: the #1389 repair and the #1205
