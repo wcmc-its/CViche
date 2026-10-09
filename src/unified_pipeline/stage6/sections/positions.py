@@ -212,6 +212,11 @@ _YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
 # classification, coverage or comment fields (#476).
 _INHERITED_EMPLOYER_FIELDS = ('institution', 'organization', 'department', 'location')
 
+# Point size of a duties continuation row (#1205): the body-text size every
+# section writer sets on its runs (`formatting.docx._set_font`'s default), so
+# the row reads as part of the table above it.
+CONTINUATION_ROW_FONT_PT = 11
+
 
 def _child_position_records(entry: dict) -> list[dict]:
     """The tab-joined child appointments of `entry`, as position records of
@@ -649,7 +654,7 @@ def _add_continuation_row(table: Table, text: str) -> None:
     cell = row.cells[0].merge(row.cells[-1]) if len(row.cells) > 1 else row.cells[0]
     for extra in cell.paragraphs[1:]:  # merge() keeps one paragraph per cell
         extra._p.getparent().remove(extra._p)
-    _set_font(cell.paragraphs[0].add_run(text), size=11)
+    _set_font(cell.paragraphs[0].add_run(text), size=CONTINUATION_ROW_FONT_PT)
 
 
 class PositionsSection:
@@ -1127,11 +1132,15 @@ class PositionsSection:
 
     def _add_position_row(self, table: Table, entry: dict, superseded: bool = False,
                           latest_rank: bool = False) -> None:
-        """Render one normalized position record as one table row.
+        """Render one normalized position record as one table row, plus a
+        continuation row when its title holds duties.
 
         Renders unconditionally: every record `_normalized_positions` yields
-        becomes exactly one row (#476 review item 7). Whether a record yields
-        a row at all is decided there, against these same cells.
+        becomes exactly one record row (#476 review item 7). Whether a record
+        yields a row at all is decided there, against these same cells. A
+        record whose title holds duty prose (#1205) also gets one full-width
+        continuation row under it, holding the duties split off the title
+        (`_add_continuation_row`); that row is part of the record, not another.
         """
         self._add_table_row_with_mixed_content(
             table,
