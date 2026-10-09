@@ -1159,11 +1159,18 @@ def test_an_error_finding_counts_like_a_warning(monkeypatch):
 
 def test_an_unmeasured_lint_gets_the_stated_prior(monkeypatch):
     """No verdicts in the ledger (absent, or listed with none judged): the
-    prior, never 0 (which would hide the lint) and never 1."""
+    prior, never 0 (which would hide the lint) and never 1.
+
+    The expected minutes are literals, not derived from the constant, so a
+    change to the prior has to change this test too."""
+    assert 0.0 < qs.UNMEASURED_PRECISION_PRIOR < 1.0
     monkeypatch.setattr(qs, "load_ledger", _ledger(missed_headers=(0, 0)))
-    for lint in ("missed_headers", "dedup_drops"):
+    # One WARN each: 0.5 prior x 1.0 severity x the lint's fix minutes
+    # (missed_headers 0.5, dedup_drops 1.0).
+    for lint, expected_minutes in (("missed_headers", 0.25), ("dedup_drops", 0.5)):
         cost, = qs.estimate_cleanup([_finding(lint)])
         assert cost.precision == qs.UNMEASURED_PRECISION_PRIOR, lint
+        assert cost.minutes == pytest.approx(expected_minutes), lint
 
 
 def test_a_lint_newer_than_this_scorer_costs_the_default_minutes(monkeypatch):
