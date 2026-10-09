@@ -1412,3 +1412,129 @@ def test_t_row_that_is_its_own_non_t_entry_is_not_recovered():
     bullets = _bulleted_texts(gen.doc.paragraphs)
     assert row not in bullets
     assert _T_ROWS[2] in bullets
+
+
+# --- #1205: supplementary prose as tracked-deleted sub-points -----------------
+# The generator glue for stage6/supplementary.py: the flag, the pass's place
+# before the overflow routing and this recovery, and both skipping what a
+# sub-point carries. The sub-point module itself is test_stage6_supplementary.py.
+
+_DUTY_PROSE = ("Responsible for coordinating the departmental curriculum committee "
+               "and supervising graduate trainees in the example programme")
+
+
+def _duty_appointment():
+    """A D1 row whose source text ends in duty prose no field holds, split
+    over two record-shaped lines the way SQMWHM 29's was (YUYVIG)."""
+    return {
+        "element_idx_start": 29,
+        "taxonomy_code": "D1",
+        "hierarchy": ["PROFESSIONAL EXPERIENCE"],
+        "text": ("July 2010 - present\tAssociate Professor and Program Director, Department of "
+                 f"Example Studies, Norvale University\nMain Annex, ZQ.\t{_DUTY_PROSE}"),
+        "extraction_coverage": {"extraction_coverage_percent": 21.0},
+        "extracted_fields": {
+            "title": "Associate Professor and Program Director",
+            "institution": "Department of Example Studies, Norvale University",
+            "start_date": "2010-07",
+            "end_date": "present",
+        },
+    }
+
+
+def _subpoint_rows(gen):
+    author = "CViche: source text with no template field"
+    return [tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+            if (d := tr.find(f"{qn('w:trPr')}/{qn('w:del')}")) is not None
+            and d.get(qn("w:author")) == author]
+
+
+def _render_duty_appointment(**kwargs):
+    gen = _generator(**kwargs)
+    entry = _duty_appointment()
+    gen._fill_positions({"D1": [entry]})
+    gen._add_supplementary_subpoints({"D1": [entry]})
+    return gen, entry
+
+
+def test_supplementary_subpoints_default_off():
+    assert WCMTemplateGenerator(verbose=False).supplementary_subpoints is False
+
+
+def test_run_stage6_passes_the_subpoint_flag_to_the_generator(monkeypatch):
+    from unified_pipeline import stage_6_word_template as stage6
+
+    seen = {}
+
+    class _FakeGenerator:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def generate(self, *args, **kwargs):
+            return "unused.docx"
+
+    monkeypatch.setattr(stage6, "WCMTemplateGenerator", _FakeGenerator)
+    stage6.run_stage6("unused.json")
+    assert seen["supplementary_subpoints"] is False
+    stage6.run_stage6("unused.json", supplementary_subpoints=True)
+    assert seen["supplementary_subpoints"] is True
+
+
+def test_duty_prose_is_a_deleted_row_under_its_appointment():
+    gen, _entry = _render_duty_appointment(supplementary_subpoints=True)
+
+    rows = _subpoint_rows(gen)
+    assert len(rows) == 1
+    above = rows[0].getprevious()
+    assert "Associate Professor and Program Director" in "".join(
+        t.text for t in above.iter(qn("w:t")))
+    assert "".join(t.text for t in rows[0].iter(qn("w:delText"))) == _DUTY_PROSE
+    assert gen.stats["supplementary_subpoints"] == 1
+    assert gen._subpoint_lines and gen._subpoint_lines[0].endswith(_DUTY_PROSE)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"supplementary_subpoints": True, "emit_track_changes": False}])
+def test_no_sub_point_with_the_flag_off_or_track_changes_off(kwargs):
+    gen, _entry = _render_duty_appointment(**kwargs)
+    assert _subpoint_rows(gen) == []
+    assert "supplementary_subpoints" not in gen.stats
+    assert gen._subpoint_lines == [] and gen._subpoint_entry_ids == set()
+
+
+@pytest.mark.parametrize("flag, queued", [(True, 0), (False, 1)])
+def test_the_overflow_pass_skips_an_entry_whose_prose_is_a_sub_point(flag, queued):
+    gen, entry = _render_duty_appointment(supplementary_subpoints=flag)
+    cell_para = gen.doc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]
+    gen._overflow_entries = [(entry, cell_para, "D1")]
+
+    gen._route_overflow_entries()
+
+    assert len(gen._appendix_pending) == queued
+
+
+@pytest.mark.parametrize("flag, recovered", [(True, 0), (False, 1)])
+def test_the_recovery_reads_a_sub_point_as_its_entry_rendered(flag, recovered):
+    gen, entry = _render_duty_appointment(supplementary_subpoints=flag)
+
+    gen._recover_unrendered_records({"D1": [entry]})
+
+    assert gen.stats["unrendered_records_recovered"] == recovered
+
+
+def test_sub_point_anchors_stop_at_the_appendix_heading(monkeypatch):
+    """The Appendix repeats entry text in bullets: no place for a sub-point."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _generator(supplementary_subpoints=True)
+    gen._write_appendix_header(1)
+    appendix = gen.doc.paragraphs[gen._find_header_paragraph("T. APPENDIX")]._p
+    seen = []
+    real = supplementary.anchor_candidates
+
+    def spy(doc, stop_before=None):
+        seen.append(stop_before)
+        return real(doc, stop_before)
+
+    monkeypatch.setattr(supplementary, "anchor_candidates", spy)
+    gen._add_supplementary_subpoints({"D1": [_duty_appointment()]})
+    assert seen == [appendix]

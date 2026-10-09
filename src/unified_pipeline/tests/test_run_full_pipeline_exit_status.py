@@ -333,10 +333,12 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
         boom_if('5d')
         return _write(_FILES['5d'], {'stage_5d': {'total_cost': _STAGE_5D_COST}})
 
-    def stage_6(*, input_path, verbose, original_doc_path, llm_usage, repair_protected_data):
+    def stage_6(*, input_path, verbose, original_doc_path, llm_usage, repair_protected_data,
+                supplementary_subpoints):
         calls.record('6', input_path=input_path, verbose=verbose,
                      original_doc_path=original_doc_path,
-                     repair_protected_data=repair_protected_data)
+                     repair_protected_data=repair_protected_data,
+                     supplementary_subpoints=supplementary_subpoints)
         boom_if('6')
         llm_usage.add({'cost': _STAGE_6_COST})
         path = tmp_path / _FILES['6']
@@ -669,6 +671,19 @@ def test_stage_6_repairs_protected_data_only_under_the_flag(tmp_path, monkeypatc
     assert calls.kwargs['6']['repair_protected_data'] is repair
 
 
+@pytest.mark.parametrize("env, subpoints", [(None, False), ("0", False), ("1", True)])
+def test_stage_6_writes_sub_points_only_under_the_flag(tmp_path, monkeypatch, capsys, env, subpoints):
+    """#1205: the CLI reads CVICHE_SUPPLEMENTARY_SUBPOINTS as the web driver does."""
+    if env is None:
+        monkeypatch.delenv("CVICHE_SUPPLEMENTARY_SUBPOINTS", raising=False)
+    else:
+        monkeypatch.setenv("CVICHE_SUPPLEMENTARY_SUBPOINTS", env)
+    calls = _Calls()
+    rc, _ = _run_main(tmp_path, monkeypatch, capsys, calls=calls)
+    assert rc == 0
+    assert calls.kwargs['6']['supplementary_subpoints'] is subpoints
+
+
 def test_a_context_whose_path_and_uid_disagree_is_rejected(tmp_path):
     """Stage 4 finds its input from Path(docx_path).stem, so the two identities
     have to agree; this fails loudly instead of extracting another CV."""
@@ -705,7 +720,8 @@ def test_every_stage_receives_the_orchestration_arguments_it_expects(
     assert calls.kwargs['5c'] == {'input_path': str(_FILES['5b']), 'verbose': True}
     assert calls.kwargs['5d'] == {'input_path': str(_FILES['5c']), 'verbose': True}
     assert calls.kwargs['6'] == {'input_path': str(_FILES['5d']), 'verbose': True,
-                                 'original_doc_path': _DOCX, 'repair_protected_data': False}
+                                 'original_doc_path': _DOCX, 'repair_protected_data': False,
+                                 'supplementary_subpoints': False}
 
 
 # -- r3960726469 #6: stage order --------------------------------------------
@@ -753,7 +769,8 @@ def test_stage6_does_not_use_stale_artifact(tmp_path, monkeypatch, capsys):
                         setup=plant_stale)
     assert rc == 1, "the run had a failed stage"
     assert calls.kwargs['6'] == {'input_path': str(_FILES['5c']), 'verbose': True,
-                                 'original_doc_path': _DOCX, 'repair_protected_data': False}, (
+                                 'original_doc_path': _DOCX, 'repair_protected_data': False,
+                                 'supplementary_subpoints': False}, (
         "stage 6 took an input this run did not produce")
     assert "stage_5d: RuntimeError" in out
 
@@ -810,7 +827,8 @@ def test_standalone_stage_6_uses_the_exact_expected_path(tmp_path, monkeypatch, 
                       argv=['run_full_pipeline.py', UID, '--stage', '6'])
     assert calls.order == ['6']
     assert calls.kwargs['6'] == {'input_path': str(_FILES['4']), 'verbose': True,
-                                 'original_doc_path': _DOCX, 'repair_protected_data': False}
+                                 'original_doc_path': _DOCX, 'repair_protected_data': False,
+                                 'supplementary_subpoints': False}
     assert rc == 0
 
 
