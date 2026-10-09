@@ -291,8 +291,8 @@ def rendered_haystack(lines: list[str], doc: Document) -> _Haystack:
     `_recover_unrendered_records` builds its own, plus one token set per
     label/value table: a grant renders one fact per row, so a line naming
     the grant's funder, number and role is rendered though no single row
-    holds most of its tokens (DYLJXC: "NIH Research Award (<number>),
-    Principal Investigator <years>", rendered as its own grant table)."""
+    holds most of its tokens (YUYVIG DYLJXC: a "<funder> award (<number>),
+    <role> <years>" line, rendered as its own grant table)."""
     token_sets = [_tokens(line) for line in lines]
     token_sets += [_tokens(' '.join(t.text or '' for t in tbl.iter(qn('w:t'))))
                    for tbl in doc.element.body.iter(qn('w:tbl')) if _is_label_table(tbl)]
