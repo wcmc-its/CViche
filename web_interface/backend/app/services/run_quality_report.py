@@ -627,7 +627,11 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: LINT_COPY wording. citation_grounding (#1570) is right about half the time
 #: (doctor/PRECISION.md, YUY-CG), too often to show as a problem; Paul,
 #: 2026-10-08: "share the possible citation as a comment" instead.
-REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding"})
+#: source_line_coverage (#1588) is a source line the document may have lost:
+#: held out on YUYVIG, 37% of a hand-checked sample wholly missing and 67%
+#: missing at least a role or description (PRECISION.md, YUY-SLC), under the
+#: 50% bar of #1625, so it is a review-notes item, never a run-page row.
+REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 
