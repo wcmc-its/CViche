@@ -687,13 +687,13 @@ def test_a_capitalised_opening_after_a_plain_word_is_no_join():
 # Synthetic titles in the two shapes YUYVIG DYLJXC 661/668 carry: a role, a
 # spaced dash, an FTE share, then a "to <verb>" duty clause.
 
-_DASH_DUTY_TITLE = ("Senior Fellow in Example Science, Office of Example Therapeutics"
+_DASH_DUTY_TITLE = ("Visiting Fellow in Example Science, Example Policy Office"
                     " - 50% FTE Appointment to help plan the example programme")
 
 
 def test_split_cuts_at_the_dash_before_a_duty_clause():
     assert split_appointment_title(_DASH_DUTY_TITLE) == (
-        "Senior Fellow in Example Science, Office of Example Therapeutics",
+        "Visiting Fellow in Example Science, Example Policy Office",
         "50% FTE Appointment to help plan the example programme")
 
 
@@ -724,7 +724,7 @@ def test_split_keeps_every_word():
 
 @pytest.mark.parametrize("title", [
     "Special Assistant to the Dean for Example Affairs",
-    'Methodological consultant for "Randomized Trial to Promote Example Care"',
+    'Statistical adviser for "Example Trial to Promote Example Care"',
     "Associate Professor (Tenure), Depts. Of Example Biology & Example Chemistry",
     "Assoc. Professor of Medicine and Example Biology",
     "Asst. Professor of Example Surgery",

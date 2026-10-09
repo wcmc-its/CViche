@@ -4012,9 +4012,9 @@ def lint_orphaned_fragments(stage3b: dict) -> list[dict]:
 #: An appointment role longer than this is not a role (#1205, owner decision
 #: 2026-10-08). Measured on 1,763 D1-D3 titles over six farms (YUYVIG,
 #: EBYSBC, NDMRSO, X6, EOAHMI, the 66-CV local farm): 6 are longer, and the
-#: three a ';'-list of roles explains (EBYSBC QNZADH 0/35/39, "Distinguished
-#: Professor ...; Executive Associate Dean ...; Deputy Director ...") are
-#: judged by their longest role instead, which is under it.
+#: three a ';'-list of roles explains (EBYSBC QNZADH 0/35/39: a rank, a
+#: deanship and a directorship, each under 100 characters) are judged by
+#: their longest role instead, which is under it.
 APPOINTMENT_TITLE_WARN_CHARS = 150
 
 #: CVs list several concurrent roles in one title with this separator.

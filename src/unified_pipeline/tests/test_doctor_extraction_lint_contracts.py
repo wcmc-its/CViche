@@ -4769,7 +4769,7 @@ def test_orphaned_fragments_is_silent_on_a_list_holding_a_non_entry():
 
 # lint_appointment_title_overlong (#1205): duty prose packed into a D1-D3 role.
 
-_OVERLONG_ROLE = "Example Fellow, Office of Example Therapeutics"
+_OVERLONG_ROLE = "Example Fellow, Example Policy Office"
 
 
 def _overlong(*entries):

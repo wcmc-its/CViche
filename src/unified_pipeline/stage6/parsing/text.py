@@ -789,17 +789,17 @@ def _refold_shattered(parts: list[str]) -> list[str]:
 # --- appointment title vs. its duties (#1205) ---------------------------------
 #
 # Section D's schema has no description field, so stage 4 sometimes writes an
-# appointment's duties into `title` ("Senior Fellow in X - 50% FTE Appointment
-# to help strategize how to ..."), and the appointments table's Title column
+# appointment's duties into `title` ("Visiting Fellow, Example Office - 50% FTE
+# Appointment to help plan ..."), and the appointments table's Title column
 # then carries the role plus a paragraph. `split_appointment_title` finds the
 # point where the role ends and the duties begin.
 #
 # ponytail: the duty clause is "to <verb>" for a NAMED verb list, not a parse.
 # Measured on 966 D1-D3 titles (YUYVIG 389 + EBYSBC 577, 2026-10-08): the
 # lowercase "to <verb>" shape occurs only in duty prose there, and a title
-# that merely contains "to" ("Special Assistant to the Dean", a quoted
-# "Trial to Promote ...") is not split, because neither "the" nor the
-# capitalised "Promote" is on the list. A duty clause with a verb not on the
+# that merely contains "to" ("Special Assistant to the Dean", a quoted study
+# name such as "Trial to Improve ...") is not split, because neither "the"
+# nor a capitalised verb is on the list. A duty clause with a verb not on the
 # list is not split; the doctor's appointment_title_overlong WARN still
 # reports it once the title is over that lint's limit. Extend the list from a
 # missed case, not speculatively.

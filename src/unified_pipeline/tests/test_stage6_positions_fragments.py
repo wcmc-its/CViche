@@ -1452,7 +1452,7 @@ def test_latest_rank_rows_reads_d1_start_years_only():
 # The YUYVIG DYLJXC 661/668 shape, synthetic: stage 4 wrote the role, an FTE
 # share and the duties into `title`.
 
-DUTY_TITLE_ROLE = "Senior Fellow in Example Science, Office of Example Therapeutics"
+DUTY_TITLE_ROLE = "Visiting Fellow in Example Science, Example Policy Office"
 DUTY_TITLE_DUTIES = "50% FTE Appointment to help plan the example programme"
 
 
