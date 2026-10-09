@@ -195,93 +195,7 @@ def test_feedback_all_matches_the_single_feedback_serialisation(client, db):
     assert listed == single
 
 
-# --- the review loop (#1587): verdicts and the corrected copy ---------------------
-
-_SHOWN = {"lint": "junk_or_header_row", "shape": None}
-_DOCTOR = {"findings": [
-    {"lint": "junk_or_header_row", "severity": "WARN", "status": "ran", "evidence": [],
-     "message": f"entry {i} (D1): a lead-in label prints as a record"} for i in (3, 9)]}
-
-
-def _doctor_report(monkeypatch, payload=_DOCTOR):
-    calls = []
-
-    def fake(run_id):
-        calls.append(run_id)
-        return payload
-    monkeypatch.setattr("app.services.review_loop_service.get_doctor_report", fake)
-    return calls
-
-
-def test_verdict_groups_endpoint_lists_the_runs_fix_list_groups(client, db, monkeypatch):
-    user = _seed_run(db)
-    _doctor_report(monkeypatch)
-    with _as_user(user):
-        resp = client.get(f"/api/run/{_RUN_ID}/feedback/verdict-groups")
-    assert resp.status_code == 200
-    from app.services.run_quality_report import LINT_COPY
-    assert resp.json() == [{**_SHOWN, "title": LINT_COPY["junk_or_header_row"].title, "count": 2}]
-
-
-def test_feedback_without_verdicts_is_unchanged(client, db, monkeypatch):
-    """No verdicts: 201 exactly as before, no verdict row, and the doctor
-    report is not even read."""
-    user = _seed_run(db)
-    calls = _doctor_report(monkeypatch)
-    monkeypatch.setattr("app.services.notifications.notify_feedback_submitted", Mock())
-    with _as_user(user):
-        resp = client.post(f"/api/run/{_RUN_ID}/feedback", json=_VALID_BODY)
-    assert resp.status_code == 201
-    assert set(resp.json()) == {"id", "run_id", "user_id", "reviewer_role", "overall_usefulness",
-                                "likelihood_to_recommend", "submitted_at"}
-    from app.models import Feedback, FeedbackVerdict
-    assert db.query(Feedback).filter(Feedback.run_id == _RUN_ID).count() == 1
-    assert db.query(FeedbackVerdict).count() == 0
-    assert calls == []
-
-
-def test_feedback_stores_a_verdict_with_the_servers_group_count(client, db, monkeypatch):
-    user = _seed_run(db)
-    _doctor_report(monkeypatch)
-    monkeypatch.setattr("app.services.notifications.notify_feedback_submitted", Mock())
-    body = {**_VALID_BODY, "verdicts": [{**_SHOWN, "verdict": "not_a_problem"}]}
-    with _as_user(user):
-        resp = client.post(f"/api/run/{_RUN_ID}/feedback", json=body)
-    assert resp.status_code == 201
-    from app.models import FeedbackVerdict
-    [row] = db.query(FeedbackVerdict).all()
-    assert (row.feedback_id, row.run_id, row.lint, row.shape, row.finding_count, row.verdict) == (
-        resp.json()["id"], _RUN_ID, "junk_or_header_row", None, 2, "not_a_problem")
-
-
-@pytest.mark.parametrize("verdict", [
-    {"lint": "dead_sections", "shape": None, "verdict": "fixed"},  # not shown on this run
-    {"lint": "junk_or_header_row", "shape": "made_up", "verdict": "fixed"},  # unknown shape
-])
-def test_feedback_with_a_verdict_on_an_unshown_group_is_refused_and_writes_nothing(
-        client, db, monkeypatch, verdict):
-    user = _seed_run(db)
-    _doctor_report(monkeypatch)
-    notify = Mock()
-    monkeypatch.setattr("app.services.notifications.notify_feedback_submitted", notify)
-    with _as_user(user):
-        resp = client.post(f"/api/run/{_RUN_ID}/feedback", json={**_VALID_BODY, "verdicts": [verdict]})
-    assert resp.status_code == 422
-    from app.models import Feedback, FeedbackVerdict
-    assert db.query(Feedback).count() == 0
-    assert db.query(FeedbackVerdict).count() == 0
-    notify.assert_not_called()
-
-
-def test_feedback_with_an_unknown_verdict_value_is_refused(client, db, monkeypatch):
-    user = _seed_run(db)
-    _doctor_report(monkeypatch)
-    with _as_user(user):
-        resp = client.post(f"/api/run/{_RUN_ID}/feedback",
-                           json={**_VALID_BODY, "verdicts": [{**_SHOWN, "verdict": "maybe"}]})
-    assert resp.status_code == 422
-    from app.models import Feedback
-    assert db.query(Feedback).count() == 0
+# --- the review loop (#1587): the corrected copy -------------------------------
 
 
 def _docx(*paragraphs):
@@ -350,12 +264,13 @@ def test_corrected_docx_upload_refuses_what_the_cv_upload_refuses(
 
 
 def test_corrected_docx_upload_is_bounded_by_the_upload_size_cap(client, db, run_storage, monkeypatch):
-    monkeypatch.setattr("app.api.feedback_routes.MAX_UPLOAD_SIZE", 10)
+    corrected = _docx(_DELIVERED[0])
+    monkeypatch.setattr("app.api.feedback_routes.MAX_UPLOAD_SIZE", len(corrected) - 1)  # one byte over
     user = _seed_run(db)
     run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
     with _as_user(user):
         resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
-                           files={"file": ("corrected.docx", _docx(_DELIVERED[0]))})
+                           files={"file": ("corrected.docx", corrected)})
     assert resp.status_code == 400
     assert "too large" in resp.json()["detail"]["message"]
     assert run_storage.list_files(_RUN_ID, "corrected/") == []

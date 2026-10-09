@@ -2,13 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import FeedbackForm from './FeedbackForm'
-import {
-  getFeedback,
-  getRunFeedbackAll,
-  getVerdictGroups,
-  submitFeedback,
-  uploadCorrectedDocx,
-} from '../api/feedback'
+import { getFeedback, getRunFeedbackAll, submitFeedback, uploadCorrectedDocx } from '../api/feedback'
 import type { FeedbackDetail } from '../types'
 import { QUESTION_LABELS } from './feedbackQuestions'
 
@@ -16,7 +10,6 @@ vi.mock('../api/feedback', () => ({
   getFeedback: vi.fn(),
   submitFeedback: vi.fn(),
   getRunFeedbackAll: vi.fn(),
-  getVerdictGroups: vi.fn(),
   uploadCorrectedDocx: vi.fn(),
 }))
 
@@ -162,11 +155,6 @@ describe('FeedbackForm summary', () => {
 // "Help improve CViche" (#1587). Synthetic data only.
 // ---------------------------------------------------------------------------
 
-const GROUPS = [
-  { lint: 'junk_or_header_row', shape: null, title: 'Heading printed as an entry', count: 2 },
-  { lint: 'stage6_render_warnings', shape: 'no_teaching_content', title: 'Teaching section empty', count: 1 },
-]
-
 /** The keys today's form sends: the payload an untouched section must keep. */
 const TODAYS_PAYLOAD_KEYS = [
   'reviewer_role', 'overall_usefulness', 'overall_accuracy', 'overall_completeness',
@@ -193,15 +181,10 @@ async function submitAndGetPayload() {
 }
 
 describe('FeedbackForm "Help improve CViche"', () => {
-  beforeEach(() => {
-    vi.mocked(getVerdictGroups).mockResolvedValue(GROUPS)
-  })
-
-  it('is collapsed by default, optional, and fetches nothing until opened', async () => {
+  it('is collapsed by default and optional', async () => {
     await renderForm()
     expect(helpToggle().getAttribute('aria-expanded')).toBe('false')
-    expect(screen.queryByText("CViche's checks")).toBeNull()
-    expect(getVerdictGroups).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('file-input')).toBeNull()
     // The required-answer rule is today's: the section is not part of it.
     answerRequired()
     expect((screen.getByRole('button', { name: 'Submit review' }) as HTMLButtonElement).disabled).toBe(false)
@@ -212,64 +195,18 @@ describe('FeedbackForm "Help improve CViche"', () => {
     answerRequired()
     const payload = await submitAndGetPayload()
     expect(Object.keys(payload).sort()).toEqual(TODAYS_PAYLOAD_KEYS)
-    expect(getVerdictGroups).not.toHaveBeenCalled()
     expect(uploadCorrectedDocx).not.toHaveBeenCalled()
   })
 
-  it('opening and closing it without answering still sends no verdicts', async () => {
-    await renderForm()
-    fireEvent.click(helpToggle())
-    await screen.findByText('Heading printed as an entry')
-    fireEvent.click(helpToggle())
-    answerRequired()
-    const payload = await submitAndGetPayload()
-    expect('verdicts' in payload).toBe(false)
-  })
-
-  it('shows one verdict row per group with its count, and sends the chosen verdicts', async () => {
+  it('opening and closing it leaves the payload as it was', async () => {
     await renderForm()
     fireEvent.click(helpToggle())
     expect(helpToggle().getAttribute('aria-expanded')).toBe('true')
-    expect(await screen.findByText('Heading printed as an entry')).toBeTruthy()
-    expect(screen.getByText('2 places')).toBeTruthy()
-    expect(screen.getByText('1 place')).toBeTruthy()
-    expect(getVerdictGroups).toHaveBeenCalledWith('run-1')
-
-    const row = screen.getByRole('radiogroup', { name: 'Teaching section empty: your verdict' })
-    fireEvent.click(within(row).getByRole('radio', { name: 'Not a problem' }))
-    fireEvent.click(within(row).getByRole('radio', { name: 'Fixed' }))  // the last choice wins
-    answerRequired()
-    const payload = await submitAndGetPayload()
-    expect(payload.verdicts).toEqual([
-      { lint: 'stage6_render_warnings', shape: 'no_teaching_content', verdict: 'fixed' },
-    ])
-  })
-
-  it('a failed load says so and leaves the rest of the form working', async () => {
-    vi.mocked(getVerdictGroups).mockRejectedValue({ status: 500, message: 'boom' })
-    await renderForm()
+    expect(screen.getByTestId('file-input')).toBeTruthy()
     fireEvent.click(helpToggle())
-    expect(await screen.findByText(/checks couldn't be loaded/)).toBeTruthy()
     answerRequired()
     const payload = await submitAndGetPayload()
-    expect('verdicts' in payload).toBe(false)
-  })
-
-  it('asks "where?" for each ticked problem, writing the same issue field', async () => {
-    await renderForm()
-    fireEvent.click(helpToggle())
-    expect(screen.getByText(/Nothing is ticked under Problems/)).toBeTruthy()
-
-    fireEvent.click(within(card('Wrong section')).getByRole('checkbox'))
-    const where = screen.getByRole('textbox', { name: 'Wrong section: where?' })
-    fireEvent.change(where, { target: { value: 'Honors: the 2017 lectureship' } })
-    // The card's own box above shows the same answer: one field, two inputs.
-    expect((within(card('Wrong section')).getByPlaceholderText('Which entries?') as HTMLInputElement).value).toBe(
-      'Honors: the 2017 lectureship',
-    )
-    answerRequired()
-    const payload = await submitAndGetPayload()
-    expect(payload.issue_wrong_section).toBe('Honors: the 2017 lectureship')
+    expect(Object.keys(payload).sort()).toEqual(TODAYS_PAYLOAD_KEYS)
   })
 
   it('uploads a corrected copy and shows only the one-line confirmation', async () => {

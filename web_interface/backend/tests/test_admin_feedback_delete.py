@@ -152,32 +152,6 @@ def test_admin_delete_removes_row(client, db):
     assert db.query(Feedback).filter(Feedback.id == fb_id).first() is None
 
 
-def test_admin_delete_removes_the_feedbacks_verdicts_first(client, db):
-    """#1587: feedback_verdicts.feedback_id is a bare FK, so its rows go
-    before the feedback row, under FKs enforced the way InnoDB does."""
-    from sqlalchemy import text
-
-    from app.models import Feedback, FeedbackVerdict
-    from tests.conftest import engine
-
-    fb_id = _seed_feedback(db)
-    db.add(FeedbackVerdict(feedback_id=fb_id, run_id="_WY5HW", lint="junk_or_header_row",
-                           finding_count=2, verdict="fixed"))
-    db.commit()
-    with engine.connect() as conn:
-        conn.execute(text("PRAGMA foreign_keys=ON"))
-    try:
-        resp = _as_admin(client, lambda: client.delete(f"/api/admin/feedback/{fb_id}"))
-    finally:
-        with engine.connect() as conn:
-            conn.execute(text("PRAGMA foreign_keys=OFF"))
-
-    assert resp.status_code == 204
-    db.rollback()
-    assert db.query(Feedback).filter(Feedback.id == fb_id).first() is None
-    assert db.query(FeedbackVerdict).count() == 0
-
-
 def test_redelete_returns_404(client, db):
     """Re-deleting an already-deleted (or never-existent) id returns 404."""
     fb_id = _seed_feedback(db)

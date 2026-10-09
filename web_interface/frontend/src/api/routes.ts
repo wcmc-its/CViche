@@ -77,8 +77,6 @@ export const feedbackRoutes = {
   submit: (id: string) => `/api/run/${seg(id)}/feedback` as const,
   /** GET /api/run/:id/feedback/all  (every reviewer's feedback; owner, admin or staff) */
   all: (id: string) => `/api/run/${seg(id)}/feedback/all` as const,
-  /** GET /api/run/:id/feedback/verdict-groups  (the doctor findings the form asks a verdict on) */
-  verdictGroups: (id: string) => `/api/run/${seg(id)}/feedback/verdict-groups` as const,
   /** POST /api/run/:id/feedback/corrected-docx  (the reviewer's corrected copy, multipart) */
   correctedDocx: (id: string) => `/api/run/${seg(id)}/feedback/corrected-docx` as const,
 } as const

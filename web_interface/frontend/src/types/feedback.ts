@@ -53,26 +53,6 @@ export interface FeedbackDetail {
   submitted_at: string | null
 }
 
-/** A reviewer's answer for one group of doctor findings (#1587). */
-export type ReviewVerdict = 'fixed' | 'not_a_problem' | 'cant_tell'
-
-/** GET /api/run/:id/feedback/verdict-groups: one kind of problem the run's Fix list shows. */
-export interface VerdictGroup {
-  lint: string
-  shape: string | null
-  /** The Fix list's plain title for the problem. */
-  title: string
-  /** How many findings of this kind the run has. */
-  count: number
-}
-
-/** One entry of the optional `verdicts` list in a feedback submit. */
-export interface FeedbackVerdictSubmit {
-  lint: string
-  shape: string | null
-  verdict: ReviewVerdict
-}
-
 /** POST /api/run/:id/feedback/corrected-docx: a one-line confirmation only. */
 export interface CorrectedDocxResult {
   changes: number

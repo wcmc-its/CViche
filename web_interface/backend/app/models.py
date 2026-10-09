@@ -174,39 +174,6 @@ class Feedback(Base):
     user = relationship("User", back_populates="feedback", lazy="raise_on_sql")
 
 
-class ReviewVerdict(StrEnum):
-    """A reviewer's answer for one group of doctor findings (#1587)."""
-    FIXED = "fixed"
-    NOT_A_PROBLEM = "not_a_problem"
-    CANT_TELL = "cant_tell"
-
-
-class FeedbackVerdict(Base):
-    """One reviewer verdict on a group of doctor findings (#1587): every
-    finding of one lint and message shape that the run's Fix list showed.
-
-    A child of ``feedback``: the feedback columns stay as they were. Holds the
-    lint, the shape, how many findings the group had and the verdict, never
-    CV text. Its FKs are bare, like every other child here, so
-    ``run_service._delete_run_rows`` and ``hard_delete_feedback`` delete these
-    rows first.
-    """
-    __tablename__ = "feedback_verdicts"
-
-    # Lint keys and shape names are short snake_case identifiers
-    # (doctor/precision.py), well under this.
-    NAME_MAX_LENGTH = 64
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    feedback_id = Column(Integer, ForeignKey("feedback.id"), nullable=False, index=True)
-    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
-    lint = Column(String(NAME_MAX_LENGTH), nullable=False)
-    shape = Column(String(NAME_MAX_LENGTH), nullable=True)  # NULL: the lint's own row
-    finding_count = Column(Integer, nullable=False)
-    verdict = Column(String(20), nullable=False)  # a ReviewVerdict value
-    created_at = Column(DateTime, server_default=func.now())
-
-
 # ==========================
 # Configuration Models
 # ==========================

@@ -1,6 +1,6 @@
-"""app/services/review_loop_service.py (#1587): verdict checks and the
-corrected-copy diff. The routes over them are in test_feedback_notification.py.
-Every document here is synthetic."""
+"""app/services/review_loop_service.py (#1587): the corrected-copy diff. The
+route over it is in test_feedback_notification.py. Every document here is
+synthetic."""
 import io
 import json
 import zipfile
@@ -8,44 +8,9 @@ import zipfile
 import pytest
 from fastapi import HTTPException
 
-from app.models import ReviewVerdict
-from app.schemas import FeedbackVerdictSubmit, VerdictGroup
 from app.services import review_loop_service as svc
 
 _RUN = "RVW001"
-_GROUPS = [VerdictGroup(lint="junk_or_header_row", shape=None, title="t", count=3),
-           VerdictGroup(lint="stage6_render_warnings", shape="no_teaching_content", title="t", count=1)]
-
-
-def _verdict(lint, shape=None, verdict=ReviewVerdict.FIXED):
-    return FeedbackVerdictSubmit(lint=lint, shape=shape, verdict=verdict)
-
-
-def test_check_verdicts_takes_each_groups_count_from_the_server():
-    verdicts = [_verdict("junk_or_header_row"),
-                _verdict("stage6_render_warnings", "no_teaching_content", ReviewVerdict.CANT_TELL)]
-    counts = svc.check_verdicts(verdicts, _GROUPS)
-    assert counts == {("junk_or_header_row", None): 3, ("stage6_render_warnings", "no_teaching_content"): 1}
-    rows = svc.verdict_rows(7, _RUN, verdicts, counts)
-    assert [(r.feedback_id, r.lint, r.shape, r.finding_count, r.verdict) for r in rows] == [
-        (7, "junk_or_header_row", None, 3, "fixed"),
-        (7, "stage6_render_warnings", "no_teaching_content", 1, "cant_tell")]
-
-
-@pytest.mark.parametrize("verdicts", [
-    [_verdict("dead_sections")],  # a lint the run does not show
-    [_verdict("stage6_render_warnings")],  # a shown lint, but not under this shape
-    [_verdict("junk_or_header_row"), _verdict("junk_or_header_row", verdict=ReviewVerdict.NOT_A_PROBLEM)],
-])
-def test_check_verdicts_refuses_an_unshown_or_repeated_group(verdicts):
-    with pytest.raises(HTTPException) as e:
-        svc.check_verdicts(verdicts, _GROUPS)
-    assert e.value.status_code == 422
-
-
-def test_check_verdicts_refuses_everything_when_the_run_shows_nothing():
-    with pytest.raises(HTTPException):
-        svc.check_verdicts([_verdict("junk_or_header_row")], [])
 
 
 def _docx(*paragraphs):
