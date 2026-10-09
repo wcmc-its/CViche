@@ -22,6 +22,12 @@ is commented whatever its severity, but only on the text it quotes, never on
 a heading or as a review note. It is a possibility to check, not a problem.
 The other, source_line_coverage (#1588), quotes source text the document may
 have lost, so it has no place on the page: each quoted line is a review note.
+
+A finding whose fix is certain is not a comment but the fix itself, as a
+Word tracked change: accepting it gives the corrected text, rejecting it the
+delivered text (#1591). Which findings qualify is the "Repair tiers" table in
+doctor/PRECISION.md; today one does, owner_pi_role_empty ("PI" in an empty
+"Your role:" cell beside a PI cell naming the CV owner).
 """
 import copy
 import re
@@ -31,6 +37,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.oxml.xmlchemy import BaseOxmlElement
 from docx.text.paragraph import Paragraph
@@ -48,13 +55,18 @@ from app.services.run_quality_report import (
 )
 from unified_pipeline.core.text_norm import squash  # noqa: E402
 from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
-from unified_pipeline.doctor.lints.extraction import DEDUP_TEXT_CHARS  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    DEDUP_TEXT_CHARS,
+    ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
+    owner_pi_role_empty_tables,
+)
 from unified_pipeline.doctor.precision import (  # noqa: E402
     LintPrecision,
     ShapeKey,
     load_gate_ledger,
     shown_in_place,
 )
+from unified_pipeline.doctor.shared import docx_table_rows  # noqa: E402
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     add_cviche_box,
@@ -63,6 +75,13 @@ from unified_pipeline.stage6.formatting import (  # noqa: E402
     cviche_box_pair,
     cviche_box_text,
     space_around_cviche_box,
+)
+from unified_pipeline.stage6.sections.bibliography import (  # noqa: E402
+    TRACKED_INSERTION_FONT_NAME,
+    TRACKED_INSERTION_FONT_SIZE_HALF_POINTS,
+)
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    YOUR_ROLE_LABEL,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -148,6 +167,11 @@ REVIEW_FLAGS = {
                              "partly here. Check it and add it where it belongs."),
     "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
 }
+#: The certain fix for owner_pi_role_empty (Repair tiers, doctor/PRECISION.md):
+#: the owner named as PI has the PI role. Inserted as a tracked change.
+OWNER_PI_ROLE_FIX = "PI"
+#: The role_consistency message token that names the shape the fix repairs.
+_OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",
                "source_line_coverage": "Text from your CV that may be missing"}
@@ -473,6 +497,60 @@ def _runs(para: Paragraph, span: tuple[int, int] | None) -> list[Run]:
     return [Run(chosen[0], para), Run(chosen[-1], para)]
 
 
+def _next_revision_id(doc: Document) -> int:
+    """One past the largest w:id any tracked change in ``doc`` uses."""
+    ids = [int(el.get(qn("w:id"))) for tag in ("w:ins", "w:del")
+           for el in doc.element.body.iter(qn(tag)) if (el.get(qn("w:id")) or "").isdigit()]
+    return max(ids, default=0) + 1
+
+
+def _tracked_insertion(text: str, revision_id: int) -> BaseOxmlElement:
+    """A w:ins holding one run of ``text``, built as stage 6 builds its
+    tracked insertions (bibliography.py), in its font. No w:date: the
+    copy is the same however often it is written."""
+    ins = OxmlElement("w:ins")
+    ins.set(qn("w:id"), str(revision_id))
+    ins.set(qn("w:author"), COMMENT_AUTHOR)
+    run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), TRACKED_INSERTION_FONT_NAME)
+    fonts.set(qn("w:hAnsi"), TRACKED_INSERTION_FONT_NAME)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), TRACKED_INSERTION_FONT_SIZE_HALF_POINTS)
+    r_pr.extend([fonts, size])
+    t = OxmlElement("w:t")
+    t.text = text
+    run.extend([r_pr, t])
+    ins.append(run)
+    return ins
+
+
+def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]]:
+    """Insert OWNER_PI_ROLE_FIX, tracked, in the empty "Your role:" cell of
+    every grant table role_consistency reports as owner_pi_role_empty; return
+    how many, and the messages of the findings now fixed on every table they
+    report. A table with no "Your role:" row is skipped, and its finding
+    stays a comment. Reads the tables before the review notes add theirs."""
+    if not isinstance(stage4, dict):
+        return 0, set()
+    tables = doc.tables
+    revision_id = _next_revision_id(doc)
+    inserted = 0
+    unfixed: set[str] = set()
+    reported = owner_pi_role_empty_tables(stage4, docx_table_rows(doc))
+    for at, message in reported.items():
+        cell = next((row.cells[1] for row in tables[at].rows
+                     if len(row.cells) > 1 and row.cells[0].text.strip() == YOUR_ROLE_LABEL), None)
+        if cell is None:
+            unfixed.add(message)
+            continue
+        cell.paragraphs[0]._p.append(_tracked_insertion(OWNER_PI_ROLE_FIX, revision_id))
+        revision_id += 1
+        inserted += 1
+    return inserted, set(reported.values()) - unfixed
+
+
 def _add_review_notes(doc: Document, notes: list[Note]) -> None:
     """The review-notes box closing the document: a group per action, with
     its count and instruction, then an item per finding; last, what CViche
@@ -500,11 +578,15 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
 
 
 def write_review_docx(clean_docx: Path, doctor_payload: object,
+                      stage4: object = None,
                       rows: dict[ShapeKey, LintPrecision] | None = None) -> tuple[Path, int] | None:
     """Write the flagged copy of ``clean_docx``; return its path and how many
-    flags (comments and review notes) it carries, which may be none. None
-    when ``doctor_payload`` is not a doctor report or the document is empty.
-    ``rows`` is the precision ledger (`load_gate_ledger` when None)."""
+    flags (comments, review notes and tracked fixes) it carries, which may be
+    none. None when ``doctor_payload`` is not a doctor report or the document
+    is empty. ``stage4`` is the run's stage-4 artifact, which the
+    owner_pi_role_empty fix needs to know the owner; without it that finding
+    is a comment. ``rows`` is the precision ledger (`load_gate_ledger` when
+    None)."""
     if not isinstance(doctor_payload, dict):
         return None
     rows = load_gate_ledger() if rows is None else rows
@@ -516,6 +598,11 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     if not paragraphs:
         return None
     surfaces = (paragraphs, _rows(doc))
+    fixed, fixed_messages = (_suggest_owner_pi_role(doc, stage4)
+                             if any(_OWNER_PI_ROLE_TOKEN in str(f.get("message")) for f in findings)
+                             else (0, set()))
+    # The fix replaces the comment only where it was written on every table.
+    findings = [f for f in findings if f.get("message") not in fixed_messages]
     flags: list[Flag] = []
     notes: list[Note] = []
     per_lint: dict[str, int] = {}
@@ -536,4 +623,4 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
     doc.save(str(out))
-    return out, len(flags) + len(notes)
+    return out, len(flags) + len(notes) + fixed
