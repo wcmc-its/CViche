@@ -110,6 +110,9 @@ def test_load_run_and_prompt_carry_the_doctor_sentences_source_and_date():
                            "2. My work is funded by the Example Foundation.\n"
                            "3. I mentor three trainees."), prompt[-200:]
     assert "written on 2026-10-08" in prompt
+    # #1592: 10 of the audit's 19 YUYVIG false positives judged status by heading or label.
+    assert "end date is before 2026-10-08 is completed, whatever heading" in prompt
+    assert 'marks "present" or "current" is current' in prompt
     assert '"kind": "none" | "grant_status" |' in prompt
     assert len(sca.prompt_template_hash()) == 16
 
