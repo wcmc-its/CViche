@@ -159,6 +159,14 @@ def test_parse_reply_drops_a_leading_think_block_before_fenced_or_bare_json():
         raise AssertionError(f"accepted a think block that does not lead: {text[:30]!r}")
 
 
+def test_parse_reply_takes_the_last_fenced_block_after_prose():
+    """JPNUDX's shape on the #1592 re-measure: reasoning as prose, then the answer."""
+    reply = _reply(OK_ROW, FUNDER_ROW)
+    text = f"Looking at each sentence:\n```notes\nnot json\n```\nSo:\n```json\n{reply}\n```"
+    verdicts = sca.parse_reply(text, 2)
+    assert [(v.index, v.verdict) for v in verdicts] == [(1, "supported"), (2, "unsupported")]
+
+
 def test_parse_reply_refuses_every_reply_that_is_not_one_verdict_per_sentence():
     cases = {
         "not JSON": ("sure, here you go", 1),
@@ -402,6 +410,7 @@ if __name__ == "__main__":
     test_load_run_refuses_a_missing_or_malformed_artifact()
     test_parse_reply_accepts_one_valid_verdict_per_sentence_fenced_or_not()
     test_parse_reply_drops_a_leading_think_block_before_fenced_or_bare_json()
+    test_parse_reply_takes_the_last_fenced_block_after_prose()
     test_parse_reply_refuses_every_reply_that_is_not_one_verdict_per_sentence()
     test_audit_run_labels_only_flagged_sentences_and_carries_no_cv_text()
     test_audit_run_makes_no_call_for_a_summary_the_model_did_not_write()

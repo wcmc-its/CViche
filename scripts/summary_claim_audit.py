@@ -255,11 +255,15 @@ _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 def parse_reply(reply: str, sentence_count: int) -> list[Verdict]:
     """One Verdict per sentence from the model's JSON reply; ReplyError otherwise.
     A leading <think> block is dropped first: 2 of YUYVIG's 37 replies (OKRTPJ,
-    QQGKXR) opened with one before a valid fenced JSON block (#1592)."""
+    QQGKXR) opened with one before a valid fenced JSON block (#1592). A reply
+    that is not one fenced block takes its LAST fenced block: on the re-measure,
+    JPNUDX wrote prose reasoning before a valid fenced answer."""
     text = _LEADING_THINK_RE.sub("", reply, count=1).strip()
     fenced = _FENCED_JSON_RE.fullmatch(text)
+    blocks = [] if fenced else _FENCED_JSON_RE.findall(text)
+    body = fenced.group(1) if fenced else (blocks[-1] if blocks else text)
     try:
-        data = json.loads(fenced.group(1) if fenced else text)
+        data = json.loads(body)
     except ValueError as e:
         raise ReplyError(f"not JSON: {e}") from e
     items = data.get("sentences") if isinstance(data, dict) else None
