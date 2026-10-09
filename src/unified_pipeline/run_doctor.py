@@ -1360,6 +1360,14 @@ def _uid_owns(name: str, uid: str) -> bool:
     return bool(rest) and not rest[0].isalnum()
 
 
+def artifact_layout(root: Path, uid: str) -> dict[str, Path]:
+    """Where the pipeline writes each artifact the doctor reads, under
+    ``root``: a caller assembling a run from its stored files (the corrected
+    copy's re-run, #1654) writes them here, and `_find_artifact` finds them."""
+    return {key: Path(root) / spec.stage_dir / f"{uid}{spec.suffix}"
+            for key, spec in _ARTIFACTS.items()}
+
+
 def _find_artifact(root: Path, uid: str, key: str) -> Path | None:
     spec = _ARTIFACTS[key]
     directory = root / spec.stage_dir
@@ -1641,6 +1649,17 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("deleted_blocks", "stage_1a", "stage_3b")),
     LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
 )
+
+#: The views read from the stage-6 docx.
+_DOCX_VIEWS = frozenset(view for view, label in _VIEW_LABELS.items() if label == "stage_6_docx")
+#: Lints that read no stage-6 docx, by any input: the registry rows with no
+#: docx view, and two of the hand-dispatched gates (no_output reads the docx's
+#: path). A reviewer's corrected copy cannot change what they find, so its
+#: doctor re-run (#1654) compares them with nothing: a difference there is the
+#: re-run's inputs (no prompt logs, no PDF-converted source), not the review.
+DOCUMENT_INDEPENDENT_LINTS = frozenset(
+    {spec.lint_id for spec in LINT_REGISTRY if not _DOCX_VIEWS & {*spec.inputs, *spec.optional}}
+    | {"owner_contact_missing", "pipeline_errors_present"})
 
 
 def _build_metrics(views: dict) -> dict:

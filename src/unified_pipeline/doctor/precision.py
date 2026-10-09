@@ -33,9 +33,15 @@ run page's Fix list and the quality score's precision weights (#1595).
 A missing or unreadable file is logged and yields an empty ledger: the doctor
 still runs, and every lint reads as unmeasured.
 
+Comment-fate verdicts (#1654) can be folded into the rows by
+`fold_review_verdicts`, at a stated weighting; the gate does not do so.
+
 Imports: the standard library only. Imported by `run_doctor`, by the review
 copy (`web_interface/backend/app/services/review_comments.py`, for
-`shown_in_place` and `load_gate_ledger`), by the run page's Fix list
+`shown_in_place`, `load_gate_ledger` and `finding_shape`), by
+`doctor/comment_fate.py` and the backend's review_loop_service (the verdict
+names, `finding_shape`), by `web_interface/backend/scripts/review_labels.py`
+(`fold_review_verdicts`), by the run page's Fix list
 (`web_interface/backend/app/services/run_quality_report.py`, for the same
 gate and `finding_precision`), by `quality_score` (for `finding_precision`
 and `load_gate_ledger`), by `scripts/doctor_vs_autopsy.py` (for `stage6_shape`)
@@ -262,6 +268,44 @@ def fold_held_out(rows: dict[ShapeKey, LintPrecision],
     return combined
 
 
+#: Comment-fate verdicts (#1654, `doctor/comment_fate.py`): what a reviewer
+#: did at a review-copy comment, read from their corrected copy.
+REVIEW_FIXED = "fixed"
+REVIEW_NOT_A_PROBLEM = "not_a_problem"
+REVIEW_UNKNOWN = "unknown"
+REVIEW_VERDICTS = (REVIEW_FIXED, REVIEW_NOT_A_PROBLEM, REVIEW_UNKNOWN)
+#: The measurement id a row carries once review verdicts are folded into it.
+REVIEW_MEASUREMENT = "REVIEW"
+
+
+def fold_review_verdicts(rows: dict[ShapeKey, LintPrecision],
+                         counts: dict[ShapeKey, dict[str, int]]) -> dict[ShapeKey, LintPrecision]:
+    """``rows`` with comment-fate verdict counts added, per (lint, shape).
+
+    The weighting: one verdict counts as one hand-checked verdict. `fixed`
+    (the reviewer changed the text the comment was on) is a true positive;
+    `not_a_problem` (the comment dismissed, the text untouched) is a false
+    positive; `unknown` is not judged and adds nothing. A key with no ledger
+    row becomes one, measured on its verdicts alone.
+
+    Off for the gate: `load_gate_ledger` does not call this, so the review
+    copy, the Fix list and the quality score read hand-checked verdicts only.
+    Nothing reads these counts until a hand-checked sample of comment-fate
+    verdicts has measured them (#1654).
+    """
+    combined = dict(rows)
+    for key, verdicts in counts.items():
+        tp = verdicts.get(REVIEW_FIXED, 0)
+        judged = tp + verdicts.get(REVIEW_NOT_A_PROBLEM, 0)
+        if not judged:
+            continue
+        base = combined.get(key) or LintPrecision(key[0], 0, 0, "", key[1])
+        measured = ",".join(m for m in (base.measured, REVIEW_MEASUREMENT) if m)
+        combined[key] = LintPrecision(key[0], base.true_positives + tp, base.judged + judged,
+                                      measured, key[1])
+    return combined
+
+
 def _pooled(rows: dict[ShapeKey, LintPrecision]) -> dict[str, LintPrecision]:
     """Each lint's rows summed into one entry, its measurement ids joined in row order."""
     pooled: dict[str, tuple[int, int, list[str]]] = {}
@@ -347,6 +391,17 @@ def finding_precision(lint: str, message: str,
     named = next((row for (_, shape), row in own.items()
                   if shape and re.search(rf"(?<!\w){re.escape(shape)}(?!\w)", message)), None)
     return named or own.get((lint, None)) or _pooled(own).get(lint)
+
+
+def finding_shape(lint: str, message: str,
+                  rows: dict[ShapeKey, LintPrecision] | None = None) -> str | None:
+    """The message shape a finding is judged by: a `stage6_render_warnings`
+    message's `_STAGE6_SHAPES` name, else the shape of the ledger row
+    `finding_precision` reads for it (None for a lint's own or pooled row)."""
+    if lint == STAGE6_LINT:
+        return stage6_shape(message)
+    row = finding_precision(lint, message, rows)
+    return row.shape if row else None
 
 
 def shown_in_place(lint: str, message: str,

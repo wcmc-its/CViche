@@ -195,6 +195,50 @@ def test_tracked_move_reads_moveto_and_drops_movefrom():
     assert _kinds(_diff(_delivered(), corrected)) == [dd.CHANGE_MOVED]
 
 
+def test_block_counterparts_follow_each_block_to_what_it_became():
+    """Blocks: RESEARCH 0, the grant table 1, BIBLIOGRAPHY 2, A 3, B 4, C 5."""
+    delivered = dd.read_blocks(_delivered())
+    edited = _clone(_delivered())
+    _paragraph(edited, CITE_C[:20]).text = CITE_C.replace("2016", "2015")
+    assert dd.block_counterparts(delivered, dd.read_blocks(edited)) == [0, 1, 2, 3, 4, 5]
+
+    deleted = _clone(_delivered())
+    para = _paragraph(deleted, CITE_B[:20])
+    para._p.getparent().remove(para._p)
+    assert dd.block_counterparts(delivered, dd.read_blocks(deleted)) == [0, 1, 2, 3, None, 4]
+
+    moved = _clone(_delivered())
+    para = _paragraph(moved, CITE_B[:20])
+    para._p.getparent().remove(para._p)
+    _paragraph(moved, "RESEARCH")._p.addnext(para._p)
+    assert dd.block_counterparts(delivered, dd.read_blocks(moved))[4] is None
+
+
+def test_a_stored_report_reads_back_as_the_diff_it_was_written_from(tmp_path):
+    corrected = _clone(_delivered())
+    _paragraph(corrected, CITE_C[:20]).text = LOST
+    _paragraph(corrected, CITE_B[:20]).text = CITE_B.replace("2021", "2022")
+    _ins_run(_paragraph(corrected, CITE_A[:20]), " Erratum.")  # a pending revision, read back too
+    _delivered().save(tmp_path / "d.docx")
+    corrected.save(tmp_path / "c.docx")
+    diff = dd.diff_docx(tmp_path / "d.docx", tmp_path / "c.docx")
+    stored = json.loads(json.dumps(dd.to_report(UID, diff)))
+    assert dd.from_report(stored) == diff
+    assert dd.to_label(UID, dd.from_report(stored)) == dd.to_label(UID, diff)
+
+
+def test_a_labels_doctor_review_loads_in_the_autopsy_label_store(tmp_path):
+    corrected = _clone(_delivered())
+    _paragraph(corrected, CITE_C[:20]).text = CITE_C.replace("2016", "2015")
+    review = [{"lint": "implausible_year", "shape": None, "severity": "WARN", "verdict": "TP",
+               "element_idx_start": 12}]
+    label = dd.to_label(UID, dd.DocxDiff(changes=_diff(_delivered(), corrected)), review)
+    (tmp_path / f"{UID}.json").write_text(json.dumps(label), encoding="utf-8")
+    store = _load_script("doctor_vs_autopsy").load_labels(tmp_path)
+    assert [(r.uid, r.key, r.verdict) for r in store.reviews] == [(UID, "implausible_year", "TP")]
+    assert dd.to_label(UID, dd.DocxDiff())["doctor_review"] == []
+
+
 def test_removing_the_cviche_box_is_not_a_correction():
     assert _diff(_delivered(with_box=True), _delivered()) == []
 

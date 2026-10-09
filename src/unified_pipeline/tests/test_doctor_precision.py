@@ -16,9 +16,12 @@ from unified_pipeline.doctor.precision import (  # noqa: E402
     STAGE6_LINT,
     STAGE6_MESSAGE_PREFIX,
     STAGE6_OTHER_SHAPE,
+    REVIEW_MEASUREMENT,
     LintPrecision,
     finding_precision,
+    finding_shape,
     fold_held_out,
+    fold_review_verdicts,
     load_gate_ledger,
     load_ledger,
     load_shape_ledger,
@@ -404,3 +407,37 @@ def test_the_committed_held_out_table_folds_as_the_owner_decided():
     assert not shown_in_place("enrichment_failures", "1 failed", in_sample)
     assert gate[("source_line_coverage", None)] == in_sample[("source_line_coverage", None)]
     assert {lint for lint, _shape in HELD_OUT_CHANGED} <= set(KNOWN_LINTS)
+
+
+def test_a_findings_shape_is_its_stage6_shape_or_the_row_its_message_names():
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    refused = STAGE6_MESSAGE_PREFIX + "hierarchy-mismatch reroute K1->S8 refused fields do not fit"
+    assert finding_shape(STAGE6_LINT, refused, rows) == "reroute_refused"
+    assert finding_shape(STAGE6_LINT, STAGE6_MESSAGE_PREFIX + "an unknown check", rows) == STAGE6_OTHER_SHAPE
+    assert finding_shape("role_consistency", "entry 8: ... (owner_pi_role_empty, #1403)",
+                         rows) == "owner_pi_role_empty"
+    assert finding_shape("low_lint", "x", rows) is None
+    assert finding_shape("absent_lint", "x", rows) is None
+
+
+def test_review_verdicts_fold_one_for_one_and_unknown_is_not_judged():
+    """The stated weighting, on the synthetic ledger: low_lint 2 / 5 (40%)
+    with 3 fixed, 1 not a problem and 4 unknown is 5 / 9 (56%), over the bar
+    the gate would hold it under; a key with no row is its verdicts alone."""
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    counts = {("low_lint", None): {"fixed": 3, "not_a_problem": 1, "unknown": 4},
+              ("new_lint", "shape_n"): {"not_a_problem": 2},
+              ("half_lint", None): {"unknown": 5}}
+    folded = fold_review_verdicts(rows, counts)
+    assert folded[("low_lint", None)] == LintPrecision("low_lint", 5, 9, f"M1,{REVIEW_MEASUREMENT}")
+    assert folded[("new_lint", "shape_n")] == LintPrecision("new_lint", 0, 2, REVIEW_MEASUREMENT, "shape_n")
+    assert folded[("half_lint", None)] == rows[("half_lint", None)]  # unknown judges nothing
+    assert not shown_in_place("low_lint", "x", rows)
+    assert shown_in_place("low_lint", "x", folded)
+
+
+def test_the_gate_does_not_read_review_verdicts(tmp_path):
+    """The switch is off: the gate's ledger is the hand-checked rows only."""
+    path = tmp_path / "PRECISION.md"
+    path.write_text(_SHAPE_LEDGER, encoding="utf-8")
+    assert all(REVIEW_MEASUREMENT not in row.measured for row in load_gate_ledger(path).values())

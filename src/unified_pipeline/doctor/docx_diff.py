@@ -199,11 +199,18 @@ def read_blocks(doc: DocumentType) -> list[Block]:
     each tagged with the section heading above it. CViche's own note boxes
     are skipped: the submitter is told to delete them, so removing one is not
     a correction."""
+    return [block for block, _element in read_block_elements(doc)]
+
+
+def read_block_elements(doc: DocumentType) -> list[tuple[Block, BaseOxmlElement]]:
+    """`read_blocks`, each block with the body element (w:p or w:tbl) it was
+    read from, for a caller that locates something inside a block
+    (doctor/comment_fate.py: the comments anchored in it)."""
     from docx.table import Table
 
     from unified_pipeline.stage6.formatting import is_cviche_box
 
-    blocks: list[Block] = []
+    blocks: list[tuple[Block, BaseOxmlElement]] = []
     section: str | None = None
     for child in doc.element.body.iterchildren():
         if child.tag == _W_P:
@@ -216,7 +223,7 @@ def read_blocks(doc: DocumentType) -> list[Block]:
         else:
             continue
         if text:
-            blocks.append(Block(kind, text, section))
+            blocks.append((Block(kind, text, section), child))
     return blocks
 
 
@@ -325,6 +332,25 @@ def _align(before: list[Block], after: list[Block]) -> _Pools:
     return pools
 
 
+def block_counterparts(before: list[Block], after: list[Block]) -> list[int | None]:
+    """For each `before` block, the `after` block it became: itself where the
+    two files line up, the block it was edited into (`_pair_replaced`'s
+    pairing) inside a replaced run, and None where it was deleted or moved
+    away. The same alignment `diff_blocks` types changes by."""
+    out: list[int | None] = [None] * len(before)
+    matcher = difflib.SequenceMatcher(None, [b.text for b in before],
+                                      [b.text for b in after], autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            out[i1:i2] = range(j1, j2)
+        elif tag == "replace":
+            pools = _Pools()
+            _pair_replaced(before, after, range(i1, i2), range(j1, j2), pools)
+            for i, j in pools.edited:
+                out[i] = j
+    return out
+
+
 def _match_moves(before: list[Block], after: list[Block], pools: _Pools) -> list[tuple[int, int]]:
     """Pair each deleted block with the most similar added block at
     `MOVE_MIN_RATIO` or above; both leave their pools as one move."""
@@ -403,15 +429,28 @@ def to_report(uid: str, diff: DocxDiff) -> dict:
             "by_type": by_type, "changes": [asdict(c) for c in diff.changes]}
 
 
-def to_label(uid: str, diff: DocxDiff) -> dict:
+def from_report(report: Mapping) -> DocxDiff:
+    """The diff `to_report` stored, read back (#1654: the label store is fed
+    from stored reports, so the corrected copy is not re-read)."""
+    return DocxDiff(changes=[DocxChange(**change) for change in report["changes"]],
+                    delivered_blocks=report["delivered_blocks"],
+                    corrected_blocks=report["corrected_blocks"],
+                    delivered_revisions=Revisions(**report["delivered_revisions"]),
+                    corrected_revisions=Revisions(**report["corrected_revisions"]))
+
+
+def to_label(uid: str, diff: DocxDiff, doctor_review: list[dict] | None = None) -> dict:
     """The run's `<uid>.json` label in doctor_vs_autopsy.py's schema: one
     finding per change, carrying only its uid-scoped id, the change type (as
     `class` and its `REVIEW_SEVERITY`) and the entry index. No section, no
-    positions, no text (#1587's PII rule for the label store)."""
+    positions, no text (#1587's PII rule for the label store).
+    ``doctor_review`` is the run's verdicts on doctor findings, in the
+    schema's `doctor_review` shape (doctor/comment_fate.py `doctor_review`)."""
     findings = [{"id": f"{uid}-R{n:02d}", "class": f"{REVIEW_CLASS_PREFIX}{c.change_type}",
                  # batch_class too: doctor_vs_autopsy.py groups recall by it, never by class
                  "class_ref": None, "batch_class": c.change_type, "stage": None,
                  "severity": REVIEW_SEVERITY[c.change_type],
                  "element_idx_start": c.element_idx, "records": None, "doctor_caught": None}
                 for n, c in enumerate(diff.changes, start=1)]
-    return {"uid": uid, "batch": REVIEW_LABEL_BATCH, "findings": findings, "doctor_review": []}
+    return {"uid": uid, "batch": REVIEW_LABEL_BATCH, "findings": findings,
+            "doctor_review": list(doctor_review or [])}

@@ -1318,6 +1318,8 @@ class ServiceSection:
 
         _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
+        # Q4D is excluded from #1205 sub-points; a rerouted Q2 row here is too.
+        self._subpoint_excluded_tables.append(table._element)
 
         sorted_entries = sort_entries_reverse_chronological(filtered_entries)
 
