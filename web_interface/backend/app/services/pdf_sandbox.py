@@ -55,9 +55,11 @@ runs up to CVICHE_MAX_CONCURRENT_RUNS=3 runs. Measured in python:3.14-slim
   a quarter of the pod, leaving 1.5 GiB for the parent and its 3 runs.
   Unslotted, 6 concurrent bombs in a 2 GiB container OOM-killed children,
   and with a 700 MiB parent, 3 concurrent killed the parent.
-- PDF_TEXT_TIMEOUT_SECONDS = 30: the upload check is on the request path
-  (and /estimate runs it as soon as a file is picked); the 142-page CV
-  extracts in 4 s.
+- PDF_TEXT_TIMEOUT_SECONDS = 120: the upload check is on the request path
+  (and /estimate runs it as soon as a file is picked). The 142-page CV
+  extracts in 4 s on a laptop, but on a cviche-dev pod a 72-page CV that
+  reads in 7.5 s locally passed 30 s on an idle node (#1650), so this
+  matches the convert limit. The ALB idle timeout is 500 s.
 - PDF_CONVERT_TIMEOUT_SECONDS = 120: conversion runs once per run, off the
   request path; the 142-page CV converts in 5 s.
 - PDF_CONVERT_SLOT_WAIT_SECONDS = 120: no job holds a slot longer than
@@ -82,7 +84,7 @@ logger = logging.getLogger(__name__)
 
 PDF_CHILD_ADDRESS_SPACE_BYTES = 256 * 1024 * 1024
 PDF_CHILD_SLOTS = 2
-PDF_TEXT_TIMEOUT_SECONDS = 30
+PDF_TEXT_TIMEOUT_SECONDS = 120
 PDF_CONVERT_TIMEOUT_SECONDS = 120
 PDF_CONVERT_SLOT_WAIT_SECONDS = 120
 PDF_MAX_PAGES = 300
@@ -110,6 +112,10 @@ PDF_TIMEOUT_RUN_MESSAGE = (
     "Converting this PDF took too long and was stopped. This is often "
     'temporary, so please try "Restart with file" in a few minutes; if it '
     "happens again, upload the CV as a .docx."
+)
+PDF_TIMEOUT_UPLOAD_MESSAGE = (
+    "Reading this PDF took too long. This is often temporary, so please try "
+    "again in a few minutes; if it happens again, upload the CV as a .docx."
 )
 PDF_BUSY_RUN_MESSAGE = (
     "The server was too busy processing other PDFs to start this run. "

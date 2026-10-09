@@ -749,6 +749,27 @@ class TestUploadValidation:
         ("/api/upload", {"submission_type": "own_cv"}),
         ("/api/estimate", None),
     ])
+    def test_pdf_over_the_time_limit_says_so(self, client, db, seed_simple_mode, tmp_path,
+                                             cv_pdf, monkeypatch, endpoint, data):
+        """#1650: a text-check timeout is a 400 saying the read took too
+        long -- not that the file is too large or complex."""
+        from app.models import Run
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+        monkeypatch.setattr(pdf_sandbox, "PDF_TEXT_TIMEOUT_SECONDS", 0.01)
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                endpoint, files={"file": ("my_cv.pdf", cv_pdf(), "application/pdf")}, data=data,
+            )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["message"] == pdf_sandbox.PDF_TIMEOUT_UPLOAD_MESSAGE
+        assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
     def test_pdf_with_every_sandbox_slot_busy_gets_503(self, client, db, seed_simple_mode, tmp_path,
                                                       cv_pdf, monkeypatch, endpoint, data):
         """#806 review B1: with both PDF child slots held, a third PDF
