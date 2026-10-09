@@ -213,9 +213,9 @@ def header_footer_contact_entry(document_uid: str, docx_path: str | None) -> dic
     address, phone, fax and email. The main body walk never opens a header
     part, and the #456 side channel used it for the name alone, so the
     contact block never reached a field or the Personal Data table. Built as
-    an entry rather than injected into the stage-1 element stream: see
-    `extract_owner_side_channel` for why that would desync stage 2's
-    `para_idx` fallback. As an A entry it takes the same path as a body
+    an entry rather than injected into the stage-1 element stream: a header
+    paragraph is not a body paragraph, so it has no `para_idx` to carry and
+    no place in the body order. As an A entry it takes the same path as a body
     contact block -- stage 4 extraction, then stage 6's PII pass and routing,
     which withholds a home address or phone exactly as for body contact.
 
@@ -291,8 +291,9 @@ def extract_cv_owner_name(
         docx_path: Optional path to the source .docx. When the body-derived
             tier below finds no name at all (`last_name` AND `full_name` both
             empty) and this resolves to a real file, a #456 side-channel tier
-            runs the same prompt over any sdt/header/footer text the main
-            body walk never sees -- before falling back to
+            runs the same prompt over the document's content-control,
+            header and footer text, outside the body tier's window -- before
+            falling back to
             `fallback_from_uid`. None (the default) reproduces pre-#456
             behavior exactly; every existing caller that does not pass it
             is unaffected.

@@ -70,6 +70,23 @@ def test_capture_takes_each_block_up_to_the_next_heading(tmp_path):
     assert blocks["G"] == []
 
 
+def test_capture_reads_a_block_inside_a_body_content_control(tmp_path):
+    """#1656: the source is read as stage 1 reads it, so the E block's lines
+    inside a body-level content control (`w:sdt`) are captured in place."""
+    path = _source(tmp_path, {"EMPLOYMENT STATUS": ["Full-time salaried by Weill Cornell"]})
+    doc = Document(path)
+    employer = doc.add_paragraph("Name of Current Employer(s): Example Medical Center")._p
+    heading = next(p for p in doc.paragraphs if p.text == "EMPLOYMENT STATUS")._p
+    control = parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent/></w:sdt>')
+    control[0].append(employer)
+    heading.addnext(control)
+    doc.save(path)
+
+    blocks = sb.capture_source_blocks(path, _passthrough_letter)
+    assert [sb.element_text(e) for e in blocks["E"]] == [
+        "Name of Current Employer(s): Example Medical Center", "Full-time salaried by Weill Cornell"]
+
+
 def test_capture_skips_a_non_wcm_source_and_a_runaway_block(tmp_path):
     assert sb.capture_source_blocks(_source(tmp_path, {}, headings=["EDUCATION", "EMPLOYMENT STATUS"]),
                                     _passthrough_letter) == {}

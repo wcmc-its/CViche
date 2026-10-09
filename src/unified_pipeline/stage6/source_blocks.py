@@ -25,11 +25,11 @@ import re
 from collections.abc import Callable, Iterable
 from copy import deepcopy
 
-from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Pt
 from lxml.etree import _Element
 
+from ..core.docx_structure_extractor import open_source_docx
 from ..core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
@@ -222,7 +222,9 @@ def capture_source_blocks(path: str, letter_of: LetterOf) -> dict[str, list[_Ele
     {} when the source is not WCM-format. A block longer than
     MAX_BLOCK_ELEMENTS is left out (see its comment). Filled-or-not is the
     caller's call: it needs the template's own lines for that."""
-    heading_texts, blocks = section_blocks(Document(path).element.body, letter_of)
+    # Opened as stage 1 opened it: a block inside a body content control is
+    # read like any other (#1656).
+    heading_texts, blocks = section_blocks(open_source_docx(path).element.body, letter_of)
     if not is_wcm_format(heading_texts):
         return {}
     captured = {}

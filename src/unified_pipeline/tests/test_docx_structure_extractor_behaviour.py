@@ -11,8 +11,9 @@ extract_table_metadata (gridSpan/merged-cell repeat behaviour), get_table_first_
 looks_like_section_header (confidence tiers), flatten_table_to_text (skip_first_row),
 extract_unified_elements (document-order interleaving, unified_idx contiguity,
 table_header/table_content/table element types), extract_docx_structure
-(top-level shape), normalize_style_name, and create_simplified_layout_json
-(skip_empty on/off).
+(top-level shape), normalize_style_name, create_simplified_layout_json
+(skip_empty on/off), and the body-level content-control unwrap both read
+through (`unwrap_body_content_controls` / `open_source_docx`, #1656).
 
 Pure python-docx, no network: this module never calls an LLM, so there is
 nothing to stub. All fixture .docx files are built in memory with
@@ -60,8 +61,10 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     get_table_first_cell_text,
     looks_like_section_header,
     normalize_style_name,
+    open_source_docx,
     score_section_header,
     split_merged_cells_in_row,
+    unwrap_body_content_controls,
 )
 
 # --------------------------------------------------------------------------
@@ -2563,3 +2566,139 @@ def test_multi_column_doubly_nested_table_text_reaches_cell_data(tmp_path):
     doc.save(str(path))
     data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
     assert data[0][0]["text"] == "Host text\nMiddle line\nDeepest line"
+
+
+# --------------------------------------------------------------------------
+# body-level content controls (#1656)
+# --------------------------------------------------------------------------
+
+#: The 29 records the synthetic content control holds under its heading.
+CONTROL_RECORDS = [f"Doe J, Roe K. Synthetic study {i} of example outcomes. J Example. 2001;{i}:1-9."
+                   for i in range(1, 30)]
+NESTED_RECORDS = ["Nested record one, Example Society, 2003", "Nested record two, Example Society, 2004"]
+CONTROL_TABLE = [["2010", "Example Award for synthetic research"],
+                 ["2012", "Example Prize for synthetic teaching"]]
+#: The body paragraphs of `_content_control_cv`, in document order.
+CONTROL_CV_PARAGRAPHS = ["CURRICULUM VITAE", "APPOINTMENTS", "Assistant Professor, Example University, 2001-2005",
+                         "PUBLICATIONS", *CONTROL_RECORDS, *NESTED_RECORDS,
+                         "PATENTS", "Example patent for a synthetic device, 2015"]
+
+
+def _w_p(text: str, bold: bool = False) -> str:
+    rpr = "<w:rPr><w:b/></w:rPr>" if bold else ""
+    return f'<w:p><w:r>{rpr}<w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
+
+
+def _w_tbl(rows: list[list[str]]) -> str:
+    grid = "".join('<w:gridCol w:w="3000"/>' for _ in rows[0])
+    trs = "".join("<w:tr>" + "".join(f"<w:tc>{_w_p(c)}</w:tc>" for c in row) + "</w:tr>" for row in rows)
+    return f"<w:tbl><w:tblPr/><w:tblGrid>{grid}</w:tblGrid>{trs}</w:tbl>"
+
+
+def _w_sdt(inner_xml: str, declare_ns: bool = False) -> str:
+    ns = f" {nsdecls('w')}" if declare_ns else ""
+    return f"<w:sdt{ns}><w:sdtPr/><w:sdtContent>{inner_xml}</w:sdtContent></w:sdt>"
+
+
+def _content_control_cv(tmp_path: Path) -> str:
+    """A CV whose PUBLICATIONS heading and 29 records sit in one 30-paragraph
+    body content control, which also holds a nested control and a table."""
+    inner = (_w_p("PUBLICATIONS", bold=True) + "".join(_w_p(r) for r in CONTROL_RECORDS)
+             + _w_sdt("".join(_w_p(r) for r in NESTED_RECORDS)) + _w_tbl(CONTROL_TABLE))
+    doc = Document()
+    for text in CONTROL_CV_PARAGRAPHS[:3]:
+        doc.add_paragraph(text)
+    patents = doc.add_paragraph("PATENTS")
+    doc.add_paragraph(CONTROL_CV_PARAGRAPHS[-1])
+    patents._p.addprevious(parse_xml(_w_sdt(inner, declare_ns=True)))
+    path = tmp_path / "content_control_cv.docx"
+    doc.save(str(path))
+    return str(path)
+
+
+def test_body_content_control_reaches_the_element_stream_in_document_order(tmp_path):
+    els = extract_unified_elements(_content_control_cv(tmp_path))["elements"]
+
+    paragraphs = [e["text"] for e in els if e["type"] == "paragraph"]
+    assert paragraphs == CONTROL_CV_PARAGRAPHS
+    table = next(e for e in els if e.get("table_index") is not None)
+    assert [[c["text"] for c in row] for row in table["data"]] == CONTROL_TABLE
+    # The table sits where the control put it: after the nested records,
+    # before PATENTS.
+    assert els.index(table) == CONTROL_CV_PARAGRAPHS.index("PATENTS")
+    assert [e["unified_idx"] for e in els] == list(range(len(els)))
+
+
+def test_para_idx_and_table_index_name_the_paragraphs_and_tables_every_reader_opens(tmp_path):
+    """Stage 2's fallback (`doc.paragraphs[i]`) and stage 6's teaching levels
+    (`doc.tables[table_index]`) index `open_source_docx`'s document: one
+    paragraph order, the extractor's."""
+    path = _content_control_cv(tmp_path)
+    els = extract_unified_elements(path)["elements"]
+    doc = open_source_docx(path)
+
+    assert [p.text for p in doc.paragraphs] == CONTROL_CV_PARAGRAPHS
+    para_els = [e for e in els if e.get("para_idx") is not None]
+    assert [doc.paragraphs[e["para_idx"]].text for e in para_els] == [e["text"] for e in para_els]
+    table = next(e for e in els if e.get("table_index") is not None)
+    assert doc.tables[table["table_index"]].cell(0, 1).text == CONTROL_TABLE[0][1]
+
+    structure = extract_docx_structure(path)["elements"]
+    assert [e["text"] for e in structure if e["type"] == "paragraph"] == CONTROL_CV_PARAGRAPHS
+    assert [e["idx"] for e in structure if e["type"] == "paragraph"] == list(range(len(CONTROL_CV_PARAGRAPHS)))
+
+
+def test_unwrap_reports_the_body_positions_each_outermost_control_now_holds(tmp_path):
+    doc = Document(_content_control_cv(tmp_path))
+    spans = unwrap_body_content_controls(doc)
+    held = 1 + len(CONTROL_RECORDS) + len(NESTED_RECORDS) + 1   # heading, records, nested, table
+    assert spans == [range(3, 3 + held)]
+    assert not doc.element.body.findall(f".//{qn('w:sdt')}")
+    assert unwrap_body_content_controls(doc) == []
+
+
+def test_unwrap_leaves_a_document_without_body_content_controls_byte_identical():
+    doc = Document()
+    doc.add_paragraph("A plain paragraph")
+    doc.add_table(rows=1, cols=2).cell(0, 0).text = "cell"
+    before = doc.element.body.xml
+    assert unwrap_body_content_controls(doc) == []
+    assert doc.element.body.xml == before
+
+
+def test_a_run_level_or_cell_level_content_control_is_left_where_it_is():
+    """Only body-level controls are unwrapped: a run-level one is read by
+    `get_paragraph_text` already, and one inside a table cell is left to
+    python-docx's cell walk (#1668)."""
+    doc = Document()
+    para = doc.add_paragraph("Name: ")
+    para._p.append(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent><w:r><w:t>Example Person</w:t></w:r>'
+                             '</w:sdtContent></w:sdt>'))
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    cell._tc.append(parse_xml(_w_sdt(_w_p("In a cell"), declare_ns=True)))
+    before = doc.element.body.xml
+    assert unwrap_body_content_controls(doc) == []
+    assert doc.element.body.xml == before
+    assert get_paragraph_text(doc.paragraphs[0]) == "Name: Example Person"
+
+
+def test_an_empty_body_content_control_is_dropped_and_holds_no_span():
+    doc = Document()
+    after = doc.add_paragraph("After")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtPr/></w:sdt>'))
+    after._p.addprevious(parse_xml(_w_sdt("", declare_ns=True)))
+    assert unwrap_body_content_controls(doc) == []
+    assert [p.text for p in doc.paragraphs] == ["After"]
+    assert not doc.element.body.findall(qn("w:sdt"))
+
+
+def test_two_body_content_controls_each_report_their_own_span():
+    doc = Document()
+    doc.add_paragraph("Top")
+    middle = doc.add_paragraph("Middle")
+    end = doc.add_paragraph("End")
+    middle._p.addprevious(parse_xml(_w_sdt(_w_p("First A") + _w_p("First B"), declare_ns=True)))
+    end._p.addprevious(parse_xml(_w_sdt(_w_p("Second A"), declare_ns=True)))
+    spans = unwrap_body_content_controls(doc)
+    assert [p.text for p in doc.paragraphs] == ["Top", "First A", "First B", "Middle", "Second A", "End"]
+    assert spans == [range(1, 3), range(4, 5)]

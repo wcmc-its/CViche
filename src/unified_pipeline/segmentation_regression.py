@@ -252,6 +252,13 @@ def _has_compact_window(need: Counter[str], entry_tokens: list[str], max_span: i
 #: leaves it to the document-wide coverage figure.
 BODY_BLOCK = -1
 
+#: The block id of the paragraphs of the first body-level content control
+#: (`w:sdt`); the next control's is one lower, and so on (#1656). Tables count
+#: up from 0, so a control's id never collides with a table's or BODY_BLOCK.
+#: A control is a container like a table: one lost whole is not a rounding
+#: error against the rest of the document (RSFOYB lost 889 of 950).
+FIRST_CONTENT_CONTROL_BLOCK = -2
+
 
 def iter_source_lines(docx_path: str) -> list[str]:
     """Every text line of the source document, INCLUDING paragraphs inside
@@ -266,11 +273,18 @@ def iter_source_block_lines(docx_path: str) -> list[tuple[int, str]]:
     the table it sits in: a per-table id numbered in walk order (a nested
     table gets its own), or BODY_BLOCK. The block view (#815) scopes coverage
     to one table, so a small table lost whole is not a rounding error against
-    the rest of the document."""
+    the rest of the document. A body paragraph inside a body-level content
+    control is read too, with that control's id (FIRST_CONTENT_CONTROL_BLOCK,
+    #1656): the document is unwrapped the way stage 1 unwraps it."""
     from docx import Document  # local import: harness is optional tooling
+    from docx.oxml.text.paragraph import CT_P
     from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
-    from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
+    from unified_pipeline.core.docx_structure_extractor import (
+        get_paragraph_text,
+        unwrap_body_content_controls,
+    )
 
     lines: list[tuple[int, str]] = []
     table_ids = itertools.count()
@@ -302,10 +316,18 @@ def iter_source_block_lines(docx_path: str) -> list[tuple[int, str]]:
             walk_table(tbl)
 
     doc = Document(docx_path)
-    for para in doc.paragraphs:
-        text = get_paragraph_text(para, tab_char='\t')
+    control_block_at = {
+        position: FIRST_CONTENT_CONTROL_BLOCK - ordinal
+        for ordinal, span in enumerate(unwrap_body_content_controls(doc))
+        for position in span
+    }
+    # Body paragraphs in `doc.paragraphs` order, with their body position.
+    for position, element in enumerate(doc.element.body.iterchildren()):
+        if not isinstance(element, CT_P):
+            continue
+        text = get_paragraph_text(Paragraph(element, doc), tab_char='\t')
         if text.strip():
-            lines.append((BODY_BLOCK, text))
+            lines.append((control_block_at.get(position, BODY_BLOCK), text))
     for tbl in doc.tables:
         walk_table(tbl)
     return lines
@@ -505,11 +527,24 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     }
 
 
+#: What a lost block is: a source table (#815) or a body-level content
+#: control (#1656).
+BlockKind = Literal["table", "content_control"]
+
+
 class LostBlock(TypedDict):
-    """One source table that stage 2 mostly lost (#815)."""
+    """One source table, or body-level content control, that stage 2 mostly
+    lost (#815, #1656)."""
     block: int
+    kind: BlockKind
     substantive_lines: int
     lost_lines: list[str]
+
+
+def block_kind(block: int) -> BlockKind:
+    """The kind of container a non-body block id from
+    `iter_source_block_lines` names."""
+    return "content_control" if block <= FIRST_CONTENT_CONTROL_BLOCK else "table"
 
 
 # A table is a lost block when it holds at least this many substantive lines
@@ -519,11 +554,13 @@ LOST_BLOCK_MIN_LOST_SHARE = 0.5
 
 
 def find_lost_blocks(block_lines: list[tuple[int, str]], stage2: Stage2) -> list[LostBlock]:
-    """Pure: the source tables whose own coverage is low, whatever the rest
-    of the document scores. web207 lost its whole personal-data table (name,
-    address, phone) at 99.1% document coverage: five rows against 840
-    entries never moves the percentage (#815). Body paragraphs (BODY_BLOCK)
-    are left to the document-wide figure."""
+    """Pure: the source tables, and body-level content controls, whose own
+    coverage is low, whatever the rest of the document scores. web207 lost
+    its whole personal-data table (name, address, phone) at 99.1% document
+    coverage: five rows against 840 entries never moves the percentage
+    (#815). A content control is the same kind of container: stage 1 used to
+    skip one whole (#1656). Body paragraphs (BODY_BLOCK) are left to the
+    document-wide figure."""
     by_block: dict[int, list[str]] = {}
     for block, line in block_lines:
         if block != BODY_BLOCK:
@@ -536,8 +573,8 @@ def find_lost_blocks(block_lines: list[tuple[int, str]], stage2: Stage2) -> list
             continue
         lost = _lost_lines(substantive, entries)
         if len(lost) >= LOST_BLOCK_MIN_LOST_SHARE * len(substantive):
-            found.append({"block": block, "substantive_lines": len(substantive),
-                          "lost_lines": lost})
+            found.append({"block": block, "kind": block_kind(block),
+                          "substantive_lines": len(substantive), "lost_lines": lost})
     return found
 
 
