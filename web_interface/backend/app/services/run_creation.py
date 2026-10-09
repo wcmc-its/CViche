@@ -30,12 +30,14 @@ from app.services.config_service import BASE_OVERHEAD_SECONDS, TIME_PER_1K_TOKEN
 from app.services.input_format import detect_input_format_or_none
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE,
+    PDF_TIMEOUT_UPLOAD_MESSAGE,
     PDF_TOO_COMPLEX_MESSAGE,
     PDF_UNREADABLE_MESSAGE,
     EncryptedPdfError,
     PdfBusyError,
     PdfInterruptedError,
     PdfText,
+    PdfTimeoutError,
     PdfTooComplexError,
     UnreadablePdfError,
     read_pdf,
@@ -142,6 +144,9 @@ async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | Non
         return await run_in_threadpool(_read_upload_text, content, file_ext)
     except EncryptedPdfError:
         raise bad_request(_ENCRYPTED_PDF_MESSAGE)
+    except PdfTimeoutError as e:  # a PdfTooComplexError, but not the file's fault (#1650)
+        logger.warning("Rejected PDF over the time limit: %s", e)
+        raise bad_request(PDF_TIMEOUT_UPLOAD_MESSAGE)
     except PdfTooComplexError as e:
         logger.warning("Rejected PDF over a parse limit: %s", e)
         raise bad_request(PDF_TOO_COMPLEX_MESSAGE)
