@@ -7,12 +7,17 @@ from the scorer / doctor modules (quality_score.DIMENSIONS, run_doctor's
 LINT_PREVALENCE and rank_lints); nothing here measures anything itself.
 """
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.schemas import (
     DoctorFindingGroup,
     DoctorFindingInstance,
     DoctorSeverityCounts,
+    FixConfidence,
+    FixEffort,
+    FixListGroup,
+    FixListItem,
+    FixListProblem,
     QualityDimension,
     QualityGate,
     RunDoctorReport,
@@ -27,6 +32,8 @@ from app.services.quality_score_service import (
 from unified_pipeline import (
     quality_score as scorer,  # noqa: E402  (path set by quality_score_service)
 )
+from unified_pipeline.doctor import precision as lint_precision  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.lints.render import CITATION_EVIDENCE_CHARS  # noqa: E402
 from unified_pipeline.doctor.shared import STATUS_RAN  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
@@ -719,18 +726,164 @@ def _usable_findings(payload: dict) -> tuple[list[dict], int]:
     return ran, not_run
 
 
-def summarize_doctor(payload: object, cap_lint: str | None = None) -> RunDoctorReport | None:
+# --- the Fix list (#1589) -----------------------------------------------------
+#
+# The run page's default doctor view, for the person fixing the CV: findings
+# grouped by where they are in the document, merged per entry, in plain words
+# only. The full per-lint list above stays as the Diagnostics tab.
+
+#: Only these reach the Fix list; INFO findings fire on most runs and stay in
+#: Diagnostics.
+FIX_LIST_SEVERITIES = frozenset({"ERROR", "WARN"})
+#: Items listed before the rest are left to Diagnostics. A run can carry
+#: hundreds (277 owner_pi_role_empty on X6); collapsing those into one decision
+#: is #1591.
+MAX_FIX_LIST_ITEMS = 60
+#: "High" confidence: hand-checked right at least this often, on at least this
+#: many findings, so one lucky check cannot earn it. Below it, and at or above
+#: doctor/precision.py's IN_PLACE_MIN_PRECISION, reads "medium". Both read the
+#: gate's rows (`load_gate_ledger`: in-sample and held-out verdicts combined).
+HIGH_CONFIDENCE_MIN_PRECISION = 0.80
+HIGH_CONFIDENCE_MIN_JUDGED = 10
+
+CONFIDENCE_HIGH: FixConfidence = "high"
+CONFIDENCE_MEDIUM: FixConfidence = "medium"
+CONFIDENCE_UNMEASURED: FixConfidence = "unmeasured"
+
+EFFORT_QUICK: FixEffort = "quick"  # delete or retype one thing
+EFFORT_MINUTES: FixEffort = "minutes"  # copy or move text from the source CV
+EFFORT_LONGER: FixEffort = "longer"  # re-enter many records, or rerun the CV
+
+#: Estimated effort per lint, from its LINT_COPY "what to do" (#1589; Paul
+#: approved the labels 2026-10-08). A lint not listed reads EFFORT_MINUTES.
+LINT_EFFORT: dict[str, FixEffort] = {
+    **dict.fromkeys((
+        "junk_or_header_row", "duplicate_records", "duplicate_passages", "date_only_lines",
+        "output_hygiene", "pipe_leaks", "wrong_start_date", "date_cell_shape",
+        "implausible_year", "year_not_in_source", "span_count", "fanout_cell_residue",
+        "identical_rendered_rows", "python_repr_in_output", "table_shape", "contact_slot_lost",
+        "bucket_status", "grant_bucket", "pubmed_title_truncated", "invented_records",
+        "record_boundary",
+    ), EFFORT_QUICK),
+    **dict.fromkeys((
+        "under_extraction", "table_lost", "dead_sections", "segmentation",
+        "segmentation_collapse", "stage3b_fallback_ratio", "stage3b_second_pass_error",
+        "stage4_group_failures", "stage_failure_recorded", "pipeline_errors_present",
+        "no_output", "owner_contact_missing", "llm_fallback_served", "llm_refusal_in_output",
+        "protected_data_in_output",
+    ), EFFORT_LONGER),
+}
+
+#: The precision gate's ledger rows, keyed by (lint, message shape).
+GateRows = dict[lint_precision.ShapeKey, lint_precision.LintPrecision]
+
+_ENTRY_INDEX_RE = re.compile(r"^entry (\d+)\b")
+# Document order: the WCM template's sections follow TAXONOMY_LABELS' order.
+_SECTION_RANK = {label: i for i, label in reversed(list(enumerate(TAXONOMY_LABELS.values())))}
+
+
+@dataclass
+class _FixDraft:
+    """A Fix-list item while the findings about its entry are gathered."""
+    entry: int | None
+    position: int  # the first finding's place in the report
+    section: str | None = None
+    problems: dict[str, FixListProblem] = field(default_factory=dict)  # by lint: one line per lint
+    quotes: list[str] = field(default_factory=list)
+
+
+def _confidence(lint: str, message: str, rows: GateRows) -> FixConfidence:
+    """The band of the ledger row that measured findings like this one: the
+    same row (`finding_precision`) the gate judged it by."""
+    entry = lint_precision.finding_precision(lint, message, rows)
+    if entry is None or entry.precision is None:
+        return CONFIDENCE_UNMEASURED
+    if entry.precision >= HIGH_CONFIDENCE_MIN_PRECISION and entry.judged >= HIGH_CONFIDENCE_MIN_JUDGED:
+        return CONFIDENCE_HIGH
+    return CONFIDENCE_MEDIUM
+
+
+def _fix_list_drafts(ran: list[dict], rows: GateRows) -> tuple[list[_FixDraft], int]:
+    """One draft per entry (findings that name none get one each), and how many
+    ERROR/WARN findings were held back for Diagnostics."""
+    drafts: dict[tuple[str, int], _FixDraft] = {}
+    held_back = 0
+    for position, finding in enumerate(ran):
+        lint = finding["lint"]
+        if finding["severity"] not in FIX_LIST_SEVERITIES:
+            continue
+        copy = LINT_COPY.get(lint)
+        message = str(finding.get("message") or "")
+        # The review copy's gate (#1639): a finding it keeps off the text is
+        # kept off the Fix list too, so the two views agree.
+        if copy is None or not lint_precision.shown_in_place(lint, message, rows):
+            held_back += 1
+            continue
+        section, _detail = _section_and_detail(message)
+        match = _ENTRY_INDEX_RE.match(message)
+        entry = int(match.group(1)) if match else None
+        key = ("entry", entry) if entry is not None else ("finding", position)
+        draft = drafts.setdefault(key, _FixDraft(entry=entry, position=position))
+        draft.section = draft.section or section  # an entry's other findings may name it
+        if lint not in draft.problems or (_SEVERITY_RANK[finding["severity"]]
+                                          < _SEVERITY_RANK[draft.problems[lint].severity]):
+            draft.problems[lint] = FixListProblem(
+                severity=finding["severity"], title=copy.title, what_to_do=copy.what_to_do,
+                confidence=_confidence(lint, message, rows), effort=LINT_EFFORT.get(lint, EFFORT_MINUTES))
+        # The detail is not shown here, so a quote it repeats is kept.
+        quotes, _notes = _quotes_and_notes(finding.get("evidence"), "")
+        draft.quotes.extend(q for q in quotes if q not in draft.quotes)
+    return list(drafts.values()), held_back
+
+
+def _document_order(draft: _FixDraft) -> tuple:
+    """Findings naming no section first (they are about the whole document),
+    then sections in template order, then entries in source order, then the
+    findings that name no entry in report order."""
+    if draft.section is None:
+        section_rank = -1
+    else:
+        section_rank = _SECTION_RANK.get(draft.section, len(_SECTION_RANK))
+    entry_rank = (0, draft.entry) if draft.entry is not None else (1, draft.position)
+    return section_rank, entry_rank
+
+
+def build_fix_list(ran: list[dict], rows: GateRows) -> tuple[list[FixListGroup], int, int]:
+    """The Fix list's groups, the findings held back for Diagnostics, and how
+    many items were cut at MAX_FIX_LIST_ITEMS."""
+    drafts, held_back = _fix_list_drafts(ran, rows)
+    drafts.sort(key=_document_order)
+    shown = drafts[:MAX_FIX_LIST_ITEMS]
+    groups: list[FixListGroup] = []
+    for draft in shown:
+        item = FixListItem(
+            problems=sorted(draft.problems.values(), key=lambda p: _SEVERITY_RANK[p.severity]),
+            quotes=draft.quotes)
+        if groups and groups[-1].section == draft.section:
+            groups[-1].items.append(item)
+        else:
+            groups.append(FixListGroup(section=draft.section, items=[item]))
+    return groups, held_back, len(drafts) - len(shown)
+
+
+def summarize_doctor(payload: object, cap_lint: str | None = None,
+                     rows: GateRows | None = None) -> RunDoctorReport | None:
     """The doctor report as the run page shows it; None when ``payload`` is not
-    a doctor report."""
+    a doctor report. ``rows`` defaults to the gate's ledger (`load_gate_ledger`)."""
     if not isinstance(payload, dict):
         return None
     ran, not_run = _usable_findings(payload)
-    groups = _doctor_groups([f for f in ran if f["lint"] not in REVIEW_COPY_ONLY_LINTS], cap_lint)
+    shown = [f for f in ran if f["lint"] not in REVIEW_COPY_ONLY_LINTS]
+    groups = _doctor_groups(shown, cap_lint)
     by_severity = {s: sum(1 for g in groups if g.severity == s) for s in SEVERITY_ORDER}
+    fix_list, held_back, more = build_fix_list(
+        shown, lint_precision.load_gate_ledger() if rows is None else rows)
     return RunDoctorReport(
         counts=DoctorSeverityCounts(
             error=by_severity["ERROR"], warn=by_severity["WARN"], info=by_severity["INFO"]),
-        findings=groups, not_run=not_run)
+        findings=groups, not_run=not_run,
+        fix_list=fix_list, fix_list_held_back=held_back, fix_list_more=more,
+        not_checked=[spot.sentence for spot in blind_spots()])
 
 
 def doctor_lint_for_cap(lint: str | None, doctor_raw: object) -> str | None:
