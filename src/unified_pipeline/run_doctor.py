@@ -24,7 +24,9 @@ Lints, ranked by the severity of the failure class they catch:
                           actually rendered under in the stage-6 document
                           (the #214 rebucketing rules)
 4. under_extraction       big multi-record entries with very low stage-4
-                          extraction coverage (14.9%-coverage mega-entry)
+                          extraction coverage (14.9%-coverage mega-entry);
+                          lines a tracked-deleted sub-point offers are not
+                          counted (#1205)
 5. classified_unrendered  3b taxonomy codes none of whose entries surface in
                           the stage-6 output document (text or tables)
 5a. stage3b_fallback_ratio a hard-fail gate (see the bottom of this list): a
@@ -42,7 +44,9 @@ Lints, ranked by the severity of the failure class they catch:
 8. unrendered_records     record lines of a fused multi-record stage-4 entry
                           definitively absent from the stage-6 output — the
                           structured-fields-only render paths drop the
-                          unextracted remainder with no bullet fallback (#221)
+                          unextracted remainder with no bullet fallback (#221);
+                          a line a tracked-deleted sub-point offers is
+                          delivered for review, not absent (#1205)
 9. enrichment_failures    stage-5 PubMed enrichment lookups that failed, so
                           those citations degrade to CV-extracted fields (#222)
 10. stage6_render_warnings stage 6's own post-generation self-check findings,
@@ -116,7 +120,8 @@ Lints, ranked by the severity of the failure class they catch:
                           codes (H, R) and Personal Data values are judged
                           too; WARN for whole records (counted per list item)
                           and for a fact the document lost, INFO otherwise
-                          (#817, #1245)
+                          -- a fact a tracked-deleted sub-point offers is
+                          INFO with that note (#817, #1245, #1205)
 
 14g. implausible_year     a stage-4 date-named field whose year is below
                           1930 (or 10 years before the owner's earliest
@@ -647,6 +652,7 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     STATUS_SKIPPED,
     STATUS_UNREADABLE,
     Haystack,
+    SubpointText,
     _cell_text,
     _docx_text,
     _entry_pieces,
@@ -657,7 +663,9 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _output_section_header,
     _table_lines,
     docx_body_blocks,
+    docx_subpoint_lines,
     docx_table_rows,
+    subpoint_text,
 )
 from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
 from unified_pipeline.quality_score import (
@@ -1222,6 +1230,13 @@ def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> list[tuple[str
     return docx_body_blocks(Document(docx_path), deleted=deleted)
 
 
+def read_docx_subpoints(docx_path: str) -> SubpointText:
+    """The docx's tracked-deleted sub-points (#1205; `docx_subpoint_lines`),
+    ready for `offered_as_subpoint`."""
+    Document = _get_docx_document()
+    return subpoint_text(docx_subpoint_lines(Document(docx_path)))
+
+
 def read_docx_table_rows(docx_path: str) -> list[list[list[str]]]:
     """Raw per-row cell texts of every top-level table, EMPTY CELLS INCLUDED
     — _table_lines drops empty cells, which hides an empty date column from
@@ -1507,6 +1522,7 @@ _VIEW_LABELS = {
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
     "deleted_blocks": "stage_6_docx",
+    "subpoints": "stage_6_docx",
     "table_rows": "stage_6_docx",
 }
 
@@ -1526,14 +1542,18 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2"),
              optional=("stage_4",)),
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
-    LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
+    # `subpoints` (#1205) reads the same docx as `blocks`: prose a
+    # tracked-deleted sub-point offers is delivered for review, not lost.
+    LintSpec("under_extraction", lint_under_extraction, ("stage_4",),
+             optional=("subpoints",)),
     LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks"),
              optional=("stage_4", "stage_5b")),
     LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
     LintSpec("stage3b_fallback_ratio", lint_stage3b_fallback_ratio, ("stage_3b",)),
     LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
     LintSpec("dead_sections", lint_dead_sections, ("stage_2", "blocks")),
-    LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks")),
+    LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks"),
+             optional=("subpoints",)),
     LintSpec("section_lost", lint_section_lost, ("stage_4", "blocks")),
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
@@ -1555,7 +1575,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
     LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",),
-             optional=("blocks",)),
+             optional=("blocks", "subpoints")),
     LintSpec("implausible_year", lint_implausible_year, ("stage_4",),
              optional=("stage_5d",)),
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
@@ -1804,6 +1824,9 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     views["deleted_blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"]), deleted=True),
                                     "stage_6_docx", _note)
                                if paths["stage_6_docx"] else None)
+    views["subpoints"] = (_try(lambda: read_docx_subpoints(str(paths["stage_6_docx"])),
+                               "stage_6_docx", _note)
+                          if paths["stage_6_docx"] else None)
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
 

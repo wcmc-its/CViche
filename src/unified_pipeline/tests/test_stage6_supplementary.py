@@ -52,10 +52,14 @@ def _deleted_marks(element):
 
 # --- the switch ---------------------------------------------------------------
 
-@pytest.mark.parametrize("value, on", [("1", True), (" 1 ", True), ("0", False), ("", False),
-                                       (None, False), ("true", False), ("yes", False),
-                                       (1, True), (0, False), (True, False), (False, False)])
-def test_the_flag_is_on_only_for_1(value, on):
+@pytest.mark.parametrize("value, on", [("1", True), (" 1 ", True), ("", True), (None, True),
+                                       ("true", True), ("yes", True), (1, True), (True, True),
+                                       ("0", False), (" 0 ", False), ("false", False),
+                                       ("No", False), ("OFF", False), (0, False), (False, False)])
+def test_the_flag_is_on_unless_turned_off(value, on):
+    # On by default since the owner's 2026-10-09 review (#1205); "0" is the
+    # ops switch, and an unquoted YAML false/no/0 reads as off too.
+    assert sp.SUBPOINT_FLAG_DEFAULT == "1"
     assert sp.subpoints_enabled(value) is on
 
 

@@ -1,4 +1,6 @@
-"""Supplementary prose as a tracked-deleted sub-point (#1205). Off by default.
+"""Supplementary prose as a tracked-deleted sub-point (#1205). On by default
+since the owner's Word review of 2026-10-09; CVICHE_SUPPLEMENTARY_SUBPOINTS=0
+turns it off.
 
 An entry's supplementary prose -- a course description, a grant's aims, the
 duties under an appointment -- has no field stage 4 extracts, so no section
@@ -30,9 +32,17 @@ each sub-point with its line (`SubPoint.as_rendered_line`), so an entry whose
 prose is now a sub-point is not also re-emitted whole -- as a blue overflow
 bullet or into the Appendix (owner decision 2026-10-08: duty prose goes under
 the appointment, not to the Appendix).
-Every other reader of `w:t` -- the doctor, the render gate -- sees the
-accepted document, which has no sub-point: the doctor keeps reporting the
-prose as lost until a reviewer rejects the deletion.
+
+The duties #1641 splits off an appointment title are written by the
+positions writer itself, as a deleted row under the appointment
+(`write_row_subpoint`), and recorded in the same lines and entry ids before
+this pass runs, so they join its haystack and are not planned again.
+
+The doctor reads the sub-points through one shared test
+(`doctor.shared.offered_as_subpoint`): under_extraction and
+unrendered_records count the prose as delivered for review, offschema_fields
+still reports a value stage 4 misfiled, as INFO with a note. The render gate
+compares arms; its XML fingerprint sees every sub-point as a change.
 
 Codes: K1-K5 and M2A-M2D first, where loss is highest (#1205 body), plus
 D1-D3 duties (owner decision 2026-10-08, lifting the D exclusion for this
@@ -68,9 +78,16 @@ from .render_check import (
     _record_rendered,
 )
 
-#: The switch both drivers read: "1" adds the sub-points, anything else (the
-#: default) renders exactly as before.
+#: The switch both drivers read. Unset, it is `SUBPOINT_FLAG_DEFAULT` (on); an
+#: off word (`_SUBPOINT_OFF_VALUES`, "0" for ops) renders exactly as before the
+#: pass existed.
 SUBPOINT_FLAG_ENV = "CVICHE_SUPPLEMENTARY_SUBPOINTS"
+#: On: tracked deletion is the default once the spike passed (owner decisions
+#: on #1205, 2026-10-02 and 2026-10-09).
+SUBPOINT_FLAG_DEFAULT = "1"
+#: The values that turn the switch off, read case-blind. "false" and "no"
+#: are what an unquoted YAML `false` / `no` reach the reader as.
+_SUBPOINT_OFF_VALUES = frozenset({"0", "false", "no", "off"})
 
 TEACHING_CODES = frozenset({'K1', 'K2', 'K3', 'K4', 'K5'})
 GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C', 'M2D'})
@@ -151,10 +168,12 @@ class SubPoint(NamedTuple):
 
 
 def subpoints_enabled(value: object) -> bool:
-    """`SUBPOINT_FLAG_ENV`'s value read as the switch: on only for "1". A
+    """`SUBPOINT_FLAG_ENV`'s value read as the switch: off only for an off word
+    (`_SUBPOINT_OFF_VALUES`); unset or blank is `SUBPOINT_FLAG_DEFAULT`. A
     config file can hand it an unquoted YAML int or bool, so it is read as
     text first."""
-    return str(value if value is not None else '').strip() == '1'
+    text = str(value if value is not None else '').strip().lower() or SUBPOINT_FLAG_DEFAULT
+    return text not in _SUBPOINT_OFF_VALUES
 
 
 def _tokens(text: str) -> set[str]:
@@ -454,6 +473,17 @@ def _insert_row_after(row: BaseOxmlElement, texts: tuple[str, ...],
         tc.append(_deleted_paragraph(text, revision))
     tr.append(tc)
     _after_subpoints(row).addnext(tr)
+
+
+def write_row_subpoint(row: BaseOxmlElement, texts: tuple[str, ...],
+                       revision: Revision) -> str:
+    """A deleted row spanning the table after `row`, for a writer that already
+    holds its entry's row: the duties #1641 splits off an appointment title.
+    Returns the entry as a reader who rejects the deletion sees it, the line
+    `SubPoint.as_rendered_line` gives for a planned sub-point."""
+    _insert_row_after(row, texts, revision)
+    cells = (''.join(t.text or '' for t in tc.iter(qn('w:t'))) for tc in row.iter(qn('w:tc')))
+    return ' '.join((*(' '.join(cell.split()) for cell in cells if cell.strip()), *texts))
 
 
 def write_subpoint(subpoint: SubPoint, revision: Revision) -> None:

@@ -1338,7 +1338,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self.recover_unrendered_records = recover_unrendered_records
 
         # #1205: an entry's prose no section renders, written under it as a
-        # tracked deletion (stage6/supplementary.py). Off by default; a
+        # tracked deletion (stage6/supplementary.py). Off unless asked for
+        # here; `run_stage6`, the entry both drivers use, asks by default. A
         # deletion means nothing without track changes, so it also needs
         # emit_track_changes.
         self.supplementary_subpoints = supplementary_subpoints
@@ -3577,12 +3578,16 @@ Now analyze the text above:"""
         """#1205: write each `SUBPOINT_CODES` entry's provably-unrendered prose
         under its rendered line as a tracked deletion (stage6/supplementary.py).
         Skipped unless `supplementary_subpoints` and `emit_track_changes` are
-        both on: with track changes off a deletion is already accepted."""
-        self._subpoint_lines = []
-        self._subpoint_entry_ids = set()
+        both on: with track changes off a deletion is already accepted.
+
+        `_subpoint_lines` already holds the appointment-title duties the
+        positions writer made sub-points (`_add_title_duties`); they join the
+        haystack, so the same duties are not planned again from the entry's
+        text."""
         if not (self.supplementary_subpoints and self.emit_track_changes):
             return
-        haystack = supplementary.rendered_haystack(self._rendered_output_lines(), self.doc)
+        haystack = supplementary.rendered_haystack(
+            self._rendered_output_lines() + self._subpoint_lines, self.doc)
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
         appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
@@ -3597,7 +3602,7 @@ Now analyze the text above:"""
             self._subpoint_lines.append(subpoint.as_rendered_line())
             self._subpoint_entry_ids.add(subpoint.entry_id)
         self._revision_id = revision.next_id
-        self.stats['supplementary_subpoints'] = len(planned)
+        self.stats['supplementary_subpoints'] = len(self._subpoint_lines)
         self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)
 
     def _subpoint_section_spans(self) -> dict[str, supplementary.SectionSpan]:
@@ -4582,7 +4587,7 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                discover_original_doc: bool = True,
                llm_usage: LlmUsage | None = None,
                repair_protected_data: bool = False,
-               supplementary_subpoints: bool = False) -> str:
+               supplementary_subpoints: bool = True) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -4660,7 +4665,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             False). Both drivers pass it from CVICHE_RUN_REPAIR.
         supplementary_subpoints: Write each entry's unrendered prose under
             it as a tracked deletion (#1205, stage6/supplementary.py; default
-            False). Both drivers pass it from CVICHE_SUPPLEMENTARY_SUBPOINTS.
+            True, the owner decision of 2026-10-09). Both drivers pass it from
+            CVICHE_SUPPLEMENTARY_SUBPOINTS, which "0" turns off.
 
     Returns:
         Path to generated document

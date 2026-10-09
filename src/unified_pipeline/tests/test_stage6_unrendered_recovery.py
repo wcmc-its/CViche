@@ -1475,9 +1475,9 @@ def test_run_stage6_passes_the_subpoint_flag_to_the_generator(monkeypatch):
 
     monkeypatch.setattr(stage6, "WCMTemplateGenerator", _FakeGenerator)
     stage6.run_stage6("unused.json")
+    assert seen["supplementary_subpoints"] is True  # on by default since 2026-10-09
+    stage6.run_stage6("unused.json", supplementary_subpoints=False)
     assert seen["supplementary_subpoints"] is False
-    stage6.run_stage6("unused.json", supplementary_subpoints=True)
-    assert seen["supplementary_subpoints"] is True
 
 
 def test_duty_prose_is_a_deleted_row_under_its_appointment():
@@ -1519,6 +1519,50 @@ def test_the_recovery_reads_a_sub_point_as_its_entry_rendered(flag, recovered):
     gen._recover_unrendered_records({"D1": [entry]})
 
     assert gen.stats["unrendered_records_recovered"] == recovered
+
+
+_TITLE_ROLE = "Visiting Fellow in Example Science"
+_TITLE_DUTIES = "to coordinate the example curriculum committee"
+#: The source states the duties at more length than stage 4 kept in `title`,
+#: so the text's duty paragraph is not mostly field values: only the title
+#: row's sub-point in the pass's haystack keeps it from being planned again.
+_TEXT_DUTIES = (f"{_TITLE_DUTIES}, supervise graduate trainees, organise regional "
+                "seminars, maintain programme records and evaluate outcomes")
+
+
+def _title_duty_appointment():
+    """A D3 row whose `title` holds duties (#1641's split), and whose text
+    holds them too, as DYLJXC 661/668's did (YUYVIG)."""
+    return {
+        "element_idx_start": 661,
+        "taxonomy_code": "D3",
+        "hierarchy": ["PROFESSIONAL EXPERIENCE"],
+        "text": f"2013-2015\t{_TITLE_ROLE}, Example Policy Office\t{_TEXT_DUTIES}",
+        "extracted_fields": {
+            "title": f"{_TITLE_ROLE}, Example Policy Office, {_TITLE_DUTIES}",
+            "organization": "Example Institute for Science",
+            "start_date": "2013", "end_date": "2015",
+        },
+    }
+
+
+def test_title_duties_are_offered_once_and_read_as_rendered():
+    """#1205: the duties the positions writer made a sub-point join the pass's
+    haystack, so they are not planned again from the entry's text, and the
+    #221 recovery reads them as the entry rendered."""
+    gen = _generator(supplementary_subpoints=True)
+    entry = _title_duty_appointment()
+    gen._fill_positions({"D3": [entry]})
+    gen._add_supplementary_subpoints({"D3": [entry]})
+
+    rows = _subpoint_rows(gen)
+    texts = ["".join(t.text for t in row.iter(qn("w:delText"))) for row in rows]
+    assert texts[0].endswith(_TITLE_DUTIES)
+    # No second sub-point repeats the duties the title row already offers.
+    assert [t for t in texts[1:] if _TITLE_DUTIES in t] == []
+    assert gen.stats["supplementary_subpoints"] == len(rows)
+    gen._recover_unrendered_records({"D3": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
 
 
 def test_sub_point_anchors_stop_at_the_appendix_heading(monkeypatch):

@@ -1128,6 +1128,24 @@ def test_unrendered_records_quiet_when_all_rendered_incl_reformatted():
     assert lint_unrendered_records(stage4, blocks) == []
 
 
+def test_unrendered_records_reads_a_sub_point_as_delivered():
+    # #1205: the two dropped rows of the test above, written under the entry
+    # as tracked-deleted sub-points, are offered for review, not absent. A
+    # sub-point holding something else leaves the finding as it was.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    fused = "\n".join([_ROW_HARBORVIEW, _ROW_BLUERIDGE, _ROW_CEDARBROOK,
+                       _ROW_SILVERLAKE, _ROW_FOXGLOVE])
+    stage4 = {"entries": [_entry(fused, etype="break", start=21, taxonomy_code="M2A")]}
+    blocks = [("p", "RESEARCH"), ("table", _ROW_HARBORVIEW),
+              ("table", _ROW_BLUERIDGE), ("table", _ROW_CEDARBROOK)]
+    offered = subpoint_text([_ROW_SILVERLAKE, _ROW_FOXGLOVE])
+    assert lint_unrendered_records(stage4, blocks, offered) == []
+    one = lint_unrendered_records(stage4, blocks, subpoint_text([_ROW_SILVERLAKE]))
+    assert "1 of 5 records absent" in one[0]["message"]
+    assert one[0]["evidence"] == [_ROW_FOXGLOVE[:100]]
+
+
 def test_unrendered_records_skips_single_record_and_appendix_entries():
     blocks = [("p", "D. GRANTS"), ("table", _ROW_HARBORVIEW)]
     # One record line: not a fused candidate, even though it never rendered.

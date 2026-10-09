@@ -177,10 +177,11 @@ def test_stage_6_repairs_under_the_flag_and_keeps_the_repair_report(monkeypatch,
     assert (str(tmp_path / "STAGE6REPAIR_repairs.json") in result["output_files"]) is repair
 
 
-@pytest.mark.parametrize("env, subpoints", [(None, False), ("0", False), ("1", True)])
-def test_stage_6_writes_sub_points_only_under_the_flag(monkeypatch, tmp_path, db, env, subpoints):
-    """#1205: CVICHE_SUPPLEMENTARY_SUBPOINTS=1 asks stage 6 to write unrendered
-    prose as tracked-deleted sub-points; unset or anything else, it does not."""
+@pytest.mark.parametrize("env, subpoints", [(None, True), ("0", False), ("1", True)])
+def test_stage_6_writes_sub_points_unless_the_flag_is_off(monkeypatch, tmp_path, db, env, subpoints):
+    """#1205: stage 6 writes unrendered prose as tracked-deleted sub-points by
+    default (owner decision 2026-10-09); CVICHE_SUPPLEMENTARY_SUBPOINTS=0 is
+    the ops switch that turns it off."""
     from app.pipeline import orchestrator as orch
 
     if env is None:
@@ -204,10 +205,11 @@ def test_stage_6_writes_sub_points_only_under_the_flag(monkeypatch, tmp_path, db
     assert captured["supplementary_subpoints"] is subpoints
 
 
-@pytest.mark.parametrize("value, subpoints", [(1, True), (0, False), (True, False), (None, False)])
+@pytest.mark.parametrize("value, subpoints", [(1, True), (0, False), (True, True),
+                                              (False, False), (None, True)])
 def test_the_sub_point_switch_reads_an_unquoted_yaml_value(monkeypatch, tmp_path, db, value, subpoints):
-    """#1205: a config file's unquoted `1` or `true` reaches the switch as an
-    int or bool, not text; it is read, not raised on."""
+    """#1205: a config file's unquoted `0` or `false` reaches the switch as an
+    int or bool, not text; it is read as off, not raised on."""
     from app.pipeline import orchestrator as orch
 
     real_get_config = orch.get_config

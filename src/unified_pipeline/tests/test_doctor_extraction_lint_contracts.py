@@ -621,6 +621,20 @@ def test_under_extraction_min_records_boundary():
     assert len(lint_under_extraction({"entries": [at]})) == 1
 
 
+def test_under_extraction_leaves_out_lines_a_sub_point_delivers():
+    # #1205: the record lines a tracked-deleted sub-point offers are delivered
+    # for review. Without them the entry is under the size bar, so it is not
+    # flagged; a sub-point holding other text changes nothing.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    entry = _under_extraction_entry(30.0, UNDER_EXTRACTION_MIN_CHARS + 50, 3)
+    lines = [line for line in entry["text"].split("\n") if line.strip()]
+    assert lint_under_extraction({"entries": [entry]}, subpoint_text(lines)) == []
+    other = subpoint_text(["Unrelated committee service for the example society board"])
+    assert len(lint_under_extraction({"entries": [entry]}, other)) == 1
+    assert len(lint_under_extraction({"entries": [entry]}, None)) == 1
+
+
 
 def _stage4_records_entry(code, field):
     """An entry whose two stage-4 records carry its whole text; its own
@@ -1531,6 +1545,27 @@ def test_offschema_single_record_list_is_warn():
 def test_offschema_list_of_strings_is_info():
     findings = _offschema(_anchored("D1", {"keywords": ["one", "two"]}))
     assert [f["severity"] for f in findings] == ["INFO"]
+
+
+_DUTY_VALUE = "Coordinates the example curriculum committee and supervises graduate trainees"
+
+
+def test_offschema_value_a_sub_point_offers_is_info_with_a_note():
+    # #1205: a value the page lacks is a loss (WARN); offered under its record
+    # as a tracked-deleted sub-point it is INFO, and the message says so.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    entry = _anchored("D1", {"duties": _DUTY_VALUE}, text=f"Lecturer\t{_DUTY_VALUE}")
+    blocks = [("table", "Lecturer | Example College")]
+    lost = lint_offschema_fields({"entries": [entry]}, blocks)
+    assert [f["severity"] for f in lost] == ["WARN"]
+    assert "nowhere in the document" in lost[0]["message"]
+    offered = lint_offschema_fields({"entries": [entry]}, blocks, subpoint_text([_DUTY_VALUE]))
+    assert [f["severity"] for f in offered] == ["INFO"]
+    assert "1 of them offered as a tracked-deleted sub-point" in offered[0]["message"]
+    other = lint_offschema_fields({"entries": [entry]}, blocks,
+                                  subpoint_text(["Unrelated committee service for the example society"]))
+    assert [f["severity"] for f in other] == ["WARN"]
 
 
 def test_offschema_scalar_is_info_and_names_the_fact():

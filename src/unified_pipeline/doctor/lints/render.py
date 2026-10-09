@@ -47,6 +47,7 @@ from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
+    SubpointText,
     _entry_pieces,
     _fields_entries,
     _FieldsEntry,
@@ -57,6 +58,7 @@ from ..shared import (
     _output_section_header,
     _owner_surname_words,
     _template_haystack,
+    offered_as_subpoint,
 )
 from .extraction import _is_prose
 
@@ -565,13 +567,17 @@ def _record_rendered(line: str, haystack: str,
     return rendered
 
 
-def lint_unrendered_records(stage4: dict,
-                            blocks: list[tuple[str, str]]) -> list[dict]:
+def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
+                            subpoints: SubpointText | None = None) -> list[dict]:
     """Per-record render check over fused multi-record stage-4 entries: the
     structured-fields-only render paths keep the extracted record and drop
     the unextracted remainder lines with no bullet fallback (#221). No
     element_type filter — the KFGXBW loss was on a 'break' entry; 'T' is
-    skipped (appendix catch-all)."""
+    skipped (appendix catch-all).
+
+    `subpoints` (optional: the rendered docx's sub-points): a record line a
+    tracked-deleted sub-point offers (#1205) is delivered for review, not
+    absent -- stage 6's own #221 recovery reads the sub-points the same way."""
     # Only h.text (the verbatim-containment haystack) is used here; h.tokens
     # (the pooled document token set) is deliberately not — this lint scores
     # each record against per-OUTPUT-LINE token sets so common academic words
@@ -587,7 +593,8 @@ def lint_unrendered_records(stage4: dict,
         if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records
-                  if _record_rendered(r, h.text, output) is False]
+                  if _record_rendered(r, h.text, output) is False
+                  and not offered_as_subpoint(r, subpoints)]
         if not absent:
             continue
         findings.append(_finding(

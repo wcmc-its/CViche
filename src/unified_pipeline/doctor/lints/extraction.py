@@ -133,6 +133,7 @@ from ..shared import (
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
     Haystack,
+    SubpointText,
     _entry_pieces,
     _fields_entries,
     _FieldsEntry,
@@ -143,6 +144,7 @@ from ..shared import (
     _output_section_header,
     _owner_surname_words,
     _piece_in_template,
+    offered_as_subpoint,
 )
 
 # --------------------------------------------------------------------------
@@ -275,9 +277,24 @@ _YEAR_EDGE_LINE_RE = re.compile(
     r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
 
 
-def lint_under_extraction(stage4: dict) -> list[dict]:
+def _not_offered_as_subpoints(text: str, subpoints: SubpointText | None) -> str:
+    """`text` less the lines that reach the reader as a tracked-deleted
+    sub-point (`offered_as_subpoint`, #1205): those are delivered for review,
+    not lost."""
+    if subpoints is None or not subpoints.text:
+        return text
+    return "\n".join(line for line in text.split("\n")
+                     if not offered_as_subpoint(line, subpoints))
+
+
+def lint_under_extraction(stage4: dict, subpoints: SubpointText | None = None) -> list[dict]:
     """Large multi-record entries whose stage-4 field extraction covered
-    almost none of the text: the rest of the records silently vanish."""
+    almost none of the text: the rest of the records silently vanish.
+
+    `subpoints` (optional: the rendered docx's sub-points) takes out of the
+    entry the lines a tracked-deleted sub-point delivers for review (#1205),
+    before its size and record lines are counted: an appointment whose
+    duties are its sub-point is not flagged for them."""
     findings = []
     for e in stage4.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -289,7 +306,7 @@ def lint_under_extraction(stage4: dict) -> list[dict]:
         pct = (rendered_extraction_coverage(rendered) or {}).get("extraction_coverage_percent")
         if pct is None or pct >= UNDER_EXTRACTION_MAX_PCT:
             continue
-        text = str(e.get("text", ""))
+        text = _not_offered_as_subpoints(str(e.get("text", "")), subpoints)
         if len(text) <= UNDER_EXTRACTION_MIN_CHARS:
             continue
         records = sum(
@@ -1445,6 +1462,11 @@ GRADE_SHOWN = "shown"
 GRADE_ELSEWHERE = "elsewhere"
 GRADE_ABSENT = "absent"
 GRADE_UNGRADED = "ungraded"
+#: Not on the page, but offered under its record as a tracked-deleted
+#: sub-point (#1205): the reader gets it by rejecting the deletion. Still
+#: reported, as INFO with that note: stage 4 filed the value under a key no
+#: renderer reads, which the sub-point does not fix.
+GRADE_SUBPOINT = "subpoint"
 
 #: The words of the WCM Personal Data table's address and telephone rows
 #: (Office address, Office telephone, Cell phone; Home address is withheld).
@@ -1501,6 +1523,7 @@ class RenderedDocument(NamedTuple):
     lines: tuple[OutputLine, ...]
     record_values: tuple[frozenset[str], ...]
     owner_values: frozenset[str]
+    subpoints: SubpointText | None = None
 
 
 def _alnum(text: str) -> str:
@@ -1538,7 +1561,7 @@ def _form_unit(lines: list[OutputLine]) -> OutputLine:
 
 
 def _rendered_document(stage4: dict, blocks: list[tuple[str, str]] | None,
-                       ) -> RenderedDocument | None:
+                       subpoints: SubpointText | None = None) -> RenderedDocument | None:
     """None without the docx: every value is then UNGRADED."""
     if blocks is None:
         return None
@@ -1553,7 +1576,7 @@ def _rendered_document(stage4: dict, blocks: list[tuple[str, str]] | None,
     owner = frozenset(value for entry in entries if entry.code == PERSONAL_DATA_CODE
                       for value in map(squash, _nonempty_field_values(dict(entry.fields))))
     return RenderedDocument(tuple(units), tuple(_alnum_values(e.fields) for e in entries),
-                            owner)
+                            owner, subpoints)
 
 
 def _declared_fields() -> dict[str, frozenset[str]]:
@@ -1772,7 +1795,12 @@ def _grade_value(entry: _FieldsEntry, key: str, value: object, keys: frozenset[s
     shown_anywhere = any(_shown_on(value, line, False) for line in document.lines)
     if shown_anywhere and isinstance(value, str) and squash(value) in document.owner_values:
         return GRADE_SHOWN
-    return GRADE_ELSEWHERE if shown_anywhere else GRADE_ABSENT
+    if shown_anywhere:
+        return GRADE_ELSEWHERE
+    leaves = _value_leaves(value)
+    if leaves and all(offered_as_subpoint(leaf, document.subpoints) for leaf in leaves):
+        return GRADE_SUBPOINT
+    return GRADE_ABSENT
 
 
 def _absence_is_a_loss(entry: _FieldsEntry, key: str, value: object) -> bool:
@@ -1885,10 +1913,13 @@ def _one_fact_outcome(key: str, hits: list[OffschemaValue]) -> str:
     """The message's account of one-fact values: lost without a document to
     say otherwise, or what the document showed."""
     absent = sum(hit.grade == GRADE_ABSENT for hit in hits)
+    offered = sum(hit.grade == GRADE_SUBPOINT for hit in hits)
     if absent:
         where = ("not on its record's line" if _is_date_key(key)
                  else "nowhere in the document")
         return f"{absent} of them {where}"
+    if offered:
+        return f"{offered} of them offered as a tracked-deleted sub-point under its record"
     if all(hit.grade == GRADE_UNGRADED for hit in hits):
         return "missing from the output"
     return "the document shows it, but not with its record"
@@ -1916,7 +1947,8 @@ def _offschema_summary(code: str, key: str,
 
 
 def lint_offschema_fields(stage4: dict,
-                          blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+                          blocks: list[tuple[str, str]] | None = None,
+                          subpoints: SubpointText | None = None) -> list[dict]:
     """A non-empty stage-4 value under a key that is in neither field schema
     (built-in or config, any `extract` flag), not in `fan_out._RENDERED_FIELDS`
     for its code, not stage-4 bookkeeping, and not a record list fan-out
@@ -1929,9 +1961,11 @@ def lint_offschema_fields(stage4: dict,
     one-fact value (`_grade_value`): one its record's own line shows is not
     reported, one the document shows nowhere raises the finding to WARN
     (#1245). Without it the lint reads stage 4 alone, as before, and leaves
-    out dates and Personal Data."""
+    out dates and Personal Data. `subpoints` (optional, with `blocks`): a
+    value the page lacks but a tracked-deleted sub-point offers (#1205) is
+    `GRADE_SUBPOINT`, INFO with a note, not a loss."""
     declared_by_code = _declared_fields()
-    document = _rendered_document(stage4, blocks)
+    document = _rendered_document(stage4, blocks, subpoints)
     groups: dict[tuple[str, str], list[OffschemaValue]] = {}
     for entry in _fields_entries(stage4):
         for key, hit in _offschema_values(entry, declared_by_code, document).items():

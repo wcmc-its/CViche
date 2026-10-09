@@ -671,9 +671,10 @@ def test_stage_6_repairs_protected_data_only_under_the_flag(tmp_path, monkeypatc
     assert calls.kwargs['6']['repair_protected_data'] is repair
 
 
-@pytest.mark.parametrize("env, subpoints", [(None, False), ("0", False), ("1", True)])
-def test_stage_6_writes_sub_points_only_under_the_flag(tmp_path, monkeypatch, capsys, env, subpoints):
-    """#1205: the CLI reads CVICHE_SUPPLEMENTARY_SUBPOINTS as the web driver does."""
+@pytest.mark.parametrize("env, subpoints", [(None, True), ("0", False), ("1", True)])
+def test_stage_6_writes_sub_points_unless_the_flag_is_off(tmp_path, monkeypatch, capsys, env, subpoints):
+    """#1205: the CLI reads CVICHE_SUPPLEMENTARY_SUBPOINTS as the web driver
+    does: on when unset, off for "0"."""
     if env is None:
         monkeypatch.delenv("CVICHE_SUPPLEMENTARY_SUBPOINTS", raising=False)
     else:
@@ -721,7 +722,7 @@ def test_every_stage_receives_the_orchestration_arguments_it_expects(
     assert calls.kwargs['5d'] == {'input_path': str(_FILES['5c']), 'verbose': True}
     assert calls.kwargs['6'] == {'input_path': str(_FILES['5d']), 'verbose': True,
                                  'original_doc_path': _DOCX, 'repair_protected_data': False,
-                                 'supplementary_subpoints': False}
+                                 'supplementary_subpoints': True}
 
 
 # -- r3960726469 #6: stage order --------------------------------------------
@@ -770,7 +771,7 @@ def test_stage6_does_not_use_stale_artifact(tmp_path, monkeypatch, capsys):
     assert rc == 1, "the run had a failed stage"
     assert calls.kwargs['6'] == {'input_path': str(_FILES['5c']), 'verbose': True,
                                  'original_doc_path': _DOCX, 'repair_protected_data': False,
-                                 'supplementary_subpoints': False}, (
+                                 'supplementary_subpoints': True}, (
         "stage 6 took an input this run did not produce")
     assert "stage_5d: RuntimeError" in out
 
@@ -828,7 +829,7 @@ def test_standalone_stage_6_uses_the_exact_expected_path(tmp_path, monkeypatch, 
     assert calls.order == ['6']
     assert calls.kwargs['6'] == {'input_path': str(_FILES['4']), 'verbose': True,
                                  'original_doc_path': _DOCX, 'repair_protected_data': False,
-                                 'supplementary_subpoints': False}
+                                 'supplementary_subpoints': True}
     assert rc == 0
 
 
