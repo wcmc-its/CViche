@@ -581,3 +581,50 @@ def test_fix_list_reads_held_out_verdicts_folded_in():
 
 def test_every_effort_names_a_known_worded_lint():
     assert set(rqr.LINT_EFFORT) <= set(rqr.LINT_COPY) <= set(KNOWN_LINTS)
+
+
+# --- verdict groups (#1587) -----------------------------------------------------
+
+
+def test_verdict_groups_are_the_fix_lists_findings_by_lint_and_shape_with_counts():
+    """Every Fix-list finding, one group per (lint, shape), counted; held-back,
+    INFO, review-copy-only and unworded findings are not asked about."""
+    ledger = {**_ledger(dedup_drops=(2, 8)),
+              ("role_consistency", "owner_pi_role_empty"): LintPrecision(
+                  "role_consistency", 9, 10, "M9", "owner_pi_role_empty")}
+    findings = [
+        _finding("junk_or_header_row", message="entry 1 (D1): x"),
+        _finding("role_consistency", message="entry 2 (M2A): pi role empty (owner_pi_role_empty, #1403)"),
+        _finding("junk_or_header_row", "ERROR", message="entry 3 (H): x"),
+        _finding("role_consistency", message="entry 4 (M2A): pi role empty (owner_pi_role_empty, #1403)"),
+        _finding("dedup_drops", message="entry 5 (D1): x"),  # below the gate
+        _finding("table_shape", "INFO", message="entry 6 (D1): x"),  # INFO
+        _finding("brand_new_lint", message="entry 7 (D1): x"),  # no plain wording
+        _finding(next(iter(rqr.REVIEW_COPY_ONLY_LINTS)), message="entry 8 (D1): x"),
+    ]
+    groups = rqr.verdict_groups({"findings": findings}, ledger)
+    assert [(g.lint, g.shape, g.count, g.title) for g in groups] == [
+        ("junk_or_header_row", None, 2, rqr.LINT_COPY["junk_or_header_row"].title),
+        ("role_consistency", "owner_pi_role_empty", 2, rqr.LINT_COPY["role_consistency"].title),
+    ]
+    # The same findings the Fix list shows, no more and no fewer.
+    report = rqr.summarize_doctor({"findings": findings}, rows=ledger)
+    assert sum(g.count for g in groups) == sum(
+        len(i.problems) for grp in report.fix_list for i in grp.items)
+
+
+def test_verdict_groups_split_stage6_warnings_by_their_shape():
+    findings = [
+        _finding("stage6_render_warnings", message="stage 6 self-check: A: 2 entries recovered into the Appendix"),
+        _finding("stage6_render_warnings", message="stage 6 self-check: K4 (Clinical teaching): No visible bulleted content"),
+    ]
+    groups = rqr.verdict_groups({"findings": findings}, {})
+    assert [(g.lint, g.shape, g.count) for g in groups] == [
+        ("stage6_render_warnings", "appendix_recovered_A", 1),
+        ("stage6_render_warnings", "no_teaching_content", 1),
+    ]
+
+
+@pytest.mark.parametrize("payload", [None, [], "x"])
+def test_verdict_groups_empty_for_a_non_report(payload):
+    assert rqr.verdict_groups(payload, {}) == []

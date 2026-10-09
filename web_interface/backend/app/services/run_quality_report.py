@@ -22,6 +22,7 @@ from app.schemas import (
     QualityGate,
     RunDoctorReport,
     RunQualityReport,
+    VerdictGroup,
 )
 from app.services import quality_score_service as qss
 from app.services.quality_score_service import (
@@ -803,6 +804,13 @@ def _confidence(lint: str, message: str, rows: GateRows) -> FixConfidence:
     return CONFIDENCE_MEDIUM
 
 
+def _passes_fix_list_gate(lint: str, message: str, rows: GateRows) -> bool:
+    """May an ERROR/WARN finding reach the Fix list? Only with plain wording,
+    and only past the review copy's gate (#1639): a finding it keeps off the
+    text is kept off the Fix list too, so the two views agree."""
+    return lint in LINT_COPY and lint_precision.shown_in_place(lint, message, rows)
+
+
 def _fix_list_drafts(ran: list[dict], rows: GateRows) -> tuple[list[_FixDraft], int]:
     """One draft per entry (findings that name none get one each), and how many
     ERROR/WARN findings were held back for Diagnostics."""
@@ -812,13 +820,11 @@ def _fix_list_drafts(ran: list[dict], rows: GateRows) -> tuple[list[_FixDraft], 
         lint = finding["lint"]
         if finding["severity"] not in FIX_LIST_SEVERITIES:
             continue
-        copy = LINT_COPY.get(lint)
         message = str(finding.get("message") or "")
-        # The review copy's gate (#1639): a finding it keeps off the text is
-        # kept off the Fix list too, so the two views agree.
-        if copy is None or not lint_precision.shown_in_place(lint, message, rows):
+        if not _passes_fix_list_gate(lint, message, rows):
             held_back += 1
             continue
+        copy = LINT_COPY[lint]
         section, _detail = _section_and_detail(message)
         match = _ENTRY_INDEX_RE.match(message)
         entry = int(match.group(1)) if match else None
@@ -864,6 +870,44 @@ def build_fix_list(ran: list[dict], rows: GateRows) -> tuple[list[FixListGroup],
         else:
             groups.append(FixListGroup(section=draft.section, items=[item]))
     return groups, held_back, len(drafts) - len(shown)
+
+
+# --- verdict groups (#1587) ----------------------------------------------------
+#
+# The review form asks one verdict per kind of problem, not per finding (Paul,
+# 2026-10-09): every finding the Fix list shows, grouped by lint and message
+# shape, the unit doctor/PRECISION.md measures precision by.
+
+
+def finding_shape(lint: str, message: str, rows: GateRows) -> str | None:
+    """The message shape a finding is measured under: a stage-6 warning's
+    `_STAGE6_SHAPES` name, else the shape of the ledger row that measured it.
+    None for a finding read as its lint's own (or pooled) row."""
+    if lint == lint_precision.STAGE6_LINT:
+        return lint_precision.stage6_shape(message)
+    entry = lint_precision.finding_precision(lint, message, rows)
+    return entry.shape if entry is not None else None
+
+
+def verdict_groups(payload: object, rows: GateRows | None = None) -> list[VerdictGroup]:
+    """The Fix list's findings grouped by (lint, shape), with counts and the
+    Fix list's own titles, in the order each group first appears in the
+    report. Empty when ``payload`` is not a doctor report. ``rows`` defaults
+    to the gate's ledger (`load_gate_ledger`)."""
+    if not isinstance(payload, dict):
+        return []
+    rows = lint_precision.load_gate_ledger() if rows is None else rows
+    ran, _not_run = _usable_findings(payload)
+    counts: dict[tuple[str, str | None], int] = {}
+    for finding in ran:
+        lint, message = finding["lint"], str(finding.get("message") or "")
+        # A REVIEW_COPY_ONLY_LINTS lint has no LINT_COPY, so the gate drops it.
+        if finding["severity"] not in FIX_LIST_SEVERITIES or not _passes_fix_list_gate(lint, message, rows):
+            continue
+        key = (lint, finding_shape(lint, message, rows))
+        counts[key] = counts.get(key, 0) + 1
+    return [VerdictGroup(lint=lint, shape=shape, title=LINT_COPY[lint].title, count=count)
+            for (lint, shape), count in counts.items()]
 
 
 def summarize_doctor(payload: object, cap_lint: str | None = None,

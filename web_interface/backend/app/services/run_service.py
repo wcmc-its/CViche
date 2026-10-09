@@ -16,6 +16,7 @@ from app.database import SessionLocal
 from app.errors import forbidden, not_found
 from app.models import (
     Feedback,
+    FeedbackVerdict,
     InboundFile,
     LLMUsage,
     Log,
@@ -469,7 +470,8 @@ def _delete_run_rows(db: Session, run_id: str) -> None:
     db.query(InboundFile).filter(InboundFile.run_id == run_id).update(
         {InboundFile.run_id: None}, synchronize_session=False
     )
-    for child in (Step, Log, LLMUsage, Feedback, RunMetrics):
+    # FeedbackVerdict before Feedback: its feedback_id FK is bare too.
+    for child in (Step, Log, LLMUsage, FeedbackVerdict, Feedback, RunMetrics):
         db.query(child).filter(child.run_id == run_id).delete(synchronize_session=False)
     db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
     db.commit()

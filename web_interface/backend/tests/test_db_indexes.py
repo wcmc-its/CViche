@@ -112,3 +112,41 @@ def test_engine_sets_pool_recycle():
         db_host="localhost", db_port="3306", db_name="test", db_user="test"
     )
     assert engine.pool._recycle == 1800
+
+
+def test_migrations_have_a_single_head():
+    """Two heads crash-looped prod once (the deploy's `alembic upgrade head`
+    refuses to pick one): every new revision must extend the one chain."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    assert len(ScriptDirectory.from_config(cfg).get_heads()) == 1
+
+
+def test_feedback_verdicts_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
+    """#1587's child table: created with its run and feedback FKs on upgrade,
+    gone on a downgrade to its parent, and the feedback table untouched."""
+    from alembic.config import Config
+
+    from alembic import command
+
+    sqlite_url = f"sqlite:///{tmp_path / 'mig.db'}"
+    eng = create_engine(sqlite_url)
+    monkeypatch.setattr("app.database_factory.create_cviche_engine", lambda **kwargs: eng)
+    cfg = Config()
+    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    cfg.set_main_option("sqlalchemy.url", sqlite_url)
+
+    command.upgrade(cfg, "head")
+    insp = inspect(eng)
+    feedback_columns = {c["name"] for c in insp.get_columns("feedback")}
+    assert {c["name"] for c in insp.get_columns("feedback_verdicts")} == {
+        "id", "feedback_id", "run_id", "lint", "shape", "finding_count", "verdict", "created_at"}
+    assert {fk["referred_table"] for fk in insp.get_foreign_keys("feedback_verdicts")} == {"feedback", "runs"}
+
+    command.downgrade(cfg, "a7c2e9d4f150")
+    insp = inspect(eng)
+    assert "feedback_verdicts" not in insp.get_table_names()
+    assert {c["name"] for c in insp.get_columns("feedback")} == feedback_columns

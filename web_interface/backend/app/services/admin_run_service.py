@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, contains_eager
 from app.audit_events import RUN_DELETED
 from app.config_loader import get_config
 from app.errors import conflict, internal_error, not_found
-from app.models import Feedback, Run, RunState, User
+from app.models import Feedback, FeedbackVerdict, Run, RunState, User
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
     AdminRunEntry,
@@ -139,6 +139,9 @@ def hard_delete_feedback(db: Session, feedback_id: int, admin: User) -> None:
         raise not_found("Feedback not found.")
 
     run_id = feedback.run_id
+    # Its verdicts first (#1587): their feedback_id FK is bare.
+    db.query(FeedbackVerdict).filter(FeedbackVerdict.feedback_id == feedback_id).delete(
+        synchronize_session=False)
     db.delete(feedback)
     db.commit()
 

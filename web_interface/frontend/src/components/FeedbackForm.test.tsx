@@ -2,7 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import FeedbackForm from './FeedbackForm'
-import { getFeedback, getRunFeedbackAll, submitFeedback } from '../api/feedback'
+import {
+  getFeedback,
+  getRunFeedbackAll,
+  getVerdictGroups,
+  submitFeedback,
+  uploadCorrectedDocx,
+} from '../api/feedback'
 import type { FeedbackDetail } from '../types'
 import { QUESTION_LABELS } from './feedbackQuestions'
 
@@ -10,6 +16,8 @@ vi.mock('../api/feedback', () => ({
   getFeedback: vi.fn(),
   submitFeedback: vi.fn(),
   getRunFeedbackAll: vi.fn(),
+  getVerdictGroups: vi.fn(),
+  uploadCorrectedDocx: vi.fn(),
 }))
 
 vi.mock('../contexts/AuthContext', () => ({
@@ -147,5 +155,139 @@ describe('FeedbackForm summary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
     expect(await screen.findByText('Jane Testperson')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Submit review' })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// "Help improve CViche" (#1587). Synthetic data only.
+// ---------------------------------------------------------------------------
+
+const GROUPS = [
+  { lint: 'junk_or_header_row', shape: null, title: 'Heading printed as an entry', count: 2 },
+  { lint: 'stage6_render_warnings', shape: 'no_teaching_content', title: 'Teaching section empty', count: 1 },
+]
+
+/** The keys today's form sends: the payload an untouched section must keep. */
+const TODAYS_PAYLOAD_KEYS = [
+  'reviewer_role', 'overall_usefulness', 'overall_accuracy', 'overall_completeness',
+  'manual_conversion_effort', 'correction_effort', 'enrichment_quality', 'summary_generated',
+  'summary_quality', ...ISSUE_KEYS, 'issue_locations', 'biggest_issue', 'likelihood_to_recommend',
+].sort()
+
+function answerRequired() {
+  const pick = (name: string, group: string) =>
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name }))
+  pick('Department administrator', 'Your role')
+  pick('3', 'How useful was the CViche output?')
+  pick('0 minutes', QUESTION_LABELS.manual_conversion_effort)
+  pick('0 minutes', 'How long did it take to correct the CViche output?')
+  pick('4', 'How likely are you to recommend CViche to a colleague?')
+}
+
+const helpToggle = () => screen.getByRole('button', { name: /Help improve CViche/ })
+
+async function submitAndGetPayload() {
+  fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
+  await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1))
+  return vi.mocked(submitFeedback).mock.calls[0][1] as unknown as Record<string, unknown>
+}
+
+describe('FeedbackForm "Help improve CViche"', () => {
+  beforeEach(() => {
+    vi.mocked(getVerdictGroups).mockResolvedValue(GROUPS)
+  })
+
+  it('is collapsed by default, optional, and fetches nothing until opened', async () => {
+    await renderForm()
+    expect(helpToggle().getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText("CViche's checks")).toBeNull()
+    expect(getVerdictGroups).not.toHaveBeenCalled()
+    // The required-answer rule is today's: the section is not part of it.
+    answerRequired()
+    expect((screen.getByRole('button', { name: 'Submit review' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('submitting without touching it sends exactly the payload the form sent before', async () => {
+    await renderForm()
+    answerRequired()
+    const payload = await submitAndGetPayload()
+    expect(Object.keys(payload).sort()).toEqual(TODAYS_PAYLOAD_KEYS)
+    expect(getVerdictGroups).not.toHaveBeenCalled()
+    expect(uploadCorrectedDocx).not.toHaveBeenCalled()
+  })
+
+  it('opening and closing it without answering still sends no verdicts', async () => {
+    await renderForm()
+    fireEvent.click(helpToggle())
+    await screen.findByText('Heading printed as an entry')
+    fireEvent.click(helpToggle())
+    answerRequired()
+    const payload = await submitAndGetPayload()
+    expect('verdicts' in payload).toBe(false)
+  })
+
+  it('shows one verdict row per group with its count, and sends the chosen verdicts', async () => {
+    await renderForm()
+    fireEvent.click(helpToggle())
+    expect(helpToggle().getAttribute('aria-expanded')).toBe('true')
+    expect(await screen.findByText('Heading printed as an entry')).toBeTruthy()
+    expect(screen.getByText('2 places')).toBeTruthy()
+    expect(screen.getByText('1 place')).toBeTruthy()
+    expect(getVerdictGroups).toHaveBeenCalledWith('run-1')
+
+    const row = screen.getByRole('radiogroup', { name: 'Teaching section empty: your verdict' })
+    fireEvent.click(within(row).getByRole('radio', { name: 'Not a problem' }))
+    fireEvent.click(within(row).getByRole('radio', { name: 'Fixed' }))  // the last choice wins
+    answerRequired()
+    const payload = await submitAndGetPayload()
+    expect(payload.verdicts).toEqual([
+      { lint: 'stage6_render_warnings', shape: 'no_teaching_content', verdict: 'fixed' },
+    ])
+  })
+
+  it('a failed load says so and leaves the rest of the form working', async () => {
+    vi.mocked(getVerdictGroups).mockRejectedValue({ status: 500, message: 'boom' })
+    await renderForm()
+    fireEvent.click(helpToggle())
+    expect(await screen.findByText(/checks couldn't be loaded/)).toBeTruthy()
+    answerRequired()
+    const payload = await submitAndGetPayload()
+    expect('verdicts' in payload).toBe(false)
+  })
+
+  it('asks "where?" for each ticked problem, writing the same issue field', async () => {
+    await renderForm()
+    fireEvent.click(helpToggle())
+    expect(screen.getByText(/Nothing is ticked under Problems/)).toBeTruthy()
+
+    fireEvent.click(within(card('Wrong section')).getByRole('checkbox'))
+    const where = screen.getByRole('textbox', { name: 'Wrong section: where?' })
+    fireEvent.change(where, { target: { value: 'Honors: the 2017 lectureship' } })
+    // The card's own box above shows the same answer: one field, two inputs.
+    expect((within(card('Wrong section')).getByPlaceholderText('Which entries?') as HTMLInputElement).value).toBe(
+      'Honors: the 2017 lectureship',
+    )
+    answerRequired()
+    const payload = await submitAndGetPayload()
+    expect(payload.issue_wrong_section).toBe('Honors: the 2017 lectureship')
+  })
+
+  it('uploads a corrected copy and shows only the one-line confirmation', async () => {
+    vi.mocked(uploadCorrectedDocx).mockResolvedValue({ changes: 7, summary: '7 changes recorded' })
+    await renderForm()
+    fireEvent.click(helpToggle())
+    const file = new File(['x'], 'corrected.docx')
+    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } })
+    expect((await screen.findByRole('status')).textContent).toBe('7 changes recorded. Thank you.')
+    expect(uploadCorrectedDocx).toHaveBeenCalledWith('run-1', file)
+  })
+
+  it('shows the server message when the upload is refused', async () => {
+    vi.mocked(uploadCorrectedDocx).mockRejectedValue({ status: 400, message: 'Upload a Word file.' })
+    await renderForm()
+    fireEvent.click(helpToggle())
+    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [new File(['x'], 'a.pdf')] } })
+    expect(await screen.findByText('Upload a Word file.')).toBeTruthy()
+    expect(screen.getByTestId('file-input')).toBeTruthy()  // can try again
   })
 })

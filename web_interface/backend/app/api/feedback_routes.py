@@ -4,20 +4,29 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
+from app.api.upload import _read_bounded
 from app.auth import get_current_user
 from app.database import get_db
+from app.errors import bad_request
 from app.models import Feedback, Run, RunState, Step, User
 from app.schemas import (
+    CorrectedDocxResponse,
     FeedbackDetail,
     FeedbackResponse,
     FeedbackSubmit,
     RunFeedbackStatus,
+    VerdictGroup,
     iso_with_offset,
 )
+from app.services import review_loop_service
+from app.services.config_service import MAX_UPLOAD_SIZE
+from app.services.run_creation import _reject_active_docx_content
 from app.services.run_service import check_run_access
+from app.services.upload_validation import _validate_docx_magic
 from app.services.runs_admin_query import load_run_feedback_with_reviewers
 
 logger = logging.getLogger(__name__)
@@ -302,6 +311,13 @@ async def submit_feedback(
             detail={"error": "validation_error", "message": "summary_quality must be between 1 and 5"},
         )
 
+    # Verdicts (#1587) are checked before anything is written: each must name
+    # a group of findings this run shows.
+    verdict_counts = {}
+    if body.verdicts:
+        groups = await run_in_threadpool(review_loop_service.shown_verdict_groups, run_id)
+        verdict_counts = review_loop_service.check_verdicts(body.verdicts, groups)
+
     # Convert issue_locations list to JSON string
     issue_locations_json = json.dumps(body.issue_locations) if body.issue_locations else None
 
@@ -334,6 +350,9 @@ async def submit_feedback(
     )
 
     db.add(feedback)
+    if body.verdicts:
+        db.flush()  # feedback.id, in the same transaction as its verdicts
+        db.add_all(review_loop_service.verdict_rows(feedback.id, run_id, body.verdicts, verdict_counts))
     db.commit()
     db.refresh(feedback)
 
@@ -360,6 +379,48 @@ async def submit_feedback(
         likelihood_to_recommend=feedback.likelihood_to_recommend,
         submitted_at=feedback.submitted_at,
     )
+
+
+@router.get("/run/{run_id}/feedback/verdict-groups", response_model=list[VerdictGroup])
+def get_verdict_groups(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[VerdictGroup]:
+    """The groups of doctor findings the review form asks a verdict on
+    (#1587): the run page's Fix list, grouped by lint and message shape.
+    Empty when the run has no stored doctor report. Sync def so the blocking
+    storage read runs off the event loop."""
+    check_run_access(run_id, current_user, db, read_only=True)
+    return review_loop_service.shown_verdict_groups(run_id)
+
+
+@router.post("/run/{run_id}/feedback/corrected-docx", response_model=CorrectedDocxResponse)
+async def upload_corrected_docx(
+    run_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CorrectedDocxResponse:
+    """Store a reviewer's corrected copy of the delivered document with the
+    run, diff it against that document (doctor/docx_diff.py) and store the
+    typed diff beside it (#1587). Returns a one-line count only.
+
+    Same access as submitting feedback, and the CV upload's gates on the
+    file: its size cap, a .docx name, the docx magic and zip-bomb bounds, and
+    the active-content refusal. GuardDuty scans the bucket as for every
+    upload; the copy is never served back, so no download waits on the scan.
+    """
+    check_run_access(run_id, current_user, db)
+    if not file.filename or Path(file.filename).suffix.lower() != ".docx":
+        raise bad_request("Upload the corrected document as a Word (.docx) file.")
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
+    if not _validate_docx_magic(content):
+        raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
+    await _reject_active_docx_content(content)
+    changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id, content)
+    logger.info("Corrected copy recorded for run %s by user %s: %d changes", run_id, current_user.id, changes)
+    return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
 
 
 @router.get("/runs/feedback-status", response_model=list[RunFeedbackStatus])

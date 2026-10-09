@@ -72,3 +72,37 @@ export const RATING_SCALES = {
   summary_quality: QUALITY_5,
   likelihood_to_recommend: { min: 1, max: 5, lowLabel: 'Not at all likely', highLabel: 'Extremely likely' },
 } as const satisfies Record<string, RatingScale>
+
+// ---------------------------------------------------------------------------
+// "Help improve CViche" (#1587): optional, collapsed by default
+// ---------------------------------------------------------------------------
+
+/** A verdict per kind of problem CViche's checks flagged (the form's ChoiceRow options). */
+export const VERDICT_OPTIONS = [
+  { value: 'fixed' as const, label: 'Fixed' },
+  { value: 'not_a_problem' as const, label: 'Not a problem' },
+  { value: 'cant_tell' as const, label: "Can't tell" },
+]
+
+export const HELP_IMPROVE = {
+  heading: 'Help improve CViche',
+  intro: "Optional. Tells us which of CViche's checks were right, and what they missed.",
+  checksHeading: "CViche's checks",
+  checksIntro: 'CViche flagged these kinds of problem in your document. For each one, tell us what you found.',
+  checksNone: 'CViche flagged nothing it is confident about in this document.',
+  checksError: "CViche's checks couldn't be loaded. The rest of the form still works.",
+  whereHeading: 'Where were the problems?',
+  whereIntro: 'For each problem you ticked above, name the section and a few words of the entry, so we can find it.',
+  whereNone: 'Nothing is ticked under Problems. If CViche missed something, tick it there and say where here.',
+  wherePlaceholder: 'Section, and a few words of the entry',
+  correctedHeading: 'Your corrected document',
+  correctedIntro:
+    "If you fixed the WCM document, upload your corrected copy. Tracked changes are fine; you don't need to accept them first.",
+  correctedTitle: 'Drop your corrected .docx here',
+  correctedHint: 'Word (.docx) only',
+  correctedPrivacy:
+    "Your corrected file is kept with this run's other files and deleted with them. Only change counts and positions are used to measure CViche's accuracy, not the text of your CV.",
+} as const
+
+/** How many findings a verdict row covers, in words. */
+export const placesLabel = (count: number) => `${count} ${count === 1 ? 'place' : 'places'}`

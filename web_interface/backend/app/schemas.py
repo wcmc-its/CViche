@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
+from app.models import ReviewVerdict
+
 
 def iso_with_offset(dt: datetime) -> str:
     """Serialize a datetime to ISO 8601 with an explicit UTC offset.
@@ -392,6 +394,15 @@ class ConsentSubmitResponse(BaseModel):
 # Feedback Schemas
 # ============================================================
 
+class FeedbackVerdictSubmit(BaseModel):
+    """One verdict in a feedback submit: the group it answers, by lint and
+    message shape (as the verdict-groups endpoint named it), and the answer.
+    The route checks the group was one the run actually shows."""
+    lint: str
+    shape: str | None = None
+    verdict: ReviewVerdict
+
+
 class FeedbackSubmit(BaseModel):
     """Feedback submission from a user on a pipeline run."""
     reviewer_role: str  # required
@@ -412,6 +423,25 @@ class FeedbackSubmit(BaseModel):
     issue_locations: list[str] | None = None
     biggest_issue: str | None = None
     likelihood_to_recommend: int  # 1-5, required
+    # Optional (#1587): a verdict per group of doctor findings the form showed
+    # (GET /run/{id}/feedback/verdict-groups). Absent, the submit is as before.
+    verdicts: list[FeedbackVerdictSubmit] | None = None
+
+
+class VerdictGroup(BaseModel):
+    """One group of doctor findings the review form asks a verdict on
+    (#1587): every Fix-list finding of one lint and message shape."""
+    lint: str
+    shape: str | None = None
+    title: str  # the Fix list's plain title for the lint (run_quality_report.LINT_COPY)
+    count: int
+
+
+class CorrectedDocxResponse(BaseModel):
+    """POST /run/{id}/feedback/corrected-docx: a one-line confirmation only;
+    the typed diff itself is stored with the run, never returned."""
+    changes: int
+    summary: str
 
 
 class FeedbackResponse(BaseModel):

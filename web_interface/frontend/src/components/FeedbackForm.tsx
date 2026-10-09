@@ -1,17 +1,29 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Check, Loader2 } from 'lucide-react'
-import type { FeedbackFormData, WcmSection } from '../types'
-import { getFeedback, submitFeedback } from '../api/feedback'
+import { Check, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
+import type {
+  CorrectedDocxResult,
+  FeedbackFormData,
+  FeedbackVerdictSubmit,
+  ReviewVerdict,
+  VerdictGroup,
+  WcmSection,
+} from '../types'
+import type { ApiError } from '../api/client'
+import { getFeedback, getVerdictGroups, submitFeedback, uploadCorrectedDocx } from '../api/feedback'
 import ErrorBanner from './ErrorBanner'
 import FeedbackSummary from './FeedbackSummary'
+import DropZone from './upload/DropZone'
 import {
   EFFORT_OPTIONS,
+  HELP_IMPROVE,
   ISSUE_FIELDS,
   PROBLEMS_LABEL,
   QUESTION_LABELS,
   RATING_SCALES,
   REVIEWER_ROLES,
   SUMMARY_GENERATED_OPTIONS,
+  VERDICT_OPTIONS,
+  placesLabel,
 } from './feedbackQuestions'
 
 // ---------------------------------------------------------------------------
@@ -178,6 +190,236 @@ function ChoiceRow<T extends string | boolean>({
 }
 
 // ---------------------------------------------------------------------------
+// "Help improve CViche" (#1587): optional, collapsed by default. Nothing in it
+// is fetched or sent until the reviewer opens it and answers something.
+// ---------------------------------------------------------------------------
+
+/** Verdicts by group, keyed by verdictKey. */
+type Verdicts = Record<string, FeedbackVerdictSubmit>
+
+const verdictKey = (group: { lint: string; shape: string | null }) => `${group.lint}:${group.shape ?? ''}`
+
+function SubHeading({ children }: { children: string }) {
+  return <div className="mt-5 text-sm font-semibold text-gray-900">{children}</div>
+}
+
+function VerdictRows({
+  groups,
+  verdicts,
+  onVerdict,
+}: {
+  groups: VerdictGroup[]
+  verdicts: Verdicts
+  onVerdict: (group: VerdictGroup, verdict: ReviewVerdict) => void
+}) {
+  return (
+    <div className="mt-3 space-y-2">
+      {groups.map((group) => {
+        const chosen = verdicts[verdictKey(group)]?.verdict ?? null
+        return (
+          <div
+            key={verdictKey(group)}
+            className={`grid gap-x-4 gap-y-2 rounded-xl border border-sand-300 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center ${
+              chosen ? 'bg-sand-50' : 'bg-white'
+            }`}
+          >
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-gray-900">{group.title}</div>
+              <div className="text-xs text-gray-500">{placesLabel(group.count)}</div>
+            </div>
+            <ChoiceRow
+              options={VERDICT_OPTIONS}
+              value={chosen}
+              onChange={(v) => onVerdict(group, v)}
+              ariaLabel={`${group.title}: your verdict`}
+            />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function CorrectedUpload({ runId }: { runId: string }) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<CorrectedDocxResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const upload = async (files: File[]) => {
+    setBusy(true)
+    setError(null)
+    try {
+      setResult(await uploadCorrectedDocx(runId, files[0]))
+    } catch (e) {
+      setError((e as ApiError).message || 'The upload failed. Please try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3">
+      {error && (
+        <div className="mb-3">
+          <ErrorBanner message={error} onDismiss={() => setError(null)} />
+        </div>
+      )}
+      {busy ? (
+        <div className="flex items-center gap-2 text-sm text-gray-500">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Comparing with the document we delivered...
+        </div>
+      ) : result ? (
+        <p role="status" className="flex items-center gap-2 text-sm font-medium text-success-700">
+          <Check className="h-4 w-4" strokeWidth={3} aria-hidden="true" />
+          {result.summary}. Thank you.
+        </p>
+      ) : (
+        <DropZone multiple={false} title={HELP_IMPROVE.correctedTitle} hint={HELP_IMPROVE.correctedHint} onFiles={upload} compact />
+      )}
+      <p className="mt-2 text-xs text-gray-500">{HELP_IMPROVE.correctedPrivacy}</p>
+    </div>
+  )
+}
+
+function HelpImproveSection({
+  runId,
+  formData,
+  updateField,
+  wcmSections,
+  toggleIssueLocation,
+  verdicts,
+  onVerdict,
+}: {
+  runId: string
+  formData: FeedbackFormData
+  updateField: <K extends keyof FeedbackFormData>(key: K, value: FeedbackFormData[K]) => void
+  wcmSections: WcmSection[]
+  toggleIssueLocation: (sectionId: string) => void
+  verdicts: Verdicts
+  onVerdict: (group: VerdictGroup, verdict: ReviewVerdict) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [groups, setGroups] = useState<VerdictGroup[] | null>(null)
+  const [groupsError, setGroupsError] = useState(false)
+
+  // Fetched on first open only, so a review that never opens this section
+  // makes exactly the requests it made before.
+  useEffect(() => {
+    if (!open || groups !== null || groupsError) return
+    let cancelled = false
+    getVerdictGroups(runId)
+      .then((g) => !cancelled && setGroups(g))
+      .catch(() => !cancelled && setGroupsError(true))
+    return () => {
+      cancelled = true
+    }
+  }, [open, groups, groupsError, runId])
+
+  const ticked = ISSUE_FIELDS.filter((issue) => formData[issue.key] !== null)
+
+  return (
+    <div className="mt-6">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls="help-improve-cviche"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-3 pb-2 border-b border-sand-200 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded-sm"
+      >
+        <span>{HELP_IMPROVE.heading}</span>
+        <span className="flex items-center gap-1 normal-case tracking-normal font-medium">
+          Optional
+          {open ? <ChevronDown className="h-4 w-4" aria-hidden="true" /> : <ChevronRight className="h-4 w-4" aria-hidden="true" />}
+        </span>
+      </button>
+      {!open && <p className="mt-3 text-[13px] text-gray-500">{HELP_IMPROVE.intro}</p>}
+      {open && (
+        <div id="help-improve-cviche">
+          <SubHeading>{HELP_IMPROVE.checksHeading}</SubHeading>
+          {groupsError ? (
+            <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.checksError}</p>
+          ) : groups === null ? (
+            <Loader2 className="mt-2 h-4 w-4 animate-spin text-gray-400" aria-label="Loading CViche's checks" />
+          ) : groups.length === 0 ? (
+            <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.checksNone}</p>
+          ) : (
+            <>
+              <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.checksIntro}</p>
+              <VerdictRows groups={groups} verdicts={verdicts} onVerdict={onVerdict} />
+            </>
+          )}
+
+          <SubHeading>{HELP_IMPROVE.whereHeading}</SubHeading>
+          {ticked.length === 0 ? (
+            <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.whereNone}</p>
+          ) : (
+            <>
+              <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.whereIntro}</p>
+              {ticked.map((issue) => (
+                <QuestionRow key={issue.key} label={issue.label} helper="Where?">
+                  <input
+                    type="text"
+                    value={formData[issue.key] ?? ''}
+                    onChange={(e) => updateField(issue.key, e.target.value)}
+                    placeholder={HELP_IMPROVE.wherePlaceholder}
+                    aria-label={`${issue.label}: where?`}
+                    className={TEXT_INPUT}
+                  />
+                </QuestionRow>
+              ))}
+              {wcmSections.length > 0 && (
+                <QuestionRow label={QUESTION_LABELS.issue_locations}>
+                  <SectionToggles
+                    sections={wcmSections}
+                    selected={formData.issue_locations}
+                    onToggle={toggleIssueLocation}
+                  />
+                </QuestionRow>
+              )}
+            </>
+          )}
+
+          <SubHeading>{HELP_IMPROVE.correctedHeading}</SubHeading>
+          <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.correctedIntro}</p>
+          <CorrectedUpload runId={runId} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SectionToggles({
+  sections,
+  selected,
+  onToggle,
+}: {
+  sections: WcmSection[]
+  selected: string[]
+  onToggle: (sectionId: string) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {sections.map((section) => {
+        const on = selected.includes(section.section_id)
+        return (
+          <button
+            key={section.section_id}
+            type="button"
+            role="checkbox"
+            aria-checked={on}
+            onClick={() => onToggle(section.section_id)}
+            className={`${TOGGLE_BASE} ${on ? TOGGLE_ON : TOGGLE_OFF}`}
+          >
+            {section.section_id}: {section.section_name}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -189,6 +431,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
   const [loading, setLoading] = useState(true)
   const [existingFeedback, setExistingFeedback] = useState<Record<string, unknown> | null>(null)
   const [wcmSections, setWcmSections] = useState<WcmSection[]>([])
+  const [verdicts, setVerdicts] = useState<Verdicts>({})
 
   // ---- helpers ----
 
@@ -274,6 +517,10 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
       biggest_issue: formData.biggest_issue || null,
       likelihood_to_recommend: formData.likelihood_to_recommend,
     }
+    // Only when the reviewer gave one (#1587): an untouched "Help improve
+    // CViche" section leaves the payload exactly as it always was.
+    const verdictList = Object.values(verdicts)
+    if (verdictList.length > 0) payload.verdicts = verdictList
 
     try {
       const res = await submitFeedback(runId, payload as unknown as FeedbackFormData)
@@ -493,23 +740,11 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
       {anyIssueChecked && wcmSections.length > 0 && (
         <QuestionRow label={QUESTION_LABELS.issue_locations}>
-          <div className="flex flex-wrap gap-2">
-            {wcmSections.map((section) => {
-              const on = formData.issue_locations.includes(section.section_id)
-              return (
-                <button
-                  key={section.section_id}
-                  type="button"
-                  role="checkbox"
-                  aria-checked={on}
-                  onClick={() => toggleIssueLocation(section.section_id)}
-                  className={`${TOGGLE_BASE} ${on ? TOGGLE_ON : TOGGLE_OFF}`}
-                >
-                  {section.section_id}: {section.section_name}
-                </button>
-              )
-            })}
-          </div>
+          <SectionToggles
+            sections={wcmSections}
+            selected={formData.issue_locations}
+            onToggle={toggleIssueLocation}
+          />
         </QuestionRow>
       )}
 
@@ -583,6 +818,21 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           ariaLabel={QUESTION_LABELS.likelihood_to_recommend}
         />
       </QuestionRow>
+
+      <HelpImproveSection
+        runId={runId}
+        formData={formData}
+        updateField={updateField}
+        wcmSections={wcmSections}
+        toggleIssueLocation={toggleIssueLocation}
+        verdicts={verdicts}
+        onVerdict={(group, verdict) =>
+          setVerdicts((prev) => ({
+            ...prev,
+            [verdictKey(group)]: { lint: group.lint, shape: group.shape, verdict },
+          }))
+        }
+      />
 
       <div className="mt-4 pt-4 border-t border-sand-200 flex flex-wrap items-center justify-between gap-3">
         <span className="text-xs text-gray-500">

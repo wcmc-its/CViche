@@ -475,3 +475,27 @@ def test_delete_run_unlinks_the_inbox_file_it_was_submitted_from(db: Session, en
     inbox_file = db.query(InboundFile).one()
     assert inbox_file.run_id is None
     assert inbox_file.status == InboundFileStatus.SUBMITTED
+
+
+def test_delete_run_removes_feedback_verdicts_before_feedback(db: Session, enforced_foreign_keys: None) -> None:
+    """#1587: a run's feedback verdicts reference both the feedback row and
+    the run with bare FKs, so they are deleted first."""
+    from app.models import Feedback, FeedbackVerdict, Run
+    from app.services.run_service import delete_run_and_artifacts
+
+    user = _seed_user(db)
+    _seed_run(db, "VRD587", "complete", datetime.now(), user_id=user.id)
+    feedback = Feedback(run_id="VRD587", user_id=user.id, reviewer_role="self", overall_usefulness=3,
+                        manual_conversion_effort="0 minutes", correction_effort="0 minutes",
+                        likelihood_to_recommend=3)
+    db.add(feedback)
+    db.flush()
+    db.add(FeedbackVerdict(feedback_id=feedback.id, run_id="VRD587", lint="junk_or_header_row",
+                           finding_count=1, verdict="fixed"))
+    db.commit()
+
+    with patch("app.services.run_service.get_storage", return_value=_FakeStorage()):
+        delete_run_and_artifacts(db, db.query(Run).filter(Run.id == "VRD587").one())
+
+    assert db.query(Run).filter(Run.id == "VRD587").first() is None
+    assert db.query(FeedbackVerdict).count() == db.query(Feedback).count() == 0
