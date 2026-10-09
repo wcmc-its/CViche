@@ -46,7 +46,7 @@ def test_every_blind_cell_has_one_sentence_and_every_sentence_a_blind_cell():
 
 def test_the_sentences_are_plain_and_whole():
     for spot in blind_spots():
-        assert spot.sentence.startswith("The doctor") and spot.sentence.endswith(".")
+        assert spot.sentence.startswith("CViche ") and spot.sentence.endswith(".")
         assert "`" not in spot.sentence and "#" not in spot.sentence  # no lint keys or issue numbers
 
 
@@ -57,8 +57,8 @@ def _doc(tmp_path, body):
 
 
 def test_the_section_ends_at_the_next_heading_and_skips_prose(tmp_path):
-    path = _doc(tmp_path, "Some prose.\n\n- `wrong value / record`: The doctor cannot see it.\n")
-    assert blind_spots(path) == (BlindSpot("wrong value", "record", "The doctor cannot see it."),)
+    path = _doc(tmp_path, "Some prose.\n\n- `wrong value / record`: CViche cannot see it.\n")
+    assert blind_spots(path) == (BlindSpot("wrong value", "record", "CViche cannot see it."),)
 
 
 @pytest.mark.parametrize("body", ["Only prose.\n", "- wrong value / record: no backticks.\n",

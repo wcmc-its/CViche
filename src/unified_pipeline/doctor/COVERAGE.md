@@ -62,11 +62,11 @@ How to re-measure: score both arms with `scripts/doctor_vs_autopsy.py --json` ov
 
 ## Not checked
 
-What the document's reader is told the doctor did not check, one sentence per BLIND cell. `doctor/blind_spots.py` reads these bullets for the review copy's "not checked" box (#1589); keep the shape "- `<type> / <level>`: <sentence>." and add or remove a bullet in the PR that changes a cell.
+What the document's reader is told the doctor did not check, one sentence per BLIND cell. Faculty read these sentences, so each starts with "CViche", not "The doctor". `doctor/blind_spots.py` reads these bullets for the review copy's "not checked" box (#1589); keep the shape "- `<type> / <level>`: <sentence>." and add or remove a bullet in the PR that changes a cell.
 
-- `missing / entry`: The doctor can miss a whole entry left out of a section when the rest of the section is there.
-- `invented / section`: The doctor does not check whether the research summary's claims are supported by your CV.
-- `invented / entry`: The doctor cannot see an entry CViche made up from a note or comment in your CV.
-- `duplicated / field`: The doctor does not check for the same detail, such as a title, repeated within one entry.
-- `malformed / section`: The doctor does not check the order of entries within a section.
-- `privacy / field`: The doctor cannot reliably see other people's personal details, such as a family member's name, printed in the document.
+- `missing / entry`: CViche can miss a whole entry left out of a section when the rest of the section is there.
+- `invented / section`: CViche doesn't check whether the research summary's claims are supported by your CV.
+- `invented / entry`: CViche cannot see an entry it made up from a note or comment in your CV.
+- `duplicated / field`: CViche doesn't check for the same detail, such as a title, repeated within one entry.
+- `malformed / section`: CViche doesn't check the order of entries within a section.
+- `privacy / field`: CViche cannot reliably see other people's personal details, such as a family member's name, printed in the document.
