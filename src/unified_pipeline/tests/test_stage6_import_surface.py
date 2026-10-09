@@ -58,6 +58,7 @@ STAGE6_IMPORT_SURFACE = (
     "BARE_MENTEE_RESOLVE_CHECK",
     "DEDUP_FUSED_BLOB_RECORD_LINES",
     "GEO_SCOPE_FAILURE_STAT",
+    "NAMED_REACH_SYSTEM_PROMPT",
     "PII_REDACTED_NOTICE",
     "PRECOLLEGIATE_REROUTE_CHECK",
     "RECLASSIFY_FAILURE_STAT",
@@ -310,7 +311,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 46, (
+    assert len(STAGE6_IMPORT_SURFACE) == 47, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
