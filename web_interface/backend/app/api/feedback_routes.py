@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
@@ -373,13 +373,16 @@ async def submit_feedback(
 @router.post("/run/{run_id}/feedback/corrected-docx", response_model=CorrectedDocxResponse)
 async def upload_corrected_docx(
     run_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CorrectedDocxResponse:
     """Store a reviewer's corrected copy of the delivered document with the
     run, diff it against that document (doctor/docx_diff.py) and store the
-    typed diff beside it (#1587). Returns a one-line count only.
+    typed diff beside it (#1587). Returns a one-line count only; the
+    comment-fate verdicts and the doctor's re-run on the copy (#1654) follow
+    in a background task.
 
     Same access as submitting feedback, and the CV upload's gates on the
     file: its size cap, a .docx name, the docx magic and zip-bomb bounds, and
@@ -395,6 +398,10 @@ async def upload_corrected_docx(
     await _reject_active_docx_content(content)
     changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id, content)
     logger.info("Corrected copy recorded for run %s by user %s: %d changes", run_id, current_user.id, changes)
+    # Verdicts from the review copy's comments and the doctor's re-run (#1654)
+    # run after the response, so the confirmation never waits on them; their
+    # failure is logged there, never shown to the uploader.
+    background_tasks.add_task(review_loop_service.review_corrected_copy_in_background, run_id, content)
     return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
 
 
