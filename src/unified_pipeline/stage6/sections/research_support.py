@@ -1258,7 +1258,10 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
 ANNUAL_COSTS_LABEL = 'Annual direct costs:'
 # The rows the doctor's role_consistency lint reads back off a rendered grant
 # table (#1403): the PI cell, the owner's role, and the title it names the
-# grant by.
+# grant by. grant_facts (#1588) reads the grant number off the Award Source
+# row, the amounts off the costs rows and the years off the duration row.
+AWARD_SOURCE_LABEL = 'Award Source:'
+DURATION_LABEL = 'Duration of support:'
 PROJECT_TITLE_LABEL = 'Project title:'
 PI_NAME_LABEL = 'Name of Principal Investigator:'
 YOUR_ROLE_LABEL = 'Your role:'
@@ -1663,11 +1666,11 @@ class ResearchSupportSection:
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
         rows = [
-            ('Award Source:', agency),
+            (AWARD_SOURCE_LABEL, agency),
             (PROJECT_TITLE_LABEL, title),
             *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
-            ('Duration of support:', self._format_grant_duration(fields, code, raw_text)),
+            (DURATION_LABEL, self._format_grant_duration(fields, code, raw_text)),
             (PI_NAME_LABEL, pi_name),
             (YOUR_ROLE_LABEL, role),
             ('Your percent (%) effort:', percent_effort),

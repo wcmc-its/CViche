@@ -9,7 +9,9 @@ own scaffolding, values filed under a key no renderer reads, years given the
 wrong century, entries holding several records that stage 4 returned as
 one, grant lists cut into records at the wrong line, grants filed under a
 funding heading their own record contradicts, separate years rendered as
-one range over them, and stage-3b fragments whose text no record holds.
+one range over them, stage-3b fragments whose text no record holds, and
+grant numbers and amounts a grant's table shows that its text lacks, or
+that its text states and the document lacks.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -26,8 +28,9 @@ docstrings and comments for what changed.
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
+from decimal import Decimal
 from types import MappingProxyType
 from typing import NamedTuple
 
@@ -111,8 +114,14 @@ from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage6.sections.positions import POSITION_TAXONOMY_CODES
 from unified_pipeline.stage6.sections.research_support import (
+    ANNUAL_COSTS_LABEL,
+    AWARD_SOURCE_LABEL,
+    DURATION_LABEL,
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
+    SHARE_LABEL,
+    TOTAL_AWARD_LABEL,
+    TOTAL_REQUESTED_LABEL,
     YOUR_ROLE_LABEL,
     grant_end_year,
     year_at_or_after,
@@ -4042,6 +4051,356 @@ def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) 
     return dict(sorted((hit.table, _table_role_message(idx, shape, len(group)))
                        for (idx, shape, _), group in groups.items()
                        if shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY for hit in group))
+
+
+# --- grant_facts ----------------------------------------------------------------
+#
+# #1588's first fact-accounting slice: the grant numbers and dollar amounts a
+# grant entry's text states, against the grant table stage 6 renders for that
+# entry. Stage 4 extracts the grants of one code in one call, and an entry can
+# come back carrying another entry's values (#1575: YUYVIG UVZNIC 592, an R01
+# rendered with entry 603's amount and dates, its own amount nowhere in the
+# document). year_not_in_source flagged that entry only because the borrowed
+# values carried a year; a borrowed amount or grant number passes every other
+# lint. Two shapes, at most one finding of each per entry:
+#
+#   value_not_in_source  a grant number or amount on the entry's rendered table
+#                        (its Award Source, title and costs rows, the rows stage
+#                        4's fields fill) that the entry's own text does not
+#                        state in any format. The message names the other grant
+#                        entries whose text does: the #1575 copy.
+#   value_missing        a grant number or amount the entry's text states that
+#                        is neither on its rendered table nor anywhere outside
+#                        the other grants' tables (the Appendix, a sub-point, a
+#                        note), so the reader never sees it.
+#
+# A value matches through reformatting: an amount by its dollars ("$1.5M",
+# "$1,500,000", "1500000"), within half the last digit it states, and a grant
+# number by its identity (an NIH number by institute and serial, "5R01
+# CA012345-01A1" = "CA-12345"; another format by its letters and digits).
+# Report-only, INFO, and a review-copy comment only (doctor/PRECISION.md, GF-1).
+
+#: The finding's shapes, named in its message (`precision.finding_precision`).
+GRANT_FACT_NOT_IN_SOURCE = "value_not_in_source"
+GRANT_FACT_MISSING = "value_missing"
+#: Values a finding's message lists; it counts the rest.
+GRANT_FACTS_MAX_LISTED = 4
+#: The rendered rows value_not_in_source reads: the ones stage 4's fields
+#: fill. A goals row can carry another entry's prose by design (#958), so it
+#: is read only as somewhere a stated value reaches the reader.
+_FACT_AMOUNT_ROWS = frozenset({ANNUAL_COSTS_LABEL, TOTAL_AWARD_LABEL,
+                               TOTAL_REQUESTED_LABEL, SHARE_LABEL})
+_FACT_NUMBER_ROWS = frozenset({AWARD_SOURCE_LABEL, PROJECT_TITLE_LABEL})
+#: The stage-4 fields that say which of several same-titled entries a rendered
+#: table came from: stage 6 renders them newest first, not in stage-4 order.
+_PRODUCER_AMOUNT_KEYS = ("annual_direct_costs", "annual_funding", "total_funding",
+                         "total_funding_requested", "share_total")
+_PRODUCER_DATE_KEYS = ("start_date", "end_date")
+
+#: A dollar amount: "$123,456", "$1.5M", "$250K", "US$ 40,000", "USD 12,345",
+#: "$2 million", and "$12, 345" as a PDF conversion spaces it. The currency
+#: mark is optional, but a number without one must not continue a word or
+#: another number ("R01", "1.5").
+_AMOUNT_RE = re.compile(
+    r"(?:(?P<cur>US\$|\$|USD)\s?|(?<![\w.,$]))"
+    r"(?P<int>\d{1,3}(?:,\s?\d{3}(?!\d))+|\d+)(?:\.(?P<frac>\d+))?"
+    r"(?:\s?(?P<mult>(?i:million|thousand|mil|mm|k|m))(?![A-Za-z]))?")
+_AMOUNT_MULTIPLIERS = MappingProxyType({
+    "k": 1_000, "thousand": 1_000, "m": 1_000_000, "mm": 1_000_000,
+    "mil": 1_000_000, "million": 1_000_000})
+#: How far apart two amounts written in whole dollars or cents may be and
+#: still be one amount: stage 6 rounds cents away ("$1,200.50" -> "$1,201").
+AMOUNT_ROUNDING_DOLLARS = Decimal(1)
+#: Decimals that may instead be a thousands group ("$123.000").
+THOUSANDS_DOT_DIGITS = 3
+
+#: An NIH-style grant number: an optional application type, an activity code
+#: ("R01", "K08", "UL1", "RO1" as typed), the institute and the serial, with
+#: an optional year and suffix ("5R01 CA012345-01A1", "P30-CA90001",
+#: "NIH-R01 #NS90002-01", "HL-90003"). Without an activity code the institute
+#: must touch its serial or join it by a hyphen, so a ZIP code ("NY 10001")
+#: is not read as one.
+_NIH_GRANT_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[1-9][\s-]?)?"
+    r"(?:(?P<activity>[A-Z][0-9O]{2}|[A-Z]{2}[0-9])(?:\s?/\s?[A-Z][0-9]{2})?[\s-]*#?\s*)?"
+    r"(?P<ic>[A-Z]{2})(?P<sep>[\s-]?)(?P<serial>\d{5,6})(?:-\d{2}(?:[A-Z]\d)?)?(?![0-9])")
+#: The other sponsors' formats seen on the EBYSBC/s7ab/pilot and YUYVIG
+#: farms, matched by their letters and digits: a ClinicalTrials.gov id, a DoD
+#: or ONR award ("W81XWH-99-1-0001", "DAMD17-99-1-0002", "N000149910003"), an
+#: NSF award by its directorate ("DMS-9900001"; a two-letter word before a
+#: bare NSF number is a role, "PI 9900002"), a VA HSR&D project ("IIR 99-001") and an AHA or
+#: foundation award ("99SDG9000001").
+_OTHER_GRANT_ID_RES = (
+    re.compile(r"(?<![A-Za-z0-9])NCT\s?\d{8}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:W81XWH|DAMD17|HU0001|N00014)-?\d{2}-?\d-?\d{4}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])[A-Z]{3,4}[ -]\d{7}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:IIR|PPO|SDR|CDA|RRP|QUE)[\s-]?\d{2}-\d{3}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])\d{2}[A-Z]{2,5}\d{5,8}(?![0-9])"),
+)
+
+
+#: A letter a PDF's text layer types for a digit, when beside one.
+_OCR_DIGIT_RE = re.compile(r"(?<=\d)[lO]|[lO](?=\d)")
+_OCR_DIGITS = MappingProxyType({"l": "1", "O": "0"})
+
+
+class GrantFact(NamedTuple):
+    """One grant number or dollar amount: as written, and as compared."""
+    text: str
+    key: str = ""                  # a grant number's identity; "" for an amount
+    # An amount's dollars, each way it can be read ("$123.000": 123 or
+    # 123,000); empty for a grant number.
+    readings: tuple[Decimal, ...] = ()
+    tolerance: Decimal = AMOUNT_ROUNDING_DOLLARS
+
+
+class FactHaystack(NamedTuple):
+    """Every grant number and amount a body of text holds, in any format."""
+    amounts: tuple[GrantFact, ...]
+    grant_keys: frozenset[str]
+    alnum: str
+
+
+class _EntryFacts(NamedTuple):
+    """One grant entry (every stage-4 entry sharing its first element) as
+    grant_facts reads it: its text, and the rendered tables matched to it."""
+    idx: object
+    code: str
+    text: str
+    tables: list[dict[str, str]]
+
+
+def _amounts(text: str, *, marked_only: bool) -> list[GrantFact]:
+    """The dollar amounts in ``text``; with ``marked_only``, only those
+    written with a currency mark, which is what makes a number an amount.
+    A number with three decimals and no multiplier is read both ways, since
+    a CV may write "$123.000" for $123,000."""
+    found = []
+    for match in _AMOUNT_RE.finditer(text):
+        if marked_only and not match["cur"]:
+            continue
+        frac = match["frac"] or ""
+        multiplier = Decimal(_AMOUNT_MULTIPLIERS[match["mult"].lower()] if match["mult"] else 1)
+        value = Decimal(re.sub(r"[,\s]", "", match["int"]) + (f".{frac}" if frac else "")) * multiplier
+        # "$1.5M" states the hundred thousands: anything within 50,000 is it.
+        tolerance = (Decimal(1).scaleb(-len(frac)) * multiplier / 2 if match["mult"]
+                     else AMOUNT_ROUNDING_DOLLARS)
+        dotted = len(frac) == THOUSANDS_DOT_DIGITS and not match["mult"]
+        found.append(GrantFact(match.group(0).strip(),
+                               readings=(value, value * 1000) if dotted else (value,),
+                               tolerance=tolerance))
+    return found
+
+
+def _grant_ids(text: str) -> list[GrantFact]:
+    """The grant numbers in ``text``, each format once per span. A
+    lowercase "l" or a capital "O" beside a digit is read as the digit, as a
+    PDF's text layer can type them ("U0l AI90l23" for U01 AI90123)."""
+    text = _OCR_DIGIT_RE.sub(lambda match: _OCR_DIGITS[match.group(0)], text)
+    found, taken = [], []
+    for match in _NIH_GRANT_ID_RE.finditer(text):
+        if match["activity"] or not match["sep"].isspace():
+            found.append(GrantFact(match.group(0).strip(),
+                                   key=f"{match['ic']}{int(match['serial'])}"))
+            taken.append(match.span())
+    for pattern in _OTHER_GRANT_ID_RES:
+        for match in pattern.finditer(text):
+            if not any(lo < match.end() and match.start() < hi for lo, hi in taken):
+                found.append(GrantFact(match.group(0).strip(), key=_alnum(match.group(0)).upper()))
+                taken.append(match.span())
+    return found
+
+
+def _fact_haystack(texts: Iterable[str]) -> FactHaystack:
+    """What ``texts`` hold. Read also upper-cased: a sub-point's text comes
+    lowercased (`SubpointText`)."""
+    text = "\n".join(texts)
+    return FactHaystack(tuple(_amounts(text, marked_only=False)),
+                        frozenset(fact.key for fact in [*_grant_ids(text), *_grant_ids(text.upper())]),
+                        _alnum(text))
+
+
+def _holds_fact(haystack: FactHaystack, fact: GrantFact) -> bool:
+    """Whether ``haystack`` holds ``fact``, however reformatted."""
+    if fact.readings:
+        return any(abs(mine - theirs) <= max(fact.tolerance, amount.tolerance)
+                   for amount in haystack.amounts
+                   for mine in fact.readings for theirs in amount.readings)
+    return fact.key in haystack.grant_keys or _alnum(fact.text) in haystack.alnum
+
+
+def _distinct(facts: Iterable[GrantFact]) -> list[GrantFact]:
+    """``facts`` with each amount and grant number once, first spelling kept."""
+    seen: set[object] = set()
+    kept = []
+    for fact in facts:
+        identity = fact.key or fact.readings
+        if identity not in seen:
+            seen.add(identity)
+            kept.append(fact)
+    return kept
+
+
+def _stated_facts(text: str) -> list[GrantFact]:
+    """The grant numbers and currency-marked amounts an entry's text states."""
+    return _distinct([*_grant_ids(text), *_amounts(text, marked_only=True)])
+
+
+def _rendered_facts(cells: Mapping[str, str]) -> list[GrantFact]:
+    """The grant numbers and amounts on a rendered grant table's
+    stage-4-filled rows. A costs row holds only amounts, so its numbers count
+    without a currency mark."""
+    facts: list[GrantFact] = []
+    for label, value in cells.items():
+        if label in _FACT_NUMBER_ROWS:
+            facts.extend(_grant_ids(value))
+        if label in _FACT_AMOUNT_ROWS:
+            facts.extend(_amounts(value, marked_only=False))
+    return _distinct(facts)
+
+
+def _listed(facts: list[GrantFact]) -> str:
+    shown = ", ".join(fact.text for fact in facts[:GRANT_FACTS_MAX_LISTED])
+    rest = len(facts) - GRANT_FACTS_MAX_LISTED
+    return f"{shown} and {rest} more" if rest > 0 else shown
+
+
+def _producer_score(fields: Mapping[str, object], cells: Mapping[str, str]) -> int:
+    """How many of an entry's amounts, grant numbers and years a rendered
+    grant table shows: the table came from the entry that scores highest."""
+    shown = _fact_haystack(cells.values())
+    duration = cells.get(DURATION_LABEL, "")
+    amounts = [fact for key in _PRODUCER_AMOUNT_KEYS
+               for fact in _amounts(str(fields.get(key) or ""), marked_only=False)]
+    numbers = _grant_ids(str(fields.get("grant_number") or ""))
+    years = [year for key in _PRODUCER_DATE_KEYS for year in _value_years(fields.get(key))]
+    return (sum(_holds_fact(shown, fact) for fact in [*amounts, *numbers])
+            + sum(year in duration or f"/{year[2:]}" in duration for year in years))
+
+
+def _table_producers(rendered: list[dict], tables: list[dict[str, str]]) -> list[dict | None]:
+    """The entry each rendered grant table was rendered from, or None. A
+    table's title names its candidates (`_grant_entries_by_title`), and of
+    those not yet taken, the one whose amounts, number and years the table
+    shows best (`_producer_score`): role_consistency's title-and-role match
+    (`_table_entries`) pairs same-titled renewals in stage-4 order, which on
+    the EBYSBC farm read four correct pairs as swapped values."""
+    by_title = _grant_entries_by_title({"entries": rendered})
+    taken: set[int] = set()
+    producers: list[dict | None] = []
+    for cells in tables:
+        candidates = by_title.get(norm(cells.get(PROJECT_TITLE_LABEL, "")), [])
+        free = [entry for entry in candidates if id(entry) not in taken] or candidates
+        producer = max(free, key=lambda entry: _producer_score(entry["extracted_fields"], cells),
+                       default=None)
+        if producer is not None:
+            taken.add(id(producer))
+        producers.append(producer)
+    return producers
+
+
+def _text_outside_grant_tables(blocks: list[tuple[str, str]] | None,
+                               grant_tables: set[int]) -> list[str]:
+    """Every rendered block but the grant tables: paragraphs (the Appendix
+    among them) and other tables. Block tables and `table_rows` both list the
+    document's top-level tables in body order, so the n-th table block is
+    table n."""
+    texts, table_at = [], 0
+    for kind, text in blocks or ():
+        if kind == "table":
+            if table_at not in grant_tables:
+                texts.append(text)
+            table_at += 1
+        else:
+            texts.append(text)
+    return texts
+
+
+def _grant_fact_entries(stage4: dict, table_rows: list[list[list[str]]]
+                        ) -> tuple[list[_EntryFacts], list[dict[str, str]]]:
+    """Each grant entry with the rendered tables it produced, and the grant
+    tables matched to no entry (`_table_producers`), over the entries stage 6
+    renders: stage 4's records fanned out, so a table rendered from one of an
+    entry's records is the entry's."""
+    entries = [entry for entry in stage4.get("entries", [])
+               if entry.get("taxonomy_code") in GRANT_CODES
+               and isinstance(entry.get("extracted_fields"), Mapping)]
+    tables = _grant_tables(table_rows)
+    rendered = fan_out_multi_record_entries(entries, FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+    owned: dict[object, list[dict[str, str]]] = {}
+    unmatched = []
+    for (_, cells), entry in zip(tables, _table_producers(rendered, [cells for _, cells in tables]),
+                                 strict=True):
+        if entry is not None:
+            owned.setdefault(entry.get("element_idx_start"), []).append(cells)
+        else:
+            unmatched.append(cells)
+    texts: dict[object, list[str]] = {}
+    codes: dict[object, str] = {}
+    for entry in entries:
+        idx = entry.get("element_idx_start")
+        texts.setdefault(idx, []).append(str(entry.get("text") or ""))
+        codes.setdefault(idx, str(entry.get("taxonomy_code")))
+    return ([_EntryFacts(idx, codes[idx], "\n".join(dict.fromkeys(parts)), owned.get(idx, []))
+             for idx, parts in texts.items()], unmatched)
+
+
+def _not_in_source_message(entry: _EntryFacts, foreign: list[GrantFact],
+                           sources: Mapping[object, FactHaystack]) -> str:
+    """value_not_in_source for ``entry``, naming the grant entries whose own
+    text states one of its foreign values."""
+    others = [idx for idx, haystack in sources.items()
+              if idx != entry.idx and any(_holds_fact(haystack, fact) for fact in foreign)]
+    named = ", ".join(f"entry {idx}" for idx in others[:GRANT_FACTS_MAX_LISTED])
+    origin = f"; it is in the text of {named}" if others else ""
+    return (f"entry {entry.idx} ({entry.code}): {GRANT_FACT_NOT_IN_SOURCE}: {_listed(foreign)} "
+            f"on its rendered grant table, which the entry's own text does not state{origin} (#1588)")
+
+
+def _missing_message(entry: _EntryFacts, missing: list[GrantFact]) -> str:
+    return (f"entry {entry.idx} ({entry.code}): {GRANT_FACT_MISSING}: {_listed(missing)}, stated "
+            f"in the entry's text, is neither on its rendered grant table nor anywhere outside "
+            f"the other grants' tables (#1588)")
+
+
+def _fact_anchor(entry: _EntryFacts) -> list[str]:
+    """A finding's evidence: the title of the entry's first rendered table,
+    which the review copy comments on, else the entry's text."""
+    title = entry.tables[0].get(PROJECT_TITLE_LABEL) if entry.tables else None
+    return [title or entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def lint_grant_facts(stage4: dict, table_rows: list[list[list[str]]],
+                     blocks: list[tuple[str, str]] | None = None,
+                     subpoints: SubpointText | None = None) -> list[dict]:
+    """Grant numbers and dollar amounts, source against render (#1588): per
+    grant entry, a value_not_in_source finding for the values its rendered
+    table shows that its text lacks, and a value_missing finding for the
+    values its text states that the reader sees nowhere (see the shapes
+    above). `blocks` and `subpoints` widen where a stated value may still
+    reach the reader; without them, only its table counts. INFO."""
+    entries, unmatched = _grant_fact_entries(stage4, table_rows)
+    grant_tables = {at for at, _ in _grant_tables(table_rows)}
+    outside = _fact_haystack([
+        *_text_outside_grant_tables(blocks, grant_tables),
+        *(value for cells in unmatched for value in cells.values()),
+        subpoints.text if subpoints else ""])
+    sources = {entry.idx: _fact_haystack([entry.text]) for entry in entries}
+    findings = []
+    for entry in entries:
+        foreign = _distinct(fact for cells in entry.tables for fact in _rendered_facts(cells)
+                            if not _holds_fact(sources[entry.idx], fact))
+        if foreign:
+            findings.append(_finding("grant_facts", "INFO",
+                                     _not_in_source_message(entry, foreign, sources),
+                                     _fact_anchor(entry)))
+        shown = _fact_haystack(value for cells in entry.tables for value in cells.values())
+        missing = [fact for fact in _stated_facts(entry.text)
+                   if not _holds_fact(shown, fact) and not _holds_fact(outside, fact)]
+        if missing:
+            findings.append(_finding("grant_facts", "INFO", _missing_message(entry, missing),
+                                     _fact_anchor(entry)))
+    return findings
 
 
 # --- orphaned_fragments ------------------------------------------------------

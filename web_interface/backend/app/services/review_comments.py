@@ -22,6 +22,8 @@ is commented whatever its severity, but only on the text it quotes, never on
 a heading or as a review note. It is a possibility to check, not a problem.
 The other, source_line_coverage (#1588), quotes source text the document may
 have lost, so it has no place on the page: each quoted line is a review note.
+grant_facts (#1588) takes citation_grounding's path: a comment on the grant's
+title in its table, whatever its severity.
 
 A finding whose fix is certain is not a comment but the fix itself, as a
 Word tracked change: accepting it gives the corrected text, rejecting it the
@@ -177,6 +179,9 @@ REVIEW_FLAGS = {
     "source_line_coverage": ("This line from your CV may be missing from this document, or only "
                              "partly here. Check it and add it where it belongs."),
     "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
+    "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
+                    "your CV gives is missing, or one shown here is not in this grant's entry. "
+                    "Check it against the CV."),
 }
 #: The certain fix for owner_pi_role_empty (Repair tiers, doctor/PRECISION.md):
 #: the owner named as PI has the PI role. Inserted as a tracked change.

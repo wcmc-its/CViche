@@ -535,6 +535,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_dedup_drops,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_grant_facts,
     lint_implausible_year,
     lint_invented_records,
     lint_multi_record_coverage,
@@ -788,6 +789,7 @@ KNOWN_LINTS = (
     "shattered_prose",
     "source_line_coverage",
     "appointment_title_overlong",
+    "grant_facts",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1648,6 +1650,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
              optional=("deleted_blocks", "stage_1a", "stage_3b")),
     LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
+    # `blocks` and `subpoints` read the same docx as `table_rows`, as for
+    # offschema_fields: where else a stated grant value reaches the reader.
+    LintSpec("grant_facts", lint_grant_facts, ("stage_4", "table_rows"),
+             optional=("blocks", "subpoints")),
 )
 
 #: The views read from the stage-6 docx.

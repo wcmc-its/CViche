@@ -50,6 +50,9 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEGREE_YEAR_LEAD,
     FIELD_EVIDENCE_MAX_VALUES,
     FIELD_EVIDENCE_VALUE_CHARS,
+    GRANT_FACT_MISSING,
+    GRANT_FACT_NOT_IN_SOURCE,
+    GRANT_FACTS_MAX_LISTED,
     GRANT_ORPHAN_MIN_WORDS,
     GRANT_SOURCE_MIN_CHARS,
     GRANT_TITLE_MIN_CHARS,
@@ -84,6 +87,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_orphaned_fragments,
     lint_record_boundary,
     lint_role_consistency,
+    lint_grant_facts,
     owner_pi_role_empty_tables,
     lint_span_count,
     lint_under_extraction,
@@ -92,6 +96,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL,
+    SubpointText,
     _haystacks,
     _piece_in_template,
     _template_haystack,
@@ -100,8 +105,12 @@ from unified_pipeline.doctor.shared import (  # noqa: E402
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    ANNUAL_COSTS_LABEL,
+    AWARD_SOURCE_LABEL,
+    DURATION_LABEL,
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
+    TOTAL_AWARD_LABEL,
     YOUR_ROLE_LABEL,
 )
 
@@ -4894,3 +4903,164 @@ def test_appointment_title_overlong_judges_a_role_list_by_its_longest_role():
 ])
 def test_appointment_title_overlong_silent(entry):
     assert _overlong(entry) == []
+
+
+# grant_facts (#1588, #1575): grant numbers and dollar amounts, source against
+# the rendered grant table. Every name, title and number below is made up.
+
+def _gf_entry(idx, text, title, code="M2B", **fields):
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+            "extracted_fields": {"title": title, **fields}}
+
+
+def _gf_table(title, source="", annual="", total="", duration="", goals=None):
+    """A rendered grant table's raw rows, as `docx_table_rows` reads them."""
+    rows = [[AWARD_SOURCE_LABEL, source], [PROJECT_TITLE_LABEL, title],
+            [ANNUAL_COSTS_LABEL, annual], *([[TOTAL_AWARD_LABEL, total]] if total else []),
+            [DURATION_LABEL, duration], [PI_NAME_LABEL, ""], [YOUR_ROLE_LABEL, "PI"]]
+    return rows + ([["Major project goals:", goals]] if goals else [])
+
+
+def _gf_fact_table(shown):
+    """A table showing ``shown`` where stage 6 puts it: an amount in the
+    costs row, a grant number in the Award Source row."""
+    if re.search(r"[A-Z]{2}", shown):
+        return _gf_table("Glimmer repair", source=f"NIH ({shown})")
+    return _gf_table("Glimmer repair", total=shown)
+
+
+def _gf_shapes(findings):
+    return [(f["lint"], f["severity"], re.search(r"\): (\w+):", f["message"]).group(1),
+             f["message"].split()[1]) for f in findings]
+
+
+def test_grant_facts_reports_the_1575_copy_in_both_directions():
+    """UVZNIC 592's shape: one grant's table shows another grant's amount, and
+    its own amount appears nowhere."""
+    own = _gf_entry(10, "Glimmer repair, R01 HL900001, 2017-2023, $318,500/year", "Glimmer repair",
+                    grant_number="R01 HL900001", total_funding="$27,000/year")
+    other = _gf_entry(20, "Widget trial, Example Foundation, 1997-1999, $27,000/year", "Widget trial",
+                      total_funding="$27,000/year")
+    tables = [_gf_table("Glimmer repair", "NIH (R01 HL900001)", total="$27,000/year"),
+              _gf_table("Widget trial", "Example Foundation", total="$27,000/year")]
+    findings = lint_grant_facts({"entries": [own, other]}, tables)
+    assert _gf_shapes(findings) == [("grant_facts", "INFO", GRANT_FACT_NOT_IN_SOURCE, "10"),
+                                    ("grant_facts", "INFO", GRANT_FACT_MISSING, "10")]
+    assert "$27,000" in findings[0]["message"] and "text of entry 20" in findings[0]["message"]
+    assert "$318,500" in findings[1]["message"]
+    assert findings[0]["evidence"] == ["Glimmer repair"]  # the review copy's anchor
+
+
+def test_grant_facts_names_no_origin_for_a_value_no_entry_states():
+    entry = _gf_entry(10, "Glimmer repair, 2019-2024", "Glimmer repair", total_funding="$42,000")
+    [finding] = lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair", total="$42,000")])
+    assert GRANT_FACT_NOT_IN_SOURCE in finding["message"] and "text of" not in finding["message"]
+
+
+@pytest.mark.parametrize("stated, shown", [
+    ("$1.5M", "$1,500,000"),                    # a multiplier, within half its last digit
+    ("$1.5 million", "$1,520,000"),
+    ("$250K", "$250,000"),
+    ("$1,500,000", "1.5M"),
+    ("USD 12,345", "$12,345"),
+    ("$7,000,001.00", "$7,000,001"),            # cents rounded away
+    ("$12, 345", "$12,345"),                    # a PDF conversion's spaced thousands
+    ("$123.000", "$123,000"),                   # a dot for the thousands
+    ("5R01 CA012345-01A1", "R01-CA-12345"),     # NIH: institute and serial
+    ("NIH-R01 #NS90002-01", "R01 NS090002"),
+    ("HL-90003", "R01 HL090003"),
+    ("NIH U0l AI90l23", "U01 AI90123"),         # a PDF text layer's l for 1
+    ("W81XWH-99-1-0001", "W81XWH9910001"),      # DoD
+    ("DMS-9900001", "DMS 9900001"),             # NSF
+    ("NCT09900001", "NCT 09900001"),
+])
+def test_grant_facts_matches_a_reformatted_value(stated, shown):
+    entry = _gf_entry(10, f"Glimmer repair, 2019-2024, {stated}", "Glimmer repair")
+    assert lint_grant_facts({"entries": [entry]}, [_gf_fact_table(shown)]) == []
+
+
+@pytest.mark.parametrize("stated, shown", [
+    ("$1.5M", "$1,600,000"),                    # outside half the stated digit
+    ("$318,500", "$318,000"),
+    ("R01 CA012345", "R01 CA012346"),
+    ("R01 CA012345", "R01 HL012345"),
+])
+def test_grant_facts_tells_a_different_value_apart(stated, shown):
+    entry = _gf_entry(10, f"Glimmer repair, 2019-2024, {stated}", "Glimmer repair")
+    findings = lint_grant_facts({"entries": [entry]}, [_gf_fact_table(shown)])
+    shapes = [shape for _, _, shape, _ in _gf_shapes(findings)]
+    assert shapes == [GRANT_FACT_NOT_IN_SOURCE, GRANT_FACT_MISSING]
+
+
+@pytest.mark.parametrize("text", [
+    "Glimmer repair, New York, NY 10001, 2019-2024",   # a ZIP code is no grant number
+    "Glimmer repair, PI\t9900002, 2019",               # nor a role before a bare number
+    "Glimmer repair, 120 patients enrolled, 2019",      # a number without "$" is no amount
+    "Glimmer repair, R01, 2019",                        # an activity code alone
+])
+def test_grant_facts_reads_no_fact_where_none_is_stated(text):
+    entry = _gf_entry(10, text, "Glimmer repair")
+    assert lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")]) == []
+
+
+def test_grant_facts_counts_a_value_outside_the_grant_tables_as_shown():
+    """The Appendix, a note or a sub-point still gets a stated value to the
+    reader; another grant's table does not."""
+    entry = _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair")
+    other = _gf_entry(20, "Widget trial", "Widget trial")
+    tables = [_gf_table("Glimmer repair"), _gf_table("Widget trial", total="$55,000")]
+    blocks = [("table", "Glimmer repair"), ("table", "Widget trial $55,000")]
+    missing = lint_grant_facts({"entries": [entry, other]}, tables, blocks)
+    assert [shape for _, _, shape, idx in _gf_shapes(missing) if idx == "10"] == [GRANT_FACT_MISSING]
+    in_appendix = [*blocks, ("p", "T. APPENDIX"), ("p", "• Glimmer repair, $55,000")]
+    assert not [f for f in lint_grant_facts({"entries": [entry, other]}, tables, in_appendix)
+                if f["message"].startswith("entry 10")]
+    subpoints = SubpointText("glimmerrepair,$55,000", ())
+    assert not [f for f in lint_grant_facts({"entries": [entry, other]}, tables, blocks, subpoints)
+                if f["message"].startswith("entry 10")]
+
+
+def test_grant_facts_matches_same_titled_renewals_by_their_values():
+    """Stage 6 renders a renewal pair newest first: a title-only match pairs
+    them in stage-4 order and reads each as carrying the other's amount
+    (EBYSBC farm, four such pairs)."""
+    first = _gf_entry(10, "Glimmer repair, 1993-1994, $41,000", "Glimmer repair",
+                      total_funding="$41,000", start_date="1993", end_date="1994")
+    renewal = _gf_entry(20, "Glimmer repair, 1995-1996, $43,500.25", "Glimmer repair",
+                        total_funding="$43,500.25", start_date="1995", end_date="1996")
+    tables = [_gf_table("Glimmer repair", total="$43,500.25", duration="11/95-10/96"),
+              _gf_table("Glimmer repair", total="$41,000", duration="11/93-10/94")]
+    assert lint_grant_facts({"entries": [first, renewal]}, tables) == []
+
+
+def test_grant_facts_reads_a_goals_row_only_as_where_a_value_reaches_the_reader():
+    """A goals row can carry another entry's prose (#958), so its amounts are
+    not judged against the entry; a stated amount in it still counts as shown."""
+    entry = _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair")
+    table = _gf_table("Glimmer repair", goals="Pilot funds of $55,000 and a $9,000 supplement")
+    assert lint_grant_facts({"entries": [entry]}, [table]) == []
+
+
+def test_grant_facts_lists_a_few_values_and_counts_the_rest():
+    amounts = [f"${n},000" for n in range(11, 11 + GRANT_FACTS_MAX_LISTED + 2)]
+    entry = _gf_entry(10, "Glimmer repair, " + ", ".join(amounts), "Glimmer repair")
+    [finding] = lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")])
+    assert f"{amounts[GRANT_FACTS_MAX_LISTED - 1]} and 2 more" in finding["message"]
+    assert amounts[GRANT_FACTS_MAX_LISTED] not in finding["message"]
+
+
+def test_grant_facts_judges_an_unrendered_grant_against_the_rest_of_the_document():
+    entry = _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair")
+    [finding] = lint_grant_facts({"entries": [entry]}, [], [("p", "Glimmer repair")])
+    assert GRANT_FACT_MISSING in finding["message"]
+    assert finding["evidence"] == ["Glimmer repair, $55,000"]
+    assert lint_grant_facts({"entries": [entry]}, [], [("p", "Glimmer repair, $55,000")]) == []
+
+
+@pytest.mark.parametrize("entry", [
+    _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair", code="H"),   # not a grant
+    {"element_idx_start": 10, "taxonomy_code": "M2B", "text": "Glimmer repair, $55,000",
+     "extracted_fields": "not an object"},
+])
+def test_grant_facts_ignores_what_is_not_a_grant_entry(entry):
+    assert lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")]) == []

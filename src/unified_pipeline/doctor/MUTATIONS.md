@@ -28,7 +28,7 @@ severity, that the clean run does not. Cells are `COVERAGE.md`'s matrix cells.
 | mutation | cell | injected at | defect | caught by |
 |---|---|---|---|---|
 | `drop_publication` | missing / record | stage_6 | stage 6 renders two of the three articles | `source_line_coverage` (INFO) |
-| `drop_grant` | missing / record | stage_6 | stage 6 renders one of the two grants | `source_line_coverage` (INFO) |
+| `drop_grant` | missing / record | stage_6 | stage 6 renders one of the two grants | `grant_facts` (INFO), `source_line_coverage` (INFO) |
 | `drop_honors_section` | missing / section | stage_6 | stage 6 renders no Honors | `section_lost` (WARN), `source_line_coverage` (INFO) |
 | `drop_appointment_entry` | missing / entry | stage_3b | stage 3b loses one appointment entry stage 2 found | missed |
 | `shift_publication_year` | wrong value / field | stage_4 | an article's year is one later than the CV's | missed |

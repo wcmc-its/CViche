@@ -904,7 +904,7 @@ LINT_FIX_MINUTES = {
     ), FIX_MINUTES_MISPLACED),
     **dict.fromkeys((
         "appointment_title_overlong", "citation_field_dropped", "citation_grounding", "date_cell_shape",
-        "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "grant_boundary",
+        "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "grant_boundary", "grant_facts",
         "implausible_year", "owner_missing_from_citation", "pubmed_title_truncated",
         "record_boundary", "role_consistency", "shattered_prose", "span_count",
         "split_child_unsourced", "stage4_group_failures", "summary_unsupported_claim",

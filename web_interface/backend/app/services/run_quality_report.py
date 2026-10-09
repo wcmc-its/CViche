@@ -540,7 +540,12 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: held out on YUYVIG, 37% of a hand-checked sample wholly missing and 67%
 #: missing at least a role or description (PRECISION.md, YUY-SLC), under the
 #: 50% bar of #1625, so it is a review-notes item, never a run-page row.
-REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage"})
+#: grant_facts (#1588) is a grant number or amount a grant table shows that
+#: its CV entry lacks, or one the entry states that the document lacks: new,
+#: and measured on four held-out CVs only (PRECISION.md, GF-1), so it is a
+#: comment on the grant's table, never a run-page row, until a run-page
+#: wording is approved.
+REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage", "grant_facts"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 

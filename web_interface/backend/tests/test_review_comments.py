@@ -19,7 +19,10 @@ from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
 from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
-from unified_pipeline.doctor.lints.extraction import lint_role_consistency  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    lint_grant_facts,
+    lint_role_consistency,
+)
 from unified_pipeline.doctor.precision import LintPrecision  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     read_docx_blocks,
@@ -577,6 +580,21 @@ def _with_grant_tables(tmp_path: Path, *tables: tuple[str, str]) -> Path:
             row.cells[0].text, row.cells[1].text = label, value
     doc.save(str(clean))
     return clean
+
+
+def test_a_grant_facts_finding_is_a_comment_on_its_grant_title_though_info(tmp_path):
+    """#1588: a grant amount the CV entry states and the table lacks is a
+    possibility, commented on the grant's title in its table, whatever its
+    severity, and never a review note."""
+    clean = _with_grant_tables(tmp_path, ("", "PI"))
+    stage4 = {"entries": [{"element_idx_start": 7, "taxonomy_code": "M2B",
+                           "text": f"{GRANT_TITLE}, Example Foundation, $40,000",
+                           "extracted_fields": {"title": GRANT_TITLE}}]}
+    findings = lint_grant_facts(stage4, read_docx_table_rows(str(clean)))
+    out, n = rc.write_review_docx(clean, _report(*findings))
+    assert [f["severity"] for f in findings] == ["INFO"] and n == 1
+    assert _comments(out) == [(_flag("grant_facts"), GRANT_TITLE)]
+    assert _notes(out) == []
 
 
 def _role_findings(clean: Path, stage4: dict) -> list[dict]:
