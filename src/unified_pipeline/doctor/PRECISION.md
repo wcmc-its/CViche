@@ -274,6 +274,10 @@ Held out, the matched hits are a lower bound and the unmatched sample is 37% tru
 
 Ceilings: a fact inside a line (a number, a date, a grant amount) is not read; a record reworded past half its word pairs reads as lost; a name list with a list number reads as a line; a line found anywhere in the document counts as rendered, even in the wrong section.
 
+| YUY-AT | 2026-10-08 | `fix/1205-appointment-title-guard` on origin/dev `8e29dd24`, against `8e29dd24`, each over its own fresh render (`scripts/render_gate.py`; `scripts/doctor_gate.py` per farm, `--source-dir` for YUYVIG only) | 132: YUYVIG 39, the EBYSBC/s7ab/pilot farm 63, NDMRSO 30 | YUYVIG's held-out labels (`_labels_yuyvig_v2`); every hit hand-read | #1205 |
+
+YUY-AT adds `appointment_title_overlong`: a D1-D3 `title` whose longest `;`-separated part is over 150 characters (the owner's limit on #1205, 2026-10-08). It changes no other lint's findings on any of the 132 runs, and adds 3 WARN findings on 2 of them, all duty prose in the role field on reading the stage-4 record: YUYVIG DYLJXC 661 and 668 (D3, the two titles #1205 names) and HXBPCT 54 (D3, a consulting role followed by a participle clause listing its duties). No label carries these entries, so matched is 0. The `;` rule is the one judgement fitted on these runs: EBYSBC QNZADH 0, 35 and 39 are 356, 168 and 154 characters but are lists of concurrent roles, each under 100, and the lint skips them. Over 1,763 D1-D3 titles on six farms (these three plus X6, EOAHMI and the 66-CV local farm), only DYLJXC 661/668 carry a duty clause stage 6's split finds, and HXBPCT 54 is the one hit stage 6 renders whole: its duties open with a participle, which the split does not look for.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -304,6 +308,7 @@ Ceilings: a fact inside a line (a number, a date, a grant amount) is not read; a
 | `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |
 | `citation_grounding` | 123 | 0 | none | 62 / 123 hand-checked (50%): 41 partial, 20 false; held out 42 / 91 (46%) | 1 / 20 on labelled runs (5%) | 1 | YUY-CG |
 | `shattered_prose` | 15 | 15 | none | 15 / 15 hand-checked (100%), before and after the stage-6 fold | 0 / 12 on labelled runs (no label carries an entry index) | 0 by index, 2 by hand | YUY-SP |
+| `appointment_title_overlong` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (no label carries these entries) | 0 by index | YUY-AT |
 | `source_line_coverage` | 613 | 0 | none | 27 / 60 hand-checked (45%): held out 11 / 30, in-sample 16 / 30, unmatched hits only; 43 / 60 with the partials | 161 / 600 on labelled runs (27%): held out 31 / 248 | 110: held out 25, in-sample 85 | YUY-SLC |
 | `summary_unsupported_claim` | 11 | 11 | none | 14 / 14 hand-checked (100%) | 11 / 11 by sentence (100%) | 11 | OIE-SUM |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |

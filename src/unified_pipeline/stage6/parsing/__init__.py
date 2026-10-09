@@ -41,4 +41,5 @@ from .text import (  # noqa: F401
     _refold_shattered,
     _strip_appended_initials,
     is_membership_date_part,
+    split_appointment_title,
 )
