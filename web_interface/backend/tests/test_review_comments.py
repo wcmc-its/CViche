@@ -16,6 +16,7 @@ from docx.oxml.ns import qn  # noqa: E402
 from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import lint_role_consistency  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     read_docx_blocks,
     read_docx_table_rows,
@@ -392,17 +393,24 @@ def _stage4(*pi_names):
 
 
 def _with_grant_tables(tmp_path: Path, *tables: tuple[str, str]) -> Path:
-    """The clean document with a rendered grant table per (PI cell, role cell)."""
+    """The clean document with a rendered grant table per (PI cell, role
+    cell); a role cell of None leaves the table without a "Your role:" row."""
     clean = _clean_docx(tmp_path)
     doc = Document(str(clean))
     for pi_name, role in tables:
         rows = [("Award Source:", "Example Foundation"), (PROJECT_TITLE_LABEL, GRANT_TITLE),
-                (PI_NAME_LABEL, pi_name), (YOUR_ROLE_LABEL, role), ("Your percent (%) effort:", "")]
+                (PI_NAME_LABEL, pi_name), *([(YOUR_ROLE_LABEL, role)] if role is not None else []),
+                ("Your percent (%) effort:", "")]
         table = doc.add_table(rows=len(rows), cols=2)
         for row, (label, value) in zip(table.rows, rows, strict=True):
             row.cells[0].text, row.cells[1].text = label, value
     doc.save(str(clean))
     return clean
+
+
+def _role_findings(clean: Path, stage4: dict) -> list[dict]:
+    """What the doctor reports for ``clean``: role_consistency over its tables."""
+    return lint_role_consistency(stage4, read_docx_table_rows(str(clean)))
 
 
 def _role_cells(path: Path) -> list:
@@ -442,8 +450,9 @@ def test_only_the_tables_the_shape_reports_get_the_fix(tmp_path):
     are left as delivered."""
     clean = _with_grant_tables(tmp_path, ("Other Person", ""), ("Ada Testowner", "Co-PI"),
                                ("Ada Testowner", ""))
-    out, n = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING),
-                                  _stage4("Other Person", "Testowner", "Testowner"))
+    stage4 = _stage4("Other Person", "Testowner", "Testowner")
+    (finding,) = [f for f in _role_findings(clean, stage4) if "(owner_pi_role_empty," in f["message"]]
+    out, n = rc.write_review_docx(clean, _report(finding), stage4)
     assert n == 1
     assert [_reviewed(c, accept=True) for c in _role_cells(out)] == ["", "Co-PI", "PI"]
 
@@ -454,6 +463,19 @@ def test_each_fix_is_its_own_revision(tmp_path):
     out, n = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING), _stage4("Testowner", "Testowner"))
     ids = [ins.get(qn("w:id")) for cell in _role_cells(out) for ins in cell.iter(qn("w:ins"))]
     assert n == 2 and ids == ["91", "92"]
+
+
+def test_a_reported_table_the_fix_cannot_reach_keeps_its_comment(tmp_path):
+    """A table with no "Your role:" row shows the shape too, but has no cell
+    for the fix: its finding stays a comment; the fixed table's goes."""
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""), ("Ada Testowner", None))
+    stage4 = _stage4("Testowner", "Testowner")
+    findings = _role_findings(clean, stage4)
+    assert [f["message"][:7] for f in findings] == ["entry 5", "entry 6"]
+    out, n = rc.write_review_docx(clean, _report(*findings), stage4)
+    assert n == 2
+    assert [_reviewed(c, accept=True) for c in _role_cells(out)] == ["PI"]
+    assert _comments(out) == [(_flag("role_consistency"), GRANT_TITLE)]
 
 
 def test_without_the_stage4_artifact_the_finding_stays_a_comment(tmp_path):

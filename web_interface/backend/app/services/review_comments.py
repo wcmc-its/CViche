@@ -62,8 +62,8 @@ from unified_pipeline.stage6.sections.bibliography import (  # noqa: E402
     TRACKED_INSERTION_FONT_NAME,
     TRACKED_INSERTION_FONT_SIZE_HALF_POINTS,
 )
-from unified_pipeline.stage6.sections.research_support import (
-    YOUR_ROLE_LABEL,  # noqa: E402
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    YOUR_ROLE_LABEL,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -428,24 +428,29 @@ def _tracked_insertion(text: str, revision_id: int) -> BaseOxmlElement:
     return ins
 
 
-def _suggest_owner_pi_role(doc: Document, stage4: object) -> int:
+def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]]:
     """Insert OWNER_PI_ROLE_FIX, tracked, in the empty "Your role:" cell of
     every grant table role_consistency reports as owner_pi_role_empty; return
-    how many. Reads the tables before the review notes add theirs."""
+    how many, and the messages of the findings now fixed on every table they
+    report. A table with no "Your role:" row is skipped, and its finding
+    stays a comment. Reads the tables before the review notes add theirs."""
     if not isinstance(stage4, dict):
-        return 0
+        return 0, set()
     tables = doc.tables
     revision_id = _next_revision_id(doc)
     inserted = 0
-    for at in owner_pi_role_empty_tables(stage4, docx_table_rows(doc)):
+    unfixed: set[str] = set()
+    reported = owner_pi_role_empty_tables(stage4, docx_table_rows(doc))
+    for at, message in reported.items():
         cell = next((row.cells[1] for row in tables[at].rows
                      if len(row.cells) > 1 and row.cells[0].text.strip() == YOUR_ROLE_LABEL), None)
         if cell is None:
+            unfixed.add(message)
             continue
         cell.paragraphs[0]._p.append(_tracked_insertion(OWNER_PI_ROLE_FIX, revision_id))
         revision_id += 1
         inserted += 1
-    return inserted
+    return inserted, set(reported.values()) - unfixed
 
 
 def _add_review_notes(doc: Document, notes: list[Note]) -> None:
@@ -495,10 +500,11 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     if not paragraphs:
         return None
     surfaces = (paragraphs, _rows(doc))
-    fixed = (_suggest_owner_pi_role(doc, stage4)
-             if any(_OWNER_PI_ROLE_TOKEN in str(f.get("message")) for f in findings) else 0)
-    if fixed:  # the fix replaces the comment on every table the shape reports
-        findings = [f for f in findings if _OWNER_PI_ROLE_TOKEN not in str(f.get("message"))]
+    fixed, fixed_messages = (_suggest_owner_pi_role(doc, stage4)
+                             if any(_OWNER_PI_ROLE_TOKEN in str(f.get("message")) for f in findings)
+                             else (0, set()))
+    # The fix replaces the comment only where it was written on every table.
+    findings = [f for f in findings if f.get("message") not in fixed_messages]
     flags: list[Flag] = []
     notes: list[Note] = []
     per_lint: dict[str, int] = {}

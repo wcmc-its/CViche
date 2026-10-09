@@ -239,6 +239,36 @@ def test_the_review_copy_reads_the_runs_stage4_artifact_for_the_owner_role_fix(m
     assert ["".join(t.text for t in ins.iter(qn("w:t"))) for ins in role_cell.iter(qn("w:ins"))] == ["PI"]
 
 
+def test_a_corrupt_stage4_artifact_leaves_the_review_copy_comments_only(monkeypatch, tmp_path, db, caplog):
+    """#1591: a stage-4 JSON that does not parse costs only the tracked fix;
+    the review copy is still written, with the finding as a comment."""
+    from docx import Document
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    payload = {**_doctor_payload(), "findings": [{
+        "lint": "role_consistency", "severity": "WARN", "status": "ran", "evidence": ["Example Project"],
+        "message": "entry 5: 'Name of Principal Investigator:' names the CV owner, and 'Your role:' "
+                   "is empty (owner_pi_role_empty, #1403)"}]}
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    clean = _stage6_docx(tmp_path, "DOC_BAD4")
+    doc = Document(str(clean))
+    doc.add_paragraph("Example Project")
+    doc.save(str(clean))
+    stage4 = tmp_path / "outputs" / "stage_4_field_extraction" / "DOC_BAD4_fields.json"
+    stage4.parent.mkdir(parents=True)
+    stage4.write_text('{"cv_owner": ')
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_BAD4")
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda files: None)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(o._run_doctor())
+
+    review = Document(str(clean.with_name("DOC_BAD4_wcm_review.docx")))
+    assert len(list(review.comments)) == 1
+    assert any("Stage-4 JSON unreadable" in r.message for r in caplog.records)
+    assert not any("Review-comment docx failed" in r.message for r in caplog.records)
+
+
 def test_an_unreadable_document_still_publishes_the_report(monkeypatch, tmp_path, db, caplog):
     from app.models import Step
 

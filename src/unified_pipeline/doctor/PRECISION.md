@@ -418,7 +418,7 @@ What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's fi
 
 **Built today:**
 
-- The certain fix for `owner_pi_role_empty`. `review_comments._suggest_owner_pi_role` inserts "PI" in the empty "Your role:" cell of every grant table the lint reports (`doctor/lints/extraction.owner_pi_role_empty_tables`), and the finding gets no comment.
+- The certain fix for `owner_pi_role_empty`. `review_comments._suggest_owner_pi_role` inserts "PI" in the empty "Your role:" cell of every grant table the lint reports (`doctor/lints/extraction.owner_pi_role_empty_tables`), and a finding fixed on every table it reports gets no comment. A reported table with no "Your role:" row is left as delivered, and its finding stays a comment.
 - Separately, `protected_data_in_output` is auto-applied upstream: stage 6's #1389 repair (`CVICHE_RUN_REPAIR=1`) withholds the value and records it in `<uid>_repairs.json`.
 
 **Not built:**

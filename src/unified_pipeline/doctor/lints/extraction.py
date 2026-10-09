@@ -3927,24 +3927,33 @@ def _table_role_hits(stage4: dict, table_rows: list[list[list[str]]],
     return hits
 
 
+def _table_role_groups(hits: list[_TableRoleHit]) -> dict[tuple[object, tuple[str, str], str],
+                                                          list[_TableRoleHit]]:
+    """The hits one finding reports: those whose tables still resolve to one
+    entry and show one shape (#1590), keyed by entry index, shape and title."""
+    groups: dict[tuple[object, tuple[str, str], str], list[_TableRoleHit]] = {}
+    for hit in hits:
+        groups.setdefault((hit.idx, hit.shape, hit.title), []).append(hit)
+    return groups
+
+
+def _table_role_message(idx: object, shape: tuple[str, str], tables_hit: int) -> str:
+    """What the finding for one group of `_table_role_groups` says."""
+    where = f"entry {idx}" if idx is not None else "a grant table"
+    count = f" in {tables_hit} grant tables" if tables_hit > 1 else ""
+    return f"{where}: {shape[1]}{count} ({shape[0]}, #1403)"
+
+
 def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
                          owner: frozenset[str], reported: set[object]) -> list[dict]:
     """A finding per grant entry whose rendered table shows a role shape.
     Tables that still resolve to one entry and show one shape give one
     finding that counts them (#1590)."""
-    hits: dict[tuple[object, tuple[str, str], str], int] = {}
-    for hit in _table_role_hits(stage4, table_rows, owner, reported):
-        key = (hit.idx, hit.shape, hit.title)
-        hits[key] = hits.get(key, 0) + 1
-    findings = []
-    for (idx, shape, title), tables_hit in hits.items():
-        where = f"entry {idx}" if idx is not None else "a grant table"
-        count = f" in {tables_hit} grant tables" if tables_hit > 1 else ""
-        findings.append(_finding(
-            "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-            f"{where}: {shape[1]}{count} ({shape[0]}, #1403)",
-            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
-    return findings
+    groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
+    return [_finding("role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+                     _table_role_message(idx, shape, len(group)),
+                     [title[:FIELD_EVIDENCE_VALUE_CHARS]])
+            for (idx, shape, title), group in groups.items()]
 
 
 def lint_role_consistency(stage4: dict,
@@ -3984,15 +3993,19 @@ def _entry_role_shapes(stage4: dict, owner: frozenset[str]) -> list[tuple[dict, 
     return shaped
 
 
-def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> list[int]:
-    """The indices, among the document's top-level tables, of the grant
-    tables lint_role_consistency reports as owner_pi_role_empty: the PI cell
-    names the CV owner and "Your role:" is empty. The review copy suggests
-    "PI" there as a tracked insertion (#1591): the shape's certain fix."""
+def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> dict[int, str]:
+    """The grant tables lint_role_consistency reports as owner_pi_role_empty
+    (the PI cell names the CV owner and "Your role:" is empty), by their
+    index among the document's top-level tables, each with the message of
+    the finding that reports it. The review copy suggests "PI" there as a
+    tracked insertion (#1591): the shape's certain fix. A finding can
+    report several tables, so its comment goes only once all are fixed."""
     owner = _owner_surname_words(stage4)
     reported = {entry.get("element_idx_start") for entry, _ in _entry_role_shapes(stage4, owner)}
-    return sorted({hit.table for hit in _table_role_hits(stage4, table_rows, owner, reported)
-                   if hit.shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY})
+    groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
+    return dict(sorted((hit.table, _table_role_message(idx, shape, len(group)))
+                       for (idx, shape, _), group in groups.items()
+                       if shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY for hit in group))
 
 
 # --- orphaned_fragments ------------------------------------------------------

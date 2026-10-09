@@ -1334,10 +1334,17 @@ class PipelineOrchestrator:
         clean = paths['6']
         if not clean.exists():
             return None
+        # The stage-4 artifact names the CV owner, which the tracked
+        # owner-role fix needs (#1591); without it, or with one that does
+        # not parse, that finding is a comment.
+        stage4 = None
+        if paths['4'].exists():
+            try:
+                stage4 = json.loads(paths['4'].read_text(encoding='utf-8'))
+            except ValueError:
+                logger.warning("Stage-4 JSON unreadable for run %s; review copy without its fixes",
+                               self.run_id, exc_info=True)
         try:
-            # The stage-4 artifact names the CV owner, which the tracked
-            # owner-role fix needs (#1591); without it that finding is a comment.
-            stage4 = json.loads(paths['4'].read_text(encoding='utf-8')) if paths['4'].exists() else None
             written = write_review_docx(clean, payload, stage4)
         except REVIEW_DOCX_ERRORS:
             logger.warning("Review-comment docx failed for run %s", self.run_id, exc_info=True)

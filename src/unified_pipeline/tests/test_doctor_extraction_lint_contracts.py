@@ -4586,9 +4586,12 @@ def test_owner_pi_role_empty_tables_names_the_tables_the_shape_reports():
               _grant_table("", "Ada Testowner", title="Second Project"),
               _grant_table("PI", "", title="Second Project")]  # pi_cell_empty: another shape
     stage4 = {"cv_owner": _ROLE_OWNER, "entries": entries}
-    assert owner_pi_role_empty_tables(stage4, tables) == [1, 4]
+    reported = owner_pi_role_empty_tables(stage4, tables)
+    assert list(reported) == [1, 4]
     shapes = [f["message"] for f in lint_role_consistency(stage4, tables)]
-    assert sum("(owner_pi_role_empty," in m for m in shapes) == 2
+    # Each table carries the message of the finding that reports it.
+    assert sorted(reported.values()) == sorted(m for m in shapes if "(owner_pi_role_empty," in m)
+    assert len(set(reported.values())) == 2
     assert any("(pi_cell_empty," in m for m in shapes)
 
 
@@ -4598,12 +4601,12 @@ def test_owner_pi_role_empty_tables_skips_a_table_whose_entry_has_its_own_findin
     entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
                    pi_name="Ada Testowner", pi_role="co-I")
     stage4 = {"cv_owner": _ROLE_OWNER, "entries": [entry]}
-    assert owner_pi_role_empty_tables(stage4, [_grant_table("", "Ada Testowner")]) == []
+    assert owner_pi_role_empty_tables(stage4, [_grant_table("", "Ada Testowner")]) == {}
 
 
 def test_owner_pi_role_empty_tables_needs_an_owner():
     entry = _grant(260, "A grant", title="Example Project", pi_name="Testowner")
-    assert owner_pi_role_empty_tables({"entries": [entry]}, [_grant_table("", "Testowner")]) == []
+    assert owner_pi_role_empty_tables({"entries": [entry]}, [_grant_table("", "Testowner")]) == {}
 
 
 if __name__ == "__main__":
