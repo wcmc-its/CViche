@@ -69,16 +69,16 @@ def test_a_mutation_reaches_its_own_stage_and_every_later_one_only() -> None:
 _LEVELS = ("section", "entry", "record", "field")
 
 
-def _matrix_cells() -> set[tuple[str, str]]:
-    """(type, level) of every cell of COVERAGE.md's matrix."""
+def _matrix_cells() -> dict[tuple[str, str], str]:
+    """The text of every cell of COVERAGE.md's matrix, by (type, level)."""
     lines = COVERAGE_PATH.read_text(encoding="utf-8").splitlines()
-    cells = set()
+    cells = {}
     for line in lines[lines.index("## Matrix") + 1:]:
         if line.startswith("## "):
             break
         parts = [p.strip() for p in line.strip().strip("|").split("|")]
         if len(parts) == 1 + len(_LEVELS) and parts[0] not in ("type", "---"):
-            cells |= {(parts[0], level) for level in _LEVELS}
+            cells |= {(parts[0], level): text for level, text in zip(_LEVELS, parts[1:], strict=True)}
     return cells
 
 
@@ -86,6 +86,16 @@ def test_every_mutation_sits_in_a_coverage_matrix_cell() -> None:
     cells = _matrix_cells()
     assert len(cells) == 7 * len(_LEVELS)
     assert [m.name for m in MUTATIONS if (m.defect, m.level) not in cells] == []
+
+
+def test_a_cell_whose_mutations_were_all_missed_is_not_left_unmeasured() -> None:
+    """With no held-out finding, the synthetic rate is the cell's only
+    measurement; at 0% COVERAGE.md marks it BLIND (#1588), so its "Not
+    checked" sentence reaches the review copy and the run page."""
+    cells = _matrix_cells()
+    recorded = recorded_counts(MUTATIONS_PATH.read_text(encoding="utf-8"))
+    assert [cell for cell, (caught, _) in recorded.items()
+            if caught == 0 and cells[cell].startswith("unmeasured")] == []
 
 
 def test_no_cell_falls_below_its_recorded_catch_rate(measurement: Measurement) -> None:
