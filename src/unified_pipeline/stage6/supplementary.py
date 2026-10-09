@@ -51,13 +51,16 @@ variant). Then one code family at a time, each the one a stage-6 replay
 measured losing the most prose of those left: Q1-Q2 extramural service next
 (the remit, the meeting or the session title behind a committee or panel
 row). The decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
-B2) are not in `SUBPOINT_CODES`, so nothing else is touched.
+B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
+the service section reroutes into the Journal Reviewing table keeps its Q2
+code, so Q4D's exclusion is also applied by where an entry rendered: the
+generator passes that table as `excluded_tables`.
 """
 from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from typing import NamedTuple
 
 from docx.document import Document
@@ -98,7 +101,9 @@ GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C', 'M2D'})
 APPOINTMENT_CODES = frozenset({'D1', 'D2', 'D3'})
 #: Extramural service: leadership in an organization (Q1) and service on a
 #: board or committee (Q2). Both render as table rows in Q's tables, so a
-#: sub-point is a deleted row under the entry's row. Q4D stays excluded.
+#: sub-point is a deleted row under the entry's row. Q4D stays excluded, and
+#: so does a Q2 entry the section reroutes into the Journal Reviewing table:
+#: `plan_subpoints` skips an anchor in an `excluded_tables` table.
 SERVICE_CODES = frozenset({'Q1', 'Q2'})
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
@@ -288,14 +293,28 @@ def unrendered_prose(entry: Mapping, code: str, haystack: _Haystack) -> list[str
             and _record_rendered(fragment, haystack.text, haystack.line_tokens) is False]
 
 
+def _in_tables(anchor: AnchorCandidate, tables: Collection[BaseOxmlElement]) -> bool:
+    # `is`, not `in`: the caller holds each table's proxy, so lxml hands back
+    # that same object for the ancestor; `id()` of a dropped proxy is not
+    # identity.
+    return any(ancestor is table for ancestor in anchor.paragraph._p.iterancestors(qn('w:tbl'))
+               for table in tables)
+
+
 def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Haystack,
                    candidates: list[AnchorCandidate],
-                   spans: Mapping[str, SectionSpan]) -> list[SubPoint]:
+                   spans: Mapping[str, SectionSpan],
+                   excluded_tables: Collection[BaseOxmlElement] = ()) -> list[SubPoint]:
     """One `SubPoint` per entry of a `SUBPOINT_CODES` code that has unrendered
     prose and a rendered line in its own section (`spans`; a code with no
     span is not placed) to hang it under. A fragment is offered once, under
     the first entry that carries it (fan-out children and dedup survivors
-    share their parent's text)."""
+    share their parent's text).
+
+    An entry whose line is a row of an `excluded_tables` table gets none: it
+    rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
+    still carries Q2), so what rendered decides, not the code. Its prose is
+    not offered under any later entry either."""
     planned, offered = [], set()
     for code in sorted(entries_by_code):
         if code not in SUBPOINT_CODES or code not in spans:
@@ -311,6 +330,8 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
             if anchor is None:
                 continue
             offered.update(fragments)
+            if excluded_tables and _in_tables(anchor, excluded_tables):
+                continue
             planned.append(SubPoint(anchor, tuple(fragments), id(entry)))
     return planned
 

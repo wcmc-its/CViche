@@ -1678,3 +1678,30 @@ def test_journal_reviewing_q4d_stays_excluded():
     entry["extracted_fields"] = {"journal_name": "Example Journal of Training", "role": "Reviewer"}
     gen = _render_service("Q4D", entry, supplementary_subpoints=True)
     assert _subpoint_rows(gen) == []
+
+
+def _journal_reviewer_coded_q2():
+    """A Q2 entry `_route_q2_entries` reroutes to Journal Reviewing: its
+    rendered line is a Q4D row, but its own code stays Q2."""
+    return {
+        "element_idx_start": 1514,
+        "taxonomy_code": "Q2",
+        "text": f"2015-2018\tReviewer, Example Journal of Training\t{_SERVICE_PROSE}",
+        "extracted_fields": {"role": "Reviewer", "organization": "Example Journal of Training",
+                             "start_date": "2015", "end_date": "2018"},
+    }
+
+
+def test_a_q2_entry_rendered_as_journal_reviewing_gets_no_sub_point():
+    """The 2026-10-02 decision excludes journal reviewing. A Q2 entry the
+    section writes into the Journal Reviewing table is that, whatever its
+    code says, so it is excluded by where it rendered."""
+    from unified_pipeline.stage6.sections.service import _route_q2_entries
+
+    entry = _journal_reviewer_coded_q2()
+    assert len(_route_q2_entries([entry])[0]) == 1
+    gen = _render_service("Q2", entry, supplementary_subpoints=True)
+    assert "Example Journal of Training" in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    assert _SERVICE_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))

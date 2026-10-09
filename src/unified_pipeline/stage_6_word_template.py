@@ -46,6 +46,7 @@ try:
     from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
     from docx.oxml import OxmlElement
     from docx.oxml.ns import nsmap, qn
+    from docx.oxml.xmlchemy import BaseOxmlElement
     from docx.parts.document import DocumentPart
     from docx.shared import Inches, Pt, RGBColor, Twips
     from docx.table import Table
@@ -1347,6 +1348,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the entries it was written for, which the overflow pass skips.
         self._subpoint_lines: list[str] = []
         self._subpoint_entry_ids: set[int] = set()
+        # Tables of a code the sub-points exclude, whatever code the entries
+        # written into them carry: Journal Reviewing (Q4D), which also takes
+        # the Q2 entries `_route_q2_entries` reroutes there.
+        self._subpoint_excluded_tables: list[BaseOxmlElement] = []
 
         # CV owner location context for geographic scope classification
         self.cv_owner_location = None
@@ -3592,7 +3597,8 @@ Now analyze the text above:"""
         appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
         candidates = list(supplementary.anchor_candidates(self.doc, appendix))
         planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
-                                               self._subpoint_section_spans())
+                                               self._subpoint_section_spans(),
+                                               self._subpoint_excluded_tables)
         revision = supplementary.Revision(
             self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
         for subpoint in planned:

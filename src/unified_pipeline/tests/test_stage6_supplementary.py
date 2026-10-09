@@ -213,6 +213,23 @@ def test_plan_offers_a_fragment_once():
     assert len(planned) == 1
 
 
+def test_plan_skips_an_entry_whose_line_is_a_row_of_an_excluded_table():
+    doc = Document()
+    excluded, other = doc.add_table(rows=1, cols=3), doc.add_table(rows=1, cols=3)
+    for table in (excluded, other):
+        for cell, text in zip(table.rows[0].cells, ["Associate Professor", "Example University",
+                                                    "2010-2015"], strict=True):
+            cell.text = text
+    (in_excluded, elsewhere) = [_candidate(c.text, position=i, paragraph=c.paragraph)
+                                for i, c in enumerate(sp.anchor_candidates(doc))]
+    args = ({"D1": [_appointment(), _appointment()]}, _haystack(in_excluded.text),
+            [in_excluded, elsewhere], {"D1": sp.SectionSpan(0, None)})
+    assert len(sp.plan_subpoints(*args)) == 1
+    assert sp.plan_subpoints(*args, excluded_tables=[excluded._tbl]) == []
+    (planned,) = sp.plan_subpoints(*args, excluded_tables=[other._tbl])
+    assert planned.anchor is in_excluded
+
+
 def test_section_span_bounds():
     span = sp.SectionSpan(3, 7)
     assert [span.holds(_candidate("x", position=i)) for i in (2, 3, 6, 7)] == [False, True, True, False]
