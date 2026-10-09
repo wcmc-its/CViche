@@ -196,15 +196,13 @@ export interface RunDoctorReport {
   fix_list: FixListGroup[]
   /** ERROR/WARN findings left to Diagnostics: below the precision bar, or no plain wording yet. */
   fix_list_held_back: number
-  /** Items past the server's cap, listed in Diagnostics only. */
-  fix_list_more: number
   /** What the doctor cannot see, shown on every run. */
   not_checked: string[]
 }
 
 /** GET /api/run/:id/fix-list: the Fix list alone, for the run's owner (#1589).
  *  No lint key, score or Diagnostics finding; null when no report was stored. */
-export type RunFixList = Pick<RunDoctorReport, 'fix_list' | 'fix_list_more' | 'not_checked'>
+export type RunFixList = Pick<RunDoctorReport, 'fix_list' | 'not_checked'>
 
 /** GET /api/run/:id/run-quality (admin). Score fields are null together when no
  *  score is cached; `doctor` is null when no report was stored. */

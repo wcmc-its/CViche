@@ -437,7 +437,7 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  *  in the notes under it. */
 interface FixListView {
   groups: FixListGroup[]
-  /** Listed items plus those past the server's cap: the tab's count. */
+  /** Every item is listed (no cap since 2026-10-09): the tab's count. */
   total: number
   notes: string[]
   notChecked: string[]
@@ -445,21 +445,17 @@ interface FixListView {
 
 const countItems = (groups: FixListGroup[]) => groups.reduce((n, g) => n + g.items.length, 0)
 
-/** Staff: the notes point at Diagnostics, where the rest is. */
+/** Staff: the held-back findings are named, pointing at Diagnostics. */
 function staffFixListView(doctor: RunDoctorReport): FixListView {
-  const notes = [
-    doctor.fix_list_more > 0 && `${plural(doctor.fix_list_more, 'more item is', 'more items are')} listed under Diagnostics.`,
-    doctor.fix_list_held_back > 0 && `${plural(doctor.fix_list_held_back, 'finding that is', 'findings that are')} wrong too often to act on ${doctor.fix_list_held_back === 1 ? 'is' : 'are'} only under Diagnostics.`,
-  ].filter((n): n is string => !!n)
-  return { groups: doctor.fix_list, total: countItems(doctor.fix_list) + doctor.fix_list_more, notes, notChecked: doctor.not_checked }
+  const notes = doctor.fix_list_held_back > 0
+    ? [`${plural(doctor.fix_list_held_back, 'finding that is', 'findings that are')} wrong too often to act on ${doctor.fix_list_held_back === 1 ? 'is' : 'are'} only under Diagnostics.`]
+    : []
+  return { groups: doctor.fix_list, total: countItems(doctor.fix_list), notes, notChecked: doctor.not_checked }
 }
 
-/** The run's owner: no Diagnostics to point at, so only the cut is named. */
+/** The run's owner: the whole list, with no notes. */
 function ownerFixListView(fix: RunFixList): FixListView {
-  const notes = fix.fix_list_more > 0
-    ? [`${plural(fix.fix_list_more, 'more item was', 'more items were')} found but ${fix.fix_list_more === 1 ? "isn't" : "aren't"} listed here.`]
-    : []
-  return { groups: fix.fix_list, total: countItems(fix.fix_list) + fix.fix_list_more, notes, notChecked: fix.not_checked }
+  return { groups: fix.fix_list, total: countItems(fix.fix_list), notes: [], notChecked: fix.not_checked }
 }
 
 function FixList({ view }: { view: FixListView }) {
@@ -628,21 +624,23 @@ export function RunQualitySections({ runId }: { runId: string }) {
   )
 }
 
-const FIX_LIST_FAILURE = 'Could not load the Run Doctor Fix list.'
+const FIX_LIST_FAILURE = 'Could not load the Fix list.'
+const NO_OWNER_REPORT = 'No check results are stored for this run yet.'
 
-/** The run owner's Run Doctor card (#1589): the Fix list and what is not
- *  checked. No score, no Diagnostics; admins and staff get RunQualitySections. */
+/** The run owner's "Things to check" card (#1589; renamed from Run Doctor
+ *  2026-10-09): the Fix list and what is not checked. No score, no
+ *  Diagnostics; admins and staff get RunQualitySections. */
 export function OwnerFixList({ runId }: { runId: string }) {
   const result = useLoad(() => getRunFixList(runId), runId, FIX_LIST_FAILURE, (fix) => fix == null)
   const blurb = 'Specific problems found in this output, and what to correct in the Word file.'
   return (
-    <section aria-label="Run Doctor" className={`${CARD} gap-3.5`}>
-      <SectionHeading title="Run Doctor" blurb={blurb} />
+    <section aria-label="Things to check" className={`${CARD} gap-3.5`}>
+      <SectionHeading title="Things to check" blurb={blurb} />
       {result.state === 'loading' && <p role="status" className="m-0 text-[13px] text-gray-500">Loading the Fix list...</p>}
       {result.state === 'error' && <p role="alert" className="m-0 text-[13px] text-error-800">{result.message}</p>}
       {result.state === 'ready' && (result.data
         ? <DoctorTabs view={ownerFixListView(result.data)} diagnostics={null} />
-        : <p className="m-0 text-[13px] text-gray-500">{NO_DOCTOR_REPORT}</p>)}
+        : <p className="m-0 text-[13px] text-gray-500">{NO_OWNER_REPORT}</p>)}
     </section>
   )
 }

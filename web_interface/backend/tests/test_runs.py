@@ -717,7 +717,7 @@ def test_fix_list_gives_the_owner_the_fix_list_and_no_diagnostics(client, db, se
 
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"fix_list", "fix_list_more", "not_checked"}
+    assert set(body) == {"fix_list", "not_checked"}
     assert not _DIAGNOSTICS_KEYS & set(body)
     assert [p["title"] for g in body["fix_list"] for i in g["items"] for p in i["problems"]] == [
         "Owner name not found"]
