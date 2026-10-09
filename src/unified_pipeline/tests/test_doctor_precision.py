@@ -11,14 +11,18 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.doctor import precision  # noqa: E402
 from unified_pipeline.doctor.precision import (  # noqa: E402
+    HELD_OUT_CHANGED,
     IN_PLACE_MIN_PRECISION,
     STAGE6_LINT,
     STAGE6_MESSAGE_PREFIX,
     STAGE6_OTHER_SHAPE,
     LintPrecision,
     finding_precision,
+    fold_held_out,
+    load_gate_ledger,
     load_ledger,
     load_shape_ledger,
+    parse_held_out,
     parse_ledger,
     parse_shape_ledger,
     precision_label,
@@ -299,7 +303,104 @@ def test_the_gate_is_below_half_and_spares_the_unmeasured():
 
 
 def test_the_committed_ledger_gates_by_shape():
-    """On the real ledger: owner_pi_role_empty is shown, a recovered A entry is not."""
+    """On the real ledger: owner_pi_role_empty is shown, a recovered A entry is
+    not on the in-sample rows alone (3 / 20), and is once YUYVIG's held-out
+    verdicts are folded in (18 / 35, the gate's default)."""
     load_shape_ledger.cache_clear()
+    load_gate_ledger.cache_clear()
+    recovered = STAGE6_MESSAGE_PREFIX + "A: 1 entry ... recovered into the Appendix"
     assert shown_in_place("role_consistency", "entry 1: ... (owner_pi_role_empty, #1403)")
-    assert not shown_in_place(STAGE6_LINT, STAGE6_MESSAGE_PREFIX + "A: 1 entry ... recovered into the Appendix")
+    assert not shown_in_place(STAGE6_LINT, recovered, load_shape_ledger())
+    assert shown_in_place(STAGE6_LINT, recovered)
+
+
+_HELD_OUT_LEDGER = _SHAPE_LEDGER + """| `dedup_drops` | 2 / 8 (25%) | M1-dup |
+| `split_lint`: `shape_x` | 9 / 9 (100%) | M1 |
+
+## Held-out precision (YUY-HO)
+
+| lint | in-sample TP / judged | held-out TP / judged | points | note |
+|---|---|---|---|---|
+| `low_lint` | 2 / 5 (40%) (M1) | 4 / 5 (80%) | +40 |  |
+| `dedup_drops` | 2 / 8 (25%) (M1-dup) | 3 / 3 (100%) | +75 | changed since |
+| `stage6_render_warnings`: `appendix_recovered_A` | 1 / 10 (10%) (M1) | 9 / 10 (90%) | +80 |  |
+| `stage6_render_warnings`: `appendix_no_route` | none | 0 / 4 (0%) |  | changed since |
+| `split_lint` | 9 / 9 (100%) (M1) | 0 / 9 (0%) | -100 | pooled over shapes |
+| `cap_lint` | 6 / 7 (86%) (M3 cap table) | 0 / 3 (0%) | -86 | no per-lint row |
+| `none_lint` | none | none |  |  |
+
+## Recall
+
+| lint | TP / judged |
+|---|---|
+| `low_lint` | 0 / 50 |
+"""
+
+
+def test_the_held_out_table_parses_per_key_both_columns():
+    held = parse_held_out(_HELD_OUT_LEDGER)
+    assert held[("low_lint", None)] == ((2, 5), (4, 5))
+    assert held[(STAGE6_LINT, "appendix_recovered_A")] == ((1, 10), (9, 10))
+    assert held[("none_lint", None)] == ((0, 0), (0, 0))
+    assert ("decoy", None) not in held and len(held) == 7  # the Recall table is not read
+
+
+def test_held_out_verdicts_fold_into_an_unchanged_lints_row():
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert rows[("low_lint", None)] == LintPrecision("low_lint", 6, 10, "M1,YUY-HO")
+    assert shown_in_place("low_lint", "x", rows)  # 40% in-sample, 60% combined
+    assert rows[("none_lint", None)] == LintPrecision("none_lint", 0, 0, "M1")  # nothing held out
+
+
+def test_a_changed_lint_keeps_its_in_sample_row_only():
+    assert ("dedup_drops", None) in HELD_OUT_CHANGED
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert rows[("dedup_drops", None)] == LintPrecision("dedup_drops", 2, 8, "M1-dup")
+    assert not shown_in_place("dedup_drops", "x", rows)
+    assert (STAGE6_LINT, "appendix_no_route") not in rows  # a changed shape adds no row either
+    # A lint listed as changed (shape None) drops its held-out shape rows too.
+    assert fold_held_out({}, {("dedup_drops", "a_shape"): ((0, 0), (1, 1))}) == {}
+
+
+def test_a_stage6_shape_folds_into_its_own_shape_row():
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    recovered = STAGE6_MESSAGE_PREFIX + "A: 1 entry classified A was not found and was recovered into the Appendix"
+    assert finding_precision(STAGE6_LINT, recovered, rows) == LintPrecision(
+        STAGE6_LINT, 10, 20, "M1,YUY-HO", "appendix_recovered_A")
+    assert shown_in_place(STAGE6_LINT, recovered, rows)
+    assert rows[(STAGE6_LINT, "reroute_refused")].judged == 10  # other shapes untouched
+
+
+def test_a_pooled_held_out_row_of_a_shape_split_lint_is_not_folded():
+    """split_lint's 0 / 9 cannot be split between its shapes."""
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert ("split_lint", None) not in rows
+    assert rows[("split_lint", "shape_x")].judged == 9
+
+
+def test_a_held_out_row_with_no_in_sample_row_brings_its_own_in_sample_figures():
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert rows[("cap_lint", None)] == LintPrecision("cap_lint", 6, 10, "YUY-HO")
+    assert shown_in_place("cap_lint", "x", rows)  # 60%, not the held-out 0 / 3 alone
+
+
+def test_the_gate_ledger_is_the_shown_in_place_default(tmp_path):
+    path = tmp_path / "PRECISION.md"
+    path.write_text(_HELD_OUT_LEDGER, encoding="utf-8")
+    assert load_gate_ledger(path)[("low_lint", None)].judged == 10
+    assert load_shape_ledger(path)[("low_lint", None)].judged == 5
+
+
+def test_the_committed_held_out_table_folds_as_the_owner_decided():
+    """Paul, 2026-10-08: enrichment_failures (unchanged since dev-259) is
+    3 / 7 in-sample and 6 / 8 held out, so its comments stay on the text;
+    source_line_coverage's row already pools its held-out half and is not
+    counted twice; every changed key names a known lint."""
+    load_gate_ledger.cache_clear()
+    gate, in_sample = load_gate_ledger(), load_shape_ledger()
+    assert (gate[("enrichment_failures", None)].true_positives,
+            gate[("enrichment_failures", None)].judged) == (9, 15)
+    assert shown_in_place("enrichment_failures", "1 failed")
+    assert not shown_in_place("enrichment_failures", "1 failed", in_sample)
+    assert gate[("source_line_coverage", None)] == in_sample[("source_line_coverage", None)]
+    assert {lint for lint, _shape in HELD_OUT_CHANGED} <= set(KNOWN_LINTS)

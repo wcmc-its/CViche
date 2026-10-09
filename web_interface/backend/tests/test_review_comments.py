@@ -113,7 +113,7 @@ def _not_checked(path: Path) -> list[str]:
 def _unmeasured_ledger(monkeypatch):
     """Every lint unmeasured unless a test passes its own ledger rows, so these
     tests read placement, not PRECISION.md's current figures."""
-    monkeypatch.setattr(rc, "load_shape_ledger", dict)
+    monkeypatch.setattr(rc, "load_gate_ledger", dict)
 
 
 def _with_appendix_note(tmp_path: Path) -> Path:
@@ -334,7 +334,7 @@ def test_a_less_certain_possibility_is_dropped_not_noted(tmp_path):
 
 def test_the_committed_ledger_is_read_when_no_rows_are_given(tmp_path, monkeypatch):
     """Without ``rows`` the gate reads PRECISION.md through precision.py."""
-    monkeypatch.setattr(rc, "load_shape_ledger", lambda: _GATE_ROWS)
+    monkeypatch.setattr(rc, "load_gate_ledger", lambda: _GATE_ROWS)
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("pipe_leaks", "1 numbered citation(s)", [f"[bibliography] {SECOND}"])))
     assert _comments(out) == []

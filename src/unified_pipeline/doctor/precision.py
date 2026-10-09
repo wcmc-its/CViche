@@ -24,12 +24,18 @@ lint's shape is the row's shape name written in its message
 ("... (owner_pi_role_empty, #1403)"), and a message naming none reads as its
 lint's pooled rows.
 
+The gate also reads the "Held-out precision (YUY-HO)" table: `load_gate_ledger`
+adds its held-out verdicts to the in-sample rows of every lint whose code has
+not changed since the dev-259 doctor they judged (`HELD_OUT_CHANGED`). It is
+the one ledger for #1589's consumers to share: the review copy's gate now,
+the quality score and the run page's fix list when they adopt it.
+
 A missing or unreadable file is logged and yields an empty ledger: the doctor
 still runs, and every lint reads as unmeasured.
 
 Imports: the standard library only. Imported by `run_doctor`, by the review
 copy (`web_interface/backend/app/services/review_comments.py`, for
-`shown_in_place`), by `scripts/doctor_vs_autopsy.py` (for `stage6_shape`)
+`shown_in_place` and `load_gate_ledger`), by `scripts/doctor_vs_autopsy.py` (for `stage6_shape`)
 and by `scripts/doctor_one.py`.
 """
 from __future__ import annotations
@@ -98,6 +104,30 @@ _TABLE_HEADING_PREFIX = "per-lint precision"
 _LINT_COLUMN = "lint"
 _PRECISION_COLUMN = "tp / judged"
 _MEASURED_COLUMN = "measured"
+#: The held-out table: YUYVIG's verdicts on the dev-259 doctor (#1586).
+_HELD_OUT_HEADING_PREFIX = "held-out precision"
+_HELD_OUT_COLUMN = "held-out tp / judged"
+_HELD_OUT_IN_SAMPLE_COLUMN = "in-sample tp / judged"
+HELD_OUT_MEASUREMENT = "YUY-HO"
+
+#: Held-out rows that judged code since changed, so the gate does not fold
+#: them in. Owner decision (Paul, 2026-10-08): fold YUY-HO into a lint's
+#: precision only when its code is unchanged since dev-259 (`d1e49e39`), by
+#: `git log d1e49e39..origin/dev` on doctor/lints/*.py and the stage-6 code
+#: that emits a `stage6_render_warnings` shape. A shape of None is the whole
+#: lint. A PR that changes one of the other lints adds it here.
+HELD_OUT_CHANGED: frozenset[tuple[str, str | None]] = frozenset({
+    ("dedup_drops", None),                 # #666: new WARN classes, every drop listed
+    ("year_not_in_source", None),          # #1585: `_source_two_digit_years`
+    ("span_count", None),                  # #1585: month comma, wrapped ranges
+    ("role_consistency", None),            # #1590: tables matched per entry, counted
+    ("summary_unsupported_claim", None),   # #1592: its helpers renamed
+    ("owner_attribution", None),           # new after dev-259 (#1573)
+    ("source_line_coverage", None),        # new after dev-259 (#1588); its row already pools it
+    (STAGE6_LINT, "appendix_m1_not_in_summary"),  # #1572: `_m1_record_ids`
+    (STAGE6_LINT, "appendix_no_route"),    # #1574: a bare N3 now routes to a mentee table
+    (STAGE6_LINT, STAGE6_OTHER_SHAPE),     # #1574: adds the INFO bare-mentee message
+})
 
 _LINT_CELL_RE = re.compile(r"^`(?P<lint>[a-z0-9_]+)`(?:\s*:\s*`(?P<shape>[^`]+)`)?")
 _RATIO_CELL_RE = re.compile(r"^(?P<tp>\d+)\s*/\s*(?P<judged>\d+)\b")
@@ -135,11 +165,12 @@ def _cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def _ledger_table_rows(text: str) -> list[dict[str, str]]:
-    """The ledger table's data rows as {lowercased header: cell}."""
+def _ledger_table_rows(text: str, heading: str = _TABLE_HEADING_PREFIX) -> list[dict[str, str]]:
+    """The data rows of the first table under the heading starting with
+    ``heading``, as {lowercased header: cell}."""
     lines = text.splitlines()
     start = next((i for i, line in enumerate(lines)
-                  if line.lstrip("#").strip().lower().startswith(_TABLE_HEADING_PREFIX)
+                  if line.lstrip("#").strip().lower().startswith(heading)
                   and line.startswith("#")), None)
     if start is None:
         return []
@@ -174,10 +205,58 @@ def parse_shape_ledger(text: str) -> dict[ShapeKey, LintPrecision]:
         key = (lint_match["lint"], lint_match["shape"])
         if key in rows:
             continue
-        ratio = _RATIO_CELL_RE.match(row.get(_PRECISION_COLUMN, ""))
-        tp, judged = (int(ratio["tp"]), int(ratio["judged"])) if ratio else (0, 0)
+        tp, judged = _ratio(row.get(_PRECISION_COLUMN, ""))
         rows[key] = LintPrecision(key[0], tp, judged, row.get(_MEASURED_COLUMN, ""), key[1])
     return rows
+
+
+def _ratio(cell: str) -> tuple[int, int]:
+    """(tp, judged) of a `TP / judged` cell; (0, 0) for `none`."""
+    match = _RATIO_CELL_RE.match(cell)
+    return (int(match["tp"]), int(match["judged"])) if match else (0, 0)
+
+
+#: A held-out table row: its in-sample and held-out (tp, judged).
+HeldOutRow = tuple[tuple[int, int], tuple[int, int]]
+
+
+def parse_held_out(text: str) -> dict[ShapeKey, HeldOutRow]:
+    """PRECISION.md's held-out table as {(lint, shape): (in-sample, held-out)},
+    each a (tp, judged) pair. A `none` cell is (0, 0)."""
+    rows: dict[ShapeKey, HeldOutRow] = {}
+    for row in _ledger_table_rows(text, _HELD_OUT_HEADING_PREFIX):
+        lint_match = _LINT_CELL_RE.match(row.get(_LINT_COLUMN, ""))
+        if lint_match:
+            rows.setdefault((lint_match["lint"], lint_match["shape"]),
+                            (_ratio(row.get(_HELD_OUT_IN_SAMPLE_COLUMN, "")),
+                             _ratio(row.get(_HELD_OUT_COLUMN, ""))))
+    return rows
+
+
+def fold_held_out(rows: dict[ShapeKey, LintPrecision],
+                  held_out: dict[ShapeKey, HeldOutRow]) -> dict[ShapeKey, LintPrecision]:
+    """``rows`` with each held-out verdict added to the in-sample row it
+    measured: combined TP / judged = in-sample + held-out, for a lint not in
+    HELD_OUT_CHANGED; in-sample only for one that is.
+
+    A held-out row with no in-sample row of its key becomes one, with the
+    held-out table's own in-sample figures (`owner_missing_from_citation`'s
+    are the M3 cap table's). A lint-level held-out row of a lint the
+    in-sample table splits by shape is not folded: the gate reads one shape
+    at a time, and the pooled verdicts cannot be split between them.
+    """
+    combined = dict(rows)
+    split = {lint for lint, shape in rows if shape is not None}
+    for key, (in_sample, (tp, judged)) in held_out.items():
+        lint, shape = key
+        if (not judged or key in HELD_OUT_CHANGED or (lint, None) in HELD_OUT_CHANGED
+                or (shape is None and lint in split)):
+            continue
+        base = combined.get(key) or LintPrecision(lint, *in_sample, "", shape)
+        measured = ",".join(m for m in (base.measured, HELD_OUT_MEASUREMENT) if m)
+        combined[key] = LintPrecision(lint, base.true_positives + tp, base.judged + judged,
+                                      measured, shape)
+    return combined
 
 
 def _pooled(rows: dict[ShapeKey, LintPrecision]) -> dict[str, LintPrecision]:
@@ -202,19 +281,36 @@ def parse_ledger(text: str) -> dict[str, LintPrecision]:
 
 
 @functools.lru_cache(maxsize=None)
-def load_shape_ledger(path: Path = PRECISION_LEDGER_PATH) -> dict[ShapeKey, LintPrecision]:
-    """The parsed ledger's rows, unpooled, read once per process. Empty (and
-    logged) when the file cannot be read."""
+def _ledger_text(path: Path) -> str:
+    """The ledger file's text, read once per process; '' (and logged) when
+    it cannot be read."""
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        return Path(path).read_text(encoding="utf-8")
     except OSError:
         logger.warning("lint precision ledger unreadable at %s; every lint reads as unmeasured",
                        path, exc_info=True)
+        return ""
+
+
+@functools.lru_cache(maxsize=None)
+def load_shape_ledger(path: Path = PRECISION_LEDGER_PATH) -> dict[ShapeKey, LintPrecision]:
+    """The parsed ledger's rows, unpooled, read once per process. Empty (and
+    logged) when the file cannot be read."""
+    text = _ledger_text(path)
+    if not text:
         return {}
     rows = parse_shape_ledger(text)
     if not rows:
         logger.warning("lint precision ledger at %s has no parseable per-lint table", path)
     return rows
+
+
+@functools.lru_cache(maxsize=None)
+def load_gate_ledger(path: Path = PRECISION_LEDGER_PATH) -> dict[ShapeKey, LintPrecision]:
+    """The rows #1589's gate reads: `load_shape_ledger`'s, with the held-out
+    verdicts of unchanged lints folded in (`fold_held_out`). Call this, not
+    `load_shape_ledger`, to judge a finding as the review copy does."""
+    return fold_held_out(load_shape_ledger(path), parse_held_out(_ledger_text(path)))
 
 
 @functools.lru_cache(maxsize=None)
@@ -234,13 +330,14 @@ def stage6_shape(message: str) -> str:
 
 def finding_precision(lint: str, message: str,
                       rows: dict[ShapeKey, LintPrecision] | None = None) -> LintPrecision | None:
-    """The ledger row that measured findings like this one, or None when none did.
+    """The ledger row that measured findings like this one, or None when none
+    did. ``rows`` defaults to the gate's (`load_gate_ledger`).
 
     A stage-6 message reads its `_STAGE6_SHAPES` row only. Another lint reads
     the row of the shape its message names, else its own row, else its shape
     rows pooled (a message that names no shape).
     """
-    rows = load_shape_ledger() if rows is None else rows
+    rows = load_gate_ledger() if rows is None else rows
     if lint == STAGE6_LINT:
         return rows.get((lint, stage6_shape(message)))
     own = {key: row for key, row in rows.items() if key[0] == lint}

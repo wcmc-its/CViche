@@ -52,7 +52,7 @@ from unified_pipeline.doctor.lints.extraction import DEDUP_TEXT_CHARS  # noqa: E
 from unified_pipeline.doctor.precision import (  # noqa: E402
     LintPrecision,
     ShapeKey,
-    load_shape_ledger,
+    load_gate_ledger,
     shown_in_place,
 )
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
@@ -503,10 +503,10 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     """Write the flagged copy of ``clean_docx``; return its path and how many
     flags (comments and review notes) it carries, which may be none. None
     when ``doctor_payload`` is not a doctor report or the document is empty.
-    ``rows`` is the precision ledger (doctor/PRECISION.md when None)."""
+    ``rows`` is the precision ledger (`load_gate_ledger` when None)."""
     if not isinstance(doctor_payload, dict):
         return None
-    rows = load_shape_ledger() if rows is None else rows
+    rows = load_gate_ledger() if rows is None else rows
     findings = [f for f in _usable_findings(doctor_payload)[0]
                 if f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS]
     doc = Document(str(clean_docx))
