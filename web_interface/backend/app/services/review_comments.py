@@ -5,8 +5,17 @@ it is about: the year that looks wrong, the second copy of a duplicate. A
 finding with no one place in the document (a citation PubMed could not match,
 an entry removed as a near-duplicate, a step that fell back) is an item in the
 review-notes box closing the document, grouped by what to do about it. Where
-the Appendix entries came from goes in stage 6's own Appendix note box. The
-clean document is left as it is; this writes a copy beside it.
+the Appendix entries came from goes in stage 6's own Appendix note box; how
+many entries meant for a section went there is a comment on that section's
+heading. The clean document is left as it is; this writes a copy beside it.
+
+Precision gate (#1589): a finding is marked on the text only when its lint
+(or message shape) is right at least half the time by doctor/PRECISION.md
+(`precision.shown_in_place`). A less certain finding is a review note, so a
+false alarm never sits on correct text.
+
+Every run's copy is written, even with nothing to flag: the box always closes
+with what CViche does not check, since a quiet doctor is not a clean document.
 
 One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
 is commented whatever its severity, but only on the text it quotes, never on
@@ -37,6 +46,12 @@ from app.services.run_quality_report import (
 )
 from unified_pipeline.core.text_norm import squash  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import DEDUP_TEXT_CHARS  # noqa: E402
+from unified_pipeline.doctor.precision import (  # noqa: E402
+    LintPrecision,
+    ShapeKey,
+    load_shape_ledger,
+    shown_in_place,
+)
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     add_cviche_box,
@@ -129,6 +144,29 @@ REVIEW_FLAGS = {
 }
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete"}
+#: Said after a finding the precision gate kept off the text (#1589).
+LESS_CERTAIN_NOTE = "This check is often wrong, so it is listed here, not marked in the text."
+#: An Appendix diversion, on the heading of the section it was meant for.
+#: The count is the run page's; the Appendix group headings say where each came from.
+DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move any that belong here."
+#: The same, as a review note naming the section, under its own group title
+#: (the run page's "Document builder warnings" is internal wording).
+DIVERSION_TITLE = "Entries placed in the Appendix"
+DIVERSION_NOTE = "Entries meant for this section are in the Appendix: move any that belong there."
+#: The review notes' last group, on every copy: what the doctor cannot see.
+#: Until #1588's coverage contract names its blind cells, these are the blind
+#: classes #1588 and #1589 give as examples.
+NOT_CHECKED_TITLE = "What CViche does not check"
+NOT_CHECKED_INSTRUCTION = ("CViche cannot see these problems, or sees only some of them. "
+                           "Check them yourself against your original CV:")
+NOT_CHECKED_ITEMS = (
+    "Dates and years that are wrong but look plausible.",
+    "Journal names, volumes and page numbers.",
+    "Duties or details left out of an appointment or position.",
+    "Entries removed as repeats that were in fact separate entries.",
+    "Whether every entry is your own work, not someone else's paper or grant.",
+    "Whether every statement in the research summary is supported by your CV.",
+)
 PROTECTED_DATA_LINT = "protected_data_in_output"
 #: protected_data_in_output names a category and a section, never the value:
 #: "protected personal data (children / dependents) found in Appendix -- value withheld ...".
@@ -153,7 +191,7 @@ _DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
                        r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$")
 #: stage 6's appendix_diversion messages, after the code prefix the run page
 #: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
-_DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|recovered into) the Appendix")
+_DIVERTED_RE = re.compile(r"(?P<count>\d+) (?P<noun>entr(?:y|ies))\b[^.]*?(?:diverted to|recovered into) the Appendix")
 #: The review notes are a CViche box (stage6/formatting add_cviche_box), the
 #: same kind as stage 6's Appendix note.
 REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
@@ -306,13 +344,62 @@ def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
     return notes or [Note(DEDUP_TITLE, DEDUP_INSTRUCTION)]
 
 
-def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> tuple[list[Flag], list[Note]]:
+def _diversion(code: str, inst: DoctorFindingInstance,
+               paragraphs: list[tuple[Paragraph, str]]) -> list[Flag]:
+    """An Appendix diversion from section ``code``: a comment on that
+    section's heading, saying how many entries went. None where the section
+    has no heading."""
+    m = _DIVERTED_RE.search(inst.detail)
+    heading = _heading(code, paragraphs)
+    if heading is None or m is None:
+        return []
+    verb = "is" if m["noun"] == "entry" else "are"
+    return [Flag(heading, None, DIVERSION_FLAG.format(count=f"{m['count']} {m['noun']}", verb=verb))]
+
+
+def _note_title(lint: str) -> str:
+    """A review-notes group title: the run page's, unless that is internal wording."""
+    copy_ = LINT_COPY.get(lint)
+    return NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
+
+
+def _less_certain(lint: str, inst: DoctorFindingInstance) -> list[Note]:
+    """A finding the precision gate keeps off the text, as a review note: its
+    run-page title, its flag and why it is here. A possibility (a
+    REVIEW_COPY_ONLY_LINTS lint) is never a note; nor is a finding with no
+    section or quote to name."""
+    item = _note_item(lint, inst)
+    if lint in REVIEW_COPY_ONLY_LINTS or item is None:
+        return []
+    if _diversion_code(lint, inst) is not None:
+        return [Note(DIVERSION_TITLE, f"{DIVERSION_NOTE} {LESS_CERTAIN_NOTE}", item)]
+    return [Note(_note_title(lint), f"{REVIEW_FLAGS.get(lint, inst.detail)} {LESS_CERTAIN_NOTE}", item)]
+
+
+def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
+    """The section code a stage-6 Appendix diversion names ("" when it names
+    none); None when the finding is not a diversion."""
+    if lint != DIVERSION_LINT or _DIVERTED_RE.search(inst.detail) is None:
+        return None
+    return _CODE_BY_LABEL.get(inst.section or "", "")
+
+
+def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
+           rows: dict[ShapeKey, LintPrecision]) -> tuple[list[Flag], list[Note]]:
     """Where one finding goes: a comment on its quoted text; else on its
     section's heading; else a review note saying what and where it was. A
-    near-duplicate is always a note, since what it removed is not on the page."""
+    near-duplicate is always a note, since what it removed is not on the page,
+    and so is a finding the precision gate keeps off the text."""
     lint, inst = finding["lint"], _instance(finding)
     if lint == "dedup_drops":
         return [], _dedup_notes(inst)
+    diverted_from = _diversion_code(lint, inst)
+    if diverted_from == _APPENDIX_CODE:  # stage 6's Appendix note explains these
+        return [], []
+    if not shown_in_place(lint, str(finding.get("message") or ""), rows):
+        return [], _less_certain(lint, inst)
+    if diverted_from is not None:
+        return _diversion(diverted_from, inst, surfaces[0]), []
     label = REVIEW_FLAGS.get(lint, inst.detail)
     flags = _item_flags(lint, inst, label, surfaces)
     if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
@@ -323,9 +410,7 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> 
     item = _note_item(lint, inst)
     if item is None:  # nothing to point the submitter at: it stays on the run page
         return [], []
-    copy_ = LINT_COPY.get(lint)
-    title = NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
-    return [], [Note(title, label, item)]
+    return [], [Note(_note_title(lint), label, item)]
 
 
 def _note_item(lint: str, inst: DoctorFindingInstance) -> str | None:
@@ -377,10 +462,9 @@ def _runs(para: Paragraph, span: tuple[int, int] | None) -> list[Run]:
 
 def _add_review_notes(doc: Document, notes: list[Note]) -> None:
     """The review-notes box closing the document: a group per action, with
-    its count and instruction, then an item per finding. The space above the
-    box is set on the document's last paragraph, not a blank one."""
-    if not notes:
-        return
+    its count and instruction, then an item per finding; last, what CViche
+    does not check. The space above the box is set on the document's last
+    paragraph, not a blank one."""
     groups: dict[tuple[str, str], list[Note]] = {}
     for note in notes:
         groups.setdefault((note.title, note.instruction), []).append(note)
@@ -396,22 +480,23 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
                 cviche_box_pair(cell, "Removed:", note.removed, last=not note.kept)
             if note.kept:
                 cviche_box_pair(cell, "Kept:", note.kept, last=True)
+    cviche_box_group(cell, NOT_CHECKED_TITLE, first=not groups)
+    cviche_box_text(cell, NOT_CHECKED_INSTRUCTION)
+    for item in NOT_CHECKED_ITEMS:
+        cviche_box_item(cell, item)
 
 
-def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, int] | None:
+def write_review_docx(clean_docx: Path, doctor_payload: object,
+                      rows: dict[ShapeKey, LintPrecision] | None = None) -> tuple[Path, int] | None:
     """Write the flagged copy of ``clean_docx``; return its path and how many
-    flags (comments and review notes) it carries. None when there is nothing to flag."""
+    flags (comments and review notes) it carries, which may be none. None
+    when ``doctor_payload`` is not a doctor report or the document is empty.
+    ``rows`` is the precision ledger (doctor/PRECISION.md when None)."""
     if not isinstance(doctor_payload, dict):
         return None
-    # Stage 6's Appendix diversions say which section CViche first tried, not
-    # the heading the entry had in the CV, which the Appendix groups already
-    # show: a second, different "came from" only contradicts them. Their
-    # counts stay on the run page.
+    rows = load_shape_ledger() if rows is None else rows
     findings = [f for f in _usable_findings(doctor_payload)[0]
-                if (f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS)
-                and not (f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail))]
-    if not findings:
-        return None
+                if f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS]
     doc = Document(str(clean_docx))
     paragraphs = [(p, _norm(_paragraph_text(p)))
                   for p in (Paragraph(el, doc._body) for el in doc.element.body.iter(qn("w:p")))]
@@ -422,7 +507,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     notes: list[Note] = []
     per_lint: dict[str, int] = {}
     for f in findings:
-        found, noted = _flags(f, surfaces)
+        found, noted = _flags(f, surfaces, rows)
         for flag in found:
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
@@ -431,8 +516,6 @@ def write_review_docx(clean_docx: Path, doctor_payload: object) -> tuple[Path, i
     for flag in flags:
         doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
                         author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
-    if not flags and not notes:
-        return None
     _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
     doc.save(str(out))

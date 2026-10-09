@@ -17,6 +17,13 @@ optionally followed by `: ` and a backticked message shape
 pooled into that key's precision, since a finding carries the key, not the
 shape. A lint listed twice keeps its first row.
 
+The review copy asks one finding at a time (#1589), so it reads the rows
+unpooled: `finding_precision` takes the row of the finding's own shape. A
+`stage6_render_warnings` message is named by `_STAGE6_SHAPES`; any other
+lint's shape is the row's shape name written in its message
+("... (owner_pi_role_empty, #1403)"), and a message naming none reads as its
+lint's pooled rows.
+
 A missing or unreadable file is logged and yields an empty ledger: the doctor
 still runs, and every lint reads as unmeasured.
 
@@ -39,6 +46,50 @@ PRECISION_LEDGER_PATH = Path(__file__).with_name("PRECISION.md")
 
 #: The label for a lint with no hand-checked verdicts.
 UNMEASURED_LABEL = "p unmeasured"
+
+#: The lint key that re-emits about twenty unrelated stage-6 checks. Its rows
+#: are per message shape, and the shapes share nothing, so a message of no
+#: known shape is unmeasured rather than read as the pool of the others.
+STAGE6_LINT = "stage6_render_warnings"
+STAGE6_MESSAGE_PREFIX = "stage 6 self-check: "
+STAGE6_OTHER_SHAPE = "other"
+#: stage6_render_warnings message -> shape, first match wins. Read from the
+#: emitters: stage6/sections/appendix.py `_diversion_message`,
+#: stage_6_word_template.py `reroute_warnings` and `_validate_output`,
+#: stage6/fan_out.py, stage6/sections/{memberships,board_certification}.py.
+#: scripts/doctor_vs_autopsy.py scores by the same table.
+_STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (shape, re.compile(pattern)) for shape, pattern in (
+        ("reroute_refused", r"reroute .*refused"),
+        ("reroute_cross_family", r"reroute .*accepted cross family"),
+        ("reroute_same_family", r"reroute .*accepted same family"),
+        ("appendix_recovered_A", r"^A: .*recovered into the Appendix"),
+        ("appendix_recovered", r"recovered into the Appendix"),
+        ("appendix_no_route_T", r"^T: .*no stage 6 section is routed"),
+        ("appendix_no_route", r"no stage 6 section is routed"),
+        ("appendix_grant_too_sparse", r"too sparse to table"),
+        ("appendix_t_validation_recoded", r"T-validation recoded"),
+        ("appendix_invalid_code", r"quarantined"),
+        ("appendix_passthrough_refused", r"refused by the passthrough writer"),
+        ("appendix_section_declined", r"not placed by the section routed"),
+        ("appendix_no_research_summary", r"no research summary rendered"),
+        ("appendix_m1_not_in_summary", r"research summary does not reproduce"),
+        ("no_teaching_content", r"No visible bulleted content"),
+        ("semicolon_fused_bullets", r"combined with semicolons"),
+        ("bare_dates_in_table", r"rows have bare dates"),
+        ("board_cert_row_skipped", r"reconstructed board certification row"),
+        ("memberships_header_row_dropped", r"dropped as a source table header row"),
+        ("fanout_list_not_split", r"holds (?:several )?records that were not split"),
+        ("geo_scope_failed", r"geographic scope classification"),
+        ("appendix_reclassification_failed", r"appendix entry reclassification"),
+        ("section_failed", r"^section .* failed:"),
+    ))
+
+#: #1589's gate: a finding whose shape is hand-checked below this precision is
+#: not marked on the text it is about (the review copy lists it in its closing
+#: box instead). Paul, 2026-10-08: a lint at about 50% is a review-copy
+#: comment, so the bar is "below half", not "below the WARN bar".
+IN_PLACE_MIN_PRECISION = 0.50
 
 #: The heading (prefix) of the section whose first table is the ledger.
 _TABLE_HEADING_PREFIX = "per-lint precision"
@@ -70,6 +121,7 @@ class LintPrecision:
     true_positives: int
     judged: int
     measured: str  # measurement id(s), e.g. "M1"; "" when the column is absent
+    shape: str | None = None  # the row's message shape; None for a lint's own or pooled row
 
     @property
     def precision(self) -> float | None:
@@ -104,48 +156,106 @@ def _ledger_table_rows(text: str) -> list[dict[str, str]]:
     return [dict(zip(header, row)) for row in table[1:]]
 
 
-def parse_ledger(text: str) -> dict[str, LintPrecision]:
-    """Parse PRECISION.md's text into {lint key: LintPrecision}.
+#: A ledger row's key: its lint, and its message shape (None for a lint's own row).
+ShapeKey = tuple[str, str | None]
 
-    A lint whose rows are all `none` is still listed, with judged == 0, so a
-    caller can tell "measured, no verdicts" from "not in the ledger".
-    """
-    pooled: dict[str, list] = {}
-    seen_rows: set[tuple[str, str | None]] = set()
+
+def parse_shape_ledger(text: str) -> dict[ShapeKey, LintPrecision]:
+    """Parse PRECISION.md's text into {(lint, shape): LintPrecision}, one per
+    row, unpooled. A row listed twice keeps its first entry; a `none` row is
+    listed with judged == 0."""
+    rows: dict[ShapeKey, LintPrecision] = {}
     for row in _ledger_table_rows(text):
         lint_match = _LINT_CELL_RE.match(row.get(_LINT_COLUMN, ""))
         if not lint_match:
             continue
         key = (lint_match["lint"], lint_match["shape"])
-        if key in seen_rows:
+        if key in rows:
             continue
-        seen_rows.add(key)
         ratio = _RATIO_CELL_RE.match(row.get(_PRECISION_COLUMN, ""))
         tp, judged = (int(ratio["tp"]), int(ratio["judged"])) if ratio else (0, 0)
-        entry = pooled.setdefault(lint_match["lint"], [0, 0, []])
-        entry[0] += tp
-        entry[1] += judged
-        measured = row.get(_MEASURED_COLUMN, "")
-        if measured and measured not in entry[2]:
-            entry[2].append(measured)
+        rows[key] = LintPrecision(key[0], tp, judged, row.get(_MEASURED_COLUMN, ""), key[1])
+    return rows
+
+
+def _pooled(rows: dict[ShapeKey, LintPrecision]) -> dict[str, LintPrecision]:
+    """Each lint's rows summed into one entry, its measurement ids joined in row order."""
+    pooled: dict[str, tuple[int, int, list[str]]] = {}
+    for (lint, _shape), row in rows.items():
+        tp, judged, measured = pooled.get(lint, (0, 0, []))
+        if row.measured and row.measured not in measured:
+            measured = [*measured, row.measured]
+        pooled[lint] = (tp + row.true_positives, judged + row.judged, measured)
     return {lint: LintPrecision(lint, tp, judged, ",".join(measured))
             for lint, (tp, judged, measured) in pooled.items()}
 
 
+def parse_ledger(text: str) -> dict[str, LintPrecision]:
+    """Parse PRECISION.md's text into {lint key: LintPrecision}, shape rows pooled.
+
+    A lint whose rows are all `none` is still listed, with judged == 0, so a
+    caller can tell "measured, no verdicts" from "not in the ledger".
+    """
+    return _pooled(parse_shape_ledger(text))
+
+
 @functools.lru_cache(maxsize=None)
-def load_ledger(path: Path = PRECISION_LEDGER_PATH) -> dict[str, LintPrecision]:
-    """The parsed ledger, read once per process. Empty (and logged) when the
-    file cannot be read."""
+def load_shape_ledger(path: Path = PRECISION_LEDGER_PATH) -> dict[ShapeKey, LintPrecision]:
+    """The parsed ledger's rows, unpooled, read once per process. Empty (and
+    logged) when the file cannot be read."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
         logger.warning("lint precision ledger unreadable at %s; every lint reads as unmeasured",
                        path, exc_info=True)
         return {}
-    ledger = parse_ledger(text)
-    if not ledger:
+    rows = parse_shape_ledger(text)
+    if not rows:
         logger.warning("lint precision ledger at %s has no parseable per-lint table", path)
-    return ledger
+    return rows
+
+
+@functools.lru_cache(maxsize=None)
+def load_ledger(path: Path = PRECISION_LEDGER_PATH) -> dict[str, LintPrecision]:
+    """The parsed ledger, shape rows pooled per lint key."""
+    return _pooled(load_shape_ledger(path))
+
+
+def stage6_shape(message: str) -> str:
+    """The `_STAGE6_SHAPES` name of one stage-6 warning message."""
+    text = message.removeprefix(STAGE6_MESSAGE_PREFIX)
+    for shape, pattern in _STAGE6_SHAPES:
+        if pattern.search(text):
+            return shape
+    return STAGE6_OTHER_SHAPE
+
+
+def finding_precision(lint: str, message: str,
+                      rows: dict[ShapeKey, LintPrecision] | None = None) -> LintPrecision | None:
+    """The ledger row that measured findings like this one, or None when none did.
+
+    A stage-6 message reads its `_STAGE6_SHAPES` row only. Another lint reads
+    the row of the shape its message names, else its own row, else its shape
+    rows pooled (a message that names no shape).
+    """
+    rows = load_shape_ledger() if rows is None else rows
+    if lint == STAGE6_LINT:
+        return rows.get((lint, stage6_shape(message)))
+    own = {key: row for key, row in rows.items() if key[0] == lint}
+    named = next((row for (_, shape), row in own.items()
+                  if shape and re.search(rf"(?<!\w){re.escape(shape)}(?!\w)", message)), None)
+    return named or own.get((lint, None)) or _pooled(own).get(lint)
+
+
+def shown_in_place(lint: str, message: str,
+                   rows: dict[ShapeKey, LintPrecision] | None = None) -> bool:
+    """#1589's gate: may this finding be marked on the text it is about?
+
+    Not when its row's hand-checked precision is below IN_PLACE_MIN_PRECISION.
+    An unmeasured finding may: no verdicts is not a low precision.
+    """
+    entry = finding_precision(lint, message, rows)
+    return entry is None or entry.precision is None or entry.precision >= IN_PLACE_MIN_PRECISION
 
 
 def remediation_allowed(lint: str, ledger: dict[str, LintPrecision] | None = None) -> bool:
