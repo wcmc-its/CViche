@@ -4,6 +4,9 @@ import pytest
 from app.services import quality_score_service as qss
 from app.services import run_quality_report as rqr
 from unified_pipeline import quality_score as scorer
+from unified_pipeline.doctor import precision
+from unified_pipeline.doctor.blind_spots import blind_spots
+from unified_pipeline.doctor.precision import LintPrecision
 from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_PREVALENCE, lint_surprise
 
 OWNER_GATE = "CV owner name / contact populated (HARD-FAIL gate)"
@@ -482,3 +485,164 @@ def test_report_degrades_each_part_to_null_independently():
     nothing = rqr.build_run_quality_report("R1", None, None)
     assert nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"}) == {
         k: None for k in nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"})}
+
+
+# --- the Fix list (#1589) -----------------------------------------------------
+
+
+def _ledger(**rows):
+    """{lint: (tp, judged)} as the gate's ledger rows, one per lint."""
+    return {(lint, None): LintPrecision(lint, tp, judged, "M9") for lint, (tp, judged) in rows.items()}
+
+
+def _fix_list(findings, rows=None):
+    return rqr.summarize_doctor({"findings": findings}, rows=rows or {})
+
+
+def _fix_list_titles(report):
+    return [p.title for g in report.fix_list for i in g.items for p in i.problems]
+
+
+def test_fix_list_merges_an_entrys_findings_and_quotes_the_real_under_extraction_text():
+    """SQMWHM entry 29's shape: under_extraction names the entry but no code;
+    another finding on the same entry names the section. Runs the real lint, so
+    a reworded "entry N:" prefix fails here instead of splitting the item."""
+    from unified_pipeline.doctor.lints.extraction import lint_under_extraction
+
+    lines = [f"Visiting Lecturer in Medicine, Northfield University School of Medicine, {1990 + i}-{1991 + i}"
+             for i in range(10)]
+    entry = {"element_type": "paragraph", "element_idx_start": 29, "taxonomy_code": "H",
+             "text": "\n".join(lines), "extracted_fields": {"title": "Visiting Lecturer"},
+             "extraction_coverage": {"extraction_coverage_percent": 13.1}}
+    [under] = lint_under_extraction({"entries": [entry]})
+    junk = {**_finding("junk_or_header_row", message="entry 29 (H): a lead-in label prints as a record"),
+            "evidence": ["Honors:"]}
+
+    report = _fix_list([junk, under])
+
+    [group] = report.fix_list
+    assert group.section == "Honors & Awards"
+    [item] = group.items
+    assert [p.title for p in item.problems] == [
+        rqr.LINT_COPY["junk_or_header_row"].title, rqr.LINT_COPY["under_extraction"].title]
+    assert item.quotes == ["Honors:", under["evidence"][0] + rqr.TRUNCATION_MARK]
+
+
+def test_fix_list_item_lists_each_lint_once_worst_first():
+    report = _fix_list([
+        _finding("junk_or_header_row", message="entry 7 (D1): a"),
+        _finding("under_extraction", message="entry 7: b"),
+        _finding("under_extraction", "ERROR", message="entry 7: c"),
+    ])
+    [item] = report.fix_list[0].items
+    assert [(p.title, p.severity) for p in item.problems] == [
+        (rqr.LINT_COPY["under_extraction"].title, "ERROR"),
+        (rqr.LINT_COPY["junk_or_header_row"].title, "WARN")]
+
+
+def test_fix_list_is_in_document_order():
+    """No-section findings first, then template order (D1 before H before S1),
+    entries by index within a section, entry-less findings last."""
+    report = _fix_list([
+        _finding("junk_or_header_row", message="entry 40 (S1): x"),
+        _finding("junk_or_header_row", message="entry 9 (H): x"),
+        _finding("dead_sections", message="taxonomy code H: empty"),
+        _finding("junk_or_header_row", message="entry 3 (H): x"),
+        _finding("junk_or_header_row", message="entry 50 (D1): x"),
+        _finding("no_output", "ERROR", message="no document"),
+    ])
+    assert [g.section for g in report.fix_list] == [
+        None, "Academic Appointments", "Honors & Awards", "Peer-Reviewed Research Articles"]
+    honors = report.fix_list[2].items
+    assert [i.problems[0].title for i in honors] == [
+        rqr.LINT_COPY["junk_or_header_row"].title, rqr.LINT_COPY["junk_or_header_row"].title,
+        rqr.LINT_COPY["dead_sections"].title]
+
+
+def test_fix_list_holds_back_low_precision_info_and_unworded_findings():
+    ledger = _ledger(dedup_drops=(2, 8), junk_or_header_row=(105, 107))
+    report = _fix_list([
+        _finding("dedup_drops", message="entry 1 (D1): x"),  # 25%: Diagnostics only
+        _finding("brand_new_lint", message="entry 2 (D1): x"),  # no plain wording yet
+        _finding("table_shape", "INFO", message="entry 3 (D1): x"),  # INFO: not counted
+        _finding("junk_or_header_row", message="entry 4 (D1): x"),
+    ], ledger)
+    assert _fix_list_titles(report) == [rqr.LINT_COPY["junk_or_header_row"].title]
+    assert report.fix_list_held_back == 2
+    # Diagnostics still lists every lint.
+    assert {g.lint for g in report.findings} == {
+        "dedup_drops", "brand_new_lint", "table_shape", "junk_or_header_row"}
+
+
+@pytest.mark.parametrize("tp, judged, confidence", [
+    (105, 107, "high"),
+    (9, 9, "medium"),  # right every time, but too few checked
+    (5, 9, "medium"),
+    (0, 0, "unmeasured"),
+])
+def test_fix_list_confidence_comes_from_the_ledger(tp, judged, confidence):
+    report = _fix_list([_finding("junk_or_header_row")], _ledger(junk_or_header_row=(tp, judged)))
+    [problem] = report.fix_list[0].items[0].problems
+    assert (problem.confidence, problem.effort) == (confidence, rqr.EFFORT_QUICK)
+
+
+def test_fix_list_carries_no_lint_key_stage_entry_index_or_issue_number():
+    report = _fix_list([
+        {**_finding("role_consistency",
+                    message="entry 1515 (M2A): pi role empty (owner_pi_role_empty, #1403)"),
+         "evidence": ["entry 16", "R01 Cardiac Imaging"]},
+        _finding("stage6_render_warnings", message="stage 6 self-check: T: 6 entries diverted"),
+    ])
+    wire = report.model_dump_json(include={"fix_list"})
+    for leak in ("role_consistency", "owner_pi_role_empty", "1515", "#1403", "entry 16", "stage 6",
+                 "stage6_render_warnings"):
+        assert leak not in wire
+    assert "R01 Cardiac Imaging" in wire
+
+
+def test_fix_list_cuts_at_its_cap_and_counts_the_rest(monkeypatch):
+    monkeypatch.setattr(rqr, "MAX_FIX_LIST_ITEMS", 2)
+    report = _fix_list([_finding("junk_or_header_row", message=f"entry {i} (D1): x") for i in range(5)])
+    assert sum(len(g.items) for g in report.fix_list) == 2
+    assert report.fix_list_more == 3
+
+
+def test_every_run_says_what_the_doctor_does_not_check():
+    """The review copy's "What CViche does not check" sentences, from
+    doctor/COVERAGE.md, so the two views cannot drift."""
+    assert _fix_list([]).not_checked == [spot.sentence for spot in blind_spots()] != []
+
+
+def test_fix_list_gate_is_the_review_copys_per_shape_gate():
+    """Two shapes of one lint on the committed gate ledger: owner_attribution's
+    uncredited-citation shape is right under half the time and stays in
+    Diagnostics; its mentee-heading shape reaches the Fix list. Each finding is
+    shown exactly when the review copy would mark it in place."""
+    findings = [
+        _finding("owner_attribution", message="entry 4 (D1): no owner (citation_without_owner)"),
+        _finding("owner_attribution",
+                 message="entry 5 (N3): mentees under another heading (mentee_under_non_mentee_heading)"),
+    ]
+    report = rqr.summarize_doctor({"findings": findings})
+    assert [precision.shown_in_place(f["lint"], f["message"]) for f in findings] == [False, True]
+    assert sum(len(g.items) for g in report.fix_list) == 1
+    assert report.fix_list_held_back == 1
+
+
+def test_fix_list_reads_held_out_verdicts_folded_in():
+    """appendix_recovered_A is 3 / 20 in-sample but 18 / 35 with YUYVIG's
+    held-out verdicts: the gate's combined row shows it, at medium confidence.
+    appendix_no_route_T stays under half combined (15 / 34) and is held back."""
+    recovered = _finding("stage6_render_warnings",
+                         message="stage 6 self-check: A: 2 entries recovered into the Appendix")
+    no_route = _finding("stage6_render_warnings",
+                        message="stage 6 self-check: T: 3 entries, no stage 6 section is routed")
+    report = rqr.summarize_doctor({"findings": [recovered, no_route]})
+    [problem] = [p for g in report.fix_list for i in g.items for p in i.problems]
+    assert problem.title == rqr.LINT_COPY["stage6_render_warnings"].title
+    assert problem.confidence == "medium"
+    assert report.fix_list_held_back == 1
+
+
+def test_every_effort_names_a_known_worded_lint():
+    assert set(rqr.LINT_EFFORT) <= set(rqr.LINT_COPY) <= set(KNOWN_LINTS)

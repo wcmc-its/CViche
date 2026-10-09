@@ -2,7 +2,7 @@ export type { User, QuotaInfo, ConsentStatus, AuthConfig } from './auth'
 export type {
   StepSummary, RunState, RunStatus, RunSummary, FeedbackStatus, PaginatedRuns,
   RunBy, RunListScope, RunListParams, FilterCount, RunByOption, RunFilterOptions,
-  QualityBand, DoctorSeverity, QualityDimension, QualityGate, ScoreRowWording, DoctorFindingGroup, DoctorFindingInstance, RunDoctorReport,
+  QualityBand, DoctorSeverity, QualityDimension, QualityGate, ScoreRowWording, DoctorFindingGroup, DoctorFindingInstance, RunDoctorReport, FixConfidence, FixEffort, FixListProblem, FixListItem, FixListGroup,
   RunQualityReport, RunReviewNote, RunFeedbackSummary, FeedbackReviewer, RunFeedbackFilter,
   RunInputFormatFilter, RunStatusFilter, StatusFilterCounts,
 } from './runs'
