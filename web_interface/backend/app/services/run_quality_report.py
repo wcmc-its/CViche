@@ -53,15 +53,17 @@ BAND_MEANINGS = {
 @dataclass(frozen=True)
 class CapSource:
     """The gate behind a hard-fail cap: a short reason and the doctor lint that
-    reports the same condition."""
+    reports the same condition, None when no lint does (the doctor itself did
+    not check the run)."""
     reason: str
-    lint: str
+    lint: str | None
 
 
 # Keyed by the scorer function so the gate list cannot drift from
 # quality_score.DIMENSIONS / CAP_ONLY_GATES (every gate there needs a row; the
 # contract test pins that).
 _CAP_SOURCE_BY_SCORER = {
+    scorer.score_doctor_findings: CapSource("the doctor did not check this run", None),
     scorer.score_pipeline_errors: CapSource("fatal error in pipeline", "pipeline_errors_present"),
     scorer.score_cv_owner: CapSource("owner name missing", "owner_contact_missing"),
     scorer.score_no_output: CapSource("no document was produced", "no_output"),
@@ -69,25 +71,6 @@ _CAP_SOURCE_BY_SCORER = {
         "classification fell back to defaults", "stage3b_fallback_ratio"),
     scorer.score_protected_data: CapSource(
         "protected personal data in the output", "protected_data_in_output"),
-    scorer.score_under_extracted_records: CapSource(
-        "a large entry was only partly read, so its records are missing", "under_extraction"),
-    scorer.score_fused_entries: CapSource(
-        "several records were fused into one entry", "segmentation"),
-    scorer.score_lost_source_table: CapSource(
-        "a source table never reached the output", "table_lost"),
-    scorer.score_owner_missing_from_citation: CapSource(
-        "the CV owner was cut from several of their own citations",
-        "owner_missing_from_citation"),
-    scorer.score_etal_added: CapSource(
-        "several citations cut their co-authors to \"et al.\"", "etal_added"),
-    scorer.score_grant_boundary: CapSource(
-        "several grants show another grant's details", "grant_boundary"),
-    scorer.score_grant_application_as_award: CapSource(
-        "a grant application is listed as funding received", "grant_bucket"),
-    scorer.score_junk_rows: CapSource(
-        "several headers or labels appear as entries", "junk_or_header_row"),
-    scorer.score_group_header_context: CapSource(
-        "several rows lost the heading they sat under", "group_header_context"),
     scorer.score_stage4_group_failures: CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures"),
 }
@@ -120,55 +103,31 @@ class RowCopy:
 # quality_score.DIMENSIONS / CAP_ONLY_GATES needs one (the contract test pins
 # that).
 _ROW_COPY_BY_SCORER = {
+    # Wording approved by Paul, 2026-10-08 (#1595). The score's one
+    # weighted row since #1595.
+    scorer.score_doctor_findings: RowCopy(
+        "Problems the checker found",
+        "Adds up the problems the Run Doctor flagged as warnings, each weighted by how often that "
+        "check has been right and by the minutes that kind of problem usually takes to fix.",
+        "About 3 minutes of estimated cleanup or less keeps the run at Ship. More lowers the "
+        "score toward 60, never below it. A run the Run Doctor did not check is capped at 84.",
+        "Work through the Run Doctor findings below, most costly first."),
+    # The next two rows' scoring sentences: approved by Paul, 2026-10-08
+    # (#1595; their points were retired, only the cap remains); the rest is
+    # Paul's 2026-10-02 wording.
     scorer.score_pipeline_errors: RowCopy(
         "Processing ran without errors",
         "Looks through the run's saved records for error messages from CViche or the AI service, "
         "and for any stage the run recorded as failed.",
         "A fatal error caps the score at 40: a stage the run recorded as fatally failed, or an error "
-        "message that names a program error, a traceback, or an API error code. Otherwise each error "
-        "costs a third of the points, so three errors lose them all.",
+        "message that names a program error, a traceback, or an API error code.",
         "Rerun the CV. If the error comes back, send the run to the CViche team."),
     scorer.score_cv_owner: RowCopy(
         "Faculty name and contact",
         "Checks that the CV owner's name was found, that a location was worked out, and that some "
         "contact detail was found.",
-        "No usable name caps the score at 25. Otherwise a missing inferred location costs 40% of the "
-        "points, a missing primary location 30%, and missing contact details 30% (only when the "
-        "source CV has an email or phone).",
+        "No usable name caps the score at 25.",
         "Check that the name and contact block are in the source CV, then rerun, or add them in Word."),
-    scorer.score_t_bucket: RowCopy(
-        "Entries placed in sections",
-        "Measures how many entries ended up in the Appendix catch-all instead of a real section, "
-        "ignoring template text, empty placeholder rows and grant goal rows.",
-        "Up to 3% of entries in the catch-all costs nothing; all points are lost at 15% or more. "
-        "A failed clean-up pass adds a further 20% penalty.",
-        "Open the Appendix and move entries to their proper headings."),
-    scorer.score_sparse_tables: RowCopy(
-        "Tables filled in",
-        "Looks for tables where half or more of the cells are empty, and for large empty areas "
-        "overall, counting only tables that hold CV content.",
-        "A missing document costs half the points; a document with no tables at all costs all of them.",
-        "Compare the empty cells with the source CV and fill what is missing. If a whole section is "
-        "blank, see the section_lost and dead_sections findings."),
-    scorer.score_broken_format: RowCopy(
-        "No stray formatting",
-        "Counts raw tab characters in the text and table cells, and body paragraphs that still contain "
-        "the template's own instruction wording, such as \"please provide\", \"list here\" or \"(optional)\".",
-        "Stray tabs cost at most 3 points, reached at 10 tabs. Each 15 leftover instructions cost "
-        "about 4 points, up to all of them.",
-        "Search the document for stray tab gaps and leftover instruction text, then delete them."),
-    scorer.score_field_sparseness: RowCopy(
-        "Entry details captured",
-        "Checks how many entries came back with no usable details (dates, titles, journals) or with "
-        "extraction marked as failed. Entries with nothing to extract are not counted against it.",
-        "About 10% of entries empty and 10% failed loses all the points.",
-        "Compare the thin entries with the source CV and fill in what is missing."),
-    scorer.score_duplicate_ratio: RowCopy(
-        "No duplicate entries",
-        "Measures the share of entries the classifier flagged as duplicates.",
-        "Up to 10% costs nothing; 50% or more loses all the points.",
-        "Check that repeated entries are true repeats, delete extra copies, and merge any entry that "
-        "was split in two."),
     scorer.score_no_output: RowCopy(
         "A document was produced",
         "Checks that a Word document was written at all.",
@@ -195,70 +154,6 @@ _ROW_COPY_BY_SCORER = {
         "Caps the score at 84, one point under Ship, so the run reads \"Needs human cleanup\".",
         "Check the entries in the sections named in the finding against the source CV, because "
         "retried entries can carry wrong values."),
-    scorer.score_lost_source_table: RowCopy(
-        "Source tables read in full",
-        "Compares each table in the uploaded CV with the entries read from it, and looks for a table "
-        "whose lines mostly never arrived. Needs the original upload.",
-        "Caps the score at 84 when the worst table lost 5 or more lines.",
-        "Open the source table named in the table_lost finding and re-enter the missing rows."),
-    scorer.score_fused_entries: RowCopy(
-        "Records kept separate",
-        "Counts entries that swallowed 3 or more record-like lines, i.e. several records read as one entry.",
-        "Caps the score at 84 when 2 or more entries are fused. One fused entry is common and often "
-        "harmless, so it does not cap.",
-        "Split the fused entries named in the segmentation finding into one row per record."),
-    scorer.score_under_extracted_records: RowCopy(
-        "Long entries read in full",
-        "Uses the under_extraction finding: a long entry with several records of which under 40% "
-        "reached the document.",
-        "Caps the score at 84 on any under_extraction finding.",
-        "Compare the entry with the source and add the missing records."),
-    scorer.score_owner_missing_from_citation: RowCopy(
-        "Owner named on their own citations",
-        "Reads each publication's line in the document and checks that it names the faculty member "
-        "whenever the source CV credits them, including as a member of a study group.",
-        "Caps the score at 84 when 3 or more citations leave the faculty member out.",
-        "Restore the faculty member's name in the citations named in the owner_missing_from_citation "
-        "finding."),
-    scorer.score_etal_added: RowCopy(
-        "Co-authors kept on citations",
-        "Uses the etal_added finding: a publication whose line in the document ends its author list "
-        "with \"et al.\" where the source CV names every author.",
-        "Caps the score at 84 when 3 or more citations are flagged. One or two cut lists do not cap.",
-        "Restore the full author list from the source CV in the citations named in the etal_added "
-        "finding."),
-    scorer.score_grant_boundary: RowCopy(
-        "Grant details kept with their grant",
-        "Uses the grant_boundary finding: a grant list split at the wrong line, so a grant shows "
-        "another grant's title, principal investigator, effort or dates.",
-        "Caps the score at 84 when 3 or more grants are flagged. A single flagged grant does not "
-        "cap.",
-        "Compare the grants named in the grant_boundary finding with the source CV and move each "
-        "detail back to its own grant."),
-    scorer.score_grant_application_as_award: RowCopy(
-        "Grant applications not listed as funding",
-        "Uses the grant_bucket finding: a grant the source CV lists under an applications heading "
-        "that the document shows as current or completed funding.",
-        "Caps the score at 84 on any such grant. A current grant whose end date has passed is "
-        "reported but does not cap.",
-        "Move the grants named in the grant_bucket finding to Pending Funding, as the source CV "
-        "files them."),
-    scorer.score_junk_rows: RowCopy(
-        "Headers not shown as entries",
-        "Uses the junk_or_header_row finding: a group header, a lead-in label, a bare date or a "
-        "repeated undated title that the document shows as an entry of its own.",
-        "Caps the score at 84 when 5 or more are flagged. One to four rows are a quick deletion, "
-        "so they do not cap.",
-        "Delete the rows named in the junk_or_header_row finding, and copy any institution they "
-        "named onto the entries beneath them."),
-    scorer.score_group_header_context: RowCopy(
-        "Rows keep the heading they sat under",
-        "Uses the group_header_context finding: a society, employer or course line whose lines "
-        "show without its name, or roles that show without the course, committee or society they "
-        "were held in.",
-        "Caps the score at 84 when 4 or more are flagged. Fewer do not cap.",
-        "Add the society, institution or course from the line above to each row named in the "
-        "group_header_context finding."),
 }
 
 _GATES = (*((n, f) for n, _w, f in scorer.DIMENSIONS), *scorer.CAP_ONLY_GATES)
@@ -991,7 +886,7 @@ def summarize_doctor(payload: object, cap_lint: str | None = None,
         not_checked=[spot.sentence for spot in blind_spots()])
 
 
-def doctor_lint_for_cap(lint: str, doctor_raw: object) -> str:
+def doctor_lint_for_cap(lint: str | None, doctor_raw: object) -> str | None:
     """The doctor row a cap points at: ``lint``, except a fatal-error cap whose
     run has no pipeline_errors_present finding but a stage_failure_recorded one
     (see STAGE_FAILURE_LINT)."""

@@ -27,8 +27,8 @@ lint's pooled rows.
 The gate also reads the "Held-out precision (YUY-HO)" table: `load_gate_ledger`
 adds its held-out verdicts to the in-sample rows of every lint whose code has
 not changed since the dev-259 doctor they judged (`HELD_OUT_CHANGED`). It is
-the one ledger for #1589's consumers to share: the review copy's gate and
-the run page's Fix list read it now, the quality score when it adopts it.
+the one ledger for #1589's consumers to share: the review copy's gate, the
+run page's Fix list and the quality score's precision weights (#1595).
 
 A missing or unreadable file is logged and yields an empty ledger: the doctor
 still runs, and every lint reads as unmeasured.
@@ -37,7 +37,8 @@ Imports: the standard library only. Imported by `run_doctor`, by the review
 copy (`web_interface/backend/app/services/review_comments.py`, for
 `shown_in_place` and `load_gate_ledger`), by the run page's Fix list
 (`web_interface/backend/app/services/run_quality_report.py`, for the same
-gate and `finding_precision`), by `scripts/doctor_vs_autopsy.py` (for `stage6_shape`)
+gate and `finding_precision`), by `quality_score` (for `finding_precision`
+and `load_gate_ledger`), by `scripts/doctor_vs_autopsy.py` (for `stage6_shape`)
 and by `scripts/doctor_one.py`.
 """
 from __future__ import annotations

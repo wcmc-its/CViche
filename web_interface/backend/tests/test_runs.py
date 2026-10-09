@@ -589,7 +589,8 @@ def test_run_quality_report_shape(client, db, seed_simple_mode, monkeypatch):
         "data_complete": True,
         "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0, "label": None,
                         "checks": None, "scoring": None, "if_lost": None, "can_cap": False}]}
-    assert body["gates_fired"] == []
+    # The owner row carries no weight since #1595, so its fired cap is listed as a gate.
+    assert [(g["lint"], g["cap"]) for g in body["gates_fired"]] == [("owner_contact_missing", 25)]
     assert [(f["lint"], f["severity"], f["count"], f["caps_score"])
             for f in body["doctor"]["findings"]] == [
         ("owner_contact_missing", "ERROR", 1, True), ("table_shape", "INFO", 1, False)]
