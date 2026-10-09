@@ -16,8 +16,16 @@ from docx.oxml.ns import qn  # noqa: E402
 from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
-from unified_pipeline.run_doctor import read_docx_blocks  # noqa: E402
+from unified_pipeline.run_doctor import (  # noqa: E402
+    read_docx_blocks,
+    read_docx_table_rows,
+)
 from unified_pipeline.stage6.formatting import CVICHE_BOX_FILL  # noqa: E402
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    PI_NAME_LABEL,
+    PROJECT_TITLE_LABEL,
+    YOUR_ROLE_LABEL,
+)
 
 HEADER = "Example Medical College"
 PAST_FUNDING_HEADING = "Past (Completed) Funding"
@@ -366,3 +374,112 @@ def test_comments_leave_the_body_the_doctor_reads_unchanged(tmp_path):
 
 def test_not_a_doctor_report_writes_nothing(tmp_path):
     assert rc.write_review_docx(_clean_docx(tmp_path), None) is None
+
+
+# --- #1591: a certain fix as a tracked change ---------------------------------
+
+OWNER = {"first_name": "Ada", "last_name": "Testowner"}
+GRANT_TITLE = "Example Squid Optics Project"
+OWNER_PI_ROLE_FINDING = _finding(
+    "role_consistency", "entry 5: 'Name of Principal Investigator:' names the CV owner, and "
+    "'Your role:' is empty (owner_pi_role_empty, #1403)", [GRANT_TITLE])
+
+
+def _stage4(*pi_names):
+    return {"cv_owner": OWNER, "entries": [
+        {"taxonomy_code": "M2B", "element_idx_start": 5 + n, "text": "A grant",
+         "extracted_fields": {"title": GRANT_TITLE, "pi_name": pi}} for n, pi in enumerate(pi_names)]}
+
+
+def _with_grant_tables(tmp_path: Path, *tables: tuple[str, str]) -> Path:
+    """The clean document with a rendered grant table per (PI cell, role cell)."""
+    clean = _clean_docx(tmp_path)
+    doc = Document(str(clean))
+    for pi_name, role in tables:
+        rows = [("Award Source:", "Example Foundation"), (PROJECT_TITLE_LABEL, GRANT_TITLE),
+                (PI_NAME_LABEL, pi_name), (YOUR_ROLE_LABEL, role), ("Your percent (%) effort:", "")]
+        table = doc.add_table(rows=len(rows), cols=2)
+        for row, (label, value) in zip(table.rows, rows, strict=True):
+            row.cells[0].text, row.cells[1].text = label, value
+    doc.save(str(clean))
+    return clean
+
+
+def _role_cells(path: Path) -> list:
+    """Each grant table's "Your role:" value cell element, in order."""
+    return [row.cells[1]._tc for table in Document(str(path)).tables for row in table.rows
+            if row.cells[0].text == YOUR_ROLE_LABEL]
+
+
+def _reviewed(cell, accept: bool) -> str:
+    """The cell's text once every tracked change is accepted (w:t, inserted
+    runs included; a deletion's w:delText gone), or rejected (inserted runs
+    gone; w:delText back)."""
+    if accept:
+        return "".join(t.text or "" for t in cell.iter(qn("w:t")))
+    return "".join(el.text or "" for el in cell.iter(qn("w:t"), qn("w:delText"))
+                   if el.tag == qn("w:delText")
+                   or not any(a.tag == qn("w:ins") for a in el.iterancestors()))
+
+
+def test_an_empty_role_beside_the_owner_as_pi_gets_pi_as_a_tracked_insertion(tmp_path):
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""))
+    out, n = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING), _stage4("Testowner"))
+    assert n == 1
+    (cell,) = _role_cells(out)
+    assert _reviewed(cell, accept=True) == rc.OWNER_PI_ROLE_FIX == "PI"
+    assert _reviewed(cell, accept=False) == ""  # the delivered text
+    (ins,) = cell.iter(qn("w:ins"))
+    assert ins.get(qn("w:author")) == rc.COMMENT_AUTHOR and ins.get(qn("w:date")) is None
+    # The ids follow the clean document's own tracked insertion (w:id 90).
+    assert ins.get(qn("w:id")) == "91"
+    # The fix replaces the comment; the clean document is untouched.
+    assert _comments(out) == [] and _reviewed(_role_cells(clean)[0], accept=True) == ""
+
+
+def test_only_the_tables_the_shape_reports_get_the_fix(tmp_path):
+    """Another PI's table with an empty role, and the owner's with a role,
+    are left as delivered."""
+    clean = _with_grant_tables(tmp_path, ("Other Person", ""), ("Ada Testowner", "Co-PI"),
+                               ("Ada Testowner", ""))
+    out, n = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING),
+                                  _stage4("Other Person", "Testowner", "Testowner"))
+    assert n == 1
+    assert [_reviewed(c, accept=True) for c in _role_cells(out)] == ["", "Co-PI", "PI"]
+
+
+def test_each_fix_is_its_own_revision(tmp_path):
+    """Word accepts or rejects each change by its w:id: two fixes, two ids."""
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""), ("Ada Testowner", ""))
+    out, n = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING), _stage4("Testowner", "Testowner"))
+    ids = [ins.get(qn("w:id")) for cell in _role_cells(out) for ins in cell.iter(qn("w:ins"))]
+    assert n == 2 and ids == ["91", "92"]
+
+
+def test_without_the_stage4_artifact_the_finding_stays_a_comment(tmp_path):
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""))
+    out, n = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING))
+    assert n == 1
+    assert _comments(out) == [(_flag("role_consistency"), GRANT_TITLE)]
+    assert [_reviewed(c, accept=True) for c in _role_cells(out)] == [""]
+
+
+def test_no_fix_without_the_doctors_finding(tmp_path):
+    """The fix follows the doctor's report, not a fresh read of the tables."""
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""))
+    out, _ = rc.write_review_docx(clean, _report(
+        _finding("enrichment_failures", "1 publication(s) failed PubMed enrichment", [SECOND])), _stage4("Testowner"))
+    assert [_reviewed(c, accept=True) for c in _role_cells(out)] == [""]
+
+
+def test_the_fix_leaves_every_other_cell_as_delivered(tmp_path):
+    """Accepting the copy's changes differs from the clean document only in
+    the fixed role cell (the doctor's own table reader, which reads w:ins)."""
+    clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""))
+    out, _ = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING), _stage4("Testowner"))
+    before, after = read_docx_table_rows(str(clean)), read_docx_table_rows(str(out))
+    changed = [(t, r) for t, (a, b) in enumerate(zip(before, after, strict=True))
+               for r, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
+    assert changed == [(0, 3)]
+    assert after[0][3] == [YOUR_ROLE_LABEL, "PI"]
+

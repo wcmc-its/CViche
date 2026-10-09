@@ -3817,14 +3817,14 @@ def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
     return None
 
 
-def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
-    """Each rendered grant table as {row label: value}: the tables that have
-    a PI row."""
+def _grant_tables(table_rows: list[list[list[str]]]) -> list[tuple[int, dict[str, str]]]:
+    """Each rendered grant table (a table with a PI row) as its index among
+    the document's tables and {row label: value}."""
     tables = []
-    for table in table_rows:
+    for at, table in enumerate(table_rows):
         cells = {row[0]: (row[1] if len(row) > 1 else "") for row in table if row}
         if PI_NAME_LABEL in cells:
-            tables.append(cells)
+            tables.append((at, cells))
     return tables
 
 
@@ -3899,23 +3899,42 @@ def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
     return None
 
 
-def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
-                         owner: frozenset[str], reported: set[object]) -> list[dict]:
-    """A finding per grant entry whose rendered table shows a role shape
-    (each table matched to its entry by `_table_entries`). Tables that
-    still resolve to one entry and show one shape give one finding that
-    counts them (#1590). A table whose entry already has an entry finding is
-    reported only for pi_cell_empty, which predates the others and was
-    always reported beside them."""
+class _TableRoleHit(NamedTuple):
+    """One rendered grant table the lint reports: its index among the
+    document's tables, its entry's index, its shape and what it says, and
+    its title."""
+    table: int
+    idx: object
+    shape: tuple[str, str]
+    title: str
+
+
+def _table_role_hits(stage4: dict, table_rows: list[list[list[str]]],
+                     owner: frozenset[str], reported: set[object]) -> list[_TableRoleHit]:
+    """Each rendered grant table that shows a role shape (each table matched
+    to its entry by `_table_entries`). A table whose entry already has an
+    entry finding counts only for pi_cell_empty, which predates the others
+    and was always reported beside them."""
     tables = _grant_tables(table_rows)
-    hits: dict[tuple[object, tuple[str, str], str], int] = {}
-    for cells, entry in zip(tables, _table_entries(stage4, tables)):
+    hits = []
+    for (at, cells), entry in zip(tables, _table_entries(stage4, [cells for _, cells in tables])):
         fields = entry.get("extracted_fields", {})
         shape = _table_role_shape(cells, owner, str(fields.get("pi_name") or ""))
         idx = entry.get("element_idx_start")
         if not shape or (idx in reported and shape[0] != ROLE_SHAPE_PI_CELL_EMPTY):
             continue
-        key = (idx, shape, cells.get(PROJECT_TITLE_LABEL, ""))
+        hits.append(_TableRoleHit(at, idx, shape, cells.get(PROJECT_TITLE_LABEL, "")))
+    return hits
+
+
+def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
+                         owner: frozenset[str], reported: set[object]) -> list[dict]:
+    """A finding per grant entry whose rendered table shows a role shape.
+    Tables that still resolve to one entry and show one shape give one
+    finding that counts them (#1590)."""
+    hits: dict[tuple[object, tuple[str, str], str], int] = {}
+    for hit in _table_role_hits(stage4, table_rows, owner, reported):
+        key = (hit.idx, hit.shape, hit.title)
         hits[key] = hits.get(key, 0) + 1
     findings = []
     for (idx, shape, title), tables_hit in hits.items():
@@ -3940,23 +3959,40 @@ def lint_role_consistency(stage4: dict,
     (the render shape owner_pi_role_empty reads that off the table), a
     co-PI, or text that gives the owner both roles."""
     owner = _owner_surname_words(stage4)
-    findings = []
-    reported: set[object] = set()
+    shaped = _entry_role_shapes(stage4, owner)
+    findings = [_finding(
+        "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+        f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+        f"{shape[1]} ({shape[0]}, #1403)",
+        [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]) for entry, shape in shaped]
+    if table_rows is not None:
+        reported = {entry.get("element_idx_start") for entry, _ in shaped}
+        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
+    return findings
+
+
+def _entry_role_shapes(stage4: dict, owner: frozenset[str]) -> list[tuple[dict, tuple[str, str]]]:
+    """Each grant entry whose stage-4 fields show a role shape, with the shape."""
+    shaped = []
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
             continue
         shape = _entry_role_shape(entry, fields, owner)
         if shape:
-            reported.add(entry.get("element_idx_start"))
-            findings.append(_finding(
-                "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
-                f"{shape[1]} ({shape[0]}, #1403)",
-                [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
-    if table_rows is not None:
-        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
-    return findings
+            shaped.append((entry, shape))
+    return shaped
+
+
+def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> list[int]:
+    """The indices, among the document's top-level tables, of the grant
+    tables lint_role_consistency reports as owner_pi_role_empty: the PI cell
+    names the CV owner and "Your role:" is empty. The review copy suggests
+    "PI" there as a tracked insertion (#1591): the shape's certain fix."""
+    owner = _owner_surname_words(stage4)
+    reported = {entry.get("element_idx_start") for entry, _ in _entry_role_shapes(stage4, owner)}
+    return sorted({hit.table for hit in _table_role_hits(stage4, table_rows, owner, reported)
+                   if hit.shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY})
 
 
 # --- orphaned_fragments ------------------------------------------------------

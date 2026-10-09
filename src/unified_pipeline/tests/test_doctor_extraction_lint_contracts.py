@@ -82,6 +82,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_orphaned_fragments,
     lint_record_boundary,
     lint_role_consistency,
+    owner_pi_role_empty_tables,
     lint_span_count,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -4571,6 +4572,38 @@ def test_role_consistency_reports_a_grant_once_when_its_table_shows_a_render_sha
                    pi_name="Ada Testowner", pi_role="co-I")
     assert _shapes(entry, table_rows=[_grant_table("co-I", "Ada Testowner")]) == [
         ("contradicted", "WARN")]
+
+
+def test_owner_pi_role_empty_tables_names_the_tables_the_shape_reports():
+    """#1591's certain fix acts on exactly the tables the lint reports, by
+    their index among the document's tables (a non-grant table counts)."""
+    entries = [_grant(idx, "A grant", title=title, pi_name="Testowner")
+               for idx, title in ((20, "First Project"), (21, "Second Project"))]
+    tables = [[["Name:", "Ada Testowner"]],  # not a grant table
+              _grant_table("", "Testowner", title="First Project"),
+              _grant_table("PI", "Testowner", title="Second Project"),
+              _grant_table("", "Other Person", title="Second Project"),
+              _grant_table("", "Ada Testowner", title="Second Project"),
+              _grant_table("PI", "", title="Second Project")]  # pi_cell_empty: another shape
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": entries}
+    assert owner_pi_role_empty_tables(stage4, tables) == [1, 4]
+    shapes = [f["message"] for f in lint_role_consistency(stage4, tables)]
+    assert sum("(owner_pi_role_empty," in m for m in shapes) == 2
+    assert any("(pi_cell_empty," in m for m in shapes)
+
+
+def test_owner_pi_role_empty_tables_skips_a_table_whose_entry_has_its_own_finding():
+    """The lint reports such a table only through the entry finding, so the
+    fix is not suggested there either."""
+    entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
+                   pi_name="Ada Testowner", pi_role="co-I")
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": [entry]}
+    assert owner_pi_role_empty_tables(stage4, [_grant_table("", "Ada Testowner")]) == []
+
+
+def test_owner_pi_role_empty_tables_needs_an_owner():
+    entry = _grant(260, "A grant", title="Example Project", pi_name="Testowner")
+    assert owner_pi_role_empty_tables({"entries": [entry]}, [_grant_table("", "Testowner")]) == []
 
 
 if __name__ == "__main__":
