@@ -71,6 +71,10 @@ def _grant(code, text, *hierarchy):
     ('2019-present Example Study, Co-I 2017-2024', (2019, TEST_YEAR + 1)),
     ('2019-Present Example Study (Co-I 2017-24)', (2019, TEST_YEAR + 1)),
     ('04/08/2021 – date Example Study (Co-I 2017-2024)', (2021, TEST_YEAR + 1)),
+    # The closed pattern's month slot also takes 'present'/'date', so it can
+    # start at the open span's own offset; the open span the CV wrote wins.
+    ('2021-present 2024 Example R01', (2021, TEST_YEAR + 1)),
+    ('2019-date 2024 Example Study', (2019, TEST_YEAR + 1)),
     # A closed range written first still wins over an open end after it.
     ('2017-2024 Example Grant (renewal 2025-present)', (2017, 2024)),
     ('2017-24 Example Grant (renewal 2025-present)', (2017, 2024)),

@@ -110,7 +110,7 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     """
     open_end = _OPEN_RANGE_RE.search(text)
     closed = _closed_range(text)
-    if closed and not (open_end and open_end.start() < closed[0]):
+    if closed and not (open_end and open_end.start() <= closed[0]):
         return closed[1]
     if open_end:
         return int(open_end.group(1)), CURRENT_YEAR + 1  # Still active
