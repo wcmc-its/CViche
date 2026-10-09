@@ -60,6 +60,11 @@ spec:
             #   value: "1" # send acknowledgements through SESv2 (needs ses:SendEmail)
             - name: CVICHE_INIT_DB
               value: "0" # No metadata.create_all() DDL at boot (#191)
+            # Cap glibc malloc arenas. Stage thread pools each get an arena, and freed
+            # memory in them is not returned to the OS, so an idle worker kept ~1.1 GiB
+            # after one run (#1569).
+            - name: MALLOC_ARENA_MAX
+              value: "2"
           # Readiness: main() touches READY_FILE only after every startup
           # check (config presence, ensure_group()'s live Valkey ping) has
           # passed, so a bad rollout or an unreachable Valkey holds the pod

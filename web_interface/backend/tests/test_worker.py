@@ -1090,6 +1090,15 @@ def test_flex_worker_manifest_differs_from_the_worker_only_where_intended():
     assert flex == worker
 
 
+def test_worker_caps_glibc_malloc_arenas():
+    """#1569: without an arena cap, freed memory from the stage thread pools
+    stayed in glibc arenas and an idle worker kept ~1.1 GiB after one run. The
+    flex pool inherits this via the drift test above."""
+    worker = yaml.safe_load((_K8S / "base/worker/deployment.yaml").read_text())
+    env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {"name": "MALLOC_ARENA_MAX", "value": "2"} in env
+
+
 def test_prod_worker_pins_the_same_s3_backend_as_the_prod_backend() -> None:
     """#109: main() refuses to start without CVICHE_STORAGE_BACKEND=s3, so the
     prod worker pins it as a container env var, the same as the backend,
