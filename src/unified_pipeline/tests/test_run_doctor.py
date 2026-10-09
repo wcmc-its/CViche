@@ -5751,6 +5751,19 @@ def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     assert _find_source(tmp_path, "web05").name == "web05.docx"
 
 
+def test_artifact_layout_is_where_the_doctor_finds_each_artifact(tmp_path):
+    """#1654: a run assembled from its stored files at artifact_layout's
+    paths is read in full, artifact by artifact."""
+    from unified_pipeline.run_doctor import _ARTIFACTS, _find_artifact, artifact_layout
+
+    layout = artifact_layout(tmp_path, "web05")
+    assert set(layout) == set(_ARTIFACTS)
+    for key, path in layout.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        assert _find_artifact(tmp_path, "web05", key) == path
+
+
 def test_artifacts_are_named_tuples_readable_by_attribute():
     """_ARTIFACTS values are ArtifactSpec, not bare positional tuples -- so a
     call site can read .stage_dir/.suffix by name instead of by position."""

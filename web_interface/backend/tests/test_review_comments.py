@@ -3,6 +3,7 @@
 Every document here is built in the test from invented text; no corpus CV.
 """
 import copy
+import json
 import os
 import sys
 from pathlib import Path
@@ -677,3 +678,35 @@ def test_the_fix_leaves_every_other_cell_as_delivered(tmp_path):
                for r, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
     assert changed == [(0, 3)]
     assert after[0][3] == [YOUR_ROLE_LABEL, "PI"]
+
+
+def test_the_comment_map_names_each_comments_finding_by_its_id(tmp_path):
+    """#1654: lint, message shape, severity and entry index per comment, no text."""
+    reroute = ("stage 6 self-check: hierarchy-mismatch reroute K1->S8 refused fields do not fit: "
+               "1 entry")
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("implausible_year", "entry 3 (M2B): end_date=1912 -- before 1959",
+                 [f"Grant Title: {GRANT}; Role: PI"], severity="ERROR"),
+        _finding("stage6_render_warnings", reroute, [SECOND]),
+        _finding("dedup_drops", "1 entry dropped", ["entry 9: K1 (jaccard=1.00): dropped 'x' vs kept 'y'"])))
+    marked = json.loads(rc.comment_map_path(out).read_text(encoding="utf-8"))
+    assert rc.comment_map_path(out).name == "DOC_wcm_review_comments.json"
+    assert [m["comment_id"] for m in marked] == [c.comment_id for c in Document(str(out)).comments]
+    assert [(m["lint"], m["shape"], m["severity"], m["entry_index"]) for m in marked] == [
+        ("implausible_year", None, "ERROR", 3),
+        ("stage6_render_warnings", "reroute_refused", "WARN", None)]
+    assert GRANT not in rc.comment_map_path(out).read_text(encoding="utf-8")
+
+
+def test_a_copy_with_nothing_to_mark_has_an_empty_comment_map(tmp_path):
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report())
+    assert json.loads(rc.comment_map_path(out).read_text(encoding="utf-8")) == []
+
+
+def test_a_comments_wording_names_its_lint_only_when_one_lint_words_it_so():
+    """For a review copy written before its comment map."""
+    assert rc.lint_of_flag(_flag("implausible_year")) == "implausible_year"
+    assert _flag("bucket_status") == _flag("grant_bucket")
+    assert rc.lint_of_flag(_flag("grant_bucket")) is None
+    assert rc.lint_of_flag(rc.DIVERSION_FLAG.format(count="2 entries", verb="are")) == rc.DIVERSION_LINT
+    assert rc.lint_of_flag("A finding's own message, with no flag of its own.") is None

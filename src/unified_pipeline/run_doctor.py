@@ -1351,6 +1351,14 @@ def _uid_owns(name: str, uid: str) -> bool:
     return bool(rest) and not rest[0].isalnum()
 
 
+def artifact_layout(root: Path, uid: str) -> dict[str, Path]:
+    """Where the pipeline writes each artifact the doctor reads, under
+    ``root``: a caller assembling a run from its stored files (the corrected
+    copy's re-run, #1654) writes them here, and `_find_artifact` finds them."""
+    return {key: Path(root) / spec.stage_dir / f"{uid}{spec.suffix}"
+            for key, spec in _ARTIFACTS.items()}
+
+
 def _find_artifact(root: Path, uid: str, key: str) -> Path | None:
     spec = _ARTIFACTS[key]
     directory = root / spec.stage_dir

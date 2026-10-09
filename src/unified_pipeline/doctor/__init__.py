@@ -11,4 +11,6 @@ public import surface; these modules hold the lint rules it calls.
     docx_diff.py   a delivered docx vs the reviewer's corrected copy, typed
                    per change and written as doctor_vs_autopsy.py labels
                    (#1587); scripts/docx_review_diff.py is its CLI
+    comment_fate.py what a reviewer did at each review-copy comment, read
+                   from their corrected copy: a verdict per finding (#1654)
 """

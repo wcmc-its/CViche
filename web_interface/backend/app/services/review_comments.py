@@ -28,11 +28,17 @@ Word tracked change: accepting it gives the corrected text, rejecting it the
 delivered text (#1591). Which findings qualify is the "Repair tiers" table in
 doctor/PRECISION.md; today one does, owner_pi_role_empty ("PI" in an empty
 "Your role:" cell beside a PI cell naming the CV owner).
+
+Beside the copy, `<uid>_wcm_review_comments.json` names the finding each
+comment marks (lint, shape, severity, entry index; `CommentFinding`), so the
+fate of each comment in a reviewer's corrected copy is a verdict on that
+finding (#1654, review_loop_service).
 """
 import copy
+import json
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from docx import Document
@@ -47,6 +53,7 @@ from lxml.etree import XMLSyntaxError
 from app.schemas import DoctorFindingInstance
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX
 from app.services.run_quality_report import (
+    _ENTRY_INDEX_RE,
     LINT_COPY,
     REVIEW_COPY_ONLY_LINTS,
     TRUNCATION_MARK,
@@ -63,6 +70,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
 from unified_pipeline.doctor.precision import (  # noqa: E402
     LintPrecision,
     ShapeKey,
+    finding_shape,
     load_gate_ledger,
     shown_in_place,
 )
@@ -90,6 +98,9 @@ from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa:
 REVIEW_DOCX_ERRORS = (OSError, zipfile.BadZipFile, KeyError, ValueError, XMLSyntaxError,
                       PackageNotFoundError)
 COMMENT_AUTHOR = "CViche check"
+#: The review copy's comment-to-finding map (`CommentFinding`), beside it:
+#: `<uid>_wcm_review_comments.json`.
+COMMENT_MAP_SUFFIX = "_comments.json"
 COMMENT_INITIALS = "CV"
 COMMENTED_SEVERITIES = ("ERROR", "WARN")
 #: Flags one lint may put in one document. A lint can fire hundreds of times.
@@ -182,6 +193,8 @@ LESS_CERTAIN_NOTE = "This check is often wrong, so it is listed here, not marked
 #: An Appendix diversion, on the heading of the section it was meant for.
 #: The count is the run page's; the Appendix group headings say where each came from.
 DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move any that belong here."
+#: What every diversion comment ends with, whatever its count.
+_DIVERSION_FLAG_TAIL = DIVERSION_FLAG.split("{verb}", 1)[1]
 #: The same, as a review note naming the section, under its own group title
 #: (the run page's "Document builder warnings" is internal wording).
 DIVERSION_TITLE = "Entries placed in the Appendix"
@@ -270,9 +283,44 @@ class Note:
     kept: str | None = None
 
 
+@dataclass(frozen=True)
+class CommentFinding:
+    """Which finding one review-copy comment marks, by the comment's id in
+    the copy as written: what reading a reviewer's corrected copy needs to
+    turn the comment's fate into a verdict on that finding (#1654). Lint,
+    message shape, severity and entry index only; no text."""
+    comment_id: int
+    lint: str
+    shape: str | None
+    severity: str | None  # None for a finding read from a comment's wording alone
+    entry_index: int | None
+
+
+def lint_of_flag(text: str) -> str | None:
+    """The lint a comment's wording names, for a review copy written before
+    its comment map (#1654); None when no lint, or more than one, words it so."""
+    lints = [lint for lint, flag in REVIEW_FLAGS.items() if flag == text]
+    if len(lints) == 1:
+        return lints[0]
+    return DIVERSION_LINT if text.endswith(_DIVERSION_FLAG_TAIL) else None
+
+
 def review_docx_path(clean_docx: Path) -> Path:
     """Where the flagged copy of ``<uid>_wcm.docx`` is written."""
     return clean_docx.with_name(clean_docx.name.removesuffix("_wcm.docx") + REVIEW_DOCX_SUFFIX)
+
+
+def comment_map_path(review_docx: Path) -> Path:
+    """Where the review copy's `CommentFinding` list is written, beside it."""
+    return review_docx.with_name(review_docx.name.removesuffix(".docx") + COMMENT_MAP_SUFFIX)
+
+
+def _comment_finding(comment_id: int, finding: dict,
+                     rows: dict[ShapeKey, LintPrecision]) -> CommentFinding:
+    message = str(finding.get("message") or "")
+    entry = _ENTRY_INDEX_RE.match(message)
+    return CommentFinding(comment_id, finding["lint"], finding_shape(finding["lint"], message, rows),
+                          finding["severity"], int(entry.group(1)) if entry else None)
 
 
 def _paragraph_text(p: Paragraph) -> str:
@@ -580,9 +628,10 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
 def write_review_docx(clean_docx: Path, doctor_payload: object,
                       stage4: object = None,
                       rows: dict[ShapeKey, LintPrecision] | None = None) -> tuple[Path, int] | None:
-    """Write the flagged copy of ``clean_docx``; return its path and how many
-    flags (comments, review notes and tracked fixes) it carries, which may be
-    none. None when ``doctor_payload`` is not a doctor report or the document
+    """Write the flagged copy of ``clean_docx``, and beside it the finding
+    each comment marks (`comment_map_path`); return the copy's path and how
+    many flags (comments, review notes and tracked fixes) it carries, which
+    may be none. None when ``doctor_payload`` is not a doctor report or the document
     is empty. ``stage4`` is the run's stage-4 artifact, which the
     owner_pi_role_empty fix needs to know the owner; without it that finding
     is a comment. ``rows`` is the precision ledger (`load_gate_ledger` when
@@ -603,7 +652,7 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
                              else (0, set()))
     # The fix replaces the comment only where it was written on every table.
     findings = [f for f in findings if f.get("message") not in fixed_messages]
-    flags: list[Flag] = []
+    flags: list[tuple[Flag, dict]] = []
     notes: list[Note] = []
     per_lint: dict[str, int] = {}
     for f in findings:
@@ -611,16 +660,19 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
         for flag in found:
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
-                flags.append(flag)
+                flags.append((flag, f))
         if f["lint"] == MISSING_SOURCE_LINT:  # its notes are its flags: one per line, capped
             room = MAX_FLAGS_PER_LINT - per_lint.get(f["lint"], 0)
             noted = noted[:max(room, 0)]
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + len(noted)
         notes.extend(noted)
-    for flag in flags:
-        doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
-                        author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
+    marked = []
+    for flag, f in flags:
+        comment = doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
+                                  author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
+        marked.append(asdict(_comment_finding(comment.comment_id, f, rows)))
     _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
     doc.save(str(out))
+    comment_map_path(out).write_text(json.dumps(marked, indent=1), encoding="utf-8")
     return out, len(flags) + len(notes) + fixed

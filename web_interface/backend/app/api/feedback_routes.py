@@ -379,7 +379,8 @@ async def upload_corrected_docx(
 ) -> CorrectedDocxResponse:
     """Store a reviewer's corrected copy of the delivered document with the
     run, diff it against that document (doctor/docx_diff.py) and store the
-    typed diff beside it (#1587). Returns a one-line count only.
+    typed diff beside it (#1587), then the comment-fate verdicts and the
+    doctor's re-run on the copy (#1654). Returns a one-line count only.
 
     Same access as submitting feedback, and the CV upload's gates on the
     file: its size cap, a .docx name, the docx magic and zip-bomb bounds, and
@@ -395,6 +396,9 @@ async def upload_corrected_docx(
     await _reject_active_docx_content(content)
     changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id, content)
     logger.info("Corrected copy recorded for run %s by user %s: %d changes", run_id, current_user.id, changes)
+    # Verdicts from the review copy's comments and the doctor's re-run (#1654):
+    # best-effort, so the uploader's confirmation never waits on their failure.
+    await run_in_threadpool(review_loop_service.review_corrected_copy, db, run_id, content)
     return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
 
 

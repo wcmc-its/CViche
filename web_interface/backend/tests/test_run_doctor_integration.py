@@ -194,9 +194,11 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
 
     report = tmp_path / "outputs" / "stage_7_doctor" / "DOC_RV_doctor.json"
     review = clean.with_name("DOC_RV_wcm_review.docx")
+    comment_map = clean.with_name("DOC_RV_wcm_review_comments.json")  # #1654
     files = json.loads(db.query(Step).filter(Step.run_id == "DOC_RV").first().output_files)
-    assert files == ["/x/cv_wcm.docx", str(report), str(review)]
-    assert persisted == [str(report), str(review)]
+    assert files == ["/x/cv_wcm.docx", str(report), str(review), str(comment_map)]
+    assert persisted == [str(report), str(review), str(comment_map)]
+    assert json.loads(comment_map.read_text()) == []  # the one finding is a review note, not a comment
     # The quoted text is not in the document, so it is a review note in the box closing the copy.
     notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
     assert notes[1:4] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
