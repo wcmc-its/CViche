@@ -133,6 +133,7 @@ HELD_OUT_CHANGED: frozenset[tuple[str, str | None]] = frozenset({
     ("summary_unsupported_claim", None),   # #1592: its helpers renamed
     ("owner_attribution", None),           # new after dev-259 (#1573)
     ("source_line_coverage", None),        # new after dev-259 (#1588); its row already pools it
+    ("grant_facts", None),                 # new after dev-259 (#1588); its rows already pool it
     (STAGE6_LINT, "appendix_m1_not_in_summary"),  # #1572: `_m1_record_ids`
     (STAGE6_LINT, "appendix_no_route"),    # #1574: a bare N3 now routes to a mentee table
     (STAGE6_LINT, STAGE6_OTHER_SHAPE),     # #1574: adds the INFO bare-mentee message
