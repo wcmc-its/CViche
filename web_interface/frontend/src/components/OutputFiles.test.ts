@@ -10,8 +10,11 @@ const STEP = {
 }
 
 describe('visibleOutputFiles', () => {
-  it('hides stage JSON and the review copy from a run owner (#1388)', () => {
-    expect(visibleOutputFiles(STEP, false)).toEqual(['/o/stage_6_wcm_documents/ABC_wcm.docx'])
+  it('hides stage JSON from a run owner, but lists the review copy (#1591)', () => {
+    expect(visibleOutputFiles(STEP, false)).toEqual([
+      '/o/stage_6_wcm_documents/ABC_wcm.docx',
+      '/o/stage_6_wcm_documents/ABC_wcm_review.docx',
+    ])
   })
 
   it('lists both for admins and staff', () => {
