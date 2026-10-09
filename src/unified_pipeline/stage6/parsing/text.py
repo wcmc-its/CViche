@@ -784,3 +784,88 @@ def _refold_shattered(parts: list[str]) -> list[str]:
         else:
             folded.append(part)
     return folded
+
+
+# --- appointment title vs. its duties (#1205) ---------------------------------
+#
+# Section D's schema has no description field, so stage 4 sometimes writes an
+# appointment's duties into `title` ("Visiting Fellow, Example Office - 50% FTE
+# Appointment to help plan ..."), and the appointments table's Title column
+# then carries the role plus a paragraph. `split_appointment_title` finds the
+# point where the role ends and the duties begin.
+#
+# ponytail: the duty clause is "to <verb>" for a NAMED verb list, not a parse.
+# Measured on 966 D1-D3 titles (YUYVIG 389 + EBYSBC 577, 2026-10-08): the
+# lowercase "to <verb>" shape occurs only in duty prose there, and a title
+# that merely contains "to" ("Special Assistant to the Dean", a quoted study
+# name such as "Trial to Improve ...") is not split, because neither "the"
+# nor a capitalised verb is on the list. A duty clause with a verb not on the
+# list is not split; the doctor's appointment_title_overlong WARN still
+# reports it once the title is over that lint's limit. Extend the list from a
+# missed case, not speculatively.
+APPOINTMENT_DUTY_VERBS = frozenset({
+    'advance', 'advise', 'assist', 'build', 'conduct', 'continue', 'coordinate',
+    'create', 'design', 'develop', 'direct', 'enhance', 'establish', 'evaluate',
+    'expand', 'facilitate', 'foster', 'help', 'implement', 'improve', 'increase',
+    'lead', 'maintain', 'manage', 'mentor', 'organize', 'oversee', 'participate',
+    'plan', 'promote', 'provide', 'review', 'serve', 'strategize', 'supervise',
+    'support', 'teach', 'train',
+})
+_DUTY_CLAUSE_RE = re.compile(
+    r'\s+to\s+(?:' + '|'.join(sorted(APPOINTMENT_DUTY_VERBS)) + r')\b')
+
+# A sentence break: a period after a lowercase word of 3+ letters, then a
+# capitalised word. Titles abbreviate ("Assoc. Professor", "Depts. Of
+# Molecular Biophysics", "Asst. Professor"), so a period after one of these
+# words is not a sentence end. "Dr. X" and "M.D. and" never match: the word
+# before the period has fewer than three lowercase letters.
+_TITLE_ABBREVIATIONS = frozenset({
+    'admin', 'adj', 'assoc', 'asst', 'ctr', 'dept', 'depts', 'dir', 'div',
+    'hosp', 'inst', 'intl', 'med', 'natl', 'prof', 'sci', 'univ',
+})
+_SENTENCE_BREAK_RE = re.compile(r'([A-Za-z]*[a-z]{3})\.\s+(?=[A-Z][a-z])')
+
+# The role is cut back to the last spaced dash before the duty clause, so
+# "Agreement - 25% FTE to continue ..." keeps "Agreement", not "Agreement -
+# 25% FTE".
+_ROLE_DASH_RE = re.compile(r'\s+[-–—]\s+')
+
+# A split that would leave the Title column with less than this is not made:
+# the "role" in front of the duty clause is then too short to be one.
+APPOINTMENT_ROLE_MIN_CHARS = 10
+
+_ROLE_TRAILING_PUNCTUATION = ' ,;:-–—'
+
+
+def _duty_start(title: str) -> int | None:
+    """Where the duty prose in an appointment title starts, or None."""
+    starts = []
+    clause = _DUTY_CLAUSE_RE.search(title)
+    if clause:
+        starts.append(clause.start())
+    for match in _SENTENCE_BREAK_RE.finditer(title):
+        if match.group(1).lower() not in _TITLE_ABBREVIATIONS:
+            starts.append(match.end())
+            break
+    if not starts:
+        return None
+    start = min(starts)
+    dashes = list(_ROLE_DASH_RE.finditer(title, 0, start))
+    return dashes[-1].start() if dashes else start
+
+
+def split_appointment_title(title: str) -> tuple[str, str]:
+    """`(role, duties)`: an appointment title cut where its duty prose starts
+    (a "to <verb>" clause or a sentence break, backed up to a spaced dash
+    before it), or `(title, '')` when it has none. Nothing is dropped: the
+    two parts hold every word of `title`, minus the separator between them.
+    """
+    title = (title or '').strip()
+    start = _duty_start(title)
+    if start is None:
+        return title, ''
+    role = title[:start].rstrip(_ROLE_TRAILING_PUNCTUATION)
+    duties = title[start:].strip(_ROLE_TRAILING_PUNCTUATION)
+    if len(role) < APPOINTMENT_ROLE_MIN_CHARS or not duties:
+        return title, ''
+    return role, duties

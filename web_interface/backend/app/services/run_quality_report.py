@@ -613,6 +613,12 @@ LINT_COPY = {
         "column, such as a date, role or place, mixed into the sentence.",
         "Check each flagged paragraph against your CV: join its lines into one paragraph, "
         "and move any date, role or place that landed inside the sentence back to its entry."),
+    "appointment_title_overlong": LintCopy(
+        "Duties written into an appointment title",
+        "An appointment's title holds more than the role: a sentence or more about the duties, "
+        "such as an effort share or what the role was for.",
+        "Keep only the role in the Title column, and delete the duties or move them out of "
+        "the title."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

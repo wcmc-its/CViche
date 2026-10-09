@@ -130,6 +130,7 @@ REVIEW_FLAGS = {
                         "column mixed in: check it against your CV."),
     "source_line_coverage": ("This line from your CV may be missing from this document, or only "
                              "partly here. Check it and add it where it belongs."),
+    "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
 }
 #: Review-notes group titles where the run page's title is internal wording.
 NOTE_TITLES = {"output_hygiene": "Stray text to delete",

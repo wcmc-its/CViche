@@ -413,6 +413,11 @@ Lints, ranked by the severity of the failure class they catch:
                           half of a held-out sample is wholly missing text.
                           Reads the source docx and the docx; stage 1a and
                           3b when present
+14al. appointment_title_overlong a D1-D3 title role (one ';'-separated
+                          part) over 150 characters: duty prose stage 4
+                          packed into the role (#1205, YUYVIG DYLJXC
+                          661/668). WARN, one per entry; says whether stage 6
+                          moved the duties under the row. Reads stage 4
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -517,6 +522,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     _is_invented_record,
     _nonempty_field_values,
     _rendered_row_value_sets,
+    lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
@@ -771,6 +777,7 @@ KNOWN_LINTS = (
     "citation_grounding",
     "shattered_prose",
     "source_line_coverage",
+    "appointment_title_overlong",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1034,6 +1041,11 @@ LINT_PREVALENCE = {
     # the EBYSBC/s7ab/pilot farm -- over fresh renders of origin/dev
     # 8e29dd24, measured 2026-10-08. Same mixed-corpus caveat as above.
     "source_line_coverage": 0.89,
+    # appointment_title_overlong (#1205, YUY-AT in doctor/PRECISION.md): 2 of
+    # the 132 runs of the YUYVIG (39), EBYSBC/s7ab/pilot (63) and NDMRSO (30)
+    # farms (scripts/doctor_gate.py, measured 2026-10-08). Same mixed-corpus
+    # caveat as above.
+    "appointment_title_overlong": 0.015,
 }
 
 
@@ -1598,6 +1610,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # protected_data_in_output.
     LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
              optional=("deleted_blocks", "stage_1a", "stage_3b")),
+    LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
 )
 
 
