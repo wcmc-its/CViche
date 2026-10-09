@@ -288,8 +288,6 @@ from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 # The scopes an entry files under, and the answer when nothing settles it.
 GEO_SCOPES = ('Regional', 'National', 'International')
 GEO_SCOPE_DEFAULT = 'National'
-# The named-reach step's answer when the activity names no reach of its own.
-NO_NAMED_REACH = 'none'
 # How much of the record's own text the named-reach step sees.
 NAMED_REACH_TEXT_CHARS = 300
 
