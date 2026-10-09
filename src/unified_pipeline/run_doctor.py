@@ -415,11 +415,14 @@ Lints, ranked by the severity of the failure class they catch:
                           (3+-letter words, both on one rendered line) the
                           output holds anywhere, Appendix and tracked
                           deletions included (#1588): a record or detail lost
-                          at any stage. INFO, one per stage-3b entry, and a
-                          review-copy note only, never a run-page row: under
-                          half of a held-out sample is wholly missing text.
-                          Reads the source docx and the docx; stage 1a and
-                          3b when present
+                          at any stage. A rendered leading author list,
+                          links, a column-header row and a withheld DEA
+                          number are left out; a wrapped line is judged
+                          with the one before it. INFO, one per stage-3b
+                          entry, and a review-copy note only, never a
+                          run-page row: 4 of a held-out 30 is wholly
+                          missing text (YUY-SLC2). Reads the source docx
+                          and the docx; stage 1a and 3b when present
 14al. appointment_title_overlong a D1-D3 title role (one ';'-separated
                           part) over 150 characters: duty prose stage 4
                           packed into the role (#1205, YUYVIG DYLJXC
@@ -1046,11 +1049,11 @@ LINT_PREVALENCE = {
     # the same 3 runs as before the fold, since the fold mends none of their
     # 15 entries -- measured 2026-10-08. Same mixed-corpus caveat as above.
     "shattered_prose": 0.011,
-    # source_line_coverage (#1588, YUY-SLC in doctor/PRECISION.md): 89 of 100
-    # runs with a source docx -- 34 of the 37 YUYVIG runs and 55 of the 63 of
-    # the EBYSBC/s7ab/pilot farm -- over fresh renders of origin/dev
-    # 8e29dd24, measured 2026-10-08. Same mixed-corpus caveat as above.
-    "source_line_coverage": 0.89,
+    # source_line_coverage (#1588, YUY-SLC2 in doctor/PRECISION.md): 81 of
+    # 100 runs with a source docx -- 32 of the 37 YUYVIG runs and 49 of the 63
+    # of the EBYSBC/s7ab/pilot farm -- over fresh renders of origin/dev
+    # 49ed5a4a, measured 2026-10-09. Same mixed-corpus caveat as above.
+    "source_line_coverage": 0.81,
     # appointment_title_overlong (#1205, YUY-AT in doctor/PRECISION.md): 2 of
     # the 132 runs of the YUYVIG (39), EBYSBC/s7ab/pilot (63) and NDMRSO (30)
     # farms (scripts/doctor_gate.py, measured 2026-10-08). Same mixed-corpus

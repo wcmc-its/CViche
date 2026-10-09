@@ -274,6 +274,44 @@ Held out, the matched hits are a lower bound and the unmatched sample is 37% tru
 
 Ceilings: a fact inside a line (a number, a date, a grant amount) is not read; a record reworded past half its word pairs reads as lost; a name list with a list number reads as a line; a line found anywhere in the document counts as rendered, even in the wrong section.
 
+| YUY-SLC2 | 2026-10-09 | `feat/1588-slc-precision` on origin/dev `49ed5a4a` (dev-263), against `49ed5a4a`, both over one fresh render of `49ed5a4a` (`scripts/render_gate.py` with `--source-dir`, 37 of 37 and 63 of 63; `scripts/doctor_gate.py` per farm with `--source-dir`) | 100: YUYVIG 37, **held out** (YUY-SLC's sources); the EBYSBC/s7ab/pilot farm 63, in-sample | `_labels_yuyvig_v2` (held out) and the M1 labels (in-sample); a random 30 unmatched hits of each arm, on base and on branch, hand-read against the render (120) | #1588 |
+
+YUY-SLC2 removes the deterministic false-positive classes YUY-SLC named from `source_line_coverage`, each fitted on the farm only:
+
+- A citation's leading author list is left out of the pairs when one rendered line holds a word of at least 3 of its name chunks. A list number, a footnote mark, a trailing year or "and" no longer breaks the list, and a list that 5d cut to six names and "et al." still counts.
+- A URL or e-mail address inside a record line is left out, and so is a Word HYPERLINK field code. A line that is little but a link is still judged on the link.
+- A tab-separated column-header row is not judged when the next printed line is a tab-separated row holding a digit.
+- A DEA registration that carries its number is not judged: stage 6 withholds it (#821).
+- A printed line that continues the one before it (it opens in lower case, or closes a bracket or quote it never opened) is judged joined to that line, under the first line's entry.
+
+Not fixed, because no deterministic rule separates them from a loss: reworded research-summary paragraphs, and reworded talk, interview, review, certification and licence rows. The change leaves every other lint's findings unchanged on all 100 runs (base and branch reports identical once its key is dropped).
+
+| arm | runs with a hit | findings (lines) | per run: median / p90 / max | matched / located | recall, index match | hand-read base sample: true / partial / false | hand-read branch sample |
+|---|---|---|---|---|---|---|---|
+| YUYVIG, held out | 32 to 32 of 37 | 203 (226) to 181 (199) | 3 / 10 / 54 to 3 / 10 / 45 | 24 / 197 to 23 / 175 | 92 to 92 of 250; HIGH 21 to 21 of 41 | 4 / 4 / 22 | 4 / 11 / 15 |
+| farm, in-sample | 50 to 49 of 63 | 255 (285) to 227 (252) | 3 / 9 / 22 to 2 / 8 / 19 | 85 / 251 to 74 / 223 | 238 to 233 of 487; HIGH 43 to 43 of 84 | 6 / 10 / 14 | 5 / 10 / 15 |
+
+The rubric is YUY-SLC's. One reader judged both code versions, so base and branch compare; YUY-SLC's 11 / 30 and 16 / 30 do not, being another reader on an older render. Since that render, #1205's sub-points print much of the supplementary prose YUY-SLC counted true, as tracked deletions the lint counts as rendered.
+
+Every true and partial hit of both base samples still fires on the branch (24 of 24). Of their false positives, 7 of 22 held out and 3 of 14 in-sample no longer fire, which on those samples moves precision from 4 / 30 to 4 / 23 held out and from 6 / 30 to 6 / 27 in-sample.
+
+The branch samples' 30 false positives:
+- Held out (15): reworded rows (10: talks, interviews and media mentions, reviews, a certification, a position, a hospital); a research-summary paragraph (FLBFRK 7); an author list written "Surname, Given" (XNWSZN 550, 586); a column-header row split over two printed lines (IZABPD 420); and a line that is only a redirect link (ECXGAT 1747).
+- In-sample (15): reworded rows (14), and a column-header row whose next line holds no digit (YYVHNN 472).
+
+Neither of the 50% and 80% bars is met: strict precision is 4 / 30 (13%) held out and 5 / 30 (17%) in-sample, and 15 / 30 in both arms counting partials. So the lint stays INFO and a review-copy note only (`REVIEW_COPY_ONLY_LINTS`). Recall lost in-sample, all index matches:
+- BZZNRL-01 and BZZNRL-02 were matched through entry 7's e-mail line, which now reads too short once its HYPERLINK field code is dropped.
+- NDXXAD-06, YOXXOH-uid-1 and YYVHNN-04 were matched through a wrapped line that is now judged with the line before it, and is either half covered or reported under that line's entry.
+
+No held-out finding is lost: IZABPD-02, the one it stops matching, is caught by another lint. The mutation harness's rates are unchanged: `MUTATIONS.md` regenerates identical, and `drop_publication` and `drop_grant` are still caught by this lint.
+
+Ceilings, beyond YUY-SLC's:
+- An author list written "Surname, Given" puts each surname in a one-word chunk, which the name test does not count.
+- A column-header row is seen only when its cells are tab-separated and the next line is a data row with a digit.
+- A continuation joined to a rendered line can be covered past half while it alone was lost (a description, a venue).
+
+Disclosure: a first held-out branch sample was read on an earlier version, whose author-list guard needed a word of every chunk. Two of its false positives (IXJMKS 752, ECXGAT 658) had the shape that the in-sample HFAJCC 173 and PFBSNH 102 also show: 5d's "et al." cut, and a two-letter surname. The guard was relaxed to 3 chunks on that in-sample evidence. The held-out figures above are a fresh sample of the final code.
+
 | YUY-AT | 2026-10-08 | `fix/1205-appointment-title-guard` on origin/dev `8e29dd24`, against `8e29dd24`, each over its own fresh render (`scripts/render_gate.py`; `scripts/doctor_gate.py` per farm, `--source-dir` for YUYVIG only) | 132: YUYVIG 39, the EBYSBC/s7ab/pilot farm 63, NDMRSO 30 | YUYVIG's held-out labels (`_labels_yuyvig_v2`); every hit hand-read | #1205 |
 
 YUY-AT adds `appointment_title_overlong`: a D1-D3 `title` whose longest `;`-separated part is over 150 characters (the owner's limit on #1205, 2026-10-08). It changes no other lint's findings on any of the 132 runs, and adds 3 WARN findings on 2 of them, all duty prose in the role field on reading the stage-4 record: YUYVIG DYLJXC 661 and 668 (D3, the two titles #1205 names) and HXBPCT 54 (D3, a consulting role followed by a participle clause listing its duties). No label carries these entries, so matched is 0. The `;` rule is the one judgement fitted on these runs: EBYSBC QNZADH 0, 35 and 39 are 356, 168 and 154 characters but are lists of concurrent roles, each under 100, and the lint skips them. Over 1,763 D1-D3 titles on six farms (these three plus X6, EOAHMI and the 66-CV local farm), only DYLJXC 661/668 carry a duty clause stage 6's split finds, and HXBPCT 54 is the one hit stage 6 renders whole: its duties open with a participle, which the split does not look for.
@@ -313,7 +351,7 @@ YUY-SPH measures what H sub-points do to the doctor. The doctor code is the same
 | `citation_grounding` | 123 | 0 | none | 62 / 123 hand-checked (50%): 41 partial, 20 false; held out 42 / 91 (46%) | 1 / 20 on labelled runs (5%) | 1 | YUY-CG |
 | `shattered_prose` | 15 | 15 | none | 15 / 15 hand-checked (100%), before and after the stage-6 fold | 0 / 12 on labelled runs (no label carries an entry index) | 0 by index, 2 by hand | YUY-SP |
 | `appointment_title_overlong` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (no label carries these entries) | 0 by index | YUY-AT |
-| `source_line_coverage` | 613 | 0 | none | 27 / 60 hand-checked (45%): held out 11 / 30, in-sample 16 / 30, unmatched hits only; 43 / 60 with the partials | 161 / 600 on labelled runs (27%): held out 31 / 248 | 110: held out 25, in-sample 85 | YUY-SLC |
+| `source_line_coverage` | 408 | 0 | none | 9 / 60 hand-checked (15%): held out 4 / 30, in-sample 5 / 30, unmatched hits only; 30 / 60 with the partials | 97 / 398 on labelled runs (24%): held out 23 / 175 | 70: held out 20, in-sample 50 | YUY-SLC2 |
 | `summary_unsupported_claim` | 11 | 11 | none | 14 / 14 hand-checked (100%) | 11 / 11 by sentence (100%) | 11 | OIE-SUM |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
@@ -399,7 +437,7 @@ One row per lint key that fired on a YUYVIG run, in either doctor. **in-sample**
 | `section_consistency` | 30 / 30 (100%) (RCB-D, RCB-HE) | 13 / 24 (54%) | -46 | 23 / 23 | 24 / 24 | 6 / 24 | 6 | **overfit**: its 11 FP are `cross_reference_as_record` 3, `grant_review_not_q3` 3, `board_certification_misfiled` 2, `journal_article_as_report` 1 and 2 more, on 8 CVs |
 | `section_lost` | 0 / 1 (0%) (M1) | 1 / 3 (33%) | +33 | 3 / 3 | 3 / 3 | names text | 0 |  |
 | `segmentation_collapse` | 1 / 1 (100%) (W3B-SC) | 1 / 1 (100%) | +0 | 1 / 1 | 1 / 1 | 0 / 1 | 0 |  |
-| `source_line_coverage` | 16 / 30 (53%) (YUY-SLC, unmatched hits) | 11 / 30 (37%), unmatched hits | -16 | 0 / 0 | 254 / 0 | 31 / 248 | 25 | new (#1588); INFO and review-copy only. With partials 23 / 30 in-sample, 20 / 30 held out |
+| `source_line_coverage` | 5 / 30 (17%) (YUY-SLC2, unmatched hits) | 4 / 30 (13%), unmatched hits | -4 | 0 / 0 | 181 / 0 | 23 / 175 | 20 | new (#1588); INFO and review-copy only. With partials 15 / 30 in-sample, 15 / 30 held out. YUY-SLC read 16 / 30 and 11 / 30 (another reader, older render) |
 | `span_count` | 111 / 118 (94%) (RCB-SC, before Y1585) | 6 / 28 (21%) | -73 | 28 / 28 | 6 / 6 | 5 / 6 | 3 | **overfit** at dev-259; #1607 removed its 22 FP (Y1585, in-sample) |
 | `stage6_render_warnings`: `appendix_grant_too_sparse` | 3 / 6 (50%) (M1) | 6 / 6 (100%) | +50 | 5 / 5 | 6 / 6 | names text | 0 |  |
 | `stage6_render_warnings`: `appendix_m1_not_in_summary` | none | 6 / 6 (100%) |  | 6 / 6 | 8 / 8 | names text | 0 | #1615 diverts undated M1 too: 6 to 8 hits |
@@ -513,7 +551,7 @@ Any lint not listed here has no verdicts and is a comment.
 | `section_lost` | 0 / 1 (0%) | 1 / 3 (33%) | 1 / 4 (25%) | — | review note |
 | `segmentation_collapse` | 1 / 1 (100%) | 1 / 1 (100%) | 2 / 2 (100%) | — | comment |
 | `span_count` | 117 / 123 (95%) | 6 / 28 (21%), before #1607 | same; held out not folded (changed since dev-259) | — | comment |
-| `source_line_coverage` | 27 / 60 (45%), unmatched hits, held out included | 11 / 30 (37%), already in the per-lint row | same | — | review note, always (`REVIEW_COPY_ONLY_LINTS`) |
+| `source_line_coverage` | 9 / 60 (15%), unmatched hits, held out included | 4 / 30 (13%), already in the per-lint row | same | — | review note, always (`REVIEW_COPY_ONLY_LINTS`) |
 | `split_child_unsourced`: `institution_from_outside_entry` | 1 / 1 (100%) | none | same | — | comment |
 | `split_child_unsourced`: `date_from_sibling` | 3 / 3 (100%) | none | same | — | comment |
 | `stage4_group_failures` | none | none | same | — | comment |
