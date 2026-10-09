@@ -7,15 +7,21 @@ only before `fallback_from_uid`, never overriding a body-derived name.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage4_owner_side_channel.py -p no:cacheprovider
 
-Self-contained: `call_llm` and `extract_owner_side_channel` are both stubbed
-at the module attribute -- no Bedrock/OpenAI, no real .docx parsing.
-Synthetic names only.
+Self-contained: `call_llm` is always stubbed at the module attribute -- no
+Bedrock/OpenAI. `extract_owner_side_channel` is stubbed too, except in the
+corrupt-file test and the #1655 tests, which read a synthetic .docx built
+in-test (`letterhead_docx`). Synthetic names only.
 """
 
 import io
 import json
+import logging
 import sys
 from pathlib import Path
+
+from docx import Document
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -287,13 +293,13 @@ def test_corrupt_docx_path_falls_through_without_raising(monkeypatch, tmp_path, 
 
 
 # ---------------------------------------------------------------------------
-# #456-R2 F3, mutant m5: sdt/header/footer lines must ALL reach the prompt,
-# in that order -- not just whichever channel happened to be tested alone
-# above. `combined = channel['sdt_lines']` (dropping header/footer) survived
+# #456-R2 F3, mutant m5: header/sdt/footer lines must ALL reach the prompt,
+# in that order (header first since #1655) -- not just whichever channel
+# happened to be tested alone above. `combined = channel['sdt_lines']` (dropping header/footer) survived
 # the full suite before this test existed.
 # ---------------------------------------------------------------------------
 
-def test_side_channel_combines_sdt_header_and_footer_lines_in_order(monkeypatch, tmp_path):
+def test_side_channel_combines_header_sdt_and_footer_lines_in_order(monkeypatch, tmp_path):
     prompts = []
 
     def fake_call_llm(**kwargs):
@@ -317,11 +323,11 @@ def test_side_channel_combines_sdt_header_and_footer_lines_in_order(monkeypatch,
     assert "SDTMARK Owner" in prompt_text
     assert "HDRMARK Owner" in prompt_text
     assert "FTRMARK Owner" in prompt_text
-    # sdt -> header -> footer is the contract order (extract_owner_side_channel's
-    # docstring, `_owner_side_channel_content_lines`).
+    # header -> sdt -> footer is the contract order (#1655,
+    # `_owner_side_channel_content_lines`).
     assert (
-        prompt_text.index("SDTMARK Owner")
-        < prompt_text.index("HDRMARK Owner")
+        prompt_text.index("HDRMARK Owner")
+        < prompt_text.index("SDTMARK Owner")
         < prompt_text.index("FTRMARK Owner")
     )
 
@@ -449,3 +455,168 @@ def test_process_cv_stamps_over_the_unfiltered_3b_list_before_dropping_fragments
     monkeypatch.setattr(stage_4_field_extractor, "extract_fields_from_mapped_entries", fake_extract)
     stage_4_field_extractor.process_cv(str(tmp_path / f"{document_uid}.docx"))
     assert captured["stamps"] == [("Alpha University:", None), ("Member, Committee X", "Alpha University"), ("Chair, Committee Y", None)]
+
+
+# ---------------------------------------------------------------------------
+# #1655: a letterhead that lives only in the first-page header. Real .docx
+# built here with python-docx -- a body-level w:sdt of 25 paragraphs and a
+# first-page header carrying a synthetic owner's name and contact block.
+# ---------------------------------------------------------------------------
+
+LETTERHEAD = [
+    "Quinn Synthetic, MD, PhD",
+    "Department of Imaginary Medicine",
+    "100 Example Avenue, Room 5, Testville, NY 10000",
+    "Phone: (212) 555-0100  Fax: (212) 555-0101",
+    "Email: quinn.synthetic@example.org",
+]
+SDT_LINES = [f"Licence course LINE{i:02d}" for i in range(25)]
+
+
+def letterhead_docx(tmp_path, header=LETTERHEAD, *, default_header=(), footer=(), sdt=SDT_LINES):
+    """A docx whose body opens with "Biography" and holds a body-level w:sdt
+    of `sdt` paragraphs, with `header` in the first-page header
+    (w:titlePg), `default_header` in the default header and `footer` in the
+    default footer. Imported by test_stage4_extraction.py's #1655 wire test."""
+    doc = Document()
+    doc.add_paragraph("Biography")
+    anchor = doc.add_paragraph("A synthetic narrative paragraph about research interests.")
+    if sdt:
+        ps = "".join(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>" for text in sdt)
+        anchor._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{ps}</w:sdtContent></w:sdt>'))
+    section = doc.sections[0]
+    section.different_first_page_header_footer = True
+    for container, texts in ((section.first_page_header, header), (section.header, default_header),
+                             (section.footer, footer)):
+        if texts:
+            container.paragraphs[0].text = texts[0]
+            for text in texts[1:]:
+                container.add_paragraph(text)
+    path = tmp_path / "letterhead.docx"
+    doc.save(str(path))
+    return str(path)
+
+
+def test_header_name_reaches_the_prompt_past_a_25_paragraph_sdt(monkeypatch, tmp_path):
+    """#1655 fix 1 (RSFOYB): the 25 sdt lines used to fill the whole
+    OWNER_SIDE_CHANNEL_MAX_LINES budget, so the header never reached the
+    prompt and `cv_owner` came back empty. The real extract_owner_side_channel
+    runs here; only call_llm is stubbed."""
+    prompts = []
+
+    def fake_call_llm(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        prompts.append(prompt)
+        if "Quinn Synthetic" in prompt:
+            return _llm_result(_name_reply(first_name="Quinn", last_name="Synthetic", full_name="Quinn Synthetic"))
+        return _llm_result(_name_reply())
+
+    monkeypatch.setattr(owner_name, "call_llm", fake_call_llm)
+
+    result = owner_name.extract_cv_owner_name(
+        "web990", [{"text": "Biography"}], docx_path=letterhead_docx(tmp_path))
+
+    assert result["last_name"] == "Synthetic"
+    assert len(prompts) == 2  # body tier, then side channel
+    assert "Quinn Synthetic, MD, PhD" in prompts[1]
+
+
+def test_side_channel_names_header_as_first_channel_when_both_exist(monkeypatch, tmp_path):
+    """The tier's log line names the channel that leads the prompt."""
+    monkeypatch.setattr(
+        owner_name, "extract_owner_side_channel",
+        lambda p: {"sdt_lines": ["S"], "header_lines": ["H"], "footer_lines": ["F"]})
+
+    lines, channel = owner_name._owner_side_channel_content_lines("web990", _touch(tmp_path))
+
+    assert (lines, channel) == (["H", "S", "F"], "header")
+
+
+def test_side_channel_names_sdt_as_first_channel_without_a_header(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        owner_name, "extract_owner_side_channel",
+        lambda p: {"sdt_lines": ["S"], "header_lines": [], "footer_lines": ["F"]})
+
+    assert owner_name._owner_side_channel_content_lines("web990", _touch(tmp_path)) == (["S", "F"], "sdt")
+
+
+def test_header_footer_contact_entry_holds_header_and_footer_lines_only(tmp_path):
+    """#1655 fix 2: the synthetic A entry carries the letterhead and the
+    footer, in that order, and none of the sdt content."""
+    path = letterhead_docx(tmp_path, footer=["Updated by the synthetic owner"])
+
+    entry = owner_name.header_footer_contact_entry("web990", path)
+
+    assert entry == {
+        "text": "\n".join([*LETTERHEAD, "Updated by the synthetic owner"]),
+        "taxonomy_code": owner_name.PERSONAL_DATA_CODE,
+        "element_idx_start": owner_name.HEADER_FOOTER_ELEMENT_IDX,
+        "element_idx_end": owner_name.HEADER_FOOTER_ELEMENT_IDX,
+        owner_name.OWNER_CONTACT_SOURCE_KEY: owner_name.OWNER_CONTACT_SOURCE_HEADER_FOOTER,
+    }
+    assert "LINE00" not in entry["text"]
+
+
+def test_header_footer_contact_entry_sends_a_repeated_letterhead_once(tmp_path):
+    """A first-page and a default header repeating one letterhead are two
+    parts with the same lines; each line is sent once."""
+    path = letterhead_docx(tmp_path, default_header=LETTERHEAD)
+
+    entry = owner_name.header_footer_contact_entry("web990", path)
+
+    assert entry is not None
+    assert entry["text"].split("\n") == LETTERHEAD
+
+
+def test_header_footer_contact_entry_none_for_a_header_without_contact(tmp_path):
+    """A name and a running title carry no email or phone: no entry, so no
+    extra LLM call and nothing for the Appendix."""
+    path = letterhead_docx(tmp_path, header=["Quinn Synthetic, MD", "Curriculum Vitae"])
+
+    assert owner_name.header_footer_contact_entry("web990", path) is None
+
+
+def test_header_footer_contact_entry_none_for_sdt_contact_alone(tmp_path):
+    """A content control's email is body content, not a letterhead."""
+    path = letterhead_docx(tmp_path, header=(), sdt=["Email: quinn.synthetic@example.org"])
+
+    assert owner_name.header_footer_contact_entry("web990", path) is None
+
+
+def test_header_footer_contact_entry_none_without_a_docx(monkeypatch, tmp_path):
+    """No path, or one that is not a file: nothing is opened at all."""
+    opened = []
+    monkeypatch.setattr(owner_name, "extract_owner_side_channel", opened.append)
+
+    assert owner_name.header_footer_contact_entry("web990", None) is None
+    assert owner_name.header_footer_contact_entry("web990", str(tmp_path / "missing.docx")) is None
+    assert opened == []
+
+
+def test_header_footer_contact_entry_none_for_a_corrupt_docx(tmp_path, caplog):
+    corrupt = tmp_path / "corrupt.docx"
+    corrupt.write_text("not a docx at all")
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage4.owner_name"):
+        assert owner_name.header_footer_contact_entry("web990", str(corrupt)) is None
+
+    assert any(r.message.startswith("web990: header/footer unreadable for owner contact:")
+               for r in caplog.records)
+
+
+def test_header_footer_contact_entry_caps_the_lines_sent(tmp_path):
+    many = [f"Email: owner{i:02d}@example.org" for i in range(30)]
+    path = letterhead_docx(tmp_path, header=many, sdt=())
+
+    entry = owner_name.header_footer_contact_entry("web990", path)
+
+    assert entry is not None
+    assert entry["text"].split("\n") == many[:owner_name.OWNER_SIDE_CHANNEL_MAX_LINES]
+
+
+def test_contact_signal_reads_an_email_or_a_phone_and_not_a_year_range():
+    assert owner_name.OWNER_CONTACT_SIGNAL_RE.search("quinn@example.org")
+    assert owner_name.OWNER_CONTACT_SIGNAL_RE.search("Tel 212-555-0100")
+    assert owner_name.OWNER_CONTACT_SIGNAL_RE.search("(212) 555-0100")
+    assert not owner_name.OWNER_CONTACT_SIGNAL_RE.search("Curriculum Vitae 2001-2005")
+    assert not owner_name.OWNER_CONTACT_SIGNAL_RE.search("100 Example Avenue, NY 10000")

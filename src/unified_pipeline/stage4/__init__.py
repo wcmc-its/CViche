@@ -6,7 +6,8 @@ surface; these modules hold the implementation it calls into.
     schemas.py     per-code field schemas, descriptions, taxonomy labels
     extraction.py  LLM prompts, batch dispatch, and the recovery pass
     coercion.py    value coercion and normalisation of extracted fields
-    owner_name.py  CV owner name extraction and owner-location inference
+    owner_name.py  CV owner name extraction, owner-location inference, and
+                   the header/footer owner-contact entry (#1655)
     error_codes.py the error strings written onto an entry; imports nothing,
                    so the scorer can read them without loading `extraction`
     year_groups.py re-dates "MM-DD:" lines from their "YYYY:" group

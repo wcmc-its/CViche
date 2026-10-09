@@ -19,6 +19,10 @@ What parallelism can break, and what each test pins:
 No network, no LLM: `extract_fields_batch`, `extract_cv_owner_name` and
 `infer_cv_owner_location` are stubbed on the `extraction` module attribute
 the loop reads. Synthetic entries only.
+
+The #1655 tests at the end run the real extraction over a synthetic .docx
+built in-test, with `call_llm` stubbed in stage 4 and stage 6, and render the
+result through stage 6's Personal Data table.
 """
 
 import json
@@ -29,12 +33,19 @@ from pathlib import Path
 
 import pytest
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
+from docx import Document
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import unified_pipeline.stage4.extraction as extraction  # noqa: E402
+import unified_pipeline.stage4.owner_name as owner_name  # noqa: E402
+import unified_pipeline.stage_6_word_template as stage_6_word_template  # noqa: E402
 from unified_pipeline.core import prompt_logger  # noqa: E402
 from unified_pipeline.core.batch_pool import workers_from_config  # noqa: E402
+from unified_pipeline.tests.test_stage4_owner_side_channel import (  # noqa: E402
+    LETTERHEAD,
+    letterhead_docx,
+)
 
 _NO_OWNER = {
     "first_name": "", "middle_name": "", "last_name": "",
@@ -1856,3 +1867,152 @@ def test_year_group_lines_are_re_dated_after_the_batches_are_reassembled(monkeyp
     assert [e["extracted_fields"] for e in out["entries"]] == [
         {"date": "2016-03-16"}, {"start_date": "2016-09-14"}]
     assert out["stats"]["entries_reformatted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #1655: the owner's contact when it lives only in the page header.
+# ---------------------------------------------------------------------------
+
+_HOME_PHONE = "(212) 555-0199"
+_HOME_LINE = f"Home phone: {_HOME_PHONE}"
+_HEADER_CONTACT_FIELDS = {
+    "name": "Quinn Synthetic, MD, PhD",
+    "email": "quinn.synthetic@example.org",
+    "phone": "(212) 555-0100",
+    "address": "100 Example Avenue, Room 5, Testville, NY 10000",
+}
+_BODY_ENTRY = {"text": "MD, Example University, 2001", "taxonomy_code": "B1",
+               "element_idx_start": 0, "element_idx_end": 0, "hierarchy": ["Education"]}
+_W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+
+
+def _fake_stage4_llm(calls):
+    """call_llm for stage 4's field extraction: the letterhead entry gets the
+    synthetic contact fields (and the home phone, when its line was sent), a
+    body entry its education fields."""
+    def fake_call_llm(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        calls.append(prompt)
+        if "quinn.synthetic@example.org" in prompt:
+            item = {"entry_index": 0, **_HEADER_CONTACT_FIELDS}
+            if _HOME_LINE in prompt:
+                item["home_phone"] = _HOME_PHONE
+        else:
+            item = {"entry_index": 0, "degree": "MD", "institution": "Example University", "year": "2001"}
+        return {"content": json.dumps({"entries": [item]}), "cost": 0.25, "total_tokens": 100,
+                "cache_read_tokens": 3, "cache_write_tokens": 4}
+    return fake_call_llm
+
+
+def _fake_owner_llm(**kwargs):
+    found = "Quinn Synthetic" in kwargs["messages"][-1]["content"]
+    reply = {key: "" for key in _NO_OWNER}
+    if found:
+        reply.update(first_name="Quinn", last_name="Synthetic", full_name="Quinn Synthetic",
+                     full_name_with_credentials="Quinn Synthetic, MD, PhD")
+    return {"content": json.dumps(reply), "cost": 0.0, "total_tokens": 0}
+
+
+def _letterhead_stage4(monkeypatch, tmp_path, header=LETTERHEAD, body=(_BODY_ENTRY,)):
+    calls: list[str] = []
+    monkeypatch.setattr(extraction, "call_llm", _fake_stage4_llm(calls))
+    monkeypatch.setattr(owner_name, "call_llm", _fake_owner_llm)
+    monkeypatch.setattr(extraction, "infer_cv_owner_location", lambda entries: {})
+    out = extraction.extract_fields_from_mapped_entries(
+        [dict(e) for e in body], document_uid="web991", docx_path=letterhead_docx(tmp_path, header=header),
+        workers=1)
+    return out, calls
+
+
+def _render_personal_data(monkeypatch, tmp_path, stage4_out) -> tuple[dict[str, str], str]:
+    """Stage 6 over a stage-4 result, no LLM: the Personal Data table's
+    rows (label -> value) and every w:t of the rendered body."""
+    def no_llm(**kwargs):
+        raise RuntimeError("stage 6 must not reach an LLM in this test")
+    monkeypatch.setattr(stage_6_word_template, "call_llm", no_llm)
+    stage4_json, rendered = tmp_path / "web991_fields.json", tmp_path / "web991.docx"
+    stage4_json.write_text(json.dumps({"document_uid": "web991", **stage4_out}))
+    generator = stage_6_word_template.WCMTemplateGenerator(verbose=False)
+    generator._reconsider_appendix_entries = lambda: None
+    generator.generate(str(stage4_json), str(rendered), research_summary_path=None)
+    doc = Document(str(rendered))
+    table = next(t for t in doc.tables if any("Work email:" in c.text for r in t.rows for c in r.cells))
+    rows = {row.cells[0].text.strip().lower(): row.cells[1].text.strip() for row in table.rows}
+    return rows, "\n".join(t.text or "" for t in doc.element.body.iter(_W_T))
+
+
+def test_header_contact_reaches_stage4_fields_and_the_personal_data_table(monkeypatch, tmp_path):
+    """The wire, docx -> stage 4 -> stage 6: a letterhead only in the
+    first-page header, a body that opens with no contact and holds a
+    25-paragraph content control. The owner's name, office phone, office
+    address and work email reach the Personal Data table."""
+    out, calls = _letterhead_stage4(monkeypatch, tmp_path)
+
+    assert out["cv_owner"]["last_name"] == "Synthetic"
+    first = out["entries"][0]
+    assert first["taxonomy_code"] == "A"
+    assert first[owner_name.OWNER_CONTACT_SOURCE_KEY] == owner_name.OWNER_CONTACT_SOURCE_HEADER_FOOTER
+    assert {k: first["extracted_fields"].get(k) for k in _HEADER_CONTACT_FIELDS} == _HEADER_CONTACT_FIELDS
+    assert len(calls) == 2  # the body group, then the letterhead entry
+    assert out["total_cost"] == pytest.approx(0.5)  # the letterhead call is accounted
+    assert out["total_tokens"] == 200
+    assert (out["cache_read_tokens"], out["cache_write_tokens"]) == (6, 8)
+
+    rows, everything = _render_personal_data(monkeypatch, tmp_path, out)
+
+    assert rows["office address:"] == _HEADER_CONTACT_FIELDS["address"]
+    assert rows["office telephone:"] == _HEADER_CONTACT_FIELDS["phone"]
+    assert rows["work email:"] == _HEADER_CONTACT_FIELDS["email"]
+    assert "Quinn Synthetic, MD, PhD" in everything
+
+
+def test_home_phone_in_the_header_is_withheld_as_body_home_contact_is(monkeypatch, tmp_path):
+    """#821 holds for the letterhead entry: the home number stage 4 extracts
+    from it renders nowhere, while the work email still does."""
+    out, _ = _letterhead_stage4(monkeypatch, tmp_path, header=[*LETTERHEAD, _HOME_LINE])
+    assert out["entries"][0]["extracted_fields"]["home_phone"] == _HOME_PHONE
+
+    rows, everything = _render_personal_data(monkeypatch, tmp_path, out)
+
+    assert rows["work email:"] == _HEADER_CONTACT_FIELDS["email"]
+    assert "555-0199" not in everything
+
+
+def test_body_contact_means_no_header_contact_call(monkeypatch, tmp_path):
+    """A body A entry that holds contact: the letterhead is not extracted,
+    so no extra LLM call and no second contact entry."""
+    body_contact = {"text": "Email: quinn.synthetic@example.org", "taxonomy_code": "A",
+                    "element_idx_start": 0, "element_idx_end": 0}
+
+    out, calls = _letterhead_stage4(monkeypatch, tmp_path, body=(body_contact,))
+
+    assert len(calls) == 1
+    assert [e.get(owner_name.OWNER_CONTACT_SOURCE_KEY) for e in out["entries"]] == [None]
+
+
+def test_header_without_contact_means_no_header_contact_call(monkeypatch, tmp_path):
+    calls: list[str] = []
+    monkeypatch.setattr(extraction, "call_llm", _fake_stage4_llm(calls))
+    monkeypatch.setattr(owner_name, "call_llm", _fake_owner_llm)
+    monkeypatch.setattr(extraction, "infer_cv_owner_location", lambda entries: {})
+
+    out = extraction.extract_fields_from_mapped_entries(
+        [dict(_BODY_ENTRY)], document_uid="web991", workers=1,
+        docx_path=letterhead_docx(tmp_path, header=["Quinn Synthetic, MD", "Curriculum Vitae"]))
+
+    assert len(calls) == 1
+    assert len(out["entries"]) == 1
+
+
+def test_body_has_owner_contact_reads_a_entries_and_their_records():
+    def a_entry(fields, code="A"):
+        return {"taxonomy_code": code, "extracted_fields": fields}
+
+    has = extraction._body_has_owner_contact
+    assert has([a_entry({"email": "x@example.org"})])
+    assert has([a_entry({"office_phone": "212-555-0100"})])
+    assert has([a_entry({"name": "Q", extraction.STAGE4_RECORDS_KEY: [{"address": "1 Example Ave"}]})])
+    assert not has([a_entry({"email": "", "phone": None, "address": {}, "home_address": []})])
+    assert not has([a_entry({"name": "Quinn Synthetic"})])
+    assert not has([a_entry({"email": "x@example.org"}, code="B1")])
+    assert not has([{"taxonomy_code": "A"}])

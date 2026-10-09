@@ -4,8 +4,9 @@ Moved verbatim from `stage_4_field_extractor.py` (#498), which re-exports every
 name here.
 
 `extract_fields_from_mapped_entries` calls `extract_fields_batch`,
-`extract_cv_owner_name` and `infer_cv_owner_location` through THIS module's
-globals. A test that stubs one of them must rebind it on
+`extract_cv_owner_name`, `header_footer_contact_entry` and
+`infer_cv_owner_location` through THIS module's globals. A test that stubs one
+of them must rebind it on
 `unified_pipeline.stage4.extraction`, not on the facade -- the facade's
 re-export is a second binding, and rebinding it there silently leaves the real
 function in play (the #496 split-state lesson).
@@ -47,8 +48,10 @@ from unified_pipeline.stage4.error_codes import (
 )
 from unified_pipeline.stage4.grounding import GroupGrounding, ground_group
 from unified_pipeline.stage4.owner_name import (
+    PERSONAL_DATA_CODE,
     add_target_names,
     extract_cv_owner_name,
+    header_footer_contact_entry,
     infer_cv_owner_location,
 )
 from unified_pipeline.stage4.schemas import (
@@ -1270,6 +1273,51 @@ def _extract_and_log_cv_owner_name(
     return cv_owner_name
 
 
+# A field key naming one of these is an owner-contact field: the A schema's
+# own `email`/`phone`/`address`, and the off-schema `work_email`,
+# `office_phone`, `home_address` the model also files contact under.
+_OWNER_CONTACT_KEY_WORDS = ("email", "phone", "address")
+
+
+def _has_contact_value(fields: dict[str, Any]) -> bool:
+    return any(word in key and not _is_blank(value) and value not in ({}, [])
+               for key, value in fields.items() for word in _OWNER_CONTACT_KEY_WORDS)
+
+
+def _body_has_owner_contact(entries: list[dict[str, Any]]) -> bool:
+    """Whether a Personal Data (A) entry, or one of its records, holds a
+    non-blank contact field (`_OWNER_CONTACT_KEY_WORDS`) -- the #1655 gate."""
+    for entry in entries:
+        if entry.get("taxonomy_code") != PERSONAL_DATA_CODE:
+            continue
+        fields = entry.get("extracted_fields") or {}
+        records = fields.get(STAGE4_RECORDS_KEY) or []
+        if any(_has_contact_value(record) for record in [fields, *records] if isinstance(record, dict)):
+            return True
+    return False
+
+
+def _extract_header_footer_contact(
+    document_uid: str,
+    entries: list[dict[str, Any]],
+    docx_path: str | None,
+    cv_owner_name: dict[str, str],
+    cancel_check: Callable[[], None] | None,
+) -> BatchExtractionResult | None:
+    """The header/footer contact entry (`header_footer_contact_entry`),
+    extracted like any other A entry, when the body's A entries hold no
+    contact (#1655); None -- and no LLM call -- otherwise. One extra call,
+    only on a CV whose letterhead carries an email or phone and whose body
+    carries none."""
+    if _body_has_owner_contact(entries):
+        return None
+    entry = header_footer_contact_entry(document_uid, docx_path)
+    if entry is None:
+        return None
+    logger.info("%s: no owner contact in the body; extracting it from the header/footer", document_uid)
+    return extract_fields_batch([entry], 0, 1, cv_owner_name=cv_owner_name, cancel_check=cancel_check)
+
+
 def _extract_batches(
     valid_entries: list[dict[str, Any]],
     batch_size: int,
@@ -1429,6 +1477,15 @@ def extract_fields_from_mapped_entries(
 
     # Add back skipped entries
     all_entries.extend(skipped_entries)
+
+    header_contact = _extract_header_footer_contact(
+        document_uid, all_entries, docx_path, cv_owner_name, cancel_check)
+    if header_contact is not None:
+        all_entries.extend(header_contact["entries"])
+        total_cost += header_contact["cost"]
+        total_tokens += header_contact["tokens"]
+        total_cache_read_tokens += header_contact["cache_read_tokens"]
+        total_cache_write_tokens += header_contact["cache_write_tokens"]
 
     # Sort by original order (element_idx) - convert to int in case values are strings
     def safe_int(val, default=9999):
