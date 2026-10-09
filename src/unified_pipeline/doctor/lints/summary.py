@@ -125,7 +125,7 @@ class SummaryClaim(NamedTuple):
     sentences: tuple[str, ...]
 
 
-def _generated_summary(stage_4_5: Mapping) -> str:
+def generated_summary(stage_4_5: Mapping) -> str:
     """The summary text when the model wrote it, else ''."""
     summary = stage_4_5.get("research_summary")
     if not isinstance(summary, Mapping) or summary.get("generation_method") != GENERATION_METHOD_LLM:
@@ -133,7 +133,8 @@ def _generated_summary(stage_4_5: Mapping) -> str:
     return str(summary.get("text") or "")
 
 
-def _sentences(text: str) -> list[str]:
+def summary_sentences(text: str) -> list[str]:
+    """The summary split into sentences, the unit every summary check judges."""
     return [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
 
 
@@ -226,7 +227,7 @@ def lint_summary_unsupported_claim(stage_4_5: dict, stage_4: dict,
     the CV gives no ground for (#1554). The paragraph is signed by the owner,
     so an invented claim reaches a document they attest to; the score is not
     capped, since the rest of the document is unaffected."""
-    sentences = _sentences(_generated_summary(stage_4_5 or {}))
+    sentences = summary_sentences(generated_summary(stage_4_5 or {}))
     claims = (_kind_claims(sentences, stage_4)
               + _funder_claims(sentences, _cv_text(stage_4, source_lines)))
     return [_finding("summary_unsupported_claim", "WARN", f"The research summary {claim.message}",
