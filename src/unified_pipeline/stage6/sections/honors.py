@@ -108,6 +108,7 @@ from ..formatting import (
 )
 from ..normalization import _strip_org_tail
 from ..parsing import _is_table_header_entry
+from ..pii_pass import PII_DROPPED_FIELDS_KEY
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -1308,7 +1309,7 @@ class HonorsSection:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
-            if 'award_name' in entry.get('_pii_dropped_fields', ()):
+            if 'award_name' in entry.get(PII_DROPPED_FIELDS_KEY, ()):
                 # #892: the PII pass dropped this entry's award name (an
                 # O-1 visa). What is left -- a cut-text remnant, the
                 # immigration service as organization, the year -- still

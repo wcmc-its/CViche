@@ -79,6 +79,11 @@ PERSONAL_DATA_CODE = "A"
 #: The section label recorded for an entry `generate()` does not route.
 APPENDIX_SECTION_LABEL = "Appendix"
 
+#: The entry key listing the non-PII-named fields this pass dropped for a PII
+#: value (#892): a field-first writer reads it to tell a withheld award from
+#: one that never had a name field.
+PII_DROPPED_FIELDS_KEY = "_pii_dropped_fields"
+
 PII_REDACTED_NOTICE = (
     "[Personal data from the source CV was withheld here "
     "(e.g. date or place of birth, marital status, family members' names). "
@@ -746,7 +751,7 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             if value_hits:
                 # Which fields went, so a field-first writer can tell a
                 # withheld award from one that never had a name field.
-                entry["_pii_dropped_fields"] = sorted(value_hits)
+                entry[PII_DROPPED_FIELDS_KEY] = sorted(value_hits)
             for key, categories in value_hits.items():
                 del fields[key]
                 for category in categories:
