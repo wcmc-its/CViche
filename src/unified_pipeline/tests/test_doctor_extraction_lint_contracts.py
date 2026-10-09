@@ -42,6 +42,7 @@ from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _FUNDING_SECTIONS,
     _MIN_EXACT_LEN,
+    APPOINTMENT_TITLE_WARN_CHARS,
     _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     CLAUSE_SPAN_OUTSIDE,
@@ -70,6 +71,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _rendered_row_value_sets,
     _shared_entry_pieces,
     _short_end_year,
+    lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
@@ -4763,3 +4765,61 @@ def test_orphaned_fragments_warns_on_a_skip_that_loses_content():
 
 def test_orphaned_fragments_is_silent_on_a_list_holding_a_non_entry():
     assert lint_orphaned_fragments({"entries": [None, _orphan("tail", 1)]}) == []
+
+
+# lint_appointment_title_overlong (#1205): duty prose packed into a D1-D3 role.
+
+_OVERLONG_ROLE = "Example Fellow, Example Policy Office"
+
+
+def _overlong(*entries):
+    return lint_appointment_title_overlong({"entries": list(entries)})
+
+
+def _title_of(length, tail=" to help plan"):
+    """A title of exactly `length` characters: a role, then duty prose."""
+    head = f"{_OVERLONG_ROLE} - 50% FTE{tail}"
+    return head + "x" * (length - len(head))
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3"])
+def test_appointment_title_overlong_fires_over_the_limit(code):
+    title = _title_of(APPOINTMENT_TITLE_WARN_CHARS + 1)
+    findings = _overlong(_fields_entry(code, {"title": title}, idx=661))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "appointment_title_overlong"
+    assert findings[0]["severity"] == "WARN"
+    assert f"entry 661 ({code}): title is {APPOINTMENT_TITLE_WARN_CHARS + 1} characters" \
+        in findings[0]["message"]
+    assert f"'{_OVERLONG_ROLE}' in the Title column" in findings[0]["message"]
+    assert findings[0]["evidence"] == [title[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def test_appointment_title_overlong_limit_is_150_and_exclusive():
+    assert APPOINTMENT_TITLE_WARN_CHARS == 150
+    assert _overlong(_fields_entry("D3", {"title": _title_of(150)})) == []
+    assert len(_overlong(_fields_entry("D3", {"title": _title_of(151)}))) == 1
+
+
+def test_appointment_title_overlong_says_when_stage_6_renders_it_whole():
+    title = _title_of(160, tail=" performing evaluations ")
+    findings = _overlong(_fields_entry("D3", {"title": title}))
+    assert "rendered whole in the Title column" in findings[0]["message"]
+
+
+def test_appointment_title_overlong_judges_a_role_list_by_its_longest_role():
+    roles = "; ".join(f"Example Role {i}, Department of Example Studies" for i in range(5))
+    assert len(roles) > APPOINTMENT_TITLE_WARN_CHARS
+    assert _overlong(_fields_entry("D1", {"title": roles})) == []
+    longer = roles + "; " + "y" * (APPOINTMENT_TITLE_WARN_CHARS + 1)
+    assert len(_overlong(_fields_entry("D1", {"title": longer}))) == 1
+
+
+@pytest.mark.parametrize("entry", [
+    _fields_entry("O", {"title": "z" * 400}),                 # not an appointment
+    _fields_entry("D1", {"institution": "z" * 400}),          # not the title
+    _fields_entry("D1", {}),
+    _fields_entry("D1", "not an object"),
+])
+def test_appointment_title_overlong_silent(entry):
+    assert _overlong(entry) == []

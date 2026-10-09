@@ -10,12 +10,15 @@ from pathlib import Path
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
 from app.services import review_comments as rc  # noqa: E402
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX  # noqa: E402
 from app.services.run_quality_report import LINT_COPY  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
+from unified_pipeline.doctor.precision import LintPrecision  # noqa: E402
 from unified_pipeline.run_doctor import read_docx_blocks  # noqa: E402
 from unified_pipeline.stage6.formatting import CVICHE_BOX_FILL  # noqa: E402
 
@@ -94,8 +97,23 @@ def _box_lines(path: Path, title: str) -> list[str]:
 
 
 def _notes(path: Path) -> list[str]:
-    """The review-notes box's lines under its title."""
-    return _box_lines(path, rc.REVIEW_NOTES_TITLE)
+    """The review-notes box's lines under its title, up to its closing
+    what-is-not-checked group."""
+    lines = _box_lines(path, rc.REVIEW_NOTES_TITLE)
+    return lines[:lines.index(rc.NOT_CHECKED_TITLE)]
+
+
+def _not_checked(path: Path) -> list[str]:
+    """The review-notes box's closing group: what CViche does not check."""
+    lines = _box_lines(path, rc.REVIEW_NOTES_TITLE)
+    return lines[lines.index(rc.NOT_CHECKED_TITLE):]
+
+
+@pytest.fixture(autouse=True)
+def _unmeasured_ledger(monkeypatch):
+    """Every lint unmeasured unless a test passes its own ledger rows, so these
+    tests read placement, not PRECISION.md's current figures."""
+    monkeypatch.setattr(rc, "load_gate_ledger", dict)
 
 
 def _with_appendix_note(tmp_path: Path) -> Path:
@@ -112,6 +130,15 @@ def _with_appendix_note(tmp_path: Path) -> Path:
 
 def _flag(lint):
     return rc.REVIEW_FLAGS[lint]
+
+
+def _cv_blocks(path: Path) -> list:
+    """The blocks the doctor reads, without the review-notes box closing a copy."""
+    blocks = read_docx_blocks(str(path))
+    closing = blocks[-1] if blocks else None
+    if closing and closing[0] == "table" and closing[1].startswith(rc.REVIEW_NOTES_TITLE):
+        return blocks[:-1]
+    return blocks
 
 
 def test_every_lint_the_run_page_words_has_a_flag():
@@ -152,7 +179,7 @@ def test_a_wrong_year_is_flagged_on_the_year_alone(tmp_path):
                  [f"Grant Title: {GRANT}; Role: PI"])))
     assert _comments(out) == [(_flag("implausible_year"), "1912")]
     # Splitting the run to isolate the year leaves the text the doctor reads alone.
-    assert read_docx_blocks(str(out)) == read_docx_blocks(str(clean))
+    assert _cv_blocks(out) == read_docx_blocks(str(clean))
 
 
 def test_near_duplicates_are_one_group_naming_section_removed_and_kept(tmp_path):
@@ -218,10 +245,99 @@ _DIVERSIONS = (
 )
 
 
-def test_appendix_diversions_add_nothing_to_the_review_copy(tmp_path):
-    """They name the section CViche first tried, which contradicts the
-    Appendix group headings (the CV's own); their counts stay on the run page."""
-    assert rc.write_review_docx(_with_appendix_note(tmp_path), _report(*_DIVERSIONS)) is None
+def test_an_appendix_diversion_is_a_comment_on_its_sections_heading(tmp_path):
+    """#1589: the count goes on the heading of the section the entries were
+    meant for, not on any entry (the Appendix group headings name where each
+    came from). The Appendix's own code is stage 6's Appendix note's to explain."""
+    out, n = rc.write_review_docx(_with_appendix_note(tmp_path), _report(*_DIVERSIONS))
+    assert n == 1 and _notes(out) == []
+    assert _comments(out) == [
+        ("2 entries meant for this section are in the Appendix: move any that belong here.",
+         PAST_FUNDING_HEADING)]
+
+
+def test_a_single_diverted_entry_reads_in_the_singular(tmp_path):
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding(
+        "stage6_render_warnings", "stage 6 self-check: M2B: 1 entry diverted to the Appendix "
+        "— declined by the research-support renderer as too sparse to table")))
+    assert [text for text, _ in _comments(out)] == [
+        "1 entry meant for this section is in the Appendix: move any that belong here."]
+
+
+def test_a_diversion_with_no_heading_to_sit_on_is_a_note(tmp_path):
+    """#1639: a diversion whose section has no heading in this document, or
+    that names no section, is listed in the box rather than vanishing."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("stage6_render_warnings", "stage 6 self-check: K1: 2 entries diverted to the "
+                 "Appendix — declined by the renderer"),  # no Didactic Teaching heading
+        _finding("stage6_render_warnings", "stage 6 self-check: 1 entry diverted to the "
+                 "Appendix — no section named")))
+    assert n == 2 and _comments(out) == []
+    assert _notes(out) == [f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_NOTE, "•\tDidactic Teaching",
+                           f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_UNPLACED_NOTE]
+
+
+def test_a_less_certain_finding_with_nothing_to_name_is_still_a_note(tmp_path):
+    """#1639: off the text, the box is the only place the copy says it."""
+    rows = {("llm_fallback_served", None): LintPrecision("llm_fallback_served", 0, 3, "M1")}
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model")),
+        rows=rows)
+    assert n == 1 and _comments(out) == []
+    assert _notes(out) == [f"{rc._note_title('llm_fallback_served')} (1)",
+                           f"{_flag('llm_fallback_served')} {rc.LESS_CERTAIN_NOTE}"]
+
+
+_GATE_ROWS = {
+    ("pipe_leaks", None): LintPrecision("pipe_leaks", 0, 2, "M1"),
+    ("duplicate_records", None): LintPrecision("duplicate_records", 9, 10, "M1"),
+    ("stage6_render_warnings", "appendix_grant_too_sparse"):
+        LintPrecision("stage6_render_warnings", 1, 6, "M1", "appendix_grant_too_sparse"),
+    ("citation_grounding", None): LintPrecision("citation_grounding", 1, 4, "YUY-CG"),
+}
+
+
+def test_a_finding_right_less_than_half_the_time_is_a_note_not_a_comment(tmp_path):
+    """#1589's gate: below 50% hand-checked precision, nothing sits on the
+    text; the finding is listed in the box, saying why, and quoting it."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("pipe_leaks", "1 numbered citation(s) fusing venue-date patterns", [f"[bibliography] {SECOND}"]),
+        _finding("duplicate_records", "1 duplicated record(s)", [f"block 7 repeats at 8: {CITATION[:90]}"])),
+        rows=_GATE_ROWS)
+    assert n == 2
+    assert _comments(out) == [(_flag("duplicate_records"), CITATION)]
+    assert _notes(out) == [f"{LINT_COPY['pipe_leaks'].title} (1)",
+                           f"{_flag('pipe_leaks')} {rc.LESS_CERTAIN_NOTE}", f'\u2022\t"[bibliography] {SECOND}"']
+
+
+def test_a_less_certain_diversion_is_a_note_naming_its_section(tmp_path):
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(_DIVERSIONS[0]), rows=_GATE_ROWS)
+    assert n == 1 and _comments(out) == []
+    assert _notes(out)[1:] == [f"{rc.DIVERSION_NOTE} {rc.LESS_CERTAIN_NOTE}", "\u2022\tPast Research Funding"]
+
+
+def test_a_less_certain_appendix_code_diversion_is_not_a_note_either(tmp_path):
+    """T's own entries are stage 6's Appendix note's to explain, gated or not."""
+    rows = {**_GATE_ROWS, ("stage6_render_warnings", "appendix_no_route_T"):
+            LintPrecision("stage6_render_warnings", 0, 9, "M1", "appendix_no_route_T")}
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(_DIVERSIONS[1]), rows=rows)
+    assert n == 0 and _notes(out) == []
+
+
+def test_a_less_certain_possibility_is_dropped_not_noted(tmp_path):
+    """A REVIEW_COPY_ONLY_LINTS lint is only ever a comment on its citation."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("citation_grounding", "entry 14 (S1): author_2:initials_not_in_source", [SECOND[4:]],
+                 severity="INFO")), rows=_GATE_ROWS)
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
+
+
+def test_the_committed_ledger_is_read_when_no_rows_are_given(tmp_path, monkeypatch):
+    """Without ``rows`` the gate reads PRECISION.md through precision.py."""
+    monkeypatch.setattr(rc, "load_gate_ledger", lambda: _GATE_ROWS)
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("pipe_leaks", "1 numbered citation(s)", [f"[bibliography] {SECOND}"])))
+    assert _comments(out) == []
 
 
 def test_a_record_printed_across_table_cells_is_found_by_its_row(tmp_path):
@@ -267,9 +383,9 @@ def test_protected_data_flag_never_carries_the_finding_text(tmp_path):
 def test_info_and_skipped_findings_get_no_comment(tmp_path):
     clean = _clean_docx(tmp_path)
     skipped = {**_finding("segmentation", "skipped"), "status": "skipped"}
-    assert rc.write_review_docx(clean, _report(
-        _finding("missed_headers", "1 header", severity="INFO"), skipped)) is None
-    assert not (tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}").exists()
+    out, n = rc.write_review_docx(clean, _report(
+        _finding("missed_headers", "1 header", severity="INFO"), skipped))
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
 
 
 def test_a_citation_grounding_finding_is_a_comment_on_its_citation_though_info(tmp_path):
@@ -289,10 +405,38 @@ def test_a_citation_grounding_finding_is_a_comment_on_its_citation_though_info(t
 
 def test_a_citation_grounding_finding_not_in_the_document_flags_nothing(tmp_path):
     """No heading comment, no review note: a possibility only reads on the citation."""
-    assert rc.write_review_docx(_clean_docx(tmp_path), _report(
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("citation_grounding", "entry 3 (S8): ordinal_not_in_source:10th -- the stage 5d "
                  "citation names text its source line lacks",
-                 ["Quill A. A talk nobody printed. 10th Annual Meeting; 2004."], severity="INFO"))) is None
+                 ["Quill A. A talk nobody printed. 10th Annual Meeting; 2004."], severity="INFO")))
+    assert n == 0 and _comments(out) == [] and _notes(out) == []
+
+
+def test_a_source_line_coverage_finding_is_one_review_note_per_line_though_info(tmp_path):
+    """#1588: the quoted source lines are not on the page, so each one is a
+    review note under its own title, never a comment, whatever the severity."""
+    lost = ("Visiting lecturer in comparative squid anatomy, Example Polytechnic",
+            "Organised the annual squid optics colloquium for graduate students")
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("source_line_coverage", "entry 31: 2 source line(s) with under 50% of their word pairs "
+                 "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")))
+    assert n == 2 and _comments(out) == []
+    assert _notes(out) == ["Text from your CV that may be missing (2)", _flag("source_line_coverage"),
+                           *(f'•\t"{line}"' for line in lost)]
+
+
+def test_a_source_line_coverage_finding_below_the_bar_is_still_its_notes(tmp_path):
+    """Its lines are notes already, never on the text, so the precision gate
+    has nothing to move: a measured precision under 50% (PRECISION.md, YUY-SLC)
+    must not drop them as it drops a less certain possibility."""
+    lost = ("Visiting lecturer in comparative squid anatomy, Example Polytechnic",)
+    rows = {("source_line_coverage", None): LintPrecision("source_line_coverage", 1, 4, "T")}
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("source_line_coverage", "entry 31: 1 source line(s) with under 50% of their word pairs "
+                 "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")), rows=rows)
+    assert n == 1 and _comments(out) == []
+    assert _notes(out) == ["Text from your CV that may be missing (1)", _flag("source_line_coverage"),
+                           f'•\t"{lost[0]}"']
 
 
 def test_stray_text_is_titled_plainly_and_quotes_what_to_delete(tmp_path):
@@ -331,7 +475,9 @@ def test_review_notes_box_closes_the_document_in_its_own_type_and_spacing(tmp_pa
 def test_removed_and_kept_are_parallel_italic_labels_with_hanging_quotes(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("dedup_drops", "1 drop", [
         "K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Lecture 5 hrs' vs kept 'Squid Lecture 4 hrs'"])))
-    removed, kept = Document(str(out)).tables[-1].cell(0, 0).paragraphs[-2:]
+    paragraphs = Document(str(out)).tables[-1].cell(0, 0).paragraphs
+    at = next(i for i, p in enumerate(paragraphs) if p.text.startswith("Removed:"))
+    removed, kept = paragraphs[at:at + 2]
     for para, label in ((removed, "Removed:\t"), (kept, "Kept:\t")):
         assert para.runs[0].text == label and para.runs[0].italic
         assert para.paragraph_format.first_line_indent < 0
@@ -339,12 +485,24 @@ def test_removed_and_kept_are_parallel_italic_labels_with_hanging_quotes(tmp_pat
     assert kept.paragraph_format.space_after.pt == 3
 
 
-def test_no_review_copy_when_nothing_has_a_place_or_an_item(tmp_path):
-    """A run whose only findings point at nothing gets no review copy: an
-    empty notes box would be one more thing to delete."""
-    assert rc.write_review_docx(_clean_docx(tmp_path), _report(
-        _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model"))) is None
-    assert not (tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}").exists()
+def test_a_copy_with_nothing_to_flag_is_written_and_says_what_is_not_checked(tmp_path):
+    """#1589: a quiet doctor is not a clean document, so every run gets its
+    copy, closing with what CViche cannot see."""
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model")))
+    assert out == tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}" and n == 0
+    assert _comments(out) == [] and _notes(out) == []
+    assert _not_checked(out) == [rc.NOT_CHECKED_TITLE, rc.NOT_CHECKED_INSTRUCTION,
+                                 *(f"\u2022\t{spot.sentence}" for spot in blind_spots())]
+    assert len(_not_checked(out)) > 2  # COVERAGE.md lists at least one blind spot
+
+
+def test_what_is_not_checked_closes_a_box_that_has_notes(tmp_path):
+    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
+        _finding("output_hygiene", "1 boilerplate line(s)", ["Insert dates here (MM/YYYY)"])))
+    lines = _box_lines(out, rc.REVIEW_NOTES_TITLE)
+    assert lines[0] == "Stray text to delete (1)"
+    assert lines[-len(blind_spots()) - 2:] == _not_checked(out)
 
 
 def test_one_lints_comments_are_capped(tmp_path):
@@ -360,9 +518,21 @@ def test_comments_leave_the_body_the_doctor_reads_unchanged(tmp_path):
         _finding("pipe_leaks", "x", [CITATION]),
         _finding("section_lost", "M2B: 1 entry absent from the RESEARCH section")))
     assert _notes(out) == []
-    assert read_docx_blocks(str(out)) == read_docx_blocks(str(clean))
+    assert _cv_blocks(out) == read_docx_blocks(str(clean))
     assert len(list(Document(str(clean)).comments)) == 0  # the clean document is untouched
 
 
 def test_not_a_doctor_report_writes_nothing(tmp_path):
     assert rc.write_review_docx(_clean_docx(tmp_path), None) is None
+
+
+def test_source_line_coverage_notes_are_capped_per_document(tmp_path):
+    """Up to 3 lines a finding, up to 57 findings a run on YUYVIG: the notes
+    stop at MAX_FLAGS_PER_LINT, as a comment-placing lint's flags do."""
+    findings = [_finding("source_line_coverage", f"entry {i}: 3 source line(s) with under 50% of their "
+                         "word pairs anywhere in the output, Appendix included (lowest 0%)",
+                         [f"Squid optics seminar number {i} line {j} for graduate students" for j in range(3)])
+                for i in range(20)]
+    out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(*findings))
+    assert n == rc.MAX_FLAGS_PER_LINT
+    assert _notes(out)[0] == f"Text from your CV that may be missing ({rc.MAX_FLAGS_PER_LINT})"

@@ -47,6 +47,7 @@ from unified_pipeline.core.render_check import entry_fragments
 
 from ..formatting import (
     _clear_table_data,
+    _set_font,
     format_date_for_section,
     format_date_range,
     with_extra_date_spans,
@@ -56,6 +57,7 @@ from ..parsing import (
     _dates_overlap_or_match,
     _is_table_header_entry,
     _parse_date_components,
+    split_appointment_title,
 )
 from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
@@ -209,6 +211,11 @@ _YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
 # own. Enumerated rather than copied wholesale so a child still carries no
 # classification, coverage or comment fields (#476).
 _INHERITED_EMPLOYER_FIELDS = ('institution', 'organization', 'department', 'location')
+
+# Point size of a duties continuation row (#1205): the body-text size every
+# section writer sets on its runs (`formatting.docx._set_font`'s default), so
+# the row reads as part of the table above it.
+CONTINUATION_ROW_FONT_PT = 11
 
 
 def _child_position_records(entry: dict) -> list[dict]:
@@ -538,12 +545,7 @@ def _position_row_cells(entry: dict, superseded: bool = False,
     """
     fields = entry.get('extracted_fields', {}) or {}
 
-    title = fields.get('title') or ''
-    # Detect placeholder values that are actually column headers from source CV tables
-    # e.g., field extraction returning "Title" when the CV had "Title | Institution | Dates"
-    title_lower = title.strip().lower()
-    if title_lower in ('title', 'position', 'role', 'name', 'description', 'activity'):
-        title = ''
+    title, _duties = _appointment_title_parts(entry)
     # D3 entries often use 'organization' instead of 'institution' in field extraction
     raw_institution = fields.get('institution', '') or fields.get('organization', '')
     department = fields.get('department', '')
@@ -615,6 +617,21 @@ def _position_row_cells(entry: dict, superseded: bool = False,
     return title_content, institution_content, dates_content
 
 
+def _appointment_title_parts(entry: dict) -> tuple[str, str]:
+    """`(role, duties)` of a position record's title: the Title column shows
+    the role only, and duty prose stage 4 packed into `title` goes on a
+    continuation row under the appointment (`split_appointment_title`, #1205).
+
+    A placeholder title -- a source column header field extraction emitted as
+    data ("Title" from "Title | Institution | Dates") -- reads as no title.
+    """
+    fields = entry.get('extracted_fields', {}) or {}
+    title = fields.get('title') or ''
+    if title.strip().lower() in PositionsSection._PLACEHOLDER_TITLES:
+        return '', ''
+    return split_appointment_title(title)
+
+
 def _renders_no_content(cells: tuple[CellContent, ...]) -> bool:
     """True when every cell of the row would come out empty.
 
@@ -625,6 +642,19 @@ def _renders_no_content(cells: tuple[CellContent, ...]) -> bool:
     rule is that no row may lose its last populated cell.
     """
     return not any(text.strip() for cell in cells for text, _, _ in cell)
+
+
+def _add_continuation_row(table: Table, text: str) -> None:
+    """Append one row spanning the whole table that holds `text` as plain
+    text: duty prose split off an appointment title (#1205), shown under the
+    appointment's own row instead of in its Title column. Not counted in
+    `entries_inserted` -- it is part of the record above it, not a record.
+    """
+    row = table.add_row()
+    cell = row.cells[0].merge(row.cells[-1]) if len(row.cells) > 1 else row.cells[0]
+    for extra in cell.paragraphs[1:]:  # merge() keeps one paragraph per cell
+        extra._p.getparent().remove(extra._p)
+    _set_font(cell.paragraphs[0].add_run(text), size=CONTINUATION_ROW_FONT_PT)
 
 
 class PositionsSection:
@@ -1102,14 +1132,23 @@ class PositionsSection:
 
     def _add_position_row(self, table: Table, entry: dict, superseded: bool = False,
                           latest_rank: bool = False) -> None:
-        """Render one normalized position record as one table row.
+        """Render one normalized position record as one table row, plus a
+        continuation row when its title holds duties.
 
         Renders unconditionally: every record `_normalized_positions` yields
-        becomes exactly one row (#476 review item 7). Whether a record yields
-        a row at all is decided there, against these same cells.
+        becomes exactly one record row (#476 review item 7). Whether a record
+        yields a row at all is decided there, against these same cells. A
+        record whose title holds duty prose (#1205) also gets one full-width
+        continuation row under it, holding the duties split off the title
+        (`_add_continuation_row`); that row is part of the record, not another.
         """
         self._add_table_row_with_mixed_content(
             table,
             list(_position_row_cells(entry, superseded, latest_rank)),
             entry=entry
             )
+        _role, duties = _appointment_title_parts(entry)
+        if duties:
+            _add_continuation_row(table, duties)
+            self.stats['appointment_title_duties_split'] = (
+                self.stats.get('appointment_title_duties_split', 0) + 1)
