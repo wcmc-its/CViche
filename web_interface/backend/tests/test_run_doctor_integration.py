@@ -199,7 +199,7 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     assert persisted == [str(report), str(review)]
     # The quoted text is not in the document, so it is a review note in the box closing the copy.
     notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
-    assert notes[1:] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
+    assert notes[1:4] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
     assert len(list(Document(str(clean)).comments)) == 0
 
 
@@ -267,6 +267,31 @@ def test_a_corrupt_stage4_artifact_leaves_the_review_copy_comments_only(monkeypa
     assert len(list(review.comments)) == 1
     assert any("Stage-4 JSON unreadable" in r.message for r in caplog.records)
     assert not any("Review-comment docx failed" in r.message for r in caplog.records)
+
+
+def test_a_run_with_nothing_to_flag_still_publishes_its_review_copy(monkeypatch, tmp_path, db):
+    """#1589: no WARN finding is not a clean document; the copy is attached
+    and mirrored anyway, closing with what CViche does not check."""
+    from docx import Document
+
+    from app.models import Step
+    from app.services.review_comments import NOT_CHECKED_TITLE
+
+    monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
+    payload = {**_doctor_payload(), "findings": []}
+    monkeypatch.setattr(run_doctor_mod, "run_doctor", lambda *a, **k: payload)
+    clean = _stage6_docx(tmp_path, "DOC_QT")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_QT")
+    persisted = []
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", persisted.extend)
+
+    asyncio.run(o._run_doctor())
+
+    review = clean.with_name("DOC_QT_wcm_review.docx")
+    files = json.loads(db.query(Step).filter(Step.run_id == "DOC_QT").first().output_files)
+    assert str(review) in files and str(review) in persisted
+    box = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
+    assert box[1] == NOT_CHECKED_TITLE
 
 
 def test_an_unreadable_document_still_publishes_the_report(monkeypatch, tmp_path, db, caplog):

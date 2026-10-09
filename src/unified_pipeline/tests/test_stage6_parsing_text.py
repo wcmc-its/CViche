@@ -85,6 +85,8 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
+    APPOINTMENT_DUTY_VERBS,
+    APPOINTMENT_ROLE_MIN_CHARS,
     ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
@@ -98,6 +100,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _refold_shattered,
     _strip_appended_initials,
     is_membership_date_part,
+    split_appointment_title,
 )
 
 # --- item 1: the strip is a guess and lives at the call site (#665) --------
@@ -678,3 +681,75 @@ def test_refold_at_exactly_thirty_percent_of_the_joins_mid_sentence():
 
 def test_a_capitalised_opening_after_a_plain_word_is_no_join():
     assert _mid_sentence_joins(["the example clinic", "Example Hospital"]) == [False]
+
+
+# --- split_appointment_title (#1205) -----------------------------------------
+# Synthetic titles in the two shapes YUYVIG DYLJXC 661/668 carry: a role, a
+# spaced dash, an FTE share, then a "to <verb>" duty clause.
+
+_DASH_DUTY_TITLE = ("Visiting Fellow in Example Science, Example Policy Office"
+                    " - 50% FTE Appointment to help plan the example programme")
+
+
+def test_split_cuts_at_the_dash_before_a_duty_clause():
+    assert split_appointment_title(_DASH_DUTY_TITLE) == (
+        "Visiting Fellow in Example Science, Example Policy Office",
+        "50% FTE Appointment to help plan the example programme")
+
+
+def test_split_cuts_at_the_duty_clause_when_no_dash_precedes_it():
+    assert split_appointment_title(
+        "Visiting Scientist at the Example Agency to continue the example initiatives") == (
+        "Visiting Scientist at the Example Agency",
+        "to continue the example initiatives")
+
+
+def test_split_cuts_at_a_sentence_break():
+    assert split_appointment_title(
+        "Medical Director, Example Clinic. Responsible for the example service.") == (
+        "Medical Director, Example Clinic.", "Responsible for the example service.")
+
+
+def test_split_takes_the_earlier_of_a_sentence_break_and_a_duty_clause():
+    role, duties = split_appointment_title(
+        "Director of Example Programs. Appointed to lead the example unit")
+    assert role == "Director of Example Programs."
+    assert duties == "Appointed to lead the example unit"
+
+
+def test_split_keeps_every_word():
+    role, duties = split_appointment_title(_DASH_DUTY_TITLE)
+    assert f"{role} - {duties}" == _DASH_DUTY_TITLE
+
+
+@pytest.mark.parametrize("title", [
+    "Special Assistant to the Dean for Example Affairs",
+    'Statistical adviser for "Example Trial to Promote Example Care"',
+    "Associate Professor (Tenure), Depts. Of Example Biology & Example Chemistry",
+    "Assoc. Professor of Medicine and Example Biology",
+    "Asst. Professor of Example Surgery",
+    "Graduate Research Assistant with Dr. Example J.L. Person",
+    "Inaugural Example M.D. and Example Professor of Example Research",
+    "Professor of Medicine; Chief, Division of Example Medicine",
+    "Professor of Surgery, Division Chief \u2013 Example Trauma Surgery",
+])
+def test_split_leaves_a_title_with_no_duty_prose_whole(title):
+    assert split_appointment_title(title) == (title, "")
+
+
+@pytest.mark.parametrize("verb", sorted(APPOINTMENT_DUTY_VERBS))
+def test_split_finds_every_listed_duty_verb(verb):
+    assert split_appointment_title(f"Example Fellow, Example Office to {verb} things")[1] \
+        == f"to {verb} things"
+
+
+def test_split_needs_a_role_of_minimum_length_in_front():
+    # "Fellow" is under APPOINTMENT_ROLE_MIN_CHARS: no split.
+    title = "Fellow to help the example unit"
+    assert len("Fellow") < APPOINTMENT_ROLE_MIN_CHARS
+    assert split_appointment_title(title) == (title, "")
+
+
+@pytest.mark.parametrize("title", ["", None, "   "])
+def test_split_of_an_empty_title(title):
+    assert split_appointment_title(title) == ("", "")

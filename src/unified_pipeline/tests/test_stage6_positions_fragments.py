@@ -1446,3 +1446,78 @@ def test_latest_rank_rows_reads_d1_start_years_only():
     assert _latest_rank_rows(records) == {0, 3}
     assert records == before
     assert _latest_rank_rows([_rank_entry(1, "Lecturer", "")]) == set()
+
+
+# --- (f) duty prose in an appointment title (#1205) --------------------------
+# The YUYVIG DYLJXC 661/668 shape, synthetic: stage 4 wrote the role, an FTE
+# share and the duties into `title`.
+
+DUTY_TITLE_ROLE = "Visiting Fellow in Example Science, Example Policy Office"
+DUTY_TITLE_DUTIES = "50% FTE Appointment to help plan the example programme"
+
+
+def _duty_title_entry(code="D3"):
+    return {
+        "element_idx_start": 7,
+        "taxonomy_code": code,
+        "text": f"{DUTY_TITLE_ROLE} 2013-15\t{DUTY_TITLE_DUTIES}",
+        "extracted_fields": {
+            "title": f"{DUTY_TITLE_ROLE} - {DUTY_TITLE_DUTIES}",
+            "organization": "Example Institute for Science",
+            "start_date": "2013", "end_date": "2015",
+        },
+    }
+
+
+def _row_spans(table):
+    """Per data row, the gridSpan of each of its w:tc cells (1 when unset)."""
+    spans = []
+    for row in table.rows[1:]:
+        spans.append([int(tc.find(qn("w:tcPr") + "/" + qn("w:gridSpan")).get(qn("w:val")))
+                      if tc.find(qn("w:tcPr") + "/" + qn("w:gridSpan")) is not None else 1
+                      for tc in row._tr.findall(qn("w:tc"))])
+    return spans
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3"])
+def test_a_duty_title_shows_only_the_role_and_the_duties_on_a_row_under_it(code):
+    gen, table = _positions_generator(TABLE_ANCHORS[code])
+    gen._fill_positions({code: [_duty_title_entry(code)]})
+
+    rows = _rendered_rows(table)
+    assert rows[0] == [DUTY_TITLE_ROLE, "Example Institute for Science", "2013-2015"]
+    # The continuation row is one cell spanning the table's three columns.
+    assert rows[1] == [DUTY_TITLE_DUTIES] * 3
+    assert _row_spans(table) == [[1, 1, 1], [3]]
+    assert gen.stats["entries_inserted"] == 1
+    assert gen.stats["appointment_title_duties_split"] == 1
+
+
+def test_a_title_without_duty_prose_gets_no_continuation_row():
+    entry = _duty_title_entry()
+    entry["extracted_fields"]["title"] = DUTY_TITLE_ROLE
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen._fill_positions({"D3": [entry]})
+
+    assert _rendered_rows(table) == [[DUTY_TITLE_ROLE, "Example Institute for Science", "2013-2015"]]
+    assert "appointment_title_duties_split" not in gen.stats
+
+
+def test_the_title_cell_holds_the_role_only():
+    title, _institution, _dates = _position_row_cells(_duty_title_entry())
+    assert title == [(DUTY_TITLE_ROLE, False, "")]
+
+
+def test_a_placeholder_title_still_reads_as_no_title():
+    entry = _duty_title_entry()
+    entry["extracted_fields"]["title"] = "Title"
+    title, _institution, _dates = _position_row_cells(entry)
+    assert title == [("", False, "")]
+
+
+def test_the_split_does_not_change_the_record():
+    entry = _duty_title_entry()
+    before = copy.deepcopy(entry)
+    gen, _table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen._fill_positions({"D3": [entry]})
+    assert entry == before

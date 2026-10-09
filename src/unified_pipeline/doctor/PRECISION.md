@@ -11,13 +11,14 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 - **matched / hits**: hits that name the same entry (`element_idx_start`) as a verified autopsy finding on the same run. This is a lower bound on precision: the autopsy recorded the defects it verified, not every true signal, so an unmatched hit still needs a hand-check before it counts as a false positive. It also counts a hit on the right entry for the wrong reason as a match. "names text" means the lint's findings quote text and name no entry, so they cannot be matched by index.
 - **caught**: the verified findings this lint matched, which is its contribution to recall.
 - **Evidence cap.** The doctor prints at most 3 evidence items per finding: the stage-6 re-emit in `doctor/lints/render.py` slices to 3, and `offschema_fields` keeps `FIELD_EVIDENCE_MAX_VALUES = 3` (`doctor/lints/extraction.py`). The scorer reads only the indices a finding prints. A finding about more entries is matched on the 3 it lists, so on the reroute rows and `offschema_fields`, matched and caught can undercount, and they depend on which 3 entries come first. On M1 the cap hides 85 of 206 reroute indices (in 11 of 72 findings) and 19 of 89 `offschema_fields` indices (in 5 of 47 findings). M1's doctor was re-run once with both caps lifted, in a scratch copy that is not committed: no matched, caught or recall number changed. Only the reroute rows' unmatched-index lists grew, `reroute_refused` from 57 to 92 indices and `reroute_same_family` from 16 to 46. Another arm can differ, so a lint PR on one of these rows says how many of its findings hit the cap.
-- `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `scripts/doctor_vs_autopsy.py` (`_STAGE6_SHAPES`).
+- `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `doctor/precision.py` (`_STAGE6_SHAPES`), which `scripts/doctor_vs_autopsy.py` imports.
 
 ## Who reads this file
 
 `doctor/precision.py` parses the per-lint table below at run time, so keep its shape: the first table under the "Per-lint precision" heading, a `lint` column of backticked keys (a `stage6_render_warnings` shape row adds `: ` and the backticked shape), and a `TP / judged` column of `<tp> / <judged>` or `none`. Columns are found by header name. Shape rows are pooled into their lint key, because a finding carries the key. A lint listed twice keeps its first row. What it feeds:
 
 - Each run's doctor report gets a `lint_precision` block, and the top lints in `doctor.tsv` and the lint on the Teams card's Doctor line carry `p~0.50 n=8` (TP / judged, and judged), or `p unmeasured`.
+- The review copy's precision gate (#1589), `precision.shown_in_place`: a WARN or ERROR finding is a Word comment on the text it is about only when its row's TP / judged is at least 50%, or it has no verdicts. Below that it is listed in the closing review-notes box instead. This reads rows unpooled: a `stage6_render_warnings` finding reads its shape's row (none for a shape with no row), and another lint's finding reads the row of the shape its message names, else its rows pooled. The rows are `precision.load_gate_ledger`'s: each per-lint row plus the held-out verdicts of the YUY-HO table below, for a lint whose code has not changed since the dev-259 doctor those verdicts judged (Paul, 2026-10-08). The changed lints and shapes are `precision.HELD_OUT_CHANGED`; a PR that changes another lint adds it there. A held-out row with no per-lint row brings the YUY-HO table's in-sample figures; a held-out row pooled over a lint the per-lint table splits by shape is not folded. Meant to be shared with the quality score (PR #1642) and the run page's fix list (PR #1640), open as of this change.
 - #813's remediation gate, `precision.remediation_allowed`: a lint may drive a section retry only if it is one of #813's LLM-judgement lints (`missed_headers`, `segmentation`, `under_extraction`) with a TP / judged of at least 80% on at least 20 judged findings. On M1, none qualifies.
 
 ## Measurements
@@ -256,6 +257,27 @@ YUY-SP adds `shattered_prose`: a stage-4 entry whose `\t` parts break mid-senten
 
 The same PR folds these parts back in stage 6 (`stage6.parsing._refold_shattered`, which the lint's own test `_is_shattered` gates). That mends a single-column paragraph: OIEPQD VECUUM 21, re-rendered with it, is one whole paragraph and the lint goes quiet on it. It does not mend any of the 15 above. Every one is a multi-column row printed line by line, so each printed line also carries a neighbouring column's words (the year, title, organisation or role column, and the row's dates), and folding keeps them inside the paragraph. So the lint also fires on a folded paragraph when a line carries a column's dates (`_spliced_column_date`: a date range ending a line that is not the entry's last, or a year opening the entry ahead of a capitalised word). Over fresh renders of the branch head (origin/dev `64bb4541` merged, same 272 runs) it fires on the same 15 entries of the same 3 runs: 14 as folded paragraphs that still carry the column, and RLADNC 540 still as separate paragraphs. All 15 remain open under #1583, for the converter to separate the columns. Ceilings: a spliced role or place column without a date is not seen (every one of the 15 carries a date), and a paragraph whose own heading line ends in its dates, followed by prose that folds, would read as spliced (none seen).
 
+| YUY-SLC | 2026-10-08 | `feat/1588-coverage-contract` on origin/dev `8e29dd24`, against `8e29dd24`, both over one fresh render of `8e29dd24` (`scripts/render_gate.py` with `--source-dir`, 37 of 37 and 63 of 63; `scripts/doctor_gate.py` per farm with `--source-dir`) | 100: YUYVIG 37 (dev-259), **held out**, every source a docx (the 15 uploaded docx, and the 22 PDFs converted locally with the dev-259 converter, `d1e49e39`'s `core/pdf_to_docx.py`, whose element counts match the stored stage-2 `document_length` on all 22); the EBYSBC/s7ab/pilot farm 63, in-sample | `_labels_yuyvig_v2` (held out) and the M1 labels (in-sample); a random 30 unmatched hits of each arm hand-read against the render | #1588 |
+
+YUY-SLC adds `source_line_coverage` (#1588's first fact-accounting step): a source line holding at least 5 pairs of adjacent 3+-letter words, under half of which any one rendered line holds (both words, either order), counting the Appendix and tracked deletions. Not judged: template boilerplate, stage 1a's headings, a line that is a list of names (5d rewrites author names), a protected personal-data value, and every line of a Personal Data (A) entry. One finding per stage-3b entry, INFO. It changes no other lint's findings on any of the 100 runs (base and branch reports identical once its key is dropped).
+
+The thresholds were fitted on the farm only, in three rounds. Pairs of every word read 1,693 findings there (21% matched); dropping digits and one- and two-letter words (5d initials, reformatted dates) 753 (30%); counting a pair rendered when one output line holds both words, in either order, and leaving out name lists, 370 (38%); leaving out Personal Data entries, 359. YUYVIG was scored once, on the final code.
+
+| arm | runs with a hit | findings (lines) | per run: median / p90 / max | matched / located | recall, index match: base to branch | hand-read: true / partial / false |
+|---|---|---|---|---|---|---|
+| YUYVIG, held out | 34 of 37 | 254 (303) | 3 / 15 / 57 | 31 / 248 (13%) | 80 to 96 of 250; HIGH 16 to 21 of 41 | 11 / 9 / 10 of 30 unmatched |
+| farm, in-sample | 55 of 63 | 359 (414) | 4 / 13 / 29 | 130 / 352 (37%) | 209 to 251 of 487; HIGH 40 to 43 of 84 | 16 / 7 / 7 of 30 unmatched |
+
+True means the line's content is on no rendered line; partial means the record renders but loses what the line held beyond its title (a role word, a description, a mentee's outcome, a course description, a run of dates); false means the content renders reworded. The false hits are author lists the name-list test misses (a list number or "MD" before the first name: 4 of the 10 held-out), a research-summary paragraph reworded, reworded talk, review and certification rows, and a URL; in-sample also a source table's column-header row, the tail of a citation split across lines, and a DEA registration stage 6 withholds. Most true and partial hits are #1205's supplementary prose (descriptions, duties, award criteria, mentors and advisors), which stage 4 does not extract by design until #1205 lands.
+
+Held out, the matched hits are a lower bound and the unmatched sample is 37% true and 67% true or partial, so, counting every matched hit as true, about 45% of the hits are wholly missing text and about 70% lose something. Under #1625's 50% bar for the run page (and the 80% WARN bar), the lint ships INFO as a review-copy note only (`REVIEW_COPY_ONLY_LINTS`): each quoted source line is an item under "Text from your CV that may be missing", at most `MAX_FLAGS_PER_LINT` (25) a document, and the score never reads it. Recall it adds held out, by the YUY-HO definition (a verifier credit or an index match): 140 to 155 of 444, HIGH 20 to 25 of 53 (GFZWQE-01, HNQBOI-01, SPINJC-02, SQMWHM-01, XNWSZN-01). An index match can credit a hit on the right entry for another reason: SQMWHM-01 and XNWSZN-01 are invented values (#1445) on an entry whose other lines the lint names. Per cell, in `doctor/COVERAGE.md`.
+
+Ceilings: a fact inside a line (a number, a date, a grant amount) is not read; a record reworded past half its word pairs reads as lost; a name list with a list number reads as a line; a line found anywhere in the document counts as rendered, even in the wrong section.
+
+| YUY-AT | 2026-10-08 | `fix/1205-appointment-title-guard` on origin/dev `8e29dd24`, against `8e29dd24`, each over its own fresh render (`scripts/render_gate.py`; `scripts/doctor_gate.py` per farm, `--source-dir` for YUYVIG only) | 132: YUYVIG 39, the EBYSBC/s7ab/pilot farm 63, NDMRSO 30 | YUYVIG's held-out labels (`_labels_yuyvig_v2`); every hit hand-read | #1205 |
+
+YUY-AT adds `appointment_title_overlong`: a D1-D3 `title` whose longest `;`-separated part is over 150 characters (the owner's limit on #1205, 2026-10-08). It changes no other lint's findings on any of the 132 runs, and adds 3 WARN findings on 2 of them, all duty prose in the role field on reading the stage-4 record: YUYVIG DYLJXC 661 and 668 (D3, the two titles #1205 names) and HXBPCT 54 (D3, a consulting role followed by a participle clause listing its duties). No label carries these entries, so matched is 0. The `;` rule is the one judgement fitted on these runs: EBYSBC QNZADH 0, 35 and 39 are 356, 168 and 154 characters but are lists of concurrent roles, each under 100, and the lint skips them. Over 1,763 D1-D3 titles on six farms (these three plus X6, EOAHMI and the 66-CV local farm), only DYLJXC 661/668 carry a duty clause stage 6's split finds, and HXBPCT 54 is the one hit stage 6 renders whole: its duties open with a participle, which the split does not look for.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -286,6 +308,8 @@ The same PR folds these parts back in stage 6 (`stage6.parsing._refold_shattered
 | `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |
 | `citation_grounding` | 123 | 0 | none | 62 / 123 hand-checked (50%): 41 partial, 20 false; held out 42 / 91 (46%) | 1 / 20 on labelled runs (5%) | 1 | YUY-CG |
 | `shattered_prose` | 15 | 15 | none | 15 / 15 hand-checked (100%), before and after the stage-6 fold | 0 / 12 on labelled runs (no label carries an entry index) | 0 by index, 2 by hand | YUY-SP |
+| `appointment_title_overlong` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (no label carries these entries) | 0 by index | YUY-AT |
+| `source_line_coverage` | 613 | 0 | none | 27 / 60 hand-checked (45%): held out 11 / 30, in-sample 16 / 30, unmatched hits only; 43 / 60 with the partials | 161 / 600 on labelled runs (27%): held out 31 / 248 | 110: held out 25, in-sample 85 | YUY-SLC |
 | `summary_unsupported_claim` | 11 | 11 | none | 14 / 14 hand-checked (100%) | 11 / 11 by sentence (100%) | 11 | OIE-SUM |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
@@ -371,6 +395,7 @@ One row per lint key that fired on a YUYVIG run, in either doctor. **in-sample**
 | `section_consistency` | 30 / 30 (100%) (RCB-D, RCB-HE) | 13 / 24 (54%) | -46 | 23 / 23 | 24 / 24 | 6 / 24 | 6 | **overfit**: its 11 FP are `cross_reference_as_record` 3, `grant_review_not_q3` 3, `board_certification_misfiled` 2, `journal_article_as_report` 1 and 2 more, on 8 CVs |
 | `section_lost` | 0 / 1 (0%) (M1) | 1 / 3 (33%) | +33 | 3 / 3 | 3 / 3 | names text | 0 |  |
 | `segmentation_collapse` | 1 / 1 (100%) (W3B-SC) | 1 / 1 (100%) | +0 | 1 / 1 | 1 / 1 | 0 / 1 | 0 |  |
+| `source_line_coverage` | 16 / 30 (53%) (YUY-SLC, unmatched hits) | 11 / 30 (37%), unmatched hits | -16 | 0 / 0 | 254 / 0 | 31 / 248 | 25 | new (#1588); INFO and review-copy only. With partials 23 / 30 in-sample, 20 / 30 held out |
 | `span_count` | 111 / 118 (94%) (RCB-SC, before Y1585) | 6 / 28 (21%) | -73 | 28 / 28 | 6 / 6 | 5 / 6 | 3 | **overfit** at dev-259; #1607 removed its 22 FP (Y1585, in-sample) |
 | `stage6_render_warnings`: `appendix_grant_too_sparse` | 3 / 6 (50%) (M1) | 6 / 6 (100%) | +50 | 5 / 5 | 6 / 6 | names text | 0 |  |
 | `stage6_render_warnings`: `appendix_m1_not_in_summary` | none | 6 / 6 (100%) |  | 6 / 6 | 8 / 8 | names text | 0 | #1615 diverts undated M1 too: 6 to 8 hits |
@@ -403,7 +428,7 @@ What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's fi
 - **Certain fix**: the doctor can derive the corrected text from the run's own artifacts, and the shape is right at least 99% of the time on at least 100 judged findings. The fix is written as a Word tracked change: accepting it gives the corrected text, rejecting it gives the delivered text, and either choice is a verdict for #1587.
 - **Suggestion**: a fix the doctor can derive, right at least 80% of the time on at least 20 judged findings (the #822 / #813 bar). It is meant to be a tracked change too. None is built yet, so these are comments today.
 - **Comment**: a Word comment on the text the finding is about (`review_comments.py`).
-- **Review note**: an item in the box closing the copy, when `precision.shown_in_place` (#1589, PR #1639) keeps the finding off the text, i.e. its per-lint row is below 50%. Until #1639 merges, these findings are comments too.
+- **Review note**: an item in the box closing the copy, when `precision.shown_in_place` (#1589) keeps the finding off the text, i.e. its gate row is below 50% (`IN_PLACE_MIN_PRECISION`).
 - **Section re-run**: #813, for a lint `precision.remediation_allowed` admits. None does.
 
 **Precision used.** For the fix tiers, the lower of in-sample and held-out, each counted only when it has at least 5 judged findings, and judged findings summed over both. There are two exceptions:
@@ -411,10 +436,12 @@ What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's fi
 - `span_count` and `year_not_in_source` were held out before #1607 fixed their false positives, so their post-fix in-sample rows (Y1585) stand alone.
 - The held-out table pools `role_consistency` and `group_header_context` over their shapes, so their shape rows show that pooled figure.
 
-**Comment versus review note.** These two tiers follow the gate as built, which reads only the per-lint table. Where the held-out figure disagrees, the table says so. Moving a lint between these tiers is a ledger change, not a code change:
+**Comment versus review note.** These two tiers are the gate's, read from `precision.load_gate_ledger()`: the per-lint row with YUYVIG's held-out verdicts folded in for a lint unchanged since dev-259 (`HELD_OUT_CHANGED` excluded). The **gate (combined)** column gives that figure where it differs from in-sample, and says "same" where it does not, with the reason when a held-out figure exists but is not folded. Moving a lint between these tiers is a ledger change, not a code change. Against the in-sample figure alone, the combined one moves six rows:
 
-- `owner_missing_from_citation` (held out 17%), `date_cell_shape` (25%) and `duplicate_records` (38%) are comments.
-- `enrichment_failures` (held out 75%) and the stage-6 Appendix shapes `appendix_recovered_A` and `appendix_no_route_T` (100%, 93%) are review notes.
+- To comments: `classified_unrendered` (1 / 2, 50%), `enrichment_failures` (9 / 15, 60%), and the stage-6 shapes `appendix_recovered` (1 / 2, 50%), `appendix_recovered_A` (18 / 35, 51%) and `reroute_cross_family` (7 / 13, 54%).
+- To a review note: `date_cell_shape` (1 / 4, 25%, held-out verdicts only).
+
+`appendix_no_route_T` stays a review note at 15 / 34 (44%). `duplicate_records` stays a comment at 11 / 20 (55%). `owner_missing_from_citation` is a comment at 28 / 35 (80%), which the M3 cap table's in-sample figures bring in.
 
 **Built today:**
 
@@ -429,89 +456,91 @@ What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's fi
 
 Any lint not listed here has no verdicts and is a comment.
 
-| lint or shape | in-sample | held-out | fix the doctor can derive | tier |
-|---|---|---|---|---|
-| `citation_field_dropped`: `title_dropped` | 4 / 4 (100%) | none | re-add the stage-4 title | comment |
-| `citation_field_dropped`: `url_dropped` | 11 / 11 (100%) | none | re-add the stage-4 link | comment |
-| `citation_field_dropped`: `elision_dropped` | 15 / 15 (100%) | none | re-add the source's "..." | comment |
-| `classified_unrendered` | 0 / 1 (0%) | 1 / 1 (100%) | — | review note |
-| `contact_slot_lost` | 2 / 2 (100%) | 5 / 5 (100%) | — | comment |
-| `date_only_lines` | none | none | — | comment |
-| `dedup_drops` | 2 / 8 (25%) | 0 / 3 (0%) | — | review note |
-| `duplicate_passages` | none | none | delete the later copy | comment |
-| `duplicate_records` | 6 / 7 (86%) | 5 / 13 (38%) | delete the later copy | comment |
-| `enrichment_failures` | 3 / 7 (43%) | 6 / 8 (75%) | — | review note |
-| `etal_added` | 204 / 204 (100%) | none | restore the stage-4 author list | certain fix |
-| `enrichment_pubtype_mismatch` | 2 / 2 (100%) | 0 / 1 (0%) | — | comment |
-| `fanout_cell_residue` | 13 / 13 (100%) | 2 / 2 (100%) | delete the leftover text | comment |
-| `grant_boundary` | 60 / 60 (100%) | 6 / 6 (100%) | — | comment |
-| `grant_bucket` | 16 / 16 (100%) | none | — | comment |
-| `group_header_context`: `children_lost_header` | 105 / 109 (96%) | 21 / 21 (100%), lint pooled | — | comment |
-| `group_header_context`: `role_without_holder` | 29 / 33 (88%) | 21 / 21 (100%), lint pooled | — | comment |
-| `group_header_context`: `header_coded_unlike_list` | 19 / 22 (86%) | 21 / 21 (100%), lint pooled | — | comment |
-| `group_header_context`: `parent_dates_lost` | 21 / 21 (100%) | 21 / 21 (100%), lint pooled | — | comment |
-| `identical_rendered_rows` | 21 / 21 (100%) | 15 / 15 (100%) | delete one copy | suggestion |
-| `record_boundary` | 23 / 23 (100%) | none | — | comment |
-| `orphaned_fragments` | 39 / 41 (95%) | none | — | comment |
-| `owner_attribution`: `mentee_under_non_mentee_heading` | 3 / 3 (100%) | none | — | comment |
-| `owner_attribution`: `citation_without_owner` | 13 / 54 (24%) | none | — | review note |
-| `citation_grounding` | 62 / 123 (50%) | none | — | comment |
-| `shattered_prose` | 15 / 15 (100%) | none | — | comment |
-| `summary_unsupported_claim` | 14 / 14 (100%) | 0 / 1 (0%) | — | comment |
-| `implausible_year` | 1 / 2 (50%) | none | — | comment |
-| `junk_or_header_row` | 105 / 107 (98%) | 46 / 51 (90%) | delete the row | suggestion |
-| `llm_fallback_served` | 1 / 1 (100%) | none | — | comment |
-| `missed_headers` | 4 / 8 (50%) | none | — | comment |
-| `multi_record_coverage` | 50 / 57 (88%) | 33 / 40 (82%) | — | comment |
-| `offschema_fields` | 16 / 23 (70%) | 9 / 11 (82%) | — | comment |
-| `output_hygiene` | 30 / 33 (91%) | none | delete the stray text | suggestion |
-| `pipe_leaks` | 0 / 2 (0%) | none | — | review note |
-| `pubmed_title_truncated` | 22 / 22 (100%) | none | the stage-4 title | suggestion |
-| `role_consistency`: `contradicted` | 15 / 15 (100%) | 40 / 40 (100%), lint pooled | — | comment |
-| `role_consistency`: `pi_cell_empty` | 156 / 158 (99%) | 40 / 40 (100%), lint pooled | the owner's name in the PI cell | suggestion |
-| `role_consistency`: `pi_also_co_i` | 7 / 7 (100%) | 40 / 40 (100%), lint pooled | — | comment |
-| `role_consistency`: `pi_from_collaborator` | 5 / 5 (100%) | 40 / 40 (100%), lint pooled | — | comment |
-| `role_consistency`: `owner_lead_as_co_i` | 5 / 5 (100%) | 40 / 40 (100%), lint pooled | — | comment |
-| `role_consistency`: `owner_also_co_i` | 77 / 78 (99%) | 40 / 40 (100%), lint pooled | delete the owner from Co-Investigators | suggestion |
-| `role_consistency`: `owner_pi_role_empty` | 198 / 198 (100%) | 40 / 40 (100%), lint pooled | "PI" in "Your role:" | certain fix |
-| `role_consistency`: `owner_pi_other_role` | 69 / 70 (99%) | 40 / 40 (100%), lint pooled | — | comment |
-| `role_consistency`: `role_in_title` | 3 / 3 (100%) | 40 / 40 (100%), lint pooled | — | comment |
-| `role_consistency`: `pi_cell_from_title` | 4 / 4 (100%) | 40 / 40 (100%), lint pooled | — | comment |
-| `section_consistency` | 30 / 30 (100%) | 13 / 24 (54%) | — | comment |
-| `section_lost` | 0 / 1 (0%) | 1 / 3 (33%) | — | review note |
-| `segmentation_collapse` | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
-| `span_count` | 117 / 123 (95%) | 6 / 28 (21%), before #1607 | — | comment |
-| `split_child_unsourced`: `institution_from_outside_entry` | 1 / 1 (100%) | none | — | comment |
-| `split_child_unsourced`: `date_from_sibling` | 3 / 3 (100%) | none | — | comment |
-| `stage4_group_failures` | none | none | — | comment |
-| `stage6_render_warnings`: `appendix_grant_too_sparse` | 3 / 6 (50%) | 6 / 6 (100%) | — | comment |
-| `stage6_render_warnings`: `appendix_no_route` | none | 8 / 8 (100%) | — | comment |
-| `stage6_render_warnings`: `appendix_no_route_T` | 2 / 20 (10%) | 13 / 14 (93%) | — | review note |
-| `stage6_render_warnings`: `appendix_recovered` | 0 / 1 (0%) | 1 / 1 (100%) | — | review note |
-| `stage6_render_warnings`: `appendix_recovered_A` | 3 / 20 (15%) | 15 / 15 (100%) | — | review note |
-| `stage6_render_warnings`: `appendix_t_validation_recoded` | none | none | — | comment |
-| `stage6_render_warnings`: `bare_dates_in_table` | 1 / 1 (100%) | none | — | comment |
-| `stage6_render_warnings`: `board_cert_row_skipped` | none | none | — | comment |
-| `stage6_render_warnings`: `no_teaching_content` | 0 / 5 (0%) | none | — | review note |
-| `stage6_render_warnings`: `reroute_cross_family` | 4 / 9 (44%) | 3 / 4 (75%) | — | review note |
-| `stage6_render_warnings`: `reroute_refused` | 15 / 16 (94%) | none | — | comment |
-| `stage6_render_warnings`: `reroute_same_family` | 7 / 7 (100%) | none | — | comment |
-| `stage6_render_warnings`: `semicolon_fused_bullets` | 0 / 2 (0%) | none | — | review note |
-| `table_shape` | 1 / 6 (17%) | none | — | review note |
-| `taxonomy_code_coverage` | none | none | — | comment |
-| `teaching_postcheck` | 86 / 105 (82%) | none | — | comment |
-| `wrong_start_date` | 0 / 1 (0%) | none | "Present" to the source end date | review note |
-| `year_not_in_source` | 5 / 9 (56%) | 5 / 49 (10%), before #1607 | — | comment |
-| `date_cell_shape` | none | 1 / 4 (25%) | — | comment |
-| `owner_missing_from_citation` | none | 1 / 6 (17%) | — | comment |
-| `python_repr_in_output` | none | 1 / 1 (100%) | — | comment |
-| `stage6_render_warnings`: `appendix_m1_not_in_summary` | none | 6 / 6 (100%) | — | comment |
-| `stage6_render_warnings`: `appendix_passthrough_refused` | none | 1 / 1 (100%) | — | comment |
-| `stage6_render_warnings`: `appendix_reclassification_failed` | none | 1 / 1 (100%) | — | comment |
-| `stage6_render_warnings`: `appendix_section_declined` | none | 5 / 5 (100%) | — | comment |
-| `stage6_render_warnings`: `memberships_header_row_dropped` | none | none | — | comment |
-| `stage6_render_warnings`: `other` | none | none | — | comment |
-| `under_extraction` | none | 1 / 1 (100%) | — | comment |
+| lint or shape | in-sample | held-out | gate (combined) | fix the doctor can derive | tier |
+|---|---|---|---|---|---|
+| `citation_field_dropped`: `title_dropped` | 4 / 4 (100%) | none | same | re-add the stage-4 title | comment |
+| `citation_field_dropped`: `url_dropped` | 11 / 11 (100%) | none | same | re-add the stage-4 link | comment |
+| `citation_field_dropped`: `elision_dropped` | 15 / 15 (100%) | none | same | re-add the source's "..." | comment |
+| `classified_unrendered` | 0 / 1 (0%) | 1 / 1 (100%) | 1 / 2 (50%) | — | comment |
+| `contact_slot_lost` | 2 / 2 (100%) | 5 / 5 (100%) | 7 / 7 (100%) | — | comment |
+| `date_only_lines` | none | none | same | — | comment |
+| `dedup_drops` | 2 / 8 (25%) | 0 / 3 (0%) | same; held out not folded (changed since dev-259) | — | review note |
+| `duplicate_passages` | none | none | same | delete the later copy | comment |
+| `duplicate_records` | 6 / 7 (86%) | 5 / 13 (38%) | 11 / 20 (55%) | delete the later copy | comment |
+| `enrichment_failures` | 3 / 7 (43%) | 6 / 8 (75%) | 9 / 15 (60%) | — | comment |
+| `etal_added` | 204 / 204 (100%) | none | same | restore the stage-4 author list | certain fix |
+| `enrichment_pubtype_mismatch` | 2 / 2 (100%) | 0 / 1 (0%) | 2 / 3 (67%) | — | comment |
+| `fanout_cell_residue` | 13 / 13 (100%) | 2 / 2 (100%) | 15 / 15 (100%) | delete the leftover text | comment |
+| `grant_boundary` | 60 / 60 (100%) | 6 / 6 (100%) | 66 / 66 (100%) | — | comment |
+| `grant_bucket` | 16 / 16 (100%) | none | same | — | comment |
+| `group_header_context`: `children_lost_header` | 105 / 109 (96%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `group_header_context`: `role_without_holder` | 29 / 33 (88%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `group_header_context`: `header_coded_unlike_list` | 19 / 22 (86%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `group_header_context`: `parent_dates_lost` | 21 / 21 (100%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `identical_rendered_rows` | 21 / 21 (100%) | 15 / 15 (100%) | 36 / 36 (100%) | delete one copy | suggestion |
+| `record_boundary` | 23 / 23 (100%) | none | same | — | comment |
+| `orphaned_fragments` | 39 / 41 (95%) | none | same | — | comment |
+| `owner_attribution`: `mentee_under_non_mentee_heading` | 3 / 3 (100%) | none | same | — | comment |
+| `owner_attribution`: `citation_without_owner` | 13 / 54 (24%) | none | same | — | review note |
+| `citation_grounding` | 62 / 123 (50%) | none | same | — | comment |
+| `shattered_prose` | 15 / 15 (100%) | none | same | — | comment |
+| `appointment_title_overlong` | 3 / 3 (100%) | none | same | — | comment |
+| `summary_unsupported_claim` | 14 / 14 (100%) | 0 / 1 (0%) | same; held out not folded (changed since dev-259) | — | comment |
+| `implausible_year` | 1 / 2 (50%) | none | same | — | comment |
+| `junk_or_header_row` | 105 / 107 (98%) | 46 / 51 (90%) | 151 / 158 (96%) | delete the row | suggestion |
+| `llm_fallback_served` | 1 / 1 (100%) | none | same | — | comment |
+| `missed_headers` | 4 / 8 (50%) | none | same | — | comment |
+| `multi_record_coverage` | 50 / 57 (88%) | 33 / 40 (82%) | 83 / 97 (86%) | — | comment |
+| `offschema_fields` | 16 / 23 (70%) | 9 / 11 (82%) | 25 / 34 (74%) | — | comment |
+| `output_hygiene` | 30 / 33 (91%) | none | same | delete the stray text | suggestion |
+| `pipe_leaks` | 0 / 2 (0%) | none | same | — | review note |
+| `pubmed_title_truncated` | 22 / 22 (100%) | none | same | the stage-4 title | suggestion |
+| `role_consistency`: `contradicted` | 15 / 15 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_cell_empty` | 156 / 158 (99%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | the owner's name in the PI cell | suggestion |
+| `role_consistency`: `pi_also_co_i` | 7 / 7 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_from_collaborator` | 5 / 5 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `owner_lead_as_co_i` | 5 / 5 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `owner_also_co_i` | 77 / 78 (99%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | delete the owner from Co-Investigators | suggestion |
+| `role_consistency`: `owner_pi_role_empty` | 198 / 198 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | "PI" in "Your role:" | certain fix |
+| `role_consistency`: `owner_pi_other_role` | 69 / 70 (99%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `role_in_title` | 3 / 3 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_cell_from_title` | 4 / 4 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `section_consistency` | 30 / 30 (100%) | 13 / 24 (54%) | 43 / 54 (80%) | — | comment |
+| `section_lost` | 0 / 1 (0%) | 1 / 3 (33%) | 1 / 4 (25%) | — | review note |
+| `segmentation_collapse` | 1 / 1 (100%) | 1 / 1 (100%) | 2 / 2 (100%) | — | comment |
+| `span_count` | 117 / 123 (95%) | 6 / 28 (21%), before #1607 | same; held out not folded (changed since dev-259) | — | comment |
+| `source_line_coverage` | 27 / 60 (45%), unmatched hits, held out included | 11 / 30 (37%), already in the per-lint row | same | — | review note, always (`REVIEW_COPY_ONLY_LINTS`) |
+| `split_child_unsourced`: `institution_from_outside_entry` | 1 / 1 (100%) | none | same | — | comment |
+| `split_child_unsourced`: `date_from_sibling` | 3 / 3 (100%) | none | same | — | comment |
+| `stage4_group_failures` | none | none | same | — | comment |
+| `stage6_render_warnings`: `appendix_grant_too_sparse` | 3 / 6 (50%) | 6 / 6 (100%) | 9 / 12 (75%) | — | comment |
+| `stage6_render_warnings`: `appendix_no_route` | none | 8 / 8 (100%) | same; held out not folded (changed since dev-259) | — | comment |
+| `stage6_render_warnings`: `appendix_no_route_T` | 2 / 20 (10%) | 13 / 14 (93%) | 15 / 34 (44%) | — | review note |
+| `stage6_render_warnings`: `appendix_recovered` | 0 / 1 (0%) | 1 / 1 (100%) | 1 / 2 (50%) | — | comment |
+| `stage6_render_warnings`: `appendix_recovered_A` | 3 / 20 (15%) | 15 / 15 (100%) | 18 / 35 (51%) | — | comment |
+| `stage6_render_warnings`: `appendix_t_validation_recoded` | none | none | same | — | comment |
+| `stage6_render_warnings`: `bare_dates_in_table` | 1 / 1 (100%) | none | same | — | comment |
+| `stage6_render_warnings`: `board_cert_row_skipped` | none | none | same | — | comment |
+| `stage6_render_warnings`: `no_teaching_content` | 0 / 5 (0%) | none | same | — | review note |
+| `stage6_render_warnings`: `reroute_cross_family` | 4 / 9 (44%) | 3 / 4 (75%) | 7 / 13 (54%) | — | comment |
+| `stage6_render_warnings`: `reroute_refused` | 15 / 16 (94%) | none | same | — | comment |
+| `stage6_render_warnings`: `reroute_same_family` | 7 / 7 (100%) | none | same | — | comment |
+| `stage6_render_warnings`: `semicolon_fused_bullets` | 0 / 2 (0%) | none | same | — | review note |
+| `table_shape` | 1 / 6 (17%) | none | same | — | review note |
+| `taxonomy_code_coverage` | none | none | same | — | comment |
+| `teaching_postcheck` | 86 / 105 (82%) | none | same | — | comment |
+| `wrong_start_date` | 0 / 1 (0%) | none | same | "Present" to the source end date | review note |
+| `year_not_in_source` | 5 / 9 (56%) | 5 / 49 (10%), before #1607 | same; held out not folded (changed since dev-259) | — | comment |
+| `date_cell_shape` | none | 1 / 4 (25%) | 1 / 4 (25%) | — | review note |
+| `owner_missing_from_citation` | none | 1 / 6 (17%) | 28 / 35 (80%) | — | comment |
+| `python_repr_in_output` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+| `stage6_render_warnings`: `appendix_m1_not_in_summary` | none | 6 / 6 (100%) | same; held out not folded (changed since dev-259) | — | comment |
+| `stage6_render_warnings`: `appendix_passthrough_refused` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+| `stage6_render_warnings`: `appendix_reclassification_failed` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+| `stage6_render_warnings`: `appendix_section_declined` | none | 5 / 5 (100%) | 5 / 5 (100%) | — | comment |
+| `stage6_render_warnings`: `memberships_header_row_dropped` | none | none | same | — | comment |
+| `stage6_render_warnings`: `other` | none | none | same | — | comment |
+| `under_extraction` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
 
 ## Score cap inputs (M3)
 

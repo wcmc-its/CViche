@@ -106,8 +106,10 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.normalization.publication import resolve_publication
+from unified_pipeline.stage6.parsing import split_appointment_title
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
+from unified_pipeline.stage6.sections.positions import POSITION_TAXONOMY_CODES
 from unified_pipeline.stage6.sections.research_support import (
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
@@ -4043,4 +4045,53 @@ def lint_orphaned_fragments(stage3b: dict) -> list[dict]:
             f"entry {entry.get('element_idx_start')}: fragment of list index "
             f"{entry.get('fragment_of')} whose text no record holds ({reason})",
             [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- appointment_title_overlong ----------------------------------------------
+#
+# Section D's schema has no description field, so stage 4 can write an
+# appointment's duties into `title`, and the appointments table's Title column
+# then carries the role plus a paragraph (#1205: YUYVIG DYLJXC 661/668, 310
+# and 433 characters, which nothing flagged). Stage 6 moves the duty prose to
+# a row under the appointment when it can find where the role ends
+# (`split_appointment_title`); this lint reports the title either way, since
+# the stage-4 record is wrong whether or not the render recovered from it.
+
+#: An appointment role longer than this is not a role (#1205, owner decision
+#: 2026-10-08). Measured on 1,763 D1-D3 titles over six farms (YUYVIG,
+#: EBYSBC, NDMRSO, X6, EOAHMI, the 66-CV local farm): 6 are longer, and the
+#: three a ';'-list of roles explains (EBYSBC QNZADH 0/35/39: a rank, a
+#: deanship and a directorship, each under 100 characters) are judged by
+#: their longest role instead, which is under it.
+APPOINTMENT_TITLE_WARN_CHARS = 150
+
+#: CVs list several concurrent roles in one title with this separator.
+_APPOINTMENT_ROLE_SEPARATOR = ";"
+
+
+def lint_appointment_title_overlong(stage4: dict) -> list[dict]:
+    """A D1-D3 `title` one of whose ';'-separated roles is over
+    `APPOINTMENT_TITLE_WARN_CHARS`: duty prose stage 4 packed into the role.
+    WARN, one finding per entry. Says whether stage 6 can move the duties
+    under the row or renders the title whole in the Title column."""
+    findings = []
+    for entry in _fields_entries(stage4):
+        if entry.code not in POSITION_TAXONOMY_CODES:
+            continue
+        title = str(entry.fields.get("title") or "").strip()
+        longest = max(len(role.strip()) for role in title.split(_APPOINTMENT_ROLE_SEPARATOR))
+        if longest <= APPOINTMENT_TITLE_WARN_CHARS:
+            continue
+        role, duties = split_appointment_title(title)
+        outcome = (f"stage 6 shows '{role[:FIELD_EVIDENCE_VALUE_CHARS]}' in the Title "
+                   f"column and the rest on a row under it" if duties
+                   else "rendered whole in the Title column")
+        findings.append(_finding(
+            "appointment_title_overlong", "WARN",
+            f"entry {entry.element_idx} ({entry.code}): title is {len(title)} "
+            f"characters, its longest '{_APPOINTMENT_ROLE_SEPARATOR}' part {longest}, "
+            f"over {APPOINTMENT_TITLE_WARN_CHARS} -- duty prose in the role "
+            f"field; {outcome}",
+            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

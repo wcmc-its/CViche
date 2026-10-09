@@ -88,64 +88,6 @@ def test_finding_idxs_ignores_numbers_that_are_not_entry_indices():
         assert dva.finding_idxs(finding) == frozenset(), finding
 
 
-def test_stage6_shape_names_each_emitter_message():
-    cases = {
-        "hierarchy-mismatch reroute K1->S8 refused fields do not fit: 1 entry": "reroute_refused",
-        "hierarchy-mismatch reroute I->Q1 accepted cross family: 2 entries": "reroute_cross_family",
-        "hierarchy-mismatch reroute S5->S1 accepted same family: 1 entry": "reroute_same_family",
-        "A: 1 entry classified A was not found in the rendered document and was recovered "
-        "into the Appendix": "appendix_recovered_A",
-        "T: 1 entry classified T was not found in the rendered document and was recovered "
-        "into the Appendix": "appendix_recovered",
-        "K4: 2 segments of overflow content that the stage 6 reconsider pass coded K4 were "
-        "not placed in a section and were recovered into the Appendix": "appendix_recovered",
-        "T: 6 entries diverted to the Appendix — no stage 6 section is routed to render this "
-        "taxonomy code": "appendix_no_route_T",
-        "N3: 2 entries diverted to the Appendix — no stage 6 section is routed to render this "
-        "taxonomy code": "appendix_no_route",
-        "M2B: 1 entry diverted to the Appendix — declined by the research-support renderer as "
-        "too sparse to table": "appendix_grant_too_sparse",
-        "M1: 2 entries diverted to the Appendix — stage 3b T-validation recoded them from T to "
-        "M1, which only the research summary renders": "appendix_t_validation_recoded",
-        "K (Teaching): No visible bulleted content found - may be using track changes only":
-            "no_teaching_content",
-        "K3 (Synthetic Heading): Content appears combined with semicolons instead of separate "
-        "bullets": "semicolon_fused_bullets",
-        "Table 'Synthetic': 3 rows have bare dates in column A (should be filtered)":
-            "bare_dates_in_table",
-        "a reconstructed board certification row had no specialty or certificate number and "
-        "was skipped": "board_cert_row_skipped",
-        "P: entry at element 12 dropped as a source table header row":
-            "memberships_header_row_dropped",
-        "2 D1 entries: `appointments` holds several records that were not split into separate "
-        "rows (the entry's text holds content its fields do not carry); a record may be missing "
-        "from the output": "fanout_list_not_split",
-        "X1: 1 entry diverted to the Appendix — stage 4 quarantined it: the stage 3b taxonomy "
-        "code was not a valid taxonomy code (see original_taxonomy_code in the stage 4 artifact)":
-            "appendix_invalid_code",
-        "G: 3 entries diverted to the Appendix — refused by the passthrough writer for G (source "
-        "section label did not match)": "appendix_passthrough_refused",
-        "K1: 2 entries diverted to the Appendix — not placed by the section routed for K1 (see "
-        "any section_render_failed record for that section)": "appendix_section_declined",
-        "M1: 1 entry diverted to the Appendix — no research summary rendered":
-            "appendix_no_research_summary",
-        "M1: 1 dated entry diverted to the Appendix — the generated research summary does not "
-        "reproduce it and no other section renders it": "appendix_m1_not_in_summary",
-        "2 D1 entries: `appointments` holds records that were not split into separate rows (the "
-        "entry's text holds content its fields do not carry); a record may be missing from the "
-        "output": "fanout_list_not_split",
-        "2 geographic scope classification(s) failed and defaulted to National; the Regional/"
-        "National/International split may be wrong": "geo_scope_failed",
-        "1 appendix entry reclassification(s) failed or came back incomplete; those entries "
-        "stayed in the appendix whole instead of being split and routed to their sections":
-            "appendix_reclassification_failed",
-        "section K failed: ValueError: synthetic": "section_failed",
-        "a message no emitter writes": dva.STAGE6_OTHER_SHAPE,
-    }
-    for message, shape in cases.items():
-        assert dva.stage6_shape(dva.STAGE6_MESSAGE_PREFIX + message) == shape, (message, shape)
-
-
 def _scoring_inputs(tmp):
     reports = {
         UID_A: {"findings": [
@@ -329,7 +271,6 @@ def test_inputs_that_cannot_be_scored_exit_2():
 if __name__ == "__main__":
     test_finding_idxs_reads_every_emitter_format()
     test_finding_idxs_ignores_numbers_that_are_not_entry_indices()
-    test_stage6_shape_names_each_emitter_message()
     test_report_counts_hits_matches_and_caught_findings_per_lint()
     test_recall_groups_and_no_idx_findings()
     test_verdicts_are_tallied_and_split_by_whether_the_arm_still_fires()

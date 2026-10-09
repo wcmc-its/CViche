@@ -5,12 +5,23 @@ it is about: the year that looks wrong, the second copy of a duplicate. A
 finding with no one place in the document (a citation PubMed could not match,
 an entry removed as a near-duplicate, a step that fell back) is an item in the
 review-notes box closing the document, grouped by what to do about it. Where
-the Appendix entries came from goes in stage 6's own Appendix note box. The
-clean document is left as it is; this writes a copy beside it.
+the Appendix entries came from goes in stage 6's own Appendix note box; how
+many entries meant for a section went there is a comment on that section's
+heading. The clean document is left as it is; this writes a copy beside it.
+
+Precision gate (#1589): a finding is marked on the text only when its lint
+(or message shape) is right at least half the time by doctor/PRECISION.md
+(`precision.shown_in_place`). A less certain finding is a review note, so a
+false alarm never sits on correct text.
+
+Every run's copy is written, even with nothing to flag: the box always closes
+with what CViche does not check, since a quiet doctor is not a clean document.
 
 One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
 is commented whatever its severity, but only on the text it quotes, never on
 a heading or as a review note. It is a possibility to check, not a problem.
+The other, source_line_coverage (#1588), quotes source text the document may
+have lost, so it has no place on the page: each quoted line is a review note.
 
 A finding whose fix is certain is not a comment but the fix itself, as a
 Word tracked change: accepting it gives the corrected text, rejecting it the
@@ -43,10 +54,17 @@ from app.services.run_quality_report import (
     _usable_findings,
 )
 from unified_pipeline.core.text_norm import squash  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEDUP_TEXT_CHARS,
     ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
     owner_pi_role_empty_tables,
+)
+from unified_pipeline.doctor.precision import (  # noqa: E402
+    LintPrecision,
+    ShapeKey,
+    load_gate_ledger,
+    shown_in_place,
 )
 from unified_pipeline.doctor.shared import docx_table_rows  # noqa: E402
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
@@ -145,6 +163,9 @@ REVIEW_FLAGS = {
                            "number that the line in the original CV does not. Check it against the CV."),
     "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
                         "column mixed in: check it against your CV."),
+    "source_line_coverage": ("This line from your CV may be missing from this document, or only "
+                             "partly here. Check it and add it where it belongs."),
+    "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
 }
 #: The certain fix for owner_pi_role_empty (Repair tiers, doctor/PRECISION.md):
 #: the owner named as PI has the PI role. Inserted as a tracked change.
@@ -152,7 +173,26 @@ OWNER_PI_ROLE_FIX = "PI"
 #: The role_consistency message token that names the shape the fix repairs.
 _OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
 #: Review-notes group titles where the run page's title is internal wording.
-NOTE_TITLES = {"output_hygiene": "Stray text to delete"}
+NOTE_TITLES = {"output_hygiene": "Stray text to delete",
+               "source_line_coverage": "Text from your CV that may be missing"}
+#: A review-copy-only lint whose quotes are source text the page does not hold.
+MISSING_SOURCE_LINT = "source_line_coverage"
+#: Said after a finding the precision gate kept off the text (#1589).
+LESS_CERTAIN_NOTE = "This check is often wrong, so it is listed here, not marked in the text."
+#: An Appendix diversion, on the heading of the section it was meant for.
+#: The count is the run page's; the Appendix group headings say where each came from.
+DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move any that belong here."
+#: The same, as a review note naming the section, under its own group title
+#: (the run page's "Document builder warnings" is internal wording).
+DIVERSION_TITLE = "Entries placed in the Appendix"
+DIVERSION_NOTE = "Entries meant for this section are in the Appendix: move any that belong there."
+#: The same, for a diversion naming no section of this document.
+DIVERSION_UNPLACED_NOTE = "Some entries are in the Appendix: move any that belong in a section."
+#: The review notes' last group, on every copy: what the doctor cannot see,
+#: one item per BLIND cell of doctor/COVERAGE.md (`blind_spots()`, #1588).
+NOT_CHECKED_TITLE = "What CViche does not check"
+NOT_CHECKED_INSTRUCTION = ("CViche cannot see these problems, or sees only some of them. "
+                           "Check them yourself against your original CV:")
 PROTECTED_DATA_LINT = "protected_data_in_output"
 #: protected_data_in_output names a category and a section, never the value:
 #: "protected personal data (children / dependents) found in Appendix -- value withheld ...".
@@ -177,7 +217,7 @@ _DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
                        r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$")
 #: stage 6's appendix_diversion messages, after the code prefix the run page
 #: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
-_DIVERTED_RE = re.compile(r"(?P<count>\d+) entr(?:y|ies)\b[^.]*?(?:diverted to|recovered into) the Appendix")
+_DIVERTED_RE = re.compile(r"(?P<count>\d+) (?P<noun>entr(?:y|ies))\b[^.]*?(?:diverted to|recovered into) the Appendix")
 #: The review notes are a CViche box (stage6/formatting add_cviche_box), the
 #: same kind as stage 6's Appendix note.
 REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
@@ -330,13 +370,73 @@ def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
     return notes or [Note(DEDUP_TITLE, DEDUP_INSTRUCTION)]
 
 
-def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> tuple[list[Flag], list[Note]]:
+def _diversion(code: str, inst: DoctorFindingInstance,
+               paragraphs: list[tuple[Paragraph, str]]) -> list[Flag]:
+    """An Appendix diversion from section ``code``: a comment on that
+    section's heading, saying how many entries went. Empty where the section
+    has no heading."""
+    m = _DIVERTED_RE.search(inst.detail)
+    heading = _heading(code, paragraphs)
+    if heading is None or m is None:
+        return []
+    verb = "is" if m["noun"] == "entry" else "are"
+    return [Flag(heading, None, DIVERSION_FLAG.format(count=f"{m['count']} {m['noun']}", verb=verb))]
+
+
+def _note_title(lint: str) -> str:
+    """A review-notes group title: the run page's, unless that is internal wording."""
+    copy_ = LINT_COPY.get(lint)
+    return NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
+
+
+def _less_certain(lint: str, inst: DoctorFindingInstance) -> list[Note]:
+    """A finding the precision gate keeps off the text, as a review note: its
+    run-page title, its flag and why it is here. A possibility (a
+    REVIEW_COPY_ONLY_LINTS lint) is never a note. A finding with no section
+    or quote to name is still listed, without an item: off the text, the box
+    is the only place the copy says it."""
+    if lint in REVIEW_COPY_ONLY_LINTS:
+        return []
+    if _diversion_code(lint, inst) is not None:
+        return [_diversion_note(lint, inst, f" {LESS_CERTAIN_NOTE}")]
+    return [Note(_note_title(lint), f"{REVIEW_FLAGS.get(lint, inst.detail)} {LESS_CERTAIN_NOTE}",
+                 _note_item(lint, inst))]
+
+
+def _diversion_note(lint: str, inst: DoctorFindingInstance, suffix: str = "") -> Note:
+    """An Appendix diversion as a review note naming its section; one naming
+    no section says only that entries are in the Appendix."""
+    item = _note_item(lint, inst)
+    return Note(DIVERSION_TITLE, f"{DIVERSION_NOTE if item else DIVERSION_UNPLACED_NOTE}{suffix}", item)
+
+
+def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
+    """The section code a stage-6 Appendix diversion names ("" when it names
+    none); None when the finding is not a diversion."""
+    if lint != DIVERSION_LINT or _DIVERTED_RE.search(inst.detail) is None:
+        return None
+    return _CODE_BY_LABEL.get(inst.section or "", "")
+
+
+def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
+           rows: dict[ShapeKey, LintPrecision]) -> tuple[list[Flag], list[Note]]:
     """Where one finding goes: a comment on its quoted text; else on its
     section's heading; else a review note saying what and where it was. A
-    near-duplicate is always a note, since what it removed is not on the page."""
+    near-duplicate is always a note, since what it removed is not on the page,
+    and so is a finding the precision gate keeps off the text."""
     lint, inst = finding["lint"], _instance(finding)
     if lint == "dedup_drops":
         return [], _dedup_notes(inst)
+    if lint == MISSING_SOURCE_LINT:  # never on the page, so never gated: a note per line
+        return [], [Note(NOTE_TITLES[lint], REVIEW_FLAGS[lint], f'"{quote}"') for quote in inst.quotes]
+    diverted_from = _diversion_code(lint, inst)
+    if diverted_from == _APPENDIX_CODE:  # stage 6's Appendix note explains these
+        return [], []
+    if not shown_in_place(lint, str(finding.get("message") or ""), rows):
+        return [], _less_certain(lint, inst)
+    if diverted_from is not None:  # no heading to sit on: a note, never nothing
+        flags = _diversion(diverted_from, inst, surfaces[0])
+        return (flags, []) if flags else ([], [_diversion_note(lint, inst)])
     label = REVIEW_FLAGS.get(lint, inst.detail)
     flags = _item_flags(lint, inst, label, surfaces)
     if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
@@ -347,9 +447,7 @@ def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> 
     item = _note_item(lint, inst)
     if item is None:  # nothing to point the submitter at: it stays on the run page
         return [], []
-    copy_ = LINT_COPY.get(lint)
-    title = NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
-    return [], [Note(title, label, item)]
+    return [], [Note(_note_title(lint), label, item)]
 
 
 def _note_item(lint: str, inst: DoctorFindingInstance) -> str | None:
@@ -455,10 +553,9 @@ def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]
 
 def _add_review_notes(doc: Document, notes: list[Note]) -> None:
     """The review-notes box closing the document: a group per action, with
-    its count and instruction, then an item per finding. The space above the
-    box is set on the document's last paragraph, not a blank one."""
-    if not notes:
-        return
+    its count and instruction, then an item per finding; last, what CViche
+    does not check. The space above the box is set on the document's last
+    paragraph, not a blank one."""
     groups: dict[tuple[str, str], list[Note]] = {}
     for note in notes:
         groups.setdefault((note.title, note.instruction), []).append(note)
@@ -474,26 +571,27 @@ def _add_review_notes(doc: Document, notes: list[Note]) -> None:
                 cviche_box_pair(cell, "Removed:", note.removed, last=not note.kept)
             if note.kept:
                 cviche_box_pair(cell, "Kept:", note.kept, last=True)
+    cviche_box_group(cell, NOT_CHECKED_TITLE, first=not groups)
+    cviche_box_text(cell, NOT_CHECKED_INSTRUCTION)
+    for spot in blind_spots():
+        cviche_box_item(cell, spot.sentence)
 
 
 def write_review_docx(clean_docx: Path, doctor_payload: object,
-                      stage4: object = None) -> tuple[Path, int] | None:
+                      stage4: object = None,
+                      rows: dict[ShapeKey, LintPrecision] | None = None) -> tuple[Path, int] | None:
     """Write the flagged copy of ``clean_docx``; return its path and how many
-    flags (comments, review notes and tracked fixes) it carries. None when
-    there is nothing to flag. ``stage4`` is the run's stage-4 artifact, which
-    the owner_pi_role_empty fix needs to know the owner; without it that
-    finding is a comment."""
+    flags (comments, review notes and tracked fixes) it carries, which may be
+    none. None when ``doctor_payload`` is not a doctor report or the document
+    is empty. ``stage4`` is the run's stage-4 artifact, which the
+    owner_pi_role_empty fix needs to know the owner; without it that finding
+    is a comment. ``rows`` is the precision ledger (`load_gate_ledger` when
+    None)."""
     if not isinstance(doctor_payload, dict):
         return None
-    # Stage 6's Appendix diversions say which section CViche first tried, not
-    # the heading the entry had in the CV, which the Appendix groups already
-    # show: a second, different "came from" only contradicts them. Their
-    # counts stay on the run page.
+    rows = load_gate_ledger() if rows is None else rows
     findings = [f for f in _usable_findings(doctor_payload)[0]
-                if (f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS)
-                and not (f["lint"] == DIVERSION_LINT and _DIVERTED_RE.search(_instance(f).detail))]
-    if not findings:
-        return None
+                if f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS]
     doc = Document(str(clean_docx))
     paragraphs = [(p, _norm(_paragraph_text(p)))
                   for p in (Paragraph(el, doc._body) for el in doc.element.body.iter(qn("w:p")))]
@@ -509,17 +607,19 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
     notes: list[Note] = []
     per_lint: dict[str, int] = {}
     for f in findings:
-        found, noted = _flags(f, surfaces)
+        found, noted = _flags(f, surfaces, rows)
         for flag in found:
             per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
             if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
                 flags.append(flag)
+        if f["lint"] == MISSING_SOURCE_LINT:  # its notes are its flags: one per line, capped
+            room = MAX_FLAGS_PER_LINT - per_lint.get(f["lint"], 0)
+            noted = noted[:max(room, 0)]
+            per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + len(noted)
         notes.extend(noted)
     for flag in flags:
         doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
                         author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
-    if not flags and not notes and not fixed:
-        return None
     _add_review_notes(doc, notes)
     out = review_docx_path(clean_docx)
     doc.save(str(out))
