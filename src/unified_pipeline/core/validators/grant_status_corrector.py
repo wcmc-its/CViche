@@ -54,23 +54,18 @@ _PENDING_STATUS_TEXT_RE = re.compile(
 _UNREAD_RANGE_RE = re.compile(r'\b(?:19|20)\d{2}\s*[-–—](?![A-Za-z])')
 
 
-def extract_year_range(text: str) -> tuple[int, int] | None:
-    """
-    Extract start and end years from grant text.
+# An open end, "2019-present" or "04/08/2021 – date": still running (#981).
+_OPEN_RANGE_RE = re.compile(r'\b(19\d{2}|20\d{2})\s*[-–—]\s*(?:present|date)\b', re.IGNORECASE)
+
+
+def _closed_range(text: str) -> tuple[int, tuple[int, int]] | None:
+    """The first closed range in `text` and the offset it starts at, or None.
 
     Patterns handled:
-    - "2019-2021" or "2019–2021" or "2019—2021"
-    - "2019-present" or "2019-Present", "04/08/2021 – date"
-    - "2019-2021" (4-digit years)
-    - "2019-21" (2-digit end year)
+    - "2019-2021", "2019–2021", "2019—2021"
     - "01/2019-12/2021" (MM/YYYY format), "Mar 2022-Apr 2023"
-
-    Returns:
-        (start_year, end_year) or None if no range found.
-        For "present", end_year = CURRENT_YEAR + 1 (still active).
+    - "2019-21" (2-digit end year)
     """
-    text_lower = text.lower()
-
     # Pattern 1: a range of full years, each end optionally a full date, a
     # MM/YYYY month or a month name: "2019-2021", "01/2019-12/2021",
     # "03/01/2024-\n12/31/2028", "Mar 2022-Apr 2023". The end year may run
@@ -81,7 +76,7 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
         r'\b(19\d{2}|20\d{2})\s*[-–—]\s*'
         r'(?:\d{1,2}/){0,2}(?:[A-Za-z]{3,9}\.?\s*)?(19\d{2}|20\d{2})(?!\d)', text)
     if match:
-        return int(match.group(1)), int(match.group(2))
+        return match.start(), (int(match.group(1)), int(match.group(2)))
 
     # Pattern 2: YYYY-YY (abbreviated end year). Not when the two digits are the
     # month or day of a date: "2024-12/31/2028" is not "2024-2012".
@@ -90,12 +85,35 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
         start = int(match.group(1))
         end_suffix = int(match.group(2))
         end = 2000 + end_suffix if end_suffix < 50 else 1900 + end_suffix
-        return start, end
+        return match.start(), (start, end)
 
-    # Pattern 3: an open end, "2019-present" or "04/08/2021 – date" (#981)
-    match = re.search(r'\b(19\d{2}|20\d{2})\s*[-–—]\s*(?:present|date)\b', text_lower)
-    if match:
-        return int(match.group(1)), CURRENT_YEAR + 1  # Still active
+    return None
+
+
+def extract_year_range(text: str) -> tuple[int, int] | None:
+    """
+    Extract start and end years from grant text.
+
+    Reads a closed range (`_closed_range`), an open end ("2019-present",
+    "04/08/2021 – date"), or a single year beside a dollar amount.
+
+    An open end written before the first closed range is the entry's own span,
+    and a closed range after it says less about the entry: a role's own years
+    ("Study, 2019-present (Co-I 2017-2024)") or an earlier funding cycle. The
+    open end wins, so the entry reads as running (#1634: three ongoing studies
+    whose role sub-ranges ended were filed as completed). A closed range
+    written first keeps winning, as before.
+
+    Returns:
+        (start_year, end_year) or None if no range found.
+        For "present", end_year = CURRENT_YEAR + 1 (still active).
+    """
+    open_end = _OPEN_RANGE_RE.search(text)
+    closed = _closed_range(text)
+    if closed and not (open_end and open_end.start() <= closed[0]):
+        return closed[1]
+    if open_end:
+        return int(open_end.group(1)), CURRENT_YEAR + 1  # Still active
 
     # A year followed by a range dash is a range none of the patterns above
     # could read ("2022-03/312027", "2019 - Dec 2021"). Its start year is not
