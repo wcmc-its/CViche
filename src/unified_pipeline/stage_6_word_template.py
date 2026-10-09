@@ -296,10 +296,12 @@ NAMED_REACH_TEXT_CHARS = 300
 NAMED_REACH_SYSTEM_PROMPT = (
     "You read which reach an academic activity's own name states. Return only valid JSON.")
 # Step one of the scope decision (#1579 item 4): a body or meeting that names
-# its reach files there, wherever it met. A state rule is the owner's own state
-# only, and a line that names no reach answers "none", so the distance prompt
-# below decides it exactly as before (YUYVIG A/B, 2026-10-08).
-NAMED_REACH_PROMPT = """Does this academic activity name its own reach? Answer from the body or meeting the text names, not from where it was held.
+# its reach files there, wherever it met. National is the owner's own country
+# and Regional the owner's own state; a talk's title, topic or audience, a
+# company's name and a talk at the owner's own institution name no reach; and
+# a line that names no reach answers "none", so the distance prompt below
+# decides it exactly as before (YUYVIG A/Bs, 2026-10-08).
+NAMED_REACH_PROMPT = """Does this academic activity name its own reach? Answer from the body or meeting that holds or hosts it, not from where it was held.
 
 **CV Owner's Home State/Province and Country**: {owner_home}
 **CV Owner's Institution(s)**: {owner_institutions}
@@ -307,11 +309,13 @@ NAMED_REACH_PROMPT = """Does this academic activity name its own reach? Answer f
 **Activity Location/Organization**: {activity}
 **Activity Text**: {text}
 
+Only the hosting body or meeting counts. A talk's title, topic or audience is never the body (a talk on "international health" or to "national leaders" names no reach), and a company or product whose name contains "International" or "National" names no reach.
+
 **Answer**:
-- "International": an international or world body, or a meeting whose own name says International or World.
-- "National": a national association, society or college, or its national meeting; a federal agency (NIH, NSF, FDA, CDC, VA, ...) or one of its panels, boards or study sections.
-- "Regional": a body of the owner's own state or province ({owner_state}), or of a county, city or town in it; a local school or community group in the owner's area.
-- "none": anything else. That includes a body of a different state or province from the owner's (or any state body when the owner's state is Unknown); a university, hospital, department, company or foundation; grand rounds, a seminar or a lecture at an institution; and a line that names no body or meeting at all (e.g. "Board of Directors, 2008-2009", "Awards Committee").
+- "International": an international or world body, or a meeting whose own name says International or World. Also any national association, society, college, agency or meeting of a country other than the owner's ({owner_country}).
+- "National": a national association, society or college of the owner's own country ({owner_country}), or its national meeting; a federal agency of that country (NIH, NSF, FDA, CDC, VA, ...) or one of its panels, boards or study sections. Also a regional, state or chapter society of the owner's country whose area does not include the owner's state or province.
+- "Regional": a body of the owner's own state or province ({owner_state}), or of a county, city or town in it; a regional society whose area includes the owner's state or province; a local school or community group in the owner's area.
+- "none": anything else. That includes a government body of a different state or province from the owner's (or any state body when the owner's state is Unknown); a university, hospital, department, company or foundation; grand rounds, a seminar or a lecture at an institution, including any talk at the owner's own institution(s); and a line that names no body or meeting at all (e.g. "Board of Directors, 2008-2009", "Awards Committee").
 
 Return ONLY a JSON object: {{"reach": "International" | "National" | "Regional" | "none"}}"""
 
@@ -2330,12 +2334,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         society, a federal panel, the owner's own state's agency), or None
         when it names none (#1579 item 4)."""
         text = activity.text[:NAMED_REACH_TEXT_CHARS]
-        cache_key = (activity.location[:100], text, activity.owner_state, *activity.owner_institutions[:2])
+        cache_key = (activity.location[:100], text, activity.owner_state, activity.owner_country,
+                     *activity.owner_institutions[:2])
         if cache_key in self._named_reach_cache:
             return self._named_reach_cache[cache_key]
         owner_state = activity.owner_state or 'Unknown'
+        owner_country = activity.owner_country or 'Unknown'
         prompt = NAMED_REACH_PROMPT.format(
-            owner_home=f"{owner_state}, {activity.owner_country or 'Unknown'}",
+            owner_home=f"{owner_state}, {owner_country}", owner_country=owner_country,
             owner_institutions='; '.join(activity.owner_institutions),
             activity=activity.location, text=text, owner_state=owner_state)
         llm_result = call_llm(

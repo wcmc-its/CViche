@@ -1281,6 +1281,51 @@ def test_the_named_reach_step_sees_the_owners_state_and_the_records_text(monkeyp
     assert '**Activity Text**: Talk, Westland Society of Examples Annual Meeting, 2019' in reach_prompt
 
 
+def test_national_and_international_are_tied_to_the_owners_country(monkeypatch):
+    # YUYVIG round 2: a foreign country's national society (BCTOGR 142,
+    # OKRTPJ 870) went International -> National.
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert "meeting of a country other than the owner's (USA)" in reach_prompt
+    assert "college of the owner's own country (USA)" in reach_prompt
+
+
+def test_another_states_regional_society_is_national_not_regional(monkeypatch):
+    # YUYVIG round 2: chapter societies outside the owner's state filed
+    # Regional (BCTOGR 184, XNWSZN 922).
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert 'chapter society of the owner\'s country whose area does not include the owner\'s state' in reach_prompt
+    assert 'a regional society whose area includes the owner\'s state or province' in reach_prompt
+
+
+def test_a_title_audience_company_or_own_institution_names_no_reach(monkeypatch):
+    # YUYVIG round 2: ECXGAT 1147 (audience), FMIGLR 681 (title word),
+    # IXJMKS 904 (a company named International).
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert "A talk's title, topic or audience is never the body" in reach_prompt
+    assert 'a company or product whose name contains "International" or "National" names no reach' in reach_prompt
+    assert "including any talk at the owner's own institution(s)" in reach_prompt
+
+
+def test_the_named_reach_is_asked_again_for_another_owner_country(monkeypatch):
+    llm = _ScopeLLM(reach='National')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    primary = _STATE_OWNER_LOCATION['primary_location'] | {'country': 'Canada'}
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'primary_location': primary}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert llm.steps() == ['reach', 'reach']
+    assert "and Country**: Westland, Canada" in llm.asked[1][1]
+
+
 def test_an_unknown_owner_state_is_said_so(monkeypatch):
     llm = _ScopeLLM(reach='none')
     gen = _reach_generator(monkeypatch, llm)
