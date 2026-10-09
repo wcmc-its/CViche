@@ -33,6 +33,7 @@ from unified_pipeline import (
     quality_score as scorer,  # noqa: E402  (path set by quality_score_service)
 )
 from unified_pipeline.doctor import precision as lint_precision  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
 from unified_pipeline.doctor.lints.render import CITATION_EVIDENCE_CHARS  # noqa: E402
 from unified_pipeline.doctor.shared import STATUS_RAN  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
@@ -611,7 +612,7 @@ LINT_COPY = {
         "applicants you reviewed or for laboratory staff.",
         "Check each flagged item against the source CV, and delete it or move it to the "
         "section where it belongs."),
-    # Proposed in #1583's PR; awaiting Paul's approval.
+    # Wording approved by Paul, 2026-10-08 (#1583).
     "shattered_prose": LintCopy(
         "Paragraphs broken at their printed lines",
         "Some paragraphs from your CV were broken at their printed lines. They appear as "
@@ -619,6 +620,12 @@ LINT_COPY = {
         "column, such as a date, role or place, mixed into the sentence.",
         "Check each flagged paragraph against your CV: join its lines into one paragraph, "
         "and move any date, role or place that landed inside the sentence back to its entry."),
+    "appointment_title_overlong": LintCopy(
+        "Duties written into an appointment title",
+        "An appointment's title holds more than the role: a sentence or more about the duties, "
+        "such as an effort share or what the role was for.",
+        "Keep only the role in the Title column, and delete the duties or move them out of "
+        "the title."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
@@ -633,7 +640,11 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: LINT_COPY wording. citation_grounding (#1570) is right about half the time
 #: (doctor/PRECISION.md, YUY-CG), too often to show as a problem; Paul,
 #: 2026-10-08: "share the possible citation as a comment" instead.
-REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding"})
+#: source_line_coverage (#1588) is a source line the document may have lost:
+#: held out on YUYVIG, 37% of a hand-checked sample wholly missing and 67%
+#: missing at least a role or description (PRECISION.md, YUY-SLC), under the
+#: 50% bar of #1625, so it is a review-notes item, never a run-page row.
+REVIEW_COPY_ONLY_LINTS = frozenset({"citation_grounding", "source_line_coverage"})
 
 _SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITY_ORDER)}
 
@@ -835,7 +846,8 @@ FIX_LIST_SEVERITIES = frozenset({"ERROR", "WARN"})
 MAX_FIX_LIST_ITEMS = 60
 #: "High" confidence: hand-checked right at least this often, on at least this
 #: many findings, so one lucky check cannot earn it. Below it, and at or above
-#: doctor/precision.py's USER_VISIBLE_MIN_PRECISION, reads "medium".
+#: doctor/precision.py's IN_PLACE_MIN_PRECISION, reads "medium". Both read the
+#: gate's rows (`load_gate_ledger`: in-sample and held-out verdicts combined).
 HIGH_CONFIDENCE_MIN_PRECISION = 0.80
 HIGH_CONFIDENCE_MIN_JUDGED = 10
 
@@ -847,8 +859,8 @@ EFFORT_QUICK: FixEffort = "quick"  # delete or retype one thing
 EFFORT_MINUTES: FixEffort = "minutes"  # copy or move text from the source CV
 EFFORT_LONGER: FixEffort = "longer"  # re-enter many records, or rerun the CV
 
-#: Estimated effort per lint, from its LINT_COPY "what to do". A first pass
-#: for Paul's review (#1589); a lint not listed reads EFFORT_MINUTES.
+#: Estimated effort per lint, from its LINT_COPY "what to do" (#1589; Paul
+#: approved the labels 2026-10-08). A lint not listed reads EFFORT_MINUTES.
 LINT_EFFORT: dict[str, FixEffort] = {
     **dict.fromkeys((
         "junk_or_header_row", "duplicate_records", "duplicate_passages", "date_only_lines",
@@ -867,23 +879,8 @@ LINT_EFFORT: dict[str, FixEffort] = {
     ), EFFORT_LONGER),
 }
 
-# ponytail: the "not checked" list is fixed wording, taken from the misses the
-# YUYVIG held-out batch found no lint for (doctor/PRECISION.md, "Misses by
-# cause"). Upgrade path: read the blind cells of #1588's coverage contract once
-# it is checked in, so this list cannot drift from it.
-NOT_CHECKED = (
-    "Dates and years that look right but are wrong. Only a year the CV never states is checked.",
-    "Journal names, volumes and pages in citations.",
-    "Author names added or changed in a citation. Only an author list cut to \"et al.\", or one "
-    "missing the faculty member, is checked.",
-    "An institution, funder or place the CV does not give.",
-    "Most entries filed under the wrong section. Only a few known mix-ups are checked, such as a "
-    "residency listed as an appointment.",
-    "Description paragraphs under an entry, which are often left out of the document.",
-    "Roles and dates in mentee tables.",
-    "Whether each sentence of the research summary is supported by the CV. Only a few kinds of "
-    "claim are checked.",
-)
+#: The precision gate's ledger rows, keyed by (lint, message shape).
+GateRows = dict[lint_precision.ShapeKey, lint_precision.LintPrecision]
 
 _ENTRY_INDEX_RE = re.compile(r"^entry (\d+)\b")
 # Document order: the WCM template's sections follow TAXONOMY_LABELS' order.
@@ -900,8 +897,10 @@ class _FixDraft:
     quotes: list[str] = field(default_factory=list)
 
 
-def _confidence(lint: str, ledger: dict[str, lint_precision.LintPrecision]) -> FixConfidence:
-    entry = ledger.get(lint)
+def _confidence(lint: str, message: str, rows: GateRows) -> FixConfidence:
+    """The band of the ledger row that measured findings like this one: the
+    same row (`finding_precision`) the gate judged it by."""
+    entry = lint_precision.finding_precision(lint, message, rows)
     if entry is None or entry.precision is None:
         return CONFIDENCE_UNMEASURED
     if entry.precision >= HIGH_CONFIDENCE_MIN_PRECISION and entry.judged >= HIGH_CONFIDENCE_MIN_JUDGED:
@@ -909,8 +908,7 @@ def _confidence(lint: str, ledger: dict[str, lint_precision.LintPrecision]) -> F
     return CONFIDENCE_MEDIUM
 
 
-def _fix_list_drafts(ran: list[dict], ledger: dict[str, lint_precision.LintPrecision],
-                     ) -> tuple[list[_FixDraft], int]:
+def _fix_list_drafts(ran: list[dict], rows: GateRows) -> tuple[list[_FixDraft], int]:
     """One draft per entry (findings that name none get one each), and how many
     ERROR/WARN findings were held back for Diagnostics."""
     drafts: dict[tuple[str, int], _FixDraft] = {}
@@ -920,10 +918,12 @@ def _fix_list_drafts(ran: list[dict], ledger: dict[str, lint_precision.LintPreci
         if finding["severity"] not in FIX_LIST_SEVERITIES:
             continue
         copy = LINT_COPY.get(lint)
-        if copy is None or not lint_precision.user_visible(lint, ledger):
+        message = str(finding.get("message") or "")
+        # The review copy's gate (#1639): a finding it keeps off the text is
+        # kept off the Fix list too, so the two views agree.
+        if copy is None or not lint_precision.shown_in_place(lint, message, rows):
             held_back += 1
             continue
-        message = str(finding.get("message") or "")
         section, _detail = _section_and_detail(message)
         match = _ENTRY_INDEX_RE.match(message)
         entry = int(match.group(1)) if match else None
@@ -934,7 +934,7 @@ def _fix_list_drafts(ran: list[dict], ledger: dict[str, lint_precision.LintPreci
                                           < _SEVERITY_RANK[draft.problems[lint].severity]):
             draft.problems[lint] = FixListProblem(
                 severity=finding["severity"], title=copy.title, what_to_do=copy.what_to_do,
-                confidence=_confidence(lint, ledger), effort=LINT_EFFORT.get(lint, EFFORT_MINUTES))
+                confidence=_confidence(lint, message, rows), effort=LINT_EFFORT.get(lint, EFFORT_MINUTES))
         # The detail is not shown here, so a quote it repeats is kept.
         quotes, _notes = _quotes_and_notes(finding.get("evidence"), "")
         draft.quotes.extend(q for q in quotes if q not in draft.quotes)
@@ -953,11 +953,10 @@ def _document_order(draft: _FixDraft) -> tuple:
     return section_rank, entry_rank
 
 
-def build_fix_list(ran: list[dict], ledger: dict[str, lint_precision.LintPrecision],
-                   ) -> tuple[list[FixListGroup], int, int]:
+def build_fix_list(ran: list[dict], rows: GateRows) -> tuple[list[FixListGroup], int, int]:
     """The Fix list's groups, the findings held back for Diagnostics, and how
     many items were cut at MAX_FIX_LIST_ITEMS."""
-    drafts, held_back = _fix_list_drafts(ran, ledger)
+    drafts, held_back = _fix_list_drafts(ran, rows)
     drafts.sort(key=_document_order)
     shown = drafts[:MAX_FIX_LIST_ITEMS]
     groups: list[FixListGroup] = []
@@ -973,10 +972,9 @@ def build_fix_list(ran: list[dict], ledger: dict[str, lint_precision.LintPrecisi
 
 
 def summarize_doctor(payload: object, cap_lint: str | None = None,
-                     ledger: dict[str, lint_precision.LintPrecision] | None = None,
-                     ) -> RunDoctorReport | None:
+                     rows: GateRows | None = None) -> RunDoctorReport | None:
     """The doctor report as the run page shows it; None when ``payload`` is not
-    a doctor report. ``ledger`` defaults to the committed PRECISION.md."""
+    a doctor report. ``rows`` defaults to the gate's ledger (`load_gate_ledger`)."""
     if not isinstance(payload, dict):
         return None
     ran, not_run = _usable_findings(payload)
@@ -984,13 +982,13 @@ def summarize_doctor(payload: object, cap_lint: str | None = None,
     groups = _doctor_groups(shown, cap_lint)
     by_severity = {s: sum(1 for g in groups if g.severity == s) for s in SEVERITY_ORDER}
     fix_list, held_back, more = build_fix_list(
-        shown, lint_precision.load_ledger() if ledger is None else ledger)
+        shown, lint_precision.load_gate_ledger() if rows is None else rows)
     return RunDoctorReport(
         counts=DoctorSeverityCounts(
             error=by_severity["ERROR"], warn=by_severity["WARN"], info=by_severity["INFO"]),
         findings=groups, not_run=not_run,
         fix_list=fix_list, fix_list_held_back=held_back, fix_list_more=more,
-        not_checked=list(NOT_CHECKED))
+        not_checked=[spot.sentence for spot in blind_spots()])
 
 
 def doctor_lint_for_cap(lint: str, doctor_raw: object) -> str:

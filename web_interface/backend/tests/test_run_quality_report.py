@@ -4,6 +4,8 @@ import pytest
 from app.services import quality_score_service as qss
 from app.services import run_quality_report as rqr
 from unified_pipeline import quality_score as scorer
+from unified_pipeline.doctor import precision
+from unified_pipeline.doctor.blind_spots import blind_spots
 from unified_pipeline.doctor.precision import LintPrecision
 from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_PREVALENCE, lint_surprise
 
@@ -488,13 +490,17 @@ def test_report_degrades_each_part_to_null_independently():
 # --- the Fix list (#1589) -----------------------------------------------------
 
 
-def _ledger(**precision):
-    """{lint: (tp, judged)} as a precision ledger."""
-    return {lint: LintPrecision(lint, tp, judged, "M9") for lint, (tp, judged) in precision.items()}
+def _ledger(**rows):
+    """{lint: (tp, judged)} as the gate's ledger rows, one per lint."""
+    return {(lint, None): LintPrecision(lint, tp, judged, "M9") for lint, (tp, judged) in rows.items()}
 
 
-def _fix_list(findings, ledger=None):
-    return rqr.summarize_doctor({"findings": findings}, ledger=ledger or {})
+def _fix_list(findings, rows=None):
+    return rqr.summarize_doctor({"findings": findings}, rows=rows or {})
+
+
+def _fix_list_titles(report):
+    return [p.title for g in report.fix_list for i in g.items for p in i.problems]
 
 
 def test_fix_list_merges_an_entrys_findings_and_quotes_the_real_under_extraction_text():
@@ -561,8 +567,7 @@ def test_fix_list_holds_back_low_precision_info_and_unworded_findings():
         _finding("table_shape", "INFO", message="entry 3 (D1): x"),  # INFO: not counted
         _finding("junk_or_header_row", message="entry 4 (D1): x"),
     ], ledger)
-    assert [p.title for g in report.fix_list for i in g.items for p in i.problems] == [
-        rqr.LINT_COPY["junk_or_header_row"].title]
+    assert _fix_list_titles(report) == [rqr.LINT_COPY["junk_or_header_row"].title]
     assert report.fix_list_held_back == 2
     # Diagnostics still lists every lint.
     assert {g.lint for g in report.findings} == {
@@ -603,7 +608,40 @@ def test_fix_list_cuts_at_its_cap_and_counts_the_rest(monkeypatch):
 
 
 def test_every_run_says_what_the_doctor_does_not_check():
-    assert _fix_list([]).not_checked == list(rqr.NOT_CHECKED) != []
+    """The review copy's "What CViche does not check" sentences, from
+    doctor/COVERAGE.md, so the two views cannot drift."""
+    assert _fix_list([]).not_checked == [spot.sentence for spot in blind_spots()] != []
+
+
+def test_fix_list_gate_is_the_review_copys_per_shape_gate():
+    """Two shapes of one lint on the committed gate ledger: owner_attribution's
+    uncredited-citation shape is right under half the time and stays in
+    Diagnostics; its mentee-heading shape reaches the Fix list. Each finding is
+    shown exactly when the review copy would mark it in place."""
+    findings = [
+        _finding("owner_attribution", message="entry 4 (D1): no owner (citation_without_owner)"),
+        _finding("owner_attribution",
+                 message="entry 5 (N3): mentees under another heading (mentee_under_non_mentee_heading)"),
+    ]
+    report = rqr.summarize_doctor({"findings": findings})
+    assert [precision.shown_in_place(f["lint"], f["message"]) for f in findings] == [False, True]
+    assert sum(len(g.items) for g in report.fix_list) == 1
+    assert report.fix_list_held_back == 1
+
+
+def test_fix_list_reads_held_out_verdicts_folded_in():
+    """appendix_recovered_A is 3 / 20 in-sample but 18 / 35 with YUYVIG's
+    held-out verdicts: the gate's combined row shows it, at medium confidence.
+    appendix_no_route_T stays under half combined (15 / 34) and is held back."""
+    recovered = _finding("stage6_render_warnings",
+                         message="stage 6 self-check: A: 2 entries recovered into the Appendix")
+    no_route = _finding("stage6_render_warnings",
+                        message="stage 6 self-check: T: 3 entries, no stage 6 section is routed")
+    report = rqr.summarize_doctor({"findings": [recovered, no_route]})
+    [problem] = [p for g in report.fix_list for i in g.items for p in i.problems]
+    assert problem.title == rqr.LINT_COPY["stage6_render_warnings"].title
+    assert problem.confidence == "medium"
+    assert report.fix_list_held_back == 1
 
 
 def test_every_effort_names_a_known_worded_lint():
