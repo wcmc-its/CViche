@@ -537,9 +537,10 @@ STAGE_FAILURE_LINT = "stage_failure_recorded"
 #: (doctor/PRECISION.md, YUY-CG), too often to show as a problem; Paul,
 #: 2026-10-08: "share the possible citation as a comment" instead.
 #: source_line_coverage (#1588) is a source line the document may have lost:
-#: held out on YUYVIG, 37% of a hand-checked sample wholly missing and 67%
-#: missing at least a role or description (PRECISION.md, YUY-SLC), under the
-#: 50% bar of #1625, so it is a review-notes item, never a run-page row.
+#: held out on YUYVIG, 13% of a hand-checked sample wholly missing and 50%
+#: missing at least a role or description (PRECISION.md, YUY-SLC2), under the
+#: 50% bar of #1625 for wholly missing text, so it is a review-notes item,
+#: never a run-page row.
 #: grant_facts (#1588) is a grant number or amount a grant table shows that
 #: its CV entry lacks, or one the entry states that the document lacks: new,
 #: and measured on four held-out CVs only (PRECISION.md, GF-1), so it is a

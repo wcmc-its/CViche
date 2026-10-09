@@ -50,7 +50,8 @@ D1-D3 duties (owner decision 2026-10-08, lifting the D exclusion for this
 variant). Then one code family at a time, each the one a stage-6 replay
 measured losing the most prose of those left: Q1-Q2 extramural service next
 (the remit, the meeting or the session title behind a committee or panel
-row). The decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
+row), then H honors (an award's criteria, or the paper it was for). The
+decision's exclusions (A, T, M1, E/G/J/N1/N4/S0/L1/L2, F1, Q4D,
 B2) are not in `SUBPOINT_CODES`, so nothing else is touched. A Q2 entry
 the service section reroutes into the Journal Reviewing table keeps its Q2
 code, so Q4D's exclusion is also applied by where an entry rendered: the
@@ -78,6 +79,7 @@ from unified_pipeline.core.template_boilerplate import (
 from .fan_out import _RENDERED_FIELDS
 from .normalization import _squash
 from .parsing import _refold_shattered
+from .pii_pass import PII_DROPPED_FIELDS_KEY
 from .render_check import (
     _RECORD_DATE_PREFIX_RE,
     _RENDER_TOKEN_RE,
@@ -105,9 +107,16 @@ APPOINTMENT_CODES = frozenset({'D1', 'D2', 'D3'})
 #: so does a Q2 entry the section reroutes into the Journal Reviewing table:
 #: `plan_subpoints` skips an anchor in an `excluded_tables` table.
 SERVICE_CODES = frozenset({'Q1', 'Q2'})
+#: Honors and awards: the award's criteria, what it was for, the paper or
+#: poster it recognised. The honors section writes every H entry as a row of
+#: its three-column table, so a sub-point is a deleted row under the award's
+#: row. An entry rerouted to another code before rendering is grouped under
+#: that code and follows its rule; one rerouted into H follows this one.
+HONOR_CODES = frozenset({'H'})
 #: The codes whose prose is offered. An allowlist, not the decision's
 #: exclusion list: codes join one family at a time, as each is measured.
-SUBPOINT_CODES = TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
+SUBPOINT_CODES = (TEACHING_CODES | GRANT_CODES | APPOINTMENT_CODES | SERVICE_CODES
+                  | HONOR_CODES)
 
 #: A fragment needs this many distinctive tokens (`_RENDER_TOKEN_RE`, 5+
 #: letters) to count as prose rather than a date, a label or a name.
@@ -314,13 +323,20 @@ def plan_subpoints(entries_by_code: Mapping[str, list[Mapping]], haystack: _Hays
     An entry whose line is a row of an `excluded_tables` table gets none: it
     rendered as an excluded code (a Q2 entry rerouted to Journal Reviewing
     still carries Q2), so what rendered decides, not the code. Its prose is
-    not offered under any later entry either."""
+    not offered under any later entry either.
+
+    Nor does an entry the PII pass dropped a field from
+    (`PII_DROPPED_FIELDS_KEY`, #892): what is left of it still describes the
+    withheld item, which is why the honors writer renders no row for it, and
+    its tokens could otherwise anchor it under another record's line."""
     planned, offered = [], set()
     for code in sorted(entries_by_code):
         if code not in SUBPOINT_CODES or code not in spans:
             continue
         in_section = [c for c in candidates if spans[code].holds(c)]
         for entry in entries_by_code[code]:
+            if entry.get(PII_DROPPED_FIELDS_KEY):
+                continue
             fragments = [f for f in unrendered_prose(entry, code, haystack) if f not in offered]
             if not fragments:
                 continue
