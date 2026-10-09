@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 
 from docx import Document
+from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
@@ -74,6 +75,72 @@ def _iter_text_nodes(parent: BaseOxmlElement, tags: tuple[str, ...]) -> Iterator
         if child.tag in tags:
             yield child
         yield from _iter_text_nodes(child, tags)
+
+
+_W_SDT = qn('w:sdt')
+_W_SDT_CONTENT = qn('w:sdtContent')
+
+
+def _unwrap_content_control(sdt: BaseOxmlElement) -> int:
+    """Replace `sdt` with the children of its w:sdtContent, in place and in
+    order, unwrapping any content control nested inside it the same way.
+    Returns how many elements now stand where `sdt` stood."""
+    held = 0
+    content = sdt.find(_W_SDT_CONTENT)
+    for child in list(content) if content is not None else []:
+        sdt.addprevious(child)
+        held += _unwrap_content_control(child) if child.tag == _W_SDT else 1
+    sdt.getparent().remove(sdt)
+    return held
+
+
+def unwrap_body_content_controls(doc: DocxDocument) -> list[range]:
+    """Unwrap every body-level content control (`w:sdt`) of `doc` in place:
+    its paragraphs and tables become direct body children, in document order,
+    and a content control nested in one is unwrapped too (#1656).
+
+    python-docx has no `w:sdt` API: `doc.paragraphs`, `doc.tables` and a walk
+    of `doc.element.body` see only the body's direct w:p / w:tbl children, so
+    a body-level content control and everything in it was invisible to stage
+    1 and to the doctor. RSFOYB lost 889 of its 950 paragraphs that way.
+    Unwrapping the tree once, before anything reads it, gives every reader
+    the same paragraph order: `doc.paragraphs[para_idx]` is the paragraph
+    stage 1 numbered `para_idx`, and `doc.tables[table_index]` the table it
+    numbered `table_index`.
+
+    Only body-level controls are unwrapped. A run-level one sits inside a
+    w:p and `get_paragraph_text` already reads it. One inside a table cell,
+    or wrapping a row or a cell, is not unwrapped here, and python-docx's
+    row and cell walks skip it (#1668).
+
+    Returns the body-child positions each outermost control's content now
+    occupies, so a caller can tell which paragraphs came from one (the
+    doctor's block view does). Never save a document unwrapped this way over
+    its source: the content controls are gone from the tree.
+    """
+    body = doc.element.body
+    spans = []
+    position = 0
+    for child in list(body):
+        if child.tag != _W_SDT:
+            position += 1
+            continue
+        held = _unwrap_content_control(child)
+        if held:
+            spans.append(range(position, position + held))
+        position += held
+    return spans
+
+
+def open_source_docx(docx_path: str | Path) -> DocxDocument:
+    """The source CV, opened for reading, with its body-level content
+    controls unwrapped (`unwrap_body_content_controls`, #1656). Every
+    pipeline reader of a source document opens it through this, so stage 1's
+    `para_idx` and `table_index` index this document's `paragraphs` and
+    `tables` the same way everywhere."""
+    doc = Document(str(docx_path))
+    unwrap_body_content_controls(doc)
+    return doc
 
 
 def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
@@ -1435,7 +1502,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
         }
     }
     """
-    doc = Document(docx_path)
+    doc = open_source_docx(docx_path)
 
     elements = []
     unified_idx = 0
@@ -1444,8 +1511,8 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     num_table_headers = 0
     num_empty = 0
 
-    # A doc.paragraphs position: body paragraphs only. Layout-table cell
-    # paragraphs below carry para_idx/idx None -- use unified_idx (#609).
+    # An `open_source_docx(...).paragraphs` position (#1656): body paragraphs only.
+    # Layout-table cell paragraphs below carry para_idx/idx None -- use unified_idx (#609).
     para_idx = 0
 
     # Iterate through document body elements in order
@@ -1696,9 +1763,10 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
     """
     Extract complete document structure from .docx file.
 
-    IMPORTANT: Element indices match doc.paragraphs indices for consistency
-    with Stage 2 entry extraction. Empty paragraphs are included but marked
-    as empty (is_empty=True) so they can be skipped in LLM processing.
+    IMPORTANT: Element indices match `open_source_docx(docx_path).paragraphs`
+    indices (#1656) for consistency with Stage 2 entry extraction. Empty
+    paragraphs are included but marked as empty (is_empty=True) so they can be
+    skipped in LLM processing.
 
     Returns:
     {
@@ -1717,7 +1785,7 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
         }
     }
     """
-    doc = Document(docx_path)
+    doc = open_source_docx(docx_path)
 
     elements = []
     idx = 0
@@ -1778,13 +1846,13 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
 
 
 class OwnerSideChannel(TypedDict):
-    """Text that lives outside the main body-element stream, for stage 4's
-    owner-name fallback to consult when the body yielded no name (#456), and
-    its header/footer contact entry when the body yielded no contact (#1655).
+    """Text for stage 4's owner-name fallback to consult when the body
+    yielded no name (#456), and for its header/footer contact entry when the
+    body yielded no contact (#1655).
 
     Never merged into `extract_unified_elements`/`extract_docx_structure`'s
     `elements` list and never touches `unified_idx`/`para_idx` -- see
-    `extract_owner_side_channel`'s docstring for why.
+    `extract_owner_side_channel`'s docstring.
     """
 
     sdt_lines: list[str]
@@ -1873,25 +1941,21 @@ def _header_footer_paragraph_lines(containers: list[Any]) -> list[str]:
 
 
 def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
-    """Read CV-owner-identifying text from parts the main body walk never
-    opens (#456): a body-level `w:sdt` (Word content-control) wrapping whole
-    paragraphs, and the letterhead in `word/header*.xml` / `word/footer*.xml`.
+    """Read CV-owner-identifying text for stage 4's fallbacks (#456): every
+    paragraph inside a Word content control (`w:sdt`), and the letterhead in
+    `word/header*.xml` / `word/footer*.xml`, which
+    `extract_unified_elements`/`extract_docx_structure` never open.
 
-    `extract_unified_elements`/`extract_docx_structure` above dispatch only
-    on `isinstance(element, CT_P)` / `isinstance(element, CT_Tbl)` while
-    walking `doc.element.body`'s direct children -- a `w:sdt` element matches
-    neither, so python-docx has no wrapper for it and its entire subtree
-    (including any `w:p` inside) is silently skipped. Neither function opens
-    a header/footer OPC part at all.
+    Since #1656 a body-level content control's paragraphs are also in the
+    main element stream (`open_source_docx` unwraps them), so the body tier
+    can see them too. The two never feed one prompt: the fallback tier runs
+    only when the body tier found no name. `sdt_lines` still carries what
+    the stream does not, a content control inside a table cell.
 
-    This is an ADDITIVE, separate read. It never touches `elements`,
-    `unified_idx`, or `para_idx`, and its output is never merged into the
-    element stream those two functions return: `doc.paragraphs` (used as a
-    fallback index by `stage_2_entry_extraction.py:1118/1153/1226/1245`)
-    only enumerates direct-body `CT_P` children, so inlining an sdt paragraph
-    into the stream would shift every subsequent `para_idx` and silently
-    desync that fallback -- exactly the corruption the #456 issue's comment
-    warns against. Consumed only by stage 4 (`stage4/owner_name.py`): the
+    This is a separate read of its own, un-unwrapped copy of the document.
+    It never touches `elements`, `unified_idx`, or `para_idx`, and its output
+    is never merged into the element stream those two functions return.
+    Consumed only by stage 4 (`stage4/owner_name.py`): the
     owner-name fallback tier, when the body-derived pass found no name, and
     the header/footer contact entry (`header_footer_contact_entry`, #1655),
     when the body's Personal Data entries hold no contact.

@@ -30,6 +30,7 @@ from core.docx_structure_extractor import (
     extract_docx_structure,
     extract_unified_elements,
     join_row_cells,
+    open_source_docx,
     row_cell_texts,
 )
 from core.output_manager import OutputManager
@@ -131,7 +132,8 @@ def get_element_text(element: dict) -> str:
 
 
 def _element_text_or_fallback(idx: int, element_index_map: dict, doc: Document) -> str:
-    """Text for a unified element index, falling back to doc.paragraphs.
+    """Text for a unified element index, falling back to doc.paragraphs
+    (`doc` as `open_source_docx` opened it, #1656).
 
     element_index_map should hold every int index in [0, doc_length) by
     construction (build_element_index_map maps every element with an int
@@ -1735,8 +1737,8 @@ def run_stage_2(
     print(f"  Empty elements: {doc_structure['meta']['num_empty']}")
     print()
 
-    # Also load Document for backward compatibility with paragraph-based indexing
-    doc = Document(docx_path)
+    # Paragraph-based fallback index, opened as stage 1 opened it (#1656)
+    doc = open_source_docx(docx_path)
 
     # Extract leaf sections with boundaries from Stage 1b
     section_boundaries = hierarchy_data.get("section_boundaries", [])

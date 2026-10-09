@@ -399,6 +399,87 @@ def test_table_lost_lint_quiet_when_every_table_survives():
     assert lint_table_lost([(0, _GRANT_FSMB)], {"entries": [_entry(_GRANT_FSMB, start=1)]}) == []
 
 
+def test_table_lost_lint_reports_a_lost_content_control_apart_from_lost_tables():
+    """#1656: one finding per kind of container, the table one worded as
+    before."""
+    from unified_pipeline.segmentation_regression import FIRST_CONTENT_CONTROL_BLOCK
+
+    stage2 = {"entries": [_entry(_GRANT_FSMB, start=1)]}
+    table = [f"lost contact line {i} zebra" for i in range(3)]
+    control = [f"lost publication line {i} yak" for i in range(4)]
+    block_lines = ([(0, _GRANT_FSMB)] + [(1, line) for line in table]
+                   + [(FIRST_CONTENT_CONTROL_BLOCK, line) for line in control])
+    findings = lint_table_lost(block_lines, stage2)
+    assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [
+        ("table_lost", "WARN", "1 source table(s) mostly lost; worst: 3 of 3 lines"),
+        ("table_lost", "WARN", "1 body content control(s) mostly lost; worst: 4 of 4 lines"),
+    ]
+    assert findings[1]["evidence"] == control
+
+
+#: #1656's synthetic CV: 29 records under a heading, all in one 30-paragraph
+#: body content control, between two body paragraphs.
+_CONTROL_RECORDS = [f"Doe J, Roe K. Synthetic study {i} of example outcomes. J Example. 2001;{i}:1-9."
+                    for i in range(1, 30)]
+
+
+def _content_control_cv(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    paragraphs = "".join(f"<w:p><w:r><w:t>{t}</w:t></w:r></w:p>"
+                         for t in ["PUBLICATIONS", *_CONTROL_RECORDS])
+    doc = Document()
+    doc.add_paragraph("Example Person, MD, Assistant Professor of Example Studies")
+    after = doc.add_paragraph("Example patent for a synthetic device, filed 2015")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{paragraphs}'
+                                   '</w:sdtContent></w:sdt>'))
+    path = tmp_path / "content_control_cv.docx"
+    doc.save(path)
+    return str(path)
+
+
+def _stage2_of(path):
+    """A stage 2 that kept every element stage 1 gave it, one entry each."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    return {"entries": [_entry(el["text"], start=el["unified_idx"])
+                        for el in extract_unified_elements(path)["elements"] if el["text"]]}
+
+
+def test_doctor_flags_a_content_control_stage_1_skips_and_is_quiet_once_stage_1_reads_it(
+        tmp_path, monkeypatch):
+    """#1656 wire test: source docx -> stage-1 elements -> stage 2 -> the
+    doctor's source readers. The doctor reported 100% source coverage on
+    RSFOYB, which lost 889 of 950 paragraphs to a body content control. With
+    the extractor's unwrap reverted, `table_lost` and `segmentation` fire;
+    with it, neither does."""
+    from unified_pipeline.core import docx_structure_extractor
+    from unified_pipeline.segmentation_regression import iter_source_block_lines
+
+    path = _content_control_cv(tmp_path)
+    block_lines = iter_source_block_lines(path)
+    source_lines = [line for _, line in block_lines]
+    assert _CONTROL_RECORDS[0] in source_lines
+
+    fixed = _stage2_of(path)
+    assert lint_table_lost(block_lines, fixed) == []
+    assert lint_segmentation(source_lines, _STAGE1A, fixed) == []
+
+    # Revert the extractor's unwrap: stage 1 reads the source the old way.
+    monkeypatch.setattr(docx_structure_extractor, "open_source_docx", lambda p: Document(str(p)))
+    reverted = _stage2_of(path)
+    assert [e["text"] for e in reverted["entries"]] == [source_lines[0], source_lines[-1]]
+
+    lost = lint_table_lost(block_lines, reverted)
+    assert [f["message"] for f in lost] == [
+        f"1 body content control(s) mostly lost; worst: {len(_CONTROL_RECORDS)} of "
+        f"{len(_CONTROL_RECORDS)} lines"]
+    coverage = [f for f in lint_segmentation(source_lines, _STAGE1A, reverted)
+                if f["message"].startswith("coverage")]
+    assert len(coverage) == 1
+
+
 # ------------------------------------------------------ lint 2: missed headers
 
 def test_iter_header_candidates_sees_bold_paragraphs_and_cells(tmp_path):
@@ -415,6 +496,24 @@ def test_iter_header_candidates_sees_bold_paragraphs_and_cells(tmp_path):
     candidates = iter_header_candidates(str(path))
     assert set(candidates) == {"PROFESSIONAL EXPERIENCE", "EDUCATION",
                                "GRANTS AWARDED"}
+
+
+def test_iter_header_candidates_sees_a_header_inside_a_body_content_control(tmp_path):
+    """#1656: read as stage 1 reads it, a body content control's bold
+    heading and its single-column table are candidates like any other."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    bold = "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>{}</w:t></w:r></w:p>"
+    table = ('<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>'
+             + bold.format("INVITED LECTURES") + "</w:tc></w:tr></w:tbl>")
+    doc = Document()
+    after = doc.add_paragraph("A plain body line that is not bold and not a header")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{bold.format("PUBLICATIONS")}'
+                                   f'{table}</w:sdtContent></w:sdt>'))
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+    assert iter_header_candidates(str(path)) == ["PUBLICATIONS", "INVITED LECTURES"]
 
 
 def test_iter_header_candidates_skips_bold_non_headers(tmp_path):

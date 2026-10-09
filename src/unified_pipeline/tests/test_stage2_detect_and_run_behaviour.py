@@ -770,6 +770,82 @@ def test_run_stage_2_promotes_a_heading_stage_1b_could_not_place(tmp_path, monke
     assert json.loads(output_path.read_text()) == output_data
 
 
+#: #1656: the records a synthetic body-level content control holds.
+_CONTROL_RECORDS = [f"Doe J, Roe K. Synthetic study {i} of example outcomes. J Example. 2001;{i}:1-9."
+                    for i in range(1, 30)]
+_NESTED_RECORD = "Nested record, Example Society, 2003"
+
+
+def _w_p(text: str) -> str:
+    return f'<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
+
+
+def _content_control_docx(tmp_path: Path) -> Path:
+    """Owner line, then one body-level content control holding the
+    PUBLICATIONS heading, 29 records (30 paragraphs), a nested control and a
+    table, then PATENTS and one record outside it."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    table = ('<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>'
+             '<w:tr><w:tc>' + _w_p("2010") + '</w:tc><w:tc>' + _w_p("Example Award for synthetic research")
+             + '</w:tc></w:tr></w:tbl>')
+    inner = (_w_p("PUBLICATIONS") + "".join(_w_p(r) for r in _CONTROL_RECORDS)
+             + f"<w:sdt><w:sdtContent>{_w_p(_NESTED_RECORD)}</w:sdtContent></w:sdt>" + table)
+    doc = Document()
+    doc.add_paragraph("Example Person")
+    patents = doc.add_paragraph("PATENTS")
+    doc.add_paragraph("Example patent for a synthetic device, 2015")
+    patents._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{inner}</w:sdtContent></w:sdt>'))
+    path = tmp_path / "content_control.docx"
+    doc.save(path)
+    return path
+
+
+def test_run_stage_2_reads_a_body_content_control_into_its_sections(tmp_path, monkeypatch):
+    """#1656 wire test: docx -> stage-1 elements -> stage 2's prompt and
+    entries. RSFOYB's body content control held 889 of its 950 paragraphs
+    and stage 2 saw none of them."""
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _content_control_docx(tmp_path)
+    # 0 owner, 1 PUBLICATIONS, 2-30 records, 31 nested, 32 table, 33 PATENTS, 34 patent.
+    hpath = _write_hierarchy(
+        tmp_path, "cc_h.json", "TESTCC1",
+        hierarchy_with_indices=[
+            {"text": "PUBLICATIONS", "level": "H1", "element_idx": 1, "children": []},
+            {"text": "PATENTS", "level": "H1", "element_idx": 33, "children": []},
+        ],
+        section_boundaries=[
+            {"hierarchy": ["PUBLICATIONS"], "element_idx_start": 1, "element_idx_end": 32, "has_children": False},
+            {"hierarchy": ["PATENTS"], "element_idx_start": 33, "element_idx_end": 34, "has_children": False},
+        ],
+    )
+    prompts = {}
+
+    def fake(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        header_line = next(line for line in prompt.splitlines() if "CV Section Header" in line)
+        prompts[header_line] = prompt
+        if "`PUBLICATIONS`" in header_line:
+            return _llm_result({"delimiters": [
+                {"element_idx_start": i, "element_idx_end": i, "element_type": "paragraph", "confidence": 0.9}
+                for i in range(2, 32)]})
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    publications_prompt = next(p for h, p in prompts.items() if "`PUBLICATIONS`" in h)
+    assert _CONTROL_RECORDS[16] in publications_prompt
+    assert "Example Award for synthetic research" in publications_prompt
+    assert output_data["document_length"] == 35
+    by_idx = {e["element_idx_start"]: e for e in output_data["entries"]}
+    assert (by_idx[1]["element_type"], by_idx[1]["text"]) == ("header", "PUBLICATIONS")
+    assert [by_idx[i]["text"] for i in range(2, 32)] == [*_CONTROL_RECORDS, _NESTED_RECORD]
+    assert all(by_idx[i]["hierarchy"] == ["PUBLICATIONS"] for i in range(2, 32))
+    assert by_idx[33]["text"] == "PATENTS"
+
+
 def test_run_stage_2_strip_template_instructions_true_drops_instruction_entry(tmp_path, monkeypatch):
     _redirect_output_manager(monkeypatch, tmp_path)
 

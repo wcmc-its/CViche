@@ -1087,3 +1087,28 @@ class TestEachFormattedRecordIsItsOwnBullet:
         """Spelled out in `teaching` because `stage6/` may not import `stage4`."""
         from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
         assert teaching._STAGE4_RECORDS_KEY == STAGE4_RECORDS_KEY
+
+
+def test_source_cell_levels_reads_the_table_stage_1_numbered_inside_a_content_control(tmp_path):
+    """#1656: stage 1 numbers a table inside a body content control, so
+    `SourceCellLevels` must open the source the same way or `table_index`
+    names the wrong table (here: none, so section K rendered flat)."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    para = "<w:p>{}<w:r><w:t>{}</w:t></w:r></w:p>"
+    bullet = '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+    cell = (para.format("", "Fictional Course Director") + para.format(bullet, "Fictional lecture one")
+            + para.format(bullet, "Fictional lecture two"))
+    table = ('<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>'
+             f'<w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>')
+    doc = Document()
+    doc.add_table(rows=1, cols=1).cell(0, 0).text = "Fictional table zero"
+    after = doc.add_paragraph("After")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{table}</w:sdtContent></w:sdt>'))
+    path = tmp_path / "source.docx"
+    doc.save(str(path))
+
+    lines = ["Fictional Course Director", "Fictional lecture one", "Fictional lecture two"]
+    levels = teaching.SourceCellLevels(str(path))
+    assert levels.flags_for({"element_type": "table_row", "table_index": 1}, lines) == [False, True, True]
