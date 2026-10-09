@@ -110,6 +110,9 @@ def test_load_run_and_prompt_carry_the_doctor_sentences_source_and_date():
                            "2. My work is funded by the Example Foundation.\n"
                            "3. I mentor three trainees."), prompt[-200:]
     assert "written on 2026-10-08" in prompt
+    # #1592: 10 of the audit's 19 YUYVIG false positives judged status by heading or label.
+    assert "end date is before 2026-10-08 is completed, whatever heading" in prompt
+    assert 'marks "present" or "current" is current' in prompt
     assert '"kind": "none" | "grant_status" |' in prompt
     assert len(sca.prompt_template_hash()) == 16
 
@@ -139,6 +142,21 @@ def test_parse_reply_accepts_one_valid_verdict_per_sentence_fenced_or_not():
         verdicts = sca.parse_reply(text, 2)
         assert [(v.index, v.verdict, v.kind, v.severity) for v in verdicts] == [
             (1, "supported", "none", "none"), (2, "unsupported", "funder", "medium")]
+
+
+def test_parse_reply_drops_a_leading_think_block_before_fenced_or_bare_json():
+    """OKRTPJ and QQGKXR's shape (#1592): reasoning in <think>, then the answer."""
+    reply = _reply(OK_ROW, FUNDER_ROW)
+    think = "<think>\nSentence 2 names a funder {the CV} lacks; see ```notes```.\n</think>"
+    for text in (f"{think}\n\n```json\n{reply}\n```", f"  {think}\n{reply}\n"):
+        verdicts = sca.parse_reply(text, 2)
+        assert [(v.index, v.verdict) for v in verdicts] == [(1, "supported"), (2, "unsupported")]
+    for text in (f"{reply}\n{think}", f"Answer: {think}{reply}", f"<think>{reply}"):
+        try:
+            sca.parse_reply(text, 2)
+        except sca.ReplyError:
+            continue
+        raise AssertionError(f"accepted a think block that does not lead: {text[:30]!r}")
 
 
 def test_parse_reply_refuses_every_reply_that_is_not_one_verdict_per_sentence():
@@ -383,6 +401,7 @@ if __name__ == "__main__":
     test_load_run_and_prompt_carry_the_doctor_sentences_source_and_date()
     test_load_run_refuses_a_missing_or_malformed_artifact()
     test_parse_reply_accepts_one_valid_verdict_per_sentence_fenced_or_not()
+    test_parse_reply_drops_a_leading_think_block_before_fenced_or_bare_json()
     test_parse_reply_refuses_every_reply_that_is_not_one_verdict_per_sentence()
     test_audit_run_labels_only_flagged_sentences_and_carries_no_cv_text()
     test_audit_run_makes_no_call_for_a_summary_the_model_did_not_write()

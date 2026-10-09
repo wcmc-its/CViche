@@ -21,6 +21,7 @@ from unified_pipeline.doctor.lints.summary import (  # noqa: E402
     CLAIM_MENTORING,
     CLAIM_PENDING,
     lint_summary_unsupported_claim,
+    summary_sentences,
 )
 from unified_pipeline.run_doctor import run_doctor  # noqa: E402
 from unified_pipeline.stage_4_5_research_summary import (
@@ -48,6 +49,37 @@ def _stage4(*entries):
 
 def _claims(findings):
     return [f["evidence"][0] for f in findings]
+
+
+# ----------------------------------------------------------- sentence splitting
+
+def test_sentences_split_at_end_punctuation_before_a_capital():
+    assert summary_sentences("I study widgets.  My work spans gadgets! Is it new? yes. Last.") == [
+        "I study widgets.", "My work spans gadgets!", "Is it new? yes.", "Last."]
+
+
+def test_an_abbreviation_does_not_end_a_sentence():
+    """#1592: the YUYVIG audit judged halves of sentences cut at these."""
+    cases = {
+        "dotted acronym": "I trained in the U.S. Army Medical Corps.",
+        "lowercase dotted": "I study gadgets, e.g. Widget folding.",
+        "degree": "I hold a Ph.D. And an M.D. From two schools.",
+        "middle initial": "I worked with Jane Q. Roe on widgets.",
+        "title": "I trained at St. Widget Hospital with Dr. Roe.",
+        "citation": "As Roe et al. Showed, widgets fold.",
+    }
+    for why, sentence in cases.items():
+        assert summary_sentences(f"{sentence} Then I moved.") == [sentence, "Then I moved."], why
+    # A company suffix ends its sentence as often as not, so it still splits.
+    assert summary_sentences("It was funded by Widget Inc. I then moved.") == [
+        "It was funded by Widget Inc.", "I then moved."]
+
+
+def test_an_abbreviation_split_no_longer_hides_a_funding_claim_from_its_sentence():
+    """The finding quotes the whole sentence, not the piece after the abbreviation."""
+    sentence = "My U.S. Widget Agency work is funded by grants."
+    (finding,) = lint_summary_unsupported_claim(_summary(sentence), _stage4(_entry("P")))
+    assert finding["evidence"] == [f"claim={CLAIM_FUNDING}", f"sentence={sentence}"]
 
 
 # ----------------------------------------------------------- pending applications

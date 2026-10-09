@@ -126,6 +126,8 @@ Rules:
 - Describing research areas in general terms that the CV's publications, grants or positions cover is supported. Paraphrase and summary are fine.
 - "partly": the sentence mixes supported and unsupported claims.
 - The summary was written on {summary_date}. A grant or position is current only if the CV shows it ongoing on that date.
+- A grant whose end date is before {summary_date} is completed, whatever heading the CV files it under (such as "Current" or "Active"). Calling it completed or past is supported.
+- A role, position or trainee the CV marks "present" or "current" is current. Calling it current or ongoing is supported.
 
 Severity of an unsupported or partly supported sentence:
 - high: an invented or wrong grant, funding status, role, award or position -- a fact a reader would rely on;
@@ -245,10 +247,17 @@ def _verdict(item: object, expected_index: int) -> Verdict:
     return verdict
 
 
+#: The model's reasoning, when it writes some before its answer.
+_LEADING_THINK_RE = re.compile(r"\A\s*<think>.*?</think>", re.DOTALL)
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
 def parse_reply(reply: str, sentence_count: int) -> list[Verdict]:
-    """One Verdict per sentence from the model's JSON reply; ReplyError otherwise."""
-    text = reply.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    """One Verdict per sentence from the model's JSON reply; ReplyError otherwise.
+    A leading <think> block is dropped first: 2 of YUYVIG's 37 replies (OKRTPJ,
+    QQGKXR) opened with one before a valid fenced JSON block (#1592)."""
+    text = _LEADING_THINK_RE.sub("", reply, count=1).strip()
+    fenced = _FENCED_JSON_RE.fullmatch(text)
     try:
         data = json.loads(fenced.group(1) if fenced else text)
     except ValueError as e:
