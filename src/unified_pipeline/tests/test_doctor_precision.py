@@ -11,12 +11,25 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.doctor import precision  # noqa: E402
 from unified_pipeline.doctor.precision import (  # noqa: E402
+    HELD_OUT_CHANGED,
+    IN_PLACE_MIN_PRECISION,
+    STAGE6_LINT,
+    STAGE6_MESSAGE_PREFIX,
+    STAGE6_OTHER_SHAPE,
     LintPrecision,
+    finding_precision,
+    fold_held_out,
+    load_gate_ledger,
     load_ledger,
+    load_shape_ledger,
+    parse_held_out,
     parse_ledger,
+    parse_shape_ledger,
     precision_label,
     precision_payload,
     remediation_allowed,
+    shown_in_place,
+    stage6_shape,
 )
 from unified_pipeline.run_doctor import KNOWN_LINTS  # noqa: E402
 
@@ -159,3 +172,235 @@ def test_precision_label():
     assert precision_label(LintPrecision("a", 1, 6, "M1")) == "p~0.17 n=6"
     assert precision_label(LintPrecision("a", 0, 0, "M1")) == "p unmeasured"
     assert precision_label(None) == "p unmeasured"
+
+
+def test_stage6_shape_names_each_emitter_message():
+    cases = {
+        "hierarchy-mismatch reroute K1->S8 refused fields do not fit: 1 entry": "reroute_refused",
+        "hierarchy-mismatch reroute I->Q1 accepted cross family: 2 entries": "reroute_cross_family",
+        "hierarchy-mismatch reroute S5->S1 accepted same family: 1 entry": "reroute_same_family",
+        "A: 1 entry classified A was not found in the rendered document and was recovered "
+        "into the Appendix": "appendix_recovered_A",
+        "T: 1 entry classified T was not found in the rendered document and was recovered "
+        "into the Appendix": "appendix_recovered",
+        "K4: 2 segments of overflow content that the stage 6 reconsider pass coded K4 were "
+        "not placed in a section and were recovered into the Appendix": "appendix_recovered",
+        "T: 6 entries diverted to the Appendix — no stage 6 section is routed to render this "
+        "taxonomy code": "appendix_no_route_T",
+        "N3: 2 entries diverted to the Appendix — no stage 6 section is routed to render this "
+        "taxonomy code": "appendix_no_route",
+        "M2B: 1 entry diverted to the Appendix — declined by the research-support renderer as "
+        "too sparse to table": "appendix_grant_too_sparse",
+        "M1: 2 entries diverted to the Appendix — stage 3b T-validation recoded them from T to "
+        "M1, which only the research summary renders": "appendix_t_validation_recoded",
+        "K (Teaching): No visible bulleted content found - may be using track changes only":
+            "no_teaching_content",
+        "K3 (Synthetic Heading): Content appears combined with semicolons instead of separate "
+        "bullets": "semicolon_fused_bullets",
+        "Table 'Synthetic': 3 rows have bare dates in column A (should be filtered)":
+            "bare_dates_in_table",
+        "a reconstructed board certification row had no specialty or certificate number and "
+        "was skipped": "board_cert_row_skipped",
+        "P: entry at element 12 dropped as a source table header row":
+            "memberships_header_row_dropped",
+        "2 D1 entries: `appointments` holds several records that were not split into separate "
+        "rows (the entry's text holds content its fields do not carry); a record may be missing "
+        "from the output": "fanout_list_not_split",
+        "X1: 1 entry diverted to the Appendix — stage 4 quarantined it: the stage 3b taxonomy "
+        "code was not a valid taxonomy code (see original_taxonomy_code in the stage 4 artifact)":
+            "appendix_invalid_code",
+        "G: 3 entries diverted to the Appendix — refused by the passthrough writer for G (source "
+        "section label did not match)": "appendix_passthrough_refused",
+        "K1: 2 entries diverted to the Appendix — not placed by the section routed for K1 (see "
+        "any section_render_failed record for that section)": "appendix_section_declined",
+        "M1: 1 entry diverted to the Appendix — no research summary rendered":
+            "appendix_no_research_summary",
+        "M1: 1 dated entry diverted to the Appendix — the generated research summary does not "
+        "reproduce it and no other section renders it": "appendix_m1_not_in_summary",
+        "2 D1 entries: `appointments` holds records that were not split into separate rows (the "
+        "entry's text holds content its fields do not carry); a record may be missing from the "
+        "output": "fanout_list_not_split",
+        "2 geographic scope classification(s) failed and defaulted to National; the Regional/"
+        "National/International split may be wrong": "geo_scope_failed",
+        "1 appendix entry reclassification(s) failed or came back incomplete; those entries "
+        "stayed in the appendix whole instead of being split and routed to their sections":
+            "appendix_reclassification_failed",
+        "section K failed: ValueError: synthetic": "section_failed",
+        "a message no emitter writes": STAGE6_OTHER_SHAPE,
+    }
+    for message, shape in cases.items():
+        assert stage6_shape(STAGE6_MESSAGE_PREFIX + message) == shape, (message, shape)
+
+
+_SHAPE_LEDGER = """## Per-lint precision
+
+| lint | TP / judged | measured |
+|---|---|---|
+| `role_consistency`: `owner_pi_role_empty` | 9 / 9 (100%) | X6-role |
+| `role_consistency`: `pi_cell_empty` | 1 / 4 (25%) | RC-ROLE2 |
+| `stage6_render_warnings`: `reroute_refused` | 9 / 10 (90%) | M1 |
+| `stage6_render_warnings`: `appendix_recovered_A` | 1 / 10 (10%) | M1 |
+| `owner_attribution`: `citation_without_owner` | 1 / 9 (11%) | YUY-OA |
+| `owner_attribution`: `mentee_under_non_mentee_heading` | 1 / 1 (100%) | YUY-OA |
+| `half_lint` | 1 / 2 (50%) | M1 |
+| `low_lint` | 2 / 5 (40%) | M1 |
+| `none_lint` | none | M1 |
+"""
+
+
+def test_shape_rows_are_kept_apart_unpooled():
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    assert rows[("role_consistency", "pi_cell_empty")] == LintPrecision(
+        "role_consistency", 1, 4, "RC-ROLE2", "pi_cell_empty")
+    assert rows[("low_lint", None)] == LintPrecision("low_lint", 2, 5, "M1")
+    assert parse_ledger(_SHAPE_LEDGER)["role_consistency"] == LintPrecision(
+        "role_consistency", 10, 13, "X6-role,RC-ROLE2")
+
+
+def test_a_finding_reads_the_row_of_the_shape_its_message_names():
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    empty = "entry 7: 'Your role:' is MPI, but the PI cell is empty (pi_cell_empty, #1403)"
+    named = "entry 8: the PI cell names the CV owner, and 'Your role:' is empty (owner_pi_role_empty, #1403)"
+    assert finding_precision("role_consistency", empty, rows).shape == "pi_cell_empty"
+    assert finding_precision("role_consistency", named, rows).shape == "owner_pi_role_empty"
+    assert not shown_in_place("role_consistency", empty, rows)
+    assert shown_in_place("role_consistency", named, rows)
+
+
+def test_a_shape_name_inside_a_longer_token_is_not_that_shape():
+    # Listed first, so a bare substring test would pick it.
+    rows = {("role_consistency", "role_empty"): LintPrecision("role_consistency", 0, 9, "", "role_empty"),
+            **parse_shape_ledger(_SHAPE_LEDGER)}
+    named = "entry 8: ... (owner_pi_role_empty, #1403)"
+    assert finding_precision("role_consistency", named, rows).shape == "owner_pi_role_empty"
+
+
+def test_a_message_naming_no_shape_reads_its_lints_rows_pooled():
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    entry = finding_precision("owner_attribution", "entries 3-3 (S1), whose author list never names the owner", rows)
+    assert (entry.true_positives, entry.judged) == (2, 10)
+    assert not shown_in_place("owner_attribution", "entries 3-3 (S1) ...", rows)
+
+
+def test_a_stage6_message_reads_its_own_shapes_row_and_no_pool():
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    recovered = STAGE6_MESSAGE_PREFIX + "A: 1 entry classified A was not found and was recovered into the Appendix"
+    refused = STAGE6_MESSAGE_PREFIX + "hierarchy-mismatch reroute K1->S8 refused fields do not fit: 1 entry"
+    assert not shown_in_place(STAGE6_LINT, recovered, rows)
+    assert shown_in_place(STAGE6_LINT, refused, rows)
+    # A shape with no row is unmeasured, not the other shapes' pool (10 / 20).
+    assert finding_precision(STAGE6_LINT, STAGE6_MESSAGE_PREFIX + "an unknown check", rows) is None
+    assert shown_in_place(STAGE6_LINT, STAGE6_MESSAGE_PREFIX + "an unknown check", rows)
+
+
+def test_the_gate_is_below_half_and_spares_the_unmeasured():
+    rows = parse_shape_ledger(_SHAPE_LEDGER)
+    assert IN_PLACE_MIN_PRECISION == 0.50
+    assert shown_in_place("half_lint", "x", rows)  # exactly half is shown (Paul, 2026-10-08)
+    assert not shown_in_place("low_lint", "x", rows)
+    assert shown_in_place("none_lint", "x", rows)  # listed, no verdicts
+    assert shown_in_place("absent_lint", "x", rows)  # not in the ledger
+
+
+def test_the_committed_ledger_gates_by_shape():
+    """On the real ledger: owner_pi_role_empty is shown, a recovered A entry is
+    not on the in-sample rows alone (3 / 20), and is once YUYVIG's held-out
+    verdicts are folded in (18 / 35, the gate's default)."""
+    load_shape_ledger.cache_clear()
+    load_gate_ledger.cache_clear()
+    recovered = STAGE6_MESSAGE_PREFIX + "A: 1 entry ... recovered into the Appendix"
+    assert shown_in_place("role_consistency", "entry 1: ... (owner_pi_role_empty, #1403)")
+    assert not shown_in_place(STAGE6_LINT, recovered, load_shape_ledger())
+    assert shown_in_place(STAGE6_LINT, recovered)
+
+
+_HELD_OUT_LEDGER = _SHAPE_LEDGER + """| `dedup_drops` | 2 / 8 (25%) | M1-dup |
+| `split_lint`: `shape_x` | 9 / 9 (100%) | M1 |
+
+## Held-out precision (YUY-HO)
+
+| lint | in-sample TP / judged | held-out TP / judged | points | note |
+|---|---|---|---|---|
+| `low_lint` | 2 / 5 (40%) (M1) | 4 / 5 (80%) | +40 |  |
+| `dedup_drops` | 2 / 8 (25%) (M1-dup) | 3 / 3 (100%) | +75 | changed since |
+| `stage6_render_warnings`: `appendix_recovered_A` | 1 / 10 (10%) (M1) | 9 / 10 (90%) | +80 |  |
+| `stage6_render_warnings`: `appendix_no_route` | none | 0 / 4 (0%) |  | changed since |
+| `split_lint` | 9 / 9 (100%) (M1) | 0 / 9 (0%) | -100 | pooled over shapes |
+| `cap_lint` | 6 / 7 (86%) (M3 cap table) | 0 / 3 (0%) | -86 | no per-lint row |
+| `none_lint` | none | none |  |  |
+
+## Recall
+
+| lint | TP / judged |
+|---|---|
+| `low_lint` | 0 / 50 |
+"""
+
+
+def test_the_held_out_table_parses_per_key_both_columns():
+    held = parse_held_out(_HELD_OUT_LEDGER)
+    assert held[("low_lint", None)] == ((2, 5), (4, 5))
+    assert held[(STAGE6_LINT, "appendix_recovered_A")] == ((1, 10), (9, 10))
+    assert held[("none_lint", None)] == ((0, 0), (0, 0))
+    assert ("decoy", None) not in held and len(held) == 7  # the Recall table is not read
+
+
+def test_held_out_verdicts_fold_into_an_unchanged_lints_row():
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert rows[("low_lint", None)] == LintPrecision("low_lint", 6, 10, "M1,YUY-HO")
+    assert shown_in_place("low_lint", "x", rows)  # 40% in-sample, 60% combined
+    assert rows[("none_lint", None)] == LintPrecision("none_lint", 0, 0, "M1")  # nothing held out
+
+
+def test_a_changed_lint_keeps_its_in_sample_row_only():
+    assert ("dedup_drops", None) in HELD_OUT_CHANGED
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert rows[("dedup_drops", None)] == LintPrecision("dedup_drops", 2, 8, "M1-dup")
+    assert not shown_in_place("dedup_drops", "x", rows)
+    assert (STAGE6_LINT, "appendix_no_route") not in rows  # a changed shape adds no row either
+    # A lint listed as changed (shape None) drops its held-out shape rows too.
+    assert fold_held_out({}, {("dedup_drops", "a_shape"): ((0, 0), (1, 1))}) == {}
+
+
+def test_a_stage6_shape_folds_into_its_own_shape_row():
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    recovered = STAGE6_MESSAGE_PREFIX + "A: 1 entry classified A was not found and was recovered into the Appendix"
+    assert finding_precision(STAGE6_LINT, recovered, rows) == LintPrecision(
+        STAGE6_LINT, 10, 20, "M1,YUY-HO", "appendix_recovered_A")
+    assert shown_in_place(STAGE6_LINT, recovered, rows)
+    assert rows[(STAGE6_LINT, "reroute_refused")].judged == 10  # other shapes untouched
+
+
+def test_a_pooled_held_out_row_of_a_shape_split_lint_is_not_folded():
+    """split_lint's 0 / 9 cannot be split between its shapes."""
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert ("split_lint", None) not in rows
+    assert rows[("split_lint", "shape_x")].judged == 9
+
+
+def test_a_held_out_row_with_no_in_sample_row_brings_its_own_in_sample_figures():
+    rows = fold_held_out(parse_shape_ledger(_HELD_OUT_LEDGER), parse_held_out(_HELD_OUT_LEDGER))
+    assert rows[("cap_lint", None)] == LintPrecision("cap_lint", 6, 10, "YUY-HO")
+    assert shown_in_place("cap_lint", "x", rows)  # 60%, not the held-out 0 / 3 alone
+
+
+def test_the_gate_ledger_is_the_shown_in_place_default(tmp_path):
+    path = tmp_path / "PRECISION.md"
+    path.write_text(_HELD_OUT_LEDGER, encoding="utf-8")
+    assert load_gate_ledger(path)[("low_lint", None)].judged == 10
+    assert load_shape_ledger(path)[("low_lint", None)].judged == 5
+
+
+def test_the_committed_held_out_table_folds_as_the_owner_decided():
+    """Paul, 2026-10-08: enrichment_failures (unchanged since dev-259) is
+    3 / 7 in-sample and 6 / 8 held out, so its comments stay on the text;
+    source_line_coverage's row already pools its held-out half and is not
+    counted twice; every changed key names a known lint."""
+    load_gate_ledger.cache_clear()
+    gate, in_sample = load_gate_ledger(), load_shape_ledger()
+    assert (gate[("enrichment_failures", None)].true_positives,
+            gate[("enrichment_failures", None)].judged) == (9, 15)
+    assert shown_in_place("enrichment_failures", "1 failed")
+    assert not shown_in_place("enrichment_failures", "1 failed", in_sample)
+    assert gate[("source_line_coverage", None)] == in_sample[("source_line_coverage", None)]
+    assert {lint for lint, _shape in HELD_OUT_CHANGED} <= set(KNOWN_LINTS)
