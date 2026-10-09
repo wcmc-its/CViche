@@ -1779,7 +1779,8 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
 
 class OwnerSideChannel(TypedDict):
     """Text that lives outside the main body-element stream, for stage 4's
-    owner-name fallback to consult when the body yielded no name (#456).
+    owner-name fallback to consult when the body yielded no name (#456), and
+    its header/footer contact entry when the body yielded no contact (#1655).
 
     Never merged into `extract_unified_elements`/`extract_docx_structure`'s
     `elements` list and never touches `unified_idx`/`para_idx` -- see
@@ -1890,9 +1891,10 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
     only enumerates direct-body `CT_P` children, so inlining an sdt paragraph
     into the stream would shift every subsequent `para_idx` and silently
     desync that fallback -- exactly the corruption the #456 issue's comment
-    warns against. Consumed only by stage 4's owner-name fallback tier
-    (`stage4/owner_name.py`), and only when the body-derived pass found no
-    name.
+    warns against. Consumed only by stage 4 (`stage4/owner_name.py`): the
+    owner-name fallback tier, when the body-derived pass found no name, and
+    the header/footer contact entry (`header_footer_contact_entry`, #1655),
+    when the body's Personal Data entries hold no contact.
 
     Args:
         docx_path: Path to the .docx file. Opens it independently -- shares
