@@ -53,7 +53,19 @@ CLAIM_FUNDING = "funding"
 CLAIM_MENTORING = "mentoring"
 CLAIM_FUNDER = "funder"
 
+#: A candidate sentence boundary: end punctuation, space, a capital.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+#: Abbreviations whose period is not a sentence end (#1592: YUYVIG's audit
+#: split "U.S.", "St." and dotted acronyms mid-sentence). No company suffix:
+#: "Inc." ended the sentence at all 3 of its YUYVIG and farm splits.
+_TITLE_ABBREVIATIONS = ("St", "Dr", "Mr", "Mrs", "Ms", "Prof", "Jr", "Sr", "Dept", "Univ",
+                        "Mt", "vs", "al", "Ph.D")
+#: A candidate's text ending in one: a dotted acronym ("U.S.", "e.g."), a lone
+#: capital (a middle initial, "A."), or a title abbreviation. The cost is that
+#: a real sentence ending in one ("...in the U.S. We...") stays joined to the next.
+_ABBREVIATION_END_RE = re.compile(
+    r"(?:\b(?:[A-Za-z]\.){2,}|(?<![\w.])[A-Z]\."
+    rf"|\b(?:{'|'.join(re.escape(a) for a in _TITLE_ABBREVIATIONS)})\.)\Z")
 _PENDING_RE = re.compile(
     r"\b(?:under\s+review|pending|submitted|resubmi(?:tted|ssion)|awaiting\s+(?:a\s+)?"
     r"(?:funding\s+)?decision)\b", re.IGNORECASE)
@@ -134,8 +146,17 @@ def generated_summary(stage_4_5: Mapping) -> str:
 
 
 def summary_sentences(text: str) -> list[str]:
-    """The summary split into sentences, the unit every summary check judges."""
-    return [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    """The summary split into sentences, the unit every summary check judges.
+    A candidate that ends in an abbreviation is joined to the next one."""
+    sentences: list[str] = []
+    for piece in (p.strip() for p in _SENTENCE_SPLIT_RE.split(text)):
+        if not piece:
+            continue
+        if sentences and _ABBREVIATION_END_RE.search(sentences[-1]):
+            sentences[-1] = f"{sentences[-1]} {piece}"
+        else:
+            sentences.append(piece)
+    return sentences
 
 
 def _is_pending_grant(entry: _FieldsEntry) -> bool:
