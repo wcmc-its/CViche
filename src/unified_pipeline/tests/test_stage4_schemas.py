@@ -202,6 +202,14 @@ def test_d3_title_guide_takes_a_consulting_topic_as_the_title():
     assert "For a consulting engagement that states no job title, the project topic" in guide
 
 
+@pytest.mark.parametrize("code", ["M2A", "M2B"])
+def test_grant_effort_guide_keeps_months_as_written(code):
+    """#1659: the field guide said only "convert to %", which the model applied
+    to "0.24 Cal Months" as "24%"."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS[code]["percent_effort"]
+    assert "effort in calendar/person months stays as written ('0.24 Cal Months')" in guide
+
+
 def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
     """#475: web160's 11 "Visiting Professor" roles were dropped at stage 4
     because R had no `role` field. Read off the ACTIVE (config-merged) schema,
