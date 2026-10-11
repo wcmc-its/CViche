@@ -319,7 +319,7 @@ def test_agency_named_row_is_withheld_not_rendered_as_a_licence():
 def test_agency_named_row_render_has_no_number_and_records_the_notice():
     gen = _generator()
     gen._fill_licensure([_agency_row_entry()])
-    assert "AB1234563" not in _all_cell_text(gen)
+    assert "AB1234567" not in _all_cell_text(gen)
     assert _AGENCY not in _all_cell_text(gen)
     assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
 
