@@ -39,6 +39,7 @@ from unified_pipeline.stage6.normalization.pii import (
     CAT_TAX_ID,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
+    _dea_check_digit_ok,
     _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
@@ -91,12 +92,6 @@ _DEA_LABEL_PRESENT_RE = re.compile(r'\bdea\b', re.IGNORECASE)
 _DEA_NUMBER_VALUE_RE = re.compile(
     r'(?<![A-Za-z0-9])[A-Za-z]{2}\d{7}(?![A-Za-z0-9])')
 
-# The DEA check digit (#1658): with the seven digits d1..d7,
-# (d1 + d3 + d5) + 2 * (d2 + d4 + d6) ends in d7.
-_DEA_CHECK_WEIGHTS = (1, 2, 1, 2, 1, 2)
-_DEA_CHECK_MODULUS = 10
-_DEA_DIGIT_COUNT = 7
-
 # The Personal Data table's own "Home address:" row is a static template
 # label too, unlike every OTHER row of this lint's full policy (DOB, SSN,
 # spouse, ... only ever appear because the SOURCE cv's free text used that
@@ -128,13 +123,6 @@ _HOME_CONTACT_LABEL_ONLY_RE = re.compile(
 # next row's bare label never does.
 _HOME_CONTACT_LABEL_RE = re.compile(
     r'home\s*(?:address|phone|telephone|tel\.?)\s*:', re.IGNORECASE)
-
-
-def _dea_check_digit_ok(token: str) -> bool:
-    """Whether a two-letters-seven-digits token carries the DEA check digit."""
-    digits = [int(ch) for ch in token[-_DEA_DIGIT_COUNT:]]
-    weighted = sum(w * d for w, d in zip(_DEA_CHECK_WEIGHTS, digits))
-    return weighted % _DEA_CHECK_MODULUS == digits[-1]
 
 
 def _unlabelled_dea_matches(text: str) -> list[re.Match[str]]:
