@@ -2,16 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import type { ApiError } from '../../api/client'
 import { createBatch } from '../../api/batches'
 import { getRunStatus, startRun } from '../../api/runs'
-import { submitInboxItem } from '../../api/inbox'
+import { estimateInboxItems, submitInboxItem } from '../../api/inbox'
 import { getBatchEstimate, uploadFile } from '../../api/upload'
 import {
-  MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
-  startFailure, wasStarted,
+  MAX_UPLOADS_IN_FLIGHT, classifyFailure, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
+  splitForEstimate, startFailure, wasStarted,
   DEFAULT_MAX_UPLOAD_MB,
 } from './batchRows'
 import type { BatchRow, HeldFile } from './batchRows'
 import type { SubmissionType } from './consentText'
-import type { Estimate } from '../../types'
+import type { BatchEstimate, Estimate } from '../../types'
 
 export type BatchPhase = 'edit' | 'uploading' | 'done'
 
@@ -81,11 +81,14 @@ async function sendRow(row: BatchRow, batchId: string, options: BatchSubmitOptio
 
 type PatchMany = (keys: Set<string>, change: (r: BatchRow) => Partial<BatchRow>) => void
 
-/** One /estimate call for `targets`: each row gets its estimate, or the server's reason it can't be submitted. */
-async function estimateRows(targets: BatchRow[], patchMany: PatchMany, setError: (message: string) => void): Promise<void> {
+/** One estimate call for `targets` (/estimate for chosen files, /inbox/estimate for emailed ones): each row
+ *  gets its estimate, or the server's reason it can't be submitted. */
+async function estimateRows(
+  targets: BatchRow[], request: Promise<BatchEstimate>, patchMany: PatchMany, setError: (message: string) => void,
+): Promise<void> {
   const keys = new Set(targets.map((r) => r.key))
   try {
-    const result = await getBatchEstimate(targets.map((r) => r.file))
+    const result = await request
     const byKey = new Map(targets.map((r, i) => [r.key, result.files[i]]))
     patchMany(keys, (r) => {
       const answer = byKey.get(r.key)
@@ -164,17 +167,18 @@ export function useBatchUpload(
 
   const addFiles = (files: File[]) => {
     const fresh = files.map((file) => makeRow(file, nextKey(), undefined, maxUploadMb))
-    // One estimate call holds at most MAX_BATCH_FILES files; any beyond the room left go unestimated.
-    const room = Math.max(0, MAX_BATCH_FILES - rows.filter(isValidRow).length)
-    const toEstimate = fresh.filter(isValidRow).slice(0, room)
-    const estimated = new Set(toEstimate.map((r) => r.key))
-    changeFiles((prev) => [...prev, ...fresh.map((r) => (isValidRow(r) && !estimated.has(r.key) ? { ...r, estimate: null } : r))])
-    if (toEstimate.length) void estimateRows(toEstimate, patchMany, setError)
+    const { added, toEstimate } = splitForEstimate(fresh, rows.filter(isValidRow).length)
+    changeFiles((prev) => [...prev, ...added])
+    if (toEstimate.length) void estimateRows(toEstimate, getBatchEstimate(toEstimate.map((r) => r.file)), patchMany, setError)
   }
 
   const addInbox = (items: HeldFile[]) => {
     const held = new Set(rows.flatMap((r) => (r.inbox ? [r.inbox.id] : [])))
-    changeFiles((prev) => [...prev, ...items.filter((i) => !held.has(i.id)).map((i) => makeInboxRow(i, nextKey()))])
+    const fresh = items.filter((i) => !held.has(i.id)).map((i) => makeInboxRow(i, nextKey()))
+    const { added, toEstimate } = splitForEstimate(fresh, rows.filter(isValidRow).length)
+    changeFiles((prev) => [...prev, ...added])
+    const ids = toEstimate.flatMap((r) => (r.inbox ? [r.inbox.id] : []))
+    if (ids.length) void estimateRows(toEstimate, estimateInboxItems(ids), patchMany, setError)
   }
 
   const sendAll = async (targets: BatchRow[], id: string, options: BatchSubmitOptions) => {

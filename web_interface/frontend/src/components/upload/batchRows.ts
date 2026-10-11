@@ -95,9 +95,19 @@ export function makeRow(
 /** What a held emailed CV needs to be shown and submitted. */
 export type HeldFile = Pick<InboxItem, 'id' | 'filename' | 'size_bytes'>
 
-/** A row for an emailed CV. The server already validated it, and it has no estimate (the bytes are not here). */
+/** A row for an emailed CV. The server already validated it; its estimate is pending, from POST /inbox/estimate (#1626). */
 export function makeInboxRow(item: HeldFile, key: string): BatchRow {
-  return { ...makeRow(new File([], item.filename), key, null), inbox: { id: item.id, sizeBytes: item.size_bytes } }
+  return { ...makeRow(new File([], item.filename), key), inbox: { id: item.id, sizeBytes: item.size_bytes } }
+}
+
+/** New rows split for one estimate call, which holds at most MAX_BATCH_FILES less the `listedValid` rows already
+ *  in the table: `toEstimate` are the valid rows it has room for; `added` is every new row, those past the room
+ *  marked unestimated (null). */
+export function splitForEstimate(fresh: BatchRow[], listedValid: number): { added: BatchRow[]; toEstimate: BatchRow[] } {
+  const room = Math.max(0, MAX_BATCH_FILES - listedValid)
+  const toEstimate = fresh.filter(isValidRow).slice(0, room)
+  const estimated = new Set(toEstimate.map((r) => r.key))
+  return { added: fresh.map((r) => (isValidRow(r) && !estimated.has(r.key) ? { ...r, estimate: null } : r)), toEstimate }
 }
 
 /** The size to show: an emailed row's real size, not its empty placeholder's. */
