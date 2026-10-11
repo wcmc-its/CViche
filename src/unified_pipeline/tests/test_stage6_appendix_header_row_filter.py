@@ -1706,13 +1706,92 @@ def test_appendix_group_heading_is_the_sources_words_never_a_section_header(sour
 
 # ------------------------------------------- #1551: record tails, signature line
 
+_RANGES_AND_SHOWN = [
+    # (the bare Appendix line, a rendered line that shows the same range)
+    ("2014 – 2016", "Example Committee, Member, 2014-2016"),
+    ("2014-2016", "Example Committee 2014 – 2016"),
+    ("2014 to 2016", "Example Committee (2014-2016)"),
+    ("(2014-2016)", "Example Committee, 2014 - 2016"),
+    ("1968- 1969.", "Example Fellowship 1968-1969"),
+    ("1999-Present", "Example Board 1999 – present"),
+    ("July 2023 – Present", "Example Council, July  2023-Present"),  # spacing aside
+    ("07/1990-06/1991", "Example Contract | 07/1990 - 06/1991"),
+]
+
+
 @pytest.mark.parametrize("code", ["T", "N3", "M2B", "I"])
-@pytest.mark.parametrize("text", [
-    "2014 – 2016", "2014-2016", "2014 to 2016", "(2014-2016)", "1968- 1969.",
-    "1999-Present", "July 2023 – Present", "07/1990-06/1991",
+@pytest.mark.parametrize("text,shown", _RANGES_AND_SHOWN)
+def test_bare_date_range_the_document_shows_is_dropped_under_any_code(text, shown, code):
+    entries = [{"text": text, "taxonomy_code": code}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Unrelated line", shown])
+    assert kept == []
+    assert dropped == Counter({DROP_DATE_RANGE: 1})
+
+
+@pytest.mark.parametrize("text,shown", _RANGES_AND_SHOWN)
+def test_bare_date_range_shown_nowhere_else_is_kept(text, shown):
+    """#1551 review (NDMRSO ATUVAL): a range the document does not show is the
+    only place that value appears, so its Appendix line stays."""
+    entries = [{"text": text, "taxonomy_code": "N3"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Committee, 2017-2019"])
+    assert [t for _, t in kept] == [text]
+    assert dropped == Counter()
+    # No document at all drops nothing either, and the text-only check never
+    # claims a range (stage 6's T-line recovery reads it, #1230).
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS)[0] == kept
+    assert _sig(text, None, code="N3") is None
+
+
+@pytest.mark.parametrize("shown", [
+    "Example Committee, 12014-2016",      # the range inside a longer number
+    "Example Committee, 2014-20169",
+    "Example Committee, 1/2014-2016",     # the start is another date's tail
 ])
-def test_bare_date_range_is_dropped_under_any_code(text, code):
-    assert _sig(text, None, code=code) == DROP_DATE_RANGE
+def test_a_range_counts_as_shown_only_on_its_own_boundaries(shown):
+    entries = [{"text": "2014-2016", "taxonomy_code": "N3"}]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, [shown])[1] == Counter()
+
+
+def test_another_appendix_line_vouches_for_a_range_but_a_bare_copy_does_not():
+    other = {"text": "Example Committee, Member, 2014-2016", "taxonomy_code": "T"}
+    tail = {"text": "2014 – 2016", "taxonomy_code": "N3"}
+    kept, dropped = _filter_unmapped_entries([other, tail], _OWNER_TOKENS)
+    assert [t for _, t in kept] == [other["text"]]
+    assert dropped == Counter({DROP_DATE_RANGE: 1})
+    # Two copies of one unplaced range: neither vouches for the other.
+    copy = {"text": "2014-2016", "taxonomy_code": "T"}
+    kept, dropped = _filter_unmapped_entries([tail, copy], _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["2014 – 2016", "2014-2016"]
+    assert dropped == Counter()
+
+
+def test_a_dropped_line_does_not_vouch_for_a_range():
+    """Only a line the Appendix shows vouches: one dropped as page furniture
+    is on no page."""
+    furniture = {"text": "Page 3 2014-2016", "taxonomy_code": "T"}
+    tail = {"text": "2014-2016", "taxonomy_code": "N3"}
+    kept, dropped = _filter_unmapped_entries([furniture, tail], _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["2014-2016"]
+    assert dropped == Counter({DROP_PAGE_FURNITURE: 1})
+
+
+def test_fill_appendix_reads_the_rendered_document_for_a_range():
+    """The wire: `_fill_appendix` hands the document rendered so far to the
+    date-range check, so a range a section already shows is dropped, and the
+    same line with no such section stays."""
+    entries = [{"text": "2014 – 2016", "hierarchy": ["Service"], "taxonomy_code": "N3"},
+               {"text": GENUINE_ONE, "hierarchy": ["Service"], "taxonomy_code": "T"}]
+
+    def appendix_after(section_text: str | None) -> list[str]:
+        gen = WCMTemplateGenerator(verbose=False)
+        gen.doc = Document(gen.template_path)
+        if section_text:
+            gen.doc.add_paragraph(section_text)
+        gen._fill_appendix([dict(e) for e in entries])
+        return _after_appendix_note([p.text for p in gen.doc.paragraphs])
+
+    assert "1. 2014 – 2016" not in appendix_after("Example Committee, Member, 2014-2016")
+    assert "1. 2014 – 2016" in appendix_after(None)
 
 
 @pytest.mark.parametrize("code", ["T", "M2B", "M2A"])
@@ -1747,12 +1826,44 @@ def test_record_tail_drops_are_counted_and_described():
         {"text": "Amount: $2,500", "taxonomy_code": "M2B"},
         {"text": "2015 (sabbatical year)", "taxonomy_code": "T"},
     ]
-    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS)
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Committee 2014-2016"])
     assert [t for _, t in kept] == ["2015 (sabbatical year)"]
     assert dropped == Counter({DROP_DATE_RANGE: 1, DROP_AMOUNT: 1})
     assert _describe_dropped(dropped) == (
         "2 non-content blocks removed (date-range 1, amount 1)"
     )
+
+
+@pytest.mark.parametrize("text", [
+    "Best Teacher Award: $1,000",
+    "Gates Foundation Grand Challenges: $100,000",
+    "Startup Package: $500,000",
+    "Example: $2,500",
+])
+def test_an_amount_behind_a_label_naming_the_record_is_kept(text):
+    """#1551 review: only a label naming the value itself (`_AMOUNT_LABELS`)
+    makes an amount a tail; an award's or package's own name makes it a
+    record."""
+    assert _sig(text, None, code="H") is None
+    assert _sig(text, None) is None
+
+
+@pytest.mark.parametrize("label", [
+    "Amount", "Award amount", "Total", "Total costs", "Direct costs",
+    "Annual direct costs", "Indirect costs", "Funding", "Budget",
+])
+def test_every_value_label_drops_its_bare_amount(label):
+    assert _sig(f"{label}: $12,000", None, code="M2B") == DROP_AMOUNT
+
+
+def test_a_structural_drop_keeps_its_reason_over_a_tail(monkeypatch):
+    """The tail check runs last: a line an older check drops keeps that
+    reason even when the tail check would also claim it."""
+    monkeypatch.setattr(appendix_module, "_record_tail_reason", lambda text: DROP_AMOUNT)
+    assert _sig("Page 3 2014-2016", None) == DROP_PAGE_FURNITURE
+    reclassified = "[T-validation reclassified from T] Section header only"
+    assert _sig("SERVICE", reclassified, code="Q1") == DROP_SECTION_HEADER
+    assert _sig("Example Committee, Member", None, code="Q1") == DROP_AMOUNT
 
 
 @pytest.mark.parametrize("text", ["JQ Doe June 2023", "J Q Doe June 2023", "Jane Doe March 3, 2021"])
