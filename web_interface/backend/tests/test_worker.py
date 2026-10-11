@@ -12,7 +12,7 @@ worker._claim -- see the module docstring there).
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
 
@@ -27,7 +27,7 @@ from app.pipeline import run_queue  # noqa: E402
 from app.services import run_service  # noqa: E402
 from tests.conftest import TestingSessionLocal  # noqa: E402
 
-OLD = datetime(2026, 1, 1, 0, 0, 0)
+OLD = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 class StubOrchestrator:

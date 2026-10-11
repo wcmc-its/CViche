@@ -18,7 +18,7 @@ import json
 import logging
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import object_session
 
 from app.api import upload as upload_module
+from app.api.runs import _run_duration_seconds
 from app.api.upload import _extract_text, _validate_docx_magic
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -1093,7 +1094,7 @@ def test_upload_manifest_and_index_are_consistent(client, db, seed_simple_mode, 
     _auth(client, user)
     storage, upload_dir, patches = _real_storage_patches(tmp_path)
     content = b"PK\x03\x04manifest-integrity-bytes"
-    before = datetime.now()
+    before = datetime.now(timezone.utc)
     resp = _run_patches(patches, lambda: _post_upload(client, "My CV.docx", content, DOCX_MIME))
 
     assert resp.status_code == 200, resp.text
@@ -1109,7 +1110,7 @@ def test_upload_manifest_and_index_are_consistent(client, db, seed_simple_mode, 
     assert manifest["sha256"] == hashlib.sha256(content).hexdigest()
     assert manifest["content_type"] == DOCX_MIME
     assert manifest["user_email"] == "Case@Example.com"
-    assert before <= datetime.fromisoformat(manifest["uploaded_at"]) <= datetime.now()
+    assert before <= datetime.fromisoformat(manifest["uploaded_at"]) <= datetime.now(timezone.utc)
     assert set(manifest) == {
         "run_id", "original_filename", "stored_as", "file_type", "size_bytes",
         "sha256", "content_type", "uploaded_at", "user_email",
@@ -1125,7 +1126,16 @@ def test_upload_manifest_and_index_are_consistent(client, db, seed_simple_mode, 
     assert index_path.read_bytes() == manifest_bytes
 
     assert storage.get_file(run_id, f"input/{run_id}.docx") == content
-    assert db.get(Run, run_id).user_id == user.id
+    run = db.get(Run, run_id)
+    assert run.user_id == user.id
+
+    # #798: the manifest's uploaded_at, the row's started_at and a duration
+    # computed from it are one clock -- UTC -- not an offset apart.
+    uploaded_at = datetime.fromisoformat(manifest["uploaded_at"])
+    assert uploaded_at.utcoffset() == timedelta(0)
+    assert abs(run.started_at - uploaded_at) < timedelta(seconds=5)
+    run.status = "running"
+    assert 0 <= _run_duration_seconds(run) < 5
 
 
 # --- item 11: step rows ------------------------------------------------------

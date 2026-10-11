@@ -13,7 +13,6 @@ import string
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -57,6 +56,7 @@ from app.services.upload_validation import (
 )
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -602,7 +602,7 @@ async def create_run_from_bytes(
             "size_bytes": len(content),
             "sha256": source_sha256,
             "content_type": content_type,
-            "uploaded_at": datetime.now().isoformat(),
+            "uploaded_at": utc_now().isoformat(),
             "user_email": current_user.email,
         }, indent=2).encode("utf-8")
 
@@ -644,7 +644,7 @@ async def create_run_from_bytes(
             filename=filename,
             file_type=file_ext[1:],  # Remove dot
             status=RunState.CREATED,
-            started_at=datetime.now(),
+            started_at=utc_now(),
             user_id=current_user.id,
             submission_type=submission_type,
             estimated_duration_seconds=estimated_duration_seconds,

@@ -20,7 +20,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 from app.pipeline import run_queue  # noqa: E402
 
-SEEDED_AT = datetime(2026, 1, 1, 0, 0, 0)
+SEEDED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture

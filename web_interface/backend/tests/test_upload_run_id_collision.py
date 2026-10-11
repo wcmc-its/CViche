@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1112,7 +1112,7 @@ def test_restart_preserves_all_fields_on_child(db, tmp_path):
     upload_dir.mkdir()
     (upload_dir / "ORIGP1.docx").write_bytes(b"PK\x03\x04fake-restarted-docx")
 
-    before = datetime.now()
+    before = datetime.now(timezone.utc)
     with _restart_env(original, storage, upload_dir) as runs_api:
         result = _restart(runs_api, "ORIGP1", db, user)
 

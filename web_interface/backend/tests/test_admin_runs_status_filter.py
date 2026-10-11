@@ -8,7 +8,7 @@ sentinel opts back in to every status. Filtering must apply to the total count
 as well as the page so pagination stays consistent.
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
@@ -105,7 +105,7 @@ def test_specific_status_exact_match_still_works(client, db):
 def _seed_queue_view(db):
     from app.models import Run
 
-    old = datetime.now() - timedelta(minutes=30)
+    old = datetime.now(timezone.utc) - timedelta(minutes=30)
     # started_at deliberately does NOT match queued_at (it's left at its
     # original pre-retry value, e.g. hours old): queued_at, not started_at, is
     # the queued-age source (#701 runs.py point 6 -- started_at is re-stamped
@@ -113,9 +113,9 @@ def _seed_queue_view(db):
     # started_at here would read as hours old, not ~30 minutes.
     db.add_all([
         Run(id="QS_QUEUED", filename="a.docx", file_type="docx", status="queued",
-            started_at=datetime.now() - timedelta(hours=5), queued_at=old),
+            started_at=datetime.now(timezone.utc) - timedelta(hours=5), queued_at=old),
         Run(id="QS_RUNNING", filename="b.docx", file_type="docx", status="running",
-            started_at=datetime.now() - timedelta(minutes=5)),
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=5)),
         Run(id="QS_DONE", filename="c.docx", file_type="docx", status="complete", started_at=old),
     ])
     db.commit()

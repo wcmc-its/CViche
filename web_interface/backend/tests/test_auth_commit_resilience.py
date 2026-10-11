@@ -131,21 +131,21 @@ def test_bump_last_active_does_not_dirty_the_request_session(client, db):
     later db.commit() re-issues the same UPDATE from a snapshot older than
     that side commit and MariaDB (innodb_snapshot_isolation=ON) rejects it
     with 1020 -- the 2026-09-03 prod regression on POST /run/{id}/feedback."""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import inspect
 
     from app.auth import _bump_last_active
 
     user = _make_user(db)
-    user.last_active_at = datetime.now() - timedelta(minutes=5)
+    user.last_active_at = datetime.now(timezone.utc) - timedelta(minutes=5)
     db.commit()
 
     _bump_last_active(user)
 
     assert user not in db.dirty
     assert not inspect(user).modified
-    assert (datetime.now() - user.last_active_at).total_seconds() < 5
+    assert (datetime.now(timezone.utc) - user.last_active_at).total_seconds() < 5
     # and the write really landed, via the side session
     db.expire_all()
-    assert (datetime.now() - db.query(User).get(user.id).last_active_at).total_seconds() < 5
+    assert (datetime.now(timezone.utc) - db.query(User).get(user.id).last_active_at).total_seconds() < 5

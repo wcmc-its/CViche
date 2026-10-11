@@ -22,7 +22,7 @@ Runnable like the rest of the suite, e.g.:
 import asyncio
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -530,7 +530,7 @@ def test_execute_cancel_is_idempotent_when_api_already_cancelled(monkeypatch, tm
     row, _, _ = _run_cancelled_execute(
         monkeypatch, tmp_path, db, "CNCL02", "running", prepare=api_cancel)
     assert row.status == "cancelled"
-    assert row.completed_at == datetime(2026, 6, 4, 12, 5, 0)
+    assert row.completed_at == datetime(2026, 6, 4, 12, 5, 0, tzinfo=timezone.utc)
 
 
 def test_execute_cancel_does_not_overwrite_another_terminal_status(monkeypatch, tmp_path, db):

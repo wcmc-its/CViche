@@ -17,7 +17,7 @@ import os
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -36,7 +36,7 @@ def _seed_stale_running_run(db, run_id="STALE1", *, attempt_count=1,
     """
     run = Run(
         id=run_id, filename="cv.docx", file_type="docx", status="running",
-        started_at=datetime.now() - timedelta(minutes=120),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=120),
         attempt_count=attempt_count,
     )
     db.add(run)
@@ -184,7 +184,7 @@ def test_resumed_run_is_not_stale_on_the_next_sweep(db, monkeypatch):
     db.refresh(run)
     assert run.status == "running"
     assert run.attempt_count == 2
-    assert run.started_at > datetime.now() - timedelta(minutes=1)
+    assert run.started_at > datetime.now(timezone.utc) - timedelta(minutes=1)
 
 
 def test_resume_restamps_the_image_tag_of_the_resuming_process(db, monkeypatch):
@@ -251,7 +251,7 @@ def test_sweep_does_not_fail_a_run_a_sibling_resumed_mid_sweep(db, monkeypatch):
 
     def sibling_resumes_first(run, session):
         session.query(Run).filter(Run.id == run.id).update(
-            {"started_at": datetime.now(), "attempt_count": 2},
+            {"started_at": datetime.now(timezone.utc), "attempt_count": 2},
             synchronize_session=False,
         )
         session.commit()
@@ -278,7 +278,7 @@ def test_sweep_that_loses_the_retry_claim_dispatches_nothing(db, monkeypatch):
 
     def sibling_resumes_first(run, session):
         session.query(Run).filter(Run.id == run.id).update(
-            {"started_at": datetime.now(), "attempt_count": 2},
+            {"started_at": datetime.now(timezone.utc), "attempt_count": 2},
             synchronize_session=False,
         )
         session.commit()

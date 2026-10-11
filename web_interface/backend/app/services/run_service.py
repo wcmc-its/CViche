@@ -31,6 +31,7 @@ from app.pipeline import concurrency, run_queue
 from app.services import auto_retry, batch_completion, batch_service, notifications
 from app.storage import get_storage
 from app.storage.base import RunStorage
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +303,7 @@ def reconcile_stale_runs(db: Session) -> int:
     a run that is still legitimately executing.
     """
     minutes = _effective_stale_run_minutes()
-    cutoff = datetime.now() - timedelta(minutes=minutes)
+    cutoff = utc_now() - timedelta(minutes=minutes)
     stale_runs = (
         db.query(Run)
         .filter(Run.status == RunState.RUNNING, Run.started_at < cutoff)
@@ -311,7 +312,7 @@ def reconcile_stale_runs(db: Session) -> int:
     if not stale_runs:
         return 0
 
-    now = datetime.now()
+    now = utc_now()
     failed_count = 0
     resumed_count = 0
     failed_batches: set[str | None] = set()
@@ -396,7 +397,7 @@ def reconcile_queued_runs(db: Session) -> int:
         return 0
 
     minutes = _queued_reconcile_minutes()
-    cutoff = datetime.now() - timedelta(minutes=minutes)
+    cutoff = utc_now() - timedelta(minutes=minutes)
     stranded = (
         db.query(Run)
         .filter(Run.status == RunState.QUEUED, Run.queued_at.isnot(None), Run.queued_at < cutoff)
@@ -435,7 +436,7 @@ def queue_db_view(db: Session) -> dict[str, int | float | None]:
     """
     from sqlalchemy import func
 
-    now = datetime.now()
+    now = utc_now()
 
     queued_count, oldest_queued = db.query(func.count(Run.id), func.min(Run.queued_at)).filter(
         Run.status == RunState.QUEUED
@@ -566,7 +567,7 @@ def reap_orphaned_created_runs(
         except (TypeError, ValueError):
             older_than_hours = DEFAULT_ORPHAN_REAP_HOURS
 
-    cutoff = datetime.now() - timedelta(hours=older_than_hours)
+    cutoff = utc_now() - timedelta(hours=older_than_hours)
     orphans = (
         db.query(Run)
         .filter(Run.status == RunState.CREATED, Run.started_at < cutoff)
@@ -648,7 +649,7 @@ def _transition_run_for_retry(
         db, run, seen_started_at,
         attempt_count=Run.attempt_count + 1,
         image_tag=current_image_tag(),
-        started_at=datetime.now(),
+        started_at=utc_now(),
         error_message=None,
         completed_at=None,
     ):
@@ -760,7 +761,7 @@ def _schedule_auto_retry(
             "Auto-retry could not resolve input for run %s; marking failed", run.id
         )
         if _claim_stale_run(db, run, seen_started_at, status=RunState.FAILED):
-            _mark_run_failed(run, db, datetime.now())
+            _mark_run_failed(run, db, utc_now())
         return False
 
     if not _transition_run_for_retry(run, db, start_step_number, seen_started_at):
@@ -770,7 +771,7 @@ def _schedule_auto_retry(
         # Launch declined (no slot) or errored -- don't leave the run pinned at
         # "running" with nothing executing it. Fall back to the failed path.
         # This pod took the run in the transition above, so no claim is needed.
-        _mark_run_failed(run, db, datetime.now())
+        _mark_run_failed(run, db, utc_now())
         db.commit()
         return False
     return True
@@ -785,7 +786,7 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     drain last looked is left alone. Each run marked failed also gets a Log
     row and a Teams failure card. Returns the count marked failed.
     """
-    now = datetime.now()
+    now = utc_now()
     failed = []
     for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
         if not _claim_stale_run(db, run, run.started_at, status=RunState.FAILED):
@@ -945,7 +946,7 @@ def claim_queued(run_id: str) -> ClaimResult:
         won = db.execute(
             update(Run)
             .where(Run.id == run_id, Run.status == RunState.QUEUED)
-            .values(status=RunState.RUNNING, started_at=datetime.now(),
+            .values(status=RunState.RUNNING, started_at=utc_now(),
                     image_tag=current_image_tag(),
                     error_message=None, completed_at=None)
         ).rowcount == 1
@@ -980,7 +981,7 @@ def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) ->
     """
     db = SessionLocal()
     try:
-        now = datetime.now()
+        now = utc_now()
         rowcount = db.execute(
             update(Run)
             .where(Run.id == run_id, Run.status.in_(from_statuses))
@@ -1043,7 +1044,7 @@ def flip_to_queued(
     rowcount = db.execute(
         update(Run)
         .where(Run.id == run_id, Run.status.in_(allowed_from))
-        .values(status=RunState.QUEUED, queued_at=datetime.now(), error_message=None,
+        .values(status=RunState.QUEUED, queued_at=utc_now(), error_message=None,
                 completed_at=None, resume_from_step=resume_from_step)
     ).rowcount
     step_snapshots: tuple[StepSnapshot, ...] = ()

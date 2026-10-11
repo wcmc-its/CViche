@@ -3,7 +3,6 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 
 import redis
@@ -71,6 +70,7 @@ from app.services.runs_admin_query import (
     status_clause,
 )
 from app.storage import get_storage
+from app.timeutil import as_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +93,13 @@ def _run_duration_seconds(run) -> int | None:
     """
     if run.total_duration_seconds is not None:
         return run.total_duration_seconds
+    # Every operand goes through as_utc (app/timeutil.py): a value loaded from
+    # the DB is aware UTC, but one assigned in-process and not yet reloaded can
+    # be naive UTC, and naive minus aware raises TypeError.
     if run.started_at and run.completed_at:
-        return int((run.completed_at - run.started_at).total_seconds())
+        return int((as_utc(run.completed_at) - as_utc(run.started_at)).total_seconds())
     if run.started_at and run.status == RunState.RUNNING:
-        # Use datetime.now() to match server_default=func.now() (local time).
-        return max(0, int((datetime.now() - run.started_at).total_seconds()))
+        return max(0, int((utc_now() - as_utc(run.started_at)).total_seconds()))
     return None
 
 
@@ -565,7 +567,7 @@ async def restart_run(
             "size_bytes": len(content),
             "sha256": hashlib.sha256(content).hexdigest(),
             "restarted_from": run_id,  # provenance: the run this was restarted from
-            "uploaded_at": datetime.now().isoformat(),
+            "uploaded_at": utc_now().isoformat(),
             "user_email": current_user.email,
         }, indent=2).encode("utf-8")
 
@@ -624,7 +626,7 @@ async def restart_run(
             filename=original_run.filename,
             file_type=original_run.file_type,
             status=RunState.CREATED,
-            started_at=datetime.now(),
+            started_at=utc_now(),
             user_id=current_user.id,
             submission_type=original_run.submission_type,
             show_track_changes=original_run.show_track_changes,
@@ -681,7 +683,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     # value would round-trip as naive UTC and get mislabelled with the
     # server's LOCAL offset by schemas.py's _iso_with_offset -- wrong by
     # that offset (timestamp and duration both) on a non-UTC host.
-    run.completed_at = datetime.now()
+    run.completed_at = utc_now()
     db.commit()
     batch_completion.notify_if_batch_complete(run.batch_id)
 
@@ -810,7 +812,7 @@ def retry_step(
     # it, so a retry of a run started over an hour ago was reaped mid-run (#145).
     if not claim_run_as_running(
         db, run_id, Run.status != RunState.RUNNING,
-        error_message=None, completed_at=None, started_at=datetime.now(),
+        error_message=None, completed_at=None, started_at=utc_now(),
     ):
         db.rollback()
         concurrency.release_slot(run_id)
