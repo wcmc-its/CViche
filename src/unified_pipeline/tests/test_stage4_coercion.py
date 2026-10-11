@@ -180,6 +180,33 @@ def test_apostrophe_and_hyphen_surnames_still_work():
     assert normalize_authors_vancouver("Smith-Jones, amy") == "Smith-Jones A"
 
 
+# --- #1660: mixed-case digraph initials ("Th") are not a surname ----------
+
+def test_mixed_case_digraph_initials_stay_after_surname():
+    # Before the fix "FJTh" failed the all-caps initials check and the
+    # "FirstName LastName" branch reordered "Doe FJTh" into "FJTh D".
+    assert (
+        normalize_authors_vancouver("Berger HJ, Doe FJTh, Surkin L")
+        == "Berger HJ, Doe FJTh, Surkin L"
+    )
+
+
+def test_ch_and_sh_digraph_initials_stay_after_surname():
+    assert normalize_authors_vancouver("Doe ChA") == "Doe ChA"
+    assert normalize_authors_vancouver("Doe ASh") == "Doe ASh"
+
+
+def test_plain_initials_and_real_surnames_unchanged_by_digraph_rule():
+    # Regression guard: all-caps initials stay put, and a real lowercase
+    # surname that merely starts with "Th"/"Ch"/"Sh" still reorders.
+    assert normalize_authors_vancouver("Doe JA") == "Doe JA"
+    assert normalize_authors_vancouver("Ann Chen") == "Chen A"
+    assert normalize_authors_vancouver("Mary Shaw") == "Shaw M"
+    assert normalize_authors_vancouver("Li Thu") == "Thu L"
+    # Only T/C/S take a lowercase "h": any other "Xh" is not an initial.
+    assert normalize_authors_vancouver("Ann JBh") == "JBh A"
+
+
 # --- #3819086998: negative-path coverage ------------------------------------
 
 def test_malformed_pmid_not_extracted():

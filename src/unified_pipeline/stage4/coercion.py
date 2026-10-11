@@ -357,6 +357,14 @@ REGEX_PATTERNS = {
     'orcid': r'(\d{4}-\d{4}-\d{4}-\d{3}[\dX])',
 }
 
+# A trailing byline token that is initials, not a surname, even though it is
+# not all-uppercase: every letter uppercase except an "h" after T, C or S --
+# the Dutch/Germanic digraph initials "Th", "Ch", "Sh" ("Doe FJTh"). No length
+# cap, matching the all-caps initials check it sits beside.
+# Without it the "FirstName LastName" branch reads "FJTh" as the surname and
+# reorders "Doe FJTh" into "FJTh D" (#1660).
+_MIXED_CASE_INITIALS_RE = re.compile(r'^(?:[A-Z]|[TCS]h)+$')
+
 def normalize_authors_vancouver(authors_string: str) -> str:
     """
     Normalize author string to Vancouver citation style.
@@ -432,7 +440,11 @@ def normalize_authors_vancouver(authors_string: str) -> str:
         space_parts = author.split()
         if len(space_parts) >= 2:
             # Check if last part looks like a last name (not initials)
-            if len(space_parts[-1]) > 2 and not re.match(r'^[A-Z]+$', space_parts[-1]):
+            if (
+                len(space_parts[-1]) > 2
+                and not re.match(r'^[A-Z]+$', space_parts[-1])
+                and not _MIXED_CASE_INITIALS_RE.match(space_parts[-1])
+            ):
                 last_name = space_parts[-1]
                 first_parts = ' '.join(space_parts[:-1])
                 initials = extract_initials(first_parts)
