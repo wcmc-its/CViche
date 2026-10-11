@@ -190,6 +190,13 @@ _LEADING_CONNECTIVE_RE = re.compile(
     r'^(?:(?:of|at|from|by|for|in|to|and|with|on)\s+)+(?:the\s+)?', re.IGNORECASE)
 _TRAILING_CONNECTIVE_RE = re.compile(
     r'(?:\s+(?:of|the|at|from|by|for|in|to|and|with|on))+$|\s*&$', re.IGNORECASE)
+# A clause this short is a list glyph or a stub the removals left, not a name:
+# Word's Courier sub-bullet "o" (or the "◦" the PDF converter now reads it as)
+# rendered as six Q1 Organizations on one CV (SXPHOG-02, #1584). Kept at this
+# length: a two-capital acronym ("UN"), and anything with a digit ("3M", or a
+# year written short, "2019, 21, 23", which the Dates cell may not show).
+_RESIDUE_MAX_CHARS = 2
+_SHORT_RESIDUE_KEPT_RE = re.compile(r'[A-Z]{2}|.*\d.*')
 
 # A Q2 row with no stage-4 role gets the default 'Member' only when the row is
 # a membership: its source heading, or its own line, names a body one sits on.
@@ -264,7 +271,9 @@ def _organization_segment(segment: str) -> str:
     tidied clause by clause (#1437): each comma clause loses the edge
     punctuation and edge connectives the removals exposed, and a clause made
     only of months and connectives -- none of which can name an organization --
-    is dropped. A year stays: it may be one the Dates cell does not show."""
+    is dropped, as is one of one or two characters with no digit that is not
+    a two-capital acronym (#1584: a bullet glyph). A year stays: it may be one the Dates cell does
+    not show."""
     clauses = (_organization_clause(clause) for clause in segment.split(','))
     return ', '.join(clause for clause in clauses if clause)
 
@@ -277,6 +286,8 @@ def _organization_clause(clause: str) -> str:
     clause = _TRAILING_CONNECTIVE_RE.sub('', clause).strip(_EDGE_PUNCTUATION)
     words = {word.lower() for word in re.findall(r'\w+', clause)}
     if words <= _MONTH_WORDS | _CONNECTIVE_WORDS:
+        return ''
+    if len(clause) <= _RESIDUE_MAX_CHARS and not _SHORT_RESIDUE_KEPT_RE.fullmatch(clause):
         return ''
     return clause
 

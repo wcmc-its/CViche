@@ -434,6 +434,19 @@ Lints, ranked by the severity of the failure class they catch:
                           145-155, cut at 100 characters before #1605). WARN,
                           one per entry; a regression guard. Reads stage 4
                           and the docx's table rows
+14an. footer_in_record    a running page footer kept as a stage-4 entry's
+                          '\\t' part: a bare month-year that 5 or more
+                          entries carry, and a bare page number beside it
+                          (#1584, RLADNC-01). WARN when a date field holds
+                          the footer's year and the rest of the text does
+                          not (the record is misdated), else INFO; one per
+                          entry. Reads stage 4
+14ao. glyph_field         a rendered table cell that is only one or two
+                          list glyphs ("o", "◦", "•", "-"): a source bullet
+                          read as a field value (#1584, SXPHOG-02). WARN,
+                          one finding for the run; INFO for a stage-4 field
+                          of that shape no cell shows. Reads the docx's
+                          table rows; stage 4 when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -542,6 +555,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_footer_in_record,
     lint_grant_boundary,
     lint_grant_bucket,
     lint_grant_facts,
@@ -605,6 +619,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_duplicate_records,
     lint_etal_added,
     lint_fanout_cell_residue,
+    lint_glyph_field,
     lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
@@ -801,6 +816,8 @@ KNOWN_LINTS = (
     "appointment_title_overlong",
     "grant_facts",
     "licensure_fallback_truncated",
+    "footer_in_record",
+    "glyph_field",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1667,6 +1684,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks", "subpoints")),
     LintSpec("licensure_fallback_truncated", lint_licensure_fallback_truncated,
              ("stage_4", "table_rows")),
+    LintSpec("footer_in_record", lint_footer_in_record, ("stage_4",)),
+    LintSpec("glyph_field", lint_glyph_field, ("table_rows",), optional=("stage_4",)),
 )
 
 #: The views read from the stage-6 docx.

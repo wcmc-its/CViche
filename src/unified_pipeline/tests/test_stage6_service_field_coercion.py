@@ -908,6 +908,18 @@ def test_q1_missing_organization_is_the_text_left_after_role_and_dates(tmp_path)
     assert row == ["Fictional Gazette WoW", "Section Editor, Widgets", "2022-Present"]
 
 
+def test_q1_sub_bullet_glyph_is_not_rendered_as_the_organization(tmp_path):
+    """#1584 (SXPHOG-02 shape): the stage-2 line carries a Courier "o" part
+    and stage 4 left the organization null; the cell stays blank."""
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("Fictional Board Secretary\tJuly 2020 \u2013 August 2021\to",
+                  role="Fictional Board Secretary", start_date="2020-07",
+                  end_date="2021-08"),
+        "Fictional Board Secretary")
+    assert row[0] == ""
+
+
 def test_q1_role_that_is_the_whole_line_leaves_organization_blank(tmp_path):
     row = _q1_row(
         tmp_path,
@@ -1010,6 +1022,24 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     # A century-less end year goes with its range (#665): taking "1992" alone
     # left "93" behind as the whole Organization cell.
     ("1992-93 Vice-President", "Vice-President", "1992", "1993", ""),
+    # #1584 (SXPHOG-02 shape): a sub-bullet glyph glued to the line as its own
+    # part is no organization, as Word's Courier "o" or as the converter's "◦".
+    ("Secretary\tJuly 2020 \u2013 August 2021\to", "Secretary", "2020-07", "2021-08", ""),
+    ("o\tSecretary\t2020", "Secretary", "2020", None, ""),
+    ("Fictional Society\t\u25e6\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society, \u2022 Treasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society\tx\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society\t\u25e6\u25e6\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society\tUn\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    # A two-capital acronym, or a short name with a digit, can name one.
+    ("UN\tTreasurer", "Treasurer", None, None, "UN"),
+    ("3M\tTreasurer", "Treasurer", None, None, "3M"),
+    ("Fictional Society, NY\tTreasurer", "Treasurer", None, None, "Fictional Society, NY"),
+    # A short year the Dates cell does not show stays (it is text the row
+    # would otherwise lose); so do three characters.
+    ("Fictional Society, 2019, 21, 23\tTreasurer", "Treasurer", "2019", None,
+     "Fictional Society, 21, 23"),
+    ("Fictional Society\tAbc\tTreasurer", "Treasurer", None, None, "Fictional Society, Abc"),
 ])
 def test_organization_left_in_text(text, role, start, end, expected):
     assert _organization_left_in_text(text, role, start, end) == expected

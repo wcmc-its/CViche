@@ -527,6 +527,16 @@ LINT_COPY = {
         "A licence or certification with no state and no number is shown by its own text in "
         "the State column, and that text stops partway: the rest of it is not in the document.",
         "Restore the full text from the source CV."),
+    "footer_in_record": LintCopy(
+        "Page footer read as part of an entry",
+        "A line repeated at the foot of the source CV's pages, such as a month and year, was "
+        "kept with an entry, and the entry may carry that date instead of its own.",
+        "Check the entry's date against the source CV and remove the footer text."),
+    "glyph_field": LintCopy(
+        "Bullet symbol shown as a value",
+        "A bullet symbol from the source CV, such as \"o\" or \"•\", is shown on its own in a "
+        "table cell, where a value such as an organization should be.",
+        "Replace the symbol with the value from the source CV, or clear the cell."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present

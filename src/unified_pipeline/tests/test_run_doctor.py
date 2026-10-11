@@ -58,6 +58,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
     lint_etal_added,
+    lint_glyph_field,
     lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
@@ -4780,14 +4781,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (67), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (69), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 65
+    assert len(payload["findings"]) == 67
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -7995,3 +7996,57 @@ def test_licensure_fallback_truncated_reads_only_f1_entries_without_state_or_num
     assert _lic_hits([_lic_entry(145, ""), _lic_entry(147, _LIC_TEXT, code="F2")], rows) == []
     assert _lic_hits([_lic_entry(145, _LIC_TEXT, license_number="123456")], rows) == []
     assert _lic_hits([_lic_entry(145, _LIC_TEXT, state_country="Example State")], rows) == []
+
+
+# glyph_field (#1584, SXPHOG-02 shape): a source list glyph rendered as a
+# field. Invented rows.
+
+_GLYPH_HEADER = ["Organization", "Role", "Dates"]
+
+
+def _glyph_table(*rows):
+    return [[_GLYPH_HEADER, *rows]]
+
+
+@pytest.mark.parametrize("glyph", ["o", "\u25e6", "\u2022", "-", "\u2013", "\uf0b7", " o ", "--"])
+def test_glyph_field_warns_on_a_rendered_glyph_cell(glyph):
+    tables = _glyph_table(["Fictional Society", "Treasurer", "2001"],
+                          [glyph, "Secretary", "2020-2021"])
+    assert lint_glyph_field(tables, None) == [{
+        "lint": "glyph_field", "severity": "WARN",
+        "message": "1 rendered table row(s) hold a cell that is only a list glyph -- "
+                   "a source bullet read as a field value",
+        "evidence": [f"{glyph.strip()} | Secretary | 2020-2021"],
+        "status": "ran", "reason": ""}]
+
+
+@pytest.mark.parametrize("cell", [
+    "", "UN", "x", "O", "oo o", "%", "|", "3", "ooo", "o Fictional Society", "\u2022\u2022\u2022"])
+def test_glyph_field_is_silent_on_a_value_or_an_empty_cell(cell):
+    assert lint_glyph_field(_glyph_table([cell, "Secretary", "2020"]), None) == []
+
+
+def test_glyph_field_is_one_finding_for_the_run():
+    tables = _glyph_table(["o", "Secretary", "2020"], ["o", "Treasurer", "2021"])
+    [finding] = lint_glyph_field([*tables, *tables], None)
+    assert finding["message"].startswith("4 rendered table row(s)")
+
+
+def _glyph_stage4(value):
+    return {"entries": [{"taxonomy_code": "Q1", "element_idx_start": 533,
+                         "extracted_fields": {"organization": value, "role": "Secretary"}}]}
+
+
+def test_glyph_field_is_info_for_a_stage_4_glyph_no_cell_shows():
+    [finding] = lint_glyph_field(_glyph_table(["", "Secretary", "2020"]), _glyph_stage4("o"))
+    assert finding["severity"] == "INFO"
+    assert finding["evidence"] == ["entry 533 (Q1): organization = 'o'"]
+
+
+def test_glyph_field_reports_the_rendered_cell_over_the_stage_4_field():
+    [finding] = lint_glyph_field(_glyph_table(["o", "Secretary", "2020"]), _glyph_stage4("o"))
+    assert finding["severity"] == "WARN"
+
+
+def test_glyph_field_is_silent_on_a_stage_4_value():
+    assert lint_glyph_field(_glyph_table(), _glyph_stage4("Fictional Society")) == []

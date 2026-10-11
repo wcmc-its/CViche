@@ -180,6 +180,9 @@ REVIEW_FLAGS = {
                              "partly here. Check it and add it where it belongs."),
     "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
     "licensure_fallback_truncated": "Text cut short: complete it from your CV.",
+    "footer_in_record": ("This entry may hold a page footer from your CV, such as a month and "
+                         "year: check its date against the CV."),
+    "glyph_field": "A bullet symbol is shown here instead of a value: fill it in from your CV.",
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
                     "your CV gives is missing, or one shown here is not in this grant's entry. "
                     "Check it against the CV."),

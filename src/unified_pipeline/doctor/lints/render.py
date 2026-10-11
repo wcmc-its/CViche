@@ -65,7 +65,7 @@ from ..shared import (
     _template_haystack,
     offered_as_subpoint,
 )
-from .extraction import _is_prose
+from .extraction import _is_prose, _leaf_strings
 
 # Lint 7: a source section with at least this many substantive lines whose
 # output section is empty did not just "have nothing to say".
@@ -4283,3 +4283,66 @@ def lint_licensure_fallback_truncated(stage4: dict,
             f"rest is in no licence row: '{tail[:LICENSURE_TAIL_EXCERPT_CHARS]}'",
             truncated))
     return findings
+
+
+# --- glyph_field -------------------------------------------------------------
+#
+# A list glyph the source used as a bullet, read as text and rendered as a
+# field: Word's level-2 bullet is a Courier "o", and one CV rendered six Q1
+# rows with Organization "o" (#1584, SXPHOG-02). #1630 folds the glyph onto its
+# item in the PDF converter, and stage 6's Organization fallback no longer
+# takes a one- or two-character residue (`_organization_clause`); this lint
+# checks both stay so. A rendered table cell is WARN: the reader sees it. A
+# stage-4 field value of the same shape that no cell shows is INFO: the
+# record holds it, but it did not reach the page.
+
+#: The glyphs a source CV bullets with: pdf_to_docx's BULLET_GLYPHS (not
+#: imported: that module loads pdfplumber), Word's Courier "o" and Wingdings
+#: section mark, a middle dot, an asterisk and the dashes.
+GLYPH_FIELD_CHARS = frozenset("•▪◦‣●○■□─o§·*-–—")
+#: A field of at most this many characters, every one a glyph, is a glyph.
+GLYPH_FIELD_MAX_CHARS = 2
+#: Values quoted per finding.
+GLYPH_FIELD_EVIDENCE_LIMIT = 5
+
+
+def _is_glyph(value: str) -> bool:
+    value = value.strip()
+    return 0 < len(value) <= GLYPH_FIELD_MAX_CHARS and set(value) <= GLYPH_FIELD_CHARS
+
+
+def _glyph_cells(table_rows: list[list[list[str]]]) -> list[str]:
+    """Each rendered row with a glyph cell, its cells joined."""
+    return [TABLE_ROW_JOINER.join(cell.strip() for cell in row if cell.strip())
+            for table in table_rows for row in table if any(map(_is_glyph, row))]
+
+
+def _glyph_fields(stage4: dict | None) -> list[str]:
+    """'entry N (code): key' for each stage-4 field whose value is a glyph."""
+    if not stage4:
+        return []
+    return [f"entry {entry.element_idx} ({entry.code}): {key} = {leaf.strip()!r}"
+            for entry in _fields_entries(stage4) for key, value in entry.fields.items()
+            for leaf in _leaf_strings(value) if _is_glyph(leaf)]
+
+
+def lint_glyph_field(table_rows: list[list[list[str]]], stage4: dict | None) -> list[dict]:
+    """A rendered table cell, or a stage-4 field value, that is nothing but
+    one or two list glyphs (#1584). WARN for the rendered rows, one finding
+    quoting them; INFO for the stage-4 fields, one finding, when no cell
+    shows a glyph."""
+    rows = _glyph_cells(table_rows)
+    if rows:
+        return [_finding(
+            "glyph_field", "WARN",
+            f"{len(rows)} rendered table row(s) hold a cell that is only a list "
+            f"glyph -- a source bullet read as a field value",
+            rows[:GLYPH_FIELD_EVIDENCE_LIMIT])]
+    fields = _glyph_fields(stage4)
+    if fields:
+        return [_finding(
+            "glyph_field", "INFO",
+            f"{len(fields)} stage-4 field value(s) are only a list glyph; no "
+            f"rendered cell shows one",
+            fields[:GLYPH_FIELD_EVIDENCE_LIMIT])]
+    return []
