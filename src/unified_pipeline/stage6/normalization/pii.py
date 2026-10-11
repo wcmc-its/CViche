@@ -134,7 +134,8 @@ _DEA_DIGIT_COUNT = 7
 def _dea_check_digit_ok(token: str) -> bool:
     """Whether a two-letters-seven-digits token carries the DEA check digit."""
     digits = [int(ch) for ch in token[-_DEA_DIGIT_COUNT:]]
-    weighted = sum(w * d for w, d in zip(_DEA_CHECK_WEIGHTS, digits))
+    weighted = sum(w * d for w, d in zip(_DEA_CHECK_WEIGHTS, digits[:-1],
+                                         strict=True))
     return weighted % _DEA_CHECK_MODULUS == digits[-1]
 
 
