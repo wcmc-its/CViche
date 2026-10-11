@@ -11,7 +11,7 @@ than through the lifespan.
 """
 import asyncio
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import fakeredis
 import pytest
@@ -214,30 +214,30 @@ class TestReconcileQueuedRuns:
 
     def test_noop_outside_queue_mode(self, db, fake_redis, monkeypatch):
         monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
-        _seed_queued_run(db, "NQ001", queued_at=datetime.now() - timedelta(minutes=30))
+        _seed_queued_run(db, "NQ001", queued_at=datetime.now(timezone.utc) - timedelta(minutes=30))
         assert run_service.reconcile_queued_runs(db) == 0
         assert _stream_run_ids(fake_redis) == []
 
     def test_requeues_a_stranded_row_with_no_token(self, db, fake_redis, queue_mode):
-        _seed_queued_run(db, "SQ001", queued_at=datetime.now() - timedelta(minutes=10))
+        _seed_queued_run(db, "SQ001", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10))
         assert run_service.reconcile_queued_runs(db) == 1
         assert _stream_run_ids(fake_redis) == ["SQ001"]
 
     def test_leaves_a_recently_queued_row_alone(self, db, fake_redis, queue_mode):
-        _seed_queued_run(db, "SQ002", queued_at=datetime.now() - timedelta(minutes=1))
+        _seed_queued_run(db, "SQ002", queued_at=datetime.now(timezone.utc) - timedelta(minutes=1))
         assert run_service.reconcile_queued_runs(db) == 0
         assert _stream_run_ids(fake_redis) == []
 
     def test_leaves_a_row_alone_when_its_token_is_still_undelivered(self, db, fake_redis, queue_mode):
         run_queue.ensure_group()
-        _seed_queued_run(db, "SQ003", queued_at=datetime.now() - timedelta(minutes=10))
+        _seed_queued_run(db, "SQ003", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10))
         run_queue.enqueue("SQ003")  # never delivered -- still live
         assert run_service.reconcile_queued_runs(db) == 0
         assert _stream_run_ids(fake_redis) == ["SQ003"]  # unchanged: no 2nd token
 
     def test_leaves_a_row_alone_when_its_token_is_pending(self, db, fake_redis, queue_mode):
         run_queue.ensure_group()
-        _seed_queued_run(db, "SQ004", queued_at=datetime.now() - timedelta(minutes=10))
+        _seed_queued_run(db, "SQ004", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10))
         run_queue.enqueue("SQ004")
         run_queue.read_one("worker-a")  # delivered, not yet ACKed -> pending
         assert run_service.reconcile_queued_runs(db) == 0
@@ -249,7 +249,7 @@ class TestReconcileQueuedRuns:
         row genuinely stranded after its one token was fully cleared would
         never be recovered."""
         run_queue.ensure_group()
-        _seed_queued_run(db, "SQ005", queued_at=datetime.now() - timedelta(minutes=10))
+        _seed_queued_run(db, "SQ005", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10))
         entry_id = run_queue.enqueue("SQ005")
         run_queue.read_one("worker-a")
         run_queue.ack(entry_id)
@@ -265,7 +265,7 @@ class TestReconcileQueuedRuns:
         guard stops a second sweep in the same window from adding a duplicate
         token for the same run (#701 runs.py#5's re-enqueue-storm guard,
         reused here for the reconciler)."""
-        _seed_queued_run(db, "SQ006", queued_at=datetime.now() - timedelta(minutes=10))
+        _seed_queued_run(db, "SQ006", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10))
         assert run_service.reconcile_queued_runs(db) == 1
         assert run_service.reconcile_queued_runs(db) == 0
         assert _stream_run_ids(fake_redis) == ["SQ006"]
@@ -274,7 +274,7 @@ class TestReconcileQueuedRuns:
         """#1114: the reconciler routes through run_queue.queue_for like every
         other producer -- a stranded batch run goes back on the batch stream,
         never onto the single-run stream where general workers would take it."""
-        _seed_queued_run(db, "SQB001", queued_at=datetime.now() - timedelta(minutes=10), batch_id="BATCHA")
+        _seed_queued_run(db, "SQB001", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10), batch_id="BATCHA")
         assert run_service.reconcile_queued_runs(db) == 1
         assert _batch_stream_run_ids(fake_redis) == ["SQB001"]
         assert _stream_run_ids(fake_redis) == []
@@ -283,7 +283,7 @@ class TestReconcileQueuedRuns:
         """#1340: a one-file batch (a single upload that asked for the
         completion email) routes like a single run on every producer,
         including this one."""
-        _seed_queued_run(db, "SQB003", queued_at=datetime.now() - timedelta(minutes=10), batch_id="ONEFIL",
+        _seed_queued_run(db, "SQB003", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10), batch_id="ONEFIL",
                          batch_files_submitted=1)
         assert run_service.reconcile_queued_runs(db) == 1
         assert _stream_run_ids(fake_redis) == ["SQB003"]
@@ -293,7 +293,7 @@ class TestReconcileQueuedRuns:
         """#1114: live_run_ids() must see the batch stream too, or every queued
         batch run older than the threshold would get a duplicate token."""
         run_queue.ensure_group(run_queue.BATCH)
-        _seed_queued_run(db, "SQB002", queued_at=datetime.now() - timedelta(minutes=10), batch_id="BATCHA")
+        _seed_queued_run(db, "SQB002", queued_at=datetime.now(timezone.utc) - timedelta(minutes=10), batch_id="BATCHA")
         run_queue.enqueue("SQB002", run_queue.BATCH)
         assert run_service.reconcile_queued_runs(db) == 0
         assert _batch_stream_run_ids(fake_redis) == ["SQB002"]
@@ -328,7 +328,7 @@ class TestEffectiveStaleRunMinutes:
         monkeypatch.setenv("CVICHE_STALE_RUN_MINUTES", "10")
         monkeypatch.setenv("CVICHE_RUN_TIMEOUT_SECONDS", "5400")
         run = Run(id="RQF001", filename="cv.docx", file_type="docx", status=RunState.RUNNING,
-                  started_at=datetime.now() - timedelta(minutes=20))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=20))
         db.add(run)
         db.commit()
 
@@ -342,7 +342,7 @@ class TestEffectiveStaleRunMinutes:
 
 def _drain_fixture_runs(monkeypatch):
     """Point the drain at the test DB and a fast poll; seed two runs."""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from app.models import Run
     from app.pipeline import concurrency
@@ -352,7 +352,7 @@ def _drain_fixture_runs(monkeypatch):
     monkeypatch.setattr(concurrency, "DRAIN_POLL_SECONDS", 0.01)
     monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
     db = TestingSessionLocal()
-    started = datetime.now() - timedelta(minutes=10)
+    started = datetime.now(timezone.utc) - timedelta(minutes=10)
     db.add(Run(id="LONG01", filename="a.docx", file_type="docx", status="running", started_at=started))
     db.add(Run(id="QUICK2", filename="b.docx", file_type="docx", status="running", started_at=started))
     db.commit()
@@ -498,7 +498,7 @@ def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monke
     """If the process outlives the drain, the run's still-running executor must
     not write "complete" over the shutdown failure (a user told to restart would
     otherwise get a duplicate run)."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -512,7 +512,7 @@ def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monke
     monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
     db = TestingSessionLocal()
     db.add(Run(id="FLIP01", filename="cv.docx", file_type="docx", status="running",
-               started_at=datetime.now()))
+               started_at=datetime.now(timezone.utc)))
     db.commit()
     assert concurrency.try_acquire_slot("FLIP01") is True
 

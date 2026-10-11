@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from app.errors import forbidden, validation_error
 from app.models import Consent, Feedback, Run, User, UserRole
+from app.timeutil import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,9 @@ _CSV_CHUNK_ROWS = 500
 
 
 def _iso(value: datetime | None) -> str:
-    return value.isoformat() if value else ""
+    # Naive UTC wall-clock, the same bytes the export wrote before timestamps
+    # loaded aware (#798): a CSV consumer sees no format change.
+    return as_utc(value).replace(tzinfo=None).isoformat() if value else ""
 
 
 class _CsvExport(NamedTuple):

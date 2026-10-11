@@ -14,7 +14,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -71,7 +71,7 @@ def _docx_bytes(text: str) -> bytes:
 class TestReconcileStaleRuns:
     def test_old_running_run_is_failed(self, db):
         run = Run(id="OLD001", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=120))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=120))
         db.add(run)
         db.add(Step(run_id="OLD001", step_number=3, step_name="x", status="running"))
         db.commit()
@@ -88,7 +88,7 @@ class TestReconcileStaleRuns:
 
     def test_recent_running_run_is_left_alone(self, db):
         run = Run(id="NEW001", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=5))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=5))
         db.add(run)
         db.commit()
 
@@ -98,7 +98,7 @@ class TestReconcileStaleRuns:
 
     def test_completed_run_is_ignored(self, db):
         run = Run(id="DONE01", filename="a.docx", file_type="docx", status="complete",
-                  started_at=datetime.now() - timedelta(minutes=999))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=999))
         db.add(run)
         db.commit()
 
@@ -109,7 +109,7 @@ class TestReconcileStaleRuns:
     def test_env_threshold_is_respected(self, db, monkeypatch):
         monkeypatch.setenv("CVICHE_STALE_RUN_MINUTES", "10")
         run = Run(id="ENV001", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=15))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=15))
         db.add(run)
         db.commit()
 
@@ -134,7 +134,7 @@ class TestFailRunsInterruptedByShutdown:
     def test_still_running_run_is_failed_with_the_shutdown_message(self, db, notified):
         user = _make_user(db, email="Owner@Example.com")
         run = Run(id="DPLY01", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=30), user_id=user.id)
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=30), user_id=user.id)
         db.add(run)
         db.add(Step(run_id="DPLY01", step_number=4, step_name="x", status="running"))
         db.commit()
@@ -162,7 +162,7 @@ class TestFailRunsInterruptedByShutdown:
         from sqlalchemy.exc import OperationalError
         for run_id in ("DPLY04", "DPLY05"):
             db.add(Run(id=run_id, filename="a.docx", file_type="docx", status="running",
-                       started_at=datetime.now() - timedelta(minutes=30)))
+                       started_at=datetime.now(timezone.utc) - timedelta(minutes=30)))
         db.commit()
 
         def lookup(db_, run):
@@ -177,9 +177,9 @@ class TestFailRunsInterruptedByShutdown:
                                     ("DPLY05", "failed", "owner@example.com")]
 
     def test_run_that_finished_meanwhile_is_untouched(self, db, notified):
-        finished_at = datetime.now() - timedelta(minutes=1)
+        finished_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         run = Run(id="DPLY02", filename="a.docx", file_type="docx", status="complete",
-                  started_at=datetime.now() - timedelta(minutes=20), completed_at=finished_at)
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=20), completed_at=finished_at)
         db.add(run)
         db.commit()
 
@@ -194,7 +194,7 @@ class TestFailRunsInterruptedByShutdown:
 
     def test_run_not_on_this_pod_is_untouched(self, db, notified):
         run = Run(id="DPLY03", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=5))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=5))
         db.add(run)
         db.commit()
 
@@ -212,7 +212,7 @@ class TestRestartQuota:
         user = _make_user(db, daily_limit=0)
         _auth_cookie(client, user)
         run = Run(id="QUOTA1", filename="cv.docx", file_type="docx", status="failed",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
 
@@ -228,7 +228,7 @@ class TestRestartQuota:
         user = _make_user(db, email="ok@example.com")
         _auth_cookie(client, user)
         run = Run(id="QUOTA2", filename="cv.docx", file_type="docx", status="failed",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
 
@@ -305,7 +305,7 @@ class TestEmptyUploadRejection:
 
 def _seed_failed_run(db, user, run_id="RETRY1", failed_at=6):
     run = Run(id=run_id, filename="cv.docx", file_type="docx", status="failed",
-              user_id=user.id, started_at=datetime.now(), completed_at=datetime.now(),
+              user_id=user.id, started_at=datetime.now(timezone.utc), completed_at=datetime.now(timezone.utc),
               total_cost=0.5, error_message="boom")
     db.add(run)
     for sd in STEP_REGISTRY:
@@ -368,7 +368,7 @@ class TestRetryStep:
         user = _make_user(db)
         _auth_cookie(client, user)
         run = _seed_failed_run(db, user, run_id="RETRY4", failed_at=6)
-        run.started_at = datetime.now() - timedelta(hours=3)
+        run.started_at = datetime.now(timezone.utc) - timedelta(hours=3)
         db.commit()
 
         from app.api.upload import UPLOAD_DIR
@@ -385,7 +385,7 @@ class TestRetryStep:
         assert reconcile_stale_runs(db) == 0
         run = db.query(Run).filter(Run.id == "RETRY4").first()
         assert run.status == "running"
-        assert run.started_at > datetime.now() - timedelta(minutes=1)
+        assert run.started_at > datetime.now(timezone.utc) - timedelta(minutes=1)
 
     def test_retry_rejects_non_failed_step(self, client, db, seed_simple_mode):
         user = _make_user(db)
@@ -473,7 +473,7 @@ def test_prepare_resume_preserves_cost_and_loads_prior_outputs(db, tmp_path):
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     run = Run(id="RSME01", filename="cv.docx", file_type="docx", status="failed",
-              total_cost=1.5, started_at=datetime.now())
+              total_cost=1.5, started_at=datetime.now(timezone.utc))
     db.add(run)
     db.commit()
 
@@ -508,7 +508,7 @@ def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     run = Run(id="RSME02", filename="cv.docx", file_type="docx", status="running",
-              total_cost=0.2, started_at=datetime.now())
+              total_cost=0.2, started_at=datetime.now(timezone.utc))
     db.add(run)
     db.commit()
 
@@ -649,7 +649,7 @@ class TestConcurrencyAdmission:
         user = _make_user(db)
         _auth_cookie(client, user)
         run = Run(id="BUSY01", filename="cv.docx", file_type="docx", status="created",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
         upload_file = UPLOAD_DIR / "BUSY01.docx"
@@ -674,7 +674,7 @@ class TestConcurrencyAdmission:
         user = _make_user(db, email="free@example.com")
         _auth_cookie(client, user)
         run = Run(id="FREE01", filename="cv.docx", file_type="docx", status="created",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
         upload_file = UPLOAD_DIR / "FREE01.docx"
@@ -758,7 +758,7 @@ class TestAtomicRunStart:
         _auth_cookie(client, user)
         run_id = f"RACE{status[:2].upper()}1"
         db.add(Run(id=run_id, filename="cv.docx", file_type="docx", status=status,
-                   user_id=user.id, started_at=datetime.now()))
+                   user_id=user.id, started_at=datetime.now(timezone.utc)))
         db.commit()
         upload_file = UPLOAD_DIR / f"{run_id}.docx"
         upload_file.write_bytes(b"dummy")
@@ -781,7 +781,7 @@ class TestAtomicRunStart:
         user = _make_user(db, email="seq@example.com")
         _auth_cookie(client, user)
         db.add(Run(id="SEQ001", filename="cv.docx", file_type="docx", status="created",
-                   user_id=user.id, started_at=datetime.now()))
+                   user_id=user.id, started_at=datetime.now(timezone.utc)))
         db.commit()
         upload_file = UPLOAD_DIR / "SEQ001.docx"
         upload_file.write_bytes(b"dummy")
@@ -909,7 +909,7 @@ def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload, attempts=(
     monkeypatch.setattr(orch, "STEP_REGISTRY", [SimpleNamespace(number=1, stage_id="1a", name="1a")])
     monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
     db.add(Run(id=run_id, filename="cv.pdf", file_type="pdf", status="running",
-               started_at=datetime.now()))
+               started_at=datetime.now(timezone.utc)))
     db.commit()
     o = orch.PipelineOrchestrator(run_id, upload, db)
     monkeypatch.setattr(o, "execute_step", AsyncMock())

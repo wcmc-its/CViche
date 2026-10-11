@@ -124,6 +124,7 @@ from unified_pipeline.stage6.sections.research_support import (
     TOTAL_AWARD_LABEL,
     TOTAL_REQUESTED_LABEL,
     YOUR_ROLE_LABEL,
+    _is_person_name_capture,
     grant_end_year,
     year_at_or_after,
 )
@@ -3645,7 +3646,18 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
 #   own words (RINASX 396: "<title words>, PI" read as a PI label, the
 #   parse #1418 stopped).
 #
-# The last two are regression guards on current dev: the stage-6 causes are
+# One more from the YUYVIG batch (#1571, SLYBST and DYLJXC):
+#
+# - pi_cell_not_a_person: the rendered PI cell is sponsor, award or role
+#   text, not a person ("Society. Research Scholar Award", "Acme
+#   Foundation"): stage 6 read the text before the owner's own "(PI)" or ",
+#   Principal Investigator" label as the PI's name. It also catches a role
+#   cell the pipe-row fallback took as the PI (batch-4 web210: "Principal
+#   Investigator"). A part of the cell fails stage 6's own
+#   `_is_person_name_capture` (a SPONSOR_OR_AWARD_WORDS word or a sentence
+#   break), so the lint and the stage-6 veto (#1608) share one word list.
+#
+# The last three are regression guards on current dev: the stage-6 causes are
 # fixed, and they fire on documents rendered before the fix.
 
 ROLE_SHAPE_CONTRADICTED = "contradicted"
@@ -3658,6 +3670,7 @@ ROLE_SHAPE_ROLE_IN_TITLE = "role_in_title"
 ROLE_SHAPE_OWNER_PI_ROLE_EMPTY = "owner_pi_role_empty"
 ROLE_SHAPE_OWNER_PI_OTHER_ROLE = "owner_pi_other_role"
 ROLE_SHAPE_PI_CELL_FROM_TITLE = "pi_cell_from_title"
+ROLE_SHAPE_PI_CELL_NOT_A_PERSON = "pi_cell_not_a_person"
 #: Each shape's severity, from its measured precision (RC-ROLE2 and X6-role
 #: in doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked
 #: hits, INFO below either bar.
@@ -3672,6 +3685,7 @@ ROLE_SHAPE_SEVERITY = MappingProxyType({
     ROLE_SHAPE_OWNER_PI_ROLE_EMPTY: "WARN",
     ROLE_SHAPE_OWNER_PI_OTHER_ROLE: "WARN",
     ROLE_SHAPE_PI_CELL_FROM_TITLE: "INFO",
+    ROLE_SHAPE_PI_CELL_NOT_A_PERSON: "INFO",
 })
 
 #: Any word that labels a role on a grant, in normalised text: "PI", "P.I.",
@@ -3915,11 +3929,12 @@ def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
                       extracted_pi: str) -> tuple[str, str] | None:
     """The first role shape one rendered grant table shows, as (shape, what
     it says), or None: pi_cell_empty, then the three render shapes the X6
-    batch added. The owner is read off the PI cell by surname word, the way
-    `_entry_role_shape` reads `pi_name`. `extracted_pi` is the table's
-    entry's `pi_name`: a PI cell stage 4 extracted as a person is not a
-    title run, even where the title names that person (a fellowship titled
-    after its holder, NDMRSO CAGLNY 118)."""
+    batch added, then pi_cell_not_a_person (#1571). The owner is read off
+    the PI cell by surname word, the way `_entry_role_shape` reads
+    `pi_name`. `extracted_pi` is the table's entry's `pi_name`: a PI cell
+    stage 4 extracted as a person is not a title run, even where the title
+    names that person (a fellowship titled after its holder, NDMRSO CAGLNY
+    118)."""
     pi_cell, role = cells[PI_NAME_LABEL], cells.get(YOUR_ROLE_LABEL, "")
     if not pi_cell:
         if _stated_role(role) == ROLE_PI:
@@ -3942,6 +3957,10 @@ def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
             and re.search(rf"(?<!\w){re.escape(pi_text)}(?!\w)", title)):
         return (ROLE_SHAPE_PI_CELL_FROM_TITLE,
                 "'Name of Principal Investigator:' is a run of the project title's words")
+    if not all(map(_is_person_name_capture, _PERSON_SPLIT_RE.split(pi_cell))):
+        return (ROLE_SHAPE_PI_CELL_NOT_A_PERSON,
+                "'Name of Principal Investigator:' is sponsor, award or role text, "
+                "not a person")
     return None
 
 

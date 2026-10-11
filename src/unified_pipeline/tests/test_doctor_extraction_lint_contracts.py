@@ -4551,11 +4551,69 @@ def test_role_consistency_flags_a_pi_cell_cut_from_the_title():
     ("Lee", "The Lee Cohort", ""),                                   # one word
     ("Ada Testowner", "Ada Testowner Lab Award", ""),                # the owner
     ("Other Person", "Example Project", ""),
-    ("Ann Studies", "Johann Studies Program", ""),                   # not whole words
+    ("Ann Rivers", "Johann Rivers Program", ""),                     # not whole words
 ])
 def test_role_consistency_spares_a_pi_cell_that_is_not_a_title_run(pi_cell, title, pi_name):
     entry = _grant(118, "A grant", title=title, pi_name=pi_name, pi_role="Mentor")
     assert _shapes(entry, table_rows=[_grant_table("Mentor", pi_cell, title=title)]) == []
+
+
+# pi_cell_not_a_person (#1571, YUYVIG SLYBST and DYLJXC): the PI cell holds the
+# sponsor or award text before the owner's own "(PI)" or ", Principal
+# Investigator" label. Synthetic cells of the issue's shapes, invented names.
+
+@pytest.mark.parametrize("pi_cell", [
+    "Society. Research Scholar Award",                     # sponsor + award, sentence break
+    "Foundation. Junior Faculty Award",
+    "Leukemia and Lymphoma Society. Postdoctoral Fellowship",  # joined capture
+    "Aging. Alzheimer's Disease Supplement",               # a sentence break alone
+    "Example Pediatric Cancer Initiative",                 # an award word alone
+    "Hospital Patient Care Award",
+    "Acme Foundation",
+    "Northfield University Hospital Award",
+    "Ada Other, Acme Foundation",                          # one part of a list
+    "Acme Foundation, Ada Other",                          # a word before a comma
+    "Principal Investigator",                              # a pipe row's role cell (web210)
+])
+def test_role_consistency_flags_a_pi_cell_of_sponsor_or_award_text(pi_cell):
+    entry = _grant(38, "A grant (PI)", title="Example Project", pi_role="PI")
+    assert _shapes(entry, table_rows=[_grant_table("PI", pi_cell)]) == [
+        ("pi_cell_not_a_person", "INFO")]
+
+
+@pytest.mark.parametrize("pi_cell", [
+    "Other Person",
+    "M. Silva",
+    "Dr. Ana Cruz",
+    "Mrs. Ann Lee",
+    "Prof. Bo Li",
+    "Lee & Park",
+    "Jean-Luc Moreau-Dubois",                              # hyphens
+    "Ludwig van der Berg",                                 # particles
+    "Maria de la Cruz",
+    "J. R. Okafor",                                        # initials
+    "Lee J., Park K.",
+    "Ana Cruz, M.D., Ph.D.",
+    "Tom Young",                                           # surnames that are common words
+    "Ann Price",
+    "Lee Grant",                                           # "Grant" is left out on purpose
+    "Mary St. John",
+])
+def test_role_consistency_spares_a_pi_cell_that_names_a_person(pi_cell):
+    entry = _grant(38, "A grant (PI)", title="Example Project", pi_role="PI")
+    assert _shapes(entry, table_rows=[_grant_table("PI", pi_cell)]) == []
+
+
+def test_role_consistency_shares_stage_6s_sponsor_word_list(monkeypatch):
+    """The shape reads stage 6's own SPONSOR_OR_AWARD_WORDS, so a word added
+    there is a word the lint flags (#1571: the two cannot drift)."""
+    from unified_pipeline.stage6.sections import research_support
+    entry = _grant(38, "A grant (PI)", title="Example Project", pi_role="PI")
+    table = [_grant_table("PI", "Ada Zebrafish")]
+    assert _shapes(entry, table_rows=table) == []
+    monkeypatch.setattr(research_support, "SPONSOR_OR_AWARD_WORDS",
+                        research_support.SPONSOR_OR_AWARD_WORDS | {"zebrafish"})
+    assert _shapes(entry, table_rows=table) == [("pi_cell_not_a_person", "INFO")]
 
 
 def test_role_consistency_places_tables_of_one_title_at_their_own_entries():

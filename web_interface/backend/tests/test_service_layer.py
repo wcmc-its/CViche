@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -126,7 +126,7 @@ class TestCheckRunAccess:
         assert result.id == "ABC123"
 
 
-SEEDED_QUEUE_AT = datetime(2026, 1, 1, 0, 0, 0)
+SEEDED_QUEUE_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 class TestQueueRunTransitions:
@@ -798,7 +798,7 @@ class TestAdminService:
         db.refresh(user)
 
         # Add runs
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         run1 = Run(id="RUN001", filename="cv1.docx", file_type="docx", status="complete",
                     user_id=user.id, total_cost=0.15, started_at=now)
         run2 = Run(id="RUN002", filename="cv2.docx", file_type="docx", status="running",
@@ -830,7 +830,7 @@ class TestAdminService:
         db.refresh(u1)
         db.refresh(u2)
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         run1 = Run(id="RUN001", filename="cv.docx", file_type="docx", status="complete",
                     user_id=u1.id, total_cost=0.20, started_at=now)
         db.add(run1)
@@ -851,7 +851,7 @@ class TestAdminService:
         db.commit()
         db.refresh(user)
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         run = Run(id="RUN001", filename="cv.docx", file_type="docx", status="complete",
                   user_id=user.id, total_cost=0.30, started_at=now)
         db.add(run)
@@ -1181,13 +1181,13 @@ class TestAdminCsvExportStreaming:
 
     def test_download_filename_and_audit_line(self, client, db, caplog):
         import logging
-        from datetime import datetime
+        from datetime import datetime, timezone
         _seed_export_fixture(db)
 
         with caplog.at_level(logging.INFO):
             resp = self._get(client, "users")
 
-        stamp = datetime.now().strftime("%Y%m%d")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         assert resp.headers["content-disposition"] == f'attachment; filename="cviche_users_{stamp}.csv"'
         audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_export")]
         assert audit == ["admin_export: user=admin@example.com role=admin export_type=users"]
