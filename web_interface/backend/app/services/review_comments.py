@@ -179,6 +179,7 @@ REVIEW_FLAGS = {
     "source_line_coverage": ("This line from your CV may be missing from this document, or only "
                              "partly here. Check it and add it where it belongs."),
     "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
+    "licensure_fallback_truncated": "Text cut short: complete it from your CV.",
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
                     "your CV gives is missing, or one shown here is not in this grant's entry. "
                     "Check it against the CV."),

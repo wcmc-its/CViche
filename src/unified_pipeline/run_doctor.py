@@ -428,6 +428,12 @@ Lints, ranked by the severity of the failure class they catch:
                           packed into the role (#1205, YUYVIG DYLJXC
                           661/668). WARN, one per entry; says whether stage 6
                           moved the duties under the row. Reads stage 4
+14am. licensure_fallback_truncated an F1 entry with no jurisdiction and no
+                          number whose Licensure State cell shows only the
+                          start of its raw text (#1576, YUYVIG HXBPCT
+                          145-155, cut at 100 characters before #1605). WARN,
+                          one per entry; a regression guard. Reads stage 4
+                          and the docx's table rows
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -602,6 +608,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
+    lint_licensure_fallback_truncated,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_owner_attribution,
@@ -793,6 +800,7 @@ KNOWN_LINTS = (
     "source_line_coverage",
     "appointment_title_overlong",
     "grant_facts",
+    "licensure_fallback_truncated",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1657,6 +1665,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # offschema_fields: where else a stated grant value reaches the reader.
     LintSpec("grant_facts", lint_grant_facts, ("stage_4", "table_rows"),
              optional=("blocks", "subpoints")),
+    LintSpec("licensure_fallback_truncated", lint_licensure_fallback_truncated,
+             ("stage_4", "table_rows")),
 )
 
 #: The views read from the stage-6 docx.

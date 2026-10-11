@@ -41,6 +41,11 @@ from unified_pipeline.stage6.parsing import (
     _refold_shattered,
 )
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
+from unified_pipeline.stage6.sections.licensure import (
+    _LICENSURE_HEADER_CELLS,
+    _license_record,
+    _normalize_licensure_entry,
+)
 
 from ..shared import (
     _NAME_WORD_RE,
@@ -4188,4 +4193,93 @@ def lint_split_child_unsourced(stage4: dict,
             "split_child_unsourced", SPLIT_CHILD_SEVERITY,
             f"entry {raw.get('element_idx_start')} ({raw.get('taxonomy_code')}): {what}",
             evidence) for what, evidence in problems]
+    return findings
+
+
+# licensure_fallback_truncated (#1576, YUYVIG HXBPCT 145-155): an F1 entry
+# with no jurisdiction and no number renders its raw text in the Licensure
+# State cell (`_license_record`'s fallback). Until #1605 that text was cut at
+# 100 characters, mid-word and silently. With the cap gone this is a
+# regression guard: a State cell, in a row with no number, that holds the
+# start of such an entry's text but not all of it.
+LICENSURE_CODE = "F1"
+LICENSURE_FALLBACK_SEVERITY = "WARN"
+LICENSURE_TAIL_EXCERPT_CHARS = 60
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+class _FallbackLicence(NamedTuple):
+    """An F1 entry stage 6 renders by its raw text alone."""
+    element_idx: object
+    text: str  # whitespace-normalized raw text, as the State cell shows it
+
+
+def _no_space(text: str) -> str:
+    """`text` without whitespace: a line break in the raw text reads back as
+    a newline or a space, depending on how the cell was written."""
+    return _WHITESPACE_RE.sub("", text)
+
+
+def _licensure_rows(table_rows: list[list[list[str]]]) -> list[list[str]]:
+    """The data rows of every table whose header row is the licensure
+    table's own (`_LICENSURE_HEADER_CELLS`, as `_is_licensure_table`)."""
+    rows = []
+    for table in table_rows:
+        if not table:
+            continue
+        header = tuple(" ".join(cell.split()).lower() for cell in table[0])
+        if header == _LICENSURE_HEADER_CELLS[:len(header)]:
+            rows += [row for row in table[1:] if len(row) >= 2]
+    return rows
+
+
+def _licensure_entries(stage4: dict) -> tuple[list[_FallbackLicence], frozenset[str]]:
+    """The F1 entries stage 6 renders by raw text, and the State cell every
+    F1 entry renders whole (whitespace removed), by the renderer's own
+    `_license_record`."""
+    fallbacks, whole = [], set()
+    for raw in stage4.get("entries", []):
+        if raw.get("taxonomy_code") != LICENSURE_CODE:
+            continue
+        entry = _normalize_licensure_entry(raw)
+        record = _license_record(entry)
+        if record is None:
+            continue
+        whole.add(_no_space(record.state))
+        if not entry.state and not entry.number:
+            fallbacks.append(_FallbackLicence(raw.get("element_idx_start"),
+                                              " ".join(entry.original_text.split())))
+    return fallbacks, frozenset(whole)
+
+
+def _truncated_cells(fallback: _FallbackLicence, cells: list[str],
+                     whole: frozenset[str]) -> list[str]:
+    """The cells holding the start of `fallback`'s text but not all of it.
+    A cell some F1 entry renders whole is none: that is the entry's own
+    text, or a shorter credential's that opens the same way."""
+    text = _no_space(fallback.text)
+    return [cell for cell in cells
+            if _no_space(cell) not in whole and text.startswith(_no_space(cell))]
+
+
+def lint_licensure_fallback_truncated(stage4: dict,
+                                      table_rows: list[list[list[str]]]) -> list[dict]:
+    """An F1 entry with no jurisdiction and no number whose Licensure State
+    cell shows only the start of its raw text (#1576). One finding per entry,
+    naming its element_idx_start. Reads stage 4 and the docx's table rows."""
+    cells = [row[0] for row in _licensure_rows(table_rows) if row[0] and not row[1]]
+    fallbacks, whole = _licensure_entries(stage4)
+    findings = []
+    for fallback in fallbacks:
+        truncated = _truncated_cells(fallback, cells, whole)
+        if not truncated:
+            continue
+        shown = " ".join(truncated[0].split())
+        tail = fallback.text[len(shown):].strip()
+        findings.append(_finding(
+            "licensure_fallback_truncated", LICENSURE_FALLBACK_SEVERITY,
+            f"entry {fallback.element_idx} ({LICENSURE_CODE}): the Licensure State cell "
+            f"shows {len(shown)} of the entry's {len(fallback.text)} characters, and the "
+            f"rest is in no licence row: '{tail[:LICENSURE_TAIL_EXCERPT_CHARS]}'",
+            truncated))
     return findings

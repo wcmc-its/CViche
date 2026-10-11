@@ -61,6 +61,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
+    lint_licensure_fallback_truncated,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
@@ -4779,14 +4780,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (66), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (67), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 64
+    assert len(payload["findings"]) == 65
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -7883,3 +7884,114 @@ def test_group_header_context_reads_a_lead_line_that_is_all_role_as_a_record():
     entries = _lead_block("Chair, Example Campaign", code="O",
                           leadership_role="Chair, Example Campaign")
     assert _grp_hits(entries, [[["Chair, Example Campaign", ""]]]) == []
+
+
+# licensure_fallback_truncated (#1576, YUYVIG HXBPCT 145-155). Invented
+# credentials: an F1 entry with no state and no number renders its raw text
+# in the Licensure State cell, which a 100-character cap used to cut.
+_LIC_HEADER = ["State", "Number", "Date of issue (mm/dd/yyyy)",
+               "Date of last registration (mm/dd/yyyy) – (mm/dd/yyyy)"]
+_LIC_TEXT = ("Certified in Example Widget Laser Surgery for Low Widget Index, "
+             "High Widget Index, Hyperwidgetic Index, Blend Zone and Mixed Widgets, "
+             "Gadget Zone and Example Sprocket Alignment 2011")
+_LIC_CUT = 100
+
+
+def _lic_entry(idx, text, code="F1", **fields):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "extracted_fields": {"state_country": None, "license_number": None, **fields}}
+
+
+def _lic_hits(entries, rows, header=_LIC_HEADER):
+    return lint_licensure_fallback_truncated({"entries": entries}, [[header, *rows]])
+
+
+def _lic_render(tmp_path, entries):
+    """Stage 6's own licensure table for `entries`, read back from the docx."""
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_licensure(entries)
+    path = tmp_path / "licensure.docx"
+    gen.doc.save(str(path))
+    return read_docx_table_rows(str(path))
+
+
+def test_licensure_fallback_truncated_is_quiet_on_stage_6s_whole_render(tmp_path):
+    """The renderer keeps the whole raw text (#1605), so its own table
+    passes: the lint is a regression guard, not a live finding."""
+    entries = [_lic_entry(145, _LIC_TEXT)]
+    tables = _lic_render(tmp_path, entries)
+    assert any(row[0] == _LIC_TEXT for table in tables for row in table)
+    assert lint_licensure_fallback_truncated({"entries": entries}, tables) == []
+
+
+def test_licensure_fallback_truncated_warns_on_a_render_cut_at_the_old_cap(tmp_path):
+    """The same render with its State cell cut to the old 100 characters."""
+    entries = [_lic_entry(145, _LIC_TEXT)]
+    tables = [[[_LIC_TEXT[:_LIC_CUT] if cell == _LIC_TEXT else cell for cell in row]
+               for row in table] for table in _lic_render(tmp_path, entries)]
+    assert lint_licensure_fallback_truncated({"entries": entries}, tables) == [{
+        "lint": "licensure_fallback_truncated", "severity": "WARN",
+        "message": "entry 145 (F1): the Licensure State cell shows 100 of the entry's "
+                   f"{len(_LIC_TEXT)} characters, and the rest is in no licence row: "
+                   "'ex, Blend Zone and Mixed Widgets, Gadget Zone and Example Sp'",
+        "evidence": [_LIC_TEXT[:_LIC_CUT]],
+        "status": "ran", "reason": ""}]
+
+
+def test_licensure_fallback_truncated_names_each_cut_entry():
+    other = _LIC_TEXT.replace("Widget Laser", "Gadget Laser")
+    entries = [_lic_entry(145, _LIC_TEXT), _lic_entry(147, other)]
+    rows = [[_LIC_TEXT[:_LIC_CUT], "", "", ""], [other[:_LIC_CUT], "", "", ""]]
+    assert [hit["message"].split(":")[0] for hit in _lic_hits(entries, rows)] == [
+        "entry 145 (F1)", "entry 147 (F1)"]
+
+
+def test_licensure_fallback_truncated_reads_a_line_break_as_whitespace():
+    """A two-line raw text renders with a break the docx reads back as a
+    newline: the cell holds it whole."""
+    text = "Certified in Example Widget Surgery\nAdvanced Example Gadget Course 2012"
+    assert _lic_hits([_lic_entry(145, text)], [[text.replace("\n", " \n"), "", "", ""]]) == []
+
+
+def test_licensure_fallback_truncated_quotes_a_cut_multi_line_text_as_one_line():
+    """Cut at a word boundary after a line break: the counts and the lost
+    tail are read off the text with its whitespace collapsed."""
+    text = "Certified in Example Widget Surgery \nAdvanced Example Gadget Course  and Review 2012"
+    cell = "Certified in Example Widget Surgery \nAdvanced Example"
+    [hit] = _lic_hits([_lic_entry(145, text)], [[cell, "", "", ""]])
+    assert hit["message"] == (
+        "entry 145 (F1): the Licensure State cell shows 52 of the entry's 82 characters, "
+        "and the rest is in no licence row: 'Gadget Course and Review 2012'")
+    assert hit["evidence"] == [cell]
+
+
+def test_licensure_fallback_truncated_spares_a_shorter_entry_shown_whole():
+    """One credential's text opens another's: its own whole cell is no cut of
+    the longer one, which renders nowhere (another lint's loss)."""
+    short = "Certified in Example Widget Laser Surgery"
+    entries = [_lic_entry(145, short), _lic_entry(147, _LIC_TEXT)]
+    assert _lic_hits(entries, [[short, "", "", ""]]) == []
+
+
+def test_licensure_fallback_truncated_reads_only_numberless_rows_with_a_state():
+    """A row with a number is a structured licence, not the raw-text
+    fallback, and an empty State cell is the start of nothing."""
+    rows = [[_LIC_TEXT[:_LIC_CUT], "123456", "", ""], ["", "", "", ""], [_LIC_TEXT[:_LIC_CUT]]]
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT)], rows) == []
+
+
+def test_licensure_fallback_truncated_reads_only_the_licensure_table():
+    row = [_LIC_TEXT[:_LIC_CUT], "", "", ""]
+    stage4 = {"entries": [_lic_entry(145, _LIC_TEXT)]}
+    assert lint_licensure_fallback_truncated(
+        stage4, [[], [["Name of award", "Organization", "Date awarded"], row], [row]]) == []
+
+
+def test_licensure_fallback_truncated_reads_only_f1_entries_without_state_or_number():
+    rows = [[_LIC_TEXT[:_LIC_CUT], "", "", ""]]
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT, code="F2")], rows) == []
+    assert _lic_hits([_lic_entry(145, ""), _lic_entry(147, _LIC_TEXT, code="F2")], rows) == []
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT, license_number="123456")], rows) == []
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT, state_country="Example State")], rows) == []

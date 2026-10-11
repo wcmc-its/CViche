@@ -522,6 +522,11 @@ LINT_COPY = {
         "such as an effort share or what the role was for.",
         "Keep only the role in the Title column, and delete the duties or move them out of "
         "the title."),
+    "licensure_fallback_truncated": LintCopy(
+        "Licensure text cut short",
+        "A licence or certification with no state and no number is shown by its own text in "
+        "the State column, and that text stops partway: the rest of it is not in the document.",
+        "Restore the full text from the source CV."),
 }
 
 # A fatal cap from a recorded stage failure has no pipeline_errors_present
