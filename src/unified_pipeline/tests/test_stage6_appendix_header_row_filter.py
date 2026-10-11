@@ -1794,13 +1794,68 @@ def test_fill_appendix_reads_the_rendered_document_for_a_range():
     assert "1. 2014 – 2016" in appendix_after(None)
 
 
+_AMOUNTS_AND_SHOWN = [
+    # (the bare Appendix line, a rendered line that shows the same amount)
+    ("Amount: $2,500", "Example Award, 2014, $2,500"),
+    ("Direct Costs: $100,645", "Example Grant | $100,645 | 2016-2019"),
+    ("Annual direct cost:   $1,105,168", "Example Grant (annual direct costs $1,105,168)"),
+    ("$ 10,334,879", "Example Program Project, $10,334,879"),  # spacing after $ aside
+    ("Total: $12,500.00", "Example Contract, total $12,500.00"),
+    ("   Amount: $2,500 ", "Example Award $ 2,500."),
+]
+
+
 @pytest.mark.parametrize("code", ["T", "M2B", "M2A"])
-@pytest.mark.parametrize("text", [
-    "Amount: $2,500", "Direct Costs: $100,645", "Annual direct cost:   $1,105,168",
-    "$ 10,334,879", "Total: $12,500.00", "   Amount: $2,500 ",
+@pytest.mark.parametrize("text,shown", _AMOUNTS_AND_SHOWN)
+def test_bare_amount_the_document_shows_is_dropped_under_any_code(text, shown, code):
+    entries = [{"text": text, "taxonomy_code": code}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Unrelated line", shown])
+    assert kept == []
+    assert dropped == Counter({DROP_AMOUNT: 1})
+
+
+@pytest.mark.parametrize("text,shown", _AMOUNTS_AND_SHOWN)
+def test_bare_amount_shown_nowhere_else_is_kept(text, shown):
+    """#1551 render A/B (web205, web199, web26, VGHNZD): an amount the document
+    does not show is the only place that value appears, so its line stays."""
+    entries = [{"text": text, "taxonomy_code": "M2B"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Grant, $7,777"])
+    assert [t for _, t in kept] == [text]
+    assert dropped == Counter()
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS)[0] == kept
+    assert _sig(text, None, code="M2B") is None
+
+
+@pytest.mark.parametrize("shown", [
+    "Example Grant, $1,100,645",      # the amount inside a larger number
+    "Example Grant, $100,645.50",     # ... with cents the tail does not have
+    "Example Grant, $100,6450",       # ... running on into another digit
+    "Example Grant, $2100,645",
 ])
-def test_bare_amount_behind_one_label_is_dropped_under_any_code(text, code):
-    assert _sig(text, None, code=code) == DROP_AMOUNT
+def test_an_amount_counts_as_shown_only_on_its_own_boundaries(shown):
+    entries = [{"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, [shown])
+    assert [t for _, t in kept] == ["Direct Costs: $100,645"]
+    assert dropped == Counter()
+
+
+def test_a_value_split_across_two_document_lines_is_not_shown():
+    entries = [{"text": "2014-2016", "taxonomy_code": "N3"},
+               {"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}]
+    shown = ["Example Committee 2014", "-2016 Example", "Example Grant $100", ",645"]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, shown)[1] == Counter()
+
+
+def test_another_appendix_line_vouches_for_an_amount_but_a_bare_copy_does_not():
+    other = {"text": "Example Grant, Example Foundation, $100,645", "taxonomy_code": "M2B"}
+    tail = {"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}
+    kept, dropped = _filter_unmapped_entries([other, tail], _OWNER_TOKENS)
+    assert [t for _, t in kept] == [other["text"]]
+    assert dropped == Counter({DROP_AMOUNT: 1})
+    copy = {"text": "$100,645", "taxonomy_code": "T"}
+    kept, dropped = _filter_unmapped_entries([tail, copy], _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["Direct Costs: $100,645", "$100,645"]
+    assert dropped == Counter()
 
 
 @pytest.mark.parametrize("text", [
@@ -1816,6 +1871,11 @@ def test_bare_amount_behind_one_label_is_dropped_under_any_code(text, code):
     "Example Award, 2014-2016, $2,500",
 ])
 def test_a_line_with_anything_besides_the_range_or_amount_is_kept(text):
+    """Kept even when the document shows every value in it: only a bare tail
+    is a candidate for the shown-elsewhere drop."""
+    shown = ["Example Award 2014-2016, $2,500, 2015 (sabbatical year), 2,500, 2014"]
+    entries = [{"text": text, "taxonomy_code": "M2B"}]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, shown)[1] == Counter()
     assert _sig(text, None, code="M2B") is None
     assert _sig(text, None) is None
 
@@ -1826,7 +1886,8 @@ def test_record_tail_drops_are_counted_and_described():
         {"text": "Amount: $2,500", "taxonomy_code": "M2B"},
         {"text": "2015 (sabbatical year)", "taxonomy_code": "T"},
     ]
-    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Committee 2014-2016"])
+    kept, dropped = _filter_unmapped_entries(
+        entries, _OWNER_TOKENS, ["Example Committee 2014-2016", "Example Award $2,500"])
     assert [t for _, t in kept] == ["2015 (sabbatical year)"]
     assert dropped == Counter({DROP_DATE_RANGE: 1, DROP_AMOUNT: 1})
     assert _describe_dropped(dropped) == (
@@ -1843,27 +1904,56 @@ def test_record_tail_drops_are_counted_and_described():
 def test_an_amount_behind_a_label_naming_the_record_is_kept(text):
     """#1551 review: only a label naming the value itself (`_AMOUNT_LABELS`)
     makes an amount a tail; an award's or package's own name makes it a
-    record."""
-    assert _sig(text, None, code="H") is None
-    assert _sig(text, None) is None
+    record, kept even when the document shows the same amount."""
+    shown = ["Example Grant $1,000 $100,000 $500,000 $2,500"]
+    entries = [{"text": text, "taxonomy_code": "H"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, shown)
+    assert [t for _, t in kept] == [text]
+    assert dropped == Counter()
 
 
 @pytest.mark.parametrize("label", [
     "Amount", "Award amount", "Total", "Total costs", "Direct costs",
     "Annual direct costs", "Indirect costs", "Funding", "Budget",
+    "Total cost", "Direct cost", "Annual direct cost", "Indirect cost", "Award   amount",
 ])
-def test_every_value_label_drops_its_bare_amount(label):
-    assert _sig(f"{label}: $12,000", None, code="M2B") == DROP_AMOUNT
+def test_every_value_label_makes_a_shown_amount_a_tail(label):
+    entries = [{"text": f"{label}: $12,000", "taxonomy_code": "M2B"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Grant, $12,000"])
+    assert kept == []
+    assert dropped == Counter({DROP_AMOUNT: 1})
 
 
 def test_a_structural_drop_keeps_its_reason_over_a_tail(monkeypatch):
-    """The tail check runs last: a line an older check drops keeps that
-    reason even when the tail check would also claim it."""
-    monkeypatch.setattr(appendix_module, "_record_tail_reason", lambda text: DROP_AMOUNT)
-    assert _sig("Page 3 2014-2016", None) == DROP_PAGE_FURNITURE
+    """The tail pass runs last, over kept lines only: a line an older check
+    drops keeps that reason even when the tail pass would also claim it."""
+    monkeypatch.setattr(appendix_module, "_record_tail", lambda text: (DROP_AMOUNT, "vouched"))
     reclassified = "[T-validation reclassified from T] Section header only"
-    assert _sig("SERVICE", reclassified, code="Q1") == DROP_SECTION_HEADER
-    assert _sig("Example Committee, Member", None, code="Q1") == DROP_AMOUNT
+    entries = [
+        {"text": "Page 3 2014-2016", "taxonomy_code": "T"},
+        {"text": "SERVICE", "taxonomy_code": "Q1", "classification_reasoning": reclassified},
+        {"text": "Example Committee, Member", "taxonomy_code": "Q1"},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["vouched"])
+    assert kept == []
+    assert dropped == Counter({DROP_PAGE_FURNITURE: 1, DROP_SECTION_HEADER: 1, DROP_AMOUNT: 1})
+
+
+def test_fill_appendix_reads_the_whole_rendered_document(monkeypatch):
+    """The wire's arguments: the instruction box's example text must not
+    vouch for a value, and tracked insertions (enriched citations, the
+    research summary) must."""
+    calls = []
+
+    def record(self, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(WCMTemplateGenerator, "_rendered_output_lines", record)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_appendix([{"text": GENUINE_ONE, "hierarchy": ["Service"], "taxonomy_code": "T"}])
+    assert {"exclude_instruction_box": True, "include_tracked_insertions": True} in calls
 
 
 @pytest.mark.parametrize("text", ["JQ Doe June 2023", "J Q Doe June 2023", "Jane Doe March 3, 2021"])

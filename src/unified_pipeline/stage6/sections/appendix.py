@@ -135,20 +135,23 @@ space ("*****"). A bare label that closes with a colon and holds nothing after i
 The two-signal rule kept it whenever 3b called it a "header label only" rather
 than a section header.
 
-Two last checks run under every code (#1551, EBYSBC VGHNZD) for the tail of a
+One last pass runs under every code (#1551, EBYSBC VGHNZD) for the tail of a
 record that was split: a grant table's date cell, the date line under a
-committee, a budget line under a grant.
+committee, a budget line under a grant. `_drop_shown_record_tails` drops such a
+tail only when its value already shows in the rendered document or in another
+kept Appendix line that is not itself a tail. A tail shown nowhere else is
+kept, since the Appendix line is then the only place that value appears (NDMRSO
+ATUVAL lost five governance terms, and web205, web199, web26 and VGHNZD their
+budget lines, to unconditional versions).
 
-- `amount` (`_record_tail_reason`): the line is only a dollar amount, behind no
-  label or one that names the value itself (`_AMOUNT_LABELS`: "Amount",
-  "Direct costs", "Total", ...). An award's own name in front ("Best Teacher
-  Award: $1,000") makes it a record, and it is kept.
-- `date-range` (`_drop_shown_date_ranges`): the line is only a date range
-  ("2014 – 2016", "1999-Present"), and the same range, dashes and spacing
-  aside, already shows in the rendered document or in another Appendix line.
-  A range shown nowhere else is kept, since the Appendix line is then the only
-  place it appears (NDMRSO ATUVAL lost five governance terms to the
-  unconditional first version).
+- `date-range`: the line is only a date range ("2014 – 2016", "1999-Present");
+  dashes, "to" and spacing are ignored when comparing it.
+- `amount`: the line is only a dollar amount, behind no label or one that
+  names the value itself (`_AMOUNT_LABELS`: "Amount", "Direct costs",
+  "Total", ...); the number is compared, spacing after "$" aside, and never
+  matches inside a longer number ("100,645" is not "1,100,645"). An award's
+  own name in front ("Best Teacher Award: $1,000") makes it a record, and it
+  is kept.
 
 A year with a note ("2015 (sabbatical year)") says something and is kept, and
 so is a range or an amount with any other word beside it. The owner's name and
@@ -443,7 +446,8 @@ _OWNER_NAME_FIELDS = ("first_name", "middle_name", "last_name")
 # #1551 (EBYSBC VGHNZD): the tail of a record that was split, alone on its line --
 # only a date range ("2014 – 2016", "July 2023 – Present", "(07/1990-06/1991)")
 # or only an amount behind a value label ("Amount: $2,500", "Direct Costs:
-# $100,645"). See the module docstring for when each is dropped.
+# $100,645"). Either is dropped only when its value already shows elsewhere
+# (`_drop_shown_record_tails`; see the module docstring).
 _RANGE_POINT = rf"(?:{_MONTH}\.?,?\s*)?(?:19|20)\d{{2}}|\d{{1,2}}/(?:19|20)\d{{2}}"
 _OPEN_RANGE_END = r"present|current|now|ongoing"
 _DATE_RANGE_RE = re.compile(
@@ -461,8 +465,12 @@ _AMOUNT_LABELS = (
     "annual direct cost", "indirect cost", "funding", "budget",
 )
 _AMOUNT_LABEL = "|".join(label.replace(" ", r"\s+") + "s?" for label in _AMOUNT_LABELS)
+# A shown value stands on its own boundaries: no word, "/" or digit group
+# ("1,", "6.") runs into it on either side, so "100,645" is not "1,100,645".
+_VALUE_START = r"(?<![\w/])(?<!\d[,.])"
+_VALUE_END = r"(?![\w/])(?![,.]\d)"
 _AMOUNT_RE = re.compile(
-    rf"^(?:(?:{_AMOUNT_LABEL})\s*:\s*)?\$\s?\d[\d,]*(?:\.\d{{2}})?\.?$", re.IGNORECASE)
+    rf"^(?:(?:{_AMOUNT_LABEL})\s*:\s*)?\$\s?(\d[\d,]*(?:\.\d{{2}})?)\.?$", re.IGNORECASE)
 
 # The CV's own title, up to two leading words ("Medico-legal Curriculum
 # Vitae"), an optional "& Bibliography", and optionally a date line under it.
@@ -1362,10 +1370,9 @@ def _appendix_drop_reason(
     shape recognise "Signed: <owner>" (#1221); empty skips that recognition.
     A T entry nothing above caught last meets `_furniture_reason` (#1221):
     page furniture, which also reads *owner_tokens* for a running header, and
-    "References available on request". An entry of any code nothing else
-    caught meets `_record_tail_reason` (#1551): a bare amount. A bare date
-    range needs the rendered document, so `_drop_shown_date_ranges` decides it
-    after this check has kept the line.
+    "References available on request". A bare date range or amount needs the
+    rendered document, so `_drop_shown_record_tails` decides it after this
+    check has kept the line (#1551).
     """
     if not text.strip():
         return DROP_BLANK
@@ -1396,20 +1403,9 @@ def _appendix_drop_reason(
     # Last, so every older check keeps the drop it already claimed; only
     # entries nothing else caught reach the two-signal residual test.
     if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
-        structural = (_confirmed_structural_reason(text, reasoning, owner_tokens)
-                      or _furniture_reason(text, owner_tokens))
-    else:
-        structural = reclassified_structural_reason(text, reasoning, owner_tokens)
-    return structural or _record_tail_reason(text)
-
-
-def _record_tail_reason(text: str) -> str | None:
-    """`DROP_AMOUNT` when *text* is only an amount behind at most one value
-    label (`_AMOUNT_LABELS`) -- the tail of a split record, under any code
-    (#1551) -- else None."""
-    if _AMOUNT_RE.match(text.strip()):
-        return DROP_AMOUNT
-    return None
+        return (_confirmed_structural_reason(text, reasoning, owner_tokens)
+                or _furniture_reason(text, owner_tokens))
+    return reclassified_structural_reason(text, reasoning, owner_tokens)
 
 
 def _canonical_range(text: str) -> str:
@@ -1418,32 +1414,46 @@ def _canonical_range(text: str) -> str:
     return " ".join(_RANGE_JOIN_RE.sub("-", text.lower()).split())
 
 
-def _drop_shown_date_ranges(
+def _record_tail(text: str) -> tuple[str, str] | None:
+    """(the `DROP_*` reason, the value to look for) when *text* is only a date
+    range (`_DATE_RANGE_RE`, the value canonical) or only an amount behind at
+    most one value label (`_AMOUNT_RE`, the value its number) -- the tail of a
+    split record (#1551) -- else None."""
+    stripped = text.strip()
+    if _DATE_RANGE_RE.match(stripped):
+        return DROP_DATE_RANGE, _canonical_range(stripped.strip("().").strip())
+    amount = _AMOUNT_RE.match(stripped)
+    if amount:
+        return DROP_AMOUNT, amount.group(1)
+    return None
+
+
+def _drop_shown_record_tails(
     kept: Sequence[AppendixLine],
     dropped: Counter[str],
     document_lines: Sequence[str],
 ) -> list[AppendixLine]:
-    """*kept* without each line that is only a date range (`_DATE_RANGE_RE`)
-    whose range *document_lines* (the document rendered so far) or another
-    kept line already shows, each counted on *dropped* as `date-range` (#1551).
+    """*kept* without each line that is only a record's tail (`_record_tail`)
+    whose value *document_lines* (the document rendered so far) or another
+    kept line already shows, each counted on *dropped* under its reason
+    (#1551).
 
-    A range shown nowhere else is kept: it is the only place that value
-    appears (NDMRSO ATUVAL's governance terms, #1551 review). A kept line that
-    is itself a bare range never vouches for another, so two copies of one
-    unplaced range both stay."""
-    def is_bare_range(entry: UnmappedEntry) -> bool:
-        return bool(_DATE_RANGE_RE.match((entry.get("text") or "").strip()))
-
+    A tail shown nowhere else is kept: it is the only place that value
+    appears (NDMRSO ATUVAL's governance terms, web205's direct costs, #1551
+    review). A kept line that is itself a tail never vouches for another, so
+    two copies of one unplaced value both stay. The value must stand on its
+    own boundaries: "100,645" is not shown by "1,100,645" or "100,645.50"."""
+    tails = [_record_tail(entry.get("text") or "") for entry, _ in kept]
     shown = "\x00".join(_canonical_range(line) for line in (
-        *document_lines, *(rendered for entry, rendered in kept if not is_bare_range(entry))))
+        *document_lines, *(rendered for (_, rendered), tail in zip(kept, tails) if tail is None)))
     result: list[AppendixLine] = []
-    for entry, rendered in kept:
-        if is_bare_range(entry):
-            needle = re.escape(_canonical_range((entry.get("text") or "").strip().strip("().").strip()))
-            if re.search(rf"(?<![\w/]){needle}(?![\w/])", shown):
-                dropped[DROP_DATE_RANGE] += 1
+    for line, tail in zip(kept, tails):
+        if tail is not None:
+            reason, value = tail
+            if re.search(rf"{_VALUE_START}{re.escape(value)}{_VALUE_END}", shown):
+                dropped[reason] += 1
                 continue
-        result.append((entry, rendered))
+        result.append(line)
     return result
 
 
@@ -1466,7 +1476,8 @@ def _filter_unmapped_entries(
 ) -> tuple[list[AppendixLine], Counter[str]]:
     """Split *entries* into the lines the appendix will show and a count of
     drops per `DROP_*` reason. *document_lines* is the document rendered so
-    far, which `_drop_shown_date_ranges` reads; empty drops no date range."""
+    far, which `_drop_shown_record_tails` reads; empty drops no date range
+    or amount unless another kept line shows it."""
     kept: list[AppendixLine] = []
     dropped: Counter[str] = Counter()
     for entry in entries:
@@ -1484,7 +1495,7 @@ def _filter_unmapped_entries(
         else:
             dropped[reason] += 1
     kept = _drop_lone_bare_labels(kept, dropped)
-    return _drop_shown_date_ranges(kept, dropped, document_lines), dropped
+    return _drop_shown_record_tails(kept, dropped, document_lines), dropped
 
 
 def _drop_lone_bare_labels(
