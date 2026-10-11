@@ -543,17 +543,20 @@ def _orphan_layout_is_tabular(layout: list[str]) -> bool:
     return len(run_lengths) == 2 or all(length == 1 for length in run_lengths)
 
 
-def _pair_orphaned_dates(items: list[ParsedActivityLine], dates_pool: list[str],
-                         layout: list[str]) -> None:
-    """Give each undated item in `items` its orphaned date, in place, forward
-    by position -- only when the counts agree and `layout` is tabular.
+def _orphaned_dates_line_up(dates_pool: list[str], layout: list[str]) -> bool:
+    """True when the orphaned dates in `dates_pool` may be paired, forward by
+    position, with the undated items `layout` records -- the counts agree and
+    `layout` is tabular.
 
-    Otherwise every undated item stays dateless and a warning names why: a
-    dateless item renders with a blank Dates cell, a visible gap, where a
-    shifted date would be a silent wrong answer (review thread 3843817401).
+    Otherwise a warning names why and the caller leaves every undated item
+    dateless: a dateless item renders with a blank Dates cell, a visible gap,
+    where a shifted date would be a silent wrong answer (review thread
+    3843817401). Shared by the O/P committee parser below and section Q1's
+    `_parse_extramural_leadership_lines` (#1518), whose items are a
+    different type, so this decides and each caller assigns.
     """
     if not dates_pool:
-        return
+        return False
     undated_count = layout.count(_UNDATED_ACTIVITY)
     if undated_count != len(dates_pool):
         logger.warning(
@@ -562,7 +565,7 @@ def _pair_orphaned_dates(items: list[ParsedActivityLine], dates_pool: list[str],
             "unassigned instead of pairing positionally",
             len(dates_pool), undated_count,
         )
-        return
+        return False
     if not _orphan_layout_is_tabular(layout):
         logger.warning(
             "committee/leadership date alignment: %d orphaned date(s) and "
@@ -570,6 +573,15 @@ def _pair_orphaned_dates(items: list[ParsedActivityLine], dates_pool: list[str],
             "-- leaving dates unassigned instead of pairing positionally",
             len(dates_pool), undated_count,
         )
+        return False
+    return True
+
+
+def _pair_orphaned_dates(items: list[ParsedActivityLine], dates_pool: list[str],
+                         layout: list[str]) -> None:
+    """Give each undated item in `items` its orphaned date, in place, forward
+    by position -- only when `_orphaned_dates_line_up` says so."""
+    if not _orphaned_dates_line_up(dates_pool, layout):
         return
     dates = iter(dates_pool)
     for i, item in enumerate(items):
