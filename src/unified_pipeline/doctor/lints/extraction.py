@@ -110,6 +110,7 @@ from unified_pipeline.stage6.normalization.pii import (
 )
 from unified_pipeline.stage6.normalization.publication import resolve_publication
 from unified_pipeline.stage6.parsing import split_appointment_title
+from unified_pipeline.stage6.parsing.dates import _MONTH_NAME_TO_NUM
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
 from unified_pipeline.stage6.sections.positions import POSITION_TAXONOMY_CODES
@@ -4506,4 +4507,95 @@ def lint_appointment_title_overlong(stage4: dict) -> list[dict]:
             f"over {APPOINTMENT_TITLE_WARN_CHARS} -- duty prose in the role "
             f"field; {outcome}",
             [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- footer_in_record --------------------------------------------------------
+#
+# A PDF's running page footer that the converter kept as body text reaches the
+# record that straddles the page break as one of its '\t' parts, and stage 4
+# can take it as the record's date (#1584, RLADNC-01: a "November 2020" footer,
+# cut from its page number at a two-column gutter, dated five talks 2020).
+# #1630 fixed the converter; this lint is the check that it stays fixed. A
+# footer is told from a real date by repetition: the same bare month-year as a
+# whole part of many entries. A bare page number is read as furniture only
+# beside such a part, since alone it cannot be told from a count.
+
+#: A bare month-year part shared by at least this many entries is a footer.
+#: Over the 126 local stage-4 artifacts (the 66-CV farm and the 2026-09-11
+#: and 2026-09-17 batches) no such part is shared by more than 3 entries;
+#: RLADNC's footer was on 6.
+FOOTER_MIN_ENTRIES = 5
+_FOOTER_MONTHS = "|".join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+_FOOTER_MONTH_YEAR_RE = re.compile(
+    rf"(?:{_FOOTER_MONTHS})\.?,?\s+((?:19|20)\d{{2}})", re.IGNORECASE)
+_FOOTER_PAGE_NUMBER_RE = re.compile(r"(?:page\s+)?\d{1,3}(?:\s+of\s+\d{1,3})?", re.IGNORECASE)
+#: Parts a stage-2 entry text is joined by.
+_ENTRY_PART_SEPARATOR = "\t"
+
+
+def _footer_key(part: str) -> str | None:
+    """A bare month-year part, normalised for counting; None otherwise."""
+    return " ".join(part.lower().split()) if _FOOTER_MONTH_YEAR_RE.fullmatch(part) else None
+
+
+def _entry_parts(entry: _FieldsEntry) -> list[str]:
+    return [part.strip() for part in entry.text.split(_ENTRY_PART_SEPARATOR)]
+
+
+def _footer_keys(entries: list[_FieldsEntry]) -> frozenset[str]:
+    """The bare month-year parts at least `FOOTER_MIN_ENTRIES` entries carry."""
+    carriers: dict[str, set[object]] = {}
+    for entry in entries:
+        for part in _entry_parts(entry):
+            key = _footer_key(part)
+            if key:
+                carriers.setdefault(key, set()).add(entry.element_idx)
+    return frozenset(key for key, idxs in carriers.items() if len(idxs) >= FOOTER_MIN_ENTRIES)
+
+
+def _footer_parts(parts: list[str], keys: frozenset[str]) -> list[int]:
+    """Indices of the footer parts, and of a bare page number beside one."""
+    footer = {i for i, part in enumerate(parts) if _footer_key(part) in keys}
+    pages = {j for i in footer for j in (i - 1, i + 1)
+             if 0 <= j < len(parts) and j not in footer
+             and _FOOTER_PAGE_NUMBER_RE.fullmatch(parts[j])}
+    return sorted(footer | pages)
+
+
+def _dated_from_footer(entry: _FieldsEntry, parts: list[str], footer: list[int]) -> bool:
+    """Whether a date field holds a footer's year that the rest of the entry
+    text does not state: stage 4 dated the record from the footer."""
+    footer_years = {year for i in footer for year in _FOOTER_MONTH_YEAR_RE.findall(parts[i])}
+    rest = " ".join(part for i, part in enumerate(parts) if i not in footer)
+    years = footer_years - set(_FOUR_DIGIT_YEAR_RE.findall(rest))
+    return any(year in _FOUR_DIGIT_YEAR_RE.findall(leaf)
+               for key, value in entry.fields.items() if _is_date_key(key)
+               for leaf in _leaf_strings(value) for year in years)
+
+
+def lint_footer_in_record(stage4: dict) -> list[dict]:
+    """A stage-4 entry carrying a running page footer as a '\t' part: a bare
+    month-year that at least `FOOTER_MIN_ENTRIES` entries carry, with a bare
+    page number beside it (#1584). WARN when a date field holds the footer's
+    year and the rest of the text does not (the record is misdated), else
+    INFO. One finding per entry."""
+    entries = _fields_entries(stage4)
+    keys = _footer_keys(entries)
+    if not keys:
+        return []
+    findings = []
+    for entry in entries:
+        parts = _entry_parts(entry)
+        footer = _footer_parts(parts, keys)
+        if not footer:
+            continue
+        dated = _dated_from_footer(entry, parts, footer)
+        outcome = ("a date field holds its year, which the rest of the entry does not state"
+                   if dated else "no date field is taken from it")
+        findings.append(_finding(
+            "footer_in_record", "WARN" if dated else "INFO",
+            f"entry {entry.element_idx} ({entry.code}): carries a running page footer "
+            f"that {FOOTER_MIN_ENTRIES} or more entries share; {outcome}",
+            [" | ".join(parts[i] for i in footer)[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

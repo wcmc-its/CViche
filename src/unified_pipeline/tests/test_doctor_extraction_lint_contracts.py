@@ -50,6 +50,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     DEGREE_YEAR_LEAD,
     FIELD_EVIDENCE_MAX_VALUES,
     FIELD_EVIDENCE_VALUE_CHARS,
+    FOOTER_MIN_ENTRIES,
     GRANT_FACT_MISSING,
     GRANT_FACT_NOT_IN_SOURCE,
     GRANT_FACTS_MAX_LISTED,
@@ -78,6 +79,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_footer_in_record,
     lint_grant_boundary,
     lint_grant_bucket,
     lint_implausible_year,
@@ -5122,3 +5124,73 @@ def test_grant_facts_judges_an_unrendered_grant_against_the_rest_of_the_document
 ])
 def test_grant_facts_ignores_what_is_not_a_grant_entry(entry):
     assert lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")]) == []
+
+
+# lint_footer_in_record (#1584, RLADNC-01 shape): a PDF running footer kept as
+# a stage-4 entry's '\t' part, and the record dated from it. Invented talks.
+
+_FOOTER = "November 2020"
+
+
+def _footer_talk(idx, text, **fields):
+    return _fields_entry("L3", {"title": "Example talk", **fields}, text=text, idx=idx)
+
+
+def _footer_talks(count, **fields):
+    """`count` talks of 2014, each ending in the footer part."""
+    return [_footer_talk(i, f"Example talk, Example Venue, 2014\t{_FOOTER}", **fields)
+            for i in range(count)]
+
+
+def test_footer_in_record_warns_on_a_record_dated_from_the_footer():
+    entries = [*_footer_talks(FOOTER_MIN_ENTRIES - 1, date="2014"),
+               _footer_talk(1275, f"{_FOOTER}\t26\tExample talk, Example Venue", date="2020-11")]
+    findings = lint_footer_in_record({"entries": entries})
+    assert [f["severity"] for f in findings] == ["INFO"] * (FOOTER_MIN_ENTRIES - 1) + ["WARN"]
+    warn = findings[-1]
+    assert warn["lint"] == "footer_in_record"
+    assert warn["message"].startswith("entry 1275 (L3): ")
+    assert "a date field holds its year" in warn["message"]
+    assert warn["evidence"] == [f"{_FOOTER} | 26"]
+
+
+def test_footer_in_record_is_info_when_the_year_is_also_the_records_own():
+    entries = _footer_talks(FOOTER_MIN_ENTRIES - 1, date="2014") + [
+        _footer_talk(9, f"Example talk, Example Venue, 2020\t{_FOOTER}", date="2020")]
+    assert [f["severity"] for f in lint_footer_in_record({"entries": entries})] == [
+        "INFO"] * FOOTER_MIN_ENTRIES
+
+
+def test_footer_in_record_needs_the_part_on_five_entries():
+    entries = _footer_talks(FOOTER_MIN_ENTRIES - 1, date="2020-11")
+    assert FOOTER_MIN_ENTRIES == 5
+    assert lint_footer_in_record({"entries": entries}) == []
+    # One entry carrying it twice is still one entry.
+    entries.append(_footer_talk(0, f"{_FOOTER}\tExample talk\t{_FOOTER}"))
+    assert lint_footer_in_record({"entries": entries}) == []
+
+
+def test_footer_in_record_reads_whole_parts_only():
+    """A month-year inside a part is the record's own date, not a footer."""
+    entries = [_footer_talk(i, f"Example talk, {_FOOTER}, Example Venue", date="2020-11")
+               for i in range(FOOTER_MIN_ENTRIES + 1)]
+    assert lint_footer_in_record({"entries": entries}) == []
+
+
+@pytest.mark.parametrize("page, quoted", [
+    ("27", f"{_FOOTER} | 27"), ("Page 3 of 9", f"{_FOOTER} | Page 3 of 9"),
+    ("Example Venue", _FOOTER), ("1234", _FOOTER)])
+def test_footer_in_record_quotes_a_page_number_beside_the_footer(page, quoted):
+    entries = _footer_talks(FOOTER_MIN_ENTRIES - 1) + [
+        _footer_talk(9, f"Example talk, 2014\t{_FOOTER}\t{page}")]
+    assert lint_footer_in_record({"entries": entries})[-1]["evidence"] == [quoted]
+
+
+@pytest.mark.parametrize("footer", ["Nov. 2020", "NOVEMBER 2020", "Sept 2019"])
+def test_footer_in_record_reads_abbreviated_and_capitalised_months(footer):
+    entries = [_footer_talk(i, f"Example talk, 2014\t{footer}") for i in range(FOOTER_MIN_ENTRIES)]
+    assert len(lint_footer_in_record({"entries": entries})) == FOOTER_MIN_ENTRIES
+
+
+def test_footer_in_record_is_silent_on_entries_without_text():
+    assert lint_footer_in_record({"entries": [{"taxonomy_code": "L3"}] * 6}) == []
