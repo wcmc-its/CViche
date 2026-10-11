@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  COST_OUTLIER_RATIO, DEFAULT_MAX_UPLOAD_MB, UNSUPPORTED_TYPE_REASON, costOutliers, missingItems, maxUploadBytes, tooLargeReason, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
+  COST_OUTLIER_RATIO, DEFAULT_MAX_UPLOAD_MB, UNSUPPORTED_TYPE_REASON, costOutliers, missingItems, maxUploadBytes, tooLargeReason, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, splitForEstimate, wasStarted, MAX_BATCH_FILES,
 } from './batchRows'
 import type { Estimate, QuotaInfo } from '../../types'
 
@@ -125,8 +125,14 @@ describe('emailed CV rows (#1298)', () => {
     expect(row.file.name).toBe('emailed.docx')
     expect(rowSize(row)).toBe(4096)
     expect(row.invalidReason).toBeNull()
-    expect(row.estimate).toBeNull()
+    expect(row.estimate).toBeUndefined()  // pending, from POST /inbox/estimate (#1626)
     expect(makeRow(new File(['ab'], 'a.docx'), 'row-2').inbox).toBeNull()
+  })
+
+  it('counts an estimated emailed CV toward the outlier check and its median (#1626)', () => {
+    const uploaded = [1, 1].map((w, i) => makeRow(new File(['x'], `cv${i}.docx`), `k${i}`, { ...EST_BASE, cost_weight: w }))
+    const emailed = { ...makeInboxRow(item, 'big'), estimate: { ...EST_BASE, cost_weight: 9 } }
+    expect([...costOutliers([...uploaded, emailed]).keys()]).toEqual(['big'])
   })
 
   it('states only the count when no row has an estimate', () => {
@@ -166,5 +172,23 @@ describe('costOutliers (#1599)', () => {
     const input = { rows, multi: true, attested: true, quota: null }
     expect(missingItems(input)).toEqual(['Include or remove 1 unusually large CV'])
     expect(missingItems({ ...input, rows: rows.map((r) => ({ ...r, costConfirmed: true })) })).toEqual([])
+  })
+})
+
+describe('splitForEstimate (#1626)', () => {
+  const rowsOf = (n: number) => Array.from({ length: n }, (_, i) => makeRow(new File(['x'], `cv${i}.docx`), `k${i}`))
+
+  it('estimates every valid new row while the call has room, and skips an invalid one', () => {
+    const fresh = [...rowsOf(2), makeRow(new File(['x'], 'notes.txt'), 'bad')]
+    const { added, toEstimate } = splitForEstimate(fresh, 0)
+    expect(toEstimate.map((r) => r.key)).toEqual(['k0', 'k1'])
+    expect(added.map((r) => r.estimate)).toEqual([undefined, undefined, null])
+  })
+
+  it('marks the rows past MAX_BATCH_FILES less the listed valid rows unestimated', () => {
+    const { added, toEstimate } = splitForEstimate(rowsOf(3), MAX_BATCH_FILES - 2)
+    expect(toEstimate.map((r) => r.key)).toEqual(['k0', 'k1'])
+    expect(added.map((r) => r.estimate)).toEqual([undefined, undefined, null])
+    expect(splitForEstimate(rowsOf(1), MAX_BATCH_FILES + 1).toEstimate).toEqual([])
   })
 })
