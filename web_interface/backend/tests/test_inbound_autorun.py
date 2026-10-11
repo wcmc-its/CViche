@@ -3,6 +3,7 @@ starts its CVs automatically as one batch; duplicates, files past the quota,
 everything for a user with outdated consent, and everything outside queue mode
 are held pending. Messages and users are synthetic; storage is a tmp_path
 LocalRunStorage; the queue and the Teams card are recorders."""
+import functools
 import hashlib
 import io
 import logging
@@ -34,7 +35,11 @@ from tests.test_inbound_mail import make_eml
 SENDER = "pat@med.cornell.edu"
 
 
+@functools.cache
 def _docx(label="a") -> bytes:
+    """One set of bytes per label (#1685, as #1325 did for test_inbox_api): python-docx
+    stamps the save time into the zip, so two saves either side of a 2-second boundary
+    hash differently and the duplicate tests would see two different files."""
     document = Document()
     document.add_paragraph(f"Synthetic CV {label}. " * 60)
     buffer = io.BytesIO()
