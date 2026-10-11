@@ -79,12 +79,23 @@ _DEA_LABEL_PRESENT_RE = re.compile(r'\bdea\b', re.IGNORECASE)
 # so it cannot be cut out of a longer token. Calibrated before it was made
 # ungated: rendered over the 163-CV corpus, the only bare tokens of this
 # shape inside the Licensure section were the two leaked DEA numbers; every
-# other hit sat in the Bibliography, Research or Mentoring sections. A state
-# licence or certificate number that happens to share the shape WOULD be a
-# finding here -- the cost of a false positive is a hard-fail the reviewer
-# can read in the document, the cost of a miss is a leaked identifier.
+# other hit sat in the Bibliography, Research or Mentoring sections.
+#
+# The shape alone also matches a STATE licence number written the same way --
+# a Florida medical licence is "ME" plus digits -- and because the repair
+# (`repair/protected_data.py`) cuts what this probe finds, such a licence row
+# rendered with its number blank and no withheld notice (#1658, GHWROW 215).
+# So with no label in the block a match must also carry the DEA check digit
+# (`_dea_check_digit_ok`): a real DEA number always does, a state licence
+# number of the same shape does in only one case in ten.
 _DEA_NUMBER_VALUE_RE = re.compile(
     r'(?<![A-Za-z0-9])[A-Za-z]{2}\d{7}(?![A-Za-z0-9])')
+
+# The DEA check digit (#1658): with the seven digits d1..d7,
+# (d1 + d3 + d5) + 2 * (d2 + d4 + d6) ends in d7.
+_DEA_CHECK_WEIGHTS = (1, 2, 1, 2, 1, 2)
+_DEA_CHECK_MODULUS = 10
+_DEA_DIGIT_COUNT = 7
 
 # The Personal Data table's own "Home address:" row is a static template
 # label too, unlike every OTHER row of this lint's full policy (DOB, SSN,
@@ -119,12 +130,27 @@ _HOME_CONTACT_LABEL_RE = re.compile(
     r'home\s*(?:address|phone|telephone|tel\.?)\s*:', re.IGNORECASE)
 
 
+def _dea_check_digit_ok(token: str) -> bool:
+    """Whether a two-letters-seven-digits token carries the DEA check digit."""
+    digits = [int(ch) for ch in token[-_DEA_DIGIT_COUNT:]]
+    weighted = sum(w * d for w, d in zip(_DEA_CHECK_WEIGHTS, digits))
+    return weighted % _DEA_CHECK_MODULUS == digits[-1]
+
+
+def _unlabelled_dea_matches(text: str) -> list[re.Match[str]]:
+    """DEA numbers in text whose block does not name DEA: the real format with
+    a valid check digit (#1217, #1658)."""
+    return [m for m in _DEA_NUMBER_VALUE_RE.finditer(text)
+            if _dea_check_digit_ok(m.group(0))]
+
+
 def _dea_value_matches(block_text: str) -> list[re.Match[str]]:
     """DEA-shaped values in one Licensure-section block: the loose shape when
-    the block names DEA, the real format alone when it does not (#1217)."""
-    probe = (_DEA_VALUE_RE if _DEA_LABEL_PRESENT_RE.search(block_text)
-             else _DEA_NUMBER_VALUE_RE)
-    return list(probe.finditer(block_text))
+    the block names DEA, a check-digit-valid real-format number when it does
+    not (#1217, #1658)."""
+    if _DEA_LABEL_PRESENT_RE.search(block_text):
+        return list(_DEA_VALUE_RE.finditer(block_text))
+    return _unlabelled_dea_matches(block_text)
 
 
 def _home_contact_value_leaked(block_text: str) -> bool:
