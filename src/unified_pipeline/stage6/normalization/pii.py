@@ -119,6 +119,25 @@ CAT_TAX_ID = "tax ID number"
 # `stage6/pii_pass.py` directly rather than through this table.
 CAT_THIRD_PARTY_CONTACT = "third-party contact"
 
+# The DEA check digit (#1658): with the seven digits d1..d7 of a DEA number
+# (two letters then seven digits), (d1 + d3 + d5) + 2 * (d2 + d4 + d6) ends
+# in d7. A real DEA number always passes; a state licence number of the same
+# shape (a Florida medical licence is "ME" plus seven digits) passes in one
+# case in ten. Here because both the stage-6 licensure section and the
+# doctor's protected-data lint need it, and the doctor imports stage 6, not
+# the reverse.
+_DEA_CHECK_WEIGHTS = (1, 2, 1, 2, 1, 2)
+_DEA_CHECK_MODULUS = 10
+_DEA_DIGIT_COUNT = 7
+
+
+def _dea_check_digit_ok(token: str) -> bool:
+    """Whether a two-letters-seven-digits token carries the DEA check digit."""
+    digits = [int(ch) for ch in token[-_DEA_DIGIT_COUNT:]]
+    weighted = sum(w * d for w, d in zip(_DEA_CHECK_WEIGHTS, digits[:-1],
+                                         strict=True))
+    return weighted % _DEA_CHECK_MODULUS == digits[-1]
+
 
 @dataclass(frozen=True)
 class WithholdRule:

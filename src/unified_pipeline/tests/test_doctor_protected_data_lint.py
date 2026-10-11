@@ -25,6 +25,7 @@ from docx.oxml.ns import nsdecls  # noqa: E402
 
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: E402
     _INDEPENDENT_SHAPES,
+    _dea_check_digit_ok,
     _shape_hits,
     lint_protected_data_in_output,
 )
@@ -215,19 +216,36 @@ def test_a_bare_dea_shaped_number_in_a_licence_row_is_flagged_without_a_label():
     """#1217: the row names no "DEA" -- its first column is a state, or the
     agency spelled out, or the number sits fused in another credential's
     cell -- so the label-gated probe above never saw it."""
-    for row in ("New York\tAB1234567\t03/2019\t03/2021",
-                "Drug Enforcement Administration\tAB1234567\t2011\tPresent",
-                "Example State\t#12345A, 1234567890, #AB1234567\t2005\tPresent"):
+    for row in ("New York\tAB1234563\t03/2019\t03/2021",
+                "Drug Enforcement Administration\tAB1234563\t2011\tPresent",
+                "Example State\t#12345A, 1234567890, #AB1234563\t2005\tPresent"):
         findings = lint_protected_data_in_output([_p("LICENSURE"), _t(row)])
         assert len(findings) == 1, row
         assert "(DEA number)" in findings[0]["message"]
-        assert "AB1234567" not in findings[0]["message"]
+        assert "AB1234563" not in findings[0]["message"]
 
 
 def test_a_bare_dea_shaped_number_is_flagged_under_the_real_templates_header():
     blocks = [_p("LICENSURE, BOARD CERTIFICATION"),
-              _t("Example State\tAB1234567\t2005\tPresent")]
+              _t("Example State\tAB1234563\t2005\tPresent")]
     assert len(lint_protected_data_in_output(blocks)) == 1
+
+
+def test_a_state_licence_number_without_the_dea_check_digit_is_not_flagged():
+    """#1658: a Florida medical licence is "ME" plus digits, so one with seven
+    digits has the DEA shape. With no DEA label in the block, only a number
+    that carries the DEA check digit is a finding; this one does not."""
+    for row in ("Florida\tME1234567\t09/2014\t",
+                "Example State\t#12345A, ME1234567\t2005\tPresent"):
+        assert lint_protected_data_in_output([_p("LICENSURE"), _t(row)]) == [], row
+
+
+@pytest.mark.parametrize("token, valid", [
+    ("AB1234563", True), ("FB0000000", True),
+    ("AB1234567", False), ("ME1234567", False), ("XY7654321", False)])
+def test_the_dea_check_digit(token, valid):
+    """(d1 + d3 + d5) + 2 * (d2 + d4 + d6) ends in d7 (#1658)."""
+    assert _dea_check_digit_ok(token) is valid
 
 
 def test_a_bare_dea_shaped_number_outside_licensure_is_not_flagged():
@@ -314,13 +332,13 @@ def test_a_dea_number_in_a_rendered_licence_row_is_flagged_and_the_fixed_render_
     gen.doc = Document(gen.template_path)
     gen._fill_licensure([
         {"taxonomy_code": "F1",
-         "text": "Licensed Physician, Example State | #12345A\n #AB1234567",
+         "text": "Licensed Physician, Example State | #12345A\n #AB1234563",
          "extracted_fields": {"state_country": "Example State",
-                             "license_number": "#12345A, #AB1234567"}},
+                             "license_number": "#12345A, #AB1234563"}},
     ])
     assert lint_protected_data_in_output(docx_body_blocks(gen.doc)) == []
 
-    _licence_number_cell(gen).text = "#12345A, #AB1234567"
+    _licence_number_cell(gen).text = "#12345A, #AB1234563"
     findings = lint_protected_data_in_output(docx_body_blocks(gen.doc))
     assert len(findings) == 2
     assert all("(DEA number)" in f["message"] for f in findings)
@@ -333,7 +351,7 @@ def test_quality_score_caps_red_on_a_bare_dea_number_in_a_licence_table(tmp_path
     doc.add_paragraph("LICENSURE, BOARD CERTIFICATION")
     table = doc.add_table(rows=1, cols=4)
     for cell, text in zip(table.rows[0].cells,
-                          ("Example State", "AB1234567", "2005", "Present")):
+                          ("Example State", "AB1234563", "2005", "Present")):
         cell.text = text
     doc.add_paragraph("EDUCATION")
     doc.save(str(tmp_path / f"{_UID}_wcm.docx"))
