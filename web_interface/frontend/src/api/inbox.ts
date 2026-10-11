@@ -1,6 +1,6 @@
 import { api } from './client'
 import { inboxRoutes } from './routes'
-import type { InboxItem, InboxSubmitResult } from '../types'
+import type { BatchEstimate, InboxItem, InboxSubmitResult } from '../types'
 
 /** The caller's emailed CVs waiting for confirmation, oldest first. */
 export async function listInbox(): Promise<InboxItem[]> {
@@ -9,6 +9,11 @@ export async function listInbox(): Promise<InboxItem[]> {
 
 export async function discardInboxItem(id: number): Promise<void> {
   await api.post(inboxRoutes.discard(id))
+}
+
+/** One /estimate call for held items (#1626): a row per id, in order, plus totals, like getBatchEstimate. */
+export async function estimateInboxItems(ids: number[]): Promise<BatchEstimate> {
+  return api.post<BatchEstimate>(inboxRoutes.estimate(), { item_ids: ids })
 }
 
 export interface InboxSubmitOptions {

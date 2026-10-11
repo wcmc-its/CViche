@@ -153,6 +153,8 @@ export const inboxRoutes = {
   discard: (id: number) => `/api/inbox/${id}/discard` as const,
   /** POST /api/inbox/submit  (create runs from held items) */
   submit: () => `/api/inbox/submit` as const,
+  /** POST /api/inbox/estimate  (cost/time estimate of held items) */
+  estimate: () => `/api/inbox/estimate` as const,
 } as const
 
 export const wsRoutes = {
