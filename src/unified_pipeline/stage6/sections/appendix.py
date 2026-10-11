@@ -135,6 +135,20 @@ space ("*****"). A bare label that closes with a colon and holds nothing after i
 The two-signal rule kept it whenever 3b called it a "header label only" rather
 than a section header.
 
+The last check runs under every code (#1551, EBYSBC VGHNZD): a line that is
+only a date range ("2014 – 2016", "1999-Present") or only an amount behind at
+most one label ("Amount: $2,500") is dropped as `date-range` or `amount`
+(`_record_tail_reason`). Each is the tail of a record that was split: a grant
+table's date cell, the date line under a committee, a budget line under a
+grant. Measured over the 189-CV render corpus (the 66-CV farm, the 2026-09-11
+and 2026-09-17 batches, EBYSBC), it removed 37 Appendix lines from 8 CVs, every
+one such a tail. The record each belonged to renders elsewhere, or nowhere, so
+the line was nothing a reviewer could place; for 17 of the 37 the date or
+amount appears nowhere else in the document. A year with a note
+("2015 (sabbatical year)") says something and is kept, and so is a range or an
+amount with any other word beside it. The owner's name and a date alone
+("<initials> <Surname> June 2023") was already page furniture.
+
 The same furniture test keeps an A-coded orphan out of the post-render recovery
 (stage 6's `_unconsumed_personal_data_batch`), and decides the severity of the
 "A ... recovered into the Appendix" warning: INFO when every recovered A line is
@@ -281,6 +295,8 @@ DROP_RULE_LINE = "rule-line"
 DROP_SIGNATURE_BLOCK = "signature-block"
 DROP_PAGE_FURNITURE = "page-furniture"
 DROP_ON_REQUEST = "on-request"
+DROP_DATE_RANGE = "date-range"
+DROP_AMOUNT = "amount"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
@@ -300,6 +316,8 @@ DROP_REASONS = (
     DROP_SIGNATURE_BLOCK,
     DROP_PAGE_FURNITURE,
     DROP_ON_REQUEST,
+    DROP_DATE_RANGE,
+    DROP_AMOUNT,
 )
 
 # The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
@@ -416,6 +434,21 @@ _SIGNATURE_DATE_RE = re.compile(rf"{_FULL_DATE}|{_MONTH_YEAR}", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"_+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _OWNER_NAME_FIELDS = ("first_name", "middle_name", "last_name")
+
+# #1551 (EBYSBC VGHNZD): the tail of a record that was split, alone on its line --
+# only a date range ("2014 – 2016", "July 2023 – Present", "(07/1990-06/1991)")
+# or only an amount, behind at most one label ("Amount: $2,500", "Direct Costs:
+# $100,645"). The record it belonged to renders elsewhere, or nowhere, so the
+# line carries nothing a reader could place. Text-only and under every code:
+# measured over the 189-CV render corpus, every such Appendix line was a tail
+# (see the module docstring).
+_RANGE_POINT = rf"(?:{_MONTH}\.?,?\s*)?(?:19|20)\d{{2}}|\d{{1,2}}/(?:19|20)\d{{2}}"
+_OPEN_RANGE_END = r"present|current|now|ongoing"
+_DATE_RANGE_RE = re.compile(
+    rf"^\(?\s*(?:{_RANGE_POINT})\s*(?:[-–—]+|to)\s*(?:{_RANGE_POINT}|{_OPEN_RANGE_END})\s*\)?\.?$",
+    re.IGNORECASE,
+)
+_AMOUNT_RE = re.compile(r"^(?:[A-Za-z][A-Za-z ]{0,40}:\s*)?\$\s?\d[\d,]*(?:\.\d{2})?\.?$")
 
 # The CV's own title, up to two leading words ("Medico-legal Curriculum
 # Vitae"), an optional "& Bibliography", and optionally a date line under it.
@@ -1315,7 +1348,8 @@ def _appendix_drop_reason(
     shape recognise "Signed: <owner>" (#1221); empty skips that recognition.
     A T entry nothing above caught last meets `_furniture_reason` (#1221):
     page furniture, which also reads *owner_tokens* for a running header, and
-    "References available on request".
+    "References available on request". An entry of any code nothing else
+    caught meets `_record_tail_reason` (#1551): a bare date range or amount.
     """
     if not text.strip():
         return DROP_BLANK
@@ -1346,9 +1380,23 @@ def _appendix_drop_reason(
     # Last, so every older check keeps the drop it already claimed; only
     # entries nothing else caught reach the two-signal residual test.
     if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
-        return (_confirmed_structural_reason(text, reasoning, owner_tokens)
-                or _furniture_reason(text, owner_tokens))
-    return reclassified_structural_reason(text, reasoning, owner_tokens)
+        structural = (_confirmed_structural_reason(text, reasoning, owner_tokens)
+                      or _furniture_reason(text, owner_tokens))
+    else:
+        structural = reclassified_structural_reason(text, reasoning, owner_tokens)
+    return structural or _record_tail_reason(text)
+
+
+def _record_tail_reason(text: str) -> str | None:
+    """`DROP_DATE_RANGE` or `DROP_AMOUNT` when *text* is only a date range or
+    only an amount behind at most one label -- the tail of a split record, under
+    any code (#1551) -- else None."""
+    stripped = text.strip()
+    if _DATE_RANGE_RE.match(stripped):
+        return DROP_DATE_RANGE
+    if _AMOUNT_RE.match(stripped):
+        return DROP_AMOUNT
+    return None
 
 
 def reclassified_structural_reason(

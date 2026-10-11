@@ -53,10 +53,12 @@ from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: 
 from unified_pipeline.stage6.sections import appendix as appendix_module  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     APPENDIX_MAX_CHARS,
+    DROP_AMOUNT,
     DROP_BARE_YEAR,
     DROP_BLANK,
     DROP_COLUMN_HEADER,
     DROP_CV_TITLE,
+    DROP_DATE_RANGE,
     DROP_DATE_STAMP,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_ON_REQUEST,
@@ -1700,3 +1702,62 @@ def test_appendix_group_heading_is_the_sources_words_never_a_section_header(sour
     CAPS, either of which reads as a WCM section header (to a reader, and to
     the doctor's _output_section_header, which would end the Appendix there)."""
     assert appendix_module.appendix_group_heading(source) == shown
+
+
+# ------------------------------------------- #1551: record tails, signature line
+
+@pytest.mark.parametrize("code", ["T", "N3", "M2B", "I"])
+@pytest.mark.parametrize("text", [
+    "2014 – 2016", "2014-2016", "2014 to 2016", "(2014-2016)", "1968- 1969.",
+    "1999-Present", "July 2023 – Present", "07/1990-06/1991",
+])
+def test_bare_date_range_is_dropped_under_any_code(text, code):
+    assert _sig(text, None, code=code) == DROP_DATE_RANGE
+
+
+@pytest.mark.parametrize("code", ["T", "M2B", "M2A"])
+@pytest.mark.parametrize("text", [
+    "Amount: $2,500", "Direct Costs: $100,645", "Annual direct cost:   $1,105,168",
+    "$ 10,334,879", "Total: $12,500.00", "   Amount: $2,500 ",
+])
+def test_bare_amount_behind_one_label_is_dropped_under_any_code(text, code):
+    assert _sig(text, None, code=code) == DROP_AMOUNT
+
+
+@pytest.mark.parametrize("text", [
+    "2015 (sabbatical year)",           # a year with a note: says something
+    "2014 – 2016 Example Committee, Member",
+    "2014 – 2016\tExample Society, Member",
+    "2014-",                            # an open start, not a range
+    "Sabbatical: 2014-2016",            # a label before the range
+    "Amount: $2,500 from the Example Foundation",
+    "$2,500 Example Award",
+    "Source: Example Foundation\tAmount: $2,500",
+    "Amount: 2,500",                    # no currency mark
+    "Example Award, 2014-2016, $2,500",
+])
+def test_a_line_with_anything_besides_the_range_or_amount_is_kept(text):
+    assert _sig(text, None, code="M2B") is None
+    assert _sig(text, None) is None
+
+
+def test_record_tail_drops_are_counted_and_described():
+    entries = [
+        {"text": "2014 – 2016", "taxonomy_code": "N3"},
+        {"text": "Amount: $2,500", "taxonomy_code": "M2B"},
+        {"text": "2015 (sabbatical year)", "taxonomy_code": "T"},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["2015 (sabbatical year)"]
+    assert dropped == Counter({DROP_DATE_RANGE: 1, DROP_AMOUNT: 1})
+    assert _describe_dropped(dropped) == (
+        "2 non-content blocks removed (date-range 1, amount 1)"
+    )
+
+
+@pytest.mark.parametrize("text", ["JQ Doe June 2023", "J Q Doe June 2023", "Jane Doe March 3, 2021"])
+def test_owner_name_and_a_date_alone_is_dropped(text):
+    """#1551's signature line, the owner's initials and surname and a month
+    and year, is page furniture: nothing but the owner's name and a date."""
+    reasoning = "[T-validation confirmed] Stray name/date fragment, not substantive"
+    assert _sig(text, reasoning) == DROP_PAGE_FURNITURE
