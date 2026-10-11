@@ -4,24 +4,21 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
+from app.timeutil import as_utc
+
 
 def iso_with_offset(dt: datetime) -> str:
     """Serialize a datetime to ISO 8601 with an explicit UTC offset.
 
-    Timestamps are written with naive ``datetime.now()`` (and ``func.now()``),
-    i.e. the server's wall clock with no tzinfo. Pydantic serializes a naive
-    datetime with no timezone designator (``2026-06-11T09:00:00``), so the
-    browser's ``new Date()`` interprets it in the *viewer's* local zone. For a
-    UTC prod pod viewed from a non-UTC client every timestamp is then wrong by
-    the client's offset (e.g. a just-uploaded file shows "5 hours ago" from
-    UTC+5:30). Attaching the server's own offset (``astimezone()`` treats a
-    naive value as local) makes the instant unambiguous; the client converts it
-    correctly regardless of viewer zone. Assumption-free: writes and this
-    serializer use the same server zone, so we never need to know what it is.
+    Pydantic serializes a naive datetime with no timezone designator
+    (``2026-06-11T09:00:00``), so the browser's ``new Date()`` would read it in
+    the *viewer's* local zone and every timestamp would be off by the viewer's
+    offset. Model timestamps load as aware UTC (``app.timeutil.UTCDateTime``),
+    so they already carry ``+00:00``; a naive value that reaches here anyway is
+    taken to be UTC, the stored convention (#798), rather than the server's own
+    zone. An aware value keeps its own offset.
     """
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    return dt.isoformat()
+    return (dt if dt.tzinfo else as_utc(dt)).isoformat()
 
 
 # Apply to every datetime field the API returns. ``when_used='json'`` keeps

@@ -1,13 +1,13 @@
 """Regression guard for the "5 hours ago" timezone bug.
 
-Timestamps are written with naive ``datetime.now()`` (the server's wall clock,
-no tzinfo). Before the fix, Pydantic serialized those naive values with no
-timezone designator (``2026-06-11T09:00:00``), so the browser's ``new Date()``
-interpreted them in the *viewer's* local zone -- making every timestamp wrong by
-the viewer's offset (a just-uploaded file showed "5 hours ago" from UTC+5:30).
+Pydantic serializes a naive datetime with no timezone designator
+(``2026-06-11T09:00:00``), so the browser's ``new Date()`` interprets it in the
+*viewer's* local zone -- making every timestamp wrong by the viewer's offset (a
+just-uploaded file showed "5 hours ago" from UTC+5:30).
 
-The ``TZDateTime`` serializer in ``app.schemas`` attaches the server's own offset
-so the emitted instant is unambiguous. These tests pin that contract: every
+Model timestamps now load as aware UTC (#798, ``app.timeutil``), and the
+``TZDateTime`` serializer in ``app.schemas`` reads any naive value that still
+reaches it as UTC, the stored convention. These tests pin that contract: every
 datetime the API returns must carry a timezone, while Python-mode access stays a
 real ``datetime`` for internal callers.
 """
@@ -30,6 +30,20 @@ def test_naive_datetime_serializes_with_timezone():
     emitted = _run().model_dump(mode="json")["started_at"]
     # Must round-trip to an aware datetime -- never a bare naive string.
     assert datetime.fromisoformat(emitted).tzinfo is not None, emitted
+
+
+def test_naive_datetime_is_read_as_utc_not_the_server_zone(monkeypatch):
+    # A non-UTC server zone must not leak into the emitted offset (#798): the
+    # stored convention is naive UTC, whatever zone the pod happens to run in.
+    import time
+    monkeypatch.setenv("TZ", "Asia/Kolkata")
+    time.tzset()
+    try:
+        emitted = _run().model_dump(mode="json")["started_at"]
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    assert emitted == "2026-06-11T09:00:00+00:00"
 
 
 def test_none_datetime_stays_null():

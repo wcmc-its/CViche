@@ -5,7 +5,6 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime
 
 from fastapi import Depends, HTTPException, Request
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -36,6 +35,7 @@ from app.models import (  # can_view_all_runs re-exported
 from app.services import ed_access
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 from app.session_idle import SessionStoreUnavailable, get_idle_store
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -544,7 +544,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
 
 def _bump_last_active(user: User) -> None:
     """Debounced last_active_at update (once per 60s)."""
-    now = datetime.now()
+    now = utc_now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
         set_committed_value(user, "last_active_at", now)  # see role sync above
         _best_effort_persist(user.id, "last_active_at", last_active_at=now)

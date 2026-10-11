@@ -192,6 +192,13 @@ def _require_db_password() -> str:
     return password
 
 
+# Pin every connection's session time_zone to UTC (#798) so that what MariaDB
+# writes for a ``server_default=func.now()`` column is UTC wall-clock, the same
+# convention app.timeutil.UTCDateTime stores. Without it, those defaults follow
+# the server's time_zone setting, which nothing in this repo controls.
+DB_SESSION_TIME_ZONE_SQL = "SET time_zone = '+00:00'"
+
+
 def _iam_connect_kwargs(host: str, port: int, user: str, token: str, name: str) -> dict:
     """Build the pymysql.connect kwargs for the IAM-token (deployed) path.
 
@@ -211,6 +218,7 @@ def _iam_connect_kwargs(host: str, port: int, user: str, token: str, name: str) 
         "database": name,
         "ssl": {"ca": str(RDS_CA_PATH), "check_hostname": True},
         "connect_timeout": DB_CONNECT_TIMEOUT_SECONDS,
+        "init_command": DB_SESSION_TIME_ZONE_SQL,
     }
 
 
@@ -289,6 +297,7 @@ def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str)
                 host=db_host, port=port, user=db_user,
                 password=db_password, database=db_name,
                 connect_timeout=DB_CONNECT_TIMEOUT_SECONDS,
+                init_command=DB_SESSION_TIME_ZONE_SQL,
             )
         return pymysql.connect(
             **_iam_connect_kwargs(db_host, port, db_user, _rds_auth_token(), db_name)

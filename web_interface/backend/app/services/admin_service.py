@@ -1,7 +1,7 @@
 """Admin service functions with O(1) aggregation queries, and the admin user update."""
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from app.models import Feedback, Run, RunState, Step, User, UserRole, UserStatus
 from app.schemas import AdminStats, AdminStepAvg, AdminUser, AdminUserUpdate
 from app.services import admin_policy
 from app.services.runs_admin_query import submission_split
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ def get_admin_stats(db: Session) -> AdminStats:
     """Return overview statistics for the admin dashboard."""
     total_runs = db.query(func.count(Run.id)).scalar() or 0
 
-    thirty_days_ago = datetime.now() - timedelta(days=30)
+    thirty_days_ago = utc_now() - timedelta(days=30)
     active_users = (
         db.query(func.count(func.distinct(Run.user_id)))
         .filter(Run.started_at >= thirty_days_ago, Run.user_id.isnot(None))
@@ -91,7 +92,7 @@ def get_users_with_stats(db: Session) -> list[AdminUser]:
 
     Compatible with both SQLite and MariaDB/MySQL.
     """
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Subquery: per-user run stats
     run_stats = (
@@ -161,7 +162,7 @@ def get_single_user_stats(user: User, db: Session) -> dict:
     Uses individual queries (not subqueries) since it's for a single user -- the overhead
     is constant and avoids the complexity of subqueries for one row.
     """
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     runs_today = (
         db.query(func.count(Run.id))

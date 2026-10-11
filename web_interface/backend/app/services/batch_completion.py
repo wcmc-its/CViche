@@ -18,7 +18,6 @@ retried -- mail is a courtesy, as in app.services.mailer.
 Counts only: no filename, no score. Never logs an address.
 """
 import logging
-from datetime import datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -27,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import BatchSource, Run, RunBatch, RunState, User
 from app.services import mailer
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def _claim(db: Session, batch_id: str) -> bool:
     won = db.execute(
         update(RunBatch)
         .where(RunBatch.id == batch_id, RunBatch.completion_notified_at.is_(None))
-        .values(completion_notified_at=datetime.now())
+        .values(completion_notified_at=utc_now())
     ).rowcount == 1
     db.commit()
     return won

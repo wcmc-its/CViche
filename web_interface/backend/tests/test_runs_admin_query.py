@@ -1,5 +1,5 @@
 """runs_admin_query: filter parsing and the cascade each facet's counts follow."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -131,7 +131,7 @@ def test_faculty_options_are_most_recently_run_first(db, seeded):
     faculty = build_filter_options(db, RunFilters()).faculty
     # Omar's newest run (Sep 5) is later than Jane's (Sep 3).
     assert [f.value for f in faculty] == ["Omar Testperson", "Jane Testperson"]
-    assert faculty[0].last_run_at == datetime(2026, 9, 5)
+    assert faculty[0].last_run_at == datetime(2026, 9, 5, tzinfo=timezone.utc)
 
 
 def test_filtered_query_loads_the_user_without_a_lazy_load(db, seeded):

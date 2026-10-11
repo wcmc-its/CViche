@@ -60,6 +60,7 @@ from app.services.pdf_sandbox import (
     PdfTooComplexError,
     convert_pdf,
 )
+from app.timeutil import utc_now
 from unified_pipeline.core.prompt_logger import reset_current_run_id, set_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage
@@ -1088,7 +1089,7 @@ class PipelineOrchestrator:
 
             duration = int(_now() - start_time)
             run.status = RunState.COMPLETE
-            run.completed_at = datetime.now()
+            run.completed_at = utc_now()
             # Persist the authoritative pipeline duration (previously only emitted
             # over the WebSocket) so historical conversion-time metrics are queryable.
             _record_total_duration(run, duration, start_step_number is not None)
@@ -1154,7 +1155,7 @@ class PipelineOrchestrator:
             run.error_message = user_facing_error(
                 e, resuming=start_step_number is not None
             )
-            run.completed_at = datetime.now()
+            run.completed_at = utc_now()
             # Record time-to-failure too -- useful when diagnosing a run that was
             # "taking too long" and then errored out.
             if start_time is not None:
@@ -1207,7 +1208,7 @@ class PipelineOrchestrator:
             {
                 "status": RunState.CANCELLED,
                 "error_message": USER_CANCEL_MESSAGE,
-                "completed_at": datetime.now(),
+                "completed_at": utc_now(),
             },
             synchronize_session=False,
         )
@@ -1397,7 +1398,7 @@ class PipelineOrchestrator:
 
         try:
             step.status = "running"
-            step.started_at = datetime.now()
+            step.started_at = utc_now()
             self.db.commit()
 
             await event_emitter.emit_step_start(self.run_id, step_number, self.total_cost)
@@ -1431,7 +1432,7 @@ class PipelineOrchestrator:
 
             # Mark as complete
             step.status = "complete"
-            step.completed_at = datetime.now()
+            step.completed_at = utc_now()
             step.duration_seconds = duration
             step.cost = result.get("cost", 0.0)
             step.output_files = json.dumps(result.get("output_files", []))
@@ -1467,7 +1468,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             step.status = "error"
-            step.completed_at = datetime.now()
+            step.completed_at = utc_now()
             tb_str = traceback.format_exc()
             step.error_message = f"{str(e)}\n\nTraceback:\n{tb_str}"
             self.db.commit()

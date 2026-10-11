@@ -3,7 +3,6 @@
 The one admin route staff may call (require_view_all_runs, not
 require_admin); which types staff may export is admin_export_service's rule.
 """
-from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -13,6 +12,7 @@ from app.auth import require_view_all_runs
 from app.database import get_db
 from app.models import User
 from app.services.admin_export_service import open_export
+from app.timeutil import utc_now
 
 router = APIRouter()
 
@@ -32,6 +32,6 @@ async def export_csv(
         open_export(db, viewer, export_type),
         media_type="text/csv",
         headers={
-            "Content-Disposition": f'attachment; filename="cviche_{export_type}_{datetime.now().strftime("%Y%m%d")}.csv"'
+            "Content-Disposition": f'attachment; filename="cviche_{export_type}_{utc_now().strftime("%Y%m%d")}.csv"'
         },
     )

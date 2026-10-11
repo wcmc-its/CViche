@@ -57,6 +57,7 @@ from app.services.upload_validation import (
     is_mostly_scanned,
 )
 from app.storage.base import RunStorage
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,7 @@ def poll_once(session_factory: Callable[[], Session], storage: RunStorage) -> in
 def expire_stale(session_factory: Callable[[], Session], storage: RunStorage,
                  now: datetime | None = None) -> int:
     """Expire pending items past ``PENDING_EXPIRY`` and delete their bytes."""
-    cutoff = (now or datetime.now()) - PENDING_EXPIRY
+    cutoff = (now or utc_now()) - PENDING_EXPIRY
     expired = 0
     with session_factory() as db:
         items = db.scalars(select(InboundFile).where(
