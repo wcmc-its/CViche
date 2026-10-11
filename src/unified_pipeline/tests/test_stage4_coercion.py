@@ -314,6 +314,9 @@ def test_percent_effort_already_extracted_is_not_overwritten():
         ("Example Award 9/24/12-8/31/14  1.2 cal mon", "", "1.2 cal mon"),
         ("Example Award Co-investigator, 0.6 person months", "", "0.6 person months"),
         ("Example Award $100,000 PI, 1.8 CM", "", "1.8 CM"),
+        # A whole number of months before "CM", up to 12.
+        ("Example Award 2019-2021 Co-I 12 CM", "", "12 CM"),
+        ("Example Award 2019-2021 Co-I 3 CM", "", "3 CM"),
         ("Example Award 3/05/2018 - 3/04/2019 1.08 calendar months", "108%", "1.08 calendar months"),
     ],
 )
@@ -353,6 +356,13 @@ def test_effort_the_source_states_survives_a_months_figure(text, llm_effort):
         "Green CM, Smith J. Example study. Example Agency grant",  # author initials
         "Example Award, 2 calendar years",                           # not months
         "Example Award 2019-2021 0.24 cm tumour margin",            # lower-case cm
+        # Digits that are not a month figure before "CM": the tail of a grant
+        # number, a year, a whole number over 12.
+        "R01 CA123456 CM Jones, co-I",
+        "Smith J, Green CM. 2019 CM study",
+        "Example Award 2019-2021 Co-I 24 CM",
+        "Example Award ID 1234.5 CM",                                 # decimal over 12
+        "Example Award 2019-2021 3 CMV cohorts",                      # "CM" inside a word
     ],
 )
 def test_text_without_an_effort_in_months_fills_nothing(text):

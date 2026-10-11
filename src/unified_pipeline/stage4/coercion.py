@@ -1250,11 +1250,14 @@ def _find_percent_effort(original_text: str) -> tuple[str, str] | None:
 # months", "1.8 CM". A month figure is not a percent -- 0.24 calendar months
 # is about 2% of a 12-month appointment, and the appointment length is not
 # known -- so it is kept as written, never converted. The bare "CM" form is
-# case-sensitive and needs a number before it, because "CM" is also a pair of
-# author initials ("Green CM").
+# case-sensitive, because "CM" is also a pair of author initials ("Green CM"),
+# and needs a plausible month figure before it: a decimal ("1.8", ".24") or a
+# whole number 0-12, standing as its own token. So the digits ending a grant
+# number ("CA123456 CM") or a year ("2019 CM study") are not read as effort.
 _EFFORT_MONTHS_PATTERN = re.compile(
     r'\d*\.?\d+\s*'
-    r'(?:(?i:cal(?:endar)?\.?\s*mo(?:n(?:th)?s?|s)?\b|person[\s-]*months?\b)|CM\b)'
+    r'(?i:cal(?:endar)?\.?\s*mo(?:n(?:th)?s?|s)?\b|person[\s-]*months?\b)'
+    r'|(?<![\w.])(?:\d{0,2}\.\d+|1[0-2]|\d)\s*CM\b'
 )
 # The figure a percent-shaped value states, for checking the source wrote it.
 _PERCENT_VALUE_PATTERN = re.compile(r'^\s*(\d*\.?\d+)\s*%\s*$')
