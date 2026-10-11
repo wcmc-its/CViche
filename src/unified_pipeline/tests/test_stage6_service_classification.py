@@ -582,6 +582,19 @@ def test_q1_orphaned_dates_skip_a_role_that_carries_its_own_date():
                     [_Q1_ORG, "Secretary", "2013-2015"]]
 
 
+def test_q1_orphaned_dates_pair_across_two_org_headers():
+    """Control: a second org header adds no item, so it is not an undated
+    slot. Counting it as one would make the counts disagree (4 vs 3) and
+    leave every role dateless."""
+    org_b = "Quuxian Academy of Surgery"
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer",
+                      org_b, "   Secretary",
+                      "2010-2012", "2013-2015", "2016-2018"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2013-2015"],
+                    [org_b, "Secretary", "2016-2018"]]
+
+
 @pytest.mark.parametrize("dates", [
     ["2010-2012", "2013-2015"],                            # one date short
     ["2010-2012", "2013-2015", "2016-2018", "2019-2021"],  # one date over
