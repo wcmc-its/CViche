@@ -36,6 +36,7 @@ from ..formatting import (
     with_extra_date_spans,
 )
 from ..normalization import _cell_text, _squash
+from ..parsing import _ORPHAN_DATE, _UNDATED_ACTIVITY, _orphaned_dates_line_up
 from ..parsing.dates import YEAR, YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
 from ..sorting import sort_entries_reverse_chronological
 
@@ -1152,6 +1153,9 @@ class ServiceSection:
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
         date_only_lines = []  # standalone dates
+        # (original_idx, kind) for every orphaned date and undated item, so
+        # the third pass can check their layout (#1518)
+        orphan_positions: list[tuple[int, str]] = []
 
         for idx, line in enumerate(lines):
             line = line.strip()
@@ -1166,6 +1170,7 @@ class ServiceSection:
                     dp = dp.strip()
                     if dp:
                         date_only_lines.append(dp)
+                        orphan_positions.append((idx, _ORPHAN_DATE))
                 continue
 
             # Check for pipe-separated format: "Role | Date" or "Org | Role | Date"
@@ -1197,7 +1202,8 @@ class ServiceSection:
         items = []
         current_org = None
 
-        for line, embedded_date, is_org, is_role, _ in content_lines:
+        for line, embedded_date, is_org, is_role, idx in content_lines:
+            item_count = len(items)
             if is_org:
                 current_org = line
                 # If org has embedded date, it's a standalone membership
@@ -1220,23 +1226,18 @@ class ServiceSection:
                     current_org = line
                     if embedded_date:
                         items.append((current_org, '', embedded_date))
+            if len(items) > item_count and not embedded_date:
+                orphan_positions.append((idx, _UNDATED_ACTIVITY))
 
-        # Third pass: match date-only lines to items without dates
-        # Strategy: try to match dates in order they appear
-        items_needing_dates = [(i, item) for i, item in enumerate(items) if not item[2]]
-
-        if date_only_lines and items_needing_dates:
-            # If roughly equal counts, match 1:1 in order
-            if abs(len(date_only_lines) - len(items_needing_dates)) <= 2:
-                for (item_idx, _), date in zip(items_needing_dates, date_only_lines):
-                    org, role, _ = items[item_idx]
-                    items[item_idx] = (org, role, date)
-            else:
-                # More dates than items or vice versa - match from top
-                for i, (item_idx, _) in enumerate(items_needing_dates):
-                    if i < len(date_only_lines):
-                        org, role, _ = items[item_idx]
-                        items[item_idx] = (org, role, date_only_lines[i])
+        # Third pass: date-only lines go to the undated items forward by
+        # position -- only when the counts agree and the two sit in a table
+        # layout, the guard section O/P's parser uses. Otherwise the items
+        # stay dateless: a blank Dates cell is a visible gap, a shifted date
+        # a silent wrong answer (#1518).
+        layout = [kind for _, kind in sorted(orphan_positions)]
+        if _orphaned_dates_line_up(date_only_lines, layout):
+            dates = iter(date_only_lines)
+            items = [(org, role, date or next(dates)) for org, role, date in items]
 
         # Add rows for each item
         for org, role, date in items:

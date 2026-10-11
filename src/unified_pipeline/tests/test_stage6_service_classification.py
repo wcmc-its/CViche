@@ -540,6 +540,82 @@ def test_leading_date_cell_is_stripped_whole(raw, expected):
 
 
 # ---------------------------------------------------------------------------
+# #1518: Q1's orphaned date column pairs only on equal counts in a table layout
+
+_Q1_ORG = "Zorblax Society of Medicine"
+
+
+def _parse_q1(lines):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+    gen._parse_extramural_leadership_lines(table, lines)
+    return _leadership_rows(table)
+
+
+def test_q1_orphaned_dates_pair_when_the_columns_line_up():
+    """Control: column 1 (three roles), then column 2 (three dates) -- one
+    run of each, equal counts -- still pairs forward by position."""
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer",
+                      "   Secretary", "2010-2012", "2013-2015", "2016-2018"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2013-2015"],
+                    [_Q1_ORG, "Secretary", "2016-2018"]]
+
+
+def test_q1_orphaned_dates_pair_when_rows_alternate():
+    """Control: a table read row by row (role, its date, role, its date) is
+    strict alternation, which is tabular too."""
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "2010-2012",
+                      "   Treasurer", "2013-2015"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2013-2015"]]
+
+
+def test_q1_orphaned_dates_skip_a_role_that_carries_its_own_date():
+    """A role with an embedded pipe date is neither an undated item nor an
+    orphaned date, so it neither takes a date nor breaks the layout."""
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer | 2001-2003",
+                      "   Secretary", "2010-2012", "2013-2015"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2001-2003"],
+                    [_Q1_ORG, "Secretary", "2013-2015"]]
+
+
+@pytest.mark.parametrize("dates", [
+    ["2010-2012", "2013-2015"],                            # one date short
+    ["2010-2012", "2013-2015", "2016-2018", "2019-2021"],  # one date over
+    ["2010-2012"],                                         # two short
+])
+def test_q1_orphaned_dates_stay_unassigned_when_counts_disagree(dates, caplog):
+    """The pre-#1518 parser zipped whenever the counts were within two, and
+    paired "from the top" otherwise, so a missing date shifted every later
+    date onto the wrong role. Now every role stays dateless and a warning
+    says why."""
+    with caplog.at_level("WARNING"):
+        rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer",
+                          "   Secretary", *dates])
+    assert rows == [[_Q1_ORG, "Program Chair", ""],
+                    [_Q1_ORG, "Treasurer", ""],
+                    [_Q1_ORG, "Secretary", ""]]
+    assert "counts disagree" in caplog.text
+
+
+def test_q1_orphaned_dates_stay_unassigned_in_no_table_layout(caplog):
+    """Equal counts, but the roles and dates are interleaved the way no
+    flattened two-column table produces (role, date, role, role, date), so
+    the equal count is a coincidence, not evidence."""
+    with caplog.at_level("WARNING"):
+        rows = _parse_q1([_Q1_ORG, "   Program Chair", "2010-2012",
+                          "   Treasurer", "   Secretary", "2013-2015",
+                          "2016-2018"])
+    assert rows == [[_Q1_ORG, "Program Chair", ""],
+                    [_Q1_ORG, "Treasurer", ""],
+                    [_Q1_ORG, "Secretary", ""]]
+    assert "no table layout" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # #1580: Q2 ad hoc grant reviews render under Grant Reviewing, not as boards
 
 
