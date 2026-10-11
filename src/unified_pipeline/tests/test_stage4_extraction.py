@@ -1055,6 +1055,16 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
     assert rule in prompt
 
 
+def test_grant_prompt_says_effort_in_months_is_not_a_percent():
+    """#1659: "0.24 Cal Months" came back as "24%"; the rule line tells the
+    model to copy a month figure as written."""
+    schema = extraction.get_field_schema("M2A")
+    prompt = extraction.build_extraction_prompt([{"text": "Grant X"}], schema, "M2A")
+    assert ('- Effort given in calendar or person months (e.g., "0.24 Cal Months", "1.8 CM") '
+            'is NOT a percent: copy it into percent_effort as written ("0.24 Cal Months"), '
+            'never convert it to "%"') in prompt
+
+
 @pytest.mark.parametrize("rule", [
     "- A SESSION, PANEL, SYMPOSIUM or WORKSHOP entry (e.g., one you moderated or chaired) "
     "names a title, often in quotes: committee_name = that title (without the quotes)",
@@ -1089,9 +1099,11 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: back. The pi_role line names the owner, so this owner-less prompt does not
 #: carry it. M2A re-measured for the EOAHMI recheck (#1403 items b/c), whose
 #: two added pi_name lines are the only difference: dropping them gives
-#: 108969062c... back.
+#: 108969062c... back. M2A re-measured for #1659, whose added effort-in-months
+#: rule line and two field-guide clauses are the only difference: dropping them
+#: gives d69c439d... back.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "d69c439ddab70048345703c9eb14caefa71eae7de2378d68b88192fc2c4eb8a3",
+    "M2A": "bcf4fb95ce94fdcc5ee2b24f1a5cd4a820f05f6d14f616734e0ad65e61f7be53",
     "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 

@@ -812,6 +812,7 @@ def build_extraction_prompt(
    - title = the scientific project title - NOT a person's name, NOT FTE information
    - When there is no "Title:" label, an unlabelled name of the project or program that comes before the labelled parts (e.g., before "Program Partner:" or "Funder:") is the title; do not leave title null when the entry names one
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
+   - Effort given in calendar or person months (e.g., "0.24 Cal Months", "1.8 CM") is NOT a percent: copy it into percent_effort as written ("0.24 Cal Months"), never convert it to "%"
    - Do NOT put the project title in pi_name field
    - A person the entry names without a PI label, such as a "with Dr. <name>" collaborator or the investigator who "initiated" a study, is not pi_name; put a collaborator in co_investigators
    - An entry that opens with an author list and has no PI label (e.g., "<name> AB, <name> CD. <title>. $<amount> (<sponsor>)"): pi_name = the first-listed author, co_investigators = the other authors
