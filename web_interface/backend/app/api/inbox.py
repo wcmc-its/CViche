@@ -6,16 +6,26 @@ Submitting goes through the same upload core /upload uses
 (``create_run_from_bytes``), with the same consent gate, rate limit, batch and
 duplicate-confirm rules. Like /upload, it only CREATES the runs: the client
 then POSTs /run/{run_id}/start for each, exactly as a batch upload does.
+Estimating goes through the same per-file core a multi-file /estimate uses
+(``_estimate_batch_file``), with the same two estimate budgets (#1626).
 """
+import io
 import logging
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.upload import (
+    BatchEstimateFile,
+    BatchEstimateResponse,
+    _batch_totals,
+    _check_estimate_limits,
+    _estimate_batch_file,
+)
 from app.auth import get_current_user
 from app.consent import require_current_consent
 from app.database import get_db
@@ -35,6 +45,9 @@ from app.storage.base import StorageKeyNotFound
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# The answer for a held item whose stored bytes are gone, on submit and on estimate.
+_FILE_MISSING_MESSAGE = "This file is no longer available."
 
 
 class InboxDuplicate(BaseModel):
@@ -64,6 +77,10 @@ class InboxSubmitRequest(BaseModel):
     strip_wcm_instructions: bool = True
     batch_id: str | None = None
     confirm_duplicate: bool = False
+
+
+class InboxEstimateRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1)
 
 
 class InboxSubmitResult(BaseModel):
@@ -115,6 +132,12 @@ def discard_inbox_item(
     return InboxDiscardResponse(id=item.id, status="discarded")
 
 
+async def _read_held(item: InboundFile) -> bytes:
+    """The held item's stored bytes; raises StorageKeyNotFound once they are gone."""
+    object_key = f"{item.storage_key}{inbound_service.HELD_OBJECT_NAME}"
+    return await run_in_threadpool(get_storage().get_global, object_key)
+
+
 def _failure(item_id: int, error: HTTPException) -> InboxSubmitResult:
     detail = error.detail if isinstance(error.detail, dict) else {}
     return InboxSubmitResult(
@@ -130,12 +153,10 @@ async def _submit_one(
     rate_limit_error = check_rate_limit(user, db)
     if rate_limit_error:
         return _failure(item.id, HTTPException(status_code=429, detail=rate_limit_error))
-    storage = get_storage()
-    object_key = f"{item.storage_key}{inbound_service.HELD_OBJECT_NAME}"
     try:
-        content = await run_in_threadpool(storage.get_global, object_key)
+        content = await _read_held(item)
     except StorageKeyNotFound:
-        return _failure(item.id, bad_request("This file is no longer available.", "file_missing"))
+        return _failure(item.id, bad_request(_FILE_MISSING_MESSAGE, "file_missing"))
     try:
         response = await create_run_from_bytes(
             db, user, filename=item.filename, content=content, content_type=None, request=request,
@@ -145,8 +166,34 @@ async def _submit_one(
     item.status = InboundFileStatus.SUBMITTED
     item.run_id = response.run_id
     db.commit()
-    await run_in_threadpool(storage.delete_global_prefix, item.storage_key)
+    await run_in_threadpool(get_storage().delete_global_prefix, item.storage_key)
     return InboxSubmitResult(id=item.id, status="submitted", run_id=response.run_id)
+
+
+async def _estimate_held(user: User, item: InboundFile) -> BatchEstimateFile:
+    """One held item's /estimate row, from its stored bytes."""
+    try:
+        content = await _read_held(item)
+    except StorageKeyNotFound:
+        return BatchEstimateFile(filename=item.filename, error=_FILE_MISSING_MESSAGE)
+    return await _estimate_batch_file(UploadFile(io.BytesIO(content), filename=item.filename), user)
+
+
+@router.post("/inbox/estimate", response_model=BatchEstimateResponse)
+async def estimate_inbox_items(
+    body: InboxEstimateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> BatchEstimateResponse:
+    """A multi-file /estimate over held items (#1626): a row per id, in the
+    order sent, plus totals -- so an emailed CV is weighed like an uploaded
+    one. An id that is not the caller's pending item is a 404."""
+    if len(body.item_ids) > MAX_BATCH_FILES:
+        raise bad_request(f"At most {MAX_BATCH_FILES} files can be estimated at once.")
+    items = [inbound_service.get_pending_owned(db, current_user, item_id) for item_id in body.item_ids]
+    _check_estimate_limits(current_user, db)
+    rows = [await _estimate_held(current_user, item) for item in items]
+    return _batch_totals(rows, current_user)
 
 
 @router.post("/inbox/submit", response_model=InboxSubmitResponse)
