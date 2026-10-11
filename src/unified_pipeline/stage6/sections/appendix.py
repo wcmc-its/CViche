@@ -148,8 +148,9 @@ budget lines, to unconditional versions).
   dashes, "to" and spacing are ignored when comparing it.
 - `amount`: the line is only a dollar amount, behind no label or one that
   names the value itself (`_AMOUNT_LABELS`: "Amount", "Direct costs",
-  "Total", ...); the number is compared, spacing after "$" aside, and never
-  matches inside a longer number ("100,645" is not "1,100,645"). An award's
+  "Total", ...); it is shown only as the same number after a "$", spacing
+  aside, and never inside a longer number ("$100,645" is not "$1,100,645",
+  and a count, "150,000 Example Twins", is no amount). An award's
   own name in front ("Best Teacher Award: $1,000") makes it a record, and it
   is kept.
 
@@ -466,7 +467,8 @@ _AMOUNT_LABELS = (
 )
 _AMOUNT_LABEL = "|".join(label.replace(" ", r"\s+") + "s?" for label in _AMOUNT_LABELS)
 # A shown value stands on its own boundaries: no word, "/" or digit group
-# ("1,", "6.") runs into it on either side, so "100,645" is not "1,100,645".
+# ("1,", "6.") runs into it on either side, so "2014-2016" is not
+# "1.2014-2016" and "$100,645" is not "$100,645.50".
 _VALUE_START = r"(?<![\w/])(?<!\d[,.])"
 _VALUE_END = r"(?![\w/])(?![,.]\d)"
 _AMOUNT_RE = re.compile(
@@ -1415,16 +1417,16 @@ def _canonical_range(text: str) -> str:
 
 
 def _record_tail(text: str) -> tuple[str, str] | None:
-    """(the `DROP_*` reason, the value to look for) when *text* is only a date
-    range (`_DATE_RANGE_RE`, the value canonical) or only an amount behind at
-    most one value label (`_AMOUNT_RE`, the value its number) -- the tail of a
-    split record (#1551) -- else None."""
+    """(the `DROP_*` reason, a pattern for its value) when *text* is only a
+    date range (`_DATE_RANGE_RE`, the range canonical) or only an amount
+    behind at most one value label (`_AMOUNT_RE`, its number after a "$") --
+    the tail of a split record (#1551) -- else None."""
     stripped = text.strip()
     if _DATE_RANGE_RE.match(stripped):
-        return DROP_DATE_RANGE, _canonical_range(stripped.strip("().").strip())
+        return DROP_DATE_RANGE, re.escape(_canonical_range(stripped.strip("().").strip()))
     amount = _AMOUNT_RE.match(stripped)
     if amount:
-        return DROP_AMOUNT, amount.group(1)
+        return DROP_AMOUNT, r"\$\s?" + re.escape(amount.group(1))
     return None
 
 
@@ -1442,7 +1444,8 @@ def _drop_shown_record_tails(
     appears (NDMRSO ATUVAL's governance terms, web205's direct costs, #1551
     review). A kept line that is itself a tail never vouches for another, so
     two copies of one unplaced value both stay. The value must stand on its
-    own boundaries: "100,645" is not shown by "1,100,645" or "100,645.50"."""
+    own boundaries: "$100,645" is not shown by "$1,100,645" or "$100,645.50",
+    nor by a count ("100,645 Example Twins") with no "$"."""
     tails = [_record_tail(entry.get("text") or "") for entry, _ in kept]
     shown = "\x00".join(_canonical_range(line) for line in (
         *document_lines, *(rendered for (_, rendered), tail in zip(kept, tails) if tail is None)))
@@ -1450,7 +1453,7 @@ def _drop_shown_record_tails(
     for line, tail in zip(kept, tails):
         if tail is not None:
             reason, value = tail
-            if re.search(rf"{_VALUE_START}{re.escape(value)}{_VALUE_END}", shown):
+            if re.search(rf"{_VALUE_START}{value}{_VALUE_END}", shown):
                 dropped[reason] += 1
                 continue
         result.append(line)

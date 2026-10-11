@@ -1746,10 +1746,21 @@ def test_bare_date_range_shown_nowhere_else_is_kept(text, shown):
     "Example Committee, 12014-2016",      # the range inside a longer number
     "Example Committee, 2014-20169",
     "Example Committee, 1/2014-2016",     # the start is another date's tail
+    "Example Committee, 1.2014-2016",     # ... or another number's
+    "Example Committee, 2014-2016.5",
 ])
 def test_a_range_counts_as_shown_only_on_its_own_boundaries(shown):
     entries = [{"text": "2014-2016", "taxonomy_code": "N3"}]
     assert _filter_unmapped_entries(entries, _OWNER_TOKENS, [shown])[1] == Counter()
+
+
+def test_a_range_is_compared_literally():
+    """The range's "." is a full stop, not a wildcard: "Jan. 2014-2016" is
+    not shown by "Janx 2014-2016"."""
+    entries = [{"text": "Jan. 2014-2016", "taxonomy_code": "N3"}]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example, Janx 2014-2016"])[1] == Counter()
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example, Jan. 2014 – 2016"])[1] == (
+        Counter({DROP_DATE_RANGE: 1}))
 
 
 def test_another_appendix_line_vouches_for_a_range_but_a_bare_copy_does_not():
@@ -1831,6 +1842,9 @@ def test_bare_amount_shown_nowhere_else_is_kept(text, shown):
     "Example Grant, $100,645.50",     # ... with cents the tail does not have
     "Example Grant, $100,6450",       # ... running on into another digit
     "Example Grant, $2100,645",
+    "Example Grant, 100,645",         # no currency mark: a count, not an amount
+    "Example study of 100,645 Example Twins",
+    "Example Grant, US$100,645",
 ])
 def test_an_amount_counts_as_shown_only_on_its_own_boundaries(shown):
     entries = [{"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}]
