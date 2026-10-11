@@ -55,7 +55,12 @@ _UNREAD_RANGE_RE = re.compile(r'\b(?:19|20)\d{2}\s*[-–—](?![A-Za-z])')
 
 
 # An open end, "2019-present" or "04/08/2021 – date": still running (#981).
-_OPEN_RANGE_RE = re.compile(r'\b(19\d{2}|20\d{2})\s*[-–—]\s*(?:present|date)\b', re.IGNORECASE)
+# The separator may be a word, "11/5/2021 to Present", and the end "Current"
+# or "ongoing": without them a "$" amount sent the entry to the single-year
+# guess, (2021, 2021), and a current grant was filed as completed (#1657).
+_OPEN_RANGE_RE = re.compile(
+    r'\b(19\d{2}|20\d{2})(?:\s*[-–—]|\s+(?:to|through|until))\s*'
+    r'(?:present|date|current|ongoing)\b', re.IGNORECASE)
 
 
 def _closed_range(text: str) -> tuple[int, tuple[int, int]] | None:
