@@ -685,6 +685,109 @@ def test_three_letter_words_count():
     assert title_word_overlap('DNA repair', ['DNA damage']) == 0.5
 
 
+# ------------- (i-b) title gate: same-topic record of another year and volume (#1696)
+
+# The UAURFU e694 shape, synthetic: the record's short title is a subset of the
+# CV's topic words (5 of its 7 words shared, 0.71 against the shorter title),
+# but only 5 of the CV's 15, and the year and volume both differ.
+LONG_CV_TITLE = ('Views of coastal birders and park rangers about digital survey tools '
+                 'for heron nesting in the estuary')
+SHORT_RECORD_TITLE = 'Digital survey tool for identification of heron nesting.'
+
+
+def _dated_article_xml(title, year, volume, vernacular=None):
+    vern = f'<VernacularTitle>{vernacular}</VernacularTitle>' if vernacular else ''
+    return f"""<?xml version="1.0"?>
+<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>{PMID}</PMID>
+<Article><ArticleTitle>{title}</ArticleTitle>{vern}<Journal><Title>J</Title>
+<JournalIssue><Volume>{volume}</Volume><PubDate><Year>{year}</Year></PubDate></JournalIssue>
+</Journal></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>""".encode()
+
+
+def _record(title=SHORT_RECORD_TITLE, year=2020, volume='19', vernacular_title=None):
+    return {'pmid': PMID, 'title': title, 'vernacular_title': vernacular_title,
+            'year': year, 'volume': volume, 'authors': [], 'authors_vancouver': ''}
+
+
+def _accepts(entry_fields, record, source='pmid'):
+    entry = {'extracted_fields': entry_fields}
+    return PubMedEnricher(verbose=False)._accept_record(entry, record, source), entry
+
+
+def test_pmcid_record_of_another_year_and_volume_is_refused(monkeypatch):
+    assert 0.7 < title_word_overlap(LONG_CV_TITLE, [SHORT_RECORD_TITLE]) < 0.8
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': [{'pmcid': PMCID, 'pmid': PMID}]}),
+        FakeResponse(200, content=_dated_article_xml(SHORT_RECORD_TITLE, 2020, '19')),
+    ])
+    entry = _titled(LONG_CV_TITLE, pmcid=PMCID, year='2021', volume='20')
+    [result] = enricher._enrich_by_pmcid([(entry, PMCID)])
+    assert result['enrichment_status'] == 'title_check_failed'
+    assert 'enrichment_data' not in result  # the CV's own citation renders
+    assert result['enrichment_rejected'] == {
+        'source': 'pmcid_conversion', 'pubmed_pmid': PMID, 'pubmed_title': SHORT_RECORD_TITLE,
+        'title_word_overlap': 0.71, 'year_and_volume_differ': True}
+    assert 'pmid' not in result['extracted_fields']
+
+
+@pytest.mark.parametrize('cv_fields, record', [
+    # online-versus-print: the year is off by one, the volume is the record's
+    ({'year': '2021', 'volume': '19'}, _record()),
+    ({'year': '2020', 'volume': '20'}, _record()),        # the year agrees
+    ({'year': '2021'}, _record()),                         # no CV volume
+    ({'volume': '20'}, _record()),                         # no CV year
+    ({'year': 'n.d.', 'volume': '20'}, _record()),         # no year to read
+    ({'year': '2021', 'volume': '20'}, _record(year=None)),
+    ({'year': '2021', 'volume': '20'}, _record(volume='')),
+    ({'year': '2021', 'volume': '20'}, _record(volume='Suppl 2')),
+    ({'year': '2021', 'volume': '19'}, _record(volume='19 Suppl 1')),
+], ids=['volume-agrees', 'year-agrees', 'no-cv-volume', 'no-cv-year', 'unreadable-cv-year',
+        'no-record-year', 'no-record-volume', 'record-volume-has-no-number', 'supplement-volume'])
+def test_record_is_accepted_unless_year_and_volume_both_contradict(cv_fields, record):
+    accepted, entry = _accepts({'title': LONG_CV_TITLE, **cv_fields}, record)
+    assert accepted, entry.get('enrichment_rejected')
+    assert entry['enrichment_status'] == 'enriched'
+
+
+@pytest.mark.parametrize('source', ['pmid', 'pmcid_conversion', 'doi_search', 'pmcid_as_pmid'])
+def test_every_id_path_refuses_the_contradicted_record(source):
+    accepted, entry = _accepts({'title': LONG_CV_TITLE, 'year': '2021', 'volume': '20'},
+                               _record(), source)
+    assert not accepted
+    assert entry['enrichment_rejected']['year_and_volume_differ'] is True
+
+
+def test_title_search_is_left_to_its_own_guards():
+    accepted, _ = _accepts({'title': LONG_CV_TITLE, 'year': '2021', 'volume': '20'},
+                           _record(), stage5.TITLE_SEARCH_SOURCE)
+    assert accepted
+
+
+def test_same_title_with_a_wrong_cv_year_and_volume_is_kept():
+    # A CV that gives the issue number as the volume and the online year (the
+    # 11 same-title year-and-volume disagreements in the corpus replay).
+    accepted, _ = _accepts({'title': SHORT_RECORD_TITLE, 'year': '2021', 'volume': '4'},
+                           _record())
+    assert accepted
+
+
+def test_same_title_through_the_vernacular_title_is_kept():
+    record = _record(title='[A different translated title].', vernacular_title=LONG_CV_TITLE)
+    accepted, _ = _accepts({'title': LONG_CV_TITLE, 'year': '2021', 'volume': '20'}, record)
+    assert accepted
+
+
+def test_untitled_entry_still_skips_the_gate():
+    accepted, _ = _accepts({'year': '2021', 'volume': '20'}, _record())
+    assert accepted
+
+
+@pytest.mark.parametrize('volume, number', [
+    ('19 Suppl 1', 19), (' 7', 7), (42, 42), ('Suppl 2', None), ('', None), (None, None)])
+def test_volume_number_is_the_leading_number(volume, number):
+    assert stage5.volume_number(volume) == number
+
+
 # ------------------------------------------------ #1219 items 2-4
 
 BARE_PMID = PMID  # 8 digits, written under a "PMCID" label with no PMC prefix
