@@ -630,6 +630,33 @@ def delimiter_index_text(value: object) -> str:
     return value.literal if isinstance(value, _ExactNumber) else str(value)
 
 
+def unreverse_paragraph_spans(delimiters: object, where: str) -> object:
+    """The reply's delimiters with every reversed paragraph span put in order.
+
+    The model sometimes writes a span end-first: ``1178`` to ``1176``. The text
+    is then built from an empty ``range(1178, 1177)``, the entry is dropped as
+    noise and its lines fall to ``break``. GNONHA lost 12 correctly grouped
+    records (23 lines) that way (#1738). Only integer spans are swapped;
+    ``row_range_entry`` already handles a reversed table-row span. Anything
+    that is not a list is returned as it came, so a malformed reply fails the
+    batch exactly as before.
+    """
+    if not isinstance(delimiters, list):
+        return delimiters
+    ordered = []
+    swapped = 0
+    for delim in delimiters:
+        start = delim.get("element_idx_start") if isinstance(delim, dict) else None
+        end = delim.get("element_idx_end") if isinstance(delim, dict) else None
+        if type(start) is int and type(end) is int and end < start:  # bool is not an index
+            delim = {**delim, "element_idx_start": end, "element_idx_end": start}
+            swapped += 1
+        ordered.append(delim)
+    if swapped:
+        logger.warning(f"    ⚠ Swapped {swapped} reversed entry span(s) (end before start) in {where}")
+    return ordered
+
+
 def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
                     confidence: float) -> tuple[dict | None, list[str]]:
     """The entry for a delimiter on table sub-rows, and the row keys it claims.
@@ -1229,7 +1256,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             claimed_row_keys = set()
 
             # Validate delimiters and extract full text
-            for delim in delimiters:
+            for delim in unreverse_paragraph_spans(delimiters, f"batch {batch_idx + 1} [{full_hierarchy}]"):
                 if "element_idx_start" in delim and "element_idx_end" in delim:
                     start_idx = delim["element_idx_start"]
                     end_idx = delim["element_idx_end"]
