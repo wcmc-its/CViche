@@ -365,6 +365,49 @@ REGEX_PATTERNS = {
 # reorders "Doe FJTh" into "FJTh D" (#1660).
 _MIXED_CASE_INITIALS_RE = re.compile(r'^(?:[A-Z]|[TCS]h)+$')
 
+# A byline token naming a collective author -- a study group, consortium,
+# committee or society -- rather than a person. Such a token has no surname
+# and no initials, so the person-name branches below reorder it into nonsense:
+# "Example Study Group" became "Group ES", and a 9-word working group became
+# "Trials WGOFOMFC" (#1705). Matched as whole words, case-insensitively.
+_COLLECTIVE_AUTHOR_RE = re.compile(
+    r'\b(?:Groups?|Committees?|Consortium|Consortia|Collaborative|Collaboration'
+    r'|Investigators|Networks?|Trials?|Trialists|Society|Study|Task\s+Force)\b',
+    re.IGNORECASE,
+)
+
+# A balanced, non-nested parenthetical, e.g. the "(C. Roe)" credit after a group
+# name. Masked before the byline is split so the split never cuts inside it.
+_PARENTHETICAL_RE = re.compile(r'\([^()]*\)')
+_PAREN_MASK = '\x00{}\x00'
+_PAREN_MASK_RE = re.compile(r'\x00(\d+)\x00')
+
+
+def _mask_parentheticals(text: str) -> tuple[str, list[str]]:
+    """Replace each balanced "( ... )" with a placeholder; return the text and the originals."""
+    originals: list[str] = []
+
+    def _stash(match: re.Match[str]) -> str:
+        originals.append(match.group(0))
+        return _PAREN_MASK.format(len(originals) - 1)
+
+    return _PARENTHETICAL_RE.sub(_stash, text), originals
+
+
+def _unmask_parentheticals(text: str, originals: list[str]) -> str:
+    """Put back the parentheticals `_mask_parentheticals` replaced."""
+    return _PAREN_MASK_RE.sub(lambda m: originals[int(m.group(1))], text)
+
+
+def _is_verbatim_author(author: str) -> bool:
+    """A collective author, or any token carrying a parenthesis, is passed through as written (#1705)."""
+    return bool(
+        _COLLECTIVE_AUTHOR_RE.search(author)
+        or _PAREN_MASK_RE.search(author)
+        or '(' in author
+        or ')' in author
+    )
+
 def normalize_authors_vancouver(authors_string: str) -> str:
     """
     Normalize author string to Vancouver citation style.
@@ -399,6 +442,10 @@ def normalize_authors_vancouver(authors_string: str) -> str:
     if has_et_al:
         result = result[:et_al_match.start()]
 
+    # Parenthetical contents are masked so neither the "and" rewrite nor the
+    # split below reaches inside them (#1705).
+    result, parentheticals = _mask_parentheticals(result)
+
     # Step 2: Replace "and" / "&" with comma for consistent splitting
     result = re.sub(r'\s+and\s+', ', ', result, flags=re.IGNORECASE)
     result = re.sub(r'\s*&\s*', ', ', result)
@@ -411,6 +458,12 @@ def normalize_authors_vancouver(authors_string: str) -> str:
     for author in authors:
         author = author.strip()
         if not author:
+            continue
+
+        if _is_verbatim_author(author):
+            normalized_authors.append(
+                re.sub(r'\s+', ' ', _unmask_parentheticals(author, parentheticals))
+            )
             continue
 
         # Try to parse "LastName, FirstName MiddleName" format
