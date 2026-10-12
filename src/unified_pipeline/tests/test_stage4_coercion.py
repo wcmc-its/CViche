@@ -221,6 +221,14 @@ def test_plain_initials_and_real_surnames_unchanged_by_digraph_rule():
     "Doe AB, Example Society",
     "Doe AB, Example Trial",
     "Doe AB, Example Task Force",
+    # One case per remaining alternative, and lowercase forms the corpus uses.
+    "Doe AB, Example Study",
+    "Doe AB, Example Groups",
+    "Doe AB, Example Consortia",
+    "Doe AB, Example Trialists",
+    "Doe AB, Example Collaboration",
+    "Doe AB, EXAMPLE study group",
+    "Doe AB, EXAMPLE consortium",
 ])
 def test_collective_author_kept_verbatim(byline):
     assert normalize_authors_vancouver(byline) == byline
@@ -270,6 +278,11 @@ def test_person_names_around_a_collective_still_normalise():
         normalize_authors_vancouver("Doe AB, John Roe, Example Study Group")
         == "Doe AB, Roe J, Example Study Group"
     )
+
+
+def test_group_word_inside_a_surname_is_not_a_collective():
+    # The rule matches whole words: "Postrial" ends in "trial" but is a surname.
+    assert normalize_authors_vancouver("Doe AB, John Postrial") == "Doe AB, Postrial J"
 
 
 def test_person_only_bylines_unchanged_by_collective_rule():
