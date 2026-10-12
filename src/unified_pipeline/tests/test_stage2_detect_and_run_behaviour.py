@@ -1832,7 +1832,7 @@ def test_extract_section_signature_bundles_the_five_constants_into_one_context_p
     for kw_only in ("document_uid", "cancel_check"):
         assert by_name[kw_only].kind == inspect.Parameter.KEYWORD_ONLY
     assert stage2._DocumentContext._fields == (
-        "doc_elements", "header_indices", "element_index_map", "header_info", "doc",
+        "doc_elements", "header_indices", "element_index_map", "header_info", "doc", "unlocated_headings",
     )
 
 
@@ -1967,8 +1967,10 @@ def _detail_fold_docx(tmp_path):
 def test_run_stage_2_folds_detail_lines_whether_detector_missed_or_split_them(tmp_path, monkeypatch):
     _redirect_output_manager(monkeypatch, tmp_path)
     path, hpath = _detail_fold_docx(tmp_path)
-    # Mentoring: the detector returns nothing, so every line is an unassigned
-    # "break". Advising: it splits the Role line off as its own entry.
+    # Mentoring: the detector returns nothing. 1 is long enough to come back
+    # gap-filled, with its Project line under it; 3 is too short, so it stays a
+    # break and the fold joins its Project line to it. Advising: the detector
+    # splits the Role line off as its own entry, and the fold puts it back.
     _route_call_llm(monkeypatch, {
         "Advising": [
             {"element_idx_start": 7, "element_idx_end": 7, "element_type": "paragraph", "confidence": 0.9},
@@ -1981,14 +1983,14 @@ def test_run_stage_2_folds_detail_lines_whether_detector_missed_or_split_them(tm
     rows = [(e["element_idx_start"], e["element_idx_end"], e["element_type"], e["text"])
             for e in output_data["entries"] if e["element_type"] != "header"]
     assert rows == [
-        (1, 2, "break", "2016 Ana Cruz, Graduate Student\tProject: Study of tides"),
+        (1, 2, "paragraph", "2016 Ana Cruz, Graduate Student\tProject: Study of tides"),
         (3, 4, "break", "2015 Lee Park, Undergraduate\tProject: Study of kelp"),
         (5, 5, "break", ""),
         (7, 8, "paragraph", "2014 Kim Ortiz, Fellow\tRole: Primary advisor"),
     ]
     assert output_data["coverage"]["coverage_percentage"] == 100.0
     assert output_data["coverage"]["unaccounted_indices"] == []
-    assert output_data["coverage"]["content_entries"] == 1  # only the paragraph; folded breaks are 3b-visible breaks
+    assert output_data["coverage"]["content_entries"] == 2  # folded breaks are 3b-visible breaks
 
 
 def test_run_stage_2_fold_gives_the_same_artifact_serial_and_parallel(tmp_path, monkeypatch):
@@ -2356,6 +2358,33 @@ def test_run_stage_2_writes_the_batch_carry_counts_to_the_artifact(tmp_path, mon
     assert json.loads(output_path.read_text())["batch_carry"] == output_data["batch_carry"]
 
 
+def test_run_stage_2_gap_fills_unclaimed_records_but_leaves_an_unplaced_heading_to_promote(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    doc = Document()
+    for text in ["EMPLOYMENT", "May 2003 - February 2016 Research Assistant Professor, Department of Medicine", "",
+                 "ABSTRACTS (selected, 2010 to 2020 for the department)",
+                 "2019 Example abstract title presented at the annual meeting"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "unclaimed.docx"
+    doc.save(docx_path)
+    hpath = _write_hierarchy(
+        tmp_path, "unclaimed_h.json", "UNCLMD",
+        hierarchy_with_indices=[{"text": "Employment", "level": "H1", "element_idx": 0, "children": []},
+                                {"text": "ABSTRACTS", "level": "H1", "element_idx": None, "children": []}],
+        section_boundaries=[{"hierarchy": ["Employment"], "element_idx_start": 0, "element_idx_end": 4,
+                             "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {})  # the model claims nothing
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+    rows = [(e["element_idx_start"], e["element_type"], e.get("gap_filled", False), e["hierarchy"])
+            for e in output_data["entries"] if e["element_type"] != "break"]
+    assert rows == [(0, "header", False, ["Employment"]), (1, "paragraph", True, ["Employment"]),
+                    (3, "header", False, ["ABSTRACTS"]), (4, "paragraph", True, ["ABSTRACTS"])]
+    assert output_data["batch_carry"]["gap_filled_entries"] == 2
+    assert output_data["batch_carry_sections"] == [
+        {"hierarchy": ["Employment"], "element_idx_start": 0, **output_data["batch_carry"]}]
+
+
 def test_the_carry_cap_is_the_cut_lookback_and_a_fifteen_element_carry_is_taken(monkeypatch):
     assert stage2.STAGE2_CARRY_MAX == stage2.BATCH_CUT_LOOKBACK == 15
     elements = [_para(i, f"Line {i}") for i in range(80)]
@@ -2464,22 +2493,77 @@ def _skipping_model(prompts, first_claim_by_call):
     return fake
 
 
-def test_an_uncarried_batch_never_gap_fills_what_its_reply_skipped(monkeypatch):
-    elements = [_para(i, f"Line {i}") for i in range(80)]
+def _record_line(i):
+    """A line ``_gap_fill`` reads as a record: long, with a number."""
+    return f"Visiting professor of medicine at hospital number {i}"
+
+
+def test_every_reply_s_unclaimed_record_lines_are_filled_carried_or_not(monkeypatch):
+    elements = [_para(i, _record_line(i)) for i in range(80)]
     prompts = []
     # Batch 1 skips lines 0-4 and spans to its end, so no carry: batch 2 opens
-    # at 50, uncarried, and skips 50-54 too. Neither gap comes back.
+    # at 50, uncarried, and skips 50-54 too. Both gaps come back line by line.
     monkeypatch.setattr(stage2, "call_llm", _skipping_model(prompts, {1: 5, 2: 55}))
     entries, cost_info = stage2.detect_entries_for_section(
-        ["Big"], elements, 0, 79, element_index_map=_idx_map(elements))
+        ["Big"], elements, 0, 80, element_index_map=_idx_map(elements))
     assert [_prompt_indices(p)[0] for p in prompts] == ["0", "50"]
+    assert sorted(_spans(entries)) == sorted([(i, i) for i in range(5)] + [(5, 49)]
+                                             + [(i, i) for i in range(50, 55)] + [(55, 79)])
+    assert all(e.get("gap_filled") for e in entries if e["element_idx_start"] == e["element_idx_end"])
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, skipped_over_max=1, gap_filled_entries=10)
+
+
+def test_short_unclaimed_lines_are_never_filled(monkeypatch):
+    elements = [_para(i, f"Line {i}") for i in range(80)]
+    monkeypatch.setattr(stage2, "call_llm", _skipping_model([], {1: 5, 2: 55}))
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Big"], elements, 0, 80, element_index_map=_idx_map(elements))
     assert _spans(entries) == [(5, 49), (55, 79)]
     assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, skipped_over_max=1)
 
 
-def test_a_carried_gap_appends_run_on_lines_and_leaves_noise_as_break(monkeypatch):
-    texts = {5: "Dr Name CV", 50: "Taught the residents course", 51: "with two co-directors.", 52: "Dr Name CV",
-             53: "Comments:", 54: "Very clear teaching", 55: "Weaknesses:", 57: "Next claimed record"}
+@pytest.mark.parametrize("reply", [
+    [{"element_idx_start": 2, "element_idx_end": 2}],
+    [],  # the model claimed nothing: its unclaimed records still come back
+])
+def test_a_single_batch_reply_s_unclaimed_records_are_filled_and_reported(monkeypatch, reply):
+    elements = [_para(0, "Director of Surgical Research, Example Trauma Center, 1976-present"),
+                {"unified_idx": 1, "type": "empty", "text": ""}, _para(2, "Professor of Surgery"),
+                _para(3, "Chief, Trauma Services, Example Regional Trauma Center, 2010-2015")]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": reply}))
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Positions"], elements, 0, 4, element_index_map=_idx_map(elements))
+    filled = [(e["element_idx_start"], e["confidence"]) for e in entries if e.get("gap_filled")]
+    assert filled == [(0, stage2.GAP_FILL_CONFIDENCE), (3, stage2.GAP_FILL_CONFIDENCE)]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(gap_filled_entries=2)
+
+
+def test_a_failed_batch_fills_only_the_carried_lines_the_reply_before_it_saw(monkeypatch):
+    elements = [_para(i, f"Committee member number {i} of the hospital board") for i in range(63)]
+    prompts = []
+
+    def model(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        if len(prompts) == 1:  # the last entry opens at 48 and 49 is left unclaimed: 48-49 are carried
+            return _llm_result({"delimiters": [{"element_idx_start": 0, "element_idx_end": 44},
+                                               {"element_idx_start": 45, "element_idx_end": 46},
+                                               {"element_idx_start": 48, "element_idx_end": 48}]})
+        raise RuntimeError("simulated batch failure")
+
+    monkeypatch.setattr(stage2, "call_llm", model)
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Board"], elements, 0, 63, element_index_map=_idx_map(elements))
+    assert _prompt_indices(prompts[1])[0] == "48"
+    # 47 is batch 1's to settle, 49 its carried line; batch 2's own lines were never seen.
+    assert sorted(_spans(entries)) == [(0, 44), (45, 46), (47, 47), (48, 48), (49, 49)]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(
+        edges=1, carried=1, failed_batches=1, restored_after_failure=1, gap_filled_entries=2)
+
+
+def test_a_carried_gap_appends_run_on_lines_and_leaves_furniture_as_break(monkeypatch):
+    texts = {5: "Dr Name CV running footer", 50: "Taught the residents course on emergency care and triage",
+             51: "with two co-directors.", 52: "Dr Name CV running footer", 53: "Comments:",
+             54: "Very clear teaching of the course, rated 5 of 5", 55: "Weaknesses:", 57: "Next claimed record"}
     elements = [_para(i, texts.get(i, f"Line {i}")) if i != 56 else {"unified_idx": i, "type": "empty", "text": ""}
                 for i in range(70)]
     prompts = []
@@ -2494,14 +2578,13 @@ def test_a_carried_gap_appends_run_on_lines_and_leaves_noise_as_break(monkeypatc
 
     monkeypatch.setattr(stage2, "call_llm", model)
     entries, cost_info = stage2.detect_entries_for_section(
-        ["Teaching"], elements, 0, 69, element_index_map=_idx_map(elements))
+        ["Teaching"], elements, 0, 70, element_index_map=_idx_map(elements))
     assert _prompt_indices(prompts[1])[0] == "45"
     # 50 is its own entry and 51 runs on from it; 52, a running footer (it
-    # repeats at 5), and the label 55, with a blank after it, stay unclaimed;
-    # the label 53 heads 54's content.
-    assert _spans(entries) == [(0, 44), (45, 49), (50, 51), (53, 53), (54, 54), (57, 69)]
+    # repeats at 5), and the labels 53 and 55 stay unclaimed; 54 is a record.
+    assert _spans(entries) == [(0, 44), (45, 49), (50, 51), (54, 54), (57, 69)]
     assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, carried=1, restored_unclaimed=1,
-                                                               gap_filled_entries=3, gap_filled_attached=1)
+                                                               gap_filled_entries=2, gap_filled_attached=1)
 
 
 def test_a_carried_reply_that_claims_any_held_back_line_replaces_that_entry(monkeypatch):

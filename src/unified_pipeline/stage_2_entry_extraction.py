@@ -888,9 +888,9 @@ class BatchCarryCounts:
     batch and a single-batch section's included. ``restored_after_failure`` and
     ``restored_unclaimed`` count held-back entries put back because the batch
     that re-listed them failed, or replied without claiming any of their lines.
-    ``gap_filled_entries`` and ``gap_filled_attached`` count the content lines a
-    carried batch's reply left unclaimed before its first claim, put back as
-    their own entries or appended to the entry they continue (``_gap_fill``).
+    ``gap_filled_entries`` and ``gap_filled_attached`` count the content lines
+    a batch's reply left unclaimed, put back as their own entries or appended
+    to the entry they continue (``_gap_fill``).
     """
     edges: int = 0
     carried: int = 0
@@ -904,8 +904,9 @@ class BatchCarryCounts:
     gap_filled_attached: int = 0
 
     def any(self) -> bool:
-        """True when there is anything to report: an edge or a failed batch."""
-        return bool(self.edges or self.failed_batches)
+        """True when there is anything to report: an edge, a failed batch or a
+        gap-filled line."""
+        return bool(self.edges or self.failed_batches or self.gap_filled_entries or self.gap_filled_attached)
 
     def record(self, skip_reason: str | None) -> None:
         self.edges += 1
@@ -1005,23 +1006,42 @@ def _unclaimed_pending(pending: list[dict], batch_entries: list[dict],
     return restored, kept
 
 
-# Gap-fill a carried batch (#1226). A carried batch re-opens on the record the
-# batch before it held back. Its reply may open well past that record: on
-# LFFKVV it opened 32 lines on, so G1 restored the held-back entry and the 32
-# student-evaluation lines between it and the reply's first claim fell to
-# break -- on both new-arm draws, never on dev, whose batches never re-open.
-# The model was shown those lines and claimed none, so each content line is
-# put back: appended to the entry right above it when it visibly continues
-# that entry's last line, else as its own one-line entry. Only lines before the
-# reply's first claim, only in a carried batch, only paragraphs (#420 recovers
-# table rows). A line with no letters, a page number, a bare "Label:" with no
-# content line after it, and a short line repeated elsewhere in the section
-# (a running header or footer) stay break; run_stage_2's filter_extraction_noise
-# then reads these entries as it reads every other.
+# Gap-fill (#1226, generalised for unclaimed lines). The model is shown every
+# line of a batch and may leave real records unclaimed: on the 83 stored
+# production runs 61 record lines in 11 runs fell to break that way -- whole
+# employment histories and appointment lists, and one CV's two independent
+# replies dropped the same 8 appointments. On a carried batch the reply may
+# open well past the record it re-opens on (LFFKVV: 32 evaluation lines). So
+# once a batch's reply is in, each unclaimed record line the batch settles is
+# put back as its own one-line entry, or appended to the entry right above it
+# when it visibly continues that entry (``_attaches_to``). A batch settles its
+# lines up to its carry; the carried tail is settled by the next batch, or by
+# this one's reply when the next batch fails. Only paragraphs (#420 recovers
+# table rows). A line that is a heading 1b could not place stays break, for
+# promote_unlocated_headings. run_stage_2's filter_extraction_noise and
+# template-instruction filter then read these entries as they read every other.
+#
+# Most of what a reply leaves unclaimed is not a record: of the 548
+# text-bearing lines the stored replies left unclaimed on 102 runs, 83 are.
+# The rest is page furniture, the CV's own title, "(continued)" headings,
+# legends, "Last updated" stamps, column-header rows, names and sub-headings.
+# So a line is a record only when it is none of that furniture and is long,
+# or holds a number (a date, a score) and is not short (``_gap_line_is_content``).
 GAP_FILL_CONFIDENCE = 0.5  # not model-attested, like a #420-recovered row
 GAP_FILL_REPEAT_MAX_WORDS = 6  # a repeated line this short is a running header or footer
+GAP_FILL_MIN_WORDS = 8  # a record line with no number has at least this many words
+GAP_FILL_MIN_NUMBERED_WORDS = 5  # one with a date or a score ("5/2022 State of Colorado Physicians License")
 _LETTER_RE = re.compile(r"[^\W\d_]")
 _PAGE_NUMBER_RE = re.compile(r"^\W*\d+(?:\s*(?:of|/)\s*\d+)?\W*$|\bpage\s*\d+", re.IGNORECASE)
+# Word field codes left in running headers and footers, and the CV's own title.
+_FURNITURE_RE = re.compile(r"MERGEFORMAT|NUMPAGES|HYPERLINK|\bPAGE\b|DATE\s*\\@|(?i:\bcurriculum\s+vita)")
+# "*Denotes invited talks", "# denotes senior author", "KEY: † indicates ..."
+_LEGEND_RE = re.compile(r"^(?:key:\s*)?\S{0,3}\s*(?:denotes?|designates?|indicates?|marks?)\b", re.IGNORECASE)
+# "Last updated 8/2/2024", "Date Prepared: 5/2016", "Current h-index: 34"
+_CV_METADATA_RE = re.compile(
+    r"^\W*(?:(?:last\s+)?(?:updated|revised|date\s+prepared)\b|rev\.)|\bh-index\b|\bi-?10[- ]index\b|\bcitations\s*=",
+    re.IGNORECASE)
+_COLUMN_HEADER_PUNCTUATION = frozenset(",.;:()")
 _LINE_END_PUNCTUATION = (".", "!", "?", ";", ":")
 
 
@@ -1029,21 +1049,31 @@ def _normalised(text: str) -> str:
     return " ".join(text.split())
 
 
-def _is_bare_label(text: str) -> bool:
-    """``Strengths:`` -- a leading label with nothing after its colon."""
-    match = _LEADING_LABEL_RE.match(text)
-    return match is not None and not text[match.end():].strip()
+def _is_furniture(text: str) -> bool:
+    """A page number or field code, the CV's title, a legend, a CV stamp, or
+    a heading that ends in a colon: never a record, nor part of one."""
+    return bool(_PAGE_NUMBER_RE.search(text) or _FURNITURE_RE.search(text) or text.endswith(":")
+                or _LEGEND_RE.match(text) or _CV_METADATA_RE.search(text))
 
 
-def _gap_line_is_content(pos: int, batch_elements: list[dict], repeated: set[str]) -> bool:
-    """Whether the unclaimed paragraph at ``pos`` holds content worth an entry."""
-    text = _normalised(batch_elements[pos]["text"])
-    if not _LETTER_RE.search(text) or _PAGE_NUMBER_RE.search(text):
+def _is_column_header(text: str) -> bool:
+    """``Institution Rank/Title Inclusive Dates`` -- every word capitalised,
+    with no digit and no punctuation a record would carry."""
+    return (not any(ch.isdigit() or ch in _COLUMN_HEADER_PUNCTUATION for ch in text)
+            and all(not word[:1].islower() for word in text.split()))
+
+
+def _gap_line_is_content(line: str, repeated: set[str]) -> bool:
+    """Whether an unclaimed paragraph reads as a record line."""
+    text = _normalised(line)
+    words = len(text.split())
+    if not _LETTER_RE.search(text) or _is_furniture(text) or _is_column_header(text):
         return False
-    if _is_bare_label(text):
-        following = batch_elements[pos + 1] if pos + 1 < len(batch_elements) else {}
-        return following.get("type") == "paragraph" and not _is_bare_label(_normalised(following["text"]))
-    return not (len(text.split()) <= GAP_FILL_REPEAT_MAX_WORDS and text in repeated)
+    if words <= GAP_FILL_REPEAT_MAX_WORDS and text in repeated:
+        return False
+    if any(ch.isdigit() for ch in text):
+        return words >= GAP_FILL_MIN_NUMBERED_WORDS
+    return words >= GAP_FILL_MIN_WORDS
 
 
 def _repeated_lines(section_elements: list[dict]) -> set[str]:
@@ -1060,29 +1090,52 @@ def _continues_line(entry_text: str, line: str) -> bool:
     return bool(last) and not last.endswith(_LINE_END_PUNCTUATION) and line[:1].islower()
 
 
-def _gap_fill(restored: list[dict], batch_entries: list[dict], batch_elements: list[dict],
-              repeated: set[str], counts: BatchCarryCounts) -> list[dict]:
-    """``restored`` plus the carried batch's unclaimed content lines before its
-    reply's first claim, each appended to the entry it continues or made its
-    own entry. Counted in ``counts``. A reply that claims nothing fills nothing."""
-    claimed = set().union(*(_entry_keys(e, batch_elements) for e in batch_entries if not e.get("recovered_row")))
-    first = next((pos for pos, elem in enumerate(batch_elements) if str(elem["idx"]) in claimed), None)
-    if first is None:
-        return restored
-    held = set().union(*(_entry_keys(e, batch_elements) for e in restored))
-    out = list(restored)
+def _attaches_to(above: dict, line: str) -> bool:
+    """``line`` belongs to the entry right above it: it runs on from that
+    entry's last line, or it completes a gap-filled record -- an undated line
+    under a dated one ("Lutheran Medical Center" under "January 1986 - August
+    1986 Staff Pharmacist"), or a bare date under an undated one."""
+    text = _normalised(line)
+    if _is_furniture(text):
+        return False
+    if _continues_line(above["text"], line):
+        return True
+    if not above.get("gap_filled"):
+        return False
+    if _YEAR_RE.search(above["text"]):
+        return _YEAR_RE.search(text) is None and _LETTER_RE.search(text) is not None
+    return BARE_DATE_RE.match(text) is not None
+
+
+class _GapFillContext(NamedTuple):
+    """What every batch of one section's gap-fill reads."""
+    repeated: set[str]  # the section's repeated lines (_repeated_lines)
+    unlocated_headings: tuple[str, ...]  # headings 1b could not place: never filled
+    end: int  # the first index past the section: the model is shown it, but it is not this section's
+
+
+def _gap_fill(entries: list[dict], batch_elements: list[dict], settled: int,
+              context: _GapFillContext, counts: BatchCarryCounts) -> list[dict]:
+    """``entries`` plus each content line in ``batch_elements[:settled]`` that
+    none of them claims, appended to the entry it continues or made its own
+    entry. ``entries`` is every entry the section holds so far. Counted in
+    ``counts``."""
+    claimed = set().union(*(_entry_keys(e, batch_elements) for e in entries))
+    out = list(entries)
     by_end = {e["element_idx_end"]: i for i, e in enumerate(out) if isinstance(e["element_idx_end"], int)}
-    for pos in range(first):
+    for pos in range(settled):
         elem = batch_elements[pos]
-        if (elem.get("type") != "paragraph" or str(elem["idx"]) in held
-                or not _gap_line_is_content(pos, batch_elements, repeated)):
+        if (elem.get("type") != "paragraph" or str(elem["idx"]) in claimed or elem["idx"] >= context.end
+                or any(_line_is_heading(elem["text"], heading) for heading in context.unlocated_headings)):
             continue
         idx, text = elem["idx"], elem["text"]  # stripped by _section_elements
         above = by_end.pop(idx - 1, None)
-        if above is not None and _continues_line(out[above]["text"], text):
+        if above is not None and _attaches_to(out[above], text):
             out[above] = {**out[above], "element_idx_end": idx, "text": f"{out[above]['text']}\t{text}"}
             by_end[idx] = above
             counts.gap_filled_attached += 1
+            continue
+        if not _gap_line_is_content(text, context.repeated):
             continue
         out.append({"element_idx_start": idx, "element_idx_end": idx, "element_type": "paragraph",
                     "confidence": GAP_FILL_CONFIDENCE, "text": text, "gap_filled": True})
@@ -1465,23 +1518,26 @@ def _detect_in_batches(
     start_elem_idx: int,
     end_elem_idx: int,
     element_index_map: dict,
+    unlocated_headings: tuple[str, ...] = (),
 ) -> tuple[list[dict], dict]:
     """A section's entries, one call per batch, each batch after the first
     re-opening on the record the batch before it may have cut (#1226).
 
     A batch whose call fails is skipped, as before. The entries it would have
     replaced are restored -- so are any its reply leaves unclaimed: a carried
-    batch never loses what the batch before it produced. ``LLMOutageError``
-    still fails the section.
+    batch never loses what the batch before it produced. Each reply's unclaimed
+    content lines are gap-filled (``_gap_fill``). ``LLMOutageError`` still
+    fails the section.
     """
     entries = []
     pending = []  # the previous batch's tail, which this batch's reply replaces
     usage = _BatchUsage()
     carry_counts = BatchCarryCounts()
     multi_batch = len(section_elements) > STAGE2_BATCH_SIZE
-    repeated = _repeated_lines(section_elements)
+    gap_context = _GapFillContext(_repeated_lines(section_elements), unlocated_headings, end_elem_idx)
     start = 0
     batch_no = 0
+    unsettled = 0  # this batch's leading lines, carried: the previous reply saw them
 
     while start < len(section_elements):
         end = _record_aligned_end(section_elements, start, STAGE2_BATCH_SIZE)
@@ -1501,21 +1557,24 @@ def _detect_in_batches(
             carry_counts.restored_after_failure += len(pending)
             entries.extend(pending)  # nothing replaced the carried tail: it stands
             batch_entries = []
+            settled = unsettled  # only the previous reply saw these lines
         else:
             restored, batch_entries = _unclaimed_pending(pending, batch_entries, batch_elements)
             carry_counts.restored_unclaimed += len(restored)
-            if pending:  # a carried batch: put back what its reply skipped before its first claim
-                restored = _gap_fill(restored, batch_entries, batch_elements, repeated, carry_counts)
             entries.extend(restored)
+            settled = len(batch_elements)
         pending = []
 
         if end >= len(section_elements):
             entries.extend(batch_entries)
+            entries = _gap_fill(entries, batch_elements, settled, gap_context, carry_counts)
             break
         split = _carry_split(batch_entries, batch_elements, STAGE2_CARRY_MAX)
         carry_counts.record(split.skip_reason)
         entries.extend(split.kept)
+        entries = _gap_fill(entries, batch_elements, min(settled, split.carry), gap_context, carry_counts)
         pending = split.pending
+        unsettled = len(batch_elements) - split.carry
         start += split.carry
 
     cost_info = {
@@ -1536,7 +1595,8 @@ def detect_entries_for_section(
     end_elem_idx: int,
     document_uid: str | None = None,
     header_indices: set | None = None,
-    element_index_map: dict | None = None
+    element_index_map: dict | None = None,
+    unlocated_headings: tuple[str, ...] = (),
 ) -> tuple[list[dict], dict]:
     """
     Use LLM to detect and extract entries within a section.
@@ -1549,6 +1609,9 @@ def detect_entries_for_section(
         document_uid: Document identifier for logging
         header_indices: Set of element indices that are section/subsection headers (to exclude)
         element_index_map: Map from element index to element data
+        unlocated_headings: Headings stage 1b kept but could not place; a line
+            that is one is never gap-filled, so promote_unlocated_headings
+            still finds it as a break
 
     Returns:
         Tuple of (entries_list, cost_info_dict). The cost_info of a
@@ -1566,7 +1629,7 @@ def detect_entries_for_section(
 
     full_hierarchy = " > ".join(section_hierarchy)
     entries, cost_info = _detect_in_batches(
-        section_elements, full_hierarchy, start_elem_idx, end_elem_idx, element_index_map)
+        section_elements, full_hierarchy, start_elem_idx, end_elem_idx, element_index_map, unlocated_headings)
 
     # Remove subset/duplicate entries from all batches
     return remove_subset_delimiters(entries), cost_info
@@ -1794,7 +1857,7 @@ class _SectionResult(NamedTuple):
 
 
 class _DocumentContext(NamedTuple):
-    """The five values every _extract_section call shares across a whole
+    """The values every _extract_section call shares across a whole
     run_stage_2 invocation -- built once before the pool, read but never
     written by any section (#915 review item 6)."""
     doc_elements: list[dict]
@@ -1802,6 +1865,7 @@ class _DocumentContext(NamedTuple):
     element_index_map: dict
     header_info: dict[int, list[str]]
     doc: Document
+    unlocated_headings: tuple[str, ...] = ()  # gap-fill leaves these lines for promote_unlocated_headings
 
 
 def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
@@ -1831,8 +1895,8 @@ def _extract_section(
     headers/breaks around it, and report what happened -- the per-section
     unit map_in_order fans out over (#881).
 
-    ``context`` bundles the five values (doc_elements, header_indices,
-    element_index_map, header_info, doc) that are constant for every call
+    ``context`` bundles the values (doc_elements, header_indices,
+    element_index_map, header_info, doc, unlocated_headings) that are constant for every call
     in a given run_stage_2 invocation; only ``hierarchy_path``/``start_idx``/
     ``end_idx`` (this section's own slice) and ``document_uid``/
     ``cancel_check`` vary per call.
@@ -1879,7 +1943,8 @@ def _extract_section(
         end_idx + 1,  # end_idx is inclusive, so add 1 for range
         document_uid=document_uid,
         header_indices=context.header_indices,
-        element_index_map=context.element_index_map
+        element_index_map=context.element_index_map,
+        unlocated_headings=context.unlocated_headings,
     )
 
     # Track which indices are assigned to entries
@@ -2199,7 +2264,7 @@ def run_stage_2(
         header_indices=header_indices,
         element_index_map=element_index_map,
         header_info=header_info,
-        doc=doc,
+        doc=doc, unlocated_headings=tuple(heading.path[-1] for heading in collect_unlocated_headings(hierarchy)),
     )
     results = map_in_order(
         partial(
