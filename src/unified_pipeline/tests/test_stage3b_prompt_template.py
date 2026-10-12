@@ -236,6 +236,28 @@ def test_s3_s4_rules_name_the_same_section_as_the_taxonomy() -> None:
     # Rule 30's in-press line names the chapter code too.
     assert "S4 for a book chapter" in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
     assert "S3 for a book chapter" not in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    # Every line of the two definitions is load-bearing (the "(Ed.)" and
+    # "eds." cues, "whoever edited the book", "do not make it S3"), so the
+    # block is pinned whole; a wording change has to update this on purpose.
+    assert " ".join((s3 + s4).split()) == " ".join(_S3_S4_RULES.split())
+
+
+_S3_S4_RULES = """
+    - S3 = Books: a whole book, whether the CV owner wrote it or
+      edited it:
+      * Books/monographs and textbooks they authored.
+      * Books and edited volumes they edited: the owner's name is
+        followed by "(Ed.)", "(Eds.)" or "eds.", or the volume is
+        "Edited by" the owner.
+    - S4 = Chapters: one chapter or contribution in a book, whoever
+      edited the book:
+      * A chapter title followed by "In:" or "In" and the book's title,
+        usually with the book's editors "(Ed.)"/"(Eds.)" and page numbers.
+    - The book's editors appearing in a chapter citation do not make
+      it S3; a whole edited book is S3, not S4.
+    - A guest-edited special issue of a journal is an editorial role,
+      not a book or a chapter: Q4B (rule 21).
+"""
 
 
 # ---------------------------------------------------------------------------
