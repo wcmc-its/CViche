@@ -13,8 +13,8 @@ planted violation per check, run --report, assert it's counted; then the
 then the eight ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
 the waiver mechanism (WAIVABLE_ROWS) -- a waived hit is excused from its
 row's count but not forgotten, and the waived count itself ratchets; then
-the four ruff-backed rows (5.4 BLE001, 7.1 print(), both 8.3 rows) -- the count is
-summed from ruff's own statistics, a rise blocks, and a missing ruff is a
+the six ruff-backed rows (5.4 BLE001, 7.1 print(), both 8.3 rows, both 8.4
+rows) -- the count is summed from ruff's own statistics, a rise blocks, and a missing ruff is a
 hard failure rather than a zero; then the staleness helpers, which run
 against the real repo rather than the fixture since there's no git history
 to fake in a plain tempdir.
@@ -59,6 +59,21 @@ RUFF_TEST_BAIT = (
     "def g():\n    try:\n        t([])\n    except Exception:\n        return\n"
 )
 
+# §8.4: one library file with known pyflakes and bugbear hits, fully
+# annotated and print-free so it adds nothing to the other ruff rows:
+# F401 (os unused) + F841 (unused local) = 2 F; B006 (mutable default) = 1 B.
+# The rest of the fixture adds 5 F (swallows.py's 2 F821, sections/
+# __init__.py's 2 F401, widgets.py's 1 F821) and 1 B (dynattr.py's B009),
+# so the rows read 7 and 2. The copied scripts/ must stay F- and B-clean or
+# these numbers move. The fixture's 3 BLE001 hits must NOT reach the B row,
+# which is why it matches B<digits>, not the prefix "B".
+RUFF_FB_BAIT = (
+    "import os\n\n\n"
+    "def collect(items: list[int] = []) -> list[int]:\n"
+    "    unused = len(items)\n"
+    "    return items\n"
+)
+
 DOC_TEMPLATE = """# CODING_STANDARDS.md (fixture)
 
 ## 9. Where the code stands against this today
@@ -94,6 +109,7 @@ def build_tree(tree):
     # The copied scripts/check_standards.py above has a dozen print() calls
     # of its own, so T201 landing on exactly 1 is also the scripts/ ignore.
     _write(os.path.join(tree, "src", "ruffbait.py"), RUFF_BAIT)
+    _write(os.path.join(tree, "src", "ruffbait_fb.py"), RUFF_FB_BAIT)
     _write(os.path.join(tree, "src", "unified_pipeline", "tests", "test_bait.py"), RUFF_TEST_BAIT)
 
     # 1.2 -- a pure-layer file that imports docx (the violation)
@@ -238,6 +254,14 @@ def main():
         assert "today=19" in ann_section, ann_section
         print("8.3 missing annotations (ANN*, RUF012)     counted   ok")
 
+        pyflakes_section = out.split("8.4 pyflakes findings (F)")[1].split("\n")[0]
+        assert "today=7" in pyflakes_section, pyflakes_section
+        print("8.4 pyflakes findings (F)                  counted   ok")
+
+        bugbear_section = out.split("8.4 bugbear findings (B)")[1].split("\n")[0]
+        assert "today=2" in bugbear_section, bugbear_section  # 3 BLE001 hits would make it 5
+        print("8.4 bugbear findings (B)                   counted   ok (BLE001 not taken)")
+
         assert "7.4" not in out  # [judgement], not [gate] -- the auto table is [gate]-only
         print("7.4 absent from --report's auto-checkable set             ok")
 
@@ -280,6 +304,8 @@ def main():
         assert baseline["7.1 print() in library code (T201)"] == 1
         assert baseline["8.3 typing syntax (UP*, RUF013)"] == 7
         assert baseline["8.3 missing annotations (ANN*, RUF012)"] == 19
+        assert baseline["8.4 pyflakes findings (F)"] == 7
+        assert baseline["8.4 bugbear findings (B)"] == 2
         print("--update writes standards-baseline.json with fresh counts  ok")
 
         # now in sync -> default mode passes
@@ -458,6 +484,23 @@ def main():
         r = run(tree)
         assert r.returncode == 0, r.stdout
         print("removing the extra ruff hits clears the gate               ok")
+
+        # §8.4 rows rising: one more annotated, print-free library file adds
+        # an unused import (F 7 -> 8) and a mutable default (B 2 -> 3), and
+        # nothing to the other rows.
+        bait3 = os.path.join(tree, "src", "ruffbait3.py")
+        _write(bait3, "import sys\n\n\ndef more(x: list[int] = []) -> list[int]:\n    return x\n")
+        r = run(tree)
+        assert r.returncode == 1, r.stdout
+        assert "8.4 pyflakes findings (F) rose 7 -> 8" in r.stderr, r.stderr
+        assert "8.4 bugbear findings (B) rose 2 -> 3" in r.stderr, r.stderr
+        r = run(tree, "--update")
+        assert r.returncode == 1 and "refusing to raise" in r.stderr, r.stderr
+        os.remove(bait3)
+        assert run(tree, "--update").returncode == 0
+        r = run(tree)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        print("8.4 rows rising block the gate; --update refuses     exit=1    ok")
 
         # ruff missing from PATH: every mode fails closed (exit 2, §5.5) and
         # writes nothing -- a zero here would lock in an empty baseline.

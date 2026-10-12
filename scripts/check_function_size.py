@@ -110,8 +110,8 @@ def main():
         delta = now["excess_lines"] - base["excess_lines"]
         print(f"FAIL: oversized-function debt grew by {delta} lines "
               f"({base['excess_lines']} -> {now['excess_lines']}).", file=sys.stderr)
-        print(f"\nSplit the function, or if it genuinely should stay whole, say why in the PR "
-              f"and re-baseline with --update.\nWorst offenders now:", file=sys.stderr)
+        print("\nSplit the function, or if it genuinely should stay whole, say why in the PR "
+              "and re-baseline with --update.\nWorst offenders now:", file=sys.stderr)
         for length, name, path, line in found[:5]:
             print(f"  {length:5}  {name:45} {path}:{line}", file=sys.stderr)
         return 1
