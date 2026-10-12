@@ -505,6 +505,22 @@ Related centralized modules outside `services/`:
 
 **Step definitions** are centralized in `web_interface/backend/app/pipeline/step_registry.py` (`STEP_REGISTRY`) with metadata: name, LLM usage flag, weight, estimated seconds.
 
+### Run Concurrency
+
+How many pipeline runs execute at once depends on `CVICHE_DISPATCH_MODE`. The setting that limits runs differs by mode, and a setting that belongs to the other mode has no effect.
+
+| Mode | Where a run executes | What caps concurrent runs |
+|------|----------------------|---------------------------|
+| `in_process` (default) | Inside a backend pod, as a background task | `CVICHE_MAX_CONCURRENT_RUNS` **per backend pod** (`app/pipeline/concurrency.py`). A start on a full pod gets a 429. Bulk and single runs share the same slots. |
+| `queue` | On a `cviche-worker` pod, taken from the Valkey queue | Worker replica count, one run per pod. `CVICHE_MAX_CONCURRENT_RUNS` is not consulted. |
+
+Per environment, as set in `k8s/overlays/`:
+
+- **dev** (`CVICHE_DISPATCH_MODE=queue` in `kustomization.yaml`): `cviche-worker` has 3 replicas and reads only the single-run queue. `cviche-worker-flex` has 3 replicas and reads the single-run queue first, then the batch queue. That allows at most 6 runs at once, and at most 3 of them batch runs.
+- **prod** (mode unset, so `in_process`): 3 runs per backend pod, and the HPA runs 2 to 4 pods. That allows 6 to 12 runs cluster-wide. There is no cluster-wide cap (#527), and the ALB picks the pod, so a start can get a 429 on a full pod while another pod has a free slot. When prod switches to queue mode, `prod/worker-patch.yaml`'s `replicas` becomes the cap.
+
+Both overlays still set `CVICHE_MAX_CONCURRENT_RUNS=3`, equal to `DEFAULT_MAX_CONCURRENT_RUNS`. `test_release_guards.py` enforces that, so the backend keeps the same cap if dev is switched back to `in_process`.
+
 ### Storage Abstraction
 
 **Interface:** `web_interface/backend/app/storage/base.py` (`RunStorage` ABC)

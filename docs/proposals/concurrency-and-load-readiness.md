@@ -1,6 +1,7 @@
 # Concurrency & load readiness — current behavior, bottlenecks, and the real lever
 
 **Status:** analysis only. No code in this doc. Records findings from a load/scaling review on 2026-05-27.
+**Superseded for current behavior:** the replica, HPA and admission-control facts below are from 2026-05-27. Per-pod admission control, the prod HPA and the queue workers have all shipped since then. For today's limits, see [`TECHNICAL_README.md` → Run Concurrency](../TECHNICAL_README.md#run-concurrency).
 **Applies to:** the `web_interface` backend running on EKS (cluster `reciter`, nodegroup `cviche-al2023-nodes`, account `665083158573`, region `us-east-1`).
 **Related:** [`issue-4-redis-broker.md`](./issue-4-redis-broker.md) — the horizontal-scaling *enabler* (moving process-local state to Redis). This doc is the *why-and-when* around it.
 
