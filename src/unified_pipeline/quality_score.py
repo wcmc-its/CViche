@@ -894,8 +894,8 @@ LINT_FIX_MINUTES = {
     **dict.fromkeys((
         "classified_unrendered", "dead_sections", "dedup_drops", "multi_record_coverage",
         "header_consumed_record", "orphaned_fragments", "section_lost", "segmentation",
-        "segmentation_collapse", "source_line_coverage", "stage2_unaccounted",
-        "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
+        "segmentation_collapse", "source_line_coverage", "stage2_text_break",
+        "stage2_unaccounted", "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
     ), FIX_MINUTES_RECORD_LOST),
     **dict.fromkeys((
         "bucket_status", "grant_bucket", "group_header_context", "invented_records",
