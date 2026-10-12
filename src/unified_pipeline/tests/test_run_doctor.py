@@ -60,6 +60,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_etal_added,
     lint_glyph_field,
     lint_group_header_context,
+    lint_header_consumed_record,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
     lint_licensure_fallback_truncated,
@@ -75,12 +76,14 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_pipeline_errors,
     lint_pubmed_title_truncated,
     lint_python_repr_in_output,
+    lint_record_date_shift,
     lint_research_summary_call_failed,
     lint_section_lost,
     lint_segmentation,
     lint_segmentation_collapse,
     lint_shattered_prose,
     lint_split_child_unsourced,
+    lint_stage2_unaccounted,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
     lint_stage4_unplaced_items,
@@ -333,6 +336,228 @@ def test_run_doctor_wires_segmentation_collapse_to_stage_1b_then_stage_2(tmp_pat
                 if f["lint"] == "segmentation_collapse"]
     assert [(f["severity"], f["message"].split(":")[0]) for f in findings] == [
         ("WARN", "section structure lost")]
+
+
+# --- stage2_unaccounted (#1693) ------------------------------------------------
+
+
+def _stage2_unaccounted(indices, **coverage):
+    return {"coverage": {"unaccounted_indices": indices, **coverage}, "entries": []}
+
+
+def test_stage2_unaccounted_warns_once_and_folds_indices_into_spans():
+    # TGSQIR shape: a section body stage 2 never assigned to an entry.
+    findings = lint_stage2_unaccounted(_stage2_unaccounted([9, 3, 4, 5, 4]))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("stage2_unaccounted", "WARN")]
+    assert "4 source element(s)" in findings[0]["message"]
+    assert "(2 span(s))" in findings[0]["message"]
+    assert findings[0]["evidence"] == [
+        "element_idx_start 3: elements 3-5 unaccounted",
+        "element_idx_start 9: elements 9-9 unaccounted"]
+
+
+@pytest.mark.parametrize("stage2", [
+    _stage2_unaccounted([]),
+    {"coverage": {"coverage_percentage": 100.0}, "entries": []},
+    {"entries": []},
+    {"coverage": None, "entries": []},
+    _stage2_unaccounted(["3", None, True]),
+])
+def test_stage2_unaccounted_quiet_without_unaccounted_element_indices(stage2):
+    assert lint_stage2_unaccounted(stage2) == []
+
+
+def test_run_doctor_wires_stage2_unaccounted_to_stage_2(tmp_path):
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_unaccounted"]
+    path = root / "stage_2_entry_extraction" / f"{_UID}_cv_entries.json"
+    stage2 = json.loads(path.read_text())
+    stage2["coverage"] = {"unaccounted_indices": [7, 8]}
+    path.write_text(json.dumps(stage2))
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_unaccounted"]
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+# --- record_date_shift (#1226) -------------------------------------------------
+
+
+def _list2(*texts, hierarchy=("Committees",), start=100):
+    return {"entries": [_entry(text, start=start + 4 * i, hierarchy=list(hierarchy))
+                        for i, text in enumerate(texts)]}
+
+
+def test_record_date_shift_fires_on_a_date_only_entry_where_the_date_moves_last():
+    # GNONHA 505: a batch ended on the next record's date paragraph, so every
+    # entry after it pairs its text with the following record's date.
+    stage2 = _list2("2013-2016\tUnit council", "2014-2016\tQuality committee", "2015",
+                    "Safety taskforce\t2016-2018", "Search committee\t2017")
+    findings = lint_record_date_shift(stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("record_date_shift", "WARN")]
+    message = findings[0]["message"]
+    assert message.startswith("entry 108: list 'Committees' grouped one record off")
+    assert "a date with no record" in message
+    assert "before it carry their date first, the entries after it last" in message
+    assert findings[0]["evidence"][1].startswith("entry 112: Safety taskforce")
+
+
+def test_record_date_shift_fires_on_a_dateless_entry_where_the_date_moves_first():
+    # SPIHVQ 137: a mentee row cut before its date and thesis title, which
+    # open the next entry instead.
+    stage2 = _list2("Member PhD\tA. Student\tRehabilitation\tSeptember 2021\tA thesis title",
+                    "Member PhD\tB. Student\tRehabilitation\tMay 2020\tAnother title",
+                    "Member PhD\tC. Student\tRehabilitation",
+                    "July 2019\tThird title\tMember PhD\tD. Student",
+                    "January 2019\tFourth title\tMember PhD\tE. Student")
+    findings = lint_record_date_shift(stage2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 108"]
+    assert "a record with no date" in findings[0]["message"]
+    assert "carry their date mid-record, the entries after it first" in findings[0]["message"]
+
+
+def test_record_date_shift_reads_two_digit_slash_dates():
+    # NJHLUR's grant periods carry two-digit years `_is_date_only_text` does not read.
+    stage2 = _list2("Grant one\tPI\tNIH\t7/1/09-6/30/14", "Grant two\tPI\tCDC\t10/1/07-9/30/11",
+                    "Grant three\tPI", "NIH\t4/1/11 - 4/30/13\tGrant four\tPI",
+                    "CDC\t3/04-9/07\tGrant five\tPI")
+    findings = lint_record_date_shift(stage2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 108"]
+    assert "before it carry their date last, the entries after it mid-record" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("texts", [
+    # Both sides date first: a year standing alone in a list that agrees with itself.
+    ("2013\tA", "2014\tB", "2015", "2016\tC", "2017\tD"),
+    # One entry on the near side: a record split over two paragraphs beside whole ones.
+    ("A\t2013", "2015", "2016\tC", "2017\tD"),
+    ("2013\tA", "2014\tB", "2015", "C\t2016"),
+    # A side that disagrees with itself is no list order.
+    ("2013\tA", "B\t2014", "2015", "C\t2016", "D\t2017"),
+    # A side holding a second fragment.
+    ("2013\tA", "2014\tB", "2015", "C\t2016", "Undated record text"),
+    # A run of bare dates is a date column, not a shift.
+    ("2013\tA", "2014\tB", "2015", "2016", "2017"),
+    # A list that changes order at a whole record, with no fragment, is two
+    # lists written two ways.
+    ("2013\tA", "2014\tB", "C\t2015\tD", "E\t2016", "F\t2017"),
+    # A short digit-free one-field line between two tables is a sub-heading.
+    ("1977 - 1978\tA centre\tDirector", "1976 - 1977\tA clinic\tDirector",
+     "Educational Background", "A University\t1982\tEd.D.", "B University\t1976\tM.A."),
+])
+def test_record_date_shift_quiet_on_lists_that_keep_their_order(texts):
+    assert lint_record_date_shift(_list2(*texts)) == []
+
+
+def test_record_date_shift_judges_a_long_one_field_title_as_a_record_fragment():
+    # NJHLUR 431: a talk title whose date, place and host opened the next
+    # entry; one field, no digit, but too long for a sub-heading.
+    stage2 = _list2("Workshop title\t10/06/99\tTown A, Country A\tA university",
+                    "Fellowship talk\t6/01/97\tTown B, Country B\tA school",
+                    "Lessons from a long programme of work on improving how a clinic records its care",
+                    "5/17/90\tTown C, Country C\tA college\tA first invited talk title",
+                    "5/18/90\tTown C, Country C\tA college\tA second invited talk title")
+    assert [f["message"].split(":")[0] for f in lint_record_date_shift(stage2)] == ["entry 108"]
+
+
+def test_record_date_shift_judges_a_dateless_record_fragment_with_a_digit():
+    # WBZIDP 790: a patent table row cut to its number alone is a fragment,
+    # though it is one short field.
+    stage2 = _list2("43\tA patent\tPending\t1/25/2019", "44\tB patent\tPending\t1/31/2019",
+                    "46", "371\tPending\t5/18/2018\t47\tC patent",
+                    "FOR\tPending\t5/20/2018\t48\tD patent")
+    assert [f["message"].split(":")[0] for f in lint_record_date_shift(stage2)] == ["entry 108"]
+
+
+def test_record_date_shift_does_not_join_lists_across_a_header_or_another_heading():
+    before = [_entry("2013\tA", start=1, hierarchy=["X"]), _entry("2014\tB", start=2, hierarchy=["X"])]
+    after = [_entry("C\t2016", start=5, hierarchy=["X"]), _entry("D\t2017", start=6, hierarchy=["X"])]
+    with_header = {"entries": [*before, _entry("X", etype="header", start=3, hierarchy=["X"]),
+                               _entry("2015", start=4, hierarchy=["X"]), *after]}
+    with_other_path = {"entries": [*before, _entry("2015", start=4, hierarchy=["Y"]), *after]}
+    split_by_header = {"entries": [*before, _entry("Part 2", etype="header", start=4, hierarchy=["X"]),
+                                   *after]}
+    joined_by_break = {"entries": [*before, _entry("", etype="break", start=3, hierarchy=["X"]),
+                                   _entry("2015", start=4, hierarchy=["X"]), *after]}
+    assert lint_record_date_shift(with_header) == []
+    assert lint_record_date_shift(with_other_path) == []
+    assert lint_record_date_shift(split_by_header) == []
+    assert [f["message"].split(":")[0] for f in lint_record_date_shift(joined_by_break)] == [
+        "entry 4"]
+
+
+def test_run_doctor_wires_record_date_shift_to_stage_2(tmp_path):
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "record_date_shift"]
+    shifted = _list2("2013\tA", "2014\tB", "2015", "C\t2016", "D\t2017")
+    _write_stage(root, "stage_2_entry_extraction", f"{_UID}_cv_entries.json",
+                 {"document_uid": _UID, **shifted})
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "record_date_shift"]
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+# --- header_consumed_record (#1254, #1252) --------------------------------------
+
+
+def _headers2(*pairs):
+    return {"entries": [_entry(text, etype="header", start=10 * i, hierarchy=[heading])
+                        for i, (heading, text) in enumerate(pairs)]}
+
+
+def test_header_consumed_record_fires_on_a_heading_holding_its_first_record():
+    # WBBUHK 29: "BOARD CERTIFICATION: <board>" typed header, so the only
+    # board certification was never classified.
+    stage2 = _headers2(("BOARD CERTIFICATION", "BOARD CERTIFICATION: American Board of Examples"),
+                       ("Honors and Awards", "Honors and Awards Example Award -2010"))
+    findings = lint_header_consumed_record(stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [
+        ("header_consumed_record", "WARN"), ("header_consumed_record", "WARN")]
+    assert findings[0]["message"].startswith(
+        "entry 0: heading 'BOARD CERTIFICATION' also holds a record")
+    assert [f["evidence"] for f in findings] == [["American Board of Examples"],
+                                                 ["Example Award -2010"]]
+
+
+@pytest.mark.parametrize("heading,text", [
+    ("PUBLICATIONS", "PUBLICATIONS:"),
+    ("Peer Reviewed Manuscripts", "Peer Reviewed Manuscripts (cont'd)"),
+    ("Teaching", "Teaching (past 3 years only)"),
+    ("Social Security No.", "Social Security No.  [number withheld]"),
+    ("CLINICAL ACTIVITIES", "CLINICAL ACTIVITIES: none"),
+    ("CLINICAL ACTIVITIES", "CLINICAL ACTIVITIES: Not applicable."),
+    ("EDUCATION", "EDUCATION Page 2 of 3"),
+    ("SOCIETY MEMBERSHIPS", "SOCIETY MEMBERSHIPS YEAR JOINED"),
+    ("Education", "Education program"),
+    ("Conferences", "Conferences Where?"),
+    ("Home", "A heading that does not start with its own title"),
+])
+def test_header_consumed_record_quiet_on_a_heading_and_its_notes(heading, text):
+    assert lint_header_consumed_record(_headers2((heading, text))) == []
+
+
+def test_header_consumed_record_reads_only_header_entries():
+    stage2 = {"entries": [_entry("LICENSURE: State of Example", start=1, hierarchy=["LICENSURE"])]}
+    assert lint_header_consumed_record(stage2) == []
+
+
+def test_header_consumed_record_quiet_when_the_record_renders():
+    stage2 = _headers2(("Present Position", "Present Position: Professor Emeritus"),
+                       ("MEDICAL LICENSURE", "MEDICAL LICENSURE: State of Example"))
+    blocks = [("p", "A. Appointments"), ("table", "Professor Emeritus\nA university")]
+    findings = lint_header_consumed_record(stage2, blocks)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10"]
+
+
+def test_run_doctor_wires_header_consumed_record_to_stage_2_and_the_docx(tmp_path):
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "header_consumed_record"]
+    # The clean run's docx renders the FSMB grant, so a heading holding it is
+    # quiet only if the wire passes the docx's blocks.
+    stage2 = _headers2(("GRANTS", "GRANTS: Federation of State Medical Boards (FSMB) Foundation Grant"),
+                       ("LICENSURE", "LICENSURE: State of Example"))
+    _write_stage(root, "stage_2_entry_extraction", f"{_UID}_cv_entries.json",
+                 {"document_uid": _UID, **stage2})
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "header_consumed_record"]
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 10"]
 
 
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
@@ -4781,14 +5006,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (69), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (72), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 67
+    assert len(payload["findings"]) == 70
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

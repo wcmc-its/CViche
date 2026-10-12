@@ -4,10 +4,16 @@ One responsibility: whether stage 1a/2 preserved the SHAPE of the source --
 every line accounted for, entries the size of a record rather than a chapter,
 and every header-looking line actually promoted to a hierarchy node.
 
-Both lints read only the source lines and the stage 1a/2 artifacts. Nothing
-here looks at the rendered document: a header demoted to content misroutes
-everything filed under it long before stage 6 runs, and the finding is about
-the cut, not the page.
+The lints read the source lines and the stage 1a/2 artifacts. A header
+demoted to content misroutes everything filed under it long before stage 6
+runs, and the finding is about the cut, not the page. One exception:
+`lint_header_consumed_record` takes the rendered blocks, when present, only
+to confirm that the record a heading swallowed renders nowhere.
+
+Three lints read stage 2's own record of the cut (NECRGC autopsy): elements
+it assigned to no entry (`lint_stage2_unaccounted`, #1693), a list grouped
+one record off (`lint_record_date_shift`, #1226), and a heading line that
+also holds a record (`lint_header_consumed_record`, #1254).
 
 `lint_segmentation_collapse` (EBYSBC E17) reads stage 1b as well: the cut
 can lose every heading while every line is still covered, which none of the
@@ -24,7 +30,8 @@ import re
 from difflib import SequenceMatcher
 from typing import NamedTuple
 
-from unified_pipeline.core.text_norm import fold_quotes, norm
+from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
+from unified_pipeline.core.text_norm import fold_quotes, norm, squash
 from unified_pipeline.segmentation_regression import (
     compute_metrics,
     find_lost_blocks,
@@ -32,7 +39,7 @@ from unified_pipeline.segmentation_regression import (
 )
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 
-from ..shared import _finding, _magnitude_severity
+from ..shared import _finding, _haystacks, _magnitude_severity
 
 # --------------------------------------------------------------------------
 # Coverage, lost lines, mega-entries and dups, via the regression metrics.
@@ -365,6 +372,8 @@ SEGMENTATION_COLLAPSE_MAX_SYNTHETIC_SHARE = 0.5
 
 #: Stage 2's element type for a separator row, which is not an entry.
 STAGE2_BREAK_TYPE = "break"
+#: Stage 2's element type for a heading line.
+STAGE2_HEADER_TYPE = "header"
 
 
 def _hierarchy_nodes(nodes: list[dict] | None) -> list[dict]:
@@ -438,3 +447,272 @@ def lint_segmentation_collapse(stage1b: dict, stage2: dict) -> list[dict]:
         f"section structure lost: {placed} of {headings} headings placed, "
         f"{share.in_synthetic} of {share.entries} entries in synthetic sections",
         evidence)]
+
+
+# --------------------------------------------------------------------------
+# Stage 2's own accounting: elements it never assigned to any entry (#1693).
+
+#: Index ranges an `stage2_unaccounted` finding quotes.
+UNACCOUNTED_EVIDENCE_RANGES = 5
+
+
+def _index_ranges(indices: list[int]) -> list[tuple[int, int]]:
+    """Sorted, de-duplicated indices folded into (first, last) runs."""
+    ranges: list[tuple[int, int]] = []
+    for index in sorted(set(indices)):
+        if ranges and index == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], index)
+        else:
+            ranges.append((index, index))
+    return ranges
+
+
+def lint_stage2_unaccounted(stage2: dict) -> list[dict]:
+    """Source elements stage 2 records in `coverage.unaccounted_indices`:
+    elements no entry, header or break covers, so stage 3b never saw them
+    (#1693, NECRGC TGSQIR-01: a parent section's body, 50 elements, all 24
+    journal articles, while stage 1b reported 100%). Stage 2 states this
+    itself, so the finding needs neither the source docx nor the render:
+    10 farm runs whose last batch never came back carry it with no source
+    on hand for `segmentation` to read. One WARN per run."""
+    coverage = stage2.get("coverage")
+    raw = coverage.get("unaccounted_indices") if isinstance(coverage, dict) else None
+    indices = [i for i in raw or [] if isinstance(i, int) and not isinstance(i, bool)]
+    if not indices:
+        return []
+    ranges = _index_ranges(indices)
+    evidence = [f"element_idx_start {first}: elements {first}-{last} unaccounted"
+                for first, last in ranges[:UNACCOUNTED_EVIDENCE_RANGES]]
+    return [_finding(
+        "stage2_unaccounted", "WARN",
+        f"stage 2 left {len(set(indices))} source element(s) in no entry "
+        f"({len(ranges)} span(s)): their text never reached classification (#1693)",
+        evidence)]
+
+
+# --------------------------------------------------------------------------
+# A list stage 2 grouped one record off (#1226).
+#
+# Every word survives, so no coverage check sees it: each entry holds the
+# tail of one record and the head of the next. The trace it leaves is where
+# each entry's date sits. Records of one list put the date in one place; a
+# list cut one record off swaps it, first-to-last or last-to-first, and the
+# swap starts or ends at the fragment the cut left behind: a date with no
+# record (GNONHA 505, a stage-2 batch that ended on the date paragraph of
+# the next record), or a record with no date (SPIHVQ 137, ZASOTV 567: a
+# mentee row whose date and thesis title opened the next entry).
+
+#: Stage-2 element types that hold record text. A header ends a list; a
+#: break (`STAGE2_BREAK_TYPE`) sits between records and does not.
+STAGE2_RECORD_TYPES = frozenset({"paragraph", "table_row", "table"})
+
+#: How stage 2 joins a record's fields: one per tab or line.
+_RECORD_FIELD_SPLIT_RE = re.compile(r"[\t\n]+")
+
+#: A slash date with a two- or four-digit year ("7/1/09", "07/90", "4/30/13"),
+#: which `_is_date_only_text` does not read because it needs a four-digit
+#: year (NJHLUR's grant periods, CBNXND's "07/90 - present").
+_SLASH_DATE = r"\d{1,2}/(?:\d{1,2}/)?(?:\d{4}|\d{2})"
+_SLASH_DATE_ONLY_RE = re.compile(
+    rf"\(?{_SLASH_DATE}(?:\s*[-\u2010-\u2015]\s*(?:{_SLASH_DATE}|present|current))?\)?[.,;]?",
+    re.IGNORECASE)
+
+#: Entries on each side of the fragment that must agree on where their date
+#: sits, and disagree with the other side. One entry a side fired on a
+#: record split over two paragraphs beside whole ones (5 farm runs of one CV).
+DATE_SHIFT_SIDE_ENTRIES = 2
+
+#: A dateless, digit-free, one-field line of at most this many words between
+#: two lists is a sub-heading typed as a paragraph ("Educational
+#: Background"), not a record's fragment: the lists either side of it are two
+#: tables written two ways.
+DATE_SHIFT_HEADING_MAX_WORDS = 5
+
+#: Characters of an entry's text a stage-2 finding quotes.
+STAGE2_EVIDENCE_TEXT_CHARS = 100
+
+
+def _record_fields(text: str) -> list[str]:
+    return [field.strip() for field in _RECORD_FIELD_SPLIT_RE.split(text) if field.strip()]
+
+
+def _is_date_field(field: str) -> bool:
+    return _is_date_only_text(field) or bool(_SLASH_DATE_ONLY_RE.fullmatch(field))
+
+
+class DatePlace(NamedTuple):
+    """Where an entry's date fields sit among its fields."""
+    dated: bool      # some field is a date
+    date_only: bool  # every field is a date
+    leads: bool      # the first field is a date
+    trails: bool     # the last field is a date
+
+    @property
+    def fragment(self) -> bool:
+        """A date with no record, or a record with no date."""
+        return self.date_only or not self.dated
+
+
+def _date_place(text: str) -> DatePlace:
+    dates = [_is_date_field(field) for field in _record_fields(text)]
+    return DatePlace(any(dates), bool(dates) and all(dates),
+                     bool(dates) and dates[0], bool(dates) and dates[-1])
+
+
+def _record_lists(stage2: dict) -> list[list[dict]]:
+    """Runs of consecutive stage-2 record entries under one hierarchy path;
+    a header, or an entry under another path, starts a new run."""
+    lists: list[list[dict]] = []
+    current: list[dict] = []
+    path: tuple[str, ...] | None = None
+    for entry in stage2.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("element_type") == STAGE2_BREAK_TYPE:
+            continue
+        is_record = (entry.get("element_type") in STAGE2_RECORD_TYPES
+                     and isinstance(entry.get("text"), str))
+        entry_path = tuple(str(level) for level in entry.get("hierarchy") or [])
+        if not is_record or entry_path != path:
+            if current:
+                lists.append(current)
+            current = []
+            path = entry_path if is_record else None
+        if is_record:
+            current.append(entry)
+    if current:
+        lists.append(current)
+    return lists
+
+
+def _is_sub_heading(text: str) -> bool:
+    fields = _record_fields(text)
+    return (len(fields) == 1 and not re.search(r"\d", fields[0])
+            and len(fields[0].split()) <= DATE_SHIFT_HEADING_MAX_WORDS)
+
+
+def _side_order(places: list[DatePlace]) -> tuple[bool, bool] | None:
+    """The (leads, trails) every entry of one side shares, or None when the
+    side is short, holds a fragment, or disagrees with itself."""
+    if len(places) < DATE_SHIFT_SIDE_ENTRIES or any(place.fragment for place in places):
+        return None
+    orders = {(place.leads, place.trails) for place in places}
+    return orders.pop() if len(orders) == 1 else None
+
+
+def _date_shift_junctions(entries: list[dict]) -> list[tuple[int, tuple[bool, bool], tuple[bool, bool]]]:
+    """(position, order before, order after) for each fragment in one list
+    whose neighbours put their dates in two different places."""
+    places = [_date_place(entry["text"]) for entry in entries]
+    junctions = []
+    for i, place in enumerate(places):
+        if not place.fragment or (not place.dated and _is_sub_heading(entries[i]["text"])):
+            continue
+        before = _side_order(places[max(0, i - DATE_SHIFT_SIDE_ENTRIES):i])
+        after = _side_order(places[i + 1:i + 1 + DATE_SHIFT_SIDE_ENTRIES])
+        if before is not None and after is not None and before != after:
+            junctions.append((i, before, after))
+    return junctions
+
+
+def _order_words(order: tuple[bool, bool]) -> str:
+    leads, trails = order
+    if leads and trails:
+        return "first and last"
+    if leads:
+        return "first"
+    return "last" if trails else "mid-record"
+
+
+def lint_record_date_shift(stage2: dict) -> list[dict]:
+    """A list stage 2 grouped one record off (#1226): a date-only or dateless
+    entry whose two neighbours before it put their date in one place and the
+    two after it in another (first field, last field, or inside). Each
+    shifted entry then renders with the next or previous record's date,
+    place or title (NECRGC: 9 of the 13 verified HIGHs of this class;
+    GNONHA, NJHLUR, SPIHVQ, XUTTKJ, YIXQFB, WBZIDP, ZASOTV). WARN, one per
+    fragment. Reads stage 2 only.
+
+    Not judged: a list shifted from its first entry to its last, where no
+    entry differs from its neighbours (CBNXND's stacked date column), and a
+    date line paired with the wrong neighbour inside an otherwise undated
+    list (QZCHAG 18, 133)."""
+    findings = []
+    for entries in _record_lists(stage2):
+        for i, before, after in _date_shift_junctions(entries):
+            fragment, following = entries[i], entries[i + 1]
+            kind = "a date with no record" if _date_place(fragment["text"]).dated else "a record with no date"
+            title = " > ".join(str(level) for level in fragment.get("hierarchy") or [])
+            findings.append(_finding(
+                "record_date_shift", "WARN",
+                f"entry {fragment.get('element_idx_start')}: list '{title}' grouped one record "
+                f"off -- this entry is {kind}, the entries before it carry their date "
+                f"{_order_words(before)}, the entries after it {_order_words(after)} (#1226)",
+                [fragment["text"][:STAGE2_EVIDENCE_TEXT_CHARS],
+                 f"entry {following.get('element_idx_start')}: "
+                 f"{following['text'][:STAGE2_EVIDENCE_TEXT_CHARS]}"]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# A heading line that also holds the section's first record (#1254, #1252).
+#
+# Stage 1b maps "LABEL: first record" to a heading, and stage 2 types the
+# whole line `header`, so the record after the label never reaches stage 3b
+# (WBBUHK 29/32/36/49: the only board certification, the first licence and
+# society, the current employer; MFJRKW 52: an award). The heading counts as
+# covered, so `source_coverage_pct` reads 100.
+
+#: Text after the heading words that is a note on the list, not a record,
+#: though it has two words: a parenthetical or bracketed aside ("(past 3
+#: years only)", "[number withheld]"), "not applicable", or a page number
+#: ("Page 2 of 5"). A one-word note ("none", "(cont'd)") already falls under
+#: HEADER_RECORD_MIN_WORDS.
+_HEADER_NOTE_RE = re.compile(
+    r"^(?:\(.*\)|\[.*\]|not applicable|page\s*\d+(?:\s*of\s*\d+)?)[.:]?$",
+    re.IGNORECASE)
+#: Separators between a run-in heading and its first record.
+_HEADER_SEPARATORS = " \t:;,.-\u2013\u2014"
+#: The fewest letter words a remainder needs to be a record rather than a
+#: stray word ("program", "Where?").
+HEADER_RECORD_MIN_WORDS = 2
+_LETTER_WORD_RE = re.compile(r"[^\W\d_]{2,}")
+
+
+def _header_remainder(entry: dict) -> str | None:
+    """The text a header entry holds after its own heading words, when it
+    reads as a record: two or more letter words, not a note, not ALL CAPS
+    (a column-header row, "YEAR JOINED")."""
+    text, path = entry.get("text"), entry.get("hierarchy") or []
+    if not isinstance(text, str) or not path:
+        return None
+    flat, heading = " ".join(text.split()), " ".join(str(path[-1]).split())
+    if not heading or not flat.lower().startswith(heading.lower()):
+        return None
+    rest = flat[len(heading):].strip(_HEADER_SEPARATORS)
+    if (len(_LETTER_WORD_RE.findall(rest)) < HEADER_RECORD_MIN_WORDS
+            or _HEADER_NOTE_RE.match(rest) or rest.isupper()):
+        return None
+    return rest
+
+
+def lint_header_consumed_record(stage2: dict,
+                                blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """A stage-2 `header` entry whose text is its own heading followed by a
+    record (#1254, #1252): the record is never classified, so it renders
+    nowhere. With the rendered document, a remainder that does render
+    somewhere is left alone (a heading that merely starts like a record).
+    WARN, one per entry. Reads stage 2; the docx when present."""
+    rendered = _haystacks(blocks).text if blocks is not None else None
+    findings = []
+    for entry in stage2.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("element_type") != STAGE2_HEADER_TYPE:
+            continue
+        rest = _header_remainder(entry)
+        if rest is None or (rendered is not None and squash(rest) in rendered):
+            continue
+        findings.append(_finding(
+            "header_consumed_record", "WARN",
+            f"entry {entry.get('element_idx_start')}: heading '{entry['hierarchy'][-1]}' also "
+            f"holds a record, which stage 2 kept as part of the heading: it is not "
+            f"classified or rendered (#1254)",
+            [rest[:STAGE2_EVIDENCE_TEXT_CHARS]]))
+    return findings
