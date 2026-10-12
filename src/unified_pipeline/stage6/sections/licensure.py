@@ -85,7 +85,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
-from ..formatting import _clear_table_data, _set_font, format_date_for_section
+from ..formatting import _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem
 from ..normalization.pii import _dea_check_digit_ok
 from ..sorting import sort_entries_reverse_chronological
@@ -642,7 +642,7 @@ class LicensureSection:
             # than clear someone else's table (#862).
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         if not entries:
             return
         self.stats['tables_populated'] += 1

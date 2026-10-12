@@ -55,7 +55,7 @@ from typing import Literal
 
 from unified_pipeline.core.render_check import entry_lines
 
-from ..formatting import _clear_table_data, _set_font, format_date_for_section
+from ..formatting import _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -672,7 +672,7 @@ class BoardCertificationSection:
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         if entries:
             self.stats['tables_populated'] += 1
 

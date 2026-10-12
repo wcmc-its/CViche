@@ -30,7 +30,6 @@ from collections.abc import Sequence
 
 from ..fan_out import fallback_text, is_split_record
 from ..formatting import (
-    _clear_table_data,
     _set_font,
     format_date_range,
     with_extra_date_spans,
@@ -992,7 +991,7 @@ class ServiceSection:
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -1111,7 +1110,7 @@ class ServiceSection:
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
 
@@ -1328,7 +1327,7 @@ class ServiceSection:
                 "%d entries not rendered", len(filtered_entries))
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
         # Q4D is excluded from #1205 sub-points; a rerouted Q2 row here is too.
         self._subpoint_excluded_tables.append(table._element)
@@ -1425,7 +1424,7 @@ class ServiceSection:
 
             # Try to find and use a table first
             table = self._find_table_after_paragraph(section_idx)
-            if table and id(table._element) in self._cleared_tables:
+            if table and table._element in self._cleared_tables:
                 # Another filler already owns this table. Appending is wrong but
                 # recoverable; clearing destroys content that has no appendix
                 # fallback, because these Q codes are all in mapped_codes. This
@@ -1437,7 +1436,7 @@ class ServiceSection:
                     section_name)
                 self.stats['tables_populated'] += 1
             elif table:
-                _clear_table_data(table, keep_header=True)
+                self._clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
             if table:
 

@@ -101,7 +101,6 @@ from unified_pipeline.core.render_check import entry_lines
 
 from ..fan_out import fallback_text as record_fallback_text, is_split_record
 from ..formatting import (
-    _clear_table_data,
     _set_font,
     format_date_for_section,
     format_date_range,
@@ -1294,7 +1293,7 @@ class HonorsSection:
             # someone else's table (#862).
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         if entries:
             self.stats['tables_populated'] += 1
 

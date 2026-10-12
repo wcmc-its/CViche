@@ -92,7 +92,6 @@ except ImportError as exc:
     ) from exc
 
 from ..formatting import (
-    _clear_table_data,
     _set_font,
     format_date_for_section,
     format_date_range,
@@ -389,7 +388,7 @@ class ClinicalPracticeSection:
             sorted_entries = sort_entries_reverse_chronological(l1_entries)
 
             if table and table_is_valid:
-                _clear_table_data(table, keep_header=True)
+                self._clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 for entry in sorted_entries:
                     fields = entry.get('extracted_fields', {}) or {}
@@ -497,7 +496,7 @@ class ClinicalPracticeSection:
             sorted_entries = sort_entries_reverse_chronological(l2_entries)
 
             if table and table_is_valid:
-                _clear_table_data(table, keep_header=True)
+                self._clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 for entry in sorted_entries:
@@ -582,7 +581,7 @@ class ClinicalPracticeSection:
             sorted_entries = sort_entries_reverse_chronological(l3_entries)
 
             if table and table_is_valid:
-                _clear_table_data(table, keep_header=True)
+                self._clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 for entry in sorted_entries:

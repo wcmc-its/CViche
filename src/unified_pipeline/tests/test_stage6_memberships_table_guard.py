@@ -22,6 +22,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.formatting import _clear_table_data  # noqa: E402
 from unified_pipeline.stage6.sections.memberships import (
     MembershipsSection,  # noqa: E402
 )
@@ -51,6 +52,11 @@ class _StubGenerator(MembershipsSection):
 
     def _add_entry_comments(self, para, entry):
         pass
+
+    def _clear_table_data(self, table, keep_header=True):
+        # Section fillers clear through the generator's recording wrapper
+        # (#454); the stub has no guard to feed, so it only clears.
+        _clear_table_data(table, keep_header=keep_header)
 
 
 def _entries():

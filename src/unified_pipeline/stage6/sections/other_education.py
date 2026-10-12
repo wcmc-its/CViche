@@ -45,7 +45,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..formatting import (
-    _clear_table_data,
     format_date_for_section,
     format_date_range,
 )
@@ -232,7 +231,7 @@ class OtherEducationSection:
                 B2_TABLE_COLUMNS, len(table.columns), len(entries))
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         for entry in sort_entries_reverse_chronological(entries):
