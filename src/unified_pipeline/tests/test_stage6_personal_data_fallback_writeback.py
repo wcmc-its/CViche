@@ -803,16 +803,79 @@ def test_phone_number_pairs_across_spellings_and_country_prefixes(left, right, e
     assert phone(right).is_same_number(phone(left)) is expected
 
 
-def test_the_first_stage4_email_key_decides_the_row(tmp_path):
-    """`email` precedes `personal_email`: the institutional address is the
-    one read, and it goes to Work."""
+# #1712 (NECRGC PVXLKN-01, TGSQIR-06): every email a record holds is routed,
+# not only the first key's. example.org stands in for a consumer mail domain,
+# so no fixture here carries a real-looking address.
+_INST = "jdoe@example.edu"
+_HOME = "jdoe@example.org"
+
+
+@pytest.fixture
+def example_org_is_consumer(monkeypatch):
+    monkeypatch.setattr(personal_data_module, "_CONSUMER_EMAIL_DOMAINS",
+                        frozenset({"example.org"}))
+
+
+def test_an_institutional_and_a_personal_email_on_one_record_fill_both_rows(
+        tmp_path, example_org_is_consumer):
+    """`institutional_email` precedes `personal_email`; the personal address
+    used to be dropped because only the first key was read."""
     rows, _gen = _render(tmp_path, entries=[
-        _a("Contact\tzzz9999@med.cornell.edu",
-           {"email": "zzz9999@med.cornell.edu", "personal_email": "jdoe.cvtest@gmail.com"}),
+        _a(f"Contact\t{_INST}\t{_HOME}",
+           {"institutional_email": _INST, "personal_email": _HOME}),
     ])
 
-    assert rows.get("work email:") == "zzz9999@med.cornell.edu"
+    assert rows.get("work email:") == _INST
+    assert rows.get("personal email:") == _HOME
+
+
+def test_a_personal_email_key_on_an_institutional_address_still_routes_to_work(tmp_path):
+    """The key does not outrank the domain (the comment on _EMAIL_FIELD_KEYS)."""
+    rows, _gen = _render(tmp_path, entries=[
+        _a(f"Home\t{_INST}", {"personal_email": _INST}),
+    ])
+
+    assert rows.get("work email:") == _INST
     assert rows.get("personal email:", "") == ""
+
+
+def test_one_address_under_two_keys_fills_one_row_once(tmp_path, example_org_is_consumer):
+    """The first key holding an address decides its row, as when only one key
+    was read: the `work_email` copy is not offered again, so the consumer
+    address does not also land in Work. Compared stripped and lowercased."""
+    rows, _gen = _render(tmp_path, entries=[
+        _a(f"Contact\t{_HOME}", {"email": _HOME, "work_email": f" {_HOME.upper()} "}),
+    ])
+
+    assert rows.get("personal email:") == _HOME
+    assert rows.get("work email:", "") == ""
+
+
+def test_an_email_from_a_pii_fragment_does_not_stop_the_next_one(
+        tmp_path, example_org_is_consumer):
+    rows, _gen = _render(tmp_path, entries=[
+        _a(f"SPOUSE: Jane Doe jane.doe@example.edu\tPersonal: {_HOME}",
+           {"email": "jane.doe@example.edu", "personal_email": _HOME}),
+    ])
+
+    assert rows.get("personal email:") == _HOME
+    assert "jane.doe@example.edu" not in json.dumps(rows)
+
+
+@pytest.mark.parametrize("fields, fragments, expected", [
+    pytest.param({"institutional_email": _INST, "personal_email": _HOME}, [],
+                 [("institutional_email", _INST), ("personal_email", _HOME)], id="two"),
+    pytest.param({"email": _HOME, "work_email": f" {_HOME.upper()} "}, [],
+                 [("email", _HOME)], id="same-address-once"),
+    pytest.param({"email": "", "primary_email": None, "personal_email": _HOME}, [],
+                 [("personal_email", _HOME)], id="empty-keys-skipped"),
+    pytest.param({"email": "jane.doe@example.edu", "personal_email": _HOME},
+                 ["SPOUSE: Jane Doe jane.doe@example.edu"],
+                 [("personal_email", _HOME)], id="pii-fragment-dropped"),
+    pytest.param({"phone": "212-555-0100"}, [], [], id="none"),
+])
+def test_record_emails_lists_each_address_once_in_key_order(fields, fragments, expected):
+    assert personal_data_module._record_emails(fields, fragments) == expected
 
 
 @pytest.mark.parametrize("email, work, personal, expected", [

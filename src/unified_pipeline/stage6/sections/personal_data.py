@@ -1190,6 +1190,26 @@ def _email_in_text(entry: dict, ctx: _RoutingContext, slots: _ContactSlots) -> N
             email_match.group(0), ctx.text, None, slots.work_email, slots.personal_email)
 
 
+def _record_emails(fields: dict, pii_fragments: list[str]) -> list[tuple[str, _JsonValue]]:
+    """Every email a record holds, as (stage-4 key, value) in
+    `_EMAIL_FIELD_KEYS` order: one per address, under the first key that
+    holds it, and none cut from a protected-data fragment. All of them, not
+    just the first key's (#1712, NECRGC PVXLKN-01, TGSQIR-06): stage 4 fills
+    `institutional_email` and `personal_email` on one record, and reading
+    only the first lost the personal address."""
+    emails: list[tuple[str, _JsonValue]] = []
+    seen: set[_EmailAddress] = set()
+    for key in _EMAIL_FIELD_KEYS:
+        value = fields.get(key)
+        if not value or _from_pii_fragment(value, pii_fragments):
+            continue
+        address = _EmailAddress.parse(value)
+        if address not in seen:
+            seen.add(address)
+            emails.append((key, value))
+    return emails
+
+
 def _route_contact_record(fields: dict, ctx: _RoutingContext, slots: _ContactSlots,
                           ranks: tuple[_SlotRank, _SlotRank]
                           ) -> tuple[list[tuple[_AddressFate, str]], str | None]:
@@ -1203,15 +1223,11 @@ def _route_contact_record(fields: dict, ctx: _RoutingContext, slots: _ContactSlo
     extracted_phone = _drop_home_phone_segments(fields.get('phone'), ctx.withheld, ctx.text)
     extracted_address = fields.get('address')
     offschema = _offschema_contact(fields, ctx.pii_fragments)
-    email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
-    extracted_email = fields.get(email_key) if email_key else None
     if ctx.pii_fragments:
         if _from_pii_fragment(extracted_phone, ctx.pii_fragments):
             extracted_phone = None
         if _from_pii_fragment(extracted_address, ctx.pii_fragments):
             extracted_address = None
-        if _from_pii_fragment(extracted_email, ctx.pii_fragments):
-            extracted_email = None
 
     # Classify phone by type; then the numbers stage 4 put under slot-named
     # keys of their own (#1222, EBYSBC ZCTARO-06, YYVHNN-02).
@@ -1231,9 +1247,9 @@ def _route_contact_record(fields: dict, ctx: _RoutingContext, slots: _ContactSlo
             slots.home_address, slots.office_address, address_rank, ctx.withheld)
         address_fates.append((fate, _address_cell_text(address, 'office') or ''))
 
-    if extracted_email:
+    for email_key, email in _record_emails(fields, ctx.pii_fragments):
         slots.work_email, slots.personal_email = _route_email(
-            extracted_email, ctx.text, email_key, slots.work_email, slots.personal_email)
+            email, ctx.text, email_key, slots.work_email, slots.personal_email)
     return address_fates, _orcid_of(fields, ctx.pii_fragments)
 
 
