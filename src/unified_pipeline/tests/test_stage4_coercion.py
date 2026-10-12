@@ -207,6 +207,92 @@ def test_plain_initials_and_real_surnames_unchanged_by_digraph_rule():
     assert normalize_authors_vancouver("Ann JBh") == "JBh A"
 
 
+# --- #1705: collective and parenthesised authors pass through verbatim ----
+
+@pytest.mark.parametrize("byline", [
+    # Four of the replays in #1705; the trailing comment is the output before the fix.
+    "Working Group on Functional Outcome Measures for Clinical Trials",  # was "Trials WGOFOMFC"
+    "Doe AB, Example Study Group",                                       # was "Doe AB, Group ES"
+    "Doe AB, Writing Committee",                                         # was "Doe AB, Committee W"
+    "Doe TS, Roe SL, Example Consortium",                                # was "..., Consortium E"
+    "Doe AB, Example Investigators",
+    "Doe AB, Example Network",
+    "Doe AB, Example Collaborative",
+    "Doe AB, Example Society",
+    "Doe AB, Example Trial",
+    "Doe AB, Example Task Force",
+    # One case per remaining alternative, and lowercase forms the corpus uses.
+    "Doe AB, Example Study",
+    "Doe AB, Example Groups",
+    "Doe AB, Example Consortia",
+    "Doe AB, Example Trialists",
+    "Doe AB, Example Collaboration",
+    "Doe AB, EXAMPLE study group",
+    "Doe AB, EXAMPLE consortium",
+])
+def test_collective_author_kept_verbatim(byline):
+    assert normalize_authors_vancouver(byline) == byline
+
+
+def test_parenthetical_credit_stays_attached_to_its_group():
+    # The split used to cut at the "(" and the ")", giving "Doe AB, Roe) E2SG(".
+    assert (
+        normalize_authors_vancouver("Doe AB; Example 2D Study Group (C. Roe)")
+        == "Doe AB, Example 2D Study Group (C. Roe)"
+    )
+
+
+def test_split_and_and_rewrite_never_reach_inside_parentheses():
+    # A comma or "and" inside the parenthetical is part of the credit, not a
+    # byline separator.
+    assert (
+        normalize_authors_vancouver("Doe AB, Example Group (Roe C, Poe D and Moe E)")
+        == "Doe AB, Example Group (Roe C, Poe D and Moe E)"
+    )
+
+
+def test_parenthesised_person_token_kept_verbatim():
+    # A role or affiliation in parentheses was reordered into "(Japan) CR".
+    assert (
+        normalize_authors_vancouver("Doe AB, C. Roe (Japan)")
+        == "Doe AB, C. Roe (Japan)"
+    )
+
+
+def test_unbalanced_parenthesis_token_kept_verbatim():
+    # Only balanced parentheticals are masked; a stray bracket left by a
+    # truncated byline still marks the token as not a plain person name.
+    assert normalize_authors_vancouver("Doe AB, Ann Roe (co-first") == "Doe AB, Ann Roe (co-first"
+    assert normalize_authors_vancouver("Doe AB, co-first) Ann Roe") == "Doe AB, co-first) Ann Roe"
+
+
+def test_collective_author_whitespace_normalised():
+    assert (
+        normalize_authors_vancouver("Doe AB,  Example   Study\nGroup")
+        == "Doe AB, Example Study Group"
+    )
+
+
+def test_person_names_around_a_collective_still_normalise():
+    assert (
+        normalize_authors_vancouver("Doe AB, John Roe, Example Study Group")
+        == "Doe AB, Roe J, Example Study Group"
+    )
+
+
+def test_group_word_inside_a_surname_is_not_a_collective():
+    # The rule matches whole words: "Postrial" ends in "trial" but is a surname.
+    assert normalize_authors_vancouver("Doe AB, John Postrial") == "Doe AB, Postrial J"
+
+
+def test_person_only_bylines_unchanged_by_collective_rule():
+    # Regression guard: no group word, no parenthesis -> the old path.
+    assert normalize_authors_vancouver("Doe AB, Roe CD, et al.") == "Doe AB, Roe CD, et al."
+    assert normalize_authors_vancouver("John A. Smith and Mary Jones") == "Smith JA, Jones M"
+    # A word that merely contains a group word is not one ("Groupe", "Studyman").
+    assert normalize_authors_vancouver("Ann Groupe") == "Groupe A"
+
+
 # --- #3819086998: negative-path coverage ------------------------------------
 
 def test_malformed_pmid_not_extracted():
