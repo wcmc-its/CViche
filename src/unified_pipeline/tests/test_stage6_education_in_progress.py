@@ -372,6 +372,83 @@ class TestYearAwardedNeedsANamedDegree:
         assert row.cells[3].text == "1990"
 
 
+class TestStringDatesAttendedEndYear:
+    """#1700 (EYTHNB 48): a STRING `dates_attended` was never read as an end
+    date, so Year Awarded fell back to the first "<Month> <Year>" of the
+    entry's whole text -- the attendance start, on every fanned-out row.
+    Synthetic values only."""
+
+    TEXT = "BA, Example College, September 1971- May 1973; September 1975- May 1976"
+
+    @staticmethod
+    def _rows(*dates):
+        gen = _generator()
+        gen._fill_education([{
+            "text": TestStringDatesAttendedEndYear.TEXT,
+            "extracted_fields": {"degree": "BA", "institution": "Example College",
+                                 "year": None, "dates_attended": d},
+        } for d in dates])
+        return _education_rows(gen)
+
+    def test_the_range_end_is_the_year_awarded(self):
+        (row,) = self._rows("September 1975- May 1976")
+        assert row[3] == "1976"
+
+    def test_each_record_renders_its_own_end_year(self):
+        rows = self._rows("September 1971- May 1973", "September 1975- May 1976")
+        assert sorted(r[3] for r in rows) == ["1973", "1976"]
+
+    def test_the_range_end_is_plain_text_not_a_text_extraction(self):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College",
+            "dates_attended": "1971-09-01 - 1973-05-01"}}])
+        row = _first_data_row(gen)
+        assert row.cells[3].text == "1973"
+        assert _cell_ins_parts(row.cells[3]) == []
+
+    @pytest.mark.parametrize("dates", [
+        "September 1975 - Present", "1972 - 1973, 1975 - present", "May 1976", "1998-06"])
+    def test_no_closed_range_keeps_the_raw_text_fallback(self, dates):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College", "dates_attended": dates}}])
+        assert _cell_ins_parts(_first_data_row(gen).cells[3]) == [("1971", "Text Extraction")]
+
+    def test_a_stated_year_still_wins(self):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College", "year": "1977",
+            "dates_attended": "September 1975- May 1976"}}])
+        assert _education_rows(gen)[0][3] == "1977"
+
+    def test_a_structured_end_date_wins_over_the_string_range(self):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College",
+            "dates_attended_start_date": "1971-09", "dates_attended_end_date": "1974-05",
+            "dates_attended": "September 1975- May 1976"}}])
+        assert _education_rows(gen)[0][3] == "1974"
+
+    @pytest.mark.parametrize("dates", ["1972 - 1973, 1975 - PRESENT", "Ref 19751976"])
+    def test_an_uppercase_open_end_or_a_long_number_is_not_a_closed_range(self, dates):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College", "dates_attended": dates}}])
+        assert _cell_ins_parts(_first_data_row(gen).cells[3]) == [("1971", "Text Extraction")]
+
+    def test_an_open_end_word_inside_another_word_does_not_open_the_range(self):
+        (row,) = self._rows("September 1975- May 1976, Concurrently enrolled")
+        assert row[3] == "1976"
+
+    def test_a_degreeless_row_gets_no_year_from_the_range(self):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": None, "institution": "Example College",
+            "dates_attended": "September 1975- May 1976"}}])
+        assert _education_rows(gen)[0][3] == ""
+
+
 class TestInstitutionLocationEnrichment:
     """Institution-location enrichment (review thread 3914996508 item 3):
     an enriched location is appended and tracked as "Institution
