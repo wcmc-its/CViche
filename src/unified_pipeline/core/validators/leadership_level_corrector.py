@@ -13,6 +13,9 @@ Rule: O should only be used for:
 - Center/Institute Director (with budget authority)
 - Vice Chair, Associate Dean, Dean
 - Executive-level institutional governance
+- Director or Co-Director of a training, residency, fellowship or clinical
+  program (#1707): the stage-3b prompt's rule 17 codes these O, so no pattern
+  here names "Program Director" or "Co-Director, ..." and the model's O stands.
 
 Everything else is P (or Q2 if external).
 """
@@ -49,7 +52,6 @@ EXECUTIVE_LEADERSHIP_PATTERNS = [
 ADMINISTRATIVE_PATTERNS = [
     r'\bDirector\s+of\s+\w+\s+Track\b',
     r'\bTrack\s+Director\b',
-    r'\bProgram\s+Director\b(?!.*T32)',  # Program Director NOT on a T32
     r'\bSecretary\b',
     r'\bTreasurer\b',
     r'\bSecretary/Treasurer\b',
@@ -62,7 +64,6 @@ ADMINISTRATIVE_PATTERNS = [
     r'\bTask\s+Force\b',
     r'\bWorking\s+Group\b',
     r'\bCoordinator\b',
-    r'\bCo-Director,\s+(?!Center|Institute|Division)',  # Co-Director of programs, not centers
     r'\bDirector,\s+\w+\s+Education\b',  # Education programs
     r'\bDirector,\s+Clinical\s+Research\s+Education\b',
     r'\bDEI\b',
