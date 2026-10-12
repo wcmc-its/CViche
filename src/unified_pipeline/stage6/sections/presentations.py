@@ -32,7 +32,6 @@ from collections.abc import Mapping
 from ..fan_out import fallback_text
 from ..formatting import (
     DATE_SPAN_SEPARATOR,
-    _clear_table_data,
     _set_font,
     format_date_for_section,
     format_date_range,
@@ -216,7 +215,7 @@ class PresentationsSection:
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope

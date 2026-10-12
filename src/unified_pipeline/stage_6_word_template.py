@@ -46,6 +46,7 @@ try:
     from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
     from docx.oxml import OxmlElement
     from docx.oxml.ns import nsmap, qn
+    from docx.oxml.table import CT_Tbl
     from docx.oxml.xmlchemy import BaseOxmlElement
     from docx.parts.document import DocumentPart
     from docx.shared import Inches, Pt, RGBColor, Twips
@@ -1401,9 +1402,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._named_reach_cache: dict[tuple[str, ...], str | None] = {}
 
         # Statistics
-        # Tables already cleared this render, by element id. Guards against one
-        # filler wiping another's rows when both resolve to the same table (#454).
-        self._cleared_tables = set()
+        # Tables already cleared this render, held as the `CT_Tbl` elements
+        # themselves. Guards against one filler wiping another's rows when both
+        # resolve to the same table (#454). Not `id(table._element)`: lxml frees
+        # a proxy nobody references, so a later lookup of the same table builds
+        # a new proxy with a different id. Holding the element keeps its proxy
+        # alive, so every later lookup returns this very object.
+        self._cleared_tables: set[CT_Tbl] = set()
         # Body paragraphs `_insert_bulleted_entry` wrote this render. A header
         # anchor must never resolve to one of them (#548): an ALL-CAPS bullet
         # (the writer does not bold, but the shape test accepts bold too) would pass `_find_header_paragraph`'s shape test.
@@ -2819,10 +2824,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         `test_stage6_import_surface.py` asks a split to leave behind; it changes
         no rendering behaviour. The one caller that resolves its table by fuzzy
         search consults `self._cleared_tables` before clearing.
+
+        Every `stage6/sections/` filler clears through this method, never the
+        module-level function: when they called the bare function the set
+        stayed empty and the backstop never fired (#454, run GNONHA lost 7 Q1
+        records to one Q4 entry). A gate test enforces it.
         """
         if not table:
             return
-        self._cleared_tables.add(id(table._element))
+        self._cleared_tables.add(table._element)
         # Resolves to the module-level import at the top of this file: a class
         # attribute of the same name does not shadow a global inside a method.
         _clear_table_data(table, keep_header=keep_header)

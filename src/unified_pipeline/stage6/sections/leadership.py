@@ -28,7 +28,6 @@ from unified_pipeline.core.render_check import (
 
 from ..fan_out import has_built_text
 from ..formatting import (
-    _clear_table_data,
     _set_font,
     format_date_range,
     with_extra_date_spans,
@@ -166,7 +165,7 @@ class LeadershipSection:
         if not _looks_like_leadership_table(table):
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)

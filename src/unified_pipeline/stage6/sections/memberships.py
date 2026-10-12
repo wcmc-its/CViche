@@ -88,7 +88,6 @@ except ImportError as exc:
 from unified_pipeline.core.render_check import entry_lines
 
 from ..formatting import (
-    _clear_table_data,
     _set_cell_vertical_alignment,
     _set_font,
     format_date_range,
@@ -688,7 +687,7 @@ class MembershipsSection:
             return
 
         # Clear existing data rows
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         if entries:
             self.stats['tables_populated'] += 1
 

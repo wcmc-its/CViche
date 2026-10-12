@@ -101,11 +101,76 @@ def test_clearing_is_recorded_so_a_second_filler_cannot_wipe_the_first():
     from docx import Document as _Doc
     gen = WCMTemplateGenerator(verbose=False)
     assert gen._cleared_tables == set(), "must start empty per render"
-    table = _Doc().add_table(rows=3, cols=2)
-    gen._clear_table_data(table, keep_header=True)
-    assert len(table.rows) == 1, "the header row must survive the clear"
-    assert id(table._element) in gen._cleared_tables, \
-        "clearing must be recorded, or the guard cannot fire"
+    doc = _Doc()
+    doc.add_table(rows=3, cols=2)
+    gen._clear_table_data(doc.tables[0], keep_header=True)
+    # A FRESH lookup, as `_fill_other_service` makes, with nothing else holding
+    # the first `Table`. Keyed on `id(table._element)` this was False: lxml
+    # freed the first proxy and built a new one with a new id (#454, GNONHA).
+    again = doc.tables[0]
+    assert len(again.rows) == 1, "the header row must survive the clear"
+    assert again._element in gen._cleared_tables, \
+        "clearing must be recorded by element identity, or the guard cannot fire"
+
+
+Q4_DATE_ONLY = "2012-Present"
+Q4_ROLE = "Distinctive Widget Advisory Panelist"
+
+
+def _q1_and_q4():
+    """A Q1 record plus plain Q4 entries, one of them a bare date line.
+
+    Q4's anchors ('EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in
+    Extramural') resolve to the table Q1 has just filled -- the GNONHA shape.
+    """
+    return [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q1", organization=Q1_ORG, role="Treasurer", dates="1992-1997"),
+        _entry("Q4", role=None, journal_name=None, start_date="2012",
+               end_date="present"),
+        _entry("Q4", role=Q4_ROLE, start_date="2015", end_date="2016"),
+    ]
+
+
+def test_q1_survives_a_plain_q4_entry_on_the_same_table(tmp_path):
+    """The reopened #454: one bare-date Q4 entry cleared every Q1 row (GNONHA)."""
+    text, lead = _render(tmp_path, _q1_and_q4())
+    assert Q1_ORG in lead, "a Q4 entry wiped the Q1 Leadership table (#454)"
+    assert Q4_ROLE in text and Q4_DATE_ONLY in text, \
+        "keeping Q1 must not drop the Q4 entries instead"
+
+
+def test_the_backstop_fires_when_q4_resolves_to_the_q1_table(tmp_path, caplog):
+    """The guard is live in a full render, not only against a held proxy."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        _render(tmp_path, _q1_and_q4())
+    assert any("already filled by another code" in r.getMessage()
+               for r in caplog.records), "the #454 backstop never fired"
+
+
+def test_no_section_filler_clears_a_table_behind_the_guard():
+    """Every stage6/sections clear goes through `self._clear_table_data`.
+
+    The bare module-level function skips the bookkeeping, so the backstop in
+    `_fill_other_service` cannot see the table was filled. That is how the
+    #454 guard went dead when the fillers moved into stage6/sections/.
+    """
+    import ast
+    sections = _SRC / "unified_pipeline" / "stage6" / "sections"
+    offenders = []
+    for path in sorted(sections.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            # Importing it at all (aliased or not) is the bypass; a bare-name
+            # call is the same bypass from a name defined some other way.
+            imported = isinstance(node, ast.ImportFrom) and any(
+                a.name == "_clear_table_data" for a in node.names)
+            called = (isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name)
+                      and node.func.id == "_clear_table_data")
+            if imported or called:
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, f"bare _clear_table_data( bypasses the #454 guard: {offenders}"
 
 
 def test_the_backstop_can_actually_log_when_it_fires():

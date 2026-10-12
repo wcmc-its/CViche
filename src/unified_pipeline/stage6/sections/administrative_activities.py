@@ -52,7 +52,6 @@ from unified_pipeline.core.render_check import entry_lines
 
 from ..fan_out import has_built_text
 from ..formatting import (
-    _clear_table_data,
     _set_font,
     format_date_range,
     with_extra_date_spans,
@@ -249,7 +248,7 @@ class AdministrativeActivitiesSection:
         sorted_entries = sort_entries_reverse_chronological(entries)
         rows = self._parse_administrative_activity_rows(sorted_entries)
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
         for activity, role, dates in rows:
             self._add_committee_row(table, activity, role, dates)

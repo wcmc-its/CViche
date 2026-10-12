@@ -69,7 +69,6 @@ from collections.abc import Mapping
 from datetime import datetime
 
 from ..formatting import (
-    _clear_table_data,
     format_date_for_section,
     format_date_range,
 )
@@ -290,7 +289,7 @@ class EducationSection:
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # A malformed entry (not even a mapping) can't reach entry.get(...)

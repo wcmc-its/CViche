@@ -53,7 +53,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..formatting import _clear_table_data, format_date_range
+from ..formatting import format_date_range
 from ..normalization import _get_cleaned_institution_name
 from ..resolution import (
     _get_institution_location,
@@ -315,7 +315,7 @@ class PostdocTrainingSection:
                 "heading; %d entries not rendered", len(training_entries))
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         for entry in sort_entries_reverse_chronological(training_entries):

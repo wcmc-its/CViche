@@ -47,7 +47,6 @@ except ImportError as exc:
 from unified_pipeline.core.render_check import entry_fragments
 
 from ..formatting import (
-    _clear_table_data,
     _set_font,
     format_date_for_section,
     format_date_range,
@@ -989,7 +988,7 @@ class PositionsSection:
         if acad_idx is not None and d1_entries:
             acad_table = self._find_table_after_paragraph(acad_idx)
             if acad_table:
-                _clear_table_data(acad_table, keep_header=True)
+                self._clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 self._add_position_rows(acad_table, d1_entries)
 
@@ -998,7 +997,7 @@ class PositionsSection:
         if hosp_idx is not None and d2_entries:
             hosp_table = self._find_table_after_paragraph(hosp_idx)
             if hosp_table:
-                _clear_table_data(hosp_table, keep_header=True)
+                self._clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 self._add_position_rows(hosp_table, d2_entries)
 
@@ -1007,7 +1006,7 @@ class PositionsSection:
         if other_idx is not None and d3_entries:
             other_table = self._find_table_after_paragraph(other_idx)
             if other_table:
-                _clear_table_data(other_table, keep_header=True)
+                self._clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 self._add_position_rows(other_table, d3_entries)
 
@@ -1021,7 +1020,7 @@ class PositionsSection:
             if not table:
                 return
 
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
             # Combine all and sort
