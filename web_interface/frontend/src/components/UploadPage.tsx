@@ -8,7 +8,7 @@ import ErrorBanner from './ErrorBanner'
 import BatchFileTable from './upload/BatchFileTable'
 import { DoneCard, UploadingBanner } from './upload/BatchStatus'
 import {
-  MAX_BATCH_FILES, countText, estimateMinutes, estimateText, finishText, isValidRow, missingItems, quotaText,
+  MAX_BATCH_FILES, countText, estimateMinutes, estimateText, finishText, isValidRow, missingItems, quotaText, unconfirmedOutliers,
   sendProgress, totalsOf,
   DEFAULT_MAX_UPLOAD_MB,
 } from './upload/batchRows'
@@ -32,18 +32,27 @@ interface BatchFilesProps {
   batch: BatchUpload
   showCost: boolean
   onRunAgain: (key: string) => void
+  onRunAllAgain: () => void
   intake: string | null
 }
 
 /** Step 2 for a batch: heading with "N to submit · M skipped", the multi-file drop zone, the table. */
-function BatchFiles({ batch, showCost, onRunAgain, intake }: BatchFilesProps) {
+function BatchFiles({ batch, showCost, onRunAgain, onRunAllAgain, intake }: BatchFilesProps) {
   const editable = batch.phase === 'edit'
+  const flagged = editable ? unconfirmedOutliers(batch.rows) : 0
+  const duplicates = batch.phase === 'done' ? batch.rows.filter((r) => r.failure?.duplicate).length : 0
   return (
     <>
       <div className={`flex flex-wrap items-baseline justify-between gap-3 ${editable ? 'mt-2' : ''}`}>
         <h2 className={H2}>{editable ? '2 · CV files' : 'Files in this batch'}</h2>
         <div className="flex items-baseline gap-3.5 text-[13px] text-gray-500">
           <span>{countText(batch.rows)}</span>
+          {flagged > 1 && (
+            <button type="button" onClick={batch.includeAllOutliers} className="text-primary-700 hover:underline">Include all {flagged} flagged</button>
+          )}
+          {duplicates > 1 && (
+            <button type="button" onClick={onRunAllAgain} className="text-primary-700 hover:underline">Run all {duplicates} again</button>
+          )}
           {editable && batch.rows.length > 1 && (
             <button type="button" onClick={batch.reset} className="text-primary-700 hover:underline">Clear all</button>
           )}
@@ -224,6 +233,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     await afterSend()
   }
 
+  const runAllAgain = async () => {
+    await batch.runAllAgain(options)
+    await afterSend()
+  }
+
   const handleStart = async () => {
     if (submitsAsSingle(multi, batch)) {
       const file = multi ? batch.rows[0].file : single.file
@@ -270,7 +284,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">
           <div className="flex flex-col gap-4">
             {editable && <WhoToggle value={submissionType} queueMode={queueMode} onChange={chooseWho} />}
-            {multi ? <BatchFiles batch={batch} showCost={showCost} onRunAgain={(key) => void runAgain(key)} intake={intake} /> : <SingleFiles single={single} run={run} intake={intake} />}
+            {multi ? <BatchFiles batch={batch} showCost={showCost} onRunAgain={(key) => void runAgain(key)} onRunAllAgain={() => void runAllAgain()} intake={intake} /> : <SingleFiles single={single} run={run} intake={intake} />}
 
             {editable && (
               <>

@@ -473,6 +473,35 @@ describe('UploadPage duplicate file confirmation (#1286)', () => {
     expect(startRun).toHaveBeenCalledTimes(2)
     expect(screen.getByText('All 2 CVs queued')).toBeTruthy()
   })
+
+  it('re-sends every held duplicate at once on Run all again', async () => {
+    let n = 0
+    vi.mocked(uploadFile).mockImplementation(async (file: File, opts: UploadOptions) => {
+      if (file.name !== 'cv_3.docx' && !opts.confirmDuplicate) throw duplicateError
+      n += 1
+      return ok(`R${n}`)
+    })
+    await renderPage()
+    await submitBatch(docxSet(3))
+    expect(startRun).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(button('Run all 2 again'))
+    await flush()
+    const resent = vi.mocked(uploadFile).mock.calls.filter(([, o]) => o.confirmDuplicate)
+    expect(resent.map(([f]) => f.name).sort()).toEqual(['cv_1.docx', 'cv_2.docx'])
+    expect(startRun).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('All 3 CVs queued')).toBeTruthy()
+  })
+
+  it('offers no Run all again for a single held duplicate', async () => {
+    vi.mocked(uploadFile).mockImplementation(async (file: File, opts: UploadOptions) => {
+      if (file.name === 'cv_1.docx' && !opts.confirmDuplicate) throw duplicateError
+      return ok('R1')
+    })
+    await renderPage()
+    await submitBatch(docxSet(2))
+    expect(screen.queryByRole('button', { name: /Run all/ })).toBeNull()
+  })
 })
 
 describe('UploadPage held run vs a changed file list', () => {
@@ -652,7 +681,7 @@ describe('UploadPage batch cost outlier (#1599)', () => {
     await addFiles(['a.docx', 'b.docx', 'c.docx', 'under.docx', 'over.docx'].map(docx))
     expect(flaggedRows()).toEqual([rowNamed('over.docx')])
     expect(within(rowNamed('over.docx')).getByTestId('cost-outlier').textContent)
-      .toBe('About 3× larger than the others in this batch: estimated $4.50 against a median of $1.50.')
+      .toBe('About 3× the cost of the others in this batch: estimated $4.50 against a median of $1.50.')
   })
 
   it('will not submit a flagged file until it is included, then submits every file', async () => {
@@ -662,7 +691,7 @@ describe('UploadPage batch cost outlier (#1599)', () => {
     await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
     tickAttestation()
     expect(button('Submit 3 CVs').disabled).toBe(true)
-    expect(screen.getByText('Include or remove 1 unusually large CV')).toBeTruthy()
+    expect(screen.getByText('Include or remove 1 unusually costly CV')).toBeTruthy()
 
     fireEvent.click(within(rowNamed('big.docx')).getByRole('button', { name: 'Include it' }))
     expect(within(rowNamed('big.docx')).queryByRole('button', { name: 'Include it' })).toBeNull()
@@ -670,6 +699,25 @@ describe('UploadPage batch cost outlier (#1599)', () => {
     fireEvent.click(button('Submit 3 CVs'))
     await flush()
     expect(vi.mocked(uploadFile).mock.calls.map(([f]) => f.name)).toEqual(['a.docx', 'b.docx', 'big.docx'])
+  })
+
+  it('includes every flagged file at once on Include all', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'c.docx': 1, 'big1.docx': 7, 'big2.docx': 8 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'c.docx', 'big1.docx', 'big2.docx'].map(docx))
+    tickAttestation()
+    expect(button('Submit 5 CVs').disabled).toBe(true)
+    fireEvent.click(button('Include all 2 flagged'))
+    expect(screen.queryByRole('button', { name: 'Include it' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Include all/ })).toBeNull()
+    expect(button('Submit 5 CVs').disabled).toBe(false)
+  })
+
+  it('offers no Include all for a single flagged file', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'big.docx': 7 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    expect(screen.queryByRole('button', { name: /Include all/ })).toBeNull()
   })
 
   it('lifts the block when the flagged file is removed instead', async () => {
@@ -687,7 +735,7 @@ describe('UploadPage batch cost outlier (#1599)', () => {
     weighted({ 'a.docx': 1, 'b.docx': 1, 'big.docx': 7 })
     await renderPage()
     await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
-    expect(within(rowNamed('big.docx')).getByTestId('cost-outlier').textContent).toBe('About 7× larger than the others in this batch.')
+    expect(within(rowNamed('big.docx')).getByTestId('cost-outlier').textContent).toBe('About 7× the cost of the others in this batch.')
     expect(screen.queryByText(/\$/)).toBeNull()
   })
 })

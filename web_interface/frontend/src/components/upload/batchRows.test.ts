@@ -170,7 +170,7 @@ describe('costOutliers (#1599)', () => {
   it('blocks submitting until each flagged file is included', () => {
     const rows = weighed([1, 1, 9])
     const input = { rows, multi: true, attested: true, quota: null }
-    expect(missingItems(input)).toEqual(['Include or remove 1 unusually large CV'])
+    expect(missingItems(input)).toEqual(['Include or remove 1 unusually costly CV'])
     expect(missingItems({ ...input, rows: rows.map((r) => ({ ...r, costConfirmed: true })) })).toEqual([])
   })
 })

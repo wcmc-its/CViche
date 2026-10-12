@@ -5,7 +5,7 @@ import { getRunStatus, startRun } from '../../api/runs'
 import { estimateInboxItems, submitInboxItem } from '../../api/inbox'
 import { getBatchEstimate, uploadFile } from '../../api/upload'
 import {
-  MAX_UPLOADS_IN_FLIGHT, classifyFailure, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
+  MAX_UPLOADS_IN_FLIGHT, classifyFailure, costOutliers, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
   splitForEstimate, startFailure, wasStarted,
   DEFAULT_MAX_UPLOAD_MB,
 } from './batchRows'
@@ -128,6 +128,8 @@ export interface BatchUpload {
   removeRow: (key: string) => void
   /** Include a file flagged as far above the rest of the batch's estimate (#1599). */
   includeOutlier: (key: string) => void
+  /** Includes every flagged row at once. */
+  includeAllOutliers: () => void
   /** Start the table from a file already chosen in the single-file picker. */
   adopt: (file: File, estimate: Estimate | null) => void
   /** `notifyOnComplete`: the batch asks for one email when every run is finished (#1335). */
@@ -135,6 +137,8 @@ export interface BatchUpload {
   retryFailed: (options: BatchSubmitOptions) => Promise<void>
   /** Re-send one row the server refused as already processed, confirmed. */
   runAgain: (key: string, options: BatchSubmitOptions) => Promise<void>
+  /** Re-runs every row refused as already processed. */
+  runAllAgain: (options: BatchSubmitOptions) => Promise<void>
   reset: () => void
 }
 
@@ -215,12 +219,16 @@ export function useBatchUpload(
     await sendAll(targets, batchId, options)
   }
 
-  const runAgain = async (key: string, options: BatchSubmitOptions) => {
-    const target = rows.find((r) => r.key === key)
-    if (!batchId || !target?.failure?.duplicate) return
-    patch(key, { state: 'waiting', failure: null })
-    await sendAll([target], batchId, { ...options, confirmDuplicate: true })
+  const runAgainRows = async (targets: BatchRow[], options: BatchSubmitOptions) => {
+    if (!batchId || !targets.length) return
+    patchMany(new Set(targets.map((r) => r.key)), () => ({ state: 'waiting', failure: null }))
+    await sendAll(targets, batchId, { ...options, confirmDuplicate: true })
   }
+
+  const runAgain = (key: string, options: BatchSubmitOptions) =>
+    runAgainRows(rows.filter((r) => r.key === key && r.failure?.duplicate), options)
+
+  const runAllAgain = (options: BatchSubmitOptions) => runAgainRows(rows.filter((r) => r.failure?.duplicate), options)
 
   const reset = () => {
     changeFiles(() => [])
@@ -240,10 +248,15 @@ export function useBatchUpload(
     addInbox,
     removeRow: (key) => changeFiles((prev) => prev.filter((r) => r.key !== key)),
     includeOutlier: (key) => patch(key, { costConfirmed: true }),
+    includeAllOutliers: () => {
+      const flagged = costOutliers(rows)
+      patchMany(new Set([...flagged.keys()]), () => ({ costConfirmed: true }))
+    },
     adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate, maxUploadMb)]),
     submit,
     retryFailed,
     runAgain,
+    runAllAgain,
     reset,
   }
 }
