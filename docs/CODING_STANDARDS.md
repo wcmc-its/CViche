@@ -452,8 +452,8 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 0 | ratchet |
 | 8.3 missing annotations (ANN*, RUF012) | falling | 490 | ratchet |
-| 8.4 pyflakes findings (F) | falling | 196 | ratchet |
-| 8.4 bugbear findings (B) | falling | 140 | ratchet |
+| 8.4 pyflakes findings (F) | falling | 192 | ratchet |
+| 8.4 bugbear findings (B) | falling | 142 | ratchet |
 
 <!-- check_standards:auto:end -->
 
