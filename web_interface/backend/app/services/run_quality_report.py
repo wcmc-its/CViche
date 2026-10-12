@@ -468,6 +468,22 @@ LINT_COPY = {
         "A line of the CV that was split into several records shows, on one of them, an "
         "institution the line does not name, or dates the line gives only to another record.",
         "Check the institution and dates of each flagged record against the source CV."),
+    "stage2_unaccounted": LintCopy(
+        "Part of the source CV never read",
+        "A stretch of the source CV was not split into entries, so nothing in it was "
+        "classified or placed in the document.",
+        "Compare the flagged part of the source CV with the document and add what is missing."),
+    "record_date_shift": LintCopy(
+        "Entries in a list shifted by one",
+        "A list in the source CV was grouped one record off, so each entry from that point "
+        "may show the date, place or title of the entry before or after it.",
+        "Check the dates, places and titles in the flagged list against the source CV."),
+    "header_consumed_record": LintCopy(
+        "First entry under a heading missing",
+        "A heading in the source CV shares its line with the first entry under it, such as "
+        "\"LICENSURE: <state>\", and that entry was kept as part of the heading, so it is "
+        "missing from the document.",
+        "Add the entry after the flagged heading from the source CV."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "
@@ -785,7 +801,7 @@ LINT_EFFORT: dict[str, FixEffort] = {
     ), EFFORT_QUICK),
     **dict.fromkeys((
         "under_extraction", "table_lost", "dead_sections", "segmentation",
-        "segmentation_collapse", "stage3b_fallback_ratio", "stage3b_second_pass_error",
+        "segmentation_collapse", "stage2_unaccounted", "stage3b_fallback_ratio", "stage3b_second_pass_error",
         "stage4_group_failures", "stage_failure_recorded", "pipeline_errors_present",
         "no_output", "owner_contact_missing", "llm_fallback_served", "llm_refusal_in_output",
         "protected_data_in_output",
