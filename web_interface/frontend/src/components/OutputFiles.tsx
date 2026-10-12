@@ -15,12 +15,16 @@ interface OutputFilesProps {
   showFinalOutput?: boolean
 }
 
-/** Label of the review copy's download beside the main one (#1589). */
-export const REVIEW_COPY_LABEL = "Review copy (with CViche's notes)"
+/** Label of the clean copy's download beside the main one, when the main
+ *  Download is the review copy (#1589). */
+export const CLEAN_COPY_LABEL = 'Clean copy (no notes)'
 
-/** Sand panel with a DOCX tile, the file name and a primary Download button,
- *  plus the review copy (#1591) beside it when the run has one. */
+/** Sand panel with a DOCX tile, the file name and a primary Download button.
+ *  When the run has a review copy (#1591), Download gets it: no output yet has
+ *  been ready to submit unchecked, so the notes come first and the clean copy
+ *  sits beside it. */
 export function DocxDownloadCard({ runId, filename, reviewFilename = null }: { runId: string; filename: string; reviewFilename?: string | null }) {
+  const primary = reviewFilename ?? filename
   return (
     <div className="flex flex-wrap items-center gap-4 p-4 rounded-[10px] bg-sand-50 border border-sand-200">
       <div
@@ -30,25 +34,29 @@ export function DocxDownloadCard({ runId, filename, reviewFilename = null }: { r
         DOCX
       </div>
       <div className="flex-1 min-w-[200px]">
-        <div className="font-semibold text-gray-900 break-all">{filename}</div>
-        <div className="text-[13px] text-gray-500">WCM institutional format Word document</div>
+        <div className="font-semibold text-gray-900 break-all">{primary}</div>
+        <div className="text-[13px] text-gray-500">
+          {reviewFilename
+            ? "WCM institutional format Word document, with CViche's notes on what to check"
+            : 'WCM institutional format Word document'}
+        </div>
       </div>
       <div className="flex flex-wrap items-center gap-2.5">
         {reviewFilename && (
           <a
-            href={runRoutes.dataFile(runId, reviewFilename)}
+            href={runRoutes.dataFile(runId, filename)}
             download
-            title={reviewFilename}
+            title={filename}
             className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-sand-400 hover:bg-sand-50 text-gray-900 font-medium rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
           >
             <Download className="w-4 h-4" aria-hidden="true" />
-            <span>{REVIEW_COPY_LABEL}</span>
+            <span>{CLEAN_COPY_LABEL}</span>
           </a>
         )}
         <a
-          href={runRoutes.dataFile(runId, filename)}
+          href={runRoutes.dataFile(runId, primary)}
           download
-          aria-label={`Download final output file ${filename}`}
+          aria-label={reviewFilename ? `Download review copy ${primary}` : `Download final output file ${primary}`}
           className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
         >
           <Download className="w-4 h-4" aria-hidden="true" />
