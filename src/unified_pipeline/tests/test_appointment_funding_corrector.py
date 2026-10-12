@@ -18,6 +18,7 @@ from unified_pipeline.core.validators.appointment_funding_corrector import (  # 
     apply_appointment_funding_corrections,
     correct_appointment_funding,
     has_funding_evidence,
+    is_honors_heading,
     is_positions_heading,
 )
 from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (  # noqa: E402
@@ -207,3 +208,45 @@ def test_an_earlier_pass_is_not_recounted():
     out, stats = apply_appointment_funding_corrections(earlier)
     assert out[0]["taxonomy_code"] == "T"
     assert stats["corrections_applied"] == 0
+
+
+# Issue #1709: "academic" reads as D1, so an honors heading that names it passes
+# as a positions heading. An unevidenced M2 entry there joins its H siblings.
+_TRAINEESHIP = "Postdoctoral Traineeship 1970-1971"
+
+
+@pytest.mark.parametrize("heading", [
+    ("ACADEMIC AND PROFESSIONAL HONORS",),
+    ("Academic Honors",),
+    ("ACADEMIC AWARDS",),
+])
+def test_unevidenced_m2_under_an_academic_honors_heading_goes_to_honors(heading):
+    assert is_positions_heading(list(heading))
+    out = correct_appointment_funding(_entry(_TRAINEESHIP, code="M2A", hierarchy=heading))
+    assert out["taxonomy_code"] == "H"
+    assert out["original_taxonomy_code"] == "M2A"
+    assert out["appointment_funding_correction"]["to"] == "H"
+    assert "Honors" in out["appointment_funding_correction"]["reason"]
+
+
+def test_appointments_heading_still_goes_to_appendix():
+    """The #946 case is unchanged."""
+    out = correct_appointment_funding(_entry(_APPLICANT, hierarchy=("ACADEMIC APPOINTMENTS",)))
+    assert out["taxonomy_code"] == "T"
+    assert "Appendix" in out["appointment_funding_correction"]["reason"]
+
+
+def test_evidenced_m2_under_an_academic_honors_heading_is_untouched():
+    out = correct_appointment_funding(
+        _entry("Career development award\t2016-2021\tK23", code="M2B", hierarchy=("Academic Honors",)))
+    assert out["taxonomy_code"] == "M2B"
+
+
+@pytest.mark.parametrize(("heading", "expected"), [
+    (("ACADEMIC AND PROFESSIONAL HONORS",), True),
+    (("HONORS AND AWARDS",), True),
+    (("ACADEMIC APPOINTMENTS",), False),
+    (None, False),
+])
+def test_is_honors_heading(heading, expected):
+    assert is_honors_heading(list(heading) if heading else heading) is expected

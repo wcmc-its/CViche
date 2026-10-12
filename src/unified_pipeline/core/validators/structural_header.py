@@ -22,6 +22,37 @@ except ImportError:
     from base_validator import BaseValidator, ValidatorGuidance
 
 
+# A document timestamp: "Updated: January 2024", "Last revised 8/2/2024",
+# "As of March 2024", "Version 3". The keyword is a whole word (a space or
+# colon follows it), then a date: a month name or a digit, optionally after
+# "Date:". Without both, a citation whose first author's surname begins
+# "Asof", or a title beginning "Revised criteria for ...", read as a
+# timestamp and went to the Appendix (#1709).
+TIMESTAMP_PATTERN = re.compile(
+    r'^(?:last\s*(?:updated|revised|modified)|updated|revised|(?:current\s*)?as\s+of|version)'
+    r'[\s:]+(?:date[\s:]*)?'
+    r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d)',
+    re.IGNORECASE,
+)
+
+# A timestamp is a short line. Longer text that starts with a timestamp
+# keyword and a date ("As of 2020, chaired the ...") is content (#1709).
+MAX_TIMESTAMP_CHARS = 60
+
+# A citation's volume:pages range ("1:10-20", "2001;12:1-5"). A short
+# citation whose title begins "Updated 2015 ..." is content, not a timestamp.
+CITATION_PAGES = re.compile(r'\d\s*:\s*\d+\s*[-\u2013]')
+
+
+def is_timestamp(text: str) -> bool:
+    """True when text is a short document-timestamp line, not a citation."""
+    return (
+        len(text) <= MAX_TIMESTAMP_CHARS
+        and TIMESTAMP_PATTERN.match(text) is not None
+        and CITATION_PAGES.search(text) is None
+    )
+
+
 @dataclass
 class CorrectionResult:
     """Result of a post-classification correction."""
@@ -57,16 +88,6 @@ class StructuralHeaderValidator(BaseValidator):
         r'^-\s*\d+\s*-$',                  # "-1-", "- 5 -"
         r'^\[\s*\d+\s*\]$',                # "[1]", "[ 3 ]"
         r'^p\.\s*\d+$',                    # "p. 1", "p.12"
-    ]
-
-    # Patterns for update timestamps
-    TIMESTAMP_PATTERNS = [
-        r'^updated:?\s*',                  # "Updated: January 2024"
-        r'^last\s*(updated|revised|modified):?\s*',
-        r'^revised:?\s*',
-        r'^as\s*of:?\s*',
-        r'^current\s*as\s*of:?\s*',
-        r'^version:?\s*',
     ]
 
     # Patterns for section dividers
@@ -168,17 +189,16 @@ class StructuralHeaderValidator(BaseValidator):
                 )
 
         # Check timestamps
-        for pattern in self.TIMESTAMP_PATTERNS:
-            if re.match(pattern, text_lower):
-                signals.append(f"Timestamp detected: '{text}'")
-                hints.append("Document timestamp - structural element, classify as T.")
-                return ValidatorGuidance(
-                    recommend_sections=['T'],
-                    hints=hints,
-                    confidence=0.90,
-                    severity='soft',
-                    deterministic_signals=signals
-                )
+        if is_timestamp(text):
+            signals.append(f"Timestamp detected: '{text}'")
+            hints.append("Document timestamp - structural element, classify as T.")
+            return ValidatorGuidance(
+                recommend_sections=['T'],
+                hints=hints,
+                confidence=0.90,
+                severity='soft',
+                deterministic_signals=signals
+            )
 
         # Check dividers
         for pattern in self.DIVIDER_PATTERNS:
@@ -281,15 +301,14 @@ class StructuralHeaderValidator(BaseValidator):
                 )
 
         # Check timestamps - should be T
-        for pattern in self.TIMESTAMP_PATTERNS:
-            if re.match(pattern, text_lower):
-                return CorrectionResult(
-                    corrected=True,
-                    original_code=current_code,
-                    new_code='T',
-                    confidence=0.90,
-                    reason=f"Timestamp '{text}' should be T, not {current_code}"
-                )
+        if is_timestamp(text):
+            return CorrectionResult(
+                corrected=True,
+                original_code=current_code,
+                new_code='T',
+                confidence=0.90,
+                reason=f"Timestamp '{text}' should be T, not {current_code}"
+            )
 
         # Check name-only entries - should be T (not A)
         if self._name_patterns and current_code == 'A':

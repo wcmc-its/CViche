@@ -17,6 +17,12 @@ Rule: an M2/M2A/M2B/M2C entry under a heading that expects position codes
       is recoded T (Appendix) so the owner reviews it. Headings that expect
       both (e.g. "Research Positions and Funding") are left alone.
 
+      When the same heading also expects honors (H), the entry is recoded H,
+      not T (#1709). The heading keyword map reads "academic" as D1, so
+      "Academic and Professional Honors" passes as a positions heading; an
+      honors line the model coded M2A there belongs with its H siblings, not
+      in the Appendix.
+
 Funding evidence is one funding-shaped signal (an amount, an NIH mechanism,
 a funder acronym, a grant/award/project/contract number, a PI or Co-I
 role, direct/indirect costs), or two DISTINCT funding words (award, grant,
@@ -39,6 +45,10 @@ from .hierarchy_mismatch_flagger import (
     is_position_code,
 )
 from .taxonomy_codes import APPENDIX_CODE
+
+# The honors code. A positions heading that also expects it is an honors
+# heading too, and an unevidenced M2 entry there goes to Honors (#1709).
+HONORS_CODE = 'H'
 
 # One of these alone is funding evidence. Funders that are also common
 # employers (CDC, DOD, VA) are left out: an appointment there is not a grant. Acronyms and roles are matched
@@ -74,6 +84,11 @@ def is_positions_heading(hierarchy: list[str] | None) -> bool:
     return any(map(is_position_code, expected)) and not any(map(is_funding_code, expected))
 
 
+def is_honors_heading(hierarchy: list[str] | None) -> bool:
+    """True when the heading path expects the honors code."""
+    return HONORS_CODE in get_expected_codes_from_hierarchy(hierarchy or [])
+
+
 def has_funding_evidence(text: str) -> bool:
     """True for one funding-shaped signal, or two distinct funding words."""
     if FUNDING_SHAPED.search(text):
@@ -82,7 +97,7 @@ def has_funding_evidence(text: str) -> bool:
 
 
 def correct_appointment_funding(entry: dict) -> dict:
-    """Return a copy of an unevidenced M2 entry under a positions heading, recoded to T."""
+    """Return a copy of an unevidenced M2 entry under a positions heading, recoded to T (H under an honors heading)."""
     code = entry.get('taxonomy_code', '')
     if not is_grant_code(code):
         return entry
@@ -91,15 +106,19 @@ def correct_appointment_funding(entry: dict) -> dict:
     if has_funding_evidence(entry.get('text', '') or ''):
         return entry
 
+    if is_honors_heading(entry.get('hierarchy')):
+        new_code, destination = HONORS_CODE, "an honors heading too; Honors with its siblings"
+    else:
+        new_code, destination = APPENDIX_CODE, "Appendix for owner review"
     entry = entry.copy()
-    entry['taxonomy_code'] = APPENDIX_CODE
+    entry['taxonomy_code'] = new_code
     entry.setdefault('original_taxonomy_code', code)
     entry['appointment_funding_correction'] = {
         'from': code,
-        'to': APPENDIX_CODE,
+        'to': new_code,
         'reason': (
             f"{code} under an appointments heading with no funding evidence "
-            "(amount, funder, grant number, PI role, or two funding words); Appendix for owner review"
+            f"(amount, funder, grant number, PI role, or two funding words); {destination}"
         ),
     }
     return entry
