@@ -682,6 +682,15 @@ def test_5d_build_raw_content_assigns_sequential_ids_by_position():
     assert "(S4: Book chapter (contributed chapter in edited volume))" in raw
 
 
+def test_5d_s3_label_covers_edited_books_as_well_as_authored() -> None:
+    """#1706: an edited book is S3 (taxonomy_v7 "Books"), so the label
+    stage 5d sends with an S3 citation must not say "authored" only."""
+    raw, _id_map = s5d.build_raw_content(
+        [{"taxonomy_code": "S3", "text": "an edited volume (Eds.)"}])
+    assert "(S3: Book (authored or edited))" in raw
+    assert "- S3: Book (authored or edited)\n" in s5d.CITATION_FORMATTER_PROMPT
+
+
 def test_5d_build_raw_content_defaults_missing_code_to_s1_description():
     entries = [{"text": "no taxonomy_code key at all"}]
     raw, _id_map = s5d.build_raw_content(entries)

@@ -58,7 +58,7 @@ PUBLICATION_CODES = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
 PUBLICATION_TYPE_DESCRIPTIONS = {
     'S1': 'Peer-reviewed research article (journal article)',
     'S2': 'Review article or editorial',
-    'S3': 'Book (authored)',
+    'S3': 'Book (authored or edited)',
     'S4': 'Book chapter (contributed chapter in edited volume)',
     'S5': 'Monograph',
     'S6': 'Letter or correspondence',
@@ -74,7 +74,7 @@ PUBLICATION TYPES:
 Each entry includes a taxonomy code indicating the publication type:
 - S1: Peer-reviewed research article (journal article)
 - S2: Review article or editorial
-- S3: Book (authored)
+- S3: Book (authored or edited)
 - S4: Book chapter (contributed chapter in edited volume)
 - S5: Monograph
 - S6: Letter or correspondence

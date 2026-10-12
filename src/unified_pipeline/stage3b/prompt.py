@@ -633,15 +633,20 @@ F. PUBLICATIONS AND SCHOLARLY OUTPUT (S0–S9, M2D)
       S2, not S1.
 
 29. BOOKS, CHAPTERS, AND EDITED VOLUMES (S3 VS S4)
-    - S3 = Authored books and book chapters:
-      * The CV owner wrote the content:
-        - Books/monographs they authored.
-        - Chapters in books edited by someone else.
-    - S4 = Edited books, edited volumes, and edited special issues:
-      * The CV owner is listed as editor (not the main author):
-        - "Smith, J. (Ed.)" or "(Eds.)"
-        - "Edited by [Name]"
-      * Special issues of journals where they are issue editors.
+    - S3 = Books: a whole book, whether the CV owner wrote it or
+      edited it:
+      * Books/monographs and textbooks they authored.
+      * Books and edited volumes they edited: the owner's name is
+        followed by "(Ed.)", "(Eds.)" or "eds.", or the volume is
+        "Edited by" the owner.
+    - S4 = Chapters: one chapter or contribution in a book, whoever
+      edited the book:
+      * A chapter title followed by "In:" or "In" and the book's title,
+        usually with the book's editors "(Ed.)"/"(Eds.)" and page numbers.
+    - The book's editors appearing in a chapter citation do not make
+      it S3; a whole edited book is S3, not S4.
+    - A guest-edited special issue of a journal is an editorial role,
+      not a book or a chapter: Q4B (rule 21).
 
 30. TECHNICAL REPORTS, STANDARDS, AND GRAY LITERATURE (S5) VS IN REVIEW (S7)
     - S5 = Non-peer-reviewed research publications:
@@ -659,7 +664,7 @@ F. PUBLICATIONS AND SCHOLARLY OUTPUT (S0–S9, M2D)
       published or publicly released belongs here.
     - "Accepted", "in press", "forthcoming" or "Epub ahead of print"
       means peer review is over: classify by publication type (S1, S2,
-      S6, or S3 for a book chapter), NOT S7, even though it is not yet
+      S6, or S4 for a book chapter), NOT S7, even though it is not yet
       in print.
 
 31. CASE REPORTS (S6)

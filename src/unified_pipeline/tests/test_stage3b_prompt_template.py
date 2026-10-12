@@ -8,6 +8,7 @@ short; these tests guard both the substitution behaviour and the
 regression this hoist was meant to fix.
 """
 import ast
+import json
 import string
 import sys
 from pathlib import Path
@@ -203,6 +204,60 @@ def test_s7_rules_mean_in_review_only_matching_its_template_header():
     # The A/B on #1173 left 28 "in press" entries in S7 while only the
     # section-6 summary said otherwise; rule 30 must say it too.
     assert '"in press"' in _rule_block("    - S7 = ", "31. CASE REPORTS")
+
+
+_TAXONOMY_PATH = _SRC / "unified_pipeline" / "core" / "taxonomy_v7.json"
+
+
+def _taxonomy_label(code: str) -> str:
+    codes = json.loads(_TAXONOMY_PATH.read_text())["codes"]
+    return next(entry["label"] for entry in codes if entry["code"] == code)
+
+
+def test_s3_s4_rules_name_the_same_section_as_the_taxonomy() -> None:
+    """#1706: rule 29 once defined S3 as chapters and S4 as edited books,
+    the reverse of taxonomy_v7.json (S3 "Books", S4 "Chapters") and of
+    stage 6, which renders S3 under "Books:" and S4 under "Chapters:". An
+    edited book then rendered under Chapters and a chapter under Books."""
+    s3 = _rule_block("    - S3 = ", "    - S4 = ")
+    s4 = _rule_block("    - S4 = ", "30. TECHNICAL REPORTS")
+    assert s3.startswith(f"    - S3 = {_taxonomy_label('S3')}:")
+    assert s4.startswith(f"    - S4 = {_taxonomy_label('S4')}:")
+    # An edited book is a whole book: S3. A chapter is S4, never S3.
+    assert '"(Eds.)"' in s3 and "edited" in s3
+    assert "chapter" not in s3.lower()
+    assert '"In:"' in s4
+    assert "a whole edited book is S3, not S4" in s4
+    # A guest-edited journal issue is the Q4B editorial role (taxonomy_v7
+    # "Guest Editor (special issue)" mapping), not S3 or S4.
+    assert "special issue of a journal is an editorial role" in s4
+    assert "Q4B (rule 21)" in s4
+    assert "Guest Editor" in _rule_block("    - Q4B = ", "    - Q4C = ")
+    # Rule 30's in-press line names the chapter code too.
+    assert "S4 for a book chapter" in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    assert "S3 for a book chapter" not in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    # Every line of the two definitions is load-bearing (the "(Ed.)" and
+    # "eds." cues, "whoever edited the book", "do not make it S3"), so the
+    # block is pinned whole; a wording change has to update this on purpose.
+    assert " ".join((s3 + s4).split()) == " ".join(_S3_S4_RULES.split())
+
+
+_S3_S4_RULES = """
+    - S3 = Books: a whole book, whether the CV owner wrote it or
+      edited it:
+      * Books/monographs and textbooks they authored.
+      * Books and edited volumes they edited: the owner's name is
+        followed by "(Ed.)", "(Eds.)" or "eds.", or the volume is
+        "Edited by" the owner.
+    - S4 = Chapters: one chapter or contribution in a book, whoever
+      edited the book:
+      * A chapter title followed by "In:" or "In" and the book's title,
+        usually with the book's editors "(Ed.)"/"(Eds.)" and page numbers.
+    - The book's editors appearing in a chapter citation do not make
+      it S3; a whole edited book is S3, not S4.
+    - A guest-edited special issue of a journal is an editorial role,
+      not a book or a chapter: Q4B (rule 21).
+"""
 
 
 # ---------------------------------------------------------------------------
