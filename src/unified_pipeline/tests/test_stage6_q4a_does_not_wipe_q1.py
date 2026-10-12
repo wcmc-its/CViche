@@ -113,6 +113,19 @@ def test_clearing_is_recorded_so_a_second_filler_cannot_wipe_the_first():
         "clearing must be recorded by element identity, or the guard cannot fire"
 
 
+def test_a_table_is_cleared_at_most_once_per_render():
+    """The wrapper itself refuses a second clear, whichever filler asks."""
+    from docx import Document as _Doc
+    gen = WCMTemplateGenerator(verbose=False)
+    doc = _Doc()
+    doc.add_table(rows=1, cols=2)
+    gen._clear_table_data(doc.tables[0], keep_header=True)
+    doc.tables[0].add_row().cells[0].text = Q1_ORG
+    gen._clear_table_data(doc.tables[0], keep_header=True)
+    assert [r.cells[0].text for r in doc.tables[0].rows][1:] == [Q1_ORG], \
+        "a second clear destroyed the rows the first filler wrote (#454)"
+
+
 Q4_DATE_ONLY = "2012-Present"
 Q4_ROLE = "Distinctive Widget Advisory Panelist"
 

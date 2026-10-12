@@ -2821,9 +2821,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         `_fill_other_service`, where a fuzzy anchor search sent Q4A onto the
         table Q1 had just filled and wiped 39 entries across 6 corpus CVs
         (#454). This wrapper is the thin delegating method
-        `test_stage6_import_surface.py` asks a split to leave behind; it changes
-        no rendering behaviour. The one caller that resolves its table by fuzzy
-        search consults `self._cleared_tables` before clearing.
+        `test_stage6_import_surface.py` asks a split to leave behind. It clears
+        a table at most once per render: a second request leaves the first
+        filler's rows in place, and the caller appends after them. The one
+        caller that resolves its table by fuzzy search, `_fill_other_service`,
+        also consults `self._cleared_tables` itself, to log which section hit it.
 
         Every `stage6/sections/` filler clears through this method, never the
         module-level function: when they called the bare function the set
@@ -2831,6 +2833,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         records to one Q4 entry). A gate test enforces it.
         """
         if not table:
+            return
+        if table._element in self._cleared_tables:
+            # A second filler resolved to a table another filler already
+            # filled. Clearing would destroy those rows; appending is wrong
+            # but recoverable, so refuse the clear and say so.
+            logger.warning("table already cleared and filled this render; "
+                           "refusing to clear it again (#454)")
             return
         self._cleared_tables.add(table._element)
         # Resolves to the module-level import at the top of this file: a class
