@@ -1535,10 +1535,12 @@ def test_batch_carry_counts_record_each_reason_and_add_sums_fields():
         counts.record("something_else")
 
 
-def test_batch_carry_counts_report_an_edge_or_a_failed_batch():
+def test_batch_carry_counts_report_an_edge_a_failed_batch_or_a_gap_fill():
     assert not stage2.BatchCarryCounts().any()
     assert stage2.BatchCarryCounts(edges=1, skipped_no_entry=1).any()
     assert stage2.BatchCarryCounts(failed_batches=1).any()
+    assert stage2.BatchCarryCounts(gap_filled_entries=1).any()
+    assert stage2.BatchCarryCounts(gap_filled_attached=1).any()
 
 
 def test_entry_keys_cover_a_paragraph_range_a_row_span_and_nothing_for_a_reversed_range():
@@ -1577,9 +1579,14 @@ def test_unclaimed_pending_ignores_recovered_rows_as_claims_and_drops_the_duplic
 
 # ------------------------------------------------- _gap_fill (#1226)
 
-def _gap(restored, reply, batch, repeated=frozenset()):
+_DATED = "March 2011 - June 2014 Staff Scientist, Example Institute for Health"  # a dated record line
+_LONG = "Member of the example committee for the outpatient clinic of the hospital"  # an undated one
+
+
+def _gap(entries, batch, settled=None, repeated=frozenset(), headings=(), end=10_000):
     counts = stage2.BatchCarryCounts()
-    out = stage2._gap_fill(restored, reply, batch, set(repeated), counts)
+    context = stage2._GapFillContext(set(repeated), tuple(headings), end)
+    out = stage2._gap_fill(entries, batch, len(batch) if settled is None else settled, context, counts)
     return out, (counts.gap_filled_entries, counts.gap_filled_attached)
 
 
@@ -1587,103 +1594,262 @@ def test_gap_fill_confidence_is_the_recovered_row_s_not_the_model_s():
     assert stage2.GAP_FILL_CONFIDENCE == 0.5  # below the 1.0 a model delimiter defaults to
 
 
-def _gap_line(idx, text):
-    return {"element_idx_start": idx, "element_idx_end": idx, "element_type": "paragraph",
+def _gap_line(idx, text, end=None):
+    return {"element_idx_start": idx, "element_idx_end": idx if end is None else end, "element_type": "paragraph",
             "confidence": stage2.GAP_FILL_CONFIDENCE, "text": text, "gap_filled": True}
 
 
-def test_gap_fill_puts_back_each_unclaimed_line_before_the_first_claim():
-    batch = [_p(40, "Held head"), _p(41, "Overall rating 5"), _p(42, "Comments:"), _p(43, "Clear lectures 4"),
-             _p(44, "Claimed record"), _p(45, "Late unclaimed line")]
-    held = [_carry_entry(40, text="Held head")]
-    out, counts = _gap(held, [_carry_entry(44, text="Claimed record")], batch)
-    assert out == held + [_gap_line(41, "Overall rating 5"), _gap_line(42, "Comments:"),
-                          _gap_line(43, "Clear lectures 4")]
-    assert counts == (3, 0)  # 45 sits after the first claim: out of scope
+def test_gap_fill_puts_back_each_unclaimed_record_line_the_batch_settles():
+    batch = [_p(40, "Claimed head"), _p(41, _DATED), _blank(42), _p(43, "Claimed record"), _p(44, _LONG),
+             _p(45, "Past the carry, record or not: " + _LONG)]
+    claimed = [_carry_entry(40, text="Claimed head"), _carry_entry(43, text="Claimed record")]
+    out, counts = _gap(claimed, batch, settled=5)
+    assert out == claimed + [_gap_line(41, _DATED), _gap_line(44, _LONG)]
+    assert counts == (2, 0)  # 45 is the next batch's to settle
+
+
+def test_gap_fill_fills_when_nothing_is_claimed_and_skips_what_any_entry_claims():
+    batch = [_p(40, _LONG), _blank(41), _p(42, _DATED), {"idx": "42.0", "type": "table_row", "text": _LONG},
+             _blank(43), _p(44, _LONG)]
+    assert _gap([], batch)[0] == [_gap_line(40, _LONG), _gap_line(42, _DATED), _gap_line(44, _LONG)]
+    earlier_batch_entry = _carry_entry(39, 40, text="from the batch before")
+    out, counts = _gap([earlier_batch_entry, _carry_entry(44, text=_LONG)], batch)
+    assert out[2:] == [_gap_line(42, _DATED)]
+    assert counts == (1, 0)
+
+
+def test_gap_fill_leaves_lines_past_the_section_and_unplaced_headings():
+    batch = [_p(40, "PRESENTATIONS (selected, 2001 to 2009 only)"), _p(41, _LONG), _p(42, _DATED)]
+    out, counts = _gap([], batch, headings=("PRESENTATIONS",), end=42)
+    assert out == [_gap_line(41, _LONG)]  # 40 stays break for promote_unlocated_headings; 42 is past the section
+    assert counts == (1, 0)
 
 
 def test_gap_fill_appends_a_line_that_runs_on_from_the_entry_above():
     batch = [_p(40, "Held head that runs"), _p(41, "on to this line"), _p(42, "and this one."),
-             _p(43, "but not past a full stop"), _p(44, "Claimed")]
+             _p(43, "but not past a full stop, however long this line runs")]
     held = [_carry_entry(40, text="Held head that runs", element_type="paragraph")]
-    out, counts = _gap(held, [_carry_entry(44)], batch)
+    out, counts = _gap(held, batch)
     assert out == [{"element_idx_start": 40, "element_idx_end": 42, "element_type": "paragraph",
                     "text": "Held head that runs\ton to this line\tand this one."},
-                   _gap_line(43, "but not past a full stop")]
+                   _gap_line(43, "but not past a full stop, however long this line runs")]
     assert counts == (1, 2)
 
 
 def test_gap_fill_chains_a_run_on_line_onto_a_filled_line():
-    batch = [_p(40, "Held."), _p(41, "Gap line that runs"), _p(42, "on here"), _p(43, "Claimed")]
-    out, counts = _gap([_carry_entry(40, text="Held.")], [_carry_entry(43)], batch)
-    assert out[1:] == [{**_gap_line(41, "Gap line that runs"), "element_idx_end": 42,
-                        "text": "Gap line that runs\ton here"}]
+    batch = [_p(40, "Held."), _p(41, _LONG + " that runs"), _p(42, "on here")]
+    out, counts = _gap([_carry_entry(40, text="Held.")], batch)
+    assert out[1:] == [_gap_line(41, f"{_LONG} that runs\ton here", end=42)]
     assert counts == (1, 1)
 
 
+def test_gap_fill_groups_a_dated_record_with_the_undated_lines_under_it():
+    batch = [_p(40, "March 2004 - June 2009 Staff Technologist"), _p(41, "Imaging Services"),
+             _p(42, "Example Regional Hospital"), _p(43, "Springfield, Exampleshire"), _blank(44),
+             _p(45, "Panel of the district wellness board, 2002-2011"), _blank(46),
+             _p(47, "Community Health Outreach Steering Group, Example County, EX"), _p(48, "2002-2011")]
+    out, counts = _gap([], batch)
+    assert out == [_gap_line(40, "March 2004 - June 2009 Staff Technologist\tImaging Services"
+                                 "\tExample Regional Hospital\tSpringfield, Exampleshire", end=43),
+                   _gap_line(45, "Panel of the district wellness board, 2002-2011"),
+                   _gap_line(47, "Community Health Outreach Steering Group, Example County, EX\t2002-2011", end=48)]
+    assert counts == (3, 4)
+
+
+def test_gap_fill_keeps_one_dated_record_per_line():
+    lines = [f"Adjunct Lecturer in Nutrition, School of Health Sciences -- 0{k}/2015-0{k}/2017" for k in range(1, 4)]
+    out, counts = _gap([], [_p(40 + k, line) for k, line in enumerate(lines)])
+    assert out == [_gap_line(40 + k, line) for k, line in enumerate(lines)]
+    assert counts == (3, 0)
+
+
+def test_gap_fill_groups_only_under_a_filled_line_and_never_furniture():
+    model = _carry_entry(40, text="2016 Ana Cruz, Graduate Student", element_type="paragraph")
+    batch = [_p(40, "2016 Ana Cruz, Graduate Student"), _p(41, "Project: tides and kelp"),
+             _p(42, "Guest Lecturer, Example University, 04/11/2019"), _p(43, "Page 2 of 4"), _p(44, "College")]
+    out, counts = _gap([model], batch)
+    assert out == [model, _gap_line(42, "Guest Lecturer, Example University, 04/11/2019")]
+    assert counts == (1, 0)  # 41 is the model's call; 43 is furniture; 44, under it, is short
+
+
+def test_gap_fill_never_groups_noise_or_a_record_of_its_own_under_a_filled_line():
+    batch = [_p(40, "March 2004 - June 2009 Staff Technologist"), _p(41, "Jordan Example, MD"), _blank(42),
+             _p(43, "April 2009 - May 2012 Senior Technologist"), _p(44, "PUBLICATIONS"), _blank(45),
+             _p(46, "June 2012 - August 2015 Lead Technologist"), _p(47, _LONG)]
+    out, counts = _gap([], batch, repeated={"Jordan Example, MD"})
+    assert out == [_gap_line(40, "March 2004 - June 2009 Staff Technologist"),
+                   _gap_line(43, "April 2009 - May 2012 Senior Technologist"),
+                   _gap_line(46, "June 2012 - August 2015 Lead Technologist"), _gap_line(47, _LONG)]
+    assert counts == (4, 0)  # 41 is a running header, 44 a heading; 47 is a record of its own
+
+
 def test_gap_fill_never_appends_across_a_blank_or_an_unfilled_line():
-    batch = [_p(40, "Held head"), _blank(41), _p(42, "after a blank"), _p(43, "12"), _p(44, "after page"),
-             _p(45, "Claimed")]
-    out, counts = _gap([_carry_entry(40, text="Held head")], [_carry_entry(45)], batch)
-    assert out[1:] == [_gap_line(42, "after a blank"), _gap_line(44, "after page")]
+    batch = [_p(40, "Held head"), _blank(41), _p(42, "after a blank, " + _LONG), _p(43, "12"),
+             _p(44, "after page, " + _LONG)]
+    out, counts = _gap([_carry_entry(40, text="Held head")], batch)
+    assert out[1:] == [_gap_line(42, "after a blank, " + _LONG), _gap_line(44, "after page, " + _LONG)]
     assert counts == (2, 0)
-
-
-def test_gap_fill_needs_a_claim_and_skips_held_lines_rows_and_recovered_rows():
-    batch = [_p(40, "Held head"), _p(41, "Held tail"), {"idx": "41.0", "type": "table_row", "text": "row text"},
-             _p(42, "Gap line"), _p(43, "Claimed")]
-    held = [_carry_entry(40, 41, text="Held head\tHeld tail")]
-    assert _gap(held, [], batch) == (held, (0, 0))  # nothing claimed: nothing filled
-    recovered_first = [_carry_entry("41.0", recovered_row=True), _carry_entry(43)]
-    out, counts = _gap(held, recovered_first, batch)
-    assert out == held + [_gap_line(42, "Gap line")]  # a recovered row is not the reply's first claim
-    assert counts == (1, 0)
-    out, _ = _gap([], [_carry_entry(43)], batch)
-    assert out == [_gap_line(40, "Held head"), _gap_line(41, "Held tail"), _gap_line(42, "Gap line")]
-
-
-def test_gap_fill_leaves_a_line_that_is_not_content():
-    batch = [_p(40, "Held."), _p(41, "- 3 -"), _p(42, "Page 4 of 9"), _p(43, "Strengths:"), _blank(44),
-             _p(45, "Weaknesses:"), _p(46, "Summary:"), _blank(47), _p(48, "Dr Name CV"),
-             _p(49, "Kept line here"), _p(50, "Claimed")]
-    out, counts = _gap([_carry_entry(40, text="Held.")], [_carry_entry(50)], batch, {"Dr Name CV"})
-    assert out[1:] == [_gap_line(49, "Kept line here")]
-    assert counts == (1, 0)
 
 
 @pytest.mark.parametrize("text", ["12", "3 of 10", "3/10", "- 4 -", "Page 7", "page7", "PAGE 2 OF 3", "***",
                                   "12-34", "- 3 of 10 -"])
 def test_gap_line_page_numbers_and_letterless_lines_are_not_content(text):
-    assert not stage2._gap_line_is_content(0, [_p(0, text), _p(1, "Next line")], set())
+    assert not stage2._gap_line_is_content(text, set())
 
 
-@pytest.mark.parametrize("text", ["Rated 5 of 5 by the class", "Lecture 3", "Pagemaster award"])
-def test_gap_line_with_a_number_inside_text_is_content(text):
-    assert stage2._gap_line_is_content(0, [_p(0, text), _p(1, "Next line")], set())
+@pytest.mark.parametrize("text", [
+    "Example, Jordan  PAGE  \\* Arabic  \\* MERGEFORMAT 4 of the curriculum",
+    "Page PAGE 7 of NUMPAGES 7 in this long curriculum document",
+    'Google Scholar: HYPERLINK "https://scholar.example.org/citations" my profile page',
+    'Revised: DATE \\@ "MMMM d, yyyy" October 3, 2012 by the department office',
+    "JANE Q. EXAMPLE, MD CURRICULUM VITAE | APRIL 2030",
+    "Curriculum Vitae for Promotion, Alex Example, Ph.D., Assistant Professor",
+    "*Denotes presentations given by a trainee under my supervision here.",
+    "# denotes corresponding author on the papers listed in this section",
+    "KEY: † indicates papers on which a listed trainee was the first author",
+    "‡Marks equal contributions shared among two or more of the authors",
+    "Last updated 1/9/2031 by the example office for the department chair",
+    "Date Prepared: 7/2011 for the example appointments committee review",
+    "Current h-index: 12 (all); 9 (since 2025) on Google Scholar",
+    "Citations = 1, 234;   H-Index = 21;   i-10 Index = 45",
+    "Google Scholar statistics as of January 5, 2031 for all publications:",
+    "Trainee Name Degree Program Project Title Year Finished",
+    "Prize Name Given By Date Awarded For The Category Listed",
+    "EDITORIAL BOARD MEMBER OR REVIEWER FOR AN EXAMPLE JOURNAL",
+])
+def test_gap_line_furniture_is_not_content(text):
+    assert not stage2._gap_line_is_content(text, set())
 
 
-def test_gap_line_a_bare_label_is_content_only_when_a_content_line_follows():
-    assert stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _p(1, "Clear lectures")], set())
-    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _p(1, "Weaknesses:")], set())
-    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _blank(1)], set())
-    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:")], set())
-    assert stage2._gap_line_is_content(0, [_p(0, "Strengths: clear"), _blank(1)], set())
+@pytest.mark.parametrize("text", [  # each matches one furniture pattern and no other
+    "SHAPE  \\* MERGEFORMAT logo in the letterhead block",
+    "of NUMPAGES in the running footer of the document",
+    'Scholar profile HYPERLINK "https://scholar.example.org" for the author',
+    "Example Name, MD  PAGE i of the running header",
+    'Robin Example DATE \\@"M\\/d\\/yyyy" for the record',
+    "Example Name, MD, Curriculum Vita, the full version",
+    "**denotes joint last author as listed in the journal",
+    "*Designates a resident co-author on the works listed below",
+    "Revised in October by the example department office",
+    "REV. 3-9-21 of this document for the committee review",
+    "Current i10-index of 17 across all the indexed work",
+    "Citations = 1,234 across all the indexed work",
+])
+def test_each_furniture_pattern_alone_is_furniture(text):
+    assert stage2._is_furniture(text)
+    assert not stage2._gap_line_is_content(text, set())
+
+
+def test_a_letterless_line_is_not_content_however_many_numbers_it_holds():
+    assert not stage2._gap_line_is_content("2001 - 2006 , 2007 - 2012", set())
+
+
+@pytest.mark.parametrize(("text", "is_record"), [
+    ("Member of the example committee for outpatient care", True),  # 8 undated words
+    ("Member of the example committee for care", False),  # 7
+    ("Committee member, example clinic, 3rd", True),  # a number: 5 words are enough
+    ("Director of the example wellness program", False),  # 6 undated words
+    ("2020 Example Clinical Practice Permit", True),  # dated, 5 words
+    ("2020 Example practice permit", False),  # dated, 4 words
+    ("The lectures were clearly presented 4", True),  # a score
+])
+def test_gap_line_a_record_is_long_or_numbered(text, is_record):
+    assert stage2._gap_line_is_content(text, set()) is is_record
+
+
+def test_gap_line_word_floors():
+    assert (stage2.GAP_FILL_MIN_WORDS, stage2.GAP_FILL_MIN_NUMBERED_WORDS) == (8, 5)
+    assert not stage2._gap_line_is_content("one two three four five six seven", set())
+    assert stage2._gap_line_is_content("one two three four five six seven eight", set())
+    assert not stage2._gap_line_is_content("one two three 4", set())
+    assert stage2._gap_line_is_content("one two three four 5", set())
+
+
+def test_gap_line_a_heading_ending_in_a_colon_is_not_content():
+    assert not stage2._gap_line_is_content("Other example funding from the city and the trust 2014:", set())
+    assert stage2._gap_line_is_content("Other example funding from the city and the trust: 2014", set())
+
+
+@pytest.mark.parametrize(("text", "header"), [
+    ("Employer Role/Title Start Dates", True), ("Program Activity Start Dates", True),
+    ("Year Term Course Enrollment", True), ("Program Name Start Date", True),  # names exactly two columns
+    ("Example Hospital Role", False),  # names one column: an employer, not a header row
+    ("Example Regional Hospital", False), ("The Foundation for The Nation", False),
+    ("Community Health Outreach Steering Group, Example County, EX", False),
+    ("Institution Degree Year Finished 2014", False),
+    ("Program name and role title", False),  # some words lower-case
+    *[(f"Program Name{mark} Role Title", False) for mark in (",", ".", ";", ":", " (", ")")],  # a record's punctuation
+])
+def test_column_header_names_columns_capitalised_with_no_digit_or_punctuation(text, header):
+    assert stage2._is_column_header(text) is header
+
+
+@pytest.mark.parametrize("text", [  # between them, every word that names a column, each pair naming exactly two
+    "Activity Dates", "Date Awarded", "Course Enrollment", "Degree Granted", "Dissertation Title", "Inclusive Years",
+    "Institution Location", "Position Name", "Organisation Role", "Organization Rank", "Thesis Year",
+])
+def test_column_header_field_words(text):
+    assert stage2._is_column_header(text)
+
+
+@pytest.mark.parametrize(("text", "heading"), [
+    ("PUBLICATIONS", True), ("GUEST LECTURES AND VISITING ROLES", True),
+    ("2019 VISITING LECTURER, EXAMPLE UNIVERSITY", False), ("Publications", False), ("2002-2011", False),
+])
+def test_caps_heading_is_all_capitals_with_no_digit(text, heading):
+    assert stage2._is_caps_heading(text) is heading
 
 
 def test_gap_line_a_short_repeated_line_is_a_running_footer_but_a_long_one_is_content():
-    short = "Teaching portfolio of a professor"  # 5 words
-    six = "Teaching portfolio of a full professor"
-    seven = "Teaching portfolio of a full professor here"
+    six = "Teaching portfolio 2020 of a professor"  # 6 words, numbered: a record unless repeated
+    seven = "Teaching portfolio 2020 of a full professor"
     assert stage2.GAP_FILL_REPEAT_MAX_WORDS == 6
-    for text, kept in ((short, False), (six, False), (seven, True)):
-        assert stage2._gap_line_is_content(0, [_p(0, text), _p(1, "x")], {text}) is kept
-    assert stage2._gap_line_is_content(0, [_p(0, short), _p(1, "x")], set())
+    for text, kept in ((six, False), (seven, True)):
+        assert stage2._gap_line_is_content(text, {text}) is kept
+    assert stage2._gap_line_is_content(six, set())
 
 
-def test_repeated_lines_counts_paragraph_text_once_normalised():
-    section = [_p(1, "Footer  text"), _p(2, "Footer text"), _p(3, "Once"),
-               {"idx": "4.0", "type": "table_row", "text": "Once"}, _blank(5), _blank(6)]
+def test_attaches_to_reads_the_run_on_rule_then_the_filled_record_rules():
+    model = {"text": "Taught the course", "element_type": "paragraph"}
+    assert stage2._attaches_to(model, "to residents", set())  # runs on, whoever claimed the line above
+    assert not stage2._attaches_to(model, "To residents", set())
+    assert not stage2._attaches_to(model, "page footer", {"page footer"})  # runs on, but a running footer
+    dated = _gap_line(1, "March 2004 - June 2004 Staff Technologist")
+    assert stage2._attaches_to(dated, "Example Regional Hospital", set())
+    assert not stage2._attaches_to(dated, "March 2003 - June 2004 Junior Technologist", set())  # its own record
+    assert not stage2._attaches_to(dated, "Page 2 of 9", set())
+    assert not stage2._attaches_to(dated, "Course Director:", set())
+    assert not stage2._attaches_to(dated, "- - -", set())
+    undated = _gap_line(1, "Community Health Outreach Steering Group, Example County, EX")
+    assert stage2._attaches_to(undated, "2002-2011", set())
+    assert not stage2._attaches_to(undated, "Springfield, Exampleshire", set())
+    assert not stage2._attaches_to({**undated, "gap_filled": False}, "2002-2011", set())
+
+
+def test_attaches_to_never_groups_noise_or_a_record_line_of_its_own():
+    dated = _gap_line(1, "March 2004 - June 2009 Staff Technologist")
+    assert stage2._attaches_to(dated, "Jordan Example, MD", set())
+    assert not stage2._attaches_to(dated, "Jordan Example, MD", {"Jordan Example, MD"})  # a running header
+    assert not stage2._attaches_to(dated, "PUBLICATIONS", set())
+    assert not stage2._attaches_to(dated, "Program Name Start Date", set())  # a column-header row
+    assert not stage2._attaches_to(dated, _LONG, set())  # a record of its own
+
+
+def test_repeated_lines_counts_paragraph_text_once_normalised_a_page_apart():
+    assert stage2.GAP_FILL_REPEAT_MIN_SPACING == 8
+    section = ([_p(1, "Footer  text"), _p(2, "Springfield, EX"), _p(3, "Once"),
+                {"idx": "4.0", "type": "table_row", "text": "Once"}, _p(5, "Springfield, EX")]
+               + [_blank(i) for i in range(6, 9)] + [_p(9, "Footer text"), _p(10, "Springfield, EX")])
+    # The footer recurs 8 elements on; the city 3 and then 5 on: a field of consecutive records.
     assert stage2._repeated_lines(section) == {"Footer text"}
+
+
+def test_repeated_lines_needs_every_recurrence_a_page_apart():
+    section = [_p(0, "Header"), *[_blank(i) for i in range(1, 8)], _p(8, "Header"), _p(9, "Header")]
+    assert stage2._repeated_lines(section) == set()  # 8 on, then 1 on
+    assert stage2._repeated_lines(section[:9]) == {"Header"}
+    row = {"idx": "8.0", "type": "table_row", "text": "Header"}
+    assert stage2._repeated_lines([*section[:8], row]) == set()  # only paragraphs count
 
 
 @pytest.mark.parametrize(("last", "line", "runs_on"), [
@@ -1696,13 +1862,6 @@ def test_repeated_lines_counts_paragraph_text_once_normalised():
 ])
 def test_continues_line_reads_the_entry_s_last_line(last, line, runs_on):
     assert stage2._continues_line(last, line) is runs_on
-
-
-def test_is_bare_label():
-    assert stage2._is_bare_label("Strengths:")
-    assert stage2._is_bare_label("Strengths :  ")
-    assert not stage2._is_bare_label("Strengths: clear")
-    assert not stage2._is_bare_label("Strengths")
 
 
 # ------------------------------------------------- fold_bare_trailing_dates (#1226)
