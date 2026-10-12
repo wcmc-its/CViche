@@ -20,7 +20,8 @@ Two fields can be enriched, and each is attributed separately:
 `dates_attended` arrives in three different shapes from field extraction (flat
 `dates_attended_start_date`, a nested dict, or plain `start_date`), and all
 three are tried before the range is formatted. When none yields a range, a
-STRING `dates_attended` is written as stage 4 gave it (#1187).
+STRING `dates_attended` is written as stage 4 gave it (#1187), and the end of
+its range is the Year Awarded fallback before any raw-text year (#1700).
 
 The degree cell is "Degree, field of study" as the template asks: `major` /
 `field_of_study`, then stage 4's `discipline`, each only when the text so far
@@ -74,6 +75,7 @@ from ..formatting import (
 )
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _extract_year_from_text
+from ..parsing.dates import OPEN_END, YEAR
 from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import sort_entries_reverse_chronological
 
@@ -175,6 +177,31 @@ def _with_advisor(degree: str, fields: Mapping) -> str:
         advisor = f"{label}: {name}"
         return f"{degree}{ADVISOR_SEPARATOR}{advisor}" if degree else advisor
     return degree
+
+
+# A four-digit year inside a string `dates_attended`, and the words that mark
+# its range as still open ("2019 - Present").
+_ATTENDED_YEAR_RE = re.compile(rf'(?<!\d){YEAR}(?!\d)')
+_OPEN_END_RE = re.compile(rf'\b{OPEN_END}\b', re.IGNORECASE)
+
+
+def _string_dates_attended_end_year(fields: Mapping) -> str:
+    """The end year of a STRING `dates_attended` range ("September 1981- May
+    1982" -> "1982"), or '' when the string is not a closed range of two or
+    more four-digit years.
+
+    Stage 4 sometimes writes the attendance as one string instead of a
+    start/end pair. Without this, `_year_awarded` had no end to fall back on
+    and read the first "<Month> <Year>" of the entry's whole text: the
+    attendance START, and the same year on every record the entry fans out
+    to (EYTHNB 48, #1700). A range's end is its latest year. A single date
+    ("1998-06", "May 1982"), an open range ("2019 - Present") or a
+    two-digit end ("2016-23") is left to the existing fallbacks."""
+    value = fields.get('dates_attended')
+    if not isinstance(value, str) or _OPEN_END_RE.search(value):
+        return ''
+    years = _ATTENDED_YEAR_RE.findall(value)
+    return max(years) if len(years) >= 2 else ''
 
 
 def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
@@ -361,7 +388,7 @@ class EducationSection:
             else:
                 dates = ''
             year_awarded, year_is_enriched = _year_awarded(
-                fields, end, raw_text, degree_named=_names_a_degree(_field_text(fields.get('degree'))),
+                fields, end or _string_dates_attended_end_year(fields), raw_text, degree_named=_names_a_degree(_field_text(fields.get('degree'))),
             )
 
             # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy
