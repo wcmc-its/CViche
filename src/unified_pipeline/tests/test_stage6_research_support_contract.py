@@ -3219,3 +3219,18 @@ def test_a_back_reference_takes_the_nearest_earlier_grant_with_its_number():
     resolve_grant_back_references(_back_reference_grants() + [retitled, see_above])
 
     assert see_above['extracted_fields']['title'] == 'Alpha Second Cycle Title (continuation)'
+
+
+def test_grant_end_date_reads_a_two_digit_year_against_as_of():
+    # yy reads as 20yy up to GRANT_END_YEAR_HORIZON years past as_of's year,
+    # so the same "06/30/37" is 2037 seen from 2030 and 1937 seen from 2026.
+    assert grant_end_date('06/30/37', date(2030, 1, 1)).year == 2037
+    assert grant_end_date('06/30/37', date(2026, 1, 1)).year == 1937
+
+
+def test_promotion_note_names_the_full_as_of_date():
+    entry = _under(['Grants'], code='M2B', title='Running Study', end_date='06/2028')
+    promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
+    assert entry['reclassification_note'] == (
+        f"Reclassified from Completed (M2B) to Current (M2A): end date 06/2028 "
+        f"is not before {TEST_AS_OF.isoformat()}")
