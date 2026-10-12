@@ -111,6 +111,15 @@ the `cv_owner` stage 6 already holds) and the words Date, Signature, Signed and
 the phrase "Signature of Candidate", with at least one of those words present. `_DATE_STAMP_RE` now also takes a numeric date, parentheses,
 and a full date alone on its line.
 
+#1714 widens the signature block. One that holds the word Signature or Signed
+is dropped on its text alone (`_signed_line_reason`), because 3b may call a bare
+"(Signature)" a "Structural placeholder"; one whose only signature word is Date
+still needs the reasoning. Before that shape and page furniture read a T line,
+an empty section's note ("None", "None at present", "N/A", "Not applicable")
+at either end of it is set aside (`_t_text_shape_reason`): stage 2 can join
+the note to the signature line after it. A note that is the whole line is
+dropped as `empty-section-note`; a note joined to a record keeps the line.
+
 Page furniture is the last T check (#1221, EBYSBC class E24): the source's
 running headers and footers, its Word field-code text, a lone "Page", revision
 stamps and "<SECTION> (Continued):" headers (`is_page_furniture`), plus a
@@ -304,6 +313,7 @@ DROP_RULE_LINE = "rule-line"
 DROP_SIGNATURE_BLOCK = "signature-block"
 DROP_PAGE_FURNITURE = "page-furniture"
 DROP_ON_REQUEST = "on-request"
+DROP_EMPTY_SECTION_NOTE = "empty-section-note"
 DROP_DATE_RANGE = "date-range"
 DROP_AMOUNT = "amount"
 DROP_REASONS = (
@@ -325,6 +335,7 @@ DROP_REASONS = (
     DROP_SIGNATURE_BLOCK,
     DROP_PAGE_FURNITURE,
     DROP_ON_REQUEST,
+    DROP_EMPTY_SECTION_NOTE,
     DROP_DATE_RANGE,
     DROP_AMOUNT,
 )
@@ -438,6 +449,20 @@ _SIGNATURE_REASONING_RE = re.compile(
 # "Candidate" and "of" count only inside this phrase, so "PhD Candidate, May 2019"
 # keeps its word "candidate" and is not a signature block.
 _SIGNATURE_PHRASE_RE = re.compile(r"\bsignature\s+of\s+candidate\b")
+# #1714 (NECRGC LWMSPJ 1043): a signature block that holds the word Signature or
+# Signed is dropped on its text alone, whatever 3b's reasoning calls it
+# ("Structural placeholder, no content"). A block whose only signature word is
+# Date still needs the reasoning signal: "Date" alone is the risky half. No
+# word boundary: `_is_signature_block` already admits no other word.
+_SIGNATURE_WORD_RE = re.compile(r"sign(?:ature|ed)", re.IGNORECASE)
+# #1714 (NECRGC QZCHAG 355): an empty section's note, which stage 2 can join to
+# the signature line after it ("None at present <owner>, PhD; <date>"). Under T
+# the note alone is dropped, and a note at either end of a line is set aside
+# before the signature and page-furniture shapes read the rest.
+_EMPTY_SECTION_NOTE = r"(?:none(?:\s+at\s+present)?|n/a|not\s+applicable)"
+_NOTE_SEPARATORS = r"[\s.;:,\-–—]"
+_LEADING_EMPTY_NOTE_RE = re.compile(rf"^{_EMPTY_SECTION_NOTE}\b{_NOTE_SEPARATORS}*", re.IGNORECASE)
+_TRAILING_EMPTY_NOTE_RE = re.compile(rf"{_NOTE_SEPARATORS}+{_EMPTY_SECTION_NOTE}\.?$", re.IGNORECASE)
 _SIGNATURE_VOCAB = frozenset({"date", "signature", "signed"})
 _SIGNATURE_DATE_RE = re.compile(rf"{_FULL_DATE}|{_MONTH_YEAR}", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"_+")
@@ -822,6 +847,31 @@ def _is_furniture_words(stripped: str, owner_tokens: OwnerTokens) -> bool:
                   or _PAGE_NUMBER_RE.fullmatch(word) or _is_fused_initials(word, owner_tokens)):
             return False
     return evidence
+
+
+def _signed_line_reason(text: str, owner_tokens: OwnerTokens) -> str | None:
+    """`DROP_SIGNATURE_BLOCK` when *text* is a signature block
+    (`_is_signature_block`) that holds the word Signature or Signed, on its
+    text alone (#1714), else None."""
+    if _SIGNATURE_WORD_RE.search(text) and _is_signature_block(text, owner_tokens):
+        return DROP_SIGNATURE_BLOCK
+    return None
+
+
+def _t_text_shape_reason(text: str, owner_tokens: OwnerTokens) -> str | None:
+    """The reason a T line is dropped on its text alone, else None: a
+    signature block holding the word Signature or Signed (`_signed_line_reason`),
+    page furniture or "available on request" (`_furniture_reason`).
+
+    An empty section's note ("None", "None at present", "N/A", "Not
+    applicable") at either end of the line is set aside first (#1714): it is
+    `DROP_EMPTY_SECTION_NOTE` when it is the whole line, and otherwise the
+    shapes read the rest. A note joined to a record keeps the line ("None at
+    present; manuscript in preparation")."""
+    rest = _TRAILING_EMPTY_NOTE_RE.sub("", _LEADING_EMPTY_NOTE_RE.sub("", text.strip())).strip()
+    if not rest:
+        return DROP_EMPTY_SECTION_NOTE
+    return _signed_line_reason(rest, owner_tokens) or _furniture_reason(rest, owner_tokens)
 
 
 def _furniture_reason(text: str, owner_tokens: OwnerTokens) -> str | None:
@@ -1372,7 +1422,9 @@ def _appendix_drop_reason(
     shape recognise "Signed: <owner>" (#1221); empty skips that recognition.
     A T entry nothing above caught last meets `_furniture_reason` (#1221):
     page furniture, which also reads *owner_tokens* for a running header, and
-    "References available on request". A bare date range or amount needs the
+    "References available on request", and a signature block that holds the
+    word Signature or Signed, both read once an empty section's note at either
+    end of the line is set aside (`_t_text_shape_reason`, #1714). A bare date range or amount needs the
     rendered document, so `_drop_shown_record_tails` decides it after this
     check has kept the line (#1551).
     """
@@ -1406,7 +1458,7 @@ def _appendix_drop_reason(
     # entries nothing else caught reach the two-signal residual test.
     if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
         return (_confirmed_structural_reason(text, reasoning, owner_tokens)
-                or _furniture_reason(text, owner_tokens))
+                or _t_text_shape_reason(text, owner_tokens))
     return reclassified_structural_reason(text, reasoning, owner_tokens)
 
 
