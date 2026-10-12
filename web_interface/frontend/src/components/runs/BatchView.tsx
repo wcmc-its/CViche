@@ -43,11 +43,12 @@ export function timeLeftText(counts: BatchStatusCounts, lane: QueueLane | null):
   return parts.join(' ')
 }
 
-/** "N files didn't upload, so they aren't in this batch." when runs fall short of the files sent. */
+/** "N files in this batch have no run." when runs fall short of the files sent. Not "didn't
+ *  upload": a file can reach storage and still fail to become a run (#802). */
 export function missingFilesNote(batch: Pick<BatchDetail, 'run_count' | 'files_submitted'>): string {
   const n = batch.files_submitted - batch.run_count
   if (n <= 0) return ''
-  return n === 1 ? "1 file didn't upload, so it isn't in this batch." : `${n} files didn't upload, so they aren't in this batch.`
+  return n === 1 ? '1 file in this batch has no run.' : `${n} files in this batch have no run.`
 }
 
 interface Loaded {

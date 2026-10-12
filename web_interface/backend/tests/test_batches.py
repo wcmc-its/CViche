@@ -237,6 +237,22 @@ def test_create_batch_reraises_a_foreign_key_violation_at_once(db, monkeypatch):
     assert len(commits) == 1
 
 
+def test_create_batch_retries_a_one_off_1020_on_the_insert(client, db, seed_simple_mode, write_conflict_on_insert):
+    """#1285 (2026-10-02, "Submit 40 CVs" got a 500): MariaDB rejecting the
+    run_batches INSERT once with 1020 is retried in a fresh transaction, so
+    POST /batches answers 200 with a stored batch."""
+    user = _make_user(db)
+    _auth(client, user)
+    attempts = write_conflict_on_insert("run_batches")
+
+    resp = client.post("/api/batches", json={"files_submitted": 2})
+
+    assert resp.status_code == 200, resp.text
+    assert len(attempts) == 2
+    db.expire_all()
+    assert db.get(RunBatch, resp.json()["id"]).files_submitted == 2
+
+
 # --- GET /batches and GET /batches/{id}: visibility ---------------------------
 
 @pytest.mark.parametrize("viewer_role", ["admin", "staff"])

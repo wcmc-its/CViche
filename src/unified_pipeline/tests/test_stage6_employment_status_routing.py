@@ -26,7 +26,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.sections.passthrough import PassthroughSection  # noqa: E402
+from unified_pipeline.stage6.sections.passthrough import (
+    PassthroughSection,  # noqa: E402
+)
 from unified_pipeline.stage_6_word_template import TEMPLATE_PATH  # noqa: E402
 
 

@@ -40,7 +40,6 @@ from unified_pipeline.doctor.lints.protected_data import (
     _APPENDIX_SECTION,
     _BARE_DATE_RE,
     _DEA_LABEL_PRESENT_RE,
-    _DEA_NUMBER_VALUE_RE,
     _DEA_VALUE_RE,
     _HOME_CONTACT_LABEL_ONLY_RE,
     _HOME_CONTACT_LABEL_RE,
@@ -50,6 +49,7 @@ from unified_pipeline.doctor.lints.protected_data import (
     _is_licensure_section,
     _scan_scope,
     _section_label,
+    _unlabelled_dea_matches,
     lint_protected_data_in_output,
 )
 from unified_pipeline.doctor.shared import docx_body_blocks
@@ -61,7 +61,10 @@ from unified_pipeline.stage6.normalization.pii import (
     _pii_matches,
 )
 from unified_pipeline.stage6.normalization.records import _is_citation_shaped
-from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE, WITHHELD_COMMENT_AUTHOR
+from unified_pipeline.stage6.pii_pass import (
+    PII_REDACTED_NOTICE,
+    WITHHELD_COMMENT_AUTHOR,
+)
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentType
@@ -158,8 +161,10 @@ def _leaks(text: str, section: str | None, dea_label_in_block: bool) -> list[_Le
     if _is_licensure_section(section):
         # The lint gates the loose DEA shape on its BLOCK naming DEA (#1217);
         # in a table the label sits in another cell, so the gate is the block's.
-        probe = _DEA_VALUE_RE if dea_label_in_block else _DEA_NUMBER_VALUE_RE
-        leaks += [_Leak(m.start(), m.end(), CAT_DEA) for m in probe.finditer(text)]
+        # Unlabelled, a match needs the DEA check digit too (#1658).
+        matches = (_DEA_VALUE_RE.finditer(text) if dea_label_in_block
+                   else _unlabelled_dea_matches(text))
+        leaks += [_Leak(m.start(), m.end(), CAT_DEA) for m in matches]
     return leaks
 
 

@@ -90,17 +90,22 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
-from unified_pipeline.stage6.sections import memberships as memberships_module  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+)
+from unified_pipeline.stage6.sections import (
+    memberships as memberships_module,  # noqa: E402
+)
 from unified_pipeline.stage6.sections.memberships import (  # noqa: E402
     MembershipsRowShapeError,
+    _classify_part,
     _entry_parts,
     _organization_fallback,
     _split_trailing_dates,
     _type_already_named,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # Genuinely multi-line, farm-derived shape (2071_Zuschlag_Cv's actual I
 # entry): entry_lines already returns >1 part, each carrying its own unsplit
@@ -1124,3 +1129,19 @@ def test_start_only_membership_keeps_present_without_an_open_dash():
     }
     rows = _render_memberships([entry])
     assert [row[1] for row in rows] == ["1981-Present"]
+
+
+# --- #665: the split gate reads dates with the parser's own rule -------------
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_split_gate_reads_every_dash_as_a_date_like_the_parser(dash):
+    # The gate's restated copy took a hyphen only, so an en/em-dash range was
+    # an "organization" to the gate while the parser it guards read a date.
+    assert _classify_part(f"2010{dash}2014") == "date"
+    assert _classify_part(f"3/2010{dash}present") == "date"
+
+
+@pytest.mark.parametrize("end", ["present", "current", "ongoing"])
+def test_trailing_dates_lift_every_open_end_word(end):
+    assert _split_trailing_dates(f"Society of Zorblax, 2010-{end}") == (
+        "Society of Zorblax", f"2010-{end}")

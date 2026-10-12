@@ -47,9 +47,8 @@ _SRC = Path(__file__).resolve().parents[1]  # src/unified_pipeline
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from docx import Document  # noqa: E402
-
 from core.docx_structure_extractor import extract_unified_elements  # noqa: E402
+from docx import Document  # noqa: E402
 
 
 def _build_merged_subheader_docx(path: str) -> None:

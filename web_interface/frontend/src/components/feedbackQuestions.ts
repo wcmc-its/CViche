@@ -72,3 +72,17 @@ export const RATING_SCALES = {
   summary_quality: QUALITY_5,
   likelihood_to_recommend: { min: 1, max: 5, lowLabel: 'Not at all likely', highLabel: 'Extremely likely' },
 } as const satisfies Record<string, RatingScale>
+
+// ---------------------------------------------------------------------------
+// "Help improve CViche" (#1587): optional, collapsed by default
+// ---------------------------------------------------------------------------
+
+export const HELP_IMPROVE = {
+  heading: 'Help improve CViche',
+  intro: "If you corrected the WCM document, send us your copy. Comparing it with ours shows us what CViche got wrong.",
+  correctedIntro: "Tracked changes are fine; you don't need to accept them first.",
+  correctedTitle: 'Drop your corrected .docx here',
+  correctedHint: 'Word (.docx) only',
+  correctedPrivacy:
+    "Your corrected file is kept with this run's other files and deleted with them. Only change counts and positions are used to measure CViche's accuracy, not the text of your CV.",
+} as const

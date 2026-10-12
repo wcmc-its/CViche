@@ -1,0 +1,689 @@
+"""The finished document with the run doctor's findings flagged for review (#1388 C).
+
+A reviewer sees each WARN or ERROR finding as a short Word comment on the text
+it is about: the year that looks wrong, the second copy of a duplicate. A
+finding with no one place in the document (a citation PubMed could not match,
+an entry removed as a near-duplicate, a step that fell back) is an item in the
+review-notes box closing the document, grouped by what to do about it. Where
+the Appendix entries came from goes in stage 6's own Appendix note box; how
+many entries meant for a section went there is a comment on that section's
+heading. The clean document is left as it is; this writes a copy beside it.
+
+Precision gate (#1589): a finding is marked on the text only when its lint
+(or message shape) is right at least half the time by doctor/PRECISION.md
+(`precision.shown_in_place`). A less certain finding is a review note, so a
+false alarm never sits on correct text.
+
+Every run's copy is written, even with nothing to flag: the box always closes
+with what CViche does not check, since a quiet doctor is not a clean document.
+
+One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
+is commented whatever its severity, but only on the text it quotes, never on
+a heading or as a review note. It is a possibility to check, not a problem.
+The other, source_line_coverage (#1588), quotes source text the document may
+have lost, so it has no place on the page: each quoted line is a review note.
+grant_facts (#1588) takes citation_grounding's path: a comment on the grant's
+title in its table, whatever its severity.
+
+A finding whose fix is certain is not a comment but the fix itself, as a
+Word tracked change: accepting it gives the corrected text, rejecting it the
+delivered text (#1591). Which findings qualify is the "Repair tiers" table in
+doctor/PRECISION.md; today one does, owner_pi_role_empty ("PI" in an empty
+"Your role:" cell beside a PI cell naming the CV owner).
+
+Beside the copy, `<uid>_wcm_review_comments.json` names the finding each
+comment marks (lint, shape, severity, entry index; `CommentFinding`), so the
+fate of each comment in a reviewer's corrected copy is a verdict on that
+finding (#1654, review_loop_service).
+"""
+import copy
+import json
+import re
+import zipfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.oxml.xmlchemy import BaseOxmlElement
+from docx.text.paragraph import Paragraph
+from docx.text.run import Run
+from lxml.etree import XMLSyntaxError
+
+from app.schemas import DoctorFindingInstance
+from app.services.artifact_service import REVIEW_DOCX_SUFFIX
+from app.services.run_quality_report import (
+    _ENTRY_INDEX_RE,
+    LINT_COPY,
+    REVIEW_COPY_ONLY_LINTS,
+    TRUNCATION_MARK,
+    _instance,
+    _usable_findings,
+)
+from unified_pipeline.core.text_norm import squash  # noqa: E402
+from unified_pipeline.doctor.blind_spots import blind_spots  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    DEDUP_TEXT_CHARS,
+    ROLE_SHAPE_OWNER_PI_ROLE_EMPTY,
+    owner_pi_role_empty_tables,
+)
+from unified_pipeline.doctor.precision import (  # noqa: E402
+    LintPrecision,
+    ShapeKey,
+    finding_shape,
+    load_gate_ledger,
+    shown_in_place,
+)
+from unified_pipeline.doctor.shared import docx_table_rows  # noqa: E402
+from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    add_cviche_box,
+    cviche_box_group,
+    cviche_box_item,
+    cviche_box_pair,
+    cviche_box_text,
+    space_around_cviche_box,
+)
+from unified_pipeline.stage6.sections.bibliography import (  # noqa: E402
+    TRACKED_INSERTION_FONT_NAME,
+    TRACKED_INSERTION_FONT_SIZE_HALF_POINTS,
+)
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    YOUR_ROLE_LABEL,
+)
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+
+#: What reading or writing a docx raises: quality_score's ``_load_docx`` set,
+#: plus PackageNotFoundError, which python-docx raises for a file that is not a zip.
+REVIEW_DOCX_ERRORS = (OSError, zipfile.BadZipFile, KeyError, ValueError, XMLSyntaxError,
+                      PackageNotFoundError)
+COMMENT_AUTHOR = "CViche check"
+#: The review copy's comment-to-finding map (`CommentFinding`), beside it:
+#: `<uid>_wcm_review_comments.json`.
+COMMENT_MAP_SUFFIX = "_comments.json"
+COMMENT_INITIALS = "CV"
+COMMENTED_SEVERITIES = ("ERROR", "WARN")
+#: Flags one lint may put in one document. A lint can fire hundreds of times.
+MAX_FLAGS_PER_LINT = 25
+
+#: What a reviewer reads, on the text it is about. Short, and an instruction
+#: where there is one. Every lint the run page words (LINT_COPY) has one.
+REVIEW_FLAGS = {
+    "segmentation": "Text from the original CV may be missing or merged here.",
+    "missed_headers": "This was a section heading in the original CV.",
+    "bucket_status": "Grant is under the wrong funding heading.",
+    "under_extraction": "Much of this entry was not read. Check it against the original CV.",
+    "classified_unrendered": "Entries from the original CV are missing here.",
+    "taxonomy_code_coverage": "Sent to the Appendix: move it to the right section.",
+    "stage3b_fallback_ratio": "Some entries may be in the wrong section.",
+    "output_hygiene": "Stray text: delete it.",
+    "dead_sections": "This section is empty, but the original CV has entries for it.",
+    "unrendered_records": "Part of this entry is missing.",
+    "section_lost": "Entries from the original CV are missing from this section.",
+    "enrichment_failures": "Not found in PubMed: check this citation.",
+    "stage6_render_warnings": "Check this section.",
+    "dedup_drops": "An entry was removed as a near-duplicate.",
+    "pipe_leaks": "Citations run together: split them.",
+    "table_shape": "One award split across rows: merge them.",
+    "duplicate_passages": "Repeated: delete this copy.",
+    "duplicate_records": "Duplicate: delete this copy.",
+    "protected_data_in_output": "Protected personal data: delete it.",
+    "invented_records": "Not in the original CV: check it or delete it.",
+    "wrong_start_date": "Shows Present, but the original has an end date.",
+    "table_lost": "A table from the original CV is mostly missing.",
+    "date_only_lines": "A date on its own line: join it to its entry.",
+    "stage3b_second_pass_error": "Some entries may be in the wrong section.",
+    "offschema_fields": "Entries from the original CV are missing from this section.",
+    "implausible_year": "Year looks wrong.",
+    "stage4_group_failures": "Some entries may be missing details.",
+    "python_repr_in_output": "Raw data code: replace it with plain text.",
+    "llm_refusal_in_output": "Not CV text: delete it.",
+    "llm_fallback_served": "A backup AI model wrote part of this document: check it.",
+    "stage_failure_recorded": "A processing step failed: content may be missing.",
+    "owner_missing_from_citation": "The CV owner's name is missing from these authors.",
+    "etal_added": 'Authors cut to "et al.": restore the full list.',
+    "multi_record_coverage": "Several entries merged into one: split them.",
+    "year_not_in_source": "This year is not in the original CV.",
+    "date_cell_shape": "Date looks wrong.",
+    "junk_or_header_row": "A heading printed as an entry: delete it.",
+    "teaching_postcheck": "Reworded wrongly: check it against the original CV.",
+    "contact_slot_lost": "Office contact details are missing.",
+    "pubmed_title_truncated": "Title cut short: complete it.",
+    "enrichment_pubtype_mismatch": "Replaced by a correction notice: restore the original citation.",
+    "section_consistency": "Probably in the wrong section.",
+    "segmentation_collapse": "Sections of the original CV were not found: content may be misplaced.",
+    "owner_contact_missing": "The CV owner's name was not found.",
+    "pipeline_errors_present": "Processing error: content may be missing.",
+    "no_output": "No document was produced.",
+    "grant_boundary": "These details belong to the grant before or after.",
+    "grant_bucket": "Grant is under the wrong funding heading.",
+    "research_summary_call_failed": "The research summary is missing.",
+    "span_count": "Separate years shown as one range.",
+    "role_consistency": "Wrong principal investigator or role.",
+    "fanout_cell_residue": "Leftover text: delete it.",
+    "identical_rendered_rows": "Same as another row: delete one.",
+    "split_child_unsourced": "Place or dates come from another entry.",
+    "record_boundary": "This line belongs to the entry before.",
+    "citation_field_dropped": 'Title, link or "..." missing from this citation.',
+    "group_header_context": "Lost the heading it sat under.",
+    "orphaned_fragments": "Text from the original CV may be missing from this entry.",
+    "stage4_unplaced_items": "Records from the original CV are missing from this section.",
+    "summary_unsupported_claim": "The summary says something the original CV does not: check it.",
+    "owner_attribution": "May be someone else's work, not yours: check it.",
+    "citation_grounding": ("This rewritten citation may name an author, an initial or a meeting "
+                           "number that the line in the original CV does not. Check it against the CV."),
+    "shattered_prose": ("One paragraph split at its printed lines, with words from a neighbouring "
+                        "column mixed in: check it against your CV."),
+    "source_line_coverage": ("This line from your CV may be missing from this document, or only "
+                             "partly here. Check it and add it where it belongs."),
+    "appointment_title_overlong": "This title holds the duties as well as the role: keep only the role.",
+    "licensure_fallback_truncated": "Text cut short: complete it from your CV.",
+    "footer_in_record": ("This entry may hold a page footer from your CV, such as a month and "
+                         "year: check its date against the CV."),
+    "glyph_field": "A bullet symbol is shown here instead of a value: fill it in from your CV.",
+    "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
+                    "your CV gives is missing, or one shown here is not in this grant's entry. "
+                    "Check it against the CV."),
+}
+#: The certain fix for owner_pi_role_empty (Repair tiers, doctor/PRECISION.md):
+#: the owner named as PI has the PI role. Inserted as a tracked change.
+OWNER_PI_ROLE_FIX = "PI"
+#: The role_consistency message token that names the shape the fix repairs.
+_OWNER_PI_ROLE_TOKEN = f"({ROLE_SHAPE_OWNER_PI_ROLE_EMPTY},"
+#: Review-notes group titles where the run page's title is internal wording.
+NOTE_TITLES = {"output_hygiene": "Stray text to delete",
+               "source_line_coverage": "Text from your CV that may be missing"}
+#: A review-copy-only lint whose quotes are source text the page does not hold.
+MISSING_SOURCE_LINT = "source_line_coverage"
+#: Said after a finding the precision gate kept off the text (#1589).
+LESS_CERTAIN_NOTE = "This check is often wrong, so it is listed here, not marked in the text."
+#: An Appendix diversion, on the heading of the section it was meant for.
+#: The count is the run page's; the Appendix group headings say where each came from.
+DIVERSION_FLAG = "{count} meant for this section {verb} in the Appendix: move any that belong here."
+#: What every diversion comment ends with, whatever its count.
+_DIVERSION_FLAG_TAIL = DIVERSION_FLAG.split("{verb}", 1)[1]
+#: The same, as a review note naming the section, under its own group title
+#: (the run page's "Document builder warnings" is internal wording).
+DIVERSION_TITLE = "Entries placed in the Appendix"
+DIVERSION_NOTE = "Entries meant for this section are in the Appendix: move any that belong there."
+#: The same, for a diversion naming no section of this document.
+DIVERSION_UNPLACED_NOTE = "Some entries are in the Appendix: move any that belong in a section."
+#: The review notes' last group, on every copy: what the doctor cannot see,
+#: one item per BLIND cell of doctor/COVERAGE.md (`blind_spots()`, #1588).
+NOT_CHECKED_TITLE = "What CViche does not check"
+NOT_CHECKED_INSTRUCTION = ("CViche cannot see these problems, or sees only some of them. "
+                           "Check them yourself against your original CV:")
+PROTECTED_DATA_LINT = "protected_data_in_output"
+#: protected_data_in_output names a category and a section, never the value:
+#: "protected personal data (children / dependents) found in Appendix -- value withheld ...".
+#: Also "a bare date found in the Personal Data block".
+_PROTECTED_WHERE_RE = re.compile(r"(?:\((?P<category>[^)]+)\)|(?P<bare>a bare date)) found in "
+                                 r"(?:the )?(?P<section>.+?)(?: block)?(?:\s+--|$)")
+#: The lint stage 6's Appendix diversions arrive under (lint_stage6_warnings).
+DIVERSION_LINT = "stage6_render_warnings"
+#: Lints whose every quoted item is its own problem, each flagged where it is.
+EACH_ITEM_LINTS = frozenset({
+    "duplicate_records", "duplicate_passages", "pipe_leaks", "enrichment_failures",
+    "stage6_render_warnings", "dedup_drops",
+})
+#: Lints that quote a record printed twice: the later copy is the one to delete.
+REPEAT_LINTS = frozenset({"duplicate_records", "duplicate_passages"})
+#: Lints whose problem is one year their detail names ("end_date=1912").
+YEAR_LINTS = frozenset({"implausible_year", "year_not_in_source"})
+_YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
+#: dedup_drops evidence, "[entry N: ]K1 (jaccard=1.00, 89% covered by kept): dropped '<x>' vs
+#: kept '<y>'" (doctor _drop_evidence); the run page may mark it cut with a trailing ellipsis.
+_DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
+                       r"dropped '(?P<dropped>.*)' vs kept '(?P<kept>.*)'\u2026?$")
+#: stage 6's appendix_diversion messages, after the code prefix the run page
+#: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
+_DIVERTED_RE = re.compile(r"(?P<count>\d+) (?P<noun>entr(?:y|ies))\b[^.]*?(?:diverted to|recovered into) the Appendix")
+#: The review notes are a CViche box (stage6/formatting add_cviche_box), the
+#: same kind as stage 6's Appendix note.
+REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
+DEDUP_TITLE = "Removed as near-duplicates"
+DEDUP_INSTRUCTION = ("We kept one copy of each. If any of these is a separate entry, "
+                     "add it back in the section shown.")
+
+#: Squashed characters of a quote matched against the output. Long enough that
+#: a hit is that passage, short enough to survive the doctor's own cuts.
+QUOTE_PROBE_CHARS = 40
+#: Shorter quotes ("PI", a year) would anchor on the first paragraph holding them.
+MIN_QUOTE_CHARS = 12
+#: Squashed length past which a paragraph is a record, not a heading.
+MAX_HEADING_CHARS = 100
+#: The doctor's locator before output text in a note: "block 337 repeats at 338: ".
+_NOTE_LOCATOR_RE = re.compile(r"^(?:entry|row|blocks?|element_idx_start|stage) \d[^:]{0,40}:\s*")
+#: pipe_leaks evidence names its section in brackets: "[bibliography] 93. ...".
+_BRACKET_LOCATOR_RE = re.compile(r"^\[[^\]]{1,40}\]\s*")
+_CODE_BY_LABEL = {label: code for code, label in TAXONOMY_LABELS.items()}
+#: Top-level template headings for the codes stage 6's heading map leaves blank
+#: (it routes no overflow there). Substrings, matched as stage 6 matches its own.
+_TOP_LEVEL_HEADINGS = {
+    "A": "PERSONAL DATA", "B": "EDUCATION", "C": "POSTDOCTORAL",
+    "D": "PROFESSIONAL POSITIONS", "E": "EMPLOYMENT STATUS", "F": "LICENSURE",
+    "G": "INSTITUTIONAL/HOSPITAL", "I": "PROFESSIONAL ORGANIZATIONS",
+    "J": "PERCENT EFFORT", "T": "APPENDIX",
+}
+_APPENDIX_CODE = "T"
+_XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+
+
+@dataclass(frozen=True)
+class Flag:
+    """One comment: the paragraph it sits on, the span of its text it covers
+    (all of it when None) and what it says."""
+    paragraph: Paragraph
+    span: tuple[int, int] | None
+    text: str
+
+
+@dataclass(frozen=True)
+class Note:
+    """One item in the review-notes box, under the group its title and
+    instruction name. ``removed`` and ``kept`` are a near-duplicate's two copies."""
+    title: str
+    instruction: str
+    item: str | None = None
+    removed: str | None = None
+    kept: str | None = None
+
+
+@dataclass(frozen=True)
+class CommentFinding:
+    """Which finding one review-copy comment marks, by the comment's id in
+    the copy as written: what reading a reviewer's corrected copy needs to
+    turn the comment's fate into a verdict on that finding (#1654). Lint,
+    message shape, severity and entry index only; no text."""
+    comment_id: int
+    lint: str
+    shape: str | None
+    severity: str | None  # None for a finding read from a comment's wording alone
+    entry_index: int | None
+
+
+def lint_of_flag(text: str) -> str | None:
+    """The lint a comment's wording names, for a review copy written before
+    its comment map (#1654); None when no lint, or more than one, words it so."""
+    lints = [lint for lint, flag in REVIEW_FLAGS.items() if flag == text]
+    if len(lints) == 1:
+        return lints[0]
+    return DIVERSION_LINT if text.endswith(_DIVERSION_FLAG_TAIL) else None
+
+
+def review_docx_path(clean_docx: Path) -> Path:
+    """Where the flagged copy of ``<uid>_wcm.docx`` is written."""
+    return clean_docx.with_name(clean_docx.name.removesuffix("_wcm.docx") + REVIEW_DOCX_SUFFIX)
+
+
+def comment_map_path(review_docx: Path) -> Path:
+    """Where the review copy's `CommentFinding` list is written, beside it."""
+    return review_docx.with_name(review_docx.name.removesuffix(".docx") + COMMENT_MAP_SUFFIX)
+
+
+def _comment_finding(comment_id: int, finding: dict,
+                     rows: dict[ShapeKey, LintPrecision]) -> CommentFinding:
+    message = str(finding.get("message") or "")
+    entry = _ENTRY_INDEX_RE.match(message)
+    return CommentFinding(comment_id, finding["lint"], finding_shape(finding["lint"], message, rows),
+                          finding["severity"], int(entry.group(1)) if entry else None)
+
+
+def _paragraph_text(p: Paragraph) -> str:
+    # ponytail: w:t only, so a tracked insertion (enrichment) counts and a
+    # tracked deletion (w:delText) does not; Paragraph.text skips w:ins runs.
+    return "".join(t.text or "" for t in p._p.iter(qn("w:t")))
+
+
+def _norm(text: str) -> str:
+    """squash, with curly quotes straightened: a source "pharmacist’s" is a
+    rendered "pharmacist's" once PubMed or stage 5d has rewritten the citation."""
+    return squash(text).translate(_QUOTES)
+
+
+def _probes(text: str) -> list[str]:
+    """Squashed windows of a quote: its start, middle and end, since stage 6
+    reformats the source text a quote was taken from (labels, date forms)."""
+    text = _BRACKET_LOCATOR_RE.sub("", _NOTE_LOCATOR_RE.sub("", text))
+    s = _norm(text.removesuffix(TRUNCATION_MARK))
+    if len(s) < MIN_QUOTE_CHARS:
+        return []
+    starts = {0, max(0, len(s) // 2 - QUOTE_PROBE_CHARS // 2), max(0, len(s) - QUOTE_PROBE_CHARS)}
+    return [s[i:i + QUOTE_PROBE_CHARS] for i in sorted(starts)]
+
+
+def _find(text: str, surfaces: tuple[list[tuple[Paragraph, str]], ...],
+          later_copy: bool = False) -> Paragraph | None:
+    """The paragraph holding ``text``: searched paragraph by paragraph, then
+    table row by table row (a record printed across cells). A quote's start
+    is its own (a repeated record matches twice; ``later_copy`` takes the
+    second); a window from its middle or end recurs across records, so it
+    only counts when unique."""
+    for surface in surfaces:
+        for n, probe in enumerate(_probes(text)):
+            hits = [p for p, body in surface if probe in body]
+            if hits and (n == 0 or len(hits) == 1):
+                return hits[1] if later_copy and len(hits) > 1 else hits[0]
+    return None
+
+
+def _rows(doc: Document) -> list[tuple[Paragraph, str]]:
+    """Each table row as one squashed text, anchored on the row's first paragraph."""
+    rows = []
+    for tr in doc.element.body.iter(qn("w:tr")):
+        first = next(tr.iter(qn("w:p")), None)
+        if first is not None:
+            rows.append((Paragraph(first, doc._body), _norm("".join(t.text or "" for t in tr.iter(qn("w:t"))))))
+    return rows
+
+
+def _heading(code: str, paragraphs: list[tuple[Paragraph, str]]) -> Paragraph | None:
+    """The template heading stage 6 files ``code``'s records under, found by
+    stage 6's own rule (_find_paragraph_with_text), kept to heading-length paragraphs."""
+    text = squash(WCMTemplateGenerator._get_wcm_section_header(code)
+                  or _TOP_LEVEL_HEADINGS.get(code[:1], ""))
+    if not text:
+        return None
+    return next((p for p, body in paragraphs if text in body and len(body) <= MAX_HEADING_CHARS), None)
+
+
+def _year_span(lint: str, detail: str, para: Paragraph) -> tuple[int, int] | None:
+    """The span of the year a year lint's detail names, when the paragraph prints it."""
+    year = _YEAR_RE.search(detail) if lint in YEAR_LINTS else None
+    at = _paragraph_text(para).find(year.group(0)) if year else -1
+    return (at, at + len(year.group(0))) if year and at >= 0 else None
+
+
+def _item_flags(lint: str, inst: DoctorFindingInstance, label: str,
+                surfaces: tuple[list[tuple[Paragraph, str]], ...]) -> list[Flag]:
+    """Flags on the quoted text itself: every item for EACH_ITEM_LINTS, else the first found."""
+    flags: list[Flag] = []
+    for item in [*inst.quotes, *inst.notes]:
+        para = _find(item, surfaces, later_copy=lint in REPEAT_LINTS)
+        if para is not None and all(f.paragraph is not para for f in flags):
+            flags.append(Flag(para, _year_span(lint, inst.detail, para), label))
+            if lint not in EACH_ITEM_LINTS:
+                break
+    return flags
+
+
+def _quoted(text: str) -> str:
+    """A dedup text in quotes, marked cut when it is as long as the doctor quotes."""
+    cut = TRUNCATION_MARK if len(text) >= DEDUP_TEXT_CHARS else ""
+    return f'"{text.strip()}{cut}"'
+
+
+def _dedup_notes(inst: DoctorFindingInstance) -> list[Note]:
+    """One note per entry dedup removed: its section, what went and what stayed."""
+    notes = []
+    for item in [*inst.quotes, *inst.notes]:  # "entry N: ..." reads as a note
+        m = _DEDUP_RE.search(item)
+        if m is not None:
+            notes.append(Note(DEDUP_TITLE, DEDUP_INSTRUCTION, TAXONOMY_LABELS.get(m["code"]),
+                              _quoted(m["dropped"]), _quoted(m["kept"])))
+    return notes or [Note(DEDUP_TITLE, DEDUP_INSTRUCTION)]
+
+
+def _diversion(code: str, inst: DoctorFindingInstance,
+               paragraphs: list[tuple[Paragraph, str]]) -> list[Flag]:
+    """An Appendix diversion from section ``code``: a comment on that
+    section's heading, saying how many entries went. Empty where the section
+    has no heading."""
+    m = _DIVERTED_RE.search(inst.detail)
+    heading = _heading(code, paragraphs)
+    if heading is None or m is None:
+        return []
+    verb = "is" if m["noun"] == "entry" else "are"
+    return [Flag(heading, None, DIVERSION_FLAG.format(count=f"{m['count']} {m['noun']}", verb=verb))]
+
+
+def _note_title(lint: str) -> str:
+    """A review-notes group title: the run page's, unless that is internal wording."""
+    copy_ = LINT_COPY.get(lint)
+    return NOTE_TITLES.get(lint) or (copy_.title if copy_ else lint)
+
+
+def _less_certain(lint: str, inst: DoctorFindingInstance) -> list[Note]:
+    """A finding the precision gate keeps off the text, as a review note: its
+    run-page title, its flag and why it is here. A possibility (a
+    REVIEW_COPY_ONLY_LINTS lint) is never a note. A finding with no section
+    or quote to name is still listed, without an item: off the text, the box
+    is the only place the copy says it."""
+    if lint in REVIEW_COPY_ONLY_LINTS:
+        return []
+    if _diversion_code(lint, inst) is not None:
+        return [_diversion_note(lint, inst, f" {LESS_CERTAIN_NOTE}")]
+    return [Note(_note_title(lint), f"{REVIEW_FLAGS.get(lint, inst.detail)} {LESS_CERTAIN_NOTE}",
+                 _note_item(lint, inst))]
+
+
+def _diversion_note(lint: str, inst: DoctorFindingInstance, suffix: str = "") -> Note:
+    """An Appendix diversion as a review note naming its section; one naming
+    no section says only that entries are in the Appendix."""
+    item = _note_item(lint, inst)
+    return Note(DIVERSION_TITLE, f"{DIVERSION_NOTE if item else DIVERSION_UNPLACED_NOTE}{suffix}", item)
+
+
+def _diversion_code(lint: str, inst: DoctorFindingInstance) -> str | None:
+    """The section code a stage-6 Appendix diversion names ("" when it names
+    none); None when the finding is not a diversion."""
+    if lint != DIVERSION_LINT or _DIVERTED_RE.search(inst.detail) is None:
+        return None
+    return _CODE_BY_LABEL.get(inst.section or "", "")
+
+
+def _flags(finding: dict, surfaces: tuple[list[tuple[Paragraph, str]], ...],
+           rows: dict[ShapeKey, LintPrecision]) -> tuple[list[Flag], list[Note]]:
+    """Where one finding goes: a comment on its quoted text; else on its
+    section's heading; else a review note saying what and where it was. A
+    near-duplicate is always a note, since what it removed is not on the page,
+    and so is a finding the precision gate keeps off the text."""
+    lint, inst = finding["lint"], _instance(finding)
+    if lint == "dedup_drops":
+        return [], _dedup_notes(inst)
+    if lint == MISSING_SOURCE_LINT:  # never on the page, so never gated: a note per line
+        return [], [Note(NOTE_TITLES[lint], REVIEW_FLAGS[lint], f'"{quote}"') for quote in inst.quotes]
+    diverted_from = _diversion_code(lint, inst)
+    if diverted_from == _APPENDIX_CODE:  # stage 6's Appendix note explains these
+        return [], []
+    if not shown_in_place(lint, str(finding.get("message") or ""), rows):
+        return [], _less_certain(lint, inst)
+    if diverted_from is not None:  # no heading to sit on: a note, never nothing
+        flags = _diversion(diverted_from, inst, surfaces[0])
+        return (flags, []) if flags else ([], [_diversion_note(lint, inst)])
+    label = REVIEW_FLAGS.get(lint, inst.detail)
+    flags = _item_flags(lint, inst, label, surfaces)
+    if flags or lint in REVIEW_COPY_ONLY_LINTS:  # a possibility, so only on the citation itself
+        return flags, []
+    heading = _heading(_CODE_BY_LABEL.get(inst.section or "", ""), surfaces[0])
+    if heading is not None:
+        return [Flag(heading, None, label)], []
+    item = _note_item(lint, inst)
+    if item is None:  # nothing to point the submitter at: it stays on the run page
+        return [], []
+    return [], [Note(_note_title(lint), label, item)]
+
+
+def _note_item(lint: str, inst: DoctorFindingInstance) -> str | None:
+    """What a review note points at: its section and quoted text; for
+    protected data, its section and category (the finding never quotes the value)."""
+    if lint == PROTECTED_DATA_LINT:
+        m = _PROTECTED_WHERE_RE.search(inst.detail)
+        return f"{m['section']}: {m['category'] or m['bare']}" if m else None
+    quote = f'"{inst.quotes[0]}"' if inst.quotes else None
+    return ": ".join(x for x in (inst.section, quote) if x) or None
+
+
+def _split(r: BaseOxmlElement, t: BaseOxmlElement, lo: int, hi: int) -> BaseOxmlElement:
+    """Split run ``r`` (one w:t) so ``t.text[lo:hi]`` is a run of its own; return that run."""
+    text = t.text or ""
+    middle = r
+    for piece, is_middle in reversed(((text[:lo], False), (text[lo:hi], True), (text[hi:], False))):
+        if not piece:
+            continue
+        clone = copy.deepcopy(r)
+        clone_t = next(clone.iter(qn("w:t")))
+        clone_t.text = piece
+        clone_t.set(_XML_SPACE, "preserve")
+        r.addnext(clone)
+        if is_middle:
+            middle = clone
+    r.getparent().remove(r)
+    return middle
+
+
+def _runs(para: Paragraph, span: tuple[int, int] | None) -> list[Run]:
+    """The first and last run covering ``span`` of the paragraph's text (all
+    of it when None), splitting runs at its ends. Runs inside a tracked
+    insertion count; a tracked deletion's do not."""
+    runs = [r for r in para._p.iter(qn("w:r")) if r.getparent().tag != qn("w:del")]
+    if not runs:
+        return [para.add_run()]
+    covered, at = [], 0
+    for r in runs if span else []:
+        ts = list(r.iter(qn("w:t")))
+        length = sum(len(t.text or "") for t in ts)
+        lo, hi = max(span[0] - at, 0), min(span[1] - at, length)
+        if lo < hi:
+            covered.append(_split(r, ts[0], lo, hi) if len(ts) == 1 else r)
+        at += length
+    chosen = covered or runs
+    return [Run(chosen[0], para), Run(chosen[-1], para)]
+
+
+def _next_revision_id(doc: Document) -> int:
+    """One past the largest w:id any tracked change in ``doc`` uses."""
+    ids = [int(el.get(qn("w:id"))) for tag in ("w:ins", "w:del")
+           for el in doc.element.body.iter(qn(tag)) if (el.get(qn("w:id")) or "").isdigit()]
+    return max(ids, default=0) + 1
+
+
+def _tracked_insertion(text: str, revision_id: int) -> BaseOxmlElement:
+    """A w:ins holding one run of ``text``, built as stage 6 builds its
+    tracked insertions (bibliography.py), in its font. No w:date: the
+    copy is the same however often it is written."""
+    ins = OxmlElement("w:ins")
+    ins.set(qn("w:id"), str(revision_id))
+    ins.set(qn("w:author"), COMMENT_AUTHOR)
+    run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), TRACKED_INSERTION_FONT_NAME)
+    fonts.set(qn("w:hAnsi"), TRACKED_INSERTION_FONT_NAME)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), TRACKED_INSERTION_FONT_SIZE_HALF_POINTS)
+    r_pr.extend([fonts, size])
+    t = OxmlElement("w:t")
+    t.text = text
+    run.extend([r_pr, t])
+    ins.append(run)
+    return ins
+
+
+def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]]:
+    """Insert OWNER_PI_ROLE_FIX, tracked, in the empty "Your role:" cell of
+    every grant table role_consistency reports as owner_pi_role_empty; return
+    how many, and the messages of the findings now fixed on every table they
+    report. A table with no "Your role:" row is skipped, and its finding
+    stays a comment. Reads the tables before the review notes add theirs."""
+    if not isinstance(stage4, dict):
+        return 0, set()
+    tables = doc.tables
+    revision_id = _next_revision_id(doc)
+    inserted = 0
+    unfixed: set[str] = set()
+    reported = owner_pi_role_empty_tables(stage4, docx_table_rows(doc))
+    for at, message in reported.items():
+        cell = next((row.cells[1] for row in tables[at].rows
+                     if len(row.cells) > 1 and row.cells[0].text.strip() == YOUR_ROLE_LABEL), None)
+        if cell is None:
+            unfixed.add(message)
+            continue
+        cell.paragraphs[0]._p.append(_tracked_insertion(OWNER_PI_ROLE_FIX, revision_id))
+        revision_id += 1
+        inserted += 1
+    return inserted, set(reported.values()) - unfixed
+
+
+def _add_review_notes(doc: Document, notes: list[Note]) -> None:
+    """The review-notes box closing the document: a group per action, with
+    its count and instruction, then an item per finding; last, what CViche
+    does not check. The space above the box is set on the document's last
+    paragraph, not a blank one."""
+    groups: dict[tuple[str, str], list[Note]] = {}
+    for note in notes:
+        groups.setdefault((note.title, note.instruction), []).append(note)
+    space_around_cviche_box(doc.paragraphs[-1] if doc.paragraphs else None, None)
+    cell = add_cviche_box(doc, REVIEW_NOTES_TITLE)
+    for n, ((title, instruction), members) in enumerate(groups.items()):
+        cviche_box_group(cell, f"{title} ({len(members)})", first=n == 0)
+        cviche_box_text(cell, instruction)
+        for note in dict.fromkeys(members):  # the same item once
+            if note.item:
+                cviche_box_item(cell, note.item)
+            if note.removed:
+                cviche_box_pair(cell, "Removed:", note.removed, last=not note.kept)
+            if note.kept:
+                cviche_box_pair(cell, "Kept:", note.kept, last=True)
+    cviche_box_group(cell, NOT_CHECKED_TITLE, first=not groups)
+    cviche_box_text(cell, NOT_CHECKED_INSTRUCTION)
+    for spot in blind_spots():
+        cviche_box_item(cell, spot.sentence)
+
+
+def write_review_docx(clean_docx: Path, doctor_payload: object,
+                      stage4: object = None,
+                      rows: dict[ShapeKey, LintPrecision] | None = None) -> tuple[Path, int] | None:
+    """Write the flagged copy of ``clean_docx``, and beside it the finding
+    each comment marks (`comment_map_path`); return the copy's path and how
+    many flags (comments, review notes and tracked fixes) it carries, which
+    may be none. None when ``doctor_payload`` is not a doctor report or the document
+    is empty. ``stage4`` is the run's stage-4 artifact, which the
+    owner_pi_role_empty fix needs to know the owner; without it that finding
+    is a comment. ``rows`` is the precision ledger (`load_gate_ledger` when
+    None)."""
+    if not isinstance(doctor_payload, dict):
+        return None
+    rows = load_gate_ledger() if rows is None else rows
+    findings = [f for f in _usable_findings(doctor_payload)[0]
+                if f["severity"] in COMMENTED_SEVERITIES or f["lint"] in REVIEW_COPY_ONLY_LINTS]
+    doc = Document(str(clean_docx))
+    paragraphs = [(p, _norm(_paragraph_text(p)))
+                  for p in (Paragraph(el, doc._body) for el in doc.element.body.iter(qn("w:p")))]
+    if not paragraphs:
+        return None
+    surfaces = (paragraphs, _rows(doc))
+    fixed, fixed_messages = (_suggest_owner_pi_role(doc, stage4)
+                             if any(_OWNER_PI_ROLE_TOKEN in str(f.get("message")) for f in findings)
+                             else (0, set()))
+    # The fix replaces the comment only where it was written on every table.
+    findings = [f for f in findings if f.get("message") not in fixed_messages]
+    flags: list[tuple[Flag, dict]] = []
+    notes: list[Note] = []
+    per_lint: dict[str, int] = {}
+    for f in findings:
+        found, noted = _flags(f, surfaces, rows)
+        for flag in found:
+            per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + 1
+            if per_lint[f["lint"]] <= MAX_FLAGS_PER_LINT:
+                flags.append((flag, f))
+        if f["lint"] == MISSING_SOURCE_LINT:  # its notes are its flags: one per line, capped
+            room = MAX_FLAGS_PER_LINT - per_lint.get(f["lint"], 0)
+            noted = noted[:max(room, 0)]
+            per_lint[f["lint"]] = per_lint.get(f["lint"], 0) + len(noted)
+        notes.extend(noted)
+    marked = []
+    for flag, f in flags:
+        comment = doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
+                                  author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
+        marked.append(asdict(_comment_finding(comment.comment_id, f, rows)))
+    _add_review_notes(doc, notes)
+    out = review_docx_path(clean_docx)
+    # The map first: a map that cannot be written raises before the copy is
+    # saved, so no copy is left on disk that the caller reports as failed.
+    comment_map_path(out).write_text(json.dumps(marked, indent=1), encoding="utf-8")
+    doc.save(str(out))
+    return out, len(flags) + len(notes) + fixed

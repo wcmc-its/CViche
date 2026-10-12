@@ -28,7 +28,11 @@ module imports that one and nothing else in the package.
 """
 import re
 
-from .authors import _join_spaced_initials, _normalize_author_names, _source_authors_after
+from .authors import (
+    _join_spaced_initials,
+    _normalize_author_names,
+    _source_authors_after,
+)
 
 # #481: a value is treated as already present in an LLM-formatted citation
 # once any of its own significant words shows up there -- not the whole

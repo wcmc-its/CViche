@@ -46,6 +46,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization import (  # noqa: E402
+    grant_heading_rebucket_target,
+    grant_status_is_empty_section_label,
+    grant_status_rebucket_target,
+)
 from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     ROLE_EFFORT_DIGIT_RE,
@@ -53,11 +58,14 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     ROLE_EFFORT_HEADER_RE,
     ROLE_EFFORT_HEADER_WINDOW,
     UnsupportedRebucketTargetError,
+    _is_cv_owner,
+    _pi_name_from_label,
     apply_effort_to_grants,
     claim_goal_rows,
     fill_major_goals_from_text,
     filter_role_effort_headers,
     grant_end_year,
+    grant_id_tokens,
     is_role_effort_header,
     match_effort_for_title,
     normalize_percent_effort,
@@ -65,14 +73,8 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     promote_open_ended_m2b_grants,
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
+    resolve_grant_back_references,
     resolve_pi_name,
-    _is_cv_owner,
-    _pi_name_from_label,
-)
-from unified_pipeline.stage6.normalization import (  # noqa: E402
-    grant_heading_rebucket_target,
-    grant_status_is_empty_section_label,
-    grant_status_rebucket_target,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -308,12 +310,15 @@ def test_a_grant_without_the_pending_fields_gets_neither_row():
 def test_the_owners_share_of_the_award_gets_its_own_row(code):
     """#817 (EBYSBC E14): stage 4 keeps the owner's part of an award under the
     off-schema `share_total`, which no row read. It renders under its own
-    label, never as the annual direct costs."""
+    label, never as the annual direct costs. Under Pending the total is a
+    request (#1343)."""
     fields = {'agency': 'NIH', 'title': 'Shared Kestrel Project',
               'total_funding': '900000', 'share_total': '$120,500'}
     cells = _cells(_generator()._create_grant_table(fields, code))
+    total_label = (research_support.TOTAL_REQUESTED_LABEL if code == 'M2C'
+                   else research_support.TOTAL_AWARD_LABEL)
     assert cells[research_support.SHARE_LABEL] == '$120,500'
-    assert cells[research_support.TOTAL_AWARD_LABEL] == '$900,000'
+    assert cells[total_label] == '$900,000'
     assert research_support.ANNUAL_COSTS_LABEL not in cells
 
 
@@ -788,6 +793,52 @@ def test_a_grant_whose_title_tail_matches_the_pi_shape_renders_the_owner_not_tit
     cells = _cells(table)
     assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
     assert cells['Your role:'] == 'PI'
+
+
+_SPONSOR_LABEL_LINES = (
+    '2015-2017 Acme Cancer Society. Research Scholar Award (PI)',
+    'Anemia and Lymphoma Society. Postdoctoral Fellowship (PI)',
+    'Hospital Patient Care Award, Principal Investigator',
+    'Acme Foundation, Principal Investigator',
+    '2018-2020 Acme Rowe. Junior Faculty (PI)',
+)
+
+
+@pytest.mark.parametrize('raw', _SPONSOR_LABEL_LINES)
+def test_a_label_capturing_sponsor_or_award_text_is_not_a_pi(raw):
+    """#1571 (SLYBST, DYLJXC): the text before the owner's own "(PI)" or
+    ", Principal Investigator" label is the sponsor or award, not a person.
+    A sponsor word, or a sentence break inside the capture ("Rowe. Junior",
+    the last line, which carries no sponsor word), refuses it; an "and" join
+    is refused when either side is."""
+    assert _pi_name_from_label(raw) == ''
+    assert resolve_pi_name({}, raw, '', 'Ada Testowner') == ''
+
+
+@pytest.mark.parametrize('raw', _SPONSOR_LABEL_LINES)
+def test_a_refused_sponsor_capture_falls_through_to_the_owner_auto_fill(raw):
+    assert resolve_pi_name({}, raw, 'PI', 'Ada Testowner') == 'Ada Testowner'
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ('Mrs. Ann Lee (PI)', 'Mrs. Ann Lee'),
+    ('Prof. Bo Li, Principal Investigator', 'Prof. Bo Li'),
+    ('Dr. J.R. Lee (PI)', 'Dr. J.R. Lee'),
+    ('Example Society (PI); Lee (PI)', 'Lee'),
+])
+def test_titles_initials_and_a_later_person_capture_still_name_the_pi(raw, expected):
+    """A title or initial is not a sentence break, and a refused capture does
+    not hide a later person the same shape names."""
+    assert resolve_pi_name({}, raw, '', '') == expected
+
+
+def test_a_grant_whose_sponsor_precedes_the_owners_pi_label_renders_the_owner():
+    """The rendered wire: the PI cell never holds the sponsor text."""
+    table = _generator()._create_grant_table(
+        {'title': 'Target RNA turnover', 'agency': 'Acme Cancer Society', 'pi_role': 'PI',
+         'start_date': '2015'},
+        'M2B', entry={'text': _SPONSOR_LABEL_LINES[0]}, owner_name='Ada Testowner')
+    assert _cells(table)['Name of Principal Investigator:'] == 'Ada Testowner'
 
 
 def test_a_null_source_text_resolves_to_no_pi_rather_than_raising():
@@ -2302,7 +2353,7 @@ def _under(heading, code='M2A', **fields):
     (['Impending Renewals'], None),           # whole words only
     (['Reunfunded Items'], None),             # no boundary before the word
     (['Unfundedness Report'], None),          # no boundary after the word
-    (['Pendingx Applications'], None),        # no boundary after a pending word
+    (['Pendingx Reports'], None),             # no boundary after a pending word
     ([], None),
 ])
 def test_grant_heading_rebucket_target(heading, expected_code):
@@ -2324,6 +2375,63 @@ def test_a_grant_without_a_status_moves_on_its_heading():
 
     assert (current, completed, pending) == ([], [], [entry])
     assert entry['reclassification_note'].startswith('Reclassified to Pending (M2C)')
+
+
+# --- #1343: a heading that lists applications files them as Pending --------------
+
+@pytest.mark.parametrize('heading, expected_code', [
+    (['GRANTS APPLIED'], 'M2C'),
+    (['Research', 'Grants Applied For'], 'M2C'),
+    (['Grants applied:'], 'M2C'),
+    (['Grant Applications'], 'M2C'),
+    (['Research Support', 'Application'], 'M2C'),
+    (['Applied Research Grants'], None),       # the adjective names no bucket
+    (['Grants', 'Applied Health Services'], None),
+    (['Funded Grant Applications'], None),     # an award word keeps it out
+    (['Grant Applications Awarded'], None),
+    (['Current Applications'], None),
+    (['Past Grant Applications'], None),
+    (['Completed Applications'], 'M2B'),       # the existing completed rule wins
+    (['Not Funded Applications'], 'M2C'),      # the existing not-funded rule wins
+    (['Reapplications'], None),                # whole words only
+])
+def test_an_application_heading_is_pending(heading, expected_code):
+    target, note = grant_heading_rebucket_target(heading)
+    assert target == expected_code
+    assert (note is not None) is (expected_code is not None)
+
+
+def test_the_application_heading_note_names_the_heading():
+    _, note = grant_heading_rebucket_target(['GRANTS APPLIED'])
+    assert note == "Reclassified to Pending (M2C): section heading 'GRANTS APPLIED' lists applications"
+
+
+def test_an_application_coded_completed_renders_under_pending_as_a_request():
+    """The ZDCXIV shape (#1343): 3b coded an application under "GRANTS APPLIED"
+    M2B with an amount and an ended date. The wire through
+    `_fill_research_support` files it under Pending and labels its amount a
+    request, not an award."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_under(['GRANTS APPLIED'], code='M2B', title='Kestrel Bone Density Study',
+                        agency='Example Foundation', total_funding='$62,841',
+                        start_date='12/2010', end_date='12/2010')]},
+        current_year=TEST_YEAR)
+
+    (table,) = _tables_under(gen, PENDING)
+    cells = _cells(table)
+    assert cells[research_support.TOTAL_REQUESTED_LABEL] == '$62,841'
+    assert research_support.TOTAL_AWARD_LABEL not in cells
+    assert _tables_under(gen, COMPLETED) == []
+
+
+def test_a_moved_grant_with_both_amounts_renders_one_requested_row():
+    """A grant with `total_funding` and the same `total_funding_requested`
+    renders the request once under Pending."""
+    fields = {'agency': 'NIH', 'title': 'Kestrel Request Project',
+              'total_funding': '250000', 'total_funding_requested': '$250,000'}
+    rows = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2C'))]
+    assert rows.count(research_support.TOTAL_REQUESTED_LABEL) == 1
 
 
 def test_a_status_field_beats_the_heading():
@@ -2853,3 +2961,119 @@ def test_a_two_digit_year_end_reaches_past_funding_through_the_section_fill():
 
     assert _titles_under(gen, COMPLETED) == ['Ended Study']
     assert _tables_under(gen, CURRENT) == []
+
+
+# --- #1485: a "see above" / "Renewal" row takes its grant's title -----------------
+
+def _source_entry(idx, text, **fields):
+    entry = _entry('M2B', text=text, **fields)
+    entry['element_idx_start'] = entry['element_idx_end'] = idx
+    return entry
+
+
+def _back_reference_grants():
+    """Synthetic shape of the RINASX record: each back-reference skips a grant."""
+    return [
+        _source_entry(10, '1970-73 NIH NS-11111, "Alpha Project Title", PI, Total $1.',
+                      grant_number='NIH NS-11111', title='Alpha Project Title', pi_role='PI',
+                      agency='NIH', start_date='1970', end_date='1973'),
+        _source_entry(11, '1974-77 NIH EY-22222, "Beta Project Title", Co-I (PI-A. Example).',
+                      grant_number='NIH EY-22222', title='Beta Project Title',
+                      pi_name='A. Example', pi_role='Co-I', agency='NIH',
+                      start_date='1974', end_date='1977'),
+        _source_entry(12, '1977-79 NIH NS-11111 (see above), total $2.',
+                      grant_number='NIH NS-11111', agency='NIH', notes='see above',
+                      start_date='1977', end_date='1979'),
+        _source_entry(13, '1978-80 NIH EY-22222 Renewal, Total $3.',
+                      grant_number='EY-22222', agency='NIH', notes='Renewal',
+                      start_date='1978', end_date='1980'),
+    ]
+
+
+def test_grant_id_tokens_ignore_the_agency_word_and_short_activity_codes():
+    assert grant_id_tokens('NIH NS-21981') == grant_id_tokens('NS-21981') == {'NS21981'}
+    assert grant_id_tokens('R01') == frozenset()
+    assert grant_id_tokens(None) == frozenset()
+
+
+def test_a_see_above_row_takes_the_title_and_pi_of_the_grant_with_its_number():
+    grants = _back_reference_grants()
+
+    assert resolve_grant_back_references(grants) == 2
+
+    see_above, renewal = (grant['extracted_fields'] for grant in grants[2:])
+    assert see_above['title'] == 'Alpha Project Title (continuation)'
+    assert (see_above['pi_name'], see_above['pi_role']) == (None, 'PI')
+    assert see_above['notes'] is None
+    assert renewal['title'] == 'Beta Project Title (renewal)'
+    assert (renewal['pi_name'], renewal['pi_role']) == ('A. Example', 'Co-I')
+    assert renewal['notes'] is None
+
+
+def test_a_back_reference_row_keeps_its_own_role():
+    grants = _back_reference_grants()
+    grants[3]['extracted_fields']['pi_role'] = 'PI'
+
+    resolve_grant_back_references(grants)
+
+    renewal = grants[3]['extracted_fields']
+    assert renewal['title'] == 'Beta Project Title (renewal)'
+    assert renewal['pi_role'] == 'PI'
+    assert renewal.get('pi_name') is None
+
+
+@pytest.mark.parametrize('change, reason', [
+    ({'grant_number': 'NIH NS-99999'}, 'no earlier grant carries the number'),
+    ({'grant_number': None}, 'no grant number to link by'),
+    ({'title': 'Its Own Project Title'}, 'the row has a title of its own'),
+])
+def test_a_back_reference_row_without_a_linkable_grant_is_left_alone(change, reason):
+    grants = _back_reference_grants()
+    grants[2]['extracted_fields'].update(change)
+    before = dict(grants[2]['extracted_fields'])
+
+    resolve_grant_back_references(grants)
+
+    assert grants[2]['extracted_fields'] == before, reason
+
+
+def test_a_back_reference_never_points_forward():
+    grants = _back_reference_grants()
+    grants[0]['element_idx_start'] = grants[0]['element_idx_end'] = 20
+
+    resolve_grant_back_references(grants)
+
+    assert not grants[2]['extracted_fields'].get('title')
+
+
+def test_a_titled_renewal_is_not_retitled():
+    grant = _source_entry(14, 'NIH NS-11111 Renewal, "Gamma Renewal Title"',
+                          grant_number='NS-11111', title='Gamma Renewal Title')
+    grants = _back_reference_grants() + [grant]
+
+    resolve_grant_back_references(grants)
+
+    assert grant['extracted_fields']['title'] == 'Gamma Renewal Title'
+
+
+def test_a_see_above_row_renders_with_its_grants_title_and_no_see_above_note():
+    gen = _sectioned_generator()
+    grants = _back_reference_grants()
+    gen._fill_research_support({'M2B': grants}, current_year=TEST_YEAR)
+
+    tables = _tables_under(gen, COMPLETED)
+    titles = [_cells(table).get('Project title:') for table in tables]
+    assert titles == ['Beta Project Title (renewal)', 'Alpha Project Title (continuation)',
+                      'Beta Project Title', 'Alpha Project Title']
+    assert all('see above' not in _cells(table).get('Notes:', '') for table in tables)
+    assert grants[2]['extracted_fields'].get('title') is None  # the caller's record is untouched
+
+
+def test_a_back_reference_takes_the_nearest_earlier_grant_with_its_number():
+    retitled = _source_entry(14, 'NIH NS-11111, "Alpha Second Cycle Title"',
+                             grant_number='NS-11111', title='Alpha Second Cycle Title')
+    see_above = _source_entry(15, 'NIH NS-11111 (see above)', grant_number='NS-11111')
+
+    resolve_grant_back_references(_back_reference_grants() + [retitled, see_above])
+
+    assert see_above['extracted_fields']['title'] == 'Alpha Second Cycle Title (continuation)'

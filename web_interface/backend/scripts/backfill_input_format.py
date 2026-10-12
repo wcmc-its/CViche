@@ -31,7 +31,9 @@ from sqlalchemy.orm import Session  # noqa: E402
 from app.api.upload import _extract_text  # noqa: E402
 from app.models import Run  # noqa: E402
 from app.services.input_format import (  # noqa: E402
-    INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM, detect_input_format,
+    INPUT_FORMAT_OTHER,
+    INPUT_FORMAT_WCM,
+    detect_input_format,
 )
 from app.storage import get_storage  # noqa: E402
 from app.storage.base import StorageKeyNotFound  # noqa: E402

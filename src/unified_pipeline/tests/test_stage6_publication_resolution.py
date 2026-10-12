@@ -45,7 +45,6 @@ from unified_pipeline.stage6.normalization.publication import (  # noqa: E402
     resolve_publication,
 )
 
-
 # ---------------------------------------------------------------------------
 # #659: the three top-level keys, absent / explicitly null / wrongly typed
 # ---------------------------------------------------------------------------

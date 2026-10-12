@@ -32,10 +32,6 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
-from unified_pipeline.stage_6_word_template import (  # noqa: E402
-    RENDER_ROUTED_CODES,
-    WCMTemplateGenerator,
-)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_taxonomy_code_coverage,
 )
@@ -66,7 +62,10 @@ from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _route_q2_entries,
     _split_q2_lines,
 )
-
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    RENDER_ROUTED_CODES,
+    WCMTemplateGenerator,
+)
 
 # ---------------------------------------------------------------------------
 # 1. Licensure: NPI/DEA routing
@@ -351,11 +350,11 @@ def test_license_record_leaves_absent_dates_blank():
     assert (record.issue_date, record.last_registration_date) == ("", "")
 
 
-def test_license_record_falls_back_to_truncated_raw_text():
-    """No jurisdiction and no number: the raw line becomes the state cell,
-    capped, and the other three columns stay blank."""
+def test_license_record_falls_back_to_the_whole_raw_text():
+    """No jurisdiction and no number: the whole raw line becomes the state
+    cell -- never cut (#1576) -- and the other three columns stay blank."""
     record = _license_record(LicensureEntry(original_text="x" * 150))
-    assert record == LicenseRecord(state="x" * 100)
+    assert record == LicenseRecord(state="x" * 150)
 
 
 def test_license_record_is_none_when_there_is_nothing_to_render():
@@ -962,7 +961,8 @@ def test_normalize_institution_falls_through_an_empty_cleaned_name():
     empty one must fall through to official_name and then to the raw
     extracted field, not blank the institution."""
     enriched = {"extracted_fields": {"institution": "Duke Medical Center, Durham, NC"},
-                "institution_enrichment": {"cleaned_name": "Duke Medical Center"}}
+                "institution_enrichment": {"cleaned_name": "Duke Medical Center",
+                                           "city": "Durham", "state": "NC"}}
     assert _normalize_training_entry(enriched, "C1").institution == "Duke Medical Center"
 
     official_only = {"extracted_fields": {"institution": "Fictional Regional Hosp., Springfield"},

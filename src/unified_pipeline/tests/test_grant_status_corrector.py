@@ -65,6 +65,29 @@ def _grant(code, text, *hierarchy):
     ('07/01/2021 - 06/30/2026Total costs: $2,000,000', (2021, 2026)),
     # A year inside a hyphenated award number is not an unread range.
     ('Award Number: HSCNO-2020-LIFT-001, $31,504', (2020, 2020)),
+    # An entry's open span written first wins over a role's closed sub-range
+    # after it, in parentheses or not (#1634).
+    ('Example Study, 2019-present (Co-I 2017-2024)', (2019, TEST_YEAR + 1)),
+    ('2019-present Example Study, Co-I 2017-2024', (2019, TEST_YEAR + 1)),
+    ('2019-Present Example Study (Co-I 2017-24)', (2019, TEST_YEAR + 1)),
+    ('04/08/2021 – date Example Study (Co-I 2017-2024)', (2021, TEST_YEAR + 1)),
+    # The closed pattern's month slot also takes 'present'/'date', so it can
+    # start at the open span's own offset; the open span the CV wrote wins.
+    ('2021-present 2024 Example R01', (2021, TEST_YEAR + 1)),
+    ('2019-date 2024 Example Study', (2019, TEST_YEAR + 1)),
+    # A closed range written first still wins over an open end after it.
+    ('2017-2024 Example Grant (renewal 2025-present)', (2017, 2024)),
+    ('2017-24 Example Grant (renewal 2025-present)', (2017, 2024)),
+    # A word separator or a "Current"/"ongoing" end is an open end too, not
+    # the single-year guess beside a "$" amount (#1657).
+    ('Site PI, $50,000, 11/5/2021 to Present', (2021, TEST_YEAR + 1)),
+    ('11/2021 to Present $1000', (2021, TEST_YEAR + 1)),
+    ('2021-Present', (2021, TEST_YEAR + 1)),
+    ('2021 through present Example Study $50,000', (2021, TEST_YEAR + 1)),
+    ('2021 until present Example Study $50,000', (2021, TEST_YEAR + 1)),
+    ('2021 to date Example Study $50,000', (2021, TEST_YEAR + 1)),
+    ('2021-current Example Study $50,000', (2021, TEST_YEAR + 1)),
+    ('2021 to ongoing Example Study $50,000', (2021, TEST_YEAR + 1)),
 ])
 def test_extract_year_range(text, expected):
     assert extract_year_range(text) == expected
@@ -85,6 +108,31 @@ def test_an_open_ended_contract_written_to_date_stays_current():
                    'Grants and Salary Support')
 
     assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
+
+
+def test_a_current_grant_written_to_present_with_an_amount_stays_current():
+    """#1657: "11/5/2021 to Present" beside a "$" amount read as the single
+    year 2021 and forced M2B on "Date range 2021-2021 ended"."""
+    entry = _grant('M2A', 'Example Industry Study, Site PI, $50,000, 11/5/2021 to Present',
+                   'Research Support', 'Current')
+
+    corrected = correct_grant_status(entry)
+
+    assert corrected['taxonomy_code'] == 'M2A'
+    assert 'status_correction' not in corrected
+
+
+@pytest.mark.parametrize('code', ['M2A', 'M2B'])
+def test_an_ongoing_study_with_an_ended_role_sub_range_stays_current(code):
+    """#1634: an ongoing study whose role's own years ended was forced to M2B
+    on "Date range 2017-2024 ended"; the study is still running."""
+    entry = _grant(code, '2017-present Example Study\tExample Site\tCo-I (2017-2024)\tChair (2024-present)',
+                   'Research', 'Cross-Site Research Involvement')
+
+    corrected = correct_grant_status(entry)
+
+    assert corrected['taxonomy_code'] == 'M2A'
+    assert ('status_correction' in corrected) == (code == 'M2B')
 
 
 def test_a_range_with_a_typo_is_not_read_as_its_start_year():

@@ -5,7 +5,7 @@ that authoritative value, fall back to wall-clock for older runs, report live
 elapsed while running, and report nothing for a not-yet-run row.
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
@@ -47,18 +47,39 @@ def test_falls_back_to_wallclock_when_not_persisted():
 
 
 def test_running_reports_live_elapsed():
-    run = _run(started_at=datetime.now() - timedelta(seconds=10), status="running")
+    run = _run(started_at=datetime.now(timezone.utc) - timedelta(seconds=10), status="running")
     elapsed = _run_duration_seconds(run)
     assert elapsed is not None and elapsed >= 9
 
 
 def test_running_never_negative_on_clock_skew():
-    run = _run(started_at=datetime.now() + timedelta(seconds=30), status="running")
+    run = _run(started_at=datetime.now(timezone.utc) + timedelta(seconds=30), status="running")
     assert _run_duration_seconds(run) == 0
 
 
+def test_running_with_db_naive_started_at_measures_from_utc():
+    # A value MariaDB hands back is naive UTC. Read against the aware UTC clock
+    # it must give the real elapsed time -- not raise TypeError, and not be off
+    # by the server's UTC offset (#798).
+    started = (datetime.now(timezone.utc) - timedelta(seconds=10)).replace(tzinfo=None)
+    elapsed = _run_duration_seconds(_run(started_at=started, status="running"))
+    assert elapsed is not None and 9 <= elapsed <= 60
+
+
+def test_wallclock_across_a_naive_and_an_aware_operand():
+    # completed_at just set in-process (aware) against a started_at not yet
+    # reloaded from the DB (naive UTC): same kind after normalising, no TypeError.
+    started = datetime(2026, 6, 4, 12, 0, 0)
+    run = _run(
+        started_at=started,
+        completed_at=datetime(2026, 6, 4, 12, 1, 30, tzinfo=timezone.utc),
+        status="complete",
+    )
+    assert _run_duration_seconds(run) == 90
+
+
 def test_not_started_returns_none():
-    run = _run(started_at=datetime.now(), status="created")  # no completed_at, not running
+    run = _run(started_at=datetime.now(timezone.utc), status="created")  # no completed_at, not running
     assert _run_duration_seconds(run) is None
 
 
@@ -67,8 +88,8 @@ def test_not_started_returns_none():
 def test_admin_stats_includes_duration_aggregates(client, db):
     """avg/p95 conversion time ride along on /admin/stats: persisted duration
     preferred, wall-clock fallback for older rows, non-complete runs excluded."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -103,8 +124,8 @@ def test_admin_stats_includes_duration_aggregates(client, db):
 
 def test_admin_stats_duration_aggregates_null_when_no_completed_runs(client, db):
     """No completed runs -> aggregates are null, not a 500."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -121,8 +142,8 @@ def test_admin_stats_duration_aggregates_null_when_no_completed_runs(client, db)
 def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(client, db):
     """step_avg_seconds averages Step.duration_seconds per stage over completed
     runs only, ordered by step_number; failed runs and null durations are excluded."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run, Step
 
     base = datetime(2026, 6, 4, 12, 0, 0)
@@ -173,8 +194,8 @@ def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(clie
 
 def test_admin_stats_step_avg_seconds_empty_without_completed_runs(client, db):
     """No completed runs -> step_avg_seconds is an empty list, not null or a 500."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -187,8 +208,8 @@ def test_admin_stats_step_avg_seconds_empty_without_completed_runs(client, db):
 
 
 def _admin_stats(client):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
@@ -206,7 +227,7 @@ def test_admin_stats_totals_active_users_and_feedback_rate(client, db):
     users = [User(email=f"u{i}@example.com", display_name=f"U{i}", role="user") for i in range(3)]
     db.add_all(users)
     db.flush()
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     db.add_all([
         Run(id="ST_A", filename="a.docx", file_type="docx", status="complete", user_id=users[0].id,
             started_at=now - timedelta(days=1), total_cost=1.11111),
@@ -241,8 +262,8 @@ def test_admin_stats_totals_are_zero_on_an_empty_database(client, db):
 def test_admin_runs_table_prefers_persisted_duration(client, db):
     """The admin submissions table's Duration column uses the persisted value,
     falling back to wall-clock for older rows -- consistent with the run API."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import Run
 
     base = datetime(2026, 6, 4, 12, 0, 0)

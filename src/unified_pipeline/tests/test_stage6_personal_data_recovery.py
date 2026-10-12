@@ -43,10 +43,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
+    _PII_FIELD_KEY_RE,
     CAT_HOME_CONTACT,
+    CAT_PLACE_OF_BIRTH,
     PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
-    _PII_FIELD_KEY_RE,
 )
 from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_AUTHOR,
@@ -1027,10 +1028,10 @@ def test_an_unanswered_visa_row_leaves_the_placeholder_alone(tmp_path):
 # slot ranking and phone-type keywords (#1222)
 # --------------------------------------------------------------------------
 
-def _contact_rows(tmp_path, entries) -> dict[str, str]:
+def _contact_rows(tmp_path, entries, cv_owner=None) -> dict[str, str]:
     """The Personal Data table as {label cell: value cell}, read from raw
     w:t nodes so tracked insertions count."""
-    _render(tmp_path, entries)
+    _render(tmp_path, entries, cv_owner)
     rows = {}
     for table in Document(str(tmp_path / "out.docx")).tables:
         for row in table.rows:
@@ -1284,6 +1285,30 @@ def test_a_banner_that_names_its_workplace_keeps_its_address_beside_a_home_numbe
     assert "1 Sample Way" in rows["Office address:"]
     assert "555-0102" in rows["Office telephone:"]
     assert "555-0198" not in _all_text(tmp_path / "out.docx")
+
+
+def test_1426_a_current_address_naming_no_workplace_is_withheld_as_home(tmp_path):
+    """#1426 (NDMRSO MQJAVH 8): "Current Address" with a street and no
+    institution, department or building word is the owner's home address. The
+    Office catch-all rendered it as the Office address; it now goes to the
+    (withheld) home slot, with the notice."""
+    rows = _contact_rows(tmp_path, [
+        _a("Current Address\t12 Sample Lane\tExampleton, ZZ  00000",
+           {"address": "12 Sample Lane, Exampleton, ZZ 00000"}),
+    ])
+    assert "12 Sample Lane" not in _all_text(tmp_path / "out.docx")
+    assert rows["Office address:"] == ""
+    assert CAT_HOME_CONTACT in _withheld_comment(tmp_path)
+
+
+def test_1426_a_current_address_naming_its_department_stays_the_office_address(tmp_path):
+    """The negative control: a department word keeps a "Current Address" in
+    Office address."""
+    rows = _contact_rows(tmp_path, [
+        _a("Current Address\tDepartment of Example\t12 Sample Lane\tExampleton, ZZ 00000",
+           {"address": "Department of Example, 12 Sample Lane, Exampleton, ZZ 00000"}),
+    ])
+    assert "12 Sample Lane" in rows["Office address:"]
 
 
 def test_an_address_beside_an_unlabelled_or_work_number_still_fills_the_office_row(tmp_path):
@@ -1888,3 +1913,240 @@ def test_a_number_too_short_to_pair_routes_by_the_whole_text():
     from unified_pipeline.stage6.sections import personal_data
     text = "home: 9 private lane 555-0112\toffice: 1 sample way"
     assert personal_data._phone_text_for_routing("12", text) is text
+
+
+# --------------------------------------------------------------------------
+# #1431 (NDMRSO ZEIGYO 1, REOYVH 0): a running title in cells, and the CV's
+# own date that stage 3b moved from T to A, are not recovered orphans
+# --------------------------------------------------------------------------
+
+_CV_DATE_REASONING = ("[T-validation reclassified from T] Dated fragment likely "
+                      "corresponds to CV date/preparation date.")
+
+
+def test_running_title_and_cv_date_are_not_recovered(tmp_path):
+    title = "Example School of Medicine\tStandardized Curriculum Vitae\tJane Q. Sample, MD"
+    cv_date = dict(_a("April 2020", idx=1), classification_reasoning=_CV_DATE_REASONING)
+    keeper = _a("Foreign Languages: Spanish, French", idx=2)
+    items = _list_item_texts_after(tmp_path, [_a(title, idx=0), cv_date, keeper], _SAMPLE_OWNER)
+    assert "Foreign Languages: Spanish, French" in items
+    assert not any("Curriculum Vitae" in item or item == "April 2020" for item in items)
+
+
+def test_month_year_a_orphan_without_the_cv_date_verdict_is_recovered(tmp_path):
+    plain = dict(_a("April 2020"), classification_reasoning="[T-validation reclassified from T] Date stamp.")
+    assert "April 2020" in _list_item_texts_after(tmp_path, [plain], _SAMPLE_OWNER)
+
+
+def test_labelled_email_already_in_personal_data_is_not_recovered(tmp_path):
+    """X6 UXBHHF 47: a running footer repeats the work email that Personal Data
+    already renders in its own cell, so the whole line is never on the page."""
+    contact = _a("Jane Sample 1 Example Way Exampleton, ZZ 00000 Ph (w): 555-0100 jsample@example.edu",
+                 {"name": "Jane Sample", "email": "jsample@example.edu", "phone_work": "555-0100"}, idx=0)
+    footer = _a("Email: jsample@example.edu",
+                {"email": "jsample@example.edu", "institutional_email": "jsample@example.edu"}, idx=47)
+    items = _list_item_texts_after(tmp_path, [contact, footer], _SAMPLE_OWNER)
+    assert "Email: jsample@example.edu" not in items
+
+
+def test_labelled_email_the_page_does_not_show_is_still_recovered(tmp_path):
+    contact = _a("Jane Sample 1 Example Way Exampleton, ZZ 00000 Ph (w): 555-0100 jsample@example.edu",
+                 {"name": "Jane Sample", "email": "jsample@example.edu", "phone_work": "555-0100"}, idx=0)
+    footer = _a("Email: jq.other@example.org",
+                {"email": "jq.other@example.org", "institutional_email": "jq.other@example.org"}, idx=47)
+    items = _list_item_texts_after(tmp_path, [contact, footer], _SAMPLE_OWNER)
+    assert "Email: jq.other@example.org" in items
+
+
+# --------------------------------------------------------------------------
+# #1556 b: every record of a multi-record contact entry
+# --------------------------------------------------------------------------
+
+_RECORDS_KEY = "stage4_records"
+
+
+def _multi_record_a(text, records, idx=0):
+    """An A entry as stage 4 writes one with several records: every record
+    under `_RECORDS_KEY`, the last one also the entry's own fields."""
+    return _a(text, {**records[-1], _RECORDS_KEY: records}, idx=idx)
+
+
+_TWO_LINE_CONTACT = _multi_record_a(
+    "Tel: 555-0101 Cell: 555-0102\tFax: 555-0103\t"
+    "E-mail: alpha@example.edu Email: beta@example.org",
+    [{"phone": "555-0101", "email": "alpha@example.edu"},
+     {"phone": "555-0102", "email": "beta@example.org"}])
+
+
+def test_1556b_every_record_of_a_contact_entry_fills_its_row(tmp_path):
+    """OIEPQD TVQZIP 22: the entry's own fields are its LAST record, so the
+    office number and the first email rendered nowhere."""
+    rows = _contact_rows(tmp_path, [_TWO_LINE_CONTACT])
+    assert rows["Office telephone:"] == "555-0101"
+    assert rows["Cell phone:"] == "555-0102"
+    assert rows["Work email:"] == "alpha@example.edu"
+
+
+def test_1556b_a_record_value_no_row_takes_reaches_the_appendix_once(tmp_path):
+    """The second email has no row left, and no row takes a fax: both go to
+    the Appendix, and nothing a row already shows is printed again."""
+    text = _render(tmp_path, [_TWO_LINE_CONTACT])
+    assert text.count("beta@example.org") == 1
+    assert text.count("Fax: 555-0103") == 1
+    assert text.count("555-0101") == 1
+    assert text.count("alpha@example.edu") == 1
+
+
+def test_1556b_a_value_two_records_share_is_recovered_once(tmp_path):
+    entry = _multi_record_a(
+        "Email: alpha@example.edu\tEmail: beta@example.org\tEmail: beta@example.org",
+        [{"email": "alpha@example.edu"}, {"email": "beta@example.org"},
+         {"email": "beta@example.org"}])
+    text = _render(tmp_path, [entry])
+    assert text.count("beta@example.org") == 1
+
+
+def test_1556b_every_address_record_is_placed(tmp_path):
+    """OIEPQD TVQZIP 17: two addresses, one Office address row. The first
+    record's address fills it and the other reaches the Appendix."""
+    entry = _multi_record_a(
+        "Lab Address Clinic Address\t1 Sample Way, Exampleton, ZZ 00000\t"
+        "2 Other Road, Exampleton, ZZ 00000",
+        [{"address": "1 Sample Way, Exampleton, ZZ 00000"},
+         {"address": "2 Other Road, Exampleton, ZZ 00000"}])
+    rows = _contact_rows(tmp_path, [entry])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert _all_text(tmp_path / "out.docx").count("2 Other Road") == 1
+
+
+@pytest.mark.parametrize("text, records, home_value", [
+    ("Home: 9 Hidden Lane, Exampleton, ZZ 00000\tOffice: 1 Sample Way, Exampleton, ZZ 00000",
+     [{"address": "9 Hidden Lane, Exampleton, ZZ 00000"},
+      {"address": "1 Sample Way, Exampleton, ZZ 00000"}], "9 Hidden Lane"),
+    ("Home phone: 555-0199\tOffice phone: 555-0100",
+     [{"phone": "555-0199"}, {"phone": "555-0100"}], "555-0199"),
+    ("Tel: 555-0100\tFax (h): 555-0198",
+     [{"phone": "555-0100"}, {"phone": "555-0100"}], "555-0198"),
+    ("Tel: 555-0100\tResidence fax: 555-0197",
+     [{"phone": "555-0100"}, {"phone": "555-0100"}], "555-0197"),
+])
+def test_1556b_a_home_record_is_still_withheld(tmp_path, text, records, home_value):
+    """#821: routing every record must not surface a home address or
+    number, in a row or in the Appendix."""
+    _render(tmp_path, [_multi_record_a(text, records)])
+    assert home_value not in _all_text(tmp_path / "out.docx")
+
+
+def _withheld_after(tmp_path, entries) -> list:
+    """The withheld list a render of `entries` leaves on its generator."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": entries}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    return gen._pii_result.withheld
+
+
+def test_1556b_a_birthplace_record_is_recorded_withheld_once(tmp_path):
+    """Finding the values no row takes routes each record a second time; that
+    pass must not record the birthplace on the withheld list again."""
+    entry = _multi_record_a(
+        "Born 1970\tSampleville, QQ\tE-mail: alpha@example.edu",
+        [{"address": "Sampleville, QQ"}, {"email": "alpha@example.edu"}])
+    withheld = _withheld_after(tmp_path, [entry])
+    assert [item.category for item in withheld].count(CAT_PLACE_OF_BIRTH) == 1
+
+
+def test_1556b_a_record_value_cut_from_a_protected_fragment_fills_no_row(tmp_path):
+    """Only the entry's own fields pass through the pii pass's field checks;
+    an earlier record's value is held back by its provenance alone."""
+    entry = _multi_record_a(
+        "Place of Birth: Sampleville, QQ 11111\tOffice: 1 Sample Way, Exampleton, ZZ 00000",
+        [{"address": "Sampleville, QQ 11111"},
+         {"address": "1 Sample Way, Exampleton, ZZ 00000"}])
+    rows = _contact_rows(tmp_path, [entry])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert "Sampleville" not in _all_text(tmp_path / "out.docx")
+
+
+def test_1556b_the_entry_own_fields_stand_for_its_last_record(tmp_path):
+    """A value written to the entry's own fields after stage 4 kept its
+    records is read: those fields are the last record."""
+    entry = _a("Tel: 555-0101\tMobile: 555-0102",
+               {"phone": "555-0101", "cell_phone": "555-0102",
+                _RECORDS_KEY: [{"phone": "555-0101"}, {"phone": "555-0101"}]})
+    rows = _contact_rows(tmp_path, [entry])
+    assert rows["Cell phone:"] == "555-0102"
+
+
+def test_1556b_a_single_record_entry_keeps_its_fax_out_of_the_appendix(tmp_path):
+    """The Appendix takes a fax only from a multi-record entry; a one-record
+    entry renders as it did before #1556 b."""
+    text = _render(tmp_path, [_a("Tel: 555-0101\tFax: 555-0103", {"phone": "555-0101"})])
+    assert "555-0103" not in text
+
+
+# --------------------------------------------------------------------------
+# #1578: a third party's contact block never fills the owner's rows
+# --------------------------------------------------------------------------
+
+_STAFF_BLOCK = _a("Division Executive Assistant\tRiley Example-Other\tFax: 555-0177\t"
+                  "Email: rother@example.edu",
+                  {"name": "Riley Example-Other", "email": "rother@example.edu",
+                   "phone": "555-0177 (Fax)"}, idx=17)
+_OWNER_EMAIL = _a("jsample@example.edu", {"email": "jsample@example.edu"}, idx=25)
+
+
+def test_1578_a_staff_contact_block_does_not_fill_the_owner_work_email(tmp_path):
+    """YUYVIG DYLJXC 17/25: an assistant's block ahead of the owner's own
+    unnamed email line filled Work email, first-wins. The owner's email
+    fills it now, and the assistant's block goes to the Appendix."""
+    rows = _contact_rows(tmp_path, [_STAFF_BLOCK, _OWNER_EMAIL], _SAMPLE_OWNER)
+    assert rows["Work email:"] == "jsample@example.edu"
+    assert not any("rother@example.edu" in value or "555-0177" in value
+                   for value in rows.values())
+    assert _all_text(tmp_path / "out.docx").count("rother@example.edu") == 1
+
+
+def test_1578_a_staff_block_is_not_the_owner_email_when_the_owner_gives_none(tmp_path):
+    """Neither the entry-text fallback nor the all-entries scan may take the
+    third party's address when no other email exists."""
+    rows = _contact_rows(tmp_path, [_STAFF_BLOCK], _SAMPLE_OWNER)
+    assert rows["Work email:"] == ""
+
+
+def test_1578_a_staff_record_of_a_multi_record_entry_reaches_the_appendix(tmp_path):
+    entry = _multi_record_a(
+        "Program Assistant: Riley Other, rother@example.edu\tEmail: jsample@example.edu",
+        [{"name": "Riley Other", "email": "rother@example.edu"},
+         {"name": None, "email": "jsample@example.edu"}])
+    rows = _contact_rows(tmp_path, [entry], _SAMPLE_OWNER)
+    assert rows["Work email:"] == "jsample@example.edu"
+    assert _all_text(tmp_path / "out.docx").count("rother@example.edu") == 1
+
+
+@pytest.mark.parametrize("entry, cv_owner", [
+    # The owner's own block, named for an endowed chair (QZWBKQ's shape):
+    # another person's name and no staff label. This is why a stage-4 name
+    # alone does not make a block a third party's, and why no doctor lint
+    # keys on the name alone (#1578).
+    (_a("Riley Other Professor, Division of Examples\tEmail: jsample@example.edu",
+        {"name": "Riley Other", "email": "jsample@example.edu"}), _SAMPLE_OWNER),
+    # A faculty rank that starts with a staff word is the owner's own title.
+    (_a("Assistant Professor of Examples\tRiley Other Scholar\tEmail: jsample@example.edu",
+        {"name": "Riley Other Scholar", "email": "jsample@example.edu"}), _SAMPLE_OWNER),
+    # The block names the owner.
+    (_a("Jane Sample, Program Coordinator\tEmail: jsample@example.edu",
+        {"name": "Jane Sample", "email": "jsample@example.edu"}), _SAMPLE_OWNER),
+    # The block names the owner by a compound surname's other word, which
+    # stage 4's last_name lacks.
+    (_a("Program Coordinator\tJ. Roe\tEmail: jsample@example.edu",
+        {"name": "J. Roe", "email": "jsample@example.edu"}),
+     {"first_name": "Jane", "last_name": "Sample", "full_name": "Jane Roe Sample"}),
+    # No owner name known: nothing is judged a third party's.
+    (_a("Program Assistant\tRiley Other\tEmail: jsample@example.edu",
+        {"name": "Riley Other", "email": "jsample@example.edu"}), None),
+])
+def test_1578_an_owner_block_still_fills_work_email(tmp_path, entry, cv_owner):
+    rows = _contact_rows(tmp_path, [entry], cv_owner)
+    assert rows["Work email:"] == "jsample@example.edu"

@@ -8,10 +8,22 @@ export interface StepSummary {
   output_files?: string
 }
 
+/** The `runs.status` vocabulary, mirroring the backend's `app.models.RunState`
+ *  (#298). Named RunState, not RunStatus, for the same reason the backend
+ *  does: `RunStatus` already names the run-status response below. */
+export type RunState =
+  | 'created'
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'complete'
+  | 'failed'
+  | 'cancelled'
+
 export interface RunStatus {
   run_id: string
   filename: string
-  status: string
+  status: RunState
   /** When the run was created (ISO, from GET /run/{id}/status). */
   started_at?: string
   total_cost: number | null
@@ -144,6 +156,35 @@ export interface DoctorFindingGroup {
   instances: DoctorFindingInstance[]
 }
 
+export type FixConfidence = 'high' | 'medium' | 'unmeasured'
+export type FixEffort = 'quick' | 'minutes' | 'longer'
+
+/** One finding as the Fix list words it (#1589): no lint key, stage, entry
+ *  index or issue number. */
+export interface FixListProblem {
+  severity: DoctorSeverity
+  title: string
+  what_to_do: string
+  /** From the lint's hand-checked precision. */
+  confidence: FixConfidence
+  effort: FixEffort
+}
+
+/** Every finding about one entry, or one finding that names no entry. */
+export interface FixListItem {
+  /** Worst first. */
+  problems: FixListProblem[]
+  /** The text at stake, as the doctor quotes it. */
+  quotes: string[]
+}
+
+/** One document location, in the document's section order. */
+export interface FixListGroup {
+  /** Null when the findings name no section. */
+  section: string | null
+  items: FixListItem[]
+}
+
 export interface RunDoctorReport {
   /** Distinct lints per severity (not instances). */
   counts: { error: number; warn: number; info: number }
@@ -151,7 +192,17 @@ export interface RunDoctorReport {
   findings: DoctorFindingGroup[]
   /** Lints skipped or unreadable because an input artifact was absent. */
   not_run: number
+  /** The CV runner's view, grouped by document location (#1589). */
+  fix_list: FixListGroup[]
+  /** ERROR/WARN findings left to Diagnostics: below the precision bar, or no plain wording yet. */
+  fix_list_held_back: number
+  /** What the doctor cannot see, shown on every run. */
+  not_checked: string[]
 }
+
+/** GET /api/run/:id/fix-list: the Fix list alone, for the run's owner (#1589).
+ *  No lint key, score or Diagnostics finding; null when no report was stored. */
+export type RunFixList = Pick<RunDoctorReport, 'fix_list' | 'not_checked'>
 
 /** GET /api/run/:id/run-quality (admin). Score fields are null together when no
  *  score is cached; `doctor` is null when no report was stored. */
@@ -179,6 +230,8 @@ export interface RunQualityReport {
 /** GET /api/run/:id/review-note. Never carries the score. */
 export interface RunReviewNote {
   needs_cleanup: boolean
+  /** False until the score is stored; needs_cleanup is not final before then. */
+  scored: boolean
 }
 
 export type RunListScope = 'mine' | 'all'

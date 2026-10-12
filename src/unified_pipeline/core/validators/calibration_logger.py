@@ -9,7 +9,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-
 # Log directories
 LOGS_DIR = Path(__file__).parent.parent.parent.parent / 'logs'
 CLASSIFICATIONS_LOG = LOGS_DIR / 'classifications.jsonl'

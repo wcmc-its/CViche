@@ -21,7 +21,6 @@ Detection logic:
 
 import re
 
-
 # Patterns that indicate position/leadership (should NOT be M2A/M2B)
 POSITION_LEADERSHIP_PATTERNS = [
     # Executive/Chair roles

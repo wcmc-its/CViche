@@ -47,9 +47,14 @@ from app.database import SessionLocal
 from app.logging_config import configure_logging
 from app.models import Run, RunState
 from app.pipeline import run_queue
-from app.pipeline.run_queue import Queue
 from app.pipeline.orchestrator import PipelineOrchestrator
-from app.services.run_service import UPLOAD_DIR, _materialize_input_if_missing, claim_queued, mark_failed
+from app.pipeline.run_queue import Queue
+from app.services.run_service import (
+    UPLOAD_DIR,
+    _materialize_input_if_missing,
+    claim_queued,
+    mark_failed,
+)
 
 logger = logging.getLogger(__name__)
 

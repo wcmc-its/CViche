@@ -28,11 +28,12 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import (  # noqa: E402
-    RENDER_ROUTED_CODES, WCMTemplateGenerator,
-)
 from unified_pipeline.doctor.lints.render import lint_stage6_warnings  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import RecoveredLine  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    RENDER_ROUTED_CODES,
+    WCMTemplateGenerator,
+)
 
 # The 21-name flat dispatch this replaced (`stage_6_word_template.py:812-833`
 # on the pre-fix tree), in the exact order `generate()` called them.

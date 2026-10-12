@@ -77,6 +77,21 @@ def validate_run_id(run_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid run ID")
 
 
+#: The finished document with the run doctor's findings as Word comments
+#: (#1388), beside the stage-6 ``<uid>_wcm.docx``. Not ``_wcm.docx``-suffixed,
+#: so nothing that looks for the clean document by suffix picks it up.
+REVIEW_DOCX_SUFFIX = "_wcm_review.docx"
+
+
+def is_staff_only_artifact(name: str) -> bool:
+    """Stage JSON, which the run page shows to admins and staff only.
+
+    The review copy (``REVIEW_DOCX_SUFFIX``) is not: since #1591 the run's
+    owner gets it like the finished document, once #1639's precision gate has
+    kept the false-alarm findings out of it."""
+    return is_json_artifact(name)
+
+
 def is_json_artifact(name: str) -> bool:
     """Normalized JSON classification (#780 review r3965801468): one rule,
     used for both authorization (the admin gate) and file-type dispatch, so

@@ -6,6 +6,7 @@ are collected here. Each constant can be overridden via an environment variable.
 import os
 
 from app.config_loader import get_config
+
 # Session
 # Absolute session lifetime. Lowered from 7 days to 12 hours so a signed cookie
 # can't keep a session alive for a week of inactivity; combined with the
@@ -24,8 +25,10 @@ SESSION_IDLE_TIMEOUT = int(get_config("auth", "CVICHE_SESSION_IDLE_TIMEOUT", def
 LOGIN_RATE_LIMIT_MAX = int(get_config("auth", "CVICHE_LOGIN_RATE_LIMIT", default=10)[0])
 LOGIN_RATE_LIMIT_WINDOW = int(get_config("auth", "CVICHE_LOGIN_RATE_WINDOW", default=60)[0])
 
-# Upload
-MAX_UPLOAD_SIZE = int(get_config("auth", "CVICHE_MAX_UPLOAD_MB", default=10)[0])*1024*1024
+# Upload. MAX_UPLOAD_MB is also advertised on GET /api/auth/config, so the
+# frontend's size check follows this value instead of keeping its own (#109).
+MAX_UPLOAD_MB = int(get_config("auth", "CVICHE_MAX_UPLOAD_MB", default=10)[0])
+MAX_UPLOAD_SIZE = MAX_UPLOAD_MB * 1024 * 1024
 
 # Cost / time estimation for the /estimate endpoint.
 TIME_PER_1K_TOKENS = int(get_config("auth", "CVICHE_TIME_PER_1K_TOKENS", default=30)[0])
@@ -86,7 +89,7 @@ def get_estimated_run_cost(text_char_count: int) -> tuple[float, float]:
 def get_estimate_model_name() -> str:
     """Friendly name of the model the cost estimate is based on (for display)."""
     try:
-        from unified_pipeline.config import get_stage_config, friendly_model_name
+        from unified_pipeline.config import friendly_model_name, get_stage_config
         return friendly_model_name(get_stage_config("default")["model"])
     except Exception:  # pragma: no cover - defensive fallback
         return "the configured model"

@@ -169,7 +169,7 @@ def test_transient_retry_logs_at_warning_with_exact_message(monkeypatch, caplog)
     assert len(matches) == 1
     assert matches[0].getMessage().startswith(
         '    ⏳ Transient API error (429 transient error for url:')
-    assert 'retry 1/2 in 1s' in matches[0].getMessage()
+    assert f'retry 1/{stage5.MAX_ATTEMPTS - 1} in 1s' in matches[0].getMessage()
     assert matches[0].exc_info is None
 
 
@@ -315,7 +315,7 @@ def test_quiet_mode_suppresses_warning_and_info_on_mocked_failure_path(monkeypat
     enricher = PubMedEnricher(verbose=False)
     enricher.session = _FakeSession([
         _FakeResponse(429, 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed'),
-    ] * 3)
+    ] * stage5.MAX_ATTEMPTS)
 
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         records = enricher._fetch_pubmed_batch(['12345678'])

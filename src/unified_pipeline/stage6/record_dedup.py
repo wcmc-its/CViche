@@ -23,9 +23,16 @@ import re
 from collections.abc import Callable
 from types import MappingProxyType
 
-from .dedup import (_YEAR_RE, _decision_fields, _entry_signature_words,
-                    _is_subsequence, _is_word_run, _ordered_words, _part_numbers,
-                    _rank_qualifiers)
+from .dedup import (
+    _YEAR_RE,
+    _decision_fields,
+    _entry_signature_words,
+    _is_subsequence,
+    _is_word_run,
+    _ordered_words,
+    _part_numbers,
+    _rank_qualifiers,
+)
 
 # The grant codes, one record whatever its status: grant_status_corrector moves
 # a copy with an amount to M2B and leaves a copy without one in M2A (AKPQEB-04).

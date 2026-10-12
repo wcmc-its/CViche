@@ -28,9 +28,9 @@ from app.database_factory import (
     DB_AUTH_MODE_PASSWORD,
     DB_CONNECT_TIMEOUT_SECONDS,
     DB_MAX_OVERFLOW,
+    DB_PASSWORD_ENV,
     DB_POOL_SIZE,
     DB_POOL_TIMEOUT_SECONDS,
-    DB_PASSWORD_ENV,
     DEFAULT_DB_AUTH_MODE,
     RDS_CA_PATH,
     RDS_CA_SHA256,
@@ -369,6 +369,35 @@ def test_password_connect_is_time_bounded(
     )
     capture_engine["kwargs"]["creator"]()
     assert record_pymysql_connect[0]["connect_timeout"] == DB_CONNECT_TIMEOUT_SECONDS
+
+
+# --- Session time zone pinned to UTC (#798) ----------------------------------
+
+def test_both_connect_branches_pin_the_session_time_zone_to_utc(
+    monkeypatch, capture_engine, record_pymysql_connect
+):
+    """func.now() server defaults must be written in UTC, the convention
+    app.timeutil.UTCDateTime stores, on the IAM and password paths alike."""
+    _password_env(monkeypatch)
+    create_cviche_engine(db_host="db", db_port="3306", db_name="cviche", db_user="root")
+    capture_engine["kwargs"]["creator"]()
+
+    _iam_env(monkeypatch)
+
+    class _FakeRds:
+        def generate_db_auth_token(self, **kwargs):
+            return "iam-token"
+
+    monkeypatch.setattr(database_factory.boto3, "client", lambda *a, **k: _FakeRds())
+    create_cviche_engine(
+        db_host="db.example.rds.amazonaws.com", db_port="3306",
+        db_name="cviche", db_user="cviche_app_user",
+    )
+    capture_engine["kwargs"]["creator"]()
+
+    assert [c["init_command"] for c in record_pymysql_connect] == [
+        "SET time_zone = '+00:00'", "SET time_zone = '+00:00'"
+    ]
 
 
 def test_engine_pool_sizing_is_explicit(monkeypatch, capture_engine):

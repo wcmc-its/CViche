@@ -16,7 +16,6 @@ Rule: If a talk is explicitly "invited" at a conference, or is a
 
 import re
 
-
 # Patterns indicating R (invited talk) even at a conference
 INVITED_TALK_PATTERNS = [
     # Explicit invited signals

@@ -10,7 +10,6 @@ These are pure functions (no DB, no launching); the reaper integration that
 acts on the decision lands in a later stage.
 """
 import os
-
 from types import SimpleNamespace
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")

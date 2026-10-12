@@ -48,6 +48,12 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
+    _BARE_BIRTH_LABEL_RE,
+    _BARE_EMAIL_SHAPE,
+    _BARE_PHONE_SHAPE,
+    _FAMILY_SHAPE_LABEL_RE,
+    _KNOWN_FIELD_LABEL_RE,
+    _PII_FRAGMENT_SPLIT_RE,
     CAT_BIRTH,
     CAT_CHILDREN,
     CAT_DATE_OF_BIRTH,
@@ -60,12 +66,6 @@ from .normalization.pii import (  # noqa: F401
     WITHHOLD_POLICY,
     PiiMatch,
     WithheldItem,
-    _BARE_BIRTH_LABEL_RE,
-    _BARE_EMAIL_SHAPE,
-    _BARE_PHONE_SHAPE,
-    _FAMILY_SHAPE_LABEL_RE,
-    _KNOWN_FIELD_LABEL_RE,
-    _PII_FRAGMENT_SPLIT_RE,
     _is_bare_label_span,
     _merge_matches,
     _pii_field_key_category,
@@ -78,6 +78,11 @@ PERSONAL_DATA_CODE = "A"
 
 #: The section label recorded for an entry `generate()` does not route.
 APPENDIX_SECTION_LABEL = "Appendix"
+
+#: The entry key listing the non-PII-named fields this pass dropped for a PII
+#: value (#892): a field-first writer reads it to tell a withheld award from
+#: one that never had a name field.
+PII_DROPPED_FIELDS_KEY = "_pii_dropped_fields"
 
 PII_REDACTED_NOTICE = (
     "[Personal data from the source CV was withheld here "
@@ -746,7 +751,7 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             if value_hits:
                 # Which fields went, so a field-first writer can tell a
                 # withheld award from one that never had a name field.
-                entry["_pii_dropped_fields"] = sorted(value_hits)
+                entry[PII_DROPPED_FIELDS_KEY] = sorted(value_hits)
             for key, categories in value_hits.items():
                 del fields[key]
                 for category in categories:

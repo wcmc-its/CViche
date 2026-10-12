@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Check, Loader2 } from 'lucide-react'
-import type { FeedbackFormData, WcmSection } from '../types'
-import { getFeedback, submitFeedback } from '../api/feedback'
+import { Check, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
+import type { CorrectedDocxResult, FeedbackFormData, WcmSection } from '../types'
+import type { ApiError } from '../api/client'
+import { getFeedback, submitFeedback, uploadCorrectedDocx } from '../api/feedback'
 import ErrorBanner from './ErrorBanner'
 import FeedbackSummary from './FeedbackSummary'
+import DropZone from './upload/DropZone'
 import {
   EFFORT_OPTIONS,
+  HELP_IMPROVE,
   ISSUE_FIELDS,
   PROBLEMS_LABEL,
   QUESTION_LABELS,
@@ -173,6 +176,83 @@ function ChoiceRow<T extends string | boolean>({
           {opt.label}
         </button>
       ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// "Help improve CViche" (#1587): optional, collapsed by default. It asks
+// nothing; it only takes the reviewer's corrected copy, which is uploaded on
+// its own and never touches the feedback payload.
+// ---------------------------------------------------------------------------
+
+function CorrectedUpload({ runId }: { runId: string }) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<CorrectedDocxResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const upload = async (files: File[]) => {
+    setBusy(true)
+    setError(null)
+    try {
+      setResult(await uploadCorrectedDocx(runId, files[0]))
+    } catch (e) {
+      setError((e as ApiError).message || 'The upload failed. Please try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3">
+      {error && (
+        <div className="mb-3">
+          <ErrorBanner message={error} onDismiss={() => setError(null)} />
+        </div>
+      )}
+      {busy ? (
+        <div className="flex items-center gap-2 text-sm text-gray-500">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Comparing with the document we delivered...
+        </div>
+      ) : result ? (
+        <p role="status" className="flex items-center gap-2 text-sm font-medium text-success-700">
+          <Check className="h-4 w-4" strokeWidth={3} aria-hidden="true" />
+          {result.summary}. Thank you.
+        </p>
+      ) : (
+        <DropZone multiple={false} title={HELP_IMPROVE.correctedTitle} hint={HELP_IMPROVE.correctedHint} onFiles={upload} compact />
+      )}
+      <p className="mt-2 text-xs text-gray-500">{HELP_IMPROVE.correctedPrivacy}</p>
+    </div>
+  )
+}
+
+function HelpImproveSection({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="mt-6">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls="help-improve-cviche"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-3 pb-2 border-b border-sand-200 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-500 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded-sm"
+      >
+        <span>{HELP_IMPROVE.heading}</span>
+        <span className="flex items-center gap-1 normal-case tracking-normal font-medium">
+          Optional
+          {open ? <ChevronDown className="h-4 w-4" aria-hidden="true" /> : <ChevronRight className="h-4 w-4" aria-hidden="true" />}
+        </span>
+      </button>
+      <p className="mt-3 text-[13px] text-gray-500">{HELP_IMPROVE.intro}</p>
+      {open && (
+        <div id="help-improve-cviche">
+          <p className="mt-1 text-[13px] text-gray-500">{HELP_IMPROVE.correctedIntro}</p>
+          <CorrectedUpload runId={runId} />
+        </div>
+      )}
     </div>
   )
 }
@@ -583,6 +663,8 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           ariaLabel={QUESTION_LABELS.likelihood_to_recommend}
         />
       </QuestionRow>
+
+      <HelpImproveSection runId={runId} />
 
       <div className="mt-4 pt-4 border-t border-sand-200 flex flex-wrap items-center justify-between gap-3">
         <span className="text-xs text-gray-500">

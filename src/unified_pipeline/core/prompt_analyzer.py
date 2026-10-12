@@ -18,10 +18,10 @@ Usage:
 
 import json
 import os
-from pathlib import Path
-from collections import defaultdict, Counter
-from datetime import datetime
 import statistics
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
 
 # Default prompt log directory
 PROMPT_LOG_DIR = Path(os.getenv("PROMPT_LOG_DIR", "prompt_logs"))

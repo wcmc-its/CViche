@@ -14,7 +14,6 @@ Rule: If the teaching entry contains leadership signals (Director,
 
 import re
 
-
 # Leadership signals that indicate K3 (program leadership) not K1 (didactic)
 LEADERSHIP_SIGNALS = [
     r'\bCourse\s+Director\b',

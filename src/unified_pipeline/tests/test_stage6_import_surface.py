@@ -55,8 +55,10 @@ if str(_SRC) not in sys.path:
 #: Adding to this list is fine. REMOVING from it is a breaking change, and it is
 #: the one the split is most likely to make by accident.
 STAGE6_IMPORT_SURFACE = (
+    "BARE_MENTEE_RESOLVE_CHECK",
     "DEDUP_FUSED_BLOB_RECORD_LINES",
     "GEO_SCOPE_FAILURE_STAT",
+    "NAMED_REACH_SYSTEM_PROMPT",
     "PII_REDACTED_NOTICE",
     "PRECOLLEGIATE_REROUTE_CHECK",
     "RECLASSIFY_FAILURE_STAT",
@@ -65,6 +67,8 @@ STAGE6_IMPORT_SURFACE = (
     "REROUTE_ACCEPTED_SAME_FAMILY",
     "REROUTE_CHECK",
     "REROUTE_REFUSED_FIELDS",
+    "REROUTE_REFUSED_FIELDS_LOST",
+    "REROUTE_REFUSED_HEADING",
     "REROUTE_REFUSED_MENTEE",
     "RETIRED_TAXONOMY_CODES",
     "TAXONOMY_TO_SECTION",
@@ -91,6 +95,7 @@ STAGE6_IMPORT_SURFACE = (
     "extract_sort_date",
     "format_date_for_section",
     "grant_status_rebucket_target",
+    "is_overflow_candidate",
     "normalize_retired_code",
     "parse_reclassified_segments",
     "rendered_extraction_coverage",
@@ -174,6 +179,7 @@ RELOCATED_BY_398_RESIDUE = {
         "_record_tokens",
         "_value_is_datelike",
         "_whole_record_rendered",
+        "m1_record_rendered",
         "normalize_retired_code",
         "segment_already_rendered",
         "segments_cover_source",
@@ -192,12 +198,13 @@ HOME_ONLY_IMPORTS = {
                                       "recovered_row_already_rendered","_row_residue",
                                       "_DECISION_FIELD_MAX_CHARS", "_decision_fields",
                                       "_GROUP_HEADER_RE", "_bare_occasion_apart", "_carries_record",
-                                      "_different_book", "_different_rank", "_part_numbers",
+                                      "_counts", "_different_book", "_different_rank", "_part_numbers",
                                       "_verbatim_contained",
                                       "_YEAR_RE", "_is_subsequence", "_is_word_run", "_ordered_words",
                                       "_rank_qualifiers",
                                       "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases",
-                                      "SPLIT_SIBLING_METRIC", "_drop_split_siblings"),
+                                      "SPLIT_SIBLING_METRIC", "_drop_split_siblings",
+                                      "_citation_identity_text"),
 }
 
 _RELOCATED_CASES = [
@@ -237,7 +244,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 34, (
+    assert len(_RELOCATED_CASES) == 35, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
@@ -304,7 +311,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 42, (
+    assert len(STAGE6_IMPORT_SURFACE) == 47, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )

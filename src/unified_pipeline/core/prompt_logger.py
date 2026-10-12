@@ -23,17 +23,19 @@ Usage:
     response = client.chat.completions.create(...)
 """
 
+import contextvars
+import hashlib
 import json
 import os
 import re
-import contextvars
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Any
-import hashlib
 
-from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, PROMPT_LOG_RESPONSE_SUFFIX
-
+from unified_pipeline.llm_provenance import (
+    FALLBACK_SERVED_KEY,
+    PROMPT_LOG_RESPONSE_SUFFIX,
+)
 
 # Default prompt log directory - use absolute path based on this module's location
 # This ensures logs go to src/unified_pipeline/prompt_logs regardless of cwd

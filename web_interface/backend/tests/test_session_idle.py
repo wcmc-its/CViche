@@ -238,7 +238,7 @@ def _make_user(db):
 
 
 def test_minted_cookie_carries_sid_and_is_accepted(client, db, seed_simple_mode, idle_store):
-    from app.auth import create_session_cookie, decode_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie, decode_session_cookie
     user = _make_user(db)
     cookie = create_session_cookie(user, db)      # seeds the idle key
     assert decode_session_cookie(cookie).get("sid")
@@ -257,7 +257,7 @@ def test_expired_idle_key_yields_401(client, db, seed_simple_mode, idle_store):
     between resolve() and expire() -- see test_auth_audit_events.py's
     idle_timeout test.
     """
-    from app.auth import create_session_cookie, decode_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie, decode_session_cookie
     user = _make_user(db)
     cookie = create_session_cookie(user, db)
     sid = decode_session_cookie(cookie)["sid"]
@@ -278,7 +278,7 @@ def test_legacy_cookie_without_sid_bypasses_idle(client, db, seed_simple_mode):
     deployment accepts v2 cookies only, so "no sid" is not a shape that can
     reach this path there at all.
     """
-    from app.auth import _serializer, COOKIE_NAME
+    from app.auth import COOKIE_NAME, _serializer
     user = _make_user(db)
     legacy = _serializer.dumps({
         "user_id": user.id, "email": user.email, "epoch": 0,
@@ -289,7 +289,7 @@ def test_legacy_cookie_without_sid_bypasses_idle(client, db, seed_simple_mode):
 
 
 def test_logout_deletes_idle_key(client, db, seed_simple_mode, idle_store):
-    from app.auth import create_session_cookie, decode_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie, decode_session_cookie
     user = _make_user(db)
     cookie = create_session_cookie(user, db)
     sid = decode_session_cookie(cookie)["sid"]

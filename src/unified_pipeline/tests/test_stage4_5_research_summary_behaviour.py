@@ -42,16 +42,31 @@ from unified_pipeline.llm_provenance import (  # noqa: E402
 from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     CURRENT_CONTEXT_TAG,
     CURRENT_WORK_REQUIREMENT,
+    FACTS_ONLY_REQUIREMENT,
+    FIRST_PERSON_REQUIREMENT,
+    FUNDING_REQUIREMENT,
+    GRANT_FIELD_NOT_STATED,
+    GRANT_STATUS_BY_CODE,
+    GRANT_STATUS_COMPLETED,
+    GRANT_STATUS_CURRENT,
+    GRANT_STATUS_NOT_RECEIVED,
+    GRANT_STATUS_NOT_STATED,
+    MENTORING_REQUIREMENT,
     NEUTRAL_REFERENCE_REQUIREMENT,
     ONGOING_PATTERN,
+    PENDING_FUNDING_REQUIREMENT,
     PI_BONUS,
     RECENCY_WEIGHT,
+    ROLE_WORDS_REQUIREMENT,
     SENIOR_AUTHOR_BONUS,
+    STATUS_REQUIREMENT,
     EntryRecency,
     build_context_string,
     compute_entry_recency,
+    end_date_state,
     format_entry_for_context,
     gather_context_entries,
+    grant_status,
     is_current_entry,
     is_valid_entry,
     latest_entry_year,
@@ -59,6 +74,7 @@ from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     run_stage_4_5,
     score_entry_recency,
     score_entry_seniority,
+    summary_requirements,
 )
 
 # Placeholder EntryRecency for build_context_string tests that exercise the
@@ -665,7 +681,166 @@ def test_format_entry_for_context_publication():
 
 def test_format_entry_for_context_grant():
     entry = {"extracted_fields": {"title": "Grant T", "pi_role": "PI", "agency": "NIH"}, "text": ""}
-    assert format_entry_for_context("M2A", entry) == "[GRANT-M2A] Grant T | Role: PI | Agency: NIH"
+    assert format_entry_for_context("M2A", entry, ended=False) == (
+        "[GRANT-M2A] Grant T | Status: current | Role: PI | Agency: NIH")
+
+
+@pytest.mark.parametrize("code, status", [
+    ("M2A", "current"),
+    ("M2B", "completed"),
+    ("M2C", "pending application (not funded)"),
+    ("M2D", "patent or innovation (not a grant)"),
+])
+def test_format_entry_for_context_grant_states_its_funding_status_as_a_word(code, status):
+    """#1484: a bare GRANT-M2C told the model nothing, and it summarised pending
+    applications as funded studies. Each M2 code now carries its status word."""
+    entry = {"extracted_fields": {"title": "Widget trial", "pi_role": "PI", "agency": "NIH"},
+             "hierarchy": [f"{status.split()[0].title()} Funding"], "text": ""}
+    assert format_entry_for_context(code, entry) == (
+        f"[GRANT-{code}] Widget trial | Status: {status} | Role: PI | Agency: NIH")
+    assert GRANT_STATUS_BY_CODE[code] == status
+
+
+def test_format_entry_for_context_unknown_grant_code_has_no_status_segment():
+    entry = {"extracted_fields": {"title": "Grant T", "pi_role": "PI", "agency": "NIH"}, "text": ""}
+    assert format_entry_for_context("M2Z", entry) == "[GRANT-M2Z] Grant T | Role: PI | Agency: NIH"
+
+
+@pytest.mark.parametrize("code, dates, segment", [
+    ("M2A", {"start_date": "2021", "end_date": "present"}, " | Period: 2021 to present"),
+    ("M2B", {"start_date": "2010-07", "end_date": "2014-06"}, " | Period: 2010-07 to 2014-06"),
+    ("M2B", {"start_date": "2011"}, " | Period: from 2011"),
+    ("M2B", {"end_date": "2016"}, " | Period: until 2016"),
+    ("M2C", {"submission_date": "2012"}, " | Submitted: 2012"),
+    ("M2B", {"start_date": "None", "end_date": "  "}, ""),
+])
+def test_format_entry_for_context_grant_line_carries_its_period(code, dates, segment):
+    """#1554: a grant line carried its status but no date, so a long-ago letter of
+    intent read as a current application. The period (or submission date) follows
+    the status; a blank or literal 'None' date adds nothing."""
+    entry = {"extracted_fields": {"title": "Gadget study", "pi_role": "PI", "agency": "Example Fund", **dates},
+             "hierarchy": ["Current Funding" if code == "M2A" else "Completed Funding"], "text": ""}
+    ended = end_date_state(entry, 2026)
+    assert format_entry_for_context(code, entry, ended) == (
+        f"[GRANT-{code}] Gadget study | Status: {GRANT_STATUS_BY_CODE[code]}{segment} | Role: PI | Agency: Example Fund")
+
+
+@pytest.mark.parametrize("end_date, expected", [
+    ("2019", True),
+    ("2019-06-30", True),
+    ("2026", False),
+    ("2031", False),
+    ("present", False),
+    ("2014 - Present", False),
+    (None, None),
+    ("None", None),
+    ("TBD", None),
+])
+def test_end_date_state_reads_ended_ongoing_or_unstated(end_date, expected):
+    """#1554: a grant line's status follows its end date; an end date with no year
+    and no ongoing word states nothing (None), which is not the same as ongoing."""
+    entry = {"extracted_fields": {"end_date": end_date}, "text": ""}
+    assert end_date_state(entry, 2026) is expected
+
+
+@pytest.mark.parametrize("code, ended, hierarchy, expected", [
+    # The end date decides a funded grant's status, whatever the 3b code (SPINJC-05).
+    ("M2B", False, ["Completed Funding"], GRANT_STATUS_CURRENT),
+    ("M2A", True, ["Current Funding"], GRANT_STATUS_COMPLETED),
+    # Undated: the deepest heading naming a status word decides it.
+    ("M2B", None, ["Research", "Ongoing Research Grants"], GRANT_STATUS_CURRENT),
+    ("M2A", None, ["Research Support", "Past (Completed) Funding"], GRANT_STATUS_COMPLETED),
+    ("M2B", None, ["Current and Completed Support", "Completed Funding"], GRANT_STATUS_COMPLETED),
+    # Undated under a heading that states none, both, or a pending word: not stated
+    # (FMIGLR-07, RLADNC-10, and the 2007 honors line coded M2A of ZDOAZO-01).
+    ("M2B", None, ["Contracts and Grants"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Research", "Clinical Trials"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Post-Degree Honors and Awards"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Current Support and Recently Completed"], GRANT_STATUS_NOT_STATED),
+    ("M2A", None, ["Present/Pending"], GRANT_STATUS_NOT_STATED),
+    # The deepest status heading decides even when it states none: no fall-back to a parent.
+    ("M2A", None, ["Completed Grants", "Present/Pending"], GRANT_STATUS_NOT_STATED),
+    ("M2B", None, ["Grant Support", "Past Support"], GRANT_STATUS_COMPLETED),
+    # A deeper heading with no status word passes the decision up to its parent.
+    ("M2B", None, ["Past Support", "Federal Grants"], GRANT_STATUS_COMPLETED),
+    ("M2B", None, [], GRANT_STATUS_NOT_STATED),
+    # A pending heading outranks the dates: 3b coded applications M2B, and their proposed
+    # period read as current; a mixed heading is not a pending one.
+    ("M2B", False, ["Grant Support", "Pending Research Grants (under review)"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2A", None, ["Grant Applications in Review"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2B", True, ["Submitted Applications"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2A", False, ["Present/Pending"], GRANT_STATUS_CURRENT),
+    # A not-funded heading is not received, whatever the code.
+    ("M2B", False, ["Submitted, Not Funded"], GRANT_STATUS_NOT_RECEIVED),
+    ("M2C", None, ["Examples of grants submitted but not funded"], GRANT_STATUS_NOT_RECEIVED),
+    ("M2C", None, ["Pending Funding"], GRANT_STATUS_BY_CODE["M2C"]),
+    # M2C and M2D keep their code's word, and an unknown code has none.
+    ("M2C", False, ["Current Funding"], GRANT_STATUS_BY_CODE["M2C"]),
+    ("M2D", None, [], GRANT_STATUS_BY_CODE["M2D"]),
+    ("M2Z", False, [], None),
+])
+def test_grant_status_reads_dates_then_heading_not_the_code(code, ended, hierarchy, expected):
+    """#1554 (YUYVIG): the code alone wrote 'current' or 'completed' into the grant line,
+    and the summary repeated it. A funded grant's status now comes from its end date,
+    then its CV heading, and is 'not stated' when neither gives one."""
+    entry = {"extracted_fields": {"title": "Widget study"}, "hierarchy": hierarchy, "text": ""}
+    assert grant_status(code, entry, ended) == expected
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+@pytest.mark.parametrize("source_status", ["DECLINED", "Withdrawn", "Not Funded", "rejected"])
+def test_grant_status_marks_a_declined_grant_not_received(code, source_status):
+    """ATRKVV-02: a DECLINED award line read as completed, and the summary counted
+    'three consecutive' awards. A declined, withdrawn or not-funded grant is not received."""
+    entry = {"extracted_fields": {"title": "Fellowship award", "status": source_status},
+             "hierarchy": ["Current Funding"], "text": ""}
+    assert grant_status(code, entry, ended=False) == GRANT_STATUS_NOT_RECEIVED
+
+
+def test_grant_status_keeps_a_funded_source_status_on_its_dates():
+    """A source status that is not a refusal ('Funded') leaves the date-derived status."""
+    entry = {"extracted_fields": {"title": "Widget study", "status": "Funded"}, "hierarchy": [], "text": ""}
+    assert grant_status("M2B", entry, ended=True) == GRANT_STATUS_COMPLETED
+
+
+@pytest.mark.parametrize("fields", [
+    {"pi_role": "", "agency": ""},
+    {"pi_role": None, "agency": None},
+    {"pi_role": "None", "agency": "None"},
+    {},
+])
+def test_format_entry_for_context_grant_says_a_missing_role_or_agency_is_not_stated(fields):
+    """#1554: a blank 'Role: ' let the model supply 'I led' (FCAAUV-07), and a literal
+    'Agency: None' left the funder open to the next line's (WPJHYT-05)."""
+    entry = {"extracted_fields": {"title": "Widget study", **fields}, "hierarchy": [], "text": ""}
+    assert format_entry_for_context("M2B", entry, ended=True) == (
+        f"[GRANT-M2B] Widget study | Status: {GRANT_STATUS_COMPLETED} "
+        f"| Role: {GRANT_FIELD_NOT_STATED} | Agency: {GRANT_FIELD_NOT_STATED}")
+
+
+def test_format_entry_for_context_grant_role_falls_back_to_the_role_field():
+    entry = {"extracted_fields": {"title": "Widget study", "pi_role": None, "role": "Co-I", "agency": "Fund"},
+             "hierarchy": [], "text": ""}
+    assert format_entry_for_context("M2B", entry, ended=True).endswith("| Role: Co-I | Agency: Fund")
+
+
+def test_build_context_string_grant_tag_and_status_agree():
+    """#1554: an undated honors line coded M2A was tagged current with Status 'current'
+    (ZDOAZO-01), and an ongoing grant coded M2B was tagged current with Status
+    'completed' (SPINJC-05). The tag now follows the line's own status."""
+    undated = {"extracted_fields": {"title": "Consensus grant", "start_date": "2007", "agency": "Fund"},
+               "hierarchy": ["Honors and Awards"], "text": "x"}
+    ongoing = {"extracted_fields": {"title": "Cohort study", "start_date": "2017", "end_date": "present",
+                                    "pi_role": "Co-I", "agency": "Fund"},
+               "hierarchy": ["Research Projects"], "text": "y"}
+    weighted = [("M2A", undated, 0.0, compute_entry_recency(undated, "M2A", 2026)),
+                ("M2B", ongoing, -0.1, compute_entry_recency(ongoing, "M2B", 2026))]
+
+    assert build_context_string(weighted, max_tokens=200) == (
+        f"[GRANT-M2A] Consensus grant | Status: {GRANT_STATUS_NOT_STATED} | Period: from 2007 "
+        f"| Role: {GRANT_FIELD_NOT_STATED} | Agency: Fund\n"
+        f"{CURRENT_CONTEXT_TAG} [GRANT-M2B] Cohort study | Status: {GRANT_STATUS_CURRENT} "
+        "| Period: 2017 to present | Role: Co-I | Agency: Fund")
 
 
 def test_format_entry_for_context_research_activities():
@@ -767,8 +942,9 @@ def test_build_context_string_tag_follows_recency_computed_at_a_year_other_than_
         [("M2A", current_grant, 0.0, current_recency), ("M2A", past_grant, 0.0, past_recency)],
         max_tokens=100)
 
-    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Role:  | Agency: "
-                       "\n[GRANT-M2A] R21 | Role:  | Agency: ")
+    assert result == (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] R01 | Status: current | Period: until 2045 "
+                       "| Role: not stated | Agency: not stated"
+                       "\n[GRANT-M2A] R21 | Status: completed | Period: until 2035 | Role: not stated | Agency: not stated")
 
 
 # --- score_existing_m1 (call_llm stubbed) -----------------------------------------
@@ -847,7 +1023,7 @@ def test_generate_research_summary_returns_stripped_text_and_usage(monkeypatch):
         }
     monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
 
-    text, usage = stage_4_5.generate_research_summary("some context", "Jane Doe")
+    text, usage = stage_4_5.generate_research_summary("some context")
 
     assert text == "Generated summary text about research."
     assert usage["prompt_tokens"] == 20
@@ -865,7 +1041,7 @@ def test_generate_research_summary_prompt_requires_current_work_first_and_neutra
         return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
 
-    stage_4_5.generate_research_summary("[CURRENT] [RESEARCH] ctx", "Jane Doe")
+    stage_4_5.generate_research_summary("[CURRENT] [RESEARCH] ctx")
 
     prompt = captured["prompt"]
     assert f"- {CURRENT_WORK_REQUIREMENT}" in prompt
@@ -874,8 +1050,134 @@ def test_generate_research_summary_prompt_requires_current_work_first_and_neutra
     assert "older work only briefly" in CURRENT_WORK_REQUIREMENT
     assert CURRENT_CONTEXT_TAG in CURRENT_WORK_REQUIREMENT
     assert "never use gendered pronouns" in NEUTRAL_REFERENCE_REQUIREMENT
-    assert "never infer gender from the name" in NEUTRAL_REFERENCE_REQUIREMENT
+    assert "never infer anyone's gender" in NEUTRAL_REFERENCE_REQUIREMENT
     assert f"ongoing entries tagged {CURRENT_CONTEXT_TAG}" in prompt
+
+
+def test_generate_research_summary_prompt_asks_for_first_person_without_naming_the_researcher(monkeypatch):
+    """#1539 (Paul, 2026-10-07): the summary is the researcher's own statement.
+    The prompt asks for the first person, drops the third-person rule, and no
+    longer frames the paragraph as being "for" a named owner, so the model has
+    no name to write "Dr. X" from."""
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    stage_4_5.generate_research_summary("[GRANT-M2A] R01 Widgets")
+
+    prompt = captured["prompt"]
+    assert f"- {FIRST_PERSON_REQUIREMENT}" in prompt
+    assert "first person" in FIRST_PERSON_REQUIREMENT
+    assert "third person" not in prompt
+    assert "paragraph for " not in prompt
+    assert "Do not name the researcher" in NEUTRAL_REFERENCE_REQUIREMENT
+    assert "by name" not in NEUTRAL_REFERENCE_REQUIREMENT
+
+
+def _captured_generation_prompt(monkeypatch, context: str) -> str:
+    """The prompt generate_research_summary sends for this context (call_llm stubbed)."""
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+    stage_4_5.generate_research_summary(context)
+    return captured["prompt"]
+
+
+_PENDING_LINE = "[GRANT-M2C] R01 Widgets | Status: pending application (not funded) | Submitted: 2024"
+_FUNDED_LINE = "[GRANT-M2B] Gizmo cohort | Status: completed | Period: 2015 to 2019 | Role: PI | Agency: Example Fund"
+_MENTEE_LINE = "[N3A] Postdoctoral fellow, gizmo modelling"
+_RESEARCH_LINE = "[RESEARCH] I study widget folding with imaging methods."
+
+
+def test_generate_research_summary_prompt_says_pending_applications_are_not_funded(monkeypatch):
+    """#1484: with a pending-application line in the context, the prompt tells the
+    model that it is an application, never funded work; the status word it keys on
+    is the one format_entry_for_context writes for M2C."""
+    prompt = _captured_generation_prompt(monkeypatch, _PENDING_LINE)
+
+    assert f"- {PENDING_FUNDING_REQUIREMENT}" in prompt
+    assert "pending application" in PENDING_FUNDING_REQUIREMENT
+    assert "pending application" in GRANT_STATUS_BY_CODE["M2C"]
+    assert "never describe it as funded" in PENDING_FUNDING_REQUIREMENT
+
+
+def test_generate_research_summary_prompt_always_carries_the_facts_only_rule(monkeypatch):
+    """#1554: the summary invented funders, applications, mentees and impact. Every
+    prompt opens its requirements with the rule to state only what the context holds."""
+    prompt = _captured_generation_prompt(monkeypatch, _RESEARCH_LINE)
+
+    assert prompt.split("REQUIREMENTS:\n", 1)[1].startswith(f"- {FACTS_ONLY_REQUIREMENT}\n")
+    assert "ONLY facts that the CV CONTEXT below contains" in FACTS_ONLY_REQUIREMENT
+    for invented in ("grant", "application", "funder", "mentee", "impact"):
+        assert invented in FACTS_ONLY_REQUIREMENT
+
+
+def test_generate_research_summary_prompt_without_grants_or_mentees_asks_for_none(monkeypatch):
+    """#1554: on a context with no grant or mentee line, the prompt does not ask for
+    funding, pending applications, mentoring or impact -- the asks the model met by
+    inventing them -- and does not prime the 'application under review' phrase."""
+    prompt = _captured_generation_prompt(monkeypatch, _RESEARCH_LINE)
+
+    for requirement in (FUNDING_REQUIREMENT, PENDING_FUNDING_REQUIREMENT, MENTORING_REQUIREMENT):
+        assert requirement not in prompt
+    assert "Highlight impact" not in prompt
+    assert "application under review" not in prompt
+    assert "funding sources" not in prompt
+    assert "mentorship" not in prompt
+
+
+@pytest.mark.parametrize("line, expected", [
+    (_FUNDED_LINE, {"funding"}),
+    (f"{CURRENT_CONTEXT_TAG} [GRANT-M2A] Gizmo trial | Status: current | Role: Co-I | Agency: Example Fund",
+     {"funding"}),
+    (_PENDING_LINE, {"pending"}),
+    (_MENTEE_LINE, {"mentoring"}),
+    ("[N3B] Former student, widget assays", {"mentoring"}),
+    ("[N4] Mentee awards and outputs", {"mentoring"}),
+    ("[GRANT-M2D] Widget patent | Status: patent or innovation (not a grant) | Role:  | Agency: ", set()),
+    ("[RESEARCH] My grants and mentees are listed elsewhere.", set()),
+    ("[RESEARCH] A tag inside free text, [GRANT-M2C] or [N3A], is not a line.", set()),
+    ("\n".join([_FUNDED_LINE, _PENDING_LINE, _MENTEE_LINE]), {"funding", "pending", "mentoring"}),
+])
+def test_summary_requirements_include_each_conditional_ask_only_for_its_line(line, expected):
+    """#1554: each conditional ask is keyed on the context line it applies to; a
+    patent line is not funding, and a word in free text is not a tagged line."""
+    by_name = {"funding": FUNDING_REQUIREMENT, "pending": PENDING_FUNDING_REQUIREMENT,
+               "mentoring": MENTORING_REQUIREMENT}
+    requirements = summary_requirements(line)
+
+    assert {name for name, text in by_name.items() if text in requirements} == expected
+
+
+def test_summary_requirements_keep_first_person_and_neutral_reference_whatever_the_context():
+    """#1539's first-person and no-name rules hold with and without conditional asks."""
+    for context in (_RESEARCH_LINE, "\n".join([_FUNDED_LINE, _PENDING_LINE, _MENTEE_LINE])):
+        requirements = summary_requirements(context)
+        assert FIRST_PERSON_REQUIREMENT in requirements
+        assert NEUTRAL_REFERENCE_REQUIREMENT in requirements
+        assert CURRENT_WORK_REQUIREMENT in requirements
+        assert STATUS_REQUIREMENT in requirements
+        assert ROLE_WORDS_REQUIREMENT in requirements
+
+
+def test_requirements_pin_the_yuyvig_status_role_and_funder_rules():
+    """#1554 (YUYVIG, after #1558): wrong status, upgraded role verbs, funders carried
+    to the wrong grant, and a declined award counted. Each rule names what it forbids."""
+    assert CURRENT_CONTEXT_TAG in STATUS_REQUIREMENT
+    for word in ("current", "completed", "do not say"):
+        assert word in STATUS_REQUIREMENT
+    for verb in ("led", "founded", "directed", "coordinated", "co-founder"):
+        assert verb in ROLE_WORDS_REQUIREMENT
+    assert "own line gives it as the Agency" in FUNDING_REQUIREMENT
+    assert "not stated" in FUNDING_REQUIREMENT
+    assert "not received" in FUNDING_REQUIREMENT
+    assert GRANT_STATUS_NOT_RECEIVED.startswith("not received")
 
 
 def test_current_context_tag_appears_in_current_work_requirement():
@@ -908,7 +1210,7 @@ def test_blank_context_makes_no_llm_call_and_returns_empty_summary(monkeypatch, 
     refusal that stage 6 then rendered as the Research Activities paragraph."""
     calls = _stub_reply(monkeypatch, "I don't have access to specific CV details for Jane Doe.")
 
-    text, method, usage = stage_4_5.generate_summary_unless_withheld(blank_context, "Jane Doe")
+    text, method, usage = stage_4_5.generate_summary_unless_withheld(blank_context)
 
     assert calls == []
     assert (text, method, usage) == ("", stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {})
@@ -917,7 +1219,7 @@ def test_blank_context_makes_no_llm_call_and_returns_empty_summary(monkeypatch, 
 def test_non_blank_context_returns_the_generated_summary(monkeypatch):
     calls = _stub_reply(monkeypatch, "  Doe's lab studies widget dynamics.  ")
 
-    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
 
     assert len(calls) == 1
     assert text == "Doe's lab studies widget dynamics."
@@ -946,7 +1248,7 @@ def test_refusal_opening_reply_is_withheld_but_its_cost_is_kept(monkeypatch, rep
     is still returned so the stage's cost total stays honest."""
     _stub_reply(monkeypatch, reply)
 
-    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
 
     assert text == ""
     assert method == stage_4_5.GENERATION_METHOD_REFUSED
@@ -960,13 +1262,93 @@ def test_refusal_opening_reply_is_withheld_but_its_cost_is_kept(monkeypatch, rep
     "Investigations by Doe's group, including ones I'm told were pioneering, ...",
     "This work could not have proceeded without R01 support.",
     'Doe studies why patients with asthma say "I cannot breathe" during exacerbations.',  # refusal words mid-text
+    # First-person summary openers (#1539): the prompt now asks for "I" / "my research".
+    "I study how widget signalling shapes immune tolerance, using mouse models and patient cohorts.",
+    "My research focuses on widget dynamics in the developing heart.",
+    "I lead an NIH-funded program on widget signalling in asthma.",
+    "I have spent the past decade developing computational methods for widget imaging.",
+    "I am a physician-scientist studying widget signalling in chronic kidney disease.",
+    "I direct a translational laboratory that tests widget inhibitors in early-phase trials.",
+    "I developed, and now apply, a widget assay that cannot be run without single-cell imaging.",
+    "In my laboratory, I combine widget imaging with patient cohorts.",
+    "I'm a clinician-investigator; my group studies widget signalling.",
+    "I do research on widget signalling.",
 ])
 def test_real_summary_is_never_mistaken_for_a_refusal(monkeypatch, reply):
     """The pattern is anchored to the reply's opening first-person phrase: a summary
     that merely contains 'cannot', 'does not' or an I-initial word is kept."""
     _stub_reply(monkeypatch, reply)
 
-    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == reply
+    assert method == stage_4_5.GENERATION_METHOD_LLM
+
+
+_WRAPPED_SUMMARY = "My research focuses on widget signalling in the developing heart."
+
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"research_summary": _WRAPPED_SUMMARY}),
+    json.dumps({"summary": _WRAPPED_SUMMARY}),
+    json.dumps({"paragraph": _WRAPPED_SUMMARY}),                       # the only value, any key
+    json.dumps({"research_summary": _WRAPPED_SUMMARY, "word_count": 10}),  # a named key wins
+    "  " + json.dumps({"research_summary": "  " + _WRAPPED_SUMMARY + " "}) + "\n",
+])
+def test_json_wrapped_reply_renders_its_inner_summary(monkeypatch, reply):
+    """#1582: ECXGAT's reply was {"research_summary": "..."} although the prompt
+    asks for plain prose, and stage 6 rendered the JSON verbatim. The wrapped
+    string is the summary."""
+    _stub_reply(monkeypatch, reply)
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == _WRAPPED_SUMMARY
+    assert method == stage_4_5.GENERATION_METHOD_LLM
+    assert usage["cost"] == 0.003
+
+
+@pytest.mark.parametrize("reply", [
+    json.dumps({"research_summary": ["a", "b"]}),        # named key, not a string
+    json.dumps({"first": "a", "second": "b"}),           # two strings, no named key
+    json.dumps({"research_summary": ""}),                # wraps an empty summary
+    json.dumps({"count": 3}),
+    json.dumps({}),
+    json.dumps([_WRAPPED_SUMMARY]),
+    json.dumps(_WRAPPED_SUMMARY),                        # a bare JSON string
+    "null",
+    "42",
+])
+def test_json_reply_wrapping_no_summary_is_withheld_but_its_cost_is_kept(monkeypatch, reply):
+    """#1582: JSON of any other shape has no prose to render, so it is withheld
+    like a refusal, under its own generation_method."""
+    _stub_reply(monkeypatch, reply)
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == ""
+    assert method == stage_4_5.GENERATION_METHOD_NON_PROSE
+    assert usage["cost"] == 0.003
+
+
+def test_json_wrapped_refusal_is_withheld_as_a_refusal(monkeypatch):
+    """The refusal check reads the unwrapped text, so a wrapper cannot hide one."""
+    _stub_reply(monkeypatch, json.dumps({"research_summary": "I cannot write this summary."}))
+
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
+
+    assert text == ""
+    assert method == stage_4_5.GENERATION_METHOD_REFUSED
+
+
+@pytest.mark.parametrize("reply", [
+    "{Widget} signalling is the focus of my research.",  # opens with a brace, not JSON
+    "My research spans [three] areas of widget biology.",
+])
+def test_prose_that_merely_looks_bracketed_is_kept_verbatim(monkeypatch, reply):
+    _stub_reply(monkeypatch, reply)
+
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets")
 
     assert text == reply
     assert method == stage_4_5.GENERATION_METHOD_LLM
@@ -1092,18 +1474,20 @@ def test_run_stage_4_5_skips_scoring_when_no_existing_m1(monkeypatch, tmp_path):
 def test_run_stage_4_5_derives_owner_name_from_document_uid(monkeypatch, tmp_path):
     """With no cv_owner block, the owner name is derived from the second
     underscore-delimited segment of document_uid: the literal substrings
-    "js" and "Cv" are stripped (line 456's ``.replace('js', '').replace('Cv',
-    '')``), then the result is capitalized, and threaded into the
-    generation prompt.
+    "js" and "Cv" are stripped, then the result is capitalized, and threaded
+    into the seniority scoring (gather_context_entries). It no longer reaches
+    the generation prompt, which is written in the first person (#1539).
 
     "JanejsCv" contains "Jane" as a substring even WITHOUT stripping (it
-    capitalizes to "Janejscv"), so merely checking ``"Jane" in prompt``
-    passes on both the correct and the buggy (unstripped) behaviour and
-    proves nothing. Instead assert the exact rendered clause "for Jane."
-    (name immediately followed by the sentence's period) is present, and
-    that the unstripped form "Janejscv" is absent -- only the intended
-    strip-then-capitalize route produces exactly "Jane"."""
+    capitalizes to "Janejscv"), so the derived name is checked for equality
+    with "Jane": only the intended strip-then-capitalize route produces it."""
     captured = {}
+    real_gather = stage_4_5.gather_context_entries
+
+    def spy_gather(entries_by_code, current_year, cv_owner_name=''):
+        captured["cv_owner_name"] = cv_owner_name
+        return real_gather(entries_by_code, current_year, cv_owner_name=cv_owner_name)
+    monkeypatch.setattr(stage_4_5, "gather_context_entries", spy_gather)
 
     def fake_call_llm(*, messages, **_kwargs):
         if _SCORE_PROMPT_MARKER in messages[0]["content"]:
@@ -1124,8 +1508,8 @@ def test_run_stage_4_5_derives_owner_name_from_document_uid(monkeypatch, tmp_pat
 
     run_stage_4_5(str(inp), str(outp), verbose=False)
 
-    assert "for Jane." in captured["prompt"]
-    assert "Janejscv" not in captured["prompt"]
+    assert captured["cv_owner_name"] == "Jane"
+    assert "Jane" not in captured["prompt"]
 
 
 def test_run_stage_4_5_raises_file_not_found_for_missing_input(monkeypatch, tmp_path):
@@ -1178,6 +1562,32 @@ def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, t
     # check the CV CONTEXT entry itself is not tagged.
     assert f"{CURRENT_CONTEXT_TAG} [GRANT-M2A]" not in captured["prompt"]
     assert "[GRANT-M2A]" in captured["prompt"]
+
+
+def test_run_stage_4_5_generation_prompt_carries_no_owner_name(monkeypatch, tmp_path):
+    """#1539, through the real driver: the owner's name from cv_owner no longer
+    reaches the generation prompt, so the model cannot write "Dr. <name>" into a
+    first-person paragraph."""
+    captured = {}
+
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
+            raise AssertionError("no M1 content -- scoring must not run")
+        captured["prompt"] = messages[0]["content"]
+        return {"content": "I study widgets.", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    inp = _write_fields_json(
+        tmp_path, "TEST1539",
+        [{"taxonomy_code": "M2C", "text": "Grant", "extracted_fields": {"title": "R01 Widgets", "agency": "NIH"}}],
+        cv_owner={"first_name": "Quillon", "last_name": "Vexmoor"},
+    )
+
+    run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)
+
+    assert "Quillon" not in captured["prompt"]
+    assert "Vexmoor" not in captured["prompt"]
+    assert "[GRANT-M2C] R01 Widgets | Status: pending application (not funded)" in captured["prompt"]
 
 
 def test_run_stage_4_5_calls_send_no_call_site_max_tokens(monkeypatch, tmp_path):
@@ -1289,7 +1699,10 @@ def test_stage_6_renders_nothing_for_the_skipped_summary_run_stage_4_5_writes(mo
 def test_run_stage_4_5_records_each_call_the_fallback_served(monkeypatch, tmp_path):
     """#1174: both calls (the M1 relevance score and the generation) are
     served by the fallback here; the artifact lists them, by call name."""
-    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_5_FALLBACK_CALLS_KEY
+    from unified_pipeline.llm_provenance import (
+        FALLBACK_SERVED_KEY,
+        STAGE4_5_FALLBACK_CALLS_KEY,
+    )
 
     def fake_call_llm(*, messages, **_kwargs):
         reply = {"content": '{"score": 0.1, "reasoning": "weak"}'

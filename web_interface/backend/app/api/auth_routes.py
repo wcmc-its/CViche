@@ -5,29 +5,37 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.client_ip import get_client_ip
-from app.database import get_db
-from app.models import User
-from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
-from app.auth import (
-    decode_session_cookie,
-    get_cookie_settings,
-    get_cookie_delete_settings,
-    get_current_user,
-    resolve_session_identity,
-    COOKIE_NAME,
-    SESSION_STORE_UNAVAILABLE_DETAIL,
-    SESSION_STATE_UNAVAILABLE_DETAIL,
-)
-from app.session_idle import get_idle_store, SessionStoreUnavailable
-from app.login_throttle import get_login_throttle
-from app.config_loader import INTAKE_ADDRESS, email_intake_enabled, get_config_value
-from app.rate_limiter import get_quota
-from app.services.auth_service import LoginRejection, authenticate_simple_login
 from app.audit_events import (
     SESSION_REVOKED,
     SESSION_STORE_UNAVAILABLE,
 )
+from app.auth import (
+    ACCOUNT_DISABLED_DETAIL,
+    COOKIE_NAME,
+    SESSION_STATE_UNAVAILABLE_DETAIL,
+    SESSION_STORE_UNAVAILABLE_DETAIL,
+    decode_session_cookie,
+    get_cookie_delete_settings,
+    get_cookie_settings,
+    get_current_user,
+    resolve_session_identity,
+)
+from app.client_ip import get_client_ip
+from app.config_loader import INTAKE_ADDRESS, email_intake_enabled, get_config_value
+from app.database import get_db
+from app.login_throttle import get_login_throttle
+from app.models import User
+from app.rate_limiter import get_quota
+from app.schemas import (
+    AuthConfigResponse,
+    LoginRequest,
+    LoginResponse,
+    MeResponse,
+    QuotaInfo,
+)
+from app.services.auth_service import LoginRejection, authenticate_simple_login
+from app.services.config_service import MAX_UPLOAD_MB
+from app.session_idle import SessionStoreUnavailable, get_idle_store
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +69,7 @@ def get_auth_config(db: Session = Depends(get_db)):
     get_current_user dependency, so this keeps the blocking work off the
     event loop with no async infrastructure change needed."""
     mode = get_config_value(db, "auth_mode") or "simple"
-    response = {"mode": mode}
+    response = {"mode": mode, "max_upload_mb": MAX_UPLOAD_MB}
     if mode == "saml":
         response["discovery_url"] = get_config_value(db, "saml_discovery_url") or ""
     return response
@@ -75,6 +83,8 @@ _LOGIN_REJECTION_RESPONSES: dict[LoginRejection, tuple[int, dict[str, str]]] = {
     LoginRejection.NOT_ALLOWLISTED: (
         403, {"error": "forbidden", "message": "Email not in the allowed users list."},
     ),
+    # The body get_current_user refuses a disabled account with, so both read alike.
+    LoginRejection.ACCOUNT_DISABLED: (403, ACCOUNT_DISABLED_DETAIL),
     LoginRejection.SESSION_STORE_UNAVAILABLE: (503, SESSION_STORE_UNAVAILABLE_DETAIL),
     LoginRejection.SESSION_STATE_UNAVAILABLE: (503, SESSION_STATE_UNAVAILABLE_DETAIL),
 }

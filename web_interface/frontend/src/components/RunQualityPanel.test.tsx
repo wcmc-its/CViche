@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, RunQualitySections, seenOn } from './RunQualityPanel'
-import { getRunQuality } from '../api/runs'
-import type { RunQualityReport } from '../types'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, OwnerFixList, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
+import { getRunFixList, getRunQuality, getRunReviewNote } from '../api/runs'
+import type { RunDoctorReport, RunFixList, RunQualityReport, RunReviewNote } from '../types'
 
 vi.mock('../api/runs', () => ({
+  getRunFixList: vi.fn(),
   getRunQuality: vi.fn(),
   getRunReviewNote: vi.fn(),
 }))
@@ -18,6 +19,8 @@ const EMPTY: RunQualityReport = {
 const SCORED: RunQualityReport = { ...EMPTY, score: 87, band: 'GREEN', band_meaning: 'Ship', earned: 87, total_weight: 95 }
 
 const NO_SCORE = 'No quality score is stored for this run.'
+/** A doctor report's Fix-list fields, empty. */
+const NO_FIX = { fix_list: [], fix_list_held_back: 0, not_checked: [] }
 
 // Lets the resolved getRunQuality promise and the resulting state update land.
 const flush = () => act(async () => { await Promise.resolve() })
@@ -73,7 +76,7 @@ describe('RunQualitySections', () => {
     vi.mocked(getRunQuality).mockResolvedValue({
       ...SCORED, cap: 25, cap_reason: 'owner name missing', cap_lint: lint,
       doctor: {
-        counts: { error: 1, warn: 0, info: 0 }, not_run: 0,
+        counts: { error: 1, warn: 0, info: 0 }, not_run: 0, ...NO_FIX,
         findings: [{ lint, severity: 'ERROR', message: 'No name', title: 'Owner name not found', what_to_do: 'Rerun.', count: 1, prevalence: null, caps_score: true, instances: [] }],
       },
     })
@@ -89,7 +92,7 @@ describe('RunQualitySections', () => {
     vi.mocked(getRunQuality).mockResolvedValue({
       ...SCORED,
       doctor: {
-        counts: { error: 0, warn: 2, info: 0 }, not_run: 0,
+        counts: { error: 0, warn: 2, info: 0 }, not_run: 0, ...NO_FIX,
         findings: [
           { ...finding, lint: 'duplicate_records', title: 'Repeated numbered entry', count: 1 },
           { ...finding, lint: 'pipe_leaks', title: null, what_to_do: null, count: 3 },
@@ -110,7 +113,7 @@ describe('RunQualitySections', () => {
     vi.mocked(getRunQuality).mockResolvedValue({
       ...SCORED,
       doctor: {
-        counts: { error: 0, warn: 1, info: 0 }, not_run: 0,
+        counts: { error: 0, warn: 1, info: 0 }, not_run: 0, ...NO_FIX,
         findings: [{
           lint: 'multi_record_coverage', severity: 'WARN', message: 'm', title: 'Several records read as one',
           what_to_do: 'Add each missing record.', count: 30, prevalence: null, caps_score: false,
@@ -163,5 +166,193 @@ describe('RunQualitySections', () => {
     const card = screen.getByRole('tooltip').textContent
     expect(card).toContain('If it fires:')
     expect(card).toContain('caps only, no points')
+  })
+})
+
+describe('Run Doctor Fix list (#1589)', () => {
+  const quote = 'Visiting Lecturer in Medicine, Northfield University, 1990-1991'
+  const DOCTOR: RunDoctorReport = {
+    counts: { error: 0, warn: 1, info: 0 }, not_run: 0,
+    findings: [{
+      lint: 'under_extraction', severity: 'WARN', message: 'm', title: 'Big entry mostly unread',
+      what_to_do: 'Add the missing records.', count: 1, prevalence: 0.03, caps_score: false, instances: [],
+    }],
+    fix_list: [
+      { section: null, items: [{ problems: [{ severity: 'ERROR', title: 'No document produced', what_to_do: 'Rerun the CV.', confidence: 'unmeasured', effort: 'longer' }], quotes: [] }] },
+      { section: 'Honors & Awards', items: [{
+        problems: [
+          { severity: 'WARN', title: 'Heading printed as a record', what_to_do: 'Delete the quoted row.', confidence: 'high', effort: 'quick' },
+          { severity: 'WARN', title: 'Big entry mostly unread', what_to_do: 'Add the missing records.', confidence: 'medium', effort: 'longer' },
+        ],
+        quotes: [quote],
+      }] },
+    ],
+    fix_list_held_back: 2,
+    not_checked: ['Journal names, volumes and pages in citations.'],
+  }
+
+  afterEach(() => { cleanup(); vi.mocked(getRunQuality).mockReset(); window.location.hash = '' })
+
+  const renderDoctor = async () => {
+    vi.mocked(getRunQuality).mockResolvedValue({ ...SCORED, doctor: DOCTOR })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await act(async () => { await Promise.resolve() })
+  }
+  const panel = (name: string) => screen.getByRole('tabpanel', { name })
+
+  it('opens on the Fix list, grouped by location, merged per entry, quoting the text at stake', async () => {
+    await renderDoctor()
+    expect(screen.getByRole('tab', { name: 'Fix list (2)' }).getAttribute('aria-selected')).toBe('true')
+    const fix = within(panel('Fix list (2)'))
+    expect(fix.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Across the document', 'Honors & Awards'])
+    const [, honors] = fix.getAllByRole('list')
+    const item = within(within(honors).getByRole('listitem'))
+    expect(item.getByText('Heading printed as a record')).toBeTruthy()
+    expect(item.getByText('Big entry mostly unread')).toBeTruthy()
+    expect(item.getByText(quote).tagName).toBe('Q')
+    expect(item.getByText('High confidence')).toBeTruthy()
+    expect(item.getByText('Quick fix')).toBeTruthy()
+    expect(fix.getByText('Confidence not yet measured')).toBeTruthy()
+    expect(fix.getByText('2 findings that are wrong too often to act on are only under Diagnostics.')).toBeTruthy()
+    // Developer language stays in Diagnostics.
+    expect(fix.queryByText('under_extraction')).toBeNull()
+    expect(fix.queryByText(/Seen on/)).toBeNull()
+    expect(screen.queryByRole('tabpanel', { name: 'Diagnostics' })).toBeNull()  // hidden
+  })
+
+  it('switches to Diagnostics, which keeps the full per-check list', async () => {
+    await renderDoctor()
+    fireEvent.click(screen.getByRole('tab', { name: 'Diagnostics' }))
+    const diagnostics = within(panel('Diagnostics'))
+    expect(diagnostics.getByText('under_extraction')).toBeTruthy()
+    expect(diagnostics.getByText('Seen on 3% of runs')).toBeTruthy()
+    expect(screen.queryByRole('tabpanel', { name: 'Fix list (2)' })).toBeNull()
+  })
+
+  it('lists what the doctor does not check under either tab', async () => {
+    await renderDoctor()
+    expect(screen.getByText('Not checked on any run')).toBeTruthy()
+    expect(screen.getByText('Journal names, volumes and pages in citations.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Diagnostics' }))
+    expect(screen.getByText('Journal names, volumes and pages in citations.')).toBeTruthy()
+  })
+
+  it('follows a cap link into Diagnostics', async () => {
+    await renderDoctor()
+    act(() => {
+      window.location.hash = '#doctor-lint-under_extraction'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(screen.getByRole('tab', { name: 'Diagnostics' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('says a quiet doctor is not a clean bill of health', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue({ ...SCORED, doctor: { ...DOCTOR, fix_list: [], fix_list_held_back: 0 } })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await act(async () => { await Promise.resolve() })
+    expect(screen.getByText("Nothing to fix was found. Some problems can't be checked, so read the list below too.")).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Fix list (0)' })).toBeTruthy()
+  })
+})
+
+describe('OwnerFixList: the run owner sees the Fix list only (#1589)', () => {
+  const quote = 'Visiting Lecturer in Medicine, Northfield University, 1990-1991'
+  const FIX: RunFixList = {
+    fix_list: [{ section: 'Honors & Awards', items: [{
+      problems: [{ severity: 'WARN', title: 'Heading printed as a record', what_to_do: 'Delete the quoted row.', confidence: 'high', effort: 'quick' }],
+      quotes: [quote],
+    }] }],
+    not_checked: ['Journal names, volumes and pages in citations.'],
+  }
+
+  afterEach(() => { cleanup(); vi.mocked(getRunFixList).mockReset(); window.location.hash = '' })
+
+  const renderOwner = async (fix: RunFixList | null = FIX) => {
+    vi.mocked(getRunFixList).mockResolvedValue(fix)
+    render(<OwnerFixList runId="ABCDEF" />)
+    await act(async () => { await Promise.resolve() })
+  }
+
+  it('shows one tab, the Fix list, with no Diagnostics and no score', async () => {
+    await renderOwner()
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Fix list (1)'])
+    const fix = within(screen.getByRole('tabpanel', { name: 'Fix list (1)' }))
+    expect(fix.getByText('Heading printed as a record')).toBeTruthy()
+    expect(fix.getByText(quote).tagName).toBe('Q')
+    expect(fix.getByText('High confidence')).toBeTruthy()
+    expect(fix.getByText('Quick fix')).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Things to check' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Things to check' })).toBeTruthy()
+    expect(screen.queryByText(/Run Doctor|more items? (was|were|is|are)/)).toBeNull()
+    expect(screen.queryByText(/Diagnostics/)).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Quality score' })).toBeNull()
+    expect(screen.getByText('Journal names, volumes and pages in citations.')).toBeTruthy()
+    expect(getRunQuality).not.toHaveBeenCalled()
+  })
+
+  it('stays on the Fix list when a link points at a Diagnostics row', async () => {
+    window.location.hash = '#doctor-lint-under_extraction'
+    await renderOwner()
+    expect(screen.getByRole('tabpanel', { name: 'Fix list (1)' })).toBeTruthy()
+  })
+
+  it('asks again while no report is stored, and shows the list once it is written', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(getRunFixList).mockResolvedValueOnce(null).mockResolvedValueOnce(FIX)
+      render(<OwnerFixList runId="ABCDEF" />)
+      await flush()
+      expect(screen.getByText('No check results are stored for this run yet.')).toBeTruthy()
+      await tick()
+      expect(getRunFixList).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole('tab', { name: 'Fix list (1)' })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says when no Run Doctor report is stored', async () => {
+    await renderOwner(null)
+    expect(screen.getByText('No check results are stored for this run yet.')).toBeTruthy()
+    expect(screen.queryByRole('tab')).toBeNull()
+  })
+})
+
+const UNSCORED_NOTE: RunReviewNote = { needs_cleanup: false, scored: false }
+const CLEANUP_NOTE: RunReviewNote = { needs_cleanup: true, scored: true }
+
+describe('ReviewNote', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.mocked(getRunReviewNote).mockReset() })
+
+  it('asks again while the run is unscored, and shows the note once the score lands (#1199)', async () => {
+    vi.mocked(getRunReviewNote).mockResolvedValueOnce(UNSCORED_NOTE).mockResolvedValueOnce(CLEANUP_NOTE)
+    render(<ReviewNote runId="ABCDEF" />)
+    await flush()
+    expect(screen.queryByRole('note')).toBeNull()
+
+    await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('note')).toBeTruthy()
+
+    await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not ask again once the run is scored, even when no cleanup is needed', async () => {
+    vi.mocked(getRunReviewNote).mockResolvedValue({ needs_cleanup: false, scored: true })
+    render(<ReviewNote runId="ABCDEF" />)
+    await flush()
+    await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('note')).toBeNull()
+  })
+
+  it('stops after EMPTY_REPORT_RETRIES when the run is never scored', async () => {
+    vi.mocked(getRunReviewNote).mockResolvedValue(UNSCORED_NOTE)
+    render(<ReviewNote runId="ABCDEF" />)
+    await flush()
+    for (let i = 0; i < EMPTY_REPORT_RETRIES + 3; i++) await tick()
+    expect(getRunReviewNote).toHaveBeenCalledTimes(1 + EMPTY_REPORT_RETRIES)
   })
 })

@@ -81,17 +81,20 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
+from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
+    _cell_text,
+    _committee_cell_text,
+)
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _DATE_SPAN,
     _join_names,
-    _journal_names_contain,
     _journal_name_cell_text,
+    _journal_names_contain,
     _organization_left_in_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Part 1: `_journal_name_cell_text` unit tests (§6.9 case list).
@@ -566,7 +569,7 @@ def test_q2_list_role_and_organization_survive_router_and_render_end_to_end(tmp_
 def _rerouted_q2(**fields):
     """A Q2 entry the router sends to `_fill_journal_reviewing`: no
     `journal_name`, and a text that matches `REVIEWER_PATTERNS`."""
-    return {"text": "Ad hoc reviewer, " + " ".join(str(v) for v in fields.values()),
+    return {"text": "Manuscript reviewer, " + " ".join(str(v) for v in fields.values()),
             "taxonomy_code": "Q2", "element_idx_start": 0,
             "extracted_fields": fields}
 
@@ -905,6 +908,18 @@ def test_q1_missing_organization_is_the_text_left_after_role_and_dates(tmp_path)
     assert row == ["Fictional Gazette WoW", "Section Editor, Widgets", "2022-Present"]
 
 
+def test_q1_sub_bullet_glyph_is_not_rendered_as_the_organization(tmp_path):
+    """#1584 (SXPHOG-02 shape): the stage-2 line carries a Courier "o" part
+    and stage 4 left the organization null; the cell stays blank."""
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("Fictional Board Secretary\tJuly 2020 \u2013 August 2021\to",
+                  role="Fictional Board Secretary", start_date="2020-07",
+                  end_date="2021-08"),
+        "Fictional Board Secretary")
+    assert row[0] == ""
+
+
 def test_q1_role_that_is_the_whole_line_leaves_organization_blank(tmp_path):
     row = _q1_row(
         tmp_path,
@@ -986,9 +1001,59 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     # A structured role is no text to subtract: the entry text stands as it is.
     ("2001- Fictional Society\tSecretary", [{"role": "Secretary"}], "2001", None,
      "2001- Fictional Society\tSecretary"),
+    # #1437 (KHXOUF 1264 shape): the years go to the Dates cell and the months
+    # around them are no organization -- not "September September".
+    ("Chair, Fictional Committee\tSeptember 1999 \u2013 September 2001",
+     "Chair, Fictional Committee", "1999-09", "2001-09", ""),
+    ("Fictional Society, Treasurer, Jan 2001 - Present", "Treasurer", "2001", None,
+     "Fictional Society"),
+    # A month inside a name is part of the name.
+    ("March of Fictional Dimes\tTreasurer", "Treasurer", None, None,
+     "March of Fictional Dimes"),
+    # #1437: the connective the role was attached by goes with it.
+    ("President of the Fictional Society", "President", None, None, "Fictional Society"),
+    ("Fictional Society Board of\tDirector", "Director", None, None,
+     "Fictional Society Board"),
+    # A leading "The" with no connective before it is the name's own.
+    ("The Fictional Society\tTreasurer", "Treasurer", None, None, "The Fictional Society"),
+    # A year the Dates cell does not show is not a month: it stays.
+    ("Fictional Society\t1995\tTreasurer", "Treasurer", "2001", None,
+     "Fictional Society, 1995"),
+    # A century-less end year goes with its range (#665): taking "1992" alone
+    # left "93" behind as the whole Organization cell.
+    ("1992-93 Vice-President", "Vice-President", "1992", "1993", ""),
+    # #1584 (SXPHOG-02 shape): a sub-bullet glyph glued to the line as its own
+    # part is no organization, as Word's Courier "o" or as the converter's "◦".
+    ("Secretary\tJuly 2020 \u2013 August 2021\to", "Secretary", "2020-07", "2021-08", ""),
+    ("o\tSecretary\t2020", "Secretary", "2020", None, ""),
+    ("Fictional Society\t\u25e6\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society, \u2022 Treasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society\tx\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society\t\u25e6\u25e6\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    ("Fictional Society\tUn\tTreasurer", "Treasurer", None, None, "Fictional Society"),
+    # A two-capital acronym, or a short name with a digit, can name one.
+    ("UN\tTreasurer", "Treasurer", None, None, "UN"),
+    ("3M\tTreasurer", "Treasurer", None, None, "3M"),
+    ("Fictional Society, NY\tTreasurer", "Treasurer", None, None, "Fictional Society, NY"),
+    # A short year the Dates cell does not show stays (it is text the row
+    # would otherwise lose); so do three characters.
+    ("Fictional Society, 2019, 21, 23\tTreasurer", "Treasurer", "2019", None,
+     "Fictional Society, 21, 23"),
+    ("Fictional Society\tAbc\tTreasurer", "Treasurer", None, None, "Fictional Society, Abc"),
 ])
 def test_organization_left_in_text(text, role, start, end, expected):
     assert _organization_left_in_text(text, role, start, end) == expected
+
+
+@pytest.mark.parametrize("text, spans", [
+    ("1992-93 Vice-President", ["1992-93"]),
+    ("2001-2004 Treasurer", ["2001-2004"]),
+    # A "12" followed by a slash is a month, not a century-less end year:
+    # "2013-12" would split the month/year range down the middle (#665).
+    ("President-Elect 4/2013-12/2014", ["2013", "2014"]),
+])
+def test_date_span_reads_century_less_end_years_but_not_months(text, spans):
+    assert [m.group() for m in _DATE_SPAN.finditer(text)] == spans
 
 
 def _q2_role_cell(**entry_keys):

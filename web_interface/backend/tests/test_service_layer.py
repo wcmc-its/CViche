@@ -1,30 +1,44 @@
 """Tests for the service layer (ARCH-01 through ARCH-06 regression)."""
+import json
 import os
 import sys
 from pathlib import Path
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 # get_estimated_run_cost imports unified_pipeline lazily and silently falls back
 # to a flat per-token rate when it can't; put src/ on the path so the cost tests
 # exercise the real model whether this file runs alone or in the full suite.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
 
-from app.services.run_service import check_run_access
-from app.services.user_service import provision_user
-from app.services.config_service import (
-    SESSION_TTL, LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW,
-    MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
-    get_cost_per_1k_tokens, get_estimated_run_cost,
-)
-from app.errors import not_found, bad_request, forbidden, validation_error
+from app.errors import bad_request, forbidden, not_found, validation_error
 from app.models import Run, Step, User
 from app.services import run_service
-from app.services.run_service import ClaimResult, claim_queued, mark_failed, flip_to_queued, revert_queued
+from app.services.config_service import (
+    BASE_OVERHEAD_SECONDS,
+    LOGIN_RATE_LIMIT_MAX,
+    LOGIN_RATE_LIMIT_WINDOW,
+    MAX_UPLOAD_SIZE,
+    SESSION_TTL,
+    TIME_PER_1K_TOKENS,
+    get_cost_per_1k_tokens,
+    get_estimated_run_cost,
+)
+from app.services.run_service import (
+    ClaimResult,
+    check_run_access,
+    claim_queued,
+    flip_to_queued,
+    mark_failed,
+    revert_queued,
+)
+from app.services.user_service import provision_user
 
 
 class TestCheckRunAccess:
@@ -112,7 +126,7 @@ class TestCheckRunAccess:
         assert result.id == "ABC123"
 
 
-SEEDED_QUEUE_AT = datetime(2026, 1, 1, 0, 0, 0)
+SEEDED_QUEUE_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 class TestQueueRunTransitions:
@@ -185,7 +199,60 @@ class TestQueueRunTransitions:
         self._seed_run(db, status="created")
         assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is True
         db.commit()
-        assert self._reload(db).image_tag == "dev-2.tag"
+        run = self._reload(db)
+        assert run.image_tag == "dev-2.tag"
+        assert json.loads(run.image_tag_history) == ["dev-2.tag"]
+
+    def test_claim_queued_starts_the_image_history(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.tag")
+        self._seed_run(db)
+        claim_queued("QRT001")
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_claim_on_a_new_image_appends_to_the_history(self, db, monkeypatch):
+        """A run split across a deploy keeps both images, oldest first."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, image_tag="dev-1.tag", image_tag_history=json.dumps(["dev-1.tag"]))
+        claim_queued("QRT001")
+        run = self._reload(db)
+        assert run.image_tag == "dev-2.tag"
+        assert json.loads(run.image_tag_history) == ["dev-1.tag", "dev-2.tag"]
+
+    def test_claim_on_the_same_image_does_not_repeat_it(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.tag")
+        self._seed_run(db, status="failed", image_tag_history=json.dumps(["dev-1.tag"]))
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "failed") is True
+        db.commit()
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_untagged_image_leaves_the_history_alone(self, db, monkeypatch):
+        monkeypatch.delenv("CVICHE_IMAGE_TAG", raising=False)
+        self._seed_run(db, image_tag_history=json.dumps(["dev-1.tag"]))
+        assert claim_queued("QRT001").won is True
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_lost_claim_does_not_touch_the_history(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, status="running", image_tag_history=json.dumps(["dev-1.tag"]))
+        assert claim_queued("QRT001").won is False
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is False
+        db.commit()
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-1.tag"]
+
+    def test_corrupt_history_is_restarted_not_fatal(self, db, monkeypatch, caplog):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, image_tag_history="{not json")
+        assert claim_queued("QRT001").won is True
+        assert json.loads(self._reload(db).image_tag_history) == ["dev-2.tag"]
+        assert "unreadable image_tag_history" in caplog.text
+
+    @pytest.mark.parametrize("raw", ['{"a": 1}', '["ok", 3]'])
+    def test_parse_image_tag_history_rejects_a_non_list_of_tags(self, raw):
+        with pytest.raises(ValueError):
+            run_service.parse_image_tag_history(raw)
+
+    def test_parse_image_tag_history_reads_null_as_empty(self):
+        assert run_service.parse_image_tag_history(None) == []
 
     def test_claim_queued_reports_none_for_an_unknown_run(self, db):
         result = claim_queued("NOSUCH")
@@ -299,6 +366,7 @@ class TestQueueRunTransitions:
         wait, not raise."""
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
+
         from app.database import Base
 
         engine = create_engine(f"sqlite:///{tmp_path}/race.db", connect_args={"timeout": 5})
@@ -462,6 +530,7 @@ class TestProvisionUser:
         case an email-keyed recovery gets wrong.
         """
         from unittest.mock import patch
+
         from sqlalchemy.orm import Query
 
         # A second email-less SSO user, so recovering by email would be ambiguous.
@@ -483,6 +552,7 @@ class TestProvisionUser:
         """Same race on the simple-auth path, where there is no cwid and
         unique(email) is the constraint that fires."""
         from unittest.mock import patch
+
         from sqlalchemy.orm import Query
 
         winner = provision_user(db, display_name="Winner", auth_method="simple",
@@ -494,6 +564,108 @@ class TestProvisionUser:
 
         assert loser.id == winner.id
         assert db.query(User).filter(User.email == "simple-race@example.com").count() == 1
+
+
+_USER_SERVICE_LOGGER = "app.services.user_service"
+_PROVISIONING_EVENTS = ("USER_CREATED", "USER_IDENTITY_LINKED", "USER_EMAIL_UPDATED", "ROLE_CHANGED")
+
+
+def _provisioning_events(caplog):
+    """(event name, record) for every provisioning audit line caplog captured."""
+    return [(r.getMessage(), r) for r in caplog.records if r.getMessage() in _PROVISIONING_EVENTS]
+
+
+class TestProvisionUserAuditEvents:
+    """#366: provisioning logs a structured audit event for each identity change
+    it actually makes -- never for an unchanged re-login, never a raw email."""
+
+    def test_new_user_logs_user_created(self, db, caplog):
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            user = provision_user(db, display_name="Fresh", auth_method="saml",
+                                  cwid="aud0001", email="fresh@example.org", role="admin")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_CREATED"
+        assert (rec.user_id, rec.cwid, rec.auth_method, rec.role) == (user.id, "aud0001", "saml", "admin")
+        assert rec.source == "provisioning"
+        assert rec.has_email is True
+
+    def test_unchanged_relogin_logs_nothing(self, db, caplog):
+        provision_user(db, display_name="Same", auth_method="saml",
+                       cwid="aud0002", email="same@example.org", role="user")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Same", auth_method="saml",
+                           cwid="aud0002", email="same@example.org", role="user")
+        assert _provisioning_events(caplog) == []
+
+    def test_role_change_logs_old_and_new_role(self, db, caplog):
+        user = provision_user(db, display_name="Promote", auth_method="simple",
+                              email="promote@example.org", role="user")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Promote", auth_method="simple",
+                           email="promote@example.org", role="admin")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "ROLE_CHANGED"
+        assert (rec.user_id, rec.old_role, rec.new_role) == (user.id, "user", "admin")
+        assert (rec.auth_method, rec.source) == ("simple", "provisioning")
+
+    def test_role_none_preserves_role_and_logs_nothing(self, db, caplog):
+        provision_user(db, display_name="Keep", auth_method="saml", cwid="aud0003", role="admin")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Keep", auth_method="saml", cwid="aud0003", role=None)
+        assert _provisioning_events(caplog) == []
+
+    def test_email_change_logged_without_either_address(self, db, caplog):
+        user = provision_user(db, display_name="Mover", auth_method="saml",
+                              cwid="aud0004", email="before@example.org")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Mover", auth_method="saml",
+                           cwid="aud0004", email="after@example.org")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_EMAIL_UPDATED"
+        assert (rec.user_id, rec.cwid, rec.had_email) == (user.id, "aud0004", True)
+        record_text = repr(vars(rec))
+        assert "before@example.org" not in record_text
+        assert "after@example.org" not in record_text
+
+    def test_first_email_on_emailless_user_logged(self, db, caplog):
+        provision_user(db, display_name="NoMail", auth_method="saml", cwid="aud0005", email=None)
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="NoMail", auth_method="saml",
+                           cwid="aud0005", email="first@example.org")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_EMAIL_UPDATED"
+        assert rec.had_email is False
+
+    def test_legacy_row_cwid_link_logged(self, db, caplog):
+        legacy = provision_user(db, display_name="Legacy", auth_method="saml",
+                                email="legacy-aud@example.org")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER):
+            caplog.clear()  # only this call's events, not setup's (logger level varies by suite order)
+            provision_user(db, display_name="Legacy", auth_method="saml",
+                           cwid="aud0006", email="legacy-aud@example.org")
+        [(name, rec)] = _provisioning_events(caplog)
+        assert name == "USER_IDENTITY_LINKED"
+        assert (rec.user_id, rec.cwid, rec.old_cwid) == (legacy.id, "aud0006", None)
+
+    def test_concurrent_insert_loser_logs_no_creation(self, db, caplog):
+        """The request that lost the #359 race created nothing; only the winner's
+        USER_CREATED may appear."""
+        from unittest.mock import patch
+
+        from sqlalchemy.orm import Query
+
+        provision_user(db, display_name="Winner", auth_method="saml", cwid="aud0007", role="user")
+        with caplog.at_level(logging.INFO, logger=_USER_SERVICE_LOGGER), \
+                patch.object(Query, "first", return_value=None):
+            caplog.clear()
+            provision_user(db, display_name="Loser", auth_method="saml", cwid="aud0007", role="user")
+        assert _provisioning_events(caplog) == []
 
 
 class TestConfigService:
@@ -590,9 +762,10 @@ class TestErrorHelpers:
 # Admin Service Tests (ARCH-05)
 # ============================================================
 
-from app.services.admin_service import get_users_with_stats, get_single_user_stats
-from app.models import Run, Feedback
 from datetime import datetime
+
+from app.models import Feedback, Run
+from app.services.admin_service import get_single_user_stats, get_users_with_stats
 
 
 class TestAdminService:
@@ -625,7 +798,7 @@ class TestAdminService:
         db.refresh(user)
 
         # Add runs
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         run1 = Run(id="RUN001", filename="cv1.docx", file_type="docx", status="complete",
                     user_id=user.id, total_cost=0.15, started_at=now)
         run2 = Run(id="RUN002", filename="cv2.docx", file_type="docx", status="running",
@@ -657,7 +830,7 @@ class TestAdminService:
         db.refresh(u1)
         db.refresh(u2)
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         run1 = Run(id="RUN001", filename="cv.docx", file_type="docx", status="complete",
                     user_id=u1.id, total_cost=0.20, started_at=now)
         db.add(run1)
@@ -678,7 +851,7 @@ class TestAdminService:
         db.commit()
         db.refresh(user)
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         run = Run(id="RUN001", filename="cv.docx", file_type="docx", status="complete",
                   user_id=user.id, total_cost=0.30, started_at=now)
         db.add(run)
@@ -742,9 +915,9 @@ class TestCsvInjectionGuard:
 
 from unittest.mock import patch
 
-from app.consent import get_current_consent_document, get_consent_text, get_consent_hash
-from app.services.consent_service import record_consent
+from app.consent import get_consent_hash, get_consent_text, get_current_consent_document
 from app.models import Consent
+from app.services.consent_service import record_consent
 
 
 def _seed_consent_user(db, email="consent-svc@example.com"):
@@ -840,7 +1013,8 @@ def _seed_export_fixture(db):
     """Synthetic rows covering every export type, incl. a formula-trigger cell,
     a comma/quote cell, a null user and null optional columns."""
     from datetime import datetime
-    from app.models import Run, Feedback
+
+    from app.models import Feedback, Run
 
     u1 = User(id=1, email="a@example.com", display_name="=Alpha", role="admin",
               auth_method="simple", daily_limit=5,
@@ -925,8 +1099,8 @@ class TestAdminCsvExportStreaming:
     buffering the whole table; the bytes are unchanged."""
 
     def _get(self, client, export_type, role="admin"):
-        from app.main import app
         from app.auth import get_current_user
+        from app.main import app
 
         # Override the session, not the role gate, so the route's real
         # require_view_all_runs dependency and its staff export check both run.
@@ -954,8 +1128,9 @@ class TestAdminCsvExportStreaming:
     @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
     def test_response_is_produced_in_multiple_chunks(self, db, export_type, monkeypatch):
         import asyncio
-        from app.api.admin_routes import exports
+
         import app.services.admin_export_service as admin_export_service
+        from app.api.admin_routes import exports
         _seed_export_fixture(db)
         monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
 
@@ -1006,13 +1181,13 @@ class TestAdminCsvExportStreaming:
 
     def test_download_filename_and_audit_line(self, client, db, caplog):
         import logging
-        from datetime import datetime
+        from datetime import datetime, timezone
         _seed_export_fixture(db)
 
         with caplog.at_level(logging.INFO):
             resp = self._get(client, "users")
 
-        stamp = datetime.now().strftime("%Y%m%d")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         assert resp.headers["content-disposition"] == f'attachment; filename="cviche_users_{stamp}.csv"'
         audit = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin_export")]
         assert audit == ["admin_export: user=admin@example.com role=admin export_type=users"]
@@ -1020,8 +1195,9 @@ class TestAdminCsvExportStreaming:
     def test_rows_are_fetched_in_bounded_batches_not_all_at_once(self, db, monkeypatch):
         """The query must carry yield_per, otherwise .all()-style hydration of
         the whole table returns and only the output side is chunked."""
-        import app.services.admin_export_service as admin_export_service
         from sqlalchemy.orm import Query
+
+        import app.services.admin_export_service as admin_export_service
         _seed_export_fixture(db)
         monkeypatch.setattr(admin_export_service, "_CSV_CHUNK_ROWS", 1, raising=False)
         seen = []

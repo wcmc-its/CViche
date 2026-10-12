@@ -1,6 +1,9 @@
 """input_format: WCM-template vs other detection on synthetic text."""
 from app.services.input_format import (
-    INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM, WCM_MIN_SIGNALS, detect_input_format,
+    INPUT_FORMAT_OTHER,
+    INPUT_FORMAT_WCM,
+    WCM_MIN_SIGNALS,
+    detect_input_format,
     detect_input_format_or_none,
 )
 

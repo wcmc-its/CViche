@@ -21,8 +21,9 @@ Design Principles:
 - Logging: Track conflict frequency for monitoring
 """
 
-from collections import Counter as CounterType
 from collections import Counter
+from collections import Counter as CounterType
+
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

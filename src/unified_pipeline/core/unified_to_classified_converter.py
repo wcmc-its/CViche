@@ -18,7 +18,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 # Map unified taxonomy IDs to legacy wcm_section_type values
 # IMPORTANT: These must match what the legacy extractors actually look for!
 TAXONOMY_TO_WCM_TYPE = {
@@ -417,8 +416,8 @@ def extract_cv_owner_from_classified(classified_data: dict) -> str:
 
 
 if __name__ == '__main__':
-    import sys
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description='Convert unified output to classified format')
     parser.add_argument('segmented_file', help='Path to Stage 1 segmented.json')

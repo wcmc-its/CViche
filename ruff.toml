@@ -9,11 +9,17 @@
 #
 # F, I, B, SIM and RET (added at the reviewer's request) have no §9 row yet:
 # check_standards.py sums only the families its rows name, so CI does not
-# count them; they show in editors and in a local `ruff check`.
+# count them; they show in editors and in a local `ruff check`. I (import
+# order) is at 0 since the one-shot `ruff check --select I --fix` sweep; until
+# a §9 row holds it there, `ruff check --select I` is the check.
 #
 # Not selected on purpose: RUF100 (unused-noqa) strips `# noqa` comments that
 # carry a human justification (stage_6_word_template.py, run_doctor.py, ...).
 target-version = "py314"
+# First-party roots, so the I rules sort our own packages as first-party:
+# src/ holds unified_pipeline, web_interface/backend holds app (and the
+# backend tests package), and "." covers scripts/ and the root modules.
+src = [".", "src", "web_interface/backend"]
 # extend-, not exclude=: a bare `exclude` REPLACES ruff's default list, which
 # is what keeps .venv/, .git/ and __pycache__/ out of the count.
 extend-exclude = [

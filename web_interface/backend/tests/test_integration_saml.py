@@ -5,20 +5,20 @@ Tests skip gracefully when mock IdP is not running.
 """
 import json
 import os
-import pytest
-import httpx
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from app.models import User
+import httpx
+import pytest
+
 from app.auth import COOKIE_NAME, create_session_cookie
-from app.models import SystemConfig
 from app.ed_group_lookup import (
+    EdUnavailableError,
+    MembershipResult,
     clear_cache,
     set_cached_membership,
-    MembershipResult,
-    EdUnavailableError,
 )
+from app.models import SystemConfig, User
 
 MOCK_IDP_URL = "http://localhost:8443"
 MOCK_IDP_METADATA = f"{MOCK_IDP_URL}/simplesaml/saml2/idp/metadata.php"

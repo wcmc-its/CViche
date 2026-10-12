@@ -46,6 +46,11 @@ spec:
               value: "0" # Alembic owns schema; the backend's initContainer runs migrations
             - name: CVICHE_INIT_DB
               value: "0" # No metadata.create_all() DDL at boot (#191)
+            # Cap glibc malloc arenas. Stage thread pools each get an arena, and freed
+            # memory in them is not returned to the OS, so an idle worker kept ~1.1 GiB
+            # after one run (#1569).
+            - name: MALLOC_ARENA_MAX
+              value: "2"
             - name: CVICHE_WORKER_STREAMS
               value: "single,batch" # single-run queue first, then the batch queue (#1114)
           readinessProbe:

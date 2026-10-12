@@ -76,7 +76,12 @@ from ..formatting import _set_font
 from ..normalization import _squash
 from ..normalization.pii import SCOPE_PERSONAL_AND_APPENDIX, _pii_matches
 from ..source_blocks import (
-    block_lines, capture_source_blocks, clean_copy, element_text, is_unfilled, section_blocks,
+    block_lines,
+    capture_source_blocks,
+    clean_copy,
+    element_text,
+    is_unfilled,
+    section_blocks,
 )
 
 logger = logging.getLogger(__name__)

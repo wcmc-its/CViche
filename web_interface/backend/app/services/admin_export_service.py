@@ -12,10 +12,12 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import NamedTuple
 
-from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
+from sqlalchemy.orm import Query as SAQuery
+from sqlalchemy.orm import Session, contains_eager
 
 from app.errors import forbidden, validation_error
-from app.models import Consent, Feedback, Run, User
+from app.models import Consent, Feedback, Run, User, UserRole
+from app.timeutil import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +55,9 @@ _CSV_CHUNK_ROWS = 500
 
 
 def _iso(value: datetime | None) -> str:
-    return value.isoformat() if value else ""
+    # Naive UTC wall-clock, the same bytes the export wrote before timestamps
+    # loaded aware (#798): a CSV consumer sees no format change.
+    return as_utc(value).replace(tzinfo=None).isoformat() if value else ""
 
 
 class _CsvExport(NamedTuple):
@@ -239,7 +243,7 @@ def open_export(db: Session, viewer: User, export_type: str) -> Iterator[str]:
     """
     if export_type not in _CSV_EXPORTS:
         raise validation_error(f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.")
-    if viewer.role != "admin" and export_type not in _STAFF_EXPORT_TYPES:
+    if viewer.role != UserRole.ADMIN and export_type not in _STAFF_EXPORT_TYPES:
         raise forbidden("Admin access required for this export.")
 
     logger.info(

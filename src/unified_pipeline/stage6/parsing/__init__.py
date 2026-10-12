@@ -27,14 +27,22 @@ from .records import (  # noqa: F401
     _is_orphan_fragment,
 )
 from .text import (  # noqa: F401
+    _ORPHAN_DATE,
+    _UNDATED_ACTIVITY,
     ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
     _extract_year_from_text,
+    _is_shattered,
     _is_structural_label,
     _is_table_header_entry,
     _looks_like_multiple_records,
+    _mid_sentence_joins,
+    _orphaned_dates_line_up,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    _refold_shattered,
     _strip_appended_initials,
+    is_membership_date_part,
+    split_appointment_title,
 )

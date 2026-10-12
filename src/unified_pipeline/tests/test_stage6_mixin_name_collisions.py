@@ -241,6 +241,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'board certification table has %d column(s), too narrow to render a row (specialty=%r, cert_number=%r, dates=%r) -- skipping': 'warning',
     "board certification: %d of %d reparsed row(s) are missing a certificate number or date that the entry's structured fields cannot be attributed to a single row -- leaving blank rather than guessing which row it belongs to (certificate_number=%r, year_certified=%r)": 'warning',
     "board certification: %s -- rendering the entry's already-extracted fields instead of losing them (certifying_board=%r, certificate_number=%r)": 'warning',
+    'board certification: attached a bare-year entry to the undated entry above it as its year_certified': 'info',
     'board certification: entry has neither text nor structured fields -- nothing to render': 'debug',
     'board certification: rejected token %r -- matches no known shape (year, certificate number, MOC, or specialty)': 'debug',
     'Could not read source cell levels from %s, section K stays flat: %s': 'warning',
@@ -393,7 +394,7 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 127, (
+    assert len(text_level_records) == 128, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

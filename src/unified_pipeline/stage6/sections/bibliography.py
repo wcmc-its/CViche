@@ -45,8 +45,8 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from difflib import SequenceMatcher
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any
 
 try:

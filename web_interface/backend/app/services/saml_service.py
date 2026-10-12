@@ -25,13 +25,22 @@ from app.audit_events import LOGIN_FAILED, LOGIN_SUCCESS, SESSION_STORE_UNAVAILA
 from app.auth import SessionEpochUnreadable, create_session_cookie, role_for_membership
 from app.config_loader import get_config_value
 from app.ed_group_lookup import (
-    check_ed_membership, fetch_ed_department, EdUnavailableError, LDAPConfig, MembershipResult,
+    EdUnavailableError,
+    LDAPConfig,
+    MembershipResult,
+    check_ed_membership,
+    fetch_ed_department,
 )
-from app.models import User, UserRole
-from app.saml_client import get_saml_client, extract_user_attrs
-from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
+from app.models import User, UserRole, UserStatus
+from app.saml_client import extract_user_attrs, get_saml_client
+from app.saml_replay import (
+    assertion_ids,
+    get_replay_cache,
+    replay_fail_closed,
+    replay_ttl,
+)
 from app.services.ed_access import partner_membership
-from app.services.user_service import provision_user, normalize_email
+from app.services.user_service import normalize_email, provision_user
 from app.session_idle import SessionStoreUnavailable
 
 # Named for the route, not __name__: these lines (the [SECURITY] rejections
@@ -46,8 +55,9 @@ BINDING_HTTP_POST = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
 
 class SamlLoginFailure(StrEnum):
     """Which check refused the session. saml_routes maps each to its
-    login-page redirect; the three that emit a LOGIN_FAILED audit line
-    (NOT_AUTHORIZED and the two SESSION_*) use their value as its `reason`."""
+    login-page redirect; the four that emit a LOGIN_FAILED audit line
+    (NOT_AUTHORIZED, ACCOUNT_DISABLED and the two SESSION_*) use their value as
+    its `reason`."""
     NO_RESPONSE = "no_response"
     BAD_SIGNATURE = "bad_signature"
     RESPONSE_REJECTED = "response_rejected"
@@ -61,6 +71,7 @@ class SamlLoginFailure(StrEnum):
     DIRECTORY_UNAVAILABLE = "directory_unavailable"
     SESSION_STORE_UNAVAILABLE = "session_store_unavailable"
     SESSION_STATE_UNAVAILABLE = "session_state_unavailable"
+    ACCOUNT_DISABLED = "account_disabled"
 
 
 @dataclass(frozen=True)
@@ -96,6 +107,12 @@ def authenticate_saml_response(saml_response: str, db: Session) -> SamlLoginSess
         role=user_role,
         department=_saml_department_from_ed(attrs["cwid"], db),
     )
+
+    # The same test get_current_user applies (app.auth._load_active_user): a
+    # session minted here would be refused on its first use anyway.
+    if user.status != UserStatus.ACTIVE:
+        logger.info(LOGIN_FAILED, extra={"cwid": attrs["cwid"], "reason": SamlLoginFailure.ACCOUNT_DISABLED})
+        return SamlLoginFailure.ACCOUNT_DISABLED
 
     token = _mint_saml_session(user, db, attrs["cwid"])
     if isinstance(token, SamlLoginFailure):

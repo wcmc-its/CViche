@@ -18,7 +18,7 @@ import json
 import logging
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,10 +29,13 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import object_session
 
 from app.api import upload as upload_module
-from app.services import upload_validation
+from app.api.runs import _run_duration_seconds
 from app.api.upload import _extract_text, _validate_docx_magic
-from app.models import User, Run, Step
+from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
+from app.services import upload_validation
+from app.services.config_service import get_estimated_run_cost
+from app.services.run_creation import RUN_NOT_CREATED_NOTHING_SAVED
 from app.storage.local_storage import LocalRunStorage
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -59,7 +62,7 @@ def _make_user(db, email="test@example.com", **overrides):
 
 
 def _auth(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     # create_session_cookie reads the current epoch from a DB session;
     # `user` was just committed on the test's session, so borrow that one.
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
@@ -1091,7 +1094,7 @@ def test_upload_manifest_and_index_are_consistent(client, db, seed_simple_mode, 
     _auth(client, user)
     storage, upload_dir, patches = _real_storage_patches(tmp_path)
     content = b"PK\x03\x04manifest-integrity-bytes"
-    before = datetime.now()
+    before = datetime.now(timezone.utc)
     resp = _run_patches(patches, lambda: _post_upload(client, "My CV.docx", content, DOCX_MIME))
 
     assert resp.status_code == 200, resp.text
@@ -1107,7 +1110,7 @@ def test_upload_manifest_and_index_are_consistent(client, db, seed_simple_mode, 
     assert manifest["sha256"] == hashlib.sha256(content).hexdigest()
     assert manifest["content_type"] == DOCX_MIME
     assert manifest["user_email"] == "Case@Example.com"
-    assert before <= datetime.fromisoformat(manifest["uploaded_at"]) <= datetime.now()
+    assert before <= datetime.fromisoformat(manifest["uploaded_at"]) <= datetime.now(timezone.utc)
     assert set(manifest) == {
         "run_id", "original_filename", "stored_as", "file_type", "size_bytes",
         "sha256", "content_type", "uploaded_at", "user_email",
@@ -1123,7 +1126,16 @@ def test_upload_manifest_and_index_are_consistent(client, db, seed_simple_mode, 
     assert index_path.read_bytes() == manifest_bytes
 
     assert storage.get_file(run_id, f"input/{run_id}.docx") == content
-    assert db.get(Run, run_id).user_id == user.id
+    run = db.get(Run, run_id)
+    assert run.user_id == user.id
+
+    # #798: the manifest's uploaded_at, the row's started_at and a duration
+    # computed from it are one clock -- UTC -- not an offset apart.
+    uploaded_at = datetime.fromisoformat(manifest["uploaded_at"])
+    assert uploaded_at.utcoffset() == timedelta(0)
+    assert abs(run.started_at - uploaded_at) < timedelta(seconds=5)
+    run.status = "running"
+    assert 0 <= _run_duration_seconds(run) < 5
 
 
 # --- item 11: step rows ------------------------------------------------------
@@ -1410,9 +1422,11 @@ def test_upload_compensates_archive_when_commit_fails(client, db, seed_simple_mo
 
 def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed_simple_mode, tmp_path, caplog):
     """#802: when the compensation's OWN storage calls also raise, the
-    response returned to the client is still the original commit-failure
-    5xx, not a compensation-failure one -- and both errors are logged,
-    instead of the second exception replacing or hiding the first."""
+    response returned to the client is still the commit-failure 500, not a
+    compensation-failure one -- and both errors are logged, instead of the
+    second exception replacing or hiding the first. The 500 no longer claims
+    "nothing was saved": the archive survived, so the message says the file
+    was stored, and the log names the run whose archive is left behind."""
     user = _make_user(db)
     _auth(client, user)
 
@@ -1432,8 +1446,8 @@ def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed
     assert resp.json()["detail"] == {
         "error": "internal_error",
         "message": (
-            "We couldn't finish creating your run, so nothing was saved. "
-            "Please try again in a moment."
+            "We couldn't finish creating your run. Your file was stored, but no run "
+            "was created for it. Please try again in a moment."
         ),
     }
 
@@ -1447,6 +1461,96 @@ def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed
     assert any("commit failed" in m for m in messages)
     assert any("delete_run failed" in m for m in messages)
     assert any("delete_global_prefix failed" in m for m in messages)
+    assert any("Compensation incomplete: run CMFAI2" in m for m in messages)
+
+
+@pytest.mark.parametrize("failing_delete", ["delete_run", "delete_global_prefix"])
+def test_upload_partial_compensation_does_not_claim_nothing_was_saved(client, db, seed_simple_mode, tmp_path, failing_delete):
+    """#802: only one of the two compensating deletes fails (the live role
+    lacked s3:DeleteObject, #1216). Something this request archived is still
+    stored -- the run's input or the by-submitter manifest -- so the 500 must
+    not say "nothing was saved"."""
+    user = _make_user(db)
+    _auth(client, user)
+
+    storage = MagicMock()
+    getattr(storage, failing_delete).side_effect = Exception("AccessDenied")
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert "nothing was saved" not in resp.json()["detail"]["message"]
+    storage.delete_run.assert_called_once()
+    storage.delete_global_prefix.assert_called_once()
+
+
+def test_upload_compensates_when_rollback_also_fails(client, db, seed_simple_mode, tmp_path, caplog):
+    """#802 item 1: a dead connection can make db.rollback() raise after the
+    commit failed. That must not skip the compensation: the archive is still
+    deleted, the failed rollback is logged, and the client gets the clean
+    500 rather than a bare one from the rollback's exception."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="RBFAIL"))
+    patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
+    patches.append(patch.object(db, "rollback", side_effect=OperationalError("stmt", {}, Exception("conn gone"))))
+    with caplog.at_level(logging.ERROR):
+        resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"]["message"] == RUN_NOT_CREATED_NOTHING_SAVED
+    assert storage.exists("RBFAIL", "input/manifest.json") is False
+    assert storage.exists("RBFAIL", "input/RBFAIL.docx") is False
+    assert not (tmp_path / "storage" / "by-submitter" / "test@example.com" / "RBFAIL").exists()
+    assert list(upload_dir.iterdir()) == []
+    assert any("rollback failed" in r.getMessage() for r in caplog.records)
+
+
+def test_upload_compensates_failure_before_the_commit(client, db, seed_simple_mode, tmp_path):
+    """#802 item 1: an exception after the archive but before db.commit()
+    (here the duration estimate) is inside the compensated section too: no
+    run row, nothing left under the run id, and a clean 500."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="PREFAI"))
+    patches.append(patch("app.services.run_creation.estimate_run_seconds", side_effect=ValueError("bad estimate")))
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"]["message"] == RUN_NOT_CREATED_NOTHING_SAVED
+    assert db.query(Run).count() == 0
+    assert storage.exists("PREFAI", "input/manifest.json") is False
+    assert not (tmp_path / "storage" / "by-submitter" / "test@example.com" / "PREFAI").exists()
+    assert list(upload_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("table, inserts_after_the_conflict", [
+    ("runs", 1),
+    ("steps", len(STEP_REGISTRY)),  # one INSERT per step row
+])
+def test_upload_retries_a_one_off_1020_and_keeps_the_archive(
+    client, db, seed_simple_mode, tmp_path, write_conflict_on_insert, table, inserts_after_the_conflict,
+):
+    """#1285: MariaDB rejecting the new run's INSERT once with 1020 is retried
+    in a fresh transaction, so the upload succeeds with its Run and Step rows
+    and its archive intact -- not a 500 plus a compensated (or orphaned) archive."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="RTRY1K"))
+    attempts = write_conflict_on_insert(table)
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 200, resp.text
+    assert len(attempts) == 1 + inserts_after_the_conflict
+    db.expire_all()
+    assert db.get(Run, "RTRY1K").status == "created"
+    assert db.query(Step).filter(Step.run_id == "RTRY1K").count() == len(STEP_REGISTRY)
+    assert storage.exists("RTRY1K", "input/manifest.json") is True
 
 
 # --- #796: filename bound BEFORE the archive --------------------------------
@@ -1625,6 +1729,29 @@ def test_estimate_many_files_returns_a_row_per_file_and_totals(client, db, seed_
     else:
         assert (body["estimated_cost_min"], body["estimated_cost_max"], one["estimated_cost_min"]) == (None, None, None)
         assert body["pricing_model"] is None
+
+
+@pytest.mark.parametrize("role", ["admin", "user"])
+def test_estimate_many_files_gives_each_a_cost_weight_even_with_cost_hidden(client, db, seed_simple_mode, role):
+    """#1599: each row carries its cost in typical CVs, so the batch table can
+    flag an outlier for a non-admin too, who sees no dollars (#1111). The
+    weights keep the costs' ratio."""
+    user = _make_user(db, role=role)
+    _auth(client, user)
+    small_chars, large_chars = 65_000, 577_000
+    patches = [
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", side_effect=["x" * small_chars, "x" * large_chars]),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "small.docx", "large.docx"))
+
+    assert resp.status_code == 200, resp.text
+    small, large = (row["estimate"] for row in resp.json()["files"])
+    assert small["cost_weight"] == pytest.approx(1.0)
+    expected = sum(get_estimated_run_cost(large_chars)) / sum(get_estimated_run_cost(small_chars))
+    assert large["cost_weight"] == pytest.approx(expected, abs=0.01)
+    assert large["cost_weight"] > 3
 
 
 def test_estimate_many_files_reports_a_bad_file_on_its_row_and_totals_the_rest(client, db, seed_simple_mode):

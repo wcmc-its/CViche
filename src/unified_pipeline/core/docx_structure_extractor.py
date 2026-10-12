@@ -11,25 +11,29 @@ This is significantly cheaper and faster than vision-based approaches.
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
+
 from docx import Document
-from docx.shared import RGBColor, Pt
+from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.xmlchemy import BaseOxmlElement
-from docx.oxml.table import CT_Tbl
-from docx.table import _Cell, _Row, Table
+from docx.shared import Pt, RGBColor
+from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
-from unified_pipeline.stage6.render_check import _is_column_header_row
+
 from unified_pipeline.stage6.normalization.pii import (
     PRE_LLM_PLACEHOLDER,
     pre_llm_bare_label_category,
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
+from unified_pipeline.stage6.render_check import _is_column_header_row
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,72 @@ def _iter_text_nodes(parent: BaseOxmlElement, tags: tuple[str, ...]) -> Iterator
         if child.tag in tags:
             yield child
         yield from _iter_text_nodes(child, tags)
+
+
+_W_SDT = qn('w:sdt')
+_W_SDT_CONTENT = qn('w:sdtContent')
+
+
+def _unwrap_content_control(sdt: BaseOxmlElement) -> int:
+    """Replace `sdt` with the children of its w:sdtContent, in place and in
+    order, unwrapping any content control nested inside it the same way.
+    Returns how many elements now stand where `sdt` stood."""
+    held = 0
+    content = sdt.find(_W_SDT_CONTENT)
+    for child in list(content) if content is not None else []:
+        sdt.addprevious(child)
+        held += _unwrap_content_control(child) if child.tag == _W_SDT else 1
+    sdt.getparent().remove(sdt)
+    return held
+
+
+def unwrap_body_content_controls(doc: DocxDocument) -> list[range]:
+    """Unwrap every body-level content control (`w:sdt`) of `doc` in place:
+    its paragraphs and tables become direct body children, in document order,
+    and a content control nested in one is unwrapped too (#1656).
+
+    python-docx has no `w:sdt` API: `doc.paragraphs`, `doc.tables` and a walk
+    of `doc.element.body` see only the body's direct w:p / w:tbl children, so
+    a body-level content control and everything in it was invisible to stage
+    1 and to the doctor. RSFOYB lost 889 of its 950 paragraphs that way.
+    Unwrapping the tree once, before anything reads it, gives every reader
+    the same paragraph order: `doc.paragraphs[para_idx]` is the paragraph
+    stage 1 numbered `para_idx`, and `doc.tables[table_index]` the table it
+    numbered `table_index`.
+
+    Only body-level controls are unwrapped. A run-level one sits inside a
+    w:p and `get_paragraph_text` already reads it. One inside a table cell,
+    or wrapping a row or a cell, is not unwrapped here, and python-docx's
+    row and cell walks skip it (#1668).
+
+    Returns the body-child positions each outermost control's content now
+    occupies, so a caller can tell which paragraphs came from one (the
+    doctor's block view does). Never save a document unwrapped this way over
+    its source: the content controls are gone from the tree.
+    """
+    body = doc.element.body
+    spans = []
+    position = 0
+    for child in list(body):
+        if child.tag != _W_SDT:
+            position += 1
+            continue
+        held = _unwrap_content_control(child)
+        if held:
+            spans.append(range(position, position + held))
+        position += held
+    return spans
+
+
+def open_source_docx(docx_path: str | Path) -> DocxDocument:
+    """The source CV, opened for reading, with its body-level content
+    controls unwrapped (`unwrap_body_content_controls`, #1656). Every
+    pipeline reader of a source document opens it through this, so stage 1's
+    `para_idx` and `table_index` index this document's `paragraphs` and
+    `tables` the same way everywhere."""
+    doc = Document(str(docx_path))
+    unwrap_body_content_controls(doc)
+    return doc
 
 
 def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
@@ -189,13 +259,13 @@ def _cell_text_in_order(cell: _Cell, tab_char: str = ' ') -> str:
 
 
 def get_cell_text_with_nested(cell: _Cell) -> str:
-    """`get_cell_text`, plus the rows of any table nested in a cell that has text
-    of its own, in document order (#1231). A cell holding ONLY a nested table
-    returns "" as before, so callers' itertext() fallback is unchanged."""
-    text = get_cell_text(cell)
-    if text.strip() and _cell_has_nested_table(cell):
+    """`get_cell_text`, plus the rows of any table nested in the cell, in document
+    order (#1231). A cell holding ONLY a nested table is read the same way, one
+    line per nested row (#1284); it used to return "" and fall through to the
+    callers' itertext() fallback, which glued the nested paragraphs together."""
+    if _cell_has_nested_table(cell):
         return _cell_text_in_order(cell)
-    return text
+    return get_cell_text(cell)
 
 
 def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, Any]:
@@ -355,6 +425,90 @@ def _carry_grid_metadata(source_row: list[Any], new_row: list[Any]) -> None:
                 new.setdefault(key, src[key])
 
 
+_MIN_ALIGNED_LINES = 3  # aligned lists need 3+ lines; matching 2-line cells stay whole
+_MIN_PARALLEL_CELLS = 2  # cells that must agree on a count before it reads as parallel lists
+
+CellSplits = list[list[str] | None]
+
+
+def _cell_text(cell: dict[str, Any] | str) -> str:
+    return cell.get("text", "") if isinstance(cell, dict) else str(cell)
+
+
+def _nonblank_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.strip().split("\n") if line.strip()]
+
+
+def _double_newline_splits(
+    row: list[dict[str, Any]], min_chars: int, min_newlines: int
+) -> tuple[CellSplits, int]:
+    """Split each cell on blank lines (\\n\\n). Returns (per-cell segments or None, max segments)."""
+    cell_splits: CellSplits = []
+    max_splits = 1
+    for cell in row:
+        cell_text = _cell_text(cell)
+        if "\n\n" not in cell_text:
+            cell_splits.append(None)
+            continue
+        segments = [s.strip() for s in cell_text.split("\n\n") if s.strip()]
+        # Split if ANY segment is substantial, or if there are 2+ non-trivial
+        # segments even when short ("MBA\n\nBS").
+        has_substantial = any(len(s) > min_chars or s.count("\n") >= min_newlines for s in segments)
+        has_multiple_items = len(segments) >= 2 and all(len(s) >= 2 for s in segments)
+        if has_substantial or has_multiple_items:
+            cell_splits.append(segments)  # keep ALL segments, not just substantial ones
+            max_splits = max(max_splits, len(segments))
+        else:
+            cell_splits.append(None)
+    return cell_splits, max_splits
+
+
+def _aligned_line_splits(row: list[dict[str, Any]]) -> tuple[CellSplits, int]:
+    """Split cells that are stacked parallel lists: 2+ cells with the same
+    non-blank line count >= 3 (blank paragraphs ignored). A shorter date
+    column is spread over the sub-rows. Returns ([None]*n, 1) if no match."""
+    cell_lines = [_nonblank_lines(_cell_text(cell)) for cell in row]
+    count_freq = Counter(len(lines) for lines in cell_lines if len(lines) >= _MIN_ALIGNED_LINES)
+    for target_count, freq in count_freq.most_common():
+        if freq < _MIN_PARALLEL_CELLS:
+            continue
+        cell_splits: CellSplits = []
+        for lines in cell_lines:
+            if len(lines) == target_count:
+                cell_splits.append(lines)
+            elif _is_date_column(lines):
+                cell_splits.append(_fit_lines_to_slots(lines, target_count))
+            else:
+                cell_splits.append(None)  # don't split non-matching cells
+        return cell_splits, target_count
+    return [None] * len(row), 1
+
+
+def _is_parallel_split(cell_splits: CellSplits) -> bool:
+    """True if 2+ cells split into the same number (>= 2) of segments."""
+    counts = Counter(len(s) for s in cell_splits if s is not None and len(s) >= 2)
+    return any(freq >= _MIN_PARALLEL_CELLS for freq in counts.values())
+
+
+def _choose_cell_splits(
+    row: list[dict[str, Any]], min_chars: int, min_newlines: int
+) -> tuple[CellSplits, int]:
+    """Pick the blank-line split or the aligned-line split for a row.
+
+    A blank-line split wins when it is itself parallel (2+ cells agree on the
+    segment count), so multi-line entries separated by blank lines stay whole.
+    Otherwise stacked parallel lists win: one blank paragraph in one cell must
+    not stop 4 ranks pairing with their 4 dates (#612, web240).
+    """
+    blank_splits, blank_max = _double_newline_splits(row, min_chars, min_newlines)
+    if _is_parallel_split(blank_splits):
+        return blank_splits, blank_max
+    aligned_splits, aligned_max = _aligned_line_splits(row)
+    if aligned_max > 1:
+        return aligned_splits, aligned_max
+    return blank_splits, blank_max
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -363,6 +517,9 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
     1. Double newlines (\\n\\n): Explicit entry separators like "MBA\\n\\nBS"
     2. Aligned single newlines: When 2+ cells have the same line count, indicating
        corresponding entries (e.g., Cell 0 has 3 roles, Cell 1 has 3 dates)
+
+    Pattern 1 wins only when 2+ cells split into the same number of blank-line
+    segments; otherwise pattern 2 is tried first (`_choose_cell_splits`, #612).
 
     The function intelligently handles multi-column tables:
     - If multiple cells have the same number of splits, splits them in parallel
@@ -380,67 +537,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
     if not row:
         return [row]
 
-    # First pass: check for double-newline splits (\n\n)
-    cell_splits = []
-    max_splits = 1
-
-    for cell in row:
-        cell_text = cell.get("text", "") if isinstance(cell, dict) else str(cell)
-
-        if '\n\n' in cell_text:
-            segments = [s.strip() for s in cell_text.split('\n\n') if s.strip()]
-            # Check if ANY segment is substantial (to decide whether to split)
-            has_substantial = any(
-                len(s) > min_chars or s.count('\n') >= min_newlines
-                for s in segments
-            )
-            # Also consider: if we have 2+ non-trivial segments, split even if short
-            # This handles cases like "MBA\n\nBS" where both are short but valid
-            has_multiple_items = len(segments) >= 2 and all(len(s) >= 2 for s in segments)
-
-            if has_substantial or has_multiple_items:
-                # Keep ALL segments, not just substantial ones
-                cell_splits.append(segments)
-                max_splits = max(max_splits, len(segments))
-            else:
-                cell_splits.append(None)  # No split needed
-        else:
-            cell_splits.append(None)
-
-    # Second pass: check for aligned single-newline patterns
-    # If no \n\n splits were found, check if multiple cells have matching line counts
-    if max_splits == 1:
-        # Count lines in each cell (split by single \n)
-        line_counts = []
-        cell_lines = []
-        for cell in row:
-            cell_text = cell.get("text", "") if isinstance(cell, dict) else str(cell)
-            lines = [line.strip() for line in cell_text.strip().split('\n') if line.strip()]
-            line_counts.append(len(lines))
-            cell_lines.append(lines)
-
-        # Find the most common line count >= 3 (to avoid splitting single-line or 2-line content)
-        from collections import Counter
-        count_freq = Counter(c for c in line_counts if c >= 3)
-
-        if count_freq:
-            # Get the most common multi-line count that appears in 2+ cells
-            most_common = count_freq.most_common()
-            for target_count, freq in most_common:
-                if freq >= 2:  # At least 2 cells have this many lines
-                    # Use this count for aligned splitting
-                    max_splits = target_count
-                    cell_splits = []
-                    for cell_idx, lines in enumerate(cell_lines):
-                        if line_counts[cell_idx] == target_count:
-                            cell_splits.append(lines)
-                        elif _is_date_column(lines):
-                            # Date column with fewer lines - try to distribute dates
-                            # Pad with empty strings to match target_count
-                            cell_splits.append(_fit_lines_to_slots(lines, target_count))
-                        else:
-                            cell_splits.append(None)  # Don't split non-matching cells
-                    break
+    cell_splits, max_splits = _choose_cell_splits(row, min_chars, min_newlines)
 
     # If no splits needed, return original row
     if max_splits == 1:
@@ -617,6 +714,17 @@ def _distinct_row_cells(row: _Row) -> list[tuple[int, int, _Cell]]:
     return cells
 
 
+def _is_layout_box(table: Table) -> bool:
+    """Is this table a single-column LAYOUT box: every row one logical cell?
+
+    Counts distinct ``<w:tc>`` per row, not ``row.cells``: python-docx repeats
+    a gridSpan-merged cell once per layout column it spans, so a 1x1 box built
+    on a multi-column grid read as a data row and was not exploded (#1229).
+    Same rule as ``run_doctor._is_single_column`` (#749).
+    """
+    return bool(table.rows) and all(len(_distinct_row_cells(row)) == 1 for row in table.rows)
+
+
 def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
     """
     Extract table structure and content.
@@ -717,15 +825,50 @@ CV_SECTION_KEYWORDS = {
 }
 
 
-def looks_like_section_header(text: str) -> tuple[bool, float]:
-    """
-    Determine if text looks like a CV section header.
+# looks_like_section_header's additive signals and their weights (#404: each
+# signal's contribution is emitted as `header_signal_scores` beside
+# `header_confidence`, so a mis-scored header shows which signal carried it).
+HEADER_SIGNAL_KEYWORD = "keyword"  # a CV_SECTION_KEYWORDS term appears anywhere
+HEADER_SIGNAL_ALL_CAPS = "all_caps"  # ALL CAPS, over 3 characters
+HEADER_SIGNAL_TITLE_CASE = "title_case"  # at most 6 words, every word capitalized
+HEADER_SIGNAL_TRAILING_COLON = "trailing_colon"
+HEADER_SIGNAL_SHORT = "short"  # 1-5 words
+HEADER_SIGNAL_SHORT_KEYWORD = "short_keyword"  # at most 2 words and a keyword
+HEADER_SIGNAL_WEIGHTS: dict[str, float] = {
+    HEADER_SIGNAL_KEYWORD: 0.4,
+    HEADER_SIGNAL_ALL_CAPS: 0.3,
+    HEADER_SIGNAL_TITLE_CASE: 0.2,
+    HEADER_SIGNAL_TRAILING_COLON: 0.1,
+    HEADER_SIGNAL_SHORT: 0.1,
+    HEADER_SIGNAL_SHORT_KEYWORD: 0.2,
+}
+# Capped confidence at or above which looks_like_section_header calls a line a header.
+SECTION_HEADER_MIN_CONFIDENCE = 0.4
 
-    Returns:
-        (is_header, confidence) tuple where confidence is 0.0-1.0
+
+class HeaderScore(NamedTuple):
+    """score_section_header's result: the capped total plus the weight of
+    each signal that fired, keyed by its HEADER_SIGNAL_* name."""
+
+    is_header: bool
+    confidence: float
+    signal_scores: dict[str, float]
+
+
+def _rejected_header_score() -> HeaderScore:
+    """A fresh not-a-header score, so no caller shares a mutable signal dict."""
+    return HeaderScore(is_header=False, confidence=0.0, signal_scores={})
+
+
+def score_section_header(text: str) -> HeaderScore:
+    """Score whether text looks like a CV section header, keeping each
+    additive signal's contribution (#404) beside the capped total.
+
+    A line rejected outright (too long, a date range, a citation) scores
+    0.0 with no signals.
     """
     if not text:
-        return False, 0.0
+        return _rejected_header_score()
 
     # For multi-line text, check just the first line
     # (table cells often have header on first line, content below)
@@ -735,7 +878,7 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
 
     # Too long to be a header (headers are typically short)
     if len(text_clean) > 100:
-        return False, 0.0
+        return _rejected_header_score()
 
     # Contains date patterns - likely content, not header
     import re
@@ -747,7 +890,7 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
     ]
     for pattern in date_patterns:
         if re.search(pattern, text_lower):
-            return False, 0.0
+            return _rejected_header_score()
 
     # Contains citation patterns - likely publication, not header
     citation_patterns = [
@@ -760,44 +903,51 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
     ]
     for pattern in citation_patterns:
         if re.search(pattern, text_lower):
-            return False, 0.0
+            return _rejected_header_score()
 
+    signal_scores = _header_signal_scores(text_clean, text_lower)
+    # Accumulated left to right with `+=`, NOT `sum()`: Python 3.12+'s sum()
+    # compensates float error, which turns the 0.9000000000000001 this scorer
+    # has always produced into 0.9 and moves a header's confidence. Capped at
+    # 1.0, so the contributions can sum past the reported confidence.
     confidence = 0.0
-
-    # Check for known CV section keywords
-    for keyword in CV_SECTION_KEYWORDS:
-        if keyword in text_lower:
-            confidence += 0.4
-            break
-
-    # ALL CAPS is a strong header signal
-    if text_clean.isupper() and len(text_clean) > 3:
-        confidence += 0.3
-
-    # Title Case with short text
-    words = text_clean.split()
-    if len(words) <= 6 and all(w[0].isupper() for w in words if w):
-        confidence += 0.2
-
-    # Ends with colon (common header pattern)
-    if text_clean.endswith(':'):
-        confidence += 0.1
-
-    # Short text (1-5 words) is more likely a header
-    if 1 <= len(words) <= 5:
-        confidence += 0.1
-
-    # Very short (1-2 words) known keyword is very likely header
-    if len(words) <= 2 and any(kw in text_lower for kw in CV_SECTION_KEYWORDS):
-        confidence += 0.2
-
-    # Cap at 1.0
+    for weight in signal_scores.values():
+        confidence += weight
     confidence = min(confidence, 1.0)
+    return HeaderScore(
+        is_header=confidence >= SECTION_HEADER_MIN_CONFIDENCE,
+        confidence=confidence,
+        signal_scores=signal_scores,
+    )
 
-    # Threshold for considering it a header
-    is_header = confidence >= 0.4
 
-    return is_header, confidence
+def _header_signal_scores(text_clean: str, text_lower: str) -> dict[str, float]:
+    """Return `{signal name: weight}` for each additive header signal that
+    fires on a first line already past the length/date/citation rejections,
+    in the order `score_section_header` sums them."""
+    words = text_clean.split()
+    has_keyword = any(kw in text_lower for kw in CV_SECTION_KEYWORDS)
+    fired = (
+        (HEADER_SIGNAL_KEYWORD, has_keyword),
+        (HEADER_SIGNAL_ALL_CAPS, text_clean.isupper() and len(text_clean) > 3),
+        (HEADER_SIGNAL_TITLE_CASE, len(words) <= 6 and all(w[0].isupper() for w in words if w)),
+        (HEADER_SIGNAL_TRAILING_COLON, text_clean.endswith(':')),
+        (HEADER_SIGNAL_SHORT, 1 <= len(words) <= 5),
+        (HEADER_SIGNAL_SHORT_KEYWORD, len(words) <= 2 and has_keyword),
+    )
+    return {name: HEADER_SIGNAL_WEIGHTS[name] for name, hit in fired if hit}
+
+
+def looks_like_section_header(text: str) -> tuple[bool, float]:
+    """
+    Determine if text looks like a CV section header.
+
+    Returns:
+        (is_header, confidence) tuple where confidence is 0.0-1.0;
+        `score_section_header` also returns each signal's contribution.
+    """
+    score = score_section_header(text)
+    return score.is_header, score.confidence
 
 
 def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
@@ -940,10 +1090,32 @@ def _classify_subheader_row_content(
     return has_value_cells, header_left_content_right
 
 
+def _table_header_element(
+    unified_idx: int, text: str, table_index: int, score: HeaderScore, style: str
+) -> dict[str, Any]:
+    """Build a `table_header` element for a table-sourced header line, with
+    its scorer's per-signal contributions beside `header_confidence` (#404)."""
+    return {
+        "unified_idx": unified_idx,
+        "type": "table_header",
+        "text": text,
+        "table_index": table_index,
+        "header_confidence": score.confidence,
+        "header_signal_scores": dict(score.signal_scores),
+        "is_header_candidate": True,
+        # Paragraph-like metadata for header detection; a table header is
+        # assumed bold-like.
+        "bold": True,
+        "style": style,
+        "alignment": None,
+        "font_size": None,
+    }
+
+
 def _handle_table_row_zero(
     table_data: dict[str, Any],
     first_cell_text: str,
-    header_confidence: float,
+    header_score: HeaderScore,
     unified_idx: int,
     num_tables: int,
 ) -> tuple[list[dict[str, Any]], int, int, list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
@@ -991,19 +1163,9 @@ def _handle_table_row_zero(
         header_text = lines[0].strip()
 
         # Emit table header as paragraph-like element
-        new_elements.append({
-            "unified_idx": unified_idx,
-            "type": "table_header",
-            "text": header_text,
-            "table_index": num_tables,
-            "header_confidence": header_confidence,
-            "is_header_candidate": True,
-            # Add some paragraph-like metadata for header detection
-            "bold": True,  # Assume table headers are bold-like
-            "style": "TableHeader",
-            "alignment": None,
-            "font_size": None,
-        })
+        new_elements.append(
+            _table_header_element(unified_idx, header_text, num_tables, header_score, "TableHeader")
+        )
         unified_idx += 1
         num_table_headers_emitted += 1
 
@@ -1340,7 +1502,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
         }
     }
     """
-    doc = Document(docx_path)
+    doc = open_source_docx(docx_path)
 
     elements = []
     unified_idx = 0
@@ -1349,8 +1511,8 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     num_table_headers = 0
     num_empty = 0
 
-    # A doc.paragraphs position: body paragraphs only. Layout-table cell
-    # paragraphs below carry para_idx/idx None -- use unified_idx (#609).
+    # An `open_source_docx(...).paragraphs` position (#1656): body paragraphs only.
+    # Layout-table cell paragraphs below carry para_idx/idx None -- use unified_idx (#609).
     para_idx = 0
 
     # Iterate through document body elements in order
@@ -1392,7 +1554,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
             # elements so header detection and stage-2 splitting see them. Multi-column rows
             # are real data (Year | Institution | Degree) and keep the joined path below.
             # A table nested in the cell is exploded the same way, in document order (#1231).
-            if table.rows and all(len(row.cells) == 1 for row in table.rows):
+            if _is_layout_box(table):
                 seen_cells = set()
                 for row in table.rows:
                     cell = row.cells[0]
@@ -1416,9 +1578,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
             # Check if first cell looks like a section header
             first_cell_text = get_table_first_cell_text(table)
-            is_header, header_confidence = looks_like_section_header(first_cell_text)
+            header_score = score_section_header(first_cell_text)
 
-            if is_header and first_cell_text:
+            if header_score.is_header and first_cell_text:
                 (
                     row0_elements,
                     unified_idx,
@@ -1426,7 +1588,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     table_rows,
                     current_content_rows,
                 ) = _handle_table_row_zero(
-                    table_data, first_cell_text, header_confidence, unified_idx, num_tables
+                    table_data, first_cell_text, header_score, unified_idx, num_tables
                 )
                 elements.extend(row0_elements)
                 num_table_headers += row0_num_headers
@@ -1466,9 +1628,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                                     # Check first line of segment for header
                                     first_line = segment.split('\n')[0].strip()
-                                    is_seg_header, seg_header_conf = looks_like_section_header(first_line)
+                                    seg_score = score_section_header(first_line)
 
-                                    if is_seg_header and len(first_line) <= 80:
+                                    if seg_score.is_header and len(first_line) <= 80:
                                         # Emit accumulated content first
                                         if current_content_rows:
                                             content_text = _flatten_table_content_text(current_content_rows)
@@ -1485,18 +1647,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                                             current_content_rows = []
 
                                         # Emit the embedded header
-                                        elements.append({
-                                            "unified_idx": unified_idx,
-                                            "type": "table_header",
-                                            "text": first_line,
-                                            "table_index": num_tables,
-                                            "header_confidence": seg_header_conf,
-                                            "is_header_candidate": True,
-                                            "bold": True,
-                                            "style": "EmbeddedHeader",
-                                            "alignment": None,
-                                            "font_size": None,
-                                        })
+                                        elements.append(_table_header_element(
+                                            unified_idx, first_line, num_tables, seg_score, "EmbeddedHeader"
+                                        ))
                                         unified_idx += 1
                                         num_table_headers += 1
 
@@ -1523,19 +1676,19 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                             current_content_rows.extend(split_rows)
                             continue
 
-                        is_row_header, row_header_conf = looks_like_section_header(cell_text)
+                        row_score = score_section_header(cell_text)
                         # A real section header with distinct content on the right (no
                         # colon, high confidence) keeps its header AND recovers the
                         # content, instead of being demoted to content-only (#811 round 2,
                         # web064: "WORK ADDRESS | <address>").
                         has_value_cells, header_left_content_right = _classify_subheader_row_content(
-                            cell_text, row_header_conf, row
+                            cell_text, row_score.confidence, row
                         )
 
                         # A non-blank trailing cell means "Name:" is a form label, not a
                         # header (#811 round 1) -- UNLESS the row is header-left/content-right
                         # (#811 round 2), in which case the header signal is kept too.
-                        if is_row_header and cell_text and (not has_value_cells or header_left_content_right):
+                        if row_score.is_header and cell_text and (not has_value_cells or header_left_content_right):
                             # Emit accumulated content rows first
                             if current_content_rows:
                                 content_text = _flatten_table_content_text(current_content_rows)
@@ -1553,18 +1706,9 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                             # Emit this row's header
                             sub_header_text = cell_text.split('\n')[0].strip()
-                            elements.append({
-                                "unified_idx": unified_idx,
-                                "type": "table_header",
-                                "text": sub_header_text,
-                                "table_index": num_tables,
-                                "header_confidence": row_header_conf,
-                                "is_header_candidate": True,
-                                "bold": True,
-                                "style": "TableSubHeader",
-                                "alignment": None,
-                                "font_size": None,
-                            })
+                            elements.append(_table_header_element(
+                                unified_idx, sub_header_text, num_tables, row_score, "TableSubHeader"
+                            ))
                             unified_idx += 1
                             num_table_headers += 1
 
@@ -1619,9 +1763,10 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
     """
     Extract complete document structure from .docx file.
 
-    IMPORTANT: Element indices match doc.paragraphs indices for consistency
-    with Stage 2 entry extraction. Empty paragraphs are included but marked
-    as empty (is_empty=True) so they can be skipped in LLM processing.
+    IMPORTANT: Element indices match `open_source_docx(docx_path).paragraphs`
+    indices (#1656) for consistency with Stage 2 entry extraction. Empty
+    paragraphs are included but marked as empty (is_empty=True) so they can be
+    skipped in LLM processing.
 
     Returns:
     {
@@ -1640,7 +1785,7 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
         }
     }
     """
-    doc = Document(docx_path)
+    doc = open_source_docx(docx_path)
 
     elements = []
     idx = 0
@@ -1701,12 +1846,13 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
 
 
 class OwnerSideChannel(TypedDict):
-    """Text that lives outside the main body-element stream, for stage 4's
-    owner-name fallback to consult when the body yielded no name (#456).
+    """Text for stage 4's owner-name fallback to consult when the body
+    yielded no name (#456), and for its header/footer contact entry when the
+    body yielded no contact (#1655).
 
     Never merged into `extract_unified_elements`/`extract_docx_structure`'s
     `elements` list and never touches `unified_idx`/`para_idx` -- see
-    `extract_owner_side_channel`'s docstring for why.
+    `extract_owner_side_channel`'s docstring.
     """
 
     sdt_lines: list[str]
@@ -1795,27 +1941,24 @@ def _header_footer_paragraph_lines(containers: list[Any]) -> list[str]:
 
 
 def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
-    """Read CV-owner-identifying text from parts the main body walk never
-    opens (#456): a body-level `w:sdt` (Word content-control) wrapping whole
-    paragraphs, and the letterhead in `word/header*.xml` / `word/footer*.xml`.
+    """Read CV-owner-identifying text for stage 4's fallbacks (#456): every
+    paragraph inside a Word content control (`w:sdt`), and the letterhead in
+    `word/header*.xml` / `word/footer*.xml`, which
+    `extract_unified_elements`/`extract_docx_structure` never open.
 
-    `extract_unified_elements`/`extract_docx_structure` above dispatch only
-    on `isinstance(element, CT_P)` / `isinstance(element, CT_Tbl)` while
-    walking `doc.element.body`'s direct children -- a `w:sdt` element matches
-    neither, so python-docx has no wrapper for it and its entire subtree
-    (including any `w:p` inside) is silently skipped. Neither function opens
-    a header/footer OPC part at all.
+    Since #1656 a body-level content control's paragraphs are also in the
+    main element stream (`open_source_docx` unwraps them), so the body tier
+    can see them too. The two never feed one prompt: the fallback tier runs
+    only when the body tier found no name. `sdt_lines` still carries what
+    the stream does not, a content control inside a table cell.
 
-    This is an ADDITIVE, separate read. It never touches `elements`,
-    `unified_idx`, or `para_idx`, and its output is never merged into the
-    element stream those two functions return: `doc.paragraphs` (used as a
-    fallback index by `stage_2_entry_extraction.py:1118/1153/1226/1245`)
-    only enumerates direct-body `CT_P` children, so inlining an sdt paragraph
-    into the stream would shift every subsequent `para_idx` and silently
-    desync that fallback -- exactly the corruption the #456 issue's comment
-    warns against. Consumed only by stage 4's owner-name fallback tier
-    (`stage4/owner_name.py`), and only when the body-derived pass found no
-    name.
+    This is a separate read of its own, un-unwrapped copy of the document.
+    It never touches `elements`, `unified_idx`, or `para_idx`, and its output
+    is never merged into the element stream those two functions return.
+    Consumed only by stage 4 (`stage4/owner_name.py`): the
+    owner-name fallback tier, when the body-derived pass found no name, and
+    the header/footer contact entry (`header_footer_contact_entry`, #1655),
+    when the body's Personal Data entries hold no contact.
 
     Args:
         docx_path: Path to the .docx file. Opens it independently -- shares

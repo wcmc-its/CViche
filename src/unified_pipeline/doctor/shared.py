@@ -29,11 +29,11 @@ from unified_pipeline.core.text_norm import norm, squash
 # import them from here unchanged); `_RENDER_TOKEN_RE` is also used directly
 # by `_long_word_tokens` below.
 from unified_pipeline.stage6.render_check import (  # noqa: F401
+    _RENDER_TOKEN_RE,
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
-    _RENDER_TOKEN_RE,
     _entry_pieces,
 )
 
@@ -88,6 +88,7 @@ def _template_haystack() -> str:
     quality_score imports this module.
     """
     from docx import Document
+
     from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH
     doc = Document(_TEMPLATE_DOCX_PATH)
     texts = [p.text for p in doc.paragraphs]
@@ -271,6 +272,62 @@ def docx_body_blocks(doc: DocumentType, *, deleted: bool = False) -> list[tuple[
     return blocks
 
 
+def docx_subpoint_lines(doc: DocumentType) -> list[str]:
+    """The text of each tracked-deleted sub-point paragraph stage 6 wrote
+    (#1205, stage6/supplementary.py): the ``<w:delText>`` under a ``<w:del>``
+    whose author is `SUBPOINT_AUTHOR`, one line per paragraph, deleted rows'
+    paragraphs included. Every other tracked deletion -- a formatter's
+    rewrite, the protected-data pass -- is not a sub-point and is left out."""
+    from docx.oxml.ns import qn
+
+    from unified_pipeline.stage6.supplementary import SUBPOINT_AUTHOR
+    w_del, w_author, w_del_text = qn("w:del"), qn("w:author"), qn("w:delText")
+    lines = []
+    for paragraph in doc.element.body.iter(qn("w:p")):
+        text = "".join(node.text or "" for deletion in paragraph.findall(w_del)
+                       if deletion.get(w_author) == SUBPOINT_AUTHOR
+                       for node in deletion.iter(w_del_text))
+        if text.strip():
+            lines.append(text)
+    return lines
+
+
+class SubpointText(NamedTuple):
+    """A rendered document's sub-points (`docx_subpoint_lines`) as
+    `offered_as_subpoint` matches against them: the squashed lines,
+    `_LINE_SENTINEL`-joined like `Haystack.text`, and each line's distinctive
+    token set."""
+    text: str
+    line_tokens: tuple[frozenset[str], ...]
+
+
+def subpoint_text(lines: list[str] | None) -> SubpointText:
+    """`SubpointText` over `docx_subpoint_lines`' lines; empty for None (no
+    document, or none read)."""
+    lines = [line for line in lines or () if line.strip()]
+    return SubpointText(_LINE_SENTINEL.join(squash(line) for line in lines),
+                        tuple(frozenset(_long_word_tokens(line)) for line in lines))
+
+
+def offered_as_subpoint(text: str, subpoints: SubpointText | None) -> bool:
+    """Whether `text` -- a record line, an entry's prose, a field value --
+    reaches the reader as a tracked-deleted sub-point (#1205): a verbatim piece
+    of it (`_entry_pieces`) sits in one, or one sub-point line holds
+    RENDER_TOKEN_OVERLAP of its distinctive tokens, at least
+    RENDER_TOKEN_MIN_COUNT of them. A sub-point is source prose the template
+    has no field for, offered for review: rejecting the deletion keeps it.
+    The one test every doctor consumer of the sub-points shares, so a lint
+    does not grow its own copy."""
+    if subpoints is None:
+        return False
+    if any(piece in subpoints.text for piece in _entry_pieces(text)):
+        return True
+    tokens = _long_word_tokens(text)
+    return len(tokens) >= RENDER_TOKEN_MIN_COUNT and any(
+        len(tokens & line) >= RENDER_TOKEN_OVERLAP * len(tokens)
+        for line in subpoints.line_tokens)
+
+
 def docx_table_rows(doc: DocumentType) -> list[list[list[str]]]:
     """Raw per-row cell texts of every top-level table of an OPEN python-docx
     Document, EMPTY CELLS INCLUDED -- _table_lines drops empty cells, which
@@ -287,12 +344,14 @@ class _FieldsEntry(NamedTuple):
     (§8.1).
     `fields` is empty when `extracted_fields` is absent or not an object.
     `element_idx_end` completes the span a later stage's copy of the entry
-    is found by (`_span`)."""
+    is found by (`_span`). `hierarchy` is the entry's heading path, empty
+    when absent."""
     element_idx: object
     code: str
     text: str
     fields: Mapping[str, object]
     element_idx_end: object = None
+    hierarchy: tuple[str, ...] = ()
 
 
 def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
@@ -306,5 +365,6 @@ def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
             raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
             str(raw.get("text") or ""),
             fields if isinstance(fields, Mapping) else {},
-            raw.get("element_idx_end")))
+            raw.get("element_idx_end"),
+            tuple(str(h) for h in raw.get("hierarchy") or ())))
     return entries

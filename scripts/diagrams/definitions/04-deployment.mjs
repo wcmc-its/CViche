@@ -92,7 +92,9 @@ export const meta = {
   ],
   footnote:
     "Replicas&nbsp;> 1 requires <code>CVICHE_REDIS_URL</code> so live progress and cancellation cross pods " +
-    "(view ③). Dev overlay differs: namespace <code>cviche-dev</code>, backend replicas 1 (250m/256Mi req), no HPA.",
+    "(view ③). Dev overlay differs: namespace <code>cviche-dev</code>, <code>CVICHE_DISPATCH_MODE=queue</code> " +
+    "(runs execute on <code>cviche-worker</code> pods, 3 general + 3 flex replicas, not in the backend), " +
+    "backend HPA fixed at 2 replicas (150m/512Mi req, 2/2Gi limits).",
   seeAlso: [
     { id: "context", label: "① system context" },
     { id: "runtime", label: "③ what runs in the backend pod" },

@@ -33,4 +33,6 @@ export interface ConsentStatus {
 export interface AuthConfig {
   mode: 'simple' | 'saml'
   discovery_url?: string
+  /** The backend's per-file upload cap in MB (#109). Absent only in the offline fallback config. */
+  max_upload_mb?: number
 }

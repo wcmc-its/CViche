@@ -60,8 +60,13 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.pii import CAT_HOME_CONTACT  # noqa: E402
-from unified_pipeline.stage6.sections import personal_data as personal_data_module  # noqa: E402
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
+from unified_pipeline.stage6.sections import (
+    personal_data as personal_data_module,  # noqa: E402
+)
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    WCMTemplateGenerator,
+    run_stage6,
+)
 
 W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
 
@@ -338,15 +343,15 @@ def test_a_directory_named_docx_is_not_opened_as_a_document(tmp_path):
 # --------------------------------------------------------------------------
 
 def _record_document_opens(monkeypatch):
-    """Record every path `personal_data` hands to python-docx."""
+    """Record every path `personal_data` opens (`open_source_docx`, #1656)."""
     opened = []
-    real_document = personal_data_module.Document
+    real_open = personal_data_module.open_source_docx
 
     def _recording(path, *args, **kwargs):
         opened.append(str(path))
-        return real_document(path, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(personal_data_module, "Document", _recording)
+    monkeypatch.setattr(personal_data_module, "open_source_docx", _recording)
     return opened
 
 
@@ -437,6 +442,25 @@ def test_email_after_the_twentieth_paragraph_is_still_recovered(tmp_path):
         "the only email in the document is past paragraph 20 and was not "
         "recovered -- the paragraph scan stopped at a fixed count"
     )
+
+
+def test_email_inside_a_body_content_control_is_recovered(tmp_path):
+    """#1656: the source is scanned as stage 1 reads it, so a contact line
+    inside a body-level content control (`w:sdt`) is not skipped."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    source = tmp_path / "source.docx"
+    doc = Document()
+    after = doc.add_paragraph("A paper with no contact details. 2019.")
+    after._p.addprevious(parse_xml(
+        f'<w:sdt {nsdecls("w")}><w:sdtContent><w:p><w:r><w:t>Correspondence to: '
+        'person@example.edu</w:t></w:r></w:p></w:sdtContent></w:sdt>'))
+    doc.save(str(source))
+
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(source))
+
+    assert rows.get("work email:") == "person@example.edu"
 
 
 # --------------------------------------------------------------------------

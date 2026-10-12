@@ -1,36 +1,41 @@
 """Authentication middleware using itsdangerous signed cookies."""
 import json
-import os
-import time
-import secrets
 import logging
+import os
+import secrets
+import time
 from dataclasses import dataclass
-from datetime import datetime
 
-from fastapi import Request, HTTPException, Depends
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from fastapi import Depends, HTTPException, Request
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
-from sqlalchemy.exc import OperationalError
 
-from app.database import get_db
-from app.models import User, UserRole, can_view_all_runs  # can_view_all_runs re-exported
-from app.config_loader import get_config_value
-from app.services import ed_access
-from app.ed_group_lookup import (
-    check_ed_membership,
-    MembershipResult,
-)
-from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
-from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.audit_events import (
+    DIRECTORY_UNAVAILABLE,
+    GROUP_MEMBERSHIP_REMOVED,
+    ROLE_CHANGED,
     SESSION_EXPIRED,
     SESSION_REVOKED,
     SESSION_STORE_UNAVAILABLE,
-    ROLE_CHANGED,
-    GROUP_MEMBERSHIP_REMOVED,
-    DIRECTORY_UNAVAILABLE,
 )
+from app.config_loader import get_config_value
+from app.database import get_db, is_retryable_write_conflict
+from app.ed_group_lookup import (
+    MembershipResult,
+    check_ed_membership,
+)
+from app.models import (  # can_view_all_runs re-exported
+    User,
+    UserRole,
+    UserStatus,
+    can_view_all_runs,
+)
+from app.services import ed_access
+from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
+from app.session_idle import SessionStoreUnavailable, get_idle_store
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ _USER_NOT_FOUND_DETAIL = {
     "error": "auth_required",
     "message": "User not found. Please log in again.",
 }
-_ACCOUNT_DISABLED_DETAIL = {
+ACCOUNT_DISABLED_DETAIL = {
     "error": "account_disabled",
     "message": "Your account has been disabled. Contact an administrator.",
 }
@@ -337,23 +342,6 @@ def _resolve_payload_identity(payload: dict) -> SessionIdentity | None:
     )
 
 
-def _is_retryable_write_conflict(exc: OperationalError) -> bool:
-    """Whether exc is the specific benign concurrent-write conflict
-    _best_effort_persist exists to swallow, not any OperationalError.
-
-    MySQL (prod): pymysql raises error 1020 ("Record has changed since last
-    read") as a 2-tuple (code, message) in .orig.args.
-    SQLite (tests): sqlite3 raises "database is locked" as a plain message,
-    no error code.
-    Anything else -- connection loss, a real outage -- is a different
-    problem and must not be swallowed the same way.
-    """
-    orig_args = getattr(exc.orig, "args", ())
-    if orig_args and orig_args[0] == 1020:
-        return True
-    return "database is locked" in str(exc).lower()
-
-
 def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
     """Persist a non-critical per-request field update (last_active_at bump,
     role sync) through its own short-lived session, isolated from the
@@ -362,7 +350,7 @@ def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
 
     A page load fires several API calls at once, each running this
     dependency and writing the same `users` row; concurrent writers can hit
-    the retryable conflict _is_retryable_write_conflict names, which isn't
+    the retryable conflict is_retryable_write_conflict names, which isn't
     required to serve the current request -- on that specific conflict we
     roll back and continue; the update simply lands on a later request. Any
     other OperationalError (connection loss, a real outage) propagates.
@@ -379,7 +367,7 @@ def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
         return True
     except OperationalError as e:
         session.rollback()
-        if not _is_retryable_write_conflict(e):
+        if not is_retryable_write_conflict(e):
             raise
         logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, e)
         return False
@@ -431,8 +419,8 @@ def _load_active_user(identity: SessionIdentity, db: Session) -> User:
     user = db.query(User).filter(User.id == identity.user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail=_USER_NOT_FOUND_DETAIL)
-    if user.status != "active":
-        raise HTTPException(status_code=401, detail=_ACCOUNT_DISABLED_DETAIL)
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=401, detail=ACCOUNT_DISABLED_DETAIL)
     return user
 
 
@@ -556,7 +544,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
 
 def _bump_last_active(user: User) -> None:
     """Debounced last_active_at update (once per 60s)."""
-    now = datetime.now()
+    now = utc_now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
         set_committed_value(user, "last_active_at", now)  # see role sync above
         _best_effort_persist(user.id, "last_active_at", last_active_at=now)
@@ -589,7 +577,7 @@ def role_for_membership(membership: MembershipResult) -> UserRole:
 def can_see_cost(user: User) -> bool:
     """Processing cost is admin-only (#1111). The UI hides it by role too; the
     API withholding it is what keeps it out of the network tab."""
-    return user.role == "admin"
+    return user.role == UserRole.ADMIN
 
 
 def visible_cost(user: User, cost: float | None) -> float | None:
@@ -598,7 +586,7 @@ def visible_cost(user: User, cost: float | None) -> float | None:
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
+    if user.role != UserRole.ADMIN:
         raise HTTPException(
             status_code=403,
             detail={"error": "forbidden", "message": "Admin access required."}

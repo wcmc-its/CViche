@@ -69,7 +69,10 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+)
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _child_position_records,
     _employers_match,
@@ -78,7 +81,6 @@ from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     _tab_joined_child_fragments,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # The exact -DAZFA D2 entry text (stage_5_enrichment JSON), en-dash and bullet
 # glyph verbatim.
@@ -1444,3 +1446,118 @@ def test_latest_rank_rows_reads_d1_start_years_only():
     assert _latest_rank_rows(records) == {0, 3}
     assert records == before
     assert _latest_rank_rows([_rank_entry(1, "Lecturer", "")]) == set()
+
+
+# --- (f) duty prose in an appointment title (#1205) --------------------------
+# The YUYVIG DYLJXC 661/668 shape, synthetic: stage 4 wrote the role, an FTE
+# share and the duties into `title`.
+
+DUTY_TITLE_ROLE = "Visiting Fellow in Example Science, Example Policy Office"
+DUTY_TITLE_DUTIES = "50% FTE Appointment to help plan the example programme"
+
+
+def _duty_title_entry(code="D3"):
+    return {
+        "element_idx_start": 7,
+        "taxonomy_code": code,
+        "text": f"{DUTY_TITLE_ROLE} 2013-15\t{DUTY_TITLE_DUTIES}",
+        "extracted_fields": {
+            "title": f"{DUTY_TITLE_ROLE} - {DUTY_TITLE_DUTIES}",
+            "organization": "Example Institute for Science",
+            "start_date": "2013", "end_date": "2015",
+        },
+    }
+
+
+def _row_spans(table):
+    """Per data row, the gridSpan of each of its w:tc cells (1 when unset)."""
+    spans = []
+    for row in table.rows[1:]:
+        spans.append([int(tc.find(qn("w:tcPr") + "/" + qn("w:gridSpan")).get(qn("w:val")))
+                      if tc.find(qn("w:tcPr") + "/" + qn("w:gridSpan")) is not None else 1
+                      for tc in row._tr.findall(qn("w:tc"))])
+    return spans
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3"])
+def test_a_duty_title_shows_only_the_role_and_the_duties_on_a_row_under_it(code):
+    gen, table = _positions_generator(TABLE_ANCHORS[code])
+    gen._fill_positions({code: [_duty_title_entry(code)]})
+
+    rows = _rendered_rows(table)
+    assert rows[0] == [DUTY_TITLE_ROLE, "Example Institute for Science", "2013-2015"]
+    # The continuation row is one cell spanning the table's three columns.
+    assert rows[1] == [DUTY_TITLE_DUTIES] * 3
+    assert _row_spans(table) == [[1, 1, 1], [3]]
+    assert gen.stats["entries_inserted"] == 1
+    assert gen.stats["appointment_title_duties_split"] == 1
+
+
+_SUBPOINT_AUTHOR = "CViche: source text with no template field"
+
+
+def _deleted_rows(table):
+    return [tr for tr in table._tbl.findall(qn("w:tr"))
+            if (d := tr.find(f"{qn('w:trPr')}/{qn('w:del')}")) is not None
+            and d.get(qn("w:author")) == _SUBPOINT_AUTHOR]
+
+
+def test_with_sub_points_on_the_duties_row_is_a_tracked_deletion():
+    """#1205: with the sub-points on, the duties split off the title are the
+    entry's tracked-deleted sub-point -- a deleted row spanning the table --
+    and are recorded so the sub-point pass, overflow and recovery skip them."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen.supplementary_subpoints = True
+    entry = _duty_title_entry()
+    gen._fill_positions({"D3": [entry]})
+
+    deleted = _deleted_rows(table)
+    assert len(deleted) == 1 and deleted[0].getprevious() is table.rows[1]._tr
+    assert "".join(t.text for t in deleted[0].iter(qn("w:delText"))) == DUTY_TITLE_DUTIES
+    assert deleted[0].find(f".//{qn('w:t')}") is None  # nothing left once accepted
+    assert _row_spans(table) == [[1, 1, 1], [3]]
+    assert gen._subpoint_lines == [
+        f"{DUTY_TITLE_ROLE} Example Institute for Science 2013-2015 {DUTY_TITLE_DUTIES}"]
+    assert gen._subpoint_entry_ids == {id(entry)}
+    assert gen.stats["appointment_title_duties_split"] == 1
+
+
+def test_with_track_changes_off_the_duties_stay_a_plain_row():
+    """A deletion means nothing without track changes, so the #1641 plain row stays."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen.supplementary_subpoints, gen.emit_track_changes = True, False
+    gen._fill_positions({"D3": [_duty_title_entry()]})
+
+    assert _deleted_rows(table) == []
+    assert _rendered_rows(table)[1] == [DUTY_TITLE_DUTIES] * 3
+    assert gen._subpoint_lines == [] and gen._subpoint_entry_ids == set()
+
+
+def test_a_title_without_duty_prose_gets_no_continuation_row():
+    entry = _duty_title_entry()
+    entry["extracted_fields"]["title"] = DUTY_TITLE_ROLE
+    gen, table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen._fill_positions({"D3": [entry]})
+
+    assert _rendered_rows(table) == [[DUTY_TITLE_ROLE, "Example Institute for Science", "2013-2015"]]
+    assert "appointment_title_duties_split" not in gen.stats
+
+
+def test_the_title_cell_holds_the_role_only():
+    title, _institution, _dates = _position_row_cells(_duty_title_entry())
+    assert title == [(DUTY_TITLE_ROLE, False, "")]
+
+
+def test_a_placeholder_title_still_reads_as_no_title():
+    entry = _duty_title_entry()
+    entry["extracted_fields"]["title"] = "Title"
+    title, _institution, _dates = _position_row_cells(entry)
+    assert title == [("", False, "")]
+
+
+def test_the_split_does_not_change_the_record():
+    entry = _duty_title_entry()
+    before = copy.deepcopy(entry)
+    gen, _table = _positions_generator(TABLE_ANCHORS["D3"])
+    gen._fill_positions({"D3": [entry]})
+    assert entry == before

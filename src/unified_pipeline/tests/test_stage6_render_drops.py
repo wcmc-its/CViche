@@ -19,12 +19,13 @@ from pathlib import Path
 
 import pytest
 
+from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
 from unified_pipeline.stage6.parsing import (
     _is_mentee_record,
     _is_mentoring_outcome,
     _is_orphan_fragment,
 )
-from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+from unified_pipeline.stage6.sections.mentoring import _partition_mentoring_entries
 from unified_pipeline.stage6.sections.other_education import (
     _normalize_other_education_entry,
 )
@@ -32,12 +33,15 @@ from unified_pipeline.stage_6_word_template import (
     _REROUTE_ANCHOR_OVERRIDES,
     _SAME_FAMILY_KIND_FIELDS,
     _TAXONOMY_WARNED_CONFUSIONS,
+    BARE_MENTEE_RESOLVE_CHECK,
+    PRECOLLEGIATE_REROUTE_CHECK,
     REROUTE_ACCEPTED_CROSS_FAMILY,
     REROUTE_ACCEPTED_SAME_FAMILY,
     REROUTE_CHECK,
     REROUTE_REFUSED_FIELDS,
+    REROUTE_REFUSED_FIELDS_LOST,
+    REROUTE_REFUSED_HEADING,
     REROUTE_REFUSED_MENTEE,
-    PRECOLLEGIATE_REROUTE_CHECK,
     WCMTemplateGenerator,
 )
 
@@ -272,7 +276,7 @@ def test_pending_grant_needs_more_than_a_title() -> None:
 
 def test_fields_inside_a_record_list_count_toward_the_fit() -> None:
     # The scalar alone does not fit S8; the list's titles do.
-    entry = _fielded("N3B", ["R", "S8"], {"mentee_level": "Resident",
+    entry = _fielded("N3B", ["R", "S8"], {"research_focus": "Topic X",
                                          "talks": [{"title": "One", "authors": "Doe J"},
                                                    {"title": "Two"}]})
     assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(entry, "N3B") == "S8"
@@ -330,8 +334,10 @@ def test_mentee_is_never_rerouted_to_an_owner_record() -> None:
         for target, fields in fits.items():
             entry = _fielded(mentee_code, [target], {**_MENTEE, **fields}, idx=81)
             gen, code = _gen_and_code(entry)
-            assert code == mentee_code, (mentee_code, target)
-            assert "taxonomy_code_original" not in entry
+            # A named bare N3 renders as a current mentee (#1574), still a mentee.
+            resolved = "N3A" if mentee_code == "N3" else mentee_code
+            assert code == resolved, (mentee_code, target)
+            assert entry.get("taxonomy_code_original", resolved) == mentee_code
             [record] = _reroute_records(gen)
             assert REROUTE_REFUSED_MENTEE.replace("_", " ") in record["message"]
             assert (record["severity"], record["evidence"]) == ("INFO", ["element_idx_start 81"])
@@ -403,6 +409,58 @@ def test_anchor_and_kind_fields_are_what_the_renderers_write() -> None:
     for (assigned, target), kind in _SAME_FAMILY_KIND_FIELDS.items():
         assert assigned[0] == target[0], (assigned, target)
         assert kind <= _RENDERED_FIELDS[assigned] and not kind & _RENDERED_FIELDS[target]
+
+
+# --- #1428: an accepted reroute still dropped fields or overrode its heading -
+# NDMRSO class E18. Synthetic records, invented values.
+
+def _refusal(gen: WCMTemplateGenerator) -> str:
+    [record] = _reroute_records(gen)
+    return record["message"]
+
+
+def test_reroute_that_drops_a_rendered_field_is_refused() -> None:
+    # TVZDVF 557's shape: a talk (R) under a posters heading kept only its
+    # title in S8; a job (D3) under a memberships heading lost its title in I.
+    talk = _fielded("R", ["S8"], {"title": "Talk X", "event_name": "Seminar",
+                                  "location": "City X", "date": "2006"})
+    job = _fielded("D3", ["I"], {"title": "Instructor", "organization": "School X",
+                                 "start_date": "1998", "end_date": "2000"})
+    for entry in (talk, job):
+        gen, code = _gen_and_code(entry)
+        assert code == entry["hierarchy_mismatch_detail"]["assigned_code"]
+        assert REROUTE_REFUSED_FIELDS_LOST.replace("_", " ") in _refusal(gen)
+        assert "taxonomy_code_original" not in entry
+
+
+def test_target_that_reads_the_field_under_another_name_keeps_the_reroute() -> None:
+    # R takes a talk's date from `year` and states the owner as presenter, so
+    # an abstract under a talks heading loses nothing it would show.
+    abstract = _fielded("S8", ["R"], {"authors": "Doe J", "title": "Abstract X",
+                                      "year": "2003"})
+    assert _gen_and_code(abstract)[1] == "R"
+
+
+def test_plain_member_role_is_not_lost_to_memberships() -> None:
+    member = _fielded("Q2", ["I"], {"organization": "Society X", "role": " Members ",
+                                    "start_date": "2015"})
+    volunteer = _fielded("Q2", ["I"], {"organization": "Society X", "role": "Volunteer",
+                                       "start_date": "2015"})
+    assert _gen_and_code(member)[1] == "I"
+    assert _gen_and_code(volunteer)[1] == "Q2"
+
+
+def test_heading_that_names_the_assigned_code_keeps_it() -> None:
+    # BNYLDF 285's shape: stage 3b expected only the I its "societies" names.
+    seat = _fielded("Q2", ["I"], {"organization": "Society X", "start_date": "1998"})
+    seat["hierarchy_mismatch_detail"]["hierarchy"] = [
+        "BOARDS OF DIRECTORS (For Professional Organizations or Societies)"]
+    gen, code = _gen_and_code(seat)
+    assert code == "Q2"
+    assert REROUTE_REFUSED_HEADING.replace("_", " ") in _refusal(gen)
+    society = _fielded("Q2", ["I"], {"organization": "Society X", "start_date": "1998"})
+    society["hierarchy_mismatch_detail"]["hierarchy"] = ["Professional Societies"]
+    assert _gen_and_code(society)[1] == "I"
 
 
 # --- #983: multi-record entries fan out before the PII pass and dedup --------
@@ -690,3 +748,87 @@ def test_non_b1_row_naming_a_school_keeps_its_own_code(code: str, fields: dict,
     assert grouped == code
     assert entry["taxonomy_code"] == code and "taxonomy_code_original" not in entry
     assert _precollegiate_records(gen) == []
+
+
+# --- #1574: a bare N3 has no renderer; a mentee coded N3 reaches the mentee
+# tables, and one list coded partly N3B and partly N3 renders in one place.
+# YUYVIG RLADNC-07, LTTYWI-06, SQMWHM-11, IZIXVF-01. Invented values.
+
+_MENTEE_HEADING = ["Example Section", "Example Trainees"]
+_PARTITION_YEAR = 2026
+
+
+def _mentee(code: str, idx: int, name: str | None = "Example Person",
+            heading: list[str] | None = None, start: str | None = None,
+            end: str | None = None, text: str = "Example entry") -> dict:
+    return {"text": text, "taxonomy_code": code, "element_idx_start": idx,
+            "hierarchy": list(heading or _MENTEE_HEADING),
+            "extracted_fields": {"mentee_name": name, "mentee_level": None,
+                                 "start_date": start, "end_date": end,
+                                 "current_position": None}}
+
+
+def _bare_mentee_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == BARE_MENTEE_RESOLVE_CHECK]
+
+
+def test_bare_n3_trainees_join_their_n3b_siblings_in_one_list() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    entries = [_mentee("N3B", 1), _mentee("N3B", 2), _mentee("N3", 3), _mentee("N3", 4)]
+    grouped = gen._group_entries_by_code(entries)
+    assert "N3" not in grouped
+    assert [e["element_idx_start"] for e in grouped["N3B"]] == [1, 2, 3, 4]
+    assert [(e["taxonomy_code"], e.get("taxonomy_code_original"))
+            for e in entries[2:]] == [("N3B", "N3"), ("N3B", "N3")]
+    partition = _partition_mentoring_entries(grouped, current_year=_PARTITION_YEAR)
+    assert len(partition.past) == 4 and not partition.current
+    [record] = _bare_mentee_records(gen)
+    assert (record["code"], record["severity"]) == ("N3", "INFO")
+    assert "N3->N3B: 2 entries" in record["message"]
+    assert record["evidence"] == ["element_idx_start 3", "element_idx_start 4"]
+    assert "Example" not in json.dumps(record)
+
+
+def test_bare_n3_mentee_with_no_coded_sibling_renders_as_a_current_mentee() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    elsewhere = _mentee("N3B", 1, heading=["Example Section", "Other Trainees"])
+    grouped = gen._group_entries_by_code([elsewhere, _mentee("N3", 2)])
+    assert [e["element_idx_start"] for e in grouped["N3A"]] == [2]
+    partition = _partition_mentoring_entries(grouped, current_year=_PARTITION_YEAR)
+    assert [e["element_idx_start"] for e in partition.current] == [2]
+
+
+def test_tied_siblings_leave_the_bare_n3_to_its_own_dates() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    grouped = gen._group_entries_by_code([
+        _mentee("N3B", 1), _mentee("N3A", 2),
+        _mentee("N3", 3, start="2001", end="2004")])
+    assert [e["element_idx_start"] for e in grouped["N3A"]] == [2, 3]
+    partition = _partition_mentoring_entries(grouped, current_year=_PARTITION_YEAR)
+    assert sorted(e["element_idx_start"] for e in partition.past) == [1, 3]
+
+
+def test_dated_bare_n3_line_naming_no_one_renders_as_a_past_summary() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    entry = _mentee("N3", 5, name=None, start="1995", end="2004",
+                    text="Supervision of example projects, 1995-2004.")
+    grouped = gen._group_entries_by_code([entry])
+    partition = _partition_mentoring_entries(grouped, current_year=_PARTITION_YEAR)
+    assert partition.past_summaries == (entry,)
+    assert not partition.current_summaries and not partition.past
+
+
+@pytest.mark.parametrize("text, start, end", [
+    ("Name Dates Current Position", None, None), ("Example Trainees:", None, None),
+    ("Not applicable", None, None), ("2014 \u2013 2016", "2014", "2016"),
+    ("Sept 2014 - present", "2014", "present"), ("Fall 2014 to date", "2014", None)],
+    ids=["column-header", "lead-in", "placeholder", "bare-range", "bare-open-range",
+         "bare-season"])
+def test_bare_n3_naming_no_one_and_saying_nothing_dated_stays_in_the_appendix(
+        text: str, start: str | None, end: str | None) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    entry = _mentee("N3", 9, name=None, text=text, start=start, end=end)
+    grouped = gen._group_entries_by_code([_mentee("N3B", 1), entry])
+    assert grouped["N3"] == [entry]
+    assert entry["taxonomy_code"] == "N3" and "taxonomy_code_original" not in entry
+    assert _bare_mentee_records(gen) == []

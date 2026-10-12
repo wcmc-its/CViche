@@ -45,8 +45,9 @@ def test_index_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
     env.py online mode builds a MySQL+IAM engine via create_cviche_engine; point
     that at a throwaway SQLite file so the real migration path runs without RDS.
     """
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     sqlite_url = f"sqlite:///{tmp_path / 'mig.db'}"
     eng = create_engine(sqlite_url)
@@ -111,3 +112,14 @@ def test_engine_sets_pool_recycle():
         db_host="localhost", db_port="3306", db_name="test", db_user="test"
     )
     assert engine.pool._recycle == 1800
+
+
+def test_migrations_have_a_single_head():
+    """Two heads crash-looped prod once (the deploy's `alembic upgrade head`
+    refuses to pick one): every new revision must extend the one chain."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    assert len(ScriptDirectory.from_config(cfg).get_heads()) == 1

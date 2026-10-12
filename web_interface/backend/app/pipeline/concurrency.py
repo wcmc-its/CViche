@@ -1,11 +1,9 @@
-"""Per-pod admission control for pipeline runs.
+"""Per-pod admission control for in-process pipeline runs.
 
-A run executes as an in-process background task (see runs.py:start_run): the
-full 15-20 min pipeline runs inside the web process, and nothing caps how many
-start at once. On the production pod (1 vCPU / 1 GiB, single replica) a handful
-of concurrent runs thrash CPU, exhaust the ~1 GiB memory ceiling, and fan out
-overlapping LLM request streams -- with no "system busy" signal, runs just
-contend silently and risk OOM.
+Applies only when CVICHE_DISPATCH_MODE is ``in_process`` (the default, and what
+prod runs today). There a run executes as an in-process background task (see
+runs.py:start_run): the full 15-20 min pipeline runs inside the web process,
+so the pod's own CPU and memory are what a burst of starts would exhaust.
 
 This module is the gate: a process-global counter of currently-executing runs,
 bounded by CVICHE_MAX_CONCURRENT_RUNS. The endpoints that launch a pipeline
@@ -13,11 +11,18 @@ acquire a slot before scheduling the background task and release it when the
 task finishes; when the pod is at capacity, new starts are rejected with 429 so
 the caller can retry rather than pile on.
 
-Scope is deliberately per-pod (a plain in-process counter, like the WebSocket
-emitter and cancellation flag): the resource being protected -- this pod's CPU
-and memory -- is itself per-pod. Cross-pod admission would need shared state
-and only becomes meaningful once replicas > 1 (see
-docs/proposals/issue-4-redis-broker.md and concurrency-and-load-readiness.md).
+Scope is per-pod: the counter is a plain in-process variable, and the resource
+it protects -- this pod's CPU and memory -- is itself per-pod. Behind a
+multi-replica backend (prod's HPA runs 2-4 pods) that has two consequences
+(#527): there is no cluster-wide ceiling (effective admission is replicas x
+cap, and it rises as the HPA scales out), and a start can 429 on a full pod
+while another pod has a free slot -- the ALB, not the gate, picks the pod.
+
+In ``queue`` mode (dev since #701) none of this gates a start: the backend
+hands the run to the Valkey queue, and the cviche-worker replica count is the
+global run ceiling (one run per worker pod; see k8s/base/worker/deployment.yaml).
+The flag-gated auto-retry reaper (run_service._launch_resume, #145) also takes
+a slot here before relaunching a run in-process.
 """
 import asyncio
 import logging
@@ -38,11 +43,13 @@ logger = logging.getLogger(__name__)
 DispatchMode = Literal["in_process", "queue"]
 _VALID_DISPATCH_MODES: tuple[DispatchMode, ...] = ("in_process", "queue")
 
-# Concurrent full-pipeline runs allowed on a single pod. Conservative default
-# for the 1 vCPU / 1 GiB prod pod: pipelines are LLM-I/O-bound so a little
-# overlap uses the wait windows productively, but memory is the hard ceiling,
-# so we keep this low. Raise via env once the pod is sized larger.
-DEFAULT_MAX_CONCURRENT_RUNS = 2
+# Concurrent full-pipeline runs allowed on a single pod. Sized for the
+# 2 vCPU / 2Gi backend pod both k8s overlays set: pipelines are LLM-I/O-bound
+# (five concurrent runs over three pods measured ~1.5% of the CPU limit and
+# ~17% of the memory limit, 2026-07-29, #527), so memory is the binding limit.
+# Kept equal to CVICHE_MAX_CONCURRENT_RUNS in k8s/overlays/{dev,prod}/
+# backend-patch.yaml, so a pod whose env var goes missing keeps the same cap.
+DEFAULT_MAX_CONCURRENT_RUNS = 3
 
 # How often wait_for_drain re-checks whether this pod's runs have finished.
 DRAIN_POLL_SECONDS = 5

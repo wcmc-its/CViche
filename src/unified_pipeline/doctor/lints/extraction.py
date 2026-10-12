@@ -8,8 +8,10 @@ dedup drops that were not duplicates, records fabricated from the template's
 own scaffolding, values filed under a key no renderer reads, years given the
 wrong century, entries holding several records that stage 4 returned as
 one, grant lists cut into records at the wrong line, grants filed under a
-funding heading their own record contradicts, and separate years rendered as
-one range over them.
+funding heading their own record contradicts, separate years rendered as
+one range over them, stage-3b fragments whose text no record holds, and
+grant numbers and amounts a grant's table shows that its text lacks, or
+that its text states and the document lacks.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -26,16 +28,13 @@ docstrings and comments for what changed.
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
+from decimal import Decimal
 from types import MappingProxyType
 from typing import NamedTuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
-from unified_pipeline.core.validators.grant_status_corrector import (
-    _AWARDED_HEADING_RE,
-    _PENDING_HEADING_RE,
-)
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
@@ -44,6 +43,26 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
+)
+from unified_pipeline.core.text_norm import (
+    SUBSTANTIVE_LINE_CHARS,
+    looks_like_record,
+    norm,
+    squash,
+)
+from unified_pipeline.core.two_digit_year import (
+    TWO_DIGIT_YEAR_PIVOT,
+    expand_two_digit_year,
+)
+from unified_pipeline.core.validators.grant_status_corrector import (
+    _AWARDED_HEADING_RE,
+    _PENDING_HEADING_RE,
+)
+from unified_pipeline.stage3b.fragment_merge import (
+    SKIP_LABEL,
+    SKIP_ORGANIZATION,
+    fragment_text_in_parent,
+    merge_skip_reason,
 )
 from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
@@ -57,52 +76,60 @@ from unified_pipeline.stage4.schemas import (
     NUMBERED_FIELD_RE,
     STAGE4_RECORDS_KEY,
 )
-from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
-from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
-from unified_pipeline.core.text_norm import (
-    SUBSTANTIVE_LINE_CHARS,
-    looks_like_record,
-    norm,
-    squash,
-)
-from unified_pipeline.stage6.formatting.dates import (
-    EXTRA_SPAN_CODES, EXTRA_SPAN_KEYS, format_date_range)
-from unified_pipeline.stage6.normalization.institutions import (
-    _get_cleaned_institution_name,
+from unified_pipeline.stage6.dedup import (
+    _PART_NUMBER_RE,
+    _TRIAL_PHASE_RE,
+    _citation_identity_text,
+    _dates_compatible,
+    _different_rank,
+    _part_numbers,
+    _trial_phases,
 )
 from unified_pipeline.stage6.fan_out import (
-    FANNED_OUT_FROM,
-    LAST_STAGE4_RECORD,
     _FORMATTED_KEYS,
     _RENDERED_FIELDS,
     _TEXT_RENDERED_CODES,
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
     _is_blank,
     fan_out_multi_record_entries,
 )
-from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT, expand_two_digit_year
+from unified_pipeline.stage6.formatting.dates import (
+    EXTRA_SPAN_CODES,
+    EXTRA_SPAN_KEYS,
+    format_date_range,
+)
+from unified_pipeline.stage6.normalization.institutions import (
+    _get_cleaned_institution_name,
+)
 from unified_pipeline.stage6.normalization.pii import (
     CAT_HOME_CONTACT,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     _pii_matches,
 )
+from unified_pipeline.stage6.normalization.publication import resolve_publication
+from unified_pipeline.stage6.parsing import split_appointment_title
+from unified_pipeline.stage6.parsing.dates import _MONTH_NAME_TO_NUM
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
-from unified_pipeline.stage6.dedup import (
-    _PART_NUMBER_RE,
-    _TRIAL_PHASE_RE,
-    _dates_compatible,
-    _different_rank,
-    _part_numbers,
-    _trial_phases,
-)
+from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
+from unified_pipeline.stage6.sections.positions import POSITION_TAXONOMY_CODES
 from unified_pipeline.stage6.sections.research_support import (
+    ANNUAL_COSTS_LABEL,
+    AWARD_SOURCE_LABEL,
+    DURATION_LABEL,
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
+    SHARE_LABEL,
+    TOTAL_AWARD_LABEL,
+    TOTAL_REQUESTED_LABEL,
     YOUR_ROLE_LABEL,
+    _is_person_name_capture,
     grant_end_year,
     year_at_or_after,
 )
-from unified_pipeline.stage6.record_dedup import RECORD_RULE_METRIC_PREFIX
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
+from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
     grant_status_rebucket_target,
@@ -110,16 +137,17 @@ from unified_pipeline.stage_6_word_template import (
 )
 
 from ..shared import (
-    Haystack,
-    OWNER_SURNAME_MIN_CHARS,
-    _FieldsEntry,
     _LINE_SENTINEL,
     _NAME_WORD_RE,
+    OWNER_SURNAME_MIN_CHARS,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
+    Haystack,
+    SubpointText,
     _entry_pieces,
     _fields_entries,
+    _FieldsEntry,
     _finding,
     _haystacks,
     _long_word_tokens,
@@ -127,8 +155,8 @@ from ..shared import (
     _output_section_header,
     _owner_surname_words,
     _piece_in_template,
+    offered_as_subpoint,
 )
-
 
 # --------------------------------------------------------------------------
 # Grant status vs the funding subsection the grant rendered under.
@@ -237,6 +265,16 @@ def lint_bucket_status(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict
 
 # Lint 4: an entry this big, with this many record-like lines, extracting
 # under this coverage is a mass-loss smell, not LLM wobble.
+#
+# Owner: the doctor's under_extraction lint; provenance and any re-derivation
+# are tracked at #721. Derivation: hand-set, not measured. All three values
+# date from the doctor's first commit (823ef4b7, 2026-07-02), tuned against
+# real CVs during the 89HQVQ forensic (#208-#213) to keep false positives near
+# zero; no distribution was recorded. The one check since: the 2026-07-09
+# sweep (docs/analysis/doctor-sweep-results-2026-07-09.md) fired on 2 of 12
+# distinct CVs, both verified real losses (2 TP / 0 FP). The 2Q1_ZQ honors
+# mega-entry at 19% coverage (#229) is the reference true positive. Re-derive
+# against a labelled corpus before changing any of the three.
 UNDER_EXTRACTION_MAX_PCT = 40.0
 UNDER_EXTRACTION_MIN_CHARS = 800
 UNDER_EXTRACTION_MIN_RECORDS = 2
@@ -250,9 +288,24 @@ _YEAR_EDGE_LINE_RE = re.compile(
     r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
 
 
-def lint_under_extraction(stage4: dict) -> list[dict]:
+def _not_offered_as_subpoints(text: str, subpoints: SubpointText | None) -> str:
+    """`text` less the lines that reach the reader as a tracked-deleted
+    sub-point (`offered_as_subpoint`, #1205): those are delivered for review,
+    not lost."""
+    if subpoints is None or not subpoints.text:
+        return text
+    return "\n".join(line for line in text.split("\n")
+                     if not offered_as_subpoint(line, subpoints))
+
+
+def lint_under_extraction(stage4: dict, subpoints: SubpointText | None = None) -> list[dict]:
     """Large multi-record entries whose stage-4 field extraction covered
-    almost none of the text: the rest of the records silently vanish."""
+    almost none of the text: the rest of the records silently vanish.
+
+    `subpoints` (optional: the rendered docx's sub-points) takes out of the
+    entry the lines a tracked-deleted sub-point delivers for review (#1205),
+    before its size and record lines are counted: an appointment whose
+    duties are its sub-point is not flagged for them."""
     findings = []
     for e in stage4.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -264,7 +317,7 @@ def lint_under_extraction(stage4: dict) -> list[dict]:
         pct = (rendered_extraction_coverage(rendered) or {}).get("extraction_coverage_percent")
         if pct is None or pct >= UNDER_EXTRACTION_MAX_PCT:
             continue
-        text = str(e.get("text", ""))
+        text = _not_offered_as_subpoints(str(e.get("text", "")), subpoints)
         if len(text) <= UNDER_EXTRACTION_MIN_CHARS:
             continue
         records = sum(
@@ -289,6 +342,7 @@ def lint_under_extraction(stage4: dict) -> list[dict]:
 # 73 scored runs of the 2026-07-25 batch -- the same measurement as
 # the render magnitudes. WARN means this run sits in the corpus's
 # worst quartile, not that the lint fired at all (#438).
+# Owner: the doctor's classified_unrendered lint; provenance tracked at #721.
 CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
@@ -743,6 +797,7 @@ def lint_taxonomy_code_coverage(stage3b: dict) -> list[dict]:
 # true duplicate; anything below carries content the kept entry lacks. On
 # 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
 # 0.60-0.89 (#227).
+# Owner: the doctor's dedup_drops lint; provenance tracked at #721.
 DEDUP_SAFE_CONTAINMENT = 0.9
 _DEDUP_TOKEN_RE = re.compile(r"[^\W_]+")
 
@@ -760,8 +815,15 @@ def _alphanumeric_tokens(text) -> Counter:
 # #666): the words alone cannot tell them apart. What can is the extracted name
 # the two entries carry and what the page shows. Stage 6 writes only the name
 # fields worth comparing into the decision (`_decision_fields`).
-# Findings listing this many drops stay readable in the finding message.
+# An INFO finding listing this many drops stays readable; a WARN lists every
+# drop, since each is a record the reader may have to restore (#666: one run's
+# five lost yearly awards would crowd out the rest).
 DEDUP_EVIDENCE_LIMIT = 6
+#: Characters of each dropped and kept text a dedup evidence line quotes:
+#: enough for the whole of a one-line record, since the review copy shows the
+#: two side by side and the difference is often at the end ("4 hrs" vs "5 hrs").
+#: The review copy marks a quote this long as cut (#1388).
+DEDUP_TEXT_CHARS = 300
 
 
 def _identity_conflicts(decision: Mapping) -> list[str]:
@@ -823,10 +885,44 @@ _OCCASION_MARKS = (("part", _part_numbers), ("phase", _trial_phases),
                    ("numeral", _standalone_numerals))
 
 
+# A class label ("Class of 2031") names the cohort an award honours, not the
+# year it was given, so two awards of one name differ when their classes do,
+# and a year inside the label vouches for no award year (#666, YUYVIG
+# LTTYWI-02: five of 28 yearly teaching awards dropped beside another class's).
+_CLASS_YEAR_RE = re.compile(r"\bclass\s+of\s+((?:19|20)\d{2})\b", re.IGNORECASE)
+_DASH = "-\u2013\u2014"
+# A year that opens a range with no end year after the dash ("2031 - Board
+# certified", "2031-present"), and a closed range's end year ("2020 - 2031").
+_OPEN_RANGE_START_RE = re.compile(
+    rf"\b((?:19|20)\d{{2}})\s*[{_DASH}](?!\s*(?:19|20)?\d{{2}}\b)")
+_CLOSED_RANGE_END_RE = re.compile(rf"\b(?:19|20)\d{{2}}\s*[{_DASH}]\s*((?:19|20)\d{{2}})\b")
+
+
+def _class_years(text: str) -> set[str]:
+    return set(_CLASS_YEAR_RE.findall(text))
+
+
+_BARE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _reopened_years(dropped_text: str, kept_text: str) -> set[str]:
+    """Years the dropped text opens a range at where the kept text only
+    closes one: a certification renewed in 2031 and still current, beside
+    the term that ended in 2031 (#666, YUYVIG HXBPCT-01). `_dates_compatible`
+    reads the open start as a bare year inside the kept range. A kept text
+    that also states the year on its own ("... 2031.") vouches for it."""
+    kept_elsewhere = set(_BARE_YEAR_RE.findall(_CLOSED_RANGE_END_RE.sub(" ", kept_text)))
+    return ((set(_OPEN_RANGE_START_RE.findall(dropped_text))
+             & set(_CLOSED_RANGE_END_RE.findall(kept_text)))
+            - set(_OPEN_RANGE_START_RE.findall(kept_text)) - kept_elsewhere)
+
+
 def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
     """Why the dropped text names another occasion than the kept text: a
-    date stated to the month or a year the kept text does not carry, or a
-    part, phase or numeral it lacks. None when nothing tells them apart.
+    date stated to the month or a year the kept text does not carry, another
+    class label or a year it carries only inside one, a range left open where
+    the kept one closes, or a part, phase or numeral it lacks. None when
+    nothing tells them apart.
 
     The same predicate stage 6 now refuses a drop on (`_dates_compatible`,
     `_part_numbers`, `_trial_phases`), re-checked here because a sidecar may
@@ -834,6 +930,15 @@ def _occasion_apart(dropped_text: str, kept_text: str) -> str | None:
     KDAZOM-03, XWNZWW-03)."""
     if not _dates_compatible(dropped_text, kept_text):
         return "a date the kept entry does not carry"
+    classes = _class_years(dropped_text) ^ _class_years(kept_text)
+    if classes:
+        return f"class of {', '.join(sorted(classes))} on one entry only"
+    if not _dates_compatible(_CLASS_YEAR_RE.sub(" ", dropped_text),
+                             _CLASS_YEAR_RE.sub(" ", kept_text)):
+        return "a year the kept entry carries only as a class"
+    reopened = _reopened_years(dropped_text, kept_text)
+    if reopened:
+        return f"a range open from {', '.join(sorted(reopened))} where the kept one ends"
     for mark, read in _OCCASION_MARKS:
         missing = read(dropped_text) - read(kept_text)
         if missing:
@@ -857,14 +962,18 @@ def _entry_index_by_text(stage_5d: Mapping | None) -> dict[str, object]:
 
 
 def _drop_evidence(decision: Mapping, index_by_text: Mapping[str, object],
-                   detail: str) -> str:
+                   detail: str, entries: list[object] | None = None) -> str:
     """One evidence line for a drop, led by `entry N` when the dropped text
-    names exactly one entry, so the precision harness can match it."""
+    names exactly one entry, or by every entry in `entries` when it does not,
+    so the precision harness and the review copy can locate it."""
     dropped = str(decision.get("dropped_text", ""))
     index = index_by_text.get(" ".join(dropped.split()))
+    if index is None and entries:
+        index = ", ".join(map(str, entries))
     prefix = f"entry {index}: " if index is not None else ""
     return (f"{prefix}{decision.get('code', '?')} ({detail}): "
-            f"dropped '{dropped[:80]}' vs kept '{str(decision.get('kept_text', ''))[:80]}'")
+            f"dropped '{dropped[:DEDUP_TEXT_CHARS]}' vs kept "
+            f"'{str(decision.get('kept_text', ''))[:DEDUP_TEXT_CHARS]}'")
 
 
 def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:
@@ -880,15 +989,171 @@ def _named_apart(decision: Mapping, rendered_items: set[str] | None) -> bool:
     return rendered_items is not None and bool(_unrendered_identity(decision, rendered_items))
 
 
+# Words two extracted names may differ by and still be one name ("The Example
+# Journal" beside "Example Journal"), and a parenthetical, which is most often
+# an acronym ("Example Society (ES)").
+_NAME_FILLER_WORDS = frozenset({"a", "an", "and", "at", "for", "in", "of", "on", "the", "to"})
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+#: The name field of a code whose entry is a bare name, so a dropped entry
+#: without the field is named by its text (a journal list, YUYVIG WPJHYT-03).
+_BARE_NAME_FIELD = "journal_name"
+
+
+def _name_words(name: str) -> list[str]:
+    """The words of an extracted name that tell it from another, in order,
+    a parenthetical and filler words left out."""
+    words = _DEDUP_TOKEN_RE.findall(norm(_PARENTHETICAL_RE.sub(" ", name)))
+    return [word for word in words if word not in _NAME_FILLER_WORDS]
+
+
+def _same_word(word: str, other: str) -> bool:
+    """One word, or one the start of the other: an abbreviation ("Prof" for
+    "Professor") or a plural ("Committees" beside "Committee")."""
+    return word.startswith(other) or other.startswith(word)
+
+
+def _words_lacking(words: list[str], other: list[str]) -> set[str]:
+    """Words of `words` that no word of `other` matches (`_same_word`)."""
+    return {word for word in words if not any(_same_word(word, o) for o in other)}
+
+
+def _inserts_a_word(dropped: list[str], kept: list[str]) -> bool:
+    """The kept name holds every dropped word with a word of its own between
+    two of them, not at either end: "Example Operations Committee" beside
+    "Example Committee" is a narrower body (YUYVIG BLBVPD-04), where
+    "Example Society, Example Chapter" extends the same name. Each dropped word is read where it first occurs, so a kept name
+    that repeats the dropped one later ("X, formerly Y") inserts nothing."""
+    positions = [next((i for i, other in enumerate(kept) if _same_word(word, other)), None)
+                 for word in dropped]
+    if not positions or None in positions:
+        return False
+    return any(_words_lacking([word], dropped)
+               for word in kept[min(positions) + 1:max(positions)])
+
+
+def _name_pairs(decision: Mapping) -> list[tuple[str, str, str]]:
+    """(field, dropped name, kept name) for each name field both entries
+    fill. A bare-name code's dropped entry without the field is named by its
+    text when the text is words of the kept name ("Cell" beside "Cancer
+    Cell"); a text sharing none is a stray fragment ("Reviewer"), no name."""
+    dropped = dict(decision.get("dropped_fields") or {})
+    kept = decision.get("kept_fields") or {}
+    text = str(decision.get("dropped_text") or "")
+    if (_BARE_NAME_FIELD in kept and not dropped.get(_BARE_NAME_FIELD)
+            and _name_words(text)
+            and not _words_lacking(_name_words(text), _name_words(str(kept[_BARE_NAME_FIELD])))):
+        dropped[_BARE_NAME_FIELD] = text
+    return [(key, str(dropped[key]), str(kept[key]))
+            for key in dropped if key in kept and str(dropped[key]).strip()]
+
+
+def _distinct_name(decision: Mapping, rendered_items: set[str] | None) -> str | None:
+    """The field whose dropped value names another record than the kept
+    one, and that is not on the page as an item of its own: two names each
+    carrying a word the other lacks (another department, another award,
+    YUYVIG OKRTPJ-01, IZABPD-06), a word inserted inside the dropped name
+    (a text drop only: a record rule matched the two on purpose despite
+    rewording), or another bare journal name (WPJHYT-03). None otherwise."""
+    field_matched = str(decision.get("metric", "")).startswith(RECORD_RULE_METRIC_PREFIX)
+    for key, dropped_name, kept_name in _name_pairs(decision):
+        dropped, kept = _name_words(dropped_name), _name_words(kept_name)
+        if key == _BARE_NAME_FIELD:
+            apart = set(dropped) != set(kept)
+        else:
+            apart = ((_words_lacking(dropped, kept) and _words_lacking(kept, dropped))
+                     or (not field_matched and _inserts_a_word(dropped, kept)))
+        on_page = (rendered_items is not None
+                   and " ".join(_DEDUP_TOKEN_RE.findall(norm(dropped_name))) in rendered_items)
+        if apart and not on_page and (key != _BARE_NAME_FIELD or rendered_items is not None):
+            return key
+    return None
+
+
+#: Fields that tell two deliveries of one talk apart when its title, venue
+#: and year match (YUYVIG LTTYWI-01: one talk given in three cities in 2006).
+_DELIVERY_FIELDS = ("date", "location")
+_CITATION_METRIC_PREFIX = "citation_"
+
+
+#: The two texts stage 6 writes for a citation drop (`_citation_identity_text`):
+#: the formatted citation for a `citation` match, title and year for the rest.
+_CITATION_IDENTITY_KINDS = ("citation", "title_journal_year")
+
+
+def _citation_copies(stage_5d: Mapping | None) -> dict[tuple[str, str], list[_FieldsEntry]]:
+    """(code, identity text) -> the stage-5d entries carrying it, so a
+    citation drop is checked against every copy it matched, not only the two
+    the decision quotes."""
+    copies: dict[tuple[str, str], list[_FieldsEntry]] = {}
+    if not stage_5d:
+        return copies
+    for raw, entry in zip(stage_5d.get("entries", []), _fields_entries(stage_5d),
+                          strict=True):
+        pub = resolve_publication(raw)
+        for text in {_citation_identity_text(kind, pub) for kind in _CITATION_IDENTITY_KINDS}:
+            copies.setdefault((entry.code, text), []).append(entry)
+    return copies
+
+
+def _deliveries_apart(decision: Mapping, copies: Mapping[tuple[str, str], list[_FieldsEntry]]) -> list[object]:
+    """The entries a citation drop matched on, when they state different
+    dates or places, so they are deliveries of one talk, not one record
+    listed twice. Empty for a non-citation drop or copies that agree."""
+    if not str(decision.get("metric", "")).startswith(_CITATION_METRIC_PREFIX):
+        return []
+    group = copies.get((decision.get("code"), decision.get("dropped_text")), [])
+    for key in _DELIVERY_FIELDS:
+        values = {" ".join(_DEDUP_TOKEN_RE.findall(norm(e.fields.get(key))))
+                  for e in group if isinstance(e.fields.get(key), str) and e.fields[key].strip()}
+        if len(values) > 1:
+            return [e.element_idx for e in group]
+    return []
+
+
+def _drop_suspicion(decision: Mapping, rendered_items: set[str] | None,
+                    copies: Mapping) -> tuple[str, str, list[object]] | None:
+    """(severity, detail, entries) for one dedup decision, or None when it
+    reads as a duplicate. `entries` names the matched copies when the drop's
+    own text names no single entry."""
+    dropped = _alphanumeric_tokens(decision.get("dropped_text", ""))
+    kept = _alphanumeric_tokens(decision.get("kept_text", ""))
+    if not dropped:
+        return None
+    coverage = sum((dropped & kept).values()) / sum(dropped.values())
+    metric = decision.get("metric", "?")
+    field_matched = str(metric).startswith(RECORD_RULE_METRIC_PREFIX)
+    if coverage < DEDUP_SAFE_CONTAINMENT and not field_matched:
+        return "WARN", f"{metric}, {coverage:.0%} covered by kept", []
+    occasion = _occasion_apart(str(decision.get("dropped_text", "")),
+                               str(decision.get("kept_text", "")))
+    if occasion:
+        return "WARN", f"{metric}, {occasion}", []
+    deliveries = _deliveries_apart(decision, copies)
+    if deliveries:
+        return "WARN", f"{metric}, copies differ in date or place", deliveries
+    name = _distinct_name(decision, rendered_items)
+    if name:
+        return "WARN", f"{metric}, {name} names another record", []
+    if _named_apart(decision, rendered_items):
+        return "INFO", str(metric), []
+    return None
+
+
 def lint_dedup_drops(report: dict,
                      blocks: list[tuple[str, str]] | None = None,
                      stage_5d: Mapping | None = None) -> list[dict]:
     """Stage-6 dedup decisions that may have dropped a distinct record.
 
-    WARN: the dropped text is NOT near-fully contained in the kept entry, so at
-    these loose similarity thresholds it is a distinct record, not a duplicate
-    (#227); or it names another occasion than the kept entry, a date, part,
-    phase or numeral the kept text lacks (`_occasion_apart`, #666).
+    WARN, one evidence line per drop with none left out (`_drop_suspicion`):
+    - the dropped text is NOT near-fully contained in the kept entry, so at
+      these loose similarity thresholds it is a distinct record, not a
+      duplicate (#227);
+    - it names another occasion than the kept entry: a date, class, open
+      range, part, phase or numeral the kept text lacks (`_occasion_apart`,
+      #666);
+    - a citation drop whose matched copies in stage 5d state different dates
+      or places (`_deliveries_apart`, needs `stage_5d`);
+    - the two entries' extracted names name two records (`_distinct_name`).
 
     INFO (#666): the dropped text IS contained, but the two entries carry
     different names, and either the dropped name is on the page as no cell of
@@ -906,30 +1171,22 @@ def lint_dedup_drops(report: dict,
     named_apart = []
     rendered_items = _rendered_item_set(blocks) if blocks is not None else None
     index_by_text = _entry_index_by_text(stage_5d)
+    copies = _citation_copies(stage_5d)
     for d in report.get("dedup_decisions", []):
-        dropped = _alphanumeric_tokens(d.get("dropped_text", ""))
-        kept = _alphanumeric_tokens(d.get("kept_text", ""))
-        if not dropped:
+        verdict = _drop_suspicion(d, rendered_items, copies)
+        if verdict is None:
             continue
-        coverage = sum((dropped & kept).values()) / sum(dropped.values())
-        metric = d.get("metric", "?")
-        field_matched = str(metric).startswith(RECORD_RULE_METRIC_PREFIX)
-        occasion = _occasion_apart(str(d.get("dropped_text", "")), str(d.get("kept_text", "")))
-        if coverage < DEDUP_SAFE_CONTAINMENT and not field_matched:
-            suspect.append(_drop_evidence(d, index_by_text,
-                                          f"{metric}, {coverage:.0%} covered by kept"))
-        elif occasion:
-            suspect.append(_drop_evidence(d, index_by_text, f"{metric}, {occasion}"))
-        elif _named_apart(d, rendered_items):
-            named_apart.append(_drop_evidence(d, index_by_text, str(metric)))
+        severity, detail, entries = verdict
+        evidence = _drop_evidence(d, index_by_text, detail, entries)
+        (suspect if severity == "WARN" else named_apart).append(evidence)
     findings = []
     if suspect:
         findings.append(_finding(
             "dedup_drops", "WARN",
-            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry or "
-            f"naming another date, part or numeral — possible distinct records "
-            f"lost (#227, #666)",
-            suspect[:DEDUP_EVIDENCE_LIMIT]))
+            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry, "
+            f"naming another date, class, part or numeral, or another record "
+            f"by name — possible distinct records lost (#227, #666)",
+            suspect))
     if named_apart:
         findings.append(_finding(
             "dedup_drops", "INFO",
@@ -1216,6 +1473,11 @@ GRADE_SHOWN = "shown"
 GRADE_ELSEWHERE = "elsewhere"
 GRADE_ABSENT = "absent"
 GRADE_UNGRADED = "ungraded"
+#: Not on the page, but offered under its record as a tracked-deleted
+#: sub-point (#1205): the reader gets it by rejecting the deletion. Still
+#: reported, as INFO with that note: stage 4 filed the value under a key no
+#: renderer reads, which the sub-point does not fix.
+GRADE_SUBPOINT = "subpoint"
 
 #: The words of the WCM Personal Data table's address and telephone rows
 #: (Office address, Office telephone, Cell phone; Home address is withheld).
@@ -1272,6 +1534,7 @@ class RenderedDocument(NamedTuple):
     lines: tuple[OutputLine, ...]
     record_values: tuple[frozenset[str], ...]
     owner_values: frozenset[str]
+    subpoints: SubpointText | None = None
 
 
 def _alnum(text: str) -> str:
@@ -1309,7 +1572,7 @@ def _form_unit(lines: list[OutputLine]) -> OutputLine:
 
 
 def _rendered_document(stage4: dict, blocks: list[tuple[str, str]] | None,
-                       ) -> RenderedDocument | None:
+                       subpoints: SubpointText | None = None) -> RenderedDocument | None:
     """None without the docx: every value is then UNGRADED."""
     if blocks is None:
         return None
@@ -1324,7 +1587,7 @@ def _rendered_document(stage4: dict, blocks: list[tuple[str, str]] | None,
     owner = frozenset(value for entry in entries if entry.code == PERSONAL_DATA_CODE
                       for value in map(squash, _nonempty_field_values(dict(entry.fields))))
     return RenderedDocument(tuple(units), tuple(_alnum_values(e.fields) for e in entries),
-                            owner)
+                            owner, subpoints)
 
 
 def _declared_fields() -> dict[str, frozenset[str]]:
@@ -1543,7 +1806,12 @@ def _grade_value(entry: _FieldsEntry, key: str, value: object, keys: frozenset[s
     shown_anywhere = any(_shown_on(value, line, False) for line in document.lines)
     if shown_anywhere and isinstance(value, str) and squash(value) in document.owner_values:
         return GRADE_SHOWN
-    return GRADE_ELSEWHERE if shown_anywhere else GRADE_ABSENT
+    if shown_anywhere:
+        return GRADE_ELSEWHERE
+    leaves = _value_leaves(value)
+    if leaves and all(offered_as_subpoint(leaf, document.subpoints) for leaf in leaves):
+        return GRADE_SUBPOINT
+    return GRADE_ABSENT
 
 
 def _absence_is_a_loss(entry: _FieldsEntry, key: str, value: object) -> bool:
@@ -1656,10 +1924,13 @@ def _one_fact_outcome(key: str, hits: list[OffschemaValue]) -> str:
     """The message's account of one-fact values: lost without a document to
     say otherwise, or what the document showed."""
     absent = sum(hit.grade == GRADE_ABSENT for hit in hits)
+    offered = sum(hit.grade == GRADE_SUBPOINT for hit in hits)
     if absent:
         where = ("not on its record's line" if _is_date_key(key)
                  else "nowhere in the document")
         return f"{absent} of them {where}"
+    if offered:
+        return f"{offered} of them offered as a tracked-deleted sub-point under its record"
     if all(hit.grade == GRADE_UNGRADED for hit in hits):
         return "missing from the output"
     return "the document shows it, but not with its record"
@@ -1687,7 +1958,8 @@ def _offschema_summary(code: str, key: str,
 
 
 def lint_offschema_fields(stage4: dict,
-                          blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+                          blocks: list[tuple[str, str]] | None = None,
+                          subpoints: SubpointText | None = None) -> list[dict]:
     """A non-empty stage-4 value under a key that is in neither field schema
     (built-in or config, any `extract` flag), not in `fan_out._RENDERED_FIELDS`
     for its code, not stage-4 bookkeeping, and not a record list fan-out
@@ -1700,9 +1972,11 @@ def lint_offschema_fields(stage4: dict,
     one-fact value (`_grade_value`): one its record's own line shows is not
     reported, one the document shows nowhere raises the finding to WARN
     (#1245). Without it the lint reads stage 4 alone, as before, and leaves
-    out dates and Personal Data."""
+    out dates and Personal Data. `subpoints` (optional, with `blocks`): a
+    value the page lacks but a tracked-deleted sub-point offers (#1205) is
+    `GRADE_SUBPOINT`, INFO with a note, not a loss."""
     declared_by_code = _declared_fields()
-    document = _rendered_document(stage4, blocks)
+    document = _rendered_document(stage4, blocks, subpoints)
     groups: dict[tuple[str, str], list[OffschemaValue]] = {}
     for entry in _fields_entries(stage4):
         for key, hit in _offschema_values(entry, declared_by_code, document).items():
@@ -1829,16 +2103,57 @@ def _year_written(year: int, text: str) -> bool:
             or year in _range_shorthand_ends(text))
 
 
+#: A month or term word, as dates write it.
+_MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
+                  r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
+                  r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
+#: Two-digit year shapes only `_year_in_source` reads (#1585, batch YUYVIG:
+#: 40 of its 44 false positives). Looser than `_two_digit_years`, whose
+#: tokens also vouch for a century in implausible_year; here a wrongly read
+#: token can only silence a finding. A dash-joined m-d-yy date ("3-30-00"),
+#: alone, so "3-24-11-26" (Mar 2024 to Nov 2026) still has no year "11".
+_DASHED_DATE_YEAR_RE = re.compile(r"(?<![\d\-/.])\d{1,2}-\d{1,2}-\s?(\d{2})(?![\d\-/])")
+#: The two-digit tails of a list after a four-digit year, its range
+#: shorthand or a two-digit range: "2014,15,16", "1975, 76, 78",
+#: "2005-06, 16", "98-00,02,04" (`_RANGE_SHORTHAND_RE` reads only the first).
+_YEAR_LIST_TAILS_RE = re.compile(
+    r"(?<!\d)(?:\d{4}(?:-\d{2})?|\d{2}-\d{2})((?:\s*,\s*\d{2}(?!\d))+)")
+#: A two-digit year after a month or term word ("Oct. 98", "June 05"), not
+#: a day: one a comma, a four-digit year or a word follows ("May 13,",
+#: "June 05 2010", "May 13 at").
+_MONTH_TWO_DIGIT_YEAR_RE = re.compile(
+    rf"(?<![a-z]){_MONTH_PATTERN}\s*(\d{{2}})(?!\d|\s*,|\s*\d{{4}})(?=\s*(?:$|[^\w\s]))",
+    re.IGNORECASE)
+#: A two-digit year opening a range left open: "16- present", "16-", not a
+#: number before a dash that opens a title ("Volume 20 - Title").
+_OPEN_TWO_DIGIT_YEAR_RE = re.compile(
+    r"(?<![\d\-/.])(\d{2})\s*[-–—]\s*(?:present|current|now|date|today|$|\))",
+    re.IGNORECASE)
+_SOURCE_ONLY_TWO_DIGIT_YEAR_RES = (_DASHED_DATE_YEAR_RE, _MONTH_TWO_DIGIT_YEAR_RE,
+                                   _OPEN_TWO_DIGIT_YEAR_RE)
+
+
+def _source_two_digit_years(text: str) -> set[int]:
+    """`_two_digit_years`, plus the shapes only `_year_in_source` reads."""
+    years = _two_digit_years(text)
+    years |= {int(yy) for pattern in _SOURCE_ONLY_TWO_DIGIT_YEAR_RES
+              for yy in pattern.findall(text)}
+    for tails in _YEAR_LIST_TAILS_RE.findall(text):
+        years |= {int(yy) for yy in re.findall(r"\d{2}", tails)}
+    return years
+
+
 def _year_in_source(year: int, text: str) -> bool:
     """The entry's text states this year in any century -- whether the
     century is right is implausible_year's question: its four digits
     anywhere, a scanned "l987" included, so a year fused into a longer digit
     run on either side counts ("04/081997", "Example20232024Total"); its
-    last two digits as a two-digit year token or a stand-alone two-digit
-    range ("5/31/34" states 2034, "64-66" both years); or a range
-    shorthand's end ("2011-2")."""
+    last two digits as a two-digit year token, a stand-alone two-digit
+    range or one of `_source_two_digit_years`'s shapes ("5/31/34" states
+    2034, "64-66" both years, "3-30-00" 2000); or a range shorthand's end
+    ("2011-2")."""
     text = _OCR_LEADING_ONE_RE.sub("1", text)
-    return (str(year) in text or year % 100 in _two_digit_years(text)
+    return (str(year) in text or year % 100 in _source_two_digit_years(text)
             or year in _range_shorthand_ends(text))
 
 
@@ -2073,9 +2388,6 @@ _DATE_YEAR_RE = re.compile(
     r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*[-–—]\s*\d{1,2})?(?!\d)"
     r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?P<slash_yy>\d{2})(?![\d/])"
     r"|(?<!\w)['\u2018\u2019](?P<apostrophe_yy>\d{2})(?!\d)")
-_MONTH_PATTERN = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?"
-                  r"|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?"
-                  r"|dec(?:ember)?|spring|summer|fall|autumn|winter)\.?")
 #: A word that belongs to a date, not to what the record is.
 _DATE_WORD_RE = re.compile(rf"^(?:{_MONTH_PATTERN}|present|current|ongoing|date|now)$",
                            re.IGNORECASE)
@@ -3008,9 +3320,9 @@ def lint_grant_bucket(stage4: dict, blocks: list[tuple[str, str]],
     grant; a grant too short to locate in the document is not judged.
     `current_year` defaults to this year, as stage 6's own rebucket does, so
     re-doctoring an old render can newly flag a grant that ended since.
-    `check_end_date=False` judges the heading only: the quality score's
-    grant-bucket cap reads that shape alone (`quality_score.
-    score_grant_application_as_award`), so a later rescore cannot move it."""
+    `check_end_date=False` judges the heading only, the shape the quality
+    score's grant-bucket cap read until #1595 retired it; no caller in the
+    pipeline passes it now."""
     year = None
     if check_end_date:
         year = current_year if current_year is not None else datetime.now().year
@@ -3053,9 +3365,11 @@ _WRITTEN_SPAN_RE = re.compile(
     r"|present|current|ongoing|now))?", re.IGNORECASE)
 #: A month or term word, and the day after it, read past so "Fall 2014 -
 #: Spring 2018" is one span; with the short term names ("Spr 2015") course
-#: lists use.
+#: lists use. A comma straight after the word goes with it: "June, 2018" is
+#: no list (#1585, batch YUYVIG: 14 of its 22 false positives).
 _SPAN_MONTH_RE = re.compile(
-    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])\s*(?:\d{{1,2}}(?:st|nd|rd|th)?\b,?)?",
+    rf"(?:{_MONTH_PATTERN}|spr|sum|fa|win|wint)(?![a-z])"
+    r"(?:,|\s*(?:\d{1,2}(?:st|nd|rd|th)?\b,?)?)",
     re.IGNORECASE)
 #: Words that join the two ends of one span: "1980 to 1987", "between 1978
 #: and 1988".
@@ -3106,6 +3420,38 @@ def _written_spans(text: str) -> list[WrittenSpan]:
     return spans
 
 
+#: The gap between two lone years of one range: a dash right after the first
+#: that no end follows ("2007– Professor of X, Y\t2012"), or one right before
+#: the second that no start precedes ("2014 Professor of X, Y\tto 2019",
+#: once `_span_source` has made "to" a dash). Not a gap a semicolon ends an
+#: item in, or whose dash a comma follows ("2003 - Talk; 2013", "2003 -, 2013").
+_SPAN_WRAPPED_GAP_RE = re.compile(
+    rf"^(?!.*;)(?:\s*{_SPAN_DASH}(?!\s*,)|.*{_SPAN_DASH}\s*$)", re.DOTALL)
+#: A dash right after a lone year: the year opens a span of its own.
+_SPAN_OPEN_DASH_RE = re.compile(rf"\s*{_SPAN_DASH}")
+
+
+def _join_wrapped_ranges(text: str, spans: list[WrittenSpan]) -> list[WrittenSpan]:
+    """`spans` with a range a table cell or line wrapped joined into one: two
+    consecutive lone years, the later second, whose dash sits in the gap with
+    no year on its other side (`_SPAN_WRAPPED_GAP_RE`), the later one opening
+    no dash of its own ("2011 - Talk, 2013 - Talk" is two items). Nothing
+    lies between them that `_WRITTEN_SPAN_RE` reads as a year (#1585, batch
+    YUYVIG: 12 of its 22 false positives). Source text only: a rendered
+    "2011 - Title 2013 - Title" line is that list."""
+    joined: list[WrittenSpan] = []
+    for span in spans:
+        before = joined[-1] if joined else None
+        if (before is not None and before.first == before.last
+                and span.first == span.last and span.first > before.first
+                and _SPAN_WRAPPED_GAP_RE.search(text[before.end:span.start])
+                and not _SPAN_OPEN_DASH_RE.match(text, span.end)):
+            joined[-1] = WrittenSpan(before.first, span.last, before.start, span.end)
+        else:
+            joined.append(span)
+    return joined
+
+
 def _is_a_list(text: str, spans: list[WrittenSpan]) -> bool:
     """Whether consecutive spans of `text` are separated as items of one list."""
     return all(_SPAN_LIST_SEPARATOR_RE.search(text[before.end:after.start])
@@ -3126,7 +3472,7 @@ def _envelope_of_separate_spans(text: str) -> tuple[tuple[int, int], int] | None
     """The min-max of the text's spans and how many there are, when the text
     lists two or more spans that leave a year of that min-max uncovered."""
     source = _span_source(text)
-    spans = _written_spans(source)
+    spans = _join_wrapped_ranges(source, _written_spans(source))
     years = list(dict.fromkeys((span.first, span.last) for span in spans))
     if not years:
         return None
@@ -3300,7 +3646,18 @@ def _source_owner_role(text: str, owner: frozenset[str]) -> str | None:
 #   own words (RINASX 396: "<title words>, PI" read as a PI label, the
 #   parse #1418 stopped).
 #
-# The last two are regression guards on current dev: the stage-6 causes are
+# One more from the YUYVIG batch (#1571, SLYBST and DYLJXC):
+#
+# - pi_cell_not_a_person: the rendered PI cell is sponsor, award or role
+#   text, not a person ("Society. Research Scholar Award", "Acme
+#   Foundation"): stage 6 read the text before the owner's own "(PI)" or ",
+#   Principal Investigator" label as the PI's name. It also catches a role
+#   cell the pipe-row fallback took as the PI (batch-4 web210: "Principal
+#   Investigator"). A part of the cell fails stage 6's own
+#   `_is_person_name_capture` (a SPONSOR_OR_AWARD_WORDS word or a sentence
+#   break), so the lint and the stage-6 veto (#1608) share one word list.
+#
+# The last three are regression guards on current dev: the stage-6 causes are
 # fixed, and they fire on documents rendered before the fix.
 
 ROLE_SHAPE_CONTRADICTED = "contradicted"
@@ -3313,6 +3670,7 @@ ROLE_SHAPE_ROLE_IN_TITLE = "role_in_title"
 ROLE_SHAPE_OWNER_PI_ROLE_EMPTY = "owner_pi_role_empty"
 ROLE_SHAPE_OWNER_PI_OTHER_ROLE = "owner_pi_other_role"
 ROLE_SHAPE_PI_CELL_FROM_TITLE = "pi_cell_from_title"
+ROLE_SHAPE_PI_CELL_NOT_A_PERSON = "pi_cell_not_a_person"
 #: Each shape's severity, from its measured precision (RC-ROLE2 and X6-role
 #: in doctor/PRECISION.md): WARN at 80% or more on 10 or more hand-checked
 #: hits, INFO below either bar.
@@ -3327,6 +3685,7 @@ ROLE_SHAPE_SEVERITY = MappingProxyType({
     ROLE_SHAPE_OWNER_PI_ROLE_EMPTY: "WARN",
     ROLE_SHAPE_OWNER_PI_OTHER_ROLE: "WARN",
     ROLE_SHAPE_PI_CELL_FROM_TITLE: "INFO",
+    ROLE_SHAPE_PI_CELL_NOT_A_PERSON: "INFO",
 })
 
 #: Any word that labels a role on a grant, in normalised text: "PI", "P.I.",
@@ -3518,38 +3877,64 @@ def _entry_role_shape(entry: Mapping[str, object], fields: Mapping[str, object],
     return None
 
 
-def _grant_tables(table_rows: list[list[list[str]]]) -> list[dict[str, str]]:
-    """Each rendered grant table as {row label: value}: the tables that have
-    a PI row."""
+def _grant_tables(table_rows: list[list[list[str]]]) -> list[tuple[int, dict[str, str]]]:
+    """Each rendered grant table (a table with a PI row) as its index among
+    the document's tables and {row label: value}."""
     tables = []
-    for table in table_rows:
+    for at, table in enumerate(table_rows):
         cells = {row[0]: (row[1] if len(row) > 1 else "") for row in table if row}
         if PI_NAME_LABEL in cells:
-            tables.append(cells)
+            tables.append((at, cells))
     return tables
 
 
-def _grant_entry_by_title(stage4: dict) -> dict[str, Mapping[str, object]]:
-    """The first grant entry per normalised title."""
-    by_title: dict[str, Mapping[str, object]] = {}
+def _grant_entries_by_title(stage4: dict) -> dict[str, list[Mapping[str, object]]]:
+    """Every grant entry per normalised title, in stage-4 order."""
+    by_title: dict[str, list[Mapping[str, object]]] = {}
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") in GRANT_CODES and isinstance(fields, Mapping):
             title = norm(str(fields.get("title") or fields.get("study_title") or ""))
             if title:
-                by_title.setdefault(title, entry)
+                by_title.setdefault(title, []).append(entry)
     return by_title
+
+
+def _table_entries(stage4: dict,
+                   tables: list[dict[str, str]]) -> list[Mapping[str, object]]:
+    """The grant entry each rendered table renders, matched by title. Several
+    entries can share a title (an organisation's name as the title of each
+    of its grants, YUYVIG SQMWHM: seven), and stage 6 renders them in date
+    order, so each table takes the first entry with its title it has not
+    already matched, preferring one whose stated role is the table's "Your
+    role:" cell. A table left with no unmatched entry (more tables than
+    entries) falls back to the first entry with its title, and to {} when
+    no entry has it."""
+    by_title = _grant_entries_by_title(stage4)
+    matched: set[int] = set()
+    resolved = []
+    for cells in tables:
+        candidates = by_title.get(norm(cells.get(PROJECT_TITLE_LABEL, "")), [])
+        free = [entry for entry in candidates if id(entry) not in matched]
+        role = norm(cells.get(YOUR_ROLE_LABEL, ""))
+        same_role = [entry for entry in free
+                     if norm(_stated_role_text(entry["extracted_fields"])) == role]
+        entry = (same_role or free or candidates or [{}])[0]
+        matched.add(id(entry))
+        resolved.append(entry)
+    return resolved
 
 
 def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
                       extracted_pi: str) -> tuple[str, str] | None:
     """The first role shape one rendered grant table shows, as (shape, what
     it says), or None: pi_cell_empty, then the three render shapes the X6
-    batch added. The owner is read off the PI cell by surname word, the way
-    `_entry_role_shape` reads `pi_name`. `extracted_pi` is the table's
-    entry's `pi_name`: a PI cell stage 4 extracted as a person is not a
-    title run, even where the title names that person (a fellowship titled
-    after its holder, NDMRSO CAGLNY 118)."""
+    batch added, then pi_cell_not_a_person (#1571). The owner is read off
+    the PI cell by surname word, the way `_entry_role_shape` reads
+    `pi_name`. `extracted_pi` is the table's entry's `pi_name`: a PI cell
+    stage 4 extracted as a person is not a title run, even where the title
+    names that person (a fellowship titled after its holder, NDMRSO CAGLNY
+    118)."""
     pi_cell, role = cells[PI_NAME_LABEL], cells.get(YOUR_ROLE_LABEL, "")
     if not pi_cell:
         if _stated_role(role) == ROLE_PI:
@@ -3572,58 +3957,645 @@ def _table_role_shape(cells: Mapping[str, str], owner: frozenset[str],
             and re.search(rf"(?<!\w){re.escape(pi_text)}(?!\w)", title)):
         return (ROLE_SHAPE_PI_CELL_FROM_TITLE,
                 "'Name of Principal Investigator:' is a run of the project title's words")
+    if not all(map(_is_person_name_capture, _PERSON_SPLIT_RE.split(pi_cell))):
+        return (ROLE_SHAPE_PI_CELL_NOT_A_PERSON,
+                "'Name of Principal Investigator:' is sponsor, award or role text, "
+                "not a person")
     return None
 
 
-def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
-                         owner: frozenset[str], reported: set[object]) -> list[dict]:
-    """A finding per rendered grant table that shows a role shape. A table
-    whose entry already has an entry finding is reported only for
-    pi_cell_empty, which predates the others and was always reported beside
-    them."""
-    by_title = _grant_entry_by_title(stage4)
-    findings = []
-    for cells in _grant_tables(table_rows):
-        title = cells.get(PROJECT_TITLE_LABEL, "")
-        entry = by_title.get(norm(title), {})
+class _TableRoleHit(NamedTuple):
+    """One rendered grant table the lint reports: its index among the
+    document's tables, its entry's index, its shape and what it says, and
+    its title."""
+    table: int
+    idx: object
+    shape: tuple[str, str]
+    title: str
+
+
+def _table_role_hits(stage4: dict, table_rows: list[list[list[str]]],
+                     owner: frozenset[str], reported: set[object]) -> list[_TableRoleHit]:
+    """Each rendered grant table that shows a role shape (each table matched
+    to its entry by `_table_entries`). A table whose entry already has an
+    entry finding counts only for pi_cell_empty, which predates the others
+    and was always reported beside them."""
+    tables = _grant_tables(table_rows)
+    hits = []
+    for (at, cells), entry in zip(tables, _table_entries(stage4, [cells for _, cells in tables])):
         fields = entry.get("extracted_fields", {})
         shape = _table_role_shape(cells, owner, str(fields.get("pi_name") or ""))
         idx = entry.get("element_idx_start")
         if not shape or (idx in reported and shape[0] != ROLE_SHAPE_PI_CELL_EMPTY):
             continue
-        where = f"entry {idx}" if idx is not None else "a grant table"
-        findings.append(_finding(
-            "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-            f"{where}: {shape[1]} ({shape[0]}, #1403)",
-            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
-    return findings
+        hits.append(_TableRoleHit(at, idx, shape, cells.get(PROJECT_TITLE_LABEL, "")))
+    return hits
+
+
+def _table_role_groups(hits: list[_TableRoleHit]) -> dict[tuple[object, tuple[str, str], str],
+                                                          list[_TableRoleHit]]:
+    """The hits one finding reports: those whose tables still resolve to one
+    entry and show one shape (#1590), keyed by entry index, shape and title."""
+    groups: dict[tuple[object, tuple[str, str], str], list[_TableRoleHit]] = {}
+    for hit in hits:
+        groups.setdefault((hit.idx, hit.shape, hit.title), []).append(hit)
+    return groups
+
+
+def _table_role_message(idx: object, shape: tuple[str, str], tables_hit: int) -> str:
+    """What the finding for one group of `_table_role_groups` says."""
+    where = f"entry {idx}" if idx is not None else "a grant table"
+    count = f" in {tables_hit} grant tables" if tables_hit > 1 else ""
+    return f"{where}: {shape[1]}{count} ({shape[0]}, #1403)"
+
+
+def _table_role_findings(stage4: dict, table_rows: list[list[list[str]]],
+                         owner: frozenset[str], reported: set[object]) -> list[dict]:
+    """A finding per grant entry whose rendered table shows a role shape.
+    Tables that still resolve to one entry and show one shape give one
+    finding that counts them (#1590)."""
+    groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
+    return [_finding("role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+                     _table_role_message(idx, shape, len(group)),
+                     [title[:FIELD_EVIDENCE_VALUE_CHARS]])
+            for (idx, shape, title), group in groups.items()]
 
 
 def lint_role_consistency(stage4: dict,
                           table_rows: list[list[list[str]]] | None = None) -> list[dict]:
     """A grant table that misstates who led the grant (#1403). One finding
     per grant entry, for the first shape it shows (see the shapes above),
-    plus one per rendered grant table for the first render shape it shows
-    (only when the docx was read; see `_table_role_findings`). The owner is
+    plus, only when the docx was read, one per grant entry and render shape
+    its rendered tables show, counting the tables (`_table_role_findings`,
+    #1590). The owner is
     `cv_owner.last_name`; with none, no shape that names the owner fires.
     Not judged from stage 4: an empty `pi_role` against the source's label
     (the render shape owner_pi_role_empty reads that off the table), a
     co-PI, or text that gives the owner both roles."""
     owner = _owner_surname_words(stage4)
-    findings = []
-    reported: set[object] = set()
+    shaped = _entry_role_shapes(stage4, owner)
+    findings = [_finding(
+        "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
+        f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
+        f"{shape[1]} ({shape[0]}, #1403)",
+        [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]) for entry, shape in shaped]
+    if table_rows is not None:
+        reported = {entry.get("element_idx_start") for entry, _ in shaped}
+        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
+    return findings
+
+
+def _entry_role_shapes(stage4: dict, owner: frozenset[str]) -> list[tuple[dict, tuple[str, str]]]:
+    """Each grant entry whose stage-4 fields show a role shape, with the shape."""
+    shaped = []
     for entry in stage4.get("entries", []):
         fields = entry.get("extracted_fields")
         if entry.get("taxonomy_code") not in GRANT_CODES or not isinstance(fields, Mapping):
             continue
         shape = _entry_role_shape(entry, fields, owner)
         if shape:
-            reported.add(entry.get("element_idx_start"))
-            findings.append(_finding(
-                "role_consistency", ROLE_SHAPE_SEVERITY[shape[0]],
-                f"entry {entry.get('element_idx_start')} ({entry.get('taxonomy_code')}): "
-                f"{shape[1]} ({shape[0]}, #1403)",
-                [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
-    if table_rows is not None:
-        findings.extend(_table_role_findings(stage4, table_rows, owner, reported))
+            shaped.append((entry, shape))
+    return shaped
+
+
+def owner_pi_role_empty_tables(stage4: dict, table_rows: list[list[list[str]]]) -> dict[int, str]:
+    """The grant tables lint_role_consistency reports as owner_pi_role_empty
+    (the PI cell names the CV owner and "Your role:" is empty), by their
+    index among the document's top-level tables, each with the message of
+    the finding that reports it. The review copy suggests "PI" there as a
+    tracked insertion (#1591): the shape's certain fix. A finding can
+    report several tables, so its comment goes only once all are fixed."""
+    owner = _owner_surname_words(stage4)
+    reported = {entry.get("element_idx_start") for entry, _ in _entry_role_shapes(stage4, owner)}
+    groups = _table_role_groups(_table_role_hits(stage4, table_rows, owner, reported))
+    return dict(sorted((hit.table, _table_role_message(idx, shape, len(group)))
+                       for (idx, shape, _), group in groups.items()
+                       if shape[0] == ROLE_SHAPE_OWNER_PI_ROLE_EMPTY for hit in group))
+
+
+# --- grant_facts ----------------------------------------------------------------
+#
+# #1588's first fact-accounting slice: the grant numbers and dollar amounts a
+# grant entry's text states, against the grant table stage 6 renders for that
+# entry. Stage 4 extracts the grants of one code in one call, and an entry can
+# come back carrying another entry's values (#1575: YUYVIG UVZNIC 592, an R01
+# rendered with entry 603's amount and dates, its own amount nowhere in the
+# document). year_not_in_source flagged that entry only because the borrowed
+# values carried a year; a borrowed amount or grant number passes every other
+# lint. Two shapes, at most one finding of each per entry:
+#
+#   value_not_in_source  a grant number or amount on the entry's rendered table
+#                        (its Award Source, title and costs rows, the rows stage
+#                        4's fields fill) that the entry's own text does not
+#                        state in any format. The message names the other grant
+#                        entries whose text does: the #1575 copy.
+#   value_missing        a grant number or amount the entry's text states that
+#                        is neither on its rendered table nor anywhere outside
+#                        the other grants' tables (the Appendix, a sub-point, a
+#                        note), so the reader never sees it.
+#
+# A value matches through reformatting: an amount by its dollars ("$1.5M",
+# "$1,500,000", "1500000"), within half the last digit it states, and a grant
+# number by its identity (an NIH number by institute and serial, "5R01
+# CA012345-01A1" = "CA-12345"; another format by its letters and digits).
+# Report-only, INFO, and a review-copy comment only (doctor/PRECISION.md, GF-1).
+
+#: The finding's shapes, named in its message (`precision.finding_precision`).
+GRANT_FACT_NOT_IN_SOURCE = "value_not_in_source"
+GRANT_FACT_MISSING = "value_missing"
+#: Values a finding's message lists; it counts the rest.
+GRANT_FACTS_MAX_LISTED = 4
+#: The rendered rows value_not_in_source reads: the ones stage 4's fields
+#: fill. A goals row can carry another entry's prose by design (#958), so it
+#: is read only as somewhere a stated value reaches the reader.
+_FACT_AMOUNT_ROWS = frozenset({ANNUAL_COSTS_LABEL, TOTAL_AWARD_LABEL,
+                               TOTAL_REQUESTED_LABEL, SHARE_LABEL})
+_FACT_NUMBER_ROWS = frozenset({AWARD_SOURCE_LABEL, PROJECT_TITLE_LABEL})
+#: The stage-4 fields that say which of several same-titled entries a rendered
+#: table came from: stage 6 renders them newest first, not in stage-4 order.
+_PRODUCER_AMOUNT_KEYS = ("annual_direct_costs", "annual_funding", "total_funding",
+                         "total_funding_requested", "share_total")
+_PRODUCER_DATE_KEYS = ("start_date", "end_date")
+
+#: A dollar amount: "$123,456", "$1.5M", "$250K", "US$ 40,000", "USD 12,345",
+#: "$2 million", and "$12, 345" as a PDF conversion spaces it. The currency
+#: mark is optional, but a number without one must not continue a word or
+#: another number ("R01", "1.5").
+_AMOUNT_RE = re.compile(
+    r"(?:(?P<cur>US\$|\$|USD)\s?|(?<![\w.,$]))"
+    r"(?P<int>\d{1,3}(?:,\s?\d{3}(?!\d))+|\d+)(?:\.(?P<frac>\d+))?"
+    r"(?:\s?(?P<mult>(?i:million|thousand|mil|mm|k|m))(?![A-Za-z]))?")
+_AMOUNT_MULTIPLIERS = MappingProxyType({
+    "k": 1_000, "thousand": 1_000, "m": 1_000_000, "mm": 1_000_000,
+    "mil": 1_000_000, "million": 1_000_000})
+#: How far apart two amounts written in whole dollars or cents may be and
+#: still be one amount: stage 6 rounds cents away ("$1,200.50" -> "$1,201").
+AMOUNT_ROUNDING_DOLLARS = Decimal(1)
+#: Decimals that may instead be a thousands group ("$123.000").
+THOUSANDS_DOT_DIGITS = 3
+
+#: An NIH-style grant number: an optional application type, an activity code
+#: ("R01", "K08", "UL1", "RO1" as typed), the institute and the serial, with
+#: an optional year and suffix ("5R01 CA012345-01A1", "P30-CA90001",
+#: "NIH-R01 #NS90002-01", "HL-90003"). Without an activity code the institute
+#: must touch its serial or join it by a hyphen, so a ZIP code ("NY 10001")
+#: is not read as one.
+_NIH_GRANT_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[1-9][\s-]?)?"
+    r"(?:(?P<activity>[A-Z][0-9O]{2}|[A-Z]{2}[0-9])(?:\s?/\s?[A-Z][0-9]{2})?[\s-]*#?\s*)?"
+    r"(?P<ic>[A-Z]{2})(?P<sep>[\s-]?)(?P<serial>\d{5,6})(?:-\d{2}(?:[A-Z]\d)?)?(?![0-9])")
+#: The other sponsors' formats seen on the EBYSBC/s7ab/pilot and YUYVIG
+#: farms, matched by their letters and digits: a ClinicalTrials.gov id, a DoD
+#: or ONR award ("W81XWH-99-1-0001", "DAMD17-99-1-0002", "N000149910003"), an
+#: NSF award by its directorate ("DMS-9900001"; a two-letter word before a
+#: bare NSF number is a role, "PI 9900002"), a VA HSR&D project ("IIR 99-001") and an AHA or
+#: foundation award ("99SDG9000001").
+_OTHER_GRANT_ID_RES = (
+    re.compile(r"(?<![A-Za-z0-9])NCT\s?\d{8}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:W81XWH|DAMD17|HU0001|N00014)-?\d{2}-?\d-?\d{4}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])[A-Z]{3,4}[ -]\d{7}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:IIR|PPO|SDR|CDA|RRP|QUE)[\s-]?\d{2}-\d{3}(?![0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])\d{2}[A-Z]{2,5}\d{5,8}(?![0-9])"),
+)
+
+
+#: A letter a PDF's text layer types for a digit, when beside one.
+_OCR_DIGIT_RE = re.compile(r"(?<=\d)[lO]|[lO](?=\d)")
+_OCR_DIGITS = MappingProxyType({"l": "1", "O": "0"})
+
+
+class GrantFact(NamedTuple):
+    """One grant number or dollar amount: as written, and as compared."""
+    text: str
+    key: str = ""                  # a grant number's identity; "" for an amount
+    # An amount's dollars, each way it can be read ("$123.000": 123 or
+    # 123,000); empty for a grant number.
+    readings: tuple[Decimal, ...] = ()
+    tolerance: Decimal = AMOUNT_ROUNDING_DOLLARS
+
+
+class FactHaystack(NamedTuple):
+    """Every grant number and amount a body of text holds, in any format."""
+    amounts: tuple[GrantFact, ...]
+    grant_keys: frozenset[str]
+    alnum: str
+
+
+class _EntryFacts(NamedTuple):
+    """One grant entry (every stage-4 entry sharing its first element) as
+    grant_facts reads it: its text, and the rendered tables matched to it."""
+    idx: object
+    code: str
+    text: str
+    tables: list[dict[str, str]]
+
+
+def _amounts(text: str, *, marked_only: bool) -> list[GrantFact]:
+    """The dollar amounts in ``text``; with ``marked_only``, only those
+    written with a currency mark, which is what makes a number an amount.
+    A number with three decimals and no multiplier is read both ways, since
+    a CV may write "$123.000" for $123,000."""
+    found = []
+    for match in _AMOUNT_RE.finditer(text):
+        if marked_only and not match["cur"]:
+            continue
+        frac = match["frac"] or ""
+        multiplier = Decimal(_AMOUNT_MULTIPLIERS[match["mult"].lower()] if match["mult"] else 1)
+        value = Decimal(re.sub(r"[,\s]", "", match["int"]) + (f".{frac}" if frac else "")) * multiplier
+        # "$1.5M" states the hundred thousands: anything within 50,000 is it.
+        tolerance = (Decimal(1).scaleb(-len(frac)) * multiplier / 2 if match["mult"]
+                     else AMOUNT_ROUNDING_DOLLARS)
+        dotted = len(frac) == THOUSANDS_DOT_DIGITS and not match["mult"]
+        found.append(GrantFact(match.group(0).strip(),
+                               readings=(value, value * 1000) if dotted else (value,),
+                               tolerance=tolerance))
+    return found
+
+
+def _grant_ids(text: str) -> list[GrantFact]:
+    """The grant numbers in ``text``, each format once per span. A
+    lowercase "l" or a capital "O" beside a digit is read as the digit, as a
+    PDF's text layer can type them ("U0l AI90l23" for U01 AI90123)."""
+    text = _OCR_DIGIT_RE.sub(lambda match: _OCR_DIGITS[match.group(0)], text)
+    found, taken = [], []
+    for match in _NIH_GRANT_ID_RE.finditer(text):
+        if match["activity"] or not match["sep"].isspace():
+            found.append(GrantFact(match.group(0).strip(),
+                                   key=f"{match['ic']}{int(match['serial'])}"))
+            taken.append(match.span())
+    for pattern in _OTHER_GRANT_ID_RES:
+        for match in pattern.finditer(text):
+            if not any(lo < match.end() and match.start() < hi for lo, hi in taken):
+                found.append(GrantFact(match.group(0).strip(), key=_alnum(match.group(0)).upper()))
+                taken.append(match.span())
+    return found
+
+
+def _fact_haystack(texts: Iterable[str]) -> FactHaystack:
+    """What ``texts`` hold. Read also upper-cased: a sub-point's text comes
+    lowercased (`SubpointText`)."""
+    text = "\n".join(texts)
+    return FactHaystack(tuple(_amounts(text, marked_only=False)),
+                        frozenset(fact.key for fact in [*_grant_ids(text), *_grant_ids(text.upper())]),
+                        _alnum(text))
+
+
+def _holds_fact(haystack: FactHaystack, fact: GrantFact) -> bool:
+    """Whether ``haystack`` holds ``fact``, however reformatted."""
+    if fact.readings:
+        return any(abs(mine - theirs) <= max(fact.tolerance, amount.tolerance)
+                   for amount in haystack.amounts
+                   for mine in fact.readings for theirs in amount.readings)
+    return fact.key in haystack.grant_keys or _alnum(fact.text) in haystack.alnum
+
+
+def _distinct(facts: Iterable[GrantFact]) -> list[GrantFact]:
+    """``facts`` with each amount and grant number once, first spelling kept."""
+    seen: set[object] = set()
+    kept = []
+    for fact in facts:
+        identity = fact.key or fact.readings
+        if identity not in seen:
+            seen.add(identity)
+            kept.append(fact)
+    return kept
+
+
+def _stated_facts(text: str) -> list[GrantFact]:
+    """The grant numbers and currency-marked amounts an entry's text states."""
+    return _distinct([*_grant_ids(text), *_amounts(text, marked_only=True)])
+
+
+def _rendered_facts(cells: Mapping[str, str]) -> list[GrantFact]:
+    """The grant numbers and amounts on a rendered grant table's
+    stage-4-filled rows. A costs row holds only amounts, so its numbers count
+    without a currency mark."""
+    facts: list[GrantFact] = []
+    for label, value in cells.items():
+        if label in _FACT_NUMBER_ROWS:
+            facts.extend(_grant_ids(value))
+        if label in _FACT_AMOUNT_ROWS:
+            facts.extend(_amounts(value, marked_only=False))
+    return _distinct(facts)
+
+
+def _listed(facts: list[GrantFact]) -> str:
+    shown = ", ".join(fact.text for fact in facts[:GRANT_FACTS_MAX_LISTED])
+    rest = len(facts) - GRANT_FACTS_MAX_LISTED
+    return f"{shown} and {rest} more" if rest > 0 else shown
+
+
+def _producer_score(fields: Mapping[str, object], cells: Mapping[str, str]) -> int:
+    """How many of an entry's amounts, grant numbers and years a rendered
+    grant table shows: the table came from the entry that scores highest."""
+    shown = _fact_haystack(cells.values())
+    duration = cells.get(DURATION_LABEL, "")
+    amounts = [fact for key in _PRODUCER_AMOUNT_KEYS
+               for fact in _amounts(str(fields.get(key) or ""), marked_only=False)]
+    numbers = _grant_ids(str(fields.get("grant_number") or ""))
+    years = [year for key in _PRODUCER_DATE_KEYS for year in _value_years(fields.get(key))]
+    return (sum(_holds_fact(shown, fact) for fact in [*amounts, *numbers])
+            + sum(year in duration or f"/{year[2:]}" in duration for year in years))
+
+
+def _table_producers(rendered: list[dict], tables: list[dict[str, str]]) -> list[dict | None]:
+    """The entry each rendered grant table was rendered from, or None. A
+    table's title names its candidates (`_grant_entries_by_title`), and of
+    those not yet taken, the one whose amounts, number and years the table
+    shows best (`_producer_score`): role_consistency's title-and-role match
+    (`_table_entries`) pairs same-titled renewals in stage-4 order, which on
+    the EBYSBC farm read four correct pairs as swapped values."""
+    by_title = _grant_entries_by_title({"entries": rendered})
+    taken: set[int] = set()
+    producers: list[dict | None] = []
+    for cells in tables:
+        candidates = by_title.get(norm(cells.get(PROJECT_TITLE_LABEL, "")), [])
+        free = [entry for entry in candidates if id(entry) not in taken] or candidates
+        producer = max(free, key=lambda entry: _producer_score(entry["extracted_fields"], cells),
+                       default=None)
+        if producer is not None:
+            taken.add(id(producer))
+        producers.append(producer)
+    return producers
+
+
+def _text_outside_grant_tables(blocks: list[tuple[str, str]] | None,
+                               grant_tables: set[int]) -> list[str]:
+    """Every rendered block but the grant tables: paragraphs (the Appendix
+    among them) and other tables. Block tables and `table_rows` both list the
+    document's top-level tables in body order, so the n-th table block is
+    table n."""
+    texts, table_at = [], 0
+    for kind, text in blocks or ():
+        if kind == "table":
+            if table_at not in grant_tables:
+                texts.append(text)
+            table_at += 1
+        else:
+            texts.append(text)
+    return texts
+
+
+def _grant_fact_entries(stage4: dict, table_rows: list[list[list[str]]]
+                        ) -> tuple[list[_EntryFacts], list[dict[str, str]]]:
+    """Each grant entry with the rendered tables it produced, and the grant
+    tables matched to no entry (`_table_producers`), over the entries stage 6
+    renders: stage 4's records fanned out, so a table rendered from one of an
+    entry's records is the entry's."""
+    entries = [entry for entry in stage4.get("entries", [])
+               if entry.get("taxonomy_code") in GRANT_CODES
+               and isinstance(entry.get("extracted_fields"), Mapping)]
+    tables = _grant_tables(table_rows)
+    rendered = fan_out_multi_record_entries(entries, FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+    owned: dict[object, list[dict[str, str]]] = {}
+    unmatched = []
+    for (_, cells), entry in zip(tables, _table_producers(rendered, [cells for _, cells in tables]),
+                                 strict=True):
+        if entry is not None:
+            owned.setdefault(entry.get("element_idx_start"), []).append(cells)
+        else:
+            unmatched.append(cells)
+    texts: dict[object, list[str]] = {}
+    codes: dict[object, str] = {}
+    for entry in entries:
+        idx = entry.get("element_idx_start")
+        texts.setdefault(idx, []).append(str(entry.get("text") or ""))
+        codes.setdefault(idx, str(entry.get("taxonomy_code")))
+    return ([_EntryFacts(idx, codes[idx], "\n".join(dict.fromkeys(parts)), owned.get(idx, []))
+             for idx, parts in texts.items()], unmatched)
+
+
+def _not_in_source_message(entry: _EntryFacts, foreign: list[GrantFact],
+                           sources: Mapping[object, FactHaystack]) -> str:
+    """value_not_in_source for ``entry``, naming the grant entries whose own
+    text states one of its foreign values."""
+    others = [idx for idx, haystack in sources.items()
+              if idx != entry.idx and any(_holds_fact(haystack, fact) for fact in foreign)]
+    named = ", ".join(f"entry {idx}" for idx in others[:GRANT_FACTS_MAX_LISTED])
+    origin = f"; it is in the text of {named}" if others else ""
+    return (f"entry {entry.idx} ({entry.code}): {GRANT_FACT_NOT_IN_SOURCE}: {_listed(foreign)} "
+            f"on its rendered grant table, which the entry's own text does not state{origin} (#1588)")
+
+
+def _missing_message(entry: _EntryFacts, missing: list[GrantFact]) -> str:
+    return (f"entry {entry.idx} ({entry.code}): {GRANT_FACT_MISSING}: {_listed(missing)}, stated "
+            f"in the entry's text, is neither on its rendered grant table nor anywhere outside "
+            f"the other grants' tables (#1588)")
+
+
+def _fact_anchor(entry: _EntryFacts) -> list[str]:
+    """A finding's evidence: the title of the entry's first rendered table,
+    which the review copy comments on, else the entry's text."""
+    title = entry.tables[0].get(PROJECT_TITLE_LABEL) if entry.tables else None
+    return [title or entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def lint_grant_facts(stage4: dict, table_rows: list[list[list[str]]],
+                     blocks: list[tuple[str, str]] | None = None,
+                     subpoints: SubpointText | None = None) -> list[dict]:
+    """Grant numbers and dollar amounts, source against render (#1588): per
+    grant entry, a value_not_in_source finding for the values its rendered
+    table shows that its text lacks, and a value_missing finding for the
+    values its text states that the reader sees nowhere (see the shapes
+    above). `blocks` and `subpoints` widen where a stated value may still
+    reach the reader; without them, only its table counts. INFO."""
+    entries, unmatched = _grant_fact_entries(stage4, table_rows)
+    grant_tables = {at for at, _ in _grant_tables(table_rows)}
+    outside = _fact_haystack([
+        *_text_outside_grant_tables(blocks, grant_tables),
+        *(value for cells in unmatched for value in cells.values()),
+        subpoints.text if subpoints else ""])
+    sources = {entry.idx: _fact_haystack([entry.text]) for entry in entries}
+    findings = []
+    for entry in entries:
+        foreign = _distinct(fact for cells in entry.tables for fact in _rendered_facts(cells)
+                            if not _holds_fact(sources[entry.idx], fact))
+        if foreign:
+            findings.append(_finding("grant_facts", "INFO",
+                                     _not_in_source_message(entry, foreign, sources),
+                                     _fact_anchor(entry)))
+        shown = _fact_haystack(value for cells in entry.tables for value in cells.values())
+        missing = [fact for fact in _stated_facts(entry.text)
+                   if not _holds_fact(shown, fact) and not _holds_fact(outside, fact)]
+        if missing:
+            findings.append(_finding("grant_facts", "INFO", _missing_message(entry, missing),
+                                     _fact_anchor(entry)))
+    return findings
+
+
+# --- orphaned_fragments ------------------------------------------------------
+#
+# Stage 3b's fragment pass tags a short line `is_fragment` with the neighbour
+# it belongs to, and stage 4 skips every fragment, so a fragment whose text is
+# not in that neighbour's text reaches no record (#1256: JNATFN's title tail,
+# BFSUMA's assignee, MQJAVH's examiner sessions). `stage3b.fragment_merge`
+# folds the text in at the end of stage 3b and leaves a header, column label
+# or organisation sub-heading out on purpose; those report INFO. Any other
+# fragment left outside its parent is content lost, WARN. Reads stage 3b only:
+# stage 4 extracts from the 3b text, so a line missing there is missing from
+# every field.
+
+#: Merge-skip reasons that leave a line out on purpose: a structural label, or
+#: an organisation sub-heading left to #985's context stamp.
+INTENDED_FRAGMENT_SKIPS = frozenset({SKIP_LABEL, SKIP_ORGANIZATION})
+
+
+def lint_orphaned_fragments(stage3b: dict) -> list[dict]:
+    """One finding per `is_fragment` entry whose text is not in its parent's
+    text: INFO when stage 3b left it out on purpose, else WARN. Silent on a
+    list holding a non-entry: `fragment_of` indexes the list as written."""
+    entries = stage3b.get("entries") or []
+    if not all(isinstance(e, dict) for e in entries):
+        return []
+    findings = []
+    for idx, entry in enumerate(entries):
+        if not entry.get("is_fragment") or fragment_text_in_parent(entries, idx):
+            continue
+        reason = merge_skip_reason(entries, idx) or "never merged"
+        severity = "INFO" if reason in INTENDED_FRAGMENT_SKIPS else "WARN"
+        findings.append(_finding(
+            "orphaned_fragments", severity,
+            f"entry {entry.get('element_idx_start')}: fragment of list index "
+            f"{entry.get('fragment_of')} whose text no record holds ({reason})",
+            [str(entry.get("text", ""))[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- appointment_title_overlong ----------------------------------------------
+#
+# Section D's schema has no description field, so stage 4 can write an
+# appointment's duties into `title`, and the appointments table's Title column
+# then carries the role plus a paragraph (#1205: YUYVIG DYLJXC 661/668, 310
+# and 433 characters, which nothing flagged). Stage 6 moves the duty prose to
+# a row under the appointment when it can find where the role ends
+# (`split_appointment_title`); this lint reports the title either way, since
+# the stage-4 record is wrong whether or not the render recovered from it.
+
+#: An appointment role longer than this is not a role (#1205, owner decision
+#: 2026-10-08). Measured on 1,763 D1-D3 titles over six farms (YUYVIG,
+#: EBYSBC, NDMRSO, X6, EOAHMI, the 66-CV local farm): 6 are longer, and the
+#: three a ';'-list of roles explains (EBYSBC QNZADH 0/35/39: a rank, a
+#: deanship and a directorship, each under 100 characters) are judged by
+#: their longest role instead, which is under it.
+APPOINTMENT_TITLE_WARN_CHARS = 150
+
+#: CVs list several concurrent roles in one title with this separator.
+_APPOINTMENT_ROLE_SEPARATOR = ";"
+
+
+def lint_appointment_title_overlong(stage4: dict) -> list[dict]:
+    """A D1-D3 `title` one of whose ';'-separated roles is over
+    `APPOINTMENT_TITLE_WARN_CHARS`: duty prose stage 4 packed into the role.
+    WARN, one finding per entry. Says whether stage 6 can move the duties
+    under the row or renders the title whole in the Title column."""
+    findings = []
+    for entry in _fields_entries(stage4):
+        if entry.code not in POSITION_TAXONOMY_CODES:
+            continue
+        title = str(entry.fields.get("title") or "").strip()
+        longest = max(len(role.strip()) for role in title.split(_APPOINTMENT_ROLE_SEPARATOR))
+        if longest <= APPOINTMENT_TITLE_WARN_CHARS:
+            continue
+        role, duties = split_appointment_title(title)
+        outcome = (f"stage 6 shows '{role[:FIELD_EVIDENCE_VALUE_CHARS]}' in the Title "
+                   f"column and the rest on a row under it" if duties
+                   else "rendered whole in the Title column")
+        findings.append(_finding(
+            "appointment_title_overlong", "WARN",
+            f"entry {entry.element_idx} ({entry.code}): title is {len(title)} "
+            f"characters, its longest '{_APPOINTMENT_ROLE_SEPARATOR}' part {longest}, "
+            f"over {APPOINTMENT_TITLE_WARN_CHARS} -- duty prose in the role "
+            f"field; {outcome}",
+            [title[:FIELD_EVIDENCE_VALUE_CHARS]]))
+    return findings
+
+
+# --- footer_in_record --------------------------------------------------------
+#
+# A PDF's running page footer that the converter kept as body text reaches the
+# record that straddles the page break as one of its '\t' parts, and stage 4
+# can take it as the record's date (#1584, RLADNC-01: a "November 2020" footer,
+# cut from its page number at a two-column gutter, dated five talks 2020).
+# #1630 fixed the converter; this lint is the check that it stays fixed. A
+# footer is told from a real date by repetition: the same bare month-year as a
+# whole part of many entries. A bare page number is read as furniture only
+# beside such a part, since alone it cannot be told from a count.
+
+#: A bare month-year part shared by at least this many entries is a footer.
+#: Over the 126 local stage-4 artifacts (the 66-CV farm and the 2026-09-11
+#: and 2026-09-17 batches) no such part is shared by more than 3 entries;
+#: RLADNC's footer was on 6.
+FOOTER_MIN_ENTRIES = 5
+_FOOTER_MONTHS = "|".join(sorted(_MONTH_NAME_TO_NUM, key=len, reverse=True))
+_FOOTER_MONTH_YEAR_RE = re.compile(
+    rf"(?:{_FOOTER_MONTHS})\.?,?\s+((?:19|20)\d{{2}})", re.IGNORECASE)
+_FOOTER_PAGE_NUMBER_RE = re.compile(r"(?:page\s+)?\d{1,3}(?:\s+of\s+\d{1,3})?", re.IGNORECASE)
+#: Parts a stage-2 entry text is joined by.
+_ENTRY_PART_SEPARATOR = "\t"
+
+
+def _footer_key(part: str) -> str | None:
+    """A bare month-year part, normalised for counting; None otherwise."""
+    return " ".join(part.lower().split()) if _FOOTER_MONTH_YEAR_RE.fullmatch(part) else None
+
+
+def _entry_parts(entry: _FieldsEntry) -> list[str]:
+    return [part.strip() for part in entry.text.split(_ENTRY_PART_SEPARATOR)]
+
+
+def _footer_keys(entries: list[_FieldsEntry]) -> frozenset[str]:
+    """The bare month-year parts at least `FOOTER_MIN_ENTRIES` entries carry."""
+    carriers: dict[str, set[object]] = {}
+    for entry in entries:
+        for part in _entry_parts(entry):
+            key = _footer_key(part)
+            if key:
+                carriers.setdefault(key, set()).add(entry.element_idx)
+    return frozenset(key for key, idxs in carriers.items() if len(idxs) >= FOOTER_MIN_ENTRIES)
+
+
+def _footer_parts(parts: list[str], keys: frozenset[str]) -> list[int]:
+    """Indices of the footer parts, and of a bare page number beside one."""
+    footer = {i for i, part in enumerate(parts) if _footer_key(part) in keys}
+    pages = {j for i in footer for j in (i - 1, i + 1)
+             if 0 <= j < len(parts) and j not in footer
+             and _FOOTER_PAGE_NUMBER_RE.fullmatch(parts[j])}
+    return sorted(footer | pages)
+
+
+def _dated_from_footer(entry: _FieldsEntry, parts: list[str], footer: list[int]) -> bool:
+    """Whether a date field holds a footer's year that the rest of the entry
+    text does not state: stage 4 dated the record from the footer."""
+    footer_years = {year for i in footer for year in _FOOTER_MONTH_YEAR_RE.findall(parts[i])}
+    rest = " ".join(part for i, part in enumerate(parts) if i not in footer)
+    years = footer_years - set(_FOUR_DIGIT_YEAR_RE.findall(rest))
+    return any(year in _FOUR_DIGIT_YEAR_RE.findall(leaf)
+               for key, value in entry.fields.items() if _is_date_key(key)
+               for leaf in _leaf_strings(value) for year in years)
+
+
+def lint_footer_in_record(stage4: dict) -> list[dict]:
+    """A stage-4 entry carrying a running page footer as a '\t' part: a bare
+    month-year that at least `FOOTER_MIN_ENTRIES` entries carry, with a bare
+    page number beside it (#1584). WARN when a date field holds the footer's
+    year and the rest of the text does not (the record is misdated), else
+    INFO. One finding per entry."""
+    entries = _fields_entries(stage4)
+    keys = _footer_keys(entries)
+    if not keys:
+        return []
+    findings = []
+    for entry in entries:
+        parts = _entry_parts(entry)
+        footer = _footer_parts(parts, keys)
+        if not footer:
+            continue
+        dated = _dated_from_footer(entry, parts, footer)
+        outcome = ("a date field holds its year, which the rest of the entry does not state"
+                   if dated else "no date field is taken from it")
+        findings.append(_finding(
+            "footer_in_record", "WARN" if dated else "INFO",
+            f"entry {entry.element_idx} ({entry.code}): carries a running page footer "
+            f"that {FOOTER_MIN_ENTRIES} or more entries share; {outcome}",
+            [" | ".join(parts[i] for i in footer)[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

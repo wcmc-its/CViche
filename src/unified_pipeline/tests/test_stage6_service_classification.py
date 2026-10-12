@@ -79,10 +79,12 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _LEADING_DATE_CELL_RE,
     EXTRAMURAL_ROLE_KEYWORDS,
     _is_known_org_line,
     _is_q2_journal_reviewer,
     _matches_word_start,
+    _route_q2_grant_reviews,
     _split_q2_lines,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -116,6 +118,36 @@ def test_reviewer_for_still_triggers_the_reroute():
     with no board signal present."""
     assert _is_q2_journal_reviewer(
         "reviewer for the annals of pediatrics", "member", "", "") is True
+
+
+def test_abstract_reviewer_is_not_journal_reviewing():
+    """#1428 (DXAGUS 94): a meeting's abstract reviewer stays a Q2 row."""
+    line = "society x, abstract reviewer and session chair, 2009"
+    assert _is_q2_journal_reviewer(line, "abstract reviewer", "", "society x") is False
+    assert _split_q2_lines(["Abstract Reviewer, Society X", "Manuscript reviewer, Journal Y"]) == (
+        ["Manuscript reviewer, Journal Y"], ["Abstract Reviewer, Society X"])
+
+
+def test_reviewer_for_needs_a_journal_on_the_line():
+    """#1428 (VYNARH 96): "reviewer for" a program or a grant is not
+    journal reviewing; "reviewer for" a journal still is."""
+    program = "2006: reviewer for the program x cooperative studies program."
+    assert _is_q2_journal_reviewer(program, "reviewer", "", "program x") is False
+    assert _split_q2_lines(["Reviewer for Agency X grants", "Reviewer for Annals of X"]) == (
+        ["Reviewer for Annals of X"], ["Reviewer for Agency X grants"])
+
+
+def test_ad_hoc_reviewer_needs_a_journal_on_the_line():
+    """#1532 (ZCTARO 151-157, BMAMWE 619/622): an "ad hoc reviewer" of a
+    grant program or funder stays a Q2 row; one of a journal still
+    reroutes, through either the single-line or the line-split path."""
+    funder = "2005 - 2006 ad hoc reviewer, fictional science foundation"
+    assert _is_q2_journal_reviewer(funder, "ad hoc reviewer", "", "") is False
+    assert _is_q2_journal_reviewer(
+        "ad hoc reviewer, journal of fictional medicine", "ad hoc reviewer", "", "") is True
+    assert _split_q2_lines(["2016 Ad Hoc Reviewer, Agency X Grant Program",
+                            "Ad hoc reviewer, Annals of X"]) == (
+        ["Ad hoc reviewer, Annals of X"], ["2016 Ad Hoc Reviewer, Agency X Grant Program"])
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +497,222 @@ def test_parse_extramural_leadership_lines_subcommittee_decides_the_role_line():
         ["American Academy of Pediatrics",
          "AHA Hospital Accreditation Stroke Certification Subcommittee",
          "2018-present"]]
+
+
+# ---------------------------------------------------------------------------
+# #665: service.py's date patterns are on the shared stage-6 date grammar
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_parse_extramural_leadership_lines_reads_every_dash(dash):
+    """The pipe-cell date and the date-only column used their own
+    hyphen/en-dash copy, so an em-dash range was read as content."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+
+    gen._parse_extramural_leadership_lines(
+        table,
+        ["Zorblax Society of Medicine",
+         f"   Program Chair | 2015{dash}2017"])
+
+    assert _leadership_rows(table) == [
+        ["Zorblax Society of Medicine", "Program Chair", f"2015{dash}2017"]]
+
+
+@pytest.mark.parametrize("dates", ["2014, 2017—2020", "2018–ongoing", "2016-18, 2020"])
+def test_q2_date_only_continuation_reads_the_shared_grammar(dates):
+    journal, board = _split_q2_lines(["Zorblax Advisory Board", dates])
+    assert (journal, board) == ([], [f"Zorblax Advisory Board {dates}"])
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2010-2014 | Editorial Board", "Editorial Board"),
+    ("2010 - present | Editorial Board", "Editorial Board"),
+    ("2010- | Editorial Board", "Editorial Board"),
+    # a century-less end year: the copy this replaced took it, so the grammar
+    # must too, or "23" is left at the front of the organization
+    ("2016-23\tZorblax Representative", "Zorblax Representative"),
+    ("Editorial Board 2010", "Editorial Board 2010"),
+])
+def test_leading_date_cell_is_stripped_whole(raw, expected):
+    assert _LEADING_DATE_CELL_RE.sub("", raw) == expected
+
+
+# ---------------------------------------------------------------------------
+# #1518: Q1's orphaned date column pairs only on equal counts in a table layout
+
+_Q1_ORG = "Zorblax Society of Medicine"
+
+
+def _parse_q1(lines):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+    gen._parse_extramural_leadership_lines(table, lines)
+    return _leadership_rows(table)
+
+
+def test_q1_orphaned_dates_pair_when_the_columns_line_up():
+    """Control: column 1 (three roles), then column 2 (three dates) -- one
+    run of each, equal counts -- still pairs forward by position."""
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer",
+                      "   Secretary", "2010-2012", "2013-2015", "2016-2018"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2013-2015"],
+                    [_Q1_ORG, "Secretary", "2016-2018"]]
+
+
+def test_q1_orphaned_dates_pair_when_rows_alternate():
+    """Control: a table read row by row (role, its date, role, its date) is
+    strict alternation, which is tabular too."""
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "2010-2012",
+                      "   Treasurer", "2013-2015"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2013-2015"]]
+
+
+def test_q1_orphaned_dates_skip_a_role_that_carries_its_own_date():
+    """A role with an embedded pipe date is neither an undated item nor an
+    orphaned date, so it neither takes a date nor breaks the layout."""
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer | 2001-2003",
+                      "   Secretary", "2010-2012", "2013-2015"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2001-2003"],
+                    [_Q1_ORG, "Secretary", "2013-2015"]]
+
+
+def test_q1_orphaned_dates_pair_across_two_org_headers():
+    """Control: a second org header adds no item, so it is not an undated
+    slot. Counting it as one would make the counts disagree (4 vs 3) and
+    leave every role dateless."""
+    org_b = "Quuxian Academy of Surgery"
+    rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer",
+                      org_b, "   Secretary",
+                      "2010-2012", "2013-2015", "2016-2018"])
+    assert rows == [[_Q1_ORG, "Program Chair", "2010-2012"],
+                    [_Q1_ORG, "Treasurer", "2013-2015"],
+                    [org_b, "Secretary", "2016-2018"]]
+
+
+@pytest.mark.parametrize("dates", [
+    ["2010-2012", "2013-2015"],                            # one date short
+    ["2010-2012", "2013-2015", "2016-2018", "2019-2021"],  # one date over
+    ["2010-2012"],                                         # two short
+])
+def test_q1_orphaned_dates_stay_unassigned_when_counts_disagree(dates, caplog):
+    """The pre-#1518 parser zipped whenever the counts were within two, and
+    paired "from the top" otherwise, so a missing date shifted every later
+    date onto the wrong role. Now every role stays dateless and a warning
+    says why."""
+    with caplog.at_level("WARNING"):
+        rows = _parse_q1([_Q1_ORG, "   Program Chair", "   Treasurer",
+                          "   Secretary", *dates])
+    assert rows == [[_Q1_ORG, "Program Chair", ""],
+                    [_Q1_ORG, "Treasurer", ""],
+                    [_Q1_ORG, "Secretary", ""]]
+    assert "counts disagree" in caplog.text
+
+
+def test_q1_orphaned_dates_stay_unassigned_in_no_table_layout(caplog):
+    """Equal counts, but the roles and dates are interleaved the way no
+    flattened two-column table produces (role, date, role, role, date), so
+    the equal count is a coincidence, not evidence."""
+    with caplog.at_level("WARNING"):
+        rows = _parse_q1([_Q1_ORG, "   Program Chair", "2010-2012",
+                          "   Treasurer", "   Secretary", "2013-2015",
+                          "2016-2018"])
+    assert rows == [[_Q1_ORG, "Program Chair", ""],
+                    [_Q1_ORG, "Treasurer", ""],
+                    [_Q1_ORG, "Secretary", ""]]
+    assert "no table layout" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #1580: Q2 ad hoc grant reviews render under Grant Reviewing, not as boards
+
+
+def _q2(text, heading, **fields):
+    return {"text": text, "taxonomy_code": "Q2", "hierarchy": ["Service", heading],
+            "extracted_fields": fields, "element_idx_start": 7}
+
+
+@pytest.mark.parametrize("entry", [
+    # a funder alone under an ad hoc review heading (WPJHYT 140-147's shape)
+    _q2("Zorblax Research Trust", "Ad Hoc Review Panels", organization="Zorblax Research Trust"),
+    # the role says so under a generic heading (SLYBST 74's shape)
+    _q2("2024 Zorblax Society, Zorblax Program, ad hoc reviewer", "External",
+        role="Ad hoc reviewer", organization="Zorblax Society", committee_name="Zorblax Program"),
+    # a pre-review of a training grant (SIJYJZ 216's shape)
+    _q2("2014 Zorblax University, external pre-review for T32 submission", "Outside Service",
+        role="External Pre-Reviewer", organization="Zorblax University"),
+    # a reviewer row under a grant-review heading
+    _q2("2018 Reviewer, Zorblax Pilot Award", "Service as grant reviewer", role="Reviewer"),
+    _q2("1999 Zorblax Foundation", "Review of Grants and Contracts", role="Reviewer"),
+    _q2("2010 Reviewer, Zorblax Panel", "Study Sections", role="Reviewer"),
+    # only the line names the review
+    _q2("2019 Ad hoc review, Zorblax Trust", "External", organization="Zorblax Trust"),
+    # only the role names the review
+    _q2("2019 Zorblax Foundation", "External", role="Ad hoc reviewer"),
+    _q2("2010 Grant reviewer, Zorblax Foundation", "Professional Service", role="Grant reviewer"),
+    # a bare "ad hoc" role under a grant-review heading
+    _q2("Zorblax pilot program 2014, ad hoc", "Grant Reviews", role="ad hoc"),
+])
+def test_q2_grant_review_is_rerouted_to_q3(entry):
+    to_grants, board = _route_q2_grant_reviews([entry])
+    assert board == []
+    assert [e["taxonomy_code"] for e in to_grants] == ["Q3"]
+    assert to_grants[0]["rerouted_from_q2"] is True
+    assert entry["taxonomy_code"] == "Q2", "the stage-3b code stays on the original"
+
+
+@pytest.mark.parametrize("entry", [
+    # a seat on a body under a grant-review heading stays a committee row
+    _q2("2009 Zorblax Institute, Promotion Committee, Ad Hoc Member", "Grant Review Panels",
+        role="Ad Hoc Member", committee_name="Promotion Committee"),
+    _q2("2002 Member, Zorblax Advisory Committee", "Grant Review", role="Member",
+        committee_name="Zorblax Advisory Committee"),
+    # no role, but a named committee
+    _q2("2014-2018 External Advisory Committee, Zorblax Program", "Service as grant reviewer",
+        committee_name="External Advisory Committee"),
+    # reviewing that is not grant reviewing
+    _q2("2020 Reviewer, All Abstracts, Zorblax Annual Meeting", "Service as grant reviewer",
+        role="Reviewer"),
+    _q2("2015 Zorblax Subject Examination", "Peer Review Groups/Grant Study sections",
+        role="Reviewer"),
+    # a multi-line entry can fuse a committee row with the review (#573)
+    _q2("2016 Ad hoc reviewer, Zorblax Trust\n2017 Member, Zorblax Steering Committee",
+        "External", role="Ad hoc reviewer"),
+    # control: an ordinary committee row
+    _q2("2010 Member, Zorblax Program Committee", "National Committees", role="Member"),
+])
+def test_q2_committee_or_other_review_stays_on_boards(entry):
+    to_grants, board = _route_q2_grant_reviews([entry])
+    assert (to_grants, board) == ([], [entry])
+
+
+def test_rerouted_committee_name_becomes_the_q3_panel_name():
+    entry = _q2("2024 Zorblax Society, Zorblax Program, ad hoc reviewer", "External",
+                role="Ad hoc reviewer", organization="Zorblax Society",
+                committee_name="Zorblax Program")
+    (rerouted,), _ = _route_q2_grant_reviews([entry])
+    assert rerouted["extracted_fields"]["panel_name"] == "Zorblax Program"
+    assert "panel_name" not in entry["extracted_fields"]
+
+
+def _table_rows_after_label(gen, label):
+    table = gen._find_table_after_paragraph(gen._find_template_label(label))
+    return [[cell.text for cell in row.cells] for row in table.rows[1:]]
+
+
+def test_fill_service_renders_a_q2_grant_review_under_grant_reviewing():
+    """End to end through the router: the row lands in the Grant Reviewing
+    table, and no "Member" is invented for it (WPJHYT-02)."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_service({"Q2": [
+        _q2("Zorblax Research Trust", "Ad Hoc Review Panels", organization="Zorblax Research Trust"),
+    ]})
+
+    assert ["", "Zorblax Research Trust", ""] in _table_rows_after_label(gen, "Grant Reviewing")

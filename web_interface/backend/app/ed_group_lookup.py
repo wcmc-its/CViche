@@ -1,24 +1,25 @@
 """Enterprise Directory group membership check via LDAP with TTL cache."""
-import time
 import logging
 import threading
+import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from collections.abc import Iterator
 from urllib.parse import unquote, urlparse
-from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
+
+from cachetools import TTLCache
+from ldap3 import BASE, LEVEL, SUBTREE, Connection, Server
+from ldap3.core.exceptions import (
+    LDAPBindError,
+    LDAPException,
+    LDAPInsufficientAccessRightsResult,
+    LDAPInvalidCredentialsResult,
+    LDAPInvalidDnError,
+    LDAPNoSuchObjectResult,
+    LDAPStrongerAuthRequiredResult,
+)
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import parse_dn
-from ldap3.core.exceptions import (
-    LDAPException,
-    LDAPBindError,
-    LDAPInvalidCredentialsResult,
-    LDAPStrongerAuthRequiredResult,
-    LDAPInsufficientAccessRightsResult,
-    LDAPNoSuchObjectResult,
-    LDAPInvalidDnError,
-)
-from cachetools import TTLCache
 from pydantic import SecretStr
 
 

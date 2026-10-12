@@ -9,25 +9,29 @@ User-facing failure modes hardened before the non-technical rollout:
 """
 import io
 import os
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timedelta
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import redis
+import yaml
 from docx import Document
+from sqlalchemy.orm import object_session
 
 from app.models import Log, Run, Step, User
 from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services.run_service import (
-    DEPLOY_INTERRUPT_MESSAGE, fail_runs_interrupted_by_shutdown, reconcile_stale_runs,
+    SHUTDOWN_INTERRUPT_MESSAGE,
+    fail_runs_interrupted_by_shutdown,
+    reconcile_stale_runs,
 )
-from sqlalchemy.orm import object_session
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -46,7 +50,7 @@ def _make_user(db, email="user@example.com", role="user", **kwargs):
 
 
 def _auth_cookie(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     # create_session_cookie reads the current epoch from a DB session;
     # `user` was just committed on the test's session, so borrow that one.
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
@@ -67,7 +71,7 @@ def _docx_bytes(text: str) -> bytes:
 class TestReconcileStaleRuns:
     def test_old_running_run_is_failed(self, db):
         run = Run(id="OLD001", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=120))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=120))
         db.add(run)
         db.add(Step(run_id="OLD001", step_number=3, step_name="x", status="running"))
         db.commit()
@@ -84,7 +88,7 @@ class TestReconcileStaleRuns:
 
     def test_recent_running_run_is_left_alone(self, db):
         run = Run(id="NEW001", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=5))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=5))
         db.add(run)
         db.commit()
 
@@ -94,7 +98,7 @@ class TestReconcileStaleRuns:
 
     def test_completed_run_is_ignored(self, db):
         run = Run(id="DONE01", filename="a.docx", file_type="docx", status="complete",
-                  started_at=datetime.now() - timedelta(minutes=999))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=999))
         db.add(run)
         db.commit()
 
@@ -105,7 +109,7 @@ class TestReconcileStaleRuns:
     def test_env_threshold_is_respected(self, db, monkeypatch):
         monkeypatch.setenv("CVICHE_STALE_RUN_MINUTES", "10")
         run = Run(id="ENV001", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=15))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=15))
         db.add(run)
         db.commit()
 
@@ -127,10 +131,10 @@ def notified(monkeypatch):
 
 
 class TestFailRunsInterruptedByShutdown:
-    def test_still_running_run_is_failed_with_the_deploy_message(self, db, notified):
+    def test_still_running_run_is_failed_with_the_shutdown_message(self, db, notified):
         user = _make_user(db, email="Owner@Example.com")
         run = Run(id="DPLY01", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=30), user_id=user.id)
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=30), user_id=user.id)
         db.add(run)
         db.add(Step(run_id="DPLY01", step_number=4, step_name="x", status="running"))
         db.commit()
@@ -139,13 +143,17 @@ class TestFailRunsInterruptedByShutdown:
 
         db.refresh(run)
         assert run.status == "failed"
-        assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
+        assert run.error_message == SHUTDOWN_INTERRUPT_MESSAGE
+        # #1565: the drain runs on every SIGTERM (node failure, eviction,
+        # scale-down, release); the pod can't tell which, so the message
+        # names no cause.
+        assert "deploy" not in run.error_message.lower()
         assert run.completed_at is not None
         assert db.query(Step).filter(Step.run_id == "DPLY01").one().status == "error"
         # #116: the run's own log says why it ended, and exactly one failure
         # card goes out -- the run's thread never gets to send one.
         assert [(log.level, log.message) for log in db.query(Log).filter(Log.run_id == "DPLY01")] \
-            == [("ERROR", DEPLOY_INTERRUPT_MESSAGE)]
+            == [("ERROR", SHUTDOWN_INTERRUPT_MESSAGE)]
         assert notified == [("DPLY01", "failed", "owner@example.com")]
 
     def test_a_failed_submitter_lookup_still_sends_every_card(self, db, notified, monkeypatch):
@@ -154,7 +162,7 @@ class TestFailRunsInterruptedByShutdown:
         from sqlalchemy.exc import OperationalError
         for run_id in ("DPLY04", "DPLY05"):
             db.add(Run(id=run_id, filename="a.docx", file_type="docx", status="running",
-                       started_at=datetime.now() - timedelta(minutes=30)))
+                       started_at=datetime.now(timezone.utc) - timedelta(minutes=30)))
         db.commit()
 
         def lookup(db_, run):
@@ -169,9 +177,9 @@ class TestFailRunsInterruptedByShutdown:
                                     ("DPLY05", "failed", "owner@example.com")]
 
     def test_run_that_finished_meanwhile_is_untouched(self, db, notified):
-        finished_at = datetime.now() - timedelta(minutes=1)
+        finished_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         run = Run(id="DPLY02", filename="a.docx", file_type="docx", status="complete",
-                  started_at=datetime.now() - timedelta(minutes=20), completed_at=finished_at)
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=20), completed_at=finished_at)
         db.add(run)
         db.commit()
 
@@ -186,7 +194,7 @@ class TestFailRunsInterruptedByShutdown:
 
     def test_run_not_on_this_pod_is_untouched(self, db, notified):
         run = Run(id="DPLY03", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=5))
+                  started_at=datetime.now(timezone.utc) - timedelta(minutes=5))
         db.add(run)
         db.commit()
 
@@ -204,7 +212,7 @@ class TestRestartQuota:
         user = _make_user(db, daily_limit=0)
         _auth_cookie(client, user)
         run = Run(id="QUOTA1", filename="cv.docx", file_type="docx", status="failed",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
 
@@ -220,7 +228,7 @@ class TestRestartQuota:
         user = _make_user(db, email="ok@example.com")
         _auth_cookie(client, user)
         run = Run(id="QUOTA2", filename="cv.docx", file_type="docx", status="failed",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
 
@@ -297,7 +305,7 @@ class TestEmptyUploadRejection:
 
 def _seed_failed_run(db, user, run_id="RETRY1", failed_at=6):
     run = Run(id=run_id, filename="cv.docx", file_type="docx", status="failed",
-              user_id=user.id, started_at=datetime.now(), completed_at=datetime.now(),
+              user_id=user.id, started_at=datetime.now(timezone.utc), completed_at=datetime.now(timezone.utc),
               total_cost=0.5, error_message="boom")
     db.add(run)
     for sd in STEP_REGISTRY:
@@ -360,7 +368,7 @@ class TestRetryStep:
         user = _make_user(db)
         _auth_cookie(client, user)
         run = _seed_failed_run(db, user, run_id="RETRY4", failed_at=6)
-        run.started_at = datetime.now() - timedelta(hours=3)
+        run.started_at = datetime.now(timezone.utc) - timedelta(hours=3)
         db.commit()
 
         from app.api.upload import UPLOAD_DIR
@@ -377,7 +385,7 @@ class TestRetryStep:
         assert reconcile_stale_runs(db) == 0
         run = db.query(Run).filter(Run.id == "RETRY4").first()
         assert run.status == "running"
-        assert run.started_at > datetime.now() - timedelta(minutes=1)
+        assert run.started_at > datetime.now(timezone.utc) - timedelta(minutes=1)
 
     def test_retry_rejects_non_failed_step(self, client, db, seed_simple_mode):
         user = _make_user(db)
@@ -461,10 +469,11 @@ class TestRetryStepQueueModeEnqueueFailure:
 
 def test_prepare_resume_preserves_cost_and_loads_prior_outputs(db, tmp_path):
     import shutil
+
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     run = Run(id="RSME01", filename="cv.docx", file_type="docx", status="failed",
-              total_cost=1.5, started_at=datetime.now())
+              total_cost=1.5, started_at=datetime.now(timezone.utc))
     db.add(run)
     db.commit()
 
@@ -495,10 +504,11 @@ def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
     than a raw filesystem path + errno."""
     import asyncio
     import shutil
+
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     run = Run(id="RSME02", filename="cv.docx", file_type="docx", status="running",
-              total_cost=0.2, started_at=datetime.now())
+              total_cost=0.2, started_at=datetime.now(timezone.utc))
     db.add(run)
     db.commit()
 
@@ -523,6 +533,19 @@ def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
 
 
 # --- #1  per-pod concurrency admission control ------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CAP_ENV_VAR = "CVICHE_MAX_CONCURRENT_RUNS"
+
+
+def _overlay_max_concurrent_runs(overlay: str) -> int:
+    """The CVICHE_MAX_CONCURRENT_RUNS value a k8s overlay's backend patch sets."""
+    patch_path = _REPO_ROOT / "k8s" / "overlays" / overlay / "backend-patch.yaml"
+    deployment = yaml.safe_load(patch_path.read_text())
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    backend = next(c for c in containers if c["name"] == "backend")
+    return int(next(e["value"] for e in backend["env"] if e["name"] == _CAP_ENV_VAR))
+
 
 class TestConcurrencyModule:
     """The process-global slot counter that bounds concurrent in-process runs."""
@@ -553,6 +576,16 @@ class TestConcurrencyModule:
     def test_nonpositive_cap_falls_back_to_default(self, monkeypatch):
         # A 0/negative cap would wedge the pod; we treat it as the default.
         monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "0")
+        assert concurrency.get_max_concurrent_runs() == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
+
+    @pytest.mark.parametrize("overlay", ["dev", "prod"])
+    def test_default_cap_matches_each_k8s_overlay(self, overlay):
+        # #527: the default was 2 while both overlays set 3, so a pod whose env
+        # var went missing would silently run at two-thirds capacity.
+        assert _overlay_max_concurrent_runs(overlay) == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
+
+    def test_unset_env_uses_default_cap(self, monkeypatch):
+        monkeypatch.delenv("CVICHE_MAX_CONCURRENT_RUNS", raising=False)
         assert concurrency.get_max_concurrent_runs() == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
 
     def test_release_never_goes_negative(self):
@@ -616,7 +649,7 @@ class TestConcurrencyAdmission:
         user = _make_user(db)
         _auth_cookie(client, user)
         run = Run(id="BUSY01", filename="cv.docx", file_type="docx", status="created",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
         upload_file = UPLOAD_DIR / "BUSY01.docx"
@@ -641,7 +674,7 @@ class TestConcurrencyAdmission:
         user = _make_user(db, email="free@example.com")
         _auth_cookie(client, user)
         run = Run(id="FREE01", filename="cv.docx", file_type="docx", status="created",
-                  user_id=user.id, started_at=datetime.now())
+                  user_id=user.id, started_at=datetime.now(timezone.utc))
         db.add(run)
         db.commit()
         upload_file = UPLOAD_DIR / "FREE01.docx"
@@ -694,6 +727,7 @@ def _stale_read_after_winner_commits(monkeypatch, run_id, stale_status):
     """
     from sqlalchemy import update
     from sqlalchemy.orm.attributes import set_committed_value
+
     from app.api import runs as runs_api
 
     real = runs_api.check_run_access
@@ -724,7 +758,7 @@ class TestAtomicRunStart:
         _auth_cookie(client, user)
         run_id = f"RACE{status[:2].upper()}1"
         db.add(Run(id=run_id, filename="cv.docx", file_type="docx", status=status,
-                   user_id=user.id, started_at=datetime.now()))
+                   user_id=user.id, started_at=datetime.now(timezone.utc)))
         db.commit()
         upload_file = UPLOAD_DIR / f"{run_id}.docx"
         upload_file.write_bytes(b"dummy")
@@ -747,7 +781,7 @@ class TestAtomicRunStart:
         user = _make_user(db, email="seq@example.com")
         _auth_cookie(client, user)
         db.add(Run(id="SEQ001", filename="cv.docx", file_type="docx", status="created",
-                   user_id=user.id, started_at=datetime.now()))
+                   user_id=user.id, started_at=datetime.now(timezone.utc)))
         db.commit()
         upload_file = UPLOAD_DIR / "SEQ001.docx"
         upload_file.write_bytes(b"dummy")
@@ -819,6 +853,7 @@ def test_orchestrator_rejects_document_uid_that_differs_from_run_id(db, tmp_path
 
 def test_copy_to_pipeline_input_is_per_run_and_overwrites(db, tmp_path, monkeypatch):
     import shutil
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
@@ -842,6 +877,7 @@ def test_copy_to_pipeline_input_converts_a_pdf(db, tmp_path, monkeypatch, cv_pdf
     """#806: a PDF upload is converted into the run's private docx path; the
     upload itself is left untouched as the original."""
     import shutil
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
@@ -865,6 +901,7 @@ def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload, attempts=(
     Log rows."""
     import shutil
     from types import SimpleNamespace
+
     from app.pipeline import orchestrator as orch
 
     monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
@@ -872,7 +909,7 @@ def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload, attempts=(
     monkeypatch.setattr(orch, "STEP_REGISTRY", [SimpleNamespace(number=1, stage_id="1a", name="1a")])
     monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
     db.add(Run(id=run_id, filename="cv.pdf", file_type="pdf", status="running",
-               started_at=datetime.now()))
+               started_at=datetime.now(timezone.utc)))
     db.commit()
     o = orch.PipelineOrchestrator(run_id, upload, db)
     monkeypatch.setattr(o, "execute_step", AsyncMock())
@@ -900,8 +937,8 @@ def test_image_only_pdf_page_is_a_run_warning(db, tmp_path, monkeypatch, cv_pdf)
 
 
 def test_image_only_warning_is_not_repeated_on_retry(db, tmp_path, monkeypatch, cv_pdf):
-    """A retry/resume re-converts the PDF, but the step-1 log already
-    carries the warning from the first attempt (Log rows are never deleted)."""
+    """A retry/resume reuses the first attempt's conversion (#1567), and the
+    step-1 log already carries its warning (Log rows are never deleted)."""
     src = tmp_path / "SCAN02.pdf"
     src.write_bytes(cv_pdf(image_pages=(1,)))
     logs = _execute_one_noop_step(db, monkeypatch, tmp_path, "SCAN02", src, attempts=(None, 1))
@@ -920,6 +957,29 @@ def test_pdf_over_a_parse_limit_fails_the_run_with_its_message(db, tmp_path, mon
     run = db.get(Run, "LONG01")
     assert run.status == "failed"
     assert run.error_message == PDF_TOO_COMPLEX_MESSAGE
+
+
+def test_pdf_conversion_child_sigtermed_does_not_blame_the_file(db, tmp_path, monkeypatch, cv_pdf):
+    """#1566: a conversion child killed by SIGTERM (the pod draining) fails
+    the run with a retry message, never "too large or complex". The action
+    it names must be one the viewer shows for this run: no step is in
+    'error', so "Retry failed step" is hidden and only "Restart with file"
+    is offered."""
+    from app.services import pdf_sandbox
+    src = tmp_path / "SIGT01.pdf"
+    src.write_bytes(cv_pdf())
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP",
+                        "import os, signal; os.kill(os.getpid(), signal.SIGTERM)")
+    db.add(Step(run_id="SIGT01", step_number=1, step_name="1a", status="pending"))
+    _execute_one_noop_step(db, monkeypatch, tmp_path, "SIGT01", src)
+    db.expire_all()
+    run = db.get(Run, "SIGT01")
+    assert run.status == "failed"
+    assert run.error_message == pdf_sandbox.PDF_INTERRUPTED_RUN_MESSAGE
+    assert "too large" not in run.error_message
+    steps = db.query(Step).filter(Step.run_id == "SIGT01").all()
+    assert [s.status for s in steps] == ["pending"]
+    assert run.error_message.split('"')[1::2] == ["Restart with file"]
 
 
 def test_run_waiting_too_long_for_a_pdf_slot_fails_with_its_message(db, tmp_path, monkeypatch, cv_pdf):
@@ -946,6 +1006,7 @@ def test_conversion_runs_off_the_event_loop_thread(db, tmp_path, monkeypatch):
     """#806 review N6: the conversion can wait for a slot and run for
     minutes; it must not block the run's event loop (cancel included)."""
     import threading
+
     from app.pipeline import orchestrator as orch
     seen = {}
     real = orch.PipelineOrchestrator._copy_to_pipeline_input

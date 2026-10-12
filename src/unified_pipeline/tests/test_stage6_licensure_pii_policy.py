@@ -289,11 +289,13 @@ def _agency_row_entry(number="AB1234567"):
     }
 
 
-def _fused_number_entry(number="#12345A, #12345B, 1234567890, #AB1234567"):
+# The fused-cell fixtures use AB1234563, which carries the DEA check digit:
+# outside DEA context only a check-digit-valid token is cut (#1658).
+def _fused_number_entry(number="#12345A, #12345B, 1234567890, #AB1234563"):
     return {
         "taxonomy_code": "F1",
         "text": "Licensed Physician, Example State | #12345A\n #12345B\n 1234567890\n"
-                " #AB1234567 | 2005-Present",
+                " #AB1234563 | 2005-Present",
         "extracted_fields": {"state_country": "Example State",
                              "license_number": number,
                              "issue_date": "2005", "expiration_date": "present"},
@@ -329,15 +331,15 @@ def test_a_dea_token_fused_into_a_licence_number_cell_is_cut_out_and_withheld():
     assert [(r.state, r.number) for r in result.licenses] == [
         ("Example State", "#12345A, #12345B, 1234567890")]
     # the #221 recovery pass re-reads this text: the DEA line is gone from it
-    assert "AB1234567" not in entry["text"]
+    assert "AB1234563" not in entry["text"]
 
 
 def test_fused_dea_token_is_cut_wherever_it_sits_in_the_cell():
     for cell, expected in (
-        ("AB1234567, 12345A, 67890B", "12345A, 67890B"),
-        ("12345A, AB1234567, 67890B", "12345A, 67890B"),
-        ("12345A 67890B AB1234567", "12345A 67890B"),
-        ("12345A; #AB1234567", "12345A"),
+        ("AB1234563, 12345A, 67890B", "12345A, 67890B"),
+        ("12345A, AB1234563, 67890B", "12345A, 67890B"),
+        ("12345A 67890B AB1234563", "12345A 67890B"),
+        ("12345A; #AB1234563", "12345A"),
     ):
         result = _resolve_licensure([_fused_number_entry(cell)])
         assert result.dea_withheld is True, cell
@@ -348,7 +350,7 @@ def test_fused_dea_token_render_has_no_number_and_records_the_notice():
     gen = _generator()
     gen._fill_licensure([_fused_number_entry()])
     text = _all_cell_text(gen)
-    assert "AB1234567" not in text
+    assert "AB1234563" not in text
     assert "#12345A, #12345B, 1234567890" in text
     assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
 
@@ -362,16 +364,16 @@ def test_221_recovery_does_not_reinsert_a_dea_line_fused_into_a_licence_entry():
         "taxonomy_code": "F1",
         "text": "\n".join([
             "State of Example | License #12345A | Issued 05/2016 | Expires 05/2026",
-            "Controlled Substance Registration | #AB1234567 | Issued 05/2016 | Expires 05/2026",
+            "Controlled Substance Registration | #AB1234563 | Issued 05/2016 | Expires 05/2026",
         ]),
         "extracted_fields": {"state_country": "State of Example",
-                             "license_number": "#12345A, #AB1234567",
+                             "license_number": "#12345A, #AB1234563",
                              "issue_date": "2016", "expiration_date": "2026"},
     }
     gen._fill_licensure([entry])
     gen._recover_unrendered_records({"F1": [entry]})
     full = "\n".join([p.text for p in gen.doc.paragraphs] + [_all_cell_text(gen)])
-    assert "AB1234567" not in full, "the fused DEA number leaked into the document"
+    assert "AB1234563" not in full, "the fused DEA number leaked into the document"
 
 
 def test_a_lone_dea_shaped_number_beside_a_stated_state_is_still_a_licence():
@@ -396,6 +398,59 @@ def test_a_nine_letter_word_in_a_number_cell_is_not_cut():
     result = _resolve_licensure([_fused_number_entry("Wisconsin, 12345A")])
     assert result.dea_withheld is False
     assert result.licenses[0].number == "Wisconsin, 12345A"
+
+
+# #1658: a Florida medical licence is "ME" plus seven digits -- the DEA shape.
+# Two of them fused into one cell, neither with the DEA check digit, are
+# licence numbers, not DEA numbers, and must render.
+def _florida_entry(number):
+    return {
+        "taxonomy_code": "F1",
+        "text": f"Florida | {number} | 09/2014",
+        "extracted_fields": {"state_country": "Florida", "license_number": number,
+                             "issue_date": "2014-09"},
+    }
+
+
+def test_fused_check_digit_failing_florida_numbers_are_kept():
+    # the second cell's separator run must survive too: a cell nothing was
+    # cut from is returned as written, not re-punctuated
+    for cell in ("ME1234567, ME7654321", "ME1234567;; ME7654321"):
+        entry = _florida_entry(cell)
+        text_before = entry["text"]
+        result = _resolve_licensure([entry])
+        assert result.dea_withheld is False, cell
+        assert [(r.state, r.number) for r in result.licenses] == [
+            ("Florida", cell)], cell
+        assert entry["text"] == text_before, cell
+
+
+def test_fused_florida_numbers_render_with_no_withheld_notice():
+    gen = _generator()
+    gen._fill_licensure([_florida_entry("ME1234567, ME7654321")])
+    assert "ME1234567, ME7654321" in _all_cell_text(gen)
+    assert gen._pii_result.withheld == []
+
+
+def test_a_check_digit_valid_dea_token_beside_a_florida_number_is_still_cut():
+    gen = _generator()
+    entry = _florida_entry("ME1234567, AB1234563")
+    gen._fill_licensure([entry])
+    text = _all_cell_text(gen)
+    assert "AB1234563" not in text
+    assert "ME1234567" in text
+    assert "AB1234563" not in entry["text"]
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
+
+
+def test_a_check_digit_failing_token_is_cut_when_the_entry_names_dea():
+    """DEA context wins over the check digit, as in the doctor's probe: a
+    mis-transcribed DEA number in an entry that names DEA is still cut."""
+    entry = _fused_number_entry("12345A, #AB1234567")
+    entry["text"] = "Licensed Physician, Example State; DEA registration on file"
+    result = _resolve_licensure([entry])
+    assert result.dea_withheld is True
+    assert result.licenses[0].number == "12345A"
 
 
 # ---------------------------------------------------------------------------

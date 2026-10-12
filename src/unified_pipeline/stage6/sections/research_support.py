@@ -81,6 +81,8 @@ RESEARCH_SUPPORT_SECTIONS = (
     ('M2B', 'Past (Completed) Funding'),
     ('M2C', 'Pending Funding'),
 )
+# The bucket whose amounts are requests, not awards (#1299, #1343).
+PENDING_GRANT_CODE = 'M2C'
 
 
 class GrantFields(TypedDict, total=False):
@@ -827,6 +829,123 @@ def claim_goal_rows(grants: list[dict], rows: list[dict]) -> list[tuple[dict, di
     return claimed
 
 
+# A grant row that only points back at an earlier one (#1485): "1979-81 NIH
+# NS-10304 (see above), total $20,350." or "1989-92 NIH NS-21981 Renewal, PI".
+# The key is the label the resolved row's title carries. "competing renewal" is
+# listed before "renewal" so the longer phrase wins the alternation.
+BACK_REFERENCE_KINDS = (
+    ('see above', 'continuation'),
+    ('continuation', 'continuation'),
+    ('competing renewal', 'renewal'),
+    ('renewal', 'renewal'),
+)
+BACK_REFERENCE_RE = re.compile(
+    r'\b(' + '|'.join(re.escape(phrase) for phrase, _ in BACK_REFERENCE_KINDS) + r')\b',
+    re.IGNORECASE,
+)
+_BACK_REFERENCE_LABELS = dict(BACK_REFERENCE_KINDS)
+# A note that is nothing but the back-reference ("see above", "(Renewal)"): it
+# says nothing once the title carries the label, so it is dropped.
+BACK_REFERENCE_NOTE_RE = re.compile(
+    r'^\W*(?:' + '|'.join(re.escape(phrase) for phrase, _ in BACK_REFERENCE_KINDS) + r')\W*$',
+    re.IGNORECASE,
+)
+# A grant-number token identifies the award only when it carries this many
+# digits: "NS-10304" does, a bare activity code like "R01" does not.
+GRANT_ID_MIN_DIGITS = 4
+_GRANT_ID_TOKEN_SPLIT_RE = re.compile(r'[\s,;()\[\]]+')
+_TITLE_KEYS = ('title', 'trial_title', 'study_title')
+
+
+def grant_id_tokens(grant_number: str | None) -> frozenset[str]:
+    """The award identifiers in a grant number, normalized for comparison.
+
+    "NIH NS-21981" and "NS-21981" both give {"NS21981"}: the agency word carries
+    no digits and drops out, and punctuation inside a token is ignored.
+    """
+    tokens = (re.sub(r'[^0-9A-Z]', '', token.upper())
+              for token in _GRANT_ID_TOKEN_SPLIT_RE.split(grant_number or ''))
+    return frozenset(token for token in tokens
+                     if sum(char.isdigit() for char in token) >= GRANT_ID_MIN_DIGITS)
+
+
+def _grant_title(fields: GrantFields) -> str:
+    return next((str(fields.get(key) or '').strip() for key in _TITLE_KEYS
+                 if str(fields.get(key) or '').strip()), '')
+
+
+def _back_reference_label(entry: dict) -> str | None:
+    """'continuation' or 'renewal' for an untitled row that points back, else None."""
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    if _grant_title(fields):
+        return None
+    match = BACK_REFERENCE_RE.search(entry.get('text') or '')
+    return _BACK_REFERENCE_LABELS[match.group(1).lower()] if match else None
+
+
+def _source_start(entry: dict) -> int | None:
+    start = entry.get('element_idx_start')
+    return start if isinstance(start, int) else None
+
+
+def _find_referent(row: dict, titled: list[dict]) -> dict | None:
+    """The nearest earlier titled grant sharing an award identifier with `row`.
+
+    The grant number, not proximity, is the link: in the RINASX record that
+    raised #1485 none of the three back-reference rows points at the grant
+    directly before it. No shared identifier, or no source position, is no match.
+    """
+    row_start = _source_start(row)
+    row_ids = grant_id_tokens(cast(GrantFields, row['extracted_fields']).get('grant_number'))
+    if row_start is None or not row_ids:
+        return None
+    earlier = [
+        (start, grant) for grant in titled
+        if (start := _source_start(grant)) is not None and start < row_start
+        and row_ids & grant_id_tokens(
+            cast(GrantFields, grant['extracted_fields']).get('grant_number'))
+    ]
+    return max(earlier, key=lambda pair: pair[0], default=(None, None))[1]
+
+
+def _attach_to_referent(row: dict, referent: dict, label: str) -> None:
+    """Give a back-reference row its referent's title, and PI when it names none."""
+    fields = cast(GrantFields, row['extracted_fields'])
+    source = cast(GrantFields, referent['extracted_fields'])
+    fields['title'] = f'{_grant_title(source)} ({label})'
+    if not fields.get('pi_name') and not fields.get('pi_role'):
+        fields['pi_name'] = source.get('pi_name')
+        fields['pi_role'] = source.get('pi_role')
+    if BACK_REFERENCE_NOTE_RE.match(str(fields.get('notes') or '')):
+        fields['notes'] = None
+
+
+def resolve_grant_back_references(grants: list[dict]) -> int:
+    """Title each "see above" / "Renewal" grant row after the grant it continues (#1485).
+
+    A CV that lists a continuation or renewal as its own row gives it only a
+    grant number, dates and money. Rendered as is, it is a grant with no title,
+    and the reverse-date sort puts it under an unrelated grant, so "see above"
+    names the wrong project. Such a row -- no title, a back-reference word in
+    its text -- takes the title of the earlier grant with the same award
+    identifier, labelled "(continuation)" or "(renewal)", plus that grant's PI
+    name and role when the row states neither. A row with no such grant is left
+    as it was. Writes land on this section's copies (`copy_entries_for_render`).
+
+    Returns how many rows were resolved.
+    """
+    titled = [grant for grant in grants
+              if _grant_title(cast(GrantFields, grant.get('extracted_fields') or {}))]
+    resolved = 0
+    for row in grants:
+        label = _back_reference_label(row)
+        referent = _find_referent(row, titled) if label else None
+        if label and referent:
+            _attach_to_referent(row, referent, label)
+            resolved += 1
+    return resolved
+
+
 # A grant's own text often names its PI, and `co_investigators` (which resolve_pi_name
 # no longer reads) sometimes held exactly that name. These are the shapes the
 # corpus carries, tried in this order, first hit wins:
@@ -896,14 +1015,60 @@ _QUALIFIED_PI_PHRASE_RE = re.compile(
     re.IGNORECASE)
 _NAME_JOINER_RE = re.compile(r" (?:&|and) ")
 _NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
+# Words that name a sponsor, an award, a programme or a role, never a person.
+# A label capture holding one is the text before the owner's own "(PI)" or
+# ", Principal Investigator" label: "Society. Research Scholar Award (PI)",
+# "Acme Foundation, Principal Investigator" (#1571, SLYBST and DYLJXC). Matched
+# case-folded against whole tokens with a trailing period removed. "Grant" is
+# left out on purpose: it is a given name and a surname, and every corpus
+# capture it would catch already carries another word here or a sentence break.
+SPONSOR_OR_AWARD_WORDS = frozenset({
+    'award', 'awards', 'fellowship', 'fellowships', 'scholar', 'scholars',
+    'scholarship', 'foundation', 'society', 'association', 'institute',
+    'institutes', 'initiative', 'supplement', 'program', 'programs', 'project',
+    'projects', 'study', 'studies', 'hospital', 'university', 'center', 'centre',
+    'college', 'health', 'pharmacy', 'fund', 'trust', 'council', 'extramural',
+    'intramural', 'investigator', 'officer',
+})
+# Period-ended tokens longer than an initial that still belong inside a name:
+# "Mrs. Ann Lee", "Prof. Bo Li", "Drs. Lee & Park". "Dr.", "Mr.", "St." and an
+# initial are two letters or fewer and pass on length.
+_NAME_TITLE_ABBREVIATIONS = frozenset({'mrs', 'drs', 'prof', 'rev', 'hon'})
+
+
+def _is_sentence_break(token: str) -> bool:
+    """True when `token` ends a sentence: "Society." but not "M.", "Dr." or "Ph.D."."""
+    bare = token[:-1]
+    return (token.endswith('.') and '.' not in bare and len(bare) > 2
+            and bare.casefold() not in _NAME_TITLE_ABBREVIATIONS)
+
+
+def _is_person_name_capture(capture: str) -> bool:
+    """False when a label capture is sponsor, award or role text, not people.
+
+    That is when a token is in SPONSOR_OR_AWARD_WORDS, or a token before the
+    last ends a sentence ("Foundation. Junior Faculty Award"). The whole
+    capture is tested, so a joined one ("Leukemia and Lymphoma Society.
+    Postdoctoral Fellowship") fails when either side does.
+    """
+    tokens = capture.split()
+    if any(t.rstrip('.').casefold() in SPONSOR_OR_AWARD_WORDS for t in tokens):
+        return False
+    return not any(_is_sentence_break(t) for t in tokens[:-1])
 
 
 def _pi_name_from_label(raw_text: str) -> str:
-    """The PI a grant's own text names, or '' when it names none."""
+    """The PI a grant's own text names, or '' when it names none.
+
+    A capture that is sponsor or award text (`_is_person_name_capture`) is
+    skipped and the search goes on, so the caller falls through to its next
+    source when nothing else matches (#1571).
+    """
     for pattern in PI_LABEL_PATTERNS:
-        match = pattern.search(raw_text or '')
-        if match:
-            return match.group(1).strip()
+        for match in pattern.finditer(raw_text or ''):
+            capture = match.group(1).strip()
+            if _is_person_name_capture(capture):
+                return capture
     return ''
 
 
@@ -1093,7 +1258,10 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
 ANNUAL_COSTS_LABEL = 'Annual direct costs:'
 # The rows the doctor's role_consistency lint reads back off a rendered grant
 # table (#1403): the PI cell, the owner's role, and the title it names the
-# grant by.
+# grant by. grant_facts (#1588) reads the grant number off the Award Source
+# row, the amounts off the costs rows and the years off the duration row.
+AWARD_SOURCE_LABEL = 'Award Source:'
+DURATION_LABEL = 'Duration of support:'
 PROJECT_TITLE_LABEL = 'Project title:'
 PI_NAME_LABEL = 'Name of Principal Investigator:'
 YOUR_ROLE_LABEL = 'Your role:'
@@ -1111,7 +1279,8 @@ SHARE_LABEL = 'Your share of award:'
 
 
 def _optional_grant_rows(
-    fields: GrantFields, title: str, pi_name: str | None
+    fields: GrantFields, title: str, pi_name: str | None,
+    cost_rows: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """The rows after the eight the WCM template defines, each only when it has text.
 
@@ -1124,6 +1293,9 @@ def _optional_grant_rows(
     Total requested and Submitted (#1299) carry the two M2C schema fields
     nothing else reads: a pending grant's requested amount and its submission
     date. Your share of award (#817) carries the off-schema `share_total`.
+    The requested row is skipped when `cost_rows` already carries that amount
+    under the same label: a grant moved into Pending renders its
+    `total_funding` as "Total requested:" (#1343).
 
     Status and Notes (#982) keep a grant's own status word and labelled remark
     ("Update: withdrawn"), which reached no cell before. Major project goals
@@ -1138,7 +1310,7 @@ def _optional_grant_rows(
     if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
         rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
     requested = _format_currency(fields.get('total_funding_requested'))
-    if requested:
+    if requested and (TOTAL_REQUESTED_LABEL, requested) not in cost_rows:
         rows.append((TOTAL_REQUESTED_LABEL, requested))
     share = _format_currency(fields.get('share_total'))
     if share:
@@ -1175,17 +1347,24 @@ def _first_rendering_amount(fields: GrantFields) -> str | int | float:
 
 
 def _format_grant_costs(
-    annual_costs: str | int | float | None, total_funding: str | int | float | None
+    annual_costs: str | int | float | None, total_funding: str | int | float | None,
+    code: str,
 ) -> list[tuple[str, str]]:
     """The costs rows as (label, currency text) pairs.
 
     `annual_costs` goes under "Annual direct costs:" whenever it renders. A
-    `total_funding` that renders goes under "Total award:", never under
-    "Annual": alone it is the only costs row, and beside a different yearly
-    amount it is a second row, so neither figure is dropped. With neither, the
-    template's own label and an empty cell. Both arguments are
-    `_create_grant_table`'s locals rather than fresh `fields` reads, so a
-    duplicate-of-title blanking made before the call is what renders here too.
+    `total_funding` that renders goes under "Total award:" (under Pending,
+    `code` M2C, "Total requested:"), never under "Annual": alone it is the
+    only costs row, and beside a different yearly amount it is a second row,
+    so neither figure is dropped. With neither, the template's own label and
+    an empty cell. Both arguments are `_create_grant_table`'s locals rather
+    than fresh `fields` reads, so a duplicate-of-title blanking made before
+    the call is what renders here too.
+
+    Only a grant moved into Pending from M2A/M2B carries `total_funding` under
+    M2C (M2C's schema names it `total_funding_requested`), and what moved it
+    -- its status or its heading -- says it awaits or lost a decision, so its
+    amount is a request, not an award (#1343).
     """
     annual_formatted = _format_currency(annual_costs)
     total_formatted = _format_currency(total_funding)
@@ -1193,8 +1372,13 @@ def _format_grant_costs(
     if annual_formatted or not total_formatted:
         rows.append((ANNUAL_COSTS_LABEL, annual_formatted))
     if total_formatted and total_formatted != annual_formatted:
-        rows.append((TOTAL_AWARD_LABEL, total_formatted))
+        rows.append((_total_amount_label(code), total_formatted))
     return rows
+
+
+def _total_amount_label(code: str) -> str:
+    """The label a grant's `total_funding` renders under in bucket `code`."""
+    return TOTAL_REQUESTED_LABEL if code == PENDING_GRANT_CODE else TOTAL_AWARD_LABEL
 
 
 class ResearchSupportSection:
@@ -1279,6 +1463,7 @@ class ResearchSupportSection:
 
         grants = m2a_entries + m2b_entries + m2c_entries
         fill_major_goals_from_text(grants)
+        resolve_grant_back_references(grants)
         claimed_goal_rows = claim_goal_rows(grants, entries_by_code.get('T', []))
         rendered_grant_ids: set[int] = set()
 
@@ -1467,7 +1652,7 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
-        cost_rows = _format_grant_costs(annual_direct_costs, total_funding)
+        cost_rows = _format_grant_costs(annual_direct_costs, total_funding, code)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --
@@ -1481,15 +1666,15 @@ class ResearchSupportSection:
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
         rows = [
-            ('Award Source:', agency),
+            (AWARD_SOURCE_LABEL, agency),
             (PROJECT_TITLE_LABEL, title),
             *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
-            ('Duration of support:', self._format_grant_duration(fields, code, raw_text)),
+            (DURATION_LABEL, self._format_grant_duration(fields, code, raw_text)),
             (PI_NAME_LABEL, pi_name),
             (YOUR_ROLE_LABEL, role),
             ('Your percent (%) effort:', percent_effort),
-            *_optional_grant_rows(fields, title, pi_name),
+            *_optional_grant_rows(fields, title, pi_name, cost_rows),
         ]
 
         # Create a new table with 2 columns

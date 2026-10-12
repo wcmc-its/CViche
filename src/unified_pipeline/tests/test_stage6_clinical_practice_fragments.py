@@ -52,9 +52,10 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
-from unified_pipeline.stage6.sections.clinical_practice import _bullet_parts  # noqa: E402
+from unified_pipeline.stage6.sections.clinical_practice import (
+    _bullet_parts,  # noqa: E402
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
-
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -314,6 +315,53 @@ def test_second_entry_renders_after_the_first_not_inside_it(code, filler, header
     ]
 
 
+# --- (a0) #1434: L1 list numbers; L3 undated rows keep their institution ---
+
+def test_l1_bullet_drops_the_source_list_number():
+    """The CV numbered its own L1 items ("8. ..."); the bullet is the marker."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l1",
+        [_entry("8. Harbor Cup Regatta (event physician), Kestrel City, 2000- 2004")])
+    assert added == ["", "Harbor Cup Regatta (event physician), Kestrel City, 2000- 2004"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("12) Event physician\n(3) Team physician", ["Event physician", "Team physician"]),
+    ("Event physician\t2. Team physician", ["Event physician", "2. Team physician"]),
+    ("2004. Event physician", ["2004. Event physician"]),
+    ("3.5 sessions per week", ["3.5 sessions per week"]),
+])
+def test_l1_strips_a_list_number_only_at_the_start_of_a_line(text, expected):
+    """Every line's own number goes; a mid-line number, a four-digit year and
+    a decimal are content."""
+    gen, added = _render_through_template("_fill_clinical_practice_l1", [_entry(text)])
+    assert [line for line in added if line] == expected
+
+
+def test_l3_undated_rows_at_two_institutions_do_not_read_as_duplicates():
+    """Two dateless rows with one role used to render as two identical bare
+    role bullets; the institution stage 4 extracted tells them apart."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director", leadership_role="Medical Director",
+                institution="Harrowgate Hospital"),
+         _entry("Medical Director", leadership_role="Medical Director",
+                institution="Birch Hollow Clinic")])
+    assert [line for line in added if line] == [
+        "Medical Director, Harrowgate Hospital", "Medical Director, Birch Hollow Clinic"]
+
+
+def test_l3_undated_row_does_not_repeat_an_institution_the_role_names():
+    """A narrative row whose text already names the institution stays as written."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Grow diagnostic testing with colleagues at Harrowgate Hospital.",
+                leadership_role="Grow diagnostic testing with colleagues at Harrowgate Hospital.",
+                institution="Harrowgate Hospital")])
+    assert [line for line in added if line] == [
+        "Grow diagnostic testing with colleagues at Harrowgate Hospital."]
+
+
 # --- (a1) L3 `unit_program`: the unit the role led reaches the bullet -------
 
 def test_l3_bullet_names_the_unit_program_between_role_and_institution():
@@ -370,6 +418,42 @@ def test_l3_unit_program_is_not_rendered_again_as_a_source_fragment():
                 start_date="2015", end_date="2020")],
     )
     assert added == ["", "Medical Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
+
+
+# --- (a1b) #1583: a paragraph whose printed lines arrived as parts ----------
+
+# One prose paragraph whose source lines each became their own paragraph (a
+# PDF the converter did not fold), joined with tabs by stage 2, then a dated
+# institution line. Over 300 characters, so it can reach the overflow router.
+SHATTERED_LINES = [
+    "Division Chief, Example Pathology. I led the establishment",
+    "of a new clinical division providing molecular diagnostics for",
+    "infectious diseases at Example Hospital. I have also integrated",
+    "many translational research tests into our clinical service",
+    "including whole genome sequencing of pathogens and metagenomic",
+    "sequencing for the hospital laboratories of the region.",
+    "Example Hospital, 2015-2023",
+]
+SHATTERED_CASE = "\t".join(SHATTERED_LINES)
+SHATTERED_FOLDED = [" ".join(SHATTERED_LINES[:6]), SHATTERED_LINES[6]]
+
+
+@pytest.mark.parametrize("filler", ["_fill_clinical_practice_l1", "_fill_clinical_practice_l2"])
+def test_shattered_paragraph_renders_as_one_bullet_not_one_per_line(filler):
+    gen, added = _render_through_template(filler, [_entry(SHATTERED_CASE)])
+    assert gen.stats["tables_populated"] == 0
+    assert added == ["", *SHATTERED_FOLDED]
+
+
+def test_shattered_l3_overflow_renders_as_one_bullet_not_one_per_line():
+    """IZABPD 477's path: the L3 bullet is composed from stage-4 fields,
+    coverage is low, so the overflow router re-emits the source text."""
+    entry = _low_coverage_entry(SHATTERED_CASE, "L3")
+    entry["extracted_fields"] = {"leadership_role": "Division Chief", "institution": "Example Hospital",
+                                 "start_date": "2015", "end_date": "2023"}
+    gen, added = _render_through_template("_fill_clinical_practice_l3", [entry], route_overflow=True)
+    assert gen.stats["overflow_bullets_added"] == 1
+    assert added == ["", *SHATTERED_FOLDED]
 
 
 # --- (a2) the overflow router: does the split make stage 6 render it twice? --

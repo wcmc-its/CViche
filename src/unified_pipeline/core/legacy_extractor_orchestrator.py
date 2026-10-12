@@ -18,13 +18,13 @@ Author: CV Parsing Pipeline
 Date: November 4, 2025
 """
 
+import asyncio
+import importlib.util
 import json
 import sys
-import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import importlib.util
 
 # Add legacy scripts to path
 LEGACY_SCRIPTS_DIR = Path(__file__).parent.parent.parent / "legacy" / "stage_based_extraction" / "scripts" / "production"

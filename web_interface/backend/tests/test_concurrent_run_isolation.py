@@ -43,8 +43,8 @@ RUN_IDS = ["LEAKRUNA", "LEAKRUNB", "LEAKRUNC"]
 
 def test_concurrent_runs_do_not_cross_contaminate(monkeypatch, tmp_path):
     from app.database import Base
+    from app.models import Log, Run
     from app.pipeline import orchestrator as orch
-    from app.models import Run, Log
     from unified_pipeline.core import prompt_logger as prompt_logger_mod
     from unified_pipeline.stage_5b_institution_enrichment import (
         INSTITUTION_CACHE,

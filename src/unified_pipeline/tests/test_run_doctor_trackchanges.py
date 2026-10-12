@@ -169,3 +169,54 @@ if __name__ == "__main__":
     test_docx_text_with_whitespace_skips_tab_stops_deletions_and_page_breaks()
     test_docx_text_empty_paragraph()
     print("OK")
+
+
+# --- sub-points (#1205): stage 6's tracked-deleted source prose ---------------
+
+_SUBPOINT_PROSE = "Coordinates the example curriculum committee and supervises graduate trainees"
+
+
+def _doc_with_a_sub_point_row_and_another_deletion():
+    """A table row with a sub-point row under it (stage6/supplementary.py's
+    writer), plus a body paragraph with a formatter's tracked deletion."""
+    from unified_pipeline.stage6.supplementary import Revision, write_row_subpoint
+
+    doc = Document()
+    doc.add_paragraph().add_run("Lecturer")._r.addnext(parse_xml(
+        f'<w:del {nsdecls("w")} w:id="90" w:author="Formatter" w:date="2026-01-01T00:00:00Z">'
+        '<w:r><w:delText>old wording</w:delText></w:r></w:del>'))
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Lecturer"
+    table.rows[0].cells[1].text = "Example College"
+    line = write_row_subpoint(table.rows[0]._tr, (_SUBPOINT_PROSE,), Revision(1, "2026-01-01T00:00:00Z"))
+    return doc, line
+
+
+def test_docx_subpoint_lines_reads_only_the_sub_points():
+    from unified_pipeline.doctor.shared import docx_subpoint_lines
+
+    doc, line = _doc_with_a_sub_point_row_and_another_deletion()
+    assert docx_subpoint_lines(doc) == [_SUBPOINT_PROSE]
+    # The row's line, as a reader who rejects the deletion sees the entry.
+    assert line == f"Lecturer Example College {_SUBPOINT_PROSE}"
+
+
+def test_read_docx_subpoints_feeds_offered_as_subpoint(tmp_path):
+    from unified_pipeline.doctor.shared import offered_as_subpoint
+    from unified_pipeline.run_doctor import read_docx_subpoints
+
+    doc, _line = _doc_with_a_sub_point_row_and_another_deletion()
+    path = tmp_path / "out.docx"
+    doc.save(str(path))
+    subpoints = read_docx_subpoints(str(path))
+    # Verbatim -- also inside a record line most of whose words are elsewhere --
+    # and reworded on the same line's words.
+    assert offered_as_subpoint(f"2019-2021\tLecturer\t{_SUBPOINT_PROSE}", subpoints)
+    assert offered_as_subpoint("Lecturer, Northfield Regional Hospital, Department of "
+                               f"Anaesthesiology Research\t{_SUBPOINT_PROSE}", subpoints)
+    assert offered_as_subpoint("supervises graduate trainees, coordinates curriculum committee",
+                               subpoints)
+    # The formatter's deletion is not a sub-point; nor is unrelated prose.
+    assert not offered_as_subpoint("old wording", subpoints)
+    assert not offered_as_subpoint("Chairs the departmental finance review panel", subpoints)
+    assert not offered_as_subpoint(_SUBPOINT_PROSE, None)

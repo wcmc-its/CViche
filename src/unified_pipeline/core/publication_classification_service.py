@@ -14,7 +14,10 @@ import json
 from datetime import datetime
 
 from .bulk_pubmed_fetcher import BulkPubMedFetcher
-from .unified_publication_classifier import classify_publication_any, ClassificationResult
+from .unified_publication_classifier import (
+    ClassificationResult,
+    classify_publication_any,
+)
 
 
 class PublicationClassificationService:

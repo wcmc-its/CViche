@@ -8,6 +8,7 @@ enforced sync)."""
 from collections.abc import Mapping
 from typing import Any
 
+
 def entry_fragments(text: str | None) -> list[str]:
     """An entry's fragments: per line, per '|' cell, and per tab cell.
 

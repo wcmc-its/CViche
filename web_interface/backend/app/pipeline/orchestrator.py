@@ -4,21 +4,22 @@ Pipeline orchestrator - coordinates execution of all 12 pipeline stages.
 Uses run_full_pipeline.py stage functions directly.
 Stages: 1a, 1b, 2, 3a, 3b, 4, 4.5, 5, 5b, 5c, 5d, 6
 """
+import asyncio
 import contextvars
+import io
 import json
 import logging
-import time
-import asyncio
 import os
 import re
 import shutil
-import traceback
 import threading
-import io
-from pathlib import Path
-from datetime import datetime
-from typing import Any
+import time
+import traceback
 from collections.abc import Iterator, Mapping
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,17 +27,19 @@ logger = logging.getLogger(__name__)
 
 # Add parent project to path to import existing pipeline code
 import sys
+
 PARENT_DIR = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(PARENT_DIR))
 sys.path.insert(0, str(PARENT_DIR / 'src'))
 
-from app.models import Run, Step, Log
-from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
+from app.config_loader import current_image_tag, get_config
+from app.models import Log, Run, RunState, Step
 from app.pipeline.event_emitter import event_emitter
+from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
+from app.services.review_comments import REVIEW_DOCX_ERRORS, comment_map_path, write_review_docx
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.config_loader import get_config
 
 # The pipeline's prompt_logger writes per-LLM-call transcripts here. We
 # replicate fresh files into per-run storage so they survive container
@@ -45,31 +48,61 @@ PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
 
 
 # Import stage functions from run_full_pipeline.py dependencies
-from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
+from app.services.pdf_sandbox import (
+    PDF_BUSY_RUN_MESSAGE,
+    PDF_INTERRUPTED_RUN_MESSAGE,
+    PDF_TIMEOUT_RUN_MESSAGE,
+    PDF_TOO_COMPLEX_MESSAGE,
+    ConversionResult,
+    PdfBusyError,
+    PdfInterruptedError,
+    PdfTimeoutError,
+    PdfTooComplexError,
+    convert_pdf,
+)
+from app.timeutil import utc_now
+from unified_pipeline.core.prompt_logger import reset_current_run_id, set_current_run_id
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage
+from unified_pipeline.repair.protected_data import (
+    REPAIR_FLAG_ENV,
+    repair_flag_on,
+    repairs_report_path,
+)
+from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+    get_cv_hierarchy_chunked,
+)
+from unified_pipeline.stage6.supplementary import (
+    SUBPOINT_FLAG_DEFAULT,
+    SUBPOINT_FLAG_ENV,
+    subpoints_enabled,
+)
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
 from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
 from unified_pipeline.stage_3b_entry_classifier import run_stage_3b
-from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
 from unified_pipeline.stage_4_5_research_summary import run_stage_4_5
+from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
 from unified_pipeline.stage_5_pubmed_enrichment import run_stage5
 from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
-from unified_pipeline.repair.protected_data import REPAIR_FLAG_ENV, repair_flag_on, repairs_report_path
-from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
-from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
-from unified_pipeline.llm.retry import LLMOutageError
-from unified_pipeline.llm_client import LlmUsage
-from app.services.pdf_sandbox import (
-    PDF_BUSY_RUN_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfBusyError,
-    PdfTooComplexError, convert_pdf,
+from unified_pipeline.stage_errors import (
+    StageError,
+    record_stage_outcome,
+    stage_errors_path,
 )
 
 # An upload with this suffix is converted, not copied, into the run's private
 # docx (#806); upload.py stores a PDF as {run_id}.pdf.
 _PDF_SUFFIX = ".pdf"
+
+# Durable home of a PDF run's converted docx, so a resume reuses it instead of
+# converting again (#1567). Not input/ (the quality scorer's source-docx gate
+# lists that prefix) and not outputs/ (downloads and the scorer read every key
+# there).
+_CONVERTED_INPUT_PREFIX = "converted/"
 
 
 def _now() -> float:
@@ -143,6 +176,12 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
     chain = list(_exception_chain(exc))
     if any(isinstance(e, LLMOutageError) for e in chain):
         return LLM_OUTAGE_MESSAGE
+    # A signal or a timeout is not the file's fault (#1566); PdfTimeoutError
+    # is a PdfTooComplexError, so it is tested first.
+    if isinstance(exc, PdfInterruptedError):
+        return PDF_INTERRUPTED_RUN_MESSAGE
+    if isinstance(exc, PdfTimeoutError):
+        return PDF_TIMEOUT_RUN_MESSAGE
     if isinstance(exc, PdfTooComplexError):
         return PDF_TOO_COMPLEX_MESSAGE
     if isinstance(exc, PdfBusyError):
@@ -234,6 +273,10 @@ USER_CANCEL_MESSAGE = "Cancelled by user"
 #: The research-summary stage: the one stage whose failure does not fail the
 #: run (#1174, `_run_research_summary_stage`).
 RESEARCH_SUMMARY_STAGE_ID = "4.5"
+
+# The doctor report's record of the image that ran its lints (#1239); null when
+# the image was built without a tag.
+DOCTOR_IMAGE_TAG_KEY = "image_tag"
 
 
 class CancelledException(Exception):
@@ -675,7 +718,7 @@ class PipelineOrchestrator:
         self._stage_guard.raise_if_stopped()  # stage 2's intra-stage callback (#590)
         with self.db.get_bind().connect() as conn:
             status = conn.execute(select(Run.status).where(Run.id == self.run_id)).scalar()
-        if status == "cancelled" or is_cancelled(self.run_id):
+        if status == RunState.CANCELLED or is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
     def _pipeline_input_path(self) -> Path:
@@ -693,18 +736,77 @@ class PipelineOrchestrator:
         """
         dest_path = self._pipeline_input_path()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        if Path(self.file_path).suffix.lower() == _PDF_SUFFIX:
-            self.pdf_conversion = convert_pdf(self.file_path, dest_path)
+        if self._upload_is_pdf():
+            # Converted beside the destination and moved into place, so a
+            # failed conversion never leaves a partial docx that a later
+            # resume would reuse (#1567).
+            partial = dest_path.with_name(f"{dest_path.stem}.converting.docx")
+            try:
+                self.pdf_conversion = convert_pdf(self.file_path, partial)
+                os.replace(partial, dest_path)
+            finally:
+                partial.unlink(missing_ok=True)
+            self._persist_converted_input(dest_path)
         else:
             shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
+
+    def _upload_is_pdf(self) -> bool:
+        return Path(self.file_path).suffix.lower() == _PDF_SUFFIX
+
+    def _converted_input_key(self) -> str:
+        return f"{_CONVERTED_INPUT_PREFIX}{self.document_uid}.docx"
+
+    def _persist_converted_input(self, path: Path) -> None:
+        """Mirror a freshly converted docx to durable storage (#1567).
+        Best-effort: without the copy, a resume on another pod converts again,
+        which is the behaviour before #1567 -- not a reason to fail the run."""
+        try:
+            get_storage().put_file(self.run_id, self._converted_input_key(), path.read_bytes())
+        except Exception:
+            logger.warning(
+                "Could not persist the converted docx for run %s; a resume on "
+                "another pod will convert the PDF again", self.run_id, exc_info=True)
+
+    def _reuse_converted_input(self) -> str | None:
+        """The docx an earlier attempt of this PDF run converted, or None when
+        no copy survives (#1567). The pod-local copy first, then durable
+        storage. Stages 1b, 2, 4 and 6 and the doctor all open this docx, so
+        reusing it also gives them the same bytes stage 1a segmented."""
+        dest = self._pipeline_input_path()
+        if dest.is_file():
+            return str(dest)
+        try:
+            data = get_storage().get_file(self.run_id, self._converted_input_key())
+        except FileNotFoundError:
+            return None  # attempt 1 predates #1567, or its persist failed
+        except Exception:
+            logger.warning(
+                "Could not rehydrate the converted docx for run %s; converting "
+                "the PDF again", self.run_id, exc_info=True)
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        logger.info("Rehydrated the converted docx for run %s from storage", self.run_id)
+        return str(dest)
+
+    def _materialize_pipeline_input(self, resuming: bool) -> str:
+        """This run's private docx. A resumed PDF run reuses its earlier
+        conversion (#1567): converting again costs a sandbox slot and up to
+        PDF_CONVERT_TIMEOUT_SECONDS, and a failure then failed a run whose
+        remaining stages only needed that same docx."""
+        if resuming and self._upload_is_pdf():
+            reused = self._reuse_converted_input()
+            if reused is not None:
+                return reused
+        return self._copy_to_pipeline_input()
 
     async def _warn_image_only_pages(self) -> None:
         """Name a converted PDF's image-only pages in the run log (#536):
         their text never reaches the pipeline, so the output silently lacks
         it otherwise. Logged under the first stage, which the user sees first,
-        and on a run's first attempt only: a retry or resume re-converts but
-        the step-1 log already carries the warning."""
+        and on a run's first attempt only: a retry or resume reuses that
+        conversion (#1567), and the step-1 log already carries the warning."""
         if self.pdf_conversion is None or not self.pdf_conversion.image_only_pages:
             return
         pages = ", ".join(str(n) for n in self.pdf_conversion.image_only_pages)
@@ -946,10 +1048,12 @@ class PipelineOrchestrator:
             if start_step_number is None:
                 await self._notify_started(run)
 
-            # Copy (or, for a PDF, convert) the upload to the pipeline input dir
+            # Copy (or, for a PDF, convert; on a resume, reuse) the upload to
+            # the pipeline input dir.
             # Off the loop: a PDF conversion can wait for a sandbox slot and
             # then run for minutes, and the loop must keep serving events.
-            cv_path = await asyncio.to_thread(self._copy_to_pipeline_input)
+            cv_path = await asyncio.to_thread(
+                self._materialize_pipeline_input, start_step_number is not None)
             if start_step_number is None:
                 await self._warn_image_only_pages()
 
@@ -980,12 +1084,12 @@ class PipelineOrchestrator:
             # worker's in-process flag. Either way we must not flip it back to
             # "complete".
             self.db.refresh(run)
-            if run.status == "cancelled" or is_cancelled(self.run_id):
+            if run.status == RunState.CANCELLED or is_cancelled(self.run_id):
                 raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
             duration = int(_now() - start_time)
-            run.status = "complete"
-            run.completed_at = datetime.now()
+            run.status = RunState.COMPLETE
+            run.completed_at = utc_now()
             # Persist the authoritative pipeline duration (previously only emitted
             # over the WebSocket) so historical conversion-time metrics are queryable.
             _record_total_duration(run, duration, start_step_number is not None)
@@ -993,19 +1097,6 @@ class PipelineOrchestrator:
             self.db.commit()
 
             await event_emitter.emit_run_complete(self.run_id, run.total_cost, run.total_tokens, duration)
-
-            # Compute & cache the advisory quality score for the admin view.
-            # Best-effort, run off the event loop; never affects run status.
-            score = None
-            try:
-                from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
-                score = await asyncio.get_running_loop().run_in_executor(
-                    None, compute_and_cache_score, self.run_id
-                )
-                # On this thread: self.db must not be touched from the executor.
-                persist_score_columns(self.db, self.run_id, score)
-            except Exception as e:
-                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
             # Post-run artifact doctor: cross-stage lints over the stage
             # outputs just written (pure local file reads, no LLM). Gated by
@@ -1022,6 +1113,24 @@ class PipelineOrchestrator:
                     self.db.rollback()
                 except Exception:
                     pass
+
+            # Compute & cache the advisory quality score for the admin view.
+            # Best-effort, run off the event loop; never affects run status.
+            # After the doctor: the score records whether its report was
+            # stored, and marks the run unchecked when it was not (#1593).
+            score = None
+            try:
+                from app.services.quality_score_service import (
+                    compute_and_cache_score,
+                    persist_score_columns,
+                )
+                score = await asyncio.get_running_loop().run_in_executor(
+                    None, compute_and_cache_score, self.run_id
+                )
+                # On this thread: self.db must not be touched from the executor.
+                persist_score_columns(self.db, self.run_id, score)
+            except Exception as e:
+                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
             # Notify on terminal success, passing the freshly-computed score so
             # the Teams message includes it. Fully decoupled and best-effort:
@@ -1042,11 +1151,11 @@ class PipelineOrchestrator:
                 await self._notify_batch_complete(run)
 
         except Exception as e:
-            run.status = "failed"
+            run.status = RunState.FAILED
             run.error_message = user_facing_error(
                 e, resuming=start_step_number is not None
             )
-            run.completed_at = datetime.now()
+            run.completed_at = utc_now()
             # Record time-to-failure too -- useful when diagnosing a run that was
             # "taking too long" and then errored out.
             if start_time is not None:
@@ -1094,12 +1203,12 @@ class PipelineOrchestrator:
         here: the drain fails that row instead.
         """
         updated = self.db.query(Run).filter(
-            Run.id == self.run_id, Run.status == "running"
+            Run.id == self.run_id, Run.status == RunState.RUNNING
         ).update(
             {
-                "status": "cancelled",
+                "status": RunState.CANCELLED,
                 "error_message": USER_CANCEL_MESSAGE,
-                "completed_at": datetime.now(),
+                "completed_at": utc_now(),
             },
             synchronize_session=False,
         )
@@ -1197,6 +1306,10 @@ class PipelineOrchestrator:
 
         loop = asyncio.get_running_loop()
         payload, out_path = await loop.run_in_executor(None, self._doctor_report)
+        new_files = [str(out_path)]
+        review_path = await loop.run_in_executor(None, self._review_docx, payload)
+        if review_path is not None:
+            new_files += [str(review_path), str(comment_map_path(review_path))]
 
         # Attach the report to the last step's output_files here, on the
         # orchestrator's thread (like _submitter_label: the session must not
@@ -1209,15 +1322,40 @@ class PipelineOrchestrator:
         )
         if step is not None:
             files = json.loads(step.output_files) if step.output_files else []
-            if str(out_path) not in files:
-                files.append(str(out_path))
-                step.output_files = json.dumps(files)
+            added = [f for f in new_files if f not in files]
+            if added:
+                step.output_files = json.dumps(files + added)
                 self.db.commit()
 
         await loop.run_in_executor(
-            None, self._persist_outputs_to_storage, [str(out_path)]
+            None, self._persist_outputs_to_storage, new_files
         )
         return payload
+
+    def _review_docx(self, payload: dict) -> Path | None:
+        """Write the finished document with the doctor's findings as Word
+        comments (#1388); returns its path, or None when there is none.
+        Best-effort: the doctor report above stands whether or not this works."""
+        paths = self._get_output_paths()
+        clean = paths['6']
+        if not clean.exists():
+            return None
+        # The stage-4 artifact names the CV owner, which the tracked
+        # owner-role fix needs (#1591); without it, or with one that does
+        # not parse, that finding is a comment.
+        stage4 = None
+        if paths['4'].exists():
+            try:
+                stage4 = json.loads(paths['4'].read_text(encoding='utf-8'))
+            except ValueError:
+                logger.warning("Stage-4 JSON unreadable for run %s; review copy without its fixes",
+                               self.run_id, exc_info=True)
+        try:
+            written = write_review_docx(clean, payload, stage4)
+        except REVIEW_DOCX_ERRORS:
+            logger.warning("Review-comment docx failed for run %s", self.run_id, exc_info=True)
+            return None
+        return written[0] if written else None
 
     def _doctor_report(self):
         """Run the doctor lints and write the JSON report; returns (payload, path)."""
@@ -1234,6 +1372,7 @@ class PipelineOrchestrator:
             self.pipeline_output_dir / 'stage_7_doctor'
             / f'{self.document_uid}_doctor.json'
         )
+        payload[DOCTOR_IMAGE_TAG_KEY] = current_image_tag()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, indent=2))
         return payload, out_path
@@ -1259,7 +1398,7 @@ class PipelineOrchestrator:
 
         try:
             step.status = "running"
-            step.started_at = datetime.now()
+            step.started_at = utc_now()
             self.db.commit()
 
             await event_emitter.emit_step_start(self.run_id, step_number, self.total_cost)
@@ -1293,7 +1432,7 @@ class PipelineOrchestrator:
 
             # Mark as complete
             step.status = "complete"
-            step.completed_at = datetime.now()
+            step.completed_at = utc_now()
             step.duration_seconds = duration
             step.cost = result.get("cost", 0.0)
             step.output_files = json.dumps(result.get("output_files", []))
@@ -1329,7 +1468,7 @@ class PipelineOrchestrator:
 
         except Exception as e:
             step.status = "error"
-            step.completed_at = datetime.now()
+            step.completed_at = utc_now()
             tb_str = traceback.format_exc()
             step.error_message = f"{str(e)}\n\nTraceback:\n{tb_str}"
             self.db.commit()
@@ -1492,6 +1631,19 @@ class PipelineOrchestrator:
     def _repair_protected_data(self) -> bool:
         """Whether stage 6 repairs protected data (#1389): off unless CVICHE_RUN_REPAIR=1."""
         return repair_flag_on(get_config("repair", REPAIR_FLAG_ENV, default="0")[0])
+
+    def _supplementary_subpoints(self) -> bool:
+        """Whether stage 6 writes unrendered prose as tracked-deleted sub-points
+        (#1205): on unless CVICHE_SUPPLEMENTARY_SUBPOINTS is "0" (or another
+        off word, `subpoints_enabled`)."""
+        return subpoints_enabled(get_config("stage6", SUBPOINT_FLAG_ENV,
+                                            default=SUBPOINT_FLAG_DEFAULT)[0])
+
+    def _stage6_switches(self) -> dict[str, bool]:
+        """The env-switched run_stage6 options: the #1389 repair and the #1205
+        sub-points."""
+        return {"repair_protected_data": self._repair_protected_data(),
+                "supplementary_subpoints": self._supplementary_subpoints()}
 
     async def _execute_stage_logic(self, stage_id: str, cv_path: str) -> dict[str, Any]:
         """Execute a specific pipeline stage."""
@@ -1827,7 +1979,7 @@ class PipelineOrchestrator:
                     # SAMPLE_CV_DIR auto-discovery that happened to find
                     # _copy_to_pipeline_input's copy by uid and CWD.
                     original_doc_path=cv_path,
-                    repair_protected_data=self._repair_protected_data(),
+                    **self._stage6_switches(),
                 )
 
                 self.stage_outputs['6'] = stage6_output_path

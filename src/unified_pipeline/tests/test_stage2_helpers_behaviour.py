@@ -44,7 +44,9 @@ import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline import stage_2_entry_extraction as stage2  # noqa: E402
-from unified_pipeline.core.docx_structure_extractor import extract_unified_elements  # noqa: E402
+from unified_pipeline.core.docx_structure_extractor import (
+    extract_unified_elements,  # noqa: E402
+)
 
 get_hierarchy_path = stage2.get_hierarchy_path
 build_element_index_map = stage2.build_element_index_map

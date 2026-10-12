@@ -11,8 +11,9 @@ extract_table_metadata (gridSpan/merged-cell repeat behaviour), get_table_first_
 looks_like_section_header (confidence tiers), flatten_table_to_text (skip_first_row),
 extract_unified_elements (document-order interleaving, unified_idx contiguity,
 table_header/table_content/table element types), extract_docx_structure
-(top-level shape), normalize_style_name, and create_simplified_layout_json
-(skip_empty on/off).
+(top-level shape), normalize_style_name, create_simplified_layout_json
+(skip_empty on/off), and the body-level content-control unwrap both read
+through (`unwrap_body_content_controls` / `open_source_docx`, #1656).
 
 Pure python-docx, no network: this module never calls an LLM, so there is
 nothing to stub. All fixture .docx files are built in memory with
@@ -46,8 +47,8 @@ from docx.shared import Inches, Pt  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
-    _is_date_column,
     _fold_orphan_date_tail,
+    _is_date_column,
     _is_date_only_text,
     create_simplified_layout_json,
     extract_docx_structure,
@@ -60,9 +61,11 @@ from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     get_table_first_cell_text,
     looks_like_section_header,
     normalize_style_name,
+    open_source_docx,
+    score_section_header,
     split_merged_cells_in_row,
+    unwrap_body_content_controls,
 )
-
 
 # --------------------------------------------------------------------------
 # get_paragraph_text / get_cell_text
@@ -578,15 +581,105 @@ def _all_lines(rows):
     )
 
 
-def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+def test_split_merged_cells_blank_paragraph_does_not_preempt_aligned_lists_612():
     # #612 shape (invented text): cell 0 holds a blank paragraph, so the \n\n
-    # pass claims max_splits=2 from cell 0 alone; the aligned-line pass never
-    # runs. The 4-line title cell is unsplit and the 4-line date cell is
-    # distributed by the date-column fallback, which used to emit only the
-    # first max_splits (2) dates and drop the other two.
+    # pass splits cell 0 alone into 2 segments. The 4-line rank and date cells
+    # are stacked parallel lists, so the aligned-line pass must win and pair
+    # each rank with its own date. Before the fix, every rank sat on sub-row 0
+    # beside the first date only.
     row = [
         {"text": "Alpha unit one\nAlpha unit two\n\nAlpha unit three", "row": 0, "col": 0},
         {"text": "Rank A\nRank B\nRank C\nRank D", "row": 0, "col": 1},
+        {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [(r[1]["text"], r[2]["text"]) for r in out] == [
+        ("Rank A", "2011 - Present"),
+        ("Rank B", "2009 - 2011"),
+        ("Rank C", "2007 - 2009"),
+        ("Rank D", "2000 - Present"),
+    ]
+    # Cell 0 matches neither list (3 lines), so it stays whole on sub-row 0.
+    assert out[0][0] == row[0]
+    assert [r[0]["text"] for r in out[1:]] == ["", "", ""]
+
+
+def test_split_merged_cells_blank_separated_labels_align_with_single_line_list_612():
+    # A label column whose paragraphs are separated by blank paragraphs beside
+    # an entry column with one entry per line: both hold 3 non-blank lines, so
+    # each label pairs with its own entry instead of every entry on sub-row 0.
+    row = [
+        {"text": "1.\n\n2.\n\n\n3.", "row": 0, "col": 0},
+        {"text": "Entry one text\nEntry two text\nEntry three text", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["1.", "Entry one text"],
+        ["2.", "Entry two text"],
+        ["3.", "Entry three text"],
+    ]
+
+
+def test_split_merged_cells_parallel_blank_line_split_beats_aligned_lines_612():
+    # Two cells agree on 2 blank-separated entries of 2 lines each. They also
+    # share a 4-line count, but the blank-line split is itself parallel, so it
+    # wins and each 2-line entry stays whole.
+    row = [
+        {"text": "Title one\nPlace one\n\nTitle two\nPlace two", "row": 0, "col": 0},
+        {"text": "Note one a\nNote one b\n\nNote two a\nNote two b", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Title one\nPlace one", "Note one a\nNote one b"],
+        ["Title two\nPlace two", "Note two a\nNote two b"],
+    ]
+
+
+def test_split_merged_cells_trailing_blank_paragraph_is_not_a_parallel_split_612():
+    # Each cell ends in a blank paragraph, so the \n\n pass yields ONE
+    # segment per cell. Two one-segment cells are not parallel entries; the
+    # 3-line lists still split by the aligned-line pass.
+    row = [
+        {"text": "Role one\nRole two\nRole three\n\n", "row": 0, "col": 0},
+        {"text": "Place one\nPlace two\nPlace three\n\n", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Role one", "Place one"],
+        ["Role two", "Place two"],
+        ["Role three", "Place three"],
+    ]
+
+
+def test_split_merged_cells_lone_blank_line_split_kept_without_aligned_match_612():
+    # Only one cell has a blank-line split and no two cells share a 3+ line
+    # count: the blank-line split still applies, as before.
+    row = [
+        {"text": "MBA\n\nBS", "row": 0, "col": 0},
+        {"text": "Some school", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [["MBA", "Some school"], ["BS", ""]]
+
+
+def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+    # The \n\n pass splits cell 0 into 2 segments and no two cells share a
+    # 3+ line count, so the 4-line date cell is distributed over 2 sub-rows by
+    # the date-column fallback, which used to drop the last 2 dates.
+    row = [
+        {"text": "Alpha unit one\n\nAlpha unit two", "row": 0, "col": 0},
+        {"text": "Rank A\nRank B", "row": 0, "col": 1},
         {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
     ]
 
@@ -852,6 +945,71 @@ def test_looks_like_section_header_numbered_heading_scores_low():
 
 def test_looks_like_section_header_empty_text():
     assert looks_like_section_header("") == (False, 0.0)
+
+
+# --------------------------------------------------------------------------
+# score_section_header -- per-signal contributions (#404)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected_signals",
+    [
+        (
+            "Research Interests",
+            {"keyword": 0.4, "title_case": 0.2, "short": 0.1, "short_keyword": 0.2},
+        ),
+        (
+            "PUBLICATIONS",
+            {"keyword": 0.4, "all_caps": 0.3, "title_case": 0.2, "short": 0.1, "short_keyword": 0.2},
+        ),
+        (
+            "Awards:",
+            {"keyword": 0.4, "title_case": 0.2, "trailing_colon": 0.1, "short": 0.1, "short_keyword": 0.2},
+        ),
+        ("Grants and funding for the research program done here", {"keyword": 0.4}),
+        ("1. Introduction", {"short": 0.1}),
+    ],
+)
+def test_score_section_header_names_each_signal_that_fired(text, expected_signals):
+    score = score_section_header(text)
+
+    assert score.signal_scores == pytest.approx(expected_signals)
+    # The tuple API is the same scorer's first two fields, unchanged.
+    assert looks_like_section_header(text) == (score.is_header, score.confidence)
+
+
+def test_score_section_header_contributions_sum_past_the_capped_confidence():
+    # "PUBLICATIONS" fires every signal but the colon: 1.2 in contributions,
+    # reported as the 1.0 cap -- the per-signal view is what shows by how much.
+    score = score_section_header("PUBLICATIONS")
+
+    assert sum(score.signal_scores.values()) == pytest.approx(1.2)
+    assert score.confidence == 1.0
+
+
+def test_score_section_header_confidence_is_the_left_to_right_float_sum():
+    # Exact, not approx: Python 3.12+'s compensated sum() gives 0.9 here where
+    # the scorer has always given 0.9000000000000001 -- a one-ulp move that
+    # a corpus A/B of extract_unified_elements caught on a real table header.
+    expected = 0.0
+    for weight in (0.4, 0.2, 0.1, 0.2):
+        expected += weight
+
+    assert score_section_header("Research Interests").confidence == expected
+    assert expected != 0.9
+
+
+@pytest.mark.parametrize("text", ["", "Education 2020-2024", "Publications (2024)", "Research " * 15])
+def test_score_section_header_rejected_line_has_no_signals(text):
+    assert score_section_header(text) == (False, 0.0, {})
+
+
+def test_score_section_header_rejections_do_not_share_a_signal_dict():
+    first = score_section_header("")
+    first.signal_scores["keyword"] = 0.4
+
+    assert score_section_header("").signal_scores == {}
 
 
 # --------------------------------------------------------------------------
@@ -1142,6 +1300,27 @@ def test_extract_unified_elements_scans_table_rows_for_subheaders(tmp_path):
     assert "A" * 90 in pre_presentations
     # The final plain content row is flushed after the last header.
     assert any("Talk one at Conference X" in t and "New York" in t for t in content_texts)
+
+
+def test_extract_unified_elements_table_headers_carry_signal_scores(tmp_path):
+    # #404: each table_header -- row 0, embedded, and row-level sub-header --
+    # carries its scorer's per-signal contributions beside header_confidence.
+    docx_path = tmp_path / "subheaders.docx"
+    _build_subheader_fixture_docx(docx_path)
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    headers = {e["style"]: e for e in elements if e["type"] == "table_header"}
+
+    assert headers["TableHeader"]["header_signal_scores"] == pytest.approx(
+        {"keyword": 0.4, "all_caps": 0.3, "title_case": 0.2, "short": 0.1}
+    )
+    assert headers["EmbeddedHeader"]["header_signal_scores"] == pytest.approx(
+        {"all_caps": 0.3, "title_case": 0.2, "short": 0.1}
+    )
+    assert headers["EmbeddedHeader"]["header_confidence"] == pytest.approx(0.6)
+    assert headers["TableSubHeader"]["header_signal_scores"] == pytest.approx(
+        {"keyword": 0.4, "all_caps": 0.3, "title_case": 0.2, "short": 0.1, "short_keyword": 0.2}
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1837,6 +2016,32 @@ def test_next_element_scrub_reaches_only_the_first_cell_of_a_table(tmp_path):
     )
 
 
+def test_847_label_with_a_year_in_its_parenthetical_scrubs_the_next_paragraph(tmp_path):
+    """#847: "Birth Date (as of 2020):" alone in a paragraph is still a bare
+    label, and its value in the next paragraph may follow a parenthesis."""
+    doc = Document()
+    doc.add_paragraph("Birth Date (as of 2020):")
+    doc.add_paragraph("(01/02/1970)")
+    docx_path = tmp_path / "next_paragraph_parenthetical_label.docx"
+    doc.save(str(docx_path))
+    label = "Birth Date (as of [withheld]):"
+    assert _reader_view(docx_path) == (
+        [(label, []), ("([withheld])", [])], [label, "([withheld])"]
+    )
+
+
+def test_847_label_cell_with_a_year_in_its_parenthetical_scrubs_the_next_cell(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Date of Birth (as of 2020):"
+    table.cell(0, 1).text = "01/02/1970"
+    docx_path = tmp_path / "next_cell_parenthetical_label.docx"
+    doc.save(str(docx_path))
+    label = "Date of Birth (as of [withheld]):"
+    flat = f"{label} | [withheld]"
+    assert _reader_view(docx_path) == ([(flat, [[label, "[withheld]"]])], [flat])
+
+
 def test_next_element_scrub_takes_a_date_opening_a_table(tmp_path):
     doc = Document()
     doc.add_paragraph("Date of Birth:")
@@ -2234,7 +2439,8 @@ def test_multi_column_nested_text_reaches_cell_data_when_first_cell_is_not_a_hea
     assert data[0][0]["text"] == "Lead-in text for the host cell, 2019 2020.\nNested only line."
 
 
-def test_nested_only_cell_keeps_itertext_fallback(tmp_path):
+def _nested_only_outer_table(tmp_path):
+    """1x2 outer table whose first cell holds only a 2x1 nested table (#1284)."""
     doc = Document()
     outer = doc.add_table(rows=1, cols=2)
     nested = outer.cell(0, 0).add_table(rows=2, cols=1)
@@ -2243,9 +2449,18 @@ def test_nested_only_cell_keeps_itertext_fallback(tmp_path):
     outer.cell(0, 1).text = "Right cell"
     path = tmp_path / "only.docx"
     doc.save(str(path))
-    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
-    text = data[0][0]["text"]
-    assert "Alpha line" in text and "Beta line" in text and "\n" not in text
+    return Document(str(path)).tables[0]
+
+
+def test_nested_only_cell_reads_one_line_per_nested_row(tmp_path):
+    table = _nested_only_outer_table(tmp_path)
+    assert get_cell_text(table.cell(0, 0)).strip() == ""  # no host text of its own
+    data = extract_table_metadata(table, "table_0")["data"]
+    assert data[0][0]["text"] == "Alpha line\nBeta line"
+
+
+def test_nested_only_first_cell_reads_one_line_per_nested_row(tmp_path):
+    assert get_table_first_cell_text(_nested_only_outer_table(tmp_path)) == "Alpha line\nBeta line"
 
 
 def test_nested_multi_cell_row_is_one_space_joined_line(tmp_path):
@@ -2351,3 +2566,139 @@ def test_multi_column_doubly_nested_table_text_reaches_cell_data(tmp_path):
     doc.save(str(path))
     data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
     assert data[0][0]["text"] == "Host text\nMiddle line\nDeepest line"
+
+
+# --------------------------------------------------------------------------
+# body-level content controls (#1656)
+# --------------------------------------------------------------------------
+
+#: The 29 records the synthetic content control holds under its heading.
+CONTROL_RECORDS = [f"Doe J, Roe K. Synthetic study {i} of example outcomes. J Example. 2001;{i}:1-9."
+                   for i in range(1, 30)]
+NESTED_RECORDS = ["Nested record one, Example Society, 2003", "Nested record two, Example Society, 2004"]
+CONTROL_TABLE = [["2010", "Example Award for synthetic research"],
+                 ["2012", "Example Prize for synthetic teaching"]]
+#: The body paragraphs of `_content_control_cv`, in document order.
+CONTROL_CV_PARAGRAPHS = ["CURRICULUM VITAE", "APPOINTMENTS", "Assistant Professor, Example University, 2001-2005",
+                         "PUBLICATIONS", *CONTROL_RECORDS, *NESTED_RECORDS,
+                         "PATENTS", "Example patent for a synthetic device, 2015"]
+
+
+def _w_p(text: str, bold: bool = False) -> str:
+    rpr = "<w:rPr><w:b/></w:rPr>" if bold else ""
+    return f'<w:p><w:r>{rpr}<w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
+
+
+def _w_tbl(rows: list[list[str]]) -> str:
+    grid = "".join('<w:gridCol w:w="3000"/>' for _ in rows[0])
+    trs = "".join("<w:tr>" + "".join(f"<w:tc>{_w_p(c)}</w:tc>" for c in row) + "</w:tr>" for row in rows)
+    return f"<w:tbl><w:tblPr/><w:tblGrid>{grid}</w:tblGrid>{trs}</w:tbl>"
+
+
+def _w_sdt(inner_xml: str, declare_ns: bool = False) -> str:
+    ns = f" {nsdecls('w')}" if declare_ns else ""
+    return f"<w:sdt{ns}><w:sdtPr/><w:sdtContent>{inner_xml}</w:sdtContent></w:sdt>"
+
+
+def _content_control_cv(tmp_path: Path) -> str:
+    """A CV whose PUBLICATIONS heading and 29 records sit in one 30-paragraph
+    body content control, which also holds a nested control and a table."""
+    inner = (_w_p("PUBLICATIONS", bold=True) + "".join(_w_p(r) for r in CONTROL_RECORDS)
+             + _w_sdt("".join(_w_p(r) for r in NESTED_RECORDS)) + _w_tbl(CONTROL_TABLE))
+    doc = Document()
+    for text in CONTROL_CV_PARAGRAPHS[:3]:
+        doc.add_paragraph(text)
+    patents = doc.add_paragraph("PATENTS")
+    doc.add_paragraph(CONTROL_CV_PARAGRAPHS[-1])
+    patents._p.addprevious(parse_xml(_w_sdt(inner, declare_ns=True)))
+    path = tmp_path / "content_control_cv.docx"
+    doc.save(str(path))
+    return str(path)
+
+
+def test_body_content_control_reaches_the_element_stream_in_document_order(tmp_path):
+    els = extract_unified_elements(_content_control_cv(tmp_path))["elements"]
+
+    paragraphs = [e["text"] for e in els if e["type"] == "paragraph"]
+    assert paragraphs == CONTROL_CV_PARAGRAPHS
+    table = next(e for e in els if e.get("table_index") is not None)
+    assert [[c["text"] for c in row] for row in table["data"]] == CONTROL_TABLE
+    # The table sits where the control put it: after the nested records,
+    # before PATENTS.
+    assert els.index(table) == CONTROL_CV_PARAGRAPHS.index("PATENTS")
+    assert [e["unified_idx"] for e in els] == list(range(len(els)))
+
+
+def test_para_idx_and_table_index_name_the_paragraphs_and_tables_every_reader_opens(tmp_path):
+    """Stage 2's fallback (`doc.paragraphs[i]`) and stage 6's teaching levels
+    (`doc.tables[table_index]`) index `open_source_docx`'s document: one
+    paragraph order, the extractor's."""
+    path = _content_control_cv(tmp_path)
+    els = extract_unified_elements(path)["elements"]
+    doc = open_source_docx(path)
+
+    assert [p.text for p in doc.paragraphs] == CONTROL_CV_PARAGRAPHS
+    para_els = [e for e in els if e.get("para_idx") is not None]
+    assert [doc.paragraphs[e["para_idx"]].text for e in para_els] == [e["text"] for e in para_els]
+    table = next(e for e in els if e.get("table_index") is not None)
+    assert doc.tables[table["table_index"]].cell(0, 1).text == CONTROL_TABLE[0][1]
+
+    structure = extract_docx_structure(path)["elements"]
+    assert [e["text"] for e in structure if e["type"] == "paragraph"] == CONTROL_CV_PARAGRAPHS
+    assert [e["idx"] for e in structure if e["type"] == "paragraph"] == list(range(len(CONTROL_CV_PARAGRAPHS)))
+
+
+def test_unwrap_reports_the_body_positions_each_outermost_control_now_holds(tmp_path):
+    doc = Document(_content_control_cv(tmp_path))
+    spans = unwrap_body_content_controls(doc)
+    held = 1 + len(CONTROL_RECORDS) + len(NESTED_RECORDS) + 1   # heading, records, nested, table
+    assert spans == [range(3, 3 + held)]
+    assert not doc.element.body.findall(f".//{qn('w:sdt')}")
+    assert unwrap_body_content_controls(doc) == []
+
+
+def test_unwrap_leaves_a_document_without_body_content_controls_byte_identical():
+    doc = Document()
+    doc.add_paragraph("A plain paragraph")
+    doc.add_table(rows=1, cols=2).cell(0, 0).text = "cell"
+    before = doc.element.body.xml
+    assert unwrap_body_content_controls(doc) == []
+    assert doc.element.body.xml == before
+
+
+def test_a_run_level_or_cell_level_content_control_is_left_where_it_is():
+    """Only body-level controls are unwrapped: a run-level one is read by
+    `get_paragraph_text` already, and one inside a table cell is left to
+    python-docx's cell walk (#1668)."""
+    doc = Document()
+    para = doc.add_paragraph("Name: ")
+    para._p.append(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent><w:r><w:t>Example Person</w:t></w:r>'
+                             '</w:sdtContent></w:sdt>'))
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    cell._tc.append(parse_xml(_w_sdt(_w_p("In a cell"), declare_ns=True)))
+    before = doc.element.body.xml
+    assert unwrap_body_content_controls(doc) == []
+    assert doc.element.body.xml == before
+    assert get_paragraph_text(doc.paragraphs[0]) == "Name: Example Person"
+
+
+def test_an_empty_body_content_control_is_dropped_and_holds_no_span():
+    doc = Document()
+    after = doc.add_paragraph("After")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtPr/></w:sdt>'))
+    after._p.addprevious(parse_xml(_w_sdt("", declare_ns=True)))
+    assert unwrap_body_content_controls(doc) == []
+    assert [p.text for p in doc.paragraphs] == ["After"]
+    assert not doc.element.body.findall(qn("w:sdt"))
+
+
+def test_two_body_content_controls_each_report_their_own_span():
+    doc = Document()
+    doc.add_paragraph("Top")
+    middle = doc.add_paragraph("Middle")
+    end = doc.add_paragraph("End")
+    middle._p.addprevious(parse_xml(_w_sdt(_w_p("First A") + _w_p("First B"), declare_ns=True)))
+    end._p.addprevious(parse_xml(_w_sdt(_w_p("Second A"), declare_ns=True)))
+    spans = unwrap_body_content_controls(doc)
+    assert [p.text for p in doc.paragraphs] == ["Top", "First A", "First B", "Middle", "Second A", "End"]
+    assert spans == [range(1, 3), range(4, 5)]

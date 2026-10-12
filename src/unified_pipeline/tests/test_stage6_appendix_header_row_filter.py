@@ -34,22 +34,31 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.oxml.ns import qn
 from lxml import etree
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.core.docx_structure_extractor import extract_unified_elements  # noqa: E402
+from unified_pipeline.core.docx_structure_extractor import (
+    extract_unified_elements,  # noqa: E402
+)
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    CVICHE_BOX_FILL,
+    is_cviche_box,
+)
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: E402
 from unified_pipeline.stage6.sections import appendix as appendix_module  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     APPENDIX_MAX_CHARS,
+    DROP_AMOUNT,
     DROP_BARE_YEAR,
     DROP_BLANK,
     DROP_COLUMN_HEADER,
     DROP_CV_TITLE,
+    DROP_DATE_RANGE,
     DROP_DATE_STAMP,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_ON_REQUEST,
@@ -64,11 +73,11 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_TEMPLATE_LABEL,
     DROP_TOC_LINE,
     DROP_UNANSWERED_PROMPT,
+    OwnerTokens,
     _appendix_drop_reason,
     _describe_dropped,
     _filter_unmapped_entries,
     _group_by_source_heading,
-    OwnerTokens,
     _owner_signature_tokens,
     _truncate_appendix_text,
 )
@@ -100,12 +109,18 @@ def _output_text(docx_path: Path) -> str:
     return "\n".join(parts)
 
 
+def _after_appendix_note(paragraphs: list[str]) -> list[str]:
+    """Body paragraph texts from the first group heading to the end: past
+    "T. APPENDIX", its note box (a table, so not a body paragraph) and the
+    blank line under it. The appendix is the last thing `generate()` writes."""
+    if "T. APPENDIX" not in paragraphs:
+        return []
+    rest = paragraphs[paragraphs.index("T. APPENDIX") + 1:]
+    return rest[next((i for i, t in enumerate(rest) if t), len(rest)):]
+
+
 def _appendix_paragraphs(docx_path: Path) -> list[str]:
-    """Body paragraph texts from the first `From "...":` label to the end --
-    the appendix is the last thing `generate()` writes."""
-    paragraphs = [p.text for p in Document(str(docx_path)).paragraphs]
-    starts = [i for i, t in enumerate(paragraphs) if t.startswith('From "')]
-    return paragraphs[starts[0]:] if starts else []
+    return _after_appendix_note([p.text for p in Document(str(docx_path)).paragraphs])
 
 
 def _comment_texts(docx_path: Path) -> list[str]:
@@ -548,7 +563,7 @@ def test_mixed_header_and_genuine_entries_numbering_does_not_shift(tmp_path, cap
                _t_entry(GENUINE_TWO, ["Service"], 3)]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "Service":',
+        'Service',
         f"1. {GENUINE_ONE}",
         f"2. {GENUINE_TWO}",
     ]
@@ -564,27 +579,45 @@ def test_numbering_restarts_per_source_heading(tmp_path, caplog):
                _t_entry(GENUINE_TWO, ["Service"], 4)]
     out = _render(tmp_path, entries, caplog)
     assert _appendix_paragraphs(out) == [
-        'From "Education":',
+        'Education',
         "1. EDU_ONE bachelor of arts, some college",
         "2. EDU_TWO master of science, some university",
         "",
-        'From "Service":',
+        'Service',
         f"1. {GENUINE_ONE}",
         f"2. {GENUINE_TWO}",
     ]
 
 
-def test_over_limit_entry_renders_at_exactly_the_limit(tmp_path, caplog):
-    """A >200-character entry renders as exactly 200 characters after the
-    number, marker included -- the old `text[:200] + '...'` gave 203."""
-    long_text = "LONG_ENTRY " + " ".join(f"word{i}" for i in range(60))
+def _diverted_entry(text: str, idx: int) -> dict[str, object]:
+    """A non-T entry the Appendix receives because nothing else rendered it."""
+    return {**_t_entry(text, ["Service"], idx), "taxonomy_code": "Z9"}
+
+
+def _fill_appendix_paragraphs(entries: list[dict[str, object]]) -> list[str]:
+    """`_appendix_paragraphs` of a bare template after `_fill_appendix` alone."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_appendix(entries)
+    return _after_appendix_note([p.text for p in gen.doc.paragraphs])
+
+
+def _overflow_entry(text: str, code: str, idx: int) -> dict[str, object]:
+    """An entry the low-coverage overflow takes (`is_overflow_candidate`)."""
+    return {**_t_entry(text, ["Service"], idx), "taxonomy_code": code,
+            "extraction_coverage": {"extraction_coverage_percent": 5.0}}
+
+
+def test_over_limit_overflow_diverted_entry_renders_at_exactly_the_limit():
+    """A long diverted entry the overflow re-splits keeps a capped pointer of
+    exactly 200 characters after the number, marker included -- the old
+    `text[:200] + '...'` gave 203."""
+    long_text = "LONG_ENTRY " + " ".join(f"overflowword{i}" for i in range(90))
     assert len(long_text) > APPENDIX_MAX_CHARS
     exact_text = "EXACT_ENTRY " + "y" * (APPENDIX_MAX_CHARS - len("EXACT_ENTRY "))
     assert len(exact_text) == APPENDIX_MAX_CHARS
-    entries = [_NAME_ENTRY,
-               _t_entry(long_text, ["Service"], 1),
-               _t_entry(exact_text, ["Service"], 2)]
-    paragraphs = _appendix_paragraphs(_render(tmp_path, entries, caplog))
+    paragraphs = _fill_appendix_paragraphs(
+        [_overflow_entry(long_text, "Z9", 1), _diverted_entry(exact_text, 2)])
     rendered_long = paragraphs[1]
     assert rendered_long.startswith("1. ")
     body = rendered_long[len("1. "):]
@@ -592,6 +625,43 @@ def test_over_limit_entry_renders_at_exactly_the_limit(tmp_path, caplog):
     assert body.endswith("...")
     assert body[:-3] == long_text[:APPENDIX_MAX_CHARS - 3]
     assert paragraphs[2] == f"2. {exact_text}"  # at the limit: untouched
+
+
+def test_over_limit_diverted_entry_renders_whole():
+    """#1555 (OIEPQD XACIVX 104-109 shape): a dated research record diverted
+    to the Appendix from M1 renders nowhere else, so its affiliation and its
+    description bullets past 200 characters reach the page whole."""
+    long_text = ("Research Assistant, Synthetic Lab of Imaginary Studies, "
+                 "Example Institute, Sometown\n"
+                 "Supervisor: Placeholder Person, Department of Invented Science\n"
+                 "- Studied an imaginary compound in a made-up assay\n"
+                 "- Built a fictional screening protocol for invented targets")
+    assert len(long_text) > APPENDIX_MAX_CHARS
+    entry = {**_diverted_entry(long_text, 1), "taxonomy_code": "M1"}
+    paragraphs = _fill_appendix_paragraphs([entry])
+    assert paragraphs[1] == f"1. {long_text}"
+
+
+def test_over_limit_t_entry_renders_whole(tmp_path, caplog):
+    """#1230 (pilot TXTATQ shape): a T entry has no other render, so a
+    420-character comma-free list of 30 items reaches the page whole."""
+    items = " ".join(f"Competency{chr(65 + i % 26)}{i:02d}" for i in range(30))
+    long_text = "Synthetic leadership competencies: " + items
+    assert len(long_text) > 400
+    paragraphs = _appendix_paragraphs(
+        _render(tmp_path, [_NAME_ENTRY, _t_entry(long_text, ["Service"], 1)], caplog))
+    assert paragraphs[1] == f"1. {long_text}"
+
+
+def test_t_entry_the_overflow_resplits_keeps_the_capped_pointer():
+    """A long low-coverage T entry goes to the overflow, whose reconsider pass
+    routes its segments; its Appendix line stays a capped pointer so the
+    routed segments are not printed a second time (#1230)."""
+    long_text = " ".join(f"overflowword{i}" for i in range(90))
+    entry = {**_t_entry(long_text, ["Service"], 1),
+             "extraction_coverage": {"extraction_coverage_percent": 5.0}}
+    body = _fill_appendix_paragraphs([entry])[1][len("1. "):]
+    assert len(body) == APPENDIX_MAX_CHARS and body.endswith("...")
 
 
 def test_real_source_table_header_row_is_dropped_but_data_row_survives(tmp_path, caplog):
@@ -631,7 +701,7 @@ def test_real_source_table_header_row_is_dropped_but_data_row_survives(tmp_path,
     ]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "EDUCATION":',
+        'Education',
         "1. 2010 — MD — Medicine — Weill Cornell Medicine, New York, NY",
     ]
     assert "Year — Degree" not in _output_text(out)
@@ -657,7 +727,7 @@ def test_web210_shape_bare_years_and_status_markers_dropped(tmp_path, caplog):
     # (Completed) Funding"), so a whole-document substring check would be
     # vacuous here.
     assert _appendix_paragraphs(out) == [
-        'From "PRESENTATIONS":',
+        'Presentations',
         f"1. {GENUINE_ONE}",
     ]
     comment = _appendix_log(caplog)
@@ -675,7 +745,7 @@ def test_web181_shape_toc_lines_dropped(tmp_path, caplog):
                _t_entry("EDUCATION AND TRAINING", ["APPOINTMENTS"], 3)]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "APPOINTMENTS":',
+        'Appointments',
         "1. EDUCATION AND TRAINING",
     ]
     assert "2 non-content blocks removed (toc-line 2)" in _comment_texts(out)
@@ -689,7 +759,7 @@ def test_a_year_next_to_real_content_is_not_dropped(tmp_path, caplog):
                         ["Positions"], 1)]
     out = _render(tmp_path, entries, caplog, emit_comments=True)
     assert _appendix_paragraphs(out) == [
-        'From "Positions":',
+        'Positions',
         "1. 2021 Assistant Professor, Weill Cornell Medicine",
     ]
     assert "removed" not in _appendix_log(caplog)
@@ -1062,17 +1132,25 @@ def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
     )
 
 
-def test_appendix_intro_is_the_shared_accurate_banner(tmp_path, caplog):
-    # #534: _fill_appendix writes the shared intro line, italic, and the old
-    # "not successfully mapped" claim is gone.
-    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7)]
+def test_appendix_note_is_a_cviche_box_with_the_final_count(tmp_path, caplog):
+    # #1388: under T. APPENDIX, one light-gray CViche box saying what the
+    # entries are and what to do (#534: never that they appear nowhere else),
+    # counted once both writers ran; the old "successfully mapped" claim is gone.
+    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7),
+               _t_entry("Example Leftover Hobby Club, 2016", ["OTHER"], 8)]
     doc = Document(str(_render(tmp_path, entries, caplog)))
-    paragraphs = doc.paragraphs
-    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
-    intro = paragraphs[header + 1]
-    assert intro.text == appendix_module.APPENDIX_INTRO_TEXT
-    assert all(run.italic for run in intro.runs)
+    [box] = [t for t in doc.tables if is_cviche_box(t)]
+    lines = [p.text for p in box.cell(0, 0).paragraphs]
+    assert lines == [appendix_module.APPENDIX_NOTE_TITLE, appendix_module.appendix_note_text(2)]
+    assert box.cell(0, 0)._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
+    assert "Some may already appear above" in lines[1]
+    # generate()'s closing table passes leave the box's own spacing alone.
+    assert box.cell(0, 0).paragraphs[0].paragraph_format.space_after.pt == 6
     assert "successfully mapped" not in _output_text(tmp_path / "out.docx")
+
+
+def test_appendix_note_text_reads_for_one_entry():
+    assert appendix_module.appendix_note_text(1).startswith("This entry from your original CV")
 
 
 # ---------------------------------------------------- #1221: signature, date, rule
@@ -1471,3 +1549,430 @@ def test_fill_appendix_drops_the_owners_running_header(tmp_path, caplog):
     text = "\n".join(p.text for p in doc.paragraphs)
     assert "Example Leftover Society Membership" in text
     assert "Curriculum Vitae 21" not in text
+
+
+# ---------------------------------------------- #1431: furniture after #1364
+# Shapes the NDMRSO batch found surviving in the Appendix. Invented text only.
+
+def _reclassified(kind_sentence):
+    return f"[T-validation reclassified from T] {kind_sentence}"
+
+
+@pytest.mark.parametrize("text", [
+    "· · · · · · · · · ·", "·  ·  ·  ·  ·", "•  •  •  •  •", "…  …  …  …  …",
+])
+def test_spaced_dot_leader_is_a_rule_line_when_t_coded(text):
+    assert _sig(text, None) == DROP_RULE_LINE
+    assert _sig(text, None, code="K1") is None
+
+
+@pytest.mark.parametrize("text", ["· · · ·", "· · x · · ·", "Sample · · · · ·", ". . . . . 12"])
+def test_short_or_mixed_dot_leaders_survive(text):
+    assert _sig(text, None) != DROP_RULE_LINE
+
+
+@pytest.mark.parametrize("text, sentence", [
+    ("7/16/18", "Stray date fragment with no context."),
+    ("As of 21 April 2023", "Date marker indicating the CV update date."),
+    ("(As of 3rd March 2019)", "Revision date stamp."),
+    ("(As of 7/16/18)", "Date stamp."),
+])
+def test_two_digit_year_and_day_first_date_stamps_are_dropped(text, sentence):
+    assert _sig(text, _confirmed(sentence)) == DROP_DATE_STAMP
+
+
+@pytest.mark.parametrize("text", [
+    "7-16-18",  # hyphens with a two-digit year read as a range
+    "7/16/18 Sample Annual Meeting",
+    "21 April 2023 Example Society Lecture",
+    "7/16",
+])
+def test_new_date_shapes_keep_a_record_or_a_range(text):
+    assert _sig(text, _confirmed("Stray date fragment.")) is None
+
+
+@pytest.mark.parametrize("text, sentence, code, reason", [
+    ("Period Fellowship/Scholarship Project Grad Student",
+     "Table header for graduate student awards under student supervision.", "N3", DROP_COLUMN_HEADER),
+    ("Semester Project Undergraduate",
+     "Table header for undergraduate student research activities.", "N3", DROP_COLUMN_HEADER),
+    ("SAMPLE PUBLICATIONS (CONTINUED)",
+     "Continuation header for the Sample Publications section.", "S1", DROP_PAGE_FURNITURE),
+    ("Sample Talks (cont'd)", "Continued heading for sample talks.", "R", DROP_PAGE_FURNITURE),
+    ("Professional Experience", "Section header for experience entries.", "B1", DROP_SECTION_HEADER),
+])
+def test_structural_line_3b_moved_out_of_t_is_dropped_with_both_signals(text, sentence, code, reason):
+    assert _sig(text, _reclassified(sentence), code=code) == reason
+
+
+@pytest.mark.parametrize("text, reasoning, code", [
+    # The reclassified verdict names no structural kind.
+    ("Semester Project Undergraduate", _reclassified("Mentee research project."), "N3"),
+    ("SAMPLE PUBLICATIONS (CONTINUED)", _reclassified("Publication list entry."), "S1"),
+    # The kind is named but the text is a record, not that shape.
+    ("Sample Project Grant 2019", _reclassified("Table header for grants."), "M2A"),
+    ("Served on the sample review committee (continued)",
+     _reclassified("Continuation header for service."), "P1"),
+    # The structural verdict without 3b's reclassified tag is not a signal.
+    ("Semester Project Undergraduate", "Table header for undergraduate research.", "N3"),
+    ("Semester Project Undergraduate", _confirmed("Table header row."), "N3"),
+])
+def test_moved_out_of_t_keeps_what_lacks_either_signal(text, reasoning, code):
+    assert _sig(text, reasoning, code=code) is None
+
+
+def test_month_year_alone_drops_only_under_a_cv_date_verdict():
+    cv_date = _reclassified("Dated fragment likely the CV date/preparation date.")
+    assert appendix_module.reclassified_structural_reason("April 2020", cv_date) == DROP_DATE_STAMP
+    assert appendix_module.reclassified_structural_reason(
+        "April 2020", _reclassified("Date stamp.")) is None
+    assert appendix_module.reclassified_structural_reason(
+        "April 2020 Example Award", cv_date) is None
+    # The T path reads the same CV-date kind; a plain stamp verdict still keeps it.
+    assert _sig("April 2020", _confirmed("CV preparation date.")) == DROP_DATE_STAMP
+    assert _sig("April 2020", _confirmed("Date stamp.")) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Date of this résumé: February 9, 2009",
+    "Date of this resume: 2/9/2009",
+    "Résumé updated March 2011",
+])
+def test_resume_date_line_is_page_furniture(text):
+    assert _sig(text, None) == DROP_PAGE_FURNITURE
+
+
+@pytest.mark.parametrize("text", [
+    "Résumé writing workshop, Example University, 2009",
+    "Date of this sample review: February 9, 2009",
+])
+def test_resume_word_needs_a_furniture_only_line(text):
+    assert _sig(text, None) != DROP_PAGE_FURNITURE
+
+
+@pytest.mark.parametrize("text", [
+    "Example University School of Medicine\tStandardized Curriculum Vitae\tJane Q. Doe, MD",
+    "Example University School of Medicine: Standardized Curriculum Vitae — Jane Q. Doe, MD",
+    "Curriculum Vitae | Jane Q. Doe, MD",
+    "Example Institute | Curriculum Vitae | Page 3",
+])
+def test_running_title_cells_are_page_furniture(text):
+    assert appendix_module.is_page_furniture(text, _OWNER_TOKENS)
+
+
+@pytest.mark.parametrize("text, tokens", [
+    # Not the owner's name.
+    ("Example University\tCurriculum Vitae\tPat Roe, MD", _OWNER_TOKENS),
+    ("Example University\tCurriculum Vitae\tJane Q. Doe, MD", OwnerTokens()),
+    # No CV-title cell; no owner or page cell; two cells left over; a digit in
+    # the one left over.
+    ("Example University\tSample Department\tJane Q. Doe, MD", _OWNER_TOKENS),
+    ("Example University\tCurriculum Vitae", _OWNER_TOKENS),
+    ("Example University\tSample Lab\tCurriculum Vitae\tJane Q. Doe", _OWNER_TOKENS),
+    ("Example Hall Room 12\tCurriculum Vitae\tJane Q. Doe", _OWNER_TOKENS),
+    ("Sample Department\tExample University\tCurriculum Vitae", _OWNER_TOKENS),
+])
+def test_running_title_needs_a_title_cell_and_an_owner_or_page_cell(text, tokens):
+    assert not appendix_module.is_page_furniture(text, tokens)
+
+
+@pytest.mark.parametrize("text, email", [
+    ("Email: jdoe@example.edu", "jdoe@example.edu"),
+    ("jdoe@example.edu", "jdoe@example.edu"),
+    ("Work E mail:  j.q.doe@mail.example.edu.", "j.q.doe@mail.example.edu"),
+    ("Email: jdoe@example.edu, Phone: 555-0100", None),
+    ("Contact the sample lab at jdoe@example.edu", None),
+    ("Email:", None),
+])
+def test_labelled_email_reads_only_a_lone_address(text, email):
+    assert appendix_module.labelled_email(text) == email
+
+
+@pytest.mark.parametrize("source, shown", [
+    ("GRANT SUPPORT", "Grant Support"),
+    ("LICENSES, REGISTRATIONS AND CERTIFICATIONS", "Licenses, Registrations and Certifications"),
+    ("GRAND ROUNDS, INVITED/VISITING LECTURES", "Grand Rounds, Invited/Visiting Lectures"),
+    ("XI. BIBLIOGRAPHY", "Bibliography"),
+    ("V. FUNDING", "Funding"),
+    ("Research & Clinical Trials", "Research & Clinical Trials"),
+    ("Dr. Example Lab", "Dr. Example Lab"),
+])
+def test_appendix_group_heading_is_the_sources_words_never_a_section_header(source, shown):
+    """#1388: the source CV's heading, plain: no section number and no ALL
+    CAPS, either of which reads as a WCM section header (to a reader, and to
+    the doctor's _output_section_header, which would end the Appendix there)."""
+    assert appendix_module.appendix_group_heading(source) == shown
+
+
+# ------------------------------------------- #1551: record tails, signature line
+
+_RANGES_AND_SHOWN = [
+    # (the bare Appendix line, a rendered line that shows the same range)
+    ("2014 – 2016", "Example Committee, Member, 2014-2016"),
+    ("2014-2016", "Example Committee 2014 – 2016"),
+    ("2014 to 2016", "Example Committee (2014-2016)"),
+    ("(2014-2016)", "Example Committee, 2014 - 2016"),
+    ("1968- 1969.", "Example Fellowship 1968-1969"),
+    ("1999-Present", "Example Board 1999 – present"),
+    ("July 2023 – Present", "Example Council, July  2023-Present"),  # spacing aside
+    ("07/1990-06/1991", "Example Contract | 07/1990 - 06/1991"),
+]
+
+
+@pytest.mark.parametrize("code", ["T", "N3", "M2B", "I"])
+@pytest.mark.parametrize("text,shown", _RANGES_AND_SHOWN)
+def test_bare_date_range_the_document_shows_is_dropped_under_any_code(text, shown, code):
+    entries = [{"text": text, "taxonomy_code": code}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Unrelated line", shown])
+    assert kept == []
+    assert dropped == Counter({DROP_DATE_RANGE: 1})
+
+
+@pytest.mark.parametrize("text,shown", _RANGES_AND_SHOWN)
+def test_bare_date_range_shown_nowhere_else_is_kept(text, shown):
+    """#1551 review (NDMRSO ATUVAL): a range the document does not show is the
+    only place that value appears, so its Appendix line stays."""
+    entries = [{"text": text, "taxonomy_code": "N3"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Committee, 2017-2019"])
+    assert [t for _, t in kept] == [text]
+    assert dropped == Counter()
+    # No document at all drops nothing either, and the text-only check never
+    # claims a range (stage 6's T-line recovery reads it, #1230).
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS)[0] == kept
+    assert _sig(text, None, code="N3") is None
+
+
+@pytest.mark.parametrize("shown", [
+    "Example Committee, 12014-2016",      # the range inside a longer number
+    "Example Committee, 2014-20169",
+    "Example Committee, 1/2014-2016",     # the start is another date's tail
+    "Example Committee, 1.2014-2016",     # ... or another number's
+    "Example Committee, 2014-2016.5",
+])
+def test_a_range_counts_as_shown_only_on_its_own_boundaries(shown):
+    entries = [{"text": "2014-2016", "taxonomy_code": "N3"}]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, [shown])[1] == Counter()
+
+
+def test_a_range_is_compared_literally():
+    """The range's "." is a full stop, not a wildcard: "Jan. 2014-2016" is
+    not shown by "Janx 2014-2016"."""
+    entries = [{"text": "Jan. 2014-2016", "taxonomy_code": "N3"}]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example, Janx 2014-2016"])[1] == Counter()
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example, Jan. 2014 – 2016"])[1] == (
+        Counter({DROP_DATE_RANGE: 1}))
+
+
+def test_another_appendix_line_vouches_for_a_range_but_a_bare_copy_does_not():
+    other = {"text": "Example Committee, Member, 2014-2016", "taxonomy_code": "T"}
+    tail = {"text": "2014 – 2016", "taxonomy_code": "N3"}
+    kept, dropped = _filter_unmapped_entries([other, tail], _OWNER_TOKENS)
+    assert [t for _, t in kept] == [other["text"]]
+    assert dropped == Counter({DROP_DATE_RANGE: 1})
+    # Two copies of one unplaced range: neither vouches for the other.
+    copy = {"text": "2014-2016", "taxonomy_code": "T"}
+    kept, dropped = _filter_unmapped_entries([tail, copy], _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["2014 – 2016", "2014-2016"]
+    assert dropped == Counter()
+
+
+def test_a_dropped_line_does_not_vouch_for_a_range():
+    """Only a line the Appendix shows vouches: one dropped as page furniture
+    is on no page."""
+    furniture = {"text": "Page 3 2014-2016", "taxonomy_code": "T"}
+    tail = {"text": "2014-2016", "taxonomy_code": "N3"}
+    kept, dropped = _filter_unmapped_entries([furniture, tail], _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["2014-2016"]
+    assert dropped == Counter({DROP_PAGE_FURNITURE: 1})
+
+
+def test_fill_appendix_reads_the_rendered_document_for_a_range():
+    """The wire: `_fill_appendix` hands the document rendered so far to the
+    date-range check, so a range a section already shows is dropped, and the
+    same line with no such section stays."""
+    entries = [{"text": "2014 – 2016", "hierarchy": ["Service"], "taxonomy_code": "N3"},
+               {"text": GENUINE_ONE, "hierarchy": ["Service"], "taxonomy_code": "T"}]
+
+    def appendix_after(section_text: str | None) -> list[str]:
+        gen = WCMTemplateGenerator(verbose=False)
+        gen.doc = Document(gen.template_path)
+        if section_text:
+            gen.doc.add_paragraph(section_text)
+        gen._fill_appendix([dict(e) for e in entries])
+        return _after_appendix_note([p.text for p in gen.doc.paragraphs])
+
+    assert "1. 2014 – 2016" not in appendix_after("Example Committee, Member, 2014-2016")
+    assert "1. 2014 – 2016" in appendix_after(None)
+
+
+_AMOUNTS_AND_SHOWN = [
+    # (the bare Appendix line, a rendered line that shows the same amount)
+    ("Amount: $2,500", "Example Award, 2014, $2,500"),
+    ("Direct Costs: $100,645", "Example Grant | $100,645 | 2016-2019"),
+    ("Annual direct cost:   $1,105,168", "Example Grant (annual direct costs $1,105,168)"),
+    ("$ 10,334,879", "Example Program Project, $10,334,879"),  # spacing after $ aside
+    ("Total: $12,500.00", "Example Contract, total $12,500.00"),
+    ("   Amount: $2,500 ", "Example Award $ 2,500."),
+]
+
+
+@pytest.mark.parametrize("code", ["T", "M2B", "M2A"])
+@pytest.mark.parametrize("text,shown", _AMOUNTS_AND_SHOWN)
+def test_bare_amount_the_document_shows_is_dropped_under_any_code(text, shown, code):
+    entries = [{"text": text, "taxonomy_code": code}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Unrelated line", shown])
+    assert kept == []
+    assert dropped == Counter({DROP_AMOUNT: 1})
+
+
+@pytest.mark.parametrize("text,shown", _AMOUNTS_AND_SHOWN)
+def test_bare_amount_shown_nowhere_else_is_kept(text, shown):
+    """#1551 render A/B (web205, web199, web26, VGHNZD): an amount the document
+    does not show is the only place that value appears, so its line stays."""
+    entries = [{"text": text, "taxonomy_code": "M2B"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Grant, $7,777"])
+    assert [t for _, t in kept] == [text]
+    assert dropped == Counter()
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS)[0] == kept
+    assert _sig(text, None, code="M2B") is None
+
+
+@pytest.mark.parametrize("shown", [
+    "Example Grant, $1,100,645",      # the amount inside a larger number
+    "Example Grant, $100,645.50",     # ... with cents the tail does not have
+    "Example Grant, $100,6450",       # ... running on into another digit
+    "Example Grant, $2100,645",
+    "Example Grant, 100,645",         # no currency mark: a count, not an amount
+    "Example study of 100,645 Example Twins",
+    "Example Grant, US$100,645",
+])
+def test_an_amount_counts_as_shown_only_on_its_own_boundaries(shown):
+    entries = [{"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, [shown])
+    assert [t for _, t in kept] == ["Direct Costs: $100,645"]
+    assert dropped == Counter()
+
+
+def test_a_value_split_across_two_document_lines_is_not_shown():
+    entries = [{"text": "2014-2016", "taxonomy_code": "N3"},
+               {"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}]
+    shown = ["Example Committee 2014", "-2016 Example", "Example Grant $100", ",645"]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, shown)[1] == Counter()
+
+
+def test_another_appendix_line_vouches_for_an_amount_but_a_bare_copy_does_not():
+    other = {"text": "Example Grant, Example Foundation, $100,645", "taxonomy_code": "M2B"}
+    tail = {"text": "Direct Costs: $100,645", "taxonomy_code": "M2B"}
+    kept, dropped = _filter_unmapped_entries([other, tail], _OWNER_TOKENS)
+    assert [t for _, t in kept] == [other["text"]]
+    assert dropped == Counter({DROP_AMOUNT: 1})
+    copy = {"text": "$100,645", "taxonomy_code": "T"}
+    kept, dropped = _filter_unmapped_entries([tail, copy], _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["Direct Costs: $100,645", "$100,645"]
+    assert dropped == Counter()
+
+
+@pytest.mark.parametrize("text", [
+    "2015 (sabbatical year)",           # a year with a note: says something
+    "2014 – 2016 Example Committee, Member",
+    "2014 – 2016\tExample Society, Member",
+    "2014-",                            # an open start, not a range
+    "Sabbatical: 2014-2016",            # a label before the range
+    "Amount: $2,500 from the Example Foundation",
+    "$2,500 Example Award",
+    "Source: Example Foundation\tAmount: $2,500",
+    "Amount: 2,500",                    # no currency mark
+    "Example Award, 2014-2016, $2,500",
+])
+def test_a_line_with_anything_besides_the_range_or_amount_is_kept(text):
+    """Kept even when the document shows every value in it: only a bare tail
+    is a candidate for the shown-elsewhere drop."""
+    shown = ["Example Award 2014-2016, $2,500, 2015 (sabbatical year), 2,500, 2014"]
+    entries = [{"text": text, "taxonomy_code": "M2B"}]
+    assert _filter_unmapped_entries(entries, _OWNER_TOKENS, shown)[1] == Counter()
+    assert _sig(text, None, code="M2B") is None
+    assert _sig(text, None) is None
+
+
+def test_record_tail_drops_are_counted_and_described():
+    entries = [
+        {"text": "2014 – 2016", "taxonomy_code": "N3"},
+        {"text": "Amount: $2,500", "taxonomy_code": "M2B"},
+        {"text": "2015 (sabbatical year)", "taxonomy_code": "T"},
+    ]
+    kept, dropped = _filter_unmapped_entries(
+        entries, _OWNER_TOKENS, ["Example Committee 2014-2016", "Example Award $2,500"])
+    assert [t for _, t in kept] == ["2015 (sabbatical year)"]
+    assert dropped == Counter({DROP_DATE_RANGE: 1, DROP_AMOUNT: 1})
+    assert _describe_dropped(dropped) == (
+        "2 non-content blocks removed (date-range 1, amount 1)"
+    )
+
+
+@pytest.mark.parametrize("text", [
+    "Best Teacher Award: $1,000",
+    "Gates Foundation Grand Challenges: $100,000",
+    "Startup Package: $500,000",
+    "Example: $2,500",
+])
+def test_an_amount_behind_a_label_naming_the_record_is_kept(text):
+    """#1551 review: only a label naming the value itself (`_AMOUNT_LABELS`)
+    makes an amount a tail; an award's or package's own name makes it a
+    record, kept even when the document shows the same amount."""
+    shown = ["Example Grant $1,000 $100,000 $500,000 $2,500"]
+    entries = [{"text": text, "taxonomy_code": "H"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, shown)
+    assert [t for _, t in kept] == [text]
+    assert dropped == Counter()
+
+
+@pytest.mark.parametrize("label", [
+    "Amount", "Award amount", "Total", "Total costs", "Direct costs",
+    "Annual direct costs", "Indirect costs", "Funding", "Budget",
+    "Total cost", "Direct cost", "Annual direct cost", "Indirect cost", "Award   amount",
+])
+def test_every_value_label_makes_a_shown_amount_a_tail(label):
+    entries = [{"text": f"{label}: $12,000", "taxonomy_code": "M2B"}]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["Example Grant, $12,000"])
+    assert kept == []
+    assert dropped == Counter({DROP_AMOUNT: 1})
+
+
+def test_a_structural_drop_keeps_its_reason_over_a_tail(monkeypatch):
+    """The tail pass runs last, over kept lines only: a line an older check
+    drops keeps that reason even when the tail pass would also claim it."""
+    monkeypatch.setattr(appendix_module, "_record_tail", lambda text: (DROP_AMOUNT, "vouched"))
+    reclassified = "[T-validation reclassified from T] Section header only"
+    entries = [
+        {"text": "Page 3 2014-2016", "taxonomy_code": "T"},
+        {"text": "SERVICE", "taxonomy_code": "Q1", "classification_reasoning": reclassified},
+        {"text": "Example Committee, Member", "taxonomy_code": "Q1"},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS, ["vouched"])
+    assert kept == []
+    assert dropped == Counter({DROP_PAGE_FURNITURE: 1, DROP_SECTION_HEADER: 1, DROP_AMOUNT: 1})
+
+
+def test_fill_appendix_reads_the_whole_rendered_document(monkeypatch):
+    """The wire's arguments: the instruction box's example text must not
+    vouch for a value, and tracked insertions (enriched citations, the
+    research summary) must."""
+    calls = []
+
+    def record(self, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(WCMTemplateGenerator, "_rendered_output_lines", record)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_appendix([{"text": GENUINE_ONE, "hierarchy": ["Service"], "taxonomy_code": "T"}])
+    assert {"exclude_instruction_box": True, "include_tracked_insertions": True} in calls
+
+
+@pytest.mark.parametrize("text", ["JQ Doe June 2023", "J Q Doe June 2023", "Jane Doe March 3, 2021"])
+def test_owner_name_and_a_date_alone_is_dropped(text):
+    """#1551's signature line, the owner's initials and surname and a month
+    and year, is page furniture: nothing but the owner's name and a date."""
+    reasoning = "[T-validation confirmed] Stray name/date fragment, not substantive"
+    assert _sig(text, reasoning) == DROP_PAGE_FURNITURE

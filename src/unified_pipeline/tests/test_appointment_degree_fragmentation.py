@@ -38,7 +38,6 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "I5NKUG_fields.json"
 docx = pytest.importorskip("docx", reason="python-docx not importable in this env")
 from unified_pipeline import stage_6_word_template as s6  # noqa: E402
 
-
 # --- helpers ---------------------------------------------------------------
 
 def _iter_blocks(doc):

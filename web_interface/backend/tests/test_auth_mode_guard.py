@@ -8,7 +8,7 @@ operator explicitly opts in via CVICHE_ALLOW_SIMPLE_AUTH=1.
 """
 import pytest
 
-from app.main import _guard_deployed_auth_mode, SECURE_AUTH_MODES
+from app.main import SECURE_AUTH_MODES, _guard_deployed_auth_mode
 from app.saml_replay import check_deployed_posture
 
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Score a single local pipeline run; print a one-line TSV summary.
 
-    PYTHONPATH=src python3 scripts/score_one.py <outputs_root> <uid> [wcm_docx] [score_json_out] [--source cv.docx]
+    PYTHONPATH=src python3 scripts/score_one.py <outputs_root> <uid> [wcm_docx] [score_json_out] [--doctor report.json]
 
 <outputs_root> is the dir holding the stage_* subdirs (i.e. src/unified_pipeline/outputs).
 If score_json_out is given, the full score_run dict is written there.
---source is the run's original CV: with it the lost-source-table gate is evaluated, without it
-that gate is skipped (a score without it can differ from the web app's).
+--doctor is the run's doctor report (doctor_one.py's findings_json_out). The score is built
+from it (#1595); without it the stage_7_doctor/<uid>_doctor.json a local run writes is used,
+and with neither the run reads as not checked and is capped below GREEN.
 
 The scorer wants every artifact in ONE directory, but a local run scatters them
 across stage_* subdirs, so they are collected into a temp dir first -- the same
@@ -29,7 +30,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from unified_pipeline.quality_score import SOURCE_DOCX_SUBDIR, score_run
+from unified_pipeline.quality_score import DOCTOR_REPORT_SUFFIX, score_run
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX
 
 logger = logging.getLogger(__name__)
@@ -37,19 +38,22 @@ logger = logging.getLogger(__name__)
 # What the dimension scorers actually read. Keep in step with
 # quality_score_service._NEEDED_SUFFIXES. The stage-error record (#745) sits in
 # its own stage_errors/ dir, which the */<uid><suffix> glob below covers.
-NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", STAGE_ERRORS_SUFFIX)
+NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", STAGE_ERRORS_SUFFIX,
+                   DOCTOR_REPORT_SUFFIX)
 
 
 def collect(outputs_root: Path, uid: str, wcm_docx: Path, dest: Path,
-            source_docx: Path | None = None) -> int:
+            doctor_report: Path | None = None) -> int:
     """Flatten this run's scorable artifacts into dest. Returns how many landed.
-    The original CV, when given, goes under SOURCE_DOCX_SUBDIR for the scorer's
-    lost-source-table gate; it is not counted (the gate is optional evidence)."""
+    A doctor report given explicitly replaces the one under outputs_root, so
+    the scorer never sees two (it would call the pair ambiguous)."""
     found = 0
-    if source_docx and source_docx.exists():
-        (dest / SOURCE_DOCX_SUBDIR).mkdir()
-        shutil.copy(source_docx, dest / SOURCE_DOCX_SUBDIR / source_docx.name)
+    if doctor_report:
+        shutil.copy(doctor_report, dest / f"{uid}{DOCTOR_REPORT_SUFFIX}")
+        found += 1
     for suffix in NEEDED_SUFFIXES:
+        if doctor_report and suffix == DOCTOR_REPORT_SUFFIX:
+            continue
         # stage_* subdirs only; a flat outputs_root works too since glob('*')
         # over files simply matches nothing.
         for path in outputs_root.glob(f"*/{uid}{suffix}"):
@@ -70,9 +74,9 @@ def main(argv=None):
                     help="generated WCM .docx; enables the render dimensions")
     ap.add_argument("score_json_out", nargs="?", default=None,
                     help="write the full score_run dict here as JSON")
-    ap.add_argument("--source", default=None,
-                    help="the run's original .docx; enables the lost-source-table gate "
-                         "(without it that gate is not evaluated)")
+    ap.add_argument("--doctor", default=None,
+                    help="the run's doctor report; the score is built from it "
+                         "(default: <outputs_root>/stage_7_doctor/<uid>_doctor.json, if any)")
     args = ap.parse_args(argv)
 
     root = Path(args.outputs_root)
@@ -98,9 +102,13 @@ def main(argv=None):
                        "(inflates the score, does not zero it): %s", docx)
         docx = None
 
+    doctor = Path(args.doctor) if args.doctor else None
+    if doctor and not doctor.is_file():
+        ap.error(f"doctor report not found: {doctor}")
+
     tmp = Path(tempfile.mkdtemp(prefix=f"score_{args.uid}_"))
     try:
-        found = collect(root, args.uid, docx, tmp, Path(args.source) if args.source else None)
+        found = collect(root, args.uid, docx, tmp, doctor)
         if not found:
             logger.error("no scorable artifacts for uid=%s under %s", args.uid, root)
             return 1

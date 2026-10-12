@@ -11,7 +11,8 @@ import pymysql.err
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from app.auth import _best_effort_persist, _is_retryable_write_conflict
+from app.auth import _best_effort_persist
+from app.database import is_retryable_write_conflict
 from app.models import User
 
 
@@ -61,7 +62,7 @@ def test_best_effort_persist_does_not_touch_unrelated_dirty_state(client, db):
 
 
 # ---------------------------------------------------------------------------
-# _is_retryable_write_conflict: real per-backend exception shapes, not
+# is_retryable_write_conflict: real per-backend exception shapes, not
 # string-matched or hand-mocked -- pymysql's is a real (code, message) tuple;
 # sqlite3's is a plain message. Verified against the actual installed
 # libraries, not asserted from memory.
@@ -75,13 +76,13 @@ def test_mysql_1020_conflict_is_retryable():
     exc = _operational_error(
         pymysql.err.OperationalError(1020, "Record has changed since last read in table 'users'")
     )
-    assert _is_retryable_write_conflict(exc) is True
+    assert is_retryable_write_conflict(exc) is True
 
 
 def test_sqlite_database_locked_is_retryable():
     import sqlite3
     exc = _operational_error(sqlite3.OperationalError("database is locked"))
-    assert _is_retryable_write_conflict(exc) is True
+    assert is_retryable_write_conflict(exc) is True
 
 
 def test_unrelated_operational_error_is_not_retryable():
@@ -92,7 +93,7 @@ def test_unrelated_operational_error_is_not_retryable():
     exc = _operational_error(
         pymysql.err.OperationalError(2013, "Lost connection to MySQL server during query")
     )
-    assert _is_retryable_write_conflict(exc) is False
+    assert is_retryable_write_conflict(exc) is False
 
 
 def test_best_effort_persist_reraises_unrelated_operational_error(db, monkeypatch):
@@ -130,19 +131,21 @@ def test_bump_last_active_does_not_dirty_the_request_session(client, db):
     later db.commit() re-issues the same UPDATE from a snapshot older than
     that side commit and MariaDB (innodb_snapshot_isolation=ON) rejects it
     with 1020 -- the 2026-09-03 prod regression on POST /run/{id}/feedback."""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
+
     from sqlalchemy import inspect
+
     from app.auth import _bump_last_active
 
     user = _make_user(db)
-    user.last_active_at = datetime.now() - timedelta(minutes=5)
+    user.last_active_at = datetime.now(timezone.utc) - timedelta(minutes=5)
     db.commit()
 
     _bump_last_active(user)
 
     assert user not in db.dirty
     assert not inspect(user).modified
-    assert (datetime.now() - user.last_active_at).total_seconds() < 5
+    assert (datetime.now(timezone.utc) - user.last_active_at).total_seconds() < 5
     # and the write really landed, via the side session
     db.expire_all()
-    assert (datetime.now() - db.query(User).get(user.id).last_active_at).total_seconds() < 5
+    assert (datetime.now(timezone.utc) - db.query(User).get(user.id).last_active_at).total_seconds() < 5

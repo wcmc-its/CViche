@@ -9,6 +9,7 @@ No REVIEW fallback - everything gets classified.
 """
 
 import re
+
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

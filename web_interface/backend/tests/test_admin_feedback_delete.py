@@ -20,7 +20,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 def _seed_feedback(db):
     """Insert a user + run + one feedback row, returning the feedback id."""
-    from app.models import User, Run, Feedback
+    from app.models import Feedback, Run, User
 
     user = User(email="reviewer@example.com", display_name="Reviewer", role="user")
     db.add(user)
@@ -54,8 +54,8 @@ def _seed_feedback(db):
 
 
 def _as_admin(client, fn):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
         id=-1, role="admin", email="admin@example.com"
@@ -69,8 +69,8 @@ def _as_admin(client, fn):
 def _as_user(client, fn):
     """Override the underlying current-user dep so the REAL require_admin runs
     and raises 403 -- this exercises the actual authorization guard."""
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
 
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         role="user", email="user@example.com"
@@ -97,8 +97,8 @@ def test_non_admin_cannot_delete_feedback(client, db):
 
 def _as_staff(client, fn):
     """Staff (read-only) through the REAL require_admin, like _as_user."""
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
 
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         id=-2, role="staff", email="staff@example.com"
@@ -260,8 +260,8 @@ def test_update_user_accepts_valid_role_and_status_values(client, db):
 
 def test_update_user_blocks_self_demotion_even_with_other_admins(client, db):
     """An admin cannot demote themselves, even when another admin exists."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     from app.models import User
 
     me = _seed_lone_admin(db)
@@ -316,8 +316,8 @@ def _seed_user(db, email, role="user", status="active"):
 
 def _put_as(client, acting, user_id, body):
     """PUT as `acting` (a seeded user) through an overridden require_admin."""
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
         id=acting.id, role="admin", email=acting.email

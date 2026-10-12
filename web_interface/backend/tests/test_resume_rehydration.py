@@ -13,13 +13,16 @@ recycle failed with "No input available for Stage 6". Resume now:
 Cost accounting continues from the persisted per-step costs of the kept
 stages (those before the effective resume point).
 """
+import asyncio
 import logging
+import shutil
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models import Run, Step
+from app.models import Run, RunState, Step
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 
@@ -41,6 +44,9 @@ class _FakeStorage:
             return self.store[(run_id, key)]
         except KeyError as exc:
             raise FileNotFoundError(key) from exc
+
+    def put_file(self, run_id, key, data):
+        self.store[(run_id, key)] = data
 
 
 def _make_orchestrator(db):
@@ -228,3 +234,179 @@ def test_stage_error_record_rehydrated_from_storage(db, tmp_path):
 
     local = stage_errors_path(orch.pipeline_output_dir, RUN_ID)
     assert local.read_bytes() == record
+
+
+# --- #1567: a resumed PDF run reuses its earlier conversion -----------------
+
+PDF_RUN = "PDFRES"
+CONVERTED_KEY = f"converted/{PDF_RUN}.docx"
+# SZHPJW's case: stages 1a-4 done, the auto-retry resumes at stage 4.5.
+RESUME_STEP = next(sd.number for sd in STEP_REGISTRY if sd.stage_id == "4.5")
+
+
+class _Converter:
+    """Stands in for pdf_sandbox.convert_pdf. Each call writes different
+    bytes, so a stage that saw a re-conversion is told apart from one that
+    saw the first; with `fail` set it raises instead, as a failed sandbox
+    conversion does."""
+
+    def __init__(self):
+        self.calls = 0
+        self.fail = False
+
+    def __call__(self, pdf_path, docx_path):
+        from app.services.pdf_sandbox import ConversionResult, PdfTooComplexError
+
+        self.calls += 1
+        if self.fail:
+            raise PdfTooComplexError("convert_pdf must not run on this attempt")
+        Path(docx_path).write_bytes(f"converted docx, call {self.calls}".encode())
+        return ConversionResult(image_only_pages=[])
+
+
+@pytest.fixture
+def pdf_run(db, tmp_path, monkeypatch):
+    """A PDF run over the real input materialization, a fake converter and
+    storage, and an execute_step that records the bytes of the docx each
+    stage was handed. `attempt(start)` runs execute() once; `recycle_pod()`
+    wipes the pod-local docx."""
+    from types import SimpleNamespace
+
+    from app.pipeline import orchestrator as orch
+
+    converter, storage = _Converter(), _FakeStorage()
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    monkeypatch.setattr(orch, "convert_pdf", converter)
+    monkeypatch.setattr(orch, "get_storage", lambda: storage)
+    monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
+    upload = tmp_path / f"{PDF_RUN}.pdf"
+    upload.write_bytes(b"%PDF-1.4 synthetic")
+    db.add(Run(id=PDF_RUN, filename="cv.pdf", file_type="pdf", status="running",
+               started_at=datetime.now()))
+    db.commit()
+    o = orch.PipelineOrchestrator(PDF_RUN, upload, db)
+    inputs: dict[str, bytes] = {}
+
+    async def record(step_number, stage_id, cv_path):
+        inputs[stage_id] = Path(cv_path).read_bytes()
+    monkeypatch.setattr(o, "execute_step", record)
+    monkeypatch.setattr(o, "_notify_started", AsyncMock())
+    # Stage outputs are not under test: resume exactly where asked.
+    monkeypatch.setattr(o, "_prepare_resume", lambda run, start: start)
+
+    def attempt(start=None):
+        inputs.clear()
+        asyncio.run(o.execute(start_step_number=start))
+        db.expire_all()
+        return dict(inputs), db.get(Run, PDF_RUN)
+
+    yield SimpleNamespace(
+        attempt=attempt, converter=converter, storage=storage,
+        run=lambda: db.get(Run, PDF_RUN),
+        local=o._pipeline_input_path(),
+        recycle_pod=lambda: shutil.rmtree(tmp_path / "repo"))
+    shutil.rmtree(o.web_output_dir, ignore_errors=True)
+
+
+def test_pdf_resume_after_a_pod_recycle_reuses_the_stored_conversion(pdf_run):
+    """#1567 acceptance: a resume past stage 1a never calls convert_pdf (here
+    it raises), and every resumed stage, stage 6 included, opens the very
+    docx attempt 1 converted and stage 1a segmented."""
+    first, _ = pdf_run.attempt()
+    assert pdf_run.storage.store[(PDF_RUN, CONVERTED_KEY)] == first["1a"]
+
+    pdf_run.recycle_pod()
+    pdf_run.converter.fail = True
+    resumed, run = pdf_run.attempt(RESUME_STEP)
+
+    assert pdf_run.converter.calls == 1  # attempt 1's only
+    assert run.status == RunState.COMPLETE, run.error_message
+    assert "6" in resumed
+    assert resumed == {stage: first[stage] for stage in resumed}
+    assert resumed["6"] == first["1a"]
+
+
+def test_pdf_resume_on_the_same_pod_reuses_the_local_conversion(pdf_run):
+    """The pod-local docx is used before storage is consulted, and without
+    converting again."""
+    first, _ = pdf_run.attempt()
+    pdf_run.storage.store.clear()
+    pdf_run.converter.fail = True
+
+    resumed, run = pdf_run.attempt(RESUME_STEP)
+
+    assert pdf_run.converter.calls == 1
+    assert run.status == RunState.COMPLETE, run.error_message
+    assert resumed["6"] == first["1a"]
+
+
+def test_pdf_resume_with_no_surviving_conversion_converts_again(pdf_run):
+    """A run whose attempt 1 predates #1567 has no stored copy: after a pod
+    recycle the resume converts again, as before, and stores that docx."""
+    pdf_run.attempt()
+    pdf_run.recycle_pod()
+    pdf_run.storage.store.clear()
+
+    resumed, run = pdf_run.attempt(RESUME_STEP)
+
+    assert pdf_run.converter.calls == 2
+    assert run.status == RunState.COMPLETE, run.error_message
+    assert resumed["6"] == b"converted docx, call 2"
+    assert pdf_run.storage.store[(PDF_RUN, CONVERTED_KEY)] == resumed["6"]
+
+
+def test_a_fresh_start_of_a_pdf_run_always_converts(pdf_run):
+    """Only a resume reuses: a start without start_step_number converts."""
+    pdf_run.attempt()
+    pdf_run.attempt()
+    assert pdf_run.converter.calls == 2
+
+
+def test_a_failed_conversion_leaves_no_docx_for_a_resume_to_reuse(pdf_run):
+    """The converter wrote part of a docx and then failed: neither the
+    pod-local path nor storage holds anything a resume could pick up."""
+    def write_then_fail(pdf_path, docx_path):
+        Path(docx_path).write_bytes(b"half a docx")
+        raise RuntimeError("child killed mid-write")
+    with patch("app.pipeline.orchestrator.convert_pdf", write_then_fail), \
+            pytest.raises(RuntimeError, match="mid-write"):
+        pdf_run.attempt()
+
+    assert pdf_run.run().status == RunState.FAILED
+    assert not pdf_run.local.exists()
+    assert list(pdf_run.local.parent.iterdir()) == []
+    assert pdf_run.storage.store == {}
+
+
+def test_storage_failure_storing_the_conversion_does_not_fail_the_run(pdf_run, caplog):
+    def refuse(run_id, key, data):
+        raise RuntimeError("s3 unreachable")
+    pdf_run.storage.put_file = refuse
+
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.orchestrator"):
+        _, run = pdf_run.attempt()
+
+    assert run.status == RunState.COMPLETE, run.error_message
+    [record] = [r for r in caplog.records
+                if "Could not persist the converted docx" in r.getMessage()]
+    assert record.exc_info and str(record.exc_info[1]) == "s3 unreachable"
+
+
+def test_storage_failure_reading_the_conversion_converts_again(pdf_run, caplog):
+    pdf_run.attempt()
+    pdf_run.recycle_pod()
+
+    def unreachable(run_id, key):
+        raise RuntimeError("s3 unreachable")
+    pdf_run.storage.get_file = unreachable
+
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.orchestrator"):
+        resumed, run = pdf_run.attempt(RESUME_STEP)
+
+    assert pdf_run.converter.calls == 2
+    assert run.status == RunState.COMPLETE, run.error_message
+    assert resumed["6"] == b"converted docx, call 2"
+    [record] = [r for r in caplog.records
+                if "Could not rehydrate the converted docx" in r.getMessage()]
+    assert record.exc_info and str(record.exc_info[1]) == "s3 unreachable"

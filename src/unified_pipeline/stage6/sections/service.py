@@ -16,7 +16,8 @@ is the section's actual logic.
 
 `_fill_service` reroutes before it dispatches: a Q2 entry whose text is really
 journal reviewing is moved to Q4D, and a multi-line Q2 entry mixing both is
-split line by line. Separating the writers into four modules would put the
+split line by line; a single-line Q2 entry that is an ad hoc grant review is
+moved to Q3 (#1580). Separating the writers into four modules would put the
 dispatcher in one file and the thing it corrects in another, which is the split
 that would have to be undone first to understand either.
 
@@ -27,15 +28,17 @@ import logging
 import re
 from collections.abc import Sequence
 
+from ..fan_out import fallback_text, is_split_record
 from ..formatting import (
     _clear_table_data,
     _set_font,
     format_date_range,
     with_extra_date_spans,
 )
-from ..fan_out import fallback_text, is_split_record
-from ..sorting import sort_entries_reverse_chronological
 from ..normalization import _cell_text, _squash
+from ..parsing import _ORPHAN_DATE, _UNDATED_ACTIVITY, _orphaned_dates_line_up
+from ..parsing.dates import YEAR, YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
+from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.render_check import entry_lines
@@ -74,15 +77,47 @@ JOURNAL_SPECIALTY_KEYWORDS = (
     'journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
     'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
 )
-JOURNAL_ROLE_PHRASES = ('editorial board', 'ad hoc reviewer', 'manuscript review')
+JOURNAL_ROLE_PHRASES = ('editorial board', 'manuscript review')
+# Role phrases that name journal reviewing on their own. 'abstract reviewer'
+# is not one: every one of its 24 Q2 lines over the NDMRSO and EBYSBC farms
+# reviews meeting abstracts, not manuscripts (DXAGUS 94, #1428).
 REVIEWER_PATTERNS = (
-    'abstract reviewer', 'reviewer for', 'manuscript reviewer',
-    'peer reviewer', 'ad hoc reviewer',
+    'manuscript reviewer', 'peer reviewer',
 )
+# Role phrases that name journal reviewing only when the line also names a
+# journal (`GENERIC_REVIEWER_JOURNAL_SIGNALS`). "Reviewer for" introduces
+# whatever is reviewed: all 10 such Q2 lines on those farms review grants,
+# abstracts or a study program (VYNARH 96, #1428), none a journal. "Ad hoc
+# reviewer" is the same: every Q2 line holding it on those farms names a
+# grant program or funder (ZCTARO 151-157, BMAMWE 619/622, #1532), none a
+# journal; a Q4D line keeps it regardless, since only Q2 is rerouted.
+GENERIC_REVIEWER_PHRASES = ('reviewer for', 'ad hoc reviewer')
+GENERIC_REVIEWER_JOURNAL_SIGNALS = (*JOURNAL_SPECIALTY_KEYWORDS, 'annals')
 BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
 )
+
+# Q2 -> Q3 reroute vocabulary (#1580). Stage 3b codes ad hoc and external
+# grant reviews Q2, as the taxonomy's own Q2 example tells it to, and each one
+# rendered as a Service on Boards row: a funder in the committee columns and,
+# under "Ad Hoc Review Panels", an invented "Member" role (WPJHYT 140-147,
+# SLYBST 74/81, SIJYJZ 216). An entry is a grant review when its nearest
+# heading names grant review, or its own line or role does.
+GRANT_REVIEW_HEADING_RE = re.compile(
+    r'\bgrants?\b[^>]*\breview|\breview\w*\b[^>]*\bgrants?\b'
+    r'|\bad[- ]?hoc\s+review|\bstudy\s+sections?\b', re.IGNORECASE)
+GRANT_REVIEW_LINE_RE = re.compile(
+    r'\bad[- ]?hoc\s+(?:grant\s+)?review|\bgrant\s+review|\bpre-?review',
+    re.IGNORECASE)
+# The entry's own role must say reviewer, or be empty. Any other role
+# ("Member", "Co-Chair", "Organizer", "Ad Hoc Member") is a seat on a body
+# and stays a committee row, whatever the heading says (JUTBUZ 111-123).
+REVIEWER_ROLE_RE = re.compile(r'review|^\s*ad[- ]?hoc\s*$', re.IGNORECASE)
+# Reviewing that is not grant reviewing, under a grant-review heading:
+# meeting abstracts (BMAMWE 625), board examinations, a task-group report.
+NOT_GRANT_REVIEW_RE = re.compile(
+    r'\b(?:abstracts?|exam(?:ination)?s?|task\s+group)\b', re.IGNORECASE)
 
 # Role indicators used by `_is_known_org_line`'s veto and the sibling
 # `is_role` check in `_parse_extramural_leadership_lines`, both matched with
@@ -131,13 +166,37 @@ _ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
 
 
 # A year, or a year range ("2005-present", "1993-1996", "2001-"), used to find
-# the date text stage 4 already moved into `start_date`/`end_date`.
-_YEAR = r'(?:1[89]|20)\d{2}'
-_DATE_SPAN = re.compile(
-    rf'(?<!\d){_YEAR}(?:\s*[-–—]\s*(?:{_YEAR}|present|current|ongoing)?)?(?!\d)',
-    re.IGNORECASE)
+# the date text stage 4 already moved into `start_date`/`end_date`. On the
+# shared stage-6 date grammar (parsing/dates.py, #665).
+_YEAR_RE = re.compile(YEAR)
+_DATE_SPAN = re.compile(rf'(?<!\d){YEAR_OR_OPEN_SPAN}(?!\d)', re.IGNORECASE)
 _TEXT_CELL_SEPARATORS = re.compile(r'[\t\n|]+')
 _EDGE_PUNCTUATION = ' ,;:.-–—|"“”'
+
+# Words that cannot name an organization on their own. Taking the years out of
+# "September 1999 – September 2001" leaves the months behind, and the row
+# rendered "September September" as its Organization (KHXOUF 1264, #1437).
+_MONTH_WORDS = frozenset({
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december',
+    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct',
+    'nov', 'dec', 'present', 'current', 'ongoing'})
+# A connective left at the edge of the residue once the role around it is gone:
+# "Chair of the Fictional Society" less "Chair" is "of the Fictional Society"
+# (#1437). A leading "the" alone is kept -- it is part of "The Fictional Society".
+_CONNECTIVE_WORDS = frozenset({
+    'of', 'the', 'at', 'from', 'by', 'for', 'in', 'to', 'and', 'with', 'on'})
+_LEADING_CONNECTIVE_RE = re.compile(
+    r'^(?:(?:of|at|from|by|for|in|to|and|with|on)\s+)+(?:the\s+)?', re.IGNORECASE)
+_TRAILING_CONNECTIVE_RE = re.compile(
+    r'(?:\s+(?:of|the|at|from|by|for|in|to|and|with|on))+$|\s*&$', re.IGNORECASE)
+# A clause this short is a list glyph or a stub the removals left, not a name:
+# Word's Courier sub-bullet "o" (or the "◦" the PDF converter now reads it as)
+# rendered as six Q1 Organizations on one CV (SXPHOG-02, #1584). Kept at this
+# length: a two-capital acronym ("UN"), and anything with a digit ("3M", or a
+# year written short, "2019, 21, 23", which the Dates cell may not show).
+_RESIDUE_MAX_CHARS = 2
+_SHORT_RESIDUE_KEPT_RE = re.compile(r'[A-Z]{2}|.*\d.*')
 
 # A Q2 row with no stage-4 role gets the default 'Member' only when the row is
 # a membership: its source heading, or its own line, names a body one sits on.
@@ -180,7 +239,9 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
     that is not in `start_date`/`end_date` (the Dates cell would not show it)
     and every word outside the role stay, so the row never loses text the
     other columns do not carry. When the role is the whole line the result is
-    '' -- the Role cell already holds it.
+    '' -- the Role cell already holds it. What the removals strand is tidied
+    by `_organization_segment` (#1437): a connective left at a piece's edge,
+    and a piece of nothing but month names.
 
     A `role` that is not a plain string (stage 4 files a list of per-record
     dicts there for a fused entry, and `_cell_text` then renders them with
@@ -190,10 +251,10 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
     text = _cell_text(text)
     if not isinstance(role, str):
         return text
-    known_years = set(re.findall(_YEAR, f'{_cell_text(start_date)} {_cell_text(end_date)}'))
+    known_years = set(_YEAR_RE.findall(f'{_cell_text(start_date)} {_cell_text(end_date)}'))
 
     def _drop_known_dates(match: re.Match[str]) -> str:
-        return '' if set(re.findall(_YEAR, match.group())) <= known_years else match.group()
+        return '' if set(_YEAR_RE.findall(match.group())) <= known_years else match.group()
 
     text = _DATE_SPAN.sub(_drop_known_dates, text)
     for part in re.split(r'\s*;\s*', _cell_text(role)):
@@ -201,8 +262,34 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
         if words:
             joined = r'[\W_]*'.join(map(re.escape, words))
             text = re.sub(rf'\b{joined}\b', '', text, flags=re.IGNORECASE)
-    segments = (segment.strip(_EDGE_PUNCTUATION) for segment in _TEXT_CELL_SEPARATORS.split(text))
-    return ', '.join(re.sub(r'\s{2,}', ' ', segment) for segment in segments if segment)
+    segments = (_organization_segment(segment) for segment in _TEXT_CELL_SEPARATORS.split(text))
+    return ', '.join(segment for segment in segments if segment)
+
+
+def _organization_segment(segment: str) -> str:
+    """One separator-delimited piece of `_organization_left_in_text`'s residue,
+    tidied clause by clause (#1437): each comma clause loses the edge
+    punctuation and edge connectives the removals exposed, and a clause made
+    only of months and connectives -- none of which can name an organization --
+    is dropped, as is one of one or two characters with no digit that is not
+    a two-capital acronym (#1584: a bullet glyph). A year stays: it may be one the Dates cell does
+    not show."""
+    clauses = (_organization_clause(clause) for clause in segment.split(','))
+    return ', '.join(clause for clause in clauses if clause)
+
+
+def _organization_clause(clause: str) -> str:
+    """One comma clause of an organization residue, tidied; '' when nothing in
+    it could name an organization."""
+    clause = re.sub(r'\s{2,}', ' ', clause.strip(_EDGE_PUNCTUATION))
+    clause = _LEADING_CONNECTIVE_RE.sub('', clause)
+    clause = _TRAILING_CONNECTIVE_RE.sub('', clause).strip(_EDGE_PUNCTUATION)
+    words = {word.lower() for word in re.findall(r'\w+', clause)}
+    if words <= _MONTH_WORDS | _CONNECTIVE_WORDS:
+        return ''
+    if len(clause) <= _RESIDUE_MAX_CHARS and not _SHORT_RESIDUE_KEPT_RE.fullmatch(clause):
+        return ''
+    return clause
 
 
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
@@ -217,6 +304,15 @@ def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
     both without changing which whole-word/whole-phrase hits count.
     """
     return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
+
+
+def _names_journal_reviewing(text_lower: str) -> bool:
+    """True when `text_lower` holds a `REVIEWER_PATTERNS` phrase, or a
+    `GENERIC_REVIEWER_PHRASES` one beside a journal signal (#1428)."""
+    if _matches_bounded(text_lower, REVIEWER_PATTERNS):
+        return True
+    return (_matches_bounded(text_lower, GENERIC_REVIEWER_PHRASES)
+            and any(signal in text_lower for signal in GENERIC_REVIEWER_JOURNAL_SIGNALS))
 
 
 def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
@@ -303,8 +399,15 @@ def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
 # A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
 # describe the line before them; nothing else should be treated as a
 # continuation (#573 review).
-_DATE_ONLY_LINE_RE = re.compile(
-    r'^\d{4}(?:\s*[-–,]\s*(?:\d{4}|present|current))*\s*$', re.IGNORECASE)
+# The same shape is the date column of a flattened extramural-leadership
+# table (`_parse_extramural_leadership_lines`).
+_DATE_ONLY_LINE_RE = re.compile(rf'^({YEAR_LIST})\s*$', re.IGNORECASE)
+# "Role | 2010-2014" / "Org | Role | 2010-present": the date cell that closes a
+# pipe-flattened row.
+_PIPE_TRAILING_DATE_RE = re.compile(rf'\|\s*({YEAR_OR_SPAN})\s*$', re.IGNORECASE)
+# The date a raw Q4 entry text opens with ("2010-2014 | Editorial Board"), for
+# the organization fallback that must not start with it.
+_LEADING_DATE_CELL_RE = re.compile(rf'^{YEAR_OR_OPEN_SPAN}\s*\|?\s*', re.IGNORECASE)
 
 # Role titles recognized when Stage 4 merges a committee name into the role
 # field (e.g. role="Chair, Ultrasound Committee") and it needs splitting
@@ -372,7 +475,7 @@ def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
 
     for line in lines:
         line_lower = line.lower()
-        is_reviewer_line = _matches_bounded(line_lower, REVIEWER_PATTERNS)
+        is_reviewer_line = _names_journal_reviewing(line_lower)
         is_board_line = _matches_bounded(line_lower, BOARD_KEYWORDS)
 
         if (not is_reviewer_line and not is_board_line and last_group
@@ -401,7 +504,7 @@ def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
     is_journal_reviewer = (
         (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
         any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
-        _matches_bounded(text_lower, REVIEWER_PATTERNS) or
+        _names_journal_reviewing(text_lower) or
         (role == 'reviewer' and 'j ' in committee) or
         (role == 'reviewer' and 'journal' in org)
     )
@@ -471,6 +574,56 @@ def _route_q2_entries(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
                 actual_board_entries.append(entry)
 
     return rerouted_to_journal, actual_board_entries
+
+
+def _is_q2_grant_review(entry: dict) -> bool:
+    """True when a single-line Q2 entry is an ad hoc or external grant
+    review rather than a seat on a committee or board (#1580).
+
+    A multi-line entry is never one: it can fuse several activities under one
+    set of fields (#573), so moving it whole could carry a committee row
+    along with it."""
+    text = str(entry.get('text') or '')
+    if len(entry_lines(text)) > 1 or NOT_GRANT_REVIEW_RE.search(text):
+        return False
+    fields = entry.get('extracted_fields') or {}
+    role = _cell_text(fields.get('role') or '')
+    headings = entry.get('hierarchy') or []
+    if isinstance(headings, str):
+        headings = [headings]
+    nearest_heading = str(headings[-1]) if headings else ''
+    if not (GRANT_REVIEW_HEADING_RE.search(nearest_heading)
+            or GRANT_REVIEW_LINE_RE.search(text)
+            or GRANT_REVIEW_LINE_RE.search(role)):
+        return False
+    if role:
+        return bool(REVIEWER_ROLE_RE.search(role))
+    # No role: a named committee or board is still a seat on it
+    # (QZWBKQ 1192, "External Advisory Committee").
+    return not _cell_text(fields.get('committee_name') or '')
+
+
+def _route_q2_grant_reviews(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split Q2 entries into grant reviews, rerouted to Q3, and the rest.
+
+    A rerouted entry is a copy with `taxonomy_code` Q3 and
+    `rerouted_from_q2` set, so the stage-3b code stays on the original.
+    Its `committee_name` is carried as the Q3 `panel_name`, which the Grant
+    Reviewing writer appends to the organization; the Q3 table has no
+    committee column."""
+    rerouted_to_grants: list[dict] = []
+    board_entries: list[dict] = []
+    for entry in q2_entries:
+        if not _is_q2_grant_review(entry):
+            board_entries.append(entry)
+            continue
+        fields = dict(entry.get('extracted_fields') or {})
+        if fields.get('committee_name') and not fields.get('panel_name'):
+            fields['panel_name'] = fields['committee_name']
+        rerouted_to_grants.append({
+            **entry, 'taxonomy_code': GRANT_REVIEWING_CODE,
+            'rerouted_from_q2': True, 'extracted_fields': fields})
+    return rerouted_to_grants, board_entries
 
 
 # Specific, multi-word organization names/acronyms used by
@@ -773,7 +926,7 @@ class ServiceSection:
             logger.info("  Rerouted %s Q2 entries/lines to Journal Reviewing", len(rerouted_to_journal))
 
         q4d_entries.extend(rerouted_to_journal)
-        q2_entries = actual_board_entries
+        rerouted_to_grants, q2_entries = _route_q2_grant_reviews(actual_board_entries)
 
         # Q2 entries go to "Service on Boards and/or Committees" - use National table by default
         if q2_entries:
@@ -787,6 +940,7 @@ class ServiceSection:
         other_q_entries = []
         for code in ['Q1', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C']:
             other_q_entries.extend(entries_by_code.get(code, []))
+        other_q_entries.extend(rerouted_to_grants)
 
         if other_q_entries:
             self._fill_other_service(other_q_entries)
@@ -1007,13 +1161,12 @@ class ServiceSection:
         - Two-column table extractions where roles and dates are in separate columns
         """
 
-        # Patterns for date detection
-        date_range_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?(?:\s*,\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)*)$', re.IGNORECASE)
-        embedded_date_pattern = re.compile(r'\|\s*(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
-
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
         date_only_lines = []  # standalone dates
+        # (original_idx, kind) for every orphaned date and undated item, so
+        # the third pass can check their layout (#1518)
+        orphan_positions: list[tuple[int, str]] = []
 
         for idx, line in enumerate(lines):
             line = line.strip()
@@ -1021,18 +1174,19 @@ class ServiceSection:
                 continue
 
             # Check for date-only line (possibly multiple dates on one line)
-            if date_range_pattern.match(line):
+            if _DATE_ONLY_LINE_RE.match(line):
                 # Split if multiple dates separated by newlines within the line
                 date_parts = re.split(r'\s*\n\s*', line)
                 for dp in date_parts:
                     dp = dp.strip()
                     if dp:
                         date_only_lines.append(dp)
+                        orphan_positions.append((idx, _ORPHAN_DATE))
                 continue
 
             # Check for pipe-separated format: "Role | Date" or "Org | Role | Date"
             embedded_date = ''
-            embedded_match = embedded_date_pattern.search(line)
+            embedded_match = _PIPE_TRAILING_DATE_RE.search(line)
             if embedded_match:
                 embedded_date = embedded_match.group(1)
                 line = line[:embedded_match.start()].strip().rstrip('|').strip()
@@ -1059,7 +1213,8 @@ class ServiceSection:
         items = []
         current_org = None
 
-        for line, embedded_date, is_org, is_role, _ in content_lines:
+        for line, embedded_date, is_org, is_role, idx in content_lines:
+            item_count = len(items)
             if is_org:
                 current_org = line
                 # If org has embedded date, it's a standalone membership
@@ -1082,23 +1237,18 @@ class ServiceSection:
                     current_org = line
                     if embedded_date:
                         items.append((current_org, '', embedded_date))
+            if len(items) > item_count and not embedded_date:
+                orphan_positions.append((idx, _UNDATED_ACTIVITY))
 
-        # Third pass: match date-only lines to items without dates
-        # Strategy: try to match dates in order they appear
-        items_needing_dates = [(i, item) for i, item in enumerate(items) if not item[2]]
-
-        if date_only_lines and items_needing_dates:
-            # If roughly equal counts, match 1:1 in order
-            if abs(len(date_only_lines) - len(items_needing_dates)) <= 2:
-                for (item_idx, _), date in zip(items_needing_dates, date_only_lines):
-                    org, role, _ = items[item_idx]
-                    items[item_idx] = (org, role, date)
-            else:
-                # More dates than items or vice versa - match from top
-                for i, (item_idx, _) in enumerate(items_needing_dates):
-                    if i < len(date_only_lines):
-                        org, role, _ = items[item_idx]
-                        items[item_idx] = (org, role, date_only_lines[i])
+        # Third pass: date-only lines go to the undated items forward by
+        # position -- only when the counts agree and the two sit in a table
+        # layout, the guard section O/P's parser uses. Otherwise the items
+        # stay dateless: a blank Dates cell is a visible gap, a shifted date
+        # a silent wrong answer (#1518).
+        layout = [kind for _, kind in sorted(orphan_positions)]
+        if _orphaned_dates_line_up(date_only_lines, layout):
+            dates = iter(date_only_lines)
+            items = [(org, role, date or next(dates)) for org, role, date in items]
 
         # Add rows for each item
         for org, role, date in items:
@@ -1180,6 +1330,8 @@ class ServiceSection:
 
         _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
+        # Q4D is excluded from #1205 sub-points; a rerouted Q2 row here is too.
+        self._subpoint_excluded_tables.append(table._element)
 
         sorted_entries = sort_entries_reverse_chronological(filtered_entries)
 
@@ -1342,7 +1494,7 @@ class ServiceSection:
                         # Parse from raw text as fallback, but strip date prefix
                         raw_text = entry.get('text', '')
                         # Remove common date patterns from beginning
-                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)
+                        organization = _LEADING_DATE_CELL_RE.sub('', raw_text)
                         # If role already contains most of the organization text, don't duplicate
                         if role and organization and role.lower()[:30] in organization.lower():
                             organization = ''

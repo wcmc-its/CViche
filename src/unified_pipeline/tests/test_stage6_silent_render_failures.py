@@ -51,27 +51,39 @@ from docx.oxml.ns import qn  # noqa: E402
 from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
-from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
+import unified_pipeline.stage_6_word_template as s6  # noqa: E402
+from unified_pipeline.stage6.formatting import (  # noqa: E402
+    CVICHE_BOX_FILL,
+    DetachedAnchorError,
+    _insert_after,
+    add_cviche_box,
+    cviche_box_group,
+    cviche_box_item,
+    cviche_box_pair,
+    cviche_box_text,
+    is_cviche_box,
+)
 from unified_pipeline.stage6.sections.appendix import CODE_ORIGIN_ENTRY  # noqa: E402
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    N1_HEADING,
+    N2_HEADING,
+    N2_INSTRUCTION,
+    MenteeRecord,
+    _looks_like_training_grant_table,
+    _outcome_line_from_fields,
+    _program_leadership_line,
+    _training_grant_is_sparse,
+    _training_grant_rows,
+)
 from unified_pipeline.stage6.sections.patents import (  # noqa: E402
     DESCRIPTION_LABEL,
     _build_patent_rows,
     _normalize_patent,
     _renderable_patents,
 )
-from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
-    MenteeRecord,
-    N1_HEADING,
-    N2_HEADING,
-    N2_INSTRUCTION,
-    _looks_like_training_grant_table,
-    _program_leadership_line,
-    _training_grant_is_sparse,
-    _training_grant_rows,
-)
-import unified_pipeline.stage_6_word_template as s6  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     GEO_SCOPE_FAILURE_STAT,
+    NAMED_REACH_SYSTEM_PROMPT,
     RECLASSIFY_FAILURE_STAT,
     WCMTemplateGenerator,
 )
@@ -385,6 +397,80 @@ def test_mentoring_real_template_body_order():
     assert len(gen.doc.tables) == template_tables - 3 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
+
+
+# --- N4: a scrambled outcome row renders from its fields (#1434) ---------------
+
+# A wrapped four-column outcome row (date | award | project | mentee) the way
+# stage 2 flattens it: each cell's lines interleaved. Synthetic values.
+_SCRAMBLED_OUTCOME_TEXT = ("2021 Kestrel Travel Spray drying of Jane Roe\t"
+                           "Award protein\tformulations")
+_OUTCOME_FIELDS = {'output_type': 'Kestrel Travel Award', 'mentee_name': 'Jane Roe',
+                   'title': 'Spray drying of protein formulations', 'date': '2021'}
+_OUTCOME_LINE = "2021 — Kestrel Travel Award — Spray drying of protein formulations — Jane Roe"
+
+
+def _n4(text: str, **fields) -> dict:
+    return {'taxonomy_code': 'N4', 'text': text, 'extracted_fields': fields}
+
+
+def test_outcome_line_rebuilds_a_scrambled_row_from_its_fields():
+    assert _outcome_line_from_fields(_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS)) == _OUTCOME_LINE
+
+
+def test_outcome_line_reads_start_and_end_dates_when_there_is_no_date():
+    fields = {**_OUTCOME_FIELDS, 'date': None, 'start_date': '2016', 'end_date': '2019'}
+    text = "2016 - Kestrel Travel Spray drying of Jane Roe\t2019 Award protein\tformulations"
+    assert _outcome_line_from_fields(_n4(text, **fields)) == (
+        "2016-2019 — Kestrel Travel Award — Spray drying of protein formulations — Jane Roe")
+
+
+def test_outcome_line_keeps_the_text_when_the_fields_lost_a_word():
+    """A partial extraction: the source says "Graduate", no field does."""
+    text = _SCRAMBLED_OUTCOME_TEXT.replace('Kestrel', 'Kestrel Graduate')
+    assert _outcome_line_from_fields(_n4(text, **_OUTCOME_FIELDS)) is None
+
+
+def test_outcome_line_keeps_the_text_when_a_field_adds_a_word():
+    """A normalised value says something the source does not ("07")."""
+    fields = {**_OUTCOME_FIELDS, 'date': '2021-07'}
+    assert _outcome_line_from_fields(_n4(_SCRAMBLED_OUTCOME_TEXT, **fields)) is None
+
+
+def test_outcome_line_keeps_the_text_when_a_field_is_a_placeholder():
+    fields = {**_OUTCOME_FIELDS, 'title': 'Not specified'}
+    assert _outcome_line_from_fields(_n4(_SCRAMBLED_OUTCOME_TEXT, **fields)) is None
+
+
+def test_outcome_line_leaves_a_row_that_already_reads_in_order():
+    text = "2021\tKestrel Travel Award\tSpray drying of protein formulations\tJane Roe"
+    assert _outcome_line_from_fields(_n4(text, **_OUTCOME_FIELDS)) is None
+
+
+@pytest.mark.parametrize('missing,text', [
+    ('output_type', "2021 Spray drying of Jane Roe\tprotein\tformulations"),
+    ('mentee_name', "2021 Kestrel Travel Spray drying of\tAward protein\tformulations"),
+])
+def test_outcome_line_needs_an_output_and_a_mentee(missing, text):
+    """Even when the remaining fields say exactly what the text says: a row
+    with no outcome or no mentee is not the outcome-table shape."""
+    fields = {**_OUTCOME_FIELDS, missing: ''}
+    assert _outcome_line_from_fields(_n4(text, **fields)) is None
+
+
+def test_outcome_line_is_only_for_outcomes():
+    entry = {**_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS), 'taxonomy_code': 'N3A'}
+    assert _outcome_line_from_fields(entry) is None
+
+
+def test_mentoring_real_template_renders_a_scrambled_outcome_from_its_fields():
+    """End to end: the scrambled row lands under MENTORING as the field line;
+    a narrative outcome beside it is still written verbatim."""
+    gen = _template_generator()
+    gen._fill_mentoring({'N4': [_n4(_SCRAMBLED_OUTCOME_TEXT, **_OUTCOME_FIELDS),
+                                _n4('One mentee now leads a lab.')]})
+    assert _body_after(gen.doc, "MENTORING", 2) == [
+        ('p', _OUTCOME_LINE), ('p', 'One mentee now leads a lab.')]
 
 
 # --- N1/N2: pure builders (#529) -------------------------------------------------
@@ -1110,6 +1196,188 @@ def test_geo_scope_failure_reaches_the_render_warnings_sidecar(
     assert found[0]['evidence'] == [f'{GEO_SCOPE_FAILURE_STAT}=1']
 
 
+# ---- named reach before distance (#1579 item 4) ----
+
+_STATE_OWNER_LOCATION = {
+    'inference_success': True,
+    'primary_location': {'institution': 'Example University', 'city': 'Springfield',
+                         'state': 'Westland', 'country': 'USA'},
+    'locations': [],
+    'metro_area': 'Springfield',
+}
+
+
+class _ScopeLLM:
+    """Answers the named-reach step with `reach` and the distance step with
+    `distance`, recording every prompt it is asked."""
+
+    def __init__(self, reach, distance='National'):
+        self.reach, self.distance = reach, distance
+        self.asked: list[tuple[str, str]] = []
+
+    def __call__(self, *args, **kwargs):
+        system, user = (m['content'] for m in kwargs['messages'])
+        step = 'reach' if system == NAMED_REACH_SYSTEM_PROMPT else 'distance'
+        self.asked.append((step, user))
+        if step == 'reach':
+            return {'content': json.dumps({'reach': self.reach})}
+        return {'content': json.dumps({'scope': self.distance})}
+
+    def steps(self):
+        return [step for step, _ in self.asked]
+
+
+def _reach_generator(monkeypatch, llm) -> WCMTemplateGenerator:
+    monkeypatch.setattr(s6, 'call_llm', llm)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.cv_owner_location = _STATE_OWNER_LOCATION
+    return gen
+
+
+@pytest.mark.parametrize('reach', ['International', 'National', 'Regional'])
+def test_a_named_reach_wins_and_distance_is_not_asked(monkeypatch, reach):
+    # ATRKVV 90: a talk at a society's International Conference held in the
+    # owner's own metro went Regional by distance.
+    llm = _ScopeLLM(reach=reach, distance='Regional' if reach != 'Regional' else 'International')
+    gen = _reach_generator(monkeypatch, llm)
+    assert gen._classify_geographic_scope(_PRESENTATION) == reach
+    assert llm.steps() == ['reach']
+
+
+@pytest.mark.parametrize('reach', ['none', 'Statewide', None])
+def test_no_named_reach_keeps_the_distance_answer(monkeypatch, reach):
+    # FMIGLR 286 and its siblings: a bare "Nominating Committee, 1996-1997"
+    # names no reach, so it keeps the distance prompt's answer.
+    llm = _ScopeLLM(reach=reach, distance='Regional')
+    gen = _reach_generator(monkeypatch, llm)
+    assert gen._classify_geographic_scope(_PRESENTATION) == 'Regional'
+    assert llm.steps() == ['reach', 'distance']
+
+
+def test_the_distance_step_sees_the_prompt_stage6_always_used(monkeypatch):
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    distance_prompt = llm.asked[1][1]
+    assert distance_prompt.startswith('Classify the geographic scope of this academic activity')
+    assert '**Activity Location/Organization**: Sample Institute\n' in distance_prompt
+    assert '**CV Owner\'s Institution(s)**: Example University, Springfield, Westland\n' in distance_prompt
+    assert 'Activity Text' not in distance_prompt
+
+
+def test_the_named_reach_step_sees_the_owners_state_and_the_records_text(monkeypatch):
+    # The other-state error (FMIGLR 687, OKRTPJ 966): the state rule is the
+    # owner's own state only. SXPHOG 553: the text is shown even when an
+    # organization is present.
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    entry = {'text': 'Talk, Westland Society of Examples Annual Meeting, 2019', 'taxonomy_code': 'R',
+             'extracted_fields': {'organization': 'Sample Institute'}}
+    gen._classify_geographic_scope(entry)
+    reach_prompt = llm.asked[0][1]
+    assert "**CV Owner's Home State/Province and Country**: Westland, USA" in reach_prompt
+    assert "owner's own state or province (Westland)" in reach_prompt
+    assert '**Activity Location/Organization**: Sample Institute' in reach_prompt
+    assert '**Activity Text**: Talk, Westland Society of Examples Annual Meeting, 2019' in reach_prompt
+
+
+def test_national_and_international_are_tied_to_the_owners_country(monkeypatch):
+    # YUYVIG round 2: a foreign country's national society (BCTOGR 142,
+    # OKRTPJ 870) went International -> National.
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert "meeting of a country other than the owner's (USA)" in reach_prompt
+    assert "college of the owner's own country (USA)" in reach_prompt
+
+
+def test_another_states_regional_society_is_national_not_regional(monkeypatch):
+    # YUYVIG round 2: chapter societies outside the owner's state filed
+    # Regional (BCTOGR 184, XNWSZN 922).
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert 'chapter society of the owner\'s country whose area does not include the owner\'s state' in reach_prompt
+    assert 'a regional society whose area includes the owner\'s state or province' in reach_prompt
+
+
+def test_a_title_audience_company_or_own_institution_names_no_reach(monkeypatch):
+    # YUYVIG round 2: ECXGAT 1147 (audience), FMIGLR 681 (title word),
+    # IXJMKS 904 (a company named International).
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    reach_prompt = llm.asked[0][1]
+    assert "A talk's title, topic or audience is never the body" in reach_prompt
+    assert 'a company or product whose name contains "International" or "National" names no reach' in reach_prompt
+    assert "including any talk at the owner's own institution(s)" in reach_prompt
+
+
+def test_the_named_reach_is_asked_again_for_another_owner_country(monkeypatch):
+    llm = _ScopeLLM(reach='National')
+    gen = _reach_generator(monkeypatch, llm)
+    gen._classify_geographic_scope(_PRESENTATION)
+    primary = _STATE_OWNER_LOCATION['primary_location'] | {'country': 'Canada'}
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'primary_location': primary}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert llm.steps() == ['reach', 'reach']
+    assert "and Country**: Westland, Canada" in llm.asked[1][1]
+
+
+def test_an_unknown_owner_state_is_said_so(monkeypatch):
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    gen.cv_owner_location = _OWNER_LOCATION | {'primary_location': {'institution': 'Example University'}}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert "**CV Owner's Home State/Province and Country**: Unknown, Unknown" in llm.asked[0][1]
+
+
+def test_the_named_reach_is_asked_once_per_activity_and_text(monkeypatch):
+    llm = _ScopeLLM(reach='National')
+    gen = _reach_generator(monkeypatch, llm)
+    other_text = dict(_PRESENTATION, text='Panel at Sample Institute')
+    assert [gen._classify_geographic_scope(e) for e in (_PRESENTATION, _PRESENTATION, other_text)] == [
+        'National'] * 3
+    assert llm.steps() == ['reach', 'reach']
+
+
+def test_an_owner_affiliation_listed_twice_is_named_once(monkeypatch):
+    llm = _ScopeLLM(reach='none')
+    gen = _reach_generator(monkeypatch, llm)
+    primary = _STATE_OWNER_LOCATION['primary_location']
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'locations': [primary]}
+    gen._classify_geographic_scope(_PRESENTATION)
+    assert llm.asked[1][1].count('Example University, Springfield, Westland') == 1
+
+
+def test_no_owner_institution_files_national_without_asking(monkeypatch):
+    llm = _ScopeLLM(reach='Regional')
+    gen = _reach_generator(monkeypatch, llm)
+    gen.cv_owner_location = _STATE_OWNER_LOCATION | {'primary_location': {'city': 'Springfield'}}
+    assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+    assert llm.asked == []
+
+
+def test_an_unknown_distance_answer_files_national(monkeypatch):
+    gen = _reach_generator(monkeypatch, _ScopeLLM(reach='none', distance='Continental'))
+    assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+
+
+def test_a_distance_failure_after_no_named_reach_warns_and_counts_once(monkeypatch, caplog):
+    def reach_then_outage(*args, **kwargs):
+        if kwargs['messages'][0]['content'] == NAMED_REACH_SYSTEM_PROMPT:
+            return {'content': json.dumps({'reach': 'none'})}
+        raise RuntimeError('simulated LLM outage')
+
+    gen = _reach_generator(monkeypatch, reach_then_outage)
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+    assert len(_warnings(caplog, S6_LOGGER)) == 1
+    assert gen.stats[GEO_SCOPE_FAILURE_STAT] == 1
+
+
 # ---- segment-reclassification failure (#652) ----
 
 _RECLASSIFY_TEXT = 'Visiting Lecturer, Example Institute, 2010'
@@ -1264,3 +1532,51 @@ def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):
     gen._appendix_pending = [(entry, 40)]
     gen._reconsider_appendix_entries()
     assert sent == [((_RECLASSIFY_TEXT, 'P', 40), CODE_ORIGIN_ENTRY)]
+
+
+def test_a_cviche_box_is_one_light_gray_cell_titled_cviche_and_nothing_else_is():
+    """#1388: CViche's note to the submitter, told apart from CV tables by
+    shape (one cell) and its first line, so table passes can skip it."""
+    doc = Document()
+    cell = add_cviche_box(doc, "CViche note: delete this box before sending")
+    box, = doc.tables
+    assert is_cviche_box(box)
+    assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
+    top = cell._tc.tcPr.find(qn("w:tcBorders")).find(qn("w:top"))
+    assert (top.get(qn("w:color")), top.get(qn("w:sz"))) == ("808080", "6")
+    title = cell.paragraphs[0].runs[0]
+    assert title.bold and title.font.small_caps and title.font.name == "Arial"
+    assert title.font.size.pt == 9 and str(title.font.color.rgb) == "595959"
+    one_cell = doc.add_table(rows=1, cols=1)
+    one_cell.cell(0, 0).text = "Example Foundation grant"
+    two_cells = doc.add_table(rows=1, cols=2)
+    two_cells.cell(0, 0).text = "CViche-looking start"
+    assert not is_cviche_box(one_cell) and not is_cviche_box(two_cells)
+
+
+def test_a_cviche_box_spans_the_column_with_padding_and_its_own_type_scale():
+    """#1388: 6pt/8pt cell padding, the full text width, and 10pt text in
+    distinct levels: group label bold with space above (none when first),
+    "Removed:"/"Kept:" in italic with the quote hanging, the pair kept together."""
+    doc = Document()
+    cell = add_cviche_box(doc, "CViche review notes: delete this box before sending")
+    tbl_pr = doc.tables[0]._tbl.tblPr
+    assert tbl_pr.find(qn("w:tblW")).get(qn("w:type")) == "pct"
+    assert tbl_pr.find(qn("w:tblW")).get(qn("w:w")) == "5000"
+    mar = tbl_pr.find(qn("w:tblCellMar"))
+    assert {e.tag.split("}")[1]: e.get(qn("w:w")) for e in mar} == {
+        "top": "120", "bottom": "120", "left": "160", "right": "160"}
+    first = cviche_box_group(cell, "Removed as near-duplicates (1)", first=True)
+    second = cviche_box_group(cell, "PubMed lookup failed (1)", first=False)
+    text = cviche_box_text(cell, "We kept one copy of each.")
+    item = cviche_box_item(cell, "Didactic Teaching")
+    removed = cviche_box_pair(cell, "Removed:", '"a"', last=False)
+    kept = cviche_box_pair(cell, "Kept:", '"b"', last=True)
+    assert first.paragraph_format.space_before.pt == 0 and second.paragraph_format.space_before.pt == 6
+    assert first.runs[0].bold and first.runs[0].font.size.pt == 10
+    assert text.runs[0].font.size.pt == 10 and text.paragraph_format.space_after.pt == 3
+    assert item.paragraph_format.first_line_indent < 0  # hanging bullet
+    assert removed.runs[0].italic and removed.runs[0].text == "Removed:\t"
+    assert removed.paragraph_format.space_after.pt == 0 and removed.paragraph_format.keep_with_next
+    assert kept.paragraph_format.space_after.pt == 3
+    assert removed.paragraph_format.first_line_indent < 0  # the quote hangs under its opening mark

@@ -16,11 +16,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest
+
 from unified_pipeline.stage_3b_entry_classifier import (
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
 )
-
-import pytest
 
 # Inclusive: a function at exactly this many lines is still within budget.
 _MAX_CLASSIFY_ENTRIES_BATCH_LINES = 250
@@ -99,11 +99,11 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
     touched _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE. Exercise the real
     function (LLM call mocked out) and assert the system message it sends
     is exactly the template rendered with the same values."""
-    import unified_pipeline.stage_3b_entry_classifier as stage_3b
     # call_llm is stubbed at the module that actually calls it: the #522 split
     # moved every classification call site into stage3b/classify.py, so patching
     # the facade's copy would no longer intercept anything (#496).
     import unified_pipeline.stage3b.classify as stage3b_classify
+    import unified_pipeline.stage_3b_entry_classifier as stage_3b
 
     captured = {}
 
@@ -137,8 +137,8 @@ def test_classify_entries_batch_renders_real_taxonomy_reference(monkeypatch):
     empty string -- it would still pass even if build_taxonomy_codes_for_prompt()
     were bypassed entirely. Exercise a taxonomy with real codes and assert the
     system message contains the exact rendered taxonomy reference."""
-    import unified_pipeline.stage_3b_entry_classifier as stage_3b
     import unified_pipeline.stage3b.classify as stage3b_classify
+    import unified_pipeline.stage_3b_entry_classifier as stage_3b
 
     captured = {}
 
@@ -203,3 +203,26 @@ def test_s7_rules_mean_in_review_only_matching_its_template_header():
     # The A/B on #1173 left 28 "in press" entries in S7 while only the
     # section-6 summary said otherwise; rule 30 must say it too.
     assert '"in press"' in _rule_block("    - S7 = ", "31. CASE REPORTS")
+
+
+# ---------------------------------------------------------------------------
+# #50: the per-CV layout's {context_str} slot
+# ---------------------------------------------------------------------------
+
+def test_per_cv_context_str_numbers_every_group_in_order():
+    from unified_pipeline.stage3b.prompt import per_cv_context_str
+    text = per_cv_context_str(["  Top-level: ALPHA", "  Top-level: BETA", "  Top-level: GAMMA"])
+    assert "in 3 hierarchy groups" in text
+    positions = [text.index(f"  GROUP {n}:\n  Top-level: {name}")
+                 for n, name in ((1, "ALPHA"), (2, "BETA"), (3, "GAMMA"))]
+    assert positions == sorted(positions)
+
+
+def test_per_cv_context_str_fills_the_template_slot_ahead_of_the_rules():
+    """The per-group context stays AHEAD of the rules (#1021 put it after them
+    and shifted classification, reverted by #1089)."""
+    from unified_pipeline.stage3b.prompt import per_cv_context_str
+    rendered = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=per_cv_context_str(["  Top-level: ALPHA"]), taxonomy_ref="TAX_MARKER_XYZ")
+    assert rendered.index("GROUP 1:") < rendered.index("TAX_MARKER_XYZ") \
+        < rendered.index("CV TAXONOMY CLASSIFICATION RULES")

@@ -12,9 +12,10 @@ Confidence Tiers:
 Position-Aware: Considers section position in document.
 """
 
-import re
 import json
+import re
 from pathlib import Path
+
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

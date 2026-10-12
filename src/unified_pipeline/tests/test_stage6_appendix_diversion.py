@@ -60,6 +60,7 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     CODE_ORIGIN_RECONSIDER,
     REASON_NO_RENDER_ROUTE,
@@ -78,10 +79,10 @@ from unified_pipeline.stage6.sections.passthrough import (  # noqa: E402
     PASSTHROUGH_CODES,
     PassthroughSection,
 )
-from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
     WCMTemplateGenerator,
+    is_overflow_candidate,
     rendered_extraction_coverage,
 )
 
@@ -893,7 +894,9 @@ def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendere
     # records the generated summary left out. Without a summary, every M1
     # entry is there because none rendered.
     from unified_pipeline.stage6.sections.appendix import (
-        REASON_M1_RECORD_NOT_IN_SUMMARY, REASON_T_VALIDATION_RECODED)
+        REASON_M1_RECORD_NOT_IN_SUMMARY,
+        REASON_T_VALIDATION_RECODED,
+    )
     written = [{"taxonomy_code": "M1"}, {"taxonomy_code": "M1"},
                {"taxonomy_code": "M1", "t_validation_applied": True},
                {"taxonomy_code": "H"}]
@@ -916,7 +919,9 @@ def test_m1_entry_is_a_record_the_summary_left_out_only_when_the_summary_rendere
 
 def test_m1_record_not_in_summary_singular_count_is_grammatical():
     # Both pronouns in the E27 message agree with a count of one.
-    from unified_pipeline.stage6.sections.appendix import REASON_M1_RECORD_NOT_IN_SUMMARY
+    from unified_pipeline.stage6.sections.appendix import (
+        REASON_M1_RECORD_NOT_IN_SUMMARY,
+    )
     [w] = build_appendix_diversion_warnings([{"taxonomy_code": "M1"}], [], RENDER_ROUTED_CODES,
                                             PASSTHROUGH_CODES, summary_rendered=True)
     assert (w["reason"], w["count"]) == (REASON_M1_RECORD_NOT_IN_SUMMARY, 1)
@@ -1055,3 +1060,30 @@ def test_untitled_undated_citation_goes_to_the_appendix_not_the_bibliography(tmp
     assert not any("[Title not provided]" in t for t in texts)
     assert {(w["code"], w["reason"]) for w in _diversion_warnings(sidecar)} == {
         ("S1", REASON_RENDERER_DECLINED)}
+
+
+def _coverage_entry(code: str, pct: float | None, length: int, **fields) -> dict:
+    entry = {"text": "x" * length, "taxonomy_code": code, "extracted_fields": fields}
+    if pct is not None:
+        entry["extraction_coverage"] = {"extraction_coverage_percent": pct}
+    return entry
+
+
+@pytest.mark.parametrize(("entry", "expected"), [
+    (_coverage_entry("L1", 40.0, 301), True),
+    (_coverage_entry("L1", 50.0, 301), False),
+    (_coverage_entry("L1", 40.0, 300), False),
+    (_coverage_entry("T", 14.0, 1001), True),
+    (_coverage_entry("T", 15.0, 1001), False),
+    (_coverage_entry("T", 14.0, 1000), False),
+    (_coverage_entry("K4", 1.0, 5000), False),
+    (_coverage_entry("S1", 1.0, 5000), False),
+    (_coverage_entry("T", 1.0, 5000, formatted_text="done"), False),
+    (_coverage_entry("T", 1.0, 5000, formatting_source="stage_5c_llm"), False),
+    (_coverage_entry("T", 0.0, 5000), False),
+    (_coverage_entry("T", None, 5000), False),
+])
+def test_is_overflow_candidate_thresholds(entry, expected):
+    """The overflow gate `_add_entry_comments` and the Appendix cap both read
+    (#1230): K/L-style thresholds for L, strict ones for every other code."""
+    assert is_overflow_candidate(entry) is expected

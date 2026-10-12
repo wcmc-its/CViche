@@ -1,7 +1,7 @@
 """Run-related service functions."""
+import json
 import logging
 import math
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,28 +10,75 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+
+from app.config_loader import current_image_tag, get_config
 from app.database import SessionLocal
+from app.errors import forbidden, not_found
 from app.models import (
-    Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics, InboundFile, can_view_all_runs,
+    Feedback,
+    InboundFile,
+    LLMUsage,
+    Log,
+    Run,
+    RunMetrics,
+    RunState,
+    Step,
+    User,
+    UserRole,
+    can_view_all_runs,
 )
-from app.errors import not_found, forbidden
-from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
+from app.services import auto_retry, batch_completion, batch_service, notifications
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.services import auto_retry, batch_completion, batch_service, notifications
-
-# Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
-IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
-
-
-def current_image_tag() -> str | None:
-    """The tag of the image this process runs, or None when it was built
-    without one (local dev, or an image built before #1239)."""
-    return os.environ.get(IMAGE_TAG_ENV, "").strip() or None
-
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
+
+
+def parse_image_tag_history(raw: str | None) -> list[str]:
+    """The tags stored in ``runs.image_tag_history``, oldest first.
+
+    NULL is an empty history. A value that is not a JSON array of strings
+    raises ValueError: the column is written only by
+    ``_record_image_tag_history``, so that means a corrupt row.
+    """
+    if raw is None:
+        return []
+    history = json.loads(raw)
+    if not isinstance(history, list) or not all(isinstance(t, str) for t in history):
+        raise ValueError(f"image_tag_history is not a JSON list of tags: {raw[:80]!r}")
+    return history
+
+
+def _record_image_tag_history(db: Session, run_id: str) -> None:
+    """Append the executing image's tag to the run's image history (#1239).
+
+    Called only by the caller that just won the move to "running", inside the
+    same transaction, so no other claimer writes the row concurrently. Appends
+    only when the tag differs from the last one recorded: a retry on the same
+    image adds nothing, a resume on a new image adds it. An untagged image
+    records nothing. A corrupt history is logged and restarted from this tag
+    rather than failing the claim: provenance must never stop a run.
+    """
+    tag = current_image_tag()
+    if tag is None:
+        return
+    raw = db.execute(select(Run.image_tag_history).where(Run.id == run_id)).scalar_one_or_none()
+    try:
+        history = parse_image_tag_history(raw)
+    except ValueError:
+        logger.warning("Run %s: discarding unreadable image_tag_history %r", run_id, raw,
+                       exc_info=True)
+        history = []
+    if history[-1:] == [tag]:
+        return
+    db.execute(
+        update(Run).where(Run.id == run_id)
+        .values(image_tag_history=json.dumps([*history, tag]))
+        .execution_options(synchronize_session=False)
+    )
+
 
 # A run older than this while still marked "running" at startup is treated as
 # orphaned by a server restart. Generous relative to the ~15-20 min a real run
@@ -125,10 +172,13 @@ RESTART_INTERRUPT_MESSAGE = (
     "progress. Please restart it with the same file."
 )
 
-# Shown on a run still executing when a deploy's drain budget ran out (#116).
-DEPLOY_INTERRUPT_MESSAGE = (
-    "Run interrupted — the server was shut down for a deploy while this run "
-    "was in progress. Please restart it with the same file."
+# Shown on a run still executing when the pod's shutdown drain budget ran out
+# (#116). Names no cause: the drain runs on every SIGTERM -- a release, but
+# also a node failure, an eviction or a scale-down -- and the pod cannot tell
+# which (#1565).
+SHUTDOWN_INTERRUPT_MESSAGE = (
+    "Run interrupted — the server running it was shut down while it was in "
+    "progress. Please restart it with the same file."
 )
 
 
@@ -140,7 +190,7 @@ def _mark_run_failed(
     This is the pre-#145 behaviour, factored out so both the default path and
     the auto-retry fallback (when a resume launch fails) can reuse it.
     """
-    run.status = "failed"
+    run.status = RunState.FAILED
     run.completed_at = now
     run.error_message = message
     running_steps = (
@@ -253,16 +303,16 @@ def reconcile_stale_runs(db: Session) -> int:
     a run that is still legitimately executing.
     """
     minutes = _effective_stale_run_minutes()
-    cutoff = datetime.now() - timedelta(minutes=minutes)
+    cutoff = utc_now() - timedelta(minutes=minutes)
     stale_runs = (
         db.query(Run)
-        .filter(Run.status == "running", Run.started_at < cutoff)
+        .filter(Run.status == RunState.RUNNING, Run.started_at < cutoff)
         .all()
     )
     if not stale_runs:
         return 0
 
-    now = datetime.now()
+    now = utc_now()
     failed_count = 0
     resumed_count = 0
     failed_batches: set[str | None] = set()
@@ -283,7 +333,7 @@ def reconcile_stale_runs(db: Session) -> int:
 
         # Every replica sweeps: fail the run only if no other pod has resumed or
         # failed it since this sweep read it.
-        if not _claim_stale_run(db, run, seen_started_at, status="failed"):
+        if not _claim_stale_run(db, run, seen_started_at, status=RunState.FAILED):
             continue
         _mark_run_failed(run, db, now)
         failed_count += 1
@@ -347,7 +397,7 @@ def reconcile_queued_runs(db: Session) -> int:
         return 0
 
     minutes = _queued_reconcile_minutes()
-    cutoff = datetime.now() - timedelta(minutes=minutes)
+    cutoff = utc_now() - timedelta(minutes=minutes)
     stranded = (
         db.query(Run)
         .filter(Run.status == RunState.QUEUED, Run.queued_at.isnot(None), Run.queued_at < cutoff)
@@ -386,7 +436,7 @@ def queue_db_view(db: Session) -> dict[str, int | float | None]:
     """
     from sqlalchemy import func
 
-    now = datetime.now()
+    now = utc_now()
 
     queued_count, oldest_queued = db.query(func.count(Run.id), func.min(Run.queued_at)).filter(
         Run.status == RunState.QUEUED
@@ -517,10 +567,10 @@ def reap_orphaned_created_runs(
         except (TypeError, ValueError):
             older_than_hours = DEFAULT_ORPHAN_REAP_HOURS
 
-    cutoff = datetime.now() - timedelta(hours=older_than_hours)
+    cutoff = utc_now() - timedelta(hours=older_than_hours)
     orphans = (
         db.query(Run)
-        .filter(Run.status == "created", Run.started_at < cutoff)
+        .filter(Run.status == RunState.CREATED, Run.started_at < cutoff)
         .all()
     )
 
@@ -570,7 +620,7 @@ def _claim_stale_run(db: Session, run: Run, seen_started_at: datetime, **values:
     """
     won = db.query(Run).filter(
         Run.id == run.id,
-        Run.status == "running",
+        Run.status == RunState.RUNNING,
         Run.started_at == seen_started_at,
     ).update(values, synchronize_session=False) == 1
     if won:
@@ -599,11 +649,13 @@ def _transition_run_for_retry(
         db, run, seen_started_at,
         attempt_count=Run.attempt_count + 1,
         image_tag=current_image_tag(),
-        started_at=datetime.now(),
+        started_at=utc_now(),
         error_message=None,
         completed_at=None,
     ):
         return False
+    _record_image_tag_history(db, run.id)
+    db.refresh(run)
 
     downstream_steps = (
         db.query(Step)
@@ -708,8 +760,8 @@ def _schedule_auto_retry(
         logger.exception(
             "Auto-retry could not resolve input for run %s; marking failed", run.id
         )
-        if _claim_stale_run(db, run, seen_started_at, status="failed"):
-            _mark_run_failed(run, db, datetime.now())
+        if _claim_stale_run(db, run, seen_started_at, status=RunState.FAILED):
+            _mark_run_failed(run, db, utc_now())
         return False
 
     if not _transition_run_for_retry(run, db, start_step_number, seen_started_at):
@@ -719,7 +771,7 @@ def _schedule_auto_retry(
         # Launch declined (no slot) or errored -- don't leave the run pinned at
         # "running" with nothing executing it. Fall back to the failed path.
         # This pod took the run in the transition above, so no claim is needed.
-        _mark_run_failed(run, db, datetime.now())
+        _mark_run_failed(run, db, utc_now())
         db.commit()
         return False
     return True
@@ -734,13 +786,13 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     drain last looked is left alone. Each run marked failed also gets a Log
     row and a Teams failure card. Returns the count marked failed.
     """
-    now = datetime.now()
+    now = utc_now()
     failed = []
     for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
-        if not _claim_stale_run(db, run, run.started_at, status="failed"):
+        if not _claim_stale_run(db, run, run.started_at, status=RunState.FAILED):
             continue
-        _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
-        db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=DEPLOY_INTERRUPT_MESSAGE))
+        _mark_run_failed(run, db, now, message=SHUTDOWN_INTERRUPT_MESSAGE)
+        db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=SHUTDOWN_INTERRUPT_MESSAGE))
         failed.append(run)
     db.commit()
     # The failure card is sent from here, not by the run: the process exits
@@ -773,13 +825,17 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
 
     ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
     are extra columns written in the same statement. Also stamps ``image_tag``
-    with the executing image (#1239). Does not commit: the caller
+    with the executing image and appends it to ``image_tag_history`` (#1239).
+    Does not commit: the caller
     commits on a win, and on a loss holds nothing to undo.
     """
     result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
-        {"status": "running", "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
+        {"status": RunState.RUNNING, "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
     )
-    return result == 1
+    if result != 1:
+        return False
+    _record_image_tag_history(db, run_id)
+    return True
 
 
 def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
@@ -807,7 +863,7 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
     run = query.first()
     if not run:
         raise not_found("Run not found")
-    if current_user.role == "admin" or run.user_id == current_user.id:
+    if current_user.role == UserRole.ADMIN or run.user_id == current_user.id:
         return run
     if read_only and can_view_all_runs(current_user):
         return run
@@ -890,10 +946,12 @@ def claim_queued(run_id: str) -> ClaimResult:
         won = db.execute(
             update(Run)
             .where(Run.id == run_id, Run.status == RunState.QUEUED)
-            .values(status=RunState.RUNNING, started_at=datetime.now(),
+            .values(status=RunState.RUNNING, started_at=utc_now(),
                     image_tag=current_image_tag(),
                     error_message=None, completed_at=None)
         ).rowcount == 1
+        if won:
+            _record_image_tag_history(db, run_id)
         db.commit()
         row = db.execute(
             select(Run.status, Run.file_type, Run.resume_from_step).where(Run.id == run_id)
@@ -923,7 +981,7 @@ def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) ->
     """
     db = SessionLocal()
     try:
-        now = datetime.now()
+        now = utc_now()
         rowcount = db.execute(
             update(Run)
             .where(Run.id == run_id, Run.status.in_(from_statuses))
@@ -986,7 +1044,7 @@ def flip_to_queued(
     rowcount = db.execute(
         update(Run)
         .where(Run.id == run_id, Run.status.in_(allowed_from))
-        .values(status=RunState.QUEUED, queued_at=datetime.now(), error_message=None,
+        .values(status=RunState.QUEUED, queued_at=utc_now(), error_message=None,
                 completed_at=None, resume_from_step=resume_from_step)
     ).rowcount
     step_snapshots: tuple[StepSnapshot, ...] = ()

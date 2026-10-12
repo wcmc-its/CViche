@@ -10,10 +10,10 @@ never sees the lazy initialisation (the #496 split-state lesson). Reach it as
 `unified_pipeline.stage4.schemas._LOADED_SCHEMAS` or not at all.
 """
 
-import re
 import copy
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +131,21 @@ STAGE4_RECORDS_RETURNED_KEY = "stage4_records_returned"
 # one-entry group folds such items into its entry instead. Write-only: it
 # records the loss for the doctor rather than dropping the items silently.
 STAGE4_UNPLACED_ITEMS_KEY = "stage4_unplaced_items"
+
+# The entry-level list of fields the group reply filled with another entry's
+# values (`stage4/grounding.py`, #1575). Those values were set to None and the
+# entry was extracted again in a call of its own; the fields it carries are
+# that call's. Write-only: it records the event for the doctor.
+STAGE4_BORROWED_FIELDS_KEY = "stage4_borrowed_fields"
+
+# Written beside STAGE4_BORROWED_FIELDS_KEY when that call of its own failed:
+# its error code. The entry then keeps the group reply's fields, with the
+# borrowed ones None.
+STAGE4_REEXTRACT_ERROR_KEY = "stage4_reextract_error"
+
+# The entry-level count of records the group reply gave the entry that were
+# another entry's (#1575, UVZNIC 559 held 573's mentee); they were removed.
+STAGE4_FOREIGN_RECORDS_KEY = "stage4_foreign_records_dropped"
 
 # `<schema field>_<n>`: a numbered second copy of a schema field, which the
 # model uses for a second record (`organization_2` held the second column of
@@ -570,7 +585,7 @@ FIELD_DESCRIPTIONS = {
         "end_date": "Funding period end",
         "total_funding": "Total award amount in dollars",
         "annual_funding": "Annual/yearly direct costs",
-        "percent_effort": "FTE/effort percentage (convert '.08FTE' to '8%')",
+        "percent_effort": "FTE/effort percentage (convert '.08FTE' to '8%'); effort in calendar/person months stays as written ('0.24 Cal Months')",
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,
     },
@@ -583,7 +598,7 @@ FIELD_DESCRIPTIONS = {
         "start_date": "Funding period start",
         "end_date": "Funding period end",
         "total_funding": "Total award amount",
-        "percent_effort": "FTE/effort (extract '.08FTE' as '8%')",
+        "percent_effort": "FTE/effort (extract '.08FTE' as '8%'); effort in calendar/person months stays as written ('0.24 Cal Months')",
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,
     },

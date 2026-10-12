@@ -10,7 +10,6 @@ This validator implements hard validation rules to prevent S7 misclassification.
 
 import re
 
-
 # Known published indicators
 PUBLISHED_INDICATORS = {
     'doi_patterns': [

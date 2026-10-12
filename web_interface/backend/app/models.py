@@ -1,10 +1,23 @@
 """SQLAlchemy database models."""
 from enum import StrEnum
 
-from sqlalchemy import Boolean, Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, false, text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    text,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
 from app.base_class import Base
+from app.timeutil import UTCDateTime
 
 # Length of a hex-encoded sha256 digest.
 SHA256_HEX_LENGTH = 64
@@ -17,11 +30,9 @@ class RunState(StrEnum):
     already names the pydantic response model for a run's status field, and
     the two would collide.
 
-    Used on every line the #701 queue rework adds or changes (the flip/claim/
-    fail transitions in ``app.services.run_service``). Existing status string
-    literals elsewhere in the codebase are intentionally left as they are (no
-    drive-by conversions, CODING STANDARDS section 8.1); the remaining sweep
-    is tracked in issue #701.
+    Every ``Run.status`` comparison and assignment in the backend uses it
+    (#346). ``Step.status`` shares some values ("running", "complete") but is
+    a separate vocabulary and does not.
     """
     CREATED = "created"
     QUEUED = "queued"
@@ -37,13 +48,25 @@ class UserRole(StrEnum):
 
     STAFF is read-only elevated access: every run
     and its pipeline detail, but no cost and no admin writes (see
-    ``can_view_all_runs``, after ``User``). Used on the lines the staff role adds or
-    changes; existing "admin"/"user" literals elsewhere are left as they are
-    (no drive-by conversions, CODING STANDARDS section 8.1).
+    ``can_view_all_runs``, after ``User``). Every role comparison in the
+    backend uses it (#346); ``schemas.AdminUserUpdate`` keeps a pydantic
+    Literal, which a test pins inside this set.
     """
     USER = "user"
     STAFF = "staff"
     ADMIN = "admin"
+
+
+class UserStatus(StrEnum):
+    """Canonical ``users.status`` vocabulary, same pattern as ``UserRole``.
+
+    Only ACTIVE may hold a session: get_current_user and both login paths
+    refuse anything else. Every status comparison in the backend uses it
+    (#346); ``schemas.AdminUserUpdate`` keeps a pydantic Literal, which a test
+    pins inside this set.
+    """
+    ACTIVE = "active"
+    DISABLED = "disabled"
 
 
 # ==========================
@@ -66,7 +89,7 @@ class User(Base):
     # A UserRole value: "user", "staff" or "admin". A plain String with no
     # Enum type or CHECK constraint, so adding a role needs no migration.
     role = Column(String(20), nullable=False, default=UserRole.USER)
-    status = Column(String(20), nullable=False, default="active")  # "active" or "disabled"
+    status = Column(String(20), nullable=False, default=UserStatus.ACTIVE)  # a UserStatus value
     daily_limit = Column(Integer, nullable=True)
     monthly_limit = Column(Integer, nullable=True)
     default_submission_type = Column(String(50), nullable=True)
@@ -75,9 +98,9 @@ class User(Base):
     department = Column(String(255), nullable=True)
     auth_method = Column(String(20), nullable=True, server_default="simple")  # "simple" or "saml"
     consent_version = Column(String(50), nullable=True)
-    consent_date = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    last_active_at = Column(DateTime, server_default=func.now())
+    consent_date = Column(UTCDateTime, nullable=True)
+    created_at = Column(UTCDateTime, server_default=func.now())
+    last_active_at = Column(UTCDateTime, server_default=func.now())
 
     # ORM relationships. lazy="raise_on_sql": callers must eager-load the paths
     # they need (selectinload/joinedload); a stray lazy load raises instead of
@@ -115,7 +138,7 @@ class Consent(Base):
     consent_text_hash = Column(String(64), nullable=False)
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(512), nullable=True)
-    timestamp = Column(DateTime, server_default=func.now())
+    timestamp = Column(UTCDateTime, server_default=func.now())
     user = relationship("User", back_populates="consents", lazy="raise_on_sql")
 # ==========================
 # Feedback Models
@@ -146,7 +169,7 @@ class Feedback(Base):
     issue_locations = Column(Text, nullable=True)  # JSON array
     biggest_issue = Column(Text, nullable=True)
     likelihood_to_recommend = Column(Integer, nullable=False)  # 1-5
-    submitted_at = Column(DateTime, server_default=func.now())
+    submitted_at = Column(UTCDateTime, server_default=func.now())
     run = relationship("Run", back_populates="feedback", lazy="raise_on_sql")
     user = relationship("User", back_populates="feedback", lazy="raise_on_sql")
 
@@ -160,7 +183,7 @@ class SystemConfig(Base):
 
     key = Column(String(255), primary_key=True)
     value = Column(Text, nullable=False)  # JSON-encoded
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at = Column(UTCDateTime, server_default=func.now(), onupdate=func.now())
     updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     # Forward-only audit pointer to the admin who last changed this key.
@@ -182,18 +205,18 @@ class Run(Base):
     # already durable.
     FILENAME_MAX_LENGTH = filename.type.length
     file_type = Column(String(20), nullable=False)  # "docx" or "pdf"
-    status = Column(String(20), nullable=False, index=True)  # "running", "complete", "failed", "paused"
+    status = Column(String(20), nullable=False, index=True)  # a RunState value
     # Statuses a run does not transition past. Single definition (CODING
     # STANDARDS §1.5) -- app.services.notifications imports this.
-    TERMINAL_RUN_STATUSES = frozenset({"complete", "failed", "cancelled"})
-    started_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
-    completed_at = Column(DateTime)
+    TERMINAL_RUN_STATUSES = frozenset({RunState.COMPLETE, RunState.FAILED, RunState.CANCELLED})
+    started_at = Column(UTCDateTime, nullable=False, server_default=func.now(), index=True)
+    completed_at = Column(UTCDateTime)
     # When this run last entered "queued" via run_service.flip_to_queued
     # (#701). started_at is re-stamped at the worker's claim (queued ->
     # running), so it means "began executing" only; the admin queue view's
     # queued-age reads this column instead. NULL = never queued (in-process
     # dispatch, or a run that predates this column).
-    queued_at = Column(DateTime, nullable=True)
+    queued_at = Column(UTCDateTime, nullable=True)
     # The step a resumed run should start from, set by retry_step's flip and
     # NULLed by start_run's flip (#701). The Valkey work token is a pure
     # wake-up and no longer carries this -- a redelivered or stale token could
@@ -228,7 +251,7 @@ class Run(Base):
     cache_read_tokens = Column(Integer, default=0)
     cache_write_tokens = Column(Integer, default=0)
     error_message = Column(Text)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(UTCDateTime, server_default=func.now())
     # Auth-related fields
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     submission_type = Column(String(50), nullable=True)
@@ -251,6 +274,11 @@ class Run(Base):
     # executing image wins), not at upload. NULL for runs that predate the
     # column or when the image was built without a tag.
     image_tag = Column(String(128), nullable=True)
+    # Every image the run executed on, oldest first, as a JSON array of tags
+    # (#1239): a tag is appended when the run moves to "running" on an image
+    # other than the last one recorded, so a run resumed across a deploy shows
+    # both. NULL until a tagged image claims the run.
+    image_tag_history = Column(Text, nullable=True)
     # Whether the uploaded CV was written in the WCM faculty CV template ("wcm")
     # or another format ("other"), and the count of template signals behind it
     # (app.services.input_format). NULL when undetermined: runs that predate the
@@ -303,7 +331,7 @@ class RunBatch(Base):
     # Letters only, like run ids (#1192), generated by batch_service.
     id = Column(String(8), primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at = Column(UTCDateTime, nullable=False, server_default=func.now())
     # Valid files the user selected when creating the batch.
     files_submitted = Column(Integer, nullable=False)
     # Where the batch came from (#1298): an "email" batch always gets the
@@ -313,7 +341,7 @@ class RunBatch(Base):
     # gets it too.
     notify_on_complete = Column(Boolean, nullable=False, default=False, server_default=false())
     # Set once, by a conditional UPDATE, by whichever pod sends the completion email.
-    completion_notified_at = Column(DateTime, nullable=True)
+    completion_notified_at = Column(UTCDateTime, nullable=True)
 
     user = relationship("User", lazy="raise_on_sql")
 
@@ -343,8 +371,8 @@ class Step(Base):
     stage_id = Column(String(10), nullable=True)  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
     step_name = Column(String(255), nullable=False)
     status = Column(String(20), nullable=False)  # "pending", "running", "complete", "error"
-    started_at = Column(DateTime)
-    completed_at = Column(DateTime)
+    started_at = Column(UTCDateTime)
+    completed_at = Column(UTCDateTime)
     duration_seconds = Column(Integer)
     cost = Column(Float, default=0.0)
     input_file = Column(String(512))
@@ -362,7 +390,7 @@ class Log(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
     step_number = Column(Integer)
-    timestamp = Column(DateTime, server_default=func.now())
+    timestamp = Column(UTCDateTime, server_default=func.now())
     level = Column(String(20), default="INFO")  # INFO, WARNING, ERROR
     message = Column(Text, nullable=False)
 
@@ -382,7 +410,7 @@ class LLMUsage(Base):
     total_tokens = Column(Integer, nullable=False)
     cost = Column(Float, nullable=False)
     latency_ms = Column(Integer)
-    timestamp = Column(DateTime, server_default=func.now())
+    timestamp = Column(UTCDateTime, server_default=func.now())
     model_version = Column(String(100), nullable=True)  # Full version e.g. gpt-4o-2024-08-06
     temperature = Column(Float, nullable=True)
     finish_reason = Column(String(50), nullable=True)  # stop, length, content_filter
@@ -405,7 +433,7 @@ class RunMetrics(Base):
     sections_populated = Column(Integer, nullable=True)
     sections_total = Column(Integer, default=71)
     language = Column(String(10), nullable=True)
-    computed_at = Column(DateTime, server_default=func.now())
+    computed_at = Column(UTCDateTime, server_default=func.now())
 
     run = relationship("Run", back_populates="metrics", lazy="raise_on_sql")
 
@@ -454,7 +482,7 @@ class InboundMessage(Base):
     message_id = Column(String(255), nullable=True)
     from_addr = Column(String(255), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    received_at = Column(DateTime, nullable=False, server_default=func.now())
+    received_at = Column(UTCDateTime, nullable=False, server_default=func.now())
     status = Column(String(20), nullable=False)
     reject_reason = Column(String(120), nullable=True)
     file_count = Column(Integer, nullable=False, default=0)
@@ -474,4 +502,4 @@ class InboundFile(Base):
     storage_key = Column(String(255), nullable=False)
     status = Column(String(20), nullable=False, default=InboundFileStatus.PENDING)
     run_id = Column(String(10), ForeignKey("runs.id"), nullable=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at = Column(UTCDateTime, nullable=False, server_default=func.now())

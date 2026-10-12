@@ -13,6 +13,8 @@ Lints, ranked by the severity of the failure class they catch:
                           into one table-cell entry); its sibling
                           `table_lost` scopes the same coverage to each
                           source table (web207's lost personal-data table)
+                          and each body content control (RSFOYB's lost
+                          889-paragraph control, #1656)
 2. missed_headers         ALL-CAPS bold header-like source lines absent from
                           the 1a hierarchy AND every entry hierarchy path
                           ('PROFESSIONAL EXPERIENCE' demoted to content); a
@@ -24,7 +26,9 @@ Lints, ranked by the severity of the failure class they catch:
                           actually rendered under in the stage-6 document
                           (the #214 rebucketing rules)
 4. under_extraction       big multi-record entries with very low stage-4
-                          extraction coverage (14.9%-coverage mega-entry)
+                          extraction coverage (14.9%-coverage mega-entry);
+                          lines a tracked-deleted sub-point offers are not
+                          counted (#1205)
 5. classified_unrendered  3b taxonomy codes none of whose entries surface in
                           the stage-6 output document (text or tables)
 5a. stage3b_fallback_ratio a hard-fail gate (see the bottom of this list): a
@@ -42,7 +46,9 @@ Lints, ranked by the severity of the failure class they catch:
 8. unrendered_records     record lines of a fused multi-record stage-4 entry
                           definitively absent from the stage-6 output — the
                           structured-fields-only render paths drop the
-                          unextracted remainder with no bullet fallback (#221)
+                          unextracted remainder with no bullet fallback (#221);
+                          a line a tracked-deleted sub-point offers is
+                          delivered for review, not absent (#1205)
 9. enrichment_failures    stage-5 PubMed enrichment lookups that failed, so
                           those citations degrade to CV-extracted fields (#222)
 10. stage6_render_warnings stage 6's own post-generation self-check findings,
@@ -116,7 +122,8 @@ Lints, ranked by the severity of the failure class they catch:
                           codes (H, R) and Personal Data values are judged
                           too; WARN for whole records (counted per list item)
                           and for a fact the document lost, INFO otherwise
-                          (#817, #1245)
+                          -- a fact a tracked-deleted sub-point offers is
+                          INFO with that note (#817, #1245, #1205)
 
 14g. implausible_year     a stage-4 date-named field whose year is below
                           1930 (or 10 years before the owner's earliest
@@ -354,6 +361,92 @@ Lints, ranked by the severity of the failure class they catch:
                           RINASX-14) and an undated role under a dated block
                           rendered with no dates (IEUPKK-14/-17), both INFO.
                           Reads stage 4 and the docx's rows
+14ae. orphaned_fragments  a stage-3b fragment whose text is not in the entry
+                          it belongs to, so no record holds it (#1256:
+                          JNATFN's title tail, MQJAVH's examiner sessions).
+                          WARN; INFO for a header, column label or
+                          organisation sub-heading stage 3b leaves out on
+                          purpose. Reads stage 3b only
+14af. stage4_unplaced_items a stage-4 batch reply item numbered past its
+                          taxonomy group's entries (a group of 2+), which
+                          stage 4 gave to no entry and stamped on the group
+                          (#1243, #1417): the record it holds is in no part
+                          of the output. WARN, one per run, naming each code
+                          and its entries. Reads stage 4 only; no score cap
+14ag. summary_unsupported_claim a sentence of the research summary stage 4.5
+                          generated that claims something of a kind the CV
+                          has none of (#1554, OIEPQD): a pending application
+                          with no pending grant, funding with no grant,
+                          mentoring with no mentoring, or a funder (NIH, NSF,
+                          DoD, ...) no entry or source line names. WARN, one
+                          per kind; no score cap. Reads stage 4.5 and 4, and
+                          the source when present
+14ah. owner_attribution   other people's content rendered as the CV owner's
+                          (#1573, YUYVIG): mentee entries (N3, N3A, N3B)
+                          under a heading or lead line naming reviewers or
+                          staff -- a grant-review panel's applicants (ECXGAT
+                          1293-1299), a lab's technical staff (IZIXVF
+                          284-298) -- WARN; a run of bibliography
+                          publications whose author list and source never
+                          name the owner, WARN under an acknowledgements
+                          heading or lead line (ECXGAT 2156-2204) and INFO
+                          elsewhere, where most hits are the owner's own
+                          group-authored papers or the owner under another
+                          surname. Reads stage 4 and the docx
+14ai. citation_grounding  a citation stage 5d wrote that names an author,
+                          an initial or an ordinal its source line lacks
+                          (#1570, YUYVIG): a bare initials token joined to
+                          the next surname (FLBFRK 25), a CV list number
+                          printed as a meeting ordinal (SIJYJZ 732). INFO:
+                          about half the hits are inventions, the rest
+                          mostly spelling fixes or split source lines, so
+                          it is no run-page row, only a review-copy
+                          comment on the citation. Reads stage 5d
+14aj. shattered_prose     one source paragraph rendered one bullet per
+                          printed line, broken mid-sentence (#1583, YUYVIG:
+                          IZABPD L2/L3, RLADNC L3): a stage-4 entry whose
+                          '\\t' parts break mid-sentence and at least three
+                          of which are whole rendered paragraphs, or that
+                          stage 6 folded back (same test) into a paragraph
+                          while a line carries a neighbouring column's
+                          dates, so the columns are still interleaved. WARN,
+                          one per entry. Reads stage 4 and the docx
+14ak. source_line_coverage a source line under half of whose word pairs
+                          (3+-letter words, both on one rendered line) the
+                          output holds anywhere, Appendix and tracked
+                          deletions included (#1588): a record or detail lost
+                          at any stage. A rendered leading author list,
+                          links, a column-header row and a withheld DEA
+                          number are left out; a wrapped line is judged
+                          with the one before it. INFO, one per stage-3b
+                          entry, and a review-copy note only, never a
+                          run-page row: 4 of a held-out 30 is wholly
+                          missing text (YUY-SLC2). Reads the source docx
+                          and the docx; stage 1a and 3b when present
+14al. appointment_title_overlong a D1-D3 title role (one ';'-separated
+                          part) over 150 characters: duty prose stage 4
+                          packed into the role (#1205, YUYVIG DYLJXC
+                          661/668). WARN, one per entry; says whether stage 6
+                          moved the duties under the row. Reads stage 4
+14am. licensure_fallback_truncated an F1 entry with no jurisdiction and no
+                          number whose Licensure State cell shows only the
+                          start of its raw text (#1576, YUYVIG HXBPCT
+                          145-155, cut at 100 characters before #1605). WARN,
+                          one per entry; a regression guard. Reads stage 4
+                          and the docx's table rows
+14an. footer_in_record    a running page footer kept as a stage-4 entry's
+                          '\\t' part: a bare month-year that 5 or more
+                          entries carry, and a bare page number beside it
+                          (#1584, RLADNC-01). WARN when a date field holds
+                          the footer's year and the rest of the text does
+                          not (the record is misdated), else INFO; one per
+                          entry. Reads stage 4
+14ao. glyph_field         a rendered table cell that is only one or two
+                          list glyphs ("o", "◦", "•", "-"): a source bullet
+                          read as a field value (#1584, SXPHOG-02). WARN,
+                          one finding for the run; INFO for a stage-4 field
+                          of that shape no cell shows. Reads the docx's
+                          table rows; stage 4 when present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -422,43 +515,28 @@ from pathlib import Path
 from typing import NamedTuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
-from unified_pipeline.doctor.precision import precision_payload
-from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
-from unified_pipeline.quality_score import prompt_log_fallback_served, stage3b_fallback_ratios
-from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
-from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
-
-# Lint rules and their primitives now live in the doctor/ package (#493).
-# Re-exported here rather than updating callers: five files import 33 names
-# from this module, including the backend orchestrator, and a moved address
-# that is not re-exported fails at IMPORT time -- which reads as a lost fix.
-# test_run_doctor_contract.py pins that surface.
-from unified_pipeline.doctor.shared import (  # noqa: F401,E402
-    FINDING_STATUSES,
-    STATUS_RAN,
-    STATUS_SKIPPED,
-    STATUS_UNREADABLE,
-    Haystack,
-    RENDER_PIECE_MIN_CHARS,
-    RENDER_PIECE_WINDOW,
-    RENDER_TOKEN_MIN_COUNT,
-    RENDER_TOKEN_OVERLAP,
-    _LINE_SENTINEL,
-    _RENDER_TOKEN_RE,
-    _SECTION_HEADER_RE,
-    _entry_pieces,
-    _finding,
-    _haystacks,
-    _long_word_tokens,
-    _magnitude_severity,
-    _output_section_header,
-    _cell_text,
-    _docx_text,
-    _table_lines,
-    docx_body_blocks,
-    docx_table_rows,
+from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
+    lint_section_consistency,
+)
+from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
+    lint_contact_slot_lost,
+)
+from unified_pipeline.doctor.lints.coverage import (  # noqa: F401,E402
+    lint_source_line_coverage,
+)
+from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
+    _OWNER_CAP,
+    _OWNER_GATE,
+    lint_enrichment_failures,
+    lint_enrichment_pubtype_mismatch,
+    lint_owner_contact_missing,
+    lint_pubmed_title_truncated,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
+    _DEDUP_TOKEN_RE,
+    _FUNDING_SECTIONS,
+    _STATUS_LABEL_RE,
+    _YEAR_EDGE_LINE_RE,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     DEDUP_SAFE_CONTAINMENT,
     INVENTED_RECORD_LICENSURE_CODE,
@@ -466,10 +544,6 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
-    _DEDUP_TOKEN_RE,
-    _FUNDING_SECTIONS,
-    _STATUS_LABEL_RE,
-    _YEAR_EDGE_LINE_RE,
     _alphanumeric_tokens,
     _entry_rendered,
     _entry_status,
@@ -477,44 +551,36 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     _is_invented_record,
     _nonempty_field_values,
     _rendered_row_value_sets,
+    lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_footer_in_record,
+    lint_grant_boundary,
+    lint_grant_bucket,
+    lint_grant_facts,
     lint_implausible_year,
     lint_invented_records,
     lint_multi_record_coverage,
     lint_offschema_fields,
+    lint_orphaned_fragments,
+    lint_record_boundary,
+    lint_role_consistency,
+    lint_span_count,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
     lint_year_not_in_source,
     unrouted_code_counts,
-    lint_grant_boundary,
-    lint_grant_bucket,
-    lint_record_boundary,
-    lint_span_count,
-    lint_role_consistency,
 )
-from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
-    _OWNER_CAP,
-    _OWNER_GATE,
-    lint_enrichment_failures,
-    lint_owner_contact_missing,
-    lint_pubmed_title_truncated,
-    lint_enrichment_pubtype_mismatch,
+from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
+    lint_citation_grounding,
+    lint_teaching_postcheck,
+)
+from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
+    lint_protected_data_in_output,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
-    DEAD_SECTION_MIN_LINES,
-    DUPLICATE_PASSAGE_MIN_BLOCKS,
-    DUPLICATE_PASSAGE_WARN_COUNT,
-    DUPLICATE_RECORD_MIN_CHARS,
-    DUPLICATE_RECORD_WARN_COUNT,
-    DUPLICATE_RECORD_WINDOW,
-    HONORS_NAME_BLOB_CHARS,
-    PIPE_CLUSTER_MIN,
-    PIPE_LEAK_MIN_SEPS,
-    RECORD_DATE_LINE_MIN_CHARS,
-    UNRENDERED_MIN_RECORD_LINES,
     _APPENDIX_ENTRY_RE,
     _APPENDIX_HEADER,
     _BRACKET_CODE_RE,
@@ -526,6 +592,17 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _US_STATE_ABBREVS,
     _VENUE_DATE_RE,
     _YEAR_RE,
+    DEAD_SECTION_MIN_LINES,
+    DUPLICATE_PASSAGE_MIN_BLOCKS,
+    DUPLICATE_PASSAGE_WARN_COUNT,
+    DUPLICATE_RECORD_MIN_CHARS,
+    DUPLICATE_RECORD_WARN_COUNT,
+    DUPLICATE_RECORD_WINDOW,
+    HONORS_NAME_BLOB_CHARS,
+    PIPE_CLUSTER_MIN,
+    PIPE_LEAK_MIN_SEPS,
+    RECORD_DATE_LINE_MIN_CHARS,
+    UNRENDERED_MIN_RECORD_LINES,
     _is_appendix_noise,
     _line_token_sets,
     _names_match,
@@ -534,27 +611,42 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _record_rendered,
     appendix_entry_count,
     honors_table_totals,
+    lint_citation_field_dropped,
     lint_date_cell_shape,
-    lint_dead_sections,
     lint_date_only_lines,
+    lint_dead_sections,
     lint_duplicate_passages,
     lint_duplicate_records,
-    lint_citation_field_dropped,
     lint_etal_added,
     lint_fanout_cell_residue,
+    lint_glyph_field,
+    lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
+    lint_licensure_fallback_truncated,
     lint_llm_refusal_in_output,
     lint_output_hygiene,
+    lint_owner_attribution,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_python_repr_in_output,
-    lint_split_child_unsourced,
-    lint_group_header_context,
     lint_section_lost,
+    lint_shattered_prose,
+    lint_split_child_unsourced,
     lint_stage6_warnings,
     lint_table_shape,
     lint_unrendered_records,
+)
+from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_llm_fallback_served,
+    lint_no_output,
+    lint_pipeline_errors,
+    lint_research_summary_call_failed,
+    lint_stage3b_fallback_ratio,
+    lint_stage3b_second_pass_errors,
+    lint_stage4_group_failures,
+    lint_stage4_unplaced_items,
+    lint_stage_failure_recorded,
 )
 from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     MISSED_HEADERS_WARN_COUNT,
@@ -565,29 +657,59 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_segmentation_collapse,
     lint_table_lost,
 )
-from unified_pipeline.doctor.lints.classification import (  # noqa: F401,E402
-    lint_section_consistency,
+from unified_pipeline.doctor.lints.summary import (  # noqa: F401,E402
+    lint_summary_unsupported_claim,
 )
-from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
-    lint_protected_data_in_output,
-)
-from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
-    lint_no_output,
-    lint_pipeline_errors,
-    lint_stage3b_fallback_ratio,
-    lint_stage3b_second_pass_errors,
-    lint_stage4_group_failures,
-    lint_llm_fallback_served,
-    lint_stage_failure_recorded,
-    lint_research_summary_call_failed,
-)
-from unified_pipeline.doctor.lints.formatting import (  # noqa: F401,E402
-    lint_teaching_postcheck,
-)
-from unified_pipeline.doctor.lints.contact import (  # noqa: F401,E402
-    lint_contact_slot_lost,
-)
+from unified_pipeline.doctor.precision import precision_payload
 
+# Lint rules and their primitives now live in the doctor/ package (#493).
+# Re-exported here rather than updating callers: five files import 33 names
+# from this module, including the backend orchestrator, and a moved address
+# that is not re-exported fails at IMPORT time -- which reads as a lost fix.
+# test_run_doctor_contract.py pins that surface.
+from unified_pipeline.doctor.shared import (  # noqa: F401,E402
+    _LINE_SENTINEL,
+    _RENDER_TOKEN_RE,
+    _SECTION_HEADER_RE,
+    FINDING_STATUSES,
+    RENDER_PIECE_MIN_CHARS,
+    RENDER_PIECE_WINDOW,
+    RENDER_TOKEN_MIN_COUNT,
+    RENDER_TOKEN_OVERLAP,
+    STATUS_RAN,
+    STATUS_SKIPPED,
+    STATUS_UNREADABLE,
+    Haystack,
+    SubpointText,
+    _cell_text,
+    _docx_text,
+    _entry_pieces,
+    _finding,
+    _haystacks,
+    _long_word_tokens,
+    _magnitude_severity,
+    _output_section_header,
+    _table_lines,
+    docx_body_blocks,
+    docx_subpoint_lines,
+    docx_table_rows,
+    subpoint_text,
+)
+from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
+from unified_pipeline.quality_score import (
+    prompt_log_fallback_served,
+    stage3b_fallback_ratios,
+)
+from unified_pipeline.segmentation_regression import (
+    compute_metrics,
+    iter_source_block_lines,
+)
+from unified_pipeline.stage3b.fragment_merge import fragment_text_in_parent
+from unified_pipeline.stage_errors import (
+    StageError,
+    read_stage_errors,
+    stage_errors_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -684,6 +806,18 @@ KNOWN_LINTS = (
     "record_boundary",
     "citation_field_dropped",
     "group_header_context",
+    "orphaned_fragments",
+    "stage4_unplaced_items",
+    "summary_unsupported_claim",
+    "owner_attribution",
+    "citation_grounding",
+    "shattered_prose",
+    "source_line_coverage",
+    "appointment_title_overlong",
+    "grant_facts",
+    "licensure_fallback_truncated",
+    "footer_in_record",
+    "glyph_field",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -708,7 +842,12 @@ LINT_PREVALENCE = {
     # batches section_lost was calibrated on (#259).
     "date_only_lines": 0.254,
     "stage6_render_warnings": 0.123,
-    "dedup_drops": 0.110,
+    # #666: 60 of 227 runs fire at any severity (38 YUYVIG dev-259 live, 63
+    # EBYSBC farm live, the 126-CV wave-1 farm re-rendered at dev), measured
+    # 2026-10-08 with the class/range/name/delivery WARN rules; origin/dev's
+    # rules fire on 55 of the same 227 (0.242). The 0.110 it replaces was the
+    # 2026-07-25 batch's 73 runs, under the older lint.
+    "dedup_drops": 0.264,
     "segmentation": 0.082,
     # 30 of 165 corpus runs (farm + 2026-09-11/-17 batches, stored stage-2
     # artifacts, measured 2026-09-29); 19 of the 30 also trip `segmentation`.
@@ -901,6 +1040,52 @@ LINT_PREVALENCE = {
     # render of origin/dev fb466a0f, measured 2026-10-06 (46 of the 111
     # stored analysis/ runs). Same mixed-corpus caveat as above.
     "group_header_context": 0.365,
+    # orphaned_fragments (#1256, FRAG in doctor/PRECISION.md): 17 of 125
+    # distinct stored stage-3b artifacts (the EBYSBC/s7ab/pilot, NDMRSO, X6
+    # and EOAHMI farms and analysis/<uid>) at any severity once
+    # stage3b.fragment_merge has run over them, measured 2026-10-07; 22 of 125
+    # as stored, before it. Same mixed-corpus caveat as above.
+    "orphaned_fragments": 0.136,
+    # stage4_unplaced_items (#1243): the stamp it reads is new (#1417), and
+    # none of the 112 stored analysis/ runs nor the eb/eo/ndm/x6 farms'
+    # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
+    # floor, as for research_summary_call_failed above.
+    "stage4_unplaced_items": 0.001,
+    # summary_unsupported_claim (#1554, OIE-SUM in doctor/PRECISION.md): 3 of
+    # the 107 stored stage-4.5 summaries of the EBYSBC/s7ab/pilot (63),
+    # NDMRSO (29), EOAHMI (9) and X6 (6) farms, and 9 of the 14 OIEPQD runs
+    # (dev-258, after #1542's pending-application prompt line), measured
+    # 2026-10-07. The farm rate is the one before #1542; same mixed-corpus
+    # caveat as above.
+    "summary_unsupported_claim": 0.028,
+    # owner_attribution (#1573, YUY-OA in doctor/PRECISION.md): 36 of the 145
+    # runs of the YUYVIG (37), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI (9)
+    # and X6 (6) farms at any severity, 3 at WARN, over fresh renders of
+    # origin/dev a65857e7, measured 2026-10-08. Same mixed-corpus caveat as
+    # above.
+    "owner_attribution": 0.248,
+    # citation_grounding (#1570, YUY-CG in doctor/PRECISION.md): 51 of 276
+    # runs at INFO -- 14 of the 38 YUYVIG runs (dev-259 artifacts, BCTOGR's
+    # retry included) and 37 of 238 held-out runs' stored stage-5d JSON --
+    # measured 2026-10-08. Same mixed-corpus caveat as above.
+    "citation_grounding": 0.185,
+    # shattered_prose (#1583, YUY-SP in doctor/PRECISION.md): 3 of the 272
+    # runs of the YUYVIG (38), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI
+    # (9), X6 (6) and wave-1 (126) farms, over fresh renders of this branch
+    # with stage 6's fold (origin/dev 64bb4541 merged) -- the post-fold rate,
+    # the same 3 runs as before the fold, since the fold mends none of their
+    # 15 entries -- measured 2026-10-08. Same mixed-corpus caveat as above.
+    "shattered_prose": 0.011,
+    # source_line_coverage (#1588, YUY-SLC2 in doctor/PRECISION.md): 81 of
+    # 100 runs with a source docx -- 32 of the 37 YUYVIG runs and 49 of the 63
+    # of the EBYSBC/s7ab/pilot farm -- over fresh renders of origin/dev
+    # 49ed5a4a, measured 2026-10-09. Same mixed-corpus caveat as above.
+    "source_line_coverage": 0.81,
+    # appointment_title_overlong (#1205, YUY-AT in doctor/PRECISION.md): 2 of
+    # the 132 runs of the YUYVIG (39), EBYSBC/s7ab/pilot (63) and NDMRSO (30)
+    # farms (scripts/doctor_gate.py, measured 2026-10-08). Same mixed-corpus
+    # caveat as above.
+    "appointment_title_overlong": 0.015,
 }
 
 
@@ -1053,7 +1238,14 @@ def iter_header_candidates(docx_path: str) -> list[str]:
                 for nested in cell.tables:
                     walk_table(nested)
 
+    from unified_pipeline.core.docx_structure_extractor import (
+        unwrap_body_content_controls,
+    )
+
     doc = Document(docx_path)
+    # Read as stage 1 reads it: a body content control's paragraphs and
+    # tables are body paragraphs and tables (#1656).
+    unwrap_body_content_controls(doc)
     for para in doc.paragraphs:
         consider(para)
     for tbl in doc.tables:
@@ -1075,6 +1267,13 @@ def read_docx_blocks(docx_path: str, *, deleted: bool = False) -> list[tuple[str
     ``deleted=True``: the tracked-deletion view (`docx_body_blocks`)."""
     Document = _get_docx_document()
     return docx_body_blocks(Document(docx_path), deleted=deleted)
+
+
+def read_docx_subpoints(docx_path: str) -> SubpointText:
+    """The docx's tracked-deleted sub-points (#1205; `docx_subpoint_lines`),
+    ready for `offered_as_subpoint`."""
+    Document = _get_docx_document()
+    return subpoint_text(docx_subpoint_lines(Document(docx_path)))
 
 
 def read_docx_table_rows(docx_path: str) -> list[list[list[str]]]:
@@ -1189,6 +1388,14 @@ def _uid_owns(name: str, uid: str) -> bool:
         return False
     rest = name[len(uid):]
     return bool(rest) and not rest[0].isalnum()
+
+
+def artifact_layout(root: Path, uid: str) -> dict[str, Path]:
+    """Where the pipeline writes each artifact the doctor reads, under
+    ``root``: a caller assembling a run from its stored files (the corrected
+    copy's re-run, #1654) writes them here, and `_find_artifact` finds them."""
+    return {key: Path(root) / spec.stage_dir / f"{uid}{spec.suffix}"
+            for key, spec in _ARTIFACTS.items()}
 
 
 def _find_artifact(root: Path, uid: str, key: str) -> Path | None:
@@ -1362,6 +1569,7 @@ _VIEW_LABELS = {
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
     "deleted_blocks": "stage_6_docx",
+    "subpoints": "stage_6_docx",
     "table_rows": "stage_6_docx",
 }
 
@@ -1381,14 +1589,18 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2"),
              optional=("stage_4",)),
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
-    LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
+    # `subpoints` (#1205) reads the same docx as `blocks`: prose a
+    # tracked-deleted sub-point offers is delivered for review, not lost.
+    LintSpec("under_extraction", lint_under_extraction, ("stage_4",),
+             optional=("subpoints",)),
     LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks"),
              optional=("stage_4", "stage_5b")),
     LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
     LintSpec("stage3b_fallback_ratio", lint_stage3b_fallback_ratio, ("stage_3b",)),
     LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
     LintSpec("dead_sections", lint_dead_sections, ("stage_2", "blocks")),
-    LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks")),
+    LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks"),
+             optional=("subpoints",)),
     LintSpec("section_lost", lint_section_lost, ("stage_4", "blocks")),
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
@@ -1410,7 +1622,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
     LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",),
-             optional=("blocks",)),
+             optional=("blocks", "subpoints")),
     LintSpec("implausible_year", lint_implausible_year, ("stage_4",),
              optional=("stage_5d",)),
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
@@ -1454,7 +1666,38 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # `blocks` reads the same docx as `table_rows`, as for junk_or_header_row.
     LintSpec("group_header_context", lint_group_header_context, ("stage_4", "table_rows"),
              optional=("blocks",)),
+    LintSpec("orphaned_fragments", lint_orphaned_fragments, ("stage_3b",)),
+    LintSpec("stage4_unplaced_items", lint_stage4_unplaced_items, ("stage_4",)),
+    LintSpec("summary_unsupported_claim", lint_summary_unsupported_claim,
+             ("stage_4_5", "stage_4"), optional=("source_lines",)),
+    LintSpec("owner_attribution", lint_owner_attribution, ("stage_4", "blocks")),
+    LintSpec("citation_grounding", lint_citation_grounding, ("stage_5d",)),
+    LintSpec("shattered_prose", lint_shattered_prose, ("stage_4", "blocks")),
+    # `deleted_blocks` reads the same docx as `blocks`, as for
+    # protected_data_in_output.
+    LintSpec("source_line_coverage", lint_source_line_coverage, ("source_lines", "blocks"),
+             optional=("deleted_blocks", "stage_1a", "stage_3b")),
+    LintSpec("appointment_title_overlong", lint_appointment_title_overlong, ("stage_4",)),
+    # `blocks` and `subpoints` read the same docx as `table_rows`, as for
+    # offschema_fields: where else a stated grant value reaches the reader.
+    LintSpec("grant_facts", lint_grant_facts, ("stage_4", "table_rows"),
+             optional=("blocks", "subpoints")),
+    LintSpec("licensure_fallback_truncated", lint_licensure_fallback_truncated,
+             ("stage_4", "table_rows")),
+    LintSpec("footer_in_record", lint_footer_in_record, ("stage_4",)),
+    LintSpec("glyph_field", lint_glyph_field, ("table_rows",), optional=("stage_4",)),
 )
+
+#: The views read from the stage-6 docx.
+_DOCX_VIEWS = frozenset(view for view, label in _VIEW_LABELS.items() if label == "stage_6_docx")
+#: Lints that read no stage-6 docx, by any input: the registry rows with no
+#: docx view, and two of the hand-dispatched gates (no_output reads the docx's
+#: path). A reviewer's corrected copy cannot change what they find, so its
+#: doctor re-run (#1654) compares them with nothing: a difference there is the
+#: re-run's inputs (no prompt logs, no PDF-converted source), not the review.
+DOCUMENT_INDEPENDENT_LINTS = frozenset(
+    {spec.lint_id for spec in LINT_REGISTRY if not _DOCX_VIEWS & {*spec.inputs, *spec.optional}}
+    | {"owner_contact_missing", "pipeline_errors_present"})
 
 
 def _build_metrics(views: dict) -> dict:
@@ -1534,11 +1777,12 @@ def _build_metrics(views: dict) -> dict:
             corrections = stats.get("total_post_corrections")
             if isinstance(corrections, int) and not isinstance(corrections, bool):
                 metrics["total_post_corrections"] = corrections
-            fr = stats.get("fragment_reconnection") or {}
-            f_reviewed = fr.get("fragments_reviewed") if isinstance(fr, dict) else None
-            if f_reviewed:
+            # #1256: the share of tagged fragments whose text their parent holds, not of tags.
+            entries = stage_3b.get("entries") or []
+            fragments = [i for i, e in enumerate(entries) if isinstance(e, dict) and e.get("is_fragment")]
+            if fragments and all(isinstance(e, dict) for e in entries):
                 metrics["fragment_reconnection_yield"] = round(
-                    fr.get("fragments_reconnected", 0) / f_reviewed, 4)
+                    sum(fragment_text_in_parent(entries, i) for i in fragments) / len(fragments), 4)
     except Exception:
         logger.exception("run_doctor: stage3b-derived metrics crashed")
 
@@ -1646,6 +1890,9 @@ def run_doctor(root: Path, uid: str, source: Path | None = None,
     views["deleted_blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"]), deleted=True),
                                     "stage_6_docx", _note)
                                if paths["stage_6_docx"] else None)
+    views["subpoints"] = (_try(lambda: read_docx_subpoints(str(paths["stage_6_docx"])),
+                               "stage_6_docx", _note)
+                          if paths["stage_6_docx"] else None)
     views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
                            if paths["stage_6_docx"] else None)
 

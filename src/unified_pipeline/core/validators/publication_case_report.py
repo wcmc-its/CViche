@@ -5,6 +5,7 @@ Detects case reports/case series to route to S6 instead of S1 (original research
 """
 
 import re
+
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

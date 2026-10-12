@@ -14,7 +14,7 @@ row inherits the original's non-default render options.
 """
 
 import asyncio
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_restart_inherits_render_options(db, tmp_path):

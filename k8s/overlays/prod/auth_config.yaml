@@ -1,3 +1,4 @@
-# Placeholder — overwritten at deploy time by buildspec.yaml (pre_build).
+# Placeholder — buildspec.yaml (pre_build) never overwrites this file: it writes
+# the real one into a temp copy of k8s/ outside the checkout (#688).
 # Committed empty so `kubectl kustomize k8s/overlays/<env>` renders from a
 # clean checkout / CI (issue #108). Never commit real auth config here.

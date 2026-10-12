@@ -1,7 +1,7 @@
 import type { ApiError } from '../../api/client'
 import { isDuplicateError } from '../../api/upload'
 import type { Estimate, InboxItem, InboxSubmitResult, QueueLane, QuotaInfo } from '../../types'
-import { formatMinutes } from '../../utils'
+import { formatCost, formatMinutes } from '../../utils'
 
 /** Most files one batch may hold; POST /api/batches enforces the same cap. */
 export const MAX_BATCH_FILES = 50
@@ -19,11 +19,11 @@ export function inFlightText(limit: number = MAX_UPLOADS_IN_FLIGHT): string {
 /** File types the batch table submits; the backend accepts the same two (#1273). */
 const ACCEPTED_EXTENSIONS = ['.docx', '.pdf']
 export const UNSUPPORTED_TYPE_REASON = 'Not a .docx or .pdf file'
-/** Client copy of the backend upload cap (CVICHE_MAX_UPLOAD_MB, default 10; MAX_UPLOAD_SIZE in
- *  backend/app/services/config_service.py). The backend does not expose it to the client, so keep the two in step. */
-export const MAX_UPLOAD_MB = 10
-export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-export const TOO_LARGE_REASON = `Larger than ${MAX_UPLOAD_MB} MB`
+/** The backend's per-file upload cap (CVICHE_MAX_UPLOAD_MB) arrives as GET /api/auth/config's max_upload_mb (#109).
+ *  This default, the backend's own, covers the moment before that loads and a backend that predates the field. */
+export const DEFAULT_MAX_UPLOAD_MB = 10
+export const maxUploadBytes = (maxUploadMb: number): number => maxUploadMb * 1024 * 1024
+export const tooLargeReason = (maxUploadMb: number): string => `Larger than ${maxUploadMb} MB`
 export const PERMANENT_FAILURE_SUFFIX = 'Fix it and upload it on its own.'
 /** Reason shown for a failure with no server message (the request never got an answer). */
 export const INTERRUPTED_REASON = 'Upload interrupted'
@@ -63,18 +63,22 @@ export interface BatchRow {
   /** Set for an emailed CV (#1298): its bytes are on the server, so "upload" is POST /inbox/submit.
    *  `file` is then a name-only placeholder and `sizeBytes` the real size. */
   inbox: { id: number; sizeBytes: number } | null
+  /** The user chose to include this file although its estimate is far above the rest of the batch's (#1599). */
+  costConfirmed: boolean
 }
 
 /** Why a chosen file can't be submitted (wrong type, over the size cap); null when it can. */
-export function fileInvalidReason(file: File): string | null {
+export function fileInvalidReason(file: File, maxUploadMb: number = DEFAULT_MAX_UPLOAD_MB): string | null {
   const name = file.name.toLowerCase()
   if (!ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))) return UNSUPPORTED_TYPE_REASON
-  return file.size > MAX_UPLOAD_BYTES ? TOO_LARGE_REASON : null
+  return file.size > maxUploadBytes(maxUploadMb) ? tooLargeReason(maxUploadMb) : null
 }
 
 /** A new row; a file that fails the client checks is marked "won't be submitted" at once. `key` must be unique on the page. */
-export function makeRow(file: File, key: string, estimate: Estimate | null | undefined = undefined): BatchRow {
-  const invalidReason = fileInvalidReason(file)
+export function makeRow(
+  file: File, key: string, estimate: Estimate | null | undefined = undefined, maxUploadMb: number = DEFAULT_MAX_UPLOAD_MB,
+): BatchRow {
+  const invalidReason = fileInvalidReason(file, maxUploadMb)
   return {
     key,
     file,
@@ -84,15 +88,26 @@ export function makeRow(file: File, key: string, estimate: Estimate | null | und
     runId: null,
     failure: null,
     inbox: null,
+    costConfirmed: false,
   }
 }
 
 /** What a held emailed CV needs to be shown and submitted. */
 export type HeldFile = Pick<InboxItem, 'id' | 'filename' | 'size_bytes'>
 
-/** A row for an emailed CV. The server already validated it, and it has no estimate (the bytes are not here). */
+/** A row for an emailed CV. The server already validated it; its estimate is pending, from POST /inbox/estimate (#1626). */
 export function makeInboxRow(item: HeldFile, key: string): BatchRow {
-  return { ...makeRow(new File([], item.filename), key, null), inbox: { id: item.id, sizeBytes: item.size_bytes } }
+  return { ...makeRow(new File([], item.filename), key), inbox: { id: item.id, sizeBytes: item.size_bytes } }
+}
+
+/** New rows split for one estimate call, which holds at most MAX_BATCH_FILES less the `listedValid` rows already
+ *  in the table: `toEstimate` are the valid rows it has room for; `added` is every new row, those past the room
+ *  marked unestimated (null). */
+export function splitForEstimate(fresh: BatchRow[], listedValid: number): { added: BatchRow[]; toEstimate: BatchRow[] } {
+  const room = Math.max(0, MAX_BATCH_FILES - listedValid)
+  const toEstimate = fresh.filter(isValidRow).slice(0, room)
+  const estimated = new Set(toEstimate.map((r) => r.key))
+  return { added: fresh.map((r) => (isValidRow(r) && !estimated.has(r.key) ? { ...r, estimate: null } : r)), toEstimate }
 }
 
 /** The size to show: an emailed row's real size, not its empty placeholder's. */
@@ -161,6 +176,55 @@ export function estimateMinutes(estimate: Estimate): number {
 export function estimateCost(estimate: Estimate): number | null {
   if (estimate.estimated_cost_min === null || estimate.estimated_cost_max === null) return null
   return (estimate.estimated_cost_min + estimate.estimated_cost_max) / 2
+}
+
+/** A file whose estimated cost is at least this many times the median of the rest of the batch
+ *  is flagged and needs a click to be included (#1599). The issue's own acceptance figure. */
+export const COST_OUTLIER_RATIO = 3
+
+export interface CostOutlier {
+  /** The file's estimated cost over the median of the other files'. */
+  ratio: number
+  /** The file's estimated dollars and the others' median; null when cost is hidden (non-admin). */
+  cost: number | null
+  medianCost: number | null
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/** The batch's cost outliers by row key: each valid row whose cost_weight is COST_OUTLIER_RATIO times or more
+ *  the median of the other estimated rows'. A row needs at least one other to be compared with. */
+export function costOutliers(rows: BatchRow[]): Map<string, CostOutlier> {
+  const weighed = rows.filter((r) => isValidRow(r) && (r.estimate?.cost_weight ?? 0) > 0)
+  const outliers = new Map<string, CostOutlier>()
+  weighed.forEach((row, i) => {
+    const others = weighed.filter((_, j) => j !== i)
+    if (!others.length) return
+    const ratio = (row.estimate?.cost_weight ?? 0) / median(others.map((r) => r.estimate?.cost_weight ?? 0))
+    if (ratio < COST_OUTLIER_RATIO) return
+    const costs = others.map((r) => (r.estimate ? estimateCost(r.estimate) : null))
+    const cost = row.estimate ? estimateCost(row.estimate) : null
+    const known = costs.filter((c): c is number => c !== null)
+    outliers.set(row.key, { ratio, cost, medianCost: cost !== null && known.length === costs.length ? median(known) : null })
+  })
+  return outliers
+}
+
+/** "About 9× larger than the others in this batch: estimated $23.10 against a median of $2.67."
+ *  The dollars only with `showCost` (admins, #1111). */
+export function outlierText({ ratio, cost, medianCost }: CostOutlier, showCost: boolean): string {
+  const dollars = showCost && cost !== null && medianCost !== null ? `: estimated ${formatCost(cost)} against a median of ${formatCost(medianCost)}` : ''
+  return `About ${Math.round(ratio)}× larger than the others in this batch${dollars}.`
+}
+
+/** Flagged rows the user has not yet chosen to include. */
+export function unconfirmedOutliers(rows: BatchRow[]): number {
+  const flagged = costOutliers(rows)
+  return rows.filter((r) => flagged.has(r.key) && !r.costConfirmed).length
 }
 
 export interface Totals {
@@ -248,6 +312,8 @@ export function missingItems({ rows, multi, attested, quota }: MissingInput): st
   if (valid > MAX_BATCH_FILES) missing.push(`Batches are limited to ${MAX_BATCH_FILES} files. Remove ${valid - MAX_BATCH_FILES}.`)
   const shortfall = valid ? quotaShortfall(valid, quota) : ''
   if (shortfall) missing.push(shortfall)
+  const outliers = unconfirmedOutliers(rows)
+  if (outliers) missing.push(`Include or remove ${outliers} unusually large ${plural(outliers, 'CV', 'CVs')}`)
   if (!attested) missing.push('Agree to the upload terms')
   return missing
 }

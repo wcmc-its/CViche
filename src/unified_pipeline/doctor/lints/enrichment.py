@@ -37,16 +37,16 @@ from unified_pipeline.stage_5_pubmed_enrichment import NOTICE_PUBTYPES
 
 from ..shared import _finding
 
-
 # --------------------------------------------------------------------------
 # Stage-5 PubMed enrichment: citations that fell back to CV-extracted fields.
 
 
-#: The key stage 5 sets on a rejection when another entry kept the PMID: the
-#: record had been merged with a different paper that shares the CV's
-#: identifier, and stage 5 put the CV's own citation back
-#: (`_restore_and_reject`). Its citation is the CV's, which is right
-#: (RCBKFG JJUQDF 93, the fix for EBYSBC AQCLHS-02).
+#: The key stage 5 sets on a rejection when the PMID was shared with another
+#: entry, whose element index it holds: that entry kept the PMID as the
+#: stronger match, or, when equally strong holders were different citations,
+#: was released too (#1598). Either way stage 5 put the CV's own citation
+#: back (`_restore_and_reject`), which is right (RCBKFG JJUQDF 93, the fix
+#: for EBYSBC AQCLHS-02).
 SHARED_PMID_REJECTION_KEY = "shared_pmid_with"
 
 
@@ -57,11 +57,15 @@ def _restored_from_shared_pmid(entry: dict) -> bool:
 
 def lint_enrichment_failures(stage5e: dict) -> list[dict]:
     """Publications whose stage-5 PubMed enrichment ended in a *_failed status
-    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed,
-    title_check_failed): their citations degrade to CV-extracted fields. Non-failure outcomes
-    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary, and
-    so is a title check stage 5 failed on purpose because another entry kept
-    the shared PMID (`SHARED_PMID_REJECTION_KEY`)."""
+    (lookup_failed, pmcid_lookup_failed, doi_found_but_fetch_failed,
+    title_check_failed; pmcid_conversion_failed in stage-5 output written before
+    #1219 split it): their citations degrade to CV-extracted fields. Non-failure
+    outcomes (enriched, no_identifier, doi_not_in_pubmed, pmcid_not_found, and
+    reply_resolved_to_replied_item, a CV reply whose PMID is the letter it
+    answers, #1438) are expected vocabulary, and so is a title check stage 5
+    failed on purpose because the PMID was shared with another entry
+    (`SHARED_PMID_REJECTION_KEY`): one that kept it, or, when equally strong
+    holders were different citations, one that was released too (#1598)."""
     failed = [e for e in stage5e.get("entries", [])
               if str(e.get("enrichment_status") or "").endswith("_failed")
               and not _restored_from_shared_pmid(e)]

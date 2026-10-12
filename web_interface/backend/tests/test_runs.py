@@ -308,8 +308,8 @@ def test_filter_options_unfiltered(client, db, seed_simple_mode):
     assert body["departments"] == [{"value": "Library", "count": 2},
                                    {"value": "Medicine", "count": 2}]
     assert body["faculty"] == [  # newest run first (ADM006 > ADM003)
-        {"value": "Omar Testperson", "count": 2, "last_run_at": "2026-09-06T00:00:00"},
-        {"value": "Jane Testperson", "count": 3, "last_run_at": "2026-09-03T00:00:00"}]
+        {"value": "Omar Testperson", "count": 2, "last_run_at": "2026-09-06T00:00:00Z"},
+        {"value": "Jane Testperson", "count": 3, "last_run_at": "2026-09-03T00:00:00Z"}]
     assert [(o["display_name"], o["count"]) for o in body["run_by"]] == [
         ("Alice Tester", 2), ("Bob Tester", 2), ("Root Admin", 1)]
     assert body["run_by"][0] == {"id": users["alice"].id, "display_name": "Alice Tester",
@@ -589,7 +589,8 @@ def test_run_quality_report_shape(client, db, seed_simple_mode, monkeypatch):
         "data_complete": True,
         "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0, "label": None,
                         "checks": None, "scoring": None, "if_lost": None, "can_cap": False}]}
-    assert body["gates_fired"] == []
+    # The owner row carries no weight since #1595, so its fired cap is listed as a gate.
+    assert [(g["lint"], g["cap"]) for g in body["gates_fired"]] == [("owner_contact_missing", 25)]
     assert [(f["lint"], f["severity"], f["count"], f["caps_score"])
             for f in body["doctor"]["findings"]] == [
         ("owner_contact_missing", "ERROR", 1, True), ("table_shape", "INFO", 1, False)]
@@ -626,14 +627,14 @@ def test_review_note_for_the_owner_never_carries_the_score(
     resp = client.get("/api/run/ADM001/review-note")
 
     assert resp.status_code == 200
-    assert resp.json() == {"needs_cleanup": expected}
+    assert resp.json() == {"needs_cleanup": expected, "scored": score is not None}
 
 
 def test_review_note_falls_back_to_the_cached_score_before_backfill(client, db, seed_simple_mode, monkeypatch):
     users = _seed_admin_view(db)
     _patch_quality(monkeypatch, {"totalScore": 70, "hard_fail_caps_applied": []}, None)
     _auth(client, users["alice"])
-    assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True}
+    assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True, "scored": True}
 
 
 def _staff(db):
@@ -700,6 +701,54 @@ def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mo
     assert client.get("/api/run/ADM001/review-note").status_code == 403
     _auth(client, users["admin"])
     assert client.get("/api/run/ADM001/review-note").status_code == 200
+
+
+# The run-quality report's developer-facing keys: none may reach the owner (#1589).
+_DIAGNOSTICS_KEYS = {"findings", "counts", "fix_list_held_back", "not_run", "score", "band",
+                     "cap", "cap_lint", "dimensions", "gates_fired", "doctor"}
+
+
+def test_fix_list_gives_the_owner_the_fix_list_and_no_diagnostics(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["alice"])  # alice owns ADM001
+
+    resp = client.get("/api/run/ADM001/fix-list")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"fix_list", "not_checked"}
+    assert not _DIAGNOSTICS_KEYS & set(body)
+    assert [p["title"] for g in body["fix_list"] for i in g["items"] for p in i["problems"]] == [
+        "Owner name not found"]
+    assert body["not_checked"]
+    # No lint key anywhere in the payload, nor the score.
+    assert "owner_contact_missing" not in resp.text and "table_shape" not in resp.text
+    assert '"totalScore"' not in resp.text
+
+
+def test_fix_list_is_null_when_no_doctor_report_was_stored(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, None)
+    _auth(client, users["alice"])
+    resp = client.get("/api/run/ADM001/fix-list")
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_fix_list_refuses_another_member_and_stays_open_to_staff_and_admins(
+        client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["bob"])  # bob does not own ADM001
+    assert client.get("/api/run/ADM001/fix-list").status_code == 403
+    _auth(client, _staff(db))
+    assert client.get("/api/run/ADM001/fix-list").status_code == 200
+    # Staff keep the full report, Diagnostics and score included.
+    assert client.get("/api/run/ADM001/run-quality").json()["doctor"]["findings"]
+    _auth(client, users["admin"])
+    assert client.get("/api/run/ADM001/fix-list").status_code == 200
+    assert client.get("/api/run/NOSUCH/fix-list").status_code == 404
 
 
 # ---------------------------------------------------------------------------

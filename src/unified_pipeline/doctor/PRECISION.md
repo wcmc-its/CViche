@@ -11,13 +11,14 @@ The rule is #819's: a hand-check that does not update this file did not happen. 
 - **matched / hits**: hits that name the same entry (`element_idx_start`) as a verified autopsy finding on the same run. This is a lower bound on precision: the autopsy recorded the defects it verified, not every true signal, so an unmatched hit still needs a hand-check before it counts as a false positive. It also counts a hit on the right entry for the wrong reason as a match. "names text" means the lint's findings quote text and name no entry, so they cannot be matched by index.
 - **caught**: the verified findings this lint matched, which is its contribution to recall.
 - **Evidence cap.** The doctor prints at most 3 evidence items per finding: the stage-6 re-emit in `doctor/lints/render.py` slices to 3, and `offschema_fields` keeps `FIELD_EVIDENCE_MAX_VALUES = 3` (`doctor/lints/extraction.py`). The scorer reads only the indices a finding prints. A finding about more entries is matched on the 3 it lists, so on the reroute rows and `offschema_fields`, matched and caught can undercount, and they depend on which 3 entries come first. On M1 the cap hides 85 of 206 reroute indices (in 11 of 72 findings) and 19 of 89 `offschema_fields` indices (in 5 of 47 findings). M1's doctor was re-run once with both caps lifted, in a scratch copy that is not committed: no matched, caught or recall number changed. Only the reroute rows' unmatched-index lists grew, `reroute_refused` from 57 to 92 indices and `reroute_same_family` from 16 to 46. Another arm can differ, so a lint PR on one of these rows says how many of its findings hit the cap.
-- `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `scripts/doctor_vs_autopsy.py` (`_STAGE6_SHAPES`).
+- `stage6_render_warnings` is one lint key that re-emits about twenty unrelated stage-6 checks, so it has one row per message shape. The shapes are defined in `doctor/precision.py` (`_STAGE6_SHAPES`), which `scripts/doctor_vs_autopsy.py` imports.
 
 ## Who reads this file
 
 `doctor/precision.py` parses the per-lint table below at run time, so keep its shape: the first table under the "Per-lint precision" heading, a `lint` column of backticked keys (a `stage6_render_warnings` shape row adds `: ` and the backticked shape), and a `TP / judged` column of `<tp> / <judged>` or `none`. Columns are found by header name. Shape rows are pooled into their lint key, because a finding carries the key. A lint listed twice keeps its first row. What it feeds:
 
 - Each run's doctor report gets a `lint_precision` block, and the top lints in `doctor.tsv` and the lint on the Teams card's Doctor line carry `p~0.50 n=8` (TP / judged, and judged), or `p unmeasured`.
+- The review copy's precision gate (#1589), `precision.shown_in_place`: a WARN or ERROR finding is a Word comment on the text it is about only when its row's TP / judged is at least 50%, or it has no verdicts. Below that it is listed in the closing review-notes box instead. This reads rows unpooled: a `stage6_render_warnings` finding reads its shape's row (none for a shape with no row), and another lint's finding reads the row of the shape its message names, else its rows pooled. The rows are `precision.load_gate_ledger`'s: each per-lint row plus the held-out verdicts of the YUY-HO table below, for a lint whose code has not changed since the dev-259 doctor those verdicts judged (Paul, 2026-10-08). The changed lints and shapes are `precision.HELD_OUT_CHANGED`; a PR that changes another lint adds it there. A held-out row with no per-lint row brings the YUY-HO table's in-sample figures; a held-out row pooled over a lint the per-lint table splits by shape is not folded. Meant to be shared with the quality score (PR #1642) and the run page's fix list (PR #1640), open as of this change.
 - #813's remediation gate, `precision.remediation_allowed`: a lint may drive a section retry only if it is one of #813's LLM-judgement lints (`missed_headers`, `segmentation`, `under_extraction`) with a TP / judged of at least 80% on at least 20 judged findings. On M1, none qualifies.
 
 ## Measurements
@@ -91,11 +92,26 @@ X6-role adds the five grant-table shapes of the X6 batch's class E32 (wrong-fiel
 
 Blind verification of X6-role (2026-10-07) widened the corpus to 378 runs (the 19 `analysis/<uid>/s3` runs the 359 left out) and hand-read 11 hits on them: 8 true, 1 ambiguous (YME2VA 222, whose source contradicts itself) and 2 false, both `owner_pi_other_role` on a PI cell that joins two co-PIs with a slash (BYFQBG 322; YME2VA 236, reported as entry 176 by the first-entry-per-title placement). The person split did not cut on "/", so the pair read as one person who is the owner. It now does. Base `50c3058d` against the fix, `lint_role_consistency` over 475 runs (the 359 above plus the 19 `s3` and 97 `_s3` stored runs under `analysis/`): exactly those 2 findings removed, none added or changed. The split is shared with `co_investigators`, so a slash there now cuts too: two slash-joined people are two people (a PI among them is seen by `pi_also_co_i`), and an owner item "<owner> (Co-I/PI)" keeps only the role before the slash, so with no stated role `owner_also_co_i` no longer fires on it, as it does not on a stated "Co-I/PI" role; "<owner> (PI/Co-I)" still fires. No co-investigator value in the 475 runs changed a finding. One caveat on the stage-4 shapes' new hits: some stored documents predate #982's Co-Investigators row (BYFQBG 334, YME2VA 260), so on those documents the owner listed again among the co-investigators is not visible; a run rendered on current dev shows it.
 
-Recall on the X6 batch's E32 findings, by record, over the live documents (`analysis/<uid>/stage_6_wcm_documents`) and the dev render (`render-x6-dev`): RVTAQT-09 3 of 3 on both (223 `owner_also_co_i`, 260 and 273 `owner_pi_role_empty`); IEUPKK-02 2 of 2 on both (243 and 247, `contradicted`, already on the base); IEUPKK-23 9 of 10 on both (257, 265, 269, 280, 284, 292, 296, 300, 342 `owner_also_co_i`; 261, where the source's second PI renders as a co-investigator, is not caught); KJJVVO-05 5 of 5 on the live document (`owner_pi_other_role`; 177 shares 176's title, so its table is reported as entry 176), 0 on the dev render, where #1457 fixed it; RINASX-08 4 of 4 on the live document (396 `pi_cell_from_title`, 382 and 388 `pi_cell_empty`, 393 the unplaced `pi_cell_empty` table, the last three already on the base), 0 on the dev render, where #1418 and #1446 fixed it; RINASX-09 1 of 1 on both (`role_in_title`). Not caught, and not grant-role shapes: RVTAQT-12 (an appointment's unit left in its title), IEUPKK-22 (a mentee's degree field as `research_focus`), KJJVVO-13 (a committee row printing the raw source line) and RINASX-12 (a mentee's externship as `funding_source`). Of the X6 batch's 10 E32 findings, 6 are grant findings (25 records). On the live documents the base caught 2 of them (IEUPKK-02, and RINASX-08 at 3 of its 4 records: 5 of 25 records); the branch catches all 6, at 24 of the 25 records. Outside X6, matched by index against every run's verified findings, the new shapes name five verified findings of their own shape that the base doctor missed: ATUVAL-10, BRUSUZ-06 and JIJRSN-03 (`owner_pi_other_role`), KHXOUF-14 (`owner_pi_role_empty`) and EQADVR-06 (`pi_cell_from_title`). The other index matches in the table (CTWLTR-01, CXRYCF-01, DXAGUS-02, VYRDHN-09, WWSEWY-05 and -06, BIITRL-07, IEUPKK-01, ATUVAL-11, KJJVVO-14, RXYBVF-02, ZDCXIV-01) are other defects on the same entries, so the caught column counts only the same-shape findings.
+| ROLE-REC | 2026-10-08 | origin/dev `2cae24d7` against the #1590 table placement, `lint_role_consistency` and `read_docx_table_rows` from both trees over the same stage-4 JSON and docx | X6-role's 359 runs and RC-ROLE2's 245, each rebuilt: the `analysis/` runs over their stored docx (RC-ROLE2: the 119 present on 2026-10-05), the X6 farm render, and fresh `scripts/render_gate.py` renders, of `05966dac` for X6-role's other farms and of `43f84e1e` for RC-ROLE2's `analysis/` render and 126 runs | as X6-role and RC-ROLE2 | #1590 |
+
+ROLE-REC re-measures the render shapes per record. They placed every table at the first grant entry with its title, so grants sharing a title (an organisation's name as the title of each of its grants) were reported as that first entry, once per table, with identical message and evidence (YUYVIG SQMWHM: 1325 three times, 1331 and 1364 twice), and the hit counts above counted tables. Each table now takes the first same-title entry it has not matched, preferring one whose stated role is its "Your role:" cell, and tables that still resolve to one entry and shape are one finding with a count. The rebuilt corpora reproduce both rows on the base: on X6-role's 359 runs every run's `role_consistency` findings equal X6-role's recorded output, and on RC-ROLE2's runs `pi_cell_empty` fires 159 times on the stored documents and the 126-run render (143 and 16; the row left out the 2 TVZDVF hits on the `analysis/` render, and so does this). Base against branch, per shape:
+
+- `pi_cell_empty`: 159 to 158 hits on RC-ROLE2's arms (164 to 163 on X6-role's). The one fewer is KDAZOM's two tables whose title no entry carries, now one "a grant table" finding counting 2. Distinct (run, entry) pairs 142 to 158: MQSUIC's 11 P.I. tables, MIFYLG's, BMAMWE's, JIJRSN 558/560 and VQFSDI 249/267 now name their own entries, each a stated PI role. Matched 11 to 10: MQSUIC 116 (MQSUIC-09) had two tables, and the second is now its own entry. TP / judged 156 / 158: the verdicts read the table, which placement does not change, and the KDAZOM pair counts once.
+- `owner_pi_role_empty`: 275 to 277 hits, distinct records 193 to 198, CVs 54. The two new hits are web30 1115 and 1236, whose empty-role tables naming the owner the base placed on same-title entries stating Co-Investigator with an entry finding of their own, which suppressed them; both PI cells name the owner (checked as the 193 were). Moved to an entry with an empty stated role: QZWBKQ 847 to 1101 and 855 to 863, RVROVQ 85/101 to 93/111, WWSEWY 166 to 181, web228 190 to 497, web202 474 to 551, web26 246 to 746 (the base entries of WWSEWY, web228, web26 and QZWBKQ 847 state PI, Principal Investigator or Co-PI, so the base placement was wrong). Matched 24 to 26: RVROVQ 111 is in RVROVQ-02 (a grant split at stage 2, not a role defect, so caught does not change), on two runs; WWSEWY-05 stays matched at 181.
+- `owner_pi_other_role`: 82 hits, unchanged; distinct records 66 to 70, the four runs of KJJVVO's source now reporting 177 apart from 176 (KJJVVO-05 verified 177 true), so TP / judged 69 / 70. Matched unchanged at 15 (ZDCXIV 176's second table moves to 177, which ZDCXIV-01 also names).
+- `pi_cell_from_title` and every stage-4 shape: no finding changed.
+
+After the fix every hit of these shapes is a distinct (run, entry) record on both corpora (X6-role: 163, 277 and 82 hits, 163, 277 and 82 records), and no two findings on a run share message and evidence (base: 24 such pairs on X6-role's runs, 26 on RC-ROLE2's). The matched counts are the base's published counts plus the index deltas above; a local scorer over `analysis/<uid>/*_verified.json` and the EBYSBC labels moves by the same amounts but does not reproduce every published total, since X6-role matched against a wider label set. The `pi_cell_empty`, `owner_pi_role_empty` and `owner_pi_other_role` bullets above keep their table counts as measured; the rows count records. The first A/B of the change, over the 184 stored runs with a stage-4 JSON and docx under `analysis/` (146 in the main checkout, 38 YUYVIG), gave 353 to 352 findings and 16 to 0 duplicate pairs.
+
+Recall on the X6 batch's E32 findings, by record, over the live documents (`analysis/<uid>/stage_6_wcm_documents`) and the dev render (`render-x6-dev`): RVTAQT-09 3 of 3 on both (223 `owner_also_co_i`, 260 and 273 `owner_pi_role_empty`); IEUPKK-02 2 of 2 on both (243 and 247, `contradicted`, already on the base); IEUPKK-23 9 of 10 on both (257, 265, 269, 280, 284, 292, 296, 300, 342 `owner_also_co_i`; 261, where the source's second PI renders as a co-investigator, is not caught); KJJVVO-05 5 of 5 on the live document (`owner_pi_other_role`; 177 shares 176's title, so its table was reported as entry 176 until ROLE-REC's placement fix), 0 on the dev render, where #1457 fixed it; RINASX-08 4 of 4 on the live document (396 `pi_cell_from_title`, 382 and 388 `pi_cell_empty`, 393 the unplaced `pi_cell_empty` table, the last three already on the base), 0 on the dev render, where #1418 and #1446 fixed it; RINASX-09 1 of 1 on both (`role_in_title`). Not caught, and not grant-role shapes: RVTAQT-12 (an appointment's unit left in its title), IEUPKK-22 (a mentee's degree field as `research_focus`), KJJVVO-13 (a committee row printing the raw source line) and RINASX-12 (a mentee's externship as `funding_source`). Of the X6 batch's 10 E32 findings, 6 are grant findings (25 records). On the live documents the base caught 2 of them (IEUPKK-02, and RINASX-08 at 3 of its 4 records: 5 of 25 records); the branch catches all 6, at 24 of the 25 records. Outside X6, matched by index against every run's verified findings, the new shapes name five verified findings of their own shape that the base doctor missed: ATUVAL-10, BRUSUZ-06 and JIJRSN-03 (`owner_pi_other_role`), KHXOUF-14 (`owner_pi_role_empty`) and EQADVR-06 (`pi_cell_from_title`). The other index matches in the table (CTWLTR-01, CXRYCF-01, DXAGUS-02, VYRDHN-09, WWSEWY-05 and -06, BIITRL-07, IEUPKK-01, ATUVAL-11, KJJVVO-14, RXYBVF-02, ZDCXIV-01) are other defects on the same entries, so the caught column counts only the same-shape findings.
 
 Owner matching. The shapes find the owner by `cv_owner.last_name`'s words, as the other owner lints do, and stage 4's surname is not ground truth for compound names. Measured over the 178 distinct CVs here (by owner name): 146 have grant entries, and 4 of those have no surname word long enough to judge. Of the other 142, the surname is in at least one grant's text on 80 and in none on 62 (CVs whose grants state only a role, such as "Role: PI"); 4 have a compound or hyphenated surname, whose parts each match. One CV names its owner in its grants by a name stage 4 did not file as the surname: web218, whose citation surname sits in `middle_name`. Adding `middle_name`'s words to the owner set changed no finding on any of the 359 runs, so it is not done. No owner word is a particle (one surname is a word that is a particle elsewhere, and is the owner's real surname there). Every PI cell the two owner render shapes read as the owner is the owner (above).
 
 None of these shapes feeds the quality score: like `span_count` and the rest of `role_consistency`, the lint is not a `quality_score.py` input, and this change does not make it one. `owner_also_co_i`, `owner_pi_role_empty` and `owner_pi_other_role` clear the #822 bar (80% on 20 or more), but the defects they name are low-severity misstatements rather than lost content, so a content-loss cap would be the wrong use; that is a decision for #822, not this change.
+| RC-SPONSOR | 2026-10-11 | origin/dev `bb7c87ef` plus the `pi_cell_not_a_person` shape of `role_consistency`, base and branch `lint_role_consistency` and `read_docx_table_rows` over the same stage-4 JSON and docx | 191: fresh `scripts/render_gate.py` renders of `bb7c87ef` of the 126 farm / batch-3 / batch-4 runs, plus the 65 farm runs over their stored docx | none on these runs | #1571 |
+
+RC-SPONSOR adds `pi_cell_not_a_person`: a filled "Name of Principal Investigator:" cell, one of whose people (split as the other render shapes split it) fails stage 6's own `_is_person_name_capture`, so it holds a `SPONSOR_OR_AWARD_WORDS` word or a sentence break. Base against branch: 236 to 249 findings, 0 removed or changed, 13 added, all INFO and all on batch-4 web210, whose 13 M2B tables render "Principal Investigator" as the PI (the pipe-row fallback took the owner's role cell; filed as #1687). Those 13 are the right call for the shape, read by script, but they are one run and one source shape, and the corpus holds none of #1571's sponsor and award captures (YUYVIG SLYBST and DYLJXC, dev-259), so the shape's precision and its recall on those 12 records are unmeasured. INFO, as the other unmeasured `role_consistency` shapes are, until a scored run measures it.
+
 | SC-1 | 2026-10-05 | origin/dev `8b287ec2` plus `split_child_unsourced` (`scripts/doctor_gate.py`, base and branch over the same renders, no `--source-dir`) | 111: fresh renders of `8b287ec2` of the EBYSBC/s7ab/pilot farm (63), the EOAHMI farm (9) and the NDMRSO farm (30), plus the 9 EOAHMI runs over their dev-248 render (`6d9862f0`, before #1449), which is where the recheck saw the defects | the EOAHMI recheck (`analysis/<uid>/recheck_verified.json`: DUTAVD-03, WYMVGU-02) | #1445 |
 
 SC-1 adds `split_child_unsourced`: a record stage 4 split out of an entry (`stage4_records`, #1406) that shows a place or a date range from outside its own text. Each finding names its shape. Base and branch differ only in this lint's findings, on every run and arm: EBYSBC/s7ab/pilot 1,830 findings both, NDMRSO 795 both, EOAHMI 125 to 126, EOAHMI on dev-248 138 to 141. Every hit was read against the stage-4 entry and the rendered row (read through `read_docx_table_rows`).
@@ -194,6 +210,143 @@ The WARN shapes together: 134 of 142 true (94%), at or above the 80% bar on more
 
 The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `f4f087fc`). On M1's code every judged (run, lint) pair still fires, so the verdict columns describe the same findings as the hit columns.
 
+| FRAG | 2026-10-07 | `fix/1256-merge-fragment-text` on origin/dev `f103edac`: `lint_orphaned_fragments` run directly over every stored stage-3b JSON as stored (the doctor these runs get today), and again after `stage3b.fragment_merge.merge_fragment_text` has run over it (runs built after #1256) | 125 distinct stored stage-3b JSON files (content-deduplicated): the EBYSBC/s7ab/pilot, NDMRSO, X6 and EOAHMI farms and `analysis/<uid>` | every one of the corpus's 48 `is_fragment` entries read against its neighbours by hand; the pilot autopsy (JNATFN 262, BFSUMA 189) and NDMRSO ND12 (MQJAVH 201) | #1256, #1365 |
+
+FRAG adds `orphaned_fragments`: a stage-3b fragment whose text is not in the text of the entry it belongs to. Stage 4 skips every fragment, so the line reaches no record. WARN, or INFO when stage 3b leaves the line out on purpose (a header, column label or page stamp the fragment pass's reasoning names, or an organisation sub-heading next to a coded record). Reads stage 3b only.
+
+As stored: 41 hits on 22 of 125 runs, 18 WARN and 23 INFO. Of the 18 WARNs, 16 are true (lost content: a title tail, an assignee, four examiner sessions, a location, poster dates, a trial's drug name, a mentee's current position, a numbered item) and 2 partial (ZGLAAD 137/138, an institution line pair pointing at each other: context, not a record). The 23 INFOs are all headers, column labels, year or drug-name dividers and organisation sub-headings, as labelled. After the merge: 29 hits on 17 runs, 6 WARN (WWSEWY 539/543, RBHRFR 468, RWBQKF 94, ZGLAAD 137/138) and the same 23 INFO. In-sample: the merge's skip rules were written from these runs.
+
+| OIE-SUM | 2026-10-07 | `fix/1554-summary-claims-lint` on origin/dev `cdd578f9`: `lint_summary_unsupported_claim` run directly over each run's stored stage-4.5 and stage-4 JSON (and the source docx where the run kept one) | the 14 OIEPQD runs (dev-258, after #1542), and for false positives the 107 stored stage-4.5 summaries of the EBYSBC/s7ab/pilot (63), NDMRSO (29), EOAHMI (9) and X6 (6) farms | the OIEPQD per-run autopsies' stage-4.5 rows | #1554 |
+
+OIE-SUM adds `summary_unsupported_claim`: a sentence of the generated research summary that claims a pending application with no pending grant in stage 4, funding with no grant, mentoring with no N-coded entry or mentoring words, or a funder no entry or source line names. WARN, one per claim kind, no score cap. On OIEPQD it fires 11 times on 9 runs, each on a sentence an autopsy verified (pending: BMYYOX, GGWLYS, PZTNWT, TVQZIP, UJNBIT; funding: PZTNWT; mentoring: BMYYOX, CULCSV, GOWQKA, XACIVX; funder: YYVITM). It misses, by construction, claims of a kind the CV does hold: UNKNBU's old letter of intent called current (the CV has M2C entries), ATQWCA's foundation award called NIH-funded (the CV names NIH elsewhere), BMYYOX's study credited to the wrong funder, and inflated mentoring on VECUUM and XAYKXA (both list some). On the farms its first draft fired 6 times; 3 were false (a CDC spelled "Center for", a study-section sentence opening "Funding", and mentoring words in abstracts at a trainee symposium that the draft did not count), each fixed. The shipped lint fires 3 times there (AKPQEB, AQCLHS, HZGJFM), each a mentoring claim on a CV whose stage-4 entries and source docx list none (AKPQEB lists resident teaching, which the OIEPQD autopsies did not count as mentoring). 14 of 14 hand-checked, in-sample: the rules were written from these runs.
+
+| Y1585 | 2026-10-08 | `fix/1585-doctor-year-span-fp` on origin/dev `2cae24d7`, against `2cae24d7`, both over the same stored renders (`scripts/doctor_gate.py`) | 278: the 37 YUYVIG runs over their dev-259 render (with `--source-dir` where the run kept a docx source, 15), and held out, the 112 runs under `analysis/<uid>` with stage-4 JSON over their stored docx (`--source-dir`, 111), the 66 farm runs in `src/unified_pipeline/outputs` (no `--source-dir`) and the 63-run EBYSBC/s7ab/pilot farm (`~/worktrees/eb-farm/base`, `--source-dir`) | the YUYVIG per-run verifier verdicts (`_labels_yuyvig`, 37 runs, 169 indexed findings), and as M1 | #1585 |
+
+Y1585 changes `year_not_in_source` and `span_count` and no other lint, on every run of the four sets: base and branch differ only in findings of those two lints, and only by findings removed. `year_not_in_source` reads four more two-digit year shapes, in `_year_in_source` only (implausible_year's `_year_written` is unchanged): a dash-joined m-d-yy date ("3-30-00", "2-28- 86"), the later two-digit tails of a list ("2014,15,16", "98-00,02,04"), a two-digit year after a month word that no comma or four-digit year follows ("Oct. 98"), and one opening an open range ("16- present"). `span_count` takes a comma straight after a month or term word with the word ("June, 2018"), and joins two lone source years whose gap holds a dash with no year on its other side ("2007– Professor of X, Y<tab>2012", "2014 ... to 2019"), unless the later year opens a dash of its own; the join reads the source only, since a rendered "2011 - Title 2013 - Title" line is a list.
+
+On YUYVIG, 62 findings go, every one a false positive the batch's verifier named in #1585: `year_not_in_source` 49 to 9 (XNWSZN 34, SIJYJZ 4, ECXGAT 20, TYGUXX 319), and `span_count` 28 to 6 (BLBVPD 8, TQXZNI 6, FMIGLR 5, LTTYWI 2, HNQBOI 16). All 5 `year_not_in_source` true positives still fire (XNWSZN 1120, IZABPD 332, XVSQFF 37, UVZNIC 559 and 592), and so do all 6 `span_count` ones (RTBEJA 114, 115 and 116, SLYBST 96, SIJYJZ 143, ZDOAZO 221). The 4 `year_not_in_source` false positives left are out of scope in #1585: two source typos (OKRTPJ 888, UVZNIC 893), a year on a child line (FMIGLR 282) and RLADNC 1920. Scored against the labels, recall goes from 61 to 58 of 169: the 3 lost are HNQBOI-06, -07 and -08, which the base matched only through the `span_count` false positive on entry 16 (the verifier's report puts HNQBOI-08's range on entry 17, which neither arm flags). The shapes were written from YUYVIG, so these figures are in-sample.
+
+Held out: on the 112 `analysis` runs, 2 findings go, both false: BNYLDF 394 (`year_not_in_source`, "Nov 92-Feb 1993", start 1992) and OIYKZE 420 (`span_count`, the cell-split range RCB-SC already counted false). The EBYSBC farm loses only OIYKZE 420 again (the same CV), so its scores do not move (recall 272 of 487 both arms); the 66 farm runs do not change. No `span_count` hit RCB-SC counted true is lost on these sets. A first version that joined wrapped ranges on the rendered line too added 3 false hits there (GKAQHB and RWBQKF 89, VNUAHA 623) and read "May 13," as a year (WWSEWY 880); the shipped rules add none. The year shapes were then narrowed so a number before a dash that opens a title ("Volume 20 - Title"), a month day a word follows ("May 13 at") and a wrapped-range gap holding a semicolon or a dash-comma no longer vouch, and the list-tail shape now reads a tail after a range shorthand ("2005-06, 16"); over all four sets the findings are identical to the looser version's. A dash-joined number run that reads as an m-d-yy date ("room 4-10-10") still vouches. Not re-run: RCB-SC's 13 pilot runs and the 60 `_autopsy_artifacts` batch runs. The `span_count` row below is RCB-SC's 118 hits less OIYKZE 420, plus YUYVIG's 6 (123 hits, 117 true); none of the 6 matches a YUYVIG label, so matched and caught stay at RCB-SC's 4 and 2.
+
+| YUY-OA | 2026-10-08 | `fix/1573-owner-attribution-lint` on origin/dev `a65857e7`, against `a65857e7`, both over one fresh render of `a65857e7` (`scripts/render_gate.py`, 145 of 145 rendered; `scripts/doctor_gate.py` per farm with `--source-dir`) | 145: YUYVIG 37 (dev-259), the EBYSBC/s7ab/pilot farm 63, NDMRSO 30, EOAHMI 9, X6 6 | YUYVIG's verified per-run autopsies (`_labels_yuyvig`, 37 runs), and the M1 labels for the 62 labelled farm runs; every hit hand-read | #1573, #1251 |
+
+YUY-OA adds `owner_attribution`: other people's content rendered as the CV owner's. It changes no other lint's findings on any of the 145 runs, and adds 57 findings on 36 of them. Two shapes:
+
+- `mentee_under_non_mentee_heading` (WARN): N3, N3A or N3B entries under a leaf heading, or under the nearest undated, unnumbered lead line of the same heading path, that names review, applicants, a panel, staff, technicians or lab managers and names no trainee, thesis or dissertation. 3 findings, 3 true: ECXGAT 1293-1299 (ECXGAT-03, the 4 grant-review applicants coded N3B; the lead line survives only as entry 1288, since stage 1b placed no headings), IZIXVF 284-305 (IZIXVF-01; 22 staff, 284-298 N3B and 299-305 N3), and DYLJXC 403, a person and thesis title under a "Reviewer:" lead line, below the entries the source marks as research done in the owner's laboratory; no autopsy row names it. Neither autopsy row matches by index (ECXGAT-03's label lists 1288 and 2104; IZIXVF-01's lists none), so matched is 0 of 3.
+- `citation_without_owner`: a run of bibliography publications (every S code but S0 and S9) whose stage-4 authors and source never name the owner, exactly or, in the source, one letter off a long surname. A group or committee credit in the source, an agency or academy as author, or no stage-4 authors is not judged. An elided source ("et al.") joins a run but cannot start a finding, and a credited citation ends the run. WARN when the run sits under a heading or lead line naming acknowledgements or citing; INFO otherwise. WARN: 1 of 1 true, ECXGAT 2156-2204 (ECXGAT-01): 18 publications, not the issue's 19, because 2186 rendered as a PubMed rebuild whose line does not pair with its source (`CITATION_MATCH_MIN_SHARE`). INFO: 53 findings on 33 runs, each read against its source entry: 12 true (talks given by a student, postdoc or resident, abstracts and papers with a complete author list that omits the owner, and OKRTPJ 408-427, whose tail entry 427 is OKRTPJ-03, the owner's citation split so the rendered part lost them), 41 false: the owner under another surname (ATUVAL 6, MRJDWE and UXBHHF 4 each, QQGKXR 2, SIJYJZ), trial or consortium papers listing no owner (RLADNC 2 runs of 107 and 16, BMAMWE 2, ULHCAP 2, RGUNJV 2, CYOFWJ, OKRTPJ 487), agency, academy or edited reports (MVUREJ 2, RGUNJV 2, WYMVGU, IZJADE), the owner's talks given with others (DPEHSZ, MQJAVH, YOXXOH, VGHNZD), a garbled author list (BLBVPD), an owner named by first name (XVSQFF), and NDXXAD 197 and VXSDRD 483. 12 of 53 (23%) is under the 80% WARN bar, so this half ships INFO, as #1573 asked.
+
+Recall: YUYVIG 61 to 63 of 169 located findings (ECXGAT-01, OKRTPJ-03); the 62 labelled farm runs 204 to 205 of 487. On the farm both matches are index overlaps with other defects: NDXXAD-04 (entry 197, a paper the owner annotates as a contributor, counted false above), the one new catch, and ZDCXIV-10 (entry 109, whose source the autopsy says names no owner), which another lint already caught. The shapes were written from these runs, so the precision is in-sample. Not reached: ULHCAP-01 (a trainee's award under a publications heading) and DYLJXC-03 (a host's title read as the owner's role).
+
+| YUY-HO | 2026-10-08 | origin/dev `a7ca2f66` (with PRs #1603, #1607, #1611 and #1616), over a fresh render of the same SHA (`scripts/render_gate.py`, 37 of 37, `--source-dir` for the 15 runs with a docx source; the 22 PDF runs kept none), then `scripts/doctor_gate.py` (37 doctored, 676 findings). Beside it, the dev-259 `d1e49e39` doctor reports the batch stored (36 runs; IXJMKS has none, #1593) | the 37 YUYVIG runs (22 PDF, 15 docx), **held out**: none is among M1's 62 | YUYVIG's verified per-run autopsies, relabelled as v2 (below): 444 findings (53 high, 167 medium, 224 low), 250 with an entry index, and 396 WARN verdicts on the dev-259 doctor | #1586 |
+
+YUY-HO is the first held-out measurement: every row above scores lints on the runs they were written from. The YUYVIG verifiers judged the doctor the batch ran (dev-259), so the held-out precision in the table under "Held-out precision (YUY-HO)" is their WARN verdicts on that doctor: 278 of 396 (70%). Four doctor PRs merged on 2026-10-08 were written from these same runs, so what they change here is in-sample. #1607 (#1585) removes 62 false positives (`year_not_in_source` 49 to 9 hits, `span_count` 28 to 6). #1616 adds `owner_attribution`, 4 WARN, all true by YUY-OA's reading. #1611 turns 4 more `dedup_drops` findings to WARN. #1603 (#1590) changes no YUYVIG count. On the current doctor that is about 282 of 338 WARN true (83%), not re-judged; the 7 `dedup_drops` WARNs are not re-judged either.
+
+Labels, v2. The v1 labels (`_labels_yuyvig`, which Y1585 and YUY-OA scored) read a finding's entry indices from a 3-line window starting at its first line. On a one-line finding the window reaches into the next findings: of the 141 indices v2 drops from 83 v1 findings, 138 belong to another finding of the same run. v2 (`_labels_yuyvig_v2`, built by `_yuyvig_autopsy/labels_v2.py`; both local, beside the v1 labels) reads each finding's own block. It takes indices only from entry anchors ("entry 34-39", "element_idx_start 287", "275 (Q4C)", a table cell's leading list), and keeps a number only if it starts an entry in that run's stage-2, 3b or 4 JSON. It indexes 250 of the 444 (v1: 169). It also records the stage the verifier blamed first (`stage`) and the issue it cites (`class_ref`). 68 findings the verifier marked NEW are re-keyed to the issue filed on 2026-10-08 that cites their id (`remap_new.py`). Each report's WARN verdicts are transcribed by hand into `doctor_review` (`reviews.py`; the process notice `llm_fallback_served` left out, as the ECXGAT verifier did). Matched counts on v1 and v2 are not comparable. `scripts/doctor_vs_autopsy.py` now groups recall by `stage` as well.
+
+The render stubs the LLM (`render_gate.py`), as every render gate does. On the 36 runs with a stored report, every lint's hit count matches that report except: the lints #1607, #1611 and #1616 change (above); three stage-6 shapes (`appendix_no_route` 8 to 3 after #1621 routes bare N3, `appendix_m1_not_in_summary` 6 to 8 after #1615, `appendix_passthrough_refused` 1 to 2, IZABPD's J entry); the INFO shape `other` 2 to 7 (#1621's new "bare mentee code resolved" message); `llm_fallback_served` 25 to 12 (the farm has no prompt logs); and `missed_headers` 20 to 19.
+
+| YUY-CG | 2026-10-08 | `fix/1570-5d-grounding-guard` on origin/dev `a7ca2f66`, against `a7ca2f66`: `scripts/doctor_gate.py` both arms over one render of the YUYVIG stage-5d JSON (`scripts/render_gate.py`, 38 of 38); the lint alone over each held-out run's stored stage-5d JSON, the only artifact it reads | 276: YUYVIG 38 (dev-259, BCTOGR's retry included); held out, 238 runs with a stage-5d artifact under `analysis/`, `src/unified_pipeline/outputs` and the 2026-09-17 `_autopsy_artifacts` batch, YUYVIG uids excluded (some are one CV run more than once) | `_labels_yuyvig`; every hit hand-read against its entry's source text by one reader, not an adversarial verifier | #1570 |
+
+YUY-CG adds `citation_grounding`: a stage-5d citation that names an author, an initial or an ordinal its entry's source line lacks. `scripts/doctor_gate.py` over the 38 YUYVIG runs adds 32 findings on 14 runs and changes no other lint's findings. It fires on all four of #1570's entries (FLBFRK 25, SIJYJZ 732, QQGKXR 481 and 483), not on YSXCFU 40, whose co-editor the source does name. Every hit is INFO.
+
+- YUYVIG, 32 hits of 7,556 5d citations, in-sample (the rules were written on these runs): 20 true, a name or number the line does not hold: a bare initials token merged into the next author (FLBFRK 25), initials given to authors the line gives none or fewer (BCTOGR 1286, 2958, 4190, 4861, ECXGAT 911, FMIGLR 1414, IXJMKS 604, OKRTPJ 464, SQMWHM 853, XNWSZN 348), initials shifted one author along (QQGKXR 481, 483), an author the line does not name (BCTOGR 1964, 2022, OKRTPJ 490), and an ordinal: the CV's list number (SIJYJZ 732) or a meeting number the line never gives (ECXGAT 859, ULHCAP 668, UVZNIC 1794). 10 partial: 5d spelling out a name the line misspells or garbles (BCTOGR 3048, 3341, 4109, 4119, 4360, 4400; BLBVPD 1785, 1867, 2441; QQGKXR 479). 2 false: ECXGAT 980 (a surname glued to the next word across a two-word surname) and VTRKUF 341 (5d shortened a hyphenated given name to one initial, which drops text rather than adding it).
+- Held out, 91 hits on 37 of 238 runs, of 21,951 5d citations: 42 true (initials the line does not give, an author it does not name, a numbered meeting or edition it does not number, a list number read as an ordinal, a generational suffix it does not give), 31 partial (7 spelling fixes; 24 where the line is a fragment of a split citation, a garbled list, a translated meeting name, or the owner's own line under a name `cv_owner` does not carry), 18 false (initials split around the surname or by a date the PDF layout put between them, OCR digits read as letters, a given name glued to the next word, a dropped initial).
+
+Over both sets, 62 of 123 are true (50%), 41 partial and 20 false: under the 80% WARN bar, so the lint ships INFO, and (Paul, 2026-10-08) as no run-page finding at all: the review copy comments each flagged citation as a possibility to check against the CV (`REVIEW_COPY_ONLY_LINTS`), and the score never counts it. The CV owner is exempt (`cv_owner`): crediting the owner on their own line invents nothing. Without the exemption the lint flags 70 more lines (10 YUYVIG, 60 held out), the owner credited on lines such as letters to the editor and talks given "with" a colleague. Recall: YUYVIG 62 to 63 of 169 located findings, one HIGH (FLBFRK 25); the other three #1570 entries carry no `element_idx_start` in the labels.
+
+Why stage 5d does not reject these yet: a replay of 5d from the YUYVIG prompt logs (no paid call; the base arm reproduces all 19,350 stored entries exactly) that dropped each failing reply sent 41 lines to stage 6's stage-4 render, and by a word-overlap count that render lost source words on 23 of them, most often an S8 entry's meeting and place (SIJYJZ 732 kept only its talk title and year, 18 source words lost to remove one).
+| YUY-SP | 2026-10-08 | `fix/1583-shattered-prose` on origin/dev `fb575e23`, against `fb575e23`, both over one fresh render of `fb575e23` (`scripts/render_gate.py`, 272 of 309 rendered: the wave-1 farm's 37 IPXFBA artifacts are not on disk; `scripts/doctor_gate.py` per farm, no `--source-dir`) | 272: YUYVIG 38 (dev-259, with BCTOGR), the EBYSBC/s7ab/pilot farm 63, NDMRSO 30, EOAHMI 9, X6 6, the wave-1 farm 126 | YUYVIG's verified per-run autopsies (`_labels_yuyvig`); every hit hand-read | #1583 |
+
+YUY-SP adds `shattered_prose`: a stage-4 entry whose `\t` parts break mid-sentence (at least 2 joins and 30% of them, at least one opening lowercase) and at least 3 of which render as whole paragraphs, which is one source paragraph printed one bullet per printed line. It changes no other lint's findings on any of the 272 runs, and adds 15 WARN findings on 3 of them, all true on reading the render: IZABPD 430, 436, 441, 445, 450, 455 (L2), 468, 477, 488 (L3) and RLADNC 530, 540, 567 (L3), which are YUYVIG's IZABPD-02 and RLADNC-04, and the pilot farm's JNATFN 680, 686, 699 (L1, a docx source). Neither YUYVIG label carries an entry index, so matched is 0 by index; by hand the lint catches both. Over the 185 stored runs under `analysis/` (stored renders, mixed images), it also fires on OIEPQD VECUUM 21 (L2), true. A first version without the lowercase-opening rule also fired on wave-1 web228 457, a three-line practice address broken at commas, false. The thresholds were fitted on these runs, so the precision is in-sample. Not reached: the same prose rendered inline as `': '` / `' — '` welds (`_clean_inline_tabs`), about 59 entries on IZABPD.
+
+The same PR folds these parts back in stage 6 (`stage6.parsing._refold_shattered`, which the lint's own test `_is_shattered` gates). That mends a single-column paragraph: OIEPQD VECUUM 21, re-rendered with it, is one whole paragraph and the lint goes quiet on it. It does not mend any of the 15 above. Every one is a multi-column row printed line by line, so each printed line also carries a neighbouring column's words (the year, title, organisation or role column, and the row's dates), and folding keeps them inside the paragraph. So the lint also fires on a folded paragraph when a line carries a column's dates (`_spliced_column_date`: a date range ending a line that is not the entry's last, or a year opening the entry ahead of a capitalised word). Over fresh renders of the branch head (origin/dev `64bb4541` merged, same 272 runs) it fires on the same 15 entries of the same 3 runs: 14 as folded paragraphs that still carry the column, and RLADNC 540 still as separate paragraphs. All 15 remain open under #1583, for the converter to separate the columns. Ceilings: a spliced role or place column without a date is not seen (every one of the 15 carries a date), and a paragraph whose own heading line ends in its dates, followed by prose that folds, would read as spliced (none seen).
+
+| YUY-SLC | 2026-10-08 | `feat/1588-coverage-contract` on origin/dev `8e29dd24`, against `8e29dd24`, both over one fresh render of `8e29dd24` (`scripts/render_gate.py` with `--source-dir`, 37 of 37 and 63 of 63; `scripts/doctor_gate.py` per farm with `--source-dir`) | 100: YUYVIG 37 (dev-259), **held out**, every source a docx (the 15 uploaded docx, and the 22 PDFs converted locally with the dev-259 converter, `d1e49e39`'s `core/pdf_to_docx.py`, whose element counts match the stored stage-2 `document_length` on all 22); the EBYSBC/s7ab/pilot farm 63, in-sample | `_labels_yuyvig_v2` (held out) and the M1 labels (in-sample); a random 30 unmatched hits of each arm hand-read against the render | #1588 |
+
+YUY-SLC adds `source_line_coverage` (#1588's first fact-accounting step): a source line holding at least 5 pairs of adjacent 3+-letter words, under half of which any one rendered line holds (both words, either order), counting the Appendix and tracked deletions. Not judged: template boilerplate, stage 1a's headings, a line that is a list of names (5d rewrites author names), a protected personal-data value, and every line of a Personal Data (A) entry. One finding per stage-3b entry, INFO. It changes no other lint's findings on any of the 100 runs (base and branch reports identical once its key is dropped).
+
+The thresholds were fitted on the farm only, in three rounds. Pairs of every word read 1,693 findings there (21% matched); dropping digits and one- and two-letter words (5d initials, reformatted dates) 753 (30%); counting a pair rendered when one output line holds both words, in either order, and leaving out name lists, 370 (38%); leaving out Personal Data entries, 359. YUYVIG was scored once, on the final code.
+
+| arm | runs with a hit | findings (lines) | per run: median / p90 / max | matched / located | recall, index match: base to branch | hand-read: true / partial / false |
+|---|---|---|---|---|---|---|
+| YUYVIG, held out | 34 of 37 | 254 (303) | 3 / 15 / 57 | 31 / 248 (13%) | 80 to 96 of 250; HIGH 16 to 21 of 41 | 11 / 9 / 10 of 30 unmatched |
+| farm, in-sample | 55 of 63 | 359 (414) | 4 / 13 / 29 | 130 / 352 (37%) | 209 to 251 of 487; HIGH 40 to 43 of 84 | 16 / 7 / 7 of 30 unmatched |
+
+True means the line's content is on no rendered line; partial means the record renders but loses what the line held beyond its title (a role word, a description, a mentee's outcome, a course description, a run of dates); false means the content renders reworded. The false hits are author lists the name-list test misses (a list number or "MD" before the first name: 4 of the 10 held-out), a research-summary paragraph reworded, reworded talk, review and certification rows, and a URL; in-sample also a source table's column-header row, the tail of a citation split across lines, and a DEA registration stage 6 withholds. Most true and partial hits are #1205's supplementary prose (descriptions, duties, award criteria, mentors and advisors), which stage 4 does not extract by design until #1205 lands.
+
+Held out, the matched hits are a lower bound and the unmatched sample is 37% true and 67% true or partial, so, counting every matched hit as true, about 45% of the hits are wholly missing text and about 70% lose something. Under #1625's 50% bar for the run page (and the 80% WARN bar), the lint ships INFO as a review-copy note only (`REVIEW_COPY_ONLY_LINTS`): each quoted source line is an item under "Text from your CV that may be missing", at most `MAX_FLAGS_PER_LINT` (25) a document, and the score never reads it. Recall it adds held out, by the YUY-HO definition (a verifier credit or an index match): 140 to 155 of 444, HIGH 20 to 25 of 53 (GFZWQE-01, HNQBOI-01, SPINJC-02, SQMWHM-01, XNWSZN-01). An index match can credit a hit on the right entry for another reason: SQMWHM-01 and XNWSZN-01 are invented values (#1445) on an entry whose other lines the lint names. Per cell, in `doctor/COVERAGE.md`.
+
+Ceilings: a fact inside a line (a number, a date, a grant amount) is not read; a record reworded past half its word pairs reads as lost; a name list with a list number reads as a line; a line found anywhere in the document counts as rendered, even in the wrong section.
+
+| YUY-SLC2 | 2026-10-09 | `feat/1588-slc-precision` on origin/dev `49ed5a4a` (dev-263), against `49ed5a4a`, both over one fresh render of `49ed5a4a` (`scripts/render_gate.py` with `--source-dir`, 37 of 37 and 63 of 63; `scripts/doctor_gate.py` per farm with `--source-dir`) | 100: YUYVIG 37, **held out** (YUY-SLC's sources); the EBYSBC/s7ab/pilot farm 63, in-sample | `_labels_yuyvig_v2` (held out) and the M1 labels (in-sample); a random 30 unmatched hits of each arm, on base and on branch, hand-read against the render (120) | #1588 |
+
+YUY-SLC2 removes the deterministic false-positive classes YUY-SLC named from `source_line_coverage`, each fitted on the farm only:
+
+- A citation's leading author list is left out of the pairs when one rendered line holds a word of at least 3 of its name chunks. A list number, a footnote mark, a trailing year or "and" no longer breaks the list, and a list that 5d cut to six names and "et al." still counts.
+- A URL or e-mail address inside a record line is left out, and so is a Word HYPERLINK field code. A line that is little but a link is still judged on the link.
+- A tab-separated column-header row is not judged when the next printed line is a tab-separated row holding a digit.
+- A DEA registration that carries its number is not judged: stage 6 withholds it (#821).
+- A printed line that continues the one before it (it opens in lower case, or closes a bracket or quote it never opened) is judged joined to that line, under the first line's entry.
+
+Not fixed, because no deterministic rule separates them from a loss: reworded research-summary paragraphs, and reworded talk, interview, review, certification and licence rows. The change leaves every other lint's findings unchanged on all 100 runs (base and branch reports identical once its key is dropped).
+
+| arm | runs with a hit | findings (lines) | per run: median / p90 / max | matched / located | recall, index match | hand-read base sample: true / partial / false | hand-read branch sample |
+|---|---|---|---|---|---|---|---|
+| YUYVIG, held out | 32 to 32 of 37 | 203 (226) to 181 (199) | 3 / 10 / 54 to 3 / 10 / 45 | 24 / 197 to 23 / 175 | 92 to 92 of 250; HIGH 21 to 21 of 41 | 4 / 4 / 22 | 4 / 11 / 15 |
+| farm, in-sample | 50 to 49 of 63 | 255 (285) to 227 (252) | 3 / 9 / 22 to 2 / 8 / 19 | 85 / 251 to 74 / 223 | 238 to 233 of 487; HIGH 43 to 43 of 84 | 6 / 10 / 14 | 5 / 10 / 15 |
+
+The rubric is YUY-SLC's. One reader judged both code versions, so base and branch compare; YUY-SLC's 11 / 30 and 16 / 30 do not, being another reader on an older render. Since that render, #1205's sub-points print much of the supplementary prose YUY-SLC counted true, as tracked deletions the lint counts as rendered.
+
+Every true and partial hit of both base samples still fires on the branch (24 of 24). Of their false positives, 7 of 22 held out and 3 of 14 in-sample no longer fire, which on those samples moves precision from 4 / 30 to 4 / 23 held out and from 6 / 30 to 6 / 27 in-sample.
+
+The branch samples' 30 false positives:
+- Held out (15): reworded rows (10: talks, interviews and media mentions, reviews, a certification, a position, a hospital); a research-summary paragraph (FLBFRK 7); an author list written "Surname, Given" (XNWSZN 550, 586); a column-header row split over two printed lines (IZABPD 420); and a line that is only a redirect link (ECXGAT 1747).
+- In-sample (15): reworded rows (14), and a column-header row whose next line holds no digit (YYVHNN 472).
+
+Neither of the 50% and 80% bars is met: strict precision is 4 / 30 (13%) held out and 5 / 30 (17%) in-sample, and 15 / 30 in both arms counting partials. So the lint stays INFO and a review-copy note only (`REVIEW_COPY_ONLY_LINTS`). Recall lost in-sample, all index matches:
+- BZZNRL-01 and BZZNRL-02 were matched through entry 7's e-mail line, which now reads too short once its HYPERLINK field code is dropped.
+- NDXXAD-06, YOXXOH-uid-1 and YYVHNN-04 were matched through a wrapped line that is now judged with the line before it, and is either half covered or reported under that line's entry.
+
+No held-out finding is lost: IZABPD-02, the one it stops matching, is caught by another lint. The mutation harness's rates are unchanged: `MUTATIONS.md` regenerates identical, and `drop_publication` and `drop_grant` are still caught by this lint.
+
+Ceilings, beyond YUY-SLC's:
+- An author list written "Surname, Given" puts each surname in a one-word chunk, which the name test does not count.
+- A column-header row is seen only when its cells are tab-separated and the next line is a data row with a digit.
+- A continuation joined to a rendered line can be covered past half while it alone was lost (a description, a venue).
+
+Disclosure: a first held-out branch sample was read on an earlier version, whose author-list guard needed a word of every chunk. Two of its false positives (IXJMKS 752, ECXGAT 658) had the shape that the in-sample HFAJCC 173 and PFBSNH 102 also show: 5d's "et al." cut, and a two-letter surname. The guard was relaxed to 3 chunks on that in-sample evidence. The held-out figures above are a fresh sample of the final code.
+
+| YUY-AT | 2026-10-08 | `fix/1205-appointment-title-guard` on origin/dev `8e29dd24`, against `8e29dd24`, each over its own fresh render (`scripts/render_gate.py`; `scripts/doctor_gate.py` per farm, `--source-dir` for YUYVIG only) | 132: YUYVIG 39, the EBYSBC/s7ab/pilot farm 63, NDMRSO 30 | YUYVIG's held-out labels (`_labels_yuyvig_v2`); every hit hand-read | #1205 |
+
+YUY-AT adds `appointment_title_overlong`: a D1-D3 `title` whose longest `;`-separated part is over 150 characters (the owner's limit on #1205, 2026-10-08). It changes no other lint's findings on any of the 132 runs, and adds 3 WARN findings on 2 of them, all duty prose in the role field on reading the stage-4 record: YUYVIG DYLJXC 661 and 668 (D3, the two titles #1205 names) and HXBPCT 54 (D3, a consulting role followed by a participle clause listing its duties). No label carries these entries, so matched is 0. The `;` rule is the one judgement fitted on these runs: EBYSBC QNZADH 0, 35 and 39 are 356, 168 and 154 characters but are lists of concurrent roles, each under 100, and the lint skips them. Over 1,763 D1-D3 titles on six farms (these three plus X6, EOAHMI and the 66-CV local farm), only DYLJXC 661/668 carry a duty clause stage 6's split finds, and HXBPCT 54 is the one hit stage 6 renders whole: its duties open with a participle, which the split does not look for.
+
+| YUY-SPH | 2026-10-09 | origin/dev `49ed5a4a` (the doctor is unchanged by this branch), over two fresh renders with sub-points on: origin/dev `49ed5a4a` and `feat/1205-subpoints-honors`, which adds H to the sub-point codes (`scripts/render_gate.py --source-dir`; `scripts/doctor_gate.py` per farm, `--source-dir`) | 102: YUYVIG 39, the EBYSBC/s7ab/pilot farm 63 | `_labels_yuyvig_v2` (`scripts/doctor_vs_autopsy.py`); the M1 labels for the farm | #1205 |
+
+YUY-SPH measures what H sub-points do to the doctor. The doctor code is the same in both arms, so every change comes from the render. YUYVIG goes from 893 findings to 890, and the farm from 2,188 to 2,163. Every removed finding is `source_line_coverage` INFO: 3 on YUYVIG and 25 on the farm. 26 of the 28 sit on H entries. The prose those entries lost is now offered as a tracked-deleted row under the award, and this lint reads it as delivered for review. The other 2 are N3B entries on JNATFN (419, 429). Their outcome lines share most of their word pairs with an H sub-point on the same CV, and this lint pools word pairs over the whole document. On the same run, `offschema_fields` WARN keeps its finding, but its count of N3B outcomes found nowhere falls from 8 to 3 for the same reason. Two `source_line_coverage` findings (farm QSWXKR 119, VGHNZD 57) and two `table_shape` INFO findings (YUYVIG BCTOGR, ECXGAT) keep their verdict but change their metric or row number. The rows move down because the evidence counts a sub-point row as a table row. Recall: YUYVIG goes from 87 to 85 of 250 labelled findings, and the farm from 238 to 235 of 487. Two of the 5 lost matches are the prose loss this change offers for review (`supplementary_prose_not_extracted`). The other 3 are different defects on the same H entries, which only the coverage finding had matched: SQMWHM-01 (#1445), ULHCAP-03 (#666) and SJWASY-06 (honors-org-tail-strip).
+
+| GF-1 | 2026-10-09 | `feat/1588-grant-fact-accounting` on origin/dev `49ed5a4a`, against `49ed5a4a`, both over one fresh render of `49ed5a4a` (`scripts/render_gate.py` with `--source-dir`, 39 of 39 and 63 of 63; `scripts/doctor_gate.py` per farm with `--source-dir`) | 102: YUYVIG 39 (37 labelled, dev-259), **held out**, every source a docx (the 17 uploaded docx, and the 22 PDFs converted locally with `d1e49e39`'s `core/pdf_to_docx.py`); the EBYSBC/s7ab/pilot farm 63, in-sample | `_labels_yuyvig_v2` (held out) and the M1 labels (in-sample); every hit hand-read against the entry's stage-4 record, its source text and its rendered grant table | #1588, #1575 |
+
+GF-1 adds `grant_facts`, #1588's first fact-accounting slice: the grant numbers and dollar amounts of each M2A-M2C entry, source against render. `value_not_in_source` is a number or amount on the entry's rendered grant table (its Award Source, title and costs rows, which stage 4's fields fill) that the entry's text does not state in any format; the message names the other grant entries whose text does, which is #1575's copy. `value_missing` is a number or amount the entry's text states (an amount needs its "$" or "USD") that is neither on its table nor anywhere outside the other grants' tables: the Appendix, a note, a tracked-deleted sub-point. Values match through reformatting: an amount by its dollars within half the last digit it states ("$1.5M" is $1,500,000; "$12, 345" and "$123.000" as PDFs write them), an NIH number by institute and serial ("5R01 CA012345-01A1" is "CA-12345"), and the DoD, ONR, NSF, VA HSR&D, AHA and ClinicalTrials.gov formats seen on both farms by their letters and digits. The tables are read with `w:ins` text and without `w:delText`; the sub-points are the `w:delText` stage 6 offers them as. A table is matched to the entry it was rendered from by its title and then by the amounts, number and years it shows. One finding per entry and shape, INFO. It changes no other lint's findings on any of the 102 runs (base and branch reports identical once its key is dropped), and adds 25 findings on 4 YUYVIG runs and 27 on 5 farm runs.
+
+Fitted on the farm only. Matching tables to entries by title, as `role_consistency` does, read 101 findings there, 40 of them `value_not_in_source`: nearly all were renewals sharing a title, which stage 6 renders newest first and a title match pairs in stage-4 order, so each read as carrying the other's amount. Matching by the values each table shows took it to 35, and reading spaced and dotted thousands to 27. YUYVIG was then scored once: 27 findings on 5 runs, 25 true and 2 false. The false ones are XNWSZN 1192, a grant number a PDF typed with "l" for "1" that stage 4 corrected, and SIJYJZ 1065, a role word before a bare NSF number read as its directorate. Both were fixed after scoring (an "l" or "O" beside a digit reads as the digit; an NSF directorate has 3 or 4 letters), which removes those 2 findings on YUYVIG and changes nothing on the farm, so those two rules are in-sample.
+
+| arm | runs with a hit | `value_missing` | `value_not_in_source` | matched / hits | recall, index match: base to branch | true / judged |
+|---|---|---|---|---|---|---|
+| YUYVIG, held out, as scored | 5 of 39 | 25 | 2 | 2 / 27 | 92 to 92 of 250; HIGH 21 to 21 of 41 | 25 / 27: `value_missing` 24 / 25, `value_not_in_source` 1 / 2 |
+| farm, in-sample | 5 of 63 | 26 | 1 | 9 / 27 | 238 to 240 of 487; HIGH 43 to 44 of 84 | 27 / 27 |
+
+True means the value is that grant's and the document does not show it (`value_missing`), or the table shows a value its own entry does not state (`value_not_in_source`). Of the 50 true `value_missing` hits, 46 are a second amount of the same grant beside the one that renders: an annual or total direct cost, an indirect cost or a yearly amount, where stage 4 keeps one amount and the template's "Annual direct costs:" row renders empty (RTBEJA's 13 entries state "Annual direct costs:" in those words). The other 4 are a second grant of a multi-grant entry (NJIKGI 338, YYVHNN 481), a combined total over an entry's three records (SIJYJZ 1210), and #1575's own lost amount (UVZNIC 592). Both true `value_not_in_source` hits are copies: UVZNIC 592 shows entry 603's amount (UVZNIC-01, HIGH), and QZWBKQ 899 renders entry 900's grant whole (QZWBKQ-05). On YUYVIG the lint adds no index recall: `year_not_in_source` already names UVZNIC 592, and the 23 other hits sit on entries no label names. On the farm it adds YYVHNN-01 (HIGH, E5) and YYVHNN-05 (E14).
+
+Severity: `value_missing` is 50 of 51 true (held out 24 of 25 as scored), over the 80% WARN bar, but 46 of those are one shape on 5 CVs, and a run-page row needs approved wording; `value_not_in_source` is 2 of 3, on 3 findings. Both ship INFO as a review-copy comment on the grant's title (`REVIEW_COPY_ONLY_LINTS`), and the score never reads them (INFO weighs 0). Ceilings: an amount in another currency, a number in a format not listed, a grant fact outside M2A-M2C (a trial), and dates, effort and roles are not read; a value found anywhere outside the other grants' tables counts as shown, even in the wrong section.
+
+| LFT-1 | 2026-10-11 | `fix/1576-licensure-fallback-truncated-lint` on origin/dev `4f76ab59`, against `4f76ab59`, over fresh renders of three arms (`scripts/render_gate.py`, no `--source-dir`): base, branch, and a synthetic arm that restores the 100-character cut #1605 removed | 163: YUYVIG 37, the 66-CV local farm, the 2026-09-11 (40) and 2026-09-17 (20) batches | the synthetic arm's own changed cells (a docx diff against base, `w:t` with `w:ins`) | #1576 |
+
+LFT-1 adds `licensure_fallback_truncated`: a Licensure State cell, in a row with no number, that holds the start of an F1 entry's raw text but not all of it, where the entry has no jurisdiction and no number (`_license_record`'s fallback). On current dev, with the cap gone, it fires on 0 of 163 runs: 30 runs have a fallback entry (43 entries), 7 of them over 100 characters, and all 7 render whole. Base and branch renders are identical on every run, and the branch's doctor gives YUYVIG's 37 runs the same 796 findings as base. On the synthetic arm the docx diff changes 7 cells on 3 runs (YUYVIG HXBPCT 147, 149, 151, 153, 155 and JPNUDX 46; the 2026-09-11 batch's web228 134), and the lint fires on exactly those 7 entries and nowhere else: 7 / 7 true, recall 7 / 7. HXBPCT 145, which #1576 lists, is under 100 characters and was never cut. A regression guard with no live hit, so it has no per-lint row: its precision on real renders is unmeasured.
+
+| GF-FR | 2026-10-11 | `fix/1584-one-glyph-org-guard-lints` on origin/dev `bb7c87ef`, against `bb7c87ef`, over fresh renders of both arms (`scripts/render_gate.py`, no `--source-dir`) | 278: a render farm of stage-4/5d artifacts from 2026-10-08 that holds YUYVIG (dev-259, before #1630's converter fix) with RLADNC and SXPHOG; plus the 126 local stage-4 artifacts (66-CV farm, 2026-09-11 and 2026-09-17 batches) and 66 local farm docx for footer_in_record and glyph_field alone | #1584's verified defects RLADNC-01 (entries 1047, 1119, 1275, 1482, 1845) and SXPHOG-02 (six Q1 rows) | #1584 |
+
+GF-FR adds `footer_in_record` and `glyph_field`. `footer_in_record` (a bare month-year that 5 or more stage-4 entries carry as a whole '\t' part) fires on 1 of 278 runs, RLADNC: WARN on exactly the five entries #1584 verified, INFO on 1704, which carries the footer but whose date is its own. On the 126 local stage-4 artifacts it fires on none: no bare month-year part is shared by more than 3 entries there. `glyph_field` (a rendered cell that is one or two list glyphs) fires on 1 of the 273 farm runs whose docx is matched by uid on the base render, SXPHOG, WARN quoting the six Q1 rows, and on none of the 66 local farm docx or 126 stage-4 artifacts. On the branch render it fires on none: the stage-6 guard leaves those six Organization cells blank. The branch render differs from base on SXPHOG alone, those six cells. Both lints are recall-checked on these two CVs only, so their precision rests on 0 false hits over the rest; there is no per-lint row.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -213,12 +366,22 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `fanout_cell_residue` | 11 | 11 | none | 13 / 13 hand-checked (100%) | 11 / 11 (100%) | 3 | FAN-RES |
 | `grant_boundary` | 60 | 60 | none | 60 / 60 hand-checked or matched (100%) | 35 / 60 (58%) | 12 | X6-grant |
 | `grant_bucket` | 16 | 16 | none | 16 / 16 matched (100%) | 16 / 16 (100%) | 2 | W3B-GR |
+| `grant_facts`: `value_missing` | 50 | 0 | none | 50 / 51 hand-checked (98%): held out 24 / 25 as scored, in-sample 26 / 26 | 9 / 50 (18%) | 5 | GF-1 |
+| `grant_facts`: `value_not_in_source` | 2 | 0 | none | 2 / 3 hand-checked (67%): held out 1 / 2 as scored, in-sample 1 / 1 | 2 / 2 (100%) | 2 | GF-1 |
 | `group_header_context`: `children_lost_header` | 47 | 47 | none | 105 / 109 hand-checked on the `analysis` runs (96%) | 32 / 47 (68%) | 11 | X6-header |
 | `group_header_context`: `role_without_holder` | 8 | 8 | none | 29 / 33 hand-checked on the `analysis` runs (88%) | 5 / 8 (63%) | 5 | X6-header |
 | `group_header_context`: `header_coded_unlike_list` | 9 | 0 | none | 19 / 22 hand-checked on the `analysis` runs (86%) | 4 / 9 (44%) | 3 | X6-header |
 | `group_header_context`: `parent_dates_lost` | 6 | 0 | none | 21 / 21 hand-checked on the `analysis` runs (100%) | 5 / 6 (83%) | 3 | X6-header |
 | `identical_rendered_rows` | 11 | 11 | none | 21 / 21 hand-checked (100%) | 1 / 11 (9%) | 1 | IDR |
 | `record_boundary` | 5 | 5 | none | 23 / 23 hand-checked (100%) | 4 / 5 (80%) | 1 | X6-grant |
+| `orphaned_fragments` | 41 | 18 | none | 39 / 41 hand-checked (95%), 2 partial | 3 / 41 (7%) | 3 | FRAG |
+| `owner_attribution`: `mentee_under_non_mentee_heading` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (0%) | 0 | YUY-OA |
+| `owner_attribution`: `citation_without_owner` | 54 | 1 | none | 13 / 54 hand-checked (24%): WARN 1 / 1, INFO 12 / 53 | 4 / 37 on labelled runs (11%) | 4 | YUY-OA |
+| `citation_grounding` | 123 | 0 | none | 62 / 123 hand-checked (50%): 41 partial, 20 false; held out 42 / 91 (46%) | 1 / 20 on labelled runs (5%) | 1 | YUY-CG |
+| `shattered_prose` | 15 | 15 | none | 15 / 15 hand-checked (100%), before and after the stage-6 fold | 0 / 12 on labelled runs (no label carries an entry index) | 0 by index, 2 by hand | YUY-SP |
+| `appointment_title_overlong` | 3 | 3 | none | 3 / 3 hand-checked (100%) | 0 / 3 (no label carries these entries) | 0 by index | YUY-AT |
+| `source_line_coverage` | 408 | 0 | none | 9 / 60 hand-checked (15%): held out 4 / 30, in-sample 5 / 30, unmatched hits only; 30 / 60 with the partials | 97 / 398 on labelled runs (24%): held out 23 / 175 | 70: held out 20, in-sample 50 | YUY-SLC2 |
+| `summary_unsupported_claim` | 11 | 11 | none | 14 / 14 hand-checked (100%) | 11 / 11 by sentence (100%) | 11 | OIE-SUM |
 | `implausible_year` | 21 | 21 | 1 / 0 / 1 | 1 / 2 (50%) | 7 / 21 (33%) | 5 | M1 |
 | `junk_or_header_row` | 107 | 107 | 102 / 2 / 0 | 105 / 107 hand-checked (98%) | 68 / 107 (64%) | 20 | RCB-D |
 | `llm_fallback_served` | 1 | 1 | 1 / 0 / 0 | 1 / 1 (100%) | names text | 0 | M1 |
@@ -229,19 +392,20 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `pipe_leaks` | 5 | 5 | 0 / 0 / 2 | 0 / 2 (0%) | names text | 0 | M1 |
 | `pubmed_title_truncated` | 22 | 22 | 22 / 0 / 0 | 22 / 22 (100%) | 8 / 22 (36%) | 2 | M2-enrich |
 | `role_consistency`: `contradicted` | 15 | 15 | none | 15 / 15 hand-checked (100%) | 2 / 15 (13%) | 1 | RC-ROLE |
-| `role_consistency`: `pi_cell_empty` | 159 | 159 | none | 157 / 159 hand-checked or script-checked (99%) | 11 / 159 (7%) | 1 | RC-ROLE2 |
+| `role_consistency`: `pi_cell_empty` | 158 | 158 | none | 156 / 158 hand-checked or script-checked (99%) | 10 / 158 (6%) | 1 | RC-ROLE2, ROLE-REC |
 | `role_consistency`: `pi_also_co_i` | 7 | 0 | none | 7 / 7 hand-checked (100%) | 0 / 7 (0%) | 0 | RC-ROLE2 |
 | `role_consistency`: `pi_from_collaborator` | 5 | 0 | none | 5 / 5 hand-checked (100%) | 4 / 5 (80%) | 1 | RC-ROLE2 |
 | `role_consistency`: `owner_lead_as_co_i` | 5 | 0 | none | 5 / 5 hand-checked (100%) | 3 / 5 (60%) | 1 | RC-ROLE2 |
 | `role_consistency`: `owner_also_co_i` | 117 | 117 | none | 77 / 78 hand-checked (99%) | 22 / 117 (19%) | 2 | X6-role |
-| `role_consistency`: `owner_pi_role_empty` | 275 | 275 | none | 193 / 193 script-checked, 44 read (100%) | 24 / 275 (9%) | 2 | X6-role |
-| `role_consistency`: `owner_pi_other_role` | 82 | 82 | none | 65 / 66 hand-checked (98%) | 15 / 82 (18%) | 4 | X6-role |
+| `role_consistency`: `owner_pi_role_empty` | 277 | 277 | none | 198 / 198 script-checked, 44 read (100%) | 26 / 277 (9%) | 2 | X6-role, ROLE-REC |
+| `role_consistency`: `owner_pi_other_role` | 82 | 82 | none | 69 / 70 hand-checked (99%) | 15 / 82 (18%) | 4 | X6-role, ROLE-REC |
 | `role_consistency`: `role_in_title` | 5 | 0 | none | 3 / 3 hand-checked (100%) | 2 / 5 (40%) | 1 | X6-role |
 | `role_consistency`: `pi_cell_from_title` | 4 | 0 | none | 4 / 4 hand-checked (100%) | 2 / 4 (50%) | 2 | X6-role |
+| `role_consistency`: `pi_cell_not_a_person` | 13 | 0 | none | none | no labels on these runs | 0 | RC-SPONSOR |
 | `section_consistency` | 28 | 28 | none | 30 / 30 hand-checked (100%) | 14 / 28 (50%) | 14 | RCB-D, RCB-HE |
 | `section_lost` | 1 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | names text | 0 | M1 |
 | `segmentation_collapse` | 1 | 1 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | W3B-SC |
-| `span_count` | 118 | 118 | none | 111 / 118 hand-checked (94%) | 4 / 118 (3%) | 2 | RCB-SC |
+| `span_count` | 123 | 123 | none | 117 / 123 hand-checked (95%) | 4 / 123 (3%) | 2 | RCB-SC, Y1585 |
 | `split_child_unsourced`: `institution_from_outside_entry` | 1 | 0 | none | 1 / 1 hand-checked (100%) | 1 / 1 (100%) | 1 | SC-1 |
 | `split_child_unsourced`: `date_from_sibling` | 3 | 0 | none | 3 / 3 hand-checked (100%) | 2 / 3 (67%) | 1 | SC-1 |
 | `stage4_group_failures` | 1 | 1 | none | none | names text | 0 | M1 |
@@ -262,13 +426,200 @@ The EBYSBC verdicts were given on the doctor deployed for that batch (dev-242, `
 | `taxonomy_code_coverage` | 3 | 0 | none | none | names text | 0 | M1 |
 | `teaching_postcheck` | 105 | 42 | 86 / 3 / 16 | 86 / 105 (82%) | 51 / 105 (49%) | 11 | M3b-5c |
 | `wrong_start_date` | 5 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | 5 / 5 (100%) | 5 | RCB-D |
+| `year_not_in_source` | 9 | 9 | 5 / 0 / 4 | 5 / 9 (56%) | 3 / 9 (33%) | 5 | Y1585 |
 
 M2-junk added `junk_or_header_row` and changed no other lint's findings on any run. All 104 hits were hand-read against the stage-4 entry and the rendered row: the 39 unmatched are 38 group headers, lead-in labels, date fragments or banner titles printed as records, and 1 partly so (a banner title rendered with a date); of the 65 matched, 64 are and 1 is partly so (a header row that also shows a role). 102 of 104 (98%). The shapes were tuned on this farm, so the next batch is the first out-of-sample check.
 M2-enrich added `pubmed_title_truncated` and `enrichment_pubtype_mismatch` and changed no other lint's findings on any run. Every hit was hand-read against the stage-4 title and the accepted text of the base docx (text inside `w:ins` included, `w:delText` excluded). `pubmed_title_truncated`: 22 of 22 are cut titles that render cut, followed directly by the journal; the 14 unmatched sit on 6 runs the autopsies did not record them for. `enrichment_pubtype_mismatch`: 2 of 2 render a correction notice's title where the CV lists the paper; the unmatched one is a CV that gives the notice's PMID for the paper. Both read stage-5 JSON built before #1358, which fixed both causes at the source, so on newer runs they guard against a regression.
 
 No hits on M1's 62 runs: `bucket_status`, `dead_sections`, `invented_records`, `llm_refusal_in_output`, `no_output`, `owner_contact_missing`, `pipeline_errors_present`, `protected_data_in_output`, `python_repr_in_output`, `segmentation`, `stage3b_fallback_ratio`, `stage3b_second_pass_error`, `stage_failure_recorded`, `table_lost`, `under_extraction`, `unrendered_records`.
 
+## Held-out precision (YUY-HO)
+
+One row per lint key that fired on a YUYVIG run, in either doctor. **in-sample** is the per-lint table's TP / judged above (summed over a lint's shapes), with its measurement. **held-out** is the YUYVIG verifiers' WARN verdicts on the dev-259 doctor (INFO findings were not judged). **points** is held-out minus in-sample. A lint is marked **overfit** when its held-out precision is 20 points or more below its in-sample number. **matched / located** and **caught** are `doctor_vs_autopsy.py` on the current doctor against the v2 labels. Hits are over 36 runs for dev-259 and 37 for the current doctor; the held-out verdicts cover all 37 (IXJMKS's verifier judged a local re-run, since the run kept no doctor report).
+
+| lint | in-sample TP / judged | held-out TP / judged | points | dev-259 hits / warn+ | current hits / warn+ | matched / located | caught | note |
+|---|---|---|---|---|---|---|---|---|
+| `citation_field_dropped` | 30 / 30 (100%) (X6-cite) | none |  | 22 / 0 | 22 / 0 | 0 / 22 | 0 |  |
+| `classified_unrendered` | 0 / 1 (0%) (M1) | 1 / 1 (100%) | +100 | 2 / 1 | 2 / 1 | names text | 0 |  |
+| `contact_slot_lost` | 2 / 2 (100%) (RCB-D) | 5 / 5 (100%) | +0 | 5 / 5 | 5 / 5 | 4 / 5 | 4 |  |
+| `date_cell_shape` | none | 1 / 4 (25%) |  | 6 / 4 | 6 / 4 | 3 / 6 | 3 | no in-sample measurement; 1 of 4 held out |
+| `date_only_lines` | none | none |  | 1 / 0 | 1 / 0 | names text | 0 |  |
+| `dedup_drops` | 2 / 8 (25%) (M1-dup) | 0 / 3 (0%) | -25 | 11 / 3 | 11 / 7 | 4 / 11 | 4 | **overfit** (n = 3); #1611 made it WARN on 7 runs and read its added drops 12 of 12 (in-sample) |
+| `duplicate_records` | 6 / 7 (86%) (RCB-D) | 5 / 13 (38%) | -48 | 13 / 13 | 13 / 13 | 1 / 12 | 1 | **overfit**: of its 8 FP, 5 are items the source lists twice and 3 are two distinct records (#1585) |
+| `enrichment_failures` | 3 / 7 (43%) (M1, RCB-D) | 6 / 8 (75%) | +32 | 8 / 8 | 8 / 8 | names text | 0 | YUYVIG's verifiers judged the informational notice TP |
+| `enrichment_pubtype_mismatch` | 2 / 2 (100%) (M2-enrich) | 0 / 1 (0%) | -100 | 1 / 1 | 1 / 1 | 0 / 1 | 0 | **overfit** (n = 1) |
+| `fanout_cell_residue` | 13 / 13 (100%) (FAN-RES) | 2 / 2 (100%) | +0 | 1 / 1 | 2 / 2 | 2 / 2 | 2 |  |
+| `grant_boundary` | 60 / 60 (100%) (X6-grant) | 6 / 6 (100%) | +0 | 6 / 6 | 6 / 6 | 1 / 6 | 1 |  |
+| `group_header_context` | 174 / 185 (94%) (X6-header) | 21 / 21 (100%) | +6 | 25 / 21 | 25 / 21 | 5 / 25 | 4 |  |
+| `identical_rendered_rows` | 21 / 21 (100%) (IDR) | 15 / 15 (100%) | +0 | 15 / 15 | 15 / 15 | 6 / 15 | 5 |  |
+| `implausible_year` | 1 / 2 (50%) (M1) | none |  | 4 / 0 | 4 / 0 | 0 / 4 | 0 |  |
+| `junk_or_header_row` | 105 / 107 (98%) (RCB-D) | 46 / 51 (90%) | -8 | 51 / 51 | 51 / 51 | 22 / 51 | 11 |  |
+| `llm_fallback_served` | 1 / 1 (100%) (M1) | none |  | 25 / 25 | 12 / 12 | names text | 0 |  |
+| `missed_headers` | 4 / 8 (50%) (M1) | none |  | 20 / 0 | 19 / 0 | names text | 0 |  |
+| `multi_record_coverage` | 50 / 57 (88%) (RCB-D, X6-multirec) | 33 / 40 (82%) | -6 | 57 / 40 | 57 / 40 | 9 / 57 | 7 |  |
+| `offschema_fields` | 16 / 23 (70%) (M1) | 9 / 11 (82%) | +12 | 13 / 11 | 13 / 11 | 4 / 13 | 5 |  |
+| `orphaned_fragments` | 39 / 41 (95%) (FRAG) | none |  | 13 / 0 | 13 / 0 | 0 / 13 | 0 |  |
+| `output_hygiene` | 30 / 33 (91%) (M1) | none |  | 25 / 0 | 26 / 0 | names text | 0 |  |
+| `owner_attribution` | 16 / 57 (28%) (YUY-OA) | none |  | 0 / 0 | 20 / 4 | 3 / 20 | 3 | new 2026-10-08 (#1616); every figure in-sample |
+| `owner_missing_from_citation` | 27 / 29 (93%) (M3 cap table) | 1 / 6 (17%) | -76 | 6 / 6 | 6 / 6 | 1 / 6 | 1 | **overfit**, on 2 CVs only: all 5 FP are one CV's news items that quote the owner |
+| `python_repr_in_output` | none | 1 / 1 (100%) |  | 1 / 1 | 1 / 1 | names text | 0 |  |
+| `role_consistency` | 539 / 543 (99%) (RC-ROLE, RC-ROLE2, X6-role) | 40 / 40 (100%) | +1 | 40 / 40 | 40 / 40 | 6 / 37 | 5 |  |
+| `section_consistency` | 30 / 30 (100%) (RCB-D, RCB-HE) | 13 / 24 (54%) | -46 | 23 / 23 | 24 / 24 | 6 / 24 | 6 | **overfit**: its 11 FP are `cross_reference_as_record` 3, `grant_review_not_q3` 3, `board_certification_misfiled` 2, `journal_article_as_report` 1 and 2 more, on 8 CVs |
+| `section_lost` | 0 / 1 (0%) (M1) | 1 / 3 (33%) | +33 | 3 / 3 | 3 / 3 | names text | 0 |  |
+| `segmentation_collapse` | 1 / 1 (100%) (W3B-SC) | 1 / 1 (100%) | +0 | 1 / 1 | 1 / 1 | 0 / 1 | 0 |  |
+| `source_line_coverage` | 5 / 30 (17%) (YUY-SLC2, unmatched hits) | 4 / 30 (13%), unmatched hits | -4 | 0 / 0 | 181 / 0 | 23 / 175 | 20 | new (#1588); INFO and review-copy only. With partials 15 / 30 in-sample, 15 / 30 held out. YUY-SLC read 16 / 30 and 11 / 30 (another reader, older render) |
+| `span_count` | 111 / 118 (94%) (RCB-SC, before Y1585) | 6 / 28 (21%) | -73 | 28 / 28 | 6 / 6 | 5 / 6 | 3 | **overfit** at dev-259; #1607 removed its 22 FP (Y1585, in-sample) |
+| `stage6_render_warnings`: `appendix_grant_too_sparse` | 3 / 6 (50%) (M1) | 6 / 6 (100%) | +50 | 5 / 5 | 6 / 6 | names text | 0 |  |
+| `stage6_render_warnings`: `appendix_m1_not_in_summary` | none | 6 / 6 (100%) |  | 6 / 6 | 8 / 8 | names text | 0 | #1615 diverts undated M1 too: 6 to 8 hits |
+| `stage6_render_warnings`: `appendix_no_route` | none | 8 / 8 (100%) |  | 8 / 8 | 3 / 3 | names text | 0 | #1621 routes bare N3: 8 to 3 hits |
+| `stage6_render_warnings`: `appendix_no_route_T` | 2 / 20 (10%) (M1) | 13 / 14 (93%) | +83 | 13 / 13 | 14 / 14 | names text | 0 | not comparable, as above |
+| `stage6_render_warnings`: `appendix_passthrough_refused` | none | 1 / 1 (100%) |  | 1 / 1 | 2 / 2 | names text | 0 |  |
+| `stage6_render_warnings`: `appendix_reclassification_failed` | none | 1 / 1 (100%) |  | 1 / 1 | 1 / 1 | names text | 0 |  |
+| `stage6_render_warnings`: `appendix_recovered` | 0 / 1 (0%) (M1) | 1 / 1 (100%) | +100 | 1 / 1 | 1 / 1 | names text | 0 |  |
+| `stage6_render_warnings`: `appendix_recovered_A` | 3 / 20 (15%) (M1) | 15 / 15 (100%) | +85 | 15 / 14 | 16 / 15 | names text | 0 | not comparable: YUYVIG's verifiers judged a benign diversion TP, EBYSBC's partial |
+| `stage6_render_warnings`: `appendix_section_declined` | none | 5 / 5 (100%) |  | 5 / 5 | 5 / 5 | names text | 0 |  |
+| `stage6_render_warnings`: `memberships_header_row_dropped` | none | none |  | 1 / 0 | 1 / 0 | 0 / 1 | 0 |  |
+| `stage6_render_warnings`: `other` | none | none |  | 2 / 0 | 7 / 0 | 2 / 5 | 2 | #1621's INFO "bare mentee code resolved" has no shape yet |
+| `stage6_render_warnings`: `reroute_cross_family` | 4 / 9 (44%) (M1) | 3 / 4 (75%) | +31 | 4 / 4 | 4 / 4 | 2 / 4 | 2 |  |
+| `stage6_render_warnings`: `reroute_refused` | 15 / 16 (94%) (M1) | none |  | 43 / 0 | 44 / 0 | 5 / 44 | 5 |  |
+| `stage6_render_warnings`: `reroute_same_family` | 7 / 7 (100%) (M1) | none |  | 15 / 0 | 16 / 0 | 1 / 16 | 1 |  |
+| `summary_unsupported_claim` | 14 / 14 (100%) (OIE-SUM) | 0 / 1 (0%) | -100 | 1 / 1 | 1 / 1 | names text | 0 | **overfit** (n = 1); missed all 19 #1554 claims |
+| `table_shape` | 1 / 6 (17%) (M1) | none |  | 2 / 0 | 2 / 0 | names text | 0 |  |
+| `taxonomy_code_coverage` | none | none |  | 10 / 0 | 10 / 0 | names text | 0 |  |
+| `teaching_postcheck` | 86 / 105 (82%) (M3b-5c) | none |  | 45 / 0 | 45 / 0 | 2 / 45 | 2 |  |
+| `under_extraction` | none | 1 / 1 (100%) |  | 1 / 1 | 1 / 1 | 1 / 1 | 2 |  |
+| `wrong_start_date` | 0 / 1 (0%) (RCB-D) | none |  | 1 / 0 | 1 / 0 | 0 / 1 | 0 |  |
+| `year_not_in_source` | none | 5 / 49 (10%) |  | 49 / 49 | 9 / 9 | 3 / 9 | 3 | **overfit**: no in-sample row before Y1585; #1607 removed 40 FP (Y1585, in-sample) |
+
+Overfit, held out: `span_count` and `year_not_in_source`, both since fixed by #1607 (its figures are in-sample); `owner_missing_from_citation`; `duplicate_records` (#1585's open residual); and `section_consistency`. `dedup_drops`, `summary_unsupported_claim` and `enrichment_pubtype_mismatch` fall too, on 3, 1 and 1 judged. Every other lint the verifiers judged holds within 10 points or rises. The stage-6 Appendix shapes rise because the two batches judged a benign diversion differently, not because the lint changed.
+
+## Repair tiers (#1591)
+
+What the review copy (`<uid>_wcm_review.docx`) does with each lint or shape's findings, chosen from the precision above. From most to least certain:
+
+- **Certain fix**: the doctor can derive the corrected text from the run's own artifacts, and the shape is right at least 99% of the time on at least 100 judged findings. The fix is written as a Word tracked change: accepting it gives the corrected text, rejecting it gives the delivered text, and either choice is a verdict for #1587.
+- **Suggestion**: a fix the doctor can derive, right at least 80% of the time on at least 20 judged findings (the #822 / #813 bar). It is meant to be a tracked change too. None is built yet, so these are comments today.
+- **Comment**: a Word comment on the text the finding is about (`review_comments.py`).
+- **Review note**: an item in the box closing the copy, when `precision.shown_in_place` (#1589) keeps the finding off the text, i.e. its gate row is below 50% (`IN_PLACE_MIN_PRECISION`).
+- **Section re-run**: #813, for a lint `precision.remediation_allowed` admits. None does.
+
+**Precision used.** For the fix tiers, the lower of in-sample and held-out, each counted only when it has at least 5 judged findings, and judged findings summed over both. There are two exceptions:
+
+- `span_count` and `year_not_in_source` were held out before #1607 fixed their false positives, so their post-fix in-sample rows (Y1585) stand alone.
+- The held-out table pools `role_consistency` and `group_header_context` over their shapes, so their shape rows show that pooled figure.
+
+**Comment versus review note.** These two tiers are the gate's, read from `precision.load_gate_ledger()`: the per-lint row with YUYVIG's held-out verdicts folded in for a lint unchanged since dev-259 (`HELD_OUT_CHANGED` excluded). The **gate (combined)** column gives that figure where it differs from in-sample, and says "same" where it does not, with the reason when a held-out figure exists but is not folded. Moving a lint between these tiers is a ledger change, not a code change. Against the in-sample figure alone, the combined one moves six rows:
+
+- To comments: `classified_unrendered` (1 / 2, 50%), `enrichment_failures` (9 / 15, 60%), and the stage-6 shapes `appendix_recovered` (1 / 2, 50%), `appendix_recovered_A` (18 / 35, 51%) and `reroute_cross_family` (7 / 13, 54%).
+- To a review note: `date_cell_shape` (1 / 4, 25%, held-out verdicts only).
+
+`appendix_no_route_T` stays a review note at 15 / 34 (44%). `duplicate_records` stays a comment at 11 / 20 (55%). `owner_missing_from_citation` is a comment at 28 / 35 (80%), which the M3 cap table's in-sample figures bring in.
+
+**Built today:**
+
+- The certain fix for `owner_pi_role_empty`. `review_comments._suggest_owner_pi_role` inserts "PI" in the empty "Your role:" cell of every grant table the lint reports (`doctor/lints/extraction.owner_pi_role_empty_tables`), and a finding fixed on every table it reports gets no comment. A reported table with no "Your role:" row is left as delivered, and its finding stays a comment.
+- Separately, `protected_data_in_output` is auto-applied upstream: stage 6's #1389 repair (`CVICHE_RUN_REPAIR=1`) withholds the value and records it in `<uid>_repairs.json`.
+
+**Not built:**
+
+- The certain fix for `etal_added`.
+- Every suggestion row.
+- Applying certain fixes to the delivered `<uid>_wcm.docx`; they reach the review copy only.
+
+Any lint not listed here has no verdicts and is a comment.
+
+| lint or shape | in-sample | held-out | gate (combined) | fix the doctor can derive | tier |
+|---|---|---|---|---|---|
+| `citation_field_dropped`: `title_dropped` | 4 / 4 (100%) | none | same | re-add the stage-4 title | comment |
+| `citation_field_dropped`: `url_dropped` | 11 / 11 (100%) | none | same | re-add the stage-4 link | comment |
+| `citation_field_dropped`: `elision_dropped` | 15 / 15 (100%) | none | same | re-add the source's "..." | comment |
+| `classified_unrendered` | 0 / 1 (0%) | 1 / 1 (100%) | 1 / 2 (50%) | — | comment |
+| `contact_slot_lost` | 2 / 2 (100%) | 5 / 5 (100%) | 7 / 7 (100%) | — | comment |
+| `date_only_lines` | none | none | same | — | comment |
+| `dedup_drops` | 2 / 8 (25%) | 0 / 3 (0%) | same; held out not folded (changed since dev-259) | — | review note |
+| `duplicate_passages` | none | none | same | delete the later copy | comment |
+| `duplicate_records` | 6 / 7 (86%) | 5 / 13 (38%) | 11 / 20 (55%) | delete the later copy | comment |
+| `enrichment_failures` | 3 / 7 (43%) | 6 / 8 (75%) | 9 / 15 (60%) | — | comment |
+| `etal_added` | 204 / 204 (100%) | none | same | restore the stage-4 author list | certain fix |
+| `enrichment_pubtype_mismatch` | 2 / 2 (100%) | 0 / 1 (0%) | 2 / 3 (67%) | — | comment |
+| `fanout_cell_residue` | 13 / 13 (100%) | 2 / 2 (100%) | 15 / 15 (100%) | delete the leftover text | comment |
+| `grant_boundary` | 60 / 60 (100%) | 6 / 6 (100%) | 66 / 66 (100%) | — | comment |
+| `grant_bucket` | 16 / 16 (100%) | none | same | — | comment |
+| `grant_facts`: `value_missing` | 26 / 26 (100%) | 24 / 25 (96%), already in the per-lint row | same | — | comment, always on the grant's title (`REVIEW_COPY_ONLY_LINTS`) |
+| `grant_facts`: `value_not_in_source` | 1 / 1 (100%) | 1 / 2 (50%), already in the per-lint row | same | — | comment, always on the grant's title (`REVIEW_COPY_ONLY_LINTS`) |
+| `group_header_context`: `children_lost_header` | 105 / 109 (96%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `group_header_context`: `role_without_holder` | 29 / 33 (88%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `group_header_context`: `header_coded_unlike_list` | 19 / 22 (86%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `group_header_context`: `parent_dates_lost` | 21 / 21 (100%) | 21 / 21 (100%), lint pooled | same; pooled held-out not folded | — | comment |
+| `identical_rendered_rows` | 21 / 21 (100%) | 15 / 15 (100%) | 36 / 36 (100%) | delete one copy | suggestion |
+| `record_boundary` | 23 / 23 (100%) | none | same | — | comment |
+| `orphaned_fragments` | 39 / 41 (95%) | none | same | — | comment |
+| `owner_attribution`: `mentee_under_non_mentee_heading` | 3 / 3 (100%) | none | same | — | comment |
+| `owner_attribution`: `citation_without_owner` | 13 / 54 (24%) | none | same | — | review note |
+| `citation_grounding` | 62 / 123 (50%) | none | same | — | comment |
+| `shattered_prose` | 15 / 15 (100%) | none | same | — | comment |
+| `appointment_title_overlong` | 3 / 3 (100%) | none | same | — | comment |
+| `summary_unsupported_claim` | 14 / 14 (100%) | 0 / 1 (0%) | same; held out not folded (changed since dev-259) | — | comment |
+| `implausible_year` | 1 / 2 (50%) | none | same | — | comment |
+| `junk_or_header_row` | 105 / 107 (98%) | 46 / 51 (90%) | 151 / 158 (96%) | delete the row | suggestion |
+| `llm_fallback_served` | 1 / 1 (100%) | none | same | — | comment |
+| `missed_headers` | 4 / 8 (50%) | none | same | — | comment |
+| `multi_record_coverage` | 50 / 57 (88%) | 33 / 40 (82%) | 83 / 97 (86%) | — | comment |
+| `offschema_fields` | 16 / 23 (70%) | 9 / 11 (82%) | 25 / 34 (74%) | — | comment |
+| `output_hygiene` | 30 / 33 (91%) | none | same | delete the stray text | suggestion |
+| `pipe_leaks` | 0 / 2 (0%) | none | same | — | review note |
+| `pubmed_title_truncated` | 22 / 22 (100%) | none | same | the stage-4 title | suggestion |
+| `role_consistency`: `contradicted` | 15 / 15 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_cell_empty` | 156 / 158 (99%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | the owner's name in the PI cell | suggestion |
+| `role_consistency`: `pi_also_co_i` | 7 / 7 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_from_collaborator` | 5 / 5 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `owner_lead_as_co_i` | 5 / 5 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `owner_also_co_i` | 77 / 78 (99%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | delete the owner from Co-Investigators | suggestion |
+| `role_consistency`: `owner_pi_role_empty` | 198 / 198 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | "PI" in "Your role:" | certain fix |
+| `role_consistency`: `owner_pi_other_role` | 69 / 70 (99%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `role_in_title` | 3 / 3 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_cell_from_title` | 4 / 4 (100%) | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `role_consistency`: `pi_cell_not_a_person` | none | 40 / 40 (100%), lint pooled | same; held out not folded (changed since dev-259) | — | comment |
+| `section_consistency` | 30 / 30 (100%) | 13 / 24 (54%) | 43 / 54 (80%) | — | comment |
+| `section_lost` | 0 / 1 (0%) | 1 / 3 (33%) | 1 / 4 (25%) | — | review note |
+| `segmentation_collapse` | 1 / 1 (100%) | 1 / 1 (100%) | 2 / 2 (100%) | — | comment |
+| `span_count` | 117 / 123 (95%) | 6 / 28 (21%), before #1607 | same; held out not folded (changed since dev-259) | — | comment |
+| `source_line_coverage` | 9 / 60 (15%), unmatched hits, held out included | 4 / 30 (13%), already in the per-lint row | same | — | review note, always (`REVIEW_COPY_ONLY_LINTS`) |
+| `split_child_unsourced`: `institution_from_outside_entry` | 1 / 1 (100%) | none | same | — | comment |
+| `split_child_unsourced`: `date_from_sibling` | 3 / 3 (100%) | none | same | — | comment |
+| `stage4_group_failures` | none | none | same | — | comment |
+| `stage6_render_warnings`: `appendix_grant_too_sparse` | 3 / 6 (50%) | 6 / 6 (100%) | 9 / 12 (75%) | — | comment |
+| `stage6_render_warnings`: `appendix_no_route` | none | 8 / 8 (100%) | same; held out not folded (changed since dev-259) | — | comment |
+| `stage6_render_warnings`: `appendix_no_route_T` | 2 / 20 (10%) | 13 / 14 (93%) | 15 / 34 (44%) | — | review note |
+| `stage6_render_warnings`: `appendix_recovered` | 0 / 1 (0%) | 1 / 1 (100%) | 1 / 2 (50%) | — | comment |
+| `stage6_render_warnings`: `appendix_recovered_A` | 3 / 20 (15%) | 15 / 15 (100%) | 18 / 35 (51%) | — | comment |
+| `stage6_render_warnings`: `appendix_t_validation_recoded` | none | none | same | — | comment |
+| `stage6_render_warnings`: `bare_dates_in_table` | 1 / 1 (100%) | none | same | — | comment |
+| `stage6_render_warnings`: `board_cert_row_skipped` | none | none | same | — | comment |
+| `stage6_render_warnings`: `no_teaching_content` | 0 / 5 (0%) | none | same | — | review note |
+| `stage6_render_warnings`: `reroute_cross_family` | 4 / 9 (44%) | 3 / 4 (75%) | 7 / 13 (54%) | — | comment |
+| `stage6_render_warnings`: `reroute_refused` | 15 / 16 (94%) | none | same | — | comment |
+| `stage6_render_warnings`: `reroute_same_family` | 7 / 7 (100%) | none | same | — | comment |
+| `stage6_render_warnings`: `semicolon_fused_bullets` | 0 / 2 (0%) | none | same | — | review note |
+| `table_shape` | 1 / 6 (17%) | none | same | — | review note |
+| `taxonomy_code_coverage` | none | none | same | — | comment |
+| `teaching_postcheck` | 86 / 105 (82%) | none | same | — | comment |
+| `wrong_start_date` | 0 / 1 (0%) | none | same | "Present" to the source end date | review note |
+| `year_not_in_source` | 5 / 9 (56%) | 5 / 49 (10%), before #1607 | same; held out not folded (changed since dev-259) | — | comment |
+| `date_cell_shape` | none | 1 / 4 (25%) | 1 / 4 (25%) | — | review note |
+| `owner_missing_from_citation` | none | 1 / 6 (17%) | 28 / 35 (80%) | — | comment |
+| `python_repr_in_output` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+| `stage6_render_warnings`: `appendix_m1_not_in_summary` | none | 6 / 6 (100%) | same; held out not folded (changed since dev-259) | — | comment |
+| `stage6_render_warnings`: `appendix_passthrough_refused` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+| `stage6_render_warnings`: `appendix_reclassification_failed` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+| `stage6_render_warnings`: `appendix_section_declined` | none | 5 / 5 (100%) | 5 / 5 (100%) | — | comment |
+| `stage6_render_warnings`: `memberships_header_row_dropped` | none | none | same | — | comment |
+| `stage6_render_warnings`: `other` | none | none | same | — | comment |
+| `under_extraction` | none | 1 / 1 (100%) | 1 / 1 (100%) | — | comment |
+
 ## Score cap inputs (M3)
+
+#1595 (2026-10-08) retired the content-loss caps this section qualified: each lint now lowers the score by its findings' precision-weighted fix minutes instead of capping it (`quality_score.score_doctor_findings`, docs/RUN_DOCTOR_SCORING.md). The rows below are kept as the measurements those caps were set on.
 
 The quality score caps a run at 84 on more lints only while this table records the cap's own findings at 80% precision or more on 20 or more of them (Paul's decision on #822, 2026-10-02). Each row measures the subset of the lint's findings that would cap, not the whole lint. **matched** is M1's index match; every unmatched hit was hand-checked against the rendered docx (`w:ins` text included) and the stage-4 entry. A partial is a real defect other than the one the cap claims, and counts against precision.
 
@@ -349,6 +700,41 @@ Per-class recall (`by_batch_class` and `by_class_ref`) is in the `--json` output
 - s7ab: its verified findings carry no class. The label converter reads the class table in the s7ab synthesis, which names each class's records by uid and entry index in prose. A finding gets `s7ab-<n>`, as both `batch_class` and `class_ref`, when exactly one class row names its uid and one of its indices. When several rows do, it gets one only if exactly one of those rows lists the finding's own category. This assigns 83 of the 112. Each of the 83 was read against the finding's own description, and one was wrong: RXYBVF-04 is set by hand to `s7ab-2`, whose row gives that run a record count rather than an index. Of the other 29, 2 are named by more than one row and 27 by none. Some rows give no index at all: class 1, for instance, names its runs and record counts only. Those 29 are grouped as `(none)`, so per-class recall for s7ab covers 83 findings.
 - pilot: `class_ref` is the pilot's `failure_class`. It has no batch class.
 
+## Recall (YUY-HO, held-out)
+
+**The doctor caught 19 of 53 HIGH (held-out)** on origin/dev `a7ca2f66`. 13 are the ones the YUYVIG verifiers credited to the dev-259 doctor (5 fully, 8 partly), and each one's lint still fires on its run. The other 6 come from lints merged on 2026-10-08 and written from these runs, so they are in-sample: ECXGAT-01 and ECXGAT-03 (`owner_attribution`), and HXBPCT-01, LTTYWI-01, OKRTPJ-01 and WPJHYT-03 (`dedup_drops` WARN, as #1611 read them). Out of sample, the doctor caught 13 of 53 HIGH.
+
+At any severity it caught 127 of 444 (29%): high 19 of 53, medium 45 of 167, low 63 of 224. Here "caught" means a verifier credit (yes or partial), or a hit of the current doctor on the finding's entry where no dev-259 hit was, or one of the 4 PR readings named above. By index match alone (`doctor_vs_autopsy.py`): the current doctor matches 77 of 250 indexed findings (31%; high 15 of 41, medium 26 of 108, low 36 of 101), and dev-259 matches 73 of 246.
+
+## Misses by cause (YUY-HO)
+
+The 317 findings no doctor caught (34 high, 122 medium, 161 low), ranked by the issue the verifier cites, weighting high 3, medium 2 and low 1. **lint gap** names the lint that should have caught them, or that none exists. A finding the verifier marked NEW, and that no issue filed since cites, stays NEW.
+
+| rank | cause | stage | missed high / med / low | missed HIGH | lint gap |
+|---|---|---|---|---|---|
+| 1 | #1554 research summary claims the source does not support | 4.5 | 2 / 7 / 10 | ATRKVV-02, ZDOAZO-01 | `summary_unsupported_claim` fired once, falsely. It reads 4 claim kinds; these are status words, funder links and role verbs (#1592 is the sampled audit) |
+| 2 | #1346 the raw source line printed in a cell when a key field is null | 4, 3b, 6 | 0 / 10 / 8 | | none. A stage-6 self-check where the renderer falls back to the raw line would name each one |
+| 3 | #1403 grant and mentee role cells | 4, 3b, 6 | 1 / 6 / 12 | SIJYJZ-01 | `role_consistency` (40 of 40 true here) reads grant PI cells. Mentee periods and mentors listed as Co-Is have no shape; sponsor text in the PI cell is #1571 |
+| 4 | #985 sub-heading context lost | 2, 1b, 3b | 2 / 8 / 5 | RLADNC-02, RTBEJA-01 | `group_header_context` (21 of 21 true) needs a heading stage 1b placed; it is silent where 1b placed none |
+| 5 | #1243 multi-record entries lose records | 4, 5d | 6 / 2 / 4 | FMIGLR-01, GFZWQE-01, HNQBOI-01, HNQBOI-02, SPINJC-01, SPINJC-02 | `multi_record_coverage` reads stage-4 records. 5d's one citation per entry (HNQBOI-01, -02, SPINJC-01) needs it to read the 5d output |
+| 6 | #1577 honor, grant, membership and credential coded as one another | 3b | 1 / 11 / 0 | UVZNIC-02 | `section_consistency` has no shape for an honors-heading entry rendered as funding, an elected fellow coded I, or a non-licence credential under Licensure |
+| 7 | #1445 stage 4 supplies values the source does not give | 4 | 3 / 4 / 4 | OKRTPJ-02, SQMWHM-01, XNWSZN-01 | `year_not_in_source` checks years only. The same source check would cover an organisation, a granting body and a place |
+| 8 | #1580 non-committee activity rendered as committee service | 3b | 0 / 9 / 2 | | `section_consistency` `grant_review_not_q3` covers ad hoc grant review only, and 3 of its YUYVIG WARNs are false |
+| 9 | #312 talks coded S8 render as authorless abstracts | 3b | 0 / 6 / 7 | | `reroute_refused` (INFO) names some. No WARN shape for an authorless S8 under a presentations heading |
+| 10 | #1205 an entry's supplementary prose is never rendered | 4 | 0 / 1 / 15 | | `under_extraction` (1 hit). By design until #1205's tracked deletions land |
+| 11 | #1581 training, appointment and employment tier | 3b | 0 / 5 / 3 | | `section_consistency` `training_as_degree` covers B1 only |
+| 12 | #1342 dates: unsupported "-Present", seasons | 4, 3b | 0 / 2 / 8 | | `span_count` and `date_cell_shape` check neither |
+| 13 | #817 field-level loss | 4 | 1 / 1 / 6 | BLBVPD-N1 | none (#817 is the missing measurement) |
+| 14 | #1579 geographic scope ignores the CV's own scope headings | 3b, 6 | 0 / 3 / 4 | | none |
+| 15 | #1570 5d invents author or venue text (tied at weight 9 with 6 more, below) | 5d | 2 / 1 / 1 | FLBFRK-01, SIJYJZ-03 | none. 5d's author list against stage 4's would name each one |
+| | NEW, uncited | 3b, 6, 4, 1a | 2 / 14 / 24 | HXBPCT-05, XVSQFF-03 | HXBPCT-05: stage 6 carries an organisation into the next flat-list row. XVSQFF-03: a B1 fan-out puts a start year in Year Awarded |
+
+The rest, each 9 or under by weight: #1222 (0 / 3 / 3), #1245 (0 / 1 / 7), #1257 (1 / 1 / 4, DYLJXC-02), #1259 (0 / 3 / 3), #1344 (1 / 2 / 2, ECXGAT-02), #666 (0 / 1 / 7, after #1611), #1226 (2 / 1 / 0, WPJHYT-01 and YSXCFU-01; `grant_boundary` catches only the first grants of a cascade), #1415 (0 / 3 / 2), #1254 (1 / 2 / 0, ATRKVV-01), #1435 (1 / 1 / 1, BLBVPD-02), #212 (0 / 2 / 2), #1252 (FCAAUV-01), #1571 (SLYBST-01), #1584 (RLADNC-01), #1251 (ULHCAP-01), #983 (XVSQFF-01), #1573 (DYLJXC-03), #1578 (DYLJXC-01), #847 (BLBVPD-01), and 14 more issues, plus 1 finding that cites none, with no HIGH among them.
+
+By the stage the verifier blamed first: 3b 110 (4 / 61 / 45), 4 94 (7 / 22 / 65), 6 39 (5 / 13 / 21), 2 28 (8 / 10 / 10), 4.5 17 (2 / 5 / 10), 5d 10 (5 / 2 / 3), 1b 7 (2 / 4 / 1), 1a 4, 5c 4, 5b 3 (1 / 0 / 2), unrecorded 1. Stage 3b's misreadings are the largest share of what the doctor misses. Stage 5d (5 HIGH of 10) and stage 2 (8 of 28) carry the most HIGH per miss.
+
+`doctor_vs_autopsy.py --json` gives the index-matched half of this (`by_class_ref`, `by_stage`). The ranking adds the verifiers' credits and the PR readings, using `_yuyvig_autopsy/rank_misses.py` (local).
+
 ## How to re-measure
 
 The farm and the labels hold CV content, so they live outside the repo:
@@ -366,6 +752,17 @@ python3 scripts/doctor_vs_autopsy.py "$FARM-doctor.json" ~/worktrees/eb-labels -
 ```
 
 M1 skipped the first two steps: it scored the existing `~/worktrees/eb-farm/doctor_base.json`, a `doctor_gate.py` run of `c3d87c5f` over the base farm (397 findings on 63 runs).
+
+The YUYVIG held-out set (YUY-HO) lives under `~/worktrees/cviche-autopsy-b13/analysis/`: one run per `<uid>/` (`outputs/` stage JSON, `input/` source), the v2 labels in `_labels_yuyvig_v2/`, and the converters in `_yuyvig_autopsy/`. Build a flat farm from `<uid>/outputs` (one `stage_*` directory per suffix, as `~/worktrees/eb-farm/outputs`), copy each docx source to `<uid>.docx` in a source directory, then render and doctor it:
+
+```bash
+PYTHONPATH=src python3 scripts/render_gate.py "$FARM" "$RENDER" --source-dir "$SRC"
+mkdir -p "$FARM/stage_6_wcm_documents" && cp "$RENDER"/*_wcm.docx "$RENDER"/*_render_warnings.json "$FARM/stage_6_wcm_documents/"
+PYTHONPATH=src python3 scripts/doctor_gate.py "$FARM" "$OUT/doctor.json" --source-dir "$SRC"
+python3 scripts/doctor_vs_autopsy.py "$OUT/doctor.json" ~/worktrees/cviche-autopsy-b13/analysis/_labels_yuyvig_v2 --json "$OUT/score.json"
+```
+
+From YUYVIG on, every batch autopsy adds its labels the same way, so the held-out set grows: convert the verified per-run reports into this schema (with `stage`, `class_ref` and the WARN verdicts in `doctor_review`), keep them beside the batch's runs, and add a held-out measurement row here.
 
 `--json` also lists each lint's unmatched hits (uid and entry index) and the runs of its unlocated hits, which is the sample for a hand-check. A lint PR reports its row before and after, hand-checks up to 30 unmatched hits, and adds a measurement id here.
 
@@ -448,3 +845,4 @@ These come from before this ledger. They are quoted as recorded, on the batch an
 | 2026-10-05 | all lints | 167 of 182 judged (92%); 75 of 90 without etal_added; recall 33 of 77 verified defects (43%) | RCBKFG, 6 CVs, dev-247 `2fa03115` | RCBKFG batch autopsy (local, not committed), its Doctor accuracy table |
 | 2026-10-06 | `grant_boundary` | dev-246 doctor 0 of the X6 E5 records; dev `05966dac` IEUPKK 13 of 14 records and RVTAQT 1 of 7; this branch 14 of 14 and 7 of 7 | X6, 6 CVs, dev-246 `33f53be7` | X6-grant |
 | 2026-10-06 | `multi_record_coverage`, X6-multirec's added and changed findings | 38 of 44 (86%); WARN 38 of 42; out of sample WARN about 17 of 21 by distinct CV (81%) | 335 runs: `analysis/` stored docx, the 63-run farm, the 126 farm/batch runs, NDMRSO and EOAHMI renders | X6-multirec, above |
+| 2026-10-08 | `dedup_drops` WARN on another class, a reopened range, another name or a talk given twice (#666) | added WARN drops, every one read: YUYVIG 12 of 12 (all 7 HIGH the batch verified: BLBVPD 94, HXBPCT 135, IZABPD 125, LTTYWI 262, 297, 307, 311, 351 and its two talk drops, OKRTPJ 51, WPJHYT 109); held out, the 63-run farm's live sidecars 3 of 3, each a loss an earlier autopsy verified (NTCULM and QFJSXR 18, RXYBVF 37), a dev `a65857e7` render of 126 farm runs 3 of 4 likely real (the fourth a Q4B drop whose journal the kept name carries behind a prefix), and the `2026-10-02` render of 163 farm runs 2 of 2 by shape (a promotion beside the earlier rank), neither autopsied. INFO on the live sidecars falls from 14 drops to 8, the 6 that moved to WARN all real and the 8 left all reworded duplicates | YUYVIG 38 runs dev-259 `d1e49e39` and the 63-run farm (live sidecars); farm renders as named | YUYVIG wave 2, this branch |

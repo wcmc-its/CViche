@@ -19,7 +19,6 @@ Everything else is P (or Q2 if external).
 
 import re
 
-
 # Patterns that indicate TRUE executive leadership (should stay O)
 EXECUTIVE_LEADERSHIP_PATTERNS = [
     r'\bDepartment\s+Chair\b',

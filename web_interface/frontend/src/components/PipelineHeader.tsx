@@ -6,6 +6,7 @@ import { getInputFileUrl } from '../api/runs'
 import type { ApiError } from '../api/client'
 import { formatCost, formatDate, formatDuration, formatTimeLeft } from '../utils'
 import { useCanSeeCost } from '../contexts/AuthContext'
+import type { RunState } from '../types'
 import { groupStepsIntoPhases } from './StepSidebar'
 
 interface HeaderStep {
@@ -23,7 +24,7 @@ interface PipelineHeaderProps {
   runDate?: string | null
   /** Admin only: who ran it. */
   runByName?: string | null
-  status: string
+  status: RunState
   steps: HeaderStep[]
   stepProgress: Record<number, { current: number; total: number; message: string }>
   displayProgress: number
@@ -56,39 +57,55 @@ const formatTotalTime = (seconds: number) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`
 }
 
-function StatusPill({ status }: { status: string }) {
-  const base = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[13px] font-medium'
+const PILL_BASE = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[13px] font-medium'
+
+/** The plain gray pill for a state with no icon of its own. */
+function NeutralPill({ label }: { label: string }) {
+  return <span className={`${PILL_BASE} bg-gray-100 text-gray-700 capitalize`}>{label}</span>
+}
+
+/** One case per RunState: adding a state to the union without a case here is
+ *  a compile error (the `never` check), not a silently gray pill (#298). */
+function StatusPill({ status }: { status: RunState }) {
   switch (status) {
     case 'running':
       return (
-        <span className={`${base} bg-primary-50 text-primary-700`}>
+        <span className={`${PILL_BASE} bg-primary-50 text-primary-700`}>
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
           Running
         </span>
       )
     case 'complete':
       return (
-        <span className={`${base} bg-[#ECFDF3] text-success-700`}>
+        <span className={`${PILL_BASE} bg-[#ECFDF3] text-success-700`}>
           <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
           Complete
         </span>
       )
     case 'failed':
       return (
-        <span className={`${base} bg-error-50 text-error-700`}>
+        <span className={`${PILL_BASE} bg-error-50 text-error-700`}>
           <XCircle className="h-3.5 w-3.5" aria-hidden="true" />
           Failed
         </span>
       )
     case 'cancelled':
       return (
-        <span className={`${base} bg-orange-50 text-orange-800`}>
+        <span className={`${PILL_BASE} bg-orange-50 text-orange-800`}>
           <Ban className="h-3.5 w-3.5" aria-hidden="true" />
           Cancelled
         </span>
       )
-    default:
-      return <span className={`${base} bg-gray-100 text-gray-700 capitalize`}>{status}</span>
+    case 'created':
+    case 'queued':
+    case 'paused':
+      return <NeutralPill label={status} />
+    default: {
+      // The API is not validated at runtime: a value outside the union still
+      // renders, as the gray pill, instead of crashing the run page.
+      const unhandled: never = status
+      return <NeutralPill label={String(unhandled)} />
+    }
   }
 }
 

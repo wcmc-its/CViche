@@ -26,6 +26,7 @@ scorer cannot disagree about a document.
 import re
 
 from unified_pipeline.stage6.normalization.pii import (
+    _MONTH_NAMES,
     CAT_CHILDREN,
     CAT_DATE_OF_BIRTH,
     CAT_DEA,
@@ -38,7 +39,7 @@ from unified_pipeline.stage6.normalization.pii import (
     CAT_TAX_ID,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
-    _MONTH_NAMES,
+    _dea_check_digit_ok,
     _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
@@ -79,10 +80,15 @@ _DEA_LABEL_PRESENT_RE = re.compile(r'\bdea\b', re.IGNORECASE)
 # so it cannot be cut out of a longer token. Calibrated before it was made
 # ungated: rendered over the 163-CV corpus, the only bare tokens of this
 # shape inside the Licensure section were the two leaked DEA numbers; every
-# other hit sat in the Bibliography, Research or Mentoring sections. A state
-# licence or certificate number that happens to share the shape WOULD be a
-# finding here -- the cost of a false positive is a hard-fail the reviewer
-# can read in the document, the cost of a miss is a leaked identifier.
+# other hit sat in the Bibliography, Research or Mentoring sections.
+#
+# The shape alone also matches a STATE licence number written the same way --
+# a Florida medical licence is "ME" plus digits -- and because the repair
+# (`repair/protected_data.py`) cuts what this probe finds, such a licence row
+# rendered with its number blank and no withheld notice (#1658, GHWROW 215).
+# So with no label in the block a match must also carry the DEA check digit
+# (`_dea_check_digit_ok`): a real DEA number always does, a state licence
+# number of the same shape does in only one case in ten.
 _DEA_NUMBER_VALUE_RE = re.compile(
     r'(?<![A-Za-z0-9])[A-Za-z]{2}\d{7}(?![A-Za-z0-9])')
 
@@ -119,12 +125,20 @@ _HOME_CONTACT_LABEL_RE = re.compile(
     r'home\s*(?:address|phone|telephone|tel\.?)\s*:', re.IGNORECASE)
 
 
+def _unlabelled_dea_matches(text: str) -> list[re.Match[str]]:
+    """DEA numbers in text whose block does not name DEA: the real format with
+    a valid check digit (#1217, #1658)."""
+    return [m for m in _DEA_NUMBER_VALUE_RE.finditer(text)
+            if _dea_check_digit_ok(m.group(0))]
+
+
 def _dea_value_matches(block_text: str) -> list[re.Match[str]]:
     """DEA-shaped values in one Licensure-section block: the loose shape when
-    the block names DEA, the real format alone when it does not (#1217)."""
-    probe = (_DEA_VALUE_RE if _DEA_LABEL_PRESENT_RE.search(block_text)
-             else _DEA_NUMBER_VALUE_RE)
-    return list(probe.finditer(block_text))
+    the block names DEA, a check-digit-valid real-format number when it does
+    not (#1217, #1658)."""
+    if _DEA_LABEL_PRESENT_RE.search(block_text):
+        return list(_DEA_VALUE_RE.finditer(block_text))
+    return _unlabelled_dea_matches(block_text)
 
 
 def _home_contact_value_leaked(block_text: str) -> bool:
@@ -238,6 +252,14 @@ _HOME_LABEL = (r"(?:\b(?i:home|residence)\b"
                r"(?:[ \t]+(?i:phone|telephone|tel|ph|address|addr|number|no|fax)\b\.?)?"
                r"|\((?i:h|home|res)\))")
 _HOME_TAG_AFTER = r"(?:\((?i:h|home|res|residence)\)|\b(?i:home)\b)"
+#: #1426 (NDMRSO MQJAVH 8): a "Current Address" line is the owner's home
+#: address when nothing on it names a workplace -- an institution, a department
+#: or a building. This lint's own word list, kept apart from the renderer's.
+_WORKPLACE_WORD = (r"\b(?i:universit\w*|college|institut\w*|school|hospital|medical|clinic\w*"
+                   r"|cent(?:er|re)|health|medicine|department|dept|division|laborator\w*|lab"
+                   r"|building|bldg|hall|pavilion|tower|floor|room|suite|office|campus)\b")
+_CURRENT_ADDRESS_LABEL = (r"\b(?i:current)[ \t]+(?i:address)\b(?![^\n]*" + _WORKPLACE_WORD + r")"
+                          r"[ \t|]*(?:[:\-–—][ \t|]*)?")
 #: NDMRSO ND1: the owner's institutional or tax ID number. A label naming whose
 #: ID it is, then four or more digits. A bare "ID #" (a board certificate's) or
 #: an institution name before a grant's "#<number>" is not such a label; NPI and
@@ -287,6 +309,7 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
      CAT_HOME_CONTACT),
     (re.compile(r"(?P<value>" + _PHONE + "|" + _STREET + r")[ \t]*[,;:]?[ \t]*" + _HOME_TAG_AFTER),
      CAT_HOME_CONTACT),
+    (re.compile(_CURRENT_ADDRESS_LABEL + r"(?P<value>" + _STREET + ")"), CAT_HOME_CONTACT),
     (re.compile(r"(?<![\w-])" + _INSTITUTIONAL_ID_LABEL + _ID_LABEL_TAIL
                 + r"(?P<value>" + _ID_NUMBER + ")"), CAT_INSTITUTIONAL_ID),
     (re.compile(r"(?<![\w-])" + _TAX_ID_LABEL + _ID_LABEL_TAIL

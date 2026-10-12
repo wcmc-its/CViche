@@ -2,11 +2,11 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_user
 from app.client_ip import get_client_ip
+from app.consent import get_current_consent_document
 from app.database import get_db
 from app.models import User
-from app.auth import get_current_user
-from app.consent import get_current_consent_document
 from app.schemas import ConsentStatus, ConsentSubmit, ConsentSubmitResponse
 from app.services.consent_service import record_consent
 

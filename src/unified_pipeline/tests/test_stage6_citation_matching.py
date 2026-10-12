@@ -39,7 +39,6 @@ from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E
     _value_referenced,
 )
 
-
 # ---------------------------------------------------------------------------
 # `_value_referenced`: the individual cases, each naming what it pins
 # ---------------------------------------------------------------------------

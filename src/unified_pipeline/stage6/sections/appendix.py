@@ -135,6 +135,29 @@ space ("*****"). A bare label that closes with a colon and holds nothing after i
 The two-signal rule kept it whenever 3b called it a "header label only" rather
 than a section header.
 
+One last pass runs under every code (#1551, EBYSBC VGHNZD) for the tail of a
+record that was split: a grant table's date cell, the date line under a
+committee, a budget line under a grant. `_drop_shown_record_tails` drops such a
+tail only when its value already shows in the rendered document or in another
+kept Appendix line that is not itself a tail. A tail shown nowhere else is
+kept, since the Appendix line is then the only place that value appears (NDMRSO
+ATUVAL lost five governance terms, and web205, web199, web26 and VGHNZD their
+budget lines, to unconditional versions).
+
+- `date-range`: the line is only a date range ("2014 – 2016", "1999-Present");
+  dashes, "to" and spacing are ignored when comparing it.
+- `amount`: the line is only a dollar amount, behind no label or one that
+  names the value itself (`_AMOUNT_LABELS`: "Amount", "Direct costs",
+  "Total", ...); it is shown only as the same number after a "$", spacing
+  aside, and never inside a longer number ("$100,645" is not "$1,100,645",
+  and a count, "150,000 Example Twins", is no amount). An award's
+  own name in front ("Best Teacher Award: $1,000") makes it a record, and it
+  is kept.
+
+A year with a note ("2015 (sabbatical year)") says something and is kept, and
+so is a range or an amount with any other word beside it. The owner's name and
+a date alone ("<initials> <Surname> June 2023") was already page furniture.
+
 The same furniture test keeps an A-coded orphan out of the post-render recovery
 (stage 6's `_unconsumed_personal_data_batch`), and decides the severity of the
 "A ... recovered into the Appendix" warning: INFO when every recovered A line is
@@ -156,18 +179,26 @@ merge-and-renumber scenario this key risks). Only one of the three,
 2068_Yount ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
 inputs, and its current appendix has a single entry under that heading, so
 `_group_by_source_heading` has not yet been exercised on a real collision.
-Numbering restarts under each heading. Bodies are capped at
-`APPENDIX_MAX_CHARS` characters, the marker that shows the cut included: the
-appendix is a pointer back to the original document, not a second copy of it.
-The cap is not what keeps a T entry's records: `_recover_unrendered_records`
-re-scans T entries too (#1230) and writes every record line the cap cut, in
-full, as an uncapped bullet.
+Numbering restarts under each heading. A body renders whole
+(`AppendixSection._appendix_body`) unless the low-coverage overflow re-splits
+the entry: only then is it capped at `APPENDIX_MAX_CHARS` characters, the
+marker that shows the cut included, as a pointer to the segments the
+reconsider pass routes. Every other numbered line -- a T entry (#1230), or one
+diverted from another code because no section placed it (#1555: M1 research
+records the summary does not reproduce, a code with no render route, a
+renderer's decline) -- is the only place that entry renders, so a cut tail
+reached no page. The cut lost undated lines the recovery pass cannot tell from
+template text (a competency list, a duty bullet), sibling rows that differ
+from a kept one only in a short word or a digit, and a record's affiliations
+and description bullets; where recovery did re-add a cut line, the entry
+printed twice: cut, then whole.
 """
 import logging
 import re
+import unicodedata
 from collections import Counter
-from collections.abc import Mapping, Sequence
-from typing import NamedTuple, TypedDict
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from ...core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -177,10 +208,19 @@ from ...core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
-from ..formatting import _set_font
+from ..formatting import (
+    _set_font,
+    add_cviche_box,
+    cviche_box_text,
+    is_cviche_box,
+    space_around_cviche_box,
+)
 from ..normalization import _clean_inline_tabs
-from ..normalization.pii import _BARE_PHONE_SHAPE
+from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from ..render_check import _is_column_header_row
+
+if TYPE_CHECKING:
+    from docx.text.paragraph import Paragraph
 
 logger = logging.getLogger(__name__)
 
@@ -194,15 +234,52 @@ _TRUNCATION_MARKER = "..."
 # Group label for an entry that carries no source hierarchy at all.
 _UNKNOWN_SECTION = "Unknown Section"
 
-# The one explanatory line under "T. APPENDIX", written by both appendix
-# writers. It must not claim the entries appear nowhere else: stage 6 cannot
-# prove that (#534 -- some numbered lines repeat content a section rendered,
-# and some carry content a renderer dropped).
-APPENDIX_INTRO_TEXT = (
-    "These entries from your original CV could not be matched to a section of "
-    "the WCM format. Some may repeat content shown in the sections above; "
-    "please review before relying on it."
-)
+# The CViche note box under "T. APPENDIX", written by both appendix writers
+# (#1388): what the entries are and what to do with them. It must not claim
+# the entries appear nowhere else: stage 6 cannot prove that (#534 -- some
+# numbered lines repeat content a section rendered, and some carry content a
+# renderer dropped). The count is the final one, set once both writers ran.
+APPENDIX_NOTE_TITLE = "CViche note: delete this box before sending"
+APPENDIX_NOTE_TEXT = {
+    True: ("This entry from your original CV did not fit any section above. Move it to "
+           "the right section or delete it. It may already appear above."),
+    False: ("These {count} entries from your original CV did not fit any section above. "
+            "For each one, move it to the right section or delete it. Some may already "
+            "appear above."),
+}
+# A count of 0: a box is only written for a line, so the Appendix holds nothing
+# but the personal-data withheld notice, which is not an entry (#1582).
+APPENDIX_NOTE_WITHHELD_ONLY_TEXT = (
+    "Personal data from your original CV was withheld here. The comment on the "
+    "notice below says what was withheld.")
+
+
+_SOURCE_SECTION_NUMBER_RE = re.compile(r"^(?:[IVXLCDM]+|[A-Z]|\d+)[.)]\s+")
+# Words an Appendix group heading keeps lower-case in Title Case, after its first.
+_HEADING_MINOR_WORDS = frozenset({"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with"})
+
+
+def appendix_group_heading(heading: str) -> str:
+    """The source CV's section heading as an Appendix group heading: its own
+    words, without its section number, in Title Case when it was ALL CAPS
+    ("V. GRANT SUPPORT" -> "Grant Support"). An ALL-CAPS line reads as a WCM section header, to a reader
+    and to the doctor's `_output_section_header`, so it would seem to end the
+    Appendix (#1388)."""
+    # The source's own section number ("V. ", "XI. ", "3) ") reads as a WCM
+    # section letter ("A. ") beside the Appendix's other headings: drop it.
+    heading = _SOURCE_SECTION_NUMBER_RE.sub("", heading).strip() or heading
+    if heading != heading.upper():
+        return heading
+    parts = re.split(r"([\s/-]+)", heading.lower())  # words, and what separates them
+    return "".join(w if i and w in _HEADING_MINOR_WORDS else w[:1].upper() + w[1:]
+                   for i, w in enumerate(parts))
+
+
+def appendix_note_text(count: int) -> str:
+    """The Appendix note box's instruction for *count* entries."""
+    if count == 0:
+        return APPENDIX_NOTE_WITHHELD_ONLY_TEXT
+    return APPENDIX_NOTE_TEXT[count == 1].format(count=count)
 
 # Why an entry did not reach the appendix, named for the check that caught it.
 # These are the words the summary Word comment and the log line report, in
@@ -227,6 +304,8 @@ DROP_RULE_LINE = "rule-line"
 DROP_SIGNATURE_BLOCK = "signature-block"
 DROP_PAGE_FURNITURE = "page-furniture"
 DROP_ON_REQUEST = "on-request"
+DROP_DATE_RANGE = "date-range"
+DROP_AMOUNT = "amount"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
@@ -246,6 +325,8 @@ DROP_REASONS = (
     DROP_SIGNATURE_BLOCK,
     DROP_PAGE_FURNITURE,
     DROP_ON_REQUEST,
+    DROP_DATE_RANGE,
+    DROP_AMOUNT,
 )
 
 # The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
@@ -291,7 +372,13 @@ _TOC_LINE_RE = re.compile(r"^.{1,90}?[ \t]Page\s+\d+(?:[-–—]\d+)?\s*$")
 # #530 (RCBKFG GKAQHB 41): any other run of five or more symbols with no
 # letter, digit or space ("*****", "#####", "~~~~~") is a separator of the
 # same kind. A spaced run ("_ _ _ _ _") is a fill-in blank and is kept.
-_RULE_LINE_RE = re.compile(r"^(?:[^\w\s]|_){5,}$")
+#
+# #1431 (NDMRSO JJYBKP 5): a dot leader keeps its spaces (". . . . .",
+# "· · · · ·"), so five or more dots are a separator spaced or not. Other spaced
+# symbols ("* * * * *") are still kept, and so is a spaced underscore run.
+_LEADER_DOTS = ".·•∙⋅…"
+_RULE_LINE_RE = re.compile(
+    rf"^(?:[^\w\s]|_){{5,}}$|^[{_LEADER_DOTS}](?:[ \t]*[{_LEADER_DOTS}]){{4,}}$")
 
 
 # #885 residual: four structural shapes that need TWO independent signals, so
@@ -302,6 +389,11 @@ _RULE_LINE_RE = re.compile(r"^(?:[^\w\s]|_){5,}$")
 # also tags real T content (hobbies, reference lists, orphaned journal titles),
 # which is why it is never sufficient here.
 _T_CONFIRMED_PREFIX = "[T-validation confirmed]"
+# #1431: 3b's T-validation can also move a structural line OUT of T, into the
+# section it heads ("[T-validation reclassified from T] Table header for ...",
+# stage3b/classify.py). Such a line reaches the Appendix under its new code, and
+# the same two signals drop it there.
+_T_RECLASSIFIED_PREFIX = "[T-validation reclassified from T]"
 # How much of the reasoning, after the tag, may name the kind. The model
 # states the verdict first ("Section header 'X' ..."), so a kind word deep in
 # the prose (an explanation of why something is NOT a header) does not count.
@@ -320,11 +412,17 @@ _MONTH_YEAR = rf"{_MONTH}\.?,?\s*(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{
 # in parentheses, and a FULL date (day included) alone on its line is a stamp
 # without its word. A bare month-year ("May 2020") is not: that shape is also
 # a real record's date fragment.
-_NUMERIC_DATE = r"\d{1,2}[/.-]\d{1,2}[/.-]\d{4}"
-_FULL_DATE = rf"(?:{_MONTH}\.?,?\s*\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:19|20)\d{{2}}|{_NUMERIC_DATE})"
+#
+# #1431: a slashed date may have a two-digit year ("7/16/18", NDMRSO VYNARH
+# 658; with dots or hyphens a two-digit year is still read as a section number
+# or a range), and the day may come first ("As of 21 April 2023", CAGLNY 2).
+_NUMERIC_DATE = r"(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{4}|\d{1,2}/\d{1,2}/\d{2})"
+_DAY_FIRST_DATE = rf"\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\.?,?\s*(?:19|20)\d{{2}}"
+_FULL_DATE = (rf"(?:{_MONTH}\.?,?\s*\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:19|20)\d{{2}}"
+              rf"|{_DAY_FIRST_DATE}|{_NUMERIC_DATE})")
 _STAMP_WORD = r"(?:date|as\s+of|revised|last\s+updated|updated|revision\s+date)"
 _DATE_STAMP_RE = re.compile(
-    rf"^\*?\(?\s*{_STAMP_WORD}\s*:?\s*(?:{_MONTH_YEAR}|{_NUMERIC_DATE})\s*\)?$"
+    rf"^\*?\(?\s*{_STAMP_WORD}\s*:?\s*(?:{_MONTH_YEAR}|{_FULL_DATE})\s*\)?$"
     rf"|^\(?\s*{_FULL_DATE}\s*\)?$",
     re.IGNORECASE,
 )
@@ -346,6 +444,36 @@ _BLANK_RUN_RE = re.compile(r"_+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _OWNER_NAME_FIELDS = ("first_name", "middle_name", "last_name")
 
+# #1551 (EBYSBC VGHNZD): the tail of a record that was split, alone on its line --
+# only a date range ("2014 – 2016", "July 2023 – Present", "(07/1990-06/1991)")
+# or only an amount behind a value label ("Amount: $2,500", "Direct Costs:
+# $100,645"). Either is dropped only when its value already shows elsewhere
+# (`_drop_shown_record_tails`; see the module docstring).
+_RANGE_POINT = rf"(?:{_MONTH}\.?,?\s*)?(?:19|20)\d{{2}}|\d{{1,2}}/(?:19|20)\d{{2}}"
+_OPEN_RANGE_END = r"present|current|now|ongoing"
+_DATE_RANGE_RE = re.compile(
+    rf"^\(?\s*(?:{_RANGE_POINT})\s*(?:[-–—]+|to)\s*(?:{_RANGE_POINT}|{_OPEN_RANGE_END})\s*\)?\.?$",
+    re.IGNORECASE,
+)
+# Two spellings of one range compare equal once each dash or "to", with the
+# space around it, is one "-" and the remaining space is single.
+_RANGE_JOIN_RE = re.compile(r"\s*(?:[-–—]+|\bto\b)\s*", re.IGNORECASE)
+# The only labels an amount alone may carry and still be a record's tail: words
+# naming the value itself. Any other label names the record ("Best Teacher
+# Award: $1,000", "Startup Package: $500,000") and is kept (#1551 review).
+_AMOUNT_LABELS = (
+    "amount", "award amount", "total", "total cost", "direct cost",
+    "annual direct cost", "indirect cost", "funding", "budget",
+)
+_AMOUNT_LABEL = "|".join(label.replace(" ", r"\s+") + "s?" for label in _AMOUNT_LABELS)
+# A shown value stands on its own boundaries: no word, "/" or digit group
+# ("1,", "6.") runs into it on either side, so "2014-2016" is not
+# "1.2014-2016" and "$100,645" is not "$100,645.50".
+_VALUE_START = r"(?<![\w/])(?<!\d[,.])"
+_VALUE_END = r"(?![\w/])(?![,.]\d)"
+_AMOUNT_RE = re.compile(
+    rf"^(?:(?:{_AMOUNT_LABEL})\s*:\s*)?\$\s?(\d[\d,]*(?:\.\d{{2}})?)\.?$", re.IGNORECASE)
+
 # The CV's own title, up to two leading words ("Medico-legal Curriculum
 # Vitae"), an optional "& Bibliography", and optionally a date line under it.
 _CV_TITLE_RE = re.compile(
@@ -360,22 +488,31 @@ _NONE_WORD_RE = re.compile(r"\bnone\b", re.IGNORECASE)
 _HEADER_CELL_SPLIT_RE = re.compile(r"\s*\|\s*|\t+|\n|\s{2,}")
 _HEADER_ROW_MAX_CELL_WORDS = 8
 
-_KIND_REASONING = {
-    DROP_CV_TITLE: re.compile(r"(?:document|cv|curriculum vitae)[^.;]{0,25}(?:title|header)"),
-    DROP_DATE_STAMP: re.compile(r"date (?:stamp|line|marker)|revision date|timestamp"),
-    # "column labels": stage 3b's "header line with only column labels" (#1221).
-    DROP_COLUMN_HEADER: re.compile(r"(?:column|table)?\s*header row|column header|column labels?\b"),
-    DROP_SECTION_HEADER: re.compile(
-        # The verdict must be a SECTION header/label, not a looser
-        # "structural header" (which also described a name line, an
-        # institution name and a career-gap explanation in the corpus).
-        r"(?:sub)?section (?:header|heading|subheader|subheading|category|label|title)"
-        # Stage 3b's other wordings for the same verdict on a bare outline
-        # label (#530): "structural header/category label", "subsection marker".
-        r"|header/category label|subsection marker"
-    ),
-    DROP_TEMPLATE_INSTRUCTION: re.compile(r"instruction (?:text|line|placeholder)|broken header"),
-}
+# How stage 3b's reasoning names each structural kind, in its opening words.
+_CV_TITLE_REASONING_RE = re.compile(r"(?:document|cv|curriculum vitae)[^.;]{0,25}(?:title|header)")
+# #1431: "Stray date fragment with no context" (NDMRSO VYNARH 658).
+_DATE_STAMP_REASONING_RE = re.compile(r"date (?:stamp|line|marker|fragment)|revision date|timestamp")
+# #1431: 3b dating the CV itself ("likely corresponds to CV date/preparation
+# date", NDMRSO REOYVH 0). Only this verdict lets a month and year alone drop:
+# under a plain "date stamp" verdict "May 2020" may be a record's date fragment.
+_CV_DATE_REASONING_RE = re.compile(r"\bcv date|preparation date|date of (?:the )?(?:cv|resume)\b")
+# "column labels": stage 3b's "header line with only column labels" (#1221).
+# #1431: "Table header for graduate student ... awards" (NDMRSO CAGLNY 688).
+_COLUMN_HEADER_REASONING_RE = re.compile(
+    r"(?:column|table)?\s*header row|column header|column labels?\b|table header\b")
+_SECTION_HEADER_REASONING_RE = re.compile(
+    # The verdict must be a SECTION header/label, not a looser
+    # "structural header" (which also described a name line, an
+    # institution name and a career-gap explanation in the corpus).
+    r"(?:sub)?section (?:header|heading|subheader|subheading|category|label|title)"
+    # Stage 3b's other wordings for the same verdict on a bare outline
+    # label (#530): "structural header/category label", "subsection marker".
+    r"|header/category label|subsection marker"
+)
+_TEMPLATE_INSTRUCTION_REASONING_RE = re.compile(r"instruction (?:text|line|placeholder)|broken header")
+# #1431: "Continuation header for Peer-Reviewed Publications section" (NDMRSO
+# UYQRUN 679), on an entry 3b moved out of T into the section it continues.
+_CONTINUATION_REASONING_RE = re.compile(r"continu(?:ation|ed) (?:header|heading)")
 
 
 # The outline marker a template puts before a label ("1. ", "b. ", "iv. ",
@@ -506,6 +643,10 @@ class OwnerTokens(NamedTuple):
     initials: frozenset[str] = frozenset()
 
 
+# No owner name known: the shapes that read the owner's tokens match nothing.
+_NO_OWNER_TOKENS = OwnerTokens()
+
+
 def _name_words(value: object) -> set[str]:
     if not isinstance(value, str):
         return set()
@@ -571,13 +712,15 @@ _PAGE_NUMBER_RE = re.compile(r"\d{1,4}(?:st|nd|rd|th)?|[ivx]{1,4}")
 _RECORD_NUMBER_RE = re.compile(r"\d\s*[;:]\s*\d|" + _BARE_PHONE_SHAPE)
 # Words that show a line is furniture: a page, the CV's title, a revision stamp.
 # Not "pages" or "pg": "Pages 12-19" is a citation's page range.
+# #1431: "resume" too ("Date of this résumé: February 9, 2009", NDMRSO JJYBKP
+# 516), read with its accents folded (`_fold_accents`).
 _FURNITURE_EVIDENCE_WORDS = frozenset({
-    "page", "cv", "curriculum", "vitae", "vita",
+    "page", "cv", "curriculum", "vitae", "vita", "resume",
     "revised", "revision", "updated", "update", "version", "prepared",
 })
 # Words such a line may also hold, which are no evidence by themselves.
 _FURNITURE_FILLER_WORDS = frozenset({
-    "of", "date", "dated", "last", "as", "on", "name", "p",
+    "of", "date", "dated", "last", "as", "on", "name", "p", "this",
     "january", "jan", "february", "feb", "march", "mar", "april", "apr", "may",
     "june", "jun", "july", "jul", "august", "aug", "september", "sep", "sept",
     "october", "oct", "november", "nov", "december", "dec",
@@ -594,6 +737,10 @@ _ON_REQUEST_RE = re.compile(
     r"^(?:references?\s*:?\s*)?(?:are\s+)?available\s+(?:up)?on\s+request\.?$", re.IGNORECASE)
 # How many of the owner's initials a running header runs together ("JQDoe").
 _MAX_FUSED_INITIALS = 3
+# #1431 (NDMRSO ZEIGYO 1): a running title set as cells, "<institution> | <CV
+# title> | <owner>". The cells as the reader joins them (tab, " | ") and as
+# `_clean_inline_tabs` rewrites them (": " for the first tab, " — " after it).
+_RUNNING_TITLE_CELL_SPLIT_RE = re.compile(r"\t+|\s*\|\s*|\s+[—–]\s+|:\s+")
 
 
 def _names_owner(word: str, owner_tokens: OwnerTokens) -> bool:
@@ -626,23 +773,47 @@ def _is_continued_header(text: str) -> bool:
             and _is_heading_words(words))
 
 
+def _fold_accents(text: str) -> str:
+    """*text* without its combining accents ("résumé" -> "resume")."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _is_running_title(text: str, owner_tokens: OwnerTokens) -> bool:
+    """A running title set as cells (#1431): one cell the CV's title
+    (`_CV_TITLE_RE`), at least one other a furniture line (the owner's name, a
+    page), and at most one cell left over, digit-free (the institution).
+    "Example University: Standardized Curriculum Vitae — Jane Q. Doe, MD"."""
+    cells = [cell.strip() for cell in _RUNNING_TITLE_CELL_SPLIT_RE.split(text) if cell.strip()]
+    titles = [cell for cell in cells if _CV_TITLE_RE.match(cell)]
+    others = [cell for cell in cells if not _CV_TITLE_RE.match(cell)]
+    leftover = [cell for cell in others if not _is_furniture_words(cell, owner_tokens)]
+    return (len(titles) == 1 and len(leftover) < len(others) and len(leftover) <= 1
+            and not any(ch.isdigit() for cell in leftover for ch in cell))
+
+
 def is_page_furniture(text: str, owner_tokens: OwnerTokens = OwnerTokens()) -> bool:
-    """True when *text* is page furniture (#1221): a "(Continued)" header, or a
-    line that, once Word field-code instructions, page numbers, dates, the
+    """True when *text* is page furniture (#1221): a "(Continued)" header, a
+    running title of cells (`_is_running_title`, #1431), or a line of
+    furniture words (`_is_furniture_words`)."""
+    stripped = text.strip()
+    return (_is_continued_header(stripped) or _is_running_title(stripped, owner_tokens)
+            or _is_furniture_words(stripped, owner_tokens))
+
+
+def _is_furniture_words(stripped: str, owner_tokens: OwnerTokens) -> bool:
+    """A line that, once Word field-code instructions, page numbers, dates, the
     owner's name tokens and `_FURNITURE_FILLER_WORDS` are removed, holds nothing
     else, and that held a field code, a `_FURNITURE_EVIDENCE_WORDS` word or the
-    owner's name. A bare date range or "May 1981" has no evidence and is kept; a
-    line with any other word in it ("Example Lab, Page 2"), a citation's volume
-    and pages, a phone number or a number of five digits or more is kept."""
-    stripped = text.strip()
-    if _is_continued_header(stripped):
-        return True
+    owner's name (#1221). A bare date range or "May 1981" has no evidence and is
+    kept; a line with any other word in it ("Example Lab, Page 2"), a citation's
+    volume and pages, a phone number or a number of five digits or more is kept."""
     has_field = bool(_FIELD_SWITCH_RE.search(stripped) or _SWITCHLESS_FIELD_NAME_RE.search(stripped))
     if has_field:
         stripped = _FIELD_NAME_RE.sub(" ", _FIELD_SWITCH_RE.sub(" ", stripped))
     if _RECORD_NUMBER_RE.search(stripped):
         return False
-    body = _POSSESSIVE_RE.sub("", _SPACED_PAGE_RE.sub(" page ", stripped).lower().replace(".", ""))
+    body = _POSSESSIVE_RE.sub("", _SPACED_PAGE_RE.sub(" page ", _fold_accents(stripped)).lower().replace(".", ""))
     evidence = has_field
     for word in _WORD_RE.findall(body):
         if word in _FURNITURE_EVIDENCE_WORDS or _names_owner(word, owner_tokens):
@@ -682,6 +853,19 @@ _PROFILE_URL_RE = re.compile(r"^(?:[A-Za-z ]{1,20}:\s*)?(?:https?://|www\.)\S+$"
 _BARE_LABEL_RE = re.compile(r"^[^\d:]{1,40}:$")
 
 
+# #1431 (X6 UXBHHF 47): a running footer's "Email: <address>". Personal Data
+# renders the address in its own cell under its own label, so the whole line is
+# never found on the page even when the address is.
+_LABELLED_EMAIL_RE = re.compile(rf"^(?:[A-Za-z ]{{1,20}}:\s*)?(?P<email>{_BARE_EMAIL_SHAPE})\.?$")
+
+
+def labelled_email(text: str) -> str | None:
+    """The address when *text* is an email address alone, or behind one short
+    label ("Email: jdoe@example.edu"), else None (#1431)."""
+    match = _LABELLED_EMAIL_RE.match(text.strip())
+    return match.group("email") if match else None
+
+
 def is_routine_recovered_line(text: str, owner_tokens: OwnerTokens = OwnerTokens()) -> bool:
     """True when a recovered A line holds nothing a reviewer must act on
     (#1221): page furniture (the owner's name, the CV title, a running header),
@@ -717,29 +901,50 @@ def _is_bare_section_label(text: str) -> bool:
             and _is_section_label_text(stripped))
 
 
-_KIND_SHAPE = {
-    DROP_TEMPLATE_INSTRUCTION: _is_template_directive,
-    DROP_CV_TITLE: lambda t: bool(_CV_TITLE_RE.match(t)),
-    DROP_DATE_STAMP: lambda t: bool(_DATE_STAMP_RE.match(t)),
-    DROP_COLUMN_HEADER: _is_label_only_row,
-    DROP_SECTION_HEADER: _is_section_label_text,
-}
+class _StructuralKind(NamedTuple):
+    """One two-signal structural kind: the `DROP_*` reason it reports, how 3b's
+    reasoning names it, and the positive shape the entry's text must have."""
+
+    reason: str
+    reasoning_re: re.Pattern[str]
+    shape: Callable[[str], bool]
+
+
+# A month and year alone ("April 2020"): a CV's own date only under
+# `_CV_DATE_REASONING_RE` (#1431).
+_LONE_MONTH_YEAR_RE = re.compile(rf"^{_MONTH}\.?,?\s*(?:19|20)\d{{2}}$", re.IGNORECASE)
+
+# Checked in order; the first kind whose reasoning and shape both match wins.
+_STRUCTURAL_KINDS = (
+    _StructuralKind(DROP_CV_TITLE, _CV_TITLE_REASONING_RE, lambda t: bool(_CV_TITLE_RE.match(t))),
+    _StructuralKind(DROP_DATE_STAMP, _DATE_STAMP_REASONING_RE, lambda t: bool(_DATE_STAMP_RE.match(t))),
+    _StructuralKind(DROP_COLUMN_HEADER, _COLUMN_HEADER_REASONING_RE, _is_label_only_row),
+    _StructuralKind(DROP_SECTION_HEADER, _SECTION_HEADER_REASONING_RE, _is_section_label_text),
+    _StructuralKind(DROP_TEMPLATE_INSTRUCTION, _TEMPLATE_INSTRUCTION_REASONING_RE, _is_template_directive),
+    _StructuralKind(DROP_DATE_STAMP, _CV_DATE_REASONING_RE,
+                    lambda t: bool(_DATE_STAMP_RE.match(t) or _LONE_MONTH_YEAR_RE.match(t))),
+    _StructuralKind(DROP_PAGE_FURNITURE, _CONTINUATION_REASONING_RE, _is_continued_header),
+)
 
 
 def _confirmed_structural_reason(
     text: str,
     reasoning: str | None,
     owner_tokens: OwnerTokens = OwnerTokens(),
+    prefix: str = _T_CONFIRMED_PREFIX,
 ) -> str | None:
-    """The `DROP_*` reason for a T entry that BOTH stage 3b's T-validation
-    confirmed as structural of a named kind AND whose raw text has that kind's
-    positive shape (#885 residual), else None."""
-    if not reasoning or not reasoning.startswith(_T_CONFIRMED_PREFIX):
+    """The `DROP_*` reason for an entry that BOTH stage 3b's T-validation
+    called structural of a named kind AND whose raw text has that kind's
+    positive shape (#885 residual), else None. *prefix* is the T-validation
+    verdict the reasoning must open with: `_T_CONFIRMED_PREFIX` for a T entry,
+    `_T_RECLASSIFIED_PREFIX` for one 3b moved out of T (#1431)."""
+    if not reasoning or not reasoning.startswith(prefix):
         return None
-    lead = reasoning[len(_T_CONFIRMED_PREFIX):].lstrip()[:_REASONING_LEAD_CHARS].lower()
-    for reason, kind_re in _KIND_REASONING.items():
-        if kind_re.search(lead) and _KIND_SHAPE[reason](text.strip()):
-            return reason
+    lead = reasoning[len(prefix):].lstrip()[:_REASONING_LEAD_CHARS].lower()
+    stripped = text.strip()
+    for kind in _STRUCTURAL_KINDS:
+        if kind.reasoning_re.search(lead) and kind.shape(stripped):
+            return kind.reason
     if _SIGNATURE_REASONING_RE.search(lead) and _is_signature_block(text, owner_tokens):
         return DROP_SIGNATURE_BLOCK
     return None
@@ -1167,7 +1372,9 @@ def _appendix_drop_reason(
     shape recognise "Signed: <owner>" (#1221); empty skips that recognition.
     A T entry nothing above caught last meets `_furniture_reason` (#1221):
     page furniture, which also reads *owner_tokens* for a running header, and
-    "References available on request".
+    "References available on request". A bare date range or amount needs the
+    rendered document, so `_drop_shown_record_tails` decides it after this
+    check has kept the line (#1551).
     """
     if not text.strip():
         return DROP_BLANK
@@ -1200,15 +1407,80 @@ def _appendix_drop_reason(
     if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
         return (_confirmed_structural_reason(text, reasoning, owner_tokens)
                 or _furniture_reason(text, owner_tokens))
+    return reclassified_structural_reason(text, reasoning, owner_tokens)
+
+
+def _canonical_range(text: str) -> str:
+    """*text* lower-cased, each dash or "to" (and the space around it) one
+    "-", the remaining space single: two spellings of one range compare equal."""
+    return " ".join(_RANGE_JOIN_RE.sub("-", text.lower()).split())
+
+
+def _record_tail(text: str) -> tuple[str, str] | None:
+    """(the `DROP_*` reason, a pattern for its value) when *text* is only a
+    date range (`_DATE_RANGE_RE`, the range canonical) or only an amount
+    behind at most one value label (`_AMOUNT_RE`, its number after a "$") --
+    the tail of a split record (#1551) -- else None."""
+    stripped = text.strip()
+    if _DATE_RANGE_RE.match(stripped):
+        return DROP_DATE_RANGE, re.escape(_canonical_range(stripped.strip("().").strip()))
+    amount = _AMOUNT_RE.match(stripped)
+    if amount:
+        return DROP_AMOUNT, r"\$\s?" + re.escape(amount.group(1))
     return None
+
+
+def _drop_shown_record_tails(
+    kept: Sequence[AppendixLine],
+    dropped: Counter[str],
+    document_lines: Sequence[str],
+) -> list[AppendixLine]:
+    """*kept* without each line that is only a record's tail (`_record_tail`)
+    whose value *document_lines* (the document rendered so far) or another
+    kept line already shows, each counted on *dropped* under its reason
+    (#1551).
+
+    A tail shown nowhere else is kept: it is the only place that value
+    appears (NDMRSO ATUVAL's governance terms, web205's direct costs, #1551
+    review). A kept line that is itself a tail never vouches for another, so
+    two copies of one unplaced value both stay. The value must stand on its
+    own boundaries: "$100,645" is not shown by "$1,100,645" or "$100,645.50",
+    nor by a count ("100,645 Example Twins") with no "$"."""
+    tails = [_record_tail(entry.get("text") or "") for entry, _ in kept]
+    shown = "\x00".join(_canonical_range(line) for line in (
+        *document_lines, *(rendered for (_, rendered), tail in zip(kept, tails) if tail is None)))
+    result: list[AppendixLine] = []
+    for line, tail in zip(kept, tails):
+        if tail is not None:
+            reason, value = tail
+            if re.search(rf"{_VALUE_START}{value}{_VALUE_END}", shown):
+                dropped[reason] += 1
+                continue
+        result.append(line)
+    return result
+
+
+def reclassified_structural_reason(
+    text: str,
+    reasoning: str | None,
+    owner_tokens: OwnerTokens = _NO_OWNER_TOKENS,
+) -> str | None:
+    """The `DROP_*` reason for an entry 3b's T-validation moved out of T while
+    naming it a structural kind whose shape its text has (#1431), else None.
+    The Appendix filter reads it for every non-T entry; stage 6's personal-data
+    recovery reads it for an A orphan."""
+    return _confirmed_structural_reason(text, reasoning, owner_tokens, _T_RECLASSIFIED_PREFIX)
 
 
 def _filter_unmapped_entries(
     entries: Sequence[UnmappedEntry],
     owner_tokens: OwnerTokens = OwnerTokens(),
+    document_lines: Sequence[str] = (),
 ) -> tuple[list[AppendixLine], Counter[str]]:
     """Split *entries* into the lines the appendix will show and a count of
-    drops per `DROP_*` reason."""
+    drops per `DROP_*` reason. *document_lines* is the document rendered so
+    far, which `_drop_shown_record_tails` reads; empty drops no date range
+    or amount unless another kept line shows it."""
     kept: list[AppendixLine] = []
     dropped: Counter[str] = Counter()
     for entry in entries:
@@ -1225,7 +1497,8 @@ def _filter_unmapped_entries(
             kept.append((entry, rendered))
         else:
             dropped[reason] += 1
-    return _drop_lone_bare_labels(kept, dropped), dropped
+    kept = _drop_lone_bare_labels(kept, dropped)
+    return _drop_shown_record_tails(kept, dropped, document_lines), dropped
 
 
 def _drop_lone_bare_labels(
@@ -1294,6 +1567,10 @@ def _describe_dropped(dropped: Counter[str]) -> str:
 class AppendixSection:
     """Section T writers, mixed into `WCMTemplateGenerator`."""
 
+    # Set when the Appendix note box was just written: the next line written
+    # carries the space below the box (a table has none of its own).
+    _appendix_note_awaits_space = False
+
     def _fill_appendix(
         self,
         unmapped_entries: Sequence[UnmappedEntry],
@@ -1317,7 +1594,8 @@ class AppendixSection:
             return []
 
         lines, dropped = _filter_unmapped_entries(
-            unmapped_entries, _owner_signature_tokens(cv_owner))
+            unmapped_entries, _owner_signature_tokens(cv_owner),
+            self._rendered_output_lines(exclude_instruction_box=True, include_tracked_insertions=True))
         if dropped:
             logger.info("Appendix: %s", _describe_dropped(dropped))
         if not lines:
@@ -1326,16 +1604,25 @@ class AppendixSection:
         if self.verbose:
             logger.info("Adding Appendix (%d unmapped entries)...", len(lines))
 
-        self._write_appendix_intro(dropped)
+        self._write_appendix_intro(dropped, len(lines))
         groups = _group_by_source_heading(lines)
         for position, (heading, group) in enumerate(groups.items()):
             self._write_appendix_group(heading, group, first=position == 0)
 
         return [entry for entry, _ in lines]
 
-    def _write_appendix_intro(self, dropped: Counter[str]) -> None:
-        """The section header, its explanatory sentence and, when anything was
+    def _write_appendix_intro(self, dropped: Counter[str], count: int) -> None:
+        """The section header, its CViche note box and, when anything was
         dropped, the ONE summary comment saying what and why."""
+        note = self._write_appendix_header(count)
+        if dropped:
+            self._add_word_comment(note, _describe_dropped(dropped), author="Template Filter")
+
+    def _write_appendix_header(self, count: int) -> Paragraph:
+        """"T. APPENDIX", then the CViche note box for *count* entries; returns
+        the box's instruction paragraph. Both appendix writers open the
+        section this way; the first line after the box takes the space below
+        it (`_after_appendix_note`)."""
         # Blank paragraph before the header, matching BIBLIOGRAPHY.
         self.doc.add_paragraph()
 
@@ -1344,34 +1631,61 @@ class AppendixSection:
         _set_font(run, bold=True)
         run.underline = True
 
-        intro_para = self.doc.add_paragraph()
-        run = intro_para.add_run(
-            APPENDIX_INTRO_TEXT
-        )
-        _set_font(run, italic=True)
-        if dropped:
-            self._add_word_comment(
-                intro_para, _describe_dropped(dropped), author="Template Filter"
-            )
+        note = cviche_box_text(add_cviche_box(self.doc, APPENDIX_NOTE_TITLE), appendix_note_text(count))
+        space_around_cviche_box(appendix_para, None)
+        self._appendix_note_awaits_space = True
+        return note
 
-        # Blank paragraph after the intro text.
-        self.doc.add_paragraph()
+    def _after_appendix_note(self, para: Paragraph) -> None:
+        """Give *para* the space below the Appendix note box, if it is the
+        first line written after it."""
+        if self._appendix_note_awaits_space:
+            space_around_cviche_box(None, para)
+            self._appendix_note_awaits_space = False
+
+    def _set_appendix_note_count(self, count: int) -> None:
+        """Restate the Appendix note box's instruction for the final *count*
+        of entries: numbered lines and recovered bullets both."""
+        for table in self.doc.tables:
+            if is_cviche_box(table) and table.cell(0, 0).paragraphs[0].text == APPENDIX_NOTE_TITLE:
+                note = table.cell(0, 0).paragraphs[1]
+                for run in note.runs[1:]:
+                    run._r.getparent().remove(run._r)
+                note.runs[0].text = appendix_note_text(count)
+                return
+
+    def _appendix_body(self, entry: UnmappedEntry, text: str) -> str:
+        """The body an Appendix line shows for *entry*: its whole *text*,
+        whatever its code (#1230 for T, #1555 for a diverted code), unless the
+        low-coverage overflow takes the entry (`is_overflow_candidate`).
+
+        A numbered Appendix line is the entry's only render, so a cut there
+        lost its tail. An overflow candidate is the exception: the reconsider
+        pass re-splits it and routes its segments, so its line stays a capped
+        pointer (`_truncate_appendix_text`) and a whole copy does not repeat
+        them.
+        """
+        if self._is_overflow_candidate(entry):
+            return _truncate_appendix_text(text)
+        return text
 
     def _write_appendix_group(
         self, heading: str, lines: Sequence[AppendixLine], first: bool
     ) -> None:
-        """One `From "<heading>":` block with its lines numbered from 1."""
+        """One block under the source CV's own section heading, in its own
+        wording and in bold, with its lines numbered from 1."""
         # Blank paragraph between groups (not before the first).
         if not first:
             self.doc.add_paragraph()
 
         header_para = self.doc.add_paragraph()
-        run = header_para.add_run(f'From "{heading}":')
+        run = header_para.add_run(appendix_group_heading(heading))
         _set_font(run, bold=True)
+        self._after_appendix_note(header_para)
 
         for number, (entry, text) in enumerate(lines, start=1):
             entry_para = self.doc.add_paragraph()
-            run = entry_para.add_run(f"{number}. {_truncate_appendix_text(text)}")
+            run = entry_para.add_run(f"{number}. {self._appendix_body(entry, text)}")
             _set_font(run)
             # Per-entry comments (e.g. why it was classified T).
             self._add_entry_comments(entry_para, entry)

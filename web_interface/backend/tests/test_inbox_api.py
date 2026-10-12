@@ -4,6 +4,7 @@ Ownership isolation (admins see only their own), discard, and submit through
 the shared upload core. Storage is a LocalRunStorage in tmp_path; users and
 files are invented.
 """
+import functools
 import hashlib
 import io
 from datetime import datetime
@@ -14,7 +15,13 @@ from sqlalchemy.orm import object_session
 
 from app.auth import COOKIE_NAME, create_session_cookie
 from app.models import (
-    InboundFile, InboundFileStatus, InboundMessage, InboundMessageStatus, Run, RunBatch, User,
+    InboundFile,
+    InboundFileStatus,
+    InboundMessage,
+    InboundMessageStatus,
+    Run,
+    RunBatch,
+    User,
 )
 from app.services import inbound_service
 from app.storage.local_storage import LocalRunStorage
@@ -22,7 +29,11 @@ from app.storage.local_storage import LocalRunStorage
 ATTEST = {"submission_type": "own_cv"}
 
 
+@functools.cache
 def _docx(label="a") -> bytes:
+    """One set of bytes per label (#1325): python-docx stamps the save time into
+    the zip, so two saves either side of a 2-second boundary hash differently and
+    a test that holds the "same" file twice would lose its duplicate match."""
     document = Document()
     document.add_paragraph(f"Synthetic CV {label}. " * 60)
     buffer = io.BytesIO()
@@ -266,3 +277,52 @@ def test_submit_rejects_an_empty_or_oversized_selection(client, db, storage, pat
     assert client.post("/api/inbox/submit", json={"item_ids": [], **ATTEST}).status_code == 422
     too_many = list(range(1, 52))
     assert client.post("/api/inbox/submit", json={"item_ids": too_many, **ATTEST}).status_code == 400
+
+
+# --- POST /inbox/estimate (#1626) ----------------------------------------------
+
+def _estimate(client, *item_ids):
+    return client.post("/api/inbox/estimate", json={"item_ids": list(item_ids)})
+
+
+def test_estimate_weighs_each_held_item_as_an_upload_of_its_bytes(client, db, storage, pat):
+    first, second = _hold(db, storage, pat, "a.docx"), _hold(db, storage, pat, "b.docx")
+    _auth(client, pat)
+
+    body = _estimate(client, second.id, first.id).json()
+
+    assert [row["filename"] for row in body["files"]] == ["b.docx", "a.docx"]
+    uploaded = client.post("/api/estimate", files={"file": ("b.docx", _docx("b.docx"))}).json()
+    assert body["files"][0]["estimate"] == uploaded
+    assert body["files"][0]["estimate"]["cost_weight"] > 0
+    assert body["estimated_time_seconds_min"] == sum(
+        row["estimate"]["estimated_time_seconds_min"] for row in body["files"])
+    assert first.status == InboundFileStatus.PENDING and len(_held(storage, first)) == 1
+
+
+def test_estimate_reports_missing_bytes_on_that_row_only(client, db, storage, pat):
+    gone, kept = _hold(db, storage, pat, "gone.docx"), _hold(db, storage, pat, "kept.docx")
+    storage.delete_global_prefix(gone.storage_key)
+    _auth(client, pat)
+
+    rows = _estimate(client, gone.id, kept.id).json()["files"]
+
+    assert rows[0] == {"filename": "gone.docx", "estimate": None, "error": "This file is no longer available."}
+    assert rows[1]["error"] is None and rows[1]["estimate"]["cost_weight"] > 0
+
+
+def test_estimate_is_scoped_to_the_callers_pending_items(client, db, storage, pat):
+    theirs = _hold(db, storage, _user(db, "sam@med.cornell.edu"), "theirs.docx")
+    done = _hold(db, storage, pat, "done.docx", status=InboundFileStatus.SUBMITTED)
+    _auth(client, pat)
+    assert _estimate(client, theirs.id).status_code == 404
+    assert _estimate(client, done.id).status_code == 404
+    assert _estimate(client).status_code == 422
+    assert _estimate(client, *range(1, 52)).status_code == 400
+
+
+def test_estimate_spends_the_estimate_budget(client, db, storage, pat, monkeypatch):
+    item = _hold(db, storage, pat, "a.docx")
+    monkeypatch.setattr("app.api.upload._check_estimate_rate_limit", lambda _user_id: {"error": "rate_limited"})
+    _auth(client, pat)
+    assert _estimate(client, item.id).status_code == 429

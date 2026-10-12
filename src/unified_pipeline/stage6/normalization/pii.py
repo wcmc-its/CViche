@@ -60,7 +60,6 @@ import re
 from dataclasses import dataclass
 from typing import NamedTuple
 
-
 # ---------------------------------------------------------------------------
 # The policy table
 # ---------------------------------------------------------------------------
@@ -119,6 +118,25 @@ CAT_TAX_ID = "tax ID number"
 # owner's own) that a scope-only row cannot express, so it is applied in
 # `stage6/pii_pass.py` directly rather than through this table.
 CAT_THIRD_PARTY_CONTACT = "third-party contact"
+
+# The DEA check digit (#1658): with the seven digits d1..d7 of a DEA number
+# (two letters then seven digits), (d1 + d3 + d5) + 2 * (d2 + d4 + d6) ends
+# in d7. A real DEA number always passes; a state licence number of the same
+# shape (a Florida medical licence is "ME" plus seven digits) passes in one
+# case in ten. Here because both the stage-6 licensure section and the
+# doctor's protected-data lint need it, and the doctor imports stage 6, not
+# the reverse.
+_DEA_CHECK_WEIGHTS = (1, 2, 1, 2, 1, 2)
+_DEA_CHECK_MODULUS = 10
+_DEA_DIGIT_COUNT = 7
+
+
+def _dea_check_digit_ok(token: str) -> bool:
+    """Whether a two-letters-seven-digits token carries the DEA check digit."""
+    digits = [int(ch) for ch in token[-_DEA_DIGIT_COUNT:]]
+    weighted = sum(w * d for w, d in zip(_DEA_CHECK_WEIGHTS, digits[:-1],
+                                         strict=True))
+    return weighted % _DEA_CHECK_MODULUS == digits[-1]
 
 
 @dataclass(frozen=True)
@@ -338,6 +356,69 @@ _FAMILY_SHAPE_STEMS: tuple[tuple[str, str], ...] = (
     (CAT_CHILDREN, _GRANDCHILDREN_STEM),
 )
 
+# #1391: the spouse words a spouse label opens on. Plurals ("Husbands:",
+# "Wives:") and the partner labels that name nothing but a person ("Domestic
+# partner:", "Life partner:", "Significant other:", "Fiancée:"), with an
+# optional "/partner" or "or partner" ("Spouse/Partner:"). A bare "partner" is
+# not here: "Industry partner:" and "Partner: <firm>" are employment and
+# funding text (`_BARE_PARTNER_SHAPE`).
+_SPOUSE_WORD = r"""(?: spouses? | wife | wives | husbands?
+    | (?: domestic | life ) \s* partner | significant \s+ other | fianc[eé]e? )
+    (?: \s* / \s* partner | \s+ or \s+ partner )?"""
+
+#: #1391: a person's name, as the doctor lint reads one
+#: (`doctor/lints/protected_data.py` `_NAME`): a capitalised word of two or
+#: more letters that is not a title's function word. Case-sensitive inside the
+#: policy's case-insensitive patterns.
+_PERSON_NAME_TOKEN = (r"(?-i: (?! (?: The | An | And | Of | In | On | For | With | From | To | At | By ) \b )"
+                      r" [A-Z] [a-z] [\w'’.-]* )")
+#: Up to five names in a row ("Pat Example", "Pat and Lee Example").
+_PERSON_NAME_MAX_EXTRA_TOKENS = 4
+_PERSON_NAME_RUN = (_PERSON_NAME_TOKEN + r"(?: [ \t]* ,? [ \t]+ (?: and [ \t]+ )? "
+                    + _PERSON_NAME_TOKEN + r"){0,%d}" % _PERSON_NAME_MAX_EXTRA_TOKENS)
+#: Words that make a capitalised run a firm or an institution, not a person
+#: ("Partner: Example Pharma", "Partner: Example University").
+_ORGANISATION_WORD = r"""(?: inc | llc | llp | ltd | co | corp | corporation | company | group
+    | partners | associates | pharma\w* | therapeutics | biotech\w* | labs? | laborator\w+
+    | university | college | institute | hospital | cent(?: er | re ) | foundation | health\w*
+    | medical | medicine | clinic | sciences? | systems | technolog\w+ | solutions | consulting
+    | capital | ventures | fund | network | alliance | council | society | association
+    | department | school | program | project | trust )"""
+#: What ends a whole-fragment value: optional blanks or a full stop, then a hard
+#: delimiter (`_PII_FRAGMENT_SPLIT_RE`) or the end of the text.
+_FRAGMENT_END_AHEAD = r"(?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )"
+#: #1391: "Partner: <name>" -- a bare partner label counts only when its value
+#: is the whole fragment and a person's name (`_PERSON_NAME_RUN`) with no
+#: organisation word in it. Fragment-initial (`anchored`), so "Industry
+#: partner: <name>" opens nothing.
+_BARE_PARTNER_SHAPE = (
+    _STEM_GUARD + r"partner [ \t]* (?: : | [-–—] (?= [ \t] ) ) [ \t]*"
+    + r"(?! [^\n\t|;]*? (?<! [\w-] ) " + _ORGANISATION_WORD + r" (?! [\w-] ) )"
+    + _PERSON_NAME_RUN + _FRAGMENT_END_AHEAD
+)
+
+#: #1391: a marital status word that is a whole line or cell of the Personal
+#: Data block ("Divorced", "• Single."). Personal Data only: elsewhere a line
+#: that is just "Single" or "Married" carries no label to say it is a status.
+_MARITAL_STATUS_WORDS = r"(?: divorced | widowed | separated | single | married )"
+_BARE_MARITAL_STATUS_RE = re.compile(
+    r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ \t]*+ (?: [•·*–—-] [ \t]* )?"
+    + _STEM_GUARD + _MARITAL_STATUS_WORDS + r" (?! [\w-] ) [ \t.]*" + _FRAGMENT_END_AHEAD,
+    re.X | re.I)
+
+#: #1391: what makes a dash "Family" label in the Appendix a family block
+#: rather than a title ("Family- wise error rate ..."): a relation word in
+#: parentheses ("Pat (wife)"), a relation word before a name ("wife Pat"),
+#: "married to", or a child count ("two sons").
+_RELATION_WORD = (r"(?: wife | husband | spouse | partner | sons? | daughters? | child (?: ren )?"
+                  r" | kids? | (?: great \s* [-–—]? \s* )* grand \s* children )")
+_FAMILY_MEMBER_VALUE_RE = re.compile(
+    r"\( [ \t]* " + _RELATION_WORD + r" [ \t]* \)"
+    r"| (?<! [\w-] ) " + _RELATION_WORD + r" [ \t]+ " + _PERSON_NAME_TOKEN
+    + r"| (?<! [\w-] ) married [ \t]+ to (?! [\w-] )"
+    r"| (?<! [\w-] ) " + _CHILD_COUNT + r" [ \t]+ " + _CHILD_NOUN + r" (?! [\w-] )",
+    re.X | re.I)
+
 
 # NDMRSO ND1: an ID number an institution or the tax authority gives the owner
 # ("<institution> ID #: <number>", "EIN Number<tab><number>"). A qualifying
@@ -448,9 +529,11 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # #1103: "Name of Spouse & Children:" opened with "Name of" and joined
     # the children onto the spouse, so neither label matched and the family's
     # names and birth years rendered in the Appendix.
+    # #1391: plural spouse words and the unambiguous partner labels
+    # (`_SPOUSE_WORD`).
     WithholdRule(CAT_SPOUSE, SCOPE_ALL_CODES, DECIDED_820, label=r"""
         (?: names? \s+ of \s+ )?
-        (?: spouse | wife | husband ) (?: [’'] s )? (?: \s* name )?
+        """ + _SPOUSE_WORD + r""" (?: [’'] s )? (?: \s* name )?
         (?: \s* (?: & | and | / | , ) \s* (?: children | child | kids | dependents? ) )?
     """),
     # "Married to <name>" carries no colon and no shaped value -- the phrase
@@ -470,8 +553,13 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"salary | honorarium"),
     # --- ambiguous as a title word: A-coded and Appendix-bound only ---------
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"born"),
+    # #1391: the singular "Child:" and "Kids:" open the same label -- never
+    # the journal title "Child: Care, Health and Development".
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 label=r"(?: names? \s+ of \s+ )? (?: children (?: [’'] s \s* names? )? | dependents? )"),
+                 label=r"""(?: names? \s+ of \s+ )?
+                     (?: children (?: [’'] s \s* names? )?
+                       | child (?! \s* : \s* care \b ) (?: [’'] s \s* names? )?
+                       | kids | dependents? )"""),
     # #1041: a bare child count that is its OWN fragment ("Marital Status:
     # <status>; <n> Children" -- the `;` hard split leaves it behind the
     # marital-status cut, and it rendered in the Appendix). The count must
@@ -505,6 +593,9 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_STEM_GUARD + _GRANDCHILDREN_STEM + r" \s* :", anchored=True,
                  render_only=True),
+    # #1391: "Partner: <person's name>" (see `_BARE_PARTNER_SHAPE`).
+    WithholdRule(CAT_SPOUSE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=_BARE_PARTNER_SHAPE, anchored=True, render_only=True),
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
     # #1223: "Family Information:" and "Family Data:" open a family block too.
     # Render-time only, like the shape rows above: this row's span runs to the
@@ -577,6 +668,42 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
 # contacts in an unlabelled References section -- withheld by #833's
 # value-shape rule in `stage6/pii_pass.py`, not by a row of this table (see
 # CAT_THIRD_PARTY_CONTACT above).
+
+
+# --- an unlabelled home address (#1426, NDMRSO MQJAVH element 8) ------------
+# "Current Address<tab><street><tab><city> <zip>" in the Personal Data block
+# names no home word, so the Office catch-all in `sections/personal_data.py`
+# rendered the owner's street address as the Office address. The label alone
+# does not say home -- "Current Address: Department of ..., <street>" is a
+# work address -- so it counts as home contact only when nothing in the entry
+# places it at a workplace (`_WORKPLACE_TOKEN_RE`). Not a WithholdRule row:
+# the decision needs the absence of a token across the whole entry, which a
+# label-to-delimiter span cannot express, and the value is already withheld by
+# the home slot it is routed to (`_withhold_home_contact`, DECIDED_821).
+_CURRENT_ADDRESS_LABEL_RE = re.compile(r"\bcurrent \s+ address\b", re.X | re.I)
+#: A word that places an address at an institution, a department or a
+#: building. Any one of them keeps a "Current Address" in the Office slot: the
+#: cost of a miss is an empty Office cell the owner can fill, the cost of a
+#: false home is a work address withheld from the CV.
+_WORKPLACE_TOKEN_RE = re.compile(r"""\b(?:
+      universit\w* | univ | college | institut\w* | school | academy | faculty
+    | hospital | medical | clinic\w* | center | centre | health | medicine
+    | department | dept | division | program | laborator\w* | lab
+    | building | bldg | hall | pavilion | tower | wing | floor | room | rm
+    | suite | ste | office | campus | attn | c/o | inc | llc | corp\w*
+    | foundation | company
+    )\b\.?""", re.X | re.I)
+
+
+def _is_unlabelled_home_address(entry_text: object, address: object) -> bool:
+    """Whether an A-coded entry's address is the owner's home contact though
+    no home word labels it (#1426): the entry is labelled "Current Address"
+    and neither its text nor the address names a workplace
+    (`_WORKPLACE_TOKEN_RE`)."""
+    text, value = str(entry_text or ""), str(address or "")
+    return (_CURRENT_ADDRESS_LABEL_RE.search(text) is not None
+            and _WORKPLACE_TOKEN_RE.search(text) is None
+            and _WORKPLACE_TOKEN_RE.search(value) is None)
 
 
 # Stage-4 field KEYS that name protected data outright (the label pattern
@@ -937,12 +1064,26 @@ _FAMILY_LABEL_RE = re.compile("|".join(
 _PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n")
 
 
+def _valued_family_dash_starts(text: str) -> list[int]:
+    """#1391: where a dash `Family` label opens a family block on its own
+    ("Family - Pat (wife), Ann (daughter)"): its fragment names a family
+    member (`_FAMILY_MEMBER_VALUE_RE`). A dash `Family` label with no such
+    value ("Family- wise error rate ...") is a title and opens nothing."""
+    return [start
+            for category, pattern in _FAMILY_DASH_PATTERNS if category == CAT_FAMILY
+            for start, end in _label_spans(text, pattern, category)
+            if _FAMILY_MEMBER_VALUE_RE.search(text, start, end)]
+
+
 def _family_dash_matches(text: str, *, personal_data: bool) -> list[PiiMatch]:
     """Every dash-labelled children/spouse/family fragment of `text` that is
     family data: all of them in an A-coded entry's text (`personal_data`),
-    otherwise those whose paragraph, ahead of them, holds a `Family` label
-    (`_FAMILY_DASH_PATTERNS`)."""
-    family_starts = [start for start, _ in _label_spans(text, _FAMILY_LABEL_RE, CAT_FAMILY)]
+    otherwise those whose paragraph, at or ahead of them, holds a `Family`
+    label -- a colon one, or a dash one that names a family member
+    (`_valued_family_dash_starts`)."""
+    family_starts = sorted(
+        [start for start, _ in _label_spans(text, _FAMILY_LABEL_RE, CAT_FAMILY)]
+        + _valued_family_dash_starts(text))
     if not family_starts and not personal_data:
         return []
     block_starts = [0] + [brk.end() for brk in _PARAGRAPH_BREAK_RE.finditer(text)]
@@ -951,9 +1092,31 @@ def _family_dash_matches(text: str, *, personal_data: bool) -> list[PiiMatch]:
         for start, end in _label_spans(text, pattern, category):
             block_start = block_starts[bisect.bisect_right(block_starts, start) - 1]
             first = bisect.bisect_left(family_starts, block_start)
-            if personal_data or (first < len(family_starts) and family_starts[first] < start):
+            if personal_data or (first < len(family_starts) and family_starts[first] <= start):
                 found.append(PiiMatch(start, end, category))
     return found
+
+
+#: Only blanks and cell delimiters on one line: the gap between a label's span
+#: and the cell that holds its value.
+_SAME_LINE_CELL_GAP_RE = re.compile(r"[ \t|;]*")
+
+
+def _with_bare_marital_status(text: str, matches: list[PiiMatch]) -> list[PiiMatch]:
+    """#1391: `matches` (merged, in order) plus every whole-cell marital status
+    word of a Personal Data block's `text` (`_BARE_MARITAL_STATUS_RE`). A word
+    in the cell right after another span on the same line is that span's value
+    ("Marital Status:<tab>Divorced"), so the span is widened over it instead of
+    being counted as a second withheld item."""
+    result = list(matches)
+    for status in _BARE_MARITAL_STATUS_RE.finditer(text):
+        before = [i for i, m in enumerate(result) if m.end <= status.start()]
+        prev = before[-1] if before else None
+        if prev is not None and _SAME_LINE_CELL_GAP_RE.fullmatch(text, result[prev].end, status.start()):
+            result[prev] = result[prev]._replace(end=status.end())
+        else:
+            result.append(PiiMatch(status.start(), status.end(), CAT_MARITAL_STATUS))
+    return _merge_matches(result)
 
 
 def _merge_matches(spans: list[PiiMatch]) -> list[PiiMatch]:
@@ -982,7 +1145,8 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
     value scrub sees exactly the spans it saw before #1223. `personal_data`
     says `text` is the Personal Data block's (an A-coded entry's), where a
     dash family label needs no `Family` label ahead of it
-    (`_family_dash_matches`)."""
+    (`_family_dash_matches`) and a whole-cell marital status word is
+    withheld (`_with_bare_marital_status`, #1391)."""
     text = str(text or "")
     if not text:
         return []
@@ -998,6 +1162,8 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
                          for m in pattern.finditer(text))
     if scope == SCOPE_PERSONAL_AND_APPENDIX and not for_pre_llm_scrub:
         found.extend(_family_dash_matches(text, personal_data=personal_data))
+        if personal_data:
+            return _with_bare_marital_status(text, _merge_matches(found))
     return _merge_matches(found)
 
 
@@ -1176,21 +1342,49 @@ def _pre_llm_value_span_in_next_run(text: str, frag_end: int, value_re: re.Patte
     return (vm.start(), vm.end()) if vm else None
 
 
+#: The date-of-birth label row's own opener, colon included -- the one row
+#: whose label can carry a parenthetical (`_DOB_LABEL_PARENTHETICAL`).
+_DOB_LABEL_OPENER_RE = next(pattern for rule, pattern in _COMPILED_POLICY
+                            if rule.category == CAT_DATE_OF_BIRTH and rule.label is not None)
+
+
+def _label_opener_end(text: str, start: int, end: int, category: str) -> int:
+    """Where the VALUE half of the `category` fragment `text[start:end]`
+    can begin: past the date-of-birth label's own opener when one opens
+    the fragment, parenthetical and colon included, else `start` (#847,
+    #1071: "Birth Date (as of 2020): 01/02/1970")."""
+    if category not in (CAT_DATE_OF_BIRTH, CAT_BIRTH):
+        return start
+    opener = _DOB_LABEL_OPENER_RE.match(text, start, end)
+    return opener.end() if opener else start
+
+
+def _pre_llm_fragment_value_spans(text: str, m: PiiMatch, value_re: re.Pattern) -> list[tuple[int, int]]:
+    """The value spans one DOB/SSN fragment `m` carries: every value shape
+    inside its label's parenthetical ("Birth Date (as of 2020):" -- the
+    year there is the label's, but the scrub cannot tell a qualifier from
+    the date itself, "Birth Date (01/02/1970):"), then the first value
+    shape after the label, else the value opening the next tab/`|`/
+    column-gap run (`_pre_llm_value_span_in_next_run`)."""
+    value_start = _label_opener_end(text, m.start, m.end, m.category)
+    spans = [vm.span() for vm in value_re.finditer(text, m.start, value_start)]
+    vm = value_re.search(text, value_start, m.end)
+    if vm is not None:
+        spans.append(vm.span())
+    elif _is_bare_label_span(text, m.start, m.end):
+        nxt = _pre_llm_value_span_in_next_run(text, m.end, value_re)
+        spans.extend([nxt] if nxt else [])
+    return spans
+
+
 def _pre_llm_label_value_spans(text: str) -> list[tuple[int, int]]:
-    """The one value each DOB/SSN label fragment of `text` carries: the
-    first value shape inside the fragment, else the value opening the next
-    tab/`|`/column-gap run (`_pre_llm_value_span_in_next_run`)."""
+    """The value spans of every DOB/SSN label fragment of `text`
+    (`_pre_llm_fragment_value_spans`)."""
     spans: list[tuple[int, int]] = []
     for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX, for_pre_llm_scrub=True):
         value_re = _PRE_LLM_VALUE_RE.get(m.category)
-        if value_re is None:
-            continue
-        vm = value_re.search(text, m.start, m.end)
-        span = (vm.start(), vm.end()) if vm else None
-        if span is None and _is_bare_label_span(text, m.start, m.end):
-            span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
-        if span:
-            spans.append(span)
+        if value_re is not None:
+            spans.extend(_pre_llm_fragment_value_spans(text, m, value_re))
     return spans
 
 
@@ -1212,8 +1406,11 @@ def redact_pre_llm_values(text: str | None) -> str:
     Idempotent: a value already replaced has no digits left for
     `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op.
 
-    A DOB/SSN label takes its FIRST value only, so "Date of Birth:
-    01/02/1970, Appointed 2005" keeps 2005 (`_pre_llm_label_value_spans`).
+    A DOB/SSN label takes its FIRST value after the label only, so "Date
+    of Birth: 01/02/1970, Appointed 2005" keeps 2005; every value inside a
+    DOB label's parenthetical is withheld too, so "Birth Date (as of
+    2020): 01/02/1970" no longer spends the one value on 2020
+    (`_pre_llm_fragment_value_spans`).
     Children's dates and birth years come from
     `_pre_llm_child_date_spans`."""
     text = str(text or "")
@@ -1235,6 +1432,12 @@ def redact_pre_llm_values(text: str | None) -> str:
     return "".join(out)
 
 
+#: What may precede a cross-boundary value (`redact_pre_llm_value_of_category`
+#: with `cross_boundary=True`): whitespace and punctuation, never a letter or
+#: digit -- a list marker or an opening parenthesis is not a label.
+_CROSS_BOUNDARY_LEAD_RE = re.compile(r"[^\w]*")
+
+
 def redact_pre_llm_value_of_category(
     text: str | None, category: str, *, cross_boundary: bool = False
 ) -> str:
@@ -1251,14 +1454,16 @@ def redact_pre_llm_value_of_category(
     CAT_BIRTH, be a whole date, never a bare year
     (`_PRE_LLM_VALUE_RE_FULL_DATE_ONLY`). So "Date of Appointment:
     07/01/2005" or "Appointed 07/01/2005" below a blank "Date of Birth:"
-    keeps its date."""
+    keeps its date. Only whitespace and punctuation may come before it
+    (`_CROSS_BOUNDARY_LEAD_RE`): "(01/02/1970)" or "- January 2, 1970"
+    opens with no word that could be another field's label (#847)."""
     text = str(text or "")
     value_map = _PRE_LLM_VALUE_RE_FULL_DATE_ONLY if cross_boundary else _PRE_LLM_VALUE_RE
     value_re = value_map.get(category)
     if not text or value_re is None:
         return text
     if cross_boundary:
-        vm = value_re.match(text, len(text) - len(text.lstrip()))
+        vm = value_re.match(text, _CROSS_BOUNDARY_LEAD_RE.match(text).end())
     else:
         vm = value_re.search(text)
     if vm is None:
@@ -1282,13 +1487,23 @@ def pre_llm_bare_label_category(text: str | None) -> str | None:
     if not text or not _is_bare_label_span(text, 0, len(text)):
         return None
     for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX, for_pre_llm_scrub=True):
-        if m.category not in _PRE_LLM_VALUE_RE:
-            continue
-        if m.start == 0 and m.end == len(text):
-            value_re = _PRE_LLM_VALUE_RE[m.category]
-            if value_re.search(text, m.start, m.end) is None:
-                return m.category
+        if (m.category in _PRE_LLM_VALUE_RE and m.start == 0 and m.end == len(text)
+                and not _label_carries_value(text, m)):
+            return m.category
     return None
+
+
+def _label_carries_value(text: str, m: PiiMatch) -> bool:
+    """True when the bare-label fragment `m` already holds its value: a
+    value shape after the label, or a WHOLE date inside a DOB label's
+    parenthetical ("Birth Date (01/02/1970):"). A bare year there is the
+    label's own qualifier ("Birth Date (as of 2020):", #847), so the value
+    is still in the next cell."""
+    value_start = _label_opener_end(text, m.start, m.end, m.category)
+    if _PRE_LLM_VALUE_RE[m.category].search(text, value_start, m.end) is not None:
+        return True
+    in_label_re = _PRE_LLM_VALUE_RE_FULL_DATE_ONLY[m.category]
+    return in_label_re.search(text, m.start, value_start) is not None
 
 
 # ---------------------------------------------------------------------------

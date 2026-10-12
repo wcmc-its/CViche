@@ -39,7 +39,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import doctor_gate_compare as dgc  # noqa: E402
 import render_gate as rg  # noqa: E402
 import render_gate_compare as rgc  # noqa: E402
-
 from docx import Document  # noqa: E402
 
 
@@ -295,11 +294,22 @@ def test_render_gate_llm_monkeypatch_still_intercepts_stage6():
     `llm_client.call_llm(...)`, this monkeypatch stops intercepting anything
     with no error -- a "deterministic" gate run could silently make a real
     LLM call (review on #589)."""
+    import ast
     import inspect
+
     import unified_pipeline.stage_6_word_template as s6
 
-    src = inspect.getsource(s6)
-    assert "from unified_pipeline.llm_client import call_llm" in src, (
+    # The invariant, not one spelling of it: a module-level
+    # `from unified_pipeline.llm_client import ..., call_llm, ...` with no
+    # alias. A literal-line match broke when the import sweep merged
+    # call_llm with LlmUsage into one statement, which binds the same name.
+    binds_call_llm = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "unified_pipeline.llm_client"
+        and any(alias.name == "call_llm" and alias.asname is None for alias in node.names)
+        for node in ast.parse(inspect.getsource(s6)).body
+    )
+    assert binds_call_llm, (
         "stage_6_word_template.py's call_llm import style changed -- "
         "render_gate.py's LLM-disable monkeypatch needs updating to match"
     )

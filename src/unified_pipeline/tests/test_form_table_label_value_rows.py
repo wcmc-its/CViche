@@ -24,12 +24,11 @@ _SRC = Path(__file__).resolve().parents[1]  # src/unified_pipeline
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from docx import Document  # noqa: E402
-
 from core.docx_structure_extractor import (  # noqa: E402
     extract_unified_elements,
     row_has_nonblank_value_cells,
 )
+from docx import Document  # noqa: E402
 
 
 def _build_form_table_docx(path: str) -> None:

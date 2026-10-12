@@ -23,6 +23,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+
 from docx import Document
 
 from unified_pipeline.llm_client import call_llm
@@ -487,8 +488,8 @@ def main():
     Usage:
         python personal_info_extractor.py <cv_file.docx>
     """
-    import sys
     import json
+    import sys
 
     if len(sys.argv) < 2:
         print("Usage: python personal_info_extractor.py <cv_file.docx>")

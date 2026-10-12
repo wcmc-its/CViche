@@ -43,8 +43,8 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.sections.bibliography import (  # noqa: E402
-    BibliographySection,
     _CONTROL_CHAR_PATTERN,
+    BibliographySection,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 

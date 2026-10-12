@@ -20,10 +20,11 @@ import contextvars
 import json
 import logging
 import uuid
+
 from fastapi import WebSocket
-from datetime import datetime
 
 from app.pipeline.redis_broker import EVENTS_CHANNEL
+from app.timeutil import utc_now
 
 # How long one get_message() waits before looping; well under redis-py 8's 5s
 # default socket_timeout, which is what killed the blocking listen() (#960).
@@ -66,7 +67,7 @@ def _stamp(event: dict) -> dict:
     routes) rather than inferring duplication from field equality. Additive --
     the frontend switches on `event` and ignores unknown keys.
     """
-    event.setdefault("timestamp", datetime.now().isoformat())
+    event.setdefault("timestamp", utc_now().isoformat())
     event.setdefault("event_id", uuid.uuid4().hex)
     return event
 

@@ -21,14 +21,15 @@ Examples:
 - H (Awards): award_name, granting_body, date, amount
 """
 
-import sys
 import json
 import logging
 import os
+import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
+
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -73,9 +74,9 @@ from unified_pipeline.stage4.owner_name import (  # noqa: F401
 from unified_pipeline.stage4.schemas import (  # noqa: F401
     DEFAULT_SCHEMA,
     FIELD_DESCRIPTIONS,
-    FIELD_SCHEMAS,
     FIELD_SCHEMA_CONFIG_PATH,
     FIELD_SCHEMA_VERSION,
+    FIELD_SCHEMAS,
     TAXONOMY_LABELS,
     get_active_schemas,
     get_field_schema,

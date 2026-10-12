@@ -1,6 +1,6 @@
 """scripts/backfill_input_format.py -- candidate selection, dry-run vs apply."""
-import importlib.util
 import hashlib
+import importlib.util
 import io
 from pathlib import Path
 

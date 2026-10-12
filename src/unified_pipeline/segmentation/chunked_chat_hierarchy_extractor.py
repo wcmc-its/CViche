@@ -18,17 +18,22 @@ Cost estimate: ~$0.05-$0.15 per CV for most CVs, ~$0.30-$0.50 for very large CVs
 """
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
-from unified_pipeline.llm_client import LlmUsage, call_llm
-import re
+
 import tiktoken
+
+from unified_pipeline.llm_client import LlmUsage, call_llm
 
 # Add parent directory to path to import from signature_based_segmentation
 sys.path.insert(0, os.path.dirname(__file__))
 from signature_based_segmentation import (
-    GEOGRAPHIC_SUB_LABELS, ensure_personal_data_first, normalize_hierarchy_with_llm,
-    restore_sub_label_document_order, validate_headers_vs_entries,
+    GEOGRAPHIC_SUB_LABELS,
+    ensure_personal_data_first,
+    normalize_hierarchy_with_llm,
+    restore_sub_label_document_order,
+    validate_headers_vs_entries,
 )
 
 

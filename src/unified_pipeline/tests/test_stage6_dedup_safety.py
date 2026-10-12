@@ -22,19 +22,20 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _DECISION_FIELD_MAX_CHARS,
-    SPLIT_SIBLING_METRIC,
-    _drop_split_siblings,
     _GROUP_HEADER_RE,
+    SPLIT_SIBLING_METRIC,
     _bare_occasion_apart,
     _carries_record,
-    _decision_fields,
-    _dates_compatible,
     _companion_title,
+    _counts,
+    _dates_compatible,
+    _decision_fields,
     _different_book,
     _different_institution,
     _different_rank,
     _distinct_bare_names,
     _drop_is_safe,
+    _drop_split_siblings,
     _lists_name,
     _names_a_sibling,
     _names_record,
@@ -42,12 +43,15 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _part_numbers,
     _place_only_event,
     _record_name,
+    _row_residue,
     _title_only_fragment,
     _verbatim_contained,
     recovered_row_already_rendered,
-    _row_residue,
 )
-from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM, _RENDERED_FIELDS  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    _RENDERED_FIELDS,
+    FANNED_OUT_FROM,
+)
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
 
@@ -127,6 +131,35 @@ def test_same_trial_phase_written_two_ways_still_dropped():
                     "in combination with examplecin in patients with advanced disease."}
     dup = {"text": "Phase 2 study of ZX-101 invented inhibitor versus placebo with examplecin."}
     assert deduplicate_entries([kept, dup]) == [kept]
+
+
+def test_the_same_course_with_another_hours_count_is_kept():
+    # #666 (VGHNZD K1): every word of the 3-hour row is in the 4-hour row;
+    # only the count tells the two years of the course apart.
+    kept = {"text": "Example Curriculum Coordinator, Lecturer, Workshop Facilitator, "
+                    "Squid Optics 4 hrs, 143 students"}
+    other_year = {"text": "Example Curriculum Lecturer and Workshop Facilitator, Squid Optics 3 hrs, 143 students"}
+    assert deduplicate_entries([kept, other_year]) == [kept, other_year]
+
+
+def test_a_copy_with_the_same_counts_still_drops():
+    # The same row with a year added and a space lost: a true duplicate.
+    kept = {"text": "2002 Example Policy & Mgmta Co-Coordinator and Lecturer, Squid Design (2 hrs) 20 hrs, 13 students"}
+    dup = {"text": "Example Policy & Mgmt a Co-Coordinator and Lecturer, Squid Design (2 hrs) 20 hrs, 13 students"}
+    assert deduplicate_entries([kept, dup]) == [kept]
+
+
+def test_a_bare_list_number_is_not_a_count():
+    # A renumbered copy ("(9)" beside "(11)") is the same citation.
+    assert _counts("(9) Quill AB, Reed EF. The squid lens. Example J. 2001") == set()
+
+
+@pytest.mark.parametrize("text, counts", [
+    ("Squid Optics 3 hrs, 143 students", {("3", "hour"), ("143", "student")}),
+    ("2 hours; 1 lecture; 12 Residents", {("2", "hour"), ("1", "lecture"), ("12", "resident")}),
+])
+def test_counts(text, counts):
+    assert _counts(text) == counts
 
 
 def test_verbatim_contained_line_dropped():
@@ -665,7 +698,7 @@ _NAME_FIELD_BY_CODE = {
     "D2": "title", "D3": "title", "F1": "state_country", "F2": "specialty", "H": "award_name",
     "I": "organization", "K1": "course_title", "L3": "leadership_role", "M2A": "title",
     "M2B": "title", "M2C": "title", "M2D": "title", "N2": "grant_title",
-    "N3A": "mentee_name", "N3B": "mentee_name", "O": "leadership_role",
+    "N3": "mentee_name", "N3A": "mentee_name", "N3B": "mentee_name", "O": "leadership_role",
     "P": "committee_name", "Q1": "organization", "Q2": "committee_name", "Q3": "panel_name",
     "Q4": "journal_name", "Q4A": "journal_name", "Q4B": "journal_name",
     "Q4C": "journal_name", "Q4D": "journal_name", "R": "title", "S1": "title",
@@ -1865,7 +1898,9 @@ def test_one_activity_under_two_year_lines_is_two_records():
     rows = [_row("T", 1, "2029"),
             _row("K2", 2, "Widget lab instructor (WID 101), 4 hours, 40 learners"),
             _row("T", 3, "2030 (on leave)"),
-            _row("K2", 4, "Widget lab instructor (WID 101), 5 hours, 40 learners")]
+            # The same count as row 2: only the year lines tell them apart (a
+            # different count alone keeps both, see the hours-count test).
+            _row("K2", 4, "Widget lab instructor (WID 101), 4 hours, 40 learners")]
     assert _kept_both("K2", rows[3], rows[1], rows[0], rows[2])
     assert not _kept_both("K2", rows[3], rows[1], rows[0])
     assert not _kept_both("D1", rows[3], rows[1], rows[0], rows[2])  # not a list code

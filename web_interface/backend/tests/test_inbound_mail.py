@@ -6,7 +6,12 @@ from email.message import EmailMessage
 import pytest
 
 from app.services import inbound_mail
-from app.services.inbound_mail import AttachmentReject, UnparseableMessage, is_wcm_address, parse_message
+from app.services.inbound_mail import (
+    AttachmentReject,
+    UnparseableMessage,
+    is_wcm_address,
+    parse_message,
+)
 
 SES_PASS = "amazonses.com; spf=pass smtp.mailfrom=med.cornell.edu; dkim=pass; dmarc=pass header.from=med.cornell.edu"
 SES_FAIL = "amazonses.com; spf=pass; dkim=none; dmarc=fail header.from=med.cornell.edu"

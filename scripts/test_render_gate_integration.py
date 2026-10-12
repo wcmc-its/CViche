@@ -41,13 +41,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # contract should not depend on the caller setting that up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import unified_pipeline  # noqa: E402
-import unified_pipeline.stage_6_word_template as _REAL_STAGE6  # noqa: E402
-import unified_pipeline.run_doctor  # noqa: F401,E402
 import render_gate as rg  # noqa: E402
-
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
+
+import unified_pipeline  # noqa: E402
+import unified_pipeline.run_doctor  # noqa: F401,E402
+import unified_pipeline.stage_6_word_template as _REAL_STAGE6  # noqa: E402
 
 _STAGE6_MODULE = "unified_pipeline.stage_6_word_template"
 
@@ -74,7 +74,9 @@ def _make_stub(render):
                            "original_doc_path": original_doc_path,
                            "discover_original_doc": kw.get("discover_original_doc"),
                            "repair_passed": "repair_protected_data" in kw,
-                           "repair_protected_data": kw.get("repair_protected_data")})
+                           "repair_protected_data": kw.get("repair_protected_data"),
+                           "subpoints_passed": "supplementary_subpoints" in kw,
+                           "supplementary_subpoints": kw.get("supplementary_subpoints")})
         return render(stub, input_path, output_path, original_doc_path)
 
     def WCMTemplateGenerator(*a, **kw):
@@ -267,6 +269,21 @@ def test_repair_is_passed_to_run_stage6_only_with_the_flag():
             assert code == 0
             assert stub.calls[0]["repair_passed"] is passed
             assert stub.calls[0]["repair_protected_data"] is (True if passed else None)
+
+
+def test_subpoints_off_is_passed_to_run_stage6_only_with_the_flag():
+    # #1205: --no-subpoints renders as CVICHE_SUPPLEMENTARY_SUBPOINTS=0 does;
+    # without it the keyword is not passed at all, so the arm's own default
+    # (on) applies and an arm predating #1205 still renders.
+    for argv_tail, passed in (([], False), (["--no-subpoints"], True)):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arm, out = _make_arm(root, ["u1"]), root / "out"
+            with _stage6(_make_stub(_renders_a_good_docx)) as stub:
+                code, _ = _run_main([str(arm), str(out), *argv_tail])
+            assert code == 0
+            assert stub.calls[0]["subpoints_passed"] is passed
+            assert stub.calls[0]["supplementary_subpoints"] is (False if passed else None)
 
 
 def test_a_uid_with_no_source_docx_still_renders_and_says_so():

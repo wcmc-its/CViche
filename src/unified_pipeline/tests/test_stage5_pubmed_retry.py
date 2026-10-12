@@ -3,9 +3,10 @@ guards for Stage 5 PubMed enrichment (#222).
 
 NCBI E-utilities return 429 when the shared rate limit is hit; previously a
 single 429 aborted the whole efetch batch (catch-all -> {}). These tests pin
-the new behavior: transient failures (429 / 5xx / connection errors) retry up
-to 3 total attempts (idconv: IDCONV_MAX_ATTEMPTS) with exponential backoff (Retry-After honored when
-larger), non-transient HTTP errors still fail immediately, exhausted retries
+the new behavior: transient failures (429 / 5xx / connection errors, and a
+200 whose body won't parse or carries an esearch ERROR, #1387) retry up to
+MAX_ATTEMPTS total attempts with exponential backoff (Retry-After honored when
+larger, summed waits capped at RETRY_TOTAL_WAIT_CAP_SECONDS), non-transient HTTP errors still fail immediately, exhausted retries
 degrade exactly as before, api_key never leaks into logged errors, and the
 fake support@example.com identity is gone (email sent only when configured).
 
@@ -46,7 +47,6 @@ from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
     shares_an_author,
     title_word_overlap,
 )
-
 
 PMID = '12345678'
 
@@ -156,26 +156,27 @@ def test_connection_error_then_200_retries(monkeypatch):
 
 # --------------------------------------------------- (b) exhausted -> graceful
 
-def test_three_429s_gives_up_gracefully(monkeypatch, caplog):
-    enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * 3)
+def test_exhausted_429s_give_up_gracefully(monkeypatch, caplog):
+    enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         records = enricher._fetch_pubmed_batch([PMID])
     assert records == {}  # same degraded shape as before
-    assert len(session.calls) == 3
-    assert sleeps == [1.0, 2.0]
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
     assert enricher.stats['api_errors'] == 1
     assert any('❌ API error' in r.getMessage() for r in caplog.records)
 
 
 def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
     enricher, session, sleeps = _make(
-        monkeypatch, [FakeResponse(429)] * stage5.IDCONV_MAX_ATTEMPTS)
+        monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         result = enricher._convert_pmcids_to_pmids(['PMC1234567'])
-    assert result == {}
-    assert len(session.calls) == stage5.IDCONV_MAX_ATTEMPTS
+    assert result.pmids == {}
+    assert result.failed == {'PMC1234567'}
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
-    assert sum(sleeps) <= stage5.IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS
+    assert sum(sleeps) <= stage5.RETRY_TOTAL_WAIT_CAP_SECONDS
     assert enricher.stats['api_errors'] == 1
     assert any('❌ ID conversion error' in r.getMessage() for r in caplog.records)
     assert all(r.exc_info is None for r in caplog.records)
@@ -184,7 +185,7 @@ def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
 def test_id_converter_429_outlasting_the_old_window_now_converts(monkeypatch):
     ok = FakeResponse(200, json_data={'records': [{'pmcid': 'PMC1234567', 'pmid': '7654321'}]})
     enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * 3 + [ok])
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {'PMC1234567': '7654321'}
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {'PMC1234567': '7654321'}
     assert sleeps == [1.0, 2.0, 4.0]
     assert enricher.stats['api_errors'] == 0
 
@@ -198,10 +199,10 @@ def test_id_converter_honours_retry_after(monkeypatch):
 
 
 def test_id_converter_retry_after_beyond_the_cap_fails_fast(monkeypatch):
-    too_long = str(int(stage5.IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)
+    too_long = str(int(stage5.RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)
     enricher, session, sleeps = _make(
         monkeypatch, [FakeResponse(429, headers={'Retry-After': too_long})])
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {}
     assert sleeps == [] and len(session.calls) == 1
     assert enricher.stats['api_errors'] == 1
 
@@ -210,8 +211,8 @@ def test_id_converter_summed_retry_after_waits_are_capped(monkeypatch):
     # Each 25 s wait is under the 60 s cap alone; the third would push the sum to 75 s.
     enricher, session, sleeps = _make(
         monkeypatch,
-        [FakeResponse(429, headers={'Retry-After': '25'})] * stage5.IDCONV_MAX_ATTEMPTS)
-    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
+        [FakeResponse(429, headers={'Retry-After': '25'})] * stage5.MAX_ATTEMPTS)
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {}
     assert sleeps == [25.0, 25.0]
     assert len(session.calls) == 3
     assert enricher.stats['api_errors'] == 1
@@ -224,6 +225,118 @@ def test_doi_search_retries_5xx_then_succeeds(monkeypatch):
     ])
     assert enricher._search_pmid_by_doi('10.1000/test.123') == PMID
     assert sleeps == [1.0]
+
+
+# ------------------------- (b2) a 200 that won't parse is transient (#1387)
+
+TRUNCATED_XML = PUBMED_XML[:len(PUBMED_XML) // 2]
+
+
+class BadJSONResponse(FakeResponse):
+    """A 200 whose body is not JSON (truncated / HTML error page)."""
+
+    def json(self):
+        raise json.JSONDecodeError('Expecting value', '', 0)
+
+
+def _esearch_error_json():
+    return {'esearchresult': {'ERROR': 'Search Backend failed: synthetic test error'}}
+
+
+def test_efetch_malformed_xml_then_valid_enriches_the_entry(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, content=TRUNCATED_XML),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    [result] = enricher._enrich_by_pmid([(_titled('A test article.', pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert len(session.calls) == 2
+    assert sleeps == [1.0]  # one backoff sleep
+    assert enricher.stats['api_errors'] == 0
+    assert enricher.stats['failed_lookups'] == 0
+
+
+def test_efetch_malformed_xml_every_attempt_gives_up_and_logs_once(monkeypatch, caplog):
+    enricher, session, _ = _make(
+        monkeypatch, [FakeResponse(200, content=TRUNCATED_XML)] * stage5.MAX_ATTEMPTS)
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        [result] = enricher._enrich_by_pmid([(_titled('A test article.', pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'lookup_failed'
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
+    assert enricher.stats['api_errors'] == 1
+    assert len(caplog.records) == 1
+    assert 'efetch' in caplog.records[0].getMessage()
+
+
+def test_esearch_error_then_idlist_enriches_not_doi_not_in_pubmed(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, json_data=_esearch_error_json()),
+        FakeResponse(200, json_data=ESEARCH_JSON),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    [result] = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['extracted_fields']['pmid'] == PMID
+    assert sleeps[0] == 1.0  # the esearch backoff (later sleeps are rate-limit pauses)
+    assert enricher.stats['failed_lookups'] == 0
+
+
+def test_esearch_error_every_attempt_is_a_lookup_failure_not_a_no_match(monkeypatch):
+    enricher, session, _ = _make(
+        monkeypatch, [FakeResponse(200, json_data=_esearch_error_json())] * stage5.MAX_ATTEMPTS)
+    [result] = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert result['enrichment_status'] == 'doi_lookup_failed'
+    assert len(session.calls) == stage5.MAX_ATTEMPTS
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_esearch_malformed_json_then_idlist_finds_the_pmid(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        BadJSONResponse(200),
+        FakeResponse(200, json_data=ESEARCH_JSON),
+    ])
+    assert enricher._search_pmid_by_doi(DOI) == PMID
+    assert sleeps == [1.0]
+
+
+def test_title_search_error_is_retried(monkeypatch):
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, json_data=_esearch_error_json()),
+        FakeResponse(200, json_data=ESEARCH_JSON),
+    ])
+    assert enricher._search_pmids_by_title('A synthetic title for a retry test') == [PMID]
+    assert sleeps == [1.0]
+
+
+def test_id_converter_malformed_json_then_valid_converts(monkeypatch):
+    ok = FakeResponse(200, json_data={'records': [{'pmcid': 'PMC1234567', 'pmid': '7654321'}]})
+    enricher, _, sleeps = _make(monkeypatch, [BadJSONResponse(200), ok])
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']).pmids == {'PMC1234567': '7654321'}
+    assert sleeps == [1.0]
+    assert enricher.stats['api_errors'] == 0
+
+
+def test_efetch_429s_outlasting_the_old_window_now_fetch(monkeypatch):
+    enricher, session, sleeps = _make(
+        monkeypatch, [FakeResponse(429)] * 3 + [FakeResponse(200, content=PUBMED_XML)])
+    assert PMID in enricher._fetch_pubmed_batch([PMID])
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_efetch_total_wait_stays_within_the_cap_on_long_retry_after(monkeypatch):
+    enricher, session, sleeps = _make(
+        monkeypatch,
+        [FakeResponse(429, headers={'Retry-After': '120'})] * stage5.MAX_ATTEMPTS)
+    assert enricher._fetch_pubmed_batch([PMID]) == {}
+    assert sum(sleeps) <= stage5.RETRY_TOTAL_WAIT_CAP_SECONDS
+    assert sleeps == [] and len(session.calls) == 1
+
+
+def test_no_sleep_after_the_last_attempt_even_under_a_loose_cap(monkeypatch):
+    monkeypatch.setattr(stage5, 'RETRY_TOTAL_WAIT_CAP_SECONDS', 10_000.0)
+    enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
+    assert enricher._fetch_pubmed_batch([PMID]) == {}
+    assert len(sleeps) == stage5.MAX_ATTEMPTS - 1  # nothing to wait for after the last try
 
 
 # --------------------------------------------------------- (c) 404 = no retry
@@ -338,16 +451,19 @@ def test_esearch_400_becomes_doi_lookup_failed(monkeypatch, caplog):
 
 
 def test_esearch_exhausted_429s_become_doi_lookup_failed(monkeypatch):
-    enricher, session, _ = _make(monkeypatch, [FakeResponse(429)] * 3)
+    enricher, session, _ = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
     assert results[0]['enrichment_status'] == 'doi_lookup_failed'
-    assert len(session.calls) == 3  # retries still exhausted first
+    assert len(session.calls) == stage5.MAX_ATTEMPTS  # retries still exhausted first
+    assert session.responses == []
 
 
 def test_esearch_connection_error_becomes_doi_lookup_failed(monkeypatch):
-    enricher, _, _ = _make(monkeypatch, [requests.ConnectionError('reset')] * 3)
+    enricher, session, _ = _make(
+        monkeypatch, [requests.ConnectionError('reset')] * stage5.MAX_ATTEMPTS)
     results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
     assert results[0]['enrichment_status'] == 'doi_lookup_failed'
+    assert session.responses == []  # gave up on the error, not an exhausted fake
 
 
 def test_doi_path_success_still_enriches(monkeypatch):
@@ -390,7 +506,7 @@ def test_distinct_failure_classes_each_logged(monkeypatch, caplog):
     enricher, _, _ = _make(
         monkeypatch,
         [FakeResponse(400, content=API_KEY_INVALID_BODY)]
-        + [requests.ConnectionError('reset')] * 3,
+        + [requests.ConnectionError('reset')] * stage5.MAX_ATTEMPTS,
         api_key='dummy-test-key')
     entries = [(_doi_entry(), DOI), (_doi_entry(), DOI)]
     with caplog.at_level(logging.ERROR, logger=stage5.__name__):
@@ -415,7 +531,7 @@ def test_efetch_failure_logged_at_error_with_redaction(monkeypatch, caplog):
 
 
 def test_pmcid_conversion_failure_logged_at_error(monkeypatch, caplog):
-    enricher, _, _ = _make(monkeypatch, [FakeResponse(429)] * stage5.IDCONV_MAX_ATTEMPTS)
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(429)] * stage5.MAX_ATTEMPTS)
     with caplog.at_level(logging.ERROR, logger=stage5.__name__):
         enricher._convert_pmcids_to_pmids(['PMC1234567'])
     assert len(caplog.records) == 1
@@ -481,6 +597,7 @@ def test_pmid_path_accepts_the_same_paper(monkeypatch):
     assert result['enrichment_status'] == 'enriched'
     assert result['enrichment_source'] == 'pmid'
     assert enricher.stats['title_mismatches'] == 0
+    assert enricher.stats['pmid_lookups'] == 1
 
 
 def test_pmcid_path_rejection_does_not_store_the_discovered_pmid(monkeypatch):
@@ -597,7 +714,7 @@ def test_bare_digit_pmcid_retry_keeps_the_title_guard(monkeypatch):
     ])
     entry = _titled(UNRELATED_TITLE, pmcid=BARE_PMID)
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert 'enrichment_rejected' not in result
     assert enricher.stats['title_mismatches'] == 0
     assert enricher.stats['failed_lookups'] == 1
@@ -619,7 +736,7 @@ def test_nine_digit_pmcid_value_is_not_truncated_to_a_pmid(monkeypatch):
     enricher, session, _ = _make(monkeypatch, [_idconv_error_response()])
     entry = _titled('A test article', pmcid='123456789')
     [result] = enricher._enrich_by_pmcid([(entry, 'PMC123456789')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert len(session.calls) == 1
 
 
@@ -630,7 +747,7 @@ def test_bare_digit_pmcid_missing_as_pmid_keeps_its_original_failure(monkeypatch
     ])
     entry = _titled('A test article', pmcid=BARE_PMID)
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert enricher.stats['failed_lookups'] == 1
 
 
@@ -672,8 +789,129 @@ def test_prefixed_pmcid_is_never_tried_as_a_pmid(monkeypatch):
     enricher, session, _ = _make(monkeypatch, [_idconv_error_response()])
     entry = _titled('A test article', pmcid=f'PMC{BARE_PMID}')
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert result['enrichment_status'] == 'pmcid_not_found'
     assert len(session.calls) == 1
+
+
+# ------------------------------- #1219 item 1: idconv URL, chunks, status split, re-run
+
+def _idconv_outage():
+    """A 429 asking for longer than the retry cap: fails after one call."""
+    return FakeResponse(
+        429, headers={'Retry-After': str(int(stage5.RETRY_TOTAL_WAIT_CAP_SECONDS) + 1)})
+
+
+def _idconv_found(pmid=PMID):
+    # idconv answers the PMID as a JSON number.
+    return FakeResponse(200, json_data={'records': [{'pmcid': PMCID, 'pmid': int(pmid)}]})
+
+
+def _idconv_not_found():
+    return FakeResponse(200, json_data={'records': [
+        {'pmcid': PMCID, 'requested-id': PMCID, 'status': 'error',
+         'errmsg': 'Identifier not found in PMC'}]})
+
+
+def _pmcid_entry():
+    return {'element_idx_start': 10, 'taxonomy_code': 'S1', 'text': 'Garcia M. A test article.',
+            'extracted_fields': {'title': 'A test article', 'pmcid': PMCID}}
+
+
+def test_id_converter_uses_the_current_url(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_idconv_found()])
+    enricher._convert_pmcids_to_pmids([PMCID])
+    assert session.calls[0][0] == 'https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/'
+
+
+def test_numeric_pmid_from_id_converter_enriches(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_idconv_found(), FakeResponse(200, content=PUBMED_XML)])
+    [result] = enricher._enrich_by_pmcid([(_titled('A test article', pmcid=PMCID), PMCID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['extracted_fields']['pmid'] == PMID
+    assert session.calls[1][1]['id'] == PMID
+
+
+def test_id_converter_sends_at_most_200_ids_per_request(monkeypatch):
+    pmcids = [f'PMC{n}' for n in range(1000001, 1000202)]  # 201
+    enricher, session, sleeps = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': []}),
+        FakeResponse(200, json_data={'records': [{'pmcid': pmcids[-1], 'pmid': 7654321}]}),
+    ])
+    result = enricher._convert_pmcids_to_pmids(pmcids + pmcids[:5])  # duplicates sent once
+    assert [len(params['ids'].split(',')) for _, params in session.calls] == [200, 1]
+    assert result.pmids == {pmcids[-1]: '7654321'}
+    assert sleeps == [stage5.RATE_LIMIT_DELAY]
+
+
+def test_a_failed_idconv_chunk_fails_only_its_own_pmcids(monkeypatch):
+    pmcids = [f'PMC{n}' for n in range(1000001, 1000202)]
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': [{'pmcid': pmcids[0], 'pmid': 7654321}]}),
+        _idconv_outage(),
+    ])
+    result = enricher._convert_pmcids_to_pmids(pmcids)
+    assert result.pmids == {pmcids[0]: '7654321'}
+    assert result.failed == {pmcids[-1]}
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_efetch_sends_at_most_200_ids_per_request(monkeypatch):
+    pmids = [str(n) for n in range(10000001, 10000202)]
+    enricher, session, _ = _make(monkeypatch, [FakeResponse(200, content=b'<PubmedArticleSet/>')] * 2)
+    enricher._fetch_pubmed_records(pmids)
+    assert [len(params['id'].split(',')) for _, params in session.calls] == [200, 1]
+
+
+@pytest.mark.parametrize('responses, status', [
+    ([_idconv_not_found()], 'pmcid_not_found'),
+    ([_idconv_outage()], 'pmcid_lookup_failed'),
+    ([_idconv_found(), FakeResponse(200, content=b'<PubmedArticleSet/>')], 'pmcid_lookup_failed'),
+])
+def test_pmcid_not_found_is_told_apart_from_a_failed_lookup(monkeypatch, responses, status):
+    enricher, _, _ = _make(monkeypatch, responses)
+    [result] = enricher._enrich_by_pmcid([(_titled('A test article', pmcid=PMCID), PMCID)])
+    assert result['enrichment_status'] == status
+    assert enricher.stats['failed_lookups'] == 1
+
+
+def test_only_a_failed_lookup_matches_the_doctor_failed_vocabulary():
+    assert stage5.PMCID_LOOKUP_FAILED.endswith('_failed')
+    assert not stage5.PMCID_NOT_FOUND.endswith('_failed')
+
+
+def test_failed_pmcid_lookup_is_rerun_at_the_end_of_the_stage(tmp_path, monkeypatch):
+    results, session, enricher = _run_entries(tmp_path, monkeypatch, [_pmcid_entry()], [
+        _idconv_outage(), _idconv_found(), FakeResponse(200, content=PUBMED_XML)])
+    [result] = results
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_source'] == 'pmcid_conversion'
+    assert [url for url, _ in session.calls] == [stage5.ID_CONVERTER_URL] * 2 + [stage5.EFETCH_URL]
+    assert (enricher.stats['enriched'], enricher.stats['failed_lookups']) == (1, 0)
+
+
+def test_rerun_waits_before_asking_idconv_again(tmp_path, monkeypatch):
+    enricher, _, sleeps = _make(monkeypatch, [
+        _idconv_outage(), _idconv_found(), FakeResponse(200, content=PUBMED_XML)])
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_pmcid_entry()]}))
+    enricher.enrich_stage4_output(str(path))
+    assert sleeps == [stage5.PMCID_RERUN_PAUSE_SECONDS]
+
+
+def test_failed_pmcid_lookup_is_rerun_only_once(tmp_path, monkeypatch):
+    results, session, enricher = _run_entries(
+        tmp_path, monkeypatch, [_pmcid_entry()], [_idconv_outage(), _idconv_outage()])
+    assert results[0]['enrichment_status'] == 'pmcid_lookup_failed'
+    assert len(session.calls) == 2
+    assert enricher.stats['failed_lookups'] == 1
+
+
+def test_pmcid_not_found_is_not_rerun(tmp_path, monkeypatch):
+    results, session, enricher = _run_entries(
+        tmp_path, monkeypatch, [_pmcid_entry()], [_idconv_not_found()])
+    assert results[0]['enrichment_status'] == 'pmcid_not_found'
+    assert len(session.calls) == 1
+    assert enricher.stats['failed_lookups'] == 1
 
 
 def test_doi_search_term_is_quoted(monkeypatch):
@@ -893,7 +1131,9 @@ def _published_entry(**fields):
 
 def test_in_press_entry_already_listed_as_published_is_marked_superseded(tmp_path, monkeypatch):
     # web200: the same paper listed both as published and as "in press".
-    enricher, _, _ = _make(monkeypatch, _found())
+    # The published entry's own title search (#1598) finds nothing here, so
+    # the duplicate is told by title and year.
+    enricher, _, _ = _make(monkeypatch, _NO_HITS + _found())
     path = tmp_path / 's4.json'
     published = _published_entry(title=INPRESS_TITLE, year='2025')
     path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), published]}))
@@ -907,13 +1147,14 @@ def test_in_press_entry_already_listed_as_published_is_marked_superseded(tmp_pat
 
 
 def test_same_pmid_elsewhere_is_a_duplicate_but_similar_title_other_year_is_not(tmp_path, monkeypatch):
-    # A PMID on the other entry costs one efetch before the title search.
+    # A PMID on the other entry costs one efetch before the title search; an
+    # S1 entry without one is title-searched first (#1598), finding nothing.
     pmid_lookup = [FakeResponse(200, content=_published_xml())]
     for other, superseded, extra in (
             (_published_entry(title=INPRESS_TITLE, pmid=PMID), True, pmid_lookup),
-            (_published_entry(title=INPRESS_TITLE, year='2019'), False, []),
+            (_published_entry(title=INPRESS_TITLE, year='2019'), False, _NO_HITS),
             # web228: a shorter title nested in the in-press one, same year.
-            (_published_entry(title='Statin adherence in older adults', year='2025'), False, []),
+            (_published_entry(title='Statin adherence in older adults', year='2025'), False, _NO_HITS),
             (dict(_published_entry(title=INPRESS_TITLE, year='2025'), taxonomy_code='S8'), False, [])):
         enricher, _, _ = _make(monkeypatch, extra + _found())
         path = tmp_path / 's4.json'
@@ -1126,17 +1367,18 @@ def test_one_pmcid_cited_for_two_papers_stays_with_the_paper_it_names(tmp_path, 
     assert 'pmid' not in results[0]['extracted_fields']
 
 
-@pytest.mark.parametrize('second_title, status', [
-    ('Heron migration along northern beaches', 'enriched'),  # 4 of 5 words: 0.8
-    ('Heron migration along wetlands', 'title_check_failed'),  # 3 of 4: 0.75
+@pytest.mark.parametrize('second_title', [
+    'Heron migration along northern beaches',  # 4 of 5 words: 0.8
+    'Heron migration along wetlands',  # 3 of 4: 0.75
 ])
-def test_second_holder_keeps_a_shared_pmid_only_as_the_same_paper(tmp_path, monkeypatch,
-                                                                   second_title, status):
-    # From MIN_TITLE_SEARCH_OVERLAP up it is the same paper listed twice (a CV
-    # listing a paper in two sections, retitled slightly).
+def test_second_holder_of_a_shared_pmid_is_released_even_as_the_same_paper(tmp_path, monkeypatch,
+                                                                         second_title):
+    # #1598: a weaker holder that is not tied is released. A paper listed twice (once retitled
+    # slightly) used to keep it on both from MIN_TITLE_SEARCH_OVERLAP up.
     entries = [_paper_entry(SHARED_TITLE, 10), _paper_entry(second_title, 11)]
     results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
-    assert [r['enrichment_status'] for r in results] == ['enriched', status]
+    assert [r['enrichment_status'] for r in results] == ['enriched', 'title_check_failed']
+    assert results[1]['enrichment_rejected']['shared_pmid_with'] == 10
 
 
 def test_untitled_entry_sharing_a_pmid_is_left_alone(tmp_path, monkeypatch):
@@ -1196,8 +1438,9 @@ def test_in_press_holder_of_a_shared_pmid_still_counts_as_its_best_match(tmp_pat
     assert (in_press['taxonomy_code'], in_press.get('in_press_superseded')) == ('S1', None)
 
 
-def test_equal_weak_matches_both_keep_a_shared_pmid():
-    # Two holders at the same overlap: nothing tells which paper it names.
+def test_equal_weak_matches_of_one_citation_both_keep_a_shared_pmid():
+    # Two holders at the same strength giving one DOI and title: the same
+    # citation listed twice keeps the PMID on both, for stage 6 dedup (#1598).
     enricher = PubMedEnricher(verbose=False)
     record = {'pmid': PAPER_PMID, 'title': SHARED_TITLE, 'vernacular_title': '', 'authors': []}
     entries = [_paper_entry(OTHER_PAPER_TITLE, i) for i in (10, 11)]
@@ -1205,6 +1448,193 @@ def test_equal_weak_matches_both_keep_a_shared_pmid():
         assert enricher._accept_record(entry, record, 'doi_search')
     enricher._release_weaker_shared_pmids()
     assert [e['enrichment_status'] for e in entries] == ['enriched', 'enriched']
+    assert enricher.stats['enriched'] == 2
+
+
+# ------------- #1598: every article without an identifier is searched by title
+
+def _article_entry(idx, code='S1', title=SHARED_TITLE, year='2025', **ids):
+    return {'element_idx_start': idx, 'taxonomy_code': code, 'text': f'Garcia M. {title}. {year}.',
+            'extracted_fields': {'title': title, 'authors': 'Garcia M', 'year': year, **ids}}
+
+
+@pytest.mark.parametrize('code', ['S1', 'S2', 'S6'])
+def test_article_without_an_identifier_is_found_by_title(tmp_path, monkeypatch, code):
+    [result], session, enricher = _run_entries(tmp_path, monkeypatch, [_article_entry(10, code)],
+                                               _doi_found())
+    assert session.calls[0][1]['term'] == f'{SHARED_TITLE}[ti]'
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+    assert result['extracted_fields']['pmid'] == PAPER_PMID
+    assert result['taxonomy_code'] == code
+    assert 'in_press_note' not in result
+    assert (enricher.stats['title_searches'], enricher.stats['enriched']) == (1, 1)
+
+
+def test_article_with_only_a_chapter_title_is_searched_by_it(tmp_path, monkeypatch):
+    entry = _article_entry(10)
+    entry['extracted_fields']['chapter_title'] = entry['extracted_fields'].pop('title')
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [entry], _doi_found())
+    assert session.calls[0][1]['term'] == f'{SHARED_TITLE}[ti]'
+    assert result['enrichment_status'] == 'enriched'
+
+
+@pytest.mark.parametrize('code', ['S4', 'S5', 'S8', 'S9'])
+def test_non_article_publication_is_not_searched_by_title(tmp_path, monkeypatch, code):
+    # S4/S8/S9 matches were about half wrong in the #1598 measurement: an
+    # abstract or chapter matched to the same group's later article.
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10, code)], [])
+    assert session.calls == []
+    assert result['enrichment_status'] == 'no_identifier'
+
+
+def test_article_whose_doi_pubmed_lacks_is_searched_by_title(tmp_path, monkeypatch):
+    entry = _article_entry(10, doi=DOI)
+    [result], session, _ = _run_entries(tmp_path, monkeypatch, [entry],
+                                        [_hits()] + _doi_found())
+    assert session.calls[1][1]['term'] == f'{SHARED_TITLE}[ti]'
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+
+
+def test_article_title_search_keeps_the_author_guard(tmp_path, monkeypatch):
+    found = [_hits(PAPER_PMID), _article_set(_article(PAPER_PMID, SHARED_TITLE, authors=('Okonkwo A',)))]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)], found)
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'enrichment_data' not in result
+
+
+def test_in_press_article_is_searched_once_by_the_in_press_step(tmp_path, monkeypatch):
+    entry = _inpress_entry(code='S1')
+    result, session, enricher = _run_stage5(tmp_path, monkeypatch, entry, _found())
+    assert len(session.calls) == 2  # one esearch, one efetch
+    assert enricher.stats['title_searches'] == 1
+    assert result['in_press_note'].startswith(f'Found in PubMed as PMID {PMID}')
+
+
+def test_in_press_article_is_left_to_the_in_press_step(tmp_path, monkeypatch):
+    # A published entry whose DOI names the paper under its pre-acceptance
+    # title (0.57) keeps it: the in-press listing, matched by title after the
+    # shared-PMID release as before #1598, is the stale duplicate.
+    published = _paper_entry(RETITLED_IN_PRESS, 10)
+    in_press = dict(_inpress_entry(code='S1'), element_idx_start=20)
+    responses = [_hits(PMID), FakeResponse(200, content=_published_xml())] + _found()
+    results, _, _ = _run_entries(tmp_path, monkeypatch, [published, in_press], responses)
+    kept, superseded = results
+    assert kept['enrichment_status'] == 'enriched'
+    assert superseded['in_press_superseded'] is True
+
+
+def test_title_match_of_a_paper_the_cv_cites_by_doi_is_released(tmp_path, monkeypatch):
+    # An abstract or duplicate listing found by title gives way to the entry
+    # whose CV identifier names the paper, at the same overlap and year.
+    entries = [_article_entry(11), _paper_entry(SHARED_TITLE, 10)]
+    entries[1]['extracted_fields']['year'] = '2025'
+    results, _, enricher = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    titled, cited = results
+    assert cited['enrichment_status'] == 'enriched'
+    assert titled['enrichment_status'] == 'title_check_failed'
+    assert titled['enrichment_rejected']['shared_pmid_with'] == 10
+    assert titled['extracted_fields'] == _article_entry(11)['extracted_fields']
+    assert enricher.stats['enriched'] == 1
+
+
+def test_shared_pmid_stays_with_the_entry_giving_pubmeds_year(tmp_path, monkeypatch):
+    # BLBVPD e848 (#1598): an exact-title holder a year off PubMed's was a
+    # different paper; the holder giving PubMed's year was the paper.
+    entries = [_article_entry(10, year='2024'), _article_entry(11, year='2025')]
+    results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == ['title_check_failed', 'enriched']
+    assert results[0]['enrichment_rejected']['shared_pmid_with'] == 11
+
+
+@pytest.mark.parametrize('years, status', [
+    (('2025', '2025'), 'enriched'),  # one paper listed twice (YUYVIG, 11 groups)
+    (('2023', '2024'), 'title_check_failed'),  # two citations, neither PubMed's year
+])
+def test_equal_title_matches_keep_a_shared_pmid_only_as_one_citation(tmp_path, monkeypatch,
+                                                                     years, status):
+    entries = [_article_entry(10, year=years[0]), _article_entry(11, year=years[1])]
+    results, _, enricher = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == [status] * 2
+    assert enricher.stats['enriched'] == (2 if status == 'enriched' else 0)
+    if status != 'enriched':
+        assert [r['enrichment_rejected']['shared_pmid_with'] for r in results] == [11, 10]
+
+
+NESTED_TITLE = 'Heron migration along the coast'  # overlap 1.0, not _same_title
+
+
+@pytest.mark.parametrize('dois, status', [
+    ((DOI, DOI.upper()), 'enriched'),  # ECXGAT e182/e287: one DOI cited twice
+    ((None, None), 'title_check_failed'),
+])
+def test_tied_holders_with_different_titles_keep_a_pmid_only_by_one_identifier(
+        tmp_path, monkeypatch, dois, status):
+    entries = [dict(_article_entry(10), extracted_fields={
+                   **_article_entry(10)['extracted_fields'], 'doi': dois[0]}),
+               dict(_article_entry(11, title=NESTED_TITLE), extracted_fields={
+                   **_article_entry(11, title=NESTED_TITLE)['extracted_fields'], 'doi': dois[1]})]
+    results, _, _ = _run_entries(tmp_path, monkeypatch, entries, _doi_found() * 2)
+    assert [r['enrichment_status'] for r in results] == [status] * 2
+
+
+def _held(**fields):
+    return stage5._Acceptance({}, {'extracted_fields': fields}, PAPER_PMID, SHARED_TITLE,
+                              2025, 'doi_search', 1.0)
+
+
+@pytest.mark.parametrize('pair, one', [
+    (({'title': SHARED_TITLE, 'year': '2025'}, {'title': SHARED_TITLE, 'year': '2025'}), True),
+    (({'title': SHARED_TITLE}, {'title': SHARED_TITLE}), True),
+    (({'title': SHARED_TITLE, 'year': '2025'}, {'title': SHARED_TITLE, 'year': '2024'}), False),
+    (({'title': SHARED_TITLE}, {'title': NESTED_TITLE}), False),
+    (({'title': SHARED_TITLE}, {'chapter_title': SHARED_TITLE}), True),
+    (({'title': SHARED_TITLE, 'doi': DOI}, {'title': NESTED_TITLE, 'doi': DOI.upper()}), True),
+    (({'title': SHARED_TITLE, 'doi': DOI}, {'title': NESTED_TITLE, 'doi': '10.1000/x.9'}), False),
+    (({'title': SHARED_TITLE, 'pmid': 'PMID: 23456789'}, {'title': NESTED_TITLE, 'pmid': '23456789'}),
+     True),
+    (({'title': SHARED_TITLE, 'pmcid': 'PMC123456'}, {'title': NESTED_TITLE, 'pmcid': '123456'}), True),
+])
+def test_one_citation_is_one_identifier_or_one_title_and_year(pair, one):
+    assert PubMedEnricher(verbose=False)._one_citation([_held(**f) for f in pair]) is one
+
+
+def test_one_citation_holds_for_every_pair_of_tied_holders():
+    same, other = {'title': SHARED_TITLE, 'year': '2025'}, {'title': NESTED_TITLE, 'year': '2025'}
+    enricher = PubMedEnricher(verbose=False)
+    assert enricher._one_citation([_held(**same)])
+    assert not enricher._one_citation([_held(**same), _held(**same), _held(**other)])
+
+
+@pytest.mark.parametrize('in_press_year', ['in press', '2025'])
+def test_published_holder_keeps_a_pmid_tied_with_an_in_press_one(tmp_path, monkeypatch, in_press_year):
+    # Two citations (no identifier in common, different years), so the tie is
+    # not kept as one: the published entry, matched by title search with a
+    # year that is not PubMed's, ties the in-press DOI holder on overlap, and
+    # the in-press rank keeps it, ahead of the year even when the in-press
+    # entry gives PubMed's year ('2025'). Releasing it would leave the
+    # in-press entry to be printed as the published paper.
+    published = _paper_entry(INPRESS_TITLE, 10, doi=None)
+    published['extracted_fields']['year'] = '2023'
+    in_press = _in_press_with_doi(INPRESS_TITLE)
+    in_press['extracted_fields']['year'] = in_press_year
+    responses = [_hits(PMID), FakeResponse(200, content=_published_xml())] * 2
+    results, _, _ = _run_entries(tmp_path, monkeypatch, [published, in_press], responses)
+    kept, in_press = results
+    assert kept['enrichment_status'] == 'enriched'
+    assert kept['enrichment_data']['pubmed_pmid'] == PMID
+    assert kept['enrichment_source'] == stage5.TITLE_SEARCH_SOURCE
+    assert (in_press['taxonomy_code'], in_press['in_press_superseded']) == ('S7', True)
+
+
+def test_cv_year_is_pubmeds_year():
+    assert stage5.cv_year_is('2025', 2025) and stage5.cv_year_is(2025, 2025)
+    assert stage5.cv_year_is('2024-2025', 2024)
+    assert not stage5.cv_year_is('2024', 2025)
+    assert not stage5.cv_year_is('in press', 2025)
+    assert not stage5.cv_year_is(None, 2025) and not stage5.cv_year_is('2025', None)
+    assert not stage5.cv_year_is(None, None)
+    # A page range or volume ahead of the year is not read as one.
+    assert stage5.cv_publication_year('1123-9, 2025') == 2025
 
 
 # OIYKZE (dev-242): PubMed's list for the owner's paper held the first ten of
@@ -1255,3 +1685,75 @@ def test_pubmed_author_list_naming_the_owner_still_renders(monkeypatch):
     [result] = enricher._enrich_by_pmid([(_owner_entry(), PMID)])
     assert result['enrichment_data']['pubmed_authors'] == 'Abel A, Quill JA'
     assert 'pubmed_authors_without_owner' not in result['enrichment_data']
+
+
+# #1438 (VYNARH, dev-246): PubMed indexes an author's reply under the letter
+# it answers, so the CV's "(Reply to Editor)" PMID resolved to the letter and
+# the letter's writer rendered in place of the owner.
+REPLY_TITLE = 'Tidal heron foraging in estuarine marshes'
+REPLY_CV_AUTHORS = 'Quill JA, Wren D'
+
+
+def _reply_entry(note='(Reply to Editor)', authors=REPLY_CV_AUTHORS):
+    return {'taxonomy_code': 'S2',
+            'text': f'{authors}. {REPLY_TITLE}. Heart Journal. 2025;7:101 {note}. PMID: {PMID}.',
+            'extracted_fields': {'title': REPLY_TITLE, 'authors': authors,
+                                 'target_name': 'Quill JA', 'pmid': PMID}}
+
+
+def _letter_response(title=REPLY_TITLE, authors=('Abel A',)):
+    return _article_set(_article(PMID, title, pubtypes=('Comment', 'Letter'), authors=authors))
+
+
+@pytest.mark.parametrize('note', [
+    '(Reply to Editor)', '(Response to Letter to Editor by A. Abel)', '(In reply to Abel)',
+    "(Authors' response)", '(reply)'])
+def test_reply_whose_pmid_is_the_letter_keeps_the_cv_citation(monkeypatch, note):
+    enricher, _, _ = _make(monkeypatch, [_letter_response()])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(note), PMID)])
+    assert result['enrichment_status'] == stage5.REPLY_TARGET_STATUS
+    assert 'enrichment_data' not in result  # stage 6 renders the CV's own citation
+    assert result['enrichment_rejected'] == {
+        'source': 'pmid', 'pubmed_pmid': PMID, 'pubmed_title': REPLY_TITLE,
+        'pubmed_authors': 'Abel A'}
+    assert enricher.stats['reply_targets_rejected'] == 1
+    assert enricher.stats['enriched'] == 0
+    assert enricher.stats['failed_lookups'] == 0
+
+
+def test_reply_record_titled_as_a_reply_is_accepted(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_letter_response(title=f'Reply: {REPLY_TITLE}')])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_reply_record_naming_a_cv_author_is_accepted(monkeypatch):
+    # A record with the CV's author may be the reply indexed with its letter.
+    enricher, _, _ = _make(monkeypatch, [_letter_response(authors=('Abel A', 'Quill JA'))])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_entry_not_called_a_reply_is_accepted(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [_letter_response()])
+    [result] = enricher._enrich_by_pmid([(_reply_entry(note='(Letter)'), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_reply_doi_path_does_not_store_the_letters_pmid(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, json_data=ESEARCH_JSON), _letter_response()])
+    entry = _reply_entry()
+    del entry['extracted_fields']['pmid']
+    [result] = enricher._enrich_by_doi([(entry, DOI)])
+    assert result['enrichment_status'] == stage5.REPLY_TARGET_STATUS
+    assert result['enrichment_rejected']['source'] == 'doi_search'
+    assert 'pmid' not in result['extracted_fields']
+
+
+def test_reply_marker_inside_the_title_is_not_a_reply():
+    title = 'Response to the editor as a teaching device'
+    assert not stage5.cites_a_reply(f'Quill JA. {title}. J Ed. 2020.', title)
+    assert stage5.cites_a_reply(f'Quill JA. {title}. J Ed. 2020 (Reply to Editor).', title)
+    # "response" alone is a common title word, not a reply.
+    assert not stage5.cites_a_reply('Quill JA. Immune response to vaccination. 2020.')
+    assert not stage5.cites_a_reply('Quill JA. Dose-Response in cognition. 2020.')

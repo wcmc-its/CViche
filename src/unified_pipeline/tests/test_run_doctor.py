@@ -25,7 +25,6 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     CITATION_EVIDENCE_CHARS,
     DATE_ONLY_LINES_WARN_COUNT,
@@ -33,63 +32,78 @@ from unified_pipeline.doctor.lints.render import (  # noqa: E402
     IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
-from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
-from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path  # noqa: E402
+from unified_pipeline.doctor.shared import (  # noqa: E402
+    TABLE_ROW_JOINER,
+    docx_body_blocks,
+)
+from unified_pipeline.quality_score import (  # noqa: E402
+    _TEMPLATE_DOCX_PATH,
+    score_cv_owner,
+)
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
+    DUPLICATE_PASSAGE_MIN_BLOCKS,
     MISSED_HEADERS_WARN_COUNT,
-    lint_surprise,
-    rank_lints,
     appendix_entry_count,
     honors_table_totals,
-    unrouted_code_counts,
     iter_header_candidates,
     lint_bucket_status,
+    lint_citation_field_dropped,
     lint_classified_unrendered,
     lint_date_cell_shape,
+    lint_date_only_lines,
     lint_dead_sections,
     lint_dedup_drops,
-    DUPLICATE_PASSAGE_MIN_BLOCKS,
-    lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_enrichment_pubtype_mismatch,
-    lint_citation_field_dropped,
     lint_etal_added,
+    lint_glyph_field,
     lint_group_header_context,
     lint_identical_rendered_rows,
     lint_junk_or_header_row,
+    lint_licensure_fallback_truncated,
     lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
+    lint_owner_attribution,
     lint_owner_contact_missing,
-    lint_pubmed_title_truncated,
     lint_owner_missing_from_citation,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_pubmed_title_truncated,
     lint_python_repr_in_output,
+    lint_research_summary_call_failed,
     lint_section_lost,
+    lint_segmentation,
+    lint_segmentation_collapse,
+    lint_shattered_prose,
     lint_split_child_unsourced,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
-    lint_stage_failure_recorded,
-    lint_research_summary_call_failed,
-    lint_taxonomy_code_coverage,
-    lint_segmentation,
-    lint_segmentation_collapse,
+    lint_stage4_unplaced_items,
     lint_stage6_warnings,
+    lint_stage_failure_recorded,
+    lint_surprise,
     lint_table_lost,
     lint_table_shape,
+    lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_unrendered_records,
     main,
+    rank_lints,
     read_docx_blocks,
     read_docx_table_rows,
     run_doctor,
+    unrouted_code_counts,
 )
-
+from unified_pipeline.stage_errors import (  # noqa: E402
+    StageError,
+    record_stage_outcome,
+    stage_errors_path,
+)
 
 _GRANT_FSMB = ("Federation of State Medical Boards (FSMB) Foundation Grant | "
                "Shapiro, M. (PI) | Role: Co-PI | Amount: $75,000 | Status: Awarded 2026")
@@ -387,6 +401,87 @@ def test_table_lost_lint_quiet_when_every_table_survives():
     assert lint_table_lost([(0, _GRANT_FSMB)], {"entries": [_entry(_GRANT_FSMB, start=1)]}) == []
 
 
+def test_table_lost_lint_reports_a_lost_content_control_apart_from_lost_tables():
+    """#1656: one finding per kind of container, the table one worded as
+    before."""
+    from unified_pipeline.segmentation_regression import FIRST_CONTENT_CONTROL_BLOCK
+
+    stage2 = {"entries": [_entry(_GRANT_FSMB, start=1)]}
+    table = [f"lost contact line {i} zebra" for i in range(3)]
+    control = [f"lost publication line {i} yak" for i in range(4)]
+    block_lines = ([(0, _GRANT_FSMB)] + [(1, line) for line in table]
+                   + [(FIRST_CONTENT_CONTROL_BLOCK, line) for line in control])
+    findings = lint_table_lost(block_lines, stage2)
+    assert [(f["lint"], f["severity"], f["message"]) for f in findings] == [
+        ("table_lost", "WARN", "1 source table(s) mostly lost; worst: 3 of 3 lines"),
+        ("table_lost", "WARN", "1 body content control(s) mostly lost; worst: 4 of 4 lines"),
+    ]
+    assert findings[1]["evidence"] == control
+
+
+#: #1656's synthetic CV: 29 records under a heading, all in one 30-paragraph
+#: body content control, between two body paragraphs.
+_CONTROL_RECORDS = [f"Doe J, Roe K. Synthetic study {i} of example outcomes. J Example. 2001;{i}:1-9."
+                    for i in range(1, 30)]
+
+
+def _content_control_cv(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    paragraphs = "".join(f"<w:p><w:r><w:t>{t}</w:t></w:r></w:p>"
+                         for t in ["PUBLICATIONS", *_CONTROL_RECORDS])
+    doc = Document()
+    doc.add_paragraph("Example Person, MD, Assistant Professor of Example Studies")
+    after = doc.add_paragraph("Example patent for a synthetic device, filed 2015")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{paragraphs}'
+                                   '</w:sdtContent></w:sdt>'))
+    path = tmp_path / "content_control_cv.docx"
+    doc.save(path)
+    return str(path)
+
+
+def _stage2_of(path):
+    """A stage 2 that kept every element stage 1 gave it, one entry each."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    return {"entries": [_entry(el["text"], start=el["unified_idx"])
+                        for el in extract_unified_elements(path)["elements"] if el["text"]]}
+
+
+def test_doctor_flags_a_content_control_stage_1_skips_and_is_quiet_once_stage_1_reads_it(
+        tmp_path, monkeypatch):
+    """#1656 wire test: source docx -> stage-1 elements -> stage 2 -> the
+    doctor's source readers. The doctor reported 100% source coverage on
+    RSFOYB, which lost 889 of 950 paragraphs to a body content control. With
+    the extractor's unwrap reverted, `table_lost` and `segmentation` fire;
+    with it, neither does."""
+    from unified_pipeline.core import docx_structure_extractor
+    from unified_pipeline.segmentation_regression import iter_source_block_lines
+
+    path = _content_control_cv(tmp_path)
+    block_lines = iter_source_block_lines(path)
+    source_lines = [line for _, line in block_lines]
+    assert _CONTROL_RECORDS[0] in source_lines
+
+    fixed = _stage2_of(path)
+    assert lint_table_lost(block_lines, fixed) == []
+    assert lint_segmentation(source_lines, _STAGE1A, fixed) == []
+
+    # Revert the extractor's unwrap: stage 1 reads the source the old way.
+    monkeypatch.setattr(docx_structure_extractor, "open_source_docx", lambda p: Document(str(p)))
+    reverted = _stage2_of(path)
+    assert [e["text"] for e in reverted["entries"]] == [source_lines[0], source_lines[-1]]
+
+    lost = lint_table_lost(block_lines, reverted)
+    assert [f["message"] for f in lost] == [
+        f"1 body content control(s) mostly lost; worst: {len(_CONTROL_RECORDS)} of "
+        f"{len(_CONTROL_RECORDS)} lines"]
+    coverage = [f for f in lint_segmentation(source_lines, _STAGE1A, reverted)
+                if f["message"].startswith("coverage")]
+    assert len(coverage) == 1
+
+
 # ------------------------------------------------------ lint 2: missed headers
 
 def test_iter_header_candidates_sees_bold_paragraphs_and_cells(tmp_path):
@@ -403,6 +498,24 @@ def test_iter_header_candidates_sees_bold_paragraphs_and_cells(tmp_path):
     candidates = iter_header_candidates(str(path))
     assert set(candidates) == {"PROFESSIONAL EXPERIENCE", "EDUCATION",
                                "GRANTS AWARDED"}
+
+
+def test_iter_header_candidates_sees_a_header_inside_a_body_content_control(tmp_path):
+    """#1656: read as stage 1 reads it, a body content control's bold
+    heading and its single-column table are candidates like any other."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    bold = "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>{}</w:t></w:r></w:p>"
+    table = ('<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>'
+             + bold.format("INVITED LECTURES") + "</w:tc></w:tr></w:tbl>")
+    doc = Document()
+    after = doc.add_paragraph("A plain body line that is not bold and not a header")
+    after._p.addprevious(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent>{bold.format("PUBLICATIONS")}'
+                                   f'{table}</w:sdtContent></w:sdt>'))
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+    assert iter_header_candidates(str(path)) == ["PUBLICATIONS", "INVITED LECTURES"]
 
 
 def test_iter_header_candidates_skips_bold_non_headers(tmp_path):
@@ -958,6 +1071,21 @@ def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
     assert non_paragraph[0]["message"].startswith("1 ")
 
 
+def test_output_hygiene_does_not_count_stage_6s_cviche_note_box():
+    """#1388: the Appendix opens with stage 6's own note to the submitter, a
+    one-cell table; it is not an entry block hiding from the scan."""
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("table", "CViche note: delete this box before sending These 2 entries from your original CV did not fit"),
+        ("p", "Grant Support"),
+        ("p", "1. Real leftover grant content | Role: PI | Status: Under review"),
+        ("p", "2. Another leftover grant | Role: Co-I"),
+    ]
+    findings = lint_output_hygiene(blocks)
+    assert not [f for f in findings if "non-paragraph" in f["message"]]
+    assert any(f["message"] == "appendix holds 2 unmapped entries" for f in findings)
+
+
 def test_output_hygiene_quiet_on_clean_output():
     blocks = [
         ("p", "D. GRANTS"),
@@ -1099,6 +1227,24 @@ def test_unrendered_records_quiet_when_all_rendered_incl_reformatted():
     stage4 = {"entries": [_entry(fused, start=5, taxonomy_code="S1")]}
     blocks = [("table", _ROW_HARBORVIEW), ("p", _CITE_RENDERED)]
     assert lint_unrendered_records(stage4, blocks) == []
+
+
+def test_unrendered_records_reads_a_sub_point_as_delivered():
+    # #1205: the two dropped rows of the test above, written under the entry
+    # as tracked-deleted sub-points, are offered for review, not absent. A
+    # sub-point holding something else leaves the finding as it was.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    fused = "\n".join([_ROW_HARBORVIEW, _ROW_BLUERIDGE, _ROW_CEDARBROOK,
+                       _ROW_SILVERLAKE, _ROW_FOXGLOVE])
+    stage4 = {"entries": [_entry(fused, etype="break", start=21, taxonomy_code="M2A")]}
+    blocks = [("p", "RESEARCH"), ("table", _ROW_HARBORVIEW),
+              ("table", _ROW_BLUERIDGE), ("table", _ROW_CEDARBROOK)]
+    offered = subpoint_text([_ROW_SILVERLAKE, _ROW_FOXGLOVE])
+    assert lint_unrendered_records(stage4, blocks, offered) == []
+    one = lint_unrendered_records(stage4, blocks, subpoint_text([_ROW_SILVERLAKE]))
+    assert "1 of 5 records absent" in one[0]["message"]
+    assert one[0]["evidence"] == [_ROW_FOXGLOVE[:100]]
 
 
 def test_unrendered_records_skips_single_record_and_appendix_entries():
@@ -1649,6 +1795,145 @@ def test_date_only_lines_info_below_threshold():
     findings = lint_date_only_lines(_date_only_blocks(dates))
     assert [f["severity"] for f in findings] == ["INFO"]
     assert findings[0]["message"].startswith("4 body paragraph(s)")
+
+
+# shattered_prose (#1583): a synthetic L3 record whose source paragraph
+# arrived one printed line per paragraph, so stage 2 joined the lines with tabs.
+_SHATTERED_LINES = (
+    "Division Chief, Example Unit. I led the establishment",
+    "of a new clinical division providing molecular diagnostic tests for",
+    "Infectious Diseases at Example Hospital. I also integrated",
+    "sequencing into routine care.",
+)
+
+
+def _shattered_stage4(lines=_SHATTERED_LINES, code="L3"):
+    # A doubled space and an empty trailing cell, as stage 2 can leave them.
+    text = "\t".join(lines).replace(" the ", "  the ", 1) + "\t \t"
+    return {"entries": [{"element_idx_start": 477, "taxonomy_code": code, "text": text}]}
+
+
+def _as_bullets(lines):
+    # A trailing space, as a rendered bullet can carry one.
+    return [("p", "C. CLINICAL PRACTICE")] + [("p", f"{line} ") for line in lines]
+
+
+def test_shattered_prose_warns_when_printed_lines_render_as_bullets():
+    findings = lint_shattered_prose(_shattered_stage4(), _as_bullets(_SHATTERED_LINES))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("shattered_prose", "WARN")]
+    assert findings[0]["message"] == (
+        "entry 477 (L3): 4 of 4 printed lines render as separate paragraphs, "
+        "3 break mid-sentence")
+    assert findings[0]["evidence"] == [
+        "Division Chief, Example Unit. I led the establishment",
+        "of a new clinical division providing molecular diagnostic te"]
+
+
+def test_shattered_prose_quiet_when_the_lines_render_as_one_paragraph():
+    folded = [("p", " ".join(_SHATTERED_LINES))]
+    assert lint_shattered_prose(_shattered_stage4(), folded) == []
+
+
+def test_shattered_prose_quiet_on_whole_sentences_one_per_line():
+    # Each line ends a sentence, so a lowercase opening after it is no break.
+    lines = ("chair, example committee.", "member, other board.",
+             "reviewer, example journal.", "editor, example series.")
+    assert lint_shattered_prose(_shattered_stage4(lines), _as_bullets(lines)) == []
+
+
+def test_shattered_prose_needs_three_parts_rendered_whole():
+    rendered = _as_bullets(_SHATTERED_LINES[:2]) + [
+        ("p", " ".join(_SHATTERED_LINES[2:]))]
+    assert lint_shattered_prose(_shattered_stage4(), rendered) == []
+
+
+def test_shattered_prose_reads_paragraphs_not_table_cells():
+    cells = [("table", line) for line in _SHATTERED_LINES]
+    assert lint_shattered_prose(_shattered_stage4(), cells) == []
+
+
+@pytest.mark.parametrize("whole, fires", [(4, True), (5, False)])
+def test_shattered_prose_mid_sentence_share_is_thirty_percent(whole, fires):
+    # Two mid-sentence joins, then whole sentences: 2 of 6 joins (33%) fire,
+    # 2 of 7 (29%) do not.
+    lines = (*_SHATTERED_LINES[:3], *(f"Sentence {i}." for i in range(whole)))
+    assert bool(lint_shattered_prose(_shattered_stage4(lines), _as_bullets(lines))) is fires
+
+
+def test_shattered_prose_quiet_on_an_address_broken_at_commas():
+    lines = ("Example Behavioral Health Team,", "Example Building, Example Clinic,",
+             "100 Example St, Suite 5, Example City")
+    assert lint_shattered_prose(_shattered_stage4(lines), _as_bullets(lines)) == []
+
+
+def test_shattered_prose_needs_two_mid_sentence_joins():
+    lines = ("Director, Example Lab. I built", "the lab.", "Chair, Board.")
+    assert lint_shattered_prose(_shattered_stage4(lines), _as_bullets(lines)) == []
+
+
+@pytest.mark.parametrize("bullets, fires", [(3, True), (2, False)])
+def test_shattered_prose_three_whole_paragraphs_is_the_boundary(bullets, fires):
+    # The rest of the lines are not rendered at all, so only the count decides.
+    findings = lint_shattered_prose(_shattered_stage4(), _as_bullets(_SHATTERED_LINES[:bullets]))
+    assert [f["message"] for f in findings] == (
+        ["entry 477 (L3): 3 of 4 printed lines render as separate paragraphs, "
+         "3 break mid-sentence"] if fires else [])
+
+
+# The same paragraph printed beside a dates column, as IZABPD 477 and RLADNC
+# 530/567 were: a line carries the row's dates. Stage 6 folds the lines back,
+# but the dates stay inside the paragraph.
+_INTERLEAVED_FOLDED = "entry 477 (L3): 4 printed lines fold back, but a line carries a " \
+                      "neighbouring column's dates, so the columns are still interleaved"
+
+
+def _folded(lines):
+    return [("p", "C. CLINICAL PRACTICE"), ("p", " ".join(lines) + " ")]
+
+
+@pytest.mark.parametrize("dated", [
+    "Division Chief, Example Unit. I led the establishment Example Hospital, 2015-2023",
+    "Division Chief, Example Unit. I led the establishment 2020 – Present",
+    "Division Chief, Example Unit. I led the establishment 2020-present",
+    "Division Chief, Example Unit. I led the establishment 2019 — current",
+    "2007 Example Unit Division Chief I led the establishment",
+])
+def test_shattered_prose_warns_when_the_fold_keeps_a_column_date(dated):
+    lines = (dated, *_SHATTERED_LINES[1:])
+    findings = lint_shattered_prose(_shattered_stage4(lines), _folded(lines))
+    assert [(f["severity"], f["message"]) for f in findings] == [("WARN", _INTERLEAVED_FOLDED)]
+
+
+@pytest.mark.parametrize("dated", [
+    pytest.param("Division Chief, Example Unit. I led the establishment in 2015",
+                 id="a year, not a range"),
+    pytest.param("Division Chief, Example Unit. I led the establishment 2015-2023 of",
+                 id="a range inside the line"),
+    pytest.param("In 2007 Example Unit Division Chief I led the establishment",
+                 id="a year after the line opens"),
+    pytest.param("2007, Example Unit Division Chief I led the establishment",
+                 id="a year opening the sentence"),
+    pytest.param("2007 was the year Example Unit Division Chief I led the establishment",
+                 id="a year opening a lowercase word"),
+    pytest.param("2007Example Unit Division Chief I led the establishment",
+                 id="a year glued to a word"),
+])
+def test_shattered_prose_quiet_when_the_fold_keeps_no_column_date(dated):
+    lines = (dated, *_SHATTERED_LINES[1:])
+    assert lint_shattered_prose(_shattered_stage4(lines), _folded(lines)) == []
+
+
+def test_shattered_prose_a_date_ending_the_last_line_is_not_spliced():
+    lines = (*_SHATTERED_LINES[:3], "sequencing into routine care since 2015-2023")
+    assert lint_shattered_prose(_shattered_stage4(lines), _folded(lines)) == []
+
+
+def test_shattered_prose_a_column_date_alone_is_no_finding():
+    # A dated line that the fold keeps apart renders, but no folded paragraph
+    # does: the entry's prose went elsewhere, so this lint has nothing to say.
+    lines = ("Division Chief, Example Hospital, 2015-2023", *_SHATTERED_LINES)
+    unrendered = [("p", "C. CLINICAL PRACTICE"), ("p", lines[0])]
+    assert lint_shattered_prose(_shattered_stage4(lines), unrendered) == []
 
 
 def test_date_only_lines_ignores_table_cells():
@@ -2234,6 +2519,212 @@ def test_etal_added_ignores_an_et_al_in_an_editor_list(editors):
     source = f"Thornquist R, Ashdown A. Chapter on tidal cores. In: Synthetic Geology, Garrow G, Holloway H, Ivesdale I, Jessop J, Larkspur, Mossgrove Press, 2019."
     stage4 = _cite_run(_publication(703, source, authors="Thornquist R, Ashdown A", code="S4"))
     assert lint_etal_added(stage4, _bibliography(line)) == []
+
+
+# ------------------- lint 14ah: other people's content shown as the owner's
+
+#: Three citations by other groups, none naming the owner `_CITE_OWNER`.
+_OTHERS = (
+    "Holloway H, Ivesdale I. Glacial varves of a model lake. Synth Limnol. 2004;3:1-9.",
+    "Jessop J, Kettering K. Sand ripple migration in a flume. Synth Sediment. 2006;8:10-19.",
+    "Larchmont L, Mossgrove M. Peat accretion on a test marsh. Synth Wetl. 2008;5:20-29.",
+)
+_OWNED = "Thornquist R, Garrow G. Silt plumes of a model delta. Synth Geol. 2010;4:30-39."
+
+
+def _authored(idx, citation, code="S1", hierarchy=None):
+    """A publication whose stage-4 authors are its citation's author list."""
+    entry = _publication(idx, citation, authors=citation.split(". ")[0], code=code)
+    if hierarchy is not None:
+        entry["hierarchy"] = hierarchy
+    return entry
+
+
+def _line_entry(idx, text, code="T", hierarchy=None):
+    entry = {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+             "extracted_fields": {}}
+    if hierarchy is not None:
+        entry["hierarchy"] = hierarchy
+    return entry
+
+
+def _attribution(stage4, *lines):
+    return [(f["severity"], f["message"]) for f in lint_owner_attribution(
+        stage4, _bibliography(*lines))]
+
+
+def _runs(findings):
+    """'<count> in <first>-<last>' of each citation_without_owner finding."""
+    return [" in ".join(re.search(r": (\d+) publication.*entries (\S+) ", message).groups())
+            for _, message in findings]
+
+
+def test_owner_attribution_warns_on_a_run_of_papers_under_an_acknowledgements_line():
+    # ECXGAT 2154-2204: stage 1b placed no headings, so the acknowledgements
+    # heading survives only as a T-coded entry above the papers.
+    stage4 = _cite_run(_line_entry(10, "ACKNOWLEDGEMENTS (partial list)"),
+                       *(_authored(11 + i, text) for i, text in enumerate(_OTHERS)))
+    findings = lint_owner_attribution(stage4, _bibliography(*_OTHERS))
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "WARN", "citation_without_owner: 3 publication(s) rendered in the bibliography, "
+        "entries 11-13 (S1) under 'ACKNOWLEDGEMENTS (partial list)', whose author list "
+        "and source never name the CV owner")]
+    assert findings[0]["evidence"][0] == f"entry 11 (S1): {_OTHERS[0][:80]}"
+
+
+def test_owner_attribution_reports_a_run_elsewhere_at_info():
+    # RLADNC 2267-2535: most runs with no acknowledgements line are the
+    # owner's own group-authored papers, so they are not WARN.
+    stage4 = _cite_run(*(_authored(11 + i, text) for i, text in enumerate(_OTHERS)))
+    assert [severity for severity, _ in _attribution(stage4, *_OTHERS)] == ["INFO"]
+
+
+def test_owner_attribution_heading_names_acknowledgements_too():
+    hierarchy = ["Bibliography", "Publications citing my work"]
+    stage4 = _cite_run(_authored(11, _OTHERS[0], hierarchy=hierarchy))
+    assert _attribution(stage4, _OTHERS[0])[0][0] == "WARN"
+
+
+def test_owner_attribution_a_credited_citation_ends_a_run():
+    stage4 = _cite_run(_authored(11, _OTHERS[0]), _authored(12, _OWNED),
+                       _authored(13, _OTHERS[1]), _authored(14, _OTHERS[2]))
+    assert _runs(_attribution(stage4, _OTHERS[0], _OWNED, *_OTHERS[1:])) == ["1 in 11-11", "2 in 13-14"]
+
+
+def test_owner_attribution_quiet_when_every_citation_credits_the_owner():
+    stage4 = _cite_run(_authored(11, _OWNED))
+    assert _attribution(stage4, _OWNED) == []
+
+
+@pytest.mark.parametrize("credit", [
+    "Thornqvist R",  # one letter off a long surname: EQADVR 147 misspells it
+    "Garrow G, Thornquist R",
+])
+def test_owner_attribution_counts_the_owner_named_in_the_source(credit):
+    citation = f"{credit}. Silt plumes of a model delta. Synth Geol. 2010;4:30-39."
+    stage4 = _cite_run(_publication(11, citation, authors="Garrow G"))
+    assert _attribution(stage4, citation) == []
+
+
+def test_owner_attribution_an_elided_citation_joins_a_run_but_cannot_start_one():
+    # ECXGAT 2162 (an "et al." citation) sits inside the acknowledgements
+    # run; a lone "et al." citation may hide the owner (ECXGAT 627).
+    elided = "Nettleford N, et al. Loess deposition in a wind tunnel. Synth Aeol. 2005;2:1-8."
+    alone = _cite_run(_authored(11, elided))
+    assert _attribution(alone, elided) == []
+    within = _cite_run(_authored(11, _OTHERS[0]), _authored(12, elided), _authored(13, _OTHERS[1]))
+    assert _runs(_attribution(within, _OTHERS[0], elided, _OTHERS[1])) == ["3 in 11-13"]
+
+
+@pytest.mark.parametrize(("entry", "line"), [
+    # S9: a reporter stage 4 filed as the author of an interview (ECXGAT 1546).
+    (_authored(12, "Quarrie Q. Interview on sediment cores. Synth Daily News. 2012.", code="S9"),
+     "Quarrie Q. Interview on sediment cores. Synth Daily News. 2012."),
+    # A group credit the owner may belong to, outside stage 4's authors
+    # (RLADNC's trial papers).
+    (_publication(12, "Quarrie Q, for the Delta Study Group. Ten-year delta outcomes. "
+                      "Synth Geol. 2011;9:1-9.", authors="Quarrie Q"),
+     "Quarrie Q, for the Delta Study Group. Ten-year delta outcomes. Synth Geol. 2011;9:1-9."),
+    # An agency as author (MVUREJ 971).
+    (_authored(12, "National Office of Synthetic Surveys. Delta survey report. Larkspur: 2013."),
+     "National Office of Synthetic Surveys. Delta survey report. Larkspur: 2013."),
+    # No stage-4 authors at all.
+    (_publication(12, "Delta survey report of a model estuary, Larkspur, 2013.", code="S5"),
+     "Delta survey report of a model estuary, Larkspur, 2013."),
+])
+def test_owner_attribution_skips_what_it_cannot_judge_without_breaking_the_run(entry, line):
+    stage4 = _cite_run(_authored(11, _OTHERS[0]), entry, _authored(13, _OTHERS[1]))
+    assert _runs(_attribution(stage4, _OTHERS[0], line, _OTHERS[1])) == ["2 in 11-13"]
+
+
+def test_owner_attribution_judges_only_citations_that_rendered_in_the_bibliography():
+    stage4 = _cite_run(_authored(11, _OTHERS[0]))
+    appendix = [("p", "T. APPENDIX"), ("p", f"1. {_OTHERS[0]}")]
+    assert lint_owner_attribution(stage4, appendix) == []
+
+
+@pytest.mark.parametrize("owner", [None, {}, {"last_name": "Wu"}])
+def test_owner_attribution_judges_no_citation_without_a_usable_owner_surname(owner):
+    stage4 = _cite_run(_authored(11, _OTHERS[0]), owner=owner)
+    assert _attribution(stage4, _OTHERS[0]) == []
+
+
+_STAFF_PATH = ["Laboratory Staff: Students, Post-docs and Technical Staff", "C. Technical Staff"]
+
+
+def _mentee(idx, text, code="N3B", hierarchy=None):
+    return _line_entry(idx, text, code=code, hierarchy=hierarchy)
+
+
+def test_owner_attribution_warns_on_mentees_under_a_staff_heading():
+    # IZIXVF 284-305: a lab's technicians coded as past mentees (N3B) and
+    # mentees (N3); the post-doctoral fellows under the same parent are mentees.
+    postdocs = ["Laboratory Staff: Students, Post-docs and Technical Staff", "B. Post-doctoral Fellows"]
+    stage4 = _cite_run(_mentee(280, "23. Ivy Example. Now a research scientist.", hierarchy=postdocs),
+                       _mentee(284, "1. Ada Example, Laboratory technician", hierarchy=_STAFF_PATH),
+                       _mentee(285, "2. Ben Example, Laboratory technician", hierarchy=_STAFF_PATH),
+                       _mentee(299, "16. Cy Example, Lab manager", code="N3", hierarchy=_STAFF_PATH))
+    findings = lint_owner_attribution(stage4, [])
+    assert [(f["severity"], f["message"]) for f in findings] == [(
+        "WARN", "mentee_under_non_mentee_heading: 3 entries coded N3, N3B as the CV owner's "
+        "mentees under 'C. Technical Staff', which names reviewers or staff, not trainees")]
+    assert findings[0]["evidence"] == [
+        "entry 284 (N3B): 1. Ada Example, Laboratory technician",
+        "entry 285 (N3B): 2. Ben Example, Laboratory technician",
+        "entry 299 (N3): 16. Cy Example, Lab manager"]
+
+
+def test_owner_attribution_reads_a_lead_line_when_the_heading_is_lost():
+    # ECXGAT 1288-1299: under the one synthetic heading, an undated lead line
+    # (coded Q3) heads two proposals coded P and two coded N3B.
+    path = ["Personal Data"]
+    proposal = ("Example Applicant – A long proposal title about synthetic sediment cores "
+                "and their modelling across seasons (12 Dec-2019)")
+    stage4 = _cite_run(_line_entry(1288, "Example University Internal Grant Review (partial list)",
+                                   code="Q3", hierarchy=path),
+                       _line_entry(1289, proposal, code="P", hierarchy=path),
+                       _mentee(1293, proposal, hierarchy=path),
+                       _mentee(1295, proposal, hierarchy=path))
+    assert _attribution(stage4) == [(
+        "WARN", "mentee_under_non_mentee_heading: 2 entries coded N3B as the CV owner's mentees "
+        "under 'Example University Internal Grant Review (partial list)', which names "
+        "reviewers or staff, not trainees")]
+
+
+@pytest.mark.parametrize("heading", [
+    "Postdoctoral fellows and staff",  # names trainees too
+    "Thesis reviewer",                 # section_consistency's N3A/N3B shape
+    "Graduate students supervised",
+])
+def test_owner_attribution_quiet_under_a_heading_naming_trainees(heading):
+    stage4 = _cite_run(_mentee(5, "Ada Example, 2019", hierarchy=["Mentoring", heading]))
+    assert _attribution(stage4) == []
+
+
+@pytest.mark.parametrize("lead", [
+    "Grant review panel, 2018",          # dated: a record, not a lead line
+    "1. Grant review panel",             # a list item
+])
+def test_owner_attribution_a_dated_or_numbered_line_leads_nothing(lead):
+    path = ["Mentoring"]
+    stage4 = _cite_run(_line_entry(4, lead, code="Q3", hierarchy=path),
+                       _mentee(5, "Ada Example, PhD 2019", hierarchy=path))
+    assert _attribution(stage4) == []
+
+
+def test_owner_attribution_a_mentee_entry_leads_nothing():
+    # A short undated mentee line naming a staff title is a mentee, not a
+    # heading over the mentees after it.
+    path = ["Mentoring"]
+    stage4 = _cite_run(_mentee(4, "Ada Example, research staff", hierarchy=path),
+                       _mentee(5, "Ben Example, PhD 2019", hierarchy=path))
+    assert _attribution(stage4) == []
+
+
+def test_owner_attribution_a_lead_line_stays_under_its_own_heading():
+    stage4 = _cite_run(_line_entry(4, "Grant review panel", code="Q3", hierarchy=["Service"]),
+                       _mentee(5, "Ada Example, PhD 2019", hierarchy=["Mentoring"]))
+    assert _attribution(stage4) == []
 
 
 # ------------- lint 14ab: a field that identifies a citation, left out of its line
@@ -3933,7 +4424,9 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
     """Both read quality_score.stage4_group_failures, so the lint fires exactly
     when the cap does -- the doctor reports the gate, not a second definition."""
     from unified_pipeline.quality_score import (
-        STAGE4_GROUP_FAILURE_CAP, score_stage4_group_failures)
+        STAGE4_GROUP_FAILURE_CAP,
+        score_stage4_group_failures,
+    )
 
     failed = {"entries": [_failed_group_entry("P", True)], "stats": {"failed_batches": 1}}
     clean = {"entries": [{"taxonomy_code": "P", "extraction_success": True}]}
@@ -3942,6 +4435,45 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
         _fraction, _detail, cap = score_stage4_group_failures(tmp_path)
         assert (cap == STAGE4_GROUP_FAILURE_CAP) is expect_flag
         assert bool(lint_stage4_group_failures(artifact)) is expect_flag
+
+
+# --------------------- #1243: stage4_unplaced_items (WARN) -------------------
+#
+# Stage 4 stamps every entry of a 2+-entry group whose reply numbered an item
+# past the group's entries (#1417); synthetic entries carry that stamp.
+
+def _stamped_entry(code, start, unplaced):
+    from unified_pipeline.stage4.schemas import STAGE4_UNPLACED_ITEMS_KEY
+
+    return {"taxonomy_code": code, "element_idx_start": start, "extraction_success": True,
+            "extracted_fields": {"note": "x"}, STAGE4_UNPLACED_ITEMS_KEY: unplaced}
+
+
+def test_stage4_unplaced_items_warns_once_and_names_each_code_and_its_entries():
+    stage4 = {"entries": [_stamped_entry("Q1", 10, 2), _stamped_entry("Q1", 14, 2),
+                          _stamped_entry("O", 30, 1), _stamped_entry("O", 31, 1),
+                          {"taxonomy_code": "P", "element_idx_start": 40}]}
+    (finding,) = lint_stage4_unplaced_items(stage4)
+    assert finding["lint"] == "stage4_unplaced_items"
+    assert finding["severity"] == "WARN"
+    assert "left 3 reply item(s) out of 2 taxonomy group(s)" in finding["message"]
+    assert finding["evidence"] == ["O: 1 item(s) left out; entries 30, 31",
+                                   "Q1: 2 item(s) left out; entries 10, 14"]
+
+
+def test_stage4_unplaced_items_quiet_on_a_clean_or_older_artifact():
+    assert lint_stage4_unplaced_items({"entries": [{"taxonomy_code": "P"}]}) == []
+    assert lint_stage4_unplaced_items({"entries": [_stamped_entry("P", 1, 0)]}) == []
+    assert lint_stage4_unplaced_items({}) == []
+
+
+def test_stage4_unplaced_items_runs_from_the_registry(tmp_path):
+    stage_dir = tmp_path / "stage_4_field_extraction"
+    stage_dir.mkdir()
+    (stage_dir / "ABCDEF_fields.json").write_text(json.dumps(
+        {"entries": [_stamped_entry("Q1", 10, 2), _stamped_entry("Q1", 14, 2)]}))
+    report = run_doctor(tmp_path, "ABCDEF")
+    assert [f["lint"] for f in report["findings"]].count("stage4_unplaced_items") == 1
 
 
 # --------------------- #1174: llm_fallback_served (WARN, caps nothing) -------
@@ -4249,14 +4781,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (57), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (69), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 55
+    assert len(payload["findings"]) == 67
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -4321,6 +4853,11 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
         "entries": [
             _entry("Mentored an invented student", taxonomy_code="N3", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
+            # #1256: the yield counts text in the parent, not tags. Of these
+            # two fragments of the entry above, only the first is in it.
+            _entry("A grant tail", taxonomy_code="M2A", start=3),
+            _entry("tail", taxonomy_code="M2A", start=4, is_fragment=True, fragment_of=2),
+            _entry("Lost line", taxonomy_code="M2A", start=5, is_fragment=True, fragment_of=2),
         ],
         "meta": {"stats": {
             "failed_batches": 41, "llm_batches": 83,
@@ -4352,13 +4889,13 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     metrics = _build_metrics(views)
 
     assert metrics["appendix_entries"] == 2
-    assert metrics["appendix_share"] == round(2 / 2, 4)
+    assert metrics["appendix_share"] == round(2 / 5, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
     assert metrics["unrouted_code_entries"] == {"N3": 1}  # N3: #529 routes N2, #291 routes M4
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
-    assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert metrics["fragment_reconnection_yield"] == round(1 / 2, 4)  # not the stats' 3 / 7
     assert metrics["total_post_corrections"] == 5
     assert "source_coverage_pct" in metrics
 
@@ -4512,9 +5049,10 @@ def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
 
 
 def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
-    """#666: the INFO tier needs the rendered document. `dedup_drops` is
-    registered with `blocks` optional; dropping that wiring leaves the WARN
-    tier working and the INFO tier silently dead, so drive run_doctor()."""
+    """#666: a journal-name drop is read against the rendered document.
+    `dedup_drops` is registered with `blocks` optional; dropping that wiring
+    leaves the coverage test working and the name tests silently dead, so
+    drive run_doctor(). Another journal's name, off the page, is a WARN."""
     root = _build_clean_run(tmp_path)
     _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
                  {"document_uid": _UID, "warnings": [],
@@ -4526,7 +5064,7 @@ def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
                        "kept_fields": {"journal_name": "European Example Optics"}}]})
     payload = run_doctor(root, _UID)
     drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
-    assert [f["severity"] for f in drops] == ["INFO"]
+    assert [f["severity"] for f in drops] == ["WARN"]
 
 
 def test_run_doctor_wires_stage_5d_into_dedup_drops_entry_index(tmp_path):
@@ -4907,12 +5445,23 @@ def test_span_count_prevalence_is_the_measured_corpus_fraction():
     assert LINT_PREVALENCE["span_count"] == round(64 / 245, 3)
 
 
+def test_dedup_drops_prevalence_is_the_measured_corpus_fraction():
+    """Measured 2026-10-08 (#666) over 227 runs: 38 YUYVIG live, 63 EBYSBC
+    farm live, 126 wave-1 farm re-rendered at dev (one fire per run at any
+    severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["dedup_drops"] == round(60 / 227, 3)
+
+
 def test_run_doctor_hands_role_consistency_the_rendered_grant_tables(tmp_path):
     """The role_consistency row must hand the lint the docx (#1403, EOAHMI
     JIJRSN 516): a grant table whose role says PI and whose PI cell is empty
     reaches the report as a WARN. Invented values."""
     from unified_pipeline.stage6.sections.research_support import (
-        PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
+        PI_NAME_LABEL,
+        PROJECT_TITLE_LABEL,
+        YOUR_ROLE_LABEL,
+    )
     root = _build_clean_run(tmp_path)
     fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
     data = json.loads(fields.read_text())
@@ -5303,6 +5852,29 @@ def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     assert _find_source(tmp_path, "web05").name == "web05.docx"
 
 
+def test_artifact_layout_is_where_the_doctor_finds_each_artifact(tmp_path):
+    """#1654: a run assembled from its stored files at artifact_layout's
+    paths is read in full, artifact by artifact."""
+    from unified_pipeline.run_doctor import _ARTIFACTS, _find_artifact, artifact_layout
+
+    layout = artifact_layout(tmp_path, "web05")
+    assert set(layout) == set(_ARTIFACTS)
+    for key, path in layout.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        assert _find_artifact(tmp_path, "web05", key) == path
+
+
+def test_document_independent_lints_are_those_reading_no_stage6_docx():
+    """#1654: what a corrected copy's re-run cannot change."""
+    from unified_pipeline.run_doctor import DOCUMENT_INDEPENDENT_LINTS
+
+    assert {"llm_fallback_served", "stage_failure_recorded", "owner_contact_missing",
+            "pipeline_errors_present", "wrong_start_date"} <= DOCUMENT_INDEPENDENT_LINTS
+    # blocks, an optional docx view, a table_rows view, and the docx-path gate
+    assert not {"output_hygiene", "dedup_drops", "table_shape", "no_output"} & DOCUMENT_INDEPENDENT_LINTS
+
+
 def test_artifacts_are_named_tuples_readable_by_attribute():
     """_ARTIFACTS values are ArtifactSpec, not bare positional tuples -- so a
     call site can read .stage_dir/.suffix by name instead of by position."""
@@ -5455,6 +6027,7 @@ _RENDER_OVERLAP_MODULES = (
     "unified_pipeline.doctor.shared",
     "unified_pipeline.doctor.lints.render",
     "unified_pipeline.doctor.lints.extraction",
+    "unified_pipeline.doctor.docx_diff",
     "unified_pipeline.run_doctor",
 )
 
@@ -7312,3 +7885,168 @@ def test_group_header_context_reads_a_lead_line_that_is_all_role_as_a_record():
     entries = _lead_block("Chair, Example Campaign", code="O",
                           leadership_role="Chair, Example Campaign")
     assert _grp_hits(entries, [[["Chair, Example Campaign", ""]]]) == []
+
+
+# licensure_fallback_truncated (#1576, YUYVIG HXBPCT 145-155). Invented
+# credentials: an F1 entry with no state and no number renders its raw text
+# in the Licensure State cell, which a 100-character cap used to cut.
+_LIC_HEADER = ["State", "Number", "Date of issue (mm/dd/yyyy)",
+               "Date of last registration (mm/dd/yyyy) – (mm/dd/yyyy)"]
+_LIC_TEXT = ("Certified in Example Widget Laser Surgery for Low Widget Index, "
+             "High Widget Index, Hyperwidgetic Index, Blend Zone and Mixed Widgets, "
+             "Gadget Zone and Example Sprocket Alignment 2011")
+_LIC_CUT = 100
+
+
+def _lic_entry(idx, text, code="F1", **fields):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "extracted_fields": {"state_country": None, "license_number": None, **fields}}
+
+
+def _lic_hits(entries, rows, header=_LIC_HEADER):
+    return lint_licensure_fallback_truncated({"entries": entries}, [[header, *rows]])
+
+
+def _lic_render(tmp_path, entries):
+    """Stage 6's own licensure table for `entries`, read back from the docx."""
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_licensure(entries)
+    path = tmp_path / "licensure.docx"
+    gen.doc.save(str(path))
+    return read_docx_table_rows(str(path))
+
+
+def test_licensure_fallback_truncated_is_quiet_on_stage_6s_whole_render(tmp_path):
+    """The renderer keeps the whole raw text (#1605), so its own table
+    passes: the lint is a regression guard, not a live finding."""
+    entries = [_lic_entry(145, _LIC_TEXT)]
+    tables = _lic_render(tmp_path, entries)
+    assert any(row[0] == _LIC_TEXT for table in tables for row in table)
+    assert lint_licensure_fallback_truncated({"entries": entries}, tables) == []
+
+
+def test_licensure_fallback_truncated_warns_on_a_render_cut_at_the_old_cap(tmp_path):
+    """The same render with its State cell cut to the old 100 characters."""
+    entries = [_lic_entry(145, _LIC_TEXT)]
+    tables = [[[_LIC_TEXT[:_LIC_CUT] if cell == _LIC_TEXT else cell for cell in row]
+               for row in table] for table in _lic_render(tmp_path, entries)]
+    assert lint_licensure_fallback_truncated({"entries": entries}, tables) == [{
+        "lint": "licensure_fallback_truncated", "severity": "WARN",
+        "message": "entry 145 (F1): the Licensure State cell shows 100 of the entry's "
+                   f"{len(_LIC_TEXT)} characters, and the rest is in no licence row: "
+                   "'ex, Blend Zone and Mixed Widgets, Gadget Zone and Example Sp'",
+        "evidence": [_LIC_TEXT[:_LIC_CUT]],
+        "status": "ran", "reason": ""}]
+
+
+def test_licensure_fallback_truncated_names_each_cut_entry():
+    other = _LIC_TEXT.replace("Widget Laser", "Gadget Laser")
+    entries = [_lic_entry(145, _LIC_TEXT), _lic_entry(147, other)]
+    rows = [[_LIC_TEXT[:_LIC_CUT], "", "", ""], [other[:_LIC_CUT], "", "", ""]]
+    assert [hit["message"].split(":")[0] for hit in _lic_hits(entries, rows)] == [
+        "entry 145 (F1)", "entry 147 (F1)"]
+
+
+def test_licensure_fallback_truncated_reads_a_line_break_as_whitespace():
+    """A two-line raw text renders with a break the docx reads back as a
+    newline: the cell holds it whole."""
+    text = "Certified in Example Widget Surgery\nAdvanced Example Gadget Course 2012"
+    assert _lic_hits([_lic_entry(145, text)], [[text.replace("\n", " \n"), "", "", ""]]) == []
+
+
+def test_licensure_fallback_truncated_quotes_a_cut_multi_line_text_as_one_line():
+    """Cut at a word boundary after a line break: the counts and the lost
+    tail are read off the text with its whitespace collapsed."""
+    text = "Certified in Example Widget Surgery \nAdvanced Example Gadget Course  and Review 2012"
+    cell = "Certified in Example Widget Surgery \nAdvanced Example"
+    [hit] = _lic_hits([_lic_entry(145, text)], [[cell, "", "", ""]])
+    assert hit["message"] == (
+        "entry 145 (F1): the Licensure State cell shows 52 of the entry's 82 characters, "
+        "and the rest is in no licence row: 'Gadget Course and Review 2012'")
+    assert hit["evidence"] == [cell]
+
+
+def test_licensure_fallback_truncated_spares_a_shorter_entry_shown_whole():
+    """One credential's text opens another's: its own whole cell is no cut of
+    the longer one, which renders nowhere (another lint's loss)."""
+    short = "Certified in Example Widget Laser Surgery"
+    entries = [_lic_entry(145, short), _lic_entry(147, _LIC_TEXT)]
+    assert _lic_hits(entries, [[short, "", "", ""]]) == []
+
+
+def test_licensure_fallback_truncated_reads_only_numberless_rows_with_a_state():
+    """A row with a number is a structured licence, not the raw-text
+    fallback, and an empty State cell is the start of nothing."""
+    rows = [[_LIC_TEXT[:_LIC_CUT], "123456", "", ""], ["", "", "", ""], [_LIC_TEXT[:_LIC_CUT]]]
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT)], rows) == []
+
+
+def test_licensure_fallback_truncated_reads_only_the_licensure_table():
+    row = [_LIC_TEXT[:_LIC_CUT], "", "", ""]
+    stage4 = {"entries": [_lic_entry(145, _LIC_TEXT)]}
+    assert lint_licensure_fallback_truncated(
+        stage4, [[], [["Name of award", "Organization", "Date awarded"], row], [row]]) == []
+
+
+def test_licensure_fallback_truncated_reads_only_f1_entries_without_state_or_number():
+    rows = [[_LIC_TEXT[:_LIC_CUT], "", "", ""]]
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT, code="F2")], rows) == []
+    assert _lic_hits([_lic_entry(145, ""), _lic_entry(147, _LIC_TEXT, code="F2")], rows) == []
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT, license_number="123456")], rows) == []
+    assert _lic_hits([_lic_entry(145, _LIC_TEXT, state_country="Example State")], rows) == []
+
+
+# glyph_field (#1584, SXPHOG-02 shape): a source list glyph rendered as a
+# field. Invented rows.
+
+_GLYPH_HEADER = ["Organization", "Role", "Dates"]
+
+
+def _glyph_table(*rows):
+    return [[_GLYPH_HEADER, *rows]]
+
+
+@pytest.mark.parametrize("glyph", ["o", "\u25e6", "\u2022", "-", "\u2013", "\uf0b7", " o ", "--"])
+def test_glyph_field_warns_on_a_rendered_glyph_cell(glyph):
+    tables = _glyph_table(["Fictional Society", "Treasurer", "2001"],
+                          [glyph, "Secretary", "2020-2021"])
+    assert lint_glyph_field(tables, None) == [{
+        "lint": "glyph_field", "severity": "WARN",
+        "message": "1 rendered table row(s) hold a cell that is only a list glyph -- "
+                   "a source bullet read as a field value",
+        "evidence": [f"{glyph.strip()} | Secretary | 2020-2021"],
+        "status": "ran", "reason": ""}]
+
+
+@pytest.mark.parametrize("cell", [
+    "", "UN", "x", "O", "oo o", "%", "|", "3", "ooo", "o Fictional Society", "\u2022\u2022\u2022"])
+def test_glyph_field_is_silent_on_a_value_or_an_empty_cell(cell):
+    assert lint_glyph_field(_glyph_table([cell, "Secretary", "2020"]), None) == []
+
+
+def test_glyph_field_is_one_finding_for_the_run():
+    tables = _glyph_table(["o", "Secretary", "2020"], ["o", "Treasurer", "2021"])
+    [finding] = lint_glyph_field([*tables, *tables], None)
+    assert finding["message"].startswith("4 rendered table row(s)")
+
+
+def _glyph_stage4(value):
+    return {"entries": [{"taxonomy_code": "Q1", "element_idx_start": 533,
+                         "extracted_fields": {"organization": value, "role": "Secretary"}}]}
+
+
+def test_glyph_field_is_info_for_a_stage_4_glyph_no_cell_shows():
+    [finding] = lint_glyph_field(_glyph_table(["", "Secretary", "2020"]), _glyph_stage4("o"))
+    assert finding["severity"] == "INFO"
+    assert finding["evidence"] == ["entry 533 (Q1): organization = 'o'"]
+
+
+def test_glyph_field_reports_the_rendered_cell_over_the_stage_4_field():
+    [finding] = lint_glyph_field(_glyph_table(["o", "Secretary", "2020"]), _glyph_stage4("o"))
+    assert finding["severity"] == "WARN"
+
+
+def test_glyph_field_is_silent_on_a_stage_4_value():
+    assert lint_glyph_field(_glyph_table(), _glyph_stage4("Fictional Society")) == []

@@ -8,16 +8,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import User
-from app.schemas import StepDetail, LogEntry
-from app.auth import can_view_all_runs, get_current_user, require_view_all_runs, visible_cost
+from app.auth import (
+    can_view_all_runs,
+    get_current_user,
+    require_view_all_runs,
+    visible_cost,
+)
 from app.config_loader import get_config
+from app.database import get_db
+from app.errors import bad_request, forbidden, internal_error, not_found
+from app.models import User
+from app.schemas import LogEntry, StepDetail
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.errors import bad_request, not_found, internal_error, forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -104,15 +109,14 @@ def get_data_file(
 
     check_run_access(run_id, current_user, db, read_only=True)
 
-    # Stage JSON files are internal pipeline artifacts -- restrict to admins and
-    # staff (can_view_all_runs).
-    # The final .docx (and any other non-JSON output) stays available to the
-    # run owner. This single gate deliberately sits ABOVE every branch below --
+    # Stage JSON files are internal pipeline artifacts -- restrict them to
+    # admins and staff (can_view_all_runs). The final .docx, its review copy
+    # (#1591) and any other output stay available to the run owner. This single gate deliberately sits ABOVE every branch below --
     # before the storage short-circuit AND before `preview` is ever read -- so it
     # covers the S3 redirect, the download and the ?preview=true JSON viewer
     # alike. Do not move it into a branch or duplicate it per-branch.
-    if artifact_service.is_json_artifact(filename) and not can_view_all_runs(current_user):
-        raise forbidden("Admin or staff access required to access stage JSON.")
+    if artifact_service.is_staff_only_artifact(filename) and not can_view_all_runs(current_user):
+        raise forbidden("Admin or staff access required to access this file.")
 
     resolved = artifact_service.resolve_artifact(db, run_id, filename)
     download_name = resolved.basename

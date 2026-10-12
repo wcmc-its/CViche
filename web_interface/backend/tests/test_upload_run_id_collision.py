@@ -16,11 +16,11 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import os
 import logging
+import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,12 +28,12 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import object_session
 
+from app.api import upload as upload_module
+from app.api.upload import generate_run_id
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.storage.base import StorageError, StorageKeyExists, StorageKeyNotFound
 from app.storage.local_storage import LocalRunStorage
-from app.api import upload as upload_module
-from app.api.upload import generate_run_id
 
 # Threads racing one exclusive create. More than a couple, so a non-atomic
 # implementation loses the race reliably rather than occasionally.
@@ -57,7 +57,7 @@ def _make_user(db, email="collision@example.com"):
 
 
 def _auth(client, user):
-    from app.auth import create_session_cookie, COOKIE_NAME
+    from app.auth import COOKIE_NAME, create_session_cookie
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 
@@ -1112,7 +1112,7 @@ def test_restart_preserves_all_fields_on_child(db, tmp_path):
     upload_dir.mkdir()
     (upload_dir / "ORIGP1.docx").write_bytes(b"PK\x03\x04fake-restarted-docx")
 
-    before = datetime.now()
+    before = datetime.now(timezone.utc)
     with _restart_env(original, storage, upload_dir) as runs_api:
         result = _restart(runs_api, "ORIGP1", db, user)
 

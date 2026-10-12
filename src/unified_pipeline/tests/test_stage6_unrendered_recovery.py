@@ -34,18 +34,19 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.stage_6_word_template import (  # noqa: E402
-    WCMTemplateGenerator,
-    _record_lines,
-    run_stage6,
-    segment_already_rendered,
-)
+from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     _record_rendered,
     _whole_record_rendered,
     segments_cover_source,
+)
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    WCMTemplateGenerator,
+    _record_lines,
+    run_stage6,
+    segment_already_rendered,
 )
 
 
@@ -952,8 +953,10 @@ _PRICED_LLM_RESULT = {"content": '{"scope": "National"}', "cost": 0.125,
 
 @pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
 def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
-    """#1177: stage 6 reported no cost at all; both of its call_llm sites now
-    feed the generator's LlmUsage."""
+    """#1177: stage 6 reported no cost at all; every one of its call_llm sites
+    now feeds the generator's LlmUsage. The scope decision makes two calls when
+    the activity names no reach of its own (#1579): the named-reach step, then
+    the distance step."""
     gen = _generator()
     gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
                                                   "city": "Springfield", "state": "ZZ"}}
@@ -966,11 +969,12 @@ def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
     else:
         gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
 
-    assert gen.llm_usage.cost == pytest.approx(0.125)
-    assert gen.llm_usage.prompt_tokens == 11
-    assert gen.llm_usage.completion_tokens == 5
-    assert gen.llm_usage.cache_read_tokens == 2
-    assert gen.llm_usage.cache_write_tokens == 1
+    calls = 2 if call == "geographic_scope" else 1
+    assert gen.llm_usage.cost == pytest.approx(0.125 * calls)
+    assert gen.llm_usage.prompt_tokens == 11 * calls
+    assert gen.llm_usage.completion_tokens == 5 * calls
+    assert gen.llm_usage.cache_read_tokens == 2 * calls
+    assert gen.llm_usage.cache_write_tokens == 1 * calls
 
 
 def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):
@@ -994,21 +998,103 @@ def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):
     assert seen["llm_usage"] is usage
 
 
-def test_remaining_appendix_intro_is_the_shared_accurate_banner():
-    # #534: the bullet writer creates T. APPENDIX with the same one-line intro
-    # as _fill_appendix -- italic, and never claiming the entries appear
-    # nowhere else (stage 6 cannot prove that).
-    from unified_pipeline.stage6.sections.appendix import APPENDIX_INTRO_TEXT
+def test_remaining_appendix_opens_with_the_shared_cviche_note_box():
+    # #534/#1388: the bullet writer creates T. APPENDIX with the same CViche
+    # note box as _fill_appendix -- never claiming the entries appear nowhere
+    # else (stage 6 cannot prove that) -- and generate() restates its count.
+    from unified_pipeline.stage6.formatting import is_cviche_box
+    from unified_pipeline.stage6.sections.appendix import (
+        APPENDIX_NOTE_TITLE,
+        appendix_note_text,
+    )
 
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     gen._add_remaining_to_appendix([("Example Leftover Committee, 2019-2021", "T", 0.0)])
+    [box] = [t for t in gen.doc.tables if is_cviche_box(t)]
+    assert [p.text for p in box.cell(0, 0).paragraphs] == [APPENDIX_NOTE_TITLE, appendix_note_text(1)]
+    # The box sits right after the heading, before the bullet.
+    body = list(gen.doc.element.body)
+    heading = next(i for i, el in enumerate(body) if el.tag.endswith("}p") and
+                   "".join(t.text or "" for t in el.iter(qn("w:t"))) == "T. APPENDIX")
+    assert body[heading + 1] is box._tbl
 
-    paragraphs = gen.doc.paragraphs
-    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
-    intro = paragraphs[header + 1]
-    assert intro.text == APPENDIX_INTRO_TEXT
-    assert all(run.italic for run in intro.runs)
+    # No blank paragraph around the box: the heading carries the space above
+    # it and the first line after it the space below (#1388).
+    assert body[heading].find(qn("w:pPr")).find(qn("w:spacing")).get(qn("w:after")) == "120"
+    after = body[heading + 2]
+    assert "".join(t.text or "" for t in after.iter(qn("w:t"))) == "Example Leftover Committee, 2019-2021"
+    assert after.find(qn("w:pPr")).find(qn("w:spacing")).get(qn("w:before")) == "120"
+
+    gen._set_appendix_note_count(7)
+    assert box.cell(0, 0).paragraphs[1].text == appendix_note_text(7)
+
+
+def test_the_appendix_note_counts_numbered_lines_and_every_recovered_bullet():
+    """#1388: the box is written by the first writer; the reconsider pass and
+    the unrendered-record recovery add bullets after it, and the box must say
+    the total (the sidecar's appendix_diversion counts sum to the same)."""
+    from unified_pipeline.stage6.formatting import is_cviche_box
+    from unified_pipeline.stage6.sections.appendix import (
+        RecoveredLine,
+        appendix_note_text,
+    )
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen._write_appendix_header(1)
+    gen._reconsider_appendix_entries = lambda: [RecoveredLine("T", "a"), RecoveredLine("T", "b")]
+    gen._recover_unrendered_records = lambda entries_by_code, cv_owner: [RecoveredLine("D1", "c")]
+    recovered = gen._recover_appendix_lines([{"text": "x", "taxonomy_code": "T"}], {}, None)
+    assert len(recovered) == 3
+    [box] = [t for t in gen.doc.tables if is_cviche_box(t)]
+    assert box.cell(0, 0).paragraphs[1].text == appendix_note_text(4)
+
+
+def _withheld_generator():
+    from unified_pipeline.stage6.normalization.pii import WithheldItem
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen._pii_result.withheld = [WithheldItem("DEA registration number", "Personal Data", 0)]
+    gen._reconsider_appendix_entries = lambda: []
+    return gen
+
+
+def _appendix_note(gen):
+    from unified_pipeline.stage6.formatting import is_cviche_box
+
+    [box] = [t for t in gen.doc.tables if is_cviche_box(t)]
+    return box.cell(0, 0).paragraphs[1].text
+
+
+def test_an_appendix_holding_only_the_withheld_notice_states_no_entry_count():
+    """#1582: with nothing written or recovered, the withheld notice alone
+    opens the Appendix; it is not an entry, so the box restated a count of 0
+    as "These 0 entries ..." above no entries. It now says what is there."""
+    from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
+    from unified_pipeline.stage6.sections.appendix import APPENDIX_NOTE_WITHHELD_ONLY_TEXT
+
+    gen = _withheld_generator()
+    recovered = gen._recover_appendix_lines([], {}, None)
+
+    assert recovered == []
+    note = _appendix_note(gen)
+    assert note == APPENDIX_NOTE_WITHHELD_ONLY_TEXT
+    assert "0 entries" not in note
+    assert PII_REDACTED_NOTICE in [p.text for p in gen.doc.paragraphs]
+
+
+def test_the_withheld_notice_is_not_counted_beside_a_real_appendix_entry():
+    """#1582: the notice beside one numbered line keeps the one-entry wording."""
+    from unified_pipeline.stage6.sections.appendix import appendix_note_text
+
+    gen = _withheld_generator()
+    gen._write_appendix_header(1)
+    gen._recover_appendix_lines([{"text": "x", "taxonomy_code": "T"}], {}, None)
+
+    assert _appendix_note(gen) == appendix_note_text(1)
+    assert _appendix_note(gen).startswith("This entry from your original CV")
 
 
 # ------------------------------------ #530: foreign scaffolding never recovered
@@ -1052,20 +1138,52 @@ def _t_entry():
     }
 
 
-def test_t_fused_entry_rows_cut_by_the_appendix_cap_are_recovered():
-    """`_fill_appendix` caps a body at APPENDIX_MAX_CHARS, so the rows after the
-    cap reach no page; the recovery pass, no longer skipping T, writes them."""
+def _appendix_count(gen, text):
+    """How many paragraphs of the document carry *text*."""
+    return sum(text in p.text for p in gen.doc.paragraphs)
+
+
+def test_t_fused_entry_rows_past_the_cap_render_once_in_the_appendix():
+    """`_fill_appendix` renders a T body whole (#1230), so every row reaches
+    the page and the recovery pass finds nothing to re-add."""
     gen = _generator()
     entry = _t_entry()
+    assert len(entry["text"]) > 200
     gen._fill_appendix([entry])
-    capped = "\n".join(p.text for p in gen.doc.paragraphs)
-    assert _T_ROWS[2] not in capped  # the cap really cut it
-
     gen._recover_unrendered_records({"T": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+    assert all(_appendix_count(gen, row.split(" | ")[0]) == 1 for row in _T_ROWS)
 
-    bullets = _bulleted_texts(gen.doc.paragraphs)
-    assert _T_ROWS[2] in bullets
-    assert gen.stats["unrendered_records_recovered"] >= 1
+
+def test_t_single_line_over_the_cap_is_not_printed_twice():
+    """EBYSBC XELRLZ shape: a 302-character T footnote printed cut as a
+    numbered item, then again whole as a recovered bullet (#1230)."""
+    footnote = ("Synthetic footnote 2004: the zeolite appointment above was held "
+                "jointly with the Marigold Institute, Example City, and the role "
+                "carried teaching duties in quartzite petrology, field courses in "
+                "obsidian sites, and a review panel seat for the Example Society.")
+    assert len(footnote) > 200
+    entry = {**_t_entry(), "text": footnote, "element_type": "paragraph"}
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    assert _appendix_count(gen, footnote) == 1
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_t_undated_lines_and_near_duplicate_rows_past_the_cap_are_kept():
+    """Undated non-record lines (a duty bullet) and sibling rows that differ
+    only in a short word or a digit reach the page whole (#1230)."""
+    lines = ["Synthetic duty: directed the zeolite workgroup and its quarterly reviews",
+             "Member | Marigold Panel A | Example Society",
+             "Member | Marigold Panel B | Example Society",
+             "Member | Marigold Panel 7 | Example Society",
+             "Synthetic note: obsidian outreach was shared with the nasturtium team"]
+    entry = {**_t_entry(), "text": "\n".join(lines)}
+    gen = _generator()
+    gen._fill_appendix([entry])
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert all(_clean_inline_tabs(line) in body for line in lines)
 
 
 def test_t_row_already_on_the_page_is_not_duplicated():
@@ -1294,3 +1412,441 @@ def test_t_row_that_is_its_own_non_t_entry_is_not_recovered():
     bullets = _bulleted_texts(gen.doc.paragraphs)
     assert row not in bullets
     assert _T_ROWS[2] in bullets
+
+
+# --- #1205: supplementary prose as tracked-deleted sub-points -----------------
+# The generator glue for stage6/supplementary.py: the flag, the pass's place
+# before the overflow routing and this recovery, and both skipping what a
+# sub-point carries. The sub-point module itself is test_stage6_supplementary.py.
+
+_DUTY_PROSE = ("Responsible for coordinating the departmental curriculum committee "
+               "and supervising graduate trainees in the example programme")
+
+
+def _duty_appointment():
+    """A D1 row whose source text ends in duty prose no field holds, split
+    over two record-shaped lines the way SQMWHM 29's was (YUYVIG)."""
+    return {
+        "element_idx_start": 29,
+        "taxonomy_code": "D1",
+        "hierarchy": ["PROFESSIONAL EXPERIENCE"],
+        "text": ("July 2010 - present\tAssociate Professor and Program Director, Department of "
+                 f"Example Studies, Norvale University\nMain Annex, ZQ.\t{_DUTY_PROSE}"),
+        "extraction_coverage": {"extraction_coverage_percent": 21.0},
+        "extracted_fields": {
+            "title": "Associate Professor and Program Director",
+            "institution": "Department of Example Studies, Norvale University",
+            "start_date": "2010-07",
+            "end_date": "present",
+        },
+    }
+
+
+def _subpoint_rows(gen):
+    author = "CViche: source text with no template field"
+    return [tr for tr in gen.doc.element.body.iter(qn("w:tr"))
+            if (d := tr.find(f"{qn('w:trPr')}/{qn('w:del')}")) is not None
+            and d.get(qn("w:author")) == author]
+
+
+def _render_duty_appointment(**kwargs):
+    gen = _generator(**kwargs)
+    entry = _duty_appointment()
+    gen._fill_positions({"D1": [entry]})
+    gen._add_supplementary_subpoints({"D1": [entry]})
+    return gen, entry
+
+
+def test_supplementary_subpoints_default_off():
+    assert WCMTemplateGenerator(verbose=False).supplementary_subpoints is False
+
+
+def test_run_stage6_passes_the_subpoint_flag_to_the_generator(monkeypatch):
+    from unified_pipeline import stage_6_word_template as stage6
+
+    seen = {}
+
+    class _FakeGenerator:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def generate(self, *args, **kwargs):
+            return "unused.docx"
+
+    monkeypatch.setattr(stage6, "WCMTemplateGenerator", _FakeGenerator)
+    stage6.run_stage6("unused.json")
+    assert seen["supplementary_subpoints"] is True  # on by default since 2026-10-09
+    stage6.run_stage6("unused.json", supplementary_subpoints=False)
+    assert seen["supplementary_subpoints"] is False
+
+
+def test_duty_prose_is_a_deleted_row_under_its_appointment():
+    gen, _entry = _render_duty_appointment(supplementary_subpoints=True)
+
+    rows = _subpoint_rows(gen)
+    assert len(rows) == 1
+    above = rows[0].getprevious()
+    assert "Associate Professor and Program Director" in "".join(
+        t.text for t in above.iter(qn("w:t")))
+    assert "".join(t.text for t in rows[0].iter(qn("w:delText"))) == _DUTY_PROSE
+    assert gen.stats["supplementary_subpoints"] == 1
+    assert gen._subpoint_lines and gen._subpoint_lines[0].endswith(_DUTY_PROSE)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"supplementary_subpoints": True, "emit_track_changes": False}])
+def test_no_sub_point_with_the_flag_off_or_track_changes_off(kwargs):
+    gen, _entry = _render_duty_appointment(**kwargs)
+    assert _subpoint_rows(gen) == []
+    assert "supplementary_subpoints" not in gen.stats
+    assert gen._subpoint_lines == [] and gen._subpoint_entry_ids == set()
+
+
+@pytest.mark.parametrize("flag, queued", [(True, 0), (False, 1)])
+def test_the_overflow_pass_skips_an_entry_whose_prose_is_a_sub_point(flag, queued):
+    gen, entry = _render_duty_appointment(supplementary_subpoints=flag)
+    cell_para = gen.doc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]
+    gen._overflow_entries = [(entry, cell_para, "D1")]
+
+    gen._route_overflow_entries()
+
+    assert len(gen._appendix_pending) == queued
+
+
+@pytest.mark.parametrize("flag, recovered", [(True, 0), (False, 1)])
+def test_the_recovery_reads_a_sub_point_as_its_entry_rendered(flag, recovered):
+    gen, entry = _render_duty_appointment(supplementary_subpoints=flag)
+
+    gen._recover_unrendered_records({"D1": [entry]})
+
+    assert gen.stats["unrendered_records_recovered"] == recovered
+
+
+_TITLE_ROLE = "Visiting Fellow in Example Science"
+_TITLE_DUTIES = "to coordinate the example curriculum committee"
+#: The source states the duties at more length than stage 4 kept in `title`,
+#: so the text's duty paragraph is not mostly field values: only the title
+#: row's sub-point in the pass's haystack keeps it from being planned again.
+_TEXT_DUTIES = (f"{_TITLE_DUTIES}, supervise graduate trainees, organise regional "
+                "seminars, maintain programme records and evaluate outcomes")
+
+
+def _title_duty_appointment():
+    """A D3 row whose `title` holds duties (#1641's split), and whose text
+    holds them too, as DYLJXC 661/668's did (YUYVIG)."""
+    return {
+        "element_idx_start": 661,
+        "taxonomy_code": "D3",
+        "hierarchy": ["PROFESSIONAL EXPERIENCE"],
+        "text": f"2013-2015\t{_TITLE_ROLE}, Example Policy Office\t{_TEXT_DUTIES}",
+        "extracted_fields": {
+            "title": f"{_TITLE_ROLE}, Example Policy Office, {_TITLE_DUTIES}",
+            "organization": "Example Institute for Science",
+            "start_date": "2013", "end_date": "2015",
+        },
+    }
+
+
+def test_title_duties_are_offered_once_and_read_as_rendered():
+    """#1205: the duties the positions writer made a sub-point join the pass's
+    haystack, so they are not planned again from the entry's text, and the
+    #221 recovery reads them as the entry rendered."""
+    gen = _generator(supplementary_subpoints=True)
+    entry = _title_duty_appointment()
+    gen._fill_positions({"D3": [entry]})
+    gen._add_supplementary_subpoints({"D3": [entry]})
+
+    rows = _subpoint_rows(gen)
+    texts = ["".join(t.text for t in row.iter(qn("w:delText"))) for row in rows]
+    assert texts[0].endswith(_TITLE_DUTIES)
+    # No second sub-point repeats the duties the title row already offers.
+    assert [t for t in texts[1:] if _TITLE_DUTIES in t] == []
+    assert gen.stats["supplementary_subpoints"] == len(rows)
+    gen._recover_unrendered_records({"D3": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_sub_point_anchors_stop_at_the_appendix_heading(monkeypatch):
+    """The Appendix repeats entry text in bullets: no place for a sub-point."""
+    from unified_pipeline.stage6 import supplementary
+
+    gen = _generator(supplementary_subpoints=True)
+    gen._write_appendix_header(1)
+    appendix = gen.doc.paragraphs[gen._find_header_paragraph("T. APPENDIX")]._p
+    seen = []
+    real = supplementary.anchor_candidates
+
+    def spy(doc, stop_before=None):
+        seen.append(stop_before)
+        return real(doc, stop_before)
+
+    monkeypatch.setattr(supplementary, "anchor_candidates", spy)
+    gen._add_supplementary_subpoints({"D1": [_duty_appointment()]})
+    assert seen == [appendix]
+
+
+# --- #1205: Q1/Q2 extramural service, the next code family -------------------
+# Both render as table rows in Q's tables, so the prose is a deleted row under
+# the entry's own row, spanning that table's columns.
+
+_SERVICE_PROSE = ("Advised the society on regional workforce planning and drafted "
+                  "the annual training standards for member programmes")
+
+
+def _board_service():
+    """A Q2 row whose source line goes on past its committee, role and
+    organization into the committee's remit, as YUYVIG ECXGAT 2129's did."""
+    return {
+        "element_idx_start": 2129,
+        "taxonomy_code": "Q2",
+        "text": f"2015-2018\tMember, Example Advisory Committee, Example Society\t{_SERVICE_PROSE}",
+        "extracted_fields": {"committee_name": "Example Advisory Committee", "role": "Member",
+                             "organization": "Example Society",
+                             "start_date": "2015", "end_date": "2018"},
+    }
+
+
+def _extramural_leadership():
+    """A Q1 row whose source holds the organization's mission, as EBYSBC
+    RGUNJV 3057's did."""
+    return {
+        "element_idx_start": 3057,
+        "taxonomy_code": "Q1",
+        "text": f"2009-2014\tExample Foundation, President\t{_SERVICE_PROSE}",
+        "extracted_fields": {"organization": "Example Foundation", "role": "President",
+                             "start_date": "2009", "end_date": "2014"},
+    }
+
+
+def _texts_of(body):
+    return ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in body.iter(qn("w:p"))]
+
+
+def _render_service(code, entry, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_service({code: [entry]})
+    gen._add_supplementary_subpoints({code: [entry]})
+    return gen
+
+
+@pytest.mark.parametrize("code, entry, anchor_text, columns", [
+    ("Q2", _board_service, "Example Advisory Committee", 4),
+    ("Q1", _extramural_leadership, "Example Foundation", 3),
+])
+def test_service_prose_is_a_deleted_row_under_its_own_row(code, entry, anchor_text, columns):
+    gen = _render_service(code, entry(), supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = row.getprevious()
+    assert anchor_text in "".join(t.text for t in above.iter(qn("w:t")))
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _SERVICE_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == str(columns)
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+@pytest.mark.parametrize("code, entry", [("Q2", _board_service), ("Q1", _extramural_leadership)])
+def test_service_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it(code, entry):
+    off = _render_service(code, entry(), supplementary_subpoints=False)
+    on = _render_service(code, entry(), supplementary_subpoints=True)
+
+    # Reject All: the deleted text is the reader's again.
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _SERVICE_PROSE in rejected
+    assert _SERVICE_PROSE not in "".join(_texts_of(off.doc.element.body))
+    # Accept All: the deleted row goes, and the document is the flag-off one,
+    # empty paragraphs included.
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+def test_service_prose_already_in_its_cell_is_not_offered_again():
+    """A Q2 row with no committee field shows the entry's whole text in its
+    cell (`_fill_service_boards`' fallback): nothing is left to offer."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _board_service()
+    entry["extracted_fields"] = {"start_date": "2015", "end_date": "2018"}
+    gen = _render_service("Q2", entry, supplementary_subpoints=True)
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "Q2", haystack) == []
+
+
+def test_journal_reviewing_q4d_stays_excluded():
+    entry = dict(_board_service(), taxonomy_code="Q4D")
+    entry["extracted_fields"] = {"journal_name": "Example Journal of Training", "role": "Reviewer"}
+    gen = _render_service("Q4D", entry, supplementary_subpoints=True)
+    assert _subpoint_rows(gen) == []
+
+
+def _journal_reviewer_coded_q2():
+    """A Q2 entry `_route_q2_entries` reroutes to Journal Reviewing: its
+    rendered line is a Q4D row, but its own code stays Q2."""
+    return {
+        "element_idx_start": 1514,
+        "taxonomy_code": "Q2",
+        "text": f"2015-2018\tReviewer, Example Journal of Training\t{_SERVICE_PROSE}",
+        "extracted_fields": {"role": "Reviewer", "organization": "Example Journal of Training",
+                             "start_date": "2015", "end_date": "2018"},
+    }
+
+
+def test_a_q2_entry_rendered_as_journal_reviewing_gets_no_sub_point():
+    """The 2026-10-02 decision excludes journal reviewing. A Q2 entry the
+    section writes into the Journal Reviewing table is that, whatever its
+    code says, so it is excluded by where it rendered."""
+    from unified_pipeline.stage6.sections.service import _route_q2_entries
+
+    entry = _journal_reviewer_coded_q2()
+    assert len(_route_q2_entries([entry])[0]) == 1
+    gen = _render_service("Q2", entry, supplementary_subpoints=True)
+    assert "Example Journal of Training" in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    assert _SERVICE_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+# --- #1205: H honors, the next code family -----------------------------------
+# The honors section writes every H entry as a row of its three-column table
+# (`_add_honors_row`), so the prose is a deleted row under the award's row.
+
+_HONOR_PROSE = ("Awarded annually to an early career investigator whose published "
+                "research advanced clinical understanding of respiratory infections")
+
+
+def _honor():
+    """An H row whose source line goes on past the award, its granting body
+    and year into the award's criteria, as EBYSBC QITQWH 39-53's did."""
+    return {
+        "element_idx_start": 39,
+        "taxonomy_code": "H",
+        "text": f"2019\tYoung Investigator Award, Example Thoracic Society\t{_HONOR_PROSE}",
+        "extracted_fields": {"award_name": "Young Investigator Award",
+                             "granting_body": "Example Thoracic Society", "date": "2019"},
+    }
+
+
+def _render_honors(entries, **kwargs):
+    gen = _generator(**kwargs)
+    gen._fill_honors(entries)
+    gen._add_supplementary_subpoints({"H": entries})
+    return gen
+
+
+def test_honor_prose_is_a_deleted_row_under_the_award_row():
+    gen = _render_honors([_honor()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = "".join(t.text for t in row.getprevious().iter(qn("w:t")))
+    assert "Young Investigator Award" in above
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _HONOR_PROSE
+    span = row.find(f"{qn('w:tc')}/{qn('w:tcPr')}/{qn('w:gridSpan')}")
+    assert span.get(qn("w:val")) == "3"
+    assert gen.stats["supplementary_subpoints"] == 1
+
+
+def test_honor_prose_goes_under_its_own_award_among_several():
+    other = {"element_idx_start": 41, "taxonomy_code": "H",
+             "text": "2015\tOutstanding Mentor Award, Example Medical College",
+             "extracted_fields": {"award_name": "Outstanding Mentor Award",
+                                  "granting_body": "Example Medical College", "date": "2015"}}
+    gen = _render_honors([other, _honor()], supplementary_subpoints=True)
+
+    (row,) = _subpoint_rows(gen)
+    above = "".join(t.text for t in row.getprevious().iter(qn("w:t")))
+    assert "Young Investigator Award" in above and "Mentor" not in above
+    below = row.getnext()
+    assert below is not None and "Outstanding Mentor Award" in "".join(
+        t.text for t in below.iter(qn("w:t")))
+
+
+def test_honor_sub_point_accept_all_is_the_flag_off_render_and_reject_restores_it():
+    off = _render_honors([_honor()], supplementary_subpoints=False)
+    on = _render_honors([_honor()], supplementary_subpoints=True)
+
+    rejected = "".join(t.text or "" for t in on.doc.element.body.iter(qn("w:t"), qn("w:delText")))
+    assert _HONOR_PROSE in rejected
+    assert _HONOR_PROSE not in "".join(_texts_of(off.doc.element.body))
+    for row in _subpoint_rows(on):
+        row.getparent().remove(row)
+    assert _texts_of(on.doc.element.body) == _texts_of(off.doc.element.body)
+
+
+def test_honor_prose_already_in_its_award_cell_is_not_offered_again():
+    """With no award field, the award cell shows the entry's whole text
+    (`parse_honor_entry`'s fallback): nothing is left to offer."""
+    from unified_pipeline.stage6 import supplementary
+
+    entry = _honor()
+    entry["extracted_fields"] = {"date": "2019"}
+    gen = _render_honors([entry], supplementary_subpoints=True)
+    assert _HONOR_PROSE in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    haystack = supplementary.rendered_haystack(gen._rendered_output_lines(), gen.doc)
+    assert supplementary.unrendered_prose(entry, "H", haystack) == []
+
+
+def _rerouted(entry, expected_code, heading):
+    """`entry` flagged by stage 3b's hierarchy check, at low confidence, under
+    a heading that expects `expected_code`: `_correct_mismatch_if_needed`
+    moves it across families."""
+    return dict(entry, taxonomy_confidence=0.5, hierarchy_mismatch_flag=True,
+                hierarchy_mismatch_detail={"expected_codes": [expected_code],
+                                           "hierarchy": [heading]})
+
+
+def _render_grouped(entries, **kwargs):
+    gen = _generator(**kwargs)
+    grouped = gen._group_entries_by_code(entries)
+    gen._fill_honors(grouped.get("H", []))
+    gen._add_supplementary_subpoints(grouped)
+    return gen, grouped
+
+
+def test_an_honor_rerouted_out_of_h_follows_its_destination_and_gets_no_sub_point():
+    """An H entry rendered as another code is that code's record: N1 is
+    excluded, so neither its own row nor another award's carries its prose."""
+    other = {"element_idx_start": 41, "taxonomy_code": "H",
+             "text": "2015\tYoung Investigator Award, Example Thoracic Society",
+             "extracted_fields": {"award_name": "Young Investigator Award",
+                                  "granting_body": "Example Thoracic Society", "date": "2015"}}
+    moved = _rerouted(_honor(), "N1", "MENTORING PROGRAMS")
+    gen, grouped = _render_grouped([other, moved], supplementary_subpoints=True)
+
+    assert grouped["N1"] == [moved] and grouped["H"] == [other]
+    assert _subpoint_rows(gen) == []
+    assert _HONOR_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))
+
+
+def test_a_record_rerouted_into_h_follows_the_honors_rule():
+    """A society fellowship stage 3b coded I under an honors heading renders
+    as an award: its prose is a deleted row under that award's row."""
+    fellowship = dict(_honor(), taxonomy_code="I")
+    gen, grouped = _render_grouped([_rerouted(fellowship, "H", "HONORS")],
+                                   supplementary_subpoints=True)
+
+    assert [e["element_idx_start"] for e in grouped["H"]] == [39]
+    (row,) = _subpoint_rows(gen)
+    assert "Young Investigator Award" in "".join(t.text for t in row.getprevious().iter(qn("w:t")))
+    assert "".join(t.text for t in row.iter(qn("w:delText"))) == _HONOR_PROSE
+
+
+def test_an_honor_whose_award_the_pii_pass_withheld_gets_no_sub_point():
+    """#892: the PII pass dropped the award's name, so the honors writer
+    renders no row for what is left. Its prose is not offered either, under
+    another award of the same granting body or anywhere else."""
+    other = {"element_idx_start": 41, "taxonomy_code": "H",
+             "text": "2015\tOutstanding Mentor Award, Example Thoracic Society",
+             "extracted_fields": {"award_name": "Outstanding Mentor Award",
+                                  "granting_body": "Example Thoracic Society", "date": "2015"}}
+    withheld = _honor()
+    del withheld["extracted_fields"]["award_name"]
+    withheld["_pii_dropped_fields"] = ["award_name"]
+    gen = _render_honors([other, withheld], supplementary_subpoints=True)
+
+    assert "Young Investigator Award" not in "".join(_texts_of(gen.doc.element.body))
+    assert _subpoint_rows(gen) == []
+    assert _HONOR_PROSE not in "".join(
+        t.text or "" for t in gen.doc.element.body.iter(qn("w:delText")))

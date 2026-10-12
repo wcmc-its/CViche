@@ -17,7 +17,15 @@ from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import selectinload
 
 from app.models import (
-    User, Run, Step, Log, LLMUsage, Feedback, RunMetrics, Consent, SystemConfig,
+    Consent,
+    Feedback,
+    LLMUsage,
+    Log,
+    Run,
+    RunMetrics,
+    Step,
+    SystemConfig,
+    User,
 )
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
@@ -165,9 +173,9 @@ def test_submit_feedback_long_issue_text_roundtrips(client, db):
     """A long, real-sentence-shaped answer in issue_missing_content survives
     the full submit_feedback path unmodified -- no truncation at the Pydantic
     schema, the route, or the ORM layer (#606)."""
-    from app.models import User, Run
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
+    from app.models import Run, User
 
     user = User(email="longtext@example.com", display_name="Reviewer", role="user")
     db.add(user)

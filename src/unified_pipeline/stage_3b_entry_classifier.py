@@ -20,33 +20,74 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
-from datetime import datetime
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from unified_pipeline.llm_client import call_llm
+from core.validators.adjunct_position_corrector import (
+    apply_adjunct_position_corrections,
+)
+from core.validators.appointment_funding_corrector import (
+    apply_appointment_funding_corrections,
+)
+from core.validators.block_coherence_corrector import apply_block_coherence_corrections
+from core.validators.committee_position_corrector import apply_committee_corrections
+from core.validators.event_volunteer_corrector import apply_event_volunteer_corrections
+from core.validators.grant_position_corrector import apply_grant_position_corrections
+from core.validators.grant_status_corrector import apply_grant_status_corrections
+from core.validators.hierarchy_mismatch_flagger import (
+    flag_hierarchy_mismatches,
+    get_mismatch_summary,
+)
+from core.validators.invited_talk_corrector import apply_invited_talk_corrections
+from core.validators.leadership_level_corrector import (
+    apply_leadership_level_corrections,
+)
+from core.validators.position_subcode_reconciler import (
+    apply_position_subcode_reconciliation,
+)
+from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
+from core.validators.reasoning_consistency_checker import apply_reasoning_corrections
 
 # Post-classification auto-correction validators
 from core.validators.structural_header import apply_structural_corrections
-from core.validators.committee_position_corrector import apply_committee_corrections
-from core.validators.reasoning_consistency_checker import apply_reasoning_corrections
-from core.validators.grant_status_corrector import apply_grant_status_corrections
-from core.validators.hierarchy_mismatch_flagger import flag_hierarchy_mismatches, get_mismatch_summary
-from core.validators.teaching_leadership_corrector import apply_teaching_leadership_corrections
-from core.validators.leadership_level_corrector import apply_leadership_level_corrections
-from core.validators.adjunct_position_corrector import apply_adjunct_position_corrections
-from core.validators.position_subcode_reconciler import apply_position_subcode_reconciliation
-from core.validators.training_compliance_corrector import apply_training_compliance_corrections
-from core.validators.invited_talk_corrector import apply_invited_talk_corrections
-from core.validators.grant_position_corrector import apply_grant_position_corrections
-from core.validators.wcm_table_corrector import apply_wcm_table_corrections
-from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
+from core.validators.teaching_leadership_corrector import (
+    apply_teaching_leadership_corrections,
+)
 from core.validators.template_scaffold import apply_template_scaffold_corrections
-from core.validators.block_coherence_corrector import apply_block_coherence_corrections
-from core.validators.appointment_funding_corrector import apply_appointment_funding_corrections
-from core.validators.event_volunteer_corrector import apply_event_volunteer_corrections
+from core.validators.training_compliance_corrector import (
+    apply_training_compliance_corrections,
+)
+from core.validators.wcm_table_corrector import apply_wcm_table_corrections
+
+from unified_pipeline.core.batch_pool import (
+    make_progress_printer,
+    map_in_order,
+    workers_from_config,
+)
+from unified_pipeline.llm_client import call_llm
+from unified_pipeline.stage3b.classify import (  # noqa: F401
+    NO_HIERARCHY_KEY,
+    ClassificationStats,
+    SharedSystemPrompt,
+    _BatchStats,
+    _build_taxonomy_ref_for_batch,
+    _classify_one_batch,
+    build_per_cv_prompts,
+    classify_entries_batch,
+    detect_duplicates,
+    group_entries_by_hierarchy,
+    reconnect_fragments,
+    validate_t_classifications,
+)
+from unified_pipeline.stage3b.context import (  # noqa: F401
+    TaxonomyContext,
+    build_mapping_index,
+    get_taxonomy_context,
+)
 
 # Every name below is re-exported from this module by being imported here: it
 # is the public import surface of stage 3b, pinned by
@@ -61,11 +102,8 @@ from core.validators.event_volunteer_corrector import apply_event_volunteer_corr
 # here. Tests that stub the LLM must patch `unified_pipeline.stage3b.classify`,
 # where every classification call site now lives; patching this module's copy
 # would cover only the flag-gated block-coherence closure in run_stage_3b.
-from unified_pipeline.stage3b.context import (  # noqa: F401
-    TaxonomyContext,
-    build_mapping_index,
-    get_taxonomy_context,
-)
+from unified_pipeline.stage3b.fragment_merge import merge_fragment_text
+from unified_pipeline.stage3b.header_pin import apply_header_pin
 from unified_pipeline.stage3b.io import (  # noqa: F401
     _normalize_taxonomy_mappings,
     _safe_float,
@@ -77,20 +115,6 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
 )
-from unified_pipeline.stage3b.header_pin import apply_header_pin
-from unified_pipeline.core.batch_pool import make_progress_printer, map_in_order, workers_from_config
-from unified_pipeline.stage3b.classify import (  # noqa: F401
-    _BatchStats,
-    _build_taxonomy_ref_for_batch,
-    _classify_one_batch,
-    ClassificationStats,
-    classify_entries_batch,
-    detect_duplicates,
-    group_entries_by_hierarchy,
-    NO_HIERARCHY_KEY,
-    reconnect_fragments,
-    validate_t_classifications,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +122,11 @@ logger = logging.getLogger(__name__)
 # per-pod semaphore so one run cannot starve the others admitted alongside it
 # (#881). Knob: CVICHE_STAGE3B_GROUP_WORKERS, env var or llm yaml key.
 STAGE3B_GROUP_WORKERS = workers_from_config("CVICHE_STAGE3B_GROUP_WORKERS")
+
+# "1" sends every group of a CV one shared, cacheable system prompt (#50,
+# stage3b/prompt.py's per-CV layout). Off by default: it changes what the
+# model sees, and needs a live classification A/B before it is turned on.
+PER_CV_PROMPT_FLAG = "CVICHE_STAGE3B_PER_CV_PROMPT"
 
 
 _GroupResult = tuple[list[dict], ClassificationStats, list[str]]
@@ -120,6 +149,7 @@ def _classify_group(
     group_entries: list[dict],
     mapping_index: dict,
     taxonomy: dict,
+    shared_prompt: SharedSystemPrompt | None = None,
 ) -> _GroupResult:
     """Classify one hierarchy group; the per-group body of run_stage_3b's loop.
 
@@ -132,11 +162,11 @@ def _classify_group(
     lines itself, from ``on_result``, which map_in_order guarantees runs on
     the calling thread.
     """
-    hierarchy = [] if hierarchy_key == NO_HIERARCHY_KEY else hierarchy_key.split(" > ")
-    context = get_taxonomy_context(hierarchy, mapping_index)
+    context = get_taxonomy_context(_hierarchy_of(hierarchy_key), mapping_index)
     primary_codes = context.get_primary_codes()
 
-    classified, stats = classify_entries_batch(group_entries, context, taxonomy)
+    classified, stats = classify_entries_batch(
+        group_entries, context, taxonomy, shared_prompt=shared_prompt)
     classified, _pinned = apply_header_pin(classified, context)
 
     lines = [f"    Entries: {len(group_entries)}"]
@@ -147,6 +177,31 @@ def _classify_group(
         lines.append(f"    Suggested codes: {codes_display}")
     lines.append(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
     return classified, stats, lines
+
+
+def _hierarchy_of(hierarchy_key: str) -> list[str]:
+    """The hierarchy path a group_entries_by_hierarchy key stands for."""
+    return [] if hierarchy_key == NO_HIERARCHY_KEY else hierarchy_key.split(" > ")
+
+
+def _shared_prompts(groups: dict[str, list[dict]], mapping_index: dict,
+                    taxonomy: dict) -> dict[str, SharedSystemPrompt]:
+    """Each group's view of the per-CV system prompt when PER_CV_PROMPT_FLAG
+    is "1", else an empty dict (every group sends its own prompt)."""
+    if os.getenv(PER_CV_PROMPT_FLAG, "0") != "1":
+        return {}
+    return build_per_cv_prompts(
+        {key: (get_taxonomy_context(_hierarchy_of(key), mapping_index), len(entries))
+         for key, entries in groups.items()},
+        taxonomy,
+    )
+
+
+def _group_args(groups: dict[str, list[dict]], mapping_index: dict, taxonomy: dict) -> list[tuple]:
+    """_classify_group's arguments for each group, in group order."""
+    shared_prompts = _shared_prompts(groups, mapping_index, taxonomy)
+    return [(key, group_entries, mapping_index, taxonomy, shared_prompts.get(key))
+            for key, group_entries in groups.items()]
 
 
 def _resolve_stage_input(stage_label: str, given: str | None, default: Path) -> Path:
@@ -251,7 +306,7 @@ def run_stage_3b(
 
     results = map_in_order(
         _classify_group,
-        [(key, group_entries, mapping_index, taxonomy) for key, group_entries in groups.items()],
+        _group_args(groups, mapping_index, taxonomy),
         workers,
         on_result=_group_progress_printer(list(groups)),
     )
@@ -644,7 +699,7 @@ def run_stage_3b(
     print(f"Post-correction summary: {total_post_corrections} total corrections applied")
     print("=" * 60)
 
-    # Add to total stats
+    all_classified, total_stats["fragment_merge"] = merge_fragment_text(all_classified)  # #1256: last text-reading pass
     total_stats['post_classification_corrections'] = post_correction_stats
     total_stats['total_post_corrections'] = total_post_corrections
 

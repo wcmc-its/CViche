@@ -28,7 +28,9 @@ from unified_pipeline.stage6.resolution import (  # noqa: E402
     _recover_institution_from_nearby_entries,
 )
 from unified_pipeline.stage6.resolution.institution import _TRAINING_CODES  # noqa: E402
-from unified_pipeline.stage6.sections.postdoc_training import POSTDOC_TRAINING_CODES  # noqa: E402
+from unified_pipeline.stage6.sections.postdoc_training import (
+    POSTDOC_TRAINING_CODES,  # noqa: E402
+)
 
 
 @pytest.mark.parametrize("location, institution", [

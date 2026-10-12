@@ -29,11 +29,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
 # call_llm is stubbed at the module that actually calls it: the #522 split
 # moved every classification call site into stage3b/classify.py, so patching
 # the facade's copy would no longer intercept anything (#496).
 import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
+import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
 from unified_pipeline.llm.retry import LLMOutageError  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
@@ -379,6 +379,33 @@ def test_run_survives_partial_failure_and_reports_stats(monkeypatch, tmp_path):
 
     sources = sorted(e["classification_source"] for e in output["entries"])
     assert sources == ["fallback", "llm"]
+
+
+def test_run_folds_fragment_text_into_the_written_artifact(monkeypatch, tmp_path):
+    """#1256: `merge_fragment_text` runs on the final entry list and what it
+    returns is what the artifact holds, with its stats under meta.stats."""
+    seen = {}
+
+    def _merge(entries):
+        seen["sources"] = [e.get("classification_source") for e in entries]
+        entries[0]["text"] += " (merged tail)"
+        return entries, {"fragments_merged": 1}
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="H"))
+    monkeypatch.setattr(stage_3b, "merge_fragment_text", _merge)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES[:1], _MAPPINGS)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    assert seen["sources"] == ["llm"]
+    assert output["entries"][0]["text"].endswith(" (merged tail)")
+    assert output["meta"]["stats"]["fragment_merge"] == {"fragments_merged": 1}
 
 
 def test_run_with_zero_entries_does_not_raise_zero_llm_error(monkeypatch, tmp_path):
@@ -782,6 +809,34 @@ def test_946_correctors_run_in_their_documented_order(monkeypatch, tmp_path):
     assert calls == list(_CORRECTOR_ORDER)
 
 
+_1581_MAPPINGS = [
+    {"title": title, "taxonomy_options": [{"code": code, "confidence": 0.9}], "children": []}
+    for title, code in (("TEACHING EXPERIENCE", "K1"), ("NON-ACADEMIC EMPLOYMENT", "D3"))
+]
+
+
+def test_1581_adjunct_corrector_keeps_an_instructor_under_an_academic_heading(monkeypatch, tmp_path):
+    """Prompt rule 12 puts adjunct faculty and Instructor in D1. The adjunct
+    corrector recoded every D1 "Adjunct Instructor" or community-college row
+    to D3, even under the author's own teaching heading (#1581, HNQBOI-05).
+    Under a non-academic employment heading it still does."""
+    row = "2031-2033 Adjunct Instructor, Example Anatomy, Example Community College"
+    entries = [{"element_type": "text", "hierarchy": [m["title"]], "text": row} for m in _1581_MAPPINGS]
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **_: _ok_response([0], code="D1"))
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, _1581_MAPPINGS)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    by_heading = {e["hierarchy"][0]: e for e in output["entries"]}
+    teaching, employment = by_heading["TEACHING EXPERIENCE"], by_heading["NON-ACADEMIC EMPLOYMENT"]
+    assert teaching["taxonomy_code"] == "D1" and "adjunct_position_correction" not in teaching
+    assert employment["taxonomy_code"] == "D3" and employment["original_taxonomy_code"] == "D1"
+
+
 # --- run_stage_3b: helpers carved out of it (#946, function-size offset) --------
 
 def test_missing_stage_input_raises_with_the_stage_label(tmp_path):
@@ -853,3 +908,42 @@ def test_312_header_pin_runs_in_the_stage_3b_group_pass(monkeypatch, tmp_path):
     assert "pre_pin_code" not in by_section["Local"]
     # The pin is not a fallback: stage 3b's zero-LLM-classification gate still counts these.
     assert output["meta"]["classification_stats"]["llm_classified"] == 3
+
+
+# --- run_stage_3b: the per-CV prompt flag (#50) --------------------------------
+
+def _run_capturing_classification_calls(monkeypatch, tmp_path, flag):
+    """Run stage 3b over the two-group fixture; return its classification calls."""
+    if flag is None:
+        monkeypatch.delenv(stage_3b.PER_CV_PROMPT_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(stage_3b.PER_CV_PROMPT_FLAG, flag)
+    calls = []
+
+    def _record(**kwargs):
+        calls.append(kwargs)
+        return _ok_response([0], code="H")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _record)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES, _MAPPINGS)
+    stage_3b.run_stage_3b("9999_Doe_Jane_CV", stage_2_path=str(stage_2),
+                          stage_3a_path=str(stage_3a), output_dir=str(tmp_path / "out"), workers=1)
+    return calls
+
+
+@pytest.mark.parametrize("flag", [None, "0"])
+def test_per_cv_flag_off_sends_each_group_its_own_prompt(monkeypatch, tmp_path, flag):
+    calls = _run_capturing_classification_calls(monkeypatch, tmp_path, flag)
+    assert len(calls) == 2
+    assert calls[0]["messages"][0] != calls[1]["messages"][0]
+    assert all(c["messages"][1]["content"].startswith("Classify these ") for c in calls)
+    assert all(c["enable_prompt_caching"] is False for c in calls)  # single-batch groups
+
+
+def test_per_cv_flag_on_sends_every_group_one_cached_prompt(monkeypatch, tmp_path):
+    calls = _run_capturing_classification_calls(monkeypatch, tmp_path, "1")
+    assert len(calls) == 2
+    assert calls[0]["messages"][0] == calls[1]["messages"][0]
+    assert [c["messages"][1]["content"].split(" (")[0] for c in calls] == [
+        "These entries come from GROUP 1", "These entries come from GROUP 2"]
+    assert all("enable_prompt_caching" not in c for c in calls)  # stage default: cachePoint kept

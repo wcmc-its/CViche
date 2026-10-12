@@ -34,27 +34,38 @@ from unified_pipeline.core.text_norm import (
 )
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
+from unified_pipeline.stage6.formatting import CVICHE_BOX_PREFIX
+from unified_pipeline.stage6.parsing import (
+    _is_shattered,
+    _mid_sentence_joins,
+    _refold_shattered,
+)
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
-
-from .extraction import _is_prose
+from unified_pipeline.stage6.sections.licensure import (
+    _LICENSURE_HEADER_CELLS,
+    _license_record,
+    _normalize_licensure_entry,
+)
 
 from ..shared import (
+    _NAME_WORD_RE,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     TABLE_ROW_JOINER,
-    _FieldsEntry,
+    SubpointText,
     _entry_pieces,
     _fields_entries,
+    _FieldsEntry,
     _finding,
     _haystacks,
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
-    _template_haystack,
-    _NAME_WORD_RE,
     _owner_surname_words,
+    _template_haystack,
+    offered_as_subpoint,
 )
-
+from .extraction import _is_prose, _leaf_strings
 
 # Lint 7: a source section with at least this many substantive lines whose
 # output section is empty did not just "have nothing to say".
@@ -260,7 +271,8 @@ def _appendix_contents(blocks: list[tuple[str, str]]
                 continue
             if in_appendix and _output_section_header(stripped):
                 in_appendix = False
-        elif in_appendix:
+        elif in_appendix and not stripped.startswith(CVICHE_BOX_PREFIX):
+            # Stage 6's own note to the submitter is a one-cell table (#1388).
             non_paragraph_count += 1
 
     entries = []
@@ -560,13 +572,17 @@ def _record_rendered(line: str, haystack: str,
     return rendered
 
 
-def lint_unrendered_records(stage4: dict,
-                            blocks: list[tuple[str, str]]) -> list[dict]:
+def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
+                            subpoints: SubpointText | None = None) -> list[dict]:
     """Per-record render check over fused multi-record stage-4 entries: the
     structured-fields-only render paths keep the extracted record and drop
     the unextracted remainder lines with no bullet fallback (#221). No
     element_type filter — the KFGXBW loss was on a 'break' entry; 'T' is
-    skipped (appendix catch-all)."""
+    skipped (appendix catch-all).
+
+    `subpoints` (optional: the rendered docx's sub-points): a record line a
+    tracked-deleted sub-point offers (#1205) is delivered for review, not
+    absent -- stage 6's own #221 recovery reads the sub-points the same way."""
     # Only h.text (the verbatim-containment haystack) is used here; h.tokens
     # (the pooled document token set) is deliberately not — this lint scores
     # each record against per-OUTPUT-LINE token sets so common academic words
@@ -582,7 +598,8 @@ def lint_unrendered_records(stage4: dict,
         if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records
-                  if _record_rendered(r, h.text, output) is False]
+                  if _record_rendered(r, h.text, output) is False
+                  and not offered_as_subpoint(r, subpoints)]
         if not absent:
             continue
         findings.append(_finding(
@@ -1621,6 +1638,78 @@ def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
         [line[:100] for line in lines[:DATE_ONLY_LINES_SAMPLES]])]
 
 
+# Lint 14aj: shattered_prose (#1583). Stage 2 joins an entry's source
+# paragraphs with '\t'; where those paragraphs were one per printed line (a
+# PDF the converter did not fold, a docx table cell of line paragraphs), stage
+# 6's L2 bullet fallback and the L3 overflow writer split on '\t' and print
+# each printed line as its own bullet, broken mid-sentence. What reads as
+# shattered is stage 6's own test (`stage6.parsing._is_shattered`), which it
+# uses to fold those parts back (`_refold_shattered`). Folding mends a
+# single-column paragraph, but where the printed lines ran across a
+# multi-column row, each line also carries a neighbouring column's words, and
+# the folded paragraph keeps them mid-sentence. So the lint reports both: the
+# parts still rendered one per paragraph, and a folded paragraph that still
+# carries a neighbouring column's dates.
+#: Parts that must each be a whole rendered paragraph. Exact equality keeps
+#: field-rendered rows, 5c/5d rewrites and folded paragraphs out.
+SHATTERED_MIN_RENDERED = 3
+SHATTERED_EXCERPT_CHARS = 60
+SHATTERED_EXCERPT_PARTS = 2
+#: A dates column printed at the end of a line that is not the entry's last
+#: ('..., 2015-2023', '2020 – Present'): the row's dates, spliced into the
+#: sentence that runs on in the next line.
+_COLUMN_DATE_RANGE_END_RE = re.compile(
+    r"(?:19|20)\d{2}\s*[-–—]\s*(?:(?:19|20)\d{2}|present|current)$", re.IGNORECASE)
+#: A year column opening the entry's first line ahead of a capitalised title
+#: column ('2007 Clinical ...'): the row's year, spliced into the paragraph.
+_COLUMN_YEAR_START_RE = re.compile(r"(?:19|20)\d{2}\s+[A-Z]")
+
+
+def _spliced_column_date(parts: list[str]) -> bool:
+    """Whether a printed line carries a neighbouring column's date, which a
+    fold leaves inside the paragraph. ponytail: reads dates only; a role or
+    place column without a date is not seen (none seen on the 15 YUY-SP
+    records, every one of which carries a date). Ceiling: a paragraph whose
+    own heading line ends in its dates and whose prose then folds reads as
+    spliced (none seen over the 272 runs of YUY-SP)."""
+    return bool(_COLUMN_YEAR_START_RE.match(parts[0])) or any(
+        _COLUMN_DATE_RANGE_END_RE.search(part) for part in parts[:-1])
+
+
+def _shattered_render(parts: list[str], paragraphs: set[str]) -> str:
+    """What is still wrong with a shattered entry's render, or '' when it
+    rendered as whole paragraphs with no spliced column."""
+    rendered = sum(part in paragraphs for part in parts)
+    if rendered >= SHATTERED_MIN_RENDERED:
+        mid = sum(_mid_sentence_joins(parts))
+        return (f"{rendered} of {len(parts)} printed lines render as separate paragraphs, "
+                f"{mid} break mid-sentence")
+    folded = [part for part in _refold_shattered(parts) if part not in parts]
+    if _spliced_column_date(parts) and any(part in paragraphs for part in folded):
+        return (f"{len(parts)} printed lines fold back, but a line carries a neighbouring "
+                f"column's dates, so the columns are still interleaved")
+    return ""
+
+
+def lint_shattered_prose(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """A stage-4 entry whose '\t' parts break mid-sentence and either render
+    as separate whole paragraphs (one source paragraph printed one bullet per
+    printed line) or fold into a paragraph that still carries a neighbouring
+    column's dates (#1583: IZABPD L2/L3, RLADNC L3). WARN, one per entry."""
+    paragraphs = {" ".join(text.split()) for kind, text in blocks if kind == "p"}
+    findings = []
+    for entry in _fields_entries(stage4):
+        parts = [" ".join(p.split()) for p in entry.text.split("\t") if p.strip()]
+        if not _is_shattered(parts):
+            continue
+        wrong = _shattered_render(parts, paragraphs)
+        if wrong:
+            findings.append(_finding(
+                "shattered_prose", "WARN", f"entry {entry.element_idx} ({entry.code}): {wrong}",
+                [part[:SHATTERED_EXCERPT_CHARS] for part in parts[:SHATTERED_EXCERPT_PARTS]]))
+    return findings
+
+
 # Lints 14f/14g: text that is not CV content reaching the delivered document
 # (#1233, #1224). Neither one has a benign form, so both WARN on a single hit
 # and carry no threshold: a threshold would only hide the first occurrence.
@@ -2007,6 +2096,198 @@ def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
             f"source elides no author",
             [citation.line[:CITATION_EVIDENCE_CHARS]]))
     return findings
+
+
+# Lint 14ah, owner_attribution (#1573; #1251 records that it was missing):
+# another person's content rendered as the CV owner's. Batch YUYVIG
+# (2026-10-08) verified it on 4 of 37 CVs and the doctor caught none of the
+# HIGH instances: papers by other groups listed under an acknowledgements
+# line, rendered as the owner's publications (ECXGAT 2156-2204), and the
+# applicants of a grant-review panel and a laboratory's technical staff,
+# rendered as the owner's past mentees (ECXGAT 1293-1299, IZIXVF 284-298).
+# Two shapes, both read off stage 4; the first also needs the bibliography
+# line each publication rendered as, so it judges only what rendered there.
+
+OWNER_ATTRIBUTION_SHAPE_UNCREDITED = "citation_without_owner"
+OWNER_ATTRIBUTION_SHAPE_NOT_MENTEES = "mentee_under_non_mentee_heading"
+
+#: Publication codes left unjudged: S0 holds profile links and metrics, and
+#: S9 (other media) holds interviews and news items, whose `authors` stage 4
+#: fills with the reporter (ECXGAT: about 60 of them).
+OWNER_ATTRIBUTION_SKIPPED_CODES = frozenset({"S0", "S9"})
+
+#: A source credited to a group, a consortium or a committee: the owner may
+#: be a member the author list does not print (a site PI of a trial group).
+_GROUP_CREDIT_RE = re.compile(
+    r"\b(?:(?:work\s?)?group|consortium|investigators|collaborat\w*|network|committee"
+    r"|society|association|task\s+force|working)\b", re.IGNORECASE)
+#: An author list naming an agency, an academy or no one: a report the owner
+#: contributed to. Read in `authors` only, since a title or a journal names
+#: these words too (ECXGAT 2168's title names an institute).
+_CORPORATE_AUTHOR_RE = re.compile(
+    r"\b(?:anonymous|department|office|national|academ(?:y|ies)|centers?|program(?:me)?"
+    r"|institutes?|editors?)\b", re.IGNORECASE)
+
+#: A heading or lead line saying that what follows is other people's work
+#: about or crediting the owner: an acknowledgements list (ECXGAT 2154).
+_ACKNOWLEDGED_CONTEXT_RE = re.compile(r"acknowledg|\bcit(?:ed|ing)\b", re.IGNORECASE)
+
+#: The mentee codes (N3 all, N3A current, N3B past).
+MENTEE_CODES = frozenset({"N3", "N3A", "N3B"})
+
+#: A heading or lead line naming people the owner reviewed or employed, not
+#: trained: a grant-review panel's applicants, a lab's technical staff.
+_NON_MENTEE_CONTEXT_RE = re.compile(
+    r"\breview(?:s|er|ers|ing)?\b|\bapplicants?\b|\bpanels?\b|\bstaff\b"
+    r"|\btechnicians?\b|\blab(?:oratory)?\s+managers?\b", re.IGNORECASE)
+#: Words that name trainees. A heading with one of them is a mentee heading,
+#: whatever else it names ('Postdoctoral fellows and staff'), and so is a
+#: thesis or dissertation review, which section_consistency files as N3A/N3B.
+_MENTEE_CONTEXT_RE = re.compile(
+    r"student|fellow|trainee|mentee|post-?doc|resident|scholar|advisee|thes[ie]s"
+    r"|dissertation|supervis", re.IGNORECASE)
+
+#: Entries a finding names in its evidence, and characters of each quoted.
+OWNER_ATTRIBUTION_EVIDENCE_LIMIT = 3
+OWNER_ATTRIBUTION_EVIDENCE_CHARS = 80
+
+
+class _AttributionEntry(NamedTuple):
+    """The stage-4 fields this lint reads off one entry, taken once."""
+    element_idx: object
+    code: str
+    text: str
+    heading: tuple[str, ...]
+
+
+def _attribution_entries(stage4: dict) -> list[_AttributionEntry]:
+    """The entries with a position, in source order."""
+    positioned = []
+    for raw in stage4.get("entries", []):
+        position = _entry_position(raw)
+        if position is None:
+            continue
+        hierarchy = raw.get("hierarchy")
+        positioned.append((position, _AttributionEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
+            str(raw.get("text") or "").strip(),
+            tuple(str(h) for h in hierarchy) if isinstance(hierarchy, list) else ())))
+    return [entry for _, entry in sorted(positioned, key=lambda pair: pair[0])]
+
+
+def _is_attribution_lead(entry: _AttributionEntry) -> bool:
+    """A line that heads the entries after it: undated, short, no list item,
+    and no mentee itself. On a run whose headings stage 1b lost (ECXGAT
+    placed none), this is where a heading survives."""
+    return (entry.code not in MENTEE_CODES and not _FOUR_DIGIT_YEAR_RE.search(entry.text)
+            and len(entry.text.split()) <= GROUP_LEAD_MAX_WORDS
+            and not _GROUP_ENUMERATED_RE.match(entry.text))
+
+
+def _attribution_contexts(entries: list[_AttributionEntry]) -> dict[object, tuple[str, str]]:
+    """element_idx_start -> (leaf heading, the nearest lead line above it
+    under the same heading path, or '')."""
+    contexts: dict[object, tuple[str, str]] = {}
+    lead: dict[tuple[str, ...], str] = {}
+    for entry in entries:
+        contexts.setdefault(entry.element_idx,
+                            (entry.heading[-1] if entry.heading else "", lead.get(entry.heading, "")))
+        if _is_attribution_lead(entry):
+            lead[entry.heading] = entry.text
+    return contexts
+
+
+def _non_mentee_context(leaf: str, lead: str) -> str | None:
+    """The heading or lead line naming reviewers or staff that a mentee
+    entry sits under, or None. A leaf heading that names trainees settles it."""
+    for context in (leaf, lead):
+        if _MENTEE_CONTEXT_RE.search(context):
+            return None
+        if _NON_MENTEE_CONTEXT_RE.search(context):
+            return context
+    return None
+
+
+def _evidence_lines(items: list[tuple[object, str, str]]) -> list[str]:
+    return [f"entry {idx} ({code}): {text[:OWNER_ATTRIBUTION_EVIDENCE_CHARS]}"
+            for idx, code, text in items[:OWNER_ATTRIBUTION_EVIDENCE_LIMIT]]
+
+
+def _uncredited_runs(stage4: dict, blocks: list[tuple[str, str]],
+                     owner: frozenset[str]) -> list[list[RenderedCitation]]:
+    """Runs of rendered publications whose author list and source never name
+    the owner (`_owner_credit`; in the source, not even one letter off a long
+    surname, `_shows_owner`: EQADVR 147 misspells it), unbroken by one that
+    does. A citation with no stage-4 authors, a skipped code, or a group or
+    corporate credit is not judged and breaks no run. One whose source elides authors may hide the owner, so it
+    joins a run but cannot start a finding: a run of only those is dropped."""
+    runs: list[list[RenderedCitation]] = [[]]
+    for citation in _rendered_citations(stage4, blocks):
+        if (citation.code in OWNER_ATTRIBUTION_SKIPPED_CODES or not citation.authors.strip()
+                or _CORPORATE_AUTHOR_RE.search(citation.authors)
+                or _GROUP_CREDIT_RE.search(citation.source)):
+            continue
+        if (_owner_credit(citation, owner) is not None
+                or _shows_owner(_EMAIL_OR_URL_RE.sub(" ", citation.source), owner)):
+            runs.append([])
+        else:
+            runs[-1].append(citation)
+    return [run for run in runs
+            if any(not _SOURCE_ELISION_RE.search(c.source) for c in run)]
+
+
+def _uncredited_finding(run: list[RenderedCitation],
+                        contexts: dict[object, tuple[str, str]]) -> tuple[str, str, list[str]]:
+    """(severity, message, evidence) of one run: WARN when a run sits under an acknowledgements heading or lead line,
+    the verified shape; INFO otherwise, where most hits are the owner's own
+    group-authored papers (doctor/PRECISION.md, YUY-OA)."""
+    acknowledged = next((context for c in run for context in contexts.get(c.element_idx, ())
+                         if _ACKNOWLEDGED_CONTEXT_RE.search(context)), None)
+    codes = ", ".join(sorted({c.code for c in run}))
+    where = f" under '{acknowledged}'" if acknowledged else ""
+    return (
+        "WARN" if acknowledged else "INFO",
+        f"{OWNER_ATTRIBUTION_SHAPE_UNCREDITED}: {len(run)} publication(s) rendered in the "
+        f"bibliography, entries {run[0].element_idx}-{run[-1].element_idx} ({codes}){where}, "
+        f"whose author list and source never name the CV owner",
+        _evidence_lines([(c.element_idx, c.code, c.line) for c in run]))
+
+
+def _non_mentee_findings(entries: list[_AttributionEntry],
+                         contexts: dict[object, tuple[str, str]]) -> list[tuple[str, str, list[str]]]:
+    """(severity, message, evidence): one WARN per heading or lead line naming reviewers or staff that has
+    mentee entries under it."""
+    groups: dict[str, list[_AttributionEntry]] = defaultdict(list)
+    for entry in entries:
+        context = (_non_mentee_context(*contexts[entry.element_idx])
+                   if entry.code in MENTEE_CODES else None)
+        if context is not None:
+            groups[context].append(entry)
+    return [(
+        "WARN",
+        f"{OWNER_ATTRIBUTION_SHAPE_NOT_MENTEES}: {len(members)} entr"
+        f"{'y' if len(members) == 1 else 'ies'} coded "
+        f"{', '.join(sorted({e.code for e in members}))} as the CV owner's mentees "
+        f"under '{context}', which names reviewers or staff, not trainees",
+        _evidence_lines([(e.element_idx, e.code, e.text) for e in members]))
+        for context, members in groups.items()]
+
+
+def lint_owner_attribution(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """Other people's content rendered as the CV owner's (#1573): a run of
+    bibliography publications that never credit the owner, and mentee
+    entries under a heading naming reviewers or staff. A trainee's award
+    under a publications heading (ULHCAP-01) and a host's title read as the
+    owner's role (DYLJXC-03) are not reached yet."""
+    entries = _attribution_entries(stage4)
+    contexts = _attribution_contexts(entries)
+    shown = _non_mentee_findings(entries, contexts)
+    owner = _owner_surname_words(stage4)
+    if owner:
+        shown += [_uncredited_finding(run, contexts)
+                  for run in _uncredited_runs(stage4, blocks, owner)]
+    return [_finding("owner_attribution", severity, message, evidence)
+            for severity, message, evidence in shown]
 
 
 # Lint 14n's third sibling, citation_field_dropped (X6 KJJVVO-10, UXBHHF-20):
@@ -3913,3 +4194,155 @@ def lint_split_child_unsourced(stage4: dict,
             f"entry {raw.get('element_idx_start')} ({raw.get('taxonomy_code')}): {what}",
             evidence) for what, evidence in problems]
     return findings
+
+
+# licensure_fallback_truncated (#1576, YUYVIG HXBPCT 145-155): an F1 entry
+# with no jurisdiction and no number renders its raw text in the Licensure
+# State cell (`_license_record`'s fallback). Until #1605 that text was cut at
+# 100 characters, mid-word and silently. With the cap gone this is a
+# regression guard: a State cell, in a row with no number, that holds the
+# start of such an entry's text but not all of it.
+LICENSURE_CODE = "F1"
+LICENSURE_FALLBACK_SEVERITY = "WARN"
+LICENSURE_TAIL_EXCERPT_CHARS = 60
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+class _FallbackLicence(NamedTuple):
+    """An F1 entry stage 6 renders by its raw text alone."""
+    element_idx: object
+    text: str  # whitespace-normalized raw text, as the State cell shows it
+
+
+def _no_space(text: str) -> str:
+    """`text` without whitespace: a line break in the raw text reads back as
+    a newline or a space, depending on how the cell was written."""
+    return _WHITESPACE_RE.sub("", text)
+
+
+def _licensure_rows(table_rows: list[list[list[str]]]) -> list[list[str]]:
+    """The data rows of every table whose header row is the licensure
+    table's own (`_LICENSURE_HEADER_CELLS`, as `_is_licensure_table`)."""
+    rows = []
+    for table in table_rows:
+        if not table:
+            continue
+        header = tuple(" ".join(cell.split()).lower() for cell in table[0])
+        if header == _LICENSURE_HEADER_CELLS[:len(header)]:
+            rows += [row for row in table[1:] if len(row) >= 2]
+    return rows
+
+
+def _licensure_entries(stage4: dict) -> tuple[list[_FallbackLicence], frozenset[str]]:
+    """The F1 entries stage 6 renders by raw text, and the State cell every
+    F1 entry renders whole (whitespace removed), by the renderer's own
+    `_license_record`."""
+    fallbacks, whole = [], set()
+    for raw in stage4.get("entries", []):
+        if raw.get("taxonomy_code") != LICENSURE_CODE:
+            continue
+        entry = _normalize_licensure_entry(raw)
+        record = _license_record(entry)
+        if record is None:
+            continue
+        whole.add(_no_space(record.state))
+        if not entry.state and not entry.number:
+            fallbacks.append(_FallbackLicence(raw.get("element_idx_start"),
+                                              " ".join(entry.original_text.split())))
+    return fallbacks, frozenset(whole)
+
+
+def _truncated_cells(fallback: _FallbackLicence, cells: list[str],
+                     whole: frozenset[str]) -> list[str]:
+    """The cells holding the start of `fallback`'s text but not all of it.
+    A cell some F1 entry renders whole is none: that is the entry's own
+    text, or a shorter credential's that opens the same way."""
+    text = _no_space(fallback.text)
+    return [cell for cell in cells
+            if _no_space(cell) not in whole and text.startswith(_no_space(cell))]
+
+
+def lint_licensure_fallback_truncated(stage4: dict,
+                                      table_rows: list[list[list[str]]]) -> list[dict]:
+    """An F1 entry with no jurisdiction and no number whose Licensure State
+    cell shows only the start of its raw text (#1576). One finding per entry,
+    naming its element_idx_start. Reads stage 4 and the docx's table rows."""
+    cells = [row[0] for row in _licensure_rows(table_rows) if row[0] and not row[1]]
+    fallbacks, whole = _licensure_entries(stage4)
+    findings = []
+    for fallback in fallbacks:
+        truncated = _truncated_cells(fallback, cells, whole)
+        if not truncated:
+            continue
+        shown = " ".join(truncated[0].split())
+        tail = fallback.text[len(shown):].strip()
+        findings.append(_finding(
+            "licensure_fallback_truncated", LICENSURE_FALLBACK_SEVERITY,
+            f"entry {fallback.element_idx} ({LICENSURE_CODE}): the Licensure State cell "
+            f"shows {len(shown)} of the entry's {len(fallback.text)} characters, and the "
+            f"rest is in no licence row: '{tail[:LICENSURE_TAIL_EXCERPT_CHARS]}'",
+            truncated))
+    return findings
+
+
+# --- glyph_field -------------------------------------------------------------
+#
+# A list glyph the source used as a bullet, read as text and rendered as a
+# field: Word's level-2 bullet is a Courier "o", and one CV rendered six Q1
+# rows with Organization "o" (#1584, SXPHOG-02). #1630 folds the glyph onto its
+# item in the PDF converter, and stage 6's Organization fallback no longer
+# takes a one- or two-character residue (`_organization_clause`); this lint
+# checks both stay so. A rendered table cell is WARN: the reader sees it. A
+# stage-4 field value of the same shape that no cell shows is INFO: the
+# record holds it, but it did not reach the page.
+
+#: The glyphs a source CV bullets with: pdf_to_docx's BULLET_GLYPHS (not
+#: imported: that module loads pdfplumber), Word's Courier "o" and Wingdings
+#: section mark, a middle dot, an asterisk and the dashes.
+GLYPH_FIELD_CHARS = frozenset("•▪◦‣●○■□─o§·*-–—")
+#: A field of at most this many characters, every one a glyph, is a glyph.
+GLYPH_FIELD_MAX_CHARS = 2
+#: Values quoted per finding.
+GLYPH_FIELD_EVIDENCE_LIMIT = 5
+
+
+def _is_glyph(value: str) -> bool:
+    value = value.strip()
+    return 0 < len(value) <= GLYPH_FIELD_MAX_CHARS and set(value) <= GLYPH_FIELD_CHARS
+
+
+def _glyph_cells(table_rows: list[list[list[str]]]) -> list[str]:
+    """Each rendered row with a glyph cell, its cells joined."""
+    return [TABLE_ROW_JOINER.join(cell.strip() for cell in row if cell.strip())
+            for table in table_rows for row in table if any(map(_is_glyph, row))]
+
+
+def _glyph_fields(stage4: dict | None) -> list[str]:
+    """'entry N (code): key' for each stage-4 field whose value is a glyph."""
+    if not stage4:
+        return []
+    return [f"entry {entry.element_idx} ({entry.code}): {key} = {leaf.strip()!r}"
+            for entry in _fields_entries(stage4) for key, value in entry.fields.items()
+            for leaf in _leaf_strings(value) if _is_glyph(leaf)]
+
+
+def lint_glyph_field(table_rows: list[list[list[str]]], stage4: dict | None) -> list[dict]:
+    """A rendered table cell, or a stage-4 field value, that is nothing but
+    one or two list glyphs (#1584). WARN for the rendered rows, one finding
+    quoting them; INFO for the stage-4 fields, one finding, when no cell
+    shows a glyph."""
+    rows = _glyph_cells(table_rows)
+    if rows:
+        return [_finding(
+            "glyph_field", "WARN",
+            f"{len(rows)} rendered table row(s) hold a cell that is only a list "
+            f"glyph -- a source bullet read as a field value",
+            rows[:GLYPH_FIELD_EVIDENCE_LIMIT])]
+    fields = _glyph_fields(stage4)
+    if fields:
+        return [_finding(
+            "glyph_field", "INFO",
+            f"{len(fields)} stage-4 field value(s) are only a list glyph; no "
+            f"rendered cell shows one",
+            fields[:GLYPH_FIELD_EVIDENCE_LIMIT])]
+    return []

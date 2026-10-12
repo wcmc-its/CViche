@@ -509,3 +509,30 @@ def test_run_stage5b_cli_path_still_reuses_its_disk_cache(monkeypatch, tmp_path)
 
     stats = json.loads(Path(result_path).read_text())["institution_enrichment_stats"]
     assert (stats["cache_consulted"], stats["cache_hits"], stats["llm_lookups"]) == (True, 1, 0)
+
+
+def test_run_stage5b_logs_a_progress_bar_line_per_llm_batch(monkeypatch, caplog, tmp_path, progress_patterns):
+    """#576: 5b's "[N/M] institution batches looked up" line is the parsed
+    progress-bar contract -- orchestrator.py's PROGRESS_PATTERNS (pinned in
+    conftest.py's progress_patterns fixture) read it into the web bar. Drive
+    the real run_stage5b loop, not a hand-typed literal, so a reword of the
+    logged line fails here instead of silently parking the bar at its
+    placeholder for all of 5b."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(s5b, "BATCH_SIZE", 2)  # 5 institutions -> 3 batches
+    monkeypatch.setattr(s5b_lookup, "call_llm", lambda **kw: _fake_llm_result("{}"))
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({"document_uid": "test-uid", "entries": _institution_entries(5)}))
+
+    with caplog.at_level(logging.INFO, logger="unified_pipeline.stage_5b_institution_enrichment"):
+        s5b.run_stage5b(str(input_path), output_path=str(tmp_path / "out.json"), verbose=True)
+
+    progress = []
+    for record in caplog.records:
+        match = next((m for p in progress_patterns if (m := p.search(record.getMessage()))), None)
+        if match:
+            progress.append((int(match.group(1)), int(match.group(2))))
+    assert progress == [(1, 3), (2, 3), (3, 3)]

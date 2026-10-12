@@ -85,18 +85,23 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
+    APPOINTMENT_DUTY_VERBS,
+    APPOINTMENT_ROLE_MIN_CHARS,
+    ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
     _extract_year_from_text,
     _is_structural_label,
     _is_table_header_entry,
     _looks_like_multiple_records,
+    _mid_sentence_joins,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    _refold_shattered,
     _strip_appended_initials,
-    ParsedActivityLine,
+    is_membership_date_part,
+    split_appointment_title,
 )
-
 
 # --- item 1: the strip is a guess and lives at the call site (#665) --------
 
@@ -535,3 +540,216 @@ def test_committee_lines_accept_every_dash(dash):
 @pytest.mark.parametrize("dash", ["-", "–", "—"])
 def test_year_from_text_reads_the_end_of_a_range_for_every_dash(dash):
     assert _extract_year_from_text(f"served 2019{dash}2021") == "2021"
+
+
+# --- #665: orphaned dates pair only in a layout a table produces ------------
+
+@pytest.mark.parametrize("lines", [
+    # column 1 then column 2
+    ["Zorblax Board", "Quux Council", "Frob Panel", "2001", "2002-2004", "2005"],
+    # column 2 then column 1
+    ["2001", "2002-2004", "2005", "Zorblax Board", "Quux Council", "Frob Panel"],
+    # row by row, date after its activity
+    ["Zorblax Board", "2001", "Quux Council", "2002-2004", "Frob Panel", "2005"],
+    # row by row, date before its activity
+    ["2001", "Zorblax Board", "2002-2004", "Quux Council", "2005", "Frob Panel"],
+    # a self-dated row between the runs is not part of the layout
+    ["Zorblax Board", "Quux Council", "Blorp Group  1999", "Frob Panel",
+     "2001", "2002-2004", "2005"],
+])
+def test_orphaned_dates_pair_in_every_table_layout(lines):
+    dated = {item.activity: item.dates
+             for item in _parse_flattened_committee_lines(lines)}
+    assert (dated["Zorblax Board"], dated["Quux Council"], dated["Frob Panel"]) == (
+        "2001", "2002-2004", "2005")
+
+
+@pytest.mark.parametrize("lines", [
+    # one row flattened, then two rows' columns as runs: equal counts, but
+    # nothing proves the second date belongs to the second activity
+    ["Zorblax Board", "2001", "Quux Council", "Frob Panel", "2002-2004", "2005"],
+    ["Zorblax Board", "Quux Council", "2001", "Frob Panel", "2002-2004", "2005"],
+])
+def test_orphaned_dates_in_no_table_layout_stay_unassigned(lines, caplog):
+    with caplog.at_level("WARNING"):
+        items = _parse_flattened_committee_lines(lines)
+    assert [item.dates for item in items] == ["", "", ""]
+    assert "no table layout" in caplog.text
+
+
+@pytest.mark.parametrize("end", ["present", "current", "ongoing", "Current"])
+def test_committee_range_may_end_in_every_open_end_word(end):
+    assert _parse_flattened_committee_lines(
+        [f"Zorblax Board    2001-{end}", f"Quux Council (Chair 2003-{end})"]) == [
+        ParsedActivityLine("Zorblax Board", (), f"2001-{end}"),
+        ParsedActivityLine("Quux Council", ("Chair",), f"2003-{end}"),
+    ]
+
+
+@pytest.mark.parametrize("part, expected", [
+    ("2010-2014", True),
+    ("2010–present", True),
+    ("2010—current", True),
+    ("3/2010-6/2012", True),
+    ("3/2010–ongoing", True),
+    ("3/2010 (founding)", True),   # a month/year that opens the part
+    ("2010", False),                # a bare year is not a membership date part
+    ("Society of 2010", False),
+])
+def test_membership_date_part_is_the_shared_grammar(part, expected):
+    assert is_membership_date_part(part) is expected
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("Zorblax Board    2016-23", ParsedActivityLine("Zorblax Board", (), "2016-23")),
+    ("Zorblax Board (Chair 2016-23)", ParsedActivityLine("Zorblax Board", ("Chair",), "2016-23")),
+    # a third digit is not a short end year cut off early
+    ("Zorblax Board    2016-202", ParsedActivityLine("Zorblax Board    2016-202", (), "")),
+])
+def test_committee_range_may_end_in_a_century_less_year(line, expected):
+    assert _parse_flattened_committee_lines([line]) == [expected]
+
+
+# --- #1583: one paragraph cut at its printed lines ---------------------------
+
+_PRINTED_LINES = ["Division Chief, Example Unit. I led the establishment",
+                  "of a new clinical division providing molecular tests for",
+                  "Infectious Diseases at Example Hospital. I also integrated",
+                  "sequencing into routine care.",
+                  "Example Hospital, 2015-2023"]
+
+
+def test_refold_joins_mid_sentence_lines_and_keeps_a_sentence_end():
+    # 'of' opens lowercase, 'for' is a connector, 'sequencing' opens
+    # lowercase; the line after 'care.' starts a new part.
+    assert _refold_shattered(_PRINTED_LINES) == [" ".join(_PRINTED_LINES[:4]), _PRINTED_LINES[4]]
+
+
+@pytest.mark.parametrize("parts", [
+    pytest.param(["Chair, Example Committee.", "member, other board.", "reviewer, journal."],
+                 id="every line ends a sentence"),
+    pytest.param(["Example Team,", "Example Building, Example Clinic,", "100 Example St, Suite 5"],
+                 id="an address broken at commas"),
+    pytest.param(["Director, Example Lab. I built", "the lab.", "Chair, Board."],
+                 id="one mid-sentence join"),
+    pytest.param(["Attending Physician", "Example Hospital", "2015-2020"],
+                 id="a flattened row"),
+])
+def test_refold_leaves_parts_that_are_not_one_cut_paragraph(parts):
+    assert _refold_shattered(parts) == parts
+
+
+@pytest.mark.parametrize("sentences, folds", [(4, True), (5, False)])
+def test_refold_needs_thirty_percent_of_the_joins_mid_sentence(sentences, folds):
+    # Two mid-sentence joins, then whole sentences: 2 of 6 joins fold, 2 of 7 do not.
+    parts = [*_PRINTED_LINES[:3], *(f"Sentence {i}." for i in range(sentences))]
+    assert (_refold_shattered(parts) != parts) is folds
+
+
+@pytest.mark.parametrize("end", list(".!?;:)]\"\u201d"))
+def test_a_line_ending_a_sentence_is_no_mid_sentence_join(end):
+    # Even before a lowercase opening, which otherwise marks a join.
+    assert _mid_sentence_joins([f"the example clinic{end}", "member of the board"]) == [False]
+
+
+@pytest.mark.parametrize("end", [",", "-", "\u2013", " and", " or", " of", " the", " for",
+                                 " to", " in", " with", " a", " an", " at", " by", " on",
+                                 " from", " as", " that", " which", " including", " into",
+                                 " our", " my", " their", " its"])
+def test_a_line_ending_on_a_connector_joins_mid_sentence(end):
+    # Even before a capitalised opening, which otherwise marks no join.
+    assert _mid_sentence_joins([f"the example clinic{end}", "Example Hospital"]) == [True]
+
+
+def test_a_capitalised_connector_still_joins():
+    assert _mid_sentence_joins(["the Department Of", "Example Hospital"]) == [True]
+
+
+def test_refold_counts_lowercase_openings_only_at_mid_sentence_joins():
+    # Two joins at connectors, both capitalised; the one lowercase opening
+    # follows a sentence end, so no join opens lowercase and nothing folds.
+    parts = ["Director of", "Example Lab and", "Example Unit.", "member of the board."]
+    assert _refold_shattered(parts) == parts
+
+
+def test_refold_at_exactly_thirty_percent_of_the_joins_mid_sentence():
+    # 3 of 10 joins mid-sentence: the share is a floor, met exactly.
+    parts = ["I led the", "establishment of a", "new clinical", "division.",
+             *(f"Sentence {i}." for i in range(7))]
+    assert _refold_shattered(parts) == [" ".join(parts[:4]), *parts[4:]]
+
+
+def test_a_capitalised_opening_after_a_plain_word_is_no_join():
+    assert _mid_sentence_joins(["the example clinic", "Example Hospital"]) == [False]
+
+
+# --- split_appointment_title (#1205) -----------------------------------------
+# Synthetic titles in the two shapes YUYVIG DYLJXC 661/668 carry: a role, a
+# spaced dash, an FTE share, then a "to <verb>" duty clause.
+
+_DASH_DUTY_TITLE = ("Visiting Fellow in Example Science, Example Policy Office"
+                    " - 50% FTE Appointment to help plan the example programme")
+
+
+def test_split_cuts_at_the_dash_before_a_duty_clause():
+    assert split_appointment_title(_DASH_DUTY_TITLE) == (
+        "Visiting Fellow in Example Science, Example Policy Office",
+        "50% FTE Appointment to help plan the example programme")
+
+
+def test_split_cuts_at_the_duty_clause_when_no_dash_precedes_it():
+    assert split_appointment_title(
+        "Visiting Scientist at the Example Agency to continue the example initiatives") == (
+        "Visiting Scientist at the Example Agency",
+        "to continue the example initiatives")
+
+
+def test_split_cuts_at_a_sentence_break():
+    assert split_appointment_title(
+        "Medical Director, Example Clinic. Responsible for the example service.") == (
+        "Medical Director, Example Clinic.", "Responsible for the example service.")
+
+
+def test_split_takes_the_earlier_of_a_sentence_break_and_a_duty_clause():
+    role, duties = split_appointment_title(
+        "Director of Example Programs. Appointed to lead the example unit")
+    assert role == "Director of Example Programs."
+    assert duties == "Appointed to lead the example unit"
+
+
+def test_split_keeps_every_word():
+    role, duties = split_appointment_title(_DASH_DUTY_TITLE)
+    assert f"{role} - {duties}" == _DASH_DUTY_TITLE
+
+
+@pytest.mark.parametrize("title", [
+    "Special Assistant to the Dean for Example Affairs",
+    'Statistical adviser for "Example Trial to Promote Example Care"',
+    "Associate Professor (Tenure), Depts. Of Example Biology & Example Chemistry",
+    "Assoc. Professor of Medicine and Example Biology",
+    "Asst. Professor of Example Surgery",
+    "Graduate Research Assistant with Dr. Example J.L. Person",
+    "Inaugural Example M.D. and Example Professor of Example Research",
+    "Professor of Medicine; Chief, Division of Example Medicine",
+    "Professor of Surgery, Division Chief \u2013 Example Trauma Surgery",
+])
+def test_split_leaves_a_title_with_no_duty_prose_whole(title):
+    assert split_appointment_title(title) == (title, "")
+
+
+@pytest.mark.parametrize("verb", sorted(APPOINTMENT_DUTY_VERBS))
+def test_split_finds_every_listed_duty_verb(verb):
+    assert split_appointment_title(f"Example Fellow, Example Office to {verb} things")[1] \
+        == f"to {verb} things"
+
+
+def test_split_needs_a_role_of_minimum_length_in_front():
+    # "Fellow" is under APPOINTMENT_ROLE_MIN_CHARS: no split.
+    title = "Fellow to help the example unit"
+    assert len("Fellow") < APPOINTMENT_ROLE_MIN_CHARS
+    assert split_appointment_title(title) == (title, "")
+
+
+@pytest.mark.parametrize("title", ["", None, "   "])
+def test_split_of_an_empty_title(title):
+    assert split_appointment_title(title) == ("", "")

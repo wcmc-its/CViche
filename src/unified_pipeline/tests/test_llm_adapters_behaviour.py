@@ -29,7 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -1365,6 +1365,68 @@ def test_call_with_retry_cancel_after_backoff_stops_further_attempts(monkeypatch
 
     assert attempts["n"] == 1  # cancel fired before a second attempt started
     assert len(sleeps) == 1  # the first attempt's backoff still ran
+
+
+# A stand-in for provider response text that must never reach a WARNING (#639).
+_PROVIDER_DETAIL_SENTINEL = "body-fragment req-id 0000-synthetic https://example.invalid/x"
+
+
+def _warning_and_debug_messages(
+    caplog: pytest.LogCaptureFixture,
+) -> tuple[list[str], list[str]]:
+    records = [r for r in caplog.records if r.name == retry.__name__]
+    warnings = [r.getMessage() for r in records if r.levelno == logging.WARNING]
+    debugs = [r.getMessage() for r in records if r.levelno == logging.DEBUG]
+    return warnings, debugs
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_label"),
+    [
+        ("InternalServerException", "ClientError[InternalServerException]"),
+        ("ServiceUnavailableException", "ClientError[ServiceUnavailableException]"),
+    ],
+    ids=["ordinary_retry_site", "outage_pause_site"],
+)
+def test_call_with_retry_warning_names_error_class_and_code_not_provider_text(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    code: str,
+    expected_label: str,
+) -> None:
+    # #639: both retry sites used to interpolate str(e) -- which can carry
+    # response-body fragments, URLs, or IDs -- into a WARNING. The WARNING now
+    # names only the exception class and botocore error code; the raw text is
+    # kept, at DEBUG.
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    attempts = {"n": 0}
+
+    def fails_once() -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ClientError(
+                {"Error": {"Code": code, "Message": _PROVIDER_DETAIL_SENTINEL}}, "Converse"
+            )
+        return "recovered"
+
+    with caplog.at_level(logging.DEBUG, logger=retry.__name__):
+        retry._call_with_retry(fails_once, retry_count=2)
+
+    warnings, debugs = _warning_and_debug_messages(caplog)
+    assert len(warnings) == 1
+    assert expected_label in warnings[0]
+    assert _PROVIDER_DETAIL_SENTINEL not in warnings[0]
+    assert any(_PROVIDER_DETAIL_SENTINEL in m for m in debugs)
+
+
+def test_redacted_error_label_is_bare_class_name_without_a_botocore_code() -> None:
+    # A transport error (no response dict) and a ClientError whose response
+    # lacks an error code both fall back to the class name alone.
+    transport = ReadTimeoutError(endpoint_url=_PROVIDER_DETAIL_SENTINEL)
+    codeless = ClientError({"Error": {"Message": _PROVIDER_DETAIL_SENTINEL}}, "Converse")
+
+    assert retry._redacted_error_label(transport) == "ReadTimeoutError"
+    assert retry._redacted_error_label(codeless) == "ClientError"
 
 
 # ---------------------------------------------------------------------------

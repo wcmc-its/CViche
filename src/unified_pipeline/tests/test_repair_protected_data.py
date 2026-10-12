@@ -27,11 +27,16 @@ from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls, qn  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
-from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output  # noqa: E402
+from unified_pipeline.doctor.lints.protected_data import (
+    lint_protected_data_in_output,  # noqa: E402
+)
 from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
 from unified_pipeline.repair import protected_data as repair  # noqa: E402
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE  # noqa: E402
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    WCMTemplateGenerator,
+    run_stage6,
+)
 
 _UID = "TESTRP"
 _ENTRIES = [
@@ -241,7 +246,30 @@ def test_the_loose_dea_shape_is_cut_only_where_its_block_names_dea():
     licensure = "licensure, board certification"
     assert repair._leaks("AB12CD345", licensure, dea_label_in_block=True)
     assert repair._leaks("AB12CD345", licensure, dea_label_in_block=False) == []
-    assert repair._leaks("AB1234567", licensure, dea_label_in_block=False)
+    assert repair._leaks("AB1234563", licensure, dea_label_in_block=False)
+    # #1658: unlabelled, the real format needs the DEA check digit too.
+    assert repair._leaks("ME1234567", licensure, dea_label_in_block=False) == []
+
+
+def _licence_numbers(docx_path: Path) -> list[str]:
+    """The Number cell of every rendered licence row."""
+    return [row.cells[1].text for table in Document(str(docx_path)).tables
+            for row in table.rows[1:] if row.cells[0].text == "Florida"]
+
+
+@pytest.mark.parametrize("number, kept", [("ME1234567", True), ("AB1234563", False)])
+def test_a_state_licence_number_is_cut_only_with_the_dea_check_digit(tmp_path, number, kept):
+    """#1658: an unlabelled licence row's DEA-shaped number is cut only when it
+    carries the DEA check digit. "ME" plus seven digits that fail it is a
+    Florida medical licence and keeps its number; one that passes is cut."""
+    entry = {"text": f"Florida medical license {number}", "taxonomy_code": "F1",
+             "element_idx_start": 2,
+             "extracted_fields": {"state_country": "Florida", "license_number": number}}
+    path = tmp_path / "in.json"
+    path.write_text(json.dumps({"document_uid": _UID, "entries": _ENTRIES + [entry]}))
+    out = run_stage6(str(path), str(tmp_path / f"{_UID}_wcm.docx"), verbose=False,
+                     discover_original_doc=False, repair_protected_data=True)
+    assert _licence_numbers(Path(out)) == [number if kept else ""]
 
 
 _FORBIDDEN_IMPORTS = ("unified_pipeline.stage_6_word_template", "unified_pipeline.run_doctor",

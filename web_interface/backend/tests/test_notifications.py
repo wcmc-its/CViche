@@ -185,6 +185,26 @@ def test_payload_score_unmarked_when_complete_or_unknown(monkeypatch, data_compl
     assert _facts(payload)["Quality score"] == "87 (GREEN (ship))"
 
 
+@pytest.mark.parametrize("missing, expected", [
+    ([], "97 (GREEN (ship)) — not checked (no doctor report)"),
+    (["x"], "97 (GREEN (ship)) — incomplete: 1 file(s) missing or unreadable"
+            " — not checked (no doctor report)"),
+])
+def test_payload_score_unchecked_by_the_doctor_says_so(monkeypatch, missing, expected):
+    """#1593: a score with no doctor report beside it reads "not checked", not
+    as a bare band; a missing-file count still shows beside it."""
+    from app.services.quality_score_service import DOCTOR_NOT_CHECKED, DOCTOR_STATUS_KEY
+
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {"totalScore": 97, "band": "GREEN (ship)", "data_complete": False,
+             "missing_evidence": missing, DOCTOR_STATUS_KEY: DOCTOR_NOT_CHECKED}
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    assert _facts(payload)["Quality score"] == expected
+    assert f"score {expected}" in payload["summary"]
+
+
 def test_payload_run_link_uses_first_allowed_origin(monkeypatch):
     monkeypatch.setenv(
         "CVICHE_ALLOWED_ORIGINS",

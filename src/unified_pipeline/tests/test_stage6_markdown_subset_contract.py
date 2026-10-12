@@ -33,7 +33,6 @@ from unified_pipeline.stage6.normalization.rendering import (  # noqa: E402
     _strip_markdown_for_word,
 )
 
-
 # --------------------------------------------------------------------------
 # The supported subset
 # --------------------------------------------------------------------------

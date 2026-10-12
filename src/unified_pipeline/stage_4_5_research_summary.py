@@ -14,11 +14,11 @@ Output: Same JSON with M1 entry replaced by generated research summary
 import argparse
 import json
 import logging
-import re
 import os
+import re
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"
@@ -101,6 +101,52 @@ PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes 
 # Current by definition (active funding, current mentees) unless the entry's end_date has passed.
 CURRENT_TAXONOMY_CODES = ('M2A', 'N3A')
 RESEARCH_ACTIVITIES_CODE = 'M1'  # an undated M1 narrative is the owner's present research statement
+# The funding status each M2 code means, written into the grant's context line as a word: the
+# model never learns what a bare "GRANT-M2C" means, and summarised pending applications as
+# funded work (KJJVVO, #1484). M2D holds patents, which share the M2 prefix but are not grants.
+# For a funded grant (M2A/M2B) the code's word is only the fallback: grant_status() reads the
+# status from the grant's own end date, then its CV heading, and says "not stated" when neither
+# gives one (#1554).
+GRANT_STATUS_CURRENT = 'current'
+GRANT_STATUS_COMPLETED = 'completed'
+GRANT_STATUS_BY_CODE = {
+    'M2A': GRANT_STATUS_CURRENT,
+    'M2B': GRANT_STATUS_COMPLETED,
+    'M2C': 'pending application (not funded)',
+    'M2D': 'patent or innovation (not a grant)',
+}
+# A funded grant's status when neither its end date nor its CV heading states one. The 3b code
+# alone wrote "current" or "completed" here, and the summary repeated it as fact: undated grants
+# coded M2B became "completed" (FMIGLR-07), an undated trial coded M2A became "I currently serve"
+# (RLADNC-10), and a 2007 honors line coded M2A became "I continue work" (ZDOAZO-01) (YUYVIG, #1554).
+GRANT_STATUS_NOT_STATED = 'not stated in the CV'
+# A grant the CV marks as declined, withdrawn or not funded was never received, whatever its
+# code: "three consecutive Fellowship Training Awards" counted a DECLINED year (ATRKVV-02, #1554).
+GRANT_STATUS_NOT_RECEIVED = 'not received (declined, withdrawn or not funded)'
+GRANT_SOURCE_STATUS_FIELD = 'status'
+NOT_RECEIVED_STATUS_PATTERN = re.compile(r'\b(?:declined|withdrawn|not\s+funded|rejected)\b', re.IGNORECASE)
+# CV heading words that state a grant's status, read from the grant's deepest heading that names
+# any: "Ongoing Research Grants", "Past (Completed) Funding", "Pending Research Grants (under
+# review)", "Submitted, Not Funded". A heading mixing them ("Present/Pending", "Current Support
+# and Recently Completed") states none. A pending or not-funded heading outranks the grant's dates:
+# 3b coded some applications M2B, and their proposed period would otherwise read as current.
+HEADING_CURRENT_PATTERN = re.compile(r'\b(?:current|ongoing|active|present)\b', re.IGNORECASE)
+HEADING_COMPLETED_PATTERN = re.compile(r'\b(?:completed|past|prior|previous|former)\b', re.IGNORECASE)
+HEADING_PENDING_PATTERN = re.compile(r'\b(?:pending|submitted|under\s+review|in\s+review)\b', re.IGNORECASE)
+HEADING_STATUS_PATTERNS = (HEADING_CURRENT_PATTERN, HEADING_COMPLETED_PATTERN, HEADING_PENDING_PATTERN,
+                           NOT_RECEIVED_STATUS_PATTERN)
+# Grant date fields written into the grant's context line, so an old application or a long-ended
+# grant does not read as current (UNKNBU, #1554). M2C applications carry a submission date instead.
+GRANT_START_FIELD = 'start_date'
+GRANT_END_FIELD = 'end_date'
+GRANT_SUBMITTED_FIELD = 'submission_date'
+# The context tags the generation prompt's conditional requirements key on (#1554): funded grant
+# lines, pending-application lines, and mentee lines. The prompt asks about funding, pending
+# applications or mentoring only when the context holds such a line, so the model is never asked
+# for content the CV does not have.
+FUNDED_GRANT_CODES = ('M2A', 'M2B')
+PENDING_GRANT_CODE = 'M2C'
+MENTORING_TAXONOMY_CODES = ('N3A', 'N3B', 'N4')
 
 # Recency (#946 item 6). An entry's recency score is 1.0 when it is ongoing and
 # falls linearly to 0 over RECENCY_WINDOW_YEARS; RECENCY_WEIGHT scales it into
@@ -159,16 +205,26 @@ def resolve_current_year(current_year: int | None) -> int:
     return datetime.now().year if current_year is None else current_year
 
 
-def ended_before(entry: dict, current_year: int) -> bool:
-    """True when the entry's end_date names a year earlier than current_year.
-    An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
-    whatever year it names, so an open-ended M2A/N3A stays current."""
+def end_date_state(entry: dict, current_year: int) -> bool | None:
+    """Whether the entry's end_date has passed: True when it names only years
+    earlier than current_year; False when it matches ONGOING_PATTERN ("2024 -
+    Present"), whatever year it names, or names current_year or later; None
+    when it names neither (no end_date, or one with no year)."""
     fields = entry.get('extracted_fields') or {}
     end_date = str(fields.get('end_date') or '')
     if ONGOING_PATTERN.search(end_date):
         return False
     end_years = [int(y) for y in YEAR_PATTERN.findall(end_date)]
-    return bool(end_years) and max(end_years) < current_year
+    if not end_years:
+        return None
+    return max(end_years) < current_year
+
+
+def ended_before(entry: dict, current_year: int) -> bool:
+    """True when the entry's end_date names a year earlier than current_year.
+    An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
+    whatever year it names, so an open-ended M2A/N3A stays current."""
+    return end_date_state(entry, current_year) is True
 
 
 def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_year: int | None = _UNCOMPUTED) -> bool:
@@ -200,6 +256,9 @@ class EntryRecency:
     is_current: bool
     latest_year: int | None
     score: float
+    # end_date_state(): True ended, False ongoing, None when the end date states neither.
+    # grant_status() reads it, so a grant line's status follows its dates, not its code (#1554).
+    ended: bool | None = None
 
 
 def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> EntryRecency:
@@ -212,7 +271,8 @@ def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) ->
         score = 0.0
     else:
         score = min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
-    return EntryRecency(is_current=current, latest_year=year, score=score)
+    return EntryRecency(is_current=current, latest_year=year, score=score,
+                        ended=end_date_state(entry, current_year))
 
 
 def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
@@ -373,8 +433,103 @@ def is_valid_entry(code: str, entry: dict) -> bool:
     return True
 
 
-def format_entry_for_context(code: str, entry: dict) -> str:
-    """Format an entry for inclusion in the LLM context (no truncation)."""
+def status_heading(entry: dict) -> str:
+    """The entry's deepest CV heading that names a status word (HEADING_STATUS_PATTERNS), else ''."""
+    for heading in reversed(entry.get('hierarchy') or []):
+        heading = str(heading)
+        if any(pattern.search(heading) for pattern in HEADING_STATUS_PATTERNS):
+            return heading
+    return ''
+
+
+def heading_grant_status(heading: str) -> str | None:
+    """The status a status_heading() states on its own: GRANT_STATUS_NOT_RECEIVED for a
+    not-funded heading, the pending-application word for a pending one, else current or
+    completed; None when it mixes them or names none (#1554)."""
+    if NOT_RECEIVED_STATUS_PATTERN.search(heading):
+        return GRANT_STATUS_NOT_RECEIVED
+    current = bool(HEADING_CURRENT_PATTERN.search(heading))
+    completed = bool(HEADING_COMPLETED_PATTERN.search(heading))
+    pending = bool(HEADING_PENDING_PATTERN.search(heading))
+    if current + completed + pending != 1:
+        return None
+    if pending:
+        return GRANT_STATUS_BY_CODE[PENDING_GRANT_CODE]
+    return GRANT_STATUS_CURRENT if current else GRANT_STATUS_COMPLETED
+
+
+def grant_status(code: str, entry: dict, ended: bool | None) -> str | None:
+    """The status word for a grant's context line, or None for a code GRANT_STATUS_BY_CODE
+    does not know (#1484). `ended` is the entry's end_date_state().
+
+    A grant the CV marks declined, withdrawn or not funded (its status field or its heading) is
+    GRANT_STATUS_NOT_RECEIVED. M2C and M2D otherwise keep their code's word. A funded grant
+    (M2A/M2B) under a pending heading is a pending application; otherwise its status comes from
+    its end date, else from its heading, else it is GRANT_STATUS_NOT_STATED: the code alone is the
+    3b bucket, which defaults an undated grant to one side (#1554)."""
+    if code not in GRANT_STATUS_BY_CODE:
+        return None
+    source_status = _field_text(entry.get('extracted_fields') or {}, GRANT_SOURCE_STATUS_FIELD)
+    heading_status = heading_grant_status(status_heading(entry))
+    if NOT_RECEIVED_STATUS_PATTERN.search(source_status) or heading_status == GRANT_STATUS_NOT_RECEIVED:
+        return GRANT_STATUS_NOT_RECEIVED
+    if code not in FUNDED_GRANT_CODES:
+        return GRANT_STATUS_BY_CODE[code]
+    if heading_status == GRANT_STATUS_BY_CODE[PENDING_GRANT_CODE]:
+        return heading_status
+    if ended is not None:
+        return GRANT_STATUS_COMPLETED if ended else GRANT_STATUS_CURRENT
+    return heading_status or GRANT_STATUS_NOT_STATED
+
+
+def grant_status_segment(status: str | None) -> str:
+    """' | Status: <word>' for a grant_status() word, else '' (#1484)."""
+    return f" | Status: {status}" if status else ""
+
+
+def _field_text(fields: dict, name: str) -> str:
+    """The field's value as stripped text; '' when missing, blank, or the literal 'None'."""
+    value = str(fields.get(name) or '').strip()
+    return '' if value.lower() == 'none' else value
+
+
+def grant_period_segment(fields: dict) -> str:
+    """' | Period: <start> to <end>' and/or ' | Submitted: <date>' from the grant's date
+    fields, else '' (#1554): an undated grant line let an old application read as current."""
+    start = _field_text(fields, GRANT_START_FIELD)
+    end = _field_text(fields, GRANT_END_FIELD)
+    submitted = _field_text(fields, GRANT_SUBMITTED_FIELD)
+    segment = ''
+    if start and end:
+        segment = f" | Period: {start} to {end}"
+    elif start:
+        segment = f" | Period: from {start}"
+    elif end:
+        segment = f" | Period: until {end}"
+    if submitted:
+        segment += f" | Submitted: {submitted}"
+    return segment
+
+
+def grant_context_tag(code: str) -> str:
+    """The tag that opens a grant's context line, e.g. '[GRANT-M2A]'."""
+    return f"[GRANT-{code}]"
+
+
+def generic_context_tag(code: str) -> str:
+    """The tag that opens a context line in the generic format, e.g. '[N3A]'."""
+    return f"[{code}]"
+
+
+# What a grant line says for a Role or Agency the entry does not give. A blank "Role: " let the
+# model supply one ("I led several state-funded initiatives", FCAAUV-07), and a literal
+# "Agency: None" left the funder open to the next line's (WPJHYT-05) (#1554).
+GRANT_FIELD_NOT_STATED = 'not stated'
+
+
+def format_entry_for_context(code: str, entry: dict, ended: bool | None = None) -> str:
+    """Format an entry for inclusion in the LLM context (no truncation). `ended` is the
+    entry's end_date_state(), which a grant line's status reads (#1554)."""
     fields = entry.get('extracted_fields', {})
     text = entry.get('text', '')  # No truncation
 
@@ -388,9 +543,10 @@ def format_entry_for_context(code: str, entry: dict) -> str:
 
     elif code.startswith(GRANT_TAXONOMY_PREFIX):  # Grant
         title = fields.get('title', '')
-        role = fields.get('pi_role', '') or fields.get('role', '')
-        agency = fields.get('agency', '')
-        return f"[GRANT-{code}] {title} | Role: {role} | Agency: {agency}"
+        role = _field_text(fields, 'pi_role') or _field_text(fields, 'role') or GRANT_FIELD_NOT_STATED
+        agency = _field_text(fields, 'agency') or GRANT_FIELD_NOT_STATED
+        return (f"{grant_context_tag(code)} {title}{grant_status_segment(grant_status(code, entry, ended))}"
+                f"{grant_period_segment(fields)} | Role: {role} | Agency: {agency}")
 
     elif code == 'M1':  # Research activities
         return f"[RESEARCH] {text}"
@@ -405,7 +561,17 @@ def format_entry_for_context(code: str, entry: dict) -> str:
 
     else:
         # Generic format - no truncation
-        return f"[{code}] {text}"
+        return f"{generic_context_tag(code)} {text}"
+
+
+def is_tagged_current(code: str, entry: dict, recency: EntryRecency) -> bool:
+    """Whether the entry's context line opens with CURRENT_CONTEXT_TAG: a funded grant only
+    when its line's status is current, so the tag never contradicts the status (an undated
+    honors line coded M2A was tagged current, ZDOAZO-01, #1554); any other entry when it is
+    ongoing (recency.is_current)."""
+    if code in FUNDED_GRANT_CODES:
+        return grant_status(code, entry, recency.ended) == GRANT_STATUS_CURRENT
+    return recency.is_current
 
 
 def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]],
@@ -435,8 +601,8 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRec
     valid_entries.sort(key=lambda x: x[2], reverse=True)
 
     for code, entry, weight, recency in valid_entries:
-        formatted = format_entry_for_context(code, entry)
-        if recency.is_current:
+        formatted = format_entry_for_context(code, entry, recency.ended)
+        if is_tagged_current(code, entry, recency):
             formatted = f"{CURRENT_CONTEXT_TAG} {formatted}"
 
         if total_chars + len(formatted) > max_chars:
@@ -546,36 +712,109 @@ Respond with JSON only:
 # Generation-prompt requirements (#946 item 6), named so tests pin them. Kept next to
 # generate_research_summary rather than the recency constants above: these are prompt
 # content, not recency logic, and NEUTRAL_REFERENCE_REQUIREMENT has nothing to do with dates.
+# The summary is the researcher's own statement, in the first person (Paul, 2026-10-07, #1539).
+FIRST_PERSON_REQUIREMENT = (
+    "Write in the first person, as the researcher describing their own work (\"I\", \"my research\", "
+    "\"my group\")"
+)
 CURRENT_WORK_REQUIREMENT = (
     f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
     "and the most recent years); mention older work only briefly, as background, after the current work"
 )
-NEUTRAL_REFERENCE_REQUIREMENT = (
-    "Refer to the researcher by name or with gender-neutral phrasing (e.g. \"this research program\", \"this work\"); "
-    "never use gendered pronouns (he/she/his/her/him) and never infer gender from the name"
+# YUYVIG, after #1558: the summary called ongoing protocols "completed" (SPINJC-05), a 2019-only
+# item current (OKRTPJ-13) and a 2007 line continuing (ZDOAZO-01) (#1554).
+STATUS_REQUIREMENT = (
+    f"Call work current, ongoing or continuing only when its line is tagged {CURRENT_CONTEXT_TAG} or its "
+    "dates run to the present, and completed only when its dates have ended; when a line gives neither, "
+    "do not say whether the work is current or completed"
 )
+# YUYVIG, after #1558: "led", "founded" and "direct" for roles the CV gives as co-founder, lecturer,
+# a committee seat or no role at all (XVSQFF-08, FCAAUV-07, OKRTPJ-13, XNWSZN-15, LTTYWI-16, #1554).
+ROLE_WORDS_REQUIREMENT = (
+    "Describe the researcher's roles only in the context's own role words, and never upgrade one: do not "
+    "write led, leading, founded, directed or coordinated unless the context gives the researcher that "
+    "role, and a co-founder or co-director did not do it alone"
+)
+NEUTRAL_REFERENCE_REQUIREMENT = (
+    "Do not name the researcher or use a title such as \"Dr.\"; "
+    "never use gendered pronouns (he/she/his/her/him) and never infer anyone's gender"
+)
+# The paragraph is signed by the researcher, so a claim the CV does not make is the worst defect it
+# can have: OIEPQD invented pending applications, funders, mentees and impact on 11 of 14 runs (#1554).
+FACTS_ONLY_REQUIREMENT = (
+    "State ONLY facts that the CV CONTEXT below contains. Never add a grant, application, funder, "
+    "role, mentee, collaborator, outcome or impact (clinical, policy, commercial or other) that the "
+    "context does not state, and never name a funder the context does not name; when the context "
+    "does not cover something, leave it out"
+)
+# Asked only when the context has a funded (current or completed) grant line (#1554).
+# YUYVIG, after #1558: a funder carried over from the next grant line (WPJHYT-05), "in collaboration
+# with" read as "funded by" (DYLJXC-16), and a declined award counted as received (ATRKVV-02) (#1554).
+FUNDING_REQUIREMENT = (
+    "Mention key funding sources and the researcher's role on them, using exactly the Status, Role and Agency each "
+    "grant line states; never call a current or completed grant an application. Name a funder only for the "
+    "grant whose own line gives it as the Agency; when a line's Status, Role or Agency is not stated, do not "
+    "state or imply one; a grant whose Status is not received was not awarded, so never count it as funding"
+)
+# Pending applications are not funded work (KJJVVO, #1484). Asked only when the context has a
+# pending-application line: on a CV without one, the line primed "application under review" (#1554).
+PENDING_FUNDING_REQUIREMENT = (
+    "A grant line whose Status is a pending application is an application, not funded work: if you "
+    "mention it, say it was submitted (with its Submitted date, when the line gives one), and never describe it as funded, "
+    "awarded or ongoing work"
+)
+# Asked only when the context has a mentee line; mentorship was invented on 5 OIEPQD runs (#1554).
+MENTORING_REQUIREMENT = "Mention mentorship only as the mentee lines in the context describe it"
 
 
-def generate_research_summary(context: str, cv_owner_name: str) -> tuple[str, dict]:
+def context_has_any_tag(context: str, tags: list[str]) -> bool:
+    """True when any context line opens with one of the tags, after an optional CURRENT_CONTEXT_TAG."""
+    for line in context.splitlines():
+        line = line.removeprefix(CURRENT_CONTEXT_TAG).lstrip()
+        if any(line.startswith(tag) for tag in tags):
+            return True
+    return False
+
+
+def summary_requirements(context: str) -> list[str]:
+    """The generation prompt's REQUIREMENTS lines, with the funding, pending-application and
+    mentoring asks included only when the context has a line they apply to (#1554)."""
+    requirements = [
+        FACTS_ONLY_REQUIREMENT,
+        "Write ONE cohesive narrative paragraph of approximately 150-200 words (do NOT exceed 200 words)",
+        "Focus on research themes, methods, and scientific contributions",
+    ]
+    if context_has_any_tag(context, [grant_context_tag(code) for code in FUNDED_GRANT_CODES]):
+        requirements.append(FUNDING_REQUIREMENT)
+    if context_has_any_tag(context, [grant_context_tag(PENDING_GRANT_CODE)]):
+        requirements.append(PENDING_FUNDING_REQUIREMENT)
+    if context_has_any_tag(context, [generic_context_tag(code) for code in MENTORING_TAXONOMY_CODES]):
+        requirements.append(MENTORING_REQUIREMENT)
+    requirements += [
+        FIRST_PERSON_REQUIREMENT,
+        CURRENT_WORK_REQUIREMENT,
+        STATUS_REQUIREMENT,
+        ROLE_WORDS_REQUIREMENT,
+        NEUTRAL_REFERENCE_REQUIREMENT,
+        "Do NOT list publications or include citations",
+        "Do NOT include education or job titles",
+        "Be specific about research areas, not generic",
+        "Keep it concise - prioritize quality over comprehensiveness",
+    ]
+    return requirements
+
+
+def generate_research_summary(context: str) -> tuple[str, dict]:
     """
     Generate a biosketch-style research summary from CV context.
 
     Returns (summary_text, usage_dict).
     """
-    prompt = f"""Generate a concise, NIH biosketch-style research summary paragraph for {cv_owner_name or 'this researcher'}.
+    requirement_lines = '\n'.join(f"- {requirement}" for requirement in summary_requirements(context))
+    prompt = f"""Generate a concise, NIH biosketch-style research summary paragraph in the researcher's own voice.
 
 REQUIREMENTS:
-- Write ONE cohesive narrative paragraph of approximately 150-200 words (do NOT exceed 200 words)
-- Focus on research themes, methods, and scientific contributions
-- Mention key funding sources and roles (PI vs Co-I)
-- Highlight impact (clinical translation, policy, mentorship outcomes if relevant)
-- Write in third person
-- {CURRENT_WORK_REQUIREMENT}
-- {NEUTRAL_REFERENCE_REQUIREMENT}
-- Do NOT list publications or include citations
-- Do NOT include education or job titles
-- Be specific about research areas, not generic
-- Keep it concise - prioritize quality over comprehensiveness
+{requirement_lines}
 
 CV CONTEXT (ranked by relevance; ongoing entries tagged {CURRENT_CONTEXT_TAG}):
 {context}
@@ -612,32 +851,64 @@ GENERATION_METHOD_REFUSED = "refused_by_model"
 # The generation call raised LLM_CALL_ERRORS on every model tried (#1174); the
 # artifact's STAGE4_5_CALL_FAILURES_KEY record says how.
 GENERATION_METHOD_LLM_CALL_FAILED = "llm_call_failed"
+# The reply parsed as JSON that wraps no summary string, so there is no prose to
+# render (#1582). A JSON object that does wrap one is unwrapped instead.
+GENERATION_METHOD_NON_PROSE = "non_prose_reply"
+
+# The keys a JSON-wrapped reply has carried its summary under (#1582: ECXGAT's
+# reply was {"research_summary": "..."} though the prompt asks for plain prose).
+JSON_REPLY_SUMMARY_KEYS = ("research_summary", "summary")
 
 # score_reasoning when the M1 relevance call failed: the M1 text is treated as
 # unscored (score 0.0), so a summary is generated from the CV instead (#1174).
 M1_UNSCORED_REASONING = "unscored: the M1 relevance call failed"
 
-# The generation prompt demands third person, so a reply that opens by saying "I do not /
-# cannot / am unable / apologize" is the model declining, not the requested paragraph.
-# Anchored at the start so a real summary that mentions "cannot" later is never matched.
+# The summary is written in the first person (#1539), so a reply opening with "I" is normal
+# ("I study", "I lead", "I have", "My research"). Only an opening that declines -- "I do not /
+# don't / cannot / can't / am unable / am not able / am sorry / apologize" -- is a refusal.
+# A first-person summary does not open on those verbs; tests pin both lists. Anchored at the
+# start so a real summary that mentions "cannot" later is never matched.
 REFUSAL_OPENER_PATTERN = re.compile(
     r"\s*I(?:\s+(?:do\s+not|cannot|apologi[sz]e)|\s+(?:don|can)['’]t|"
     r"\s+am\s+(?:unable|not\s+able|sorry)|['’]m\s+(?:unable|not\s+able|sorry))\b",
     re.IGNORECASE)
 
 
-def generate_summary_unless_withheld(context: str, cv_owner_name: str) -> tuple[str, str, dict]:
+def unwrap_json_reply(reply: str) -> str | None:
+    """*reply* as the prose stage 6 renders: *reply* itself when it is not JSON;
+    the summary string a JSON object wraps (under a `JSON_REPLY_SUMMARY_KEYS` key,
+    or as its only value); None for JSON of any other shape (#1582)."""
+    try:
+        parsed = json.loads(reply)
+    except json.JSONDecodeError:
+        return reply
+    if not isinstance(parsed, dict):
+        return None
+    for key in JSON_REPLY_SUMMARY_KEYS:
+        if isinstance(parsed.get(key), str):
+            return parsed[key].strip()
+    values = list(parsed.values())
+    if len(values) == 1 and isinstance(values[0], str):
+        return values[0].strip()
+    return None
+
+
+def generate_summary_unless_withheld(context: str) -> tuple[str, str, dict]:
     """Generate the research summary, or return an empty one that stage 6 renders as nothing.
 
     Returns (summary_text, generation_method, usage). A blank context makes no LLM call:
     the model has nothing to summarize and answers with a refusal that would otherwise be
     rendered as the owner's Research Activities paragraph (MYAXRH, #1224). A reply that
-    opens as a refusal is withheld the same way. Stage 6 skips a summary under its length
-    floor, so the section stays the template's own empty heading.
+    opens as a refusal is withheld the same way. A JSON-wrapped reply is unwrapped to its
+    summary string, or withheld when it wraps none (#1582). Stage 6 skips a summary under
+    its length floor, so the section stays the template's own empty heading.
     """
     if not context.strip():
         return "", GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {}
-    summary, usage = generate_research_summary(context, cv_owner_name)
+    reply, usage = generate_research_summary(context)
+    summary = unwrap_json_reply(reply)
+    if not summary:
+        return "", GENERATION_METHOD_NON_PROSE, usage
     if REFUSAL_OPENER_PATTERN.match(summary):
         return "", GENERATION_METHOD_REFUSED, usage
     return summary, GENERATION_METHOD_LLM, usage
@@ -661,11 +932,11 @@ def score_m1_or_unscored(m1_content: str) -> tuple[float, str, dict, CallFailure
                 call_failure(STAGE4_5_CALL_M1_SCORE, e))
 
 
-def generate_summary_or_empty(context: str, cv_owner_name: str) -> tuple[str, str, dict, CallFailure | None]:
+def generate_summary_or_empty(context: str) -> tuple[str, str, dict, CallFailure | None]:
     """generate_summary_unless_withheld, or, when its call fails, an empty
     summary (stage 6 renders none) with GENERATION_METHOD_LLM_CALL_FAILED and the failure."""
     try:
-        return (*generate_summary_unless_withheld(context, cv_owner_name), None)
+        return (*generate_summary_unless_withheld(context), None)
     except LLM_CALL_ERRORS as e:
         logger.warning("Stage 4.5 summary generation call failed (%s); writing an empty summary",
                        type(e).__name__, exc_info=True)
@@ -860,8 +1131,7 @@ def run_stage_4_5(input_path: str, output_path: str | None = None, verbose: bool
         # Generate summary
         # A blank context makes no LLM call, a refusal-shaped reply is withheld (#1224),
         # and a failed call leaves the summary empty (#1174).
-        research_summary, generation_method, gen_usage, gen_failure = generate_summary_or_empty(
-            context, cv_owner_name)
+        research_summary, generation_method, gen_usage, gen_failure = generate_summary_or_empty(context)
         totals.add(STAGE4_5_CALL_SUMMARY, gen_usage, gen_failure)
 
         if verbose:

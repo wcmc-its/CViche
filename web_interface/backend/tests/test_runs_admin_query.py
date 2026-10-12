@@ -1,13 +1,19 @@
 """runs_admin_query: filter parsing and the cascade each facet's counts follow."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
 
 from app.models import Run, User
 from app.services.runs_admin_query import (
-    InputFormatFilter, RunFilters, StatusFilter, build_filter_options, filtered_runs_query,
-    my_status_counts, parse_run_filters, submission_split,
+    InputFormatFilter,
+    RunFilters,
+    StatusFilter,
+    build_filter_options,
+    filtered_runs_query,
+    my_status_counts,
+    parse_run_filters,
+    submission_split,
 )
 
 
@@ -125,7 +131,7 @@ def test_faculty_options_are_most_recently_run_first(db, seeded):
     faculty = build_filter_options(db, RunFilters()).faculty
     # Omar's newest run (Sep 5) is later than Jane's (Sep 3).
     assert [f.value for f in faculty] == ["Omar Testperson", "Jane Testperson"]
-    assert faculty[0].last_run_at == datetime(2026, 9, 5)
+    assert faculty[0].last_run_at == datetime(2026, 9, 5, tzinfo=timezone.utc)
 
 
 def test_filtered_query_loads_the_user_without_a_lazy_load(db, seeded):
@@ -246,6 +252,7 @@ class TestSubmissionSplit:
 
     def test_stats_endpoint_carries_the_split_for_admins_only(self, client, db, seeded):
         from types import SimpleNamespace
+
         from app.auth import get_current_user
         from app.main import app
 

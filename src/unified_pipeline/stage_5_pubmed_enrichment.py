@@ -22,18 +22,21 @@ Date: 2025-11-29
 """
 
 import copy
-import os
-import sys
 import json
 import logging
+import os
 import re
+import sys
 import time
 import unicodedata
-import requests
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import Any, NamedTuple
+from collections.abc import Callable
 from datetime import datetime
+from itertools import combinations
+from pathlib import Path
+from typing import Any, NamedTuple, TypeVar
+
+import requests
 
 from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
 
@@ -45,17 +48,22 @@ NCBI_API_KEY = os.getenv('NCBI_API_KEY', os.getenv('PUBMED_API_KEY', ''))
 PUBMED_CONTACT_EMAIL = os.getenv('PUBMED_CONTACT_EMAIL', os.getenv('NCBI_CONTACT_EMAIL', ''))
 RATE_LIMIT_DELAY = 0.1 if NCBI_API_KEY else 0.34  # 10/s with key, 3/s without
 
-# Retry policy for transient NCBI API failures (429 / 5xx / connection errors)
-MAX_ATTEMPTS = 3
+# Retry policy for transient NCBI API failures: 429 / 5xx / connection
+# errors, and a 200 whose body won't parse or carries an esearch ERROR.
+# idconv (#1219): a 429 there outlasted the old 3-attempt, ~3 s window in 2 of
+# 8 batch CVs and failed every PMCID in the CV. Re-probes showed it throttles
+# intermittently (429, 200, 429, 200 at 15 s spacing). #1387 made that policy
+# the default for every NCBI call (efetch and esearch kept the ~3 s window).
+# 6 attempts back off 1+2+4+8+16 = 31 s; the total cap bounds that sum plus
+# any Retry-After, so a server asking for longer than the cap fails fast
+# instead of stalling stage 5. A call that succeeds takes no longer.
+MAX_ATTEMPTS = 6
 BACKOFF_BASE_SECONDS = 1.0  # 1s, 2s, ... doubling; Retry-After honored when larger
+RETRY_TOTAL_WAIT_CAP_SECONDS = 60.0
 
-# idconv (#1219): a 429 there outlasted the 3-attempt, ~3 s window in 2 of 8
-# batch CVs and failed every PMCID in the CV. Re-probes showed it throttles
-# intermittently (429, 200, 429, 200 at 15 s spacing). 6 attempts back off
-# 1+2+4+8+16 = 31 s; the total cap bounds that sum plus any Retry-After, so a
-# server asking for longer than the cap fails fast instead of stalling stage 5.
-IDCONV_MAX_ATTEMPTS = 6
-IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS = 60.0
+# esearch can answer 200 with esearchresult.ERROR set when its backend fails;
+# read as an empty idlist, that was recorded as 'doi_not_in_pubmed' (#1387).
+ESEARCH_ERROR_KEY = 'ERROR'
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
@@ -64,7 +72,21 @@ OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
-ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+# The legacy www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ host 301-redirects
+# here (checked 2026-10-02 and 2026-10-07), so every attempt paid for the
+# redirect (#1219).
+ID_CONVERTER_URL = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
+
+# NCBI's documented per-request ceiling for both idconv and efetch-by-id. A
+# CV's PMCIDs went to idconv in one GET before #1219, so a CV citing more
+# than 200 sent an over-limit request.
+NCBI_MAX_IDS_PER_REQUEST = 200
+
+# idconv throttles intermittently: CHXRBM's request re-sent 15 s apart
+# answered 429, 200, 429, 200 (#1219). A PMCID whose lookup still failed
+# after the retry budget is asked for once more at the end of stage 5, at
+# least this long after the failure.
+PMCID_RERUN_PAUSE_SECONDS = 15.0
 
 # Minimum share of the shorter title's words that the PubMed record's title
 # must share with the source title before the record replaces the citation
@@ -73,9 +95,19 @@ ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
 # (retitled on publication) score 0.45-0.57.
 MIN_TITLE_WORD_OVERLAP = 0.4
 
+# PMCID-path outcomes (#1219), split so that an outage is not read as a
+# missing paper. Not found: idconv answered, with no PMID for the PMCID (not
+# in PMC, or not indexed in PubMed); expected vocabulary, like
+# 'doi_not_in_pubmed'. Lookup failed: the idconv request, or the efetch of the
+# PMID it gave, failed; a *_failed status the doctor's enrichment_failures
+# lint counts, and the one the end-of-stage re-run retries.
+PMCID_NOT_FOUND = 'pmcid_not_found'
+PMCID_LOOKUP_FAILED = 'pmcid_lookup_failed'
+TITLE_CHECK_FAILED = 'title_check_failed'
+
 # Statuses the PMCID path leaves on an entry it could not enrich, which the
 # bare-digits-as-PMID retry (#1219) may still resolve.
-PMCID_PATH_FAILURES = ('pmcid_conversion_failed', 'title_check_failed')
+PMCID_PATH_FAILURES = (PMCID_NOT_FOUND, PMCID_LOOKUP_FAILED, TITLE_CHECK_FAILED)
 
 # Words shorter than this carry no signal ("of", "in", "a"); 3 keeps short
 # content words such as "DNA" and "HIV". Preventive, no incident: a stopword
@@ -159,9 +191,36 @@ PUBLISHED_ARTICLE_CODES = frozenset({'S1', 'S2', 'S6'})
 # journal paper of the same title (SDEBQJ, dev-239, 2026-10-02); a PubMed
 # journal article is no replacement for a chapter or a book either.
 IN_PRESS_ELIGIBLE_CODES = PUBLISHED_ARTICLE_CODES | {IN_REVIEW_CODE}
+# PubMed often indexes an author's reply under the letter it answers, so the
+# PMID a CV gives for its reply resolves to the letter, by someone else
+# (VYNARH, dev-246: three "(Reply to Editor)" entries rendered the letter
+# writers in place of the owner, #1438). The CV text marks a reply in these
+# shapes; a bare "response" is not one ("immune response", "Dose-Response").
+REPLY_CITATION_PATTERN = re.compile(
+    r"\b(?:in\s+)?repl(?:y|ies)\s+to\b"
+    r"|\bresponse\s+to\s+(?:the\s+|a\s+)?"
+    r"(?:letters?|editors?|editorials?|comments?|commentary|correspondence)\b"
+    r"|\bauthors?['\u2019]?s?\s+(?:reply|response)\b"
+    r"|\(\s*(?:reply|response)\s*\)", re.I)
+# A record whose own title says reply or response is the reply itself, which
+# PubMed titles "Reply", "Response to ...", "The authors reply" and so on.
+REPLY_RECORD_TITLE_PATTERN = re.compile(r'\b(?:repl(?:y|ies)|response|rebuttal)\b', re.I)
+# The status of a reply whose record is the item it replies to. Not a
+# *_failed status: the CV's own citation is the right one to render.
+REPLY_TARGET_STATUS = 'reply_resolved_to_replied_item'
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
+# The journal-article codes searched by title whether or not the CV calls the
+# entry in press (#1598). Measured offline over 7 YUYVIG runs (2026-10-08):
+# 43% of S1/S2/S6 entries without an identifier matched, and 96-99% of the
+# hand-checked matches were the right paper. S4/S8/S9 matched 3-8%, and about
+# half of those were wrong: an abstract, talk or chapter matched to the same
+# group's later article of near-identical title, which every guard passes.
+TITLE_SEARCH_CODES = PUBLISHED_ARTICLE_CODES
+# The `enrichment_source` of a record found by title search, not by an
+# identifier the CV gave.
+TITLE_SEARCH_SOURCE = 'title_search'
 
 
 def in_press_phrase(text: str, title: str = '') -> str | None:
@@ -238,6 +297,27 @@ def pubmed_list_drops_the_owner(cv_authors: str | list[str] | None, target_name:
                 and not any(owner & s for s in surnames))
 
 
+def cites_a_reply(text: str, title: str = '') -> bool:
+    """Whether the CV's citation text calls the entry a reply. A marker inside
+    the title is the title's, so the text must hold more matches than the
+    title does (the counting `in_press_phrase` uses)."""
+    return (len(REPLY_CITATION_PATTERN.findall(text or ''))
+            > len(REPLY_CITATION_PATTERN.findall(title or '')))
+
+
+def record_is_the_replied_item(entry: dict, pubmed_record: dict) -> bool:
+    """Whether `pubmed_record` is the item a CV reply answers rather than the
+    reply: the CV calls the entry a reply, the record's title does not, and
+    the record names none of the CV's authors (#1438). A record naming a CV
+    author may be the reply indexed with its letter, and stays."""
+    fields = entry.get('extracted_fields') or {}
+    title = fields.get('title') or fields.get('chapter_title') or ''
+    record_titles = f"{pubmed_record.get('title') or ''} {pubmed_record.get('vernacular_title') or ''}"
+    return (cites_a_reply(entry.get('text') or '', title)
+            and not REPLY_RECORD_TITLE_PATTERN.search(record_titles)
+            and not shares_an_author(fields.get('authors'), pubmed_record.get('authors') or []))
+
+
 def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | None) -> bool:
     """False only when both years are known and PubMed's falls outside
     IN_PRESS_YEAR_WINDOW of the CV's."""
@@ -290,6 +370,51 @@ def _sanitize_error(error: Any) -> str:
     return re.sub(r'api_key=[^&\s]+', 'api_key=***', str(error))
 
 
+class NCBIResponseError(ValueError):
+    """A 200 response whose body reports a server-side failure. A ValueError,
+    like a body that won't parse, so _get_with_retry retries both."""
+
+
+_Parsed = TypeVar('_Parsed')
+
+
+class _Attempt(NamedTuple):
+    """One GET's outcome: the parsed body, or the transient error to retry
+    on (with the server's Retry-After, when it sent one)."""
+    value: Any = None
+    error: Exception | None = None
+    retry_after: str | None = None
+
+
+def _parse_xml(response: requests.Response) -> ET.Element:
+    return ET.fromstring(response.content)
+
+
+def _parse_json(response: requests.Response) -> dict[str, Any]:
+    return response.json()
+
+
+def _parse_esearch_idlist(response: requests.Response) -> list[str]:
+    """The esearch idlist; an ERROR in the result raises NCBIResponseError so
+    it is retried, and never read as a no-match."""
+    result = response.json().get('esearchresult', {})
+    if ESEARCH_ERROR_KEY in result:
+        raise NCBIResponseError(f"esearch error: {result[ESEARCH_ERROR_KEY]}")
+    return result.get('idlist', [])
+
+
+class _PmcidConversion(NamedTuple):
+    """idconv's answer for a set of PMCIDs: the PMID of each PMCID it mapped,
+    and the PMCIDs whose request failed (so their absence from `pmids` is an
+    outage, not a not-found)."""
+    pmids: dict[str, str]
+    failed: frozenset[str]
+
+
+def _chunks(ids: list[str], size: int) -> list[list[str]]:
+    return [ids[i:i + size] for i in range(0, len(ids), size)]
+
+
 class _Acceptance(NamedTuple):
     """One accepted record, kept until every lookup path has run so that an
     entry sharing its PMID with a better-matching entry can be restored to
@@ -298,8 +423,46 @@ class _Acceptance(NamedTuple):
     before: dict
     pmid: str
     pubmed_title: str
+    pubmed_year: int | None
     source: str
     overlap: float | None
+
+
+def cv_publication_year(cv_year: str | int | None) -> int | None:
+    """The first four-digit year the CV gives, or None."""
+    match = re.search(r'(?:19|20)\d\d', str(cv_year or ''))
+    return int(match.group()) if match else None
+
+
+def cv_year_is(cv_year: str | int | None, pubmed_year: int | None) -> bool:
+    """Whether the CV gives exactly PubMed's year for the paper."""
+    return bool(pubmed_year) and cv_publication_year(cv_year) == pubmed_year
+
+
+def cv_title(fields: dict) -> str:
+    """The title an entry is matched to PubMed by."""
+    return fields.get('title') or fields.get('chapter_title') or ''
+
+
+def _cv_fields(accepted: _Acceptance) -> dict:
+    """An accepted record's entry as the CV gave it, before the merge."""
+    return accepted.before.get('extracted_fields') or {}
+
+
+def _match_strength(accepted: _Acceptance) -> tuple[float, bool, bool, bool]:
+    """How strongly an accepted record names its entry's paper, compared
+    between entries holding the same PMID: title overlap first; then a
+    published listing over one the CV calls in press (the in-press step marks
+    that one superseded); then the CV giving PubMed's own year; then an
+    identifier the CV gave over a title search. The year decides between two
+    exact-title holders: in the #1598 measurement two such holders were
+    hand-checked as a different paper (BLBVPD e848, BCTOGR e2519), and each
+    was the one whose CV year was not PubMed's."""
+    fields = _cv_fields(accepted)
+    return (accepted.overlap or 0.0,
+            not listed_in_press(accepted.before),
+            cv_year_is(fields.get('year'), accepted.pubmed_year),
+            accepted.source != TITLE_SEARCH_SOURCE)
 
 
 class PubMedEnricher:
@@ -334,6 +497,7 @@ class PubMedEnricher:
             'doi_searches': 0,
             'failed_lookups': 0,
             'title_mismatches': 0,
+            'reply_targets_rejected': 0,
             'api_errors': 0,
             'title_searches': 0,
             'in_press_resolved': 0,
@@ -409,7 +573,7 @@ class PubMedEnricher:
             logger.info(f"  - {len(by_pmid)} with PMID (direct lookup)")
             logger.info(f"  - {len(by_pmcid)} with PMCID only (needs conversion)")
             logger.info(f"  - {len(by_doi)} with DOI only (needs search)")
-            logger.info(f"  - {len(no_id)} without identifiers (skip)")
+            logger.info(f"  - {len(no_id)} without identifiers (articles searched by title)")
 
         # Process each category
         enriched_entries = []
@@ -446,7 +610,16 @@ class PubMedEnricher:
             entry['enrichment_status'] = 'no_identifier'
             enriched_entries.append(entry)
 
-        # 4b. One PMID accepted for two entries: only the paper it names keeps it.
+        # 4a. PMCIDs whose lookup failed get one more try, now that the DOI
+        # path has given idconv's throttle time to clear. Before 4b, so a
+        # record the re-run accepts is checked for a shared PMID too.
+        self._rerun_failed_pmcid_lookups(by_pmcid)
+
+        # 4b. Articles still without a record: guarded title search (#1598).
+        # Before 4c, so a title match that shares a PMID is weighed there too.
+        self._enrich_articles_by_title(pub_entries)
+
+        # 4c. One PMID accepted for two entries: only the paper it names keeps it.
         # Before step 5, whose duplicate check reads the PMIDs entries hold.
         self._release_weaker_shared_pmids()
 
@@ -520,19 +693,8 @@ class PubMedEnricher:
         """
         results = []
         pmids = list(dict.fromkeys(pmid for _, pmid in entries_with_pmid))
-
-        # Fetch in batches
-        batch_size = 200
-        all_records = {}
-
-        for i in range(0, len(pmids), batch_size):
-            batch = pmids[i:i + batch_size]
-            records = self._fetch_pubmed_batch(batch)
-            all_records.update(records)
-            self.stats['pmid_lookups'] += len(batch)
-
-            if i + batch_size < len(pmids):
-                time.sleep(RATE_LIMIT_DELAY)
+        all_records = self._fetch_pubmed_records(pmids)
+        self.stats['pmid_lookups'] += len(pmids)
 
         # Merge enrichment data into entries
         for entry, pmid in entries_with_pmid:
@@ -553,33 +715,51 @@ class PubMedEnricher:
 
         # Convert PMCIDs to PMIDs using ID converter
         pmcids = [pmcid for _, pmcid in entries_with_pmcid]
-        pmcid_to_pmid = self._convert_pmcids_to_pmids(pmcids)
+        conversion = self._convert_pmcids_to_pmids(pmcids)
         self.stats['pmcid_conversions'] += len(pmcids)
-
-        # Now fetch by PMID (ensure strings)
-        pmids_to_fetch = [str(pmid) for pmid in pmcid_to_pmid.values() if pmid]
-
-        if pmids_to_fetch:
-            records = self._fetch_pubmed_batch(pmids_to_fetch)
-        else:
-            records = {}
+        records = self._fetch_pubmed_records(list(dict.fromkeys(conversion.pmids.values())))
 
         # Merge results
         for entry, pmcid in entries_with_pmcid:
-            pmid = pmcid_to_pmid.get(pmcid)
-            pmid_str = str(pmid) if pmid else None
-            if pmid_str and pmid_str in records:
-                if self._accept_record(entry, records[pmid_str], 'pmcid_conversion'):
+            pmid = conversion.pmids.get(pmcid)
+            if pmid and pmid in records:
+                if self._accept_record(entry, records[pmid], 'pmcid_conversion'):
                     # Also store the PMID we discovered
                     if 'extracted_fields' in entry:
-                        entry['extracted_fields']['pmid'] = pmid_str
+                        entry['extracted_fields']['pmid'] = pmid
             else:
-                entry['enrichment_status'] = 'pmcid_conversion_failed'
+                entry['enrichment_status'] = self._pmcid_failure_status(pmcid, conversion)
                 self.stats['failed_lookups'] += 1
             results.append(entry)
 
         self._retry_bare_pmcids_as_pmids(results)
         return results
+
+    @staticmethod
+    def _pmcid_failure_status(pmcid: str, conversion: _PmcidConversion) -> str:
+        """Not found only when idconv answered for this PMCID and gave no
+        PMID. A failed idconv request, or a PMID whose record efetch did not
+        return, is a lookup failure."""
+        if pmcid in conversion.failed or pmcid in conversion.pmids:
+            return PMCID_LOOKUP_FAILED
+        return PMCID_NOT_FOUND
+
+    def _rerun_failed_pmcid_lookups(self, entries_with_pmcid: list[tuple[dict, str]]) -> None:
+        """Run the PMCID path once more for the entries whose lookup failed
+        (#1219: one idconv 429 that outlasted the retries cost CHXRBM all 40
+        of its PMCID citations). The failure counts the first pass added
+        come off before the re-run adds its own."""
+        rerun = [(entry, pmcid) for entry, pmcid in entries_with_pmcid
+                 if entry.get('enrichment_status') == PMCID_LOOKUP_FAILED]
+        if not rerun:
+            return
+        if self.verbose:
+            logger.info(f"\n🔄 Re-running {len(rerun)} failed PMCID lookups "
+                        f"in {PMCID_RERUN_PAUSE_SECONDS:g}s...")
+        time.sleep(PMCID_RERUN_PAUSE_SECONDS)
+        for _ in rerun:
+            self._shift_failure_counts(PMCID_LOOKUP_FAILED, -1)
+        self._enrich_by_pmcid(rerun)
 
     def _bare_digits_pmid(self, entry: dict) -> str | None:
         """The PMID-length digit run of a "PMCID" value that has no PMC prefix
@@ -596,7 +776,7 @@ class PubMedEnricher:
     def _failure_counts(status: str | None) -> tuple[int, int]:
         """(failed_lookups, title_mismatches) an entry with this status adds."""
         failed = status in PMCID_PATH_FAILURES or status == 'lookup_failed'
-        return (1 if failed else 0, 1 if status == 'title_check_failed' else 0)
+        return (1 if failed else 0, 1 if status == TITLE_CHECK_FAILED else 0)
 
     def _shift_failure_counts(self, status: str | None, sign: int) -> None:
         failed, mismatched = self._failure_counts(status)
@@ -636,7 +816,8 @@ class PubMedEnricher:
 
         Outcome classes are distinct (#222): 'doi_not_in_pubmed' means esearch
         succeeded with an empty idlist (a normal-vocabulary outcome), while an
-        API failure (non-2xx after retries, connection error) is recorded as
+        API failure (non-2xx after retries, connection error, a body that
+        will not parse or carries an esearch ERROR) is recorded as
         'doi_lookup_failed' so failure lints can surface it.
         """
         results = []
@@ -705,6 +886,23 @@ class PubMedEnricher:
             else:
                 self._record_in_press_resolution(entry, phrase)
 
+    def _enrich_articles_by_title(self, pub_entries: list[dict]) -> None:
+        """Search PubMed by title for every TITLE_SEARCH_CODES entry with no
+        usable identifier (#1598), under `_enrich_by_title`'s guards. An entry
+        the CV lists as in press is left to `_resolve_in_press`, which
+        searches it as before."""
+        candidates = [entry for entry in pub_entries
+                      if entry.get('taxonomy_code') in TITLE_SEARCH_CODES
+                      and entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES
+                      and not listed_in_press(entry)]
+        if self.verbose and candidates:
+            logger.info(f"\n🔍 Searching PubMed by title for {len(candidates)} articles...")
+        for searched, entry in enumerate(candidates, 1):
+            fields = entry.get('extracted_fields') or {}
+            self._enrich_by_title(entry, cv_title(fields))
+            if self.verbose:
+                logger.info("[%d/%d] publications searched by title", searched, len(candidates))
+
     def _enrich_by_title(self, entry: dict, title: str) -> None:
         """Accept the best of the top title-search hits when its title
         overlap clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the
@@ -737,7 +935,7 @@ class PubMedEnricher:
         if (overlap >= MIN_TITLE_SEARCH_OVERLAP
                 and shares_an_author(fields.get('authors'), best['authors'])
                 and plausible_publication_year(fields.get('year'), best['year'])):
-            self._accept_record(entry, best, 'title_search')
+            self._accept_record(entry, best, TITLE_SEARCH_SOURCE)
 
     def _search_pmids_by_title(self, title: str) -> list[str]:
         params = {
@@ -749,8 +947,7 @@ class PubMedEnricher:
         }
         if self.api_key:
             params['api_key'] = self.api_key
-        response = self._get_with_retry(ESEARCH_URL, params)
-        return response.json().get('esearchresult', {}).get('idlist', [])
+        return self._get_with_retry(ESEARCH_URL, params, _parse_esearch_idlist)
 
     def _record_in_press_resolution(self, entry: dict, phrase: str) -> None:
         enrichment = entry.get('enrichment_data') or {}
@@ -861,48 +1058,73 @@ class PubMedEnricher:
         self,
         url: str,
         params: dict[str, Any],
-        max_attempts: int = MAX_ATTEMPTS,
-        total_wait_cap: float | None = None,
-    ) -> requests.Response:
+        parse: Callable[[requests.Response], _Parsed],
+    ) -> _Parsed:
         """
-        HTTP GET with retry on transient failures.
+        HTTP GET, parsed by `parse`, with retry on transient failures.
 
-        Retries 429s, 5xx responses, and connection/timeout errors up to
-        max_attempts total attempts with exponential backoff (1s, 2s, ...),
-        honoring a Retry-After header when larger. When total_wait_cap is set,
-        a retry whose delay would push the summed waits past it is not taken
-        and the last error raises. Other HTTP errors (e.g. 404) raise
-        immediately, exactly as before.
+        Retries 429s, 5xx responses, connection/timeout errors, and a 200
+        whose body `parse` rejects (ET.ParseError / ValueError, which covers
+        a truncated body and NCBIResponseError) up to MAX_ATTEMPTS total
+        attempts with exponential backoff (1s, 2s, ...), honoring a
+        Retry-After header when larger. A retry whose delay would push the
+        summed waits past RETRY_TOTAL_WAIT_CAP_SECONDS is not taken and the
+        last error raises. Other HTTP errors (e.g. 404) raise immediately.
         """
-        last_error = None
+        last_error: Exception | None = None
         waited = 0.0
-        for attempt in range(max_attempts):
-            retry_after = None
-            try:
-                response = self.session.get(url, params=params, timeout=30)
-                if response.status_code == 429 or response.status_code >= 500:
-                    retry_after = response.headers.get('Retry-After')
-                    last_error = requests.HTTPError(
-                        f"{response.status_code} transient error for url: {response.url}",
-                        response=response
-                    )
-                else:
-                    response.raise_for_status()  # non-transient 4xx raises here
-                    return response
-            except (requests.ConnectionError, requests.Timeout) as e:
-                last_error = e
-
-            if attempt < max_attempts - 1:
-                delay = self._retry_delay(attempt, retry_after)
-                if total_wait_cap is not None and waited + delay > total_wait_cap:
-                    break
-                waited += delay
-                if self.verbose:
-                    logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
-                                   f"retry {attempt + 1}/{max_attempts - 1} in {delay:g}s")
-                time.sleep(delay)
+        for attempt in range(MAX_ATTEMPTS):
+            outcome = self._attempt_get(url, params, parse)
+            if outcome.error is None:
+                return outcome.value
+            last_error = outcome.error
+            if attempt == MAX_ATTEMPTS - 1:
+                break
+            delay = self._retry_delay(attempt, outcome.retry_after)
+            if waited + delay > RETRY_TOTAL_WAIT_CAP_SECONDS:
+                break
+            waited += delay
+            if self.verbose:
+                logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
+                               f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
+            time.sleep(delay)
 
         raise last_error
+
+    def _attempt_get(
+        self,
+        url: str,
+        params: dict[str, Any],
+        parse: Callable[[requests.Response], _Parsed],
+    ) -> _Attempt:
+        """One GET. A transient failure comes back as `error`; a
+        non-transient HTTP error (e.g. 404) raises."""
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            return _Attempt(error=e)
+        if response.status_code == 429 or response.status_code >= 500:
+            return _Attempt(
+                error=requests.HTTPError(
+                    f"{response.status_code} transient error for url: {response.url}",
+                    response=response,
+                ),
+                retry_after=response.headers.get('Retry-After'),
+            )
+        response.raise_for_status()  # non-transient 4xx raises here
+        try:
+            return _Attempt(value=parse(response))
+        except (ET.ParseError, ValueError) as e:  # truncated / error body on a 200
+            return _Attempt(error=e)
+
+    def _fetch_pubmed_records(self, pmids: list[str]) -> dict[str, dict]:
+        """efetch in requests of at most NCBI_MAX_IDS_PER_REQUEST ids."""
+        records: dict[str, dict] = {}
+        for i, chunk in enumerate(_chunks(pmids, NCBI_MAX_IDS_PER_REQUEST)):
+            if i:
+                time.sleep(RATE_LIMIT_DELAY)
+            records.update(self._fetch_pubmed_batch(chunk))
+        return records
 
     def _fetch_pubmed_batch(self, pmids: list[str]) -> dict[str, dict]:
         """
@@ -922,9 +1144,7 @@ class PubMedEnricher:
             if self.api_key:
                 params['api_key'] = self.api_key
 
-            response = self._get_with_retry(EFETCH_URL, params)
-
-            root = ET.fromstring(response.content)
+            root = self._get_with_retry(EFETCH_URL, params, _parse_xml)
 
             results = {}
             for article in root.findall('.//PubmedArticle'):
@@ -1042,47 +1262,43 @@ class PubMedEnricher:
         found = elem.find(path)
         return found.text.strip() if found is not None and found.text else ''
 
-    def _convert_pmcids_to_pmids(self, pmcids: list[str]) -> dict[str, str]:
+    def _convert_pmcids_to_pmids(self, pmcids: list[str]) -> _PmcidConversion:
         """
-        Convert PMCIDs to PMIDs using NCBI ID converter.
+        Convert PMCIDs to PMIDs using the NCBI ID converter, in requests of
+        at most NCBI_MAX_IDS_PER_REQUEST ids. A request that fails marks
+        only its own PMCIDs failed.
         """
-        if not pmcids:
-            return {}
+        unique = list(dict.fromkeys(pmcids))
+        pmids: dict[str, str] = {}
+        failed: set[str] = set()
+        for i, chunk in enumerate(_chunks(unique, NCBI_MAX_IDS_PER_REQUEST)):
+            if i:
+                time.sleep(RATE_LIMIT_DELAY)
+            try:
+                pmids.update(self._convert_pmcid_chunk(chunk))
+            except Exception as e:
+                failed.update(chunk)
+                self.stats['api_errors'] += 1
+                self._log_api_failure('pmcid_conversion', e)
+                if self.verbose:
+                    # Info, not error: see the note at _enrich_by_doi's DOI search error above.
+                    logger.info(f"    ❌ ID conversion error: {_sanitize_error(e)}")
+        if self.verbose and unique:
+            logger.info(f"    → Converted {len(pmids)}/{len(unique)} PMCIDs to PMIDs")
+        return _PmcidConversion(pmids, frozenset(failed))
 
-        try:
-            params = {
-                'ids': ','.join(pmcids),
-                'format': 'json',
-                **self._identity_params()
-            }
-
-            response = self._get_with_retry(
-                ID_CONVERTER_URL, params,
-                max_attempts=IDCONV_MAX_ATTEMPTS,
-                total_wait_cap=IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS,
-            )
-
-            data = response.json()
-
-            result = {}
-            for record in data.get('records', []):
-                pmcid = record.get('pmcid', '')
-                pmid = record.get('pmid', '')
-                if pmcid and pmid:
-                    result[pmcid] = pmid
-
-            if self.verbose:
-                logger.info(f"    → Converted {len(result)}/{len(pmcids)} PMCIDs to PMIDs")
-
-            return result
-
-        except Exception as e:
-            self.stats['api_errors'] += 1
-            self._log_api_failure('pmcid_conversion', e)
-            if self.verbose:
-                # Info, not error: see the note at _enrich_by_doi's DOI search error above.
-                logger.info(f"    ❌ ID conversion error: {_sanitize_error(e)}")
-            return {}
+    def _convert_pmcid_chunk(self, pmcids: list[str]) -> dict[str, str]:
+        """One idconv request: PMCID -> PMID for each record that has both.
+        idconv answers the PMID as a JSON number, so it is stringified."""
+        params = {
+            'ids': ','.join(pmcids),
+            'format': 'json',
+            **self._identity_params()
+        }
+        data = self._get_with_retry(ID_CONVERTER_URL, params, _parse_json)
+        return {record['pmcid']: str(record['pmid'])
+                for record in data.get('records', [])
+                if record.get('pmcid') and record.get('pmid')}
 
     def _search_pmid_by_doi(self, doi: str) -> str | None:
         """
@@ -1103,10 +1319,7 @@ class PubMedEnricher:
         if self.api_key:
             params['api_key'] = self.api_key
 
-        response = self._get_with_retry(ESEARCH_URL, params)
-
-        data = response.json()
-        id_list = data.get('esearchresult', {}).get('idlist', [])
+        id_list = self._get_with_retry(ESEARCH_URL, params, _parse_esearch_idlist)
 
         if id_list:
             return id_list[0]  # First match
@@ -1128,9 +1341,12 @@ class PubMedEnricher:
             self._reject_record(entry, source, pubmed_record.get('pmid'),
                                 pubmed_record.get('title'), overlap)
             return False
+        if record_is_the_replied_item(entry, pubmed_record):
+            self._reject_replied_item(entry, source, pubmed_record)
+            return False
         self._acceptances.append(_Acceptance(
             entry, copy.deepcopy(entry), pubmed_record.get('pmid'),
-            pubmed_record.get('title'), source, overlap))
+            pubmed_record.get('title'), pubmed_record.get('year'), source, overlap))
         self._merge_pubmed_data(entry, pubmed_record)
         entry['enrichment_status'] = 'enriched'
         entry['enrichment_source'] = source
@@ -1144,7 +1360,7 @@ class PubMedEnricher:
         refused kept under `enrichment_rejected` for audit. A refusal because
         another entry matches the record better names that entry's
         element_idx_start."""
-        entry['enrichment_status'] = 'title_check_failed'
+        entry['enrichment_status'] = TITLE_CHECK_FAILED
         entry['enrichment_rejected'] = {
             'source': source,
             'pubmed_pmid': pmid,
@@ -1156,30 +1372,76 @@ class PubMedEnricher:
         self.stats['title_mismatches'] += 1
         self.stats['failed_lookups'] += 1
 
+    def _reject_replied_item(self, entry: dict, source: str, pubmed_record: dict) -> None:
+        """Leave a CV reply on its own fields when its record is the item it
+        replies to (#1438), with that record kept under `enrichment_rejected`
+        for audit."""
+        entry['enrichment_status'] = REPLY_TARGET_STATUS
+        entry['enrichment_rejected'] = {
+            'source': source,
+            'pubmed_pmid': pubmed_record.get('pmid'),
+            'pubmed_title': pubmed_record.get('title'),
+            'pubmed_authors': pubmed_record.get('authors_vancouver'),
+        }
+        self.stats['reply_targets_rejected'] += 1
+
     def _release_weaker_shared_pmids(self) -> None:
-        """When one PMID was accepted for several entries, the entry whose
-        title matches it best keeps it, and so does any other whose title
-        clears MIN_TITLE_SEARCH_OVERLAP (the same paper listed twice). Any
-        other holder is a different paper that cleared the ID paths' looser
-        MIN_TITLE_WORD_OVERLAP on shared topic words, and is put back as it
-        was before the record was merged (AQCLHS, dev-242: a CV gave two
-        consecutive papers one DOI, and the second, at 0.43, was replaced by
-        a copy of the first). Order-independent, so it runs once every ID
-        path is done. An untitled entry has no overlap to compare and is
-        left alone. An entry the CV lists as in press can keep the PMID but
-        is never released: the in-press step marks it superseded when a
-        published entry holds the PMID (a paper retitled after acceptance),
-        and a release would promote it to a second copy of that paper."""
+        """One PMID ends on at most one citation of a document (#1598). When it
+        was accepted for several, the holder with the strongest
+        `_match_strength` keeps it and every other holder is put back as it
+        was before the record was merged. Two shapes: a different paper that
+        cleared the ID paths' looser MIN_TITLE_WORD_OVERLAP on shared topic
+        words (AQCLHS, dev-242: a CV gave two consecutive papers one DOI, and
+        the second, at 0.43, was replaced by a copy of the first), and an item
+        a title search matched to a paper another entry already holds (the
+        #1598 measurement: 71 PMIDs on two or more entries of 7 runs, mostly
+        an abstract and its paper, or one paper listed twice). When the
+        strongest holders tie, they keep the PMID if they are one citation
+        (`_one_citation`): one paper listed twice, which stage 6 dedup
+        collapses (stage6/dedup.py). Tied holders that are different
+        citations (title or year differs) are all released, since nothing
+        tells which one the record names.
+        Order-independent, so it runs once every ID path and the article
+        title search are done. An untitled entry has no overlap to compare
+        and is left alone. An entry the CV lists as in press can keep the
+        PMID but is never released: the in-press step marks it superseded
+        when a published entry holds the PMID (a paper retitled after
+        acceptance), and a release would promote it to a second copy of that
+        paper."""
         holders: dict[str, list[_Acceptance]] = {}
         for accepted in self._acceptances:
             if accepted.overlap is not None:
                 holders.setdefault(accepted.pmid, []).append(accepted)
         for group in holders.values():
-            best = max(group, key=lambda accepted: accepted.overlap)
-            for accepted in group:
-                if (accepted.overlap < min(best.overlap, MIN_TITLE_SEARCH_OVERLAP)
-                        and not listed_in_press(accepted.before)):
-                    self._restore_and_reject(accepted, best)
+            ranked = sorted(group, key=_match_strength, reverse=True)
+            strongest = [accepted for accepted in ranked
+                         if _match_strength(accepted) == _match_strength(ranked[0])]
+            kept = len(strongest) if self._one_citation(strongest) else 0
+            for accepted in ranked[kept:]:
+                if listed_in_press(accepted.before):
+                    continue
+                stronger = ranked[1] if accepted is ranked[0] else ranked[0]
+                self._restore_and_reject(accepted, stronger)
+
+    def _one_citation(self, holders: list[_Acceptance]) -> bool:
+        """Whether every pair of these holders is one citation as the CV gave
+        it: an identifier in common, or the same title (`_same_title`) and
+        the same year. In the #1598 measurement all 11 tied holder pairs on
+        7 YUYVIG runs were this shape (ECXGAT e182/e287 and SQMWHM e84/e86
+        give one DOI or PMID twice)."""
+        return all(self._cv_identifiers(a) & self._cv_identifiers(b)
+                   or (_same_title(cv_title(_cv_fields(a)), cv_title(_cv_fields(b)))
+                       and cv_publication_year(_cv_fields(a).get('year'))
+                       == cv_publication_year(_cv_fields(b).get('year')))
+                   for a, b in combinations(holders, 2))
+
+    def _cv_identifiers(self, accepted: _Acceptance) -> set[tuple[str, str]]:
+        """The identifiers the CV gave for an accepted record's entry."""
+        fields = _cv_fields(accepted)
+        ids = {('pmid', self._clean_pmid(fields.get('pmid'))),
+               ('pmcid', self._clean_pmcid(fields.get('pmcid'))),
+               ('doi', (self._clean_doi(fields.get('doi')) or '').lower())}
+        return {(kind, value) for kind, value in ids if value}
 
     def _restore_and_reject(self, accepted: _Acceptance, keeper: _Acceptance) -> None:
         entry = accepted.entry

@@ -6,52 +6,88 @@ import secrets
 import string
 import threading
 import time
-from pathlib import Path
 from collections.abc import Callable
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
-from fastapi.concurrency import run_in_threadpool
-from sqlalchemy.orm import Session
 from dataclasses import dataclass
 from datetime import datetime
-from pydantic import BaseModel
+from pathlib import Path
 from typing import Literal, NamedTuple, Optional
 
-from app.database import get_db
-from app.models import Run, Step, User
-from app.schemas import UploadResponse
-from app.pipeline.step_registry import STEP_REGISTRY
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
 from app.auth import can_see_cost, get_current_user, visible_cost
-from app.rate_limiter import check_rate_limit
 from app.consent import require_current_consent
-from app.services.config_service import (
-    MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
-    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
-    get_estimated_run_cost, get_estimate_model_name,
-)
-from app.services.run_service import latest_run_with_hash
+from app.database import get_db
 from app.errors import bad_request, duplicate_file, internal_error
-from app.storage import get_storage
-from app.storage.base import StorageKeyExists
+from app.models import Run, Step, User
+from app.pipeline.step_registry import STEP_REGISTRY
+from app.rate_limiter import check_rate_limit
+from app.schemas import UploadResponse
+from app.services import run_creation
 from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
-from app.services.run_service import UPLOAD_DIR
+from app.services.config_service import (
+    BASE_OVERHEAD_SECONDS,
+    ESTIMATE_RATE_LIMIT_MAX,
+    ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
+    MAX_UPLOAD_SIZE,
+    TIME_PER_1K_TOKENS,
+    get_estimate_model_name,
+    get_estimated_run_cost,
+)
 from app.services.input_format import detect_input_format_or_none
+from app.services.pdf_sandbox import (
+    PDF_BUSY_MESSAGE,
+    PDF_TOO_COMPLEX_MESSAGE,
+    PDF_UNREADABLE_MESSAGE,
+    EncryptedPdfError,
+    PdfBusyError,
+    PdfTooComplexError,
+    UnreadablePdfError,
+)
+from app.services.run_creation import (  # noqa: F401 -- re-exported: other modules and tests import these from here
+    _ENCRYPTED_PDF_MESSAGE,
+    _PDF_BUSY_RETRY_AFTER_SECONDS,
+    _RUN_ID_ATTEMPTS,
+    DUPLICATE_DATE_FORMAT,
+    DuplicateInfo,
+    RunIdAttemptsExhausted,
+    RunRequest,
+    _add_pending_steps,
+    _archive_or_502,
+    _compensate_failed_run,
+    _estimate_char_count,
+    _extract_text_or_400,
+    _page_ranges,
+    _read_upload_text,
+    _reject_mostly_scanned_pdf,
+    _reject_unconfirmed_duplicate,
+    _unlink_best_effort,
+    compensated_run_creation,
+    create_run_archive,
+    create_run_from_bytes,
+    duplicate_info,
+    estimate_run_seconds,
+    generate_run_id,
+)
+from app.services.run_service import UPLOAD_DIR, latest_run_with_hash
 from app.services.template_warning import detect_wcm_template
 from app.services.upload_validation import (  # noqa: F401 -- re-exported: tests patch these names here
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, PDF_MAGIC, SCANNED_PAGE_REJECT_SHARE, ZIP_MAGIC, _DOCX_MAX_ENTRIES,
-    _DOCX_MAX_UNCOMPRESSED_BYTES, _DOCX_READ_ERRORS, _extract_text, _validate_docx_magic, _validate_pdf_magic,
+    _DOCX_MAX_ENTRIES,
+    _DOCX_MAX_UNCOMPRESSED_BYTES,
+    _DOCX_READ_ERRORS,
+    MIN_EXTRACTED_CHARS,
+    PDF_EXTENSION,
+    PDF_MAGIC,
+    SCANNED_PAGE_REJECT_SHARE,
+    ZIP_MAGIC,
+    _extract_text,
+    _validate_docx_magic,
+    _validate_pdf_magic,
 )
-from app.services import run_creation
-from app.services.run_creation import (  # noqa: F401 -- re-exported: other modules and tests import these from here
-    DUPLICATE_DATE_FORMAT, DuplicateInfo, RunIdAttemptsExhausted, RunRequest, _RUN_ID_ATTEMPTS,
-    _add_pending_steps, _archive_or_502, _page_ranges, _read_upload_text, _reject_mostly_scanned_pdf, _compensate_failed_run, _ENCRYPTED_PDF_MESSAGE,
-    _estimate_char_count, _extract_text_or_400, _PDF_BUSY_RETRY_AFTER_SECONDS, _reject_unconfirmed_duplicate,
-    _unlink_best_effort, commit_run_or_compensate, create_run_archive, create_run_from_bytes,
-    duplicate_info, estimate_run_seconds, generate_run_id,
-)
-from app.services.pdf_sandbox import (
-    PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
-    PdfBusyError, PdfTooComplexError, UnreadablePdfError,
-)
+from app.storage import get_storage
+from app.storage.base import StorageKeyExists
 
 logger = logging.getLogger(__name__)
 # Extensions the upload API accepts, matching the frontend's guard
@@ -195,6 +231,10 @@ class EstimateResponse(BaseModel):
     # (#1282). Fewer than SCANNED_PAGE_REJECT_SHARE of its pages, or the
     # file would have been refused.
     scanned_pages: list[int] = []
+    # The file's estimated cost in "typical CVs" (#1599): unitless, so a
+    # non-admin's batch table can compare files without seeing a dollar
+    # figure (#1111). Only ratios between files are meaningful.
+    cost_weight: float = 0.0
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -321,6 +361,19 @@ def _check_estimate_limits(current_user: User, db: Session) -> None:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
 
+# The text length one "typical CV" is taken to have when cost_weight is
+# expressed in typical CVs (#1599): about the median of YUYVIG's 38 CVs
+# (64,906 characters). It only sets the scale; the batch table compares
+# weights with each other, so any fixed value gives the same flags.
+_COST_WEIGHT_REFERENCE_CHARS = 65_000
+
+
+def _cost_weight(cost_min: float, cost_max: float) -> float:
+    """A cost range in units of a typical CV's estimated cost (#1599)."""
+    ref_min, ref_max = get_estimated_run_cost(_COST_WEIGHT_REFERENCE_CHARS)
+    return round((cost_min + cost_max) / (ref_min + ref_max), 2)
+
+
 async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> EstimateResponse:
     """Read, validate and size one file for /estimate; raises the same 400s
     /upload would for an unreadable or mislabeled file."""
@@ -386,6 +439,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
         scanned_pages=scanned_pages,
+        cost_weight=_cost_weight(cost_min, cost_max),
     )
 
 

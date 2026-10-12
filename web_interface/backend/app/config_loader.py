@@ -1,10 +1,12 @@
 """Load auth config from YAML and seed SystemConfig DB table."""
 import json
 import logging
-import yaml
 import os
 from pathlib import Path
+
+import yaml
 from sqlalchemy.orm import Session
+
 from app.models import SystemConfig
 
 logger = logging.getLogger(__name__)
@@ -108,6 +110,16 @@ def get_config_value(db: Session, key: str):
     if row:
         return json.loads(row.value)
     return None
+
+# Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
+IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
+
+
+def current_image_tag() -> str | None:
+    """The tag of the image this process runs, or None when it was built
+    without one (local dev, or an image built before #1239)."""
+    return os.environ.get(IMAGE_TAG_ENV, "").strip() or None
+
 
 def get_config(section, key, default=None):
     # 1. env 

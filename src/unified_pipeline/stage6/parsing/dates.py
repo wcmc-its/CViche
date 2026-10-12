@@ -15,8 +15,8 @@ deciding what order records go in is `sorting/`. Both import from here, so
 nothing in this file may import from either.
 """
 import datetime
-from types import MappingProxyType
 import re
+from types import MappingProxyType
 
 from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
@@ -44,8 +44,11 @@ _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
 # drift between the three date modules again -- it already had (#553): this
 # module recognized only 'present', so an end_date of "ongoing" reached
 # _dates_overlap_or_match as a literal string instead of the open-ended
-# range the other two modules already treat it as.
-CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now'})
+# range the other two modules already treat it as. "to date" and "date" are
+# the end stage 4 stores for a CV's "2012 to date" / "2018-date" (#1432,
+# VYNARH): without them the range rendered as the raw "2012-to date".
+CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now',
+                                 'to date', 'date'})
 
 # The two keys of the range stage 4 sometimes returns where a single date was
 # asked for: `{"start_date": "2008", "end_date": "2018"}` (#1233). B1's
@@ -55,6 +58,37 @@ CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now'})
 # (keys it by its end, else its start), for the same reason as above.
 RANGE_START_KEY = 'start_date'
 RANGE_END_KEY = 'end_date'
+
+# The regex grammar every stage-6 date recogniser is composed from: the
+# committee and membership parsers in text.py, and the date patterns in
+# sections/service.py and sections/memberships.py (#665). Those used to spell
+# their own dashes, years and open ends, and had drifted -- service.py took no
+# em dash, memberships.py took only a hyphen while the parser it gates took all
+# three, and only service.py knew "current" and "ongoing". A change to a dash
+# or to how a range may end now reaches every one of them.
+DATE_DASH = r'[-–—]'
+YEAR = r'\d{4}'
+# The words a CV writes for an end that has not come yet. A regex subset of
+# CURRENT_DATE_VALUES: "now", "date" and "to date" are left out because each is
+# also ordinary prose ("to date" ends sentences), and a recogniser that admits
+# them reads text as a date range.
+OPEN_END = r'(?:present|current|ongoing)'
+# A range's end year written with its century dropped ("2016-23"). Not when a
+# digit or a slash follows: in "4/2013-12/2014" the "12" is a month, and
+# reading it as an end year splits that range into "2013-12" and "/2014".
+SHORT_END_YEAR = r'\d{2}(?![\d/])'
+RANGE_END = rf'(?:{YEAR}|{SHORT_END_YEAR}|{OPEN_END})'
+# "2001-2005", "2016-23", "2010-present".
+YEAR_SPAN = rf'{YEAR}\s*{DATE_DASH}\s*{RANGE_END}'
+# "2001", "2001-2005", "2010-present".
+YEAR_OR_SPAN = rf'{YEAR}(?:\s*{DATE_DASH}\s*{RANGE_END})?'
+# YEAR_OR_SPAN plus a range whose end is missing altogether ("2001-").
+YEAR_OR_OPEN_SPAN = rf'{YEAR}(?:\s*{DATE_DASH}\s*{RANGE_END}?)?'
+# Several of the above, comma-separated: "2014, 2017-2020".
+YEAR_LIST = rf'{YEAR_OR_SPAN}(?:\s*,\s*{YEAR_OR_SPAN})*'
+# "3/2010", "03/2010-present", "3/2010-6/2012".
+MONTH_YEAR_DATE = r'\d{1,2}/?\d{0,4}'
+MONTH_YEAR_SPAN = rf'{MONTH_YEAR_DATE}\s*{DATE_DASH}\s*(?:{OPEN_END}|{MONTH_YEAR_DATE})'
 
 
 def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int | None]:
@@ -242,6 +276,23 @@ def _ends_strictly_before(end: tuple[int, int | None] | object, start: tuple[int
         return end_year < start_year
     return (end_month is not None and start_month is not None
             and end_month < start_month)
+
+
+def range_is_reversed(start_date: str, end_date: str) -> bool:
+    """True only when the stated data PROVES `end_date` precedes `start_date`.
+
+    Stage 4 stores a list of separate dates ("2020, 2019, 2018, 2014",
+    "October 14, 2011; September 1, 2010") as its first and last item, so
+    the "range" runs backwards (#1432, UYQRUN). Read at the granularity the
+    CV states, the same way `_dates_overlap_or_match` reads its boundaries:
+    an unreadable boundary, an open end, or the same year with a month
+    missing on either side proves nothing and returns False.
+    """
+    start = _overlap_boundary(start_date, is_end=False)
+    end = _overlap_boundary(end_date, is_end=True)
+    if start is None or end is None:
+        return False
+    return _ends_strictly_before(end, start)
 
 
 def _dates_overlap_or_match(entry_a: dict, entry_b: dict) -> bool:

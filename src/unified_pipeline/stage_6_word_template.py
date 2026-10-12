@@ -17,20 +17,19 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
-import logging
 import functools
-import os
-import sys
 import json
-import traceback
-from types import MappingProxyType
+import logging
+import os
 import re
-from collections.abc import Mapping, Sequence
-from pathlib import Path
-from typing import Any, Literal, NamedTuple
-from collections.abc import Callable
+import sys
+import traceback
+from collections import Counter, defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from collections import defaultdict
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Literal, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +42,56 @@ RECLASSIFY_FAILURE_STAT = 'segment_reclassification_failures'
 try:
     from docx import Document
     from docx.document import Document as DocumentType
-    from docx.shared import Pt, RGBColor, Inches, Twips
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import nsmap, qn
+    from docx.oxml.xmlchemy import BaseOxmlElement
+    from docx.parts.document import DocumentPart
+    from docx.shared import Inches, Pt, RGBColor, Twips
     from docx.table import Table
     from docx.text.paragraph import Paragraph
-    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
-    from docx.oxml.ns import qn, nsmap
-    from docx.oxml import OxmlElement
-    from docx.parts.document import DocumentPart
     from lxml import etree
 except ImportError:
     logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
-from unified_pipeline.llm_client import call_llm
-from unified_pipeline.llm_client import LlmUsage
-from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
+from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
+    is_source_boilerplate,
+    is_template_instruction,
+)
+from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
+    code_matches_expected,
+    get_expected_codes_from_hierarchy,
+)
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.stage4.extraction import (
+    UnextractedContentReport,
+    calculate_unextracted_content,
+)
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+from unified_pipeline.stage6 import supplementary
+from unified_pipeline.stage6.dedup import (  # noqa: F401
+    _STOP_WORDS,
+    DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
+    DEDUP_FUSED_BLOB_RECORD_LINES,
+    _drop_is_safe,
+    _entry_signature_words,
+    _entry_title_words,
+    _significant_words,
+    deduplicate_entries,
+    recovered_row_already_rendered,
+)
+from unified_pipeline.stage6.fan_out import (
+    _RENDERED_FIELDS,
+    fan_out_multi_record_entries,
+    record_scope,
+    record_text,
+)
+
 # Every name below is re-exported from this module by being imported here: it is
 # the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
 # run_full_pipeline.py and the backend orchestrator.py are parallel drivers over
@@ -68,8 +100,8 @@ from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # `noqa: F401` is deliberate -- several of these have no caller left in this file
 # and exist purely to keep that surface intact.
 from unified_pipeline.stage6.formatting import (  # noqa: F401
-    DATE_FORMATS,
     _MONTH_NAMES,
+    DATE_FORMATS,
     _clear_table_data,
     _format_citation,
     _format_currency,
@@ -83,7 +115,35 @@ from unified_pipeline.stage6.formatting import (  # noqa: F401
     _set_table_border,
     format_date_for_section,
     format_date_range,
+    is_cviche_box,
     normalize_iso_dates_in_text,
+)
+from unified_pipeline.stage6.normalization import (  # noqa: F401
+    _ALL_PHONE_SLOT_KEYS,
+    _CELL_PHONE_KEYS,
+    _HOME_ADDRESS_KEYS,
+    _HOME_PHONE_KEYS,
+    _OFFICE_ADDRESS_KEYS,
+    _OFFICE_PHONE_KEYS,
+    _PII_FRAGMENT_SPLIT_RE,
+    _TAXONOMY_CODE_PREFIX,
+    _address_cell_text,
+    _clean_inline_tabs,
+    _committee_cell_text,
+    _deduplicate_repeated_content,
+    _from_pii_fragment,
+    _get_cleaned_institution_name,
+    _labels_its_own_address_slots,
+    _labels_its_own_phone_slots,
+    _normalize_author_names,
+    _phone_cell_text,
+    _pii_fragments,
+    _squash,
+    _strip_markdown_for_word,
+    _strip_org_tail,
+    _strip_taxonomy_code,
+    grant_status_rebucket_target,
+    split_fused_citation_entries,
 )
 from unified_pipeline.stage6.parsing import (  # noqa: F401
     _MONTH_NAME_TO_NUM,
@@ -99,70 +159,32 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     _is_table_header_entry,
     _parse_date_components,
     _parse_multi_membership_entry,
+    _refold_shattered,
 )
-from unified_pipeline.stage6.resolution import (  # noqa: F401
-    _get_cv_owner_name,
-    _get_institution_location,
-    _recover_institution_from_nearby_entries,
-)
-from unified_pipeline.stage6.normalization import (  # noqa: F401
-    _CELL_PHONE_KEYS,
-    _OFFICE_PHONE_KEYS,
-    _HOME_PHONE_KEYS,
-    _ALL_PHONE_SLOT_KEYS,
-    _labels_its_own_phone_slots,
-    _phone_cell_text,
-    _PII_FRAGMENT_SPLIT_RE,
-    _squash,
-    _pii_fragments,
-    _from_pii_fragment,
-    _HOME_ADDRESS_KEYS,
-    _OFFICE_ADDRESS_KEYS,
-    _TAXONOMY_CODE_PREFIX,
-    _address_cell_text,
-    _clean_inline_tabs,
-    _committee_cell_text,
-    _deduplicate_repeated_content,
-    _get_cleaned_institution_name,
-    _labels_its_own_address_slots,
-    _normalize_author_names,
-    _strip_markdown_for_word,
-    _strip_org_tail,
-    _strip_taxonomy_code,
-    grant_status_rebucket_target,
-    split_fused_citation_entries,
-)
-from unified_pipeline.stage6.sorting import (  # noqa: F401
-    element_idx_sort_key,
-    extract_sort_date,
-    sort_entries_reverse_chronological,
-)
-from unified_pipeline.stage6.dedup import (  # noqa: F401
-    DEDUP_FULL_CONTAINMENT_MIN_TOKENS,
-    DEDUP_FUSED_BLOB_RECORD_LINES,
-    _STOP_WORDS,
-    _drop_is_safe,
-    _entry_signature_words,
-    _entry_title_words,
-    _significant_words,
-    deduplicate_entries,
-    recovered_row_already_rendered,
+from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
+from unified_pipeline.stage6.pii_pass import (  # noqa: F401
+    PII_REDACTED_NOTICE,
+    WITHHELD_COMMENT_AUTHOR,
+    PiiPassResult,
+    relocate_withheld,
+    run_pii_pass,
+    withheld_comment_text,
 )
 from unified_pipeline.stage6.record_dedup import deduplicate_record_groups
 from unified_pipeline.stage6.render_check import (  # noqa: F401
-    RECORD_DATE_LINE_MIN_CHARS,
-    RENDER_PIECE_MIN_CHARS,
-    RENDER_PIECE_WINDOW,
-    RENDER_TOKEN_MIN_COUNT,
-    RECLASSIFY_MIN_TOKEN_COVERAGE,
-    RENDER_TOKEN_OVERLAP,
-    RETIRED_TAXONOMY_CODES,
-    UNRENDERED_MIN_RECORD_LINES,
     _COLUMN_HEADER_WORDS,
     _IDENTIFYING_FIELDS,
     _MONTH_WORDS,
     _RECORD_DATE_PREFIX_RE,
     _RENDER_TOKEN_RE,
+    RECLASSIFY_MIN_TOKEN_COVERAGE,
+    RECORD_DATE_LINE_MIN_CHARS,
+    RENDER_PIECE_MIN_CHARS,
+    RENDER_PIECE_WINDOW,
+    RENDER_TOKEN_MIN_COUNT,
+    RENDER_TOKEN_OVERLAP,
+    RETIRED_TAXONOMY_CODES,
+    UNRENDERED_MIN_RECORD_LINES,
     _entry_pieces,
     _is_column_header_row,
     _looks_like_record,
@@ -172,26 +194,16 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     _record_tokens,
     _value_is_datelike,
     _whole_record_rendered,
+    m1_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
     segments_cover_source,
     t_recovery_lines,
 )
-from unified_pipeline.stage4.extraction import UnextractedContentReport, calculate_unextracted_content
-from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
-from unified_pipeline.stage6.fan_out import (
-    _RENDERED_FIELDS,
-    fan_out_multi_record_entries,
-    record_scope,
-    record_text,
-)
-from unified_pipeline.stage6.pii_pass import (  # noqa: F401
-    PII_REDACTED_NOTICE,
-    WITHHELD_COMMENT_AUTHOR,
-    PiiPassResult,
-    relocate_withheld,
-    run_pii_pass,
-    withheld_comment_text,
+from unified_pipeline.stage6.resolution import (  # noqa: F401
+    _get_cv_owner_name,
+    _get_institution_location,
+    _recover_institution_from_nearby_entries,
 )
 from unified_pipeline.stage6.sections import (  # noqa: F401
     AdministrativeActivitiesSection,
@@ -212,16 +224,17 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     PositionsSection,
     PostdocTrainingSection,
     PresentationsSection,
+    ResearcherProfilesSection,
     ResearchSummarySection,
     ResearchSupportSection,
-    ResearcherProfilesSection,
     ServiceSection,
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
-    APPENDIX_MAX_CHARS,
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
-    APPENDIX_INTRO_TEXT,
+)
+from unified_pipeline.stage6.sections.appendix import (
+    APPENDIX_MAX_CHARS,
     CODE_ORIGIN_ENTRY,
     CODE_ORIGIN_RECONSIDER,
     OwnerTokens,
@@ -232,19 +245,18 @@ from unified_pipeline.stage6.sections.appendix import (
     build_appendix_diversion_warnings,
     is_page_furniture,
     is_t_validation_recoded_m1,
+    labelled_email,
+    reclassified_structural_reason,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
-from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
-
-from unified_pipeline.core.template_boilerplate import (
-    is_foreign_template_instruction,
-    is_source_boilerplate,
-    is_template_instruction,
+from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS
+from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
+from unified_pipeline.stage6.sorting import (  # noqa: F401
+    element_idx_sort_key,
+    extract_sort_date,
+    sort_entries_reverse_chronological,
 )
-
-
-
-
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 
 # Keys observed in structured stage-4 `phone` values: cell, office, fax. Stage 4
 # extracts with no schema, so the vocabulary is unbounded -- match on the key
@@ -272,6 +284,50 @@ from unified_pipeline.core.template_boilerplate import (
 # template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
 
 
+
+
+# ---- geographic scope of an R / Q2 entry (#1579) ----
+# The scopes an entry files under, and the answer when nothing settles it.
+GEO_SCOPES = ('Regional', 'National', 'International')
+GEO_SCOPE_DEFAULT = 'National'
+# How much of the record's own text the named-reach step sees.
+NAMED_REACH_TEXT_CHARS = 300
+
+NAMED_REACH_SYSTEM_PROMPT = (
+    "You read which reach an academic activity's own name states. Return only valid JSON.")
+# Step one of the scope decision (#1579 item 4): a body or meeting that names
+# its reach files there, wherever it met. National is the owner's own country
+# and Regional the owner's own state; a talk's title, topic or audience, a
+# company's name and a talk at the owner's own institution name no reach; and
+# a line that names no reach answers "none", so the distance prompt below
+# decides it exactly as before (YUYVIG A/Bs, 2026-10-08).
+NAMED_REACH_PROMPT = """Does this academic activity name its own reach? Answer from the body or meeting that holds or hosts it, not from where it was held.
+
+**CV Owner's Home State/Province and Country**: {owner_home}
+**CV Owner's Institution(s)**: {owner_institutions}
+
+**Activity Location/Organization**: {activity}
+**Activity Text**: {text}
+
+Only the hosting body or meeting counts. A talk's title, topic or audience is never the body (a talk on "international health" or to "national leaders" names no reach), and a company or product whose name contains "International" or "National" names no reach.
+
+**Answer**:
+- "International": an international or world body, or a meeting whose own name says International or World. Also any national association, society, college, agency or meeting of a country other than the owner's ({owner_country}).
+- "National": a national association, society or college of the owner's own country ({owner_country}), or its national meeting; a federal agency of that country (NIH, NSF, FDA, CDC, VA, ...) or one of its panels, boards or study sections. Also a regional, state or chapter society of the owner's country whose area does not include the owner's state or province.
+- "Regional": a body of the owner's own state or province ({owner_state}), or of a county, city or town in it; a regional society whose area includes the owner's state or province; a local school or community group in the owner's area.
+- "none": anything else. That includes a government body of a different state or province from the owner's (or any state body when the owner's state is Unknown); a university, hospital, department, company or foundation; grand rounds, a seminar or a lecture at an institution, including any talk at the owner's own institution(s); and a line that names no body or meeting at all (e.g. "Board of Directors, 2008-2009", "Awards Committee").
+
+Return ONLY a JSON object: {{"reach": "International" | "National" | "Regional" | "none"}}"""
+
+
+class ScopeActivity(NamedTuple):
+    """What the scope steps see of one R / Q2 record and its owner."""
+    location: str                  # the record's organization, else its location, else its text
+    text: str                      # the record's own text (`fan_out.record_text`)
+    owner_institutions: list[str]  # "Institution, City, State" per owner affiliation
+    metro_area: str
+    owner_state: str
+    owner_country: str
 
 
 # XML namespaces for Word documents
@@ -555,6 +611,48 @@ def rendered_extraction_coverage(entry: Mapping[str, Any]) -> UnextractedContent
     return calculate_unextracted_content(str(entry.get('text') or ''), own)
 
 
+# Low-coverage content overflow (`_add_entry_comments`): an entry whose render
+# kept too little of its text is re-emitted in full. K/L entries support bullet
+# text and qualify more readily; other codes' table rows summarise adequately
+# even at 20-40% coverage, so they qualify only when very low and very long.
+LOW_COVERAGE_COMMENT_PCT = 70
+OVERFLOW_KL_MAX_COVERAGE_PCT = 50
+OVERFLOW_KL_MIN_CHARS = 300
+OVERFLOW_OTHER_MAX_COVERAGE_PCT = 15
+OVERFLOW_OTHER_MIN_CHARS = 1000
+
+
+def _has_formatted_text(entry: Mapping[str, Any]) -> bool:
+    """Whether stage 5c already formatted the entry's full text."""
+    fields = entry.get('extracted_fields') or {}
+    return bool(fields.get('formatted_text')
+                or fields.get('formatting_source') == 'stage_5c_llm')
+
+
+def is_overflow_candidate(entry: Mapping[str, Any]) -> bool:
+    """Whether an entry's coverage and length send it to the content overflow,
+    before the check that its paragraphs already show most of its text.
+
+    K and S entries never qualify (free-form teaching text; bibliography uses
+    enrichment), nor does one stage 5c formatted. A coverage of 0 or None reads
+    as unknown and does not qualify. The Appendix also reads this: an entry
+    that qualifies is re-split by the reconsider pass, so its Appendix line
+    stays a capped pointer; every other Appendix line renders whole (#1230,
+    #1555).
+    """
+    code = str(entry.get('taxonomy_code') or '')
+    if code.startswith(('K', 'S')) or _has_formatted_text(entry):
+        return False
+    coverage = rendered_extraction_coverage(entry) or {}
+    pct = coverage.get('extraction_coverage_percent', 100)
+    if not pct or pct >= LOW_COVERAGE_COMMENT_PCT:
+        return False
+    length = len(entry.get('text', ''))
+    if code.startswith('L'):
+        return pct < OVERFLOW_KL_MAX_COVERAGE_PCT and length > OVERFLOW_KL_MIN_CHARS
+    return pct < OVERFLOW_OTHER_MAX_COVERAGE_PCT and length > OVERFLOW_OTHER_MIN_CHARS
+
+
 _KEEP_SENTINEL = 'KEEP'
 _TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
 
@@ -623,10 +721,12 @@ def _recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
     A fused multi-record entry (two or more record-shaped lines) for any code.
-    A T entry longer than the Appendix cap is the exception: the cap cut
-    everything past `APPENDIX_MAX_CHARS`, so every record-shaped or dated line
-    of it is a candidate (`t_recovery_lines`), and a single-record entry
-    qualifies (#1230). A T entry the cap did not cut renders whole and has none.
+    A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
+    record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
+    a single-record entry qualifies (#1230). The Appendix renders a T body
+    whole (`_appendix_body`) unless the overflow re-splits it, so these lines
+    are usually found on the page; the scan still catches what a re-split
+    reply or dedup left out. A shorter T entry has none.
     """
     text = str(entry.get('text') or '')
     if code == 'T':
@@ -686,12 +786,36 @@ def _summary_paraphrases_m1(mapped_codes: set[str], research_summary_data: dict 
     return summary_info.get('generation_method') != _SUMMARY_METHOD_VERBATIM_M1
 
 
+# A credit line naming who ran the work -- "Investigators: ...", "(co-investigator)",
+# "My role: ...", "Mentor: ...", "Study Title: ..." -- marks a project record even
+# when stage 4 filed every word of it under `narrative` (#1572: LTTYWI's projects).
+_M1_CREDIT_LABEL_RE = re.compile(
+    r'\b(?:co-?)?investigators?\s*:|\((?:co-?)?investigator\)|\bmentors?\s*:'
+    r'|\brole\s*:|\bstudy title\s*:|\bPI\s*:', re.IGNORECASE)
+
+
 def _is_m1_record(entry: Mapping[str, Any]) -> bool:
-    """True when an M1 entry is a dated record (a position, a project) rather
-    than research-statement prose: stage 4 extracted a populated field outside
-    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184)."""
+    """True when an M1 entry is a record (a position, a project) rather than
+    research-statement prose: stage 4 extracted a populated field outside
+    `_M1_PROSE_FIELDS` (E27: CMTQDR 122, XWNZWW 184), or its text carries a
+    credit line (`_M1_CREDIT_LABEL_RE`)."""
     fields = entry.get('extracted_fields') or {}
-    return any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+    return (any(value for key, value in fields.items() if key not in _M1_PROSE_FIELDS)
+            or bool(_M1_CREDIT_LABEL_RE.search(str(entry.get('text') or ''))))
+
+
+def _m1_record_ids(m1_entries: list[dict]) -> set[int]:
+    """`id()` of every M1 entry that is a record: one `_is_m1_record` accepts,
+    and every other entry under the same heading, as an item of that record
+    list (#1572). Stage 4 often extracts dates from some items of a list and
+    nothing but `narrative` from the rest: ECXGAT's 22 virus isolates, of which
+    4 carried a date, and LTTYWI's numbered research projects. An entry with no
+    heading is judged on its own."""
+    records = [entry for entry in m1_entries if _is_m1_record(entry)]
+    record_headings = {tuple(entry.get('hierarchy') or ()) for entry in records}
+    return ({id(entry) for entry in records}
+            | {id(entry) for entry in m1_entries
+               if entry.get('hierarchy') and tuple(entry['hierarchy']) in record_headings})
 
 
 def _paragraph_text(paragraph: Paragraph, include_tracked_insertions: bool) -> str:
@@ -757,12 +881,35 @@ _SAME_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingProx
     ('S4', 'S1'): frozenset({'book_title', 'editors', 'publisher'}),
 })
 
+# Fields a target's renderer also reads under another schema's name
+# (`_RENDERED_FIELDS` is probed with the target's own schema only): R takes a
+# talk's date from `year` or `start_date`, Q1 its organization from a
+# `journal_name` or `program_name`. A rerouted record keeps these.
+_RENDERED_FIELD_ALIASES: Mapping[str, frozenset[str]] = MappingProxyType({
+    'R': frozenset(_TALK_DATE_KEYS),
+    'Q1': frozenset(EXTRAMURAL_ORGANIZATION_FIELDS),
+})
+# Fields a target states without writing them: R lists the owner's own talks,
+# so its table has no author column, and an abstract moved there under an
+# invited-talks heading loses nothing it would show (MQSUIC 433, EBYSBC farm).
+_REROUTE_IMPLIED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
+    'R': frozenset({'authors'}),
+})
+
+# The section whose rows are memberships, and the role value it already
+# states: a Q1/Q2 row moved there loses its `role` (I writes
+# `membership_type`), which costs nothing when the role is just "Member".
+MEMBERSHIP_CODE = 'I'
+_PLAIN_MEMBER_ROLE_RE = re.compile(r'\s*members?\s*', re.IGNORECASE)
+
 # Outcomes of a hierarchy-mismatch reroute, one render-warnings record each
 # (per assigned -> target pair). A refusal keeps the classifier's code.
 REROUTE_ACCEPTED_SAME_FAMILY = 'accepted_same_family'
 REROUTE_ACCEPTED_CROSS_FAMILY = 'accepted_cross_family'
 REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
 REROUTE_REFUSED_MENTEE = 'refused_mentee_to_owner_record'
+REROUTE_REFUSED_FIELDS_LOST = 'refused_fields_would_be_dropped'
+REROUTE_REFUSED_HEADING = 'refused_heading_names_assigned_code'
 
 # Render-warnings `check` value for every reroute record, and each outcome's
 # severity: an accepted cross-family move is a low-confidence guess that moved
@@ -773,6 +920,8 @@ _REROUTE_SEVERITY = MappingProxyType({
     REROUTE_ACCEPTED_CROSS_FAMILY: 'WARN',
     REROUTE_REFUSED_FIELDS: 'INFO',
     REROUTE_REFUSED_MENTEE: 'INFO',
+    REROUTE_REFUSED_FIELDS_LOST: 'INFO',
+    REROUTE_REFUSED_HEADING: 'INFO',
 })
 
 
@@ -826,15 +975,61 @@ def _fields_fit_reroute_target(entry: Mapping[str, Any], target_code: str) -> bo
     return all(filled & anchors for anchors in anchor_groups)
 
 
+def _fields_lost_in_reroute(entry: Mapping[str, Any], assigned_code: str,
+                           target_code: str) -> frozenset[str]:
+    """The entry's filled fields the assigned code's renderer writes and the
+    target's does not, under any name it reads (#1428): an R talk moved to S8
+    lost its date, event and place (TVZDVF 557), a D3 job moved to I its title
+    (HJPBEM 290). Empty when either code renders the entry's text rather than
+    its fields: a text target carries every field in the text, and a text
+    source has none to lose. A plain "Member" role is not lost to Memberships
+    (`MEMBERSHIP_CODE`)."""
+    assigned_rendered = _RENDERED_FIELDS.get(assigned_code)
+    target_rendered = _RENDERED_FIELDS.get(target_code)
+    if assigned_rendered is None or target_rendered is None:
+        return frozenset()
+    target_keeps = (target_rendered | _RENDERED_FIELD_ALIASES.get(target_code, frozenset())
+                    | _REROUTE_IMPLIED_FIELDS.get(target_code, frozenset()))
+    lost = (_filled_field_names(entry) & assigned_rendered) - target_keeps
+    if target_code == MEMBERSHIP_CODE and _has_plain_member_role(entry):
+        lost -= {'role'}
+    return lost
+
+
+def _has_plain_member_role(entry: Mapping[str, Any]) -> bool:
+    """Whether the entry's stage-4 `role` reads only "Member(s)"."""
+    role = (entry.get('extracted_fields') or {}).get('role')
+    return isinstance(role, str) and bool(_PLAIN_MEMBER_ROLE_RE.fullmatch(role))
+
+
+def _heading_names_assigned_code(entry: Mapping[str, Any], assigned_code: str) -> bool:
+    """Whether the entry's heading path, read by the hierarchy-mismatch
+    flagger's current keyword table, expects the assigned code after all
+    (#1428): stage 3b's stored `expected_codes` predate the table's
+    board-of-directors terms (BNYLDF 285)."""
+    detail = entry.get('hierarchy_mismatch_detail') or {}
+    hierarchy = detail.get('hierarchy') or entry.get('hierarchy') or []
+    if isinstance(hierarchy, str):
+        hierarchy = [hierarchy]
+    expected = get_expected_codes_from_hierarchy([str(level) for level in hierarchy])
+    return bool(expected) and code_matches_expected(assigned_code, expected)
+
+
 def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
                           target_code: str) -> str | None:
-    """The outcome refusing a cross-family reroute, or None to apply it: a
-    mentee never becomes an owner record, and any other record must fit the
-    target (`_fields_fit_reroute_target`)."""
+    """The outcome refusing a cross-family reroute, or None to apply it: the
+    heading must not name the assigned code (`_heading_names_assigned_code`),
+    a mentee never becomes an owner record, and any other record must fit the
+    target (`_fields_fit_reroute_target`) and keep every field the assigned
+    code's renderer writes (`_fields_lost_in_reroute`)."""
+    if _heading_names_assigned_code(entry, assigned_code):
+        return REROUTE_REFUSED_HEADING
     if assigned_code in _MENTEE_CODES and target_code[:1] in _OWNER_RECORD_FAMILIES:
         return REROUTE_REFUSED_MENTEE
     if not _fields_fit_reroute_target(entry, target_code):
         return REROUTE_REFUSED_FIELDS
+    if _fields_lost_in_reroute(entry, assigned_code, target_code):
+        return REROUTE_REFUSED_FIELDS_LOST
     return None
 
 
@@ -903,6 +1098,91 @@ def precollegiate_reroute_warnings(moved: list[object]) -> list[dict[str, Any]]:
         'evidence': [f"element_idx_start {idx}" for idx in moved],
         'severity': 'INFO',
     }]
+
+
+# #1574 (YUYVIG RLADNC-07, LTTYWI-06, SQMWHM-11, IZIXVF-01): stage 3b still
+# codes some trainees with the bare parent N3, which has no renderer -- only
+# its children N3A (current) and N3B (past) do -- so they went to the
+# Appendix, and one list coded partly N3B and partly N3 split between Past
+# Mentees and the Appendix. A bare N3 entry that names a mentee, or states a
+# year (an aggregate line such as a supervision period), takes the code most
+# of its N3A/N3B siblings under the same heading carry, so one list renders in
+# one place. With no clear sibling majority it is N3A, and
+# `_partition_mentoring_entries` moves it to Past when its own dates ended:
+# the past/current rule every N3A already gets. A bare N3 that does neither --
+# a column-header row, a lead-in label, "Not applicable" -- is not a mentee
+# and stays N3, so it still reaches the Appendix. Nor is a line that is only
+# its dates ("2014 - 2016", split from its record at stage 2: EBYSBC VGHNZD),
+# which would render as a bare date under Past Mentees.
+BARE_MENTEE_CODE = 'N3'
+CURRENT_MENTEE_CODE = 'N3A'
+PAST_MENTEE_CODE = 'N3B'
+BARE_MENTEE_RESOLVE_CHECK = 'bare_mentee_code_resolved'
+_MENTEE_DATE_FIELDS = ('start_date', 'end_date')
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_DATE_WORDS = frozenset(_MONTH_NAME_TO_NUM) | _SEASON_TOKENS | CURRENT_DATE_VALUES
+
+
+def _heading_path(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The entry's stage-2 heading path, the key its siblings share."""
+    return tuple(str(heading) for heading in entry.get('hierarchy') or ())
+
+
+def _mentee_sibling_codes(entries: Sequence[Mapping[str, Any]]) -> dict[tuple[str, ...], Counter[str]]:
+    """{heading path: how many N3A and N3B entries stage 3b coded under it}."""
+    siblings: dict[tuple[str, ...], Counter[str]] = defaultdict(Counter)
+    for entry in entries:
+        code = entry.get('taxonomy_code')
+        if code in (CURRENT_MENTEE_CODE, PAST_MENTEE_CODE):
+            siblings[_heading_path(entry)][code] += 1
+    return siblings
+
+
+def _states_a_mentee_year(entry: Mapping[str, Any]) -> bool:
+    """Whether stage 4 wrote a start or end date with a readable year, and
+    the entry's text says something besides its dates."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return False
+    words = _WORD_RE.findall(str(entry.get('text') or ''))
+    return (any(word.lower() not in _DATE_WORDS for word in words)
+            and any(_parse_date_components(str(fields.get(key) or ''))[0] is not None
+                    for key in _MENTEE_DATE_FIELDS))
+
+
+def _route_bare_mentee(entry: dict[str, Any], code: str,
+                       siblings: Mapping[tuple[str, ...], Counter[str]],
+                       resolved: list[tuple[object, str]]) -> str:
+    """The code to group *entry* under: N3A or N3B for a bare N3 that names a
+    mentee or states a year (see the comment above), whose element_idx_start
+    and new code are appended to *resolved*; *code* otherwise."""
+    if code != BARE_MENTEE_CODE or not (_is_mentee_record(entry) or _states_a_mentee_year(entry)):
+        return code
+    ranked = siblings.get(_heading_path(entry), Counter()).most_common(2)
+    has_majority = bool(ranked) and (len(ranked) == 1 or ranked[0][1] > ranked[1][1])
+    target = ranked[0][0] if has_majority else CURRENT_MENTEE_CODE
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = target
+    resolved.append((entry.get('element_idx_start'), target))
+    return target
+
+
+def bare_mentee_resolution_warnings(resolved: list[tuple[object, str]]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record per target code naming the bare N3
+    entries `_route_bare_mentee` resolved to it, by element_idx_start only
+    (never CV text); none when nothing was resolved."""
+    by_target: dict[str, list[str]] = defaultdict(list)
+    for idx, target in resolved:
+        by_target[target].append(f"element_idx_start {idx}")
+    return [{
+        'check': BARE_MENTEE_RESOLVE_CHECK,
+        'code': BARE_MENTEE_CODE,
+        'section': None,
+        'message': (f"bare mentee code resolved {BARE_MENTEE_CODE}->{target}: "
+                    f"{len(evidence)} entr{'y' if len(evidence) == 1 else 'ies'}"),
+        'evidence': evidence,
+        'severity': 'INFO',
+    } for target, evidence in sorted(by_target.items())]
 
 
 def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
@@ -1025,7 +1305,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
                  recover_unrendered_records: bool = True,
-                 llm_usage: LlmUsage | None = None):
+                 llm_usage: LlmUsage | None = None,
+                 supplementary_subpoints: bool = False):
         # Priced result of every call_llm this render makes (geographic scope,
         # appendix reclassification). The caller passes its own to read the
         # total back; run_stage6 returns a path, so there is no other channel
@@ -1056,6 +1337,21 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # surface anywhere in the document (the structured-fields-only render
         # paths keep the extracted record and drop the remainder).
         self.recover_unrendered_records = recover_unrendered_records
+
+        # #1205: an entry's prose no section renders, written under it as a
+        # tracked deletion (stage6/supplementary.py). Off unless asked for
+        # here; `run_stage6`, the entry both drivers use, asks by default. A
+        # deletion means nothing without track changes, so it also needs
+        # emit_track_changes.
+        self.supplementary_subpoints = supplementary_subpoints
+        # Each written sub-point with its line, for the #221 recovery, and
+        # the entries it was written for, which the overflow pass skips.
+        self._subpoint_lines: list[str] = []
+        self._subpoint_entry_ids: set[int] = set()
+        # Tables of a code the sub-points exclude, whatever code the entries
+        # written into them carry: Journal Reviewing (Q4D), which also takes
+        # the Q2 entries `_route_q2_entries` reroutes there.
+        self._subpoint_excluded_tables: list[BaseOxmlElement] = []
 
         # CV owner location context for geographic scope classification
         self.cv_owner_location = None
@@ -1100,6 +1396,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
         self._geographic_scope_cache = {}
+        # Memoizes _named_reach's LLM calls, keyed on (activity, its text,
+        # owner state, owner institutions) (#1579).
+        self._named_reach_cache: dict[tuple[str, ...], str | None] = {}
 
         # Statistics
         # Tables already cleared this render, by element id. Guards against one
@@ -1165,6 +1464,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
           mentee, course and committee records rerouted to S8 rendered as
           bare numbered items, 28 of them on 2 of 10 CVs (class 3,
           AUTOPSY-s7ab-batch-2026-10-02).
+          Nor when the heading, read by the flagger's current table, names
+          the assigned code after all, or when the move would drop a field
+          the assigned code's renderer writes and the target's does not
+          (`_fields_lost_in_reroute`, #1428).
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
           heading whose expected codes tie across WCM sections
           (`_pick_mismatch_target`) (#946).
@@ -1419,18 +1722,22 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         mismatch_corrections = 0
         reroutes: list[RerouteDecision] = []
         precollegiate_moved: list[object] = []
+        bare_mentees_resolved: list[tuple[object, str]] = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY)
+        mentee_siblings = _mentee_sibling_codes(entries)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code, reroutes)
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
+            code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
         self._section_failures.extend(reroute_warnings(reroutes))
         self._section_failures.extend(precollegiate_reroute_warnings(precollegiate_moved))
+        self._section_failures.extend(bare_mentee_resolution_warnings(bare_mentees_resolved))
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
@@ -1563,14 +1870,16 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         the Appendix in source order. Empty unless `_summary_paraphrases_m1`.
 
         Two kinds. Every entry stage 3b's T-validation recoded from T
-        (AUTOPSY-s7ab-batch-2026-10-02 class 11). And every dated record
-        (`_is_m1_record`) that no part of the document rendered so far carries,
+        (AUTOPSY-s7ab-batch-2026-10-02 class 11). And every record
+        (`_m1_record_ids`) that no part of the document rendered so far carries,
         the summary paragraph included (AUTOPSY-EBYSBC-batch-2026-10-02 E27: a
         generated summary that never mentions a position or a project). The
-        render check is the #221 recovery pass's `_record_rendered`: a record
-        any line or cell of which surfaces, verbatim or by token overlap with
-        one output line, stays out, and so does one too short to verify, so
-        the Appendix never repeats what the reader already sees. Prose M1
+        render check is `m1_record_rendered`: a record that surfaces as a
+        whole, verbatim or by token overlap with one output line, stays out,
+        and so does one too short to verify, so the Appendix never repeats
+        what the reader already sees. One fragment no longer vouches for the
+        record (#1429): its date-and-department fragment matched appointment
+        rows and its title matched a summary sharing its topic words. Prose M1
         entries are what the summary restates; they stay out too.
         """
         m1_entries = entries_by_code.get('M1', [])
@@ -1579,10 +1888,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         lines = self._rendered_output_lines(exclude_instruction_box=True, include_tracked_insertions=True)
         haystack = "\x00".join(_squash(line) for line in lines)
         line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in lines]
+        record_ids = _m1_record_ids(m1_entries)
         return [entry for entry in m1_entries
                 if is_t_validation_recoded_m1(entry)
-                or (_is_m1_record(entry)
-                    and _record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
+                or (id(entry) in record_ids
+                    and m1_record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
 
     def generate(self, input_path: str, output_path: str | None = None, research_summary_path: str | None = None,
                  original_doc_path: str | None = None, discover_original_doc: bool = True) -> str:
@@ -1664,7 +1974,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # section -- including passthrough and the appendix below -- runs
         # through _render_section, so one section raising costs that section
         # only; the rest still render and the run still produces a document.
-        self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
+        self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path,
+                                 records_key=STAGE4_RECORDS_KEY)
 
         # (label, codes, callable), SAME order as the flat dispatch this
         # replaced (order pinned by test_stage6_section_boundary.py); codes are dropped from mapped_codes on failure (#842).
@@ -1740,15 +2051,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             written_appendix_entries = self._render_section(
                 'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries, cv_owner)) or []
 
-        # Route content-overflow entries as tracked-change bullets
-        self._route_overflow_entries()
+        # #1205 sub-points, then content-overflow entries as tracked-change bullets
+        self._place_unrendered_prose(pre_dedup_entries_by_code)
 
         # Reconsider appendix entries (reclassify segments to other sections)
         # then recover unrendered records (#221, after reconsider so its
         # inserts count as rendered) -- both bullet leftover content into the
         # Appendix and report back each bullet's code and text (#531-R2 F1, #1221).
-        recovered_appendix_lines = list(self._reconsider_appendix_entries() or [])
-        recovered_appendix_lines += self._recover_unrendered_records(pre_dedup_entries_by_code, cv_owner) or []
+        recovered_appendix_lines = self._recover_appendix_lines(written_appendix_entries, pre_dedup_entries_by_code, cv_owner)
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -1929,6 +2239,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         - Paragraph spacing: 4pt before and 4pt after
         """
         for table in self.doc.tables:
+            if is_cviche_box(table):  # its own padding and paragraph spacing (#1388)
+                continue
             for row in table.rows:
                 for cell in row.cells:
                     _set_cell_vertical_alignment(cell, 'center')
@@ -1947,7 +2259,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         gray_color = "D9D9D9"
 
         for table in self.doc.tables:
-            if not table.rows:
+            if not table.rows or is_cviche_box(table):  # CViche's note keeps its own lighter gray
                 continue
 
             # Apply header row background color (first row). The PERSONAL DATA
@@ -1969,73 +2281,109 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def _classify_geographic_scope(self, entry: dict) -> str:
         """Classify an entry's geographic scope as Regional, National, or International.
 
-        A record fanned out of a multi-record entry keeps the scope its CV
-        heading names unless the classifier, asked about that record alone,
-        puts it in another country (`fan_out.record_scope`, EBYSBC E34). Any
-        other entry takes the classifier's answer.
+        An entry takes the scope its CV heading names without a classifier
+        call (#1579). A record fanned out of a multi-record entry keeps that
+        scope unless the classifier, asked about that record alone, puts it in
+        another country (EBYSBC E34). Any other entry takes the classifier's
+        answer (`fan_out.record_scope`).
         """
-        return record_scope(entry, self._classify_activity_scope(entry))
+        return record_scope(entry, self._classify_activity_scope)
 
     def _classify_activity_scope(self, entry: dict) -> str:
         """Classify one activity's geographic scope as Regional, National, or International.
 
-        Uses LLM (gpt-5.1) to intelligently determine if an activity is in the same
-        metropolitan area as the CV owner's institution(s), leveraging the model's
-        geographic knowledge.
-
-        Args:
-            entry: Entry dict with text and extracted_fields
-
-        Returns:
-            'Regional', 'National', or 'International'
+        Two LLM steps. A body or meeting that names its own reach files there
+        (`_named_reach`, #1579 item 4). Otherwise the activity is classified by
+        its distance from the owner's institution(s) (`_distance_scope`), the
+        prompt stage 6 has always used. Either step failing leaves the entry
+        National, warned and counted (#547).
         """
-        if not self.cv_owner_location:
-            return 'National'  # Default if no location context
+        activity = self._scope_activity(entry)
+        if activity is None:
+            return GEO_SCOPE_DEFAULT
+        try:
+            reach = self._named_reach(activity)
+            return reach if reach is not None else self._distance_scope(activity)
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
+        except Exception:
+            # Never gated on verbose (#547): production runs are not verbose,
+            # and an LLM outage would otherwise refile every presentation as
+            # National with no record. The default itself is kept.
+            logger.warning("Geographic scope classification failed; "
+                           "defaulting to National", exc_info=True)
+            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
+            return GEO_SCOPE_DEFAULT
 
-        # Extract activity location/organization from entry
+    def _scope_activity(self, entry: dict) -> ScopeActivity | None:
+        """What the scope steps see of `entry`, or None when there is no owner
+        location or nothing to classify (the entry then files National)."""
+        if not self.cv_owner_location:
+            return None
         fields = entry.get('extracted_fields', {}) or {}
         entry_location = fields.get('location', '') or fields.get('city', '') or ''
         entry_org = fields.get('organization', '') or fields.get('institution', '') or ''
         # A fanned-out record's own text, not its parent's (`fan_out.record_text`).
         entry_text = record_text(entry)
+        location = entry_org or entry_location or entry_text[:200]
+        if not location.strip():
+            return None
 
-        # Build a location string for the activity
-        activity_location = entry_org or entry_location or entry_text[:200]
-        if not activity_location.strip():
-            return 'National'  # Can't classify without location info
-
-        # Get CV owner's institutions
         owner_institutions = []
         primary = self.cv_owner_location.get('primary_location', {})
-        if primary.get('institution'):
-            inst = primary.get('institution')
-            city = primary.get('city', '')
-            state = primary.get('state', '')
-            owner_institutions.append(f"{inst}, {city}, {state}" if city else inst)
-
-        # Add all affiliations
-        for loc in self.cv_owner_location.get('locations', []):
+        for loc in [primary, *self.cv_owner_location.get('locations', [])]:
             if loc.get('institution'):
                 inst = loc.get('institution')
                 city = loc.get('city', '')
-                state = loc.get('state', '')
-                loc_str = f"{inst}, {city}, {state}" if city else inst
+                loc_str = f"{inst}, {city}, {loc.get('state', '')}" if city else inst
                 if loc_str not in owner_institutions:
                     owner_institutions.append(loc_str)
-
-        metro_area = self.cv_owner_location.get('metro_area', '')
-
         if not owner_institutions:
-            return 'National'
+            return None
+        return ScopeActivity(location=location, text=entry_text, owner_institutions=owner_institutions,
+                             metro_area=self.cv_owner_location.get('metro_area', ''),
+                             owner_state=primary.get('state', '') or '',
+                             owner_country=primary.get('country', '') or '')
 
+    def _named_reach(self, activity: ScopeActivity) -> str | None:
+        """The scope the activity's own body or meeting names (a national
+        society, a federal panel, the owner's own state's agency), or None
+        when it names none (#1579 item 4)."""
+        text = activity.text[:NAMED_REACH_TEXT_CHARS]
+        cache_key = (activity.location[:100], text, activity.owner_state, activity.owner_country,
+                     *activity.owner_institutions[:2])
+        if cache_key in self._named_reach_cache:
+            return self._named_reach_cache[cache_key]
+        owner_state = activity.owner_state or 'Unknown'
+        owner_country = activity.owner_country or 'Unknown'
+        prompt = NAMED_REACH_PROMPT.format(
+            owner_home=f"{owner_state}, {owner_country}", owner_country=owner_country,
+            owner_institutions='; '.join(activity.owner_institutions),
+            activity=activity.location, text=text, owner_state=owner_state)
+        llm_result = call_llm(
+            stage="stage_6",
+            messages=[{"role": "system", "content": NAMED_REACH_SYSTEM_PROMPT},
+                      {"role": "user", "content": prompt}],
+            temperature=0.0,
+            response_format={"type": "json_object"})
+        self.llm_usage.add(llm_result)
+        reach = json.loads(llm_result["content"]).get('reach')
+        named = reach if reach in GEO_SCOPES else None
+        self._named_reach_cache[cache_key] = named
+        return named
+
+    def _distance_scope(self, activity: ScopeActivity) -> str:
+        """The activity's scope by its distance from the owner's institution(s):
+        same metro area Regional, same country National, abroad International."""
+        owner_institutions = activity.owner_institutions
+        activity_location = activity.location
+        metro_area = activity.metro_area
         # Create cache key to avoid repeated LLM calls for same location
         cache_key = f"{activity_location[:100]}|{','.join(owner_institutions[:2])}"
         if cache_key in self._geographic_scope_cache:
             return self._geographic_scope_cache[cache_key]
 
-        # Use LLM to classify
-        try:
-            prompt = f"""Classify the geographic scope of this academic activity relative to the CV owner's institution(s).
+        prompt = f"""Classify the geographic scope of this academic activity relative to the CV owner's institution(s).
 
 **CV Owner's Institution(s)**: {'; '.join(owner_institutions)}
 **CV Owner's Metro Area**: {metro_area or 'Unknown'}
@@ -2053,40 +2401,23 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
 Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}}"""
 
-            llm_result = call_llm(
-                stage="stage_6",
-                messages=[
-                    {"role": "system", "content": "You are a geographic classification system. Use your knowledge of institution locations to classify scope. Return only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                response_format={"type": "json_object"}
-            )
-            self.llm_usage.add(llm_result)
+        llm_result = call_llm(
+            stage="stage_6",
+            messages=[
+                {"role": "system", "content": "You are a geographic classification system. Use your knowledge of institution locations to classify scope. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        self.llm_usage.add(llm_result)
 
-            result = json.loads(llm_result["content"])
-            scope = result.get('scope', 'National')
-
-            # Validate response
-            if scope not in ('Regional', 'National', 'International'):
-                scope = 'National'
-
-            # Cache the result
-            self._geographic_scope_cache[cache_key] = scope
-
-            return scope
-
-        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
-            raise
-        except Exception:
-            # Never gated on verbose (#547): production runs are not verbose,
-            # and an LLM outage would otherwise refile every presentation as
-            # National with no record. The default itself is kept.
-            logger.warning("Geographic scope classification failed; "
-                           "defaulting to National", exc_info=True)
-            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
-            return 'National'  # Default on error
-
+        result = json.loads(llm_result["content"])
+        scope = result.get('scope', GEO_SCOPE_DEFAULT)
+        if scope not in GEO_SCOPES:
+            scope = GEO_SCOPE_DEFAULT
+        self._geographic_scope_cache[cache_key] = scope
+        return scope
 
 
 
@@ -2178,7 +2509,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(numId)
         pPr.append(numPr)
 
-    def _get_wcm_section_header(self, taxonomy_code: str) -> str:
+    @staticmethod
+    def _get_wcm_section_header(taxonomy_code: str) -> str:
         """Map taxonomy code to WCM subsection header text for precise routing.
 
         Returns the WCM subsection header where overflow content for this code
@@ -2716,8 +3048,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         for entry, para, taxonomy_code in self._overflow_entries:
             original_text = entry.get('text', '').strip()
-            if not original_text:
-                continue
+            if not original_text or id(entry) in self._subpoint_entry_ids:
+                continue  # #1205: a sub-point already carries its prose
 
             # Get coverage for the comment
             extraction_coverage = rendered_extraction_coverage(entry)
@@ -2808,6 +3140,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if not clean_segments:
                 clean_segments = [text.replace('\t', ' ')]
+            # A paragraph whose printed lines arrived as separate source
+            # paragraphs is joined back at each mid-sentence tab (#1583).
+            clean_segments = _refold_shattered(clean_segments)
 
             # Assign levels using a state machine that mirrors the original CV structure:
             #   ilvl=0: title (first segment)
@@ -3107,8 +3442,8 @@ Now analyze the text above:"""
         if not section_header:
             return False
 
-        # Never anchor inside the appendix: its bold 'From "SECTION":' group
-        # heads echo source section names and would swallow content meant for
+        # Never anchor inside the appendix: its bold group heads (the source
+        # CV's own section headings) echo source section names and would swallow content meant for
         # the real section (the appendix always sits at document end, and
         # _fill_appendix runs before this).
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
@@ -3236,6 +3571,76 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
+    def _place_unrendered_prose(self, entries_by_code: dict[str, list[dict]]) -> None:
+        """#1205: tracked-deleted sub-points first, then the content-overflow
+        routing, which skips an entry a sub-point now carries, so its prose is
+        not re-emitted whole as a blue bullet or into the Appendix. The #221
+        recovery after this reads the sub-points too (`_subpoint_lines`)."""
+        self._add_supplementary_subpoints(entries_by_code)
+        self._route_overflow_entries()
+
+    def _add_supplementary_subpoints(self, entries_by_code: dict[str, list[dict]]) -> None:
+        """#1205: write each `SUBPOINT_CODES` entry's provably-unrendered prose
+        under its rendered line as a tracked deletion (stage6/supplementary.py).
+        Skipped unless `supplementary_subpoints` and `emit_track_changes` are
+        both on: with track changes off a deletion is already accepted.
+
+        `_subpoint_lines` already holds the appointment-title duties the
+        positions writer made sub-points (`_add_title_duties`); they join the
+        haystack, so the same duties are not planned again from the entry's
+        text."""
+        if not (self.supplementary_subpoints and self.emit_track_changes):
+            return
+        haystack = supplementary.rendered_haystack(
+            self._rendered_output_lines() + self._subpoint_lines, self.doc)
+        appendix_idx = self._find_header_paragraph("T. APPENDIX")
+        appendix = self.doc.paragraphs[appendix_idx]._p if appendix_idx is not None else None
+        candidates = list(supplementary.anchor_candidates(self.doc, appendix))
+        planned = supplementary.plan_subpoints(entries_by_code, haystack, candidates,
+                                               self._subpoint_section_spans(),
+                                               self._subpoint_excluded_tables)
+        revision = supplementary.Revision(
+            self._revision_id, datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+        for subpoint in planned:
+            subpoint = subpoint._replace(paragraphs=tuple(
+                self._sanitize_run_text(text) for text in subpoint.paragraphs))
+            supplementary.write_subpoint(subpoint, revision)
+            self._subpoint_lines.append(subpoint.as_rendered_line())
+            self._subpoint_entry_ids.add(subpoint.entry_id)
+        self._revision_id = revision.next_id
+        self.stats['supplementary_subpoints'] = len(self._subpoint_lines)
+        self.stats['track_changes_added'] += sum(len(sp.paragraphs) for sp in planned)
+
+    def _subpoint_section_spans(self) -> dict[str, supplementary.SectionSpan]:
+        """Per `SUBPOINT_CODES` code, the body span of its WCM section: from the
+        heading `_get_wcm_section_header` names to the next major heading
+        (`_find_section_end_paragraph_idx`). A code whose heading is not in the
+        document has no span, and its prose is not placed."""
+        body = list(self.doc.element.body.iterchildren())
+        position = {id(element): i for i, element in enumerate(body)}
+        paragraphs = self.doc.paragraphs
+        spans = {}
+        for code in sorted(supplementary.SUBPOINT_CODES):
+            header_idx = self._find_header_paragraph(self._get_wcm_section_header(code))
+            if header_idx is None:
+                continue
+            end_idx = self._find_section_end_paragraph_idx(header_idx)
+            spans[code] = supplementary.SectionSpan(
+                position[id(paragraphs[header_idx]._p)],
+                position[id(paragraphs[end_idx]._p)] if end_idx is not None else None)
+        return spans
+
+    def _recover_appendix_lines(self, written: list[UnmappedEntry],
+                                pre_dedup_entries_by_code: dict[str, list[dict]],
+                                cv_owner: Mapping[str, object] | None) -> list[RecoveredLine]:
+        """The reconsider pass, then the unrendered-record recovery, each
+        bulleting leftovers into the Appendix; returns those bullets. The
+        Appendix note box then states the total, *written* numbered lines included."""
+        recovered = list(self._reconsider_appendix_entries() or [])
+        recovered += self._recover_unrendered_records(pre_dedup_entries_by_code, cv_owner) or []
+        self._set_appendix_note_count(len(written) + len(recovered))
+        return recovered
+
     def _add_remaining_to_appendix(self, remaining: list[tuple[str, str, float]],
                                    origins: Sequence[str] = ()) -> list[RecoveredLine]:
         """Add remaining unmappable segments to the appendix as bullet lines.
@@ -3271,17 +3676,8 @@ Now analyze the text above:"""
         appendix_idx = self._find_header_paragraph("T. APPENDIX")
 
         if appendix_idx is None:
-            # Create the appendix section
-            self.doc.add_paragraph()
-            appendix_para = self.doc.add_paragraph()
-            run = appendix_para.add_run("T. APPENDIX")
-            _set_font(run, bold=True)
-            run.underline = True
-
-            intro_para = self.doc.add_paragraph()
-            run = intro_para.add_run(APPENDIX_INTRO_TEXT)
-            _set_font(run, italic=True)
-            self.doc.add_paragraph()
+            # Create the appendix section; generate() restates the note's count.
+            self._write_appendix_header(len(lines))
 
         # Add each remaining segment. The taxonomy code is an internal
         # pipeline identifier — keep it in a reviewer comment, never in the
@@ -3292,6 +3688,7 @@ Now analyze the text above:"""
             run = entry_para.add_run(segment_text)
             _set_font(run)
             self._apply_list_bullet(entry_para, level=0)
+            self._after_appendix_note(entry_para)
             if segment_text == PII_REDACTED_NOTICE:
                 # The A-820 addendum: ONE sidebar comment on the notice
                 # saying what the policy removed -- categories, counts and
@@ -3411,7 +3808,8 @@ Now analyze the text above:"""
         lets the A-orphan recovery recognise the owner's own running header
         (#1221).
         """
-        out_lines = self._rendered_output_lines()
+        # #1205: a sub-point is the entry's prose, written under it.
+        out_lines = self._rendered_output_lines() + self._subpoint_lines
         haystack = "\x00".join(_squash(line) for line in out_lines)
 
         appendix_batch = []   # (text, code, coverage) for _add_remaining_to_appendix
@@ -3541,7 +3939,10 @@ Now analyze the text above:"""
           appending them would be pure duplication. A banner the page holds in
           another form ("Name: <owner>"), and a running header (the owner's
           name with a page number or a Word field code), are skipped by
-          `is_page_furniture` with *owner_tokens* (#1221).
+          `is_page_furniture` with *owner_tokens* (#1221), and so is an entry
+          stage 3b moved out of T while naming a structural kind its text has
+          (`reclassified_structural_reason`, #1431: the CV's own date), and
+          a labelled email address the page already shows (`labelled_email`).
         - A PII-withheld entry renders its RESIDUAL text -- `entry['text']`
           after `run_pii_pass` (#820 piece 2, `pii_pass.py`) has already cut
           only the withheld fragment(s) out of it (`_cut_spans`), not the
@@ -3610,6 +4011,11 @@ Now analyze the text above:"""
                 continue
             if _squash(text) in haystack or is_page_furniture(text, owner_tokens):
                 continue
+            if reclassified_structural_reason(raw_text, entry.get('classification_reasoning'), owner_tokens):
+                continue
+            email = labelled_email(text)
+            if email and _squash(email) in haystack:
+                continue
             batch.append((text, 'A', 0))
 
         # The withheld notice itself is NOT added here: it must reach the
@@ -3621,6 +4027,11 @@ Now analyze the text above:"""
         self.stats['personal_data_redacted'] = redacted
         return batch
 
+
+    @staticmethod
+    def _is_overflow_candidate(entry: dict) -> bool:
+        """`is_overflow_candidate`, reachable from the section mixins."""
+        return is_overflow_candidate(entry)
 
     def _add_entry_comments(self, para: Paragraph, entry: dict,
                             entry_paras: list[Paragraph] | None = None) -> None:
@@ -3680,14 +4091,12 @@ Now analyze the text above:"""
         # Skip for K-codes (teaching entries) since they have free-form content like director names
         # that aren't separate extraction fields, and skip if Stage 5c has already formatted the entry
         taxonomy_code = entry.get('taxonomy_code', '')
-        fields = entry.get('extracted_fields') or {}
         is_k_code = taxonomy_code.startswith('K')
-        has_formatted_text = fields.get('formatted_text') or fields.get('formatting_source') == 'stage_5c_llm'
 
         extraction_coverage = rendered_extraction_coverage(entry)
-        if isinstance(extraction_coverage, dict) and not is_k_code and not has_formatted_text:
+        if isinstance(extraction_coverage, dict) and not is_k_code and not _has_formatted_text(entry):
             coverage_pct = extraction_coverage.get('extraction_coverage_percent', 100)
-            if coverage_pct and coverage_pct < 70:
+            if coverage_pct and coverage_pct < LOW_COVERAGE_COMMENT_PCT:
                 unextracted = extraction_coverage.get('unextracted_words', [])
                 unextracted_str = ', '.join(unextracted[:5]) if unextracted else ''
                 comments_to_add.append({
@@ -3695,17 +4104,10 @@ Now analyze the text above:"""
                     'author': "Extraction"
                 })
 
-                # Collect for content overflow routing if coverage is low on a substantial entry.
-                # K/L codes (Teaching/Clinical) naturally support bullet text, so use a more
-                # generous threshold (50% coverage, 300 chars) for these sections.
-                # Other codes use strict thresholds (15% coverage, 1000 chars) since table rows
-                # typically summarize entries adequately even at 20-40% coverage.
+                # Collect for content overflow routing if coverage is low on a
+                # substantial entry (thresholds: `is_overflow_candidate`).
                 original_text = entry.get('text', '')
-                is_kl_code = taxonomy_code.startswith('K') or taxonomy_code.startswith('L')
-                if (is_kl_code and coverage_pct < 50 and len(original_text) > 300) or \
-                   (not is_kl_code and coverage_pct < 15 and len(original_text) > 1000):
-                    # Skip S-codes (bibliography) — they use enrichment, low coverage is expected
-                    # Skip entries with formatted_text — they already have full LLM-formatted content
+                if is_overflow_candidate(entry):
                     # Skip if the paragraph already contains most of the original text
                     # (e.g., bullet entries that render full original_text directly)
                     # Measure what the ENTRY rendered, not just `para`. The
@@ -3718,7 +4120,7 @@ Now analyze the text above:"""
                     rendered_paras = entry_paras if entry_paras is not None else ([para] if para else [])
                     para_text_len = len(' '.join(p.text.strip() for p in rendered_paras).strip())
                     para_already_has_content = para_text_len >= len(original_text) * 0.8
-                    if not taxonomy_code.startswith('S') and not has_formatted_text and not para_already_has_content:
+                    if not para_already_has_content:
                         self._overflow_entries.append((entry, para, taxonomy_code))
 
         # Direct comment fields
@@ -4005,8 +4407,8 @@ Now analyze the text above:"""
 
         try:
             from docx.opc.constants import CONTENT_TYPE as CT
-            from docx.opc.part import Part
             from docx.opc.packuri import PackURI
+            from docx.opc.part import Part
 
             # Create comments XML content
             comments_xml = self._create_comments_xml()
@@ -4190,7 +4592,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                original_doc_path: str | None = None,
                discover_original_doc: bool = True,
                llm_usage: LlmUsage | None = None,
-               repair_protected_data: bool = False) -> str:
+               repair_protected_data: bool = False,
+               supplementary_subpoints: bool = True) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -4266,6 +4669,10 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             data the doctor's `protected_data_in_output` lint still finds in the
             document and write `<uid>_repairs.json` beside it (#1389; default
             False). Both drivers pass it from CVICHE_RUN_REPAIR.
+        supplementary_subpoints: Write each entry's unrendered prose under
+            it as a tracked deletion (#1205, stage6/supplementary.py; default
+            True, the owner decision of 2026-10-09). Both drivers pass it from
+            CVICHE_SUPPLEMENTARY_SUBPOINTS, which "0" turns off.
 
     Returns:
         Path to generated document
@@ -4277,6 +4684,7 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
         llm_usage=llm_usage,
+        supplementary_subpoints=supplementary_subpoints,
     )
     output = generator.generate(input_path, output_path, original_doc_path=original_doc_path,
                                 discover_original_doc=discover_original_doc)

@@ -1,4 +1,5 @@
 """Tests for app.services.quality_score_service."""
+import json
 from pathlib import Path
 
 import pytest
@@ -39,8 +40,78 @@ def test_stage_error_record_reaches_the_scorer(monkeypatch):
     monkeypatch.setattr(svc, "get_storage", lambda: storage)
     monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
 
-    assert svc.compute_and_cache_score("R1") == {"totalScore": 40}
+    assert svc.compute_and_cache_score("R1")["totalScore"] == 40
     assert seen["names"] == ["R1_fields.json", "R1_stage_errors.json"]
+
+
+def test_the_review_copy_never_reaches_the_scorer(monkeypatch):
+    """#1388: a second .docx makes the scorer's docx lookup ambiguous, which
+    skips every dimension that reads the document."""
+    storage = _Storage({
+        "outputs/R1_wcm.docx": b"d",
+        f"outputs/R1{svc.REVIEW_DOCX_SUFFIX}": b"r",
+    })
+    seen = {}
+
+    def _score_run(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        return {"totalScore": 40}
+
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
+
+    svc.compute_and_cache_score("R1")
+    assert seen["names"] == ["R1_wcm.docx"]
+
+
+@pytest.mark.parametrize("env_tag, cached_tag", [("dev-9.tag", "dev-9.tag"), (None, None)])
+def test_cached_score_records_the_scoring_image_tag(monkeypatch, env_tag, cached_tag):
+    """#1239: quality_score.json names the image whose scorer produced it."""
+    storage = _Storage({"outputs/R1_fields.json": b"{}"})
+    if env_tag is None:
+        monkeypatch.delenv("CVICHE_IMAGE_TAG", raising=False)
+    else:
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", env_tag)
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run", lambda _d, _r: {"totalScore": 40})
+
+    svc.compute_and_cache_score("R1")
+
+    assert json.loads(storage.put[svc.CACHE_KEY])[svc.IMAGE_TAG_KEY] == cached_tag
+
+
+def test_a_score_with_no_doctor_report_is_marked_not_checked(monkeypatch):
+    """#1593: a run scored GREEN with no doctor report beside it was never
+    checked; the cached score says so and is not data_complete."""
+    storage = _Storage({"outputs/R1_fields.json": b"{}"})
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run",
+                        lambda _d, _r: {"totalScore": 97, "data_complete": True})
+
+    result = svc.compute_and_cache_score("R1")
+
+    cached = json.loads(storage.put[svc.CACHE_KEY])
+    for score in (result, cached):
+        assert score[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_NOT_CHECKED
+        assert score["data_complete"] is False
+
+
+def test_a_score_beside_a_doctor_report_is_marked_checked(monkeypatch):
+    """#1593: the stored report is what marks a score checked; it leaves the
+    scorer's own data_complete alone."""
+    storage = _Storage({
+        "outputs/R1_fields.json": b"{}",
+        f"outputs/R1{svc.DOCTOR_SUFFIX}": b"{}",
+    })
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run",
+                        lambda _d, _r: {"totalScore": 97, "data_complete": True})
+
+    svc.compute_and_cache_score("R1")
+
+    cached = json.loads(storage.put[svc.CACHE_KEY])
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_CHECKED
+    assert cached["data_complete"] is True
 
 
 def _scored_dir_listing(monkeypatch, storage):
@@ -55,42 +126,31 @@ def _scored_dir_listing(monkeypatch, storage):
 
     monkeypatch.setattr(svc, "get_storage", lambda: storage)
     monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
-    assert svc.compute_and_cache_score("R1") == {"totalScore": 40}
+    assert svc.compute_and_cache_score("R1")["totalScore"] == 40
     return seen["tree"]
 
 
-def test_the_original_docx_reaches_the_scorer_under_the_source_subdir(monkeypatch):
-    """#822: the lost-source-table gate reads the uploaded CV, archived under
-    input/, from source/ beside the stage artifacts."""
+def test_the_doctor_report_reaches_the_scorer_and_the_original_upload_does_not(monkeypatch):
+    """#1595: the score is built from the doctor report, so it is copied in
+    beside the stage artifacts. The original upload under input/ is not: no
+    scorer reads it since the lost-source-table cap was retired (the doctor's
+    table_lost lint reads the source itself)."""
     storage = _Storage({
         "outputs/R1_fields.json": b"{}",
+        f"outputs/R1{svc.DOCTOR_SUFFIX}": b'{"findings": []}',
         "input/R1.docx": b"original",
         "input/manifest.json": b"{}",
     })
-    assert _scored_dir_listing(monkeypatch, storage) == ["R1_fields.json", "source/R1.docx"]
+    assert _scored_dir_listing(monkeypatch, storage) == ["R1_doctor.json", "R1_fields.json"]
 
 
-@pytest.mark.parametrize("input_keys", [
-    ["input/R1.pdf"],                      # a PDF upload has no readable docx source
-    ["input/R1.docx", "input/R1_b.docx"],  # ambiguous: never guess which is the CV
-    [],
-])
-def test_no_single_docx_original_means_no_source_subdir(monkeypatch, input_keys):
-    files = {"outputs/R1_fields.json": b"{}", **{k: b"x" for k in input_keys}}
-    assert _scored_dir_listing(monkeypatch, _Storage(files)) == ["R1_fields.json"]
+def test_the_review_copy_suffix_matches_the_scorers():
+    """The scorer skips the review copy by this suffix (#1595); the pipeline
+    package cannot be imported where artifact_service defines it, so the two
+    definitions are pinned equal here."""
+    from unified_pipeline.quality_score import REVIEW_DOCX_SUFFIX
 
-
-def test_a_storage_error_staging_the_source_still_scores_the_run(monkeypatch, caplog):
-    class _FailingInput(_Storage):
-        def list_files(self, run_id, prefix=""):
-            if prefix == "input/":
-                raise OSError("storage unavailable")
-            return super().list_files(run_id, prefix)
-
-    storage = _FailingInput({"outputs/R1_fields.json": b"{}"})
-    with caplog.at_level("WARNING"):
-        assert _scored_dir_listing(monkeypatch, storage) == ["R1_fields.json"]
-    assert "Could not stage the source docx for run R1" in caplog.text
+    assert svc.REVIEW_DOCX_SUFFIX == REVIEW_DOCX_SUFFIX
 
 
 # --- parsed snapshot and the runs.quality_* columns --------------------------

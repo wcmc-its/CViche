@@ -1,26 +1,24 @@
 """Pydantic schemas for API request/response validation."""
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
-from typing import Annotated, Literal
 from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+
+from app.timeutil import as_utc
 
 
 def iso_with_offset(dt: datetime) -> str:
     """Serialize a datetime to ISO 8601 with an explicit UTC offset.
 
-    Timestamps are written with naive ``datetime.now()`` (and ``func.now()``),
-    i.e. the server's wall clock with no tzinfo. Pydantic serializes a naive
-    datetime with no timezone designator (``2026-06-11T09:00:00``), so the
-    browser's ``new Date()`` interprets it in the *viewer's* local zone. For a
-    UTC prod pod viewed from a non-UTC client every timestamp is then wrong by
-    the client's offset (e.g. a just-uploaded file shows "5 hours ago" from
-    UTC+5:30). Attaching the server's own offset (``astimezone()`` treats a
-    naive value as local) makes the instant unambiguous; the client converts it
-    correctly regardless of viewer zone. Assumption-free: writes and this
-    serializer use the same server zone, so we never need to know what it is.
+    Pydantic serializes a naive datetime with no timezone designator
+    (``2026-06-11T09:00:00``), so the browser's ``new Date()`` would read it in
+    the *viewer's* local zone and every timestamp would be off by the viewer's
+    offset. Model timestamps load as aware UTC (``app.timeutil.UTCDateTime``),
+    so they already carry ``+00:00``; a naive value that reaches here anyway is
+    taken to be UTC, the stored convention (#798), rather than the server's own
+    zone. An aware value keeps its own offset.
     """
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    return dt.isoformat()
+    return (dt if dt.tzinfo else as_utc(dt)).isoformat()
 
 
 # Apply to every datetime field the API returns. ``when_used='json'`` keeps
@@ -278,12 +276,6 @@ class StepDetail(BaseModel):
 # WebSocket Event Schemas
 # ============================================================
 
-class WebSocketEvent(BaseModel):
-    """Base WebSocket event."""
-    event: str
-    data: dict
-
-
 class StepStartEvent(BaseModel):
     """Step started event."""
     event: str = "STEP_START"
@@ -339,6 +331,7 @@ class AuthConfigResponse(BaseModel):
     """Public auth configuration for frontend mode detection."""
     mode: str  # "simple" or "saml"
     discovery_url: str | None = None  # Only present when mode is "saml"
+    max_upload_mb: int  # The per-file upload cap (CVICHE_MAX_UPLOAD_MB) that /upload enforces
 
 
 class QuotaInfo(BaseModel):
@@ -418,6 +411,13 @@ class FeedbackSubmit(BaseModel):
     likelihood_to_recommend: int  # 1-5, required
 
 
+class CorrectedDocxResponse(BaseModel):
+    """POST /run/{id}/feedback/corrected-docx: a one-line confirmation only;
+    the typed diff itself is stored with the run, never returned."""
+    changes: int
+    summary: str
+
+
 class FeedbackResponse(BaseModel):
     """Response after feedback submission."""
     id: int
@@ -463,27 +463,6 @@ class RunFeedbackStatus(BaseModel):
     """Feedback status for a single run."""
     run_id: str
     has_feedback: bool
-
-
-# ============================================================
-# Settings Schemas
-# ============================================================
-
-class Settings(BaseModel):
-    """Pipeline settings."""
-    model: str = "gpt-4o-mini"
-    max_tokens: int = 16000
-    enable_step_8: bool = False  # Organization enrichment
-    pricing: dict = {
-        "gpt-4o-mini": {
-            "input_per_1k": 0.00015,
-            "output_per_1k": 0.0006
-        },
-        "gpt-4o": {
-            "input_per_1k": 0.0025,
-            "output_per_1k": 0.01
-        }
-    }
 
 
 # ============================================================
@@ -583,12 +562,23 @@ class AdminRunEntry(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DimensionScore(BaseModel):
+    """One weighted dimension of ``quality_score.score_run``'s result, as it
+    builds each ``dimensionScores`` entry: ``score`` earned out of ``max`` (the
+    weight), ``penalty`` lost, and the scorer's ``detail`` line."""
+    name: str
+    score: float
+    max: int
+    penalty: float
+    detail: str
+
+
 class QualityScoreResult(BaseModel):
     """Per-run quality score detail (advisory, computed from artifacts)."""
     run_id: str
     totalScore: int
     band: str
-    dimensionScores: list[dict] = []
+    dimensionScores: list[DimensionScore] = []
     flags: list[str] = []
     # quality_score.score_run's evidence inventory (#745): data_complete is
     # False when any scored artifact was missing or unreadable, and
@@ -820,10 +810,48 @@ class DoctorFindingGroup(BaseModel):
     instances: list[DoctorFindingInstance] = []
 
 
+FixConfidence = Literal["high", "medium", "unmeasured"]
+FixEffort = Literal["quick", "minutes", "longer"]
+
+
+class FixListProblem(BaseModel):
+    """One finding as the Fix list words it (#1589): plain title and action
+    only, never a lint key, stage, entry index or issue number."""
+    severity: DoctorSeverity
+    title: str
+    what_to_do: str
+    confidence: FixConfidence  # from the lint's hand-checked precision (doctor/PRECISION.md)
+    effort: FixEffort
+
+
+class FixListItem(BaseModel):
+    """Every finding about one entry (or one finding that names no entry)."""
+    problems: list[FixListProblem]  # worst first
+    quotes: list[str] = []  # the text at stake, as the doctor quotes it
+
+
+class FixListGroup(BaseModel):
+    """One document location; groups come in the document's section order."""
+    section: str | None = None  # None: the finding names no section
+    items: list[FixListItem]
+
+
 class RunDoctorReport(BaseModel):
     counts: DoctorSeverityCounts
     findings: list[DoctorFindingGroup]  # rarest lint first
     not_run: int = 0  # lints skipped or unreadable (an input artifact was absent)
+    fix_list: list[FixListGroup] = []  # the CV runner's view (#1589)
+    # ERROR/WARN findings left to Diagnostics: below the precision bar, or no plain wording yet.
+    fix_list_held_back: int = 0
+    not_checked: list[str] = []  # what the doctor cannot see, on every run
+
+
+class RunFixList(BaseModel):
+    """GET /run/{run_id}/fix-list: the Run Doctor's Fix list for the run's owner
+    (#1589). Only what the Fix list tab shows, plus the not-checked list: no
+    lint key, score, Diagnostics finding or held-back count."""
+    fix_list: list[FixListGroup] = []
+    not_checked: list[str] = []  # what the doctor cannot see, on every run
 
 
 class RunQualityReport(BaseModel):
@@ -846,5 +874,9 @@ class RunQualityReport(BaseModel):
 
 
 class RunReviewNote(BaseModel):
-    """GET /run/{run_id}/review-note: never carries the score itself."""
+    """GET /run/{run_id}/review-note: never carries the score itself.
+
+    `scored` is false until the run's score is stored (a few seconds after the
+    run turns complete), so the page knows `needs_cleanup` is not final yet."""
     needs_cleanup: bool
+    scored: bool

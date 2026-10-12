@@ -20,9 +20,9 @@ Run:
 import itertools
 import json
 import re
-from datetime import datetime
-from collections import Counter
 import sys
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -38,65 +38,83 @@ from unified_pipeline.core.template_boilerplate import (  # noqa: E402
     is_near_template_instruction,
     is_template_instruction,
 )
+from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa: E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    _FUNDING_SECTIONS,
+    _MIN_EXACT_LEN,
+    APPOINTMENT_TITLE_WARN_CHARS,
+    _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
+    CLAUSE_SPAN_OUTSIDE,
     DEDUP_SAFE_CONTAINMENT,
+    DEGREE_YEAR_LEAD,
+    FIELD_EVIDENCE_MAX_VALUES,
+    FIELD_EVIDENCE_VALUE_CHARS,
+    FOOTER_MIN_ENTRIES,
+    GRANT_FACT_MISSING,
+    GRANT_FACT_NOT_IN_SOURCE,
+    GRANT_FACTS_MAX_LISTED,
+    GRANT_ORPHAN_MIN_WORDS,
+    GRANT_SOURCE_MIN_CHARS,
+    GRANT_TITLE_MIN_CHARS,
+    IMPLAUSIBLE_YEAR_CEILING,
+    IMPLAUSIBLE_YEAR_FLOOR,
     INVENTED_RECORD_LICENSURE_CODE,
     INVENTED_RECORD_MIN_VALUES,
+    MULTI_RECORD_MIN_NEW,
+    MULTI_RECORD_NEW_SHARE,
+    MULTI_RECORD_PROSE_MIN_LOWERCASE,
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
     _alphanumeric_tokens,
     _entry_rendered,
     _entry_status,
-    _FUNDING_SECTIONS,
     _is_invented_record,
-    _MIN_EXACT_LEN,
     _nonempty_field_values,
-    _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     _rendered_row_value_sets,
     _shared_entry_pieces,
+    _short_end_year,
+    lint_appointment_title_overlong,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
-    lint_invented_records,
-    lint_under_extraction,
-    lint_wrong_start_date,
-)
-from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa: E402
-from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
-    DEGREE_YEAR_LEAD,
-    FIELD_EVIDENCE_MAX_VALUES,
-    FIELD_EVIDENCE_VALUE_CHARS,
-    IMPLAUSIBLE_YEAR_CEILING,
-    IMPLAUSIBLE_YEAR_FLOOR,
-    MULTI_RECORD_MIN_NEW,
-    MULTI_RECORD_NEW_SHARE,
-    MULTI_RECORD_PROSE_MIN_LOWERCASE,
-    CLAUSE_SPAN_OUTSIDE,
-    lint_implausible_year,
-    lint_multi_record_coverage,
-    lint_offschema_fields,
-    lint_year_not_in_source,
-)
-from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
-    PI_NAME_LABEL, PROJECT_TITLE_LABEL, YOUR_ROLE_LABEL)
-from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
-    GRANT_ORPHAN_MIN_WORDS,
-    GRANT_SOURCE_MIN_CHARS,
-    GRANT_TITLE_MIN_CHARS,
-    _short_end_year,
+    lint_footer_in_record,
     lint_grant_boundary,
     lint_grant_bucket,
+    lint_implausible_year,
+    lint_invented_records,
+    lint_multi_record_coverage,
+    lint_offschema_fields,
+    lint_orphaned_fragments,
     lint_record_boundary,
     lint_role_consistency,
+    lint_grant_facts,
+    owner_pi_role_empty_tables,
     lint_span_count,
+    lint_under_extraction,
+    lint_wrong_start_date,
+    lint_year_not_in_source,
 )
 from unified_pipeline.doctor.shared import (  # noqa: E402
-    _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack, docx_body_blocks)
+    _LINE_SENTINEL,
+    SubpointText,
+    _haystacks,
+    _piece_in_template,
+    _template_haystack,
+    docx_body_blocks,
+)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
-
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    ANNUAL_COSTS_LABEL,
+    AWARD_SOURCE_LABEL,
+    DURATION_LABEL,
+    PI_NAME_LABEL,
+    PROJECT_TITLE_LABEL,
+    TOTAL_AWARD_LABEL,
+    YOUR_ROLE_LABEL,
+)
 
 # ==========================================================================
 # D1 (T1.1) -- lint_dedup_drops returns structured findings, not strings.
@@ -118,7 +136,6 @@ def test_lint_dedup_drops_returns_structured_findings():
     assert isinstance(finding["message"], str)
     assert isinstance(finding["evidence"], list)
     assert all(isinstance(item, str) for item in finding["evidence"])
-    assert len(finding["evidence"]) <= 6
 
     # No suspects at all -> [].
     assert lint_dedup_drops({"dedup_decisions": []}) == []
@@ -130,7 +147,7 @@ def test_lint_dedup_drops_returns_structured_findings():
     ]}
     assert lint_dedup_drops(well_covered) == []
 
-    # 7 suspects: evidence caps at 6, the message still counts all 7.
+    # 7 suspects: a WARN lists every one (#666), the message counts all 7.
     seven = {"dedup_decisions": [
         {"code": f"N{i}", "metric": "jaccard",
          "dropped_text": f"alpha{i} beta{i} gamma{i} delta{i}",
@@ -139,7 +156,7 @@ def test_lint_dedup_drops_returns_structured_findings():
     ]}
     result7 = lint_dedup_drops(seven)
     assert len(result7) == 1
-    assert len(result7[0]["evidence"]) == 6
+    assert len(result7[0]["evidence"]) == 7
     assert "7 dedup drop(s)" in result7[0]["message"]
 
 
@@ -615,6 +632,20 @@ def test_under_extraction_min_records_boundary():
     assert len(lint_under_extraction({"entries": [at]})) == 1
 
 
+def test_under_extraction_leaves_out_lines_a_sub_point_delivers():
+    # #1205: the record lines a tracked-deleted sub-point offers are delivered
+    # for review. Without them the entry is under the size bar, so it is not
+    # flagged; a sub-point holding other text changes nothing.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    entry = _under_extraction_entry(30.0, UNDER_EXTRACTION_MIN_CHARS + 50, 3)
+    lines = [line for line in entry["text"].split("\n") if line.strip()]
+    assert lint_under_extraction({"entries": [entry]}, subpoint_text(lines)) == []
+    other = subpoint_text(["Unrelated committee service for the example society board"])
+    assert len(lint_under_extraction({"entries": [entry]}, other)) == 1
+    assert len(lint_under_extraction({"entries": [entry]}, None)) == 1
+
+
 
 def _stage4_records_entry(code, field):
     """An entry whose two stage-4 records carry its whole text; its own
@@ -697,13 +728,57 @@ def _named_decision(dropped_name, kept_name):
             "kept_fields": {"journal_name": kept_name}}
 
 
+def _committee_decision(dropped_name, kept_name, metric="containment=1.00"):
+    return {"code": "P", "metric": metric,
+            "dropped_text": dropped_name, "kept_text": kept_name,
+            "dropped_fields": {"committee_name": dropped_name},
+            "kept_fields": {"committee_name": kept_name}}
+
+
 def test_dedup_drops_info_when_dropped_name_absent_from_page():
-    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
-    blocks = [("p", "Reviewer"), ("table", "European Example Optics\nJournal Reviewer")]
+    """A name the kept one extends at its end may be the same body
+    reworded, so it stays INFO."""
+    report = {"dedup_decisions": [_committee_decision(
+        "Example Committee", "Example Committee, Example Chapter")]}
+    blocks = [("p", "Member"), ("table", "Example Committee, Example Chapter\nMember")]
     result = lint_dedup_drops(report, blocks)
     assert len(result) == 1
     assert result[0]["severity"] == "INFO" and result[0]["lint"] == "dedup_drops"
-    assert "Q4D" in result[0]["evidence"][0]
+    assert result[0]["evidence"][0].startswith("P (")
+
+
+def test_dedup_drops_warns_on_another_journal_absent_from_page():
+    """A journal list's entry is a bare name: a shorter name is another
+    journal (YUYVIG WPJHYT-03), also when the dropped entry filled no field."""
+    blocks = [("p", "Reviewer"), ("table", "European Example Optics\nJournal Reviewer")]
+    named = _named_decision("Example Optics", "European Example Optics")
+    unnamed = dict(named, dropped_fields={})
+    for decision in (named, unnamed):
+        result = lint_dedup_drops({"dedup_decisions": [decision]}, blocks)
+        assert [f["severity"] for f in result] == ["WARN"]
+        assert "journal_name names another record" in result[0]["evidence"][0]
+    # a fragment sharing no word with the kept journal names no journal
+    fragment = dict(unnamed, dropped_text="Reviewer",
+                    kept_text="European Example Optics. Reviewer.")
+    assert lint_dedup_drops({"dedup_decisions": [fragment]}, blocks[1:]) == []
+    # nor does a leading article: it stays the INFO a reworded name gets
+    article = _named_decision("Example Optics", "The Example Optics")
+    result = lint_dedup_drops({"dedup_decisions": [article]}, blocks)
+    assert [f["severity"] for f in result] == ["INFO"]
+    # a blank extracted name is no name either, so it names no other journal
+    blank = dict(fragment, dropped_fields={"journal_name": " "})
+    assert "WARN" not in [f["severity"] for f in
+                          lint_dedup_drops({"dedup_decisions": [blank]}, blocks[1:])]
+
+
+def test_dedup_drops_quiet_on_a_name_of_filler_words_only():
+    """A dropped name with no word but filler gives the insertion test
+    nothing to place; it must not raise (run_doctor would drop the lint)."""
+    decision = _drop("2031 Example Committee", "2031 Example Committee", code="P",
+                     metric="containment=1.00", dropped_fields={"committee_name": "of the"},
+                     kept_fields={"committee_name": "Example Committee"})
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert "WARN" not in [f["severity"] for f in result]
 
 
 def test_dedup_drops_quiet_when_dropped_name_is_its_own_cell():
@@ -729,11 +804,11 @@ def test_dedup_drops_info_needs_rendered_blocks_and_fields():
 def test_dedup_drops_info_uses_institution_for_appointments():
     decision = {"code": "D2", "metric": "jaccard=0.82",
                 "dropped_text": "Example Hospital Example Title 2001",
-                "kept_text": "Sample Hospital Example Hospital Example Title 2001",
+                "kept_text": "Example Hospital Center Example Title 2001",
                 "dropped_fields": {"institution": "Example Hospital"},
-                "kept_fields": {"institution": "Sample Hospital"}}
+                "kept_fields": {"institution": "Example Hospital Center"}}
     result = lint_dedup_drops({"dedup_decisions": [decision]},
-                              [("table", "Sample Hospital\nExample Title")])
+                              [("table", "Example Hospital Center\nExample Title")])
     assert [f["severity"] for f in result] == ["INFO"]
 
 
@@ -745,7 +820,7 @@ def test_dedup_drops_quiet_when_only_the_dropped_entry_fills_a_name():
 
 def test_dedup_drops_info_evidence_is_capped():
     report = {"dedup_decisions": [
-        _named_decision(f"Example Optics {n}", f"European Example Optics {n} Letters")
+        _committee_decision(f"Example Committee {n}", f"Example Committee {n} Letters")
         for n in range(extraction_lints.DEDUP_EVIDENCE_LIMIT + 3)]}
     result = lint_dedup_drops(report, [("p", "x")])
     assert len(result[0]["evidence"]) == extraction_lints.DEDUP_EVIDENCE_LIMIT
@@ -755,7 +830,8 @@ def test_dedup_drops_info_evidence_is_capped():
 def test_dedup_drops_reports_warn_and_info_together():
     poorly = {"code": "N1", "metric": "jaccard",
               "dropped_text": "alpha beta gamma delta", "kept_text": "alpha"}
-    report = {"dedup_decisions": [poorly, _named_decision("Example Optics", "European Example Optics")]}
+    report = {"dedup_decisions": [poorly, _committee_decision(
+        "Example Committee", "Example Committee, Example Chapter")]}
     result = lint_dedup_drops(report, [("p", "x")])
     assert [f["severity"] for f in result] == ["WARN", "INFO"]
 
@@ -797,6 +873,35 @@ def test_occasion_apart_reads_parts_and_numerals(dropped, kept, reason):
     assert extraction_lints._occasion_apart(dropped, kept) == f"{reason} the kept entry lacks"
 
 
+@pytest.mark.parametrize("dropped, kept, reason", [
+    # LTTYWI-02's shapes: another class, and the award year only a class label carries
+    ("Example teaching award 2029", "Example teaching award (Class of 2031) 2029",
+     "class of 2031 on one entry only"),
+    ("Example teaching award (Class of 2031) 2031", "Example teaching award (Class of 2031) 2029",
+     "a year the kept entry carries only as a class"),
+    # HXBPCT-01's shape: renewed and current, beside the term that ended that year
+    ("2031 \u2013 Example board certification", "2021 \u2013 2031 Example board certification",
+     "a range open from 2031 where the kept one ends"),
+])
+def test_occasion_apart_reads_classes_and_reopened_ranges(dropped, kept, reason):
+    assert extraction_lints._occasion_apart(dropped, kept) == reason
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    ("Example award (Class of 2031) 2029", "Example award, Class of 2031, 2029"),
+    ("2031-present Example board certification", "2031 - present Example board"
+     " certification, Example Board"),
+    ("2021 - 2031 Example role", "2021-2031 Example role, Example Hospital"),
+    # the kept range is reopened in the same year it ends, as the dropped one is
+    ("2031 - Example board certification", "Example board certification 2021 - 2031 - present"),
+    # the kept text states the year on its own too: a dash after it is a separator
+    ("2031 - Example lecture, Example Symposium", "Example Survey 1990- 2031. "
+     "Example lecture, Example Symposium, 2031."),
+])
+def test_occasion_apart_quiet_on_one_class_and_one_open_range(dropped, kept):
+    assert extraction_lints._occasion_apart(dropped, kept) is None
+
+
 @pytest.mark.parametrize("dropped, kept", [
     ("I taught an example course", "Taught an example course"),     # a pronoun
     ("Doe V, Roe X. Example paper", "Doe V. Example paper"),       # initials
@@ -827,6 +932,74 @@ def test_dedup_drops_info_on_a_rank_word_even_when_the_name_renders():
     result = lint_dedup_drops({"dedup_decisions": [decision]}, blocks)
     assert [f["severity"] for f in result] == ["INFO"]
     assert lint_dedup_drops({"dedup_decisions": [decision]}) == result
+
+
+@pytest.mark.parametrize("key, dropped_name, kept_name", [
+    # OKRTPJ-01: one rank, another department
+    ("title", "Assistant Professor, Department of Example",
+     "Assistant Professor, Department of Sample"),
+    # IZABPD-06: another award of one body and year
+    ("award_name", "Example Ministry Scholarship", "Gold Medal (Example Exams)"),
+    # BLBVPD-04: a word inside the name, a narrower body
+    ("committee_name", "Example Chairs Committee", "Example Chairs Operations Committee"),
+])
+def test_dedup_drops_warns_when_names_name_two_records(key, dropped_name, kept_name):
+    decision = _drop(f"2031 {dropped_name}", f"2031 {dropped_name} {kept_name}",
+                     code="P", metric="containment=1.00",
+                     dropped_fields={key: dropped_name}, kept_fields={key: kept_name})
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert [f["severity"] for f in result] == ["WARN"]
+    assert f"{key} names another record" in result[0]["evidence"][0]
+    # the same name on the page as an item of its own was not lost
+    assert lint_dedup_drops({"dedup_decisions": [decision]}, [("p", dropped_name)]) == []
+
+
+@pytest.mark.parametrize("dropped_name, kept_name, metric", [
+    ("Example Program Steering Committee", "Steering Committee of the Example Program",
+     "jaccard=0.88"),                                                   # reordered
+    ("Example Neuroscience Program Committee", "Example Neuroscience Program (ENP) Committee",
+     "jaccard=0.89"),                                                   # an acronym
+    ("Example Equity - Workplace Committee", "Example Equity Committees: Workplace Committee",
+     "jaccard=0.91"),                                                   # a plural
+    ("Associate Professor of Example", "Associate Prof., Department of Example",
+     "record=undated_appointment"),                                     # a record rule's rewording
+    ("Example Society of Medicine", "Example Society of Medicine (ESM), formerly Example "
+     "Society of Sample Medicine", "containment=1.00"),                 # a former name after it
+    ("Associate Prof. of Example", "Associate Professor, Department of Example",
+     "record=undated_appointment"),                                     # the dropped name abbreviates
+])
+def test_dedup_drops_not_warn_on_a_reworded_name(dropped_name, kept_name, metric):
+    decision = _committee_decision(dropped_name, kept_name, metric)
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")])
+    assert "WARN" not in [f["severity"] for f in result]
+
+
+def _talk(idx, location):
+    return {"element_idx_start": idx, "taxonomy_code": "S8", "text": f"{idx}. Example talk",
+            "extracted_fields": {"title": "Example talk", "year": "2031",
+                                 "location": location,
+                                 "formatted_citation": f"Example talk. Example Society; 2031; {location}."}}
+
+
+def test_dedup_drops_warns_on_one_talk_given_in_two_places():
+    """LTTYWI-01: a citation drop matched on title and year; stage 5d shows
+    the copies were given in different places, and names each."""
+    decision = _drop("Example talk. 2031", "Example talk. 2031", code="S8",
+                     metric="citation_title_journal_year")
+    apart = {"entries": [_talk(12, "Example City"), _talk(14, "Sample City")]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, apart)
+    assert [f["severity"] for f in result] == ["WARN"]
+    assert result[0]["evidence"][0].startswith("entry 12, 14: S8 (")
+    same = {"entries": [_talk(12, "Example City"), _talk(14, "Example City")]}
+    assert lint_dedup_drops({"dedup_decisions": [decision]}, None, same) == []
+    # a dropped text one entry carries names that entry, not every copy
+    own = {"entries": [_talk(12, "Example City"),
+                       dict(_talk(14, "Sample City"), text="Example talk. 2031")]}
+    result = lint_dedup_drops({"dedup_decisions": [decision]}, None, own)
+    assert result[0]["evidence"][0].startswith("entry 14: S8 (")
+    # only a citation drop is read as a delivery: a text match is a text match
+    worded = dict(decision, metric="jaccard=0.95")
+    assert lint_dedup_drops({"dedup_decisions": [worded]}, None, apart) == []
 
 
 def test_dedup_drops_evidence_names_the_dropped_entry_from_stage_5d():
@@ -1383,6 +1556,27 @@ def test_offschema_single_record_list_is_warn():
 def test_offschema_list_of_strings_is_info():
     findings = _offschema(_anchored("D1", {"keywords": ["one", "two"]}))
     assert [f["severity"] for f in findings] == ["INFO"]
+
+
+_DUTY_VALUE = "Coordinates the example curriculum committee and supervises graduate trainees"
+
+
+def test_offschema_value_a_sub_point_offers_is_info_with_a_note():
+    # #1205: a value the page lacks is a loss (WARN); offered under its record
+    # as a tracked-deleted sub-point it is INFO, and the message says so.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    entry = _anchored("D1", {"duties": _DUTY_VALUE}, text=f"Lecturer\t{_DUTY_VALUE}")
+    blocks = [("table", "Lecturer | Example College")]
+    lost = lint_offschema_fields({"entries": [entry]}, blocks)
+    assert [f["severity"] for f in lost] == ["WARN"]
+    assert "nowhere in the document" in lost[0]["message"]
+    offered = lint_offschema_fields({"entries": [entry]}, blocks, subpoint_text([_DUTY_VALUE]))
+    assert [f["severity"] for f in offered] == ["INFO"]
+    assert "1 of them offered as a tracked-deleted sub-point" in offered[0]["message"]
+    other = lint_offschema_fields({"entries": [entry]}, blocks,
+                                  subpoint_text(["Unrelated committee service for the example society"]))
+    assert [f["severity"] for f in other] == ["WARN"]
 
 
 def test_offschema_scalar_is_info_and_names_the_fact():
@@ -1947,6 +2141,19 @@ def test_offschema_a_span_key_on_a_code_no_date_cell_extends_is_unread():
         ("WARN", "additional_dates")]
     assert "no renderer reads it" in findings[0]["message"]
     assert "date cell" not in findings[0]["message"]
+
+
+def test_offschema_a_talks_further_dates_are_judged_as_its_date_cells_span():
+    """#1245 (X6 VPMMFM 531): the R date cell now reads the span keys, so a
+    talk date under `additional_dates` that its row lacks is a span that did
+    not reach the date cell, not a key no renderer reads."""
+    entry = _fields_entry("R", {
+        "title": "Example Talk", "event_name": "Example Symposium",
+        "date": "2001", "additional_dates": "2004"})
+    findings = _graded([_table(_row("Example Talk", "Example Symposium", "2001"))], entry)
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "additional_dates")]
+    assert "its span did not reach the record's date cell" in findings[0]["message"]
 
 
 def test_offschema_a_string_of_ranges_is_judged_as_a_further_span():
@@ -3262,6 +3469,43 @@ def test_year_not_in_source_silent_when_the_text_states_the_year(fields, text):
     assert _not_in_source(_fields_entry("C", fields, text=text)) == []
 
 
+@pytest.mark.parametrize("fields, text", [
+    # Batch YUYVIG (#1585): XNWSZN's talks and grant periods, m-d-yy with dashes.
+    ({"date": "2000-03-30"}, "Example talk, Example City, 3-30-00."),
+    ({"date": "1999-05-04"}, "Example talk, 5-4-99"),
+    ({"start_date": "1983-03-01", "end_date": "1986-02-28"},
+     "Example grant 3-1-83 to 2-28- 86, $1,000"),
+    # SIJYJZ, ECXGAT: the later two-digit tails of a list.
+    ({"end_date": "2016"}, "Example reviewer 2014,15,16"),
+    ({"start_date": "1978"}, "Example award 1975, 76, 78"),
+    ({"start_date": "2004"}, "Example committee 98-00,02,04"),
+    ({"start_date": "2016"}, "Example course 2005-06, 16- Example Course"),
+    # TYGUXX: a month abbreviation and a two-digit year.
+    ({"start_date": "1998", "end_date": "1999"}, "Example fellow Oct. 98 - Oct. 99"),
+    # SIJYJZ: a two-digit year opening an open range.
+    ({"start_date": "2016"}, "Example member 16- present"),
+])
+def test_year_not_in_source_reads_dashed_dates_list_tails_and_month_years(fields, text):
+    assert _not_in_source(_fields_entry("C", fields, text=text)) == []
+
+
+@pytest.mark.parametrize("fields, text", [
+    # A day before a four-digit year is not a year: 2005 is not stated.
+    ({"start_date": "2005"}, "Example talk, June 05, 2010"),
+    ({"start_date": "2005"}, "Example talk, June 05 2010"),
+    # A day whose year the entry lost: "13" is not 2013.
+    ({"start_date": "2013-05-13"}, "Example lecture: Example Hall, May 13,"),
+    # A dash-joined run of numbers states no m-d-yy year.
+    ({"start_date": "2011"}, "Co-I Example contract 3-24-11-26"),
+    # A day a word follows, and a number before a dash that opens a title.
+    ({"start_date": "2013"}, "Board meeting May 13 at Example Hall"),
+    ({"start_date": "2020"}, "Volume 20 - Example Title"),
+    ({"start_date": "2012"}, "Chapter 12- Example Title"),
+])
+def test_year_not_in_source_new_shapes_do_not_vouch_for_a_day_or_a_number_run(fields, text):
+    assert len(_not_in_source(_fields_entry("C", fields, text=text))) == 1
+
+
 def test_year_not_in_source_skips_personal_data_and_publications():
     """Code A is personal data. A citation's year renders through 5d and
     PubMed; on the farm each publication hit was a split citation or a
@@ -4307,21 +4551,117 @@ def test_role_consistency_flags_a_pi_cell_cut_from_the_title():
     ("Lee", "The Lee Cohort", ""),                                   # one word
     ("Ada Testowner", "Ada Testowner Lab Award", ""),                # the owner
     ("Other Person", "Example Project", ""),
-    ("Ann Studies", "Johann Studies Program", ""),                   # not whole words
+    ("Ann Rivers", "Johann Rivers Program", ""),                     # not whole words
 ])
 def test_role_consistency_spares_a_pi_cell_that_is_not_a_title_run(pi_cell, title, pi_name):
     entry = _grant(118, "A grant", title=title, pi_name=pi_name, pi_role="Mentor")
     assert _shapes(entry, table_rows=[_grant_table("Mentor", pi_cell, title=title)]) == []
 
 
-def test_role_consistency_places_tables_of_one_title_at_its_first_entry():
-    """Two grants with one title both name the first entry, as pi_cell_empty
-    always has (KJJVVO 176 and 177)."""
+# pi_cell_not_a_person (#1571, YUYVIG SLYBST and DYLJXC): the PI cell holds the
+# sponsor or award text before the owner's own "(PI)" or ", Principal
+# Investigator" label. Synthetic cells of the issue's shapes, invented names.
+
+@pytest.mark.parametrize("pi_cell", [
+    "Society. Research Scholar Award",                     # sponsor + award, sentence break
+    "Foundation. Junior Faculty Award",
+    "Leukemia and Lymphoma Society. Postdoctoral Fellowship",  # joined capture
+    "Aging. Alzheimer's Disease Supplement",               # a sentence break alone
+    "Example Pediatric Cancer Initiative",                 # an award word alone
+    "Hospital Patient Care Award",
+    "Acme Foundation",
+    "Northfield University Hospital Award",
+    "Ada Other, Acme Foundation",                          # one part of a list
+    "Acme Foundation, Ada Other",                          # a word before a comma
+    "Principal Investigator",                              # a pipe row's role cell (web210)
+])
+def test_role_consistency_flags_a_pi_cell_of_sponsor_or_award_text(pi_cell):
+    entry = _grant(38, "A grant (PI)", title="Example Project", pi_role="PI")
+    assert _shapes(entry, table_rows=[_grant_table("PI", pi_cell)]) == [
+        ("pi_cell_not_a_person", "INFO")]
+
+
+@pytest.mark.parametrize("pi_cell", [
+    "Other Person",
+    "M. Silva",
+    "Dr. Ana Cruz",
+    "Mrs. Ann Lee",
+    "Prof. Bo Li",
+    "Lee & Park",
+    "Jean-Luc Moreau-Dubois",                              # hyphens
+    "Ludwig van der Berg",                                 # particles
+    "Maria de la Cruz",
+    "J. R. Okafor",                                        # initials
+    "Lee J., Park K.",
+    "Ana Cruz, M.D., Ph.D.",
+    "Tom Young",                                           # surnames that are common words
+    "Ann Price",
+    "Lee Grant",                                           # "Grant" is left out on purpose
+    "Mary St. John",
+])
+def test_role_consistency_spares_a_pi_cell_that_names_a_person(pi_cell):
+    entry = _grant(38, "A grant (PI)", title="Example Project", pi_role="PI")
+    assert _shapes(entry, table_rows=[_grant_table("PI", pi_cell)]) == []
+
+
+def test_role_consistency_shares_stage_6s_sponsor_word_list(monkeypatch):
+    """The shape reads stage 6's own SPONSOR_OR_AWARD_WORDS, so a word added
+    there is a word the lint flags (#1571: the two cannot drift)."""
+    from unified_pipeline.stage6.sections import research_support
+    entry = _grant(38, "A grant (PI)", title="Example Project", pi_role="PI")
+    table = [_grant_table("PI", "Ada Zebrafish")]
+    assert _shapes(entry, table_rows=table) == []
+    monkeypatch.setattr(research_support, "SPONSOR_OR_AWARD_WORDS",
+                        research_support.SPONSOR_OR_AWARD_WORDS | {"zebrafish"})
+    assert _shapes(entry, table_rows=table) == [("pi_cell_not_a_person", "INFO")]
+
+
+def test_role_consistency_places_tables_of_one_title_at_their_own_entries():
+    """Two grants with one title each name their own entry, not both the
+    first (KJJVVO 176 and 177; #1590)."""
     first = _grant(176, "A grant", title="Example Project", pi_role="Co-PI")
     second = _grant(177, "A grant", title="Example Project", pi_role="Co-PI")
     findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [first, second]},
                                      [_grant_table("Co-PI", "Ada Testowner")] * 2)
-    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 176"]
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 177"]
+
+
+def test_role_consistency_places_tables_whose_role_reads_differently_at_their_own_entries():
+    """A stated role the table renders in other words ("Co-Principal
+    Investigator" as "Co-PI") matches no table by role, so the tables still
+    take the unmatched same-title entries in order (#1590)."""
+    first = _grant(176, "A grant", title="Example Project", pi_role="Co-Principal Investigator")
+    second = _grant(177, "A grant", title="Example Project", pi_role="Co-Principal Investigator")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [first, second]},
+                                     [_grant_table("Co-PI", "Ada Testowner")] * 2)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 176", "entry 177"]
+
+
+def test_role_consistency_matches_a_shared_title_table_to_the_entry_with_its_role():
+    """Grants sharing a title render in date order, not stage-4 order: a table
+    with an empty role is the entry with no role, never the first entry with
+    the title, which states one (#1590, YUYVIG SQMWHM 1325)."""
+    stated = _grant(10, "A grant", title="Example Project", pi_name="Testowner", pi_role="PI")
+    unstated = [_grant(idx, "A grant", title="Example Project", pi_name="Testowner")
+                for idx in (11, 12)]
+    tables = [_grant_table("", "Testowner"), _grant_table("PI", "Testowner"),
+              _grant_table("", "Testowner")]
+    findings = lint_role_consistency(
+        {"cv_owner": _ROLE_OWNER, "entries": [stated, *unstated]}, tables)
+    assert [f["message"].split(":")[0] for f in findings] == ["entry 11", "entry 12"]
+    assert len({(f["message"], tuple(f["evidence"])) for f in findings}) == len(findings)
+
+
+def test_role_consistency_reports_an_entry_once_for_all_its_tables():
+    """More tables than entries with their title: the tables left over fall
+    back to the first entry, and its repeats are one finding that counts them
+    (#1590)."""
+    entry = _grant(30, "A grant", title="Example Project", pi_name="Testowner")
+    findings = lint_role_consistency({"cv_owner": _ROLE_OWNER, "entries": [entry]},
+                                     [_grant_table("", "Testowner")] * 3)
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith("entry 30: ")
+    assert " in 3 grant tables (owner_pi_role_empty, #1403)" in findings[0]["message"]
 
 
 def test_role_consistency_still_reports_an_empty_pi_cell_beside_an_entry_finding():
@@ -4338,6 +4678,41 @@ def test_role_consistency_reports_a_grant_once_when_its_table_shows_a_render_sha
                    pi_name="Ada Testowner", pi_role="co-I")
     assert _shapes(entry, table_rows=[_grant_table("co-I", "Ada Testowner")]) == [
         ("contradicted", "WARN")]
+
+
+def test_owner_pi_role_empty_tables_names_the_tables_the_shape_reports():
+    """#1591's certain fix acts on exactly the tables the lint reports, by
+    their index among the document's tables (a non-grant table counts)."""
+    entries = [_grant(idx, "A grant", title=title, pi_name="Testowner")
+               for idx, title in ((20, "First Project"), (21, "Second Project"))]
+    tables = [[["Name:", "Ada Testowner"]],  # not a grant table
+              _grant_table("", "Testowner", title="First Project"),
+              _grant_table("PI", "Testowner", title="Second Project"),
+              _grant_table("", "Other Person", title="Second Project"),
+              _grant_table("", "Ada Testowner", title="Second Project"),
+              _grant_table("PI", "", title="Second Project")]  # pi_cell_empty: another shape
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": entries}
+    reported = owner_pi_role_empty_tables(stage4, tables)
+    assert list(reported) == [1, 4]
+    shapes = [f["message"] for f in lint_role_consistency(stage4, tables)]
+    # Each table carries the message of the finding that reports it.
+    assert sorted(reported.values()) == sorted(m for m in shapes if "(owner_pi_role_empty," in m)
+    assert len(set(reported.values())) == 2
+    assert any("(pi_cell_empty," in m for m in shapes)
+
+
+def test_owner_pi_role_empty_tables_skips_a_table_whose_entry_has_its_own_finding():
+    """The lint reports such a table only through the entry finding, so the
+    fix is not suggested there either."""
+    entry = _grant(243, "Role: PIs: Testowner A, co-Is: Third C", title="Example Project",
+                   pi_name="Ada Testowner", pi_role="co-I")
+    stage4 = {"cv_owner": _ROLE_OWNER, "entries": [entry]}
+    assert owner_pi_role_empty_tables(stage4, [_grant_table("", "Ada Testowner")]) == {}
+
+
+def test_owner_pi_role_empty_tables_needs_an_owner():
+    entry = _grant(260, "A grant", title="Example Project", pi_name="Testowner")
+    assert owner_pi_role_empty_tables({"entries": [entry]}, [_grant_table("", "Testowner")]) == {}
 
 
 if __name__ == "__main__":
@@ -4399,6 +4774,53 @@ def test_span_count_spares_one_range_written_with_words_or_split_across_cells():
         assert _span_count(_span_entry(text), "2003-2013") == [], text
 
 
+@pytest.mark.parametrize("text", [
+    # Batch YUYVIG (#1585): a comma after the month or term word.
+    "Reviewer, Example Society, September, 2003 - June, 2013",
+    "Reviewer, Example Society, Fall, 2003 to Summer, 2013",
+    "Reviewer, October 31, 2003 Example Society, Example\tto June, 2013 Example",
+    # A range a table cell wrapped, a comma in the title between its ends.
+    "2003\u2013 Reviewer, Example Society\t2013",
+    "2003 Reviewer of X, Example Society\tto 2013",
+])
+def test_span_count_spares_month_comma_and_wrapped_ranges(text):
+    assert _span_count(_span_entry(text), "2003-2013") == [], text
+
+
+@pytest.mark.parametrize("text, start, end", [
+    ("Reviewer, Example Society, 2015, 2017", "2015", "2017"),
+    ("Reviewer, Example Society, 2011, 2012, 2013, 2015", "2011", "2015"),
+    ("Reviewer, Example Society, 2018,2020", "2018", "2020"),
+    ("Reviewer, Example Society, 1998-1998, 2000-2000", "1998", "2000"),
+    # An open start and a later range are two spans, not one wrapped range.
+    ("2003\u2013 Reviewer, Example Society\t2009-2013", "2003", "2013"),
+    ("2003-2005 Reviewer, Example Society\t- 2013", "2003", "2013"),
+    # Nor is a later year and an earlier one.
+    ("2013\u2013 Reviewer, Example Society\t2003, 2007", "2003", "2013"),
+    # Nor two items that each open with "year -".
+    ("2003 - Reviewer, Example Society; 2013 - Reviewer, Example Board", "2003", "2013"),
+    # A semicolon, or a comma straight after the dash, ends the first item.
+    ("2003 - Reviewer, Example Society; 2013", "2003", "2013"),
+    ("Reviewer 2003 -, 2013", "2003", "2013"),
+])
+def test_span_count_still_flags_yuyvig_true_lists(text, start, end):
+    """The batch's true hits (#1585) keep firing."""
+    assert _span_count(_span_entry(text, start, end), f"{start}-{end}"), text
+
+
+def test_span_count_reads_a_rendered_year_dash_title_line_as_a_list():
+    """The wrapped-range join reads the source only: a rendered line of
+    "year - title" items shows the separate years, whether or not the later
+    year opens a dash of its own (#1585)."""
+    entry = _fields_entry("K1", {"course_title": "Example Course", "start_date": "2003",
+                                 "end_date": "2013"},
+                          text="Example Course, Fall 2003, Fall 2013")
+    assert lint_span_count({"entries": [entry]}, [
+        ("p", "2003 - Example Course, Example School 2013 - Example Course")]) == []
+    assert lint_span_count({"entries": [entry]}, [
+        ("p", "2003 - Example Course, Example School 2013 Edition")]) == []
+
+
 def test_span_count_skips_mentoring_codes():
     """A mentee line's years are the mentee's own degrees (M.S. 2003; Ph.D.
     2013), not the record's span. The same entry under a code the lint
@@ -4430,3 +4852,345 @@ def test_span_count_judges_teaching_rows():
     findings = lint_span_count({"entries": [entry]},
                                [("p", "2003-2013 - Example Course")])
     assert [f["lint"] for f in findings] == ["span_count"]
+
+
+# ---------------------------------------------------------------------------
+# orphaned_fragments (#1256) -- a stage-3b fragment whose text no record
+# holds: WARN, or INFO when stage 3b left a label or an organisation
+# sub-heading out on purpose.
+
+def _orphan_entries(*fragments):
+    parent = {"text": "Examiner for a specialty board", "taxonomy_code": "Q2",
+              "element_idx_start": 10}
+    return {"entries": [parent, *fragments]}
+
+
+def _orphan(text, start, reasoning="completes the previous entry", code="Q2"):
+    return {"text": text, "taxonomy_code": code, "element_idx_start": start,
+            "is_fragment": True, "fragment_of": 0, "fragment_reasoning": reasoning}
+
+
+def test_orphaned_fragments_warns_on_a_fragment_never_merged():
+    """MQJAVH 201 as stored before the merge: the session line is in no record."""
+    findings = lint_orphaned_fragments(_orphan_entries(_orphan("Springfield, 1985", 11)))
+    assert [(f["lint"], f["severity"]) for f in findings] == [("orphaned_fragments", "WARN")]
+    assert "entry 11" in findings[0]["message"] and "never merged" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["Springfield, 1985"]
+
+
+def test_orphaned_fragments_is_silent_once_the_parent_holds_the_text():
+    stage3b = _orphan_entries(_orphan("Springfield, 1985", 11))
+    stage3b["entries"][0]["text"] += " Springfield, 1985"
+    assert lint_orphaned_fragments(stage3b) == []
+
+
+def test_orphaned_fragments_reports_a_label_left_out_on_purpose_at_info():
+    findings = lint_orphaned_fragments(_orphan_entries(
+        _orphan("Institution Title Dates", 11, reasoning="a header/column label")))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "header_or_label" in findings[0]["message"]
+
+
+def test_orphaned_fragments_reports_an_organisation_sub_heading_at_info():
+    findings = lint_orphaned_fragments(_orphan_entries(_orphan("Example State University", 11)))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_orphaned_fragments_warns_on_a_skip_that_loses_content():
+    """RWBQKF 94: a numbered item kept out of item 2 is still lost."""
+    findings = lint_orphaned_fragments(_orphan_entries(_orphan("1. Collaboration with colleagues", 11)))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "numbered_list_item" in findings[0]["message"]
+
+
+def test_orphaned_fragments_is_silent_on_a_list_holding_a_non_entry():
+    assert lint_orphaned_fragments({"entries": [None, _orphan("tail", 1)]}) == []
+
+
+# lint_appointment_title_overlong (#1205): duty prose packed into a D1-D3 role.
+
+_OVERLONG_ROLE = "Example Fellow, Example Policy Office"
+
+
+def _overlong(*entries):
+    return lint_appointment_title_overlong({"entries": list(entries)})
+
+
+def _title_of(length, tail=" to help plan"):
+    """A title of exactly `length` characters: a role, then duty prose."""
+    head = f"{_OVERLONG_ROLE} - 50% FTE{tail}"
+    return head + "x" * (length - len(head))
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3"])
+def test_appointment_title_overlong_fires_over_the_limit(code):
+    title = _title_of(APPOINTMENT_TITLE_WARN_CHARS + 1)
+    findings = _overlong(_fields_entry(code, {"title": title}, idx=661))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "appointment_title_overlong"
+    assert findings[0]["severity"] == "WARN"
+    assert f"entry 661 ({code}): title is {APPOINTMENT_TITLE_WARN_CHARS + 1} characters" \
+        in findings[0]["message"]
+    assert f"'{_OVERLONG_ROLE}' in the Title column" in findings[0]["message"]
+    assert findings[0]["evidence"] == [title[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def test_appointment_title_overlong_limit_is_150_and_exclusive():
+    assert APPOINTMENT_TITLE_WARN_CHARS == 150
+    assert _overlong(_fields_entry("D3", {"title": _title_of(150)})) == []
+    assert len(_overlong(_fields_entry("D3", {"title": _title_of(151)}))) == 1
+
+
+def test_appointment_title_overlong_says_when_stage_6_renders_it_whole():
+    title = _title_of(160, tail=" performing evaluations ")
+    findings = _overlong(_fields_entry("D3", {"title": title}))
+    assert "rendered whole in the Title column" in findings[0]["message"]
+
+
+def test_appointment_title_overlong_judges_a_role_list_by_its_longest_role():
+    roles = "; ".join(f"Example Role {i}, Department of Example Studies" for i in range(5))
+    assert len(roles) > APPOINTMENT_TITLE_WARN_CHARS
+    assert _overlong(_fields_entry("D1", {"title": roles})) == []
+    longer = roles + "; " + "y" * (APPOINTMENT_TITLE_WARN_CHARS + 1)
+    assert len(_overlong(_fields_entry("D1", {"title": longer}))) == 1
+
+
+@pytest.mark.parametrize("entry", [
+    _fields_entry("O", {"title": "z" * 400}),                 # not an appointment
+    _fields_entry("D1", {"institution": "z" * 400}),          # not the title
+    _fields_entry("D1", {}),
+    _fields_entry("D1", "not an object"),
+])
+def test_appointment_title_overlong_silent(entry):
+    assert _overlong(entry) == []
+
+
+# grant_facts (#1588, #1575): grant numbers and dollar amounts, source against
+# the rendered grant table. Every name, title and number below is made up.
+
+def _gf_entry(idx, text, title, code="M2B", **fields):
+    return {"element_idx_start": idx, "taxonomy_code": code, "text": text,
+            "extracted_fields": {"title": title, **fields}}
+
+
+def _gf_table(title, source="", annual="", total="", duration="", goals=None):
+    """A rendered grant table's raw rows, as `docx_table_rows` reads them."""
+    rows = [[AWARD_SOURCE_LABEL, source], [PROJECT_TITLE_LABEL, title],
+            [ANNUAL_COSTS_LABEL, annual], *([[TOTAL_AWARD_LABEL, total]] if total else []),
+            [DURATION_LABEL, duration], [PI_NAME_LABEL, ""], [YOUR_ROLE_LABEL, "PI"]]
+    return rows + ([["Major project goals:", goals]] if goals else [])
+
+
+def _gf_fact_table(shown):
+    """A table showing ``shown`` where stage 6 puts it: an amount in the
+    costs row, a grant number in the Award Source row."""
+    if re.search(r"[A-Z]{2}", shown):
+        return _gf_table("Glimmer repair", source=f"NIH ({shown})")
+    return _gf_table("Glimmer repair", total=shown)
+
+
+def _gf_shapes(findings):
+    return [(f["lint"], f["severity"], re.search(r"\): (\w+):", f["message"]).group(1),
+             f["message"].split()[1]) for f in findings]
+
+
+def test_grant_facts_reports_the_1575_copy_in_both_directions():
+    """UVZNIC 592's shape: one grant's table shows another grant's amount, and
+    its own amount appears nowhere."""
+    own = _gf_entry(10, "Glimmer repair, R01 HL900001, 2017-2023, $318,500/year", "Glimmer repair",
+                    grant_number="R01 HL900001", total_funding="$27,000/year")
+    other = _gf_entry(20, "Widget trial, Example Foundation, 1997-1999, $27,000/year", "Widget trial",
+                      total_funding="$27,000/year")
+    tables = [_gf_table("Glimmer repair", "NIH (R01 HL900001)", total="$27,000/year"),
+              _gf_table("Widget trial", "Example Foundation", total="$27,000/year")]
+    findings = lint_grant_facts({"entries": [own, other]}, tables)
+    assert _gf_shapes(findings) == [("grant_facts", "INFO", GRANT_FACT_NOT_IN_SOURCE, "10"),
+                                    ("grant_facts", "INFO", GRANT_FACT_MISSING, "10")]
+    assert "$27,000" in findings[0]["message"] and "text of entry 20" in findings[0]["message"]
+    assert "$318,500" in findings[1]["message"]
+    assert findings[0]["evidence"] == ["Glimmer repair"]  # the review copy's anchor
+
+
+def test_grant_facts_names_no_origin_for_a_value_no_entry_states():
+    entry = _gf_entry(10, "Glimmer repair, 2019-2024", "Glimmer repair", total_funding="$42,000")
+    [finding] = lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair", total="$42,000")])
+    assert GRANT_FACT_NOT_IN_SOURCE in finding["message"] and "text of" not in finding["message"]
+
+
+@pytest.mark.parametrize("stated, shown", [
+    ("$1.5M", "$1,500,000"),                    # a multiplier, within half its last digit
+    ("$1.5 million", "$1,520,000"),
+    ("$250K", "$250,000"),
+    ("$1,500,000", "1.5M"),
+    ("USD 12,345", "$12,345"),
+    ("$7,000,001.00", "$7,000,001"),            # cents rounded away
+    ("$12, 345", "$12,345"),                    # a PDF conversion's spaced thousands
+    ("$123.000", "$123,000"),                   # a dot for the thousands
+    ("5R01 CA012345-01A1", "R01-CA-12345"),     # NIH: institute and serial
+    ("NIH-R01 #NS90002-01", "R01 NS090002"),
+    ("HL-90003", "R01 HL090003"),
+    ("NIH U0l AI90l23", "U01 AI90123"),         # a PDF text layer's l for 1
+    ("W81XWH-99-1-0001", "W81XWH9910001"),      # DoD
+    ("DMS-9900001", "DMS 9900001"),             # NSF
+    ("NCT09900001", "NCT 09900001"),
+])
+def test_grant_facts_matches_a_reformatted_value(stated, shown):
+    entry = _gf_entry(10, f"Glimmer repair, 2019-2024, {stated}", "Glimmer repair")
+    assert lint_grant_facts({"entries": [entry]}, [_gf_fact_table(shown)]) == []
+
+
+@pytest.mark.parametrize("stated, shown", [
+    ("$1.5M", "$1,600,000"),                    # outside half the stated digit
+    ("$318,500", "$318,000"),
+    ("R01 CA012345", "R01 CA012346"),
+    ("R01 CA012345", "R01 HL012345"),
+])
+def test_grant_facts_tells_a_different_value_apart(stated, shown):
+    entry = _gf_entry(10, f"Glimmer repair, 2019-2024, {stated}", "Glimmer repair")
+    findings = lint_grant_facts({"entries": [entry]}, [_gf_fact_table(shown)])
+    shapes = [shape for _, _, shape, _ in _gf_shapes(findings)]
+    assert shapes == [GRANT_FACT_NOT_IN_SOURCE, GRANT_FACT_MISSING]
+
+
+@pytest.mark.parametrize("text", [
+    "Glimmer repair, New York, NY 10001, 2019-2024",   # a ZIP code is no grant number
+    "Glimmer repair, PI\t9900002, 2019",               # nor a role before a bare number
+    "Glimmer repair, 120 patients enrolled, 2019",      # a number without "$" is no amount
+    "Glimmer repair, R01, 2019",                        # an activity code alone
+])
+def test_grant_facts_reads_no_fact_where_none_is_stated(text):
+    entry = _gf_entry(10, text, "Glimmer repair")
+    assert lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")]) == []
+
+
+def test_grant_facts_counts_a_value_outside_the_grant_tables_as_shown():
+    """The Appendix, a note or a sub-point still gets a stated value to the
+    reader; another grant's table does not."""
+    entry = _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair")
+    other = _gf_entry(20, "Widget trial", "Widget trial")
+    tables = [_gf_table("Glimmer repair"), _gf_table("Widget trial", total="$55,000")]
+    blocks = [("table", "Glimmer repair"), ("table", "Widget trial $55,000")]
+    missing = lint_grant_facts({"entries": [entry, other]}, tables, blocks)
+    assert [shape for _, _, shape, idx in _gf_shapes(missing) if idx == "10"] == [GRANT_FACT_MISSING]
+    in_appendix = [*blocks, ("p", "T. APPENDIX"), ("p", "• Glimmer repair, $55,000")]
+    assert not [f for f in lint_grant_facts({"entries": [entry, other]}, tables, in_appendix)
+                if f["message"].startswith("entry 10")]
+    subpoints = SubpointText("glimmerrepair,$55,000", ())
+    assert not [f for f in lint_grant_facts({"entries": [entry, other]}, tables, blocks, subpoints)
+                if f["message"].startswith("entry 10")]
+
+
+def test_grant_facts_matches_same_titled_renewals_by_their_values():
+    """Stage 6 renders a renewal pair newest first: a title-only match pairs
+    them in stage-4 order and reads each as carrying the other's amount
+    (EBYSBC farm, four such pairs)."""
+    first = _gf_entry(10, "Glimmer repair, 1993-1994, $41,000", "Glimmer repair",
+                      total_funding="$41,000", start_date="1993", end_date="1994")
+    renewal = _gf_entry(20, "Glimmer repair, 1995-1996, $43,500.25", "Glimmer repair",
+                        total_funding="$43,500.25", start_date="1995", end_date="1996")
+    tables = [_gf_table("Glimmer repair", total="$43,500.25", duration="11/95-10/96"),
+              _gf_table("Glimmer repair", total="$41,000", duration="11/93-10/94")]
+    assert lint_grant_facts({"entries": [first, renewal]}, tables) == []
+
+
+def test_grant_facts_reads_a_goals_row_only_as_where_a_value_reaches_the_reader():
+    """A goals row can carry another entry's prose (#958), so its amounts are
+    not judged against the entry; a stated amount in it still counts as shown."""
+    entry = _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair")
+    table = _gf_table("Glimmer repair", goals="Pilot funds of $55,000 and a $9,000 supplement")
+    assert lint_grant_facts({"entries": [entry]}, [table]) == []
+
+
+def test_grant_facts_lists_a_few_values_and_counts_the_rest():
+    amounts = [f"${n},000" for n in range(11, 11 + GRANT_FACTS_MAX_LISTED + 2)]
+    entry = _gf_entry(10, "Glimmer repair, " + ", ".join(amounts), "Glimmer repair")
+    [finding] = lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")])
+    assert f"{amounts[GRANT_FACTS_MAX_LISTED - 1]} and 2 more" in finding["message"]
+    assert amounts[GRANT_FACTS_MAX_LISTED] not in finding["message"]
+
+
+def test_grant_facts_judges_an_unrendered_grant_against_the_rest_of_the_document():
+    entry = _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair")
+    [finding] = lint_grant_facts({"entries": [entry]}, [], [("p", "Glimmer repair")])
+    assert GRANT_FACT_MISSING in finding["message"]
+    assert finding["evidence"] == ["Glimmer repair, $55,000"]
+    assert lint_grant_facts({"entries": [entry]}, [], [("p", "Glimmer repair, $55,000")]) == []
+
+
+@pytest.mark.parametrize("entry", [
+    _gf_entry(10, "Glimmer repair, $55,000", "Glimmer repair", code="H"),   # not a grant
+    {"element_idx_start": 10, "taxonomy_code": "M2B", "text": "Glimmer repair, $55,000",
+     "extracted_fields": "not an object"},
+])
+def test_grant_facts_ignores_what_is_not_a_grant_entry(entry):
+    assert lint_grant_facts({"entries": [entry]}, [_gf_table("Glimmer repair")]) == []
+
+
+# lint_footer_in_record (#1584, RLADNC-01 shape): a PDF running footer kept as
+# a stage-4 entry's '\t' part, and the record dated from it. Invented talks.
+
+_FOOTER = "November 2020"
+
+
+def _footer_talk(idx, text, **fields):
+    return _fields_entry("L3", {"title": "Example talk", **fields}, text=text, idx=idx)
+
+
+def _footer_talks(count, **fields):
+    """`count` talks of 2014, each ending in the footer part."""
+    return [_footer_talk(i, f"Example talk, Example Venue, 2014\t{_FOOTER}", **fields)
+            for i in range(count)]
+
+
+def test_footer_in_record_warns_on_a_record_dated_from_the_footer():
+    entries = [*_footer_talks(FOOTER_MIN_ENTRIES - 1, date="2014"),
+               _footer_talk(1275, f"{_FOOTER}\t26\tExample talk, Example Venue", date="2020-11")]
+    findings = lint_footer_in_record({"entries": entries})
+    assert [f["severity"] for f in findings] == ["INFO"] * (FOOTER_MIN_ENTRIES - 1) + ["WARN"]
+    warn = findings[-1]
+    assert warn["lint"] == "footer_in_record"
+    assert warn["message"].startswith("entry 1275 (L3): ")
+    assert "a date field holds its year" in warn["message"]
+    assert warn["evidence"] == [f"{_FOOTER} | 26"]
+
+
+def test_footer_in_record_is_info_when_the_year_is_also_the_records_own():
+    entries = _footer_talks(FOOTER_MIN_ENTRIES - 1, date="2014") + [
+        _footer_talk(9, f"Example talk, Example Venue, 2020\t{_FOOTER}", date="2020")]
+    assert [f["severity"] for f in lint_footer_in_record({"entries": entries})] == [
+        "INFO"] * FOOTER_MIN_ENTRIES
+
+
+def test_footer_in_record_needs_the_part_on_five_entries():
+    entries = _footer_talks(FOOTER_MIN_ENTRIES - 1, date="2020-11")
+    assert FOOTER_MIN_ENTRIES == 5
+    assert lint_footer_in_record({"entries": entries}) == []
+    # One entry carrying it twice is still one entry.
+    entries.append(_footer_talk(0, f"{_FOOTER}\tExample talk\t{_FOOTER}"))
+    assert lint_footer_in_record({"entries": entries}) == []
+
+
+def test_footer_in_record_reads_whole_parts_only():
+    """A month-year inside a part is the record's own date, not a footer."""
+    entries = [_footer_talk(i, f"Example talk, {_FOOTER}, Example Venue", date="2020-11")
+               for i in range(FOOTER_MIN_ENTRIES + 1)]
+    assert lint_footer_in_record({"entries": entries}) == []
+
+
+@pytest.mark.parametrize("page, quoted", [
+    ("27", f"{_FOOTER} | 27"), ("Page 3 of 9", f"{_FOOTER} | Page 3 of 9"),
+    ("Example Venue", _FOOTER), ("1234", _FOOTER)])
+def test_footer_in_record_quotes_a_page_number_beside_the_footer(page, quoted):
+    entries = _footer_talks(FOOTER_MIN_ENTRIES - 1) + [
+        _footer_talk(9, f"Example talk, 2014\t{_FOOTER}\t{page}")]
+    assert lint_footer_in_record({"entries": entries})[-1]["evidence"] == [quoted]
+
+
+@pytest.mark.parametrize("footer", ["Nov. 2020", "NOVEMBER 2020", "Sept 2019"])
+def test_footer_in_record_reads_abbreviated_and_capitalised_months(footer):
+    entries = [_footer_talk(i, f"Example talk, 2014\t{footer}") for i in range(FOOTER_MIN_ENTRIES)]
+    assert len(lint_footer_in_record({"entries": entries})) == FOOTER_MIN_ENTRIES
+
+
+def test_footer_in_record_is_silent_on_entries_without_text():
+    assert lint_footer_in_record({"entries": [{"taxonomy_code": "L3"}] * 6}) == []

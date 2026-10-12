@@ -13,7 +13,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.consent import ConsentDocument, get_current_consent_document
-from app.models import Consent, User
+from app.models import Consent, User, UserStatus
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,6 @@ def record_consent(
 # A published consent version is "<major>.<minor>", e.g. "1.2".
 _CONSENT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)$")
 
-# User.status of an account that can sign in and upload.
-ACTIVE_USER_STATUS = "active"
-
 
 def next_consent_version(current: str) -> str:
     """The version a publish moves to: the minor number plus one ("1.1" -> "1.2",
@@ -101,7 +98,7 @@ def count_users_to_reconsent(db: Session, version: str) -> int:
     (a NULL version, which SQL's != would silently skip)."""
     return (
         db.query(func.count(User.id))
-        .filter(User.status == ACTIVE_USER_STATUS,
+        .filter(User.status == UserStatus.ACTIVE,
                 or_(User.consent_version.is_(None), User.consent_version != version))
         .scalar() or 0
     )

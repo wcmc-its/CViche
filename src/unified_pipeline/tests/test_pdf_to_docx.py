@@ -1,7 +1,8 @@
 """Tests for core/pdf_to_docx.py and scripts/pdf_to_docx.py (#806).
 
 No PDF writer is a dependency, so fixtures are built from hand-written PDF
-bytes (`_make_pdf`): base-14 Helvetica / Helvetica-Bold, optional 1x1 image.
+bytes (`_make_pdf`): base-14 Helvetica / Helvetica-Bold / Courier, optional
+1x1 image.
 """
 
 import hashlib
@@ -20,16 +21,16 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
 from unified_pipeline.core.pdf_to_docx import (
+    GUTTER_EDGE_FRAC,
+    LIST_MARKER_RE,
+    _blank_gap_em,
     _column_gaps,
     _is_bold,
-    _Para,
-    GUTTER_EDGE_FRAC,
-    _blank_gap_em,
     _Line,
+    _Para,
     _Run,
     _runs,
     _write_docx,
-    LIST_MARKER_RE,
     convert_pdf_to_docx,
 )
 from unified_pipeline.run_doctor import iter_header_candidates
@@ -74,6 +75,12 @@ def _encrypt_dict(user_password: str, obj_num: int) -> tuple[bytes, bytes]:
     return body, f"/Encrypt {obj_num} 0 R /ID [<{doc_id.hex()}> <{doc_id.hex()}>]".encode()
 
 
+#: `bold` in a `_make_pdf` op picks the font: False Helvetica, True
+#: Helvetica-Bold, COURIER Courier.
+COURIER = "courier"
+_FONT_NUMBER = {False: 1, True: 2, COURIER: 3}
+
+
 def _make_pdf(pages, image_pages=(), user_password=None) -> bytes:
     """pages: list of lists of (bold, size, x, y, text). image_pages: 0-based
     indexes of pages that also carry a 1x1 image."""
@@ -84,13 +91,14 @@ def _make_pdf(pages, image_pages=(), user_password=None) -> bytes:
         5: (b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
             b"/ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\n"
             b"stream\n\x80\nendstream"),
+        6: b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
     }
     kids = []
     for i, ops in enumerate(pages):
-        page_id, content_id = 6 + 2 * i, 7 + 2 * i
+        page_id, content_id = 7 + 2 * i, 8 + 2 * i
         kids.append(f"{page_id} 0 R")
         body = "".join(
-            f"BT /F{2 if bold else 1} {size} Tf {x} {y} Td ({text}) Tj ET\n"
+            f"BT /F{_FONT_NUMBER[bold]} {size} Tf {x} {y} Td ({text}) Tj ET\n"
             for bold, size, x, y, text in ops)
         if i in image_pages:
             body += "q 200 0 0 200 100 300 cm /Im0 Do Q\n"
@@ -100,7 +108,7 @@ def _make_pdf(pages, image_pages=(), user_password=None) -> bytes:
         objs[page_id] = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             f"/Contents {content_id} 0 R /Resources << /Font << /F1 3 0 R "
-            f"/F2 4 0 R >> /XObject << /Im0 5 0 R >> >> >>").encode()
+            f"/F2 4 0 R /F3 6 0 R >> /XObject << /Im0 5 0 R >> >> >>").encode()
     trailer_extra = b""
     if user_password is not None:
         # xref subsections are contiguous, so the object takes the next number.
@@ -208,6 +216,35 @@ def test_repeated_body_line_is_kept(tmp_path):
     pages = [[(False, 10, 72, 400, "Present")] for _ in range(3)]
     _, doc = _convert(tmp_path, pages)
     assert " ".join(p.text for p in doc.paragraphs).split() == ["Present"] * 3
+
+
+def _footer_page(number, two_column):
+    """A body, and a footer printed as "November 2020", a column gap, and
+    the page number."""
+    body = _two_column_page(right_offset=5) if two_column else [(False, 10, 72, 600, f"Body {number}")]
+    return body + [(False, 9, 72, 25, "November 2020"), (False, 9, 500, 25, str(number))]
+
+
+def test_running_footer_cut_by_a_gutter_is_still_furniture(tmp_path):
+    """RLADNC (#1584): the footer prints whole on pages 1 and 3; the gutter
+    of two-column page 2 cuts it into "November 2020" and "2", each on
+    one page only. Both parts still match the whole footer's copies."""
+    pages = [_footer_page(1, False), _footer_page(2, True), _footer_page(3, False)]
+    _, doc = _convert(tmp_path, pages)
+    texts = [t for t in _texts(doc) if t]
+    assert "November" not in " ".join(texts) and "2" not in texts
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+def test_top_band_line_cut_by_a_gutter_keeps_both_parts_on_page_one(tmp_path):
+    """A running header cut at page 1's gutter keeps both of its parts
+    there, once; its whole copies on later pages go."""
+    header = [(False, 9, 72, 765, "Running Name"), (False, 9, 400, 765, "Curriculum Vitae")]
+    pages = [header + _two_column_page(right_offset=5)] + [
+        header + [(False, 10, 72, 600, f"Body {n}")] for n in (1, 2)]
+    _, doc = _convert(tmp_path, pages)
+    text = " ".join(_texts(doc))
+    assert (text.count("Running Name"), text.count("Curriculum Vitae")) == (1, 1)
 
 
 def test_single_page_is_never_treated_as_furniture(tmp_path):
@@ -581,6 +618,45 @@ def test_real_dash_list_splits_and_a_lone_dash_wrap_merges(tmp_path):
 @pytest.mark.parametrize("char", ["\uf0b7", "\u2500", "\u2022"])
 def test_bullet_glyphs_are_list_markers(char):
     assert LIST_MARKER_RE.match(f"{char} item")
+
+
+def _bulleted_items(font, glyph, x, drop):
+    """A heading, then two items at x=90 whose bullet `glyph` sits at `x`,
+    `drop` points below the item's baseline."""
+    page = [(True, 12, 72, 700, "SERVICE")]
+    for i, item in enumerate(("First item", "Second item")):
+        y = 650 - 14 * i
+        page += [(font, 10, x, y - drop, glyph), (False, 10, 90, y, item)]
+    return page
+
+
+@pytest.mark.parametrize("font, glyph, drop, first, second", [
+    # Word's level-2 bullet on its item's line (XACIVX, DYLJXC) ...
+    (COURIER, "o", 0.5, "\u25e6 First item", "\u25e6 Second item"),
+    # ... and 4.5pt lower, its own line cluster (SXPHOG, #1584).
+    (COURIER, "o", 4.5, "\u25e6 First item", "\u25e6 Second item"),
+    # A bullet glyph off its item's baseline is that item's marker too.
+    (False, "\267", 4.5, "\u2022 First item", "\u2022 Second item"),
+    # A Helvetica "o" is a word, not Word's bullet.
+    (False, "o", 0.5, "o First item", "o Second item"),
+])
+def test_bullet_glyph_marks_the_item_it_sits_left_of(tmp_path, font, glyph, drop, first, second):
+    _, doc = _convert(tmp_path, [_bulleted_items(font, glyph, 72, drop)])
+    assert [t for t in _texts(doc) if t] == ["SERVICE", first, second]
+
+
+@pytest.mark.parametrize("x, drop", [
+    (300, 4.5),  # right of its neighbour line's first word: not its marker
+    (72, 8.0),   # overlaps the line above by under half its own height
+])
+def test_bullet_glyph_that_marks_no_line_stays_as_printed(tmp_path, x, drop):
+    _, doc = _convert(tmp_path, [_bulleted_items(COURIER, "o", x, drop)])
+    words = " ".join(_texts(doc)).split()
+    assert words.count("o") == 2 and "\u25e6" not in words
+    # Not folded into the item's line: at x=300 a fold lands the glyph after
+    # the item ("First item\to"), which the word count above cannot see.
+    texts = _texts(doc)
+    assert "First item" in texts and not any("item\to" in t for t in texts)
 
 
 def test_first_line_indent_paragraph_is_not_split(tmp_path):
@@ -1232,6 +1308,21 @@ def test_right_margin_ignores_a_few_lines_that_stick_out(tmp_path):
     assert _texts(doc)[-1].endswith(f"{short} tail")
 
 
+def test_right_margin_counts_each_printed_line_of_a_table_row(tmp_path):
+    """50 printed lines, one sticking out 30pt: the margin ignores it. Two
+    of them are one reassembled table row; counted as one line, the stray
+    line would set the margin (#1583)."""
+    base = 72 + _width(tmp_path, _LONG)
+    lines = [(False, 10, 72 + (30 if i == 25 else 0), 760 - 12 * i, _LONG) for i in range(46)]
+    row = (_table_row(200, [(72, "2019"), (150, "Title of"), (400, "Boston")])
+           + _table_row(188, [(150, "the award")]))
+    short = _LONG[:-12]
+    page2 = [(False, 10, base - 10 - _width(tmp_path, short), 700, short), (False, 10, 72, 688, "tail")]
+    _, doc = _convert(tmp_path, [lines + row, page2])
+    assert "2019\tTitle of the award\tBoston" in _texts(doc)
+    assert _texts(doc)[-1].endswith(f"{short} tail")
+
+
 def _table_row(y, cells):
     return [(False, 10, x, y, text) for x, text in cells if text]
 
@@ -1254,6 +1345,81 @@ def test_row_with_an_empty_first_cell_is_its_own_row(tmp_path):
             + _table_row(676, [(150, "Lecturer"), (400, "1998-2001")]) + [_FILL])
     _, doc = _convert(tmp_path, [page])
     assert _texts(doc)[:2] == ["Alpha Inst\tProfessor\t2001-2005", "\tLecturer\t1998-2001"]
+
+
+def test_cells_wrapping_mid_sentence_stay_in_their_row(tmp_path):
+    """#1583: every cell of a row wraps, so each printed line after the first
+    has an empty first cell. Where the cells it fills continue the row's
+    cells mid-sentence, it is the same row, not the next one."""
+    page = (_table_row(700, [(72, "2007"), (150, "Sample"), (260, "Leader in the"),
+                             (380, "Method:")])
+            + _table_row(688, [(150, "tracking"), (260, "design,"), (380, "supports the")])
+            + _table_row(676, [(150, "Program"), (260, "Review"),
+                               (380, "review of results.")])
+            + _table_row(664, [(72, "2009"), (150, "Second item"), (260, "Built"),
+                               (380, "A new method.")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == [
+        "2007\tSample tracking Program\tLeader in the design, Review"
+        "\tMethod: supports the review of results.",
+        "2009\tSecond item\tBuilt\tA new method."]
+
+
+def test_cell_empty_in_the_row_does_not_count_as_continued(tmp_path):
+    """The second row leaves its third cell empty. The line below fills that
+    cell lowercase, but an empty cell has no text to continue, so the line
+    continues none of the row's cells and is the next row."""
+    page = (_table_row(700, [(72, "2019"), (150, "Prize."), (260, "Lead."), (400, "Boston.")])
+            + _table_row(688, [(150, "Medal."), (400, "Paris.")])
+            + _table_row(676, [(150, "Gold"), (260, "co-lead")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == ["2019\tPrize.\tLead.\tBoston.", "\tMedal.\t\tParis.", "\tGold\tco-lead"]
+
+
+@pytest.mark.parametrize("range_above, year_below, same_row", [
+    ("2011-", "2014", True), ("2011-", "2014-", False), ("since 2011-", "2014-", False)])
+def test_open_year_range_cell_continues_only_into_its_end(tmp_path, range_above, year_below,
+                                                         same_row):
+    """"2011-" over "2014" is one range wrapped; over "2014-" it is the next
+    row's own open range, under the same first cell. The range is found at
+    the end of a cell of several words too ("since 2011-")."""
+    page = (_table_row(700, [(72, "Example Org"), (200, range_above), (300, "Faculty")])
+            + _table_row(688, [(200, year_below), (300, "Coach")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    expected = ([f"Example Org\t{range_above} {year_below}\tFaculty Coach"] if same_row
+                else [f"Example Org\t{range_above}\tFaculty", f"\t{year_below}\tCoach"])
+    assert _texts(doc)[:len(expected)] == expected
+
+
+def test_cell_row_continuing_under_half_its_cells_is_the_next_row(tmp_path):
+    page = (_table_row(700, [(72, "2007"), (150, "Sample"), (260, "Leader"), (380, "Uses the")])
+            + _table_row(688, [(150, "Program"), (260, "Lead"), (380, "results.")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2007\tSample\tLeader\tUses the", "\tProgram\tLead\tresults."]
+
+
+def test_lowercase_line_continues_a_cell_with_no_connector_end(tmp_path):
+    """"Senior research" ends on no connector and no sentence end; "fellow"
+    below it opens lowercase, so that cell wraps. It is one of the line's two
+    filled cells, half, so the line is the row's own wrap."""
+    page = (_table_row(700, [(72, "2019"), (150, "Senior research"), (400, "Lead")])
+            + _table_row(688, [(150, "fellow"), (400, "Boston")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "2019\tSenior research fellow\tLead Boston"
+
+
+def test_cell_ending_a_sentence_is_not_wrapped_by_a_lowercase_line(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Award."), (400, "Boston.")])
+            + _table_row(688, [(150, "runner up"), (400, "and Paris")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tAward.\tBoston.", "\trunner up\tand Paris"]
+
+
+def test_cell_ending_in_a_colon_is_wrapped_by_the_line_below(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Role:"), (400, "Site:")])
+            + _table_row(688, [(150, "co-lead"), (400, "Boston")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "2019\tRole: co-lead\tSite: Boston"
 
 
 def test_indented_note_across_cells_is_not_spread_into_them(tmp_path):

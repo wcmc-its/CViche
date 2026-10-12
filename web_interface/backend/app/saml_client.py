@@ -2,16 +2,16 @@
 import logging
 import os
 import shutil
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
-from saml2.config import Config as Saml2Config
-from saml2.client import Saml2Client
 from cryptography import x509
-from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+from saml2.client import Saml2Client
+from saml2.config import Config as Saml2Config
 from sqlalchemy.orm import Session
 
 from app.config_loader import get_config_value

@@ -7,7 +7,7 @@ storage objects (runs/{id}/input/ and the by-submitter index).
 """
 import os
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -62,8 +62,8 @@ def test_reap_deletes_old_created_run_with_children_and_storage(db):
     from app.services.run_service import reap_orphaned_created_runs
 
     user = _seed_user(db)
-    old = datetime.now() - timedelta(hours=48)
-    young = datetime.now()
+    old = datetime.now(timezone.utc) - timedelta(hours=48)
+    young = datetime.now(timezone.utc)
     _seed_run(db, "OLD001", "created", old, user_id=user.id, steps=3)
     _seed_run(db, "YOUNG1", "created", young, user_id=user.id, steps=2)  # too new
     _seed_run(db, "RUN001", "running", old, user_id=user.id, steps=2)    # not 'created'
@@ -93,7 +93,7 @@ def test_reap_dry_run_changes_nothing(db):
     from app.services.run_service import reap_orphaned_created_runs
 
     user = _seed_user(db)
-    _seed_run(db, "OLD002", "created", datetime.now() - timedelta(hours=48),
+    _seed_run(db, "OLD002", "created", datetime.now(timezone.utc) - timedelta(hours=48),
               user_id=user.id, steps=2)
 
     fake = _FakeStorage()
@@ -112,8 +112,8 @@ def test_reap_dry_run_changes_nothing(db):
 # ---------------------------------------------------------------------------
 
 def _as_admin(client, fn):
-    from app.main import app
     from app.auth import require_admin
+    from app.main import app
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
         role="admin", email="admin@example.com")
     try:
@@ -125,8 +125,8 @@ def _as_admin(client, fn):
 def _as_user(client, fn):
     """Override the underlying current-user dep so the REAL require_admin runs
     and returns 403 -- exercises the actual authorization guard."""
-    from app.main import app
     from app.auth import get_current_user
+    from app.main import app
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         role="user", email="user@example.com")
     try:
@@ -143,7 +143,7 @@ def test_non_admin_cannot_reap(client, db):
 def test_admin_dry_run_previews_without_deleting(client, db):
     from app.models import Run
     user = _seed_user(db)
-    _seed_run(db, "OLD003", "created", datetime.now() - timedelta(hours=48),
+    _seed_run(db, "OLD003", "created", datetime.now(timezone.utc) - timedelta(hours=48),
               user_id=user.id, steps=2)
 
     resp = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
@@ -157,7 +157,7 @@ def test_admin_dry_run_previews_without_deleting(client, db):
 def test_admin_reap_removes_orphan(client, db):
     from app.models import Run
     user = _seed_user(db)
-    _seed_run(db, "OLD004", "created", datetime.now() - timedelta(hours=48),
+    _seed_run(db, "OLD004", "created", datetime.now(timezone.utc) - timedelta(hours=48),
               user_id=user.id, steps=2)
 
     fake = _FakeStorage()
@@ -212,7 +212,7 @@ def test_admin_delete_unknown_run_is_404(client, db):
 
 def test_admin_delete_running_run_is_409_and_untouched(client, db):
     from app.models import Run
-    _seed_run(db, "RUN683", "running", datetime.now())
+    _seed_run(db, "RUN683", "running", datetime.now(timezone.utc))
 
     fake = _FakeStorage()
     with patch("app.services.run_service.get_storage", return_value=fake):
@@ -248,6 +248,7 @@ def _child_counts(db, run_id):
 
 def test_admin_delete_complete_run_removes_only_target_and_logs_audit(client, db, caplog):
     import logging
+
     from app.audit_events import RUN_DELETED
     from app.models import Run
     user = _seed_user(db, email="Withdraw@Example.com")
@@ -255,7 +256,7 @@ def test_admin_delete_complete_run_removes_only_target_and_logs_audit(client, db
     # Two other runs sit on either side of the target so a find_run that
     # ignores run_id (first(), last()) cannot pass by luck of ordering.
     for rid, uid in (("AAA683", other.id), ("DONE683", user.id), ("ZZZ683", other.id)):
-        _seed_run(db, rid, "complete", datetime.now() - timedelta(days=30),
+        _seed_run(db, rid, "complete", datetime.now(timezone.utc) - timedelta(days=30),
                   user_id=uid, steps=2)
         _seed_children(db, rid, uid)
     before_other = _child_counts(db, "AAA683")
@@ -295,7 +296,7 @@ def test_admin_delete_storage_failure_is_500_and_rows_survive_then_retry_succeed
     from app.models import Run
     user = _seed_user(db)
     for rid in ("BAD683", "OTHER683"):
-        _seed_run(db, rid, "complete", datetime.now(), user_id=user.id, steps=2)
+        _seed_run(db, rid, "complete", datetime.now(timezone.utc), user_id=user.id, steps=2)
         _seed_children(db, rid, user.id)
     before = _child_counts(db, "BAD683")
 
@@ -321,7 +322,7 @@ def test_admin_delete_storage_failure_is_500_and_rows_survive_then_retry_succeed
 def test_admin_delete_index_prefix_failure_is_500_and_rows_survive(client, db):
     from app.models import Run
     user = _seed_user(db)
-    _seed_run(db, "IDX683", "complete", datetime.now(), user_id=user.id)
+    _seed_run(db, "IDX683", "complete", datetime.now(timezone.utc), user_id=user.id)
 
     class _PrefixFails(_FakeStorage):
         def delete_global_prefix(self, prefix):
@@ -340,7 +341,7 @@ def test_reaper_stays_best_effort_when_storage_fails(db):
     from app.models import Run
     from app.services.run_service import reap_orphaned_created_runs
     user = _seed_user(db)
-    _seed_run(db, "ORPH683", "created", datetime.now() - timedelta(hours=48),
+    _seed_run(db, "ORPH683", "created", datetime.now(timezone.utc) - timedelta(hours=48),
               user_id=user.id)
     with patch("app.services.run_service.get_storage", return_value=_FlakyStorage()):
         result = reap_orphaned_created_runs(db, older_than_hours=24)
@@ -351,7 +352,7 @@ def test_reaper_stays_best_effort_when_storage_fails(db):
 def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
     from app.models import Run
     from app.services.run_service import delete_run_and_artifacts
-    _seed_run(db, "FAIL683", "complete", datetime.now())
+    _seed_run(db, "FAIL683", "complete", datetime.now(timezone.utc))
     run = db.query(Run).filter(Run.id == "FAIL683").first()
 
     fake = _FakeStorage()
@@ -373,7 +374,7 @@ def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
 def test_admin_reap_body_and_audit_line(client, db, caplog):
     import logging
     user = _seed_user(db)
-    _seed_run(db, "OLD005", "created", datetime.now() - timedelta(hours=48), user_id=user.id)
+    _seed_run(db, "OLD005", "created", datetime.now(timezone.utc) - timedelta(hours=48), user_id=user.id)
 
     with caplog.at_level(logging.INFO):
         resp = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
@@ -385,7 +386,7 @@ def test_admin_reap_body_and_audit_line(client, db, caplog):
 
 
 def test_admin_reap_older_than_hours_overrides_the_default_threshold(client, db):
-    _seed_run(db, "YOUNG05", "created", datetime.now() - timedelta(hours=5))
+    _seed_run(db, "YOUNG05", "created", datetime.now(timezone.utc) - timedelta(hours=5))
 
     default = _as_admin(client, lambda: client.post("/api/admin/runs/reap-orphans?dry_run=true"))
     override = _as_admin(
@@ -398,7 +399,7 @@ def test_admin_reap_older_than_hours_overrides_the_default_threshold(client, db)
 
 
 def test_admin_delete_error_messages(client, db):
-    _seed_run(db, "BUSY683", "running", datetime.now())
+    _seed_run(db, "BUSY683", "running", datetime.now(timezone.utc))
 
     missing = _as_admin(client, lambda: client.delete("/api/admin/runs/NOSUCH"))
     busy = _as_admin(client, lambda: client.delete("/api/admin/runs/BUSY683"))
@@ -411,7 +412,7 @@ def test_admin_delete_error_messages(client, db):
 
 def test_admin_delete_allows_a_cancelled_run(client, db):
     from app.models import Run
-    _seed_run(db, "CANC683", "cancelled", datetime.now())
+    _seed_run(db, "CANC683", "cancelled", datetime.now(timezone.utc))
 
     with patch("app.services.run_service.get_storage", return_value=_FakeStorage()):
         resp = _as_admin(client, lambda: client.delete("/api/admin/runs/CANC683"))
@@ -423,7 +424,7 @@ def test_admin_delete_allows_a_cancelled_run(client, db):
 
 def test_admin_delete_failure_logs_the_traceback_and_returns_the_retry_message(client, db, caplog):
     import logging
-    _seed_run(db, "LOG683", "complete", datetime.now())
+    _seed_run(db, "LOG683", "complete", datetime.now(timezone.utc))
 
     with patch("app.services.run_service.get_storage", return_value=_FlakyStorage()), \
             caplog.at_level(logging.INFO):
@@ -457,7 +458,7 @@ def test_delete_run_unlinks_the_inbox_file_it_was_submitted_from(db: Session, en
     from app.services.run_service import delete_run_and_artifacts
 
     user = _seed_user(db)
-    _seed_run(db, "MAIL408", "complete", datetime.now(), user_id=user.id, steps=2)
+    _seed_run(db, "MAIL408", "complete", datetime.now(timezone.utc), user_id=user.id, steps=2)
     message = InboundMessage(s3_key="inbound/msg-408", status="accepted", file_count=1, user_id=user.id)
     db.add(message)
     db.flush()

@@ -454,7 +454,11 @@ def test_execute_step_failure_writes_and_mirrors_a_stage_error_record(monkeypatc
     """The orchestrator raises (fails the run) but first records which stage
     broke and how, and mirrors it to outputs/ where the scorer collects it --
     even when the message names no exception type."""
-    from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
+    from unified_pipeline.stage_errors import (
+        StageError,
+        read_stage_errors,
+        stage_errors_path,
+    )
 
     async def boom(stage_id, cv_path):
         raise TypeError("'int' object is not iterable")
@@ -473,7 +477,11 @@ def test_execute_step_success_clears_an_earlier_stage_error(monkeypatch, tmp_pat
     """A retried stage that now succeeds removes its entry, locally and in the
     mirrored copy, so a recovered run is not capped by its own history."""
     from unified_pipeline.stage_errors import (
-        StageError, read_stage_errors, record_stage_outcome, stage_errors_path)
+        StageError,
+        read_stage_errors,
+        record_stage_outcome,
+        stage_errors_path,
+    )
 
     async def ok(stage_id, cv_path):
         return {"cost": 0.0, "output_files": []}
@@ -590,6 +598,25 @@ def test_user_facing_error_stage_timeout():
     assert user_facing_error(exc, resuming=False) == STAGE_TIMEOUT_MESSAGE
 
 
+def test_user_facing_error_pdf_child_failures():
+    """#1566: only a real limit tells the user the PDF is too large; a
+    signal-stopped or timed-out conversion child gets a message that does not
+    blame the file."""
+    from app.pipeline.orchestrator import user_facing_error
+    from app.services.pdf_sandbox import (
+        PDF_INTERRUPTED_RUN_MESSAGE,
+        PDF_TIMEOUT_RUN_MESSAGE,
+        PDF_TOO_COMPLEX_MESSAGE,
+        PdfInterruptedError,
+        PdfTimeoutError,
+        PdfTooComplexError,
+    )
+
+    assert user_facing_error(PdfTooComplexError("over 300 pages"), resuming=False) == PDF_TOO_COMPLEX_MESSAGE
+    assert user_facing_error(PdfTimeoutError("exceeded 120s"), resuming=True) == PDF_TIMEOUT_RUN_MESSAGE
+    assert user_facing_error(PdfInterruptedError("signal 15"), resuming=True) == PDF_INTERRUPTED_RUN_MESSAGE
+
+
 def test_user_facing_error_missing_input_only_special_on_resume():
     from app.pipeline.orchestrator import (
         GENERIC_FAILURE_MESSAGE,
@@ -605,15 +632,26 @@ def test_user_facing_error_missing_input_only_special_on_resume():
 def test_user_facing_error_messages_name_real_buttons():
     """Every message's quoted action must be a button PipelineViewer renders."""
     from app.pipeline import orchestrator as orch
+    from app.services import pdf_sandbox
 
     viewer = (
         Path(__file__).parents[2] / "frontend" / "src" / "components" / "PipelineViewer.tsx"
     ).read_text()
+    pre_step_messages = (
+        pdf_sandbox.PDF_INTERRUPTED_RUN_MESSAGE,
+        pdf_sandbox.PDF_TIMEOUT_RUN_MESSAGE,
+        pdf_sandbox.PDF_BUSY_RUN_MESSAGE,
+    )
     for msg in (
         orch.RESUME_INPUT_MISSING_MESSAGE,
         orch.LLM_OUTAGE_MESSAGE,
         orch.STAGE_TIMEOUT_MESSAGE,
         orch.GENERIC_FAILURE_MESSAGE,
+        *pre_step_messages,
     ):
         for label in msg.split('"')[1::2]:
             assert label in viewer, f"{label!r} is not a PipelineViewer button"
+    # #1566: PDF conversion fails before any step runs, so no step is in
+    # 'error' and the viewer hides "Retry failed step" for these runs.
+    for msg in pre_step_messages:
+        assert msg.split('"')[1::2] == ["Restart with file"], msg

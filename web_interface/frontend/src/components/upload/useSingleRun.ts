@@ -6,7 +6,7 @@ import type { UploadResult } from '../../api/upload'
 import type { Estimate } from '../../types'
 import { getCapacity, startRun } from '../../api/runs'
 import { isConsentError } from './useBatchUpload'
-import { MAX_UPLOAD_BYTES, TOO_LARGE_REASON } from './batchRows'
+import { DEFAULT_MAX_UPLOAD_MB, maxUploadBytes, tooLargeReason } from './batchRows'
 import type { HeldFile } from './batchRows'
 import type { SubmissionType } from './consentText'
 
@@ -203,7 +203,9 @@ export interface SingleFile {
 /** The single run's chosen file and its estimate. `onChange` runs whenever the
  *  file changes, so a held run from the previous file is forgotten; `onRefused`
  *  gets the message for a file of the wrong type. */
-export function useSingleFile(onChange: () => void, onRefused: (message: string | null) => void): SingleFile {
+export function useSingleFile(
+  onChange: () => void, onRefused: (message: string | null) => void, maxUploadMb: number = DEFAULT_MAX_UPLOAD_MB,
+): SingleFile {
   const [file, setFile] = useState<File | null>(null)
   const [estimate, setEstimate] = useState<Estimate | null>(null)
   const [estimating, setEstimating] = useState(false)
@@ -223,8 +225,8 @@ export function useSingleFile(onChange: () => void, onRefused: (message: string 
       clear()
       return
     }
-    if (selected.size > MAX_UPLOAD_BYTES) {
-      onRefused(`${TOO_LARGE_REASON}, so it won't be submitted`)
+    if (selected.size > maxUploadBytes(maxUploadMb)) {
+      onRefused(`${tooLargeReason(maxUploadMb)}, so it won't be submitted`)
       clear()
       return
     }

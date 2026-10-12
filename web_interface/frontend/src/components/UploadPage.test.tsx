@@ -9,9 +9,9 @@ import type { UploadOptions, UploadResult } from '../api/upload'
 import { getCapacity, getRunStatus, startRun } from '../api/runs'
 import { createBatch, getQueue } from '../api/batches'
 import { getCurrentUser } from '../api/auth'
-import { discardInboxItem, listInbox, submitInboxItem } from '../api/inbox'
+import { discardInboxItem, estimateInboxItems, listInbox, submitInboxItem } from '../api/inbox'
 import { InboxProvider } from '../contexts/InboxContext'
-import type { BatchEstimate, Estimate, InboxItem, InboxSubmitResult, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
+import type { AuthConfig, BatchEstimate, Estimate, InboxItem, InboxSubmitResult, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
 
 vi.mock('../api/upload', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/upload')>()),
@@ -20,7 +20,7 @@ vi.mock('../api/upload', async (importOriginal) => ({
 vi.mock('../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn(), getRunStatus: vi.fn() }))
 vi.mock('../api/batches', () => ({ createBatch: vi.fn(), getQueue: vi.fn() }))
 vi.mock('../api/auth', () => ({ getCurrentUser: vi.fn() }))
-vi.mock('../api/inbox', () => ({ listInbox: vi.fn(), discardInboxItem: vi.fn(), submitInboxItem: vi.fn() }))
+vi.mock('../api/inbox', () => ({ listInbox: vi.fn(), discardInboxItem: vi.fn(), submitInboxItem: vi.fn(), estimateInboxItems: vi.fn() }))
 
 // Invented user; no real names in fixtures.
 const ADMIN: User = {
@@ -28,8 +28,10 @@ const ADMIN: User = {
   consent_version: '1.0', default_submission_type: 'authorized_admin', quota: null,
 }
 let currentUser: User = ADMIN
+// null = the config not loaded yet, so the page falls back to the default upload cap.
+let currentAuthConfig: AuthConfig | null = null
 vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ user: currentUser }),
+  useAuth: () => ({ user: currentUser, authConfig: currentAuthConfig }),
   useCanSeeCost: () => currentUser.role === 'admin',
 }))
 
@@ -125,6 +127,7 @@ beforeEach(() => {
   vi.mocked(createBatch).mockResolvedValue({ id: 'BQXZKD' })
   vi.mocked(startRun).mockResolvedValue(undefined)
   vi.mocked(listInbox).mockResolvedValue([])
+  vi.mocked(estimateInboxItems).mockImplementation(async (ids) => batchEstimate(ids.map((id) => docx(`held_${id}.docx`))))
 })
 
 afterEach(() => {
@@ -195,6 +198,23 @@ describe('UploadPage batch selection', () => {
     expect(screen.getByText('2 to submit · 1 skipped')).toBeTruthy()
     expect(screen.getByText("Won't be submitted")).toBeTruthy()
     expect(screen.getByText('Not a .docx or .pdf file')).toBeTruthy()
+  })
+
+  it("checks file size against the backend's advertised cap, not a client copy (#109)", async () => {
+    currentAuthConfig = { mode: 'simple', max_upload_mb: 20 }
+    try {
+      await renderPage()
+      const sized = (name: string, mb: number) => {
+        const file = docx(name)
+        Object.defineProperty(file, 'size', { value: mb * 1024 * 1024 })
+        return file
+      }
+      await addFiles([sized('fifteen.docx', 15), sized('twentyfive.docx', 25)])
+      expect(vi.mocked(getBatchEstimate).mock.calls[0][0].map((f) => f.name)).toEqual(['fifteen.docx'])
+      expect(screen.getByText('Larger than 20 MB')).toBeTruthy()
+    } finally {
+      currentAuthConfig = null
+    }
   })
 
   it("shows a PDF row's scanned pages from its estimate (#1282)", async () => {
@@ -612,6 +632,66 @@ describe('UploadPage cost is for admins only', () => {
   })
 })
 
+describe('UploadPage batch cost outlier (#1599)', () => {
+  /** Each file's estimate scaled by its weight: cost_weight w, cost $w-$2w (midpoint $1.5w). */
+  function weighted(weights: Record<string, number>) {
+    vi.mocked(getBatchEstimate).mockImplementation(async (files) => ({
+      ...batchEstimate(files),
+      files: files.map((f) => {
+        const w = weights[f.name]
+        return { filename: f.name, error: null, estimate: { ...EST, cost_weight: w, estimated_cost_min: w, estimated_cost_max: 2 * w } }
+      }),
+    }))
+  }
+  const flaggedRows = () => screen.getAllByTestId('batch-row').filter((row) => within(row).queryByTestId('cost-outlier'))
+  const rowNamed = (name: string) => screen.getAllByTestId('batch-row').find((row) => row.textContent?.includes(name)) as HTMLElement
+
+  it('flags a file at 3x the median of the others, and not one just under', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'c.docx': 1, 'under.docx': 2.99, 'over.docx': 3 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'c.docx', 'under.docx', 'over.docx'].map(docx))
+    expect(flaggedRows()).toEqual([rowNamed('over.docx')])
+    expect(within(rowNamed('over.docx')).getByTestId('cost-outlier').textContent)
+      .toBe('About 3× larger than the others in this batch: estimated $4.50 against a median of $1.50.')
+  })
+
+  it('will not submit a flagged file until it is included, then submits every file', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1.2, 'big.docx': 7 })
+    uploadsSucceed()
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    tickAttestation()
+    expect(button('Submit 3 CVs').disabled).toBe(true)
+    expect(screen.getByText('Include or remove 1 unusually large CV')).toBeTruthy()
+
+    fireEvent.click(within(rowNamed('big.docx')).getByRole('button', { name: 'Include it' }))
+    expect(within(rowNamed('big.docx')).queryByRole('button', { name: 'Include it' })).toBeNull()
+    expect(button('Submit 3 CVs').disabled).toBe(false)
+    fireEvent.click(button('Submit 3 CVs'))
+    await flush()
+    expect(vi.mocked(uploadFile).mock.calls.map(([f]) => f.name)).toEqual(['a.docx', 'b.docx', 'big.docx'])
+  })
+
+  it('lifts the block when the flagged file is removed instead', async () => {
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'big.docx': 7 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    tickAttestation()
+    fireEvent.click(button('Remove big.docx'))
+    expect(button('Submit 2 CVs').disabled).toBe(false)
+  })
+
+  it('flags the file for a non-admin too, without a dollar figure', async () => {
+    currentUser = MEMBER
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...MEMBER, quota: QUOTA_LEFT })
+    weighted({ 'a.docx': 1, 'b.docx': 1, 'big.docx': 7 })
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx', 'big.docx'].map(docx))
+    expect(within(rowNamed('big.docx')).getByTestId('cost-outlier').textContent).toBe('About 7× larger than the others in this batch.')
+    expect(screen.queryByText(/\$/)).toBeNull()
+  })
+})
+
 describe('UploadPage quota', () => {
   it('re-reads the runs left before another batch', async () => {
     currentUser = MEMBER
@@ -777,6 +857,35 @@ describe('UploadPage emailed CV inbox (#1298)', () => {
     await flush()
     expect(vi.mocked(submitInboxItem).mock.calls[1][1].confirmDuplicate).toBe(true)
     expect(onUploadSuccess).toHaveBeenCalledWith('RM2')
+  })
+
+  it('estimates an added item through /inbox/estimate, so a large one is flagged against the batch (#1626)', async () => {
+    vi.mocked(listInbox).mockResolvedValue([INBOX_ITEMS[0]])
+    vi.mocked(getBatchEstimate).mockImplementation(async (files) => ({
+      ...batchEstimate(files), files: files.map((f) => ({ filename: f.name, error: null, estimate: { ...EST, cost_weight: 1 } })),
+    }))
+    vi.mocked(estimateInboxItems).mockImplementation(async (ids) => ({
+      ...batchEstimate([]), files: ids.map(() => ({ filename: 'emailed_one.docx', error: null, estimate: { ...EST, cost_weight: 7 } })),
+    }))
+    await renderPage()
+    await addFiles(['a.docx', 'b.docx'].map(docx))
+    fireEvent.click(button('Add emailed_one.docx'))
+    await flush()
+    expect(estimateInboxItems).toHaveBeenCalledWith([11])
+    const flagged = screen.getAllByTestId('batch-row').filter((row) => within(row).queryByTestId('cost-outlier'))
+    expect(flagged.map((row) => row.textContent?.includes('emailed_one.docx'))).toEqual([true])
+    tickAttestation()
+    expect(button('Submit 3 CVs').disabled).toBe(true)
+  })
+
+  it('leaves an item added past 50 files unestimated, not pending forever (#1626)', async () => {
+    vi.mocked(listInbox).mockResolvedValue([INBOX_ITEMS[0]])
+    await renderPage()
+    await addFiles(docxSet(50))
+    fireEvent.click(button('Add emailed_one.docx'))
+    await flush()
+    expect(estimateInboxItems).not.toHaveBeenCalled()
+    expect(button('Submit 51 CVs').disabled).toBe(true)
   })
 
   it('returns a removed single item to the list, and a role switch carries it into the batch', async () => {

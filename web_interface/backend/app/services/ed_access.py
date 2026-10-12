@@ -15,7 +15,12 @@ from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
 from app.config_loader import get_config, get_config_value
-from app.ed_group_lookup import EdUnavailableError, LDAPConfig, MembershipResult, check_ed_membership
+from app.ed_group_lookup import (
+    EdUnavailableError,
+    LDAPConfig,
+    MembershipResult,
+    check_ed_membership,
+)
 from app.models import User
 
 logger = logging.getLogger(__name__)

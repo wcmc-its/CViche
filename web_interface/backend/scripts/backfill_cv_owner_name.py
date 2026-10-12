@@ -24,7 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.models import Run, Step  # noqa: E402
-from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name  # noqa: E402
+from app.services.cv_owner_service import (  # noqa: E402
+    CV_OWNER_STAGE_ID,
+    read_cv_owner_name,
+)
 
 logger = logging.getLogger("backfill_cv_owner_name")
 

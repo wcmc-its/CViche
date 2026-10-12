@@ -65,7 +65,6 @@ from unified_pipeline.stage4.coercion import (  # noqa: E402
     normalize_dates,
 )
 
-
 # --- #3819054910: FTE decimal -> percent conversion ------------------------
 
 @pytest.mark.parametrize(
@@ -179,6 +178,33 @@ def test_apostrophe_and_hyphen_surnames_still_work():
     # ASCII class) must survive the broadened Unicode class.
     assert normalize_authors_vancouver("O'Brien, amy") == "O'Brien A"
     assert normalize_authors_vancouver("Smith-Jones, amy") == "Smith-Jones A"
+
+
+# --- #1660: mixed-case digraph initials ("Th") are not a surname ----------
+
+def test_mixed_case_digraph_initials_stay_after_surname():
+    # Before the fix "FJTh" failed the all-caps initials check and the
+    # "FirstName LastName" branch reordered "Doe FJTh" into "FJTh D".
+    assert (
+        normalize_authors_vancouver("Berger HJ, Doe FJTh, Surkin L")
+        == "Berger HJ, Doe FJTh, Surkin L"
+    )
+
+
+def test_ch_and_sh_digraph_initials_stay_after_surname():
+    assert normalize_authors_vancouver("Doe ChA") == "Doe ChA"
+    assert normalize_authors_vancouver("Doe ASh") == "Doe ASh"
+
+
+def test_plain_initials_and_real_surnames_unchanged_by_digraph_rule():
+    # Regression guard: all-caps initials stay put, and a real lowercase
+    # surname that merely starts with "Th"/"Ch"/"Sh" still reorders.
+    assert normalize_authors_vancouver("Doe JA") == "Doe JA"
+    assert normalize_authors_vancouver("Ann Chen") == "Chen A"
+    assert normalize_authors_vancouver("Mary Shaw") == "Shaw M"
+    assert normalize_authors_vancouver("Li Thu") == "Thu L"
+    # Only T/C/S take a lowercase "h": any other "Xh" is not an initial.
+    assert normalize_authors_vancouver("Ann JBh") == "JBh A"
 
 
 # --- #3819086998: negative-path coverage ------------------------------------
@@ -296,6 +322,87 @@ def test_percent_effort_already_extracted_is_not_overwritten():
 
     assert updated["percent_effort"] == "25%"
     assert "percent_effort" not in reformatted
+
+
+# --- #1659: effort in calendar/person months is kept as written -----------
+
+@pytest.mark.parametrize(
+    "text,llm_effort,expected",
+    [
+        # The four shapes the issue names (synthetic text): the LLM read the
+        # month figure as a percent ("0.24" -> "24%"), or left the field blank.
+        ("R01 Example Agency 2020-2025 Site & Project PI 0.24 Cal Months", "24%", "0.24 Cal Months"),
+        ("R21 Example Agency 2021-2023 Site & Project PI 0.12 Cal Months", "12%", "0.12 Cal Months"),
+        ("U01 Example Agency 2019-2024 Site PI 0.2 Cal Months", "", "0.2 Cal Months"),
+        ("K24 Example Agency 2018-2023 Co-I 0.10 Cal Months", None, "0.10 Cal Months"),
+        # Other spellings of the same unit.
+        ("Example Award 1.2 calendar months", "", "1.2 calendar months"),
+        ("Example Award .24 calendar months - No Salary", "", ".24 calendar months"),
+        ("Example Award 9/24/12-8/31/14  1.2 cal mon", "", "1.2 cal mon"),
+        ("Example Award Co-investigator, 0.6 person months", "", "0.6 person months"),
+        ("Example Award $100,000 PI, 1.8 CM", "", "1.8 CM"),
+        # A whole number of months before "CM", up to 12.
+        ("Example Award 2019-2021 Co-I 12 CM", "", "12 CM"),
+        ("Example Award 2019-2021 Co-I 3 CM", "", "3 CM"),
+        ("Example Award 3/05/2018 - 3/04/2019 1.08 calendar months", "108%", "1.08 calendar months"),
+    ],
+)
+def test_effort_in_months_is_kept_as_written_not_converted(text, llm_effort, expected):
+    fields = {} if llm_effort is None else {"percent_effort": llm_effort}
+    updated, reformatted = apply_regex_post_processing(text, fields, "M2B")
+
+    assert updated["percent_effort"] == expected
+    assert reformatted["percent_effort"]["reformatted"] == expected
+    assert reformatted["percent_effort"]["original"] == (llm_effort or expected)
+
+
+@pytest.mark.parametrize(
+    "text,llm_effort",
+    [
+        # The source states the percent itself next to the months.
+        ("Effort: 1.20 Calendar Months (10% Effort)", "10%"),
+        ("% Effort: 1.07 Cal Months (8.9% Acad Months)", "8.9%"),
+        # The source states an FTE the LLM converted.
+        ("Effort: 0.96 CM (.08 FTE)", "8%"),
+        # Not a bare percent: an LLM months value is left alone.
+        ("Effort: 1.2 calendar months", "0.60 calendar months"),
+    ],
+)
+def test_effort_the_source_states_survives_a_months_figure(text, llm_effort):
+    updated, reformatted = apply_regex_post_processing(
+        text, {"percent_effort": llm_effort}, "M2A"
+    )
+
+    assert updated["percent_effort"] == llm_effort
+    assert "percent_effort" not in reformatted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Green CM, Smith J. Example study. Example Agency grant",  # author initials
+        "Example Award, 2 calendar years",                           # not months
+        "Example Award 2019-2021 0.24 cm tumour margin",            # lower-case cm
+        # Digits that are not a month figure before "CM": the tail of a grant
+        # number, a year, a whole number over 12.
+        "R01 CA123456 CM Jones, co-I",
+        "Smith J, Green CM. 2019 CM study",
+        "Example Award 2019-2021 Co-I 24 CM",
+        "Example Award ID 1234.5 CM",                                 # decimal over 12
+        "Example Award 2019-2021 3 CMV cohorts",                      # "CM" inside a word
+    ],
+)
+def test_text_without_an_effort_in_months_fills_nothing(text):
+    updated, reformatted = apply_regex_post_processing(text, {}, "M2B")
+
+    assert "percent_effort" not in updated
+    assert "percent_effort" not in reformatted
+
+
+def test_effort_in_months_is_not_applied_outside_grant_taxonomy():
+    updated, _ = apply_regex_post_processing("Example 0.24 Cal Months", {}, "S1")
+
+    assert "percent_effort" not in updated
 
 
 # --- Two-digit source year read into the wrong century ----------------------

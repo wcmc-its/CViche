@@ -1,11 +1,12 @@
 """Security regression tests for SEC-01 through SEC-07."""
+import importlib
 import json
 import logging
 import os
-import importlib
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 from sqlalchemy.orm import object_session
 
 
@@ -132,6 +133,7 @@ class TestSamlSignature:
         calling pysaml2 (which would need IdP metadata and xmlsec1).
         """
         from unittest.mock import call
+
         import app.saml_client as saml_mod
 
         # Capture the config dict passed to Saml2Config.load()
@@ -252,7 +254,7 @@ class TestPathTraversal:
 
     def _create_test_user_and_run(self, db, role="user"):
         """Helper to create a user and run for file access tests."""
-        from app.models import User, Run
+        from app.models import Run, User
         user = User(email="test@example.com", display_name="Test User", role=role)
         db.add(user)
         db.commit()
@@ -271,7 +273,7 @@ class TestPathTraversal:
 
     def _auth_cookie(self, client, user):
         """Set a valid session cookie on the test client."""
-        from app.auth import create_session_cookie, COOKIE_NAME
+        from app.auth import COOKIE_NAME, create_session_cookie
         # create_session_cookie reads the current epoch from a DB session;
         # `user` was just committed on the test's session, so borrow that one.
         cookie_value = create_session_cookie(user, object_session(user))
@@ -610,6 +612,13 @@ class TestDocsGating:
     def test_root_does_not_advertise_docs(self, client, db, seed_simple_mode):
         assert client.get("/").json()["docs"] is None
 
+    def test_root_reports_the_image_tag_as_its_version(self, client, db, seed_simple_mode, monkeypatch):
+        """#1239: GET / names the deployed image, not a static "1.0.0"."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-3.tag")
+        assert client.get("/").json()["version"] == "dev-3.tag"
+        monkeypatch.delenv("CVICHE_IMAGE_TAG")
+        assert client.get("/").json()["version"] is None
+
     def test_enable_docs_env_flag(self, monkeypatch):
         from app.main import _docs_enabled
         monkeypatch.setenv("CVICHE_ENABLE_DOCS", "true")
@@ -635,8 +644,8 @@ class TestUploadValidation:
 
     def _create_auth_user(self, client, db, email="test@example.com", role="user"):
         """Create a user with consent and set auth cookie."""
+        from app.auth import COOKIE_NAME, create_session_cookie
         from app.models import User
-        from app.auth import create_session_cookie, COOKIE_NAME
 
         user = User(
             email=email,
@@ -740,6 +749,27 @@ class TestUploadValidation:
         ("/api/upload", {"submission_type": "own_cv"}),
         ("/api/estimate", None),
     ])
+    def test_pdf_over_the_time_limit_says_so(self, client, db, seed_simple_mode, tmp_path,
+                                             cv_pdf, monkeypatch, endpoint, data):
+        """#1650: a text-check timeout is a 400 saying the read took too
+        long -- not that the file is too large or complex."""
+        from app.models import Run
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+        monkeypatch.setattr(pdf_sandbox, "PDF_TEXT_TIMEOUT_SECONDS", 0.01)
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                endpoint, files={"file": ("my_cv.pdf", cv_pdf(), "application/pdf")}, data=data,
+            )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["message"] == pdf_sandbox.PDF_TIMEOUT_UPLOAD_MESSAGE
+        assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
     def test_pdf_with_every_sandbox_slot_busy_gets_503(self, client, db, seed_simple_mode, tmp_path,
                                                       cv_pdf, monkeypatch, endpoint, data):
         """#806 review B1: with both PDF child slots held, a third PDF
@@ -766,6 +796,24 @@ class TestUploadValidation:
         assert int(response.headers["retry-after"]) > 0
         assert db.query(Run).count() == 0
         assert list(tmp_path.iterdir()) == []
+
+    def test_pdf_child_stopped_by_sigterm_gets_503_not_400(self, client, db, seed_simple_mode, tmp_path,
+                                                         cv_pdf, monkeypatch):
+        """#1566: a PDF check whose child is SIGTERMed (the pod draining) is
+        transient -- a 503 to retry, never the "too large" 400."""
+        from app.models import Run
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+        monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP",
+                            "import os, signal; os.kill(os.getpid(), signal.SIGTERM)")
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                "/api/upload", files={"file": ("cv.pdf", cv_pdf(), "application/pdf")},
+                data={"submission_type": "own_cv"},
+            )
+        assert response.status_code == 503, response.text
+        assert int(response.headers["retry-after"]) > 0
+        assert db.query(Run).count() == 0
 
     def test_unreadable_pdf_child_reply_is_a_400_not_a_500(self, client, db, seed_simple_mode, cv_pdf, monkeypatch):
         """#806 review N1: whatever goes wrong inside the PDF job short of an
@@ -923,6 +971,7 @@ class TestUploadValidation:
         """#793: both endpoints reject a docx whose declared uncompressed
         size exceeds the expansion cap, before python-docx reads it."""
         import io
+
         from docx import Document
         self._create_auth_user(client, db)
         doc = Document()
@@ -1082,6 +1131,7 @@ class TestUploadValidation:
         and the body is never read (_read_bounded) or parsed (_extract_text,
         _validate_docx_magic) -- the budget is spent before either runs."""
         from unittest.mock import AsyncMock
+
         from app.api import upload as upload_module
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"

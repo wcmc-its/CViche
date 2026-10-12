@@ -25,7 +25,6 @@ from typing import Any
 
 from unified_pipeline.llm_client import call_llm
 
-
 # =============================================================================
 # TAXONOMY CODE DESCRIPTIONS (Condensed for LLM)
 # =============================================================================

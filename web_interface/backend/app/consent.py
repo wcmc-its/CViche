@@ -7,8 +7,8 @@ from pathlib import Path
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models import Consent, User
 from app.config_loader import get_config_value
+from app.models import Consent, User
 
 logger = logging.getLogger(__name__)
 

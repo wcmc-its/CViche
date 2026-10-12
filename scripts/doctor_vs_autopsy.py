@@ -36,8 +36,10 @@ re-emits about twenty unrelated stage-6 checks, so it is split by `_STAGE6_SHAPE
 
 Recall: the verified findings carrying an element_idx_start that at least one
 hit matched, overall and by severity, batch, batch_class (a batch synthesis's
-own class: EBYSBC's E1..E36, s7ab's s7ab-1..s7ab-21) and class_ref (the
-cross-batch class it cites). A null class is grouped as "(none)".
+own class: EBYSBC's E1..E36, s7ab's s7ab-1..s7ab-21), class_ref (the
+cross-batch class it cites; YUYVIG cites an issue, "#1403", or "NEW") and stage
+(the pipeline stage the verifier blamed first, "3b"; #1586 ranks misses by it).
+A null class or stage is grouped as "(none)".
 A finding with no index (`element_idx_start: null`) is counted apart: no hit
 can match it. The autopsy's own `doctor_caught` verdicts are tallied beside it.
 
@@ -46,6 +48,7 @@ Label schema, one `<uid>.json` per run. Ids, codes and counts only -- no CV text
     {"uid": "ABCDEF", "batch": "EBYSBC",
      "findings": [{"id": "ABCDEF-01", "class": "whole_record_lost",
                    "class_ref": "s7ab-4" | null, "batch_class": "E1" | null,
+                   "stage": "3b" | null,  # optional
                    "severity": "high" | "medium" | "low",
                    "element_idx_start": 32 | [32, 64] | null, "records": 5 | null,
                    "doctor_caught": {"verdict": "yes" | "partial" | "no",
@@ -69,14 +72,23 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-STAGE6_LINT = "stage6_render_warnings"
-STAGE6_MESSAGE_PREFIX = "stage 6 self-check: "
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+# The shapes are the run-time ledger's (doctor/precision.py), so this scorer
+# and the review copy's precision gate (#1589) name a stage-6 message alike.
+from unified_pipeline.doctor.precision import (  # noqa: E402
+    STAGE6_LINT,
+    stage6_shape,
+)
+
 STATUS_RAN = "ran"
 FAILED_KEY = "_failed"  # doctor_gate.py's top-level failure map
 LOUD_SEVERITIES = frozenset({"WARN", "ERROR"})
 VERDICTS = ("TP", "partial", "FP")
 NO_CLASS = "(none)"
-CLASS_GROUPS = ("batch_class", "class_ref")
+CLASS_GROUPS = ("batch_class", "class_ref", "stage")
 CLASS_TEXT_MIN = 3  # the text table lists a class with this many findings; --json lists all
 EXIT_INPUT_ERROR = 2
 
@@ -88,37 +100,6 @@ EXIT_INPUT_ERROR = 2
 # finding can quote CV text, where a number after "entry" is not an index.
 _IDX_PREFIX_RE = re.compile(r"(?:element_idx_start[ =:]\s*|entry |idx )(\d+(?:\.\d+)?)\b")
 
-# stage6_render_warnings message -> shape, first match wins. Read from the
-# emitters: stage6/sections/appendix.py `_diversion_message`,
-# stage_6_word_template.py `reroute_warnings` and `_validate_output`,
-# stage6/fan_out.py, stage6/sections/{memberships,board_certification}.py.
-_STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
-    (shape, re.compile(pattern)) for shape, pattern in (
-        ("reroute_refused", r"reroute .*refused"),
-        ("reroute_cross_family", r"reroute .*accepted cross family"),
-        ("reroute_same_family", r"reroute .*accepted same family"),
-        ("appendix_recovered_A", r"^A: .*recovered into the Appendix"),
-        ("appendix_recovered", r"recovered into the Appendix"),
-        ("appendix_no_route_T", r"^T: .*no stage 6 section is routed"),
-        ("appendix_no_route", r"no stage 6 section is routed"),
-        ("appendix_grant_too_sparse", r"too sparse to table"),
-        ("appendix_t_validation_recoded", r"T-validation recoded"),
-        ("appendix_invalid_code", r"quarantined"),
-        ("appendix_passthrough_refused", r"refused by the passthrough writer"),
-        ("appendix_section_declined", r"not placed by the section routed"),
-        ("appendix_no_research_summary", r"no research summary rendered"),
-        ("appendix_m1_not_in_summary", r"research summary does not reproduce"),
-        ("no_teaching_content", r"No visible bulleted content"),
-        ("semicolon_fused_bullets", r"combined with semicolons"),
-        ("bare_dates_in_table", r"rows have bare dates"),
-        ("board_cert_row_skipped", r"reconstructed board certification row"),
-        ("memberships_header_row_dropped", r"dropped as a source table header row"),
-        ("fanout_list_not_split", r"holds (?:several )?records that were not split"),
-        ("geo_scope_failed", r"geographic scope classification"),
-        ("appendix_reclassification_failed", r"appendix entry reclassification"),
-        ("section_failed", r"^section .* failed:"),
-    ))
-STAGE6_OTHER_SHAPE = "other"
 
 
 class InputError(Exception):
@@ -143,6 +124,7 @@ class Verified:
     severity: str
     class_ref: str
     batch_class: str
+    stage: str
     idxs: frozenset[int]
     autopsy_credit: str | None  # doctor_caught verdict: yes / partial / no / None
 
@@ -176,15 +158,6 @@ class LintRow:
     judged_firing: dict[str, int] = field(default_factory=dict)
     unmatched_hits: list[tuple[str, list[int]]] = field(default_factory=list)
     unlocated_uids: list[str] = field(default_factory=list)
-
-
-def stage6_shape(message: str) -> str:
-    """The `_STAGE6_SHAPES` name of one stage-6 warning message."""
-    text = message.removeprefix(STAGE6_MESSAGE_PREFIX)
-    for shape, pattern in _STAGE6_SHAPES:
-        if pattern.search(text):
-            return shape
-    return STAGE6_OTHER_SHAPE
 
 
 def lint_key(lint: str, shape: str | None) -> str:
@@ -243,7 +216,7 @@ def _label_findings(uid: str, label: dict) -> list[Verified]:
     batch = label.get("batch") or ""
     return [Verified(uid, f["id"], batch, f["severity"],
                      f.get("class_ref") or NO_CLASS, f.get("batch_class") or NO_CLASS,
-                     as_idx_set(f["element_idx_start"]),
+                     f.get("stage") or NO_CLASS, as_idx_set(f["element_idx_start"]),
                      (f.get("doctor_caught") or {}).get("verdict"))
             for f in label["findings"]]
 

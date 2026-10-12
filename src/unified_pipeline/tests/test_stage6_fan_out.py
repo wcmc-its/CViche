@@ -444,11 +444,12 @@ def test_date_keys_never_count_as_a_parents_identity(key, expected):
 _NEUTRAL_TEXT = 'Xyneutral probe line'
 
 
-def _rendered_markers(tmp_path, code):
-    """The schema fields of `code` whose marker reaches the .docx when one entry
-    of that code is rendered with a unique marker in every field, and whether
-    the entry's own (neutral) text reaches it. The text must not carry the
-    markers: a section that writes the text would then "render" every field."""
+def _rendered_markers(tmp_path, code, extra_fields=frozenset()):
+    """The schema fields of `code` (and `extra_fields`) whose marker reaches the
+    .docx when one entry of that code is rendered with a unique marker in every
+    field, and whether the entry's own (neutral) text reaches it. The text must
+    not carry the markers: a section that writes the text would then "render"
+    every field."""
     import json
 
     from docx import Document
@@ -456,7 +457,7 @@ def _rendered_markers(tmp_path, code):
     from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
 
     markers = {name: 'Zq' + name.replace('_', 'x') + 'Z'
-               for name in FIELD_SCHEMAS[code]['fields'] if name != 'narrative'}
+               for name in {*FIELD_SCHEMAS[code]['fields'], *extra_fields} if name != 'narrative'}
     entry = {'taxonomy_code': code, 'element_idx_start': 0, 'text': _NEUTRAL_TEXT,
              'extracted_fields': dict(markers)}
     source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
@@ -476,6 +477,39 @@ def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
     coverage test pass on content the output drops (web240's `institution`),
     and one it omits would needlessly keep entries whole."""
     assert _rendered_markers(tmp_path, code) == (set(fan_out._RENDERED_FIELDS[code]), False)
+
+
+def _offschema_date_fields(code):
+    """The date fields stage 4 may emit for `code` that its `FIELD_SCHEMAS`
+    entry does not name: the active (config-file) schema's and the field
+    descriptions' (#1556 d: Q4D's start/end)."""
+    from unified_pipeline.stage4.schemas import FIELD_DESCRIPTIONS, get_active_schemas
+
+    active = get_active_schemas().get(code, {}).get('fields', [])
+    named = set(active) | set(FIELD_DESCRIPTIONS.get(code, {}))
+    return {key for key in named - set(FIELD_SCHEMAS[code]['fields']) if fan_out._is_date_key(key)}
+
+
+@pytest.mark.parametrize('code', sorted(
+    code for code in fan_out._RENDERED_FIELDS if _offschema_date_fields(code)))
+def test_offschema_date_fields_a_section_writes_are_the_ones_fan_out_counts(tmp_path, code):
+    """A date field outside the schema that the section writes must be a
+    written date to `_is_written_date`, or `_repeated_rows` reads two spans of
+    one name as one row (#1556 d); one it does not write must not be."""
+    extra = _offschema_date_fields(code)
+    written = _rendered_markers(tmp_path, code, extra)[0] & extra
+    markers = {key: 'Zq' + key for key in extra}
+    assert written == {key for key in extra
+                       if fan_out._is_written_date(code, key, markers[key], markers)}
+
+
+@pytest.mark.parametrize('code', ['B2', 'Q4D'])
+def test_only_b1_writes_a_nested_dates_attended(code):
+    """B2 and Q4D write a flat start/end only; a `dates_attended` on one of
+    their records is not in the row, so it must not tell two rows apart."""
+    nested = {'start_date': '1990', 'end_date': '1992'}
+    assert not fan_out._is_written_date(code, 'dates_attended', nested, {})
+    assert fan_out._is_written_date('B1', 'dates_attended', nested, {})
 
 
 @pytest.mark.parametrize('code', sorted(fan_out._TEXT_RENDERED_CODES))
@@ -1163,21 +1197,28 @@ def _meeting(place, year):
 
 class TestInheritedScope:
     """EBYSBC E34 (BZZNRL 137): a fanned child keeps its heading's scope
-    unless the classifier, asked about that record alone, puts it abroad."""
+    unless the classifier, asked about that record alone, puts it abroad.
+    #1579 (YUYVIG): any other entry under a scope heading takes it, and the
+    classifier is not asked."""
 
     @pytest.mark.parametrize('hierarchy,scope', [
         (['SERVICE', 'National'], 'National'), (['NATIONAL SERVICE ROLES'], 'National'),
         (['International', 'Talks'], 'International'), (['Regional'], 'Regional'),
         (['International Activities', 'National'], 'National'),
-        (['Talks: National, International'], None), (['Editorial Work'], None), ([], None)])
+        (['Talks: National, International'], None), (['Editorial Work'], None), ([], None),
+        # #1579: the heading forms the YUYVIG CVs file their talks and committees under.
+        (['R. INVITED TALKS', 'Regional*'], 'Regional'), (['R. INVITED TALKS', 'National*'], 'National'),
+        (['R. INVITED TALKS', 'International*'], 'International'), (['INVITED LECTURER', 'STATE'], 'Regional'),
+        (['Scholarship', 'Presentations (State & Local)'], 'Regional'), (['LOCAL'], 'Regional'),
+        (['Statewide Review Panels'], 'Regional'), (['Provincial Committees'], 'Regional'),
+        (['Federal Advisory Boards'], 'National'), (['Talks', 'International/National'], None),
+        (['Committees for State and Federal Agencies'], None)])
     def test_the_nearest_heading_naming_one_scope(self, hierarchy, scope):
-        assert fan_out.inherited_scope({FANNED_OUT_FROM: {}, 'hierarchy': hierarchy}) == scope
+        assert fan_out.inherited_scope({'hierarchy': hierarchy}) == scope
 
-    def test_the_last_stage4_record_inherits_too(self):
+    def test_a_fanned_out_record_inherits_too(self):
+        assert fan_out.inherited_scope({FANNED_OUT_FROM: {}, 'hierarchy': ['National']}) == 'National'
         assert fan_out.inherited_scope({LAST_STAGE4_RECORD: {}, 'hierarchy': ['National']}) == 'National'
-
-    def test_an_entry_that_was_not_fanned_out_inherits_nothing(self):
-        assert fan_out.inherited_scope({'hierarchy': ['National']}) is None
 
     @pytest.mark.parametrize('marker,heading,own,scope', [
         (FANNED_OUT_FROM, 'National', 'Regional', 'National'),
@@ -1186,11 +1227,28 @@ class TestInheritedScope:
         (FANNED_OUT_FROM, 'Regional', 'National', 'Regional'),
         (FANNED_OUT_FROM, 'International', 'National', 'International'),
         (FANNED_OUT_FROM, 'Editorial Work', 'Regional', 'Regional'),
-        (None, 'National', 'Regional', 'Regional')])
+        (None, 'Editorial Work', 'International', 'International')])
     def test_a_record_keeps_its_heading_unless_the_classifier_puts_it_abroad(
             self, marker, heading, own, scope):
         entry = {'hierarchy': ['SERVICE', heading], **({marker: {}} if marker else {})}
-        assert fan_out.record_scope(entry, own) == scope
+        assert fan_out.record_scope(entry, lambda _: own) == scope
+
+    @pytest.mark.parametrize('heading,scope', [
+        ('Regional*', 'Regional'), ('National', 'National'), ('International*', 'International'),
+        ('STATE', 'Regional'), ('Presentations (State & Local)', 'Regional')])
+    def test_an_entry_under_a_scope_heading_takes_it_without_the_classifier(self, heading, scope):
+        # #1579 IZABPD h0041, SQMWHM h1322, SXPHOG h1271: the classifier's
+        # distance answer re-bucketed talks the CV had already sorted.
+        asked = []
+        entry = {'hierarchy': ['R. INVITED TALKS', heading]}
+        assert fan_out.record_scope(entry, lambda e: asked.append(e) or 'International') == scope
+        assert asked == []
+
+    def test_an_ambiguous_heading_falls_back_to_the_classifier(self):
+        asked = []
+        entry = {'hierarchy': ['R. INVITED TALKS', 'International/National']}
+        assert fan_out.record_scope(entry, lambda e: asked.append(e) or 'Regional') == 'Regional'
+        assert asked == [entry]
 
     def test_the_last_stage4_record_is_its_own_fields_not_the_whole_line(self):
         entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text='Glade Board\tFern Council and Moss Panel')
@@ -1209,9 +1267,11 @@ class TestInheritedScope:
         generator = _scope_generator(monkeypatch, abroad='Varnor')
         assert [generator._classify_geographic_scope(c) for c in children] == [
             'International', 'National', 'National']
-        # Classified on the whole line, as the parent was, the last record goes abroad.
+        # Classified on the whole line, as the parent was, the last record goes
+        # abroad; under its National heading it now takes that heading (#1579).
         whole = {key: value for key, value in children[-1].items() if key != LAST_STAGE4_RECORD}
-        assert generator._classify_geographic_scope(whole) == 'International'
+        assert generator._classify_geographic_scope({**whole, 'hierarchy': ['SERVICE']}) == 'International'
+        assert generator._classify_geographic_scope(whole) == 'National'
 
     def test_a_listed_child_keeps_the_heading_unless_it_is_abroad(self, monkeypatch):
         entry = {'taxonomy_code': 'Q2', 'hierarchy': ['SERVICE', 'National'],
@@ -1222,8 +1282,11 @@ class TestInheritedScope:
         generator = _scope_generator(monkeypatch, abroad='Varnor')
         assert [generator._classify_geographic_scope(c) for c in _fan(entry)] == [
             'National', 'International']
-        # An entry that was not fanned out takes the classifier's answer.
-        assert generator._classify_geographic_scope({**entry, 'text': 'Spring Forum, Ashby'}) == 'Regional'
+        # An entry that was not fanned out takes its heading, even where the
+        # classifier would put it abroad (#1579), and its own answer without one.
+        assert generator._classify_geographic_scope({**entry, 'text': 'Spring Forum, Varnor'}) == 'National'
+        assert generator._classify_geographic_scope(
+            {**entry, 'hierarchy': ['SERVICE'], 'text': 'Spring Forum, Ashby'}) == 'Regional'
 
 
 @pytest.mark.parametrize('context', ['', '\tUnit of Kestrel Studies\tAshby University'],
@@ -1296,6 +1359,42 @@ class TestStage4RecordOwnText:
         assert [fan_out.is_split_record(c) for c in children] == [True, True, True]
         assert [fan_out.is_split_record(c) for c in _fan(_THREE_HONORS)] == [True] * 3
         assert not fan_out.is_split_record({'text': 'Glade Board'})
+
+
+class TestBuiltTextIsMarked:
+    """#1556 e: a child whose text is the line built from its fields says so
+    (`has_built_text`), so a renderer does not re-parse the built line's
+    separators as a source pipe column. A child that keeps a line of the CV
+    -- its tab segment, or the parent's whole text -- does not."""
+
+    def test_stage4_children_with_built_lines_are_marked_and_the_last_is_not(self):
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES)))
+        assert [fan_out.has_built_text(c) for c in children] == [True, True, False]
+
+    def test_stage4_children_with_their_own_tab_segments_are_not_marked(self):
+        text = 'Chair, Glade Board 1999-2001\tMember, Fern Council 2001-2003\tMember, Moss Panel 2004-2006'
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))
+        assert not any(fan_out.has_built_text(c) for c in children)
+
+    def test_generic_children_follow_the_same_rule(self):
+        assert not any(fan_out.has_built_text(c) for c in _fan(_THREE_HONORS))
+        wrapped = _honors('Alpha Prize, Hollis College\tGraduate School\tBeta Prize',
+                          [_award('Alpha Prize Graduate School'), _award('Beta Prize')])
+        assert [fan_out.has_built_text(c) for c in _fan(wrapped)] == [True, True]
+
+    def test_a_lone_record_keeps_the_whole_text_unmarked(self):
+        # Two tab segments, one record: the child's text is the CV's own text.
+        entry = {'taxonomy_code': 'D1',
+                 'text': 'Varnor College, School of Botany\tLecturer in Botany, 1977-1979',
+                 'extracted_fields': {'appointments': [_appointment(
+                     'Lecturer in Botany', '1977', '1979', 'Varnor College, School of Botany')],
+                     'start_date': '1977', 'end_date': '1979'}}
+        (child,) = _fan(entry)
+        assert child['text'] == entry['text']
+        assert not fan_out.has_built_text(child)
+
+    def test_an_entry_that_was_not_split_is_not_marked(self):
+        assert not fan_out.has_built_text({'text': 'Glade Board | Member'})
 
 
 class TestStage4RecordDates:
@@ -1374,3 +1473,100 @@ class TestStage4RepeatedRows:
         records[1]['start_date'] = '2001-09'
         records[1]['end_date'] = '2002-06'
         assert len(_fan4(_stage4_entry(records, code='C', text='Resident, Ashby Hospital'))) == 2
+
+    # #1556 (d), OIEPQD XAYKXA entry 134: Q4D's and B2's schema names no
+    # start/end, but their sections write the range, so two spans are two rows.
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name')])
+    def test_two_spans_the_date_column_shows_keep_both_records(self, code, name_key):
+        records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2009', 'end_date': 'present'},
+                   {name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}]
+        children = _fan4(_stage4_entry(
+            records, code=code, text='Zqjournal of Lanterns reviewer since 2009, board 2016-2019'))
+        assert [(c['extracted_fields']['start_date'], c['extracted_fields']['end_date'])
+                for c in children] == [('2009', 'present'), ('2016', '2019')]
+
+    @pytest.mark.parametrize('code,name_key', [('Q4D', 'journal_name'), ('B2', 'program_name')])
+    def test_one_span_listed_twice_still_renders_once(self, code, name_key):
+        records = [{name_key: 'Zqjournal of Lanterns', 'start_date': '2016', 'end_date': '2019'}] * 2
+        children = _fan4(_stage4_entry(
+            copy.deepcopy(records), code=code, text='Zqjournal of Lanterns 2016-2019'))
+        assert len(children) == 1
+
+    def test_two_b1_attendance_spans_keep_both_records(self):
+        records = [{'degree': 'Zqcertificate', 'institution': 'Ashby College', 'year': None,
+                    'dates_attended': {'start_date': start, 'end_date': end}}
+                   for start, end in (('1990', '1992'), ('1995', '1997'))]
+        children = _fan4(_stage4_entry(
+            records, code='B1', text='Zqcertificate, Ashby College, 1990-1992 and 1995-1997'))
+        assert len(children) == 2
+
+
+# --- #1243: stage 5d's one citation on an entry stage 4 split into records ---
+# NDMRSO VYRDHN 607/613: two tab-joined articles, split by stage 4; 5d wrote
+# one citation (of the first) and the split was declined, so the second
+# article never rendered. Invented authors, titles and journals.
+
+
+def _article(title, journal, authors='Zqowner A, Brack T'):
+    return {'authors': authors, 'year': '2006', 'title': title, 'journal': journal,
+            'volume': '5', 'issue': '1', 'pages': '10-19'}
+
+
+_TWO_ARTICLES = [_article('Lanterns in the orchard model.', 'Zqjournal Alpha'),
+                 _article('Copper weathering of the north arch.', 'Zqjournal Beta')]
+_TWO_ARTICLES_TEXT = ('Zqowner A, Brack T. 2006. Lanterns in the orchard model. Zqjournal Alpha 5(1):10-19.'
+                      '\tZqowner A, Brack T. 2006. Copper weathering of the north arch. '
+                      'Zqjournal Beta 5(1):10-19.')
+
+
+def _cited_entry(citation):
+    entry = _stage4_entry(copy.deepcopy(_TWO_ARTICLES), code='S1', text=_TWO_ARTICLES_TEXT)
+    entry['extracted_fields'].update({'formatted_citation': citation,
+                                      'formatting_source': 'stage_5d_llm'})
+    return entry
+
+
+_FIRST_CITATION = ('Zqowner A, Brack T. "Lanterns in the Orchard Model." '
+                   'Zqjournal Alpha. 2006;5(1):10-19.')
+
+
+class TestStage5dCitationOnASplitEntry:
+    def test_the_split_fans_out_and_the_citation_stays_with_its_record(self):
+        first, last = _fan4(_cited_entry(_FIRST_CITATION))
+        assert first['extracted_fields']['formatted_citation'] == _FIRST_CITATION
+        assert first['extracted_fields']['formatting_source'] == 'stage_5d_llm'
+        assert last['extracted_fields']['title'] == 'Copper weathering of the north arch.'
+        assert 'formatted_citation' not in last['extracted_fields']
+        assert 'formatting_source' not in last['extracted_fields']
+
+    def test_a_citation_of_the_last_record_stays_on_the_last_child(self):
+        citation = 'Zqowner A, Brack T. Copper weathering of the north arch. Zqjournal Beta. 2006.'
+        first, last = _fan4(_cited_entry(citation))
+        assert 'formatted_citation' not in first['extracted_fields']
+        assert last['extracted_fields']['formatted_citation'] == citation
+
+    @pytest.mark.parametrize('citation', [
+        'Zqowner A. An unrelated essay. Zqjournal Gamma. 2006.',
+        'Lanterns in the orchard model; Copper weathering of the north arch. Zqmeeting; Ashby.',
+    ], ids=['no_title', 'both_titles'])
+    def test_a_citation_naming_no_one_record_declines_the_split(self, citation):
+        # EOAHMI GHCIXA S8: a citation of every record renders them all, with
+        # a venue and a place no S8 field holds; splitting it lost both.
+        entry = _cited_entry(citation)
+        assert _fan4(entry) == [entry]
+
+    def test_both_articles_reach_the_document(self, tmp_path):
+        from docx import Document
+
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+        source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+        source.write_text(json.dumps({'document_uid': 'TESTAA',
+                                      'entries': [_cited_entry(_FIRST_CITATION)]}))
+        WCMTemplateGenerator(verbose=False).generate(
+            str(source), str(target), research_summary_path=None)
+        body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+        assert 'Lanterns in the Orchard Model' in body
+        assert 'Copper weathering of the north arch' in body
+        assert body.count('Lanterns in the') == 1

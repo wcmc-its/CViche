@@ -24,9 +24,9 @@ Two clients, by design, because of how a run executes:
 All Redis operations are best-effort: a broker failure logs and degrades rather
 than failing the run (the DB remains the source of truth for run status).
 """
-import os
 import json
 import logging
+import os
 import threading
 
 from app.config_loader import get_config

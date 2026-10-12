@@ -21,19 +21,43 @@ from sqlalchemy.orm import Session
 
 from app.errors import not_found
 from app.models import (
-    InboundFile, InboundFileStatus, InboundMessage, InboundMessageStatus, InboundRejectReason, User,
+    InboundFile,
+    InboundFileStatus,
+    InboundMessage,
+    InboundMessageStatus,
+    InboundRejectReason,
+    User,
+    UserStatus,
 )
 from app.services import ed_access, mailer
-from app.services.inbound_autorun import AutoRunResult, auto_run
 from app.services.batch_service import MAX_BATCH_FILES
+from app.services.inbound_autorun import AutoRunResult, auto_run
 from app.services.inbound_mail import (
-    Attachment, AttachmentReject, ParsedMessage, UnparseableMessage, is_wcm_address, parse_message,
+    Attachment,
+    AttachmentReject,
+    ParsedMessage,
+    UnparseableMessage,
+    is_wcm_address,
+    parse_message,
+)
+from app.services.pdf_sandbox import (
+    EncryptedPdfError,
+    PdfBusyError,
+    PdfInterruptedError,
+    PdfTooComplexError,
+    UnreadablePdfError,
+    read_pdf,
 )
 from app.services.upload_validation import (
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, _extract_text, _validate_docx_magic, docx_active_content, is_mostly_scanned,
+    MIN_EXTRACTED_CHARS,
+    PDF_EXTENSION,
+    _extract_text,
+    _validate_docx_magic,
+    docx_active_content,
+    is_mostly_scanned,
 )
-from app.services.pdf_sandbox import EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError, read_pdf
 from app.storage.base import RunStorage
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +113,7 @@ def _screen_sender(db: Session, parsed: ParsedMessage) -> Verdict:
         return Verdict(None, InboundRejectReason.UNKNOWN_USER)
     if not user.consent_version:
         return Verdict(user, InboundRejectReason.NEVER_CONSENTED)
-    if user.status != "active":
+    if user.status != UserStatus.ACTIVE:
         return Verdict(user, InboundRejectReason.USER_DISABLED)
     if not _passes_access_check(db, user):
         return Verdict(user, InboundRejectReason.NOT_IN_ACCESS_GROUP)
@@ -112,8 +136,8 @@ def _readable_reject(att: Attachment) -> AttachmentReject | None:
             text = pdf.text
         else:
             text = _extract_text(att.content, ext)
-    except PdfBusyError as e:
-        raise TransientIntakeError("pdf sandbox busy") from e
+    except (PdfBusyError, PdfInterruptedError) as e:
+        raise TransientIntakeError(f"pdf sandbox transient failure: {e}") from e
     except (EncryptedPdfError, PdfTooComplexError, UnreadablePdfError):
         return AttachmentReject.UNREADABLE
     if text is not None and len(text.strip()) < MIN_EXTRACTED_CHARS:
@@ -305,7 +329,7 @@ def poll_once(session_factory: Callable[[], Session], storage: RunStorage) -> in
 def expire_stale(session_factory: Callable[[], Session], storage: RunStorage,
                  now: datetime | None = None) -> int:
     """Expire pending items past ``PENDING_EXPIRY`` and delete their bytes."""
-    cutoff = (now or datetime.now()) - PENDING_EXPIRY
+    cutoff = (now or utc_now()) - PENDING_EXPIRY
     expired = 0
     with session_factory() as db:
         items = db.scalars(select(InboundFile).where(

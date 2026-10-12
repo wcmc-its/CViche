@@ -24,10 +24,11 @@ if str(_SRC) not in sys.path:
 
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
-
 from docx.oxml.ns import qn  # noqa: E402
 
-from unified_pipeline.core.template_boilerplate import is_source_boilerplate  # noqa: E402
+from unified_pipeline.core.template_boilerplate import (
+    is_source_boilerplate,  # noqa: E402
+)
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     grant_status_rebucket_target,

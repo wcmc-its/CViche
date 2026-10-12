@@ -8,10 +8,11 @@ This module provides configuration settings used by:
 
 Single source of truth for all paths, settings, and feature flags.
 """
-from pathlib import Path
 import logging
 import math
 import os
+from pathlib import Path
+
 import yaml
 
 logger = logging.getLogger(__name__)

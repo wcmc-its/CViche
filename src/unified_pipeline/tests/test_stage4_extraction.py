@@ -19,6 +19,10 @@ What parallelism can break, and what each test pins:
 No network, no LLM: `extract_fields_batch`, `extract_cv_owner_name` and
 `infer_cv_owner_location` are stubbed on the `extraction` module attribute
 the loop reads. Synthetic entries only.
+
+The #1655 tests at the end run the real extraction over a synthetic .docx
+built in-test, with `call_llm` stubbed in stage 4 and stage 6, and render the
+result through stage 6's Personal Data table.
 """
 
 import json
@@ -29,12 +33,19 @@ from pathlib import Path
 
 import pytest
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
+from docx import Document
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import unified_pipeline.stage4.extraction as extraction  # noqa: E402
+import unified_pipeline.stage4.owner_name as owner_name  # noqa: E402
+import unified_pipeline.stage_6_word_template as stage_6_word_template  # noqa: E402
 from unified_pipeline.core import prompt_logger  # noqa: E402
 from unified_pipeline.core.batch_pool import workers_from_config  # noqa: E402
+from unified_pipeline.tests.test_stage4_owner_side_channel import (  # noqa: E402
+    LETTERHEAD,
+    letterhead_docx,
+)
 
 _NO_OWNER = {
     "first_name": "", "middle_name": "", "last_name": "",
@@ -497,7 +508,10 @@ def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(
     """#1174: a served call is a success, so only this stamp records it. The
     stamp is on the entries of the group the fallback answered, not on other
     groups, and a normal result leaves no key."""
-    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
+    from unified_pipeline.llm_provenance import (
+        FALLBACK_SERVED_KEY,
+        STAGE4_ENTRY_FALLBACK_KEY,
+    )
 
     entries = [
         {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
@@ -536,7 +550,10 @@ def test_extract_fields_batch_folds_out_of_range_items_into_a_one_entry_group(mo
     in index order; the scalar fields are the last, as for any multi-record
     entry, and nothing is stamped because nothing was lost."""
     from unified_pipeline.stage4.schemas import (
-        STAGE4_RECORDS_KEY, STAGE4_RECORDS_RETURNED_KEY, STAGE4_UNPLACED_ITEMS_KEY)
+        STAGE4_RECORDS_KEY,
+        STAGE4_RECORDS_RETURNED_KEY,
+        STAGE4_UNPLACED_ITEMS_KEY,
+    )
 
     monkeypatch.setattr(extraction, "call_llm", _llm_returning([
         {"entry_index": 0, "title": "Rank A", "start_date": "2001"},
@@ -594,6 +611,174 @@ def test_extract_fields_batch_stamps_a_larger_group_with_items_no_entry_can_take
     assert by_text["Rank B"]["extraction_error"] == extraction.NO_MATCHING_EXTRACTION
     assert [by_text[t].get(STAGE4_UNPLACED_ITEMS_KEY) for t in ("Rank A", "Rank B", "Other group")] == [2, 2, None]
     assert "2 reply item(s) at entry_index [-1, 5] fit no entry of the 2-entry group" in caplog.text
+
+
+# --- #1575: a group reply gives one entry another entry's values ---------------
+
+_GRANT_A = "Example Cancer Institute R01CA000001 (MPI, Effort: 20%) Total award: $326,020/year 04/21/17-03/31/23"
+_GRANT_B = "Example Foundation award (PI, Effort: 30%) Total award: $30,000/year 07/01/1997-06/30/1999"
+_GRANT_C = "Example Society pilot grant (PI) Total award: $150,000 04/01/98-12/31/02"
+
+
+def _m2b_at(text, idx):
+    return {"text": text, "taxonomy_code": "M2B", "element_idx_start": idx, "element_idx_end": idx}
+
+
+def _grant_group():
+    return [_m2b_at(_GRANT_A, 10), _m2b_at(_GRANT_C, 11), _m2b_at(_GRANT_B, 12)]
+
+
+# UVZNIC 592's shape: entry 0 keeps its own grant number and title, but its
+# dates, amount, effort and role are entry 2's.
+_CONTAMINATED_REPLY = [
+    {"entry_index": 0, "grant_number": "R01CA000001", "pi_role": "PI", "start_date": "1997-07-01",
+     "end_date": "1999-06-30", "total_funding": "$30,000/year", "percent_effort": "30%"},
+    {"entry_index": 1, "pi_role": "PI", "start_date": "1998-04-01", "end_date": "2002-12-31",
+     "total_funding": "$150,000"},
+    {"entry_index": 2, "pi_role": "PI", "start_date": "1997-07-01", "end_date": "1999-06-30",
+     "total_funding": "$30,000/year", "percent_effort": "30%"},
+]
+
+_ALONE_REPLY = [
+    {"entry_index": 0, "grant_number": "R01CA000001", "pi_role": "MPI", "start_date": "2017-04-21",
+     "end_date": "2023-03-31", "total_funding": "$326,020/year", "percent_effort": "20%"},
+]
+
+
+def _llm_by_group_size(replies_by_size, calls, fail_alone=False):
+    """A call_llm stub answering by how many entries the prompt holds, so the
+    group call and an entry's call of its own get different replies."""
+    def fake_call_llm(*, messages, **_kwargs):
+        size = messages[1]["content"].count("\n[Entry ")
+        calls.append(size)
+        if fail_alone and size == 1:
+            raise RuntimeError("provider error")
+        return {"content": json.dumps({"entries": replies_by_size[size]}), "cost": 0.01 * size,
+                "total_tokens": 100 * size}
+    return fake_call_llm
+
+
+def test_an_entry_given_another_entrys_values_is_extracted_again_alone(monkeypatch, caplog):
+    """UVZNIC 592: an active R01 rendered another grant's 1997-99 dates,
+    amount, effort and role. The borrowed values are not kept: the entry is
+    extracted again in a call of its own and carries that call's fields, with
+    the stamp naming what the group reply borrowed. The other entries keep
+    the group's fields, and the batch's cost counts both calls."""
+    from unified_pipeline.stage4.schemas import STAGE4_BORROWED_FIELDS_KEY
+
+    calls = []
+    monkeypatch.setattr(extraction, "call_llm",
+                        _llm_by_group_size({3: _CONTAMINATED_REPLY, 1: _ALONE_REPLY}, calls))
+
+    with caplog.at_level("WARNING"):
+        result = extraction.extract_fields_batch(_grant_group(), 0, 1)
+
+    by_idx = {e["element_idx_start"]: e for e in result["entries"]}
+    fields = by_idx[10]["extracted_fields"]
+    assert (fields["start_date"], fields["end_date"]) == ("2017-04-21", "2023-03-31")
+    assert (fields["total_funding"], fields["percent_effort"], fields["pi_role"]) == ("$326,020/year", "20%", "MPI")
+    assert by_idx[10][STAGE4_BORROWED_FIELDS_KEY] == ["end_date", "percent_effort", "start_date", "total_funding"]
+    assert by_idx[12]["extracted_fields"]["start_date"] == "1997-07-01"
+    assert STAGE4_BORROWED_FIELDS_KEY not in by_idx[11] and STAGE4_BORROWED_FIELDS_KEY not in by_idx[12]
+    assert calls == [3, 1]
+    assert result["cost"] == pytest.approx(0.04)
+    assert result["tokens"] == 400
+    assert "held another entry's end_date, percent_effort, start_date, total_funding" in caplog.text
+
+
+def test_when_the_call_of_its_own_fails_the_borrowed_values_are_still_not_kept(monkeypatch):
+    """The re-extraction failing does not bring the borrowed values back: the
+    entry keeps the group's fields with them None (the regex pass may refill
+    one from the entry's own text) and is stamped with the call's error. The
+    group's own call succeeded, so the batch is not failed."""
+    from unified_pipeline.stage4.schemas import STAGE4_REEXTRACT_ERROR_KEY
+
+    monkeypatch.setattr(extraction, "call_llm",
+                        _llm_by_group_size({3: _CONTAMINATED_REPLY}, [], fail_alone=True))
+
+    result = extraction.extract_fields_batch(_grant_group(), 0, 1)
+
+    entry = next(e for e in result["entries"] if e["element_idx_start"] == 10)
+    values = {str(value) for value in entry["extracted_fields"].values()}
+    assert not values & {"1997-07-01", "1999-06-30", "$30,000/year", "30%"}
+    assert entry["extracted_fields"]["grant_number"] == "R01CA000001"
+    assert entry[STAGE4_REEXTRACT_ERROR_KEY] == extraction.LLM_PROVIDER_ERROR
+    assert result["success"] is True
+
+
+def test_a_record_that_is_another_entrys_is_removed_from_the_entry(monkeypatch):
+    """UVZNIC 559: the reply gave entry 1 a second record that was entry 2's
+    mentee and gave entry 2 nothing. The record is removed from entry 1, which
+    is stamped with the count; entry 2 is left to the recovery pass as any
+    unmatched entry is. Removing a record calls nothing more."""
+    from unified_pipeline.stage4.schemas import (
+        STAGE4_BORROWED_FIELDS_KEY,
+        STAGE4_FOREIGN_RECORDS_KEY,
+        STAGE4_RECORDS_KEY,
+    )
+
+    calls = []
+    entries = [{"text": t, "taxonomy_code": "N3B", "element_idx_start": i, "element_idx_end": i}
+               for i, t in enumerate(["Mentee A, 2016-2018", "Mentee B, 2017-18", "Mentee C (2021-2022)"])]
+    monkeypatch.setattr(extraction, "call_llm", _llm_by_group_size({3: [
+        {"entry_index": 0, "mentee_name": "Mentee A", "start_date": "2016", "end_date": "2018"},
+        {"entry_index": 1, "mentee_name": "Mentee B", "start_date": "2017", "end_date": "2018"},
+        {"entry_index": 1, "mentee_name": "Mentee C", "start_date": "2021", "end_date": "2022"},
+    ]}, calls))
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    by_idx = {e["element_idx_start"]: e for e in result["entries"]}
+    assert by_idx[1]["extracted_fields"]["mentee_name"] == "Mentee B"
+    assert STAGE4_RECORDS_KEY not in by_idx[1]["extracted_fields"]
+    assert by_idx[1][STAGE4_FOREIGN_RECORDS_KEY] == 1
+    assert STAGE4_BORROWED_FIELDS_KEY not in by_idx[1]
+    assert by_idx[2]["extraction_error"] == extraction.NO_MATCHING_EXTRACTION
+    assert calls == [3]
+
+
+def test_a_reply_whose_values_are_each_entrys_own_is_kept_as_is(monkeypatch):
+    """The control: values each entry states itself, even ones another entry
+    also states (both grants run to 1999 here), are kept, and no entry is
+    stamped or called again."""
+    from unified_pipeline.stage4.schemas import STAGE4_BORROWED_FIELDS_KEY
+
+    calls = []
+    entries = [_m2b_at("Grant one (PI, Effort: 10%) $50,000 1995-1999", 0),
+               _m2b_at("Grant two (PI, Effort: 30%) $30,000 1997-1999", 1)]
+    monkeypatch.setattr(extraction, "call_llm", _llm_by_group_size({2: [
+        {"entry_index": 0, "start_date": "1995", "end_date": "1999", "total_funding": "$50,000",
+         "percent_effort": "10%"},
+        {"entry_index": 1, "start_date": "1997", "end_date": "1999", "total_funding": "$30,000",
+         "percent_effort": "30%"},
+    ]}, calls))
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert calls == [2]
+    assert [e["extracted_fields"]["total_funding"] for e in result["entries"]] == ["$50,000", "$30,000"]
+    assert not any(STAGE4_BORROWED_FIELDS_KEY in e for e in result["entries"])
+
+
+def test_a_year_from_the_entrys_own_context_heading_is_its_own(monkeypatch):
+    """The prompt shows a stamped entry under its heading (#985), so a year
+    the heading states is the entry's own, even when another entry states it
+    too."""
+    from unified_pipeline.stage4.schemas import STAGE4_BORROWED_FIELDS_KEY
+
+    calls = []
+    entries = [{**_d1_at("Visiting lecturer", 0), "context_heading": "Example University, 2019"},
+               _d1_at("Lecturer, 2019-2020", 1)]
+    monkeypatch.setattr(extraction, "call_llm", _llm_by_group_size({2: [
+        {"entry_index": 0, "title": "Visiting lecturer", "start_date": "2019"},
+        {"entry_index": 1, "title": "Lecturer", "start_date": "2019", "end_date": "2020"},
+    ]}, calls))
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert calls == [2]
+    assert result["entries"][0]["extracted_fields"]["start_date"] == "2019"
+    assert STAGE4_BORROWED_FIELDS_KEY not in result["entries"][0]
 
 
 @pytest.mark.parametrize("timeout_error", [
@@ -870,6 +1055,16 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
     assert rule in prompt
 
 
+def test_grant_prompt_says_effort_in_months_is_not_a_percent():
+    """#1659: "0.24 Cal Months" came back as "24%"; the rule line tells the
+    model to copy a month figure as written."""
+    schema = extraction.get_field_schema("M2A")
+    prompt = extraction.build_extraction_prompt([{"text": "Grant X"}], schema, "M2A")
+    assert ('- Effort given in calendar or person months (e.g., "0.24 Cal Months", "1.8 CM") '
+            'is NOT a percent: copy it into percent_effort as written ("0.24 Cal Months"), '
+            'never convert it to "%"') in prompt
+
+
 @pytest.mark.parametrize("rule", [
     "- A SESSION, PANEL, SYMPOSIUM or WORKSHOP entry (e.g., one you moderated or chaired) "
     "names a title, often in quotes: committee_name = that title (without the quotes)",
@@ -904,9 +1099,11 @@ def test_q2_prompt_puts_a_session_panel_or_workshop_title_in_committee_name(rule
 #: back. The pi_role line names the owner, so this owner-less prompt does not
 #: carry it. M2A re-measured for the EOAHMI recheck (#1403 items b/c), whose
 #: two added pi_name lines are the only difference: dropping them gives
-#: 108969062c... back.
+#: 108969062c... back. M2A re-measured for #1659, whose added effort-in-months
+#: rule line and two field-guide clauses are the only difference: dropping them
+#: gives d69c439d... back.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "d69c439ddab70048345703c9eb14caefa71eae7de2378d68b88192fc2c4eb8a3",
+    "M2A": "bcf4fb95ce94fdcc5ee2b24f1a5cd4a820f05f6d14f616734e0ad65e61f7be53",
     "K1": "984c639c769e8093d4fbdf99a04ba3a4895b14fee3756c23b923fb917a8bb416",
 }
 
@@ -1682,3 +1879,152 @@ def test_year_group_lines_are_re_dated_after_the_batches_are_reassembled(monkeyp
     assert [e["extracted_fields"] for e in out["entries"]] == [
         {"date": "2016-03-16"}, {"start_date": "2016-09-14"}]
     assert out["stats"]["entries_reformatted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #1655: the owner's contact when it lives only in the page header.
+# ---------------------------------------------------------------------------
+
+_HOME_PHONE = "(212) 555-0199"
+_HOME_LINE = f"Home phone: {_HOME_PHONE}"
+_HEADER_CONTACT_FIELDS = {
+    "name": "Quinn Synthetic, MD, PhD",
+    "email": "quinn.synthetic@example.org",
+    "phone": "(212) 555-0100",
+    "address": "100 Example Avenue, Room 5, Testville, NY 10000",
+}
+_BODY_ENTRY = {"text": "MD, Example University, 2001", "taxonomy_code": "B1",
+               "element_idx_start": 0, "element_idx_end": 0, "hierarchy": ["Education"]}
+_W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+
+
+def _fake_stage4_llm(calls):
+    """call_llm for stage 4's field extraction: the letterhead entry gets the
+    synthetic contact fields (and the home phone, when its line was sent), a
+    body entry its education fields."""
+    def fake_call_llm(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        calls.append(prompt)
+        if "quinn.synthetic@example.org" in prompt:
+            item = {"entry_index": 0, **_HEADER_CONTACT_FIELDS}
+            if _HOME_LINE in prompt:
+                item["home_phone"] = _HOME_PHONE
+        else:
+            item = {"entry_index": 0, "degree": "MD", "institution": "Example University", "year": "2001"}
+        return {"content": json.dumps({"entries": [item]}), "cost": 0.25, "total_tokens": 100,
+                "cache_read_tokens": 3, "cache_write_tokens": 4}
+    return fake_call_llm
+
+
+def _fake_owner_llm(**kwargs):
+    found = "Quinn Synthetic" in kwargs["messages"][-1]["content"]
+    reply = {key: "" for key in _NO_OWNER}
+    if found:
+        reply.update(first_name="Quinn", last_name="Synthetic", full_name="Quinn Synthetic",
+                     full_name_with_credentials="Quinn Synthetic, MD, PhD")
+    return {"content": json.dumps(reply), "cost": 0.0, "total_tokens": 0}
+
+
+def _letterhead_stage4(monkeypatch, tmp_path, header=LETTERHEAD, body=(_BODY_ENTRY,)):
+    calls: list[str] = []
+    monkeypatch.setattr(extraction, "call_llm", _fake_stage4_llm(calls))
+    monkeypatch.setattr(owner_name, "call_llm", _fake_owner_llm)
+    monkeypatch.setattr(extraction, "infer_cv_owner_location", lambda entries: {})
+    out = extraction.extract_fields_from_mapped_entries(
+        [dict(e) for e in body], document_uid="web991", docx_path=letterhead_docx(tmp_path, header=header),
+        workers=1)
+    return out, calls
+
+
+def _render_personal_data(monkeypatch, tmp_path, stage4_out) -> tuple[dict[str, str], str]:
+    """Stage 6 over a stage-4 result, no LLM: the Personal Data table's
+    rows (label -> value) and every w:t of the rendered body."""
+    def no_llm(**kwargs):
+        raise RuntimeError("stage 6 must not reach an LLM in this test")
+    monkeypatch.setattr(stage_6_word_template, "call_llm", no_llm)
+    stage4_json, rendered = tmp_path / "web991_fields.json", tmp_path / "web991.docx"
+    stage4_json.write_text(json.dumps({"document_uid": "web991", **stage4_out}))
+    generator = stage_6_word_template.WCMTemplateGenerator(verbose=False)
+    generator._reconsider_appendix_entries = lambda: None
+    generator.generate(str(stage4_json), str(rendered), research_summary_path=None)
+    doc = Document(str(rendered))
+    table = next(t for t in doc.tables if any("Work email:" in c.text for r in t.rows for c in r.cells))
+    rows = {row.cells[0].text.strip().lower(): row.cells[1].text.strip() for row in table.rows}
+    return rows, "\n".join(t.text or "" for t in doc.element.body.iter(_W_T))
+
+
+def test_header_contact_reaches_stage4_fields_and_the_personal_data_table(monkeypatch, tmp_path):
+    """The wire, docx -> stage 4 -> stage 6: a letterhead only in the
+    first-page header, a body that opens with no contact and holds a
+    25-paragraph content control. The owner's name, office phone, office
+    address and work email reach the Personal Data table."""
+    out, calls = _letterhead_stage4(monkeypatch, tmp_path)
+
+    assert out["cv_owner"]["last_name"] == "Synthetic"
+    first = out["entries"][0]
+    assert first["taxonomy_code"] == "A"
+    assert first[owner_name.OWNER_CONTACT_SOURCE_KEY] == owner_name.OWNER_CONTACT_SOURCE_HEADER_FOOTER
+    assert {k: first["extracted_fields"].get(k) for k in _HEADER_CONTACT_FIELDS} == _HEADER_CONTACT_FIELDS
+    assert len(calls) == 2  # the body group, then the letterhead entry
+    assert out["total_cost"] == pytest.approx(0.5)  # the letterhead call is accounted
+    assert out["total_tokens"] == 200
+    assert (out["cache_read_tokens"], out["cache_write_tokens"]) == (6, 8)
+
+    rows, everything = _render_personal_data(monkeypatch, tmp_path, out)
+
+    assert rows["office address:"] == _HEADER_CONTACT_FIELDS["address"]
+    assert rows["office telephone:"] == _HEADER_CONTACT_FIELDS["phone"]
+    assert rows["work email:"] == _HEADER_CONTACT_FIELDS["email"]
+    assert "Quinn Synthetic, MD, PhD" in everything
+
+
+def test_home_phone_in_the_header_is_withheld_as_body_home_contact_is(monkeypatch, tmp_path):
+    """#821 holds for the letterhead entry: the home number stage 4 extracts
+    from it renders nowhere, while the work email still does."""
+    out, _ = _letterhead_stage4(monkeypatch, tmp_path, header=[*LETTERHEAD, _HOME_LINE])
+    assert out["entries"][0]["extracted_fields"]["home_phone"] == _HOME_PHONE
+
+    rows, everything = _render_personal_data(monkeypatch, tmp_path, out)
+
+    assert rows["work email:"] == _HEADER_CONTACT_FIELDS["email"]
+    assert "555-0199" not in everything
+
+
+def test_body_contact_means_no_header_contact_call(monkeypatch, tmp_path):
+    """A body A entry that holds contact: the letterhead is not extracted,
+    so no extra LLM call and no second contact entry."""
+    body_contact = {"text": "Email: quinn.synthetic@example.org", "taxonomy_code": "A",
+                    "element_idx_start": 0, "element_idx_end": 0}
+
+    out, calls = _letterhead_stage4(monkeypatch, tmp_path, body=(body_contact,))
+
+    assert len(calls) == 1
+    assert [e.get(owner_name.OWNER_CONTACT_SOURCE_KEY) for e in out["entries"]] == [None]
+
+
+def test_header_without_contact_means_no_header_contact_call(monkeypatch, tmp_path):
+    calls: list[str] = []
+    monkeypatch.setattr(extraction, "call_llm", _fake_stage4_llm(calls))
+    monkeypatch.setattr(owner_name, "call_llm", _fake_owner_llm)
+    monkeypatch.setattr(extraction, "infer_cv_owner_location", lambda entries: {})
+
+    out = extraction.extract_fields_from_mapped_entries(
+        [dict(_BODY_ENTRY)], document_uid="web991", workers=1,
+        docx_path=letterhead_docx(tmp_path, header=["Quinn Synthetic, MD", "Curriculum Vitae"]))
+
+    assert len(calls) == 1
+    assert len(out["entries"]) == 1
+
+
+def test_body_has_owner_contact_reads_a_entries_and_their_records():
+    def a_entry(fields, code="A"):
+        return {"taxonomy_code": code, "extracted_fields": fields}
+
+    has = extraction._body_has_owner_contact
+    assert has([a_entry({"email": "x@example.org"})])
+    assert has([a_entry({"office_phone": "212-555-0100"})])
+    assert has([a_entry({"name": "Q", extraction.STAGE4_RECORDS_KEY: [{"address": "1 Example Ave"}]})])
+    assert not has([a_entry({"email": "", "phone": None, "address": {}, "home_address": []})])
+    assert not has([a_entry({"name": "Quinn Synthetic"})])
+    assert not has([a_entry({"email": "x@example.org"}, code="B1")])
+    assert not has([{"taxonomy_code": "A"}])

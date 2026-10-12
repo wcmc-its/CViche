@@ -219,6 +219,7 @@ def _stream_through_real_capture(emitter, prints, loggers, timeout=20.0):
     import asyncio
     import gc
     import logging
+
     from app.logging_config import _DYNAMIC_STDOUT
 
     logged = []
@@ -291,6 +292,7 @@ def test_a_failed_delivery_does_not_stall_the_run_or_leak_a_future(monkeypatch):
     finish in 90s)."""
     import asyncio
     import logging
+
     from app.pipeline import event_emitter as emitter_module
 
     real_stdout = io.StringIO()
@@ -423,6 +425,7 @@ def test_the_delivered_debug_line_stays_out_of_the_capture(monkeypatch):
     real stdout, not stream back into the run's log."""
     import asyncio
     import logging
+
     from app.pipeline import event_emitter as emitter_module
 
     real_stdout = io.StringIO()

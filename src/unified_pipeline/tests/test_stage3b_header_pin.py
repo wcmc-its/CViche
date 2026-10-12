@@ -19,6 +19,7 @@ from unified_pipeline.stage3b.header_pin import (  # noqa: E402
     content_pin_code,
     is_note_not_record,
     leaf_header_code,
+    mentee_pin_code,
     pinned_header_code,
 )
 
@@ -265,6 +266,101 @@ def test_q3_sub_heading_overrides_only_q2():
     assert n == 0 and out == entry
 
 
+# --- YUYVIG (#1577): an unsure grant answer under an H pin --------------------------
+
+H_CTX = _ctx(meta=_node("Awards and Honors", "H"))
+HONORS = ("Awards and Honors",)
+
+
+@pytest.mark.parametrize("code", ["M2", "M2A", "M2B", "M2C"])
+@pytest.mark.parametrize("text", [
+    "2031 Example Investigator Award, Example Alliance for Research",
+    "2031 Example Consensus Group Grant, Example Fund",
+    "Example Foundation Young Investigator Award (2031)",
+    "• Designed experiments as P.I. that led Example Agency to sponsor a study",
+])
+def test_unsure_grant_code_without_a_grant_marker_under_h_becomes_h(code, text):
+    (out,), n = apply_header_pin([_row(code, text, confidence=0.55, hierarchy=HONORS)], H_CTX)
+    assert n == 1 and out["taxonomy_code"] == "H" and out["pre_pin_code"] == code
+
+
+@pytest.mark.parametrize("text", [
+    "2031 Example Agency R01 Grant, Example signals in tissue",                 # activity code
+    "Supported by Example training grant 2T32GM000000-11, 2031",                # grant number
+    "Example Student Traineeship Grant (EXMPL31H0), 2031",                      # award id
+    "2031 Example Research and Creative Grant funded for $1,000",               # amount
+    "2031 Example Seed Grant, 5000 USD",                                        # amount
+    "Example Grant-in-Aid, 2031-2033",                                          # two-ended period
+    "Example Career Development Award, May 2031 to May 2033",
+    "Example Fellow, supported 7/2031-6/2033",
+    "Example Scholar Award, fall 2031-spring 2033",
+    "Example Pilot Award 2031-33",
+    "Example Pilot Award 2031 - present",
+    "Principal Investigator. Example Society Research Grant, 2031",             # PI role at the head
+    "2031 Co-Investigator, Example Foundation Grant",
+    "PI, Example Foundation Grant, 2031",
+])
+def test_unsure_grant_code_with_a_grant_marker_under_h_stays(text):
+    entry = _row("M2A", text, confidence=0.55, hierarchy=HONORS)
+    (out,), n = apply_header_pin([entry], H_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("text", [
+    "Pi Kappa Example Award, 2031",                 # "Pi" is not a PI role
+    "Example COVID-19 Response Award, 2031",        # a hyphenated name is not a grant id
+])
+def test_lookalike_markers_do_not_keep_a_grant_code(text):
+    (out,), n = apply_header_pin([_row("M2A", text, confidence=0.55, hierarchy=HONORS)], H_CTX)
+    assert n == 1 and out["taxonomy_code"] == "H"
+
+
+def test_h_pin_breaks_a_tie_and_does_not_overrule_a_firm_grant_answer():
+    text = "2031 Example Investigator Award, Example Alliance for Research"
+    (at_ceiling,), _ = apply_header_pin([_row("M2A", text, confidence=0.80, hierarchy=HONORS)], H_CTX)
+    assert at_ceiling["taxonomy_code"] == "H"
+    firm = _row("M2A", text, confidence=0.85, hierarchy=HONORS)
+    (out,), n = apply_header_pin([firm], H_CTX)
+    assert n == 0 and out == firm
+
+
+@pytest.mark.parametrize("code,text", [
+    ("I", "2031 Fellow, Example College of Examples"),     # a fellowship stays the model's call
+    ("M2D", "2031 Example dataset deposit"),
+    ("K4", "2031 Example teaching award lecture"),
+])
+def test_h_pin_recodes_only_grant_codes(code, text):
+    entry = _row(code, text, confidence=0.55, hierarchy=HONORS)
+    (out,), n = apply_header_pin([entry], H_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("ctx", [
+    _ctx(meta=_node("Awards and Honors", "H", HEADER_PIN_MIN_CONFIDENCE - 0.01)),
+    _ctx(meta=_node("Awards and Grants", "M2", 1.0), section=_node("Honors", "H", 1.0)),
+    _ctx(meta=_node("Research Support", "M2A", 1.0)),
+])
+def test_no_h_pin_leaves_an_unsure_grant_code(ctx):
+    entry = _row("M2A", "2031 Example Investigator Award", confidence=0.55, hierarchy=HONORS)
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+def test_h_pin_is_not_flipped_back_by_the_reasoning_or_grant_status_checks():
+    from unified_pipeline.core.validators.grant_status_corrector import (
+        apply_grant_status_corrections,
+    )
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    entry = {**_row("M2A", "2031 Example Investigator Award", confidence=0.55, hierarchy=HONORS),
+             "classification_reasoning": "an investigator award is research funding (M2A)"}
+    (out,), _ = apply_header_pin([entry], H_CTX)
+    (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    (status,), _ = apply_grant_status_corrections([corrected])
+    assert out["taxonomy_code"] == corrected["taxonomy_code"] == status["taxonomy_code"] == "H"
+
+
 # --- EBYSBC E11 (#312): content pins --------------------------------------------
 
 NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))
@@ -281,6 +377,14 @@ NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))
     ("D3", "2031-2033 Postdoctoral Research Fellow, Example University", ("Appointments",), "C"),
     ("D3", "2031-2033 Clinical Fellow, Example College of Medicine", ("Appointments",), "C"),
     ("D1", "2031-2033 Research Fellow in Example Medicine, Example School of Medicine", ("Appointments",), "C"),
+    # A veterinary residency at a college or hospital is still training (#1581).
+    ("D2", "2031-2033 Resident Veterinarian: Example Animal Hospital, Example College", ("Experience",), "C"),
+    # A trainee row naming its supervisor is training, not a faculty-advisor role (#1581).
+    ("D3", "2031-2033 Postdoctoral Fellow, Example University, Faculty Advisor: Dr. Doe", ("Appointments",), "C"),
+    ("D3", "2031-2033 Postdoctoral Fellow (faculty advisor: Dr Doe), Example University", ("Appointments",), "C"),
+    ("D1", "Clinical Fellow, Example Hospital, faculty advisors J Doe", ("Appointments",), "C"),
+    ("D3", "2031 Intern, Example University (Advisor: Prof. Doe)", ("Appointments",), "C"),
+    ("D3", "2031-2033 Postdoctoral Fellow, Example University, faculty advisor, J. Doe", ("Appointments",), "C"),
     ("K4", "Example Society Meeting, 2031 (attendee)", ("Teaching",), "B2"),
     ("K4", "Attendance at the Example Review Course, 2031", ("Teaching",), "B2"),
     ("F1", "ACLS certification, 2031-2033", ("Credentials",), "B2"),
@@ -324,6 +428,13 @@ def test_content_pins_recode_whatever_the_heading(code, text, hierarchy, expecte
     ("D3", "2031-present Senior Fellow, Example Policy Institute", ("Appointments",)),
     ("D3", "2031-present Senior Research Fellow, Example Policy Institute", ("Appointments",)),
     ("D1", "2031-2034 Resident Director, Example College House", ("Appointments",)),
+    # A fellow title qualified as a faculty-advisor role, and a resident professional
+    # outside a college, university, hospital or school, are positions (#1581).
+    ("D1", "2031-present Fellow (undergraduate faculty advisor), Example College", ("Appointments",)),
+    ("D1", "2031-present Fellow, faculty advisor to undergraduates, Example House", ("Appointments",)),
+    ("D1", "2031-present Fellow, faculty advisor, Example House", ("Appointments",)),
+    ("D1", "2031-present Fellow (resident faculty adviser), Example College", ("Appointments",)),
+    ("D3", "Resident Veterinarian, Example Farm, Springfield, 2031-2033", ("Experience",)),
     ("F1", "Example State Medical License, Example Teaching Hospital, 2031", ("Licensure",)),
     ("F1", "Example State Medical License #12345, 2031", ("Licensure",)),
     ("S2", "Doe J. Example rhythms. Example Journal 2031;1:1-2.", ("Publications",)),
@@ -345,7 +456,9 @@ def test_content_pins_leave_other_rows(code, text, hierarchy):
     ("S2", "Wrote an invited example article (see publication #12).", NO_PIN_CTX),
 ])
 def test_no_new_pin_is_flipped_back_by_the_reasoning_check(code, text, ctx):
-    from unified_pipeline.core.validators.reasoning_consistency_checker import apply_reasoning_corrections
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
     (out,), n = apply_header_pin([_row(code, text, hierarchy=("SECTION", "Example grant review"))], ctx)
     assert n == 1
     (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
@@ -362,6 +475,92 @@ def test_fallback_entries_get_no_content_pin():
     entry = {**_row("F1", "Basic Life Support, 2031"), "classification_source": "fallback"}
     (out,), n = apply_header_pin([entry], NO_PIN_CTX)
     assert n == 0 and out == entry
+
+
+# --- #1251: a mentee's accomplishments are N4 ----------------------------------
+
+STUDENT_HEADING = ("STUDENT ACCOMPLISHMENTS",)
+
+
+def _mentee_group(*rows):
+    """A named-mentee line followed by `rows` (code, text), all under STUDENT_HEADING."""
+    mentee = _row("N3B", "Alex Example (PhD Committee Chair):", hierarchy=STUDENT_HEADING)
+    return [mentee, *(_row(code, text, hierarchy=STUDENT_HEADING) for code, text in rows)]
+
+
+def test_awards_after_a_named_mentee_become_n4():
+    group = _mentee_group(("H", "Awarded the Example Foundation Dissertation Fellowship (2031)"),
+                          ("K5", "2031 Example Leadership Program Participant"),
+                          ("K4", "Example Transdisciplinary Training Program, 2031"))
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 3
+    assert [e["taxonomy_code"] for e in out] == ["N3B", "N4", "N4", "N4"]
+    assert [e.get("pre_pin_code") for e in out[1:]] == ["H", "K5", "K4"]
+
+
+def test_a_student_awards_heading_with_no_mentee_line_stays_the_owners():
+    # web210 "Student/Trainee Awards": the owner's own awards from training.
+    group = [_row("H", text, hierarchy=("Student/Trainee Awards",))
+             for text in ("Example University Doctoral Fellowship, 2031", "Second Prize, Example Essay Contest, 2030")]
+    out, n = apply_header_pin(group, NO_PIN_CTX)
+    assert n == 0 and out == group
+
+
+def test_rows_before_the_mentee_line_are_left_alone():
+    first = _row("H", "Example Society Award, 2031", hierarchy=STUDENT_HEADING)
+    out, n = apply_header_pin([first, *_mentee_group()], NO_PIN_CTX)
+    assert n == 0 and out[0]["taxonomy_code"] == "H"
+
+
+@pytest.mark.parametrize("code,heading", [
+    ("K5", ("ADVISING", "Undergraduate Research Students")),   # teaching, no accomplishments word
+    ("D1", ("MENTORING", "Trainees")),
+    ("S1", STUDENT_HEADING),                                     # a publication stays a publication
+    ("H", ("PROFESSIONAL ACCOMPLISHMENTS",)),                    # no mentee word in the heading
+])
+def test_mentee_pin_needs_both_the_heading_and_the_code(code, heading):
+    entry = _row(code, "Example row, 2031", hierarchy=heading)
+    assert mentee_pin_code(entry, after_mentee=True) is None
+
+
+def test_a_fallback_mentee_line_still_opens_the_group():
+    mentee = {**_row("N3A", "Alex Example (advisee):", hierarchy=STUDENT_HEADING), "classification_source": "fallback"}
+    award = _row("H", "Example Student Research Award, 2031", hierarchy=STUDENT_HEADING)
+    out, n = apply_header_pin([mentee, award], NO_PIN_CTX)
+    assert n == 1 and out[1]["taxonomy_code"] == "N4"
+
+
+def test_a_named_residents_project_award_under_research_becomes_n4():
+    # KDAZOM "Medical Residency Research": the line opens with the resident's name and degree.
+    entry = _row("H", 'Jordan Example, M.D., Dermatology: "An example assay." 2nd place, resident competition, 2031',
+                 hierarchy=("Medical Residency Research",))
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "N4"
+
+
+@pytest.mark.parametrize("text,heading", [
+    ("Jordan Example, MD Faculty Teaching Award, 2031", ("HONORS AND AWARDS",)),   # eponymous award
+    ("Jordan Example, MD Faculty Teaching Award, 2031", ("Research Awards",)),
+    ("Example Society Young Investigator Award, 2031", ("Medical Residency Research",)),
+    ("Jordan Example, B.S. with Distinction, 2031", ("PUBLICATIONS",)),
+])
+def test_named_lead_needs_a_research_heading_without_an_honors_word(text, heading):
+    assert mentee_pin_code(_row("H", text, hierarchy=heading), after_mentee=False) is None
+
+
+def test_mentee_pin_is_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    out, _ = apply_header_pin(_mentee_group(("H", "Recipient of the Example Memorial Scholarship")), NO_PIN_CTX)
+    (corrected,), _ = apply_reasoning_corrections([{**out[1], "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    assert corrected["taxonomy_code"] == "N4"
+
+
+def test_header_pin_wins_over_the_mentee_pin():
+    entry = _row("H", "Example Society Award, 2031", hierarchy=STUDENT_HEADING)
+    out, _ = apply_header_pin([*_mentee_group(), entry], R_CTX)
+    assert out[-1]["taxonomy_code"] == "R"
 
 
 # --- is_note_not_record ---------------------------------------------------------

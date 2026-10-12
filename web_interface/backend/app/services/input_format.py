@@ -52,7 +52,9 @@ def count_template_signals(extracted_text: str) -> int:
     """Distinct distinctive WCM headings plus left-in template instruction lines."""
     _ensure_pipeline_on_path()
     from unified_pipeline.core.template_boilerplate import (
-        is_template_instruction, normalize_template_text, template_section_headers,
+        is_template_instruction,
+        normalize_template_text,
+        template_section_headers,
     )
 
     headings = template_section_headers() - _GENERIC_HEADINGS

@@ -357,6 +357,14 @@ REGEX_PATTERNS = {
     'orcid': r'(\d{4}-\d{4}-\d{4}-\d{3}[\dX])',
 }
 
+# A trailing byline token that is initials, not a surname, even though it is
+# not all-uppercase: every letter uppercase except an "h" after T, C or S --
+# the Dutch/Germanic digraph initials "Th", "Ch", "Sh" ("Doe FJTh"). No length
+# cap, matching the all-caps initials check it sits beside.
+# Without it the "FirstName LastName" branch reads "FJTh" as the surname and
+# reorders "Doe FJTh" into "FJTh D" (#1660).
+_MIXED_CASE_INITIALS_RE = re.compile(r'^(?:[A-Z]|[TCS]h)+$')
+
 def normalize_authors_vancouver(authors_string: str) -> str:
     """
     Normalize author string to Vancouver citation style.
@@ -432,7 +440,11 @@ def normalize_authors_vancouver(authors_string: str) -> str:
         space_parts = author.split()
         if len(space_parts) >= 2:
             # Check if last part looks like a last name (not initials)
-            if len(space_parts[-1]) > 2 and not re.match(r'^[A-Z]+$', space_parts[-1]):
+            if (
+                len(space_parts[-1]) > 2
+                and not re.match(r'^[A-Z]+$', space_parts[-1])
+                and not _MIXED_CASE_INITIALS_RE.match(space_parts[-1])
+            ):
                 last_name = space_parts[-1]
                 first_parts = ' '.join(space_parts[:-1])
                 initials = extract_initials(first_parts)
@@ -1245,8 +1257,62 @@ def _find_percent_effort(original_text: str) -> tuple[str, str] | None:
     return None
 
 
+# NIH-style effort in months rather than a percent (#1659): "0.24 Cal Months",
+# "1.2 calendar months", ".24 calendar months", "1.2 cal mon", "0.6 person
+# months", "1.8 CM". A month figure is not a percent -- 0.24 calendar months
+# is about 2% of a 12-month appointment, and the appointment length is not
+# known -- so it is kept as written, never converted. The bare "CM" form is
+# case-sensitive, because "CM" is also a pair of author initials ("Green CM"),
+# and needs a plausible month figure before it: a decimal ("1.8", ".24") or a
+# whole number 0-12, standing as its own token. So the digits ending a grant
+# number ("CA123456 CM") or a year ("2019 CM study") are not read as effort.
+_EFFORT_MONTHS_PATTERN = re.compile(
+    r'\d*\.?\d+\s*'
+    r'(?i:cal(?:endar)?\.?\s*mo(?:n(?:th)?s?|s)?\b|person[\s-]*months?\b)'
+    r'|(?<![\w.])(?:\d{0,2}\.\d+|1[0-2]|\d)\s*CM\b'
+)
+# The figure a percent-shaped value states, for checking the source wrote it.
+_PERCENT_VALUE_PATTERN = re.compile(r'^\s*(\d*\.?\d+)\s*%\s*$')
+
+
+def _percent_stated_in_source(value: str, original_text: str) -> bool:
+    """True when ``original_text`` itself gives ``value`` ("24%") as a percent
+    or FTE figure, rather than the LLM having computed it from something else."""
+    figure = _PERCENT_VALUE_PATTERN.match(value)
+    if figure is None:
+        return True  # not a bare percent; nothing here can judge it
+    if re.search(rf'(?<![\d.]){re.escape(figure.group(1))}\s*%', original_text):
+        return True
+    found = _find_percent_effort(original_text)
+    return found is not None and found[1] == value.strip()
+
+
+def _keep_effort_months_as_written(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Put a source effort given in months into ``percent_effort`` as written.
+
+    Applies when the field is empty, or holds a percent the source never
+    states (the LLM turned "0.24 Cal Months" into "24%", #1659). A percent
+    the source does state ("1.20 Calendar Months (10% Effort)") is kept.
+    """
+    months = _EFFORT_MONTHS_PATTERN.search(original_text)
+    if months is None:
+        return
+    current = str(updated.get('percent_effort') or '')
+    if current and _percent_stated_in_source(current, original_text):
+        return
+    updated['percent_effort'] = months.group(0)
+    reformatted['percent_effort'] = {
+        'original': current or months.group(0),
+        'reformatted': months.group(0),
+        'reason': 'Kept effort in months as written; not a percent',
+    }
+
+
 def _normalize_grant_effort(original_text: str, updated: ExtractedFields, reformatted: ReformattedFields) -> None:
     """Extract percent-effort/FTE for grant entries, if the LLM didn't already fill it in."""
+    _keep_effort_months_as_written(original_text, updated, reformatted)
     if updated.get('percent_effort'):
         return
 

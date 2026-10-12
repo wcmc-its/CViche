@@ -55,6 +55,12 @@ That table is pinned by test_stage6_clinical_practice_fragments.py, which
 asserts the "same" rows against the real `entry_lines` rather than a copy of
 its rules.
 
+One more divergence, on either separator: parts that read as one paragraph
+cut at its printed lines (`_refold_shattered`, #1583) are joined back at each
+mid-sentence boundary, so a prose description whose source lines arrived as
+separate paragraphs is not printed one bullet per printed line. None of the
+rows above reads that way.
+
 All three subsections hand their raw entry text straight to this helper. They
 did not always: L1 and L2 welded every tab away first and L3 kept only
 `split('\\t')[0]`, so the fragment split was dormant on L1/L2 and L3 deleted
@@ -92,10 +98,21 @@ from ..formatting import (
     format_date_range,
 )
 from ..normalization import _committee_cell_text
-from ..parsing import _is_structural_label
+from ..parsing import _is_structural_label, _refold_shattered
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
+
+
+# A source list number at the start of a line ("8. ", "12) ", "(3) "): list
+# furniture the CV numbered its own items with, not content. The WCM bullet
+# is the item marker, so L1's bullet fallback drops it (#1434, VXHPXT 467).
+_LEADING_LIST_NUMBER_RE = re.compile(r'^[ \t]*(?:\(\d{1,3}\)|\d{1,3}[.)])[ \t]+', re.MULTILINE)
+
+
+def _without_list_numbers(text: str) -> str:
+    """`text` with the list number removed from the start of every line."""
+    return _LEADING_LIST_NUMBER_RE.sub('', text)
 
 
 # List levels for a multi-part entry (#984): the first part is the entry's
@@ -122,6 +139,11 @@ def _bullet_parts(text: str) -> list[str]:
     file's bullet-fallback branches now pass their raw entry text in, so this
     split reaches production; see the module docstring for the exact table of
     where this contract diverges from `entry_lines`.
+
+    Except where the parts read as one paragraph cut at its printed lines
+    (`_refold_shattered`, #1583): a source whose lines arrived as separate
+    paragraphs is joined back at each mid-sentence boundary, so a prose
+    description is not printed one bullet per printed line.
     """
     parts = []
     for line in str(text or "").split("\n"):
@@ -129,7 +151,7 @@ def _bullet_parts(text: str) -> list[str]:
             cell = cell.strip()
             if cell:
                 parts.append(cell)
-    return parts
+    return _refold_shattered(parts)
 
 
 # A "content word" for the duplication check below: a run of letters or
@@ -431,8 +453,9 @@ class ClinicalPracticeSection:
                     # later tab into a bare space -- so a three-part row
                     # rendered as ONE bullet with parts two and three run
                     # together, and the fragment split below never fired at all
-                    # on this path.
-                    bullet_text = original_text
+                    # on this path. Only the source's own list number goes
+                    # (#1434): the bullet is the item marker.
+                    bullet_text = _without_list_numbers(original_text)
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
@@ -635,6 +658,11 @@ class ClinicalPracticeSection:
                         bullet_text = f"{role}, {institution}, {dates}"
                     elif role and dates:
                         bullet_text = f"{role}, {dates}"
+                    elif role and _fragment_is_new(institution, role):
+                        # Without dates the institution is what tells two
+                        # rows with the same role apart (#1434, UXBHHF 79/84);
+                        # left off when the role already says it.
+                        bullet_text = f"{role}, {institution}"
                     elif role:
                         bullet_text = role
                     else:

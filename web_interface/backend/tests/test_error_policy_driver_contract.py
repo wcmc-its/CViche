@@ -27,8 +27,8 @@ import pytest
 def _orchestrator(monkeypatch, tmp_path, db, run_id):
     """A run-to-completion orchestrator with the real pipeline stubbed out,
     mirroring test_run_doctor_integration._orchestrator."""
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     db.add(Run(
         id=run_id, filename="cv.docx", file_type="docx", status="running",
@@ -122,8 +122,8 @@ def test_stage_6_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
     directory stage 6's SAMPLE_CV_DIR auto-discovery scans, under the same
     uid, from the same CWD. Pass it explicitly, like stages 1b/2/4 do.
     """
-    from app.pipeline import orchestrator as orch
     from app.models import Run
+    from app.pipeline import orchestrator as orch
 
     captured = {}
 
@@ -175,6 +175,54 @@ def test_stage_6_repairs_under_the_flag_and_keeps_the_repair_report(monkeypatch,
 
     assert captured["repair_protected_data"] is repair
     assert (str(tmp_path / "STAGE6REPAIR_repairs.json") in result["output_files"]) is repair
+
+
+@pytest.mark.parametrize("env, subpoints", [(None, True), ("0", False), ("1", True)])
+def test_stage_6_writes_sub_points_unless_the_flag_is_off(monkeypatch, tmp_path, db, env, subpoints):
+    """#1205: stage 6 writes unrendered prose as tracked-deleted sub-points by
+    default (owner decision 2026-10-09); CVICHE_SUPPLEMENTARY_SUBPOINTS=0 is
+    the ops switch that turns it off."""
+    from app.pipeline import orchestrator as orch
+
+    if env is None:
+        monkeypatch.delenv("CVICHE_SUPPLEMENTARY_SUBPOINTS", raising=False)
+    else:
+        monkeypatch.setenv("CVICHE_SUPPLEMENTARY_SUBPOINTS", env)
+    captured = {}
+
+    def fake_run_stage6(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "STAGE6SUB_wcm.docx"
+        out.write_bytes(b"PK")
+        return str(out)
+
+    monkeypatch.setattr(orch, "run_stage6", fake_run_stage6)
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE6SUB")
+    o.stage_outputs["5d"] = str(tmp_path / "stage5d.json")
+
+    asyncio.run(o._execute_stage_logic("6", str(tmp_path / "cv.docx")))
+
+    assert captured["supplementary_subpoints"] is subpoints
+
+
+@pytest.mark.parametrize("value, subpoints", [(1, True), (0, False), (True, True),
+                                              (False, False), (None, True)])
+def test_the_sub_point_switch_reads_an_unquoted_yaml_value(monkeypatch, tmp_path, db, value, subpoints):
+    """#1205: a config file's unquoted `0` or `false` reaches the switch as an
+    int or bool, not text; it is read as off, not raised on."""
+    from app.pipeline import orchestrator as orch
+
+    real_get_config = orch.get_config
+
+    def fake_get_config(section, key, default=None):
+        if key == "CVICHE_SUPPLEMENTARY_SUBPOINTS":
+            return value, "yaml"
+        return real_get_config(section, key, default=default)
+
+    monkeypatch.setattr(orch, "get_config", fake_get_config)
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE6YAML")
+
+    assert o._stage6_switches()["supplementary_subpoints"] is subpoints
 
 
 # -- #1177: every stage that calls the LLM adds its cost to the run ---------

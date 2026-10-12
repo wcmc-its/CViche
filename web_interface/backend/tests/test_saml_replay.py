@@ -36,14 +36,14 @@ import redis.exceptions
 import app.saml_replay as saml_replay
 from app.auth import COOKIE_NAME
 from app.saml_replay import (
+    _CLOCK_SKEW,
+    _DEFAULT_TTL,
+    _MAX_TTL,
     SamlReplayCache,
     assertion_ids,
-    replay_ttl,
     replay_fail_closed,
+    replay_ttl,
     set_replay_cache,
-    _DEFAULT_TTL,
-    _CLOCK_SKEW,
-    _MAX_TTL,
 )
 
 

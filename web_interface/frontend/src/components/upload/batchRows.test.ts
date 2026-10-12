@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  MAX_UPLOAD_BYTES, TOO_LARGE_REASON, UNSUPPORTED_TYPE_REASON, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
+  COST_OUTLIER_RATIO, DEFAULT_MAX_UPLOAD_MB, UNSUPPORTED_TYPE_REASON, costOutliers, missingItems, maxUploadBytes, tooLargeReason, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, splitForEstimate, wasStarted, MAX_BATCH_FILES,
 } from './batchRows'
 import type { Estimate, QuotaInfo } from '../../types'
 
@@ -71,15 +71,24 @@ describe('makeRow size check', () => {
     return file
   }
 
+  const DEFAULT_BYTES = maxUploadBytes(DEFAULT_MAX_UPLOAD_MB)
+
   it("marks a file over the cap as won't-be-submitted, with no estimate pending", () => {
-    const row = makeRow(sized('big.docx', MAX_UPLOAD_BYTES + 1), 'k')
-    expect(row.invalidReason).toBe(TOO_LARGE_REASON)
+    const row = makeRow(sized('big.docx', DEFAULT_BYTES + 1), 'k')
+    expect(row.invalidReason).toBe('Larger than 10 MB')
     expect(row.estimate).toBeNull()
   })
 
   it('accepts a file exactly at the cap and keeps the wrong-type reason first', () => {
-    expect(makeRow(sized('ok.docx', MAX_UPLOAD_BYTES), 'k').invalidReason).toBeNull()
-    expect(makeRow(sized('big.doc', MAX_UPLOAD_BYTES + 1), 'k').invalidReason).toBe(UNSUPPORTED_TYPE_REASON)
+    expect(makeRow(sized('ok.docx', DEFAULT_BYTES), 'k').invalidReason).toBeNull()
+    expect(makeRow(sized('big.doc', DEFAULT_BYTES + 1), 'k').invalidReason).toBe(UNSUPPORTED_TYPE_REASON)
+  })
+
+  it("checks against the backend's cap when it is not the default (#109)", () => {
+    const fifteenMb = sized('mid.docx', maxUploadBytes(15))
+    expect(makeRow(fifteenMb, 'k', undefined, 20).invalidReason).toBeNull()
+    expect(makeRow(fifteenMb, 'k', undefined, 12).invalidReason).toBe(tooLargeReason(12))
+    expect(tooLargeReason(12)).toBe('Larger than 12 MB')
   })
 })
 
@@ -116,8 +125,14 @@ describe('emailed CV rows (#1298)', () => {
     expect(row.file.name).toBe('emailed.docx')
     expect(rowSize(row)).toBe(4096)
     expect(row.invalidReason).toBeNull()
-    expect(row.estimate).toBeNull()
+    expect(row.estimate).toBeUndefined()  // pending, from POST /inbox/estimate (#1626)
     expect(makeRow(new File(['ab'], 'a.docx'), 'row-2').inbox).toBeNull()
+  })
+
+  it('counts an estimated emailed CV toward the outlier check and its median (#1626)', () => {
+    const uploaded = [1, 1].map((w, i) => makeRow(new File(['x'], `cv${i}.docx`), `k${i}`, { ...EST_BASE, cost_weight: w }))
+    const emailed = { ...makeInboxRow(item, 'big'), estimate: { ...EST_BASE, cost_weight: 9 } }
+    expect([...costOutliers([...uploaded, emailed]).keys()]).toEqual(['big'])
   })
 
   it('states only the count when no row has an estimate', () => {
@@ -132,5 +147,48 @@ describe('emailed CV rows (#1298)', () => {
     expect(inboxFailure({ ...base, error: 'rate_limited', message: 'Daily limit reached' }).retryable).toBe(true)
     expect(inboxFailure({ ...base, error: 'file_missing', message: null }))
       .toEqual({ reason: "Couldn't submit the emailed file", retryable: false })
+  })
+})
+
+describe('costOutliers (#1599)', () => {
+  const weighed = (weights: (number | undefined)[]) =>
+    weights.map((w, i) => makeRow(new File(['x'], `cv${i}.docx`), `k${i}`, { ...EST_BASE, cost_weight: w }))
+
+  it('compares each file with the median of the others, an even count averaging the middle two', () => {
+    // big's others are 1, 1, 2, 4: median 1.5, so 4.5 is exactly COST_OUTLIER_RATIO.
+    const flagged = costOutliers(weighed([1, 1, 2, 4, 4.5]))
+    expect([...flagged.keys()]).toEqual(['k4'])
+    expect(flagged.get('k4')?.ratio).toBe(COST_OUTLIER_RATIO)
+  })
+
+  it('flags nothing in a one-file batch, or for an estimate without a weight (an older backend)', () => {
+    expect(costOutliers(weighed([9])).size).toBe(0)
+    expect(costOutliers(weighed([1, undefined, 1, 9])).has('k3')).toBe(true)
+    expect(costOutliers(weighed([undefined, undefined, 9])).size).toBe(0)
+  })
+
+  it('blocks submitting until each flagged file is included', () => {
+    const rows = weighed([1, 1, 9])
+    const input = { rows, multi: true, attested: true, quota: null }
+    expect(missingItems(input)).toEqual(['Include or remove 1 unusually large CV'])
+    expect(missingItems({ ...input, rows: rows.map((r) => ({ ...r, costConfirmed: true })) })).toEqual([])
+  })
+})
+
+describe('splitForEstimate (#1626)', () => {
+  const rowsOf = (n: number) => Array.from({ length: n }, (_, i) => makeRow(new File(['x'], `cv${i}.docx`), `k${i}`))
+
+  it('estimates every valid new row while the call has room, and skips an invalid one', () => {
+    const fresh = [...rowsOf(2), makeRow(new File(['x'], 'notes.txt'), 'bad')]
+    const { added, toEstimate } = splitForEstimate(fresh, 0)
+    expect(toEstimate.map((r) => r.key)).toEqual(['k0', 'k1'])
+    expect(added.map((r) => r.estimate)).toEqual([undefined, undefined, null])
+  })
+
+  it('marks the rows past MAX_BATCH_FILES less the listed valid rows unestimated', () => {
+    const { added, toEstimate } = splitForEstimate(rowsOf(3), MAX_BATCH_FILES - 2)
+    expect(toEstimate.map((r) => r.key)).toEqual(['k0', 'k1'])
+    expect(added.map((r) => r.estimate)).toEqual([undefined, undefined, null])
+    expect(splitForEstimate(rowsOf(1), MAX_BATCH_FILES + 1).toEstimate).toEqual([])
   })
 })

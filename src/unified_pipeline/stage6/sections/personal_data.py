@@ -12,7 +12,9 @@ almost nothing about a CV's contact block is structured. The work is in order:
    both. An extracted address that names its own halves is routed by
    `_labels_its_own_address_slots` instead, which is #442: a dict naming home
    and office was previously forced whole into whichever slot the raw text
-   happened to label.
+   happened to label. Every record stage 4 kept for an entry is routed, in
+   order (`_contact_records`, #1556 b); a record value no row takes, and a
+   fax number, goes to the Appendix recovery (`_unrouted_record_values`).
 3. Re-open the ORIGINAL .docx when fields are still missing, in
    `_recover_contact_fields_from_docx`. Contact data frequently lives in a
    source table ("NAME: | Patricia Opresko") that entry extraction never
@@ -23,8 +25,8 @@ almost nothing about a CV's contact block is structured. The work is in order:
 4. Fill the template's PERSONAL DATA table, located by its "Work email:" cell
    rather than by index.
 
-This is the only section writer that reads the source document directly, which
-is why `Document` and `Path` are imported here and nowhere else in this package.
+This section writer reads the source document directly, through
+`open_source_docx` (#1656), as `teaching.py`'s `SourceCellLevels` does.
 
 Step 3 runs on a live CV because both drivers hand `run_stage6()` the resolved
 source path (`run_full_pipeline.py` `_stage_6`, `orchestrator.py` stage `'6'`;
@@ -59,16 +61,15 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
 
 try:
-    from docx import Document
-    # The class `Document()` (the factory function above) returns -- aliased
-    # so `_recover_contact_fields_from_table_rows` can annotate its
-    # `original_doc` parameter without shadowing the factory import (#820 R3).
+    # The class `Document()` returns -- aliased so
+    # `_recover_contact_fields_from_table_rows` can annotate its
+    # `original_doc` parameter (#820 R3).
     from docx.document import Document as _WordDocument
     from docx.opc.exceptions import PackageNotFoundError
     from docx.table import _Row as _TableRow
@@ -78,6 +79,7 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
+from ...core.docx_structure_extractor import open_source_docx
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import (
     CAT_HOME_CONTACT,
@@ -85,6 +87,7 @@ from ..normalization import (
     WithheldItem,
     _address_cell_text,
     _from_pii_fragment,
+    _is_unlabelled_home_address,
     _labels_its_own_address_slots,
     _labels_its_own_phone_slots,
     _phone_cell_text,
@@ -595,9 +598,10 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     A dict that names its own halves fills both slots from them instead of
     forcing the whole thing into whichever one the raw text happened to label
     (#442); a dict that names no slot is one address and is routed by the
-    raw text, same as a string. A place of birth fills no slot: it is
-    recorded on `withheld`, and SET_ASIDE makes the caller count
-    the entry consumed, since the recovery pass would render its residual,
+    raw text, same as a string. A "Current Address" naming no workplace is
+    the home address (`_is_unlabelled_home_address`, #1426). A place of
+    birth fills no slot: it is recorded on `withheld`, and SET_ASIDE makes
+    the caller count the entry consumed, since the recovery pass would render its residual,
     the place (#1223, EBYSBC EQADVR-02). A value with no street, number or
     state (`_names_a_street_or_number`) is a department or school name, not
     an address, and fills no slot either (#1222, EBYSBC RVROVQ-04). When a
@@ -609,7 +613,8 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
     if _labels_its_own_address_slots(address):
         return (home_address or _address_cell_text(address, 'home'),
                 office_address or _address_cell_text(address, 'office'), _AddressFate.ROUTED)
-    if _address_is_home(ctx.text, ctx.pii_fragments, ctx.phone):
+    if (_address_is_home(ctx.text, ctx.pii_fragments, ctx.phone)
+            or _is_unlabelled_home_address(ctx.text, _address_cell_text(address, 'office'))):
         return home_address or _address_cell_text(address, 'home'), office_address, _AddressFate.ROUTED
     if _address_is_birthplace(ctx.text, ctx.pii_fragments):
         withheld.append(WithheldItem(CAT_PLACE_OF_BIRTH, _PERSONAL_DATA_SECTION_LABEL, None))
@@ -626,19 +631,21 @@ def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str 
 
 
 def _entry_for_recovery(entry: dict, address_fates: list[tuple[_AddressFate, str]],
-                        rendered: bool) -> dict | None:
+                        rendered: bool, unrouted: list[str]) -> dict | None:
     """What of `entry` the post-render recovery pass must place, or None.
 
     `rendered` says another of its values (a slot, an ORCID) reached the
     document. With nothing rendered and no address set aside, the whole
     entry is unconsumed. An address left for recovery renders nowhere else,
     so when something else of the entry did render, only the lines naming
-    that address go to the pass (#1222)."""
+    that address go to the pass (#1222), followed by the `unrouted` values
+    of its records (`_unrouted_record_values`, #1556 b)."""
     fates = {fate for fate, _ in address_fates}
     if not rendered and _AddressFate.SET_ASIDE not in fates:
         return entry
     left = [name for fate, name in address_fates if fate is _AddressFate.LEFT_FOR_RECOVERY]
-    return {**entry, 'text': _lines_naming(entry.get('text', ''), left)} if left else None
+    lines = [_lines_naming(entry.get('text', ''), left)] if left else []
+    return {**entry, 'text': '\n'.join([*lines, *unrouted])} if lines or unrouted else None
 
 
 def _lines_naming(text: str, names: list[str]) -> str:
@@ -1076,6 +1083,190 @@ def _route_email(email: str, text: str, field_key: str | None,
     return work_email or email, personal_email
 
 
+@dataclass
+class _ContactSlots:
+    """The contact values `_fill_personal_data` routes its A entries into,
+    one per template row plus `home_phone`, which no row shows."""
+    work_email: str | None = None
+    personal_email: str | None = None
+    office_phone: str | None = None
+    cell_phone: str | None = None
+    home_phone: str | None = None
+    office_address: str | None = None
+    home_address: str | None = None
+
+    def rendered(self) -> tuple[str | None, ...]:
+        """The values that say an entry was consumed. home_phone is
+        deliberately absent: it is written and never read (the template has
+        no home-phone row), so an entry that sets only home_phone reaches the
+        document nowhere and is genuinely unconsumed. Two corpus entries are
+        in exactly that state."""
+        return (self.work_email, self.personal_email, self.office_phone,
+                self.cell_phone, self.office_address, self.home_address)
+
+    def shown(self) -> tuple[str | None, ...]:
+        """The values a row prints: never a home one, which #821 withholds."""
+        return (self.work_email, self.personal_email, self.office_phone,
+                self.cell_phone, self.office_address)
+
+
+class _RoutingContext(NamedTuple):
+    """What routing one A entry's records reads besides the record: the
+    entry, its lowercased text, the fragments the pii pass cut from it, the
+    lowercased text of every non-A entry, and the list a withheld value is
+    recorded on."""
+    entry: dict
+    text: str
+    pii_fragments: list[str]
+    other_entries_text: str
+    withheld: list[WithheldItem]
+
+
+def _contact_records(fields: dict, records_key: str | None) -> list[dict]:
+    """The records of one A entry, in stage 4's order (#1556 b, OIEPQD
+    TVQZIP 17/22): every record kept under `records_key`, the last of which
+    is the entry's own fields, or just those fields. Stage 4 returns one
+    record per contact line since #1406, and reading only the entry's own
+    fields (the LAST record) lost every earlier address, phone and email."""
+    records = fields.get(records_key) if records_key else None
+    if not isinstance(records, list) or len(records) < 2 \
+            or not all(isinstance(record, dict) for record in records):
+        return [fields]
+    return [*records[:-1], {key: value for key, value in fields.items() if key != records_key}]
+
+
+#: The cv_owner fields whose words are the owner's name. Credentials are left
+#: out, so a "PhD" cannot make a third party's name read as the owner's.
+_OWNER_NAME_KEYS = ('first_name', 'middle_name', 'last_name', 'full_name')
+#: The shortest word compared, so an initial or "Jr" cannot match a name.
+_MIN_NAME_WORD_CHARS = 3
+_NAME_WORD_RE = re.compile(r'[^\W\d_]+')
+#: A staff role that labels a contact block as someone else's: the assistant
+#: or coordinator a CV lists for scheduling (#1578, YUYVIG DYLJXC 17 and 21).
+#: A faculty title that starts with one of these words is the owner's own
+#: ("Assistant Professor", "Assistant Dean"), so those are not staff labels.
+_STAFF_ROLE_RE = re.compile(
+    r'\b(?:assistant|coordinator|administrator|secretary|scheduler)\b'
+    r'(?!\s+(?:professor|prof\b|dean|director|chief|chair|attending|clinical|research'
+    r'|investigator|scientist|physician|editor|member))', re.IGNORECASE)
+
+
+def _name_words(value: _JsonValue) -> frozenset[str]:
+    """The lowercased words of a name, without initials or periods."""
+    if not isinstance(value, str):
+        return frozenset()
+    return frozenset(word for word in _NAME_WORD_RE.findall(value.replace('.', '').lower())
+                     if len(word) >= _MIN_NAME_WORD_CHARS)
+
+
+def _owner_name_words(cv_owner: dict | None) -> frozenset[str]:
+    """Every word of the owner's name (`_OWNER_NAME_KEYS`). All of them, not
+    just `last_name`: stage 4's surname is not ground truth for a compound
+    surname, and a wider set only ever spares a record."""
+    owner = cv_owner or {}
+    return frozenset(word for key in _OWNER_NAME_KEYS for word in _name_words(owner.get(key)))
+
+
+def _is_third_party_record(fields: dict, text: str, owner_words: frozenset[str]) -> bool:
+    """Whether a record is someone else's contact block (#1578): stage 4 names
+    a person who shares no word with the owner, and the entry's text labels
+    the block with a staff role (`_STAFF_ROLE_RE`). Both are needed: the
+    corpus has owner blocks named for an endowed chair or a hospital, with no
+    staff label. With no owner name known, nothing is judged a third party's."""
+    other_name = _name_words(fields.get('name'))
+    return (bool(owner_words) and bool(other_name) and not other_name & owner_words
+            and _STAFF_ROLE_RE.search(text) is not None)
+
+
+def _email_in_text(entry: dict, ctx: _RoutingContext, slots: _ContactSlots) -> None:
+    """Offer the first email in the entry's text when no email row is filled
+    yet and the pii pass did not cut it from a protected fragment. Lifted out
+    of `_fill_personal_data` (#1578) unchanged."""
+    if slots.work_email or slots.personal_email:
+        return
+    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
+    if email_match and not _from_pii_fragment(email_match.group(0), ctx.pii_fragments):
+        slots.work_email, slots.personal_email = _route_email(
+            email_match.group(0), ctx.text, None, slots.work_email, slots.personal_email)
+
+
+def _route_contact_record(fields: dict, ctx: _RoutingContext, slots: _ContactSlots,
+                          ranks: tuple[_SlotRank, _SlotRank]
+                          ) -> tuple[list[tuple[_AddressFate, str]], str | None]:
+    """Route one record's phone, address and email into `slots`, in place,
+    by the labels of its entry's text; return what `_route_address` did with
+    each address and the record's ORCID iD. A value cut from a
+    protected-data fragment routes nowhere. Lifted out of
+    `_fill_personal_data` (#1556 b) so every record of an entry is routed
+    the same way."""
+    address_rank, phone_rank = ranks
+    extracted_phone = _drop_home_phone_segments(fields.get('phone'), ctx.withheld, ctx.text)
+    extracted_address = fields.get('address')
+    offschema = _offschema_contact(fields, ctx.pii_fragments)
+    email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
+    extracted_email = fields.get(email_key) if email_key else None
+    if ctx.pii_fragments:
+        if _from_pii_fragment(extracted_phone, ctx.pii_fragments):
+            extracted_phone = None
+        if _from_pii_fragment(extracted_address, ctx.pii_fragments):
+            extracted_address = None
+        if _from_pii_fragment(extracted_email, ctx.pii_fragments):
+            extracted_email = None
+
+    # Classify phone by type; then the numbers stage 4 put under slot-named
+    # keys of their own (#1222, EBYSBC ZCTARO-06, YYVHNN-02).
+    phones = _PhoneSlots(slots.office_phone, slots.cell_phone, slots.home_phone)
+    for phone_value in (extracted_phone, offschema.phone):
+        if phone_value:
+            phones = _route_phone(phone_value, ctx.text, ctx.pii_fragments, ctx.entry,
+                                  phones, phone_rank)
+    slots.office_phone, slots.cell_phone, slots.home_phone = phones
+
+    # Classify address by type, each half of a "Home: ...; Office: ..." on its own
+    address_fates: list[tuple[_AddressFate, str]] = []
+    for address, address_text in _entry_addresses(extracted_address, offschema.address, ctx.text):
+        slots.home_address, slots.office_address, fate = _route_address(
+            address, _AddressContext(address_text, ctx.pii_fragments, fields.get('phone'),
+                                     ctx.entry, ctx.other_entries_text),
+            slots.home_address, slots.office_address, address_rank, ctx.withheld)
+        address_fates.append((fate, _address_cell_text(address, 'office') or ''))
+
+    if extracted_email:
+        slots.work_email, slots.personal_email = _route_email(
+            extracted_email, ctx.text, email_key, slots.work_email, slots.personal_email)
+    return address_fates, _orcid_of(fields, ctx.pii_fragments)
+
+
+#: A fax label, with the word before it ("Office Fax", "Home fax"), and the
+#: number after it ("Fax: 555-0199", "Fax 555 0199"). No row takes a fax
+#: number (`_classify_contact_label`).
+_FAX_NUMBER_RE = re.compile(r'(?:\b[^\W\d_]+[ ]+)?\bfax\b[^\d\t\n]{0,12}' + _PHONE_NUMBER_PATTERN,
+                            re.IGNORECASE)
+
+
+def _unrouted_record_values(records: list[dict], ctx: _RoutingContext,
+                            slots: _ContactSlots) -> list[str]:
+    """What of a multi-record entry no row prints (#1556 b, OIEPQD TVQZIP
+    17/22): each record's value that, routed alone into empty slots, takes
+    a row now showing another value -- one row per kind, and an earlier
+    record or entry filled it -- and each fax number the text gives
+    (`_FAX_NUMBER_RE`), which no record holds. A value routed to a home
+    slot is never one: #821 withholds it. A value already shown is not
+    repeated, so the post-render recovery prints only what is missing."""
+    shown = {value for value in slots.shown() if value}
+    unrouted: list[str] = []
+    for fields in records:
+        alone = _ContactSlots()
+        _route_contact_record(fields, ctx._replace(withheld=[]), alone,
+                              _office_slot_ranks([]))
+        unrouted.extend(value for value in alone.shown()
+                        if value and value not in shown and value not in unrouted)
+    text = ctx.entry.get('text', '') or ''
+    unrouted.extend(match.group(0) for match in _FAX_NUMBER_RE.finditer(text)
+                    if not _HOME_PHONE_MARKER.search(match.group(0)))
+    return unrouted
+
+
 class _VisaAnswers(NamedTuple):
     """The faculty's answers to the template's two visa rows, or empty."""
     eligibility: str
@@ -1295,7 +1486,8 @@ class PersonalDataSection:
     """Section A writers, mixed into `WCMTemplateGenerator`."""
 
     def _fill_personal_data(self, entries: list[dict], cv_owner: dict, document_uid: str,
-                            all_entries: list[dict] | None = None, original_doc_path: str | None = None):
+                            all_entries: list[dict] | None = None, original_doc_path: str | None = None,
+                            records_key: str | None = None):
         """Fill personal data section.
 
         Args:
@@ -1304,6 +1496,11 @@ class PersonalDataSection:
             document_uid: Document identifier
             all_entries: All entries from the CV (to search for email if not in A entries)
             original_doc_path: Path to original Word document (for fallback email extraction)
+            records_key: the `extracted_fields` key stage 4 keeps an entry's
+                records under (`stage4.schemas.STAGE4_RECORDS_KEY`, handed in
+                because nothing under `stage6/` imports `stage4`); every
+                record is routed (`_contact_records`). None reads only the
+                entry's own fields.
         """
         if self.verbose:
             logger.info("\nFilling Personal Data...")
@@ -1337,109 +1534,59 @@ class PersonalDataSection:
 
         # Collect different types of contact info from A entries
         # The original text contains labels like "Office address:", "Cell phone:", etc.
-        work_email = None
-        personal_email = None
-        office_phone = None
-        cell_phone = None
-        home_phone = None
-        office_address = None
-        home_address = None
-
         # A entries that reach none of the six slots below are consumed by
         # nothing. 'A' is in mapped_codes, so they were then excluded from the
         # appendix too, and vanished. Detected by ablation rather than by
         # re-listing the fields this loop reads, so it cannot drift out of step
         # when the loop learns to read a new one.
-        unconsumed = []
-        address_rank, phone_rank = _office_slot_ranks(unconsumed)
+        unconsumed: list[dict] = []
         # An A entry's ORCID iD, for the S0 researcher-profile renderer.
         self._a_researcher_profiles: list[dict] = []
         s0_text = ' '.join(e.get('text', '') for e in all_entries or [] if e.get('taxonomy_code') == 'S0')
         other_entries_text = '\n'.join(e.get('text') or '' for e in all_entries or []
                                        if e.get('taxonomy_code') != 'A').lower()
 
+        slots = _ContactSlots()
+        ranks = _office_slot_ranks(unconsumed)
+        owner_words, third_party_entries = _owner_name_words(cv_owner), []
         for entry in entries:
-            fields = entry.get('extracted_fields', {}) or {}
-            text = entry.get('text', '').lower()
-            slots_before = (work_email, personal_email, office_phone,
-                            cell_phone, office_address, home_address)
-            address_fates: list[tuple[_AddressFate, str]] = []
-
             # Values stage 4 lifted out of a protected-personal-data fragment
-            # are not contact details and must not reach the template. web07's
-            # Office address row renders "Cincinnati, Ohio" today, taken
-            # straight from "PLACE OF BIRTH: Cincinnati, Ohio" by the address
-            # catch-all below.
-            #
-            # Read from the #820 pre-render pass (`_pii_pass.py`), not
-            # recomputed here: by this point `entry['text']` has already had
-            # its PII fragments STRIPPED by that pass, so re-running
-            # `_pii_fragments` against it would find nothing. The pass
-            # stores what it found -- computed against the ORIGINAL text --
-            # on the entry precisely so this check can still answer "did
-            # this extracted_fields value come from a PII fragment?"
-            pii_fragments = entry.get('_pii_fragments', [])
+            # are not contact details and must not reach the template (web07:
+            # "PLACE OF BIRTH: Cincinnati, Ohio" as the Office address). Read
+            # from the #820 pre-render pass (`_pii_pass.py`), not recomputed:
+            # `entry['text']` has already had its PII fragments STRIPPED by
+            # that pass, which stores what it found against the ORIGINAL text.
+            ctx = _RoutingContext(entry, entry.get('text', '').lower(),
+                                  entry.get('_pii_fragments', []), other_entries_text,
+                                  self._pii_result.withheld)
+            slots_before = slots.rendered()
+            records = _contact_records(entry.get('extracted_fields', {}) or {}, records_key)
+            address_fates: list[tuple[_AddressFate, str]] = []
+            orcids: list[str] = []
+            # #1578: a third party's record fills no owner row (`_is_third_party_record`).
+            owned = [fields for fields in records
+                     if not _is_third_party_record(fields, ctx.text, owner_words)]
+            third_party_entries += [entry] if len(owned) < len(records) else []
+            for fields in owned:
+                fates, orcid = _route_contact_record(fields, ctx, slots, ranks)
+                address_fates.extend(fates)
+                orcids.extend([orcid] if orcid else [])
+            for orcid in orcids:
+                profile = _orcid_profile_entry(orcid, s0_text)
+                if profile:
+                    self._a_researcher_profiles.append(profile)
+                    s0_text += ' ' + profile['text']
 
-            # Determine type based on original text labels
-            extracted_phone = _drop_home_phone_segments(fields.get('phone'), self._pii_result.withheld, text)
-            extracted_address = fields.get('address')
-            offschema = _offschema_contact(fields, pii_fragments)
-            email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
-            extracted_email = fields.get(email_key) if email_key else None
-
-            if pii_fragments:
-                if _from_pii_fragment(extracted_phone, pii_fragments):
-                    extracted_phone = None
-                if _from_pii_fragment(extracted_address, pii_fragments):
-                    extracted_address = None
-                if _from_pii_fragment(extracted_email, pii_fragments):
-                    extracted_email = None
-
-            # Classify phone by type; then the numbers stage 4 put under
-            # slot-named keys of their own (#1222, EBYSBC ZCTARO-06, YYVHNN-02).
-            phones = _PhoneSlots(office_phone, cell_phone, home_phone)
-            for phone_value in (extracted_phone, offschema.phone):
-                if phone_value:
-                    phones = _route_phone(phone_value, text, pii_fragments, entry,
-                                          phones, phone_rank)
-            office_phone, cell_phone, home_phone = phones
-
-            # Classify address by type, each half of a "Home: ...; Office: ..." on its own
-            for address, address_text in _entry_addresses(extracted_address, offschema.address, text):
-                home_address, office_address, fate = _route_address(
-                    address, _AddressContext(address_text, pii_fragments, fields.get('phone'), entry,
-                                             other_entries_text),
-                    home_address, office_address, address_rank, self._pii_result.withheld)
-                address_fates.append((fate, _address_cell_text(address, 'office') or ''))
-            orcid = _orcid_of(fields, pii_fragments)
-            profile = _orcid_profile_entry(orcid, s0_text) if orcid else None
-            if profile:
-                self._a_researcher_profiles.append(profile)
-                s0_text += ' ' + profile['text']
-
-            # Classify email by type
-            if extracted_email:
-                work_email, personal_email = _route_email(
-                    extracted_email, text, email_key, work_email, personal_email)
-
-            # Also check entry text for email pattern (fallback)
-            if not work_email and not personal_email:
-                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
-                if email_match and not _from_pii_fragment(email_match.group(0),
-                                                          pii_fragments):
-                    work_email, personal_email = _route_email(
-                        email_match.group(0), text, None, work_email, personal_email)
-
-            # home_phone is deliberately absent from this tuple: it is written
-            # and never read (the template has no home-phone row), so an entry
-            # that sets only home_phone reaches the document nowhere and is
-            # genuinely unconsumed. Two corpus entries are in exactly that
-            # state.
-            recovered = _entry_for_recovery(entry, address_fates, bool(orcid) or (
-                work_email, personal_email, office_phone, cell_phone,
-                office_address, home_address) != slots_before)
+            if len(owned) == len(records):
+                _email_in_text(entry, ctx, slots)
+            unrouted = _unrouted_record_values(records, ctx, slots) if len(records) > 1 else []
+            recovered = _entry_for_recovery(entry, address_fates, bool(orcids) or (
+                slots.rendered() != slots_before), unrouted)
             if recovered is not None:
                 unconsumed.append(recovered)
+        work_email, personal_email = slots.work_email, slots.personal_email
+        office_phone, cell_phone, home_phone = slots.office_phone, slots.cell_phone, slots.home_phone
+        office_address, home_address = slots.office_address, slots.home_address
 
         # Handed to the post-render recovery pass, which is the only point at
         # which "did this content reach the document?" can actually be asked.
@@ -1460,6 +1607,8 @@ class PersonalDataSection:
         # already pins that path and caught this one the moment it went live.
         if not work_email and all_entries:
             for entry in all_entries:
+                if any(entry is third_party for third_party in third_party_entries):
+                    continue  # #1578: a third party's email is never the owner's
                 text = entry.get('text', '')
                 # Read from the #820 pass, not recomputed -- see the
                 # per-entry loop above for why.
@@ -1643,7 +1792,9 @@ class PersonalDataSection:
             return given
 
         try:
-            original_doc = Document(original_doc_path)
+            # Opened as stage 1 opened it: a body content control's
+            # paragraphs and tables are scanned too (#1656).
+            original_doc = open_source_docx(original_doc_path)
         except _UNREADABLE_SOURCE_ERRORS as e:
             # Ungated -- was verbose-only, so a parsing failure on this
             # fallback left no trace at all outside a verbose run (#550).

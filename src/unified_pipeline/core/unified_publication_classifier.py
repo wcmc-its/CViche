@@ -12,11 +12,10 @@ Based on design by ChatGPT, implemented for Scholar Signals CV Pipeline.
 Date: 2025-11-09
 """
 
-import re
 import hashlib
 import json
-from dataclasses import dataclass, asdict
-
+import re
+from dataclasses import asdict, dataclass
 
 # =============================================================================
 # DATA STRUCTURES

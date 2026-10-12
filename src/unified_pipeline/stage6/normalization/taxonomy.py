@@ -6,7 +6,6 @@ the taxonomy changes, and nothing else in ``normalization`` does.
 """
 import re
 
-
 # A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
 # bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
 # very start and followed by whitespace. Seen verbatim in output on the WCM-

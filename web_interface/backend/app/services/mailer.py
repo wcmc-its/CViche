@@ -23,7 +23,15 @@ from app.config_loader import get_config
 from app.models import InboundRejectReason
 from app.services import notifications
 from app.services.email_templates import (
-    LOGO_FILES, BadgeKind, EmailContent, Para, StatusKind, StatusRow, greeting_for, render_html, render_text,
+    LOGO_FILES,
+    BadgeKind,
+    EmailContent,
+    Para,
+    StatusKind,
+    StatusRow,
+    greeting_for,
+    render_html,
+    render_text,
 )
 
 if TYPE_CHECKING:

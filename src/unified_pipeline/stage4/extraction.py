@@ -4,8 +4,9 @@ Moved verbatim from `stage_4_field_extractor.py` (#498), which re-exports every
 name here.
 
 `extract_fields_from_mapped_entries` calls `extract_fields_batch`,
-`extract_cv_owner_name` and `infer_cv_owner_location` through THIS module's
-globals. A test that stubs one of them must rebind it on
+`extract_cv_owner_name`, `header_footer_contact_entry` and
+`infer_cv_owner_location` through THIS module's globals. A test that stubs one
+of them must rebind it on
 `unified_pipeline.stage4.extraction`, not on the facade -- the facade's
 re-export is a second binding, and rebinding it there silently leaves the real
 function in play (the #496 split-state lesson).
@@ -14,17 +15,24 @@ function in play (the #496 split-state lesson).
 import json
 import logging
 from collections import defaultdict
-from typing import Any, NamedTuple, NotRequired, TypedDict
 from collections.abc import Callable
+from typing import Any, NamedTuple, NotRequired, TypedDict
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
-from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.core.batch_pool import (
+    make_batches,
+    make_progress_printer,
+    map_in_order,
+    workers_from_config,
+)
 from unified_pipeline.llm.retry import LLMOutageError
-from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
-
+from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.llm_provenance import (
+    FALLBACK_SERVED_KEY,
+    STAGE4_ENTRY_FALLBACK_KEY,
+)
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
     ReformattedFields,
@@ -38,17 +46,23 @@ from unified_pipeline.stage4.error_codes import (
     LLM_TIMEOUT,
     NO_MATCHING_EXTRACTION,
 )
+from unified_pipeline.stage4.grounding import GroupGrounding, ground_group
 from unified_pipeline.stage4.owner_name import (
+    PERSONAL_DATA_CODE,
     add_target_names,
     extract_cv_owner_name,
+    header_footer_contact_entry,
     infer_cv_owner_location,
 )
 from unified_pipeline.stage4.schemas import (
     FIELD_DESCRIPTIONS,
     FIELD_SCHEMA_VERSION,
     NUMBERED_FIELD_RE,
+    STAGE4_BORROWED_FIELDS_KEY,
+    STAGE4_FOREIGN_RECORDS_KEY,
     STAGE4_RECORDS_KEY,
     STAGE4_RECORDS_RETURNED_KEY,
+    STAGE4_REEXTRACT_ERROR_KEY,
     STAGE4_UNPLACED_ITEMS_KEY,
     get_active_schemas,
     get_field_schema,
@@ -798,6 +812,7 @@ def build_extraction_prompt(
    - title = the scientific project title - NOT a person's name, NOT FTE information
    - When there is no "Title:" label, an unlabelled name of the project or program that comes before the labelled parts (e.g., before "Program Partner:" or "Funder:") is the title; do not leave title null when the entry names one
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
+   - Effort given in calendar or person months (e.g., "0.24 Cal Months", "1.8 CM") is NOT a percent: copy it into percent_effort as written ("0.24 Cal Months"), never convert it to "%"
    - Do NOT put the project title in pi_name field
    - A person the entry names without a PI label, such as a "with Dr. <name>" collaborator or the investigator who "initiated" a study, is not pi_name; put a collaborator in co_investigators
    - An entry that opens with an author list and has no PI label (e.g., "<name> AB, <name> CD. <title>. $<amount> (<sponsor>)"): pi_name = the first-listed author, co_investigators = the other authors
@@ -950,6 +965,171 @@ def _extraction_map(raw_extractions: list[Any], group_size: int, code: str,
     return extraction_map, {STAGE4_UNPLACED_ITEMS_KEY: unplaced}
 
 
+class _CallSpend(NamedTuple):
+    """What one or more stage-4 calls cost."""
+
+    cost: float = 0.0
+    tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    def plus(self, other: _CallSpend) -> _CallSpend:
+        return _CallSpend(*(mine + theirs for mine, theirs in zip(self, other, strict=True)))
+
+
+class _GroupExtraction(NamedTuple):
+    """One taxonomy-code group's extraction: one result entry per input entry,
+    in the group's order, what its calls cost, and whether the call failed
+    outright (counted into the batch's `failed_groups`)."""
+
+    entries: list[dict[str, Any]]
+    spend: _CallSpend
+    failed: bool
+
+
+def _failed_entries(code_entries: list[dict[str, Any]], error: str) -> list[dict[str, Any]]:
+    return [{**entry, "extracted_fields": {}, "extraction_success": False, "extraction_error": error}
+            for entry in code_entries]
+
+
+def _prompt_text(entry: dict[str, Any]) -> str:
+    """The entry's text as `build_extraction_prompt` shows it: its text and
+    the context heading it is stamped under, if any."""
+    return f"{entry.get('text', '')}\n{entry.get('context_heading') or ''}"
+
+
+def _grounding_flags(grounding: GroupGrounding, index: int) -> dict[str, Any]:
+    flags: dict[str, Any] = {}
+    if index in grounding.borrowed_fields:
+        flags[STAGE4_BORROWED_FIELDS_KEY] = grounding.borrowed_fields[index]
+    if index in grounding.dropped_records:
+        flags[STAGE4_FOREIGN_RECORDS_KEY] = grounding.dropped_records[index]
+    return flags
+
+
+def _merge_group_reply(code: str, code_entries: list[dict[str, Any]], raw_extractions: list[Any],
+                       group_flags: dict[str, Any]) -> list[dict[str, Any]]:
+    """The reply's items merged onto the group's entries by `entry_index`,
+    after the values an item borrowed from another entry of the group are
+    removed (`ground_group`, #1575)."""
+    extraction_map, unplaced_flag = _extraction_map(raw_extractions, len(code_entries), code)
+    grounding = ground_group([_prompt_text(entry) for entry in code_entries], extraction_map)
+    for index, fields in grounding.borrowed_fields.items():
+        logger.warning(
+            "Stage 4 batch extraction for %s: entry %d of %d held another entry's %s; "
+            "set to None and extracted again alone (#1575)",
+            code, index, len(code_entries), ", ".join(fields),
+        )
+    for index, count in grounding.dropped_records.items():
+        logger.warning(
+            "Stage 4 batch extraction for %s: entry %d of %d held %d record(s) of another "
+            "entry; removed (#1575)", code, index, len(code_entries), count,
+        )
+    merged = []
+    for i, entry in enumerate(code_entries):
+        if i in grounding.items:
+            # Coerce, date-normalize and regex-complete every item the
+            # reply holds for this entry -- see _extract_entry_items.
+            extraction = _extract_entry_items(
+                entry.get("text", ""), grounding.items[i], entry.get("taxonomy_code", ""))
+            flags = {**group_flags, **unplaced_flag, **_grounding_flags(grounding, i)}
+            merged.append(_entry_with_extraction(entry, extraction, flags))
+        else:
+            merged.append({**_failed_entries([entry], NO_MATCHING_EXTRACTION)[0], **unplaced_flag})
+    return merged
+
+
+def _extract_code_group(
+    code: str,
+    code_entries: list[dict[str, Any]],
+    cv_owner_name: dict[str, str] | None,
+    cancel_check: Callable[[], None] | None,
+) -> _GroupExtraction:
+    """One call for one taxonomy-code group, merged back onto its entries.
+
+    A call or reply that fails outright marks every entry of the group failed
+    with the reason; a provider outage raises (#810).
+    """
+    prompt = build_extraction_prompt(code_entries, get_field_schema(code), code, cv_owner_name)
+    spend = _CallSpend()
+    try:
+        messages = [
+            {"role": "system", "content": "You are a precise field extraction system for academic CVs. Extract only explicitly stated information."},
+            {"role": "user", "content": prompt}
+        ]
+        llm_result = call_llm(
+            stage="stage_4",
+            messages=messages,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            cancel_check=cancel_check,
+        )
+        result = json.loads(llm_result["content"])
+        spend = _CallSpend(llm_result["cost"], llm_result["total_tokens"],
+                           llm_result.get("cache_read_tokens", 0), llm_result.get("cache_write_tokens", 0))
+        logger.info(
+            "[%s] %d entries | %s tokens | $%.4f",
+            code, len(code_entries), f"{llm_result['total_tokens']:,}", spend.cost,
+        )
+
+        # CRITICAL: Use entry_index from LLM response to match correctly
+        raw_extractions = result.get("entries", result.get("extractions", []))
+        if not isinstance(raw_extractions, list):
+            logger.warning(
+                "Stage 4 batch extraction response for %s was not a list (got %s); treating as empty",
+                code, type(raw_extractions).__name__,
+            )
+            raw_extractions = []
+        merged = _merge_group_reply(code, code_entries, raw_extractions, _fallback_flags(llm_result))
+        return _GroupExtraction(merged, spend, failed=False)
+
+    except (ReadTimeoutError, ConnectTimeoutError):
+        logger.exception("Stage 4 extraction LLM call timed out for code %s", code)
+        return _GroupExtraction(_failed_entries(code_entries, LLM_TIMEOUT), spend, failed=True)
+    except json.JSONDecodeError:
+        logger.exception("Stage 4 extraction response for code %s was not valid JSON", code)
+        return _GroupExtraction(_failed_entries(code_entries, LLM_RESPONSE_INVALID), spend, failed=True)
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
+    except Exception:
+        logger.exception("Stage 4 extraction failed for code %s", code)
+        return _GroupExtraction(_failed_entries(code_entries, LLM_PROVIDER_ERROR), spend, failed=True)
+
+
+def _reextract_borrowed_alone(
+    code: str,
+    code_entries: list[dict[str, Any]],
+    group: _GroupExtraction,
+    cv_owner_name: dict[str, str] | None,
+    cancel_check: Callable[[], None] | None,
+) -> _GroupExtraction:
+    """`group` with each entry whose reply borrowed another entry's values
+    (STAGE4_BORROWED_FIELDS_KEY) extracted again in a call of its own, which
+    has no other entry to borrow from (#1575, UVZNIC 592).
+
+    The re-extraction replaces the entry and keeps the stamp. If that call
+    fails, the entry keeps the group's fields, borrowed ones None, and is
+    stamped with the call's error code; the group is not counted failed,
+    since its call succeeded.
+    """
+    entries = list(group.entries)
+    spend = group.spend
+    for i, (entry, merged) in enumerate(zip(code_entries, group.entries, strict=True)):
+        borrowed = merged.get(STAGE4_BORROWED_FIELDS_KEY)
+        if not borrowed:
+            continue
+        if cancel_check is not None:
+            cancel_check()
+        alone = _extract_code_group(code, [entry], cv_owner_name, cancel_check)
+        spend = spend.plus(alone.spend)
+        [result] = alone.entries
+        if result.get("extraction_success"):
+            entries[i] = {**result, STAGE4_BORROWED_FIELDS_KEY: borrowed}
+        else:
+            entries[i] = {**merged, STAGE4_REEXTRACT_ERROR_KEY: result.get("extraction_error")}
+    return _GroupExtraction(entries, spend, group.failed)
+
+
 def extract_fields_batch(
     entries: list[dict[str, Any]],
     batch_idx: int,
@@ -991,108 +1171,18 @@ def extract_fields_batch(
     failed_groups = 0
 
     for code, code_entries in entries_by_code.items():
-        # Outside the try/except below: a raised cancel must propagate, not
-        # be caught as a generic provider failure.
+        # Outside _extract_code_group's try/except: a raised cancel must
+        # propagate, not be caught as a generic provider failure.
         if cancel_check is not None:
             cancel_check()
-
-        schema = get_field_schema(code)
-        prompt = build_extraction_prompt(code_entries, schema, code, cv_owner_name)
-
-        # Call LLM
-        try:
-            messages = [
-                {"role": "system", "content": "You are a precise field extraction system for academic CVs. Extract only explicitly stated information."},
-                {"role": "user", "content": prompt}
-            ]
-
-            llm_result = call_llm(
-                stage="stage_4",
-                messages=messages,
-                temperature=0.0,
-                response_format={"type": "json_object"},
-                cancel_check=cancel_check,
-            )
-
-            # Parse response
-            content = llm_result["content"]
-            result = json.loads(content)
-
-            cost = llm_result["cost"]
-            total_cost += cost
-            total_tokens += llm_result["total_tokens"]
-            total_cache_read_tokens += llm_result.get("cache_read_tokens", 0)
-            total_cache_write_tokens += llm_result.get("cache_write_tokens", 0)
-
-            # Log cost for this call
-            logger.info(
-                "[%s] %d entries | %s tokens | $%.4f",
-                code, len(code_entries), f"{llm_result['total_tokens']:,}", cost,
-            )
-
-            # Merge extracted fields back with entries
-            # CRITICAL: Use entry_index from LLM response to match correctly
-            raw_extractions = result.get("entries", result.get("extractions", []))
-            if not isinstance(raw_extractions, list):
-                logger.warning(
-                    "Stage 4 batch extraction response for %s was not a list (got %s); treating as empty",
-                    code, type(raw_extractions).__name__,
-                )
-                raw_extractions = []
-
-            # Validate each item at the external trust boundary (see _extraction_map).
-            extraction_map, unplaced_flag = _extraction_map(raw_extractions, len(code_entries), code)
-            group_flags = {**_fallback_flags(llm_result), **unplaced_flag}
-
-            # Merge using explicit indices to avoid mismapping
-            for i, entry in enumerate(code_entries):
-                if i in extraction_map:
-                    # Coerce, date-normalize and regex-complete every item the
-                    # reply holds for this entry -- see _extract_entry_items.
-                    extraction = _extract_entry_items(
-                        entry.get("text", ""), extraction_map[i], entry.get("taxonomy_code", ""))
-                    all_extracted.append(_entry_with_extraction(entry, extraction, group_flags))
-                else:
-                    # No extraction found - mark as failed
-                    all_extracted.append({
-                        **entry,
-                        "extracted_fields": {},
-                        "extraction_success": False,
-                        "extraction_error": NO_MATCHING_EXTRACTION, **unplaced_flag
-                    })
-
-        except (ReadTimeoutError, ConnectTimeoutError):
-            logger.exception("Stage 4 extraction LLM call timed out for code %s", code)
-            failed_groups += 1
-            for entry in code_entries:
-                all_extracted.append({
-                    **entry,
-                    "extracted_fields": {},
-                    "extraction_success": False,
-                    "extraction_error": LLM_TIMEOUT
-                })
-        except json.JSONDecodeError:
-            logger.exception("Stage 4 extraction response for code %s was not valid JSON", code)
-            failed_groups += 1
-            for entry in code_entries:
-                all_extracted.append({
-                    **entry,
-                    "extracted_fields": {},
-                    "extraction_success": False,
-                    "extraction_error": LLM_RESPONSE_INVALID
-                })
-        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
-            raise
-        except Exception:
-            logger.exception("Stage 4 extraction failed for code %s", code)
-            failed_groups += 1
-            for entry in code_entries:
-                all_extracted.append({
-                    **entry,
-                    "extracted_fields": {},
-                    "extraction_success": False,
-                    "extraction_error": LLM_PROVIDER_ERROR
-                })
+        group = _extract_code_group(code, code_entries, cv_owner_name, cancel_check)
+        group = _reextract_borrowed_alone(code, code_entries, group, cv_owner_name, cancel_check)
+        all_extracted.extend(group.entries)
+        total_cost += group.spend.cost
+        total_tokens += group.spend.tokens
+        total_cache_read_tokens += group.spend.cache_read_tokens
+        total_cache_write_tokens += group.spend.cache_write_tokens
+        failed_groups += int(group.failed)
 
     # ==========================================================================
     # LLM RECOVERY PASS: Re-process entries with poor extraction coverage
@@ -1182,6 +1272,51 @@ def _extract_and_log_cv_owner_name(
             cv_owner_name['last_name'],
         )
     return cv_owner_name
+
+
+# A field key naming one of these is an owner-contact field: the A schema's
+# own `email`/`phone`/`address`, and the off-schema `work_email`,
+# `office_phone`, `home_address` the model also files contact under.
+_OWNER_CONTACT_KEY_WORDS = ("email", "phone", "address")
+
+
+def _has_contact_value(fields: dict[str, Any]) -> bool:
+    return any(word in key and not _is_blank(value) and value not in ({}, [])
+               for key, value in fields.items() for word in _OWNER_CONTACT_KEY_WORDS)
+
+
+def _body_has_owner_contact(entries: list[dict[str, Any]]) -> bool:
+    """Whether a Personal Data (A) entry, or one of its records, holds a
+    non-blank contact field (`_OWNER_CONTACT_KEY_WORDS`) -- the #1655 gate."""
+    for entry in entries:
+        if entry.get("taxonomy_code") != PERSONAL_DATA_CODE:
+            continue
+        fields = entry.get("extracted_fields") or {}
+        records = fields.get(STAGE4_RECORDS_KEY) or []
+        if any(_has_contact_value(record) for record in [fields, *records] if isinstance(record, dict)):
+            return True
+    return False
+
+
+def _extract_header_footer_contact(
+    document_uid: str,
+    entries: list[dict[str, Any]],
+    docx_path: str | None,
+    cv_owner_name: dict[str, str],
+    cancel_check: Callable[[], None] | None,
+) -> BatchExtractionResult | None:
+    """The header/footer contact entry (`header_footer_contact_entry`),
+    extracted like any other A entry, when the body's A entries hold no
+    contact (#1655); None -- and no LLM call -- otherwise. One extra call,
+    only on a CV whose letterhead carries an email or phone and whose body
+    carries none."""
+    if _body_has_owner_contact(entries):
+        return None
+    entry = header_footer_contact_entry(document_uid, docx_path)
+    if entry is None:
+        return None
+    logger.info("%s: no owner contact in the body; extracting it from the header/footer", document_uid)
+    return extract_fields_batch([entry], 0, 1, cv_owner_name=cv_owner_name, cancel_check=cancel_check)
 
 
 def _extract_batches(
@@ -1343,6 +1478,15 @@ def extract_fields_from_mapped_entries(
 
     # Add back skipped entries
     all_entries.extend(skipped_entries)
+
+    header_contact = _extract_header_footer_contact(
+        document_uid, all_entries, docx_path, cv_owner_name, cancel_check)
+    if header_contact is not None:
+        all_entries.extend(header_contact["entries"])
+        total_cost += header_contact["cost"]
+        total_tokens += header_contact["tokens"]
+        total_cache_read_tokens += header_contact["cache_read_tokens"]
+        total_cache_write_tokens += header_contact["cache_write_tokens"]
 
     # Sort by original order (element_idx) - convert to int in case values are strings
     def safe_int(val, default=9999):

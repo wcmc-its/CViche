@@ -753,5 +753,90 @@ def test_cache_opt_out_kwarg_is_consumed_by_call_llm():
     assert llm_client._resolve_call_config("stage_3b", {})["enable_prompt_caching"] is True
 
 
+
+# ---------------------------------------------------------------------------
+# #50: the per-CV layout -- one shared system prompt for every group
+# ---------------------------------------------------------------------------
+
+def _notes_taxonomy():
+    return {"codes": [
+        {"code": "H", "label": "Honors", "key_rules": ["H-RULE"]},
+        {"code": "I", "label": "Memberships", "key_rules": ["I-RULE"]},
+        {"code": "S1", "label": "Articles", "key_rules": ["S1-RULE"]},
+        {"code": "T", "label": "Other"},
+    ]}
+
+
+def _groups(*specs):
+    """specs: (key, codes, entry_count) -> build_per_cv_prompts' groups dict."""
+    return {key: (_context(codes), count) for key, codes, count in specs}
+
+
+def test_per_cv_prompts_share_one_system_prompt_across_groups():
+    prompts = classify.build_per_cv_prompts(
+        _groups(("A", ("H",), 2), ("B", ("I",), 3)), _notes_taxonomy())
+    assert list(prompts) == ["A", "B"]
+    assert prompts["A"].system_prompt == prompts["B"].system_prompt
+
+
+def test_per_cv_prompt_carries_every_group_context_in_order():
+    ctx_h, ctx_i = _context(("H",)), _context(("I",))
+    prompts = classify.build_per_cv_prompts({"A": (ctx_h, 1), "B": (ctx_i, 1)}, _notes_taxonomy())
+    system = prompts["A"].system_prompt
+    first = system.index("GROUP 1:\n" + ctx_h.format_context_string())
+    assert system.index("GROUP 2:\n" + ctx_i.format_context_string()) > first
+
+
+def test_per_cv_prompt_lists_every_code_with_notes_for_each_suggested_one():
+    """The full code list (S1 no group suggests is listed too), with the
+    disambiguation notes for every code ANY group suggests, and none for
+    the rest."""
+    system = classify.build_per_cv_prompts(
+        _groups(("A", ("H",), 1), ("B", ("I",), 1)), _notes_taxonomy())["A"].system_prompt
+    for line in ("H: Honors", "I: Memberships", "S1: Articles", "T: Other", "H-RULE", "I-RULE"):
+        assert line in system
+    assert "S1-RULE" not in system
+
+
+def test_per_cv_user_prefix_names_each_group_by_its_number():
+    prompts = classify.build_per_cv_prompts(
+        _groups(("A", ("H",), 1), ("B", ("I",), 1)), _notes_taxonomy())
+    assert prompts["A"].user_prefix.startswith("These entries come from GROUP 1 ")
+    assert prompts["B"].user_prefix.startswith("These entries come from GROUP 2 ")
+
+
+@pytest.mark.parametrize("specs, cache", [
+    ((("A", ("H",), 15),), False),                    # the whole CV is one call
+    ((("A", ("H",), 16),), True),                     # one group, two batches
+    ((("A", ("H",), 1), ("B", ("I",), 1)), True),     # two single-batch groups
+])
+def test_per_cv_prompt_caches_unless_the_cv_is_one_call(specs, cache):
+    prompts = classify.build_per_cv_prompts(_groups(*specs), _notes_taxonomy(), batch_size=15)
+    assert {p.cache for p in prompts.values()} == {cache}
+
+
+def _shared(cache):
+    return classify.SharedSystemPrompt(system_prompt="SHARED SYSTEM", user_prefix="PREFIX\n\n", cache=cache)
+
+
+def test_shared_prompt_replaces_system_and_prefixes_user_message(monkeypatch):
+    calls = _capture_calls(monkeypatch)
+    ents = _entries(2)
+    classify.classify_entries_batch(ents, _context(), _taxonomy())
+    classify.classify_entries_batch(ents, _context(), _taxonomy(), shared_prompt=_shared(True))
+    own, shared = calls
+    assert shared["messages"][0] == {"role": "system", "content": "SHARED SYSTEM"}
+    assert shared["messages"][1]["content"] == "PREFIX\n\n" + own["messages"][1]["content"]
+
+
+@pytest.mark.parametrize("cache, kwargs", [(True, {}), (False, {"enable_prompt_caching": False})])
+def test_shared_prompt_cache_flag_decides_the_cache_point(monkeypatch, cache, kwargs):
+    """A single-batch group keeps the cachePoint under the shared prompt
+    (another group reads it), unless the shared prompt says the CV is one call."""
+    calls = _capture_calls(monkeypatch)
+    classify.classify_entries_batch(_entries(2), _context(), _taxonomy(), shared_prompt=_shared(cache))
+    assert {k: v for k, v in calls[0].items() if k == "enable_prompt_caching"} == kwargs
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
