@@ -37,7 +37,7 @@ def _phase_reply(prompt: str) -> str:
                         "confidence": 0.9} for g in groups])
 
 
-def _make_run(root: Path, carry_max: int) -> Path:
+def _make_run(root: Path, carry_max: int, n_lines: int = 63) -> Path:
     """A run dir in the S3 layout, its prompt logs and entries written by stage 2
     itself (carry set to ``carry_max``) against the phase model."""
     run = root / UID
@@ -45,14 +45,14 @@ def _make_run(root: Path, carry_max: int) -> Path:
         (run / sub).mkdir(parents=True)
     doc = Document()
     doc.add_paragraph("MENTORING")
-    for i in range(63):
+    for i in range(n_lines):
         doc.add_paragraph(f"Field {i % RECORD} of record {i // RECORD}")
     doc.save(run / "input" / f"{UID}.docx")
     hierarchy = run / "outputs" / f"{UID}_hierarchy_mapped.json"
     hierarchy.write_text(json.dumps({
         "document_uid": UID,
         "hierarchy_with_indices": [{"text": "Mentoring", "level": "H1", "element_idx": 0, "children": []}],
-        "section_boundaries": [{"hierarchy": ["Mentoring"], "element_idx_start": 0, "element_idx_end": 63,
+        "section_boundaries": [{"hierarchy": ["Mentoring"], "element_idx_start": 0, "element_idx_end": n_lines,
                                 "has_children": False}],
     }))
     calls = []
@@ -216,6 +216,178 @@ def test_census_counts_the_edge_and_the_carry_from_stored_entries():
             assert sr.run_census(stage2, []) == 2
 
 
+def _arms(run: Path, root: Path) -> dict:
+    return {"base": _replay(run, root / "base", carry_max=0),
+            "new": _replay(run, root / "new"),
+            "base_fail": _replay(run, root / "base_fail", fail_later=True, carry_max=0),
+            "new_fail": _replay(run, root / "new_fail", fail_later=True)}
+
+
+def _copy(record: dict) -> dict:
+    return json.loads(json.dumps(record))
+
+
+def _failed_criteria(row: dict) -> list[str]:
+    """The gate criteria a row fails, judged here independently of gate_passes."""
+    checks = {
+        "first_batch": row["first_batch_prompt_diffs"] == 0,
+        "single_batch": row["single_batch_prompt_diffs"] == 0,
+        "outside_carry": row["changed_entries_outside_carry"] == 0,
+        "unaccounted_fail_arms": row["unaccounted_same_fail_arms"],
+        "unaccounted_vs_base": row["unaccounted_same_as_base"],
+        "lost": row["fail_lines_lost"] == 0,
+        "gained": row["fail_lines_gained"] == 0,
+        "multi_claimed": row["fail_multi_claimed_base"] == row["fail_multi_claimed_new"],
+    }
+    return sorted(name for name, ok in checks.items() if not ok)
+
+
+def _gate(arms: dict, **replace: dict) -> dict:
+    merged = {**arms, **replace}
+    return sr.gate_run(merged["base"], merged["new"], merged["base_fail"], merged["new_fail"])
+
+
+def test_a_replay_miss_raises_and_a_repeated_prompt_is_answered_in_log_order():
+    answer = {"cost": 0.0, "total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    replayer = sr._Replayer({"P": [{**answer, "content": "a"}, {**answer, "content": "b"}]}, False)
+    replayer.sections.append({"start": 0, "end": 1, "batches": []})
+    asked = [{"role": "user", "content": "P"}]
+    assert [replayer.call_llm("stage_2", asked)["content"] for _ in range(3)] == ["a", "b", "b"]
+    try:
+        replayer.call_llm("stage_2", [{"role": "user", "content": "never sent"}])
+    except sr.ReplayMiss:
+        pass
+    else:
+        raise AssertionError("a prompt with no stored reply was answered")
+    assert (replayer.served, replayer.misses) == (3, 1)
+    assert [b["outcome"] for b in replayer.sections[0]["batches"]] == ["served"] * 3 + ["miss"]
+
+
+def test_a_replay_that_differs_from_the_stored_entries_is_reported():
+    with tempfile.TemporaryDirectory() as tmp:
+        run = _make_run(Path(tmp), carry_max=0)
+        stored = run / "outputs" / f"{UID}_entries.json"
+        data = json.loads(stored.read_text())
+        data["entries"] = data["entries"][1:]
+        stored.write_text(json.dumps(data))
+        assert not _replay(run, Path(tmp) / "base", carry_max=0)["matches_stored_entries"]
+
+
+def test_each_gate_criterion_fails_the_gate_on_its_own():
+    with tempfile.TemporaryDirectory() as tmp:
+        arms = _arms(_make_run(Path(tmp), carry_max=0), Path(tmp))
+        assert _failed_criteria(_gate(arms)) == [] and sr.gate_passes(_gate(arms))
+
+        # A section one batch long in the base arm that the new arm sends as two.
+        base, new = _copy(arms["base"]), _copy(arms["new"])
+        base["sections"][0]["batches"] = base["sections"][0]["batches"][:1]
+        new["sections"][0]["batches"][0] = base["sections"][0]["batches"][0]
+        cases = {"single_batch": {"base": base, "new": new}}
+
+        gained = _copy(arms["new_fail"])
+        gained["entries"].append({"element_type": "paragraph", "element_idx_start": 60, "element_idx_end": 60})
+        cases["gained"] = {"new_fail": gained}
+
+        twice = _copy(arms["new_fail"])
+        twice["entries"].append(next(e for e in twice["entries"] if e["element_type"] == "paragraph"))
+        cases["multi_claimed"] = {"new_fail": twice}
+
+        fail_arm = _copy(arms["base_fail"])
+        fail_arm["coverage"]["unaccounted_indices"] = [999]
+        cases["unaccounted_fail_arms"] = {"base_fail": fail_arm}
+
+        served = _copy(arms["base"])
+        served["coverage"]["unaccounted_indices"] = [999]
+        cases["unaccounted_vs_base"] = {"base": served}
+
+        for criterion, replace in cases.items():
+            row = _gate(arms, **replace)
+            assert _failed_criteria(row) == [criterion], (criterion, row)
+            assert not sr.gate_passes(row), criterion
+
+
+def test_the_gate_reports_served_line_changes_and_restores_without_gating_them():
+    with tempfile.TemporaryDirectory() as tmp:
+        arms = _arms(_make_run(Path(tmp), carry_max=0), Path(tmp))
+        # The served new arm misses batch 2 (a prompt the stored run never sent):
+        # lines 51-63 are breaks there, batch 1's held-back record 50 is restored.
+        row = _gate(arms)
+        assert (row["served_lines_lost"], row["served_lines_gained"]) == (13, 0)
+        assert (row["new_restored"], row["new_failed_batches"]) == (1, 1)
+        assert sr.gate_passes(row)
+
+        new = _copy(arms["base"])
+        new["entries"] = [e for e in new["entries"] if e["element_idx_start"] != 51]  # lines 51-57
+        new["entries"].append({"element_type": "paragraph", "element_idx_start": 0, "element_idx_end": 0})
+        new["batch_carry"] = {"restored_unclaimed": 2, "restored_after_failure": 1, "failed_batches": 4}
+        row = _gate(arms, new=new)
+        assert (row["served_lines_lost"], row["served_lines_gained"]) == (RECORD, 1)
+        assert (row["new_restored"], row["new_failed_batches"]) == (3, 4)
+        new["batch_carry"] = None
+        assert (_gate(arms, new=new)["new_restored"], _gate(arms, new=new)["new_failed_batches"]) == (0, 0)
+
+
+def test_an_entry_on_the_carried_regions_first_line_is_inside_it():
+    with tempfile.TemporaryDirectory() as tmp:
+        arms = _arms(_make_run(Path(tmp), carry_max=0), Path(tmp))
+        assert sr.carried_regions(arms["base"], arms["new"]) == [(50, 63)]
+        new = _copy(arms["new"])
+        head = next(e for e in new["entries"] if e["element_idx_start"] == 50)
+        head["text"] += " (changed)"
+        assert _gate(arms, new=new)["changed_entries_outside_carry"] == 0
+
+
+def test_the_carried_region_starts_at_the_first_batch_whose_prompt_differs():
+    def section(shas):
+        return {"start": 0, "end": 101, "batches": [{"first": str(20 * k), "sha": sha, "outcome": "served"}
+                                                    for k, sha in enumerate(shas)]}
+    base, new = {"sections": [section("abc")]}, {"sections": [section("abd")]}
+    assert sr.carried_regions(base, new) == [(40, 100)]
+    assert sr.carried_regions(base, {"sections": [section("abc")]}) == []
+    assert sr.carried_regions(base, {"sections": [section("abcd")]}) == [(60, 100)]
+
+
+def test_same_exits_1_on_an_entry_only_or_a_coverage_only_difference():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        run = _make_run(root, carry_max=0)
+        _replay(run, root / "base", carry_max=0)
+        record = json.loads((root / "base" / f"{UID}.json").read_text())
+        entries_only, coverage_only = _copy(record), _copy(record)
+        entries_only["entries"] = entries_only["entries"][1:]
+        coverage_only["coverage"]["unaccounted_indices"] = [999]
+        with contextlib.redirect_stdout(io.StringIO()):
+            for name, changed in (("entries_only", entries_only), ("coverage_only", coverage_only)):
+                (root / name).mkdir()
+                (root / name / f"{UID}.json").write_text(json.dumps(changed))
+                assert sr.main(["same", "--a", str(root / "base"), "--b", str(root / name)]) == 1, name
+        (root / "none").mkdir()
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert sr.main(["same", "--a", str(root / "none"), "--b", str(root / "base")]) == 2
+
+
+def test_census_counts_no_edge_for_a_single_batch_section_and_estimates_the_extra_cost():
+    with tempfile.TemporaryDirectory() as tmp:
+        run = _make_run(Path(tmp), carry_max=0, n_lines=20)
+        row = sr.census_cv(stage2, *sr._run_files(run)[1:])
+        assert (row["edges"], row["multi_batch_sections"], row["calls_today"], row["carries"]) == (0, 0, 1, [])
+    with tempfile.TemporaryDirectory() as tmp:
+        run = _make_run(Path(tmp), carry_max=0)
+        entries = run / "outputs" / f"{UID}_entries.json"
+        data = json.loads(entries.read_text())
+        data["total_cost"] = 63.0  # one extra element of 63 sent: an estimated extra $1.00
+        entries.write_text(json.dumps(data))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            assert sr.run_census(stage2, [sr._run_files(run)]) == 0
+        assert "stage-2 cost $63.00  estimated extra $1.00" in out.getvalue()
+
+
+def test_percentile_takes_the_value_at_the_quantile_not_the_maximum():
+    assert sr._percentile([4, 1, 3, 2], 0.5) == 3
+    assert sr._percentile([4, 1, 3, 2], 0.9) == 4
+    assert sr._percentile([], 0.5) == 0
+
+
 if __name__ == "__main__":
     for test in (test_stored_replies_pair_by_log_id_and_key_by_the_user_prompt,
                  test_a_stored_run_replays_to_its_own_entries_and_a_miss_is_counted,
@@ -223,6 +395,15 @@ if __name__ == "__main__":
                  test_gate_passes_the_carry_and_fails_a_change_outside_the_carried_region,
                  test_gate_and_same_cli_exit_codes,
                  test_entry_lines_cover_paragraph_ranges_and_row_spans,
-                 test_census_counts_the_edge_and_the_carry_from_stored_entries):
+                 test_census_counts_the_edge_and_the_carry_from_stored_entries,
+                 test_a_replay_miss_raises_and_a_repeated_prompt_is_answered_in_log_order,
+                 test_a_replay_that_differs_from_the_stored_entries_is_reported,
+                 test_each_gate_criterion_fails_the_gate_on_its_own,
+                 test_the_gate_reports_served_line_changes_and_restores_without_gating_them,
+                 test_an_entry_on_the_carried_regions_first_line_is_inside_it,
+                 test_the_carried_region_starts_at_the_first_batch_whose_prompt_differs,
+                 test_same_exits_1_on_an_entry_only_or_a_coverage_only_difference,
+                 test_census_counts_no_edge_for_a_single_batch_section_and_estimates_the_extra_cost,
+                 test_percentile_takes_the_value_at_the_quantile_not_the_maximum):
         test()
         print(f"ok {test.__name__}")

@@ -853,13 +853,26 @@ CARRY_SKIP_OVER_MAX = "over_max"
 @dataclass
 class BatchCarryCounts:
     """What happened at a section's batch edges (#1226): written to the stage-2
-    artifact so a skipped carry is visible (§5.3). ``edges`` is always
-    ``carried`` plus the three skip counts."""
+    artifact so a skipped carry, a failed batch and a restored tail are each
+    visible (§5.3). ``edges`` is always ``carried`` plus the three skip counts.
+
+    ``failed_batches`` counts every batch whose call or reply failed, the last
+    batch and a single-batch section's included. ``restored_after_failure`` and
+    ``restored_unclaimed`` count held-back entries put back because the batch
+    that re-listed them failed, or replied without claiming any of their lines.
+    """
     edges: int = 0
     carried: int = 0
     skipped_no_entry: int = 0
     skipped_no_progress: int = 0
     skipped_over_max: int = 0
+    failed_batches: int = 0
+    restored_after_failure: int = 0
+    restored_unclaimed: int = 0
+
+    def any(self) -> bool:
+        """True when there is anything to report: an edge or a failed batch."""
+        return bool(self.edges or self.failed_batches)
 
     def record(self, skip_reason: str | None) -> None:
         self.edges += 1
@@ -880,6 +893,9 @@ class BatchCarryCounts:
         self.skipped_no_entry += other.skipped_no_entry
         self.skipped_no_progress += other.skipped_no_progress
         self.skipped_over_max += other.skipped_over_max
+        self.failed_batches += other.failed_batches
+        self.restored_after_failure += other.restored_after_failure
+        self.restored_unclaimed += other.restored_unclaimed
 
 
 class _CarrySplit(NamedTuple):
@@ -918,6 +934,40 @@ def _carry_split(batch_entries: list[dict], batch_elements: list[dict], carry_ma
         pos = position(entry)
         (pending if pos is not None and pos >= carry else kept).append(entry)
     return _CarrySplit(kept, pending, carry, None)
+
+
+def _entry_keys(entry: dict, batch_elements: list[dict]) -> set[str]:
+    """The element keys one entry covers: its paragraph range, or the batch
+    rows from its start key to its end key. A reversed range covers nothing."""
+    start, end = entry["element_idx_start"], entry["element_idx_end"]
+    if isinstance(start, int) and isinstance(end, int):
+        return {str(idx) for idx in range(start, end + 1)}
+    keys = [str(elem["idx"]) for elem in batch_elements]
+    start_text, end_text = delimiter_index_text(start), delimiter_index_text(end)
+    if start_text not in keys:
+        return {start_text}
+    first = keys.index(start_text)
+    last = keys.index(end_text) if end_text in keys else first
+    return set(keys[first:max(first, last) + 1])
+
+
+def _unclaimed_pending(pending: list[dict], batch_entries: list[dict],
+                       batch_elements: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(the held-back entries this batch's reply left alone, the batch's
+    entries less any #420-recovered row those entries already hold).
+
+    The next batch re-lists the held-back tail so its reply can replace it.
+    A reply that claims none of a held-back entry's lines -- an empty ``[]``,
+    or one that opens past the carried lines -- has replaced nothing, so that
+    entry stands. Only model-attested entries claim; a row #420 recovered in
+    this batch is the same row the restored entry holds, and is dropped.
+    """
+    claimed = set().union(*(_entry_keys(e, batch_elements) for e in batch_entries if not e.get("recovered_row")))
+    restored = [e for e in pending if not _entry_keys(e, batch_elements) & claimed]
+    held = set().union(*(_entry_keys(e, batch_elements) for e in restored))
+    kept = [e for e in batch_entries
+            if not (e.get("recovered_row") and _entry_keys(e, batch_elements) <= held)]
+    return restored, kept
 
 
 def _table_row_elements(idx: int, rows: Iterable[tuple[int, object]], table_index: object) -> list[dict]:
@@ -1228,12 +1278,21 @@ def _validated_entries(
     return entries, claimed_row_keys
 
 
-class _BatchReply(NamedTuple):
-    entries: list[dict]   # model-attested entries, then any #420-recovered rows
-    cost: float
-    total_tokens: int
-    prompt_tokens: int
-    completion_tokens: int
+@dataclass
+class _BatchUsage:
+    """A section's summed call cost and tokens. A call is counted as soon as
+    it returns, so a reply that then fails to parse or validate is still
+    counted -- it was paid for (§5.4)."""
+    cost: float = 0.0
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    def add(self, llm_result: dict) -> None:
+        self.cost += llm_result["cost"]
+        self.total_tokens += llm_result["total_tokens"]
+        self.prompt_tokens += llm_result["prompt_tokens"]
+        self.completion_tokens += llm_result["completion_tokens"]
 
 
 def _run_batch(
@@ -1243,14 +1302,18 @@ def _run_batch(
     start_elem_idx: int,
     end_elem_idx: int,
     element_index_map: dict,
-) -> _BatchReply:
-    """One batch's call and its validated entries. Raises on any failure."""
+    usage: _BatchUsage,
+) -> list[dict]:
+    """One batch's validated entries: the model-attested ones, then any
+    #420-recovered rows. Raises on any failure; the call's cost is added to
+    ``usage`` once it returns, before the reply is read."""
     llm_result = call_llm(
         stage="stage_2",
         messages=_batch_messages(batch_elements, full_hierarchy),
         response_format={"type": "json_object"},
         temperature=0.1
     )
+    usage.add(llm_result)
     result = parse_delimiter_reply(llm_result["content"])
     entries, claimed_row_keys = _validated_entries(
         _reply_delimiters(result), batch_elements, start_elem_idx, end_elem_idx, element_index_map)
@@ -1271,8 +1334,7 @@ def _run_batch(
     if recovered:
         logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
                     f"in batch {batch_no} [{full_hierarchy}]")
-    return _BatchReply(entries + recovered, llm_result["cost"], llm_result["total_tokens"],
-                       llm_result["prompt_tokens"], llm_result["completion_tokens"])
+    return entries + recovered
 
 
 def _detect_in_batches(
@@ -1285,14 +1347,14 @@ def _detect_in_batches(
     """A section's entries, one call per batch, each batch after the first
     re-opening on the record the batch before it may have cut (#1226).
 
-    A batch whose call fails is skipped, as before, and the entries it would
-    have replaced are restored -- a failure never loses what the batch before
-    it produced. ``LLMOutageError`` still fails the section.
+    A batch whose call fails is skipped, as before. The entries it would have
+    replaced are restored -- so are any its reply leaves unclaimed: a carried
+    batch never loses what the batch before it produced. ``LLMOutageError``
+    still fails the section.
     """
     entries = []
     pending = []  # the previous batch's tail, which this batch's reply replaces
-    total_cost = 0.0
-    total_tokens = prompt_tokens = completion_tokens = 0
+    usage = _BatchUsage()
     carry_counts = BatchCarryCounts()
     multi_batch = len(section_elements) > STAGE2_BATCH_SIZE
     start = 0
@@ -1306,23 +1368,20 @@ def _detect_in_batches(
             logger.info(f"    Processing batch {batch_no} (elements {start + 1}-{end} of {len(section_elements)})")
 
         try:
-            reply = _run_batch(batch_elements, full_hierarchy, batch_no,
-                               start_elem_idx, end_elem_idx, element_index_map)
+            batch_entries = _run_batch(batch_elements, full_hierarchy, batch_no,
+                                       start_elem_idx, end_elem_idx, element_index_map, usage)
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
         except Exception as e:
             logger.warning(f"    ⚠ Error in batch {batch_no}: {e} [{full_hierarchy}]")
-            reply = None
-
-        if reply is None:
+            carry_counts.failed_batches += 1
+            carry_counts.restored_after_failure += len(pending)
             entries.extend(pending)  # nothing replaced the carried tail: it stands
             batch_entries = []
         else:
-            total_cost += reply.cost
-            total_tokens += reply.total_tokens
-            prompt_tokens += reply.prompt_tokens
-            completion_tokens += reply.completion_tokens
-            batch_entries = reply.entries
+            restored, batch_entries = _unclaimed_pending(pending, batch_entries, batch_elements)
+            carry_counts.restored_unclaimed += len(restored)
+            entries.extend(restored)
         pending = []
 
         if end >= len(section_elements):
@@ -1335,12 +1394,12 @@ def _detect_in_batches(
         start += split.carry
 
     cost_info = {
-        "cost": total_cost,
-        "tokens": total_tokens,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
+        "cost": usage.cost,
+        "tokens": usage.total_tokens,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
     }
-    if carry_counts.edges:
+    if carry_counts.any():
         cost_info["batch_carry"] = carry_counts
     return entries, cost_info
 
@@ -1367,8 +1426,9 @@ def detect_entries_for_section(
         element_index_map: Map from element index to element data
 
     Returns:
-        Tuple of (entries_list, cost_info_dict). A multi-batch section's
-        cost_info also carries ``batch_carry``, its BatchCarryCounts.
+        Tuple of (entries_list, cost_info_dict). The cost_info of a
+        multi-batch section, or of one with a failed batch, also carries
+        ``batch_carry``, its BatchCarryCounts.
     """
     if header_indices is None:
         header_indices = set()
@@ -1479,6 +1539,98 @@ def fold_labelled_detail_entries(entries: list[dict], element_index_map: dict) -
         logger.info(f"    Folded {fold_count} labelled detail line(s) into the entry above")
         return folded
     return entries
+
+
+# Bare trailing-date fold (#1226). A carried batch opens on a whole record
+# but shows no column header and no earlier record, and the model can then
+# emit a record's trailing date as an entry of its own ("Date for prior
+# entry"): stage 6 renders that record undated (XUTTKJ-01). A one-line entry
+# that is only a date folds into the entry above it when only blank lines sit
+# between them and that entry's full text has no year of its own. Never when
+# the next entry is a bare date too: a run of them is a stacked date column
+# (#259), not one record's tail. Judged on each entry's full text, never the
+# prompt's 150-character truncation, where a cut-off year reads as missing.
+_MONTH = (r"(?:January|February|March|April|May|June|July|August|September|October|November|December"
+          r"|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)")
+_YEAR4 = r"(?:19|20)\d{2}"
+_DATE_TOKEN = (rf"(?:{_MONTH}\.?\s+(?:\d{{1,2}},?\s*)?{_YEAR4}|\d{{1,2}}/\d{{1,2}}/(?:{_YEAR4}|\d{{2}})"
+               rf"|\d{{1,2}}/{_YEAR4}|{_YEAR4})")
+BARE_DATE_RE = re.compile(
+    rf"^\s*{_DATE_TOKEN}(?:\s*(?:,|[-\u2013\u2014]|to)\s*(?:{_DATE_TOKEN}|present|current|now|ongoing))*\s*[,.]?\s*$",
+    re.IGNORECASE)
+
+
+def _is_paragraph_entry(entry: dict, element_index_map: dict) -> bool:
+    """A content entry over a paragraph range: integer bounds, its first
+    element a paragraph (never a table row, header or break)."""
+    return (
+        entry.get("element_type") not in _STRUCTURAL_ENTRY_TYPES
+        and isinstance(entry.get("element_idx_start"), int)
+        and isinstance(entry.get("element_idx_end"), int)
+        and element_index_map.get(entry["element_idx_start"], {}).get("type") == "paragraph"
+    )
+
+
+def _is_bare_date_entry(entry: dict, element_index_map: dict) -> bool:
+    """A one-line paragraph entry whose whole text is a date or date range."""
+    return (
+        _is_paragraph_entry(entry, element_index_map)
+        and entry["element_idx_start"] == entry["element_idx_end"]
+        and bool(BARE_DATE_RE.match(entry.get("text", "")))
+    )
+
+
+def _only_blank_lines_between(prev_end: int, cur_start: int, element_index_map: dict) -> bool:
+    return all(
+        element_index_map.get(idx, {}).get("type") in ("empty", "paragraph")
+        and not get_element_text(element_index_map[idx])
+        for idx in range(prev_end + 1, cur_start)
+    )
+
+
+def _bare_date_completes_previous(prev: dict, cur: dict, nxt: dict | None, element_index_map: dict) -> bool:
+    """True when ``cur`` is a bare date that ends ``prev``'s record (the rule
+    above the constants). ``prev`` is a paragraph entry already."""
+    return (
+        _is_bare_date_entry(cur, element_index_map)
+        and prev.get("hierarchy") == cur.get("hierarchy")
+        and _only_blank_lines_between(prev["element_idx_end"], cur["element_idx_start"], element_index_map)
+        and not _YEAR_RE.search(prev.get("text", ""))
+        and not (nxt is not None and _is_bare_date_entry(nxt, element_index_map))
+    )
+
+
+def fold_bare_trailing_dates(entries: list[dict], element_index_map: dict) -> list[dict]:
+    """Fold each isolated bare trailing date into the record above it (#1226).
+
+    Runs on one section's entries, like ``fold_labelled_detail_entries``. The
+    folded entry keeps the record's type, confidence and hierarchy; its range
+    extends to the date and the blank lines between, whose break entries go.
+    Returns ``entries`` itself, untouched, when nothing folds.
+    """
+    content = sorted((e for e in entries if _is_paragraph_entry(e, element_index_map)),
+                     key=lambda e: e["element_idx_start"])
+    folded: list[dict] = []
+    spans: list[tuple[int, int]] = []
+    for pos, entry in enumerate(content):
+        nxt = content[pos + 1] if pos + 1 < len(content) else None
+        if folded and _bare_date_completes_previous(folded[-1], entry, nxt, element_index_map):
+            parent = folded[-1]
+            folded[-1] = {**parent, "element_idx_end": entry["element_idx_end"],
+                          "text": parent["text"] + "\t" + entry["text"]}
+            spans.append((parent["element_idx_end"] + 1, entry["element_idx_end"]))
+        else:
+            folded.append(entry)
+    if not spans:
+        return entries
+
+    def absorbed(entry: dict) -> bool:  # only blank-line breaks sit in a folded gap
+        start = entry.get("element_idx_start")
+        return isinstance(start, int) and any(lo <= start <= hi for lo, hi in spans)
+
+    rest = [e for e in entries if not _is_paragraph_entry(e, element_index_map) and not absorbed(e)]
+    logger.info(f"    Folded {len(spans)} bare date line(s) into the record above")
+    return rest + folded
 
 
 def _bound_coverage_indices(
@@ -1679,8 +1831,9 @@ def _extract_section(
 
     # Combine all entries for this section: headers -> content -> breaks,
     # the same order the pre-#881 loop extended all_entries in.
-    section_entries_in_order = fold_labelled_detail_entries(
-        section_headers + entries + break_entries, context.element_index_map
+    section_entries_in_order = fold_bare_trailing_dates(
+        fold_labelled_detail_entries(section_headers + entries + break_entries, context.element_index_map),
+        context.element_index_map,
     )
 
     return _SectionResult(section_entries_in_order, cost_info, section_assigned, lines)
@@ -1741,6 +1894,20 @@ def _entry_sort_key(entry: dict) -> tuple[float, float]:
         return (float(idx), 0)
     else:
         return (float(idx), 0)
+
+
+def _batch_carry_report(cost_infos: list[dict], sections: list[tuple[list[str], int, int]]
+                        ) -> tuple[dict, list[dict]]:
+    """The run's summed BatchCarryCounts, and each section's own counts where
+    it has any: which section failed a batch or restored a tail (§5.3)."""
+    total = BatchCarryCounts()
+    per_section = []
+    for cost_info, (path, start, _end) in zip(cost_infos, sections, strict=True):
+        counts = cost_info.get("batch_carry")
+        if counts is not None:
+            total.add(counts)
+            per_section.append({"hierarchy": path, "element_idx_start": start, **asdict(counts)})
+    return asdict(total), per_section
 
 
 def run_stage_2(
@@ -1920,12 +2087,10 @@ def run_stage_2(
         workers,
         on_result=_section_progress_printer([p for p, _, _ in sections_to_process]),
     )
-    batch_carry = BatchCarryCounts()
+    batch_carry, batch_carry_sections = _batch_carry_report([r.cost_info for r in results], sections_to_process)
     for section_entries, cost_info, section_assigned, _lines in results:
         total_cost += cost_info.get("cost", 0)
         total_tokens += cost_info.get("tokens", 0)
-        if "batch_carry" in cost_info:
-            batch_carry.add(cost_info["batch_carry"])
         all_assigned_indices |= section_assigned
         all_entries.extend(section_entries)
 
@@ -1973,7 +2138,8 @@ def run_stage_2(
             "unaccounted_indices": sorted(list(unaccounted_indices)) if unaccounted_indices else [],
             "coverage_percentage": round(len(covered_doc_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
         },
-        "batch_carry": asdict(batch_carry),  # #1226: carries and skipped carries at batch edges
+        "batch_carry": batch_carry,  # #1226: carries, skipped carries, failed batches, restored tails
+        "batch_carry_sections": batch_carry_sections,  # the same counts for each section that has any
         "entries": all_entries
     }
 

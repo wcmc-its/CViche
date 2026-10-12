@@ -27,6 +27,10 @@ No LLM call is made by any subcommand.
         - with every later batch failing in both arms, the new arm keeps
           coverage.unaccounted_indices and loses, gains and double-claims no
           content line against the base arm.
+        Also reported, never gated: content lines the served new arm loses
+        and gains against the served base arm (a line in no content entry
+        is a ``break``, which ``unaccounted_indices`` cannot see), and the
+        new arm's batch_carry restore and failure counts.
         Sections the base arm cannot fully replay (a stored prompt the base
         code no longer sends) are excluded and counted. Exits 1 when a
         criterion fails, 2 when there is nothing to compare.
@@ -261,6 +265,9 @@ def gate_run(base: dict, new: dict, base_fail: dict, new_fail: dict) -> dict:
     outside_base, outside_new = _outside(base["entries"], regions), _outside(new["entries"], regions)
     covered_base, multi_base = line_census(base_fail["entries"])
     covered_new, multi_new = line_census(new_fail["entries"])
+    served_base, _ = line_census(base["entries"])
+    served_new, _ = line_census(new["entries"])
+    carry = new["batch_carry"] or {}
     return {
         "uid": base["uid"],
         "base_matches_stored": base["matches_stored_entries"],
@@ -278,6 +285,10 @@ def gate_run(base: dict, new: dict, base_fail: dict, new_fail: dict) -> dict:
         "fail_lines_gained": len(covered_new - covered_base),
         "fail_multi_claimed_base": len(multi_base), "fail_multi_claimed_new": len(multi_new),
         "fail_entries_identical": _canonical(base_fail["entries"]) == _canonical(new_fail["entries"]),
+        "served_lines_lost": len(served_base - served_new),
+        "served_lines_gained": len(served_new - served_base),
+        "new_restored": carry.get("restored_unclaimed", 0) + carry.get("restored_after_failure", 0),
+        "new_failed_batches": carry.get("failed_batches", 0),
         "new_batch_carry": new["batch_carry"],
     }
 
@@ -294,7 +305,8 @@ GATE_COLUMNS = ("uid", "base_matches_stored", "stored_calls", "base_served", "ba
                 "base_miss_sections", "multi_batch_sections", "first_batch_prompt_diffs",
                 "single_batch_prompt_diffs", "changed_entries_outside_carry", "unaccounted_same_fail_arms",
                 "unaccounted_same_as_base", "fail_lines_lost", "fail_lines_gained",
-                "fail_multi_claimed_base", "fail_multi_claimed_new", "fail_entries_identical", "pass")
+                "fail_multi_claimed_base", "fail_multi_claimed_new", "fail_entries_identical",
+                "served_lines_lost", "served_lines_gained", "new_restored", "new_failed_batches", "pass")
 
 
 def run_gate(dirs: dict[str, Path]) -> int:
