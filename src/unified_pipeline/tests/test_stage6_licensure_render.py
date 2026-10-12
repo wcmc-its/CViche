@@ -697,7 +697,7 @@ def _one_licence_record(text="Wrenshire licence 77001", **fields):
     return record
 
 
-@pytest.mark.parametrize("open_end", ["present", "Present", " current ", "Active", "ongoing"])
+@pytest.mark.parametrize("open_end", ["present", "Present", " current ", "Active", "active", "ongoing"])
 def test_an_open_end_leaves_the_date_empty_and_says_active(open_end):
     """HBALTD 21/22, HVSKET 33: "2005-present" printed "Present" in a date cell."""
     record = _one_licence_record(text="2005-present Wrenshire licence 77001",
@@ -730,6 +730,7 @@ def test_an_inactive_word_inside_another_word_does_not_block_active(board):
     "Wrenshire  Lic # 77001  Exp. 05-2011",
     "Wrenshire licence 77001, expires 05/2011",
     "Wrenshire licence 77001, Expiration: 05/2011",
+    "Wrenshire licence 77001, Expiration Date : 05/2011",
     "Wrenshire licence 77001, expiration date 05/2011",
     "Wrenshire licence 77001, expiry 05/2011",
     "Wrenshire licence 77001, valid through 05/2011",
