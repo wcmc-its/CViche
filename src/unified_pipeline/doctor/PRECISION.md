@@ -357,6 +357,21 @@ NEC-S2 adds three lints that read stage 2's own artifact, written from the NECRG
 
 Recall on the 63 verified NECRGC HIGHs, counting a WARN that names the defect: 7 to 21 (11% to 33%). `record_date_shift` names 9 of the 13 #1226 HIGHs (GNONHA-02/03/04, NJHLUR-01, SPIHVQ-01, ZASOTV-01, XUTTKJ-01, YIXQFB-V1, WBZIDP-01; GNONHA-02/03 and WBZIDP-01 were symptom-only before) and none of its 5 MEDs; `header_consumed_record` names all 5 #1254/#1252 HIGHs (WBBUHK-01..04, MFJRKW-01), HBALTD-05 (MED) and WYNUCX-01 in part; `stage2_unaccounted` names TGSQIR-01, which `segmentation` already caught. Counting partial and symptom hits as well: 14 to 26 (22% to 41%). None of the three feeds the score's caps; each is a WARN the precision-weighted estimate reads.
 
+| S2-TB | 2026-10-12 | `feat/doctor-stage2-break-text` on origin/dev `e62e674e`, against `e62e674e` (`run_doctor` per run on the 40 NECRGC runs, both arms over the same stored artifacts; the lint alone, with and without the docx, on the rest) | 249: the 83 stored runs of the #1226 forensics (the 40 NECRGC/JAFPFP runs, 17 runs of the b13 batch, both with their stage-6 docx, and 26 S3 runs stored with their stage-2 artifact only) and the 166 local farm runs NEC-S2 read | every hit on the 83 runs and on the 2026-09-11 and 2026-09-17 batches read by hand, and 80 sampled breaks under `src/unified_pipeline/outputs` | #1226 |
+
+S2-TB adds `stage2_text_break`, the #1226 forensics' G4: a stage-2 `break` entry holding text `source_line_coverage`'s gate would judge (six or more words; not boilerplate, a stage-1a heading, a name list, a column header or withheld data), that no other entry also covers, and, with the docx, that renders nowhere. Each printed line is judged alone; only when none is judged are the lines joined, which finds 12 more record lines on the 83 runs (a title and its college split by a soft return) and no other hit. One finding per section. True means the break holds a record or part of one (a position, an appointment, a talk, a licence, a citation, a grant's purpose or amount); false means a "(cont'd)" heading, a legend, a running header or footer, template instructions, a column header, a table of contents or a sub-heading.
+
+| runs | render read | runs hit | findings true / all | breaks true / all |
+|---|---|---|---|---|
+| NECRGC 40 + b13 17, current render | yes | 3 | 0 / 3 | 0 / 3 |
+| the same 57, stage 2 alone | no | 16 | 5 / 21 (24%) | 6 / 23 (26%) |
+| S3 runs 26 | none stored | 7 | 7 / 7 | 41 / 45 (91%) |
+| the 83 runs, stage 2 alone | no | 23 | 12 / 28 (43%) | 47 / 68 (69%) |
+| 2026-09-11 and 2026-09-17 batches 60 | none stored | 24 | 25 / 39 (64%) | 118 / 139 (85%) |
+| `src/unified_pipeline/outputs` 106 | 65 stale docx | 47 (69 without the docx) | not judged | 80 / 80 sampled, either arm |
+
+Recall, stage 2 alone on the 83 runs: of the 58 breaks of six or more words that hold a record, it reports 47 (81%), on all 11 runs that have one; the 11 it misses are under the gate (a licence line, two continuation lines, two lines of one job history, six short talk lines). With the render it reports none of the six on the 57 runs with a current render: every one renders, in the Appendix or, for the two board lines, the licensure table. What is left is the three false hits (a running footer with its field codes, a sub-heading, a column header), so the lint is INFO: 0 of 3 is under the 50% a WARN needs. Stage 2 alone it would be right more often (69% of breaks on the 83 runs, 85% to 100% on the older farm), but the web doctor always reads the render, and the older runs come from older stage-2 code. The 26 S3 runs have no stored docx, so whether their 41 record breaks render is not measured. On the 40 NECRGC runs every other lint's findings are identical in both arms; `stage2_unaccounted` changes only its message, which now says a break counts as accounted.
+
 ## Per-lint precision
 
 | lint | hits | warn+ | judged TP / partial / FP | TP / judged | matched / hits | caught | measured |
@@ -438,6 +453,7 @@ Recall on the 63 verified NECRGC HIGHs, counting a WARN that names the defect: 7
 | `stage2_unaccounted` | 11 | 11 | none | 11 / 11 hand-checked (100%) | 1 / 1 on labelled runs (100%) | 1 | NEC-S2 |
 | `record_date_shift` | 29 | 29 | none | 29 / 29 hand-checked (100%) | 28 / 29 in a list a verified HIGH names (97%) | 9 | NEC-S2 |
 | `header_consumed_record` | 11 | 11 | none | 9 / 11 hand-checked (82%), 2 partial | 7 / 7 on labelled runs (100%) | 6 | NEC-S2 |
+| `stage2_text_break` | 3 | 0 | none | 0 / 3 hand-checked (0%) | 0 / 2 on labelled runs (0%) | 0 | S2-TB |
 | `wrong_start_date` | 5 | 1 | 0 / 1 / 0 | 0 / 1 (0%) | 5 / 5 (100%) | 5 | RCB-D |
 | `year_not_in_source` | 9 | 9 | 5 / 0 / 4 | 5 / 9 (56%) | 3 / 9 (33%) | 5 | Y1585 |
 

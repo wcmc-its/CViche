@@ -32,6 +32,9 @@ from unified_pipeline.doctor.lints.render import (  # noqa: E402
     IDENTICAL_ROW_FUSED_MIN_CHARS,
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
+from unified_pipeline.doctor.lints.segmentation import (  # noqa: E402
+    STAGE2_EVIDENCE_TEXT_CHARS,
+)
 from unified_pipeline.doctor.shared import (  # noqa: E402
     TABLE_ROW_JOINER,
     docx_body_blocks,
@@ -83,6 +86,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_segmentation_collapse,
     lint_shattered_prose,
     lint_split_child_unsourced,
+    lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
@@ -349,7 +353,8 @@ def test_stage2_unaccounted_warns_once_and_folds_indices_into_spans():
     # TGSQIR shape: a section body stage 2 never assigned to an entry.
     findings = lint_stage2_unaccounted(_stage2_unaccounted([9, 3, 4, 5, 4]))
     assert [(f["lint"], f["severity"]) for f in findings] == [("stage2_unaccounted", "WARN")]
-    assert "4 source element(s)" in findings[0]["message"]
+    assert "4 source element(s) in no entry, header or break" in findings[0]["message"]
+    assert "a break counts as accounted" in findings[0]["message"]
     assert "(2 span(s))" in findings[0]["message"]
     assert findings[0]["evidence"] == [
         "element_idx_start 3: elements 3-5 unaccounted",
@@ -558,6 +563,134 @@ def test_run_doctor_wires_header_consumed_record_to_stage_2_and_the_docx(tmp_pat
                  {"document_uid": _UID, **stage2})
     findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "header_consumed_record"]
     assert [f["message"].split(":")[0] for f in findings] == ["entry 10"]
+
+
+# --- stage2_text_break (#1226 forensics G4) -------------------------------------
+
+#: A record line of six words or more: `source_line_coverage`'s gate judges it.
+_RECORD_LINE = "2015-2019 Assistant Professor, Department of Example Studies, Example University"
+_OTHER_RECORD_LINE = "2019-present Associate Professor, Department of Sample Sciences, Sample College"
+
+
+def _breaks2(*texts, hierarchy=("Appointments",), start=20, entries=()):
+    return {"entries": [*entries, *(_entry(text, etype="break", start=start + i,
+                                           hierarchy=list(hierarchy))
+                                    for i, text in enumerate(texts))]}
+
+
+def test_stage2_text_break_reports_a_break_holding_a_record_line_as_info():
+    # JJUQDF/RVTAQT shape: the reply claimed none of the appointments, so
+    # stage 2 labelled each one `break`.
+    stage2 = _breaks2(_RECORD_LINE, "", "   ", _OTHER_RECORD_LINE)
+    findings = lint_stage2_text_break(stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("stage2_text_break", "INFO")]
+    assert findings[0]["message"] == (
+        "entry 20: section 'Appointments': 2 stage-2 break(s) hold text no entry claimed, "
+        "so it was never classified (#1226)")
+    assert findings[0]["evidence"] == [f"entry 20: {_RECORD_LINE}", f"entry 23: {_OTHER_RECORD_LINE}"]
+
+
+def test_stage2_text_break_one_finding_per_section_quoting_at_most_three_breaks():
+    stage2 = _breaks2(*[f"{_RECORD_LINE} {n}" for n in range(4)])
+    stage2["entries"] += _breaks2(_OTHER_RECORD_LINE, hierarchy=("Education",), start=40)["entries"]
+    findings = lint_stage2_text_break(stage2)
+    assert [f["message"].split(": 4 stage-2")[0].split(": 1 stage-2")[0] for f in findings] == [
+        "entry 20: section 'Appointments'", "entry 40: section 'Education'"]
+    assert "4 stage-2 break(s)" in findings[0]["message"]
+    assert len(findings[0]["evidence"]) == 3
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "Page 2 of 5",
+    "Appointments (continued)",
+    "GRANTS",
+])
+def test_stage2_text_break_quiet_on_short_or_blank_breaks(text):
+    assert lint_stage2_text_break(_breaks2(text)) == []
+
+
+def test_stage2_text_break_reads_only_break_entries():
+    stage2 = {"entries": [_entry(_RECORD_LINE, start=20), _entry(_RECORD_LINE, etype="header", start=21),
+                          "not an entry"]}
+    assert lint_stage2_text_break(stage2) == []
+    # A paragraph or header with unreadable bounds covers nothing, and is
+    # still not read as a break.
+    stage2["entries"][0]["element_idx_start"] = None
+    stage2["entries"][1]["element_idx_end"] = "n/a"
+    assert lint_stage2_text_break(stage2) == []
+
+
+def test_stage2_text_break_quiet_when_another_entry_holds_the_break():
+    # Older stage-2 runs wrote a break beside the entry holding the same line.
+    covering = _entry(_RECORD_LINE, start=19, hierarchy=["Appointments"])
+    covering["element_idx_end"] = 20
+    stage2 = _breaks2(_RECORD_LINE, _OTHER_RECORD_LINE, entries=[covering])
+    findings = lint_stage2_text_break(stage2)
+    assert [f["evidence"] for f in findings] == [[f"entry 21: {_OTHER_RECORD_LINE}"]]
+
+
+def test_stage2_text_break_reads_int_valued_string_indices_and_skips_bad_ones():
+    covering = _entry(_RECORD_LINE, start="20", hierarchy=["Appointments"])
+    stage2 = _breaks2(_RECORD_LINE, entries=[covering])
+    assert lint_stage2_text_break(stage2) == []
+    unreadable = _breaks2(_RECORD_LINE)
+    unreadable["entries"][0]["element_idx_start"] = None
+    assert lint_stage2_text_break(unreadable) == []
+
+
+def test_stage2_text_break_skips_stage1a_headings():
+    heading = "Academic Appointments and Positions Held at Example University"
+    stage1a = {"hierarchy": [{"text": heading, "level": "H1", "children": []}]}
+    assert lint_stage2_text_break(_breaks2(heading), stage1a) == []
+    assert len(lint_stage2_text_break(_breaks2(heading))) == 1
+
+
+def test_stage2_text_break_with_the_render_reports_only_text_that_renders_nowhere():
+    stage2 = _breaks2(_RECORD_LINE, _OTHER_RECORD_LINE)
+    blocks = [("p", "Appendix"), ("p", _RECORD_LINE)]
+    findings = lint_stage2_text_break(stage2, None, blocks)
+    assert [f["evidence"] for f in findings] == [[f"entry 21: {_OTHER_RECORD_LINE}"]]
+    assert findings[0]["message"].endswith("so it was never classified; it renders nowhere (#1226)")
+    assert lint_stage2_text_break(stage2, None, [*blocks, ("p", _OTHER_RECORD_LINE)]) == []
+
+
+def test_stage2_text_break_quiet_at_exactly_half_its_word_pairs_rendered():
+    # source_line_coverage's bar: under half rendered is lost, half is not.
+    line = "Chair Example Committee Annual Review Sample Program"  # six word pairs
+    assert lint_stage2_text_break(_breaks2(line), None, [("p", "Chair Example Committee Annual")]) == []
+    assert len(lint_stage2_text_break(_breaks2(line), None, [("p", "Chair Example Committee")])) == 1
+
+
+def test_stage2_text_break_reports_a_break_one_of_whose_judged_lines_is_lost():
+    # Two judged lines: the first renders, the second does not.
+    stage2 = _breaks2(f"{_RECORD_LINE}\n{_OTHER_RECORD_LINE}")
+    findings = lint_stage2_text_break(stage2, None, [("p", _RECORD_LINE)])
+    joined = f"{_RECORD_LINE} {_OTHER_RECORD_LINE}"
+    assert [f["evidence"] for f in findings] == [[f"entry 20: {joined[:STAGE2_EVIDENCE_TEXT_CHARS]}"]]
+
+
+def test_stage2_text_break_joins_lines_only_when_no_line_is_judged_alone():
+    # A record a soft return splits: neither half has five word pairs.
+    split = "Clinical Associate Professor of Pharmacy\nExample College of Pharmacy, Sample City"
+    assert [f["evidence"] for f in lint_stage2_text_break(_breaks2(split))] == [
+        ["entry 20: Clinical Associate Professor of Pharmacy Example College of Pharmacy, Sample City"]]
+    # One line judged alone and rendered: the short lines beside it are not
+    # joined onto it, so the break is accounted for.
+    mixed = f"{_RECORD_LINE}\nShort tail with four words\nAnother tail with four words"
+    assert lint_stage2_text_break(_breaks2(mixed), None, [("p", _RECORD_LINE)]) == []
+
+
+def test_run_doctor_wires_stage2_text_break_to_stage_2_stage_1a_and_the_docx(tmp_path):
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_text_break"]
+    # The clean run's docx renders the FSMB grant and stage 1a names GRANTS
+    # as a heading: both breaks are quiet only if the wire passes them.
+    stage2 = _breaks2(_GRANT_FSMB, "GRANTS", _RECORD_LINE, hierarchy=("GRANTS",))
+    _write_stage(root, "stage_2_entry_extraction", f"{_UID}_cv_entries.json",
+                 {"document_uid": _UID, **stage2})
+    findings = [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "stage2_text_break"]
+    assert [(f["severity"], f["evidence"]) for f in findings] == [("INFO", [f"entry 22: {_RECORD_LINE}"])]
 
 
 def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
@@ -5006,14 +5139,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (72), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (73), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
     # stage_failure_recorded skips nothing either: no stage-error record is
     # the normal clean case, read as an empty list (#1174).
-    assert len(payload["findings"]) == 70
+    assert len(payload["findings"]) == 71
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
