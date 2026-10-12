@@ -548,6 +548,54 @@ class TestSubsectionMenteeShapedTableProtection841:
         assert gen.stats["entries_inserted"] == 0
 
 
+
+class TestBareStartYearStaysBare1699:
+    """#1699: L1 and L3 called `format_date_range` without the entry's text,
+    so a start year with no end always rendered "<year>-Present" -- a clinic
+    lead held for one stated year read as a post still held. With the text
+    passed, a bare year stays bare and an open range in the source ("2015-",
+    "2015 to present") still renders "-Present". The bullet fallback's case
+    is in test_stage6_clinical_practice_fragments.py, which drives the real
+    template."""
+
+    _HEADER = ["Title", "Institution/Location", "Dates (yyyy)"]
+
+    def _l3_table_dates(self, text):
+        gen, table = _fake_doc_with_table("Clinical Leadership", self._HEADER)
+        entry = {
+            "text": text,
+            "extracted_fields": {
+                "leadership_role": "Clinic Lead",
+                "institution": "Harrowgate Hospital",
+                "start_date": "2015",
+                "end_date": None,
+            },
+        }
+        gen._fill_clinical_practice({"L3": [entry]})
+        return [r.cells[0].text for r in table.rows[1:]]
+
+    def test_l3_table_bare_year_renders_bare(self):
+        assert self._l3_table_dates("2015  Harrowgate Hospital\tClinic Lead") == ["2015"]
+
+    def test_l3_table_open_dash_still_renders_present(self):
+        assert self._l3_table_dates("2015-  Harrowgate Hospital\tClinic Lead") == ["2015-Present"]
+
+    def test_l3_table_to_present_still_renders_present(self):
+        assert self._l3_table_dates("Clinic Lead, Harrowgate Hospital, 2015 to present") == ["2015-Present"]
+
+    def test_l1_table_bare_year_renders_bare(self):
+        gen, table = _fake_doc_with_table("Clinical Practice", self._HEADER)
+        entry = {
+            "text": "Camp Physician, Lakeside Camp 7/97",
+            "extracted_fields": {"activity": "Camp Physician", "location": "Lakeside Camp",
+                                 "start_date": "1997-07"},
+        }
+        gen._fill_clinical_practice({"L1": [entry]})
+
+        rows = [tuple(c.text for c in r.cells) for r in table.rows[1:]]
+        assert rows == [("Camp Physician", "Lakeside Camp", "1997")]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

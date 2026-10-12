@@ -730,6 +730,28 @@ def test_single_part_entry_stays_level_0():
     para = next(p for p in scratch.gen.doc.paragraphs if p.text == "Attending Physician")
     assert _ilvl(para) == 0
 
+def test_l3_bullet_bare_start_year_is_not_rendered_as_present():
+    """#1699: the L3 bullet fallback called `format_date_range` without the
+    entry's text, so a single stated year rendered "2015-Present"."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Clinic Lead, Harrowgate Hospital, 2015",
+                leadership_role="Clinic Lead", institution="Harrowgate Hospital",
+                start_date="2015")],
+    )
+    assert gen.stats["tables_populated"] == 0
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015"]
+
+
+def test_l3_bullet_open_start_year_still_renders_present():
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Clinic Lead, Harrowgate Hospital, 2015-",
+                leadership_role="Clinic Lead", institution="Harrowgate Hospital",
+                start_date="2015")],
+    )
+    assert added == ["", "Clinic Lead, Harrowgate Hospital, 2015-Present"]
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
