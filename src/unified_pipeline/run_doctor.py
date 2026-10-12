@@ -452,7 +452,9 @@ Lints, ranked by the severity of the failure class they catch:
                           break, so never classified (#1693, NECRGC
                           TGSQIR-01: a section body of 50 elements). WARN,
                           one per run. Reads stage 2 only, so it holds
-                          without the source docx `segmentation` needs
+                          without the source docx `segmentation` needs. A
+                          break counts as accounted, whatever text it holds:
+                          14as reads those
 14aq. record_date_shift   a list stage 2 grouped one record off (#1226): a
                           date-only or dateless entry whose two neighbours
                           before it carry their date in one place (first
@@ -465,6 +467,14 @@ Lints, ranked by the severity of the failure class they catch:
                           #1252; NECRGC WBBUHK 29/32/36/49, MFJRKW 52). WARN,
                           one per entry; with the docx, only when the record
                           renders nowhere. Reads stage 2; the docx when
+                          present
+14as. stage2_text_break   a stage-2 break holding a line source_line_coverage
+                          would judge (six or more words, not boilerplate, a
+                          heading or a name list) that no other entry covers:
+                          the model's reply claimed it for no entry, so it is
+                          never classified (#1226 forensics G4). INFO, one per
+                          section; with the docx, only lines that render
+                          nowhere. Reads stage 2; stage 1a and the docx when
                           present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
@@ -676,6 +686,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_record_date_shift,
     lint_segmentation,
     lint_segmentation_collapse,
+    lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_table_lost,
 )
@@ -843,6 +854,7 @@ KNOWN_LINTS = (
     "stage2_unaccounted",
     "record_date_shift",
     "header_consumed_record",
+    "stage2_text_break",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1120,6 +1132,13 @@ LINT_PREVALENCE = {
     "stage2_unaccounted": 0.053,
     "record_date_shift": 0.034,
     "header_consumed_record": 0.039,
+    # stage2_text_break (#1226 forensics G4; S2-TB in doctor/PRECISION.md):
+    # 73 of the same 206 runs, the docx read where one is on hand (the 40
+    # NECRGC runs and 65 of the 106 under src/unified_pipeline/outputs) --
+    # 2 NECRGC, 47 outputs, 16 and 8 of the two _autopsy_artifacts batches --
+    # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
+    # runs carry far more text breaks than current ones.
+    "stage2_text_break": 0.354,
 }
 
 
@@ -1724,6 +1743,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("record_date_shift", lint_record_date_shift, ("stage_2",)),
     LintSpec("header_consumed_record", lint_header_consumed_record, ("stage_2",),
              optional=("blocks",)),
+    LintSpec("stage2_text_break", lint_stage2_text_break, ("stage_2",),
+             optional=("stage_1a", "blocks")),
 )
 
 #: The views read from the stage-6 docx.

@@ -6,14 +6,17 @@ and every header-looking line actually promoted to a hierarchy node.
 
 The lints read the source lines and the stage 1a/2 artifacts. A header
 demoted to content misroutes everything filed under it long before stage 6
-runs, and the finding is about the cut, not the page. One exception:
-`lint_header_consumed_record` takes the rendered blocks, when present, only
-to confirm that the record a heading swallowed renders nowhere.
+runs, and the finding is about the cut, not the page. Two exceptions:
+`lint_header_consumed_record` and `lint_stage2_text_break` take the rendered
+blocks, when present, only to confirm that the text they name renders
+nowhere.
 
-Three lints read stage 2's own record of the cut (NECRGC autopsy): elements
-it assigned to no entry (`lint_stage2_unaccounted`, #1693), a list grouped
-one record off (`lint_record_date_shift`, #1226), and a heading line that
-also holds a record (`lint_header_consumed_record`, #1254).
+Four lints read stage 2's own record of the cut (NECRGC autopsy, #1226
+forensics): elements it assigned to no entry, header or break
+(`lint_stage2_unaccounted`, #1693), a list grouped one record off
+(`lint_record_date_shift`, #1226), a heading line that also holds a record
+(`lint_header_consumed_record`, #1254), and a break that holds text no entry
+claimed (`lint_stage2_text_break`, #1226).
 
 `lint_segmentation_collapse` (EBYSBC E17) reads stage 1b as well: the cut
 can lose every heading while every line is still covered, which none of the
@@ -40,6 +43,13 @@ from unified_pipeline.segmentation_regression import (
 from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 
 from ..shared import _finding, _haystacks, _magnitude_severity
+from .coverage import (
+    COVERAGE_MIN_SHARE,
+    _heading_texts,
+    _Output,
+    _printed_lines,
+    _rendered_share,
+)
 
 # --------------------------------------------------------------------------
 # Coverage, lost lines, mega-entries and dups, via the regression metrics.
@@ -474,7 +484,11 @@ def lint_stage2_unaccounted(stage2: dict) -> list[dict]:
     journal articles, while stage 1b reported 100%). Stage 2 states this
     itself, so the finding needs neither the source docx nor the render:
     10 farm runs whose last batch never came back carry it with no source
-    on hand for `segmentation` to read. One WARN per run."""
+    on hand for `segmentation` to read. One WARN per run.
+
+    A break counts as accounted: a line stage 2 labelled `break` is never
+    in this finding, whatever text it holds. `lint_stage2_text_break`
+    reads those."""
     coverage = stage2.get("coverage")
     raw = coverage.get("unaccounted_indices") if isinstance(coverage, dict) else None
     indices = [i for i in raw or [] if isinstance(i, int) and not isinstance(i, bool)]
@@ -485,8 +499,9 @@ def lint_stage2_unaccounted(stage2: dict) -> list[dict]:
                 for first, last in ranges[:UNACCOUNTED_EVIDENCE_RANGES]]
     return [_finding(
         "stage2_unaccounted", "WARN",
-        f"stage 2 left {len(set(indices))} source element(s) in no entry "
-        f"({len(ranges)} span(s)): their text never reached classification (#1693)",
+        f"stage 2 left {len(set(indices))} source element(s) in no entry, header or break "
+        f"({len(ranges)} span(s)): their text never reached classification; a break "
+        f"counts as accounted (#1693)",
         evidence)]
 
 
@@ -715,4 +730,98 @@ def lint_header_consumed_record(stage2: dict,
             f"holds a record, which stage 2 kept as part of the heading: it is not "
             f"classified or rendered (#1254)",
             [rest[:STAGE2_EVIDENCE_TEXT_CHARS]]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# A break that holds a record line (#1226 forensics, G4).
+#
+# Stage 2 labels a line `break` when the model's reply claims it for no
+# entry. `stage2_unaccounted` counts a break as accounted, so nothing reads
+# its text: on the 83 stored NECRGC/b13/s3 runs, 11 hold whole record lines
+# there (employment histories, appointments, talks, a licence, a patent).
+# A break is read the way `source_line_coverage` reads a source line, with
+# its gate: text that gate would judge (six or more words, not boilerplate,
+# a heading, a name list or withheld data) and that no rendered line holds
+# is text the document has lost. Stage 6 puts most of it in the Appendix,
+# so with the render the finding is rare.
+
+#: INFO: on the 57 runs with a current render, the only 3 breaks whose text
+#: renders nowhere are a running footer, a sub-heading and a column header
+#: (0 of 3 true; doctor/PRECISION.md, S2-TB), under the 50% a WARN needs.
+TEXT_BREAK_SEVERITY = "INFO"
+#: Breaks a `stage2_text_break` finding quotes, per section.
+TEXT_BREAK_EVIDENCE_LINES = 3
+
+
+def _element_span(entry: dict) -> range:
+    """The element indices an entry covers; empty when its bounds are not
+    integers (an int-valued string is read as one, as stage 2 wrote them on
+    older runs)."""
+    try:
+        return range(int(entry["element_idx_start"]), int(entry["element_idx_end"]) + 1)
+    except (KeyError, TypeError, ValueError):
+        return range(0)
+
+
+def _set_aside_text(entry: dict, headings: frozenset[str], output: _Output) -> str | None:
+    """A break entry's text, its lines joined, when `source_line_coverage`'s
+    gate would judge it and finds some of it under COVERAGE_MIN_SHARE
+    rendered; None otherwise. Each printed line is judged as that lint
+    judges it. Only when it judges none are the lines judged joined: a
+    record a soft return splits in two ("<title>" / "<college>, <city> --
+    <dates>") has under COVERAGE_MIN_PAIRS pairs on each line (12 record
+    lines on the 83 stored runs, and no other hit). Joining is the fallback,
+    not the rule: over 23 joined lines the personal-data matcher reads a
+    span across lines and drops the whole break."""
+    lines = [line.text for line in _printed_lines([str(entry.get("text") or "")])]
+    shares = [share for share in (_rendered_share(line, "", headings, output) for line in lines)
+              if share is not None]
+    joined = " ".join(" ".join(lines).split())
+    if not shares:
+        share = _rendered_share(joined, "", headings, output)
+        shares = [share] if share is not None else []
+    return joined if shares and min(shares) < COVERAGE_MIN_SHARE else None
+
+
+def lint_stage2_text_break(stage2: dict, stage1a: dict | None = None,
+                           blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """Stage-2 `break` entries holding text `source_line_coverage` would
+    judge (#1226 forensics G4): the model's reply claimed the line for no
+    entry, so it is never classified, and `stage2_unaccounted` counts it as
+    accounted. A break whose elements another entry also covers is left
+    alone, as is one whose bounds are unreadable: older stage-2 runs wrote a
+    break beside the entry holding the same line (2,940 of 14,721 text
+    breaks over the 249 runs measured). One finding per section, led by the
+    first such break's index. With the rendered document, a line that
+    renders somewhere (stage 6 puts many in the Appendix) is left alone;
+    stage 1a's headings are never judged."""
+    output = _Output(blocks or [])
+    headings = _heading_texts(stage1a)
+    breaks: list[dict] = []
+    claimed: set[int] = set()
+    for entry in stage2.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("element_type") == STAGE2_BREAK_TYPE:
+            breaks.append(entry)
+        else:
+            claimed.update(_element_span(entry))
+    by_section: dict[tuple[str, ...], list[tuple[dict, str]]] = {}
+    for entry in breaks:
+        if set(_element_span(entry)) <= claimed:
+            continue
+        text = _set_aside_text(entry, headings, output)
+        if text is not None:
+            path = tuple(str(level) for level in entry.get("hierarchy") or [])
+            by_section.setdefault(path, []).append((entry, text))
+    findings = []
+    for path, hits in by_section.items():
+        findings.append(_finding(
+            "stage2_text_break", TEXT_BREAK_SEVERITY,
+            f"entry {hits[0][0].get('element_idx_start')}: section '{' > '.join(path)}': "
+            f"{len(hits)} stage-2 break(s) hold text no entry claimed, so it was never "
+            f"classified{'; it renders nowhere' if blocks is not None else ''} (#1226)",
+            [f"entry {entry.get('element_idx_start')}: {text[:STAGE2_EVIDENCE_TEXT_CHARS]}"
+             for entry, text in hits[:TEXT_BREAK_EVIDENCE_LINES]]))
     return findings

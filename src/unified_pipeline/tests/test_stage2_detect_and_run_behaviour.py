@@ -598,6 +598,25 @@ def test_malformed_and_out_of_bounds_delimiters_are_silently_ignored(monkeypatch
     assert cost_info["cost"] == 0.001
 
 
+
+def test_reversed_paragraph_span_is_swapped_and_keeps_its_text(monkeypatch, caplog):
+    """#1738: (12, 10) used to pass the bounds test and build its text from an
+    empty range, so the entry was dropped as noise and its lines became break."""
+    elements = [_para(10 + i, f"P{i}") for i in range(4)]  # idx 10..13
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": 12, "element_idx_end": 10, "element_type": "paragraph", "confidence": 0.8},
+        {"element_idx_start": 13, "element_idx_end": 13, "element_type": "paragraph", "confidence": 0.8},
+    ]}))
+    with caplog.at_level("WARNING", logger=stage2.__name__):
+        entries, _ = stage2.detect_entries_for_section(["Sec"], elements, 10, 13, element_index_map=_idx_map(elements))
+    assert entries == [
+        {"element_idx_start": 10, "element_idx_end": 12, "element_type": "paragraph",
+         "confidence": 0.8, "text": "P0\tP1\tP2"},
+        {"element_idx_start": 13, "element_idx_end": 13, "element_type": "paragraph",
+         "confidence": 0.8, "text": "P3"},
+    ]
+    assert "Swapped 1 reversed entry span(s) (end before start) in batch 1 [Sec]" in caplog.text
+
 def test_pre_llm_scrub_wire_dob_and_ssn_never_reach_call_llm_messages(monkeypatch, tmp_path):
     """#847 wire test: `extract_unified_elements`'s pre-LLM scrub survives
     into the EXACT `messages` stage 2 hands to `call_llm` -- driven from a

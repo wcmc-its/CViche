@@ -484,6 +484,11 @@ LINT_COPY = {
         "\"LICENSURE: <state>\", and that entry was kept as part of the heading, so it is "
         "missing from the document.",
         "Add the entry after the flagged heading from the source CV."),
+    "stage2_text_break": LintCopy(
+        "Text set aside from a section",
+        "A line in this section of the source CV was set aside instead of being read as part "
+        "of an entry, and it appears nowhere in the document.",
+        "Check the flagged section against the source CV and add the text if it belongs."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "

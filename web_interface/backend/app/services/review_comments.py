@@ -188,6 +188,8 @@ REVIEW_FLAGS = {
                           "or after: check each against your CV."),
     "header_consumed_record": ("The first entry under this heading in your CV is missing: "
                                "add it from your CV."),
+    "stage2_text_break": ("Some text in this section of your CV was set aside and is not in the "
+                          "document: check it against your CV."),
     "grant_facts": ("A grant number or dollar amount here may not match this grant in your CV: one "
                     "your CV gives is missing, or one shown here is not in this grant's entry. "
                     "Check it against the CV."),

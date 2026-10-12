@@ -62,6 +62,7 @@ filter_extraction_noise = stage2.filter_extraction_noise
 parse_delimiter_reply = stage2.parse_delimiter_reply
 delimiter_index_text = stage2.delimiter_index_text
 row_range_entry = stage2.row_range_entry
+unreverse_paragraph_spans = stage2.unreverse_paragraph_spans
 
 
 # --------------------------------------------------------- get_hierarchy_path
@@ -926,6 +927,52 @@ def test_row_range_entry_reads_row_10_and_row_1_as_two_different_rows():
     assert entry["text"] == "row 10 alpha\nrow 11 alpha"
     assert entry["element_idx_start"] == "474.10"
 
+
+
+# ---------------------------------------------------------- unreverse_paragraph_spans
+
+def test_unreverse_paragraph_spans_swaps_each_end_first_span_and_counts_them_in_one_warning(caplog):
+    """#1738: an end-first span (1178 to 1176) built its text from an empty range
+    and its lines fell to break. The swap keeps every other key of the delimiter."""
+    delimiters = [
+        {"element_idx_start": 1178, "element_idx_end": 1176, "element_type": "paragraph", "confidence": 0.9},
+        {"element_idx_start": 1179, "element_idx_end": 1179, "element_type": "paragraph"},
+        {"element_idx_start": 1182, "element_idx_end": 1181},
+    ]
+    with caplog.at_level("WARNING", logger=stage2.__name__):
+        ordered = unreverse_paragraph_spans(delimiters, "batch 1 [Sec]")
+    assert ordered == [
+        {"element_idx_start": 1176, "element_idx_end": 1178, "element_type": "paragraph", "confidence": 0.9},
+        {"element_idx_start": 1179, "element_idx_end": 1179, "element_type": "paragraph"},
+        {"element_idx_start": 1181, "element_idx_end": 1182},
+    ]
+    assert delimiters[0]["element_idx_start"] == 1178  # the reply itself is not rewritten
+    assert len(caplog.records) == 1
+    assert "Swapped 2 reversed entry span(s)" in caplog.text
+    assert "batch 1 [Sec]" in caplog.text
+
+
+def test_unreverse_paragraph_spans_leaves_ordered_row_bool_and_malformed_spans_alone(caplog):
+    delimiters = [
+        {"element_idx_start": 10, "element_idx_end": 12},
+        {"element_idx_start": "80.2", "element_idx_end": "80.0"},  # row_range_entry's case
+        {"element_idx_start": 80.2, "element_idx_end": 80.0},
+        {"element_idx_start": 12, "element_idx_end": "10"},
+        {"element_idx_start": "12", "element_idx_end": 10},
+        {"element_idx_start": True, "element_idx_end": 0},  # a JSON true is not an index
+        {"element_idx_start": 2, "element_idx_end": True},
+        {"element_idx_start": 12},
+        "not a delimiter",
+    ]
+    with caplog.at_level("WARNING", logger=stage2.__name__):
+        assert unreverse_paragraph_spans(delimiters, "batch 1 [Sec]") == delimiters
+    assert caplog.records == []
+
+
+def test_unreverse_paragraph_spans_returns_a_non_list_reply_as_it_came():
+    reply = {"element_idx_start": 12, "element_idx_end": 10}
+    assert unreverse_paragraph_spans(reply, "batch 1 [Sec]") is reply
+    assert unreverse_paragraph_spans(None, "batch 1 [Sec]") is None
 
 def test_remove_subset_delimiters_keeps_pseudo_row_10_apart_from_pseudo_row_1():
     """A merged row split into pseudo-rows is keyed "<table>.<row>.<k>". Read as
