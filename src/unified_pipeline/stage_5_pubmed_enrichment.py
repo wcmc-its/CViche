@@ -336,6 +336,37 @@ def _same_title(a: str, b: str) -> bool:
     return len(words_a & words_b) / max(len(words_a), len(words_b)) >= MIN_TITLE_SEARCH_OVERLAP
 
 
+def volume_number(volume: str | int | None) -> int | None:
+    """The volume's leading number ("19 Suppl 1" -> 19), or None when it
+    has none to compare."""
+    match = re.match(r'\s*(\d+)', str(volume or ''))
+    return int(match.group(1)) if match else None
+
+
+# An ID-path record whose year and volume both differ from the CV's names
+# another paper unless the titles also agree against the LONGER one at the
+# title-search floor (#1696). UAURFU e694 (dev-264): a CV's 16-word 2021
+# vol. 20 title shared 6 words with an 8-word 2020 vol. 19 record by the same
+# group, which scored 0.75 against the shorter title and replaced the paper.
+# Replayed over 3,445 ID-path acceptances in 122 stage-5 artifacts, it is
+# the only one refused: of the 29 whose year and volume both differ, 17 were
+# already under MIN_TITLE_WORD_OVERLAP and 11 are the same title (the CV gave
+# the issue as the volume). 415 differ in the year alone, mostly online versus
+# print, so a year alone does not refuse. The title search has its own floor
+# and year window and is not checked this way.
+def citation_contradicts_record(fields: dict, pubmed_record: dict) -> bool:
+    """Whether the CV's year and volume are both known and both differ from
+    the record's: two facts of the citation that say it is another paper. An
+    unknown on either side contradicts nothing."""
+    cv_year = cv_publication_year(fields.get('year'))
+    cv_volume = volume_number(fields.get('volume'))
+    record_volume = volume_number(pubmed_record.get('volume'))
+    return (cv_year is not None and bool(pubmed_record.get('year'))
+            and cv_year != pubmed_record.get('year')
+            and cv_volume is not None and record_volume is not None
+            and cv_volume != record_volume)
+
+
 def published_taxonomy_code(publication_types: list[str]) -> str:
     """The S code for a published paper of these PubMed publication types."""
     for pubtype, code in PUBTYPE_TAXONOMY_CODES:
@@ -1337,9 +1368,12 @@ class PubMedEnricher:
             source_title,
             [pubmed_record.get('title') or '', pubmed_record.get('vernacular_title') or ''],
         )
-        if overlap is not None and overlap < MIN_TITLE_WORD_OVERLAP:
+        contradicted = self._contradicted_on_an_id_path(fields, pubmed_record, source)
+        if overlap is not None and (overlap < MIN_TITLE_WORD_OVERLAP or contradicted):
             self._reject_record(entry, source, pubmed_record.get('pmid'),
                                 pubmed_record.get('title'), overlap)
+            if contradicted:
+                entry['enrichment_rejected']['year_and_volume_differ'] = True
             return False
         if record_is_the_replied_item(entry, pubmed_record):
             self._reject_replied_item(entry, source, pubmed_record)
@@ -1352,6 +1386,20 @@ class PubMedEnricher:
         entry['enrichment_source'] = source
         self.stats['enriched'] += 1
         return True
+
+    @staticmethod
+    def _contradicted_on_an_id_path(fields: dict, pubmed_record: dict, source: str) -> bool:
+        """Whether an ID path's record is another paper by the CV's own
+        citation (#1696): its year and volume both differ from the CV's, and
+        its title does not match the CV's against the longer of the two
+        (`_same_title`), so a short record title that is a subset of the
+        CV's topic words is not enough."""
+        if source == TITLE_SEARCH_SOURCE or not citation_contradicts_record(fields, pubmed_record):
+            return False
+        source_title = cv_title(fields)
+        return not any(_same_title(source_title, title or '')
+                       for title in (pubmed_record.get('title'),
+                                     pubmed_record.get('vernacular_title')))
 
     def _reject_record(self, entry: dict, source: str, pmid: str | None,
                        pubmed_title: str | None, overlap: float,
