@@ -203,6 +203,8 @@ def extract_leaf_sections_with_boundaries(
 
     Also handles gaps between parent sections and their first child - these
     contain content that belongs to the parent section before any subsections.
+    When no header follows a parent (its children all precede it), its whole
+    body up to its own element_idx_end is that gap (#1693).
 
     Args:
         section_boundaries: List of section boundary dicts from Stage 1b
@@ -277,12 +279,12 @@ def extract_leaf_sections_with_boundaries(
                     or first_index_at_start[start_idx] != idx
                 )
                 next_pos = bisect.bisect_right(starts_sorted, start_idx)
-                first_child_start = starts_sorted[next_pos] if next_pos < len(starts_sorted) else None
-                if not suppressed and first_child_start is not None and first_child_start > start_idx + 1:
+                # No later header: P is last, its children all precede it, so its body runs to its own end (#1693).
+                gap_end = starts_sorted[next_pos] - 1 if next_pos < len(starts_sorted) else end_idx
+                if not suppressed and gap_end > start_idx:
                     # There's a gap between parent header and the next header
                     # This gap contains content that belongs to the parent section
                     # (e.g., journal articles before "Book" subsection in PUBLICATIONS)
-                    gap_end = first_child_start - 1
                     print(f"  [DEBUG] Found gap in '{hierarchy_path[-1]}': elements {start_idx + 1} to {gap_end}")
                     leaf_sections.append((hierarchy_path, start_idx + 1, gap_end))
 

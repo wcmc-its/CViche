@@ -1038,6 +1038,45 @@ def test_run_stage_2_parent_header_and_dedup_of_duplicate_header_record(tmp_path
     assert output_data["coverage"]["coverage_percentage"] == 100.0
 
 
+def test_run_stage_2_extracts_parent_body_when_its_child_precedes_it(tmp_path, monkeypatch):
+    # #1693: stage 1a nested a child heading under a parent that appears
+    # after it, and the parent is the last header in the document. The
+    # parent's body (4-6) used to land in coverage.unaccounted_indices.
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    for text in ["Jane Doe", "BOOK CHAPTERS", "Chapter One", "PUBLICATIONS", "Article One", "Article Two", "Article Three"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "child_first.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "child_first_h.json", "CHILD1",
+        hierarchy_with_indices=[{
+            "text": "Publications", "level": "H1", "element_idx": 3,
+            "children": [{"text": "Book Chapters", "level": "H2", "element_idx": 1, "children": []}],
+        }],
+        section_boundaries=[
+            {"hierarchy": ["Publications", "Book Chapters"], "element_idx_start": 1, "element_idx_end": 2, "has_children": False},
+            {"hierarchy": ["Publications"], "element_idx_start": 3, "element_idx_end": 6, "has_children": True},
+        ],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Publications > Book Chapters": [{"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.9}],
+        "Publications": [{"element_idx_start": i, "element_idx_end": i, "element_type": "paragraph", "confidence": 0.9} for i in (4, 5, 6)],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    assert output_data["coverage"]["unaccounted_indices"] == []
+    assert [(e["element_idx_start"], e["text"], e["hierarchy"]) for e in output_data["entries"] if e["element_type"] == "paragraph" and e["element_idx_start"] >= 4] == [
+        (4, "Article One", ["Publications"]),
+        (5, "Article Two", ["Publications"]),
+        (6, "Article Three", ["Publications"]),
+    ]
+
+
 def _build_table_gap_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Shared fixture for the two table/doc_length coverage tests below: a
     table sandwiched BETWEEN two paragraphs (the realistic shape, not last

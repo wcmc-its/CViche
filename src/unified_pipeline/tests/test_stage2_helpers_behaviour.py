@@ -413,6 +413,48 @@ def test_extract_leaf_sections_first_child_start_keeps_earlier_minimum():
     ]
 
 
+def test_parent_after_its_only_child_extracts_its_whole_body_when_last_header():
+    # #1693: stage 1a nested child C under a parent P whose header comes
+    # AFTER C, and P is the last header in the document. No strictly later
+    # header exists, so the gap used to be skipped and P's body (6-12) was
+    # extracted by nobody. It now runs to P's own element_idx_end.
+    boundaries = [
+        _b(["A"], 0, 2),
+        _b(["P", "C"], 3, 5),
+        _b(["P"], 6, 12, has_children=True),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["A"], 0, 2), (["P", "C"], 3, 5), (["P"], 7, 12)]
+
+
+def test_parent_after_its_child_with_a_later_sibling_stops_at_that_sibling():
+    # Same child-before-parent shape, but a sibling header S follows P: the
+    # body ends just before S, exactly as the existing next-header rule did.
+    boundaries = [
+        _b(["P", "C"], 3, 5),
+        _b(["P"], 6, 12, has_children=True),
+        _b(["S"], 13, 15),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P", "C"], 3, 5), (["P"], 7, 12), (["S"], 13, 15)]
+
+
+def test_last_header_parent_with_no_body_emits_nothing():
+    # A last-header parent whose range is its header alone has no body to
+    # extract: the end_idx fallback must not emit an empty or inverted range.
+    boundaries = [_b(["P", "C"], 3, 5), _b(["P"], 6, 6, has_children=True)]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P", "C"], 3, 5)]
+
+
+def test_last_header_parent_sharing_its_start_with_a_leaf_stays_suppressed():
+    # The same-start suppression (#916) still applies when no later header
+    # exists: the leaf at P's start already covers the range.
+    boundaries = [_b(["P"], 6, 12, has_children=True), _b(["L"], 6, 12)]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["L"], 6, 12)]
+
+
 # ------------------------------------------------------- collect_header_indices
 
 def test_collect_header_indices_recurses_and_skips_missing_or_none_idx():
