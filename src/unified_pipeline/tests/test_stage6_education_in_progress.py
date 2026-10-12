@@ -422,6 +422,25 @@ class TestStringDatesAttendedEndYear:
             "dates_attended": "September 1975- May 1976"}}])
         assert _education_rows(gen)[0][3] == "1977"
 
+    def test_a_structured_end_date_wins_over_the_string_range(self):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College",
+            "dates_attended_start_date": "1971-09", "dates_attended_end_date": "1974-05",
+            "dates_attended": "September 1975- May 1976"}}])
+        assert _education_rows(gen)[0][3] == "1974"
+
+    @pytest.mark.parametrize("dates", ["1972 - 1973, 1975 - PRESENT", "Ref 19751976"])
+    def test_an_uppercase_open_end_or_a_long_number_is_not_a_closed_range(self, dates):
+        gen = _generator()
+        gen._fill_education([{"text": self.TEXT, "extracted_fields": {
+            "degree": "BA", "institution": "Example College", "dates_attended": dates}}])
+        assert _cell_ins_parts(_first_data_row(gen).cells[3]) == [("1971", "Text Extraction")]
+
+    def test_an_open_end_word_inside_another_word_does_not_open_the_range(self):
+        (row,) = self._rows("September 1975- May 1976, Concurrently enrolled")
+        assert row[3] == "1976"
+
     def test_a_degreeless_row_gets_no_year_from_the_range(self):
         gen = _generator()
         gen._fill_education([{"text": self.TEXT, "extracted_fields": {
