@@ -88,6 +88,7 @@ except ImportError as exc:
 from ..formatting import _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem
 from ..normalization.pii import _dea_check_digit_ok
+from ..parsing.dates import CURRENT_DATE_VALUES
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,32 @@ _SEPARATOR_RUN_RE = re.compile(r'(?:\s*[,;/]\s*){2,}')
 _MIN_TOKENS_LICENSE_CELL = 2
 _MIN_TOKENS_NPI_CELL = 1
 
+# The "Date of last registration" column (#1698). Stage 4 has no
+# last-registration field, so the column is filled from `expiration_date`,
+# and two of that field's values state no registration date at all:
+#
+# - an open end ("present", "current", "active"): the licence is still held.
+#   The cell stays empty and the status position says so, as `_OPEN_END_STATUS`
+#   -- the word "Present" in a date cell states no date (HBALTD 21/22,
+#   HVSKET 33). Not when the entry's own text says the licence is NOT active
+#   (`_NOT_ACTIVE_RE`): "License #... (inactive status 1993-present)" is held
+#   to the present but inactive (CKDDEG 56), so the cell stays empty instead.
+# - an expiry the entry's own text labels as one ("Exp. 05-2011", "expires
+#   6/30/2023", "valid through 2024"): rendered "Expires 05/2011", never bare,
+#   which reads as the date the licence was last registered (MFJRKW 29). The
+#   label must be followed by a date, so "Expiration" in a board's name does
+#   not count. An expiry labelled only by a table's column header, a separate
+#   entry, is out of reach here (WBZIDP 914-918) and renders as before.
+_OPEN_END_EXPIRATIONS = CURRENT_DATE_VALUES | {'active'}
+_OPEN_END_STATUS = 'Active'
+_NOT_ACTIVE_RE = re.compile(
+    r'\b(?:inactive|expired|lapsed|retired|relinquished|surrendered|revoked'
+    r'|suspended)\b', re.IGNORECASE)
+_EXPIRY_LABEL_RE = re.compile(
+    r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\.?'
+    r'(?:\s+date)?\s*:?\s*\d', re.IGNORECASE)
+_EXPIRES_PREFIX = 'Expires'
+
 # Classification results for one F1 entry.
 KIND_LICENSE = 'license'
 KIND_NPI = 'npi'
@@ -201,7 +228,8 @@ class LicenseRecord:
 
     `last_registration_date` is named for the WCM template column it fills;
     stage 4's extraction schema has no separate field for it, so the closest
-    available value -- `expiration_date` -- is what gets put there.
+    available value -- `expiration_date` -- is what gets put there, except an
+    open end or a labelled expiry (`_last_registration_cell`, #1698).
     """
 
     state: str = ''
@@ -367,6 +395,23 @@ def _with_qualifier(cell: str, qualifier: str, row_text: str) -> str:
     return f"{cell} ({qualifier})" if cell else qualifier
 
 
+def _last_registration_cell(entry: LicensureEntry) -> str:
+    """The "Date of last registration" cell: the expiration date with the
+    status after it (`_with_qualifier`), except where the expiration date is
+    no registration date (#1698; see `_OPEN_END_EXPIRATIONS`)."""
+    expiration = entry.expiration_date
+    status = entry.status
+    if (isinstance(expiration, str)
+            and expiration.strip().lower() in _OPEN_END_EXPIRATIONS):
+        if not status and not _NOT_ACTIVE_RE.search(entry.original_text):
+            status = _OPEN_END_STATUS
+        return _with_qualifier('', status, '')
+    date = format_date_for_section(expiration, 'F1') if expiration else ''
+    if date and _EXPIRY_LABEL_RE.search(entry.original_text):
+        date = f"{_EXPIRES_PREFIX} {date}"
+    return _with_qualifier(date, status, date)
+
+
 def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     """The table row for an entry already classified as a licence.
 
@@ -382,16 +427,13 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     here would only duplicate the classifier's own answer (#573 review).
     """
     if entry.state or entry.number:
-        last_registration = (format_date_for_section(entry.expiration_date, 'F1')
-                             if entry.expiration_date else '')
         return LicenseRecord(
             state=_with_qualifier(entry.state, entry.license_type,
                                   f"{entry.state} {entry.number}"),
             number=entry.number,
             issue_date=(format_date_for_section(entry.issue_date, 'F1')
                         if entry.issue_date else ''),
-            last_registration_date=_with_qualifier(
-                last_registration, entry.status, last_registration),
+            last_registration_date=_last_registration_cell(entry),
         )
     if entry.original_text:
         # The whole raw text, never a slice: a silent 100-character cut

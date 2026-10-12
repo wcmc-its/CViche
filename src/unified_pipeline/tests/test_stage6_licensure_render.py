@@ -36,6 +36,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
@@ -685,3 +686,101 @@ def test_unstructured_entry_tail_reaches_the_document(tmp_path):
                      if node.tag.endswith("}t"))
              for row in table.rows for cell in row.cells]
     assert _LONG_UNSTRUCTURED in cells
+
+
+# --- #1698: no expiry or open end printed as a bare last-registration date ---
+
+def _one_licence_record(text="Wrenshire licence 77001", **fields):
+    (entry,) = _one_license(**fields)
+    entry["text"] = text
+    (record,) = _resolve_licensure([entry]).licenses
+    return record
+
+
+@pytest.mark.parametrize("open_end", ["present", "Present", " current ", "Active", "ongoing"])
+def test_an_open_end_leaves_the_date_empty_and_says_active(open_end):
+    """HBALTD 21/22, HVSKET 33: "2005-present" printed "Present" in a date cell."""
+    record = _one_licence_record(text="2005-present Wrenshire licence 77001",
+                                 expiration_date=open_end)
+    assert record.last_registration_date == "Active"
+
+
+def test_an_open_end_with_a_stated_status_keeps_that_status():
+    record = _one_licence_record(expiration_date="present", status="Restricted")
+    assert record.last_registration_date == "Restricted"
+
+
+@pytest.mark.parametrize("word", ["inactive", "Expired", "lapsed", "retired", "relinquished",
+                                  "surrendered", "revoked", "suspended"])
+def test_an_open_end_the_source_calls_not_active_is_left_empty(word):
+    """CKDDEG 56: "(inactive status 1993-present)" -- held, but not active."""
+    record = _one_licence_record(text=f"1981-present Wrenshire licence 77001 ({word} status)",
+                                 expiration_date="present")
+    assert record.last_registration_date == ""
+
+
+@pytest.mark.parametrize("board", ["Unretired Board", "Retiredale Board"])
+def test_an_inactive_word_inside_another_word_does_not_block_active(board):
+    record = _one_licence_record(text=f"1981-present Wrenshire licence 77001, {board}",
+                                 expiration_date="present")
+    assert record.last_registration_date == "Active"
+
+
+@pytest.mark.parametrize("text", [
+    "Wrenshire  Lic # 77001  Exp. 05-2011",
+    "Wrenshire licence 77001, expires 05/2011",
+    "Wrenshire licence 77001, Expiration: 05/2011",
+    "Wrenshire licence 77001, expiration date 05/2011",
+    "Wrenshire licence 77001, expiry 05/2011",
+    "Wrenshire licence 77001, valid through 05/2011",
+    "Wrenshire licence 77001, valid until 05/2011",
+])
+def test_a_labelled_expiry_renders_as_expires(text):
+    """MFJRKW 29: "Exp. 05-2011" read as the date of last registration."""
+    record = _one_licence_record(text=text, expiration_date="2011-05")
+    assert record.last_registration_date == "Expires 05/2011"
+
+
+@pytest.mark.parametrize("text", [
+    "2013-2017 Wrenshire licence 77001",            # a held span: the end year stays
+    "Wrenshire Expiration Board licence 77001, 2017",  # the label names no date
+    "Wrenshire licence 77001, experience since 2017",  # "exp" inside a word
+    "Wrenshire licence 77001, valid 2017",             # "valid" alone is no label
+    "Wrenshire licence 77001, invalid through 2017",   # the label inside a word
+])
+def test_an_unlabelled_end_date_renders_as_before(text):
+    record = _one_licence_record(text=text, expiration_date="2017")
+    assert record.last_registration_date == "2017"
+
+
+def test_a_labelled_expiry_keeps_its_status():
+    record = _one_licence_record(text="Wrenshire licence 77001 Exp. 05-2011",
+                                 expiration_date="2011-05", status="Lapsed")
+    assert record.last_registration_date == "Expires 05/2011 (Lapsed)"
+
+
+def test_an_open_end_reaches_the_document_without_present(tmp_path):
+    import json
+
+    entry = {"taxonomy_code": "F1", "element_idx_start": 0,
+             "text": "2005-present Wrenshire licence 77001",
+             "extracted_fields": {"state_country": "Wrenshire", "license_number": "77001",
+                                  "issue_date": "2005", "expiration_date": "present"}}
+    source, target = tmp_path / "in.json", tmp_path / "out.docx"
+    source.write_text(json.dumps({"document_uid": "TESTAA", "entries": [entry]}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    rows = [[c.text for c in row.cells] for table in Document(str(target)).tables
+            for row in table.rows if row.cells and "77001" in row.cells[min(1, len(row.cells) - 1)].text]
+    assert rows and rows[0][-1] == "Active"
+    assert rows[0][2] == "2005"
+
+
+def test_an_expiry_label_with_no_expiration_date_adds_nothing():
+    record = _one_licence_record(text="Wrenshire licence 77001 Exp. 05-2011", expiration_date="")
+    assert record.last_registration_date == ""
+
+
+def test_a_range_shaped_expiration_still_renders_as_the_range():
+    """#1233: stage 4 sometimes returns a {start_date, end_date} mapping."""
+    record = _one_licence_record(expiration_date={"start_date": "2013", "end_date": "2017"})
+    assert record.last_registration_date == "2013-2017"
