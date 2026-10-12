@@ -228,6 +228,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Postdoctoral Training: section heading not found in template; %d entries not rendered': 'warning',
     'Postdoctoral Training: table not found after section heading; %d entries not rendered': 'warning',
     'Propagated institution to %d sub-entries': 'info',
+    'Refused institution propagation to %d entries whose candidate parents ended before they began': 'info',
     'institution_enrichment is %s, not a mapping; treating as absent for propagation': 'warning',
     'Service on Boards: no %s or National table found; %d %s entries not rendered': 'warning',
     'Service on Boards: no Regional/National/International table found in template; %d entries not rendered': 'warning',
@@ -394,7 +395,7 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 128, (
+    assert len(text_level_records) == 129, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

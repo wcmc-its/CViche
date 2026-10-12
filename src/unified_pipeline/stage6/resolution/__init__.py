@@ -18,6 +18,7 @@ extracted one is not. Code that merely reads or reformats belongs elsewhere.
 """
 
 from .institution import (  # noqa: F401
+    _dates_rule_out_donor,
     _get_institution_location,
     _location_already_in_institution,
     _location_remainder,

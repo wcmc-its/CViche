@@ -9,9 +9,11 @@ it is why the section is this long for an 85-line writer:
 
 - `_propagate_institution_to_subentries` -- source CVs indent sub-positions
   under an employer heading, and field extraction sees each bullet on its own,
-  so the institution has to be carried forward in document order. It stops at
-  a source-structure boundary (`_crosses_source_boundary`) and records the
-  parent it took each institution from.
+  so the institution has to be carried forward in document order, over D1, D2
+  and D3 together. It stops at a source-structure boundary
+  (`_crosses_source_boundary`), skips a row whose dates rule it out as the
+  parent (`_eligible_donor`, #1692), and records the parent it took each
+  institution from.
 - `_merge_grouped_appointments` -- the same appointment arrives split into a
   title-less "employer + dates" row and one or more date-less "title only"
   rows. Rendered straight that produces blank-TITLE rows, which read as
@@ -59,7 +61,11 @@ from ..parsing import (
     _parse_date_components,
     split_appointment_title,
 )
-from ..resolution import _get_institution_location, _location_already_in_institution
+from ..resolution import (
+    _dates_rule_out_donor,
+    _get_institution_location,
+    _location_already_in_institution,
+)
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 from ..supplementary import Revision, write_row_subpoint
 
@@ -472,6 +478,47 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     return False
 
 
+def _eligible_donor(donors: list[dict], entry: dict) -> dict | None:
+    """The nearest of `donors` (in document order) that sits in `entry`'s
+    source block and whose dates do not rule it out as `entry`'s parent, None
+    when none qualifies (#1692). The block check is per donor: the list can
+    reach back past a heading change that no blank record sat on."""
+    for donor in reversed(donors):
+        if _crosses_source_boundary(donor, entry):
+            continue
+        if not _dates_rule_out_donor(donor, entry):
+            return donor
+    return None
+
+
+def _inherit_institution(donor: dict, entry: dict) -> None:
+    """Give `entry`, which named no institution, `donor`'s institution and its
+    stage-5b enrichment, and record which row it came from."""
+    fields = entry.get('extracted_fields')
+    if not fields:
+        entry['extracted_fields'] = fields = {}
+    donor_fields = donor.get('extracted_fields') or {}
+    fields['institution'] = donor_fields.get('institution') or donor_fields.get('organization')
+    # Record which row it came from. Two passes need it: the propagation only
+    # to be honest about provenance, and the merge pass to tell an inherited
+    # institution from an employer the record named itself (#476 review items
+    # 1 and 2).
+    entry[INHERITED_INSTITUTION_KEY] = donor.get('element_idx_start')
+    enrichment = donor.get('institution_enrichment')
+    if not enrichment or entry.get('institution_enrichment'):
+        return
+    if isinstance(enrichment, Mapping):
+        entry['institution_enrichment'] = dict(enrichment)
+    else:
+        # A non-Mapping (list, str, ...) shouldn't reach here, but stage 5b is
+        # an LLM output and one malformed run is enough (#743). Treat it like
+        # no enrichment to inherit rather than failing the section.
+        logger.warning(
+            "institution_enrichment is %s, not a mapping; "
+            "treating as absent for propagation",
+            type(enrichment).__name__)
+
+
 def _academic_rank(title: str) -> int | None:
     """The highest ladder rung `title` names, or None for a title on no rung
     ("Core Faculty", "Chair")."""
@@ -663,7 +710,7 @@ class PositionsSection:
 
     @staticmethod
     def _propagate_institution_to_subentries(entries: list[dict], verbose: bool = False) -> list[dict]:
-        """Fill blank institutions from the nearest preceding entry that has one.
+        """Fill blank institutions from the nearest preceding entry that could be their parent.
 
         Source CVs often list sub-positions as indented bullets under a parent
         institution.  Stage 4 field extraction treats each bullet as a separate
@@ -680,62 +727,49 @@ class PositionsSection:
         records its parent under `INHERITED_INSTITUTION_KEY`, which is also
         what `_is_one_appointment` reads to tell an inherited institution from
         one the record named itself.
+
+        Nor is "the nearest record that named one" (#1692). `_eligible_donor`
+        skips a record whose dates rule it out as the parent, so a 1975-1976
+        position does not lend its employer to a 1981 appointment; it takes the
+        nearest earlier one the dates allow, or nothing. And `_fill_positions`
+        passes D1, D2 and D3 as ONE list, so an organization-only D3 row heading
+        the D1 rows under it is the donor they see, not an older D1 employer.
         """
         if not entries:
             return entries
         # Sort by document order (element_idx_start) to ensure parent comes first
         ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
-        parent = None
-        last_institution = None
-        last_enrichment = None
+        donors: list[dict] = []
         propagated = 0
         stopped = 0
+        refused = 0
         for entry in ordered:
             fields = entry.get('extracted_fields', {}) or {}
-            inst = fields.get('institution') or fields.get('organization') or ''
-            if inst:
-                parent = entry
-                last_institution = inst
-                last_enrichment = entry.get('institution_enrichment')
+            if fields.get('institution') or fields.get('organization'):
+                donors.append(entry)
                 continue
-            if parent is None:
+            if not donors:
                 continue
-            if _crosses_source_boundary(parent, entry):
-                # A different block of the source CV: the employer carried
-                # this far is out of scope, and stays out — a later record is
-                # not re-attached to it across the unrelated one.
-                parent = None
-                last_institution = None
-                last_enrichment = None
+            if _crosses_source_boundary(donors[-1], entry):
+                # A different block of the source CV: the employers carried
+                # this far are out of scope, and stay out — a later record is
+                # not re-attached to them across the unrelated one.
+                donors = []
                 stopped += 1
                 continue
-            # This entry has no institution — inherit from parent
-            if not fields:
-                entry['extracted_fields'] = fields = {}
-            fields['institution'] = last_institution
-            # Record which row it came from. Two passes need it: this one
-            # only to be honest about provenance, and the merge pass to
-            # tell an inherited institution from an employer the record
-            # named itself (#476 review items 1 and 2).
-            entry[INHERITED_INSTITUTION_KEY] = parent.get('element_idx_start')
-            # Also propagate enrichment if available
-            if last_enrichment and not entry.get('institution_enrichment'):
-                if isinstance(last_enrichment, Mapping):
-                    entry['institution_enrichment'] = dict(last_enrichment)
-                else:
-                    # A non-Mapping (list, str, ...) shouldn't reach here, but
-                    # stage 5b is an LLM output and one malformed run is
-                    # enough (#743). Treat it like no enrichment to inherit
-                    # rather than failing the section.
-                    logger.warning(
-                        "institution_enrichment is %s, not a mapping; "
-                        "treating as absent for propagation",
-                        type(last_enrichment).__name__)
+            donor = _eligible_donor(donors, entry)
+            if donor is None:
+                refused += 1
+                continue
+            _inherit_institution(donor, entry)
             propagated += 1
         if verbose and propagated > 0:
             logger.info("Propagated institution to %d sub-entries", propagated)
         if verbose and stopped > 0:
             logger.info("Stopped institution propagation at %d source-structure boundaries", stopped)
+        if verbose and refused > 0:
+            logger.info("Refused institution propagation to %d entries whose candidate parents ended before they began",
+                        refused)
         return entries
 
     # Title strings that field extraction sometimes emits when the source CV had
@@ -963,11 +997,14 @@ class PositionsSection:
         d2_entries = entries_by_code.get(HOSPITAL_APPOINTMENT_CODE, [])
         d3_entries = entries_by_code.get(OTHER_POSITION_CODE, [])
 
-        # Propagate institution from parent entries to blank sub-entries, then
-        # reassemble appointments that were fragmented into separate title /
-        # employer+dates rows (see _merge_grouped_appointments).
+        # Propagate institution from parent entries to blank sub-entries, over
+        # the three codes at once: an organization-only D3 row is the parent of
+        # the D1/D2 rows under it, which a per-code pass cannot see (#1692).
+        # Then reassemble appointments that were fragmented into separate
+        # title / employer+dates rows (see _merge_grouped_appointments).
+        self._propagate_institution_to_subentries(
+            d1_entries + d2_entries + d3_entries, verbose=self.verbose)
         for code, entry_list in zip(POSITION_TAXONOMY_CODES, (d1_entries, d2_entries, d3_entries)):
-            self._propagate_institution_to_subentries(entry_list, verbose=self.verbose)
             merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose)
             if merged is not entry_list:
                 entry_list[:] = merged

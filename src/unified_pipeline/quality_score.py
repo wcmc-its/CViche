@@ -893,9 +893,9 @@ LINT_FIX_MINUTES = {
     ), FIX_MINUTES_CONTACT_BLOCK),
     **dict.fromkeys((
         "classified_unrendered", "dead_sections", "dedup_drops", "multi_record_coverage",
-        "orphaned_fragments", "section_lost", "segmentation", "segmentation_collapse",
-        "source_line_coverage", "stage4_unplaced_items", "table_lost", "under_extraction",
-        "unrendered_records",
+        "header_consumed_record", "orphaned_fragments", "section_lost", "segmentation",
+        "segmentation_collapse", "source_line_coverage", "stage2_unaccounted",
+        "stage4_unplaced_items", "table_lost", "under_extraction", "unrendered_records",
     ), FIX_MINUTES_RECORD_LOST),
     **dict.fromkeys((
         "bucket_status", "grant_bucket", "group_header_context", "invented_records",
@@ -907,7 +907,8 @@ LINT_FIX_MINUTES = {
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "footer_in_record",
         "glyph_field", "grant_boundary", "grant_facts",
         "implausible_year", "licensure_fallback_truncated", "owner_missing_from_citation",
-        "pubmed_title_truncated", "record_boundary", "role_consistency", "shattered_prose", "span_count",
+        "pubmed_title_truncated", "record_boundary", "record_date_shift", "role_consistency",
+        "shattered_prose", "span_count",
         "split_child_unsourced", "stage4_group_failures", "summary_unsupported_claim",
         "wrong_start_date", "year_not_in_source",
     ), FIX_MINUTES_FIELD_WRONG),

@@ -67,6 +67,7 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_RULE_LINE,
     DROP_SECTION_HEADER,
     DROP_SIGNATURE_BLOCK,
+    DROP_EMPTY_SECTION_NOTE,
     DROP_SOURCE_BOILERPLATE,
     DROP_STATUS_MARKER,
     DROP_TEMPLATE_INSTRUCTION,
@@ -1290,14 +1291,20 @@ def test_signature_shape_never_drops_a_real_record(text, sentence):
     assert _sig(text, _confirmed(sentence)) is None
 
 
-@pytest.mark.parametrize("text, lead", [
-    ("(Date)\t(Signature of Candidate)", "Signature line with placeholder."),
-    ("Signed:   Jane Q. Doe, MD", "Signed line."),
-    ("Date: ____ Signature ____", "Document footer."),
+# A signature block whose only signature word is Date: the shape that still
+# needs 3b's reasoning signal (#1714 drops one holding Signature or Signed on its
+# text alone).
+_DATE_ONLY_SIGNATURE = "01/02/2020 (Date)"
+
+
+@pytest.mark.parametrize("lead", [
+    "Signature line with placeholder.",
+    "Signed line.",
+    "Document footer.",
 ])
-def test_each_reasoning_word_alone_is_a_signature_signal(text, lead):
+def test_each_reasoning_word_alone_is_a_signature_signal(lead):
     # Raw reasoning without "structural artifact": each alternative must carry it.
-    assert _sig(text, f"[T-validation confirmed] {lead}") == DROP_SIGNATURE_BLOCK
+    assert _sig(_DATE_ONLY_SIGNATURE, f"[T-validation confirmed] {lead}") == DROP_SIGNATURE_BLOCK
 
 
 @pytest.mark.parametrize("lead", [
@@ -1308,11 +1315,11 @@ def test_each_reasoning_word_alone_is_a_signature_signal(text, lead):
 ])
 def test_signature_reasoning_signal_is_word_bounded_and_not_negated(lead):
     reasoning = f"[T-validation confirmed] {lead}"
-    assert _sig("Date: ____ Signature ____", reasoning) is None
+    assert _sig(_DATE_ONLY_SIGNATURE, reasoning) is None
 
 
 def test_signature_shape_alone_or_reasoning_alone_keeps_the_entry():
-    shape = "(Date)\t(Signature of Candidate)"
+    shape = _DATE_ONLY_SIGNATURE
     assert _sig(shape, None) is None
     assert _sig(shape, "[T-validation confirmed] Hobbies list.") is None
     assert _sig("Jane Q. Doe, Example University", _confirmed("Signature line.")) is None
@@ -1326,6 +1333,112 @@ def test_signature_blocks_survive_when_not_t_coded():
 def test_signed_owner_needs_the_owner_signature_tokens():
     text = "Signed:   Jane Q. Doe, MD"
     assert _sig(text, _confirmed("Signature line."), tokens=OwnerTokens()) is None
+
+
+# ------------------------------------------- #1714: signature lines, residual
+# Shapes from NECRGC (LWMSPJ 1043, QZCHAG 355), with the synthetic owner.
+_PLACEHOLDER_LEAD = "[T-validation confirmed] Structural placeholder, no content"
+_NO_ENTRIES_LEAD = ("[T-validation confirmed] Placeholder indicating no entries exist, "
+                    "not substantive content")
+
+
+@pytest.mark.parametrize("text, reasoning, reason", [
+    ("(Signature)", _PLACEHOLDER_LEAD, DROP_SIGNATURE_BLOCK),
+    ("(Signature)", "[T-validation confirmed] Signature placeholder", DROP_SIGNATURE_BLOCK),
+    ("Jane Q. Doe, MD; 01/02/2019", _NO_ENTRIES_LEAD, DROP_PAGE_FURNITURE),
+    ("None at present Jane Q. Doe, MD; 01/02/2019", _NO_ENTRIES_LEAD, DROP_PAGE_FURNITURE),
+    ("None at present", _NO_ENTRIES_LEAD, DROP_EMPTY_SECTION_NOTE),
+])
+def test_issue_1714_signature_and_note_shapes_are_dropped(text, reasoning, reason):
+    assert _sig(text, reasoning) == reason
+
+
+@pytest.mark.parametrize("text", [
+    "(Signature)",
+    "(SIGNED)",
+    "Signed:   Jane Q. Doe, MD",
+    "(Date)\t(Signature of Candidate)",
+    "Date: Aug 5, 2018    Signature:",
+])
+def test_a_signature_word_drops_the_signature_block_on_its_text_alone(text):
+    assert _sig(text, None) == DROP_SIGNATURE_BLOCK
+
+
+@pytest.mark.parametrize("text", [
+    "Signed a contract with Example Press, 2019",
+    "Signed: Pat Roe, MD",  # a name that is not the owner's
+    "Signature Programs Committee, Example University, 2018",
+    "PhD Candidate, May 2019",
+    _DATE_ONLY_SIGNATURE,  # Date is the only signature word: needs the reasoning
+])
+def test_a_signature_word_alone_never_drops_a_record(text):
+    assert _sig(text, None) is None
+
+
+def test_text_only_signature_and_note_drops_are_t_only():
+    assert _sig("(Signature)", None, code="K1") is None
+    assert _sig("None at present", None, code="K1") is None
+
+
+@pytest.mark.parametrize("text", [
+    "None at present", "none at present.", "None  at  present;", "None at present:",
+    "None at present,", "None at present -", "None –", "None —", "N/A —", "Not applicable –",
+])
+def test_a_bare_empty_section_note_is_dropped(text):
+    # "None", "N/A" and "Not applicable" alone were already dropped as
+    # unanswered-prompt (`is_unanswered_prompt`, any code), and still are.
+    assert _sig(text, None) == DROP_EMPTY_SECTION_NOTE
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("None at present Jane Q. Doe, MD; 01/02/2019", DROP_PAGE_FURNITURE),
+    ("N/A Jane Q. Doe, MD", DROP_PAGE_FURNITURE),
+    ("Not applicable. Signed: Jane Q. Doe", DROP_SIGNATURE_BLOCK),
+    ("None (Signature)", DROP_SIGNATURE_BLOCK),
+    # The note at the end of the line.
+    ("Signed: Jane Q. Doe; None.", DROP_SIGNATURE_BLOCK),
+    ("Jane Q. Doe, MD; 01/02/2019 - None at present", DROP_PAGE_FURNITURE),
+    ("Signed: Jane Q. Doe, N/A", DROP_SIGNATURE_BLOCK),
+    ("Signed: Jane Q. Doe — not applicable", DROP_SIGNATURE_BLOCK),
+    ("NOT  APPLICABLE (Signature)", DROP_SIGNATURE_BLOCK),
+])
+def test_a_note_joined_to_a_signature_or_furniture_line_is_dropped(text, reason):
+    assert _sig(text, None) == reason
+
+
+@pytest.mark.parametrize("text", [
+    "None at present; manuscript in preparation",
+    "None at present Example Award, 2019",
+    "None of the above, Example Society Member, 2019",
+    "Example Society Member, 2019; none at present",
+    "Nonesuch Jane Q. Doe",       # "None" must be its own word
+    "N/AJ. Doe",
+    "Signed: Jane Q. Doenone",    # a trailing note needs a separator before it
+    "Signed: Jane Q. Doe; None at presently",
+    "Jane Q. Doe; none 01/02/2019",  # a note inside the line is not set aside
+])
+def test_a_note_joined_to_a_record_keeps_the_line(text):
+    assert _sig(text, None) is None
+
+
+def test_issue_1714_drops_are_counted_and_described():
+    entries = [
+        {"text": "(Signature)", "taxonomy_code": "T",
+         "classification_reasoning": _PLACEHOLDER_LEAD},
+        {"text": "None at present", "taxonomy_code": "T",
+         "classification_reasoning": _NO_ENTRIES_LEAD},
+        {"text": "None at present Jane Q. Doe, MD; 01/02/2019", "taxonomy_code": "T",
+         "classification_reasoning": _NO_ENTRIES_LEAD},
+        {"text": "Example Society, Member, 2019", "taxonomy_code": "T"},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["Example Society, Member, 2019"]
+    assert dropped == Counter({DROP_SIGNATURE_BLOCK: 1, DROP_PAGE_FURNITURE: 1,
+                               DROP_EMPTY_SECTION_NOTE: 1})
+    assert _describe_dropped(dropped) == (
+        "3 non-content blocks removed "
+        "(signature-block 1, page-furniture 1, empty-section-note 1)"
+    )
 
 
 @pytest.mark.parametrize("text, sentence", [

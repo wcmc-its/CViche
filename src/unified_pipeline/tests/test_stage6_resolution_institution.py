@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.resolution import (  # noqa: E402
+    _dates_rule_out_donor,
     _get_institution_location,
     _location_already_in_institution,
     _location_remainder,
@@ -240,6 +241,57 @@ def test_bad_neighbour_start_is_skipped():
     target = _e(20, "C2")
     entries = [_e("x", "C", "Bad Index Hospital"), target]
     assert _recover_institution_from_nearby_entries(target, entries) == ""
+
+
+# --- #1692: a donor whose dates rule it out as the block's parent ----------
+
+def _dated(idx, code, institution=None, start="", end=""):
+    entry = _e(idx, code, institution)
+    entry["extracted_fields"].update({"start_date": start, "end_date": end})
+    return entry
+
+
+def test_a_fellowship_that_ended_before_this_one_began_lends_it_no_institution():
+    """#1692 (NECRGC EJPAIA 35): a flat list naming its institution line by
+    line. The 1971-1973 fellowship named none, and the 1969-1970 one above it
+    is no parent of it, nor is anything earlier: the cell stays empty."""
+    target = _dated(35, "C", None, "1971", "1973")
+    entries = [_dated(29, "C", "Quexley Institute", "1967", "1969"),
+               _dated(33, "C", "Norvale Medical College", "1969", "1970"),
+               target,
+               _dated(36, "C", "Kestrel University", "1970", "1971")]
+    assert _recover_institution_from_nearby_entries(target, entries) == ""
+
+
+def test_the_nearest_donor_the_dates_allow_is_taken_past_one_they_rule_out():
+    target = _dated(20, "C", None, "1995", "1996")
+    entries = [_dated(18, "C", "Running Hospital", "1990", "present"),
+               _dated(19, "C", "Ended Hospital", "1991", "1992"), target]
+    assert _recover_institution_from_nearby_entries(target, entries) == "Running Hospital"
+
+
+def test_a_donor_ending_the_year_the_record_starts_still_lends_it():
+    target = _dated(20, "C", None, "1992", "1993")
+    entries = [_dated(19, "C", "Same Year Hospital", "1990", "1992"), target]
+    assert _recover_institution_from_nearby_entries(target, entries) == "Same Year Hospital"
+
+
+@pytest.mark.parametrize("donor_dates, recipient_dates, ruled_out", [
+    (("1969", "1970"), ("1971", "1973"), True),      # ended before it began
+    (("1990", "1992"), ("1992", "1993"), False),     # ended the year it began
+    (("2011", "present"), ("2007", "2011"), False),  # later start: the reverse-chron ladder
+    (("1981", "present"), ("2016", ""), False),      # open end
+    (("1981", ""), ("2016", ""), False),             # no end year at all
+    (("", "1970"), ("1971", ""), True),              # end year alone suffices
+    (("1969", "1970"), ("", "1973"), False),         # recipient has no start year
+    (("1969", "1970"), ("undated", ""), False),      # recipient start unparseable
+    (("1969", "06/1970"), ("07/1970", ""), False),   # same year, months not compared
+])
+def test_dates_rule_out_a_donor_only_when_its_span_ended_before_the_record_began(
+        donor_dates, recipient_dates, ruled_out):
+    donor = _dated(1, "D1", "Donor", *donor_dates)
+    recipient = _dated(2, "D1", None, *recipient_dates)
+    assert _dates_rule_out_donor(donor, recipient) is ruled_out
 
 
 def test_a_lookup_of_another_institution_contributes_no_location():

@@ -447,6 +447,25 @@ Lints, ranked by the severity of the failure class they catch:
                           one finding for the run; INFO for a stage-4 field
                           of that shape no cell shows. Reads the docx's
                           table rows; stage 4 when present
+14ap. stage2_unaccounted  source elements stage 2's own coverage block lists
+                          in `unaccounted_indices`: in no entry, header or
+                          break, so never classified (#1693, NECRGC
+                          TGSQIR-01: a section body of 50 elements). WARN,
+                          one per run. Reads stage 2 only, so it holds
+                          without the source docx `segmentation` needs
+14aq. record_date_shift   a list stage 2 grouped one record off (#1226): a
+                          date-only or dateless entry whose two neighbours
+                          before it carry their date in one place (first
+                          field, last field, inside) and the two after it in
+                          another (NECRGC GNONHA 505, SPIHVQ 137). WARN, one
+                          per such entry. Reads stage 2 only
+14ar. header_consumed_record a stage-2 header entry whose text is its own
+                          heading followed by a record ("LABEL: first
+                          record"), which is then never classified (#1254,
+                          #1252; NECRGC WBBUHK 29/32/36/49, MFJRKW 52). WARN,
+                          one per entry; with the docx, only when the record
+                          renders nowhere. Reads stage 2; the docx when
+                          present
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -652,9 +671,12 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     MISSED_HEADERS_WARN_COUNT,
     _header_key,
     _hierarchy_titles,
+    lint_header_consumed_record,
     lint_missed_headers,
+    lint_record_date_shift,
     lint_segmentation,
     lint_segmentation_collapse,
+    lint_stage2_unaccounted,
     lint_table_lost,
 )
 from unified_pipeline.doctor.lints.summary import (  # noqa: F401,E402
@@ -818,6 +840,9 @@ KNOWN_LINTS = (
     "licensure_fallback_truncated",
     "footer_in_record",
     "glyph_field",
+    "stage2_unaccounted",
+    "record_date_shift",
+    "header_consumed_record",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1086,6 +1111,15 @@ LINT_PREVALENCE = {
     # farms (scripts/doctor_gate.py, measured 2026-10-08). Same mixed-corpus
     # caveat as above.
     "appointment_title_overlong": 0.015,
+    # stage2_unaccounted, record_date_shift and header_consumed_record (the
+    # NECRGC autopsy; NEC-S2 in doctor/PRECISION.md): 11, 7 and 8 of 206
+    # runs -- the 40 NECRGC/JAFPFP runs (dev-264/267, stored artifacts) and
+    # 166 local farm runs (src/unified_pipeline/outputs 106, the 2026-09-11
+    # and 2026-09-17 _autopsy_artifacts batches 40 and 20) -- measured
+    # 2026-10-12. Same mixed-corpus caveat as above.
+    "stage2_unaccounted": 0.053,
+    "record_date_shift": 0.034,
+    "header_consumed_record": 0.039,
 }
 
 
@@ -1686,6 +1720,10 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              ("stage_4", "table_rows")),
     LintSpec("footer_in_record", lint_footer_in_record, ("stage_4",)),
     LintSpec("glyph_field", lint_glyph_field, ("table_rows",), optional=("stage_4",)),
+    LintSpec("stage2_unaccounted", lint_stage2_unaccounted, ("stage_2",)),
+    LintSpec("record_date_shift", lint_record_date_shift, ("stage_2",)),
+    LintSpec("header_consumed_record", lint_header_consumed_record, ("stage_2",),
+             optional=("blocks",)),
 )
 
 #: The views read from the stage-6 docx.
