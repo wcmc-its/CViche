@@ -190,6 +190,92 @@ def test_org_not_fabricated_from_the_award_first_comma_clause_1412():
         "Some Prize, Imaginary Award Committee") == "Imaginary Award Committee"
 
 
+def test_org_not_fabricated_from_a_clause_of_the_award_name_1711():
+    """#1711 (NECRGC XUTTKJ 181/192, SPIHVQ 760): the short-proper-noun
+    fallback took a comma clause of the award's own name -- its last clause
+    when that ends in an award noun, a middle clause of a list -- as the
+    granting body."""
+    gen = WCMTemplateGenerator(verbose=False)
+    # an eponymous award's tail ends in an award noun: never a grantor
+    for text in ("Jane Q. Doe, MD Mentor Award",
+                 "Resident Supervisor Award: Jane Q. Doe, MD Mentor Award",
+                 "Jane Q. Doe, Imaginary Prize",
+                 "Jane Q. Doe, Example Fellowship",
+                 "Jane Q. Doe, Example Runner-up",
+                 "Jane Q. Doe, Example Medal"):
+        assert gen._extract_organization_from_award(text) == "", text
+    # a keyword-free middle clause is a list inside the award's name
+    assert gen._extract_organization_from_award(
+        "Imaginary Workshop on Grant Writing, Preparation, and Submissions "
+        "in Example Research") == ""
+    assert gen._extract_organization_from_award(
+        "Example Cup, Leadership, Teamwork, or Spirit Shown") == ""
+    # ...and so is the first clause of a three-clause list
+    assert gen._extract_organization_from_award(
+        "Advising, Mentoring, & Teaching Recognition Award") == ""
+    assert gen._extract_organization_from_award(
+        "Best Doctors, Top Physicians, Selected by Their Peers") == ""
+    # a clause of nothing but degree post-nominals is a person's name tail
+    for text in ("Example Award, Jane Q. Doe, MD",
+                 "Example Award, Jane Q. Doe, M.D.",
+                 "Example Award, Jane Q. Doe, PhD",
+                 "Example Award, Jane Q. Doe, MD PhD",
+                 "Example Award, Jane Q. Doe, DO"):
+        assert gen._extract_organization_from_award(text) == "", text
+
+
+def test_org_extraction_keeps_a_real_grantor_after_1711_guards():
+    """The #1711 guards leave a real grantor alone: a last clause that ends
+    in no award noun, a degree token that only opens an organization's name,
+    a grantor after a trailing year, and an award-noun clause that names an
+    institution."""
+    gen = WCMTemplateGenerator(verbose=False)
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell") == "Weill Cornell"
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell, 2010") == "Weill Cornell"
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell, NY") == "Weill Cornell"
+    # a trailing lowercase description is passed over, like a year
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell, voted by the students") == \
+        "Weill Cornell"
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell, 2010, voted by the students") == \
+        "Weill Cornell"
+    # a description whose first word only begins with "or"/"and" is still one
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell, organized by the students") == \
+        "Weill Cornell"
+    # only a WHOLE last word that is an award noun counts, not a part of one
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Imaginary Medal-Works") == "Imaginary Medal-Works"
+    # an empty clause is not a degree clause
+    assert gen._extract_organization_from_award(
+        "Teaching Award, Weill Cornell,, ") == "Weill Cornell"
+    assert gen._extract_organization_from_award(
+        "Best Paper, American Heart Association") == \
+        "American Heart Association"
+    assert gen._extract_organization_from_award(
+        "Example Award, MD Anderson") == "MD Anderson"
+    assert gen._extract_organization_from_award(
+        "Example Award, MD Anderson Cancer Center") == \
+        "MD Anderson Cancer Center"
+    assert gen._extract_organization_from_award(
+        "Some Prize, Imaginary Award Committee") == "Imaginary Award Committee"
+
+
+def test_a_comma_in_the_award_name_keeps_the_name_whole_1711():
+    """#1711 end to end: the Name cell keeps the whole award name and the
+    Organization cell stays empty, not split across the two."""
+    entry = {"taxonomy_code": "H", "text": "",
+             "extracted_fields": {
+                 "award_name": "Jane Q. Doe, MD Mentor Award",
+                 "granting_body": None, "date": "2019"}}
+    assert _render_honors([entry]) == [[
+        "Jane Q. Doe, MD Mentor Award", "", "2019"]]
+
+
 def test_award_name_keeps_an_org_it_ends_on_after_a_preposition_1412():
     """#1412 (RCBKFG KUUKNJ 139): stripping a granting body that is the
     object of the name's last phrase left the award cell ending in "of". The name now renders whole."""

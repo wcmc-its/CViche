@@ -241,6 +241,20 @@ _ORG_KEYWORDS = (r'(?:' + _STRONG_ORG_KEYWORDS + r'|'
 _MIN_ORG_WORDS = 2
 _MAX_ORG_SHARE_OF_TEXT = 0.7
 
+# A short proper-noun comma clause, one to three capitalised words
+# ("Weill Cornell").
+_PROPER_NOUN_CLAUSE_RE = re.compile(r'^[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+){0,2}$')
+
+# A trailing clause that describes the award rather than naming anything:
+# it opens with a lowercase word that is not a list conjunction ("..., voted
+# by the students"). "and Submissions in ..." is the end of a list, not this.
+_DESCRIPTIVE_CLAUSE_RE = re.compile(r'(?!(?:and|or)\b)[a-z]')
+
+# Degree post-nominals, dots removed. A clause made only of these ends a
+# person's name ("<eponym>, MD"), never a grantor's (#1711). Only a clause
+# made ENTIRELY of them: "MD Anderson Cancer Center" is a grantor.
+_DEGREE_TOKENS = frozenset(['md', 'phd', 'do'])
+
 # A comma segment longer than this is a sentence, not an organization name.
 _MAX_ORG_SEGMENT_WORDS = 10
 
@@ -1106,6 +1120,41 @@ def _build_org_around_keyword(txt: str) -> str:
     return org.strip('.,; ')
 
 
+def _is_degree_clause(seg: str) -> bool:
+    """Is `seg` nothing but degree post-nominals ("MD", "M.D.", "MD PhD")?"""
+    words = [w.replace('.', '').lower() for w in seg.split()]
+    return bool(words) and all(w in _DEGREE_TOKENS for w in words)
+
+
+def _proper_noun_clause(segs: list[str]) -> str:
+    """Strategy 2's last resort: a short proper-noun comma clause
+    ("Teaching Award, Weill Cornell, 2010" -> "Weill Cornell").
+
+    Only the last clause that says something (not a year, a state, or a
+    lowercase description such as "voted by ..."), or the first clause when
+    it is the only other one (`_is_award_words_first_clause` guards that).
+    A keyword-free clause in the middle is a list inside the award's own
+    name ("Grant Writing, Preparation, and Submissions" gave "Preparation",
+    #1711). A clause of degree post-nominals ends a person's name, so the
+    clause before it is that person, not a grantor ("<eponym>, MD" -- and
+    "MD" is also a state abbreviation, which is why this test comes first).
+    """
+    seen = 0
+    for i in range(len(segs) - 1, -1, -1):
+        seg = segs[i]
+        if _is_degree_clause(seg):
+            return ''
+        if not seg or seg.upper() in _US_STATE_ABBREVS \
+                or any(ch.isdigit() for ch in seg) \
+                or _DESCRIPTIVE_CLAUSE_RE.match(seg):
+            continue
+        if (seen == 0 or (i == 0 and seen == 1)) \
+                and _PROPER_NOUN_CLAUSE_RE.match(seg):
+            return seg
+        seen += 1
+    return ''
+
+
 def _organization_candidate(text: str) -> str:
     """Extract organization name from award/honor text using institutional keyword patterns.
 
@@ -1139,13 +1188,9 @@ def _organization_candidate(text: str) -> str:
                 if seg and re.search(keywords, seg, re.IGNORECASE) \
                         and len(seg.split()) <= _MAX_ORG_SEGMENT_WORDS:
                     return seg
-        for seg in reversed(segs):
-            if not seg or seg.upper() in _US_STATE_ABBREVS \
-                    or any(ch.isdigit() for ch in seg):
-                continue
-            # Short proper-noun segment (e.g., "Weill Cornell")
-            if re.match(r'^[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+){0,2}$', seg):
-                return seg
+        org = _proper_noun_clause(segs)
+        if org:
+            return org
 
     # Strategy 3: "Association/Society of X" at start of text
     m = _NAMED_BODY_RE.match(text)
@@ -1184,18 +1229,25 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
     Strategies 3/4 of `_organization_candidate` anchor on `College` /
     `University` and build outward, so an award named after a college
     ("College of Education 2015 Outstanding Thesis Award") became its own
-    organization (#887). Four tells, each independent: the candidate is the
+    organization (#887). Five tells, each independent: the candidate is the
     whole award name minus its trailing award word; it carries a digit (a
     year belongs to the date column); it ends in a role word; it is the
     award's own first comma clause, in award words and naming no
-    institution.
+    institution; it ends in an award noun and names no institution.
 
-    The last one is Strategy 2's short-proper-noun fallback taking the
+    The fourth is Strategy 2's short-proper-noun fallback taking the
     clause a name opens with -- "<rank>, <competition>" rendered the rank as
     the organization (RCBKFG FLYBMX 288/289, #1412). A first
     clause with no award word ("<network>, Forum for ...") or one that
     names an institution ("<university>, Teaching Award") is still a
     grantor.
+
+    The fifth is the same fallback taking the LAST clause of an eponymous
+    award, "<eponym>, MD Mentor Award" (#1711), which the first-clause tell
+    cannot see. A clause that ends in "Award" or "Prize" and names no
+    institution is the award's own wording wherever it sits; one that names
+    an institution ("<univ> Award, Forum for ...") is left to the keyword
+    passes, as for #1412.
     """
     stripped = text.strip().rstrip('.,;')
     if _AWARD_NAME_TAIL_RE.sub('', stripped).strip().lower() == org.lower() \
@@ -1205,7 +1257,17 @@ def _is_fabricated_organization(org: str, text: str) -> bool:
         return True
     if _is_award_words_first_clause(org, stripped):
         return True
-    return org.split()[-1].lower().strip('.,;') in _ORG_ROLE_WORDS
+    last_word = org.split()[-1].lower().strip('.,;')
+    if _ends_in_award_noun(last_word) \
+            and not re.search(_ORG_KEYWORDS, org, re.IGNORECASE):
+        return True
+    return last_word in _ORG_ROLE_WORDS
+
+
+def _ends_in_award_noun(last_word: str) -> bool:
+    """Is `last_word` an award noun -- the end of an award's own name?"""
+    return bool(_AWARD_CLAUSE_WORD_RE.fullmatch(last_word)
+                or _AWARD_NAME_TAIL_RE.fullmatch(' ' + last_word))
 
 
 def _is_award_words_first_clause(org: str, text: str) -> bool:
