@@ -558,7 +558,7 @@ class TestBareStartYearStaysBare1699:
     is in test_stage6_clinical_practice_fragments.py, which drives the real
     template."""
 
-    _HEADER = ["Title", "Institution/Location", "Dates (yyyy)"]
+    _HEADER = ("Title", "Institution/Location", "Dates (yyyy)")
 
     def _l3_table_dates(self, text):
         gen, table = _fake_doc_with_table("Clinical Leadership", self._HEADER)
