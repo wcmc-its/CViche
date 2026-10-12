@@ -74,6 +74,7 @@ from unified_pipeline.core.render_check import (  # noqa: E402
     entry_lines,
 )
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
+    INHERITED_INSTITUTION_KEY,
     _child_position_records,
     _employers_match,
     _institution_from_raw_text,
@@ -870,10 +871,11 @@ def _rule_1_pair_resting_on_inheritance():
 def _rule_2_pair_resting_on_inheritance():
     """The same thin evidence through Rule 2 (header + children): the header
     named no employer and inherited one, and the role beneath it names a
-    different employer."""
+    different employer. The donor's span holds the header's start, so the
+    inheritance itself is one the dates allow (#1692)."""
     return [
         _position_entry(1, "Chief of Service", "Quexley General Hospital",
-                        ["Hospital Appointments"], "1998-01", "2001-12"),
+                        ["Hospital Appointments"], "1998-01", "2008-12"),
         _position_entry(2, "", "", ["Hospital Appointments"], "2002-07", "2006-12"),
         _position_entry(3, "Attending Physician", "Norvale University Medical College",
                         ["Hospital Appointments"]),
@@ -933,7 +935,7 @@ def test_the_unmatched_employer_tally_counts_every_such_merge(caplog):
     """
     entries = [
         _position_entry(1, "Chief of Service", "Quexley General Hospital",
-                        ["Hospital Appointments"], "1998-01", "2001-12"),
+                        ["Hospital Appointments"], "1998-01", "2008-12"),
         _position_entry(2, "", "", ["Hospital Appointments"], "2002-07", "2006-12"),
         _position_entry(3, "Attending Physician", "Norvale University Medical College",
                         ["Hospital Appointments"]),
@@ -1561,3 +1563,156 @@ def test_the_split_does_not_change_the_record():
     gen, _table = _positions_generator(TABLE_ANCHORS["D3"])
     gen._fill_positions({"D3": [entry]})
     assert entry == before
+
+
+# --- (h) #1692: carry-forward only from a row that could be the parent -------
+#
+# Propagation used to fill a blank employer from the nearest preceding record
+# that named one, one code list at a time. NECRGC RSVENL: an
+# organization-only D3 row (1981-present) heads the D1 professorships beneath
+# it, but the D1 pass never saw it and gave all five the employer of a
+# 1975-1976 D1 row, with that row's 5b city.
+
+EMPLOYMENT = ["Employment"]
+
+
+def _coded(code, idx, title, institution, start="", end="", hierarchy=EMPLOYMENT):
+    entry = _position_entry(idx, title, institution, hierarchy, start, end)
+    entry["taxonomy_code"] = code
+    return entry
+
+
+def _rsvenl_shape():
+    """D1 (own employer, 1975-1976), D3 org-only parent (1981-present), then
+    D1 rows that name no employer, from 1981 on."""
+    earlier = _coded("D1", 16, "Assistant Professor, Computer Science",
+                     "Quexley College", "1975", "1976")
+    earlier["institution_enrichment"] = {"city": "Crab Hollow", "state": "ZQ"}
+    parent = _coded("D3", 18, "", None, "1981", "present")
+    parent["extracted_fields"]["organization"] = "Norvale University"  # D3's employer field
+    children = [_coded("D1", 19, "Assistant Professor, Anesthesiology", "", "1981", "1987"),
+                _coded("D1", 20, "Associate Professor, Anesthesiology", "", "1987", "1992"),
+                _coded("D1", 22, "Professor Emeritus", "", "2016", "present")]
+    return earlier, parent, children
+
+
+def _fill_all_three(entries_by_code):
+    """`_fill_positions` over a document holding all three D tables; returns
+    the rendered rows of each, keyed by code."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("D. POSITIONS")
+    tables = {}
+    for code, anchor in TABLE_ANCHORS.items():
+        gen.doc.add_paragraph().add_run(anchor).bold = True
+        tables[code] = gen.doc.add_table(rows=1, cols=3)
+        for i, header in enumerate(["Title", "Institution/Location", "Dates"]):
+            tables[code].rows[0].cells[i].text = header
+    gen._fill_positions(entries_by_code)
+    return {code: _rendered_rows(table) for code, table in tables.items()}
+
+
+def test_an_org_only_d3_row_is_the_parent_of_the_d1_rows_under_it():
+    earlier, parent, children = _rsvenl_shape()
+
+    rows = _fill_all_three({"D1": [earlier, *children], "D3": [parent]})
+
+    institutions = {title: institution for title, institution, _dates in rows["D1"]}
+    for child in children:
+        assert institutions[child["extracted_fields"]["title"]] == "Norvale University"
+    assert institutions["Assistant Professor, Computer Science"].startswith("Quexley College")
+
+
+def test_an_inherited_row_takes_the_parents_enrichment_not_an_earlier_siblings():
+    earlier, parent, children = _rsvenl_shape()
+
+    WCMTemplateGenerator._propagate_institution_to_subentries([earlier, parent, *children])
+
+    for child in children:
+        assert child[INHERITED_INSTITUTION_KEY] == 18
+        assert "institution_enrichment" not in child
+
+
+def test_a_sibling_that_ended_before_the_record_began_lends_it_no_employer():
+    earlier = _coded("D1", 1, "Assistant Professor", "Quexley College", "1975", "1976")
+    later = _coded("D1", 2, "Assistant Professor, Anesthesiology", "", "1981", "1987")
+
+    rows = _render_positions([earlier, later], code="D1")
+
+    assert ["Assistant Professor, Anesthesiology", "", "1981-1987"] in rows
+    assert INHERITED_INSTITUTION_KEY not in later
+
+
+def test_a_dated_parent_still_lends_its_employer_to_the_positions_it_contains(caplog):
+    """The control: a parent whose span holds its sub-positions -- including
+    one starting the very year the parent ends -- still propagates, and no
+    refusal is reported."""
+    parent = _coded("D2", 1, "", "Lincoln Hospital", "2001", "2004")
+    inside = _coded("D2", 2, "Attending Physician", "", "2001", "2003")
+    at_the_end = _coded("D2", 3, "Assistant Director", "", "2004", "2004")
+    undated = _coded("D2", 4, "Preceptor", "")
+
+    with caplog.at_level(logging.INFO, logger="unified_pipeline.stage6.sections.positions"):
+        WCMTemplateGenerator._propagate_institution_to_subentries(
+            [parent, inside, at_the_end, undated], verbose=True)
+
+    for entry in (inside, at_the_end, undated):
+        assert _institution_of(entry) == "Lincoln Hospital"
+    assert "Refused" not in caplog.text
+
+
+def test_the_nearest_donor_the_dates_allow_is_taken_past_one_they_rule_out():
+    heading = _coded("D1", 1, "", "Norvale University", "1981", "present")
+    visiting = _coded("D1", 2, "Visiting Professor", "Quexley College", "1983", "1984")
+    later = _coded("D1", 3, "Professor", "", "1990", "2000")
+
+    WCMTemplateGenerator._propagate_institution_to_subentries([heading, visiting, later])
+
+    assert _institution_of(later) == "Norvale University"
+    assert later[INHERITED_INSTITUTION_KEY] == 1
+
+
+def test_a_reverse_chronological_ladder_still_shares_its_employer():
+    """Only a donor that ENDED before the record began is ruled out: a
+    later-dated rank listed first is the same employer the CV names once."""
+    current = _coded("D1", 1, "Professor", "Kestrel University", "2011", "present")
+    earlier_rank = _coded("D1", 2, "Associate Professor", "", "2007", "2011")
+
+    WCMTemplateGenerator._propagate_institution_to_subentries([current, earlier_rank])
+
+    assert _institution_of(earlier_rank) == "Kestrel University"
+
+
+def test_a_donor_under_another_heading_is_never_reached_back_to():
+    """The scan back past a ruled-out donor stays inside the record's own
+    source block: an employer named under an earlier heading, with no blank
+    record between to stop the carry there, is still out of scope."""
+    elsewhere = _coded("D1", 1, "Instructor", "Quexley College", hierarchy=["Personal Data"])
+    ended = _coded("D3", 2, "Clinical Social Worker", "Norvale Clinic", "2003", "2005")
+    blank = _coded("D3", 3, "Psychiatric Social Worker", "", "2012", "2014")
+
+    WCMTemplateGenerator._propagate_institution_to_subentries([elsewhere, ended, blank])
+
+    assert _institution_of(blank) == ""
+
+
+def test_a_refused_carry_is_logged_when_verbose(caplog):
+    earlier = _coded("D1", 1, "Assistant Professor", "Quexley College", "1975", "1976")
+    later = _coded("D1", 2, "Professor", "", "1981", "1987")
+
+    with caplog.at_level(logging.INFO, logger="unified_pipeline.stage6.sections.positions"):
+        WCMTemplateGenerator._propagate_institution_to_subentries([earlier, later], verbose=True)
+
+    assert "Refused institution propagation to 1 entries" in caplog.text
+
+
+def test_a_record_with_its_own_enrichment_keeps_it_when_it_inherits():
+    parent = _coded("D2", 1, "", "Lincoln Hospital", "2001", "2004")
+    parent["institution_enrichment"] = {"city": "Crab Hollow"}
+    child = _coded("D2", 2, "Attending Physician", "", "2002", "2003")
+    child["institution_enrichment"] = {"city": "Kestrel Bay"}
+
+    WCMTemplateGenerator._propagate_institution_to_subentries([parent, child])
+
+    assert _institution_of(child) == "Lincoln Hospital"
+    assert child["institution_enrichment"] == {"city": "Kestrel Bay"}

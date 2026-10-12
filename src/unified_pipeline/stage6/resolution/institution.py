@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 
 from ..normalization.institutions import enrichment_names_the_institution
+from ..parsing import _parse_date_components
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +267,37 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
 _TRAINING_CODES = ('C', 'C1', 'C2', 'C3')
 
 
+def _record_year(record: Mapping, field: str) -> int | None:
+    """The year of `record`'s `field` date, None when it has none that parses
+    ("present" and an empty field both read as None)."""
+    fields = record.get('extracted_fields') or {}
+    return _parse_date_components(str(fields.get(field) or ''))[0]
+
+
+def _dates_rule_out_donor(donor: Mapping, recipient: Mapping) -> bool:
+    """True when the dates say `donor` cannot be the row `recipient` sits under (#1692).
+
+    A record that named no institution may borrow one from an earlier record
+    only when that record could be its parent, and a parent was still running
+    when its sub-positions began. So the donor is ruled out when its span
+    ended before the recipient started: RSVENL's 1975-1976 assistant
+    professorship is no parent of the 1981 appointments below it, nor EJPAIA's
+    1969-1970 fellowship of the 1971-1973 one.
+
+    Only that one direction. A donor that starts AFTER the recipient is the
+    reverse-chronological ladder -- "Professor 2011-present, <employer>" over
+    "Associate Professor 2007-2011" -- whose rows share an employer the CV
+    names once; ruling it out emptied two correct cells on one corpus CV.
+    Missing dates are no evidence either way: a recipient with no start year,
+    or a donor with no end year ("1981-present", or none at all), is not
+    ruled out.
+    """
+    recipient_start = _record_year(recipient, 'start_date')
+    donor_end = _record_year(donor, 'end_date')
+    return (recipient_start is not None and donor_end is not None
+            and donor_end < recipient_start)
+
+
 def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict]) -> str:
     """The institution a training block names once above its lines (#1038).
 
@@ -283,6 +315,11 @@ def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict
     record, so one it names for no record was not named above it either: the
     residency the line leaves without one took the internship hospital two
     lines up.
+
+    #1692 (NECRGC EJPAIA 35): nor from a preceding entry whose dates rule it
+    out as the block's parent (`_dates_rule_out_donor`). A fellowship that
+    ended in 1970 names no institution for one that began in 1971; the
+    nearest entry that could hold it is taken instead, or nothing.
     """
     try:
         entry_start = int(entry.get('element_idx_start', -1))
@@ -306,6 +343,8 @@ def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict
             continue
         if other_start == entry_start:
             return ''  # a sibling record names its own: see #1445 above
+        if _dates_rule_out_donor(other, entry):
+            continue
         if best_start < other_start < entry_start:
             best_start, best = other_start, institution.strip()
     return best
