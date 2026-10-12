@@ -75,20 +75,22 @@ describe('PipelineViewer on a finished run (#1589)', () => {
   it.each([
     ['the owner', false, 'Owner Fix list', 'Staff quality and Run Doctor'],
     ['staff', true, 'Staff quality and Run Doctor', 'Owner Fix list'],
-  ])('offers %s the review copy beside the download, and the matching doctor card', (_who, staff, shown, hidden) => {
+  ])('makes the review copy %s the main download, the clean copy beside it, and the matching doctor card', (_who, staff, shown, hidden) => {
     view.canViewAllRuns = staff
     view.runStatus = FINISHED
     render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
-    const link = screen.getByRole('link', { name: /Review copy \(with CViche's notes\)/ })
-    expect(link.getAttribute('href')).toContain('/api/run/ABCDEF/data/DEMO01_wcm_review.docx')
-    expect(screen.getByRole('link', { name: 'Download final output file DEMO01_wcm.docx' })).toBeTruthy()
+    const main = screen.getByRole('link', { name: 'Download review copy DEMO01_wcm_review.docx' })
+    expect(main.getAttribute('href')).toContain('/api/run/ABCDEF/data/DEMO01_wcm_review.docx')
+    const clean = screen.getByRole('link', { name: /Clean copy \(no notes\)/ })
+    expect(clean.getAttribute('href')).toMatch(/\/data\/DEMO01_wcm\.docx$/)
     expect(screen.getByText(shown)).toBeTruthy()
     expect(screen.queryByText(hidden)).toBeNull()
   })
 
-  it('leaves the review link out when no review copy was written', () => {
+  it('keeps the clean copy as the only download when no review copy was written', () => {
     view.runStatus = { ...FINISHED, steps: [{ ...FINISHED.steps[0], output_files: JSON.stringify(['/o/DEMO01_wcm.docx']) }] }
     render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
-    expect(screen.queryByRole('link', { name: /Review copy/ })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Download final output file DEMO01_wcm.docx' })).toBeTruthy()
+    expect(screen.queryByRole('link', { name: /review copy|Clean copy/i })).toBeNull()
   })
 })
