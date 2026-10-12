@@ -405,7 +405,7 @@ class ClinicalPracticeSection:
                         fields.get('location') or fields.get('institution') or '')
                     start_date = fields.get('start_date') or ''
                     end_date = fields.get('end_date') or ''
-                    dates = format_date_range(start_date, end_date, 'L1') or ''
+                    dates = format_date_range(start_date, end_date, 'L1', original_text) or ''
 
                     # Fallback to parsing original text if fields are empty
                     if not activity and original_text:
@@ -598,7 +598,7 @@ class ClinicalPracticeSection:
                     unit_program = _committee_cell_text(fields.get('unit_program'))
                     start_date = fields.get('start_date') or ''
                     end_date = fields.get('end_date') or ''
-                    dates = format_date_range(start_date, end_date, 'L3') or ''
+                    dates = format_date_range(start_date, end_date, 'L3', original_text) or ''
 
                     if not role and original_text:
                         parts = original_text.split('|')
@@ -636,7 +636,7 @@ class ClinicalPracticeSection:
                         fields.get('institution') or fields.get('organization') or '')
                     start_date = fields.get('start_date') or ''
                     end_date = fields.get('end_date') or ''
-                    dates = format_date_range(start_date, end_date, 'L3') or ''
+                    dates = format_date_range(start_date, end_date, 'L3', original_text) or ''
 
                     # Only the FIRST tab-separated fragment can stand in for
                     # a missing role field. Everything after that first tab
