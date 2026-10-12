@@ -51,6 +51,7 @@ import inspect
 import io
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -1886,10 +1887,11 @@ def test_batch_progress_goes_to_the_logger_not_stdout(monkeypatch, caplog, capsy
             document_uid="BATCHLOG", header_indices=set(), element_index_map=_idx_map(elements),
         )
 
+    # No "/N": with the #1226 carry the batch count is not known up front.
     messages = [r.message for r in caplog.records]
-    assert any("Processing batch 1/3" in m for m in messages)
-    assert any("Processing batch 2/3" in m for m in messages)
-    assert any("Processing batch 3/3" in m for m in messages)
+    assert any("Processing batch 1 (elements 1-50 of 120)" in m for m in messages)
+    assert any("Processing batch 2 (elements 51-100 of 120)" in m for m in messages)
+    assert any("Processing batch 3 (elements 101-120 of 120)" in m for m in messages)
 
     out = capsys.readouterr().out
     assert "Processing batch" not in out
@@ -1916,7 +1918,7 @@ def test_batches_reach_call_llm_cut_at_a_record_edge_not_at_element_50(monkeypat
     assert "[47] (BLANK LINE)" in prompts[0] and "[48] Field line 48" not in prompts[0]
     assert "[48] Field line 48" in prompts[1] and "[49] Field line 49" in prompts[1]
     messages = [r.message for r in caplog.records]
-    assert any("Processing batch 2/2 (elements 49-80 of 80)" in m for m in messages)
+    assert any("Processing batch 2 (elements 49-80 of 80)" in m for m in messages)
 
 
 # =============================================================== detail-line fold (#986)
@@ -2044,3 +2046,287 @@ def test_llm_outage_fails_the_section_while_other_errors_skip_the_batch(monkeypa
     monkeypatch.setattr(stage2, "call_llm", blip)
     entries, _ = stage2.detect_entries_for_section(["S"], elements, 1, 1, element_index_map=_idx_map(elements))
     assert entries == []
+
+
+# =============================================================== batch-edge carry (#1226)
+
+_PROMPT_INDEX_RE = re.compile(r"^\[([^\]]+)\] ", re.MULTILINE)
+
+
+def _prompt_indices(prompt: str) -> list[str]:
+    """The element indices a batch prompt lists, in order."""
+    return _PROMPT_INDEX_RE.findall(prompt)
+
+
+def _phase_model(record_len: int, prompts: list, fail_from_call: int | None = None,
+                 error: type[Exception] = RuntimeError):
+    """A stub that answers like the model on a cut record: it takes the batch's
+    first line as a record head and groups every ``record_len`` lines from
+    there, blank lines included, so its phase is set by where the batch opens.
+    Entries span the first to the last non-blank line of each group."""
+
+    def fake(**kw):
+        prompt = kw["messages"][-1]["content"]
+        prompts.append(prompt)
+        if fail_from_call is not None and len(prompts) >= fail_from_call:
+            raise error("simulated batch failure")
+        lines = prompt.split("**Raw Data (Paragraphs):**\n", 1)[1].split("\n\n-----", 1)[0].splitlines()
+        groups = [lines[i:i + record_len] for i in range(0, len(lines), record_len)]
+        delimiters = []
+        for group in groups:
+            filled = [int(_PROMPT_INDEX_RE.match(line).group(1)) for line in group
+                      if not line.endswith("(BLANK LINE)")]
+            if filled:
+                delimiters.append({"element_idx_start": filled[0], "element_idx_end": filled[-1],
+                                   "element_type": "paragraph", "confidence": 0.9})
+        return _llm_result({"delimiters": delimiters})
+
+    return fake
+
+
+def _spans(entries):
+    return [(e["element_idx_start"], e["element_idx_end"]) for e in entries]
+
+
+def _seven_line_records(n_records):
+    """Role / name / program / university / date / title / note, no blanks, no
+    labels: nothing tells the cut where a record ends."""
+    return [_para(i, f"Field {i % 7} of record {i // 7}") for i in range(7 * n_records)]
+
+
+def test_carry_keeps_seven_line_records_whole_across_hard_cuts(monkeypatch):
+    # 126 elements: hard cuts at 50 and 100 land 1 and 2 lines into a record.
+    elements = _seven_line_records(18)
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, prompts))
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Mentoring"], elements, 0, 125, element_index_map=_idx_map(elements))
+
+    assert _spans(entries) == [(7 * k, 7 * k + 6) for k in range(18)]
+    # Each later batch opens on the record the batch before it cut.
+    assert [_prompt_indices(p)[0] for p in prompts] == ["0", "49", "98"]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=2, carried=2)
+    assert cost_info["cost"] == pytest.approx(0.003)
+
+
+def test_without_carry_the_same_records_shift_one_line_off(monkeypatch):
+    # Positive control for the test above: with the carry off, the batch that
+    # opens mid-record groups out of phase -- so the test above can fail.
+    monkeypatch.setattr(stage2, "STAGE2_CARRY_MAX", 0)
+    elements = _seven_line_records(18)
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, prompts))
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Mentoring"], elements, 0, 125, element_index_map=_idx_map(elements))
+
+    assert [_prompt_indices(p)[0] for p in prompts] == ["0", "50", "100"]
+    assert (49, 49) in _spans(entries) and (50, 56) in _spans(entries)
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=2, skipped_over_max=2)
+
+
+def _date_blank_text_blank(n_records):
+    """Date, blank, text, blank: a blank after every line, so the blank the
+    record-aligned cut finds is as likely inside a record as between two."""
+    elements = []
+    for k in range(n_records):
+        base = 4 * k
+        elements += [_para(base, f"200{k % 10}"), {"unified_idx": base + 1, "type": "empty"},
+                     _para(base + 2, f"Committee text {k}"), {"unified_idx": base + 3, "type": "empty"}]
+    return elements
+
+
+def test_carry_leaves_no_bare_date_when_a_blank_follows_every_line(monkeypatch):
+    elements = _date_blank_text_blank(30)  # 120 elements; batch 1 ends on the blank at 49
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(4, prompts))
+    entries, _ = stage2.detect_entries_for_section(
+        ["Committees"], elements, 0, 119, element_index_map=_idx_map(elements))
+
+    assert _spans(entries) == [(4 * k, 4 * k + 2) for k in range(30)]
+    assert all(start != end for start, end in _spans(entries))  # no date stands alone
+
+
+def _records_with_an_inner_blank(n_records):
+    """Course, blank, level, date: the blank sits inside the record."""
+    elements = []
+    for k in range(n_records):
+        base = 4 * k
+        elements += [_para(base, f"Course {k}"), {"unified_idx": base + 1, "type": "empty"},
+                     _para(base + 2, f"Level {k}"), _para(base + 3, f"20{k:02d}")]
+    return elements
+
+
+def test_carry_keeps_a_record_whole_when_the_blank_is_inside_it(monkeypatch):
+    elements = _records_with_an_inner_blank(30)  # the cut takes the blank at 49, inside record 12
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(4, prompts))
+    entries, _ = stage2.detect_entries_for_section(
+        ["Teaching"], elements, 0, 119, element_index_map=_idx_map(elements))
+
+    assert _spans(entries) == [(4 * k, 4 * k + 3) for k in range(30)]
+    assert _prompt_indices(prompts[1])[0] == "48"
+
+
+def _rows_table(n_rows, unified_idx=474):
+    return {"unified_idx": unified_idx, "type": "table_content", "table_index": 0,
+            "data": [[f"Row {r} cell", f"Detail {r}"] for r in range(n_rows)]}
+
+
+def test_carry_reopens_on_row_ten_not_row_one_and_replaces_recovered_rows(monkeypatch):
+    # 38 paragraphs then a 20-row table: batch 1 ends on row 474.11. The model
+    # opens a record at 474.10 (written as a bare JSON number) and leaves 474.11
+    # unclaimed, so #420 recovers it -- inside the carried range.
+    elements = [_para(i, f"Line {i}") for i in range(38)] + [_rows_table(20)]
+    prompts = []
+    paragraph_singles = ", ".join(
+        f'{{"element_idx_start": {i}, "element_idx_end": {i}}}' for i in range(38))
+
+    def fake(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        if len(prompts) == 1:
+            rows = ", ".join(f'{{"element_idx_start": 474.{r}, "element_idx_end": 474.{r}}}' for r in range(10))
+            return _raw_llm_result(f'[{paragraph_singles}, {rows}, '
+                                   f'{{"element_idx_start": 474.10, "element_idx_end": 474.10}}]')
+        rows = ", ".join(f'{{"element_idx_start": 474.{r}, "element_idx_end": 474.{r}}}' for r in range(12, 20))
+        return _raw_llm_result(f'[{{"element_idx_start": 474.10, "element_idx_end": 474.11}}, {rows}]')
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Grants"], elements, 0, 474, element_index_map=_idx_map(elements))
+
+    assert _prompt_indices(prompts[1])[:2] == ["474.10", "474.11"]
+    row_entries = [e for e in entries if e["element_type"] == "table_row"]
+    assert [e["element_idx_start"] for e in row_entries] == (
+        [f"474.{r}" for r in range(10)] + ["474.10"] + [f"474.{r}" for r in range(12, 20)])
+    ten = next(e for e in row_entries if e["element_idx_start"] == "474.10")
+    assert ten["element_idx_end"] == "474.11"
+    assert not any(e.get("recovered_row") for e in entries)  # batch 2 claimed 474.11
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, carried=1)
+
+
+def test_a_failed_carried_batch_restores_the_tail_and_loses_nothing_the_old_path_kept(monkeypatch):
+    elements = _seven_line_records(18)
+
+    def run(carry_max):
+        monkeypatch.setattr(stage2, "STAGE2_CARRY_MAX", carry_max)
+        monkeypatch.setattr(stage2, "call_llm", _phase_model(7, [], fail_from_call=2))
+        return stage2.detect_entries_for_section(
+            ["Mentoring"], elements, 0, 125, element_index_map=_idx_map(elements))
+
+    with_carry, carry_cost = run(stage2.BATCH_CUT_LOOKBACK)
+    without_carry, _ = run(0)
+    assert _spans(with_carry) == _spans(without_carry)  # batch 1's whole reply, tail included
+    assert (49, 49) in _spans(with_carry)
+    # Batch 2 failed, so batch 3 has no reply to carry from.
+    assert carry_cost["batch_carry"] == stage2.BatchCarryCounts(edges=2, carried=1, skipped_no_entry=1)
+    assert carry_cost["cost"] == pytest.approx(0.001)  # only batch 1's call returned
+
+
+def test_a_failed_last_batch_restores_the_carried_tail(monkeypatch):
+    elements = _seven_line_records(9)  # 63 elements: two batches, the second is the last
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, prompts, fail_from_call=2))
+    entries, _ = stage2.detect_entries_for_section(
+        ["Mentoring"], elements, 0, 62, element_index_map=_idx_map(elements))
+    assert _prompt_indices(prompts[1])[0] == "49"
+    assert _spans(entries) == [(7 * k, 7 * k + 6) for k in range(7)] + [(49, 49)]
+
+
+def test_an_outage_in_a_carried_batch_still_fails_the_section(monkeypatch):
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    class _Outage(LLMOutageError):
+        def __init__(self, message):
+            super().__init__(message, seconds_waited=1800.0)
+
+    elements = _seven_line_records(18)
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, [], fail_from_call=2, error=_Outage))
+    with pytest.raises(LLMOutageError):
+        stage2.detect_entries_for_section(
+            ["Mentoring"], elements, 0, 125, element_index_map=_idx_map(elements))
+
+
+def test_no_carry_when_one_entry_spans_the_batch_and_the_next_batch_opens_at_its_end(monkeypatch):
+    elements = [_para(i, f"Line {i}") for i in range(80)]
+    prompts = []
+
+    def one_entry_per_batch(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        listed = _prompt_indices(prompts[-1])
+        return _llm_result({"delimiters": [{"element_idx_start": int(listed[0]),
+                                            "element_idx_end": int(listed[-1])}]})
+
+    monkeypatch.setattr(stage2, "call_llm", one_entry_per_batch)
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Big"], elements, 0, 79, element_index_map=_idx_map(elements))
+    assert [_prompt_indices(p)[0] for p in prompts] == ["0", "50"]
+    assert _spans(entries) == [(0, 49), (50, 79)]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, skipped_no_progress=1)
+
+
+def test_no_carry_past_the_cap_and_the_next_batch_opens_at_the_cut(monkeypatch):
+    elements = [_para(i, f"Line {i}") for i in range(80)]
+    prompts = []
+
+    def long_last_entry(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        listed = [int(i) for i in _prompt_indices(prompts[-1])]
+        # The last entry starts 16 elements before the batch's end: over the cap.
+        return _llm_result({"delimiters": [
+            {"element_idx_start": listed[0], "element_idx_end": listed[-17]},
+            {"element_idx_start": listed[-16], "element_idx_end": listed[-1]},
+        ]})
+
+    monkeypatch.setattr(stage2, "call_llm", long_last_entry)
+    _, cost_info = stage2.detect_entries_for_section(
+        ["Big"], elements, 0, 79, element_index_map=_idx_map(elements))
+    assert [_prompt_indices(p)[0] for p in prompts] == ["0", "50"]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, skipped_over_max=1)
+
+
+def test_a_single_batch_section_reports_no_batch_carry(monkeypatch):
+    elements = [_para(i, f"Line {i}") for i in range(50)]  # exactly one full batch
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, prompts))
+    _, cost_info = stage2.detect_entries_for_section(
+        ["Small"], elements, 0, 49, element_index_map=_idx_map(elements))
+    assert len(prompts) == 1
+    assert "batch_carry" not in cost_info
+
+
+def test_batch_progress_line_stays_out_of_the_progress_bar(monkeypatch, caplog, progress_patterns):
+    elements = _seven_line_records(18)
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, []))
+    with caplog.at_level(logging.INFO, logger=stage2.logger.name):
+        stage2.detect_entries_for_section(
+            ["Mentoring"], elements, 0, 125, element_index_map=_idx_map(elements))
+    lines = [r.message for r in caplog.records if "Processing batch" in r.message]
+    assert lines == ["    Processing batch 1 (elements 1-50 of 126)",
+                     "    Processing batch 2 (elements 50-99 of 126)",
+                     "    Processing batch 3 (elements 99-126 of 126)"]
+    assert not any(p.search(line) for p in progress_patterns for line in lines)
+
+
+def test_run_stage_2_writes_the_batch_carry_counts_to_the_artifact(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    doc = Document()
+    doc.add_paragraph("MENTORING")
+    for i in range(63):
+        doc.add_paragraph(f"Field {i % 7} of record {i // 7}")
+    docx_path = tmp_path / "carry.docx"
+    doc.save(docx_path)
+    hpath = _write_hierarchy(
+        tmp_path, "carry_h.json", "CARRYU",
+        hierarchy_with_indices=[{"text": "Mentoring", "level": "H1", "element_idx": 0, "children": []}],
+        section_boundaries=[{"hierarchy": ["Mentoring"], "element_idx_start": 0, "element_idx_end": 63,
+                             "has_children": False}],
+    )
+    monkeypatch.setattr(stage2, "call_llm", _phase_model(7, []))
+    output_data, output_path = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+
+    assert output_data["batch_carry"] == {"edges": 1, "carried": 1, "skipped_no_entry": 0,
+                                          "skipped_no_progress": 0, "skipped_over_max": 0}
+    content = [(e["element_idx_start"], e["element_idx_end"]) for e in output_data["entries"]
+               if e["element_type"] == "paragraph"]
+    assert content == [(1 + 7 * k, 7 + 7 * k) for k in range(9)]
+    assert json.loads(output_path.read_text())["batch_carry"] == output_data["batch_carry"]

@@ -1390,3 +1390,94 @@ def test_leading_label_reads_paragraph_and_row_labels_only():
     assert stage2._leading_label({"idx": 1, "type": "table_header", "text": "Role: PI"}) is None
     assert stage2._leading_label(_p(0, "2001-2004 R01 grant")) is None
     assert stage2._leading_label(_p(0, "A title that runs far beyond forty characters before: colon")) is None
+
+
+# =============================================================== batch-edge carry (#1226)
+
+def _carry_entry(start, end=None, **extra):
+    return {"element_idx_start": start, "element_idx_end": start if end is None else end, **extra}
+
+
+def test_carry_split_reopens_on_the_latest_starting_model_carry_entry():
+    batch = [_p(i, f"Line {i}") for i in range(10, 20)]
+    entries = [_carry_entry(10, 13), _carry_entry(14, 16), _carry_entry(17, 19)]
+    split = stage2._carry_split(entries, batch, 15)
+    assert split.carry == 7  # batch position of element 17
+    assert split.skip_reason is None
+    assert split.kept == entries[:2]
+    assert split.pending == entries[2:]
+
+
+def test_carry_split_takes_the_latest_start_not_the_last_listed_carry_entry():
+    batch = [_p(i, f"Line {i}") for i in range(10)]
+    entries = [_carry_entry(6, 9), _carry_entry(0, 5)]  # the model listed them out of order
+    split = stage2._carry_split(entries, batch, 15)
+    assert split.carry == 6
+    assert split.kept == [entries[1]]
+    assert split.pending == [entries[0]]
+
+
+def test_carry_split_recovered_rows_never_set_the_carry_but_ride_with_it():
+    batch = [_p(0, "Line 0")] + [{"idx": f"474.{r}", "type": "table_row", "text": f"Row {r}"} for r in range(12)]
+    entries = [
+        _carry_entry(0),
+        _carry_entry("474.0", "474.9"),
+        _carry_entry("474.10"),
+        _carry_entry("474.11", recovered_row=True),  # after the carry: held back with it
+        _carry_entry("474.1", recovered_row=True),   # before the carry: stands
+    ]
+    split = stage2._carry_split(entries, batch, 15)
+    assert split.carry == 11  # "474.10" is row 10, position 11 -- not row 1
+    assert split.kept == [entries[0], entries[1], entries[4]]
+    assert split.pending == [entries[2], entries[3]]
+
+
+def test_carry_split_reads_a_decimal_row_index_as_the_text_the_model_wrote():
+    batch = [{"idx": f"474.{r}", "type": "table_row", "text": f"Row {r}"} for r in range(12)]
+    reply = stage2.parse_delimiter_reply('[{"element_idx_start": 474.10, "element_idx_end": 474.10}]')
+    split = stage2._carry_split(reply, batch, 15)
+    assert split.carry == 10  # a float would have read 474.1, row 1
+
+
+def test_carry_split_skips_when_there_is_no_model_entry_in_the_batch():
+    batch = [_p(i, f"Line {i}") for i in range(10)]
+    for entries in ([], [_carry_entry(3, recovered_row=True)], [_carry_entry(99)]):
+        split = stage2._carry_split(entries, batch, 15)
+        assert (split.carry, split.skip_reason, split.kept, split.pending) == (10, "no_entry", entries, [])
+
+
+def test_carry_split_skips_when_one_entry_spans_the_whole_batch():
+    batch = [_p(i, f"Line {i}") for i in range(10)]
+    entries = [_carry_entry(0, 9)]
+    split = stage2._carry_split(entries, batch, 15)
+    assert (split.carry, split.skip_reason, split.kept, split.pending) == (10, "no_progress", entries, [])
+
+
+def test_carry_split_cap_is_inclusive_at_carry_max():
+    batch = [_p(i, f"Line {i}") for i in range(50)]
+    at_cap = stage2._carry_split([_carry_entry(0, 34), _carry_entry(35, 49)], batch, 15)  # carries 15 elements
+    assert (at_cap.carry, at_cap.skip_reason) == (35, None)
+    over = stage2._carry_split([_carry_entry(0, 33), _carry_entry(34, 49)], batch, 15)  # would carry 16
+    assert (over.carry, over.skip_reason, over.pending) == (50, "over_max", [])
+
+
+def test_carry_split_keeps_an_entry_whose_start_is_outside_the_batch():
+    batch = [_p(i, f"Line {i}") for i in range(10, 20)]
+    stray = _carry_entry(25, 26)  # inside the section, past this batch
+    split = stage2._carry_split([_carry_entry(10, 14), _carry_entry(15, 19), stray], batch, 15)
+    assert split.carry == 5
+    assert stray in split.kept and stray not in split.pending
+
+
+def test_batch_carry_counts_record_each_reason_and_add_sums_fields():
+    counts = stage2.BatchCarryCounts()
+    for reason in (None, None, "no_entry", "no_progress", "over_max"):
+        counts.record(reason)
+    assert counts == stage2.BatchCarryCounts(edges=5, carried=2, skipped_no_entry=1,
+                                             skipped_no_progress=1, skipped_over_max=1)
+    total = stage2.BatchCarryCounts(edges=1, carried=1)
+    total.add(counts)
+    assert total == stage2.BatchCarryCounts(edges=6, carried=3, skipped_no_entry=1,
+                                            skipped_no_progress=1, skipped_over_max=1)
+    with pytest.raises(ValueError):
+        counts.record("something_else")

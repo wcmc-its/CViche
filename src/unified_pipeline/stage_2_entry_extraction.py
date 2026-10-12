@@ -16,7 +16,8 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple
@@ -833,147 +834,174 @@ def make_record_aligned_batches(elements: list[dict], batch_size: int = STAGE2_B
     return batches
 
 
-def detect_entries_for_section(
-    section_hierarchy: list[str],
-    doc_elements: list[dict],
-    start_elem_idx: int,
-    end_elem_idx: int,
-    document_uid: str | None = None,
-    header_indices: set | None = None,
-    element_index_map: dict | None = None
-) -> tuple[list[dict], dict]:
+# Carry the last record across a batch edge (#1226). The cut above still lands
+# inside a record where the layout shows no edge, and a batch that opens on a
+# record's tail is grouped one line off to its end. So once a batch's reply is
+# in, the next batch re-opens on the latest-starting entry the model returned:
+# a line the model itself chose as a record head, with that record's whole text
+# in view. That entry, and anything after it in the batch, is held back and
+# replaced by the next batch's reply. No carry when it would make no progress
+# (one entry spans the batch), when the batch has no model entry, or when the
+# carry is longer than STAGE2_CARRY_MAX -- the same horizon as the cut's own
+# lookback; the next batch then opens at this batch's end, as before.
+STAGE2_CARRY_MAX = BATCH_CUT_LOOKBACK
+CARRY_SKIP_NO_ENTRY = "no_entry"
+CARRY_SKIP_NO_PROGRESS = "no_progress"
+CARRY_SKIP_OVER_MAX = "over_max"
+
+
+@dataclass
+class BatchCarryCounts:
+    """What happened at a section's batch edges (#1226): written to the stage-2
+    artifact so a skipped carry is visible (§5.3). ``edges`` is always
+    ``carried`` plus the three skip counts."""
+    edges: int = 0
+    carried: int = 0
+    skipped_no_entry: int = 0
+    skipped_no_progress: int = 0
+    skipped_over_max: int = 0
+
+    def record(self, skip_reason: str | None) -> None:
+        self.edges += 1
+        if skip_reason is None:
+            self.carried += 1
+        elif skip_reason == CARRY_SKIP_NO_ENTRY:
+            self.skipped_no_entry += 1
+        elif skip_reason == CARRY_SKIP_NO_PROGRESS:
+            self.skipped_no_progress += 1
+        elif skip_reason == CARRY_SKIP_OVER_MAX:
+            self.skipped_over_max += 1
+        else:
+            raise ValueError(f"BatchCarryCounts.record: unknown skip reason {skip_reason!r}")
+
+    def add(self, other: BatchCarryCounts) -> None:
+        self.edges += other.edges
+        self.carried += other.carried
+        self.skipped_no_entry += other.skipped_no_entry
+        self.skipped_no_progress += other.skipped_no_progress
+        self.skipped_over_max += other.skipped_over_max
+
+
+class _CarrySplit(NamedTuple):
+    kept: list[dict]      # entries that stand: they start before the carry
+    pending: list[dict]   # entries the next batch's reply replaces
+    carry: int            # batch position the next batch opens on; len(batch) for no carry
+    skip_reason: str | None
+
+
+def _carry_split(batch_entries: list[dict], batch_elements: list[dict], carry_max: int) -> _CarrySplit:
+    """Split one batch's entries at the record the next batch re-opens on.
+
+    The carry is the batch position of the latest-starting model-attested
+    entry. #420-recovered rows never set it -- the model did not choose them --
+    but those at or after it are held back with the rest. Row keys compare as
+    the text the model wrote (``delimiter_index_text``), so ``474.10`` stays
+    row 10. An entry whose start is not in this batch is kept and never sets it.
     """
-    Use LLM to detect and extract entries within a section.
+    positions = {str(elem["idx"]): pos for pos, elem in enumerate(batch_elements)}
 
-    Args:
-        section_hierarchy: Full path (e.g., ["Research Experience", "Publications", "Peer-Reviewed"])
-        doc_elements: List of elements from extract_docx_structure (paragraphs + tables)
-        start_elem_idx: Starting element index for this section
-        end_elem_idx: Ending element index for this section (before next section)
-        document_uid: Document identifier for logging
-        header_indices: Set of element indices that are section/subsection headers (to exclude)
-        element_index_map: Map from element index to element data
+    def position(entry: dict) -> int | None:
+        return positions.get(delimiter_index_text(entry["element_idx_start"]))
 
-    Returns:
-        Tuple of (entries_list, cost_info_dict)
-    """
-    if header_indices is None:
-        header_indices = set()
-    if element_index_map is None:
-        element_index_map = {}
+    heads = [pos for entry in batch_entries
+             if not entry.get("recovered_row") and (pos := position(entry)) is not None]
+    no_carry = len(batch_elements)
+    if not heads:
+        return _CarrySplit(batch_entries, [], no_carry, CARRY_SKIP_NO_ENTRY)
+    carry = max(heads)
+    if carry == 0:
+        return _CarrySplit(batch_entries, [], no_carry, CARRY_SKIP_NO_PROGRESS)
+    if len(batch_elements) - carry > carry_max:
+        return _CarrySplit(batch_entries, [], no_carry, CARRY_SKIP_OVER_MAX)
+    kept, pending = [], []
+    for entry in batch_entries:
+        pos = position(entry)
+        (pending if pos is not None and pos >= carry else kept).append(entry)
+    return _CarrySplit(kept, pending, carry, None)
 
-    # Extract elements for this section, excluding headers
-    # We now handle unified elements: paragraph, table_header, table_content, empty
+
+def _table_row_elements(idx: int, rows: Iterable[tuple[int, object]], table_index: object) -> list[dict]:
+    """The section elements for one table's rows: a ``table_row`` per row, or
+    per pseudo-row where a row holds several merged entries."""
+    elements = []
+    for row_idx, row in rows:
+        # Check if this row contains merged entries that should be split
+        if isinstance(row, list):
+            pseudo_rows = split_merged_row_into_pseudo_rows(row)
+            if pseudo_rows:
+                # Row contains multiple merged entries - create pseudo-rows
+                for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
+                    row_text = join_row_cells(pseudo_row)
+                    if row_text:
+                        elements.append({
+                            "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
+                            "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                            "type": "table_row",
+                            "full_text": row_text,
+                            "table_index": table_index,
+                            "row_index": row_idx,
+                            "pseudo_row_index": pseudo_idx,
+                            "parent_idx": idx
+                        })
+                continue
+            # Normal row - flatten cells to text
+            row_text = join_row_cells(row_cell_texts(row))
+        elif isinstance(row, dict):
+            row_text = row.get("text", "").strip()
+        else:
+            row_text = str(row).strip()
+        if row_text:
+            elements.append({
+                "idx": f"{idx}.{row_idx}",  # Sub-index for rows
+                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                "type": "table_row",
+                "full_text": row_text,
+                "table_index": table_index,
+                "row_index": row_idx,
+                "parent_idx": idx
+            })
+    return elements
+
+
+def _section_elements(doc_elements: list[dict], start_elem_idx: int, end_elem_idx: int,
+                      header_indices: set) -> list[dict]:
+    """The elements stage 2 shows the model for one section, headers excluded:
+    paragraphs, blank-line markers, table rows, and whole tables."""
     section_elements = []
-    skipped_headers = 0
-
     for elem in doc_elements:
         # Use unified_idx (from extract_unified_elements) or fall back to idx
         idx = elem.get("unified_idx", elem.get("idx"))
         elem_type = elem.get("type", "")
 
-        # Skip elements outside our section range
-        if isinstance(idx, int):
-            if idx < start_elem_idx or idx > end_elem_idx:
-                continue
-            if idx in header_indices:
-                skipped_headers += 1
-                continue
-        else:
-            # Non-integer index (shouldn't happen with unified elements)
+        # Skip elements outside our section range; a non-integer index
+        # shouldn't happen with unified elements
+        if not isinstance(idx, int) or idx < start_elem_idx or idx > end_elem_idx:
+            continue
+        if idx in header_indices:
             continue
 
         # Handle different element types from extract_unified_elements
         if elem_type == "paragraph":
             text = elem.get("text", "").strip()
             if text:
-                section_elements.append({
-                    "idx": idx,
-                    "text": text,
-                    "type": "paragraph"
-                })
+                section_elements.append({"idx": idx, "text": text, "type": "paragraph"})
         elif elem_type == "empty":
             # Include empty paragraphs as break markers - these help the LLM
             # identify natural entry boundaries (blank lines between entries)
-            section_elements.append({
-                "idx": idx,
-                "text": "",
-                "type": "empty"
-            })
+            section_elements.append({"idx": idx, "text": "", "type": "empty"})
         elif elem_type == "table_header":
             # Table headers are section markers - usually skip as they're in header_indices
             # But include if not marked as header (rare case)
             text = elem.get("text", "").strip()
             if text:
-                section_elements.append({
-                    "idx": idx,
-                    "text": text,
-                    "type": "table_header"
-                })
+                section_elements.append({"idx": idx, "text": text, "type": "table_header"})
         elif elem_type == "table_content":
-            # Table content contains the actual data rows
-            # Extract individual rows for row-level processing
+            # Table content contains the actual data rows; break the table into
+            # individual rows for row-level processing
             table_data = elem.get("data", [])  # List of row data
             table_index = elem.get("table_index")
-
             if isinstance(table_data, list) and table_data:
-                # Break table into individual rows for LLM processing
-                for row_idx, row in enumerate(table_data):
-                    # Check if this row contains merged entries that should be split
-                    if isinstance(row, list):
-                        pseudo_rows = split_merged_row_into_pseudo_rows(row)
-                        if pseudo_rows:
-                            # Row contains multiple merged entries - create pseudo-rows
-                            for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = join_row_cells(pseudo_row)
-                                if row_text:
-                                    section_elements.append({
-                                        "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
-                                        "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                        "type": "table_row",
-                                        "full_text": row_text,
-                                        "table_index": table_index,
-                                        "row_index": row_idx,
-                                        "pseudo_row_index": pseudo_idx,
-                                        "parent_idx": idx
-                                    })
-                        else:
-                            # Normal row - flatten cells to text
-                            row_text = join_row_cells(row_cell_texts(row))
-                            if row_text:
-                                section_elements.append({
-                                    "idx": f"{idx}.{row_idx}",  # Sub-index for rows
-                                    "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                    "type": "table_row",
-                                    "full_text": row_text,
-                                    "table_index": table_index,
-                                    "row_index": row_idx,
-                                    "parent_idx": idx
-                                })
-                    elif isinstance(row, dict):
-                        row_text = row.get("text", "").strip()
-                        if row_text:
-                            section_elements.append({
-                                "idx": f"{idx}.{row_idx}",
-                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                "type": "table_row",
-                                "full_text": row_text,
-                                "table_index": table_index,
-                                "row_index": row_idx,
-                                "parent_idx": idx
-                            })
-                    else:
-                        row_text = str(row).strip()
-                        if row_text:
-                            section_elements.append({
-                                "idx": f"{idx}.{row_idx}",
-                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                "type": "table_row",
-                                "full_text": row_text,
-                                "table_index": table_index,
-                                "row_index": row_idx,
-                                "parent_idx": idx
-                            })
+                section_elements.extend(_table_row_elements(idx, enumerate(table_data), table_index))
             else:
                 # Fallback: treat as single element if no row data
                 text = elem.get("text", "").strip()
@@ -988,70 +1016,14 @@ def detect_entries_for_section(
                     })
         elif elem_type == "table":
             # Legacy table format (from extract_docx_structure)
-            # Split table into individual rows for proper entry detection
             table_idx = elem.get("table_index", 0)
             table_data = elem.get("data", [])
-
             if isinstance(table_data, list) and len(table_data) > 1:
-                # Multi-row table: break into individual rows for LLM processing
-                # This allows the LLM to identify individual entries (grants, publications, etc.)
+                # Multi-row table: break into individual rows so the LLM can
+                # identify individual entries (grants, publications, etc.)
                 header_rows = _header_row_count(elem)  # #424: never an entry
-                for row_idx, row in enumerate(table_data[header_rows:], start=header_rows):
-                    # Check if this row contains merged entries that should be split
-                    if isinstance(row, list):
-                        pseudo_rows = split_merged_row_into_pseudo_rows(row)
-                        if pseudo_rows:
-                            # Row contains multiple merged entries - create pseudo-rows
-                            for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = join_row_cells(pseudo_row)
-                                if row_text:
-                                    section_elements.append({
-                                        "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
-                                        "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                        "type": "table_row",
-                                        "full_text": row_text,
-                                        "table_index": table_idx,
-                                        "row_index": row_idx,
-                                        "pseudo_row_index": pseudo_idx,
-                                        "parent_idx": idx
-                                    })
-                        else:
-                            # Normal row - flatten cells to text
-                            row_text = join_row_cells(row_cell_texts(row))
-                            if row_text:
-                                section_elements.append({
-                                    "idx": f"{idx}.{row_idx}",  # Sub-index for rows
-                                    "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                    "type": "table_row",
-                                    "full_text": row_text,
-                                    "table_index": table_idx,
-                                    "row_index": row_idx,
-                                    "parent_idx": idx
-                                })
-                    elif isinstance(row, dict):
-                        row_text = row.get("text", "").strip()
-                        if row_text:
-                            section_elements.append({
-                                "idx": f"{idx}.{row_idx}",
-                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                "type": "table_row",
-                                "full_text": row_text,
-                                "table_index": table_idx,
-                                "row_index": row_idx,
-                                "parent_idx": idx
-                            })
-                    else:
-                        row_text = str(row).strip()
-                        if row_text:
-                            section_elements.append({
-                                "idx": f"{idx}.{row_idx}",
-                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
-                                "type": "table_row",
-                                "full_text": row_text,
-                                "table_index": table_idx,
-                                "row_index": row_idx,
-                                "parent_idx": idx
-                            })
+                rows = enumerate(table_data[header_rows:], start=header_rows)
+                section_elements.extend(_table_row_elements(idx, rows, table_idx))
             else:
                 # Single-row table or no data: treat as single element
                 table_text = get_element_text(elem)
@@ -1064,68 +1036,44 @@ def detect_entries_for_section(
                         "rows": elem.get("rows", 0),
                         "cols": elem.get("cols", 0)
                     })
+    return section_elements
 
-    if not section_elements:
-        return [], {"cost": 0, "tokens": 0}
 
-    # Build context for LLM
-    section_name = section_hierarchy[-1] if section_hierarchy else "Unknown Section"
-    full_hierarchy = " > ".join(section_hierarchy)
+def _batch_element_line(elem: dict) -> str:
+    """One element's line in the prompt's raw-data list."""
+    idx = elem['idx']
+    text = elem['text']
+    elem_type = elem.get('type', 'paragraph')
+    if elem_type == 'table_row':
+        # Individual table row - show as ROW
+        return f"[{idx}] (ROW) {text[:200]}{'...' if len(text) > 200 else ''}"
+    if elem_type == 'table_content':
+        # Table content - show as table with row count
+        # 'rows' may be an integer count or a list; handle both
+        rows_data = elem.get('rows', 0)
+        row_count = len(rows_data) if isinstance(rows_data, list) else (rows_data if isinstance(rows_data, int) else 0)
+        return f"[{idx}] (TABLE {row_count} rows) {text[:200]}{'...' if len(text) > 200 else ''}"
+    if elem_type == 'table':
+        # Legacy table format
+        rows = elem.get('rows', 0)
+        cols = elem.get('cols', 0)
+        return f"[{idx}] (TABLE {rows}x{cols}) {text[:200]}{'...' if len(text) > 200 else ''}"
+    if elem_type == 'table_header':
+        return f"[{idx}] (HEADER) {text[:150]}{'...' if len(text) > 150 else ''}"
+    if elem_type == 'empty':
+        # Empty paragraph - show as blank line marker to help LLM identify entry boundaries
+        return f"[{idx}] (BLANK LINE)"
+    # paragraph
+    return f"[{idx}] {text[:150]}{'...' if len(text) > 150 else ''}"
 
-    # Process in batches if section is large; edges fall between records (#1226)
-    all_validated_entries = []
-    total_cost = 0.0
-    total_tokens = 0
-    prompt_tokens = 0
-    completion_tokens = 0
 
-    batches = make_record_aligned_batches(section_elements)
-    num_batches = len(batches)
-    batch_end = 0
+def _batch_messages(batch_elements: list[dict], full_hierarchy: str) -> list[dict]:
+    """The system and user messages for one batch's call."""
+    paragraph_list = "\n".join(_batch_element_line(elem) for elem in batch_elements)
 
-    for batch_idx, batch_elements in enumerate(batches):
-        batch_start = batch_end
-        batch_end = batch_start + len(batch_elements)
+    system_prompt = """You are an intelligent parser analyzing a CV section. Your goal is to identify individual **logical entries** (e.g., a single publication, position, award, or course) from a list of raw paragraphs or table rows. Always respond with valid JSON only."""
 
-        if num_batches > 1:
-            logger.info(f"    Processing batch {batch_idx + 1}/{num_batches} (elements {batch_start + 1}-{batch_end} of {len(section_elements)})")
-
-        # Create element list for LLM (handles paragraphs, table_content, and legacy tables)
-        element_list_parts = []
-        for elem in batch_elements:
-            idx = elem['idx']
-            text = elem['text']
-            elem_type = elem.get('type', 'paragraph')
-
-            # Format based on element type
-            if elem_type == 'table_row':
-                # Individual table row - show as ROW
-                element_list_parts.append(f"[{idx}] (ROW) {text[:200]}{'...' if len(text) > 200 else ''}")
-            elif elem_type == 'table_content':
-                # Table content - show as table with row count
-                # 'rows' may be an integer count or a list; handle both
-                rows_data = elem.get('rows', 0)
-                row_count = len(rows_data) if isinstance(rows_data, list) else (rows_data if isinstance(rows_data, int) else 0)
-                element_list_parts.append(f"[{idx}] (TABLE {row_count} rows) {text[:200]}{'...' if len(text) > 200 else ''}")
-            elif elem_type == 'table':
-                # Legacy table format
-                rows = elem.get('rows', 0)
-                cols = elem.get('cols', 0)
-                element_list_parts.append(f"[{idx}] (TABLE {rows}x{cols}) {text[:200]}{'...' if len(text) > 200 else ''}")
-            elif elem_type == 'table_header':
-                element_list_parts.append(f"[{idx}] (HEADER) {text[:150]}{'...' if len(text) > 150 else ''}")
-            elif elem_type == 'empty':
-                # Empty paragraph - show as blank line marker to help LLM identify entry boundaries
-                element_list_parts.append(f"[{idx}] (BLANK LINE)")
-            else:
-                # paragraph
-                element_list_parts.append(f"[{idx}] {text[:150]}{'...' if len(text) > 150 else ''}")
-
-        paragraph_list = "\n".join(element_list_parts)
-
-        system_prompt = """You are an intelligent parser analyzing a CV section. Your goal is to identify individual **logical entries** (e.g., a single publication, position, award, or course) from a list of raw paragraphs or table rows. Always respond with valid JSON only."""
-
-        user_prompt = f"""## Input Data
+    user_prompt = f"""## Input Data
 
 **CV Section Header:** `{full_hierarchy}`
 
@@ -1189,141 +1137,254 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 - Keep reasoning brief (<60 chars), especially for multi-line groupings
 """
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+
+def _reply_delimiters(result: list | dict) -> list:
+    """The delimiter list in a parsed reply -- the LLM may return it under
+    different keys, or as a bare list."""
+    if isinstance(result, dict):
+        return (
+            result.get("delimiters") or
+            result.get("entries") or
+            result.get("result") or
+            result.get("data") or
+            []
+        )
+    return result
+
+
+def _validated_entries(
+    delimiters: list,
+    batch_elements: list[dict],
+    start_elem_idx: int,
+    end_elem_idx: int,
+    element_index_map: dict,
+) -> tuple[list[dict], set[str]]:
+    """The entries a batch's delimiters name, with their full text, and the
+    table-row keys they claim. A delimiter that names nothing in the batch or
+    the section is skipped."""
+    entries = []
+    # Build a lookup for batch elements by index (use string keys for consistency)
+    batch_elem_lookup = {str(elem['idx']): elem for elem in batch_elements}
+    claimed_row_keys = set()
+
+    for delim in delimiters:
+        if "element_idx_start" not in delim or "element_idx_end" not in delim:
+            continue
+        start_idx = delim["element_idx_start"]
+        end_idx = delim["element_idx_end"]
+
+        # Handle table indices (strings like "table_0")
+        if isinstance(start_idx, str) and start_idx.startswith("table_"):
+            # Table entry - get full text from batch elements
+            if start_idx in batch_elem_lookup:
+                elem = batch_elem_lookup[start_idx]
+                full_text = elem.get("full_text", elem.get("text", ""))
+                entries.append({
+                    "element_idx_start": start_idx,
+                    "element_idx_end": end_idx,
+                    "element_type": "table",
+                    "confidence": delim.get("confidence", 1.0),
+                    "text": full_text
+                })
+            continue
+
+        # Handle row sub-indices (floats like 22.2 or strings like "22.2")
+        # These come from table_content rows with format "parent_idx.row_idx"
+        start_idx_str = delimiter_index_text(start_idx)
+        end_idx_str = delimiter_index_text(end_idx)
+        if "." in start_idx_str or "." in end_idx_str:
+            # Row sub-index - look up in batch elements by string key
+            entry, row_keys = row_range_entry(
+                start_idx_str, end_idx_str, batch_elem_lookup,
+                delim.get("confidence", 1.0))
+            if entry is not None:
+                entries.append(entry)
+                claimed_row_keys.update(row_keys)
+            continue
+
+        # Handle paragraph indices (integers), within the section's bounds
+        if not isinstance(start_idx, int) or not isinstance(end_idx, int):
+            continue
+        if start_idx >= start_elem_idx and end_idx <= end_elem_idx:
+            # Extract full text for all elements in the entry range
+            full_text_parts = []
+            for idx in range(start_idx, end_idx + 1):
+                if idx in element_index_map:
+                    elem_text = get_element_text(element_index_map[idx])
+                    if elem_text:
+                        full_text_parts.append(elem_text)
+            entries.append({
+                "element_idx_start": start_idx,
+                "element_idx_end": end_idx,
+                "element_type": delim.get("element_type", "paragraph"),
+                "confidence": delim.get("confidence", 1.0),
+                "text": "\t".join(full_text_parts)  # Tab-separated for compact format
+            })
+    return entries, claimed_row_keys
+
+
+class _BatchReply(NamedTuple):
+    entries: list[dict]   # model-attested entries, then any #420-recovered rows
+    cost: float
+    total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
+
+
+def _run_batch(
+    batch_elements: list[dict],
+    full_hierarchy: str,
+    batch_no: int,
+    start_elem_idx: int,
+    end_elem_idx: int,
+    element_index_map: dict,
+) -> _BatchReply:
+    """One batch's call and its validated entries. Raises on any failure."""
+    llm_result = call_llm(
+        stage="stage_2",
+        messages=_batch_messages(batch_elements, full_hierarchy),
+        response_format={"type": "json_object"},
+        temperature=0.1
+    )
+    result = parse_delimiter_reply(llm_result["content"])
+    entries, claimed_row_keys = _validated_entries(
+        _reply_delimiters(result), batch_elements, start_elem_idx, end_elem_idx, element_index_map)
+
+    # Backstop: emit any table row this batch never claimed (#420).
+    #
+    # Why rows go unclaimed: recover_unclaimed_table_rows' docstring (#420).
+    # Recovering the rows here is deterministic and costs no extra LLM
+    # call. It also runs BEFORE remove_subset_delimiters, so a whole-table
+    # blob whose rows are now all present becomes a provable duplicate and
+    # is collapsed by the #418 coverage check.
+    #
+    # The indices no longer round trip through floats (#1228): this loop
+    # only recovers rows the model genuinely skipped. A row key that is
+    # not exactly the text the model wrote would bring the old collapse
+    # back, which is why delimiter_index_text exists.
+    recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
+    if recovered:
+        logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
+                    f"in batch {batch_no} [{full_hierarchy}]")
+    return _BatchReply(entries + recovered, llm_result["cost"], llm_result["total_tokens"],
+                       llm_result["prompt_tokens"], llm_result["completion_tokens"])
+
+
+def _detect_in_batches(
+    section_elements: list[dict],
+    full_hierarchy: str,
+    start_elem_idx: int,
+    end_elem_idx: int,
+    element_index_map: dict,
+) -> tuple[list[dict], dict]:
+    """A section's entries, one call per batch, each batch after the first
+    re-opening on the record the batch before it may have cut (#1226).
+
+    A batch whose call fails is skipped, as before, and the entries it would
+    have replaced are restored -- a failure never loses what the batch before
+    it produced. ``LLMOutageError`` still fails the section.
+    """
+    entries = []
+    pending = []  # the previous batch's tail, which this batch's reply replaces
+    total_cost = 0.0
+    total_tokens = prompt_tokens = completion_tokens = 0
+    carry_counts = BatchCarryCounts()
+    multi_batch = len(section_elements) > STAGE2_BATCH_SIZE
+    start = 0
+    batch_no = 0
+
+    while start < len(section_elements):
+        end = _record_aligned_end(section_elements, start, STAGE2_BATCH_SIZE)
+        batch_elements = section_elements[start:end]
+        batch_no += 1
+        if multi_batch:
+            logger.info(f"    Processing batch {batch_no} (elements {start + 1}-{end} of {len(section_elements)})")
 
         try:
-            llm_result = call_llm(
-                stage="stage_2",
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.1
-            )
-
-            result_text = llm_result["content"]
-            result = parse_delimiter_reply(result_text)
-
-            # Accumulate cost
-            total_cost += llm_result["cost"]
-            total_tokens += llm_result["total_tokens"]
-            prompt_tokens += llm_result["prompt_tokens"]
-            completion_tokens += llm_result["completion_tokens"]
-
-            # Extract delimiters array - LLM may return in different keys
-            if isinstance(result, dict):
-                # Try common keys the LLM might use
-                delimiters = (
-                    result.get("delimiters") or
-                    result.get("entries") or
-                    result.get("result") or
-                    result.get("data") or
-                    []
-                )
-            else:
-                delimiters = result
-
-            # Build a lookup for batch elements by index (use string keys for consistency)
-            batch_elem_lookup = {str(elem['idx']): elem for elem in batch_elements}
-            claimed_row_keys = set()
-
-            # Validate delimiters and extract full text
-            for delim in delimiters:
-                if "element_idx_start" in delim and "element_idx_end" in delim:
-                    start_idx = delim["element_idx_start"]
-                    end_idx = delim["element_idx_end"]
-
-                    # Handle table indices (strings like "table_0")
-                    if isinstance(start_idx, str) and start_idx.startswith("table_"):
-                        # Table entry - get full text from batch elements
-                        if start_idx in batch_elem_lookup:
-                            elem = batch_elem_lookup[start_idx]
-                            full_text = elem.get("full_text", elem.get("text", ""))
-                            entry = {
-                                "element_idx_start": start_idx,
-                                "element_idx_end": end_idx,
-                                "element_type": "table",
-                                "confidence": delim.get("confidence", 1.0),
-                                "text": full_text
-                            }
-                            all_validated_entries.append(entry)
-                        continue
-
-                    # Handle row sub-indices (floats like 22.2 or strings like "22.2")
-                    # These come from table_content rows with format "parent_idx.row_idx"
-                    start_idx_str = delimiter_index_text(start_idx)
-                    end_idx_str = delimiter_index_text(end_idx)
-                    if "." in start_idx_str or "." in end_idx_str:
-                        # Row sub-index - look up in batch elements by string key
-                        entry, row_keys = row_range_entry(
-                            start_idx_str, end_idx_str, batch_elem_lookup,
-                            delim.get("confidence", 1.0))
-                        if entry is not None:
-                            all_validated_entries.append(entry)
-                            claimed_row_keys.update(row_keys)
-                        continue
-
-                    # Handle paragraph indices (integers)
-                    if not isinstance(start_idx, int) or not isinstance(end_idx, int):
-                        continue
-
-                    # Ensure indices are within bounds
-                    if start_idx >= start_elem_idx and end_idx <= end_elem_idx:
-                        # Extract full text for all elements in the entry range
-                        full_text_parts = []
-                        for idx in range(start_idx, end_idx + 1):
-                            if idx in element_index_map:
-                                elem = element_index_map[idx]
-                                elem_text = get_element_text(elem)
-                                if elem_text:
-                                    full_text_parts.append(elem_text)
-
-                        # Build entry with full text
-                        entry = {
-                            "element_idx_start": start_idx,
-                            "element_idx_end": end_idx,
-                            "element_type": delim.get("element_type", "paragraph"),
-                            "confidence": delim.get("confidence", 1.0),
-                            "text": "\t".join(full_text_parts)  # Tab-separated for compact format
-                        }
-                        all_validated_entries.append(entry)
-
-            # Backstop: emit any table row this batch never claimed (#420).
-            #
-            # Why rows go unclaimed: recover_unclaimed_table_rows' docstring (#420).
-            # Recovering the rows here is deterministic and costs no extra LLM
-            # call. It also runs BEFORE remove_subset_delimiters, so a whole-table
-            # blob whose rows are now all present becomes a provable duplicate and
-            # is collapsed by the #418 coverage check.
-            #
-            # The indices no longer round trip through floats (#1228): this loop
-            # only recovers rows the model genuinely skipped. A row key that is
-            # not exactly the text the model wrote would bring the old collapse
-            # back, which is why delimiter_index_text exists.
-            recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
-            all_validated_entries.extend(recovered)
-            if recovered:
-                logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
-                            f"in batch {batch_idx + 1} [{full_hierarchy}]")
-
+            reply = _run_batch(batch_elements, full_hierarchy, batch_no,
+                               start_elem_idx, end_elem_idx, element_index_map)
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
         except Exception as e:
-            logger.warning(f"    ⚠ Error in batch {batch_idx + 1}: {e} [{full_hierarchy}]")
-            continue
+            logger.warning(f"    ⚠ Error in batch {batch_no}: {e} [{full_hierarchy}]")
+            reply = None
 
-    # Remove subset/duplicate entries from all batches
-    all_validated_entries = remove_subset_delimiters(all_validated_entries)
+        if reply is None:
+            entries.extend(pending)  # nothing replaced the carried tail: it stands
+            batch_entries = []
+        else:
+            total_cost += reply.cost
+            total_tokens += reply.total_tokens
+            prompt_tokens += reply.prompt_tokens
+            completion_tokens += reply.completion_tokens
+            batch_entries = reply.entries
+        pending = []
 
-    # Return entries and cost info
+        if end >= len(section_elements):
+            entries.extend(batch_entries)
+            break
+        split = _carry_split(batch_entries, batch_elements, STAGE2_CARRY_MAX)
+        carry_counts.record(split.skip_reason)
+        entries.extend(split.kept)
+        pending = split.pending
+        start += split.carry
+
     cost_info = {
         "cost": total_cost,
         "tokens": total_tokens,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
     }
-    return all_validated_entries, cost_info
+    if carry_counts.edges:
+        cost_info["batch_carry"] = carry_counts
+    return entries, cost_info
+
+
+def detect_entries_for_section(
+    section_hierarchy: list[str],
+    doc_elements: list[dict],
+    start_elem_idx: int,
+    end_elem_idx: int,
+    document_uid: str | None = None,
+    header_indices: set | None = None,
+    element_index_map: dict | None = None
+) -> tuple[list[dict], dict]:
+    """
+    Use LLM to detect and extract entries within a section.
+
+    Args:
+        section_hierarchy: Full path (e.g., ["Research Experience", "Publications", "Peer-Reviewed"])
+        doc_elements: List of elements from extract_docx_structure (paragraphs + tables)
+        start_elem_idx: Starting element index for this section
+        end_elem_idx: Ending element index for this section (before next section)
+        document_uid: Document identifier for logging
+        header_indices: Set of element indices that are section/subsection headers (to exclude)
+        element_index_map: Map from element index to element data
+
+    Returns:
+        Tuple of (entries_list, cost_info_dict). A multi-batch section's
+        cost_info also carries ``batch_carry``, its BatchCarryCounts.
+    """
+    if header_indices is None:
+        header_indices = set()
+    if element_index_map is None:
+        element_index_map = {}
+
+    section_elements = _section_elements(doc_elements, start_elem_idx, end_elem_idx, header_indices)
+    if not section_elements:
+        return [], {"cost": 0, "tokens": 0}
+
+    full_hierarchy = " > ".join(section_hierarchy)
+    entries, cost_info = _detect_in_batches(
+        section_elements, full_hierarchy, start_elem_idx, end_elem_idx, element_index_map)
+
+    # Remove subset/duplicate entries from all batches
+    return remove_subset_delimiters(entries), cost_info
 
 
 # Detail-line fold (#986). A dateless line that opens with one of these labels
@@ -1859,9 +1920,12 @@ def run_stage_2(
         workers,
         on_result=_section_progress_printer([p for p, _, _ in sections_to_process]),
     )
+    batch_carry = BatchCarryCounts()
     for section_entries, cost_info, section_assigned, _lines in results:
         total_cost += cost_info.get("cost", 0)
         total_tokens += cost_info.get("tokens", 0)
+        if "batch_carry" in cost_info:
+            batch_carry.add(cost_info["batch_carry"])
         all_assigned_indices |= section_assigned
         all_entries.extend(section_entries)
 
@@ -1909,6 +1973,7 @@ def run_stage_2(
             "unaccounted_indices": sorted(list(unaccounted_indices)) if unaccounted_indices else [],
             "coverage_percentage": round(len(covered_doc_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
         },
+        "batch_carry": asdict(batch_carry),  # #1226: carries and skipped carries at batch edges
         "entries": all_entries
     }
 

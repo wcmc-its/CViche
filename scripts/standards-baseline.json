@@ -10,5 +10,5 @@
   "8.3 missing annotations (ANN*, RUF012)": 490,
   "8.3 typing syntax (UP*, RUF013)": 0,
   "8.4 bugbear findings (B)": 142,
-  "8.4 pyflakes findings (F)": 192
+  "8.4 pyflakes findings (F)": 191
 }

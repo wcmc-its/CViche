@@ -442,7 +442,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 0 | ✓ |
 | 2.1 no `db.query(` in `api/` | falling | 9 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 1377 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 1090 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 1 | ratchet |
@@ -452,7 +452,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 0 | ratchet |
 | 8.3 missing annotations (ANN*, RUF012) | falling | 490 | ratchet |
-| 8.4 pyflakes findings (F) | falling | 192 | ratchet |
+| 8.4 pyflakes findings (F) | falling | 191 | ratchet |
 | 8.4 bugbear findings (B) | falling | 142 | ratchet |
 
 <!-- check_standards:auto:end -->
