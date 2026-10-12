@@ -10,6 +10,7 @@ Output: JSON with extracted entries including full text and hierarchy context
 """
 
 import bisect
+import collections
 import json
 import logging
 import os
@@ -887,6 +888,9 @@ class BatchCarryCounts:
     batch and a single-batch section's included. ``restored_after_failure`` and
     ``restored_unclaimed`` count held-back entries put back because the batch
     that re-listed them failed, or replied without claiming any of their lines.
+    ``gap_filled_entries`` and ``gap_filled_attached`` count the content lines a
+    carried batch's reply left unclaimed before its first claim, put back as
+    their own entries or appended to the entry they continue (``_gap_fill``).
     """
     edges: int = 0
     carried: int = 0
@@ -896,6 +900,8 @@ class BatchCarryCounts:
     failed_batches: int = 0
     restored_after_failure: int = 0
     restored_unclaimed: int = 0
+    gap_filled_entries: int = 0
+    gap_filled_attached: int = 0
 
     def any(self) -> bool:
         """True when there is anything to report: an edge or a failed batch."""
@@ -923,6 +929,8 @@ class BatchCarryCounts:
         self.failed_batches += other.failed_batches
         self.restored_after_failure += other.restored_after_failure
         self.restored_unclaimed += other.restored_unclaimed
+        self.gap_filled_entries += other.gap_filled_entries
+        self.gap_filled_attached += other.gap_filled_attached
 
 
 class _CarrySplit(NamedTuple):
@@ -995,6 +1003,92 @@ def _unclaimed_pending(pending: list[dict], batch_entries: list[dict],
     kept = [e for e in batch_entries
             if not (e.get("recovered_row") and _entry_keys(e, batch_elements) <= held)]
     return restored, kept
+
+
+# Gap-fill a carried batch (#1226). A carried batch re-opens on the record the
+# batch before it held back. Its reply may open well past that record: on
+# LFFKVV it opened 32 lines on, so G1 restored the held-back entry and the 32
+# student-evaluation lines between it and the reply's first claim fell to
+# break -- on both new-arm draws, never on dev, whose batches never re-open.
+# The model was shown those lines and claimed none, so each content line is
+# put back: appended to the entry right above it when it visibly continues
+# that entry's last line, else as its own one-line entry. Only lines before the
+# reply's first claim, only in a carried batch, only paragraphs (#420 recovers
+# table rows). A line with no letters, a page number, a bare "Label:" with no
+# content line after it, and a short line repeated elsewhere in the section
+# (a running header or footer) stay break; run_stage_2's filter_extraction_noise
+# then reads these entries as it reads every other.
+GAP_FILL_CONFIDENCE = 0.5  # not model-attested, like a #420-recovered row
+GAP_FILL_REPEAT_MAX_WORDS = 6  # a repeated line this short is a running header or footer
+_LETTER_RE = re.compile(r"[^\W\d_]")
+_PAGE_NUMBER_RE = re.compile(r"^\W*\d+(?:\s*(?:of|/)\s*\d+)?\W*$|\bpage\s*\d+", re.IGNORECASE)
+_LINE_END_PUNCTUATION = (".", "!", "?", ";", ":")
+
+
+def _normalised(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _is_bare_label(text: str) -> bool:
+    """``Strengths:`` -- a leading label with nothing after its colon."""
+    match = _LEADING_LABEL_RE.match(text)
+    return match is not None and not text[match.end():].strip()
+
+
+def _gap_line_is_content(pos: int, batch_elements: list[dict], repeated: set[str]) -> bool:
+    """Whether the unclaimed paragraph at ``pos`` holds content worth an entry."""
+    text = _normalised(batch_elements[pos]["text"])
+    if not _LETTER_RE.search(text) or _PAGE_NUMBER_RE.search(text):
+        return False
+    if _is_bare_label(text):
+        following = batch_elements[pos + 1] if pos + 1 < len(batch_elements) else {}
+        return following.get("type") == "paragraph" and not _is_bare_label(_normalised(following["text"]))
+    return not (len(text.split()) <= GAP_FILL_REPEAT_MAX_WORDS and text in repeated)
+
+
+def _repeated_lines(section_elements: list[dict]) -> set[str]:
+    """Paragraph texts that occur more than once in the section."""
+    counts = collections.Counter(_normalised(elem["text"]) for elem in section_elements
+                                 if elem.get("type") == "paragraph")
+    return {text for text, count in counts.items() if count > 1}
+
+
+def _continues_line(entry_text: str, line: str) -> bool:
+    """``line`` runs on from the entry's last line: that line ends without
+    closing punctuation and ``line`` opens lower-case."""
+    last = entry_text.split("\t")[-1].rstrip()
+    return bool(last) and not last.endswith(_LINE_END_PUNCTUATION) and line[:1].islower()
+
+
+def _gap_fill(restored: list[dict], batch_entries: list[dict], batch_elements: list[dict],
+              repeated: set[str], counts: BatchCarryCounts) -> list[dict]:
+    """``restored`` plus the carried batch's unclaimed content lines before its
+    reply's first claim, each appended to the entry it continues or made its
+    own entry. Counted in ``counts``. A reply that claims nothing fills nothing."""
+    claimed = set().union(*(_entry_keys(e, batch_elements) for e in batch_entries if not e.get("recovered_row")))
+    first = next((pos for pos, elem in enumerate(batch_elements) if str(elem["idx"]) in claimed), None)
+    if first is None:
+        return restored
+    held = set().union(*(_entry_keys(e, batch_elements) for e in restored))
+    out = list(restored)
+    by_end = {e["element_idx_end"]: i for i, e in enumerate(out) if isinstance(e["element_idx_end"], int)}
+    for pos in range(first):
+        elem = batch_elements[pos]
+        if (elem.get("type") != "paragraph" or str(elem["idx"]) in held
+                or not _gap_line_is_content(pos, batch_elements, repeated)):
+            continue
+        idx, text = elem["idx"], elem["text"]  # stripped by _section_elements
+        above = by_end.pop(idx - 1, None)
+        if above is not None and _continues_line(out[above]["text"], text):
+            out[above] = {**out[above], "element_idx_end": idx, "text": f"{out[above]['text']}\t{text}"}
+            by_end[idx] = above
+            counts.gap_filled_attached += 1
+            continue
+        out.append({"element_idx_start": idx, "element_idx_end": idx, "element_type": "paragraph",
+                    "confidence": GAP_FILL_CONFIDENCE, "text": text, "gap_filled": True})
+        by_end[idx] = len(out) - 1
+        counts.gap_filled_entries += 1
+    return out
 
 
 def _table_row_elements(idx: int, rows: Iterable[tuple[int, object]], table_index: object) -> list[dict]:
@@ -1385,6 +1479,7 @@ def _detect_in_batches(
     usage = _BatchUsage()
     carry_counts = BatchCarryCounts()
     multi_batch = len(section_elements) > STAGE2_BATCH_SIZE
+    repeated = _repeated_lines(section_elements)
     start = 0
     batch_no = 0
 
@@ -1409,6 +1504,8 @@ def _detect_in_batches(
         else:
             restored, batch_entries = _unclaimed_pending(pending, batch_entries, batch_elements)
             carry_counts.restored_unclaimed += len(restored)
+            if pending:  # a carried batch: put back what its reply skipped before its first claim
+                restored = _gap_fill(restored, batch_entries, batch_elements, repeated, carry_counts)
             entries.extend(restored)
         pending = []
 

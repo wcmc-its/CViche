@@ -2345,7 +2345,8 @@ def test_run_stage_2_writes_the_batch_carry_counts_to_the_artifact(tmp_path, mon
     output_data, output_path = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
 
     counts = {"edges": 1, "carried": 1, "skipped_no_entry": 0, "skipped_no_progress": 0, "skipped_over_max": 0,
-              "failed_batches": 0, "restored_after_failure": 0, "restored_unclaimed": 0}
+              "failed_batches": 0, "restored_after_failure": 0, "restored_unclaimed": 0,
+              "gap_filled_entries": 0, "gap_filled_attached": 0}
     assert output_data["batch_carry"] == counts
     assert output_data["batch_carry_sections"] == [
         {"hierarchy": ["Mentoring"], "element_idx_start": 0, **counts}]
@@ -2441,8 +2442,66 @@ def test_a_carried_reply_that_opens_past_the_carried_lines_keeps_the_tail(monkey
     entries, cost_info = stage2.detect_entries_for_section(
         ["Mentoring"], elements, 0, 62, element_index_map=_idx_map(elements))
     assert _prompt_indices(prompts[1])[0] == "49"
-    assert _spans(entries) == [(7 * k, 7 * k + 6) for k in range(7)] + [(49, 49), (56, 62)]
-    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, carried=1, restored_unclaimed=1)
+    # The held-back head stands, and the six lines the reply skipped before its
+    # first claim come back one by one: none runs on from the line above it.
+    assert _spans(entries) == ([(7 * k, 7 * k + 6) for k in range(7)] + [(49, 49)]
+                               + [(i, i) for i in range(50, 56)] + [(56, 62)])
+    assert all(e.get("gap_filled") for e in entries if 50 <= e["element_idx_start"] <= 55)
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, carried=1, restored_unclaimed=1,
+                                                               gap_filled_entries=6)
+
+
+def _skipping_model(prompts, first_claim_by_call):
+    """Claims one entry per batch, from ``first_claim_by_call[n]`` (or the
+    batch's first line) to the batch's last line."""
+
+    def fake(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        listed = [int(i) for i in _prompt_indices(prompts[-1])]
+        first = first_claim_by_call.get(len(prompts), listed[0])
+        return _llm_result({"delimiters": [{"element_idx_start": first, "element_idx_end": listed[-1]}]})
+
+    return fake
+
+
+def test_an_uncarried_batch_never_gap_fills_what_its_reply_skipped(monkeypatch):
+    elements = [_para(i, f"Line {i}") for i in range(80)]
+    prompts = []
+    # Batch 1 skips lines 0-4 and spans to its end, so no carry: batch 2 opens
+    # at 50, uncarried, and skips 50-54 too. Neither gap comes back.
+    monkeypatch.setattr(stage2, "call_llm", _skipping_model(prompts, {1: 5, 2: 55}))
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Big"], elements, 0, 79, element_index_map=_idx_map(elements))
+    assert [_prompt_indices(p)[0] for p in prompts] == ["0", "50"]
+    assert _spans(entries) == [(5, 49), (55, 79)]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, skipped_over_max=1)
+
+
+def test_a_carried_gap_appends_run_on_lines_and_leaves_noise_as_break(monkeypatch):
+    texts = {5: "Dr Name CV", 50: "Taught the residents course", 51: "with two co-directors.", 52: "Dr Name CV",
+             53: "Comments:", 54: "Very clear teaching", 55: "Weaknesses:", 57: "Next claimed record"}
+    elements = [_para(i, texts.get(i, f"Line {i}")) if i != 56 else {"unified_idx": i, "type": "empty", "text": ""}
+                for i in range(70)]
+    prompts = []
+
+    def model(**kw):
+        prompts.append(kw["messages"][-1]["content"])
+        listed = [int(i) for i in _prompt_indices(prompts[-1])]
+        if len(prompts) == 1:  # the last entry opens at 45: lines 45-49 are carried
+            return _llm_result({"delimiters": [{"element_idx_start": 0, "element_idx_end": 44},
+                                               {"element_idx_start": 45, "element_idx_end": 49}]})
+        return _llm_result({"delimiters": [{"element_idx_start": 57, "element_idx_end": listed[-1]}]})
+
+    monkeypatch.setattr(stage2, "call_llm", model)
+    entries, cost_info = stage2.detect_entries_for_section(
+        ["Teaching"], elements, 0, 69, element_index_map=_idx_map(elements))
+    assert _prompt_indices(prompts[1])[0] == "45"
+    # 50 is its own entry and 51 runs on from it; 52, a running footer (it
+    # repeats at 5), and the label 55, with a blank after it, stay unclaimed;
+    # the label 53 heads 54's content.
+    assert _spans(entries) == [(0, 44), (45, 49), (50, 51), (53, 53), (54, 54), (57, 69)]
+    assert cost_info["batch_carry"] == stage2.BatchCarryCounts(edges=1, carried=1, restored_unclaimed=1,
+                                                               gap_filled_entries=3, gap_filled_attached=1)
 
 
 def test_a_carried_reply_that_claims_any_held_back_line_replaces_that_entry(monkeypatch):

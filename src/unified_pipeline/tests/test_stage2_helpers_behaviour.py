@@ -1523,12 +1523,14 @@ def test_batch_carry_counts_record_each_reason_and_add_sums_fields():
     assert counts == stage2.BatchCarryCounts(edges=5, carried=2, skipped_no_entry=1,
                                              skipped_no_progress=1, skipped_over_max=1)
     counts.failed_batches, counts.restored_after_failure, counts.restored_unclaimed = 2, 3, 4
+    counts.gap_filled_entries, counts.gap_filled_attached = 5, 6
     total = stage2.BatchCarryCounts(edges=1, carried=1, failed_batches=1, restored_after_failure=1,
-                                    restored_unclaimed=1)
+                                    restored_unclaimed=1, gap_filled_entries=1, gap_filled_attached=1)
     total.add(counts)
     assert total == stage2.BatchCarryCounts(edges=6, carried=3, skipped_no_entry=1,
                                             skipped_no_progress=1, skipped_over_max=1, failed_batches=3,
-                                            restored_after_failure=4, restored_unclaimed=5)
+                                            restored_after_failure=4, restored_unclaimed=5,
+                                            gap_filled_entries=6, gap_filled_attached=7)
     with pytest.raises(ValueError):
         counts.record("something_else")
 
@@ -1570,6 +1572,137 @@ def test_unclaimed_pending_ignores_recovered_rows_as_claims_and_drops_the_duplic
     restored, kept = stage2._unclaimed_pending(held, recovered + [later], batch)
     assert restored == held  # a recovered row claims nothing
     assert kept == [later]  # the rows the restored entries hold are not emitted twice
+
+
+
+# ------------------------------------------------- _gap_fill (#1226)
+
+def _gap(restored, reply, batch, repeated=frozenset()):
+    counts = stage2.BatchCarryCounts()
+    out = stage2._gap_fill(restored, reply, batch, set(repeated), counts)
+    return out, (counts.gap_filled_entries, counts.gap_filled_attached)
+
+
+def test_gap_fill_confidence_is_the_recovered_row_s_not_the_model_s():
+    assert stage2.GAP_FILL_CONFIDENCE == 0.5  # below the 1.0 a model delimiter defaults to
+
+
+def _gap_line(idx, text):
+    return {"element_idx_start": idx, "element_idx_end": idx, "element_type": "paragraph",
+            "confidence": stage2.GAP_FILL_CONFIDENCE, "text": text, "gap_filled": True}
+
+
+def test_gap_fill_puts_back_each_unclaimed_line_before_the_first_claim():
+    batch = [_p(40, "Held head"), _p(41, "Overall rating 5"), _p(42, "Comments:"), _p(43, "Clear lectures 4"),
+             _p(44, "Claimed record"), _p(45, "Late unclaimed line")]
+    held = [_carry_entry(40, text="Held head")]
+    out, counts = _gap(held, [_carry_entry(44, text="Claimed record")], batch)
+    assert out == held + [_gap_line(41, "Overall rating 5"), _gap_line(42, "Comments:"),
+                          _gap_line(43, "Clear lectures 4")]
+    assert counts == (3, 0)  # 45 sits after the first claim: out of scope
+
+
+def test_gap_fill_appends_a_line_that_runs_on_from_the_entry_above():
+    batch = [_p(40, "Held head that runs"), _p(41, "on to this line"), _p(42, "and this one."),
+             _p(43, "but not past a full stop"), _p(44, "Claimed")]
+    held = [_carry_entry(40, text="Held head that runs", element_type="paragraph")]
+    out, counts = _gap(held, [_carry_entry(44)], batch)
+    assert out == [{"element_idx_start": 40, "element_idx_end": 42, "element_type": "paragraph",
+                    "text": "Held head that runs\ton to this line\tand this one."},
+                   _gap_line(43, "but not past a full stop")]
+    assert counts == (1, 2)
+
+
+def test_gap_fill_chains_a_run_on_line_onto_a_filled_line():
+    batch = [_p(40, "Held."), _p(41, "Gap line that runs"), _p(42, "on here"), _p(43, "Claimed")]
+    out, counts = _gap([_carry_entry(40, text="Held.")], [_carry_entry(43)], batch)
+    assert out[1:] == [{**_gap_line(41, "Gap line that runs"), "element_idx_end": 42,
+                        "text": "Gap line that runs\ton here"}]
+    assert counts == (1, 1)
+
+
+def test_gap_fill_never_appends_across_a_blank_or_an_unfilled_line():
+    batch = [_p(40, "Held head"), _blank(41), _p(42, "after a blank"), _p(43, "12"), _p(44, "after page"),
+             _p(45, "Claimed")]
+    out, counts = _gap([_carry_entry(40, text="Held head")], [_carry_entry(45)], batch)
+    assert out[1:] == [_gap_line(42, "after a blank"), _gap_line(44, "after page")]
+    assert counts == (2, 0)
+
+
+def test_gap_fill_needs_a_claim_and_skips_held_lines_rows_and_recovered_rows():
+    batch = [_p(40, "Held head"), _p(41, "Held tail"), {"idx": "41.0", "type": "table_row", "text": "row text"},
+             _p(42, "Gap line"), _p(43, "Claimed")]
+    held = [_carry_entry(40, 41, text="Held head\tHeld tail")]
+    assert _gap(held, [], batch) == (held, (0, 0))  # nothing claimed: nothing filled
+    recovered_first = [_carry_entry("41.0", recovered_row=True), _carry_entry(43)]
+    out, counts = _gap(held, recovered_first, batch)
+    assert out == held + [_gap_line(42, "Gap line")]  # a recovered row is not the reply's first claim
+    assert counts == (1, 0)
+    out, _ = _gap([], [_carry_entry(43)], batch)
+    assert out == [_gap_line(40, "Held head"), _gap_line(41, "Held tail"), _gap_line(42, "Gap line")]
+
+
+def test_gap_fill_leaves_a_line_that_is_not_content():
+    batch = [_p(40, "Held."), _p(41, "- 3 -"), _p(42, "Page 4 of 9"), _p(43, "Strengths:"), _blank(44),
+             _p(45, "Weaknesses:"), _p(46, "Summary:"), _blank(47), _p(48, "Dr Name CV"),
+             _p(49, "Kept line here"), _p(50, "Claimed")]
+    out, counts = _gap([_carry_entry(40, text="Held.")], [_carry_entry(50)], batch, {"Dr Name CV"})
+    assert out[1:] == [_gap_line(49, "Kept line here")]
+    assert counts == (1, 0)
+
+
+@pytest.mark.parametrize("text", ["12", "3 of 10", "3/10", "- 4 -", "Page 7", "page7", "PAGE 2 OF 3", "***",
+                                  "12-34", "- 3 of 10 -"])
+def test_gap_line_page_numbers_and_letterless_lines_are_not_content(text):
+    assert not stage2._gap_line_is_content(0, [_p(0, text), _p(1, "Next line")], set())
+
+
+@pytest.mark.parametrize("text", ["Rated 5 of 5 by the class", "Lecture 3", "Pagemaster award"])
+def test_gap_line_with_a_number_inside_text_is_content(text):
+    assert stage2._gap_line_is_content(0, [_p(0, text), _p(1, "Next line")], set())
+
+
+def test_gap_line_a_bare_label_is_content_only_when_a_content_line_follows():
+    assert stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _p(1, "Clear lectures")], set())
+    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _p(1, "Weaknesses:")], set())
+    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _blank(1)], set())
+    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:")], set())
+    assert stage2._gap_line_is_content(0, [_p(0, "Strengths: clear"), _blank(1)], set())
+
+
+def test_gap_line_a_short_repeated_line_is_a_running_footer_but_a_long_one_is_content():
+    short = "Teaching portfolio of a professor"  # 5 words
+    six = "Teaching portfolio of a full professor"
+    seven = "Teaching portfolio of a full professor here"
+    assert stage2.GAP_FILL_REPEAT_MAX_WORDS == 6
+    for text, kept in ((short, False), (six, False), (seven, True)):
+        assert stage2._gap_line_is_content(0, [_p(0, text), _p(1, "x")], {text}) is kept
+    assert stage2._gap_line_is_content(0, [_p(0, short), _p(1, "x")], set())
+
+
+def test_repeated_lines_counts_paragraph_text_once_normalised():
+    section = [_p(1, "Footer  text"), _p(2, "Footer text"), _p(3, "Once"),
+               {"idx": "4.0", "type": "table_row", "text": "Once"}, _blank(5), _blank(6)]
+    assert stage2._repeated_lines(section) == {"Footer text"}
+
+
+@pytest.mark.parametrize(("last", "line", "runs_on"), [
+    ("Taught the course", "to residents", True), ("Taught the course.", "to residents", False),
+    ("Taught the course!", "to residents", False), ("Taught the course?", "to residents", False),
+    ("Taught the course;", "to residents", False), ("Topic:", "residents", False),
+    ("Taught the course", "To residents", False), ("Taught the course", "", False),
+    ("", "to residents", False), ("first\tlast line  ", "goes on", True), ("first.\tlast line", "x", True),
+    ("first\tlast.", "x", False), ("first\tlast.  ", "x", False), ("first\t  ", "x", False),
+])
+def test_continues_line_reads_the_entry_s_last_line(last, line, runs_on):
+    assert stage2._continues_line(last, line) is runs_on
+
+
+def test_is_bare_label():
+    assert stage2._is_bare_label("Strengths:")
+    assert stage2._is_bare_label("Strengths :  ")
+    assert not stage2._is_bare_label("Strengths: clear")
+    assert not stage2._is_bare_label("Strengths")
 
 
 # ------------------------------------------------- fold_bare_trailing_dates (#1226)
@@ -1670,6 +1803,12 @@ def test_bare_date_fold_takes_one_date_per_record():
     out = _date_fold(entries, elements)
     assert _spans(out) == [(0, 2), (4, 6)]
     assert [e["text"] for e in out] == ["Course one\t2019", "Course two\t2020"]
+
+
+@pytest.mark.parametrize("text", ["2018 - present", "2018 - current", "2018 to now", "2018\u2013ongoing",
+                                  "2019.", "June 2019,", "Sep 2019", "Sept. 2019", "1/2018, 3/2019"])
+def test_bare_date_regex_accepts_each_date_shape(text):
+    assert stage2.BARE_DATE_RE.match(text)
 
 
 @pytest.mark.parametrize("text", ["PGY-2", "Room 2019 A", "1234", "2019 Award", "Fall"])

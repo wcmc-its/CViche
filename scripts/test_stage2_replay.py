@@ -233,8 +233,8 @@ def _failed_criteria(row: dict) -> list[str]:
         "first_batch": row["first_batch_prompt_diffs"] == 0,
         "single_batch": row["single_batch_prompt_diffs"] == 0,
         "outside_carry": row["changed_entries_outside_carry"] == 0,
-        "unaccounted_fail_arms": row["unaccounted_same_fail_arms"],
-        "unaccounted_vs_base": row["unaccounted_same_as_base"],
+        "out_of_section_fail_arms": row["out_of_section_same_fail_arms"],
+        "out_of_section_vs_base": row["out_of_section_same_as_base"],
         "lost": row["fail_lines_lost"] == 0,
         "gained": row["fail_lines_gained"] == 0,
         "multi_claimed": row["fail_multi_claimed_base"] == row["fail_multi_claimed_new"],
@@ -294,11 +294,11 @@ def test_each_gate_criterion_fails_the_gate_on_its_own():
 
         fail_arm = _copy(arms["base_fail"])
         fail_arm["coverage"]["unaccounted_indices"] = [999]
-        cases["unaccounted_fail_arms"] = {"base_fail": fail_arm}
+        cases["out_of_section_fail_arms"] = {"base_fail": fail_arm}
 
         served = _copy(arms["base"])
         served["coverage"]["unaccounted_indices"] = [999]
-        cases["unaccounted_vs_base"] = {"base": served}
+        cases["out_of_section_vs_base"] = {"base": served}
 
         for criterion, replace in cases.items():
             row = _gate(arms, **replace)
@@ -319,12 +319,15 @@ def test_the_gate_reports_served_line_changes_and_restores_without_gating_them()
         new = _copy(arms["base"])
         new["entries"] = [e for e in new["entries"] if e["element_idx_start"] != 51]  # lines 51-57
         new["entries"].append({"element_type": "paragraph", "element_idx_start": 0, "element_idx_end": 0})
-        new["batch_carry"] = {"restored_unclaimed": 2, "restored_after_failure": 1, "failed_batches": 4}
+        new["batch_carry"] = {"restored_unclaimed": 2, "restored_after_failure": 1, "failed_batches": 4,
+                              "gap_filled_entries": 5, "gap_filled_attached": 2}
         row = _gate(arms, new=new)
         assert (row["served_lines_lost"], row["served_lines_gained"]) == (RECORD, 1)
-        assert (row["new_restored"], row["new_failed_batches"]) == (3, 4)
+        assert (row["new_restored"], row["new_failed_batches"], row["new_gap_filled"]) == (3, 4, 7)
+        assert sr.gate_passes(row) == sr.gate_passes({**row, "new_gap_filled": 0})  # reported, never gated
         new["batch_carry"] = None
-        assert (_gate(arms, new=new)["new_restored"], _gate(arms, new=new)["new_failed_batches"]) == (0, 0)
+        row = _gate(arms, new=new)
+        assert (row["new_restored"], row["new_failed_batches"], row["new_gap_filled"]) == (0, 0, 0)
 
 
 def test_an_entry_on_the_carried_regions_first_line_is_inside_it():

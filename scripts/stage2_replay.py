@@ -24,13 +24,18 @@ No LLM call is made by any subcommand.
           section's prompt, is byte-identical in the base and new arms;
         - no entry changes outside a carried region (from the first new-arm
           batch whose prompt differs to the section end);
-        - with every later batch failing in both arms, the new arm keeps
-          coverage.unaccounted_indices and loses, gains and double-claims no
-          content line against the base arm.
+        - with every later batch failing in both arms, the new arm loses,
+          gains and double-claims no content line against the base arm;
+        - the out-of-section indices (``coverage.unaccounted_indices``, the
+          indices outside every section) are the same in both fail arms and
+          as in the served base arm. This guards section bounds only: an
+          in-section line no entry claims is a ``break``, which these
+          indices cannot see. Content loss is the content-line census.
         Also reported, never gated: content lines the served new arm loses
-        and gains against the served base arm (a line in no content entry
-        is a ``break``, which ``unaccounted_indices`` cannot see), and the
-        new arm's batch_carry restore and failure counts.
+        and gains against the served base arm -- on stored runs a carried
+        prompt is a replay miss, so this census counts misses, not the
+        carry -- and the new arm's batch_carry restore, failure and
+        gap-fill counts.
         Sections the base arm cannot fully replay (a stored prompt the base
         code no longer sends) are excluded and counted. Exits 1 when a
         criterion fails, 2 when there is nothing to compare.
@@ -277,9 +282,9 @@ def gate_run(base: dict, new: dict, base_fail: dict, new_fail: dict) -> dict:
         "first_batch_prompt_diffs": first_batch_diffs,
         "single_batch_prompt_diffs": single_batch_diffs,
         "changed_entries_outside_carry": sum(((outside_base - outside_new) + (outside_new - outside_base)).values()),
-        "unaccounted_same_fail_arms": base_fail["coverage"]["unaccounted_indices"]
+        "out_of_section_same_fail_arms": base_fail["coverage"]["unaccounted_indices"]
         == new_fail["coverage"]["unaccounted_indices"],
-        "unaccounted_same_as_base": base["coverage"]["unaccounted_indices"]
+        "out_of_section_same_as_base": base["coverage"]["unaccounted_indices"]
         == new_fail["coverage"]["unaccounted_indices"],
         "fail_lines_lost": len(covered_base - covered_new),
         "fail_lines_gained": len(covered_new - covered_base),
@@ -289,6 +294,7 @@ def gate_run(base: dict, new: dict, base_fail: dict, new_fail: dict) -> dict:
         "served_lines_gained": len(served_new - served_base),
         "new_restored": carry.get("restored_unclaimed", 0) + carry.get("restored_after_failure", 0),
         "new_failed_batches": carry.get("failed_batches", 0),
+        "new_gap_filled": carry.get("gap_filled_entries", 0) + carry.get("gap_filled_attached", 0),
         "new_batch_carry": new["batch_carry"],
     }
 
@@ -296,17 +302,18 @@ def gate_run(base: dict, new: dict, base_fail: dict, new_fail: dict) -> dict:
 def gate_passes(row: dict) -> bool:
     return (row["first_batch_prompt_diffs"] == 0 and row["single_batch_prompt_diffs"] == 0
             and row["changed_entries_outside_carry"] == 0
-            and row["unaccounted_same_fail_arms"] and row["unaccounted_same_as_base"]
+            and row["out_of_section_same_fail_arms"] and row["out_of_section_same_as_base"]
             and row["fail_lines_lost"] == 0 and row["fail_lines_gained"] == 0
             and row["fail_multi_claimed_base"] == row["fail_multi_claimed_new"])
 
 
 GATE_COLUMNS = ("uid", "base_matches_stored", "stored_calls", "base_served", "base_misses",
                 "base_miss_sections", "multi_batch_sections", "first_batch_prompt_diffs",
-                "single_batch_prompt_diffs", "changed_entries_outside_carry", "unaccounted_same_fail_arms",
-                "unaccounted_same_as_base", "fail_lines_lost", "fail_lines_gained",
+                "single_batch_prompt_diffs", "changed_entries_outside_carry", "out_of_section_same_fail_arms",
+                "out_of_section_same_as_base", "fail_lines_lost", "fail_lines_gained",
                 "fail_multi_claimed_base", "fail_multi_claimed_new", "fail_entries_identical",
-                "served_lines_lost", "served_lines_gained", "new_restored", "new_failed_batches", "pass")
+                "served_lines_lost", "served_lines_gained", "new_restored", "new_failed_batches",
+                "new_gap_filled", "pass")
 
 
 def run_gate(dirs: dict[str, Path]) -> int:
