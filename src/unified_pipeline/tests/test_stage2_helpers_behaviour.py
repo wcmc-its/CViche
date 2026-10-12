@@ -1437,3 +1437,380 @@ def test_leading_label_reads_paragraph_and_row_labels_only():
     assert stage2._leading_label({"idx": 1, "type": "table_header", "text": "Role: PI"}) is None
     assert stage2._leading_label(_p(0, "2001-2004 R01 grant")) is None
     assert stage2._leading_label(_p(0, "A title that runs far beyond forty characters before: colon")) is None
+
+
+# =============================================================== batch-edge carry (#1226)
+
+def _carry_entry(start, end=None, **extra):
+    return {"element_idx_start": start, "element_idx_end": start if end is None else end, **extra}
+
+
+def test_carry_split_reopens_on_the_latest_starting_model_carry_entry():
+    batch = [_p(i, f"Line {i}") for i in range(10, 20)]
+    entries = [_carry_entry(10, 13), _carry_entry(14, 16), _carry_entry(17, 19)]
+    split = stage2._carry_split(entries, batch, 15)
+    assert split.carry == 7  # batch position of element 17
+    assert split.skip_reason is None
+    assert split.kept == entries[:2]
+    assert split.pending == entries[2:]
+
+
+def test_carry_split_takes_the_latest_start_not_the_last_listed_carry_entry():
+    batch = [_p(i, f"Line {i}") for i in range(10)]
+    entries = [_carry_entry(6, 9), _carry_entry(0, 5)]  # the model listed them out of order
+    split = stage2._carry_split(entries, batch, 15)
+    assert split.carry == 6
+    assert split.kept == [entries[1]]
+    assert split.pending == [entries[0]]
+
+
+def test_carry_split_recovered_rows_never_set_the_carry_but_ride_with_it():
+    batch = [_p(0, "Line 0")] + [{"idx": f"474.{r}", "type": "table_row", "text": f"Row {r}"} for r in range(12)]
+    entries = [
+        _carry_entry(0),
+        _carry_entry("474.0", "474.9"),
+        _carry_entry("474.10"),
+        _carry_entry("474.11", recovered_row=True),  # after the carry: held back with it
+        _carry_entry("474.1", recovered_row=True),   # before the carry: stands
+    ]
+    split = stage2._carry_split(entries, batch, 15)
+    assert split.carry == 11  # "474.10" is row 10, position 11 -- not row 1
+    assert split.kept == [entries[0], entries[1], entries[4]]
+    assert split.pending == [entries[2], entries[3]]
+
+
+def test_carry_split_reads_a_decimal_row_index_as_the_text_the_model_wrote():
+    batch = [{"idx": f"474.{r}", "type": "table_row", "text": f"Row {r}"} for r in range(12)]
+    reply = stage2.parse_delimiter_reply('[{"element_idx_start": 474.10, "element_idx_end": 474.10}]')
+    split = stage2._carry_split(reply, batch, 15)
+    assert split.carry == 10  # a float would have read 474.1, row 1
+
+
+def test_carry_split_skips_when_there_is_no_model_entry_in_the_batch():
+    batch = [_p(i, f"Line {i}") for i in range(10)]
+    for entries in ([], [_carry_entry(3, recovered_row=True)], [_carry_entry(99)]):
+        split = stage2._carry_split(entries, batch, 15)
+        assert (split.carry, split.skip_reason, split.kept, split.pending) == (10, "no_entry", entries, [])
+
+
+def test_carry_split_skips_when_one_entry_spans_the_whole_batch():
+    batch = [_p(i, f"Line {i}") for i in range(10)]
+    entries = [_carry_entry(0, 9)]
+    split = stage2._carry_split(entries, batch, 15)
+    assert (split.carry, split.skip_reason, split.kept, split.pending) == (10, "no_progress", entries, [])
+
+
+def test_carry_split_cap_is_inclusive_at_carry_max():
+    batch = [_p(i, f"Line {i}") for i in range(50)]
+    at_cap = stage2._carry_split([_carry_entry(0, 34), _carry_entry(35, 49)], batch, 15)  # carries 15 elements
+    assert (at_cap.carry, at_cap.skip_reason) == (35, None)
+    over = stage2._carry_split([_carry_entry(0, 33), _carry_entry(34, 49)], batch, 15)  # would carry 16
+    assert (over.carry, over.skip_reason, over.pending) == (50, "over_max", [])
+
+
+def test_carry_split_keeps_an_entry_whose_start_is_outside_the_batch():
+    batch = [_p(i, f"Line {i}") for i in range(10, 20)]
+    stray = _carry_entry(25, 26)  # inside the section, past this batch
+    split = stage2._carry_split([_carry_entry(10, 14), _carry_entry(15, 19), stray], batch, 15)
+    assert split.carry == 5
+    assert stray in split.kept and stray not in split.pending
+
+
+def test_batch_carry_counts_record_each_reason_and_add_sums_fields():
+    counts = stage2.BatchCarryCounts()
+    for reason in (None, None, "no_entry", "no_progress", "over_max"):
+        counts.record(reason)
+    assert counts == stage2.BatchCarryCounts(edges=5, carried=2, skipped_no_entry=1,
+                                             skipped_no_progress=1, skipped_over_max=1)
+    counts.failed_batches, counts.restored_after_failure, counts.restored_unclaimed = 2, 3, 4
+    counts.gap_filled_entries, counts.gap_filled_attached = 5, 6
+    total = stage2.BatchCarryCounts(edges=1, carried=1, failed_batches=1, restored_after_failure=1,
+                                    restored_unclaimed=1, gap_filled_entries=1, gap_filled_attached=1)
+    total.add(counts)
+    assert total == stage2.BatchCarryCounts(edges=6, carried=3, skipped_no_entry=1,
+                                            skipped_no_progress=1, skipped_over_max=1, failed_batches=3,
+                                            restored_after_failure=4, restored_unclaimed=5,
+                                            gap_filled_entries=6, gap_filled_attached=7)
+    with pytest.raises(ValueError):
+        counts.record("something_else")
+
+
+def test_batch_carry_counts_report_an_edge_or_a_failed_batch():
+    assert not stage2.BatchCarryCounts().any()
+    assert stage2.BatchCarryCounts(edges=1, skipped_no_entry=1).any()
+    assert stage2.BatchCarryCounts(failed_batches=1).any()
+
+
+def test_entry_keys_cover_a_paragraph_range_a_row_span_and_nothing_for_a_reversed_range():
+    batch = [_p(8, "Line 8"), {"idx": "9.0", "type": "table_row", "text": "a"},
+             {"idx": "9.1", "type": "table_row", "text": "b"}, {"idx": "9.2", "type": "table_row", "text": "c"}]
+    assert stage2._entry_keys(_carry_entry(3, 5), batch) == {"3", "4", "5"}
+    assert stage2._entry_keys(_carry_entry(5, 3), batch) == set()
+    assert stage2._entry_keys(_carry_entry("9.0", "9.1"), batch) == {"9.0", "9.1"}
+    assert stage2._entry_keys(_carry_entry("9.2", "9.0"), batch) == {"9.2"}  # reversed rows: the start row
+    assert stage2._entry_keys(_carry_entry("9.1", "9.7"), batch) == {"9.1"}  # end not in the batch
+    assert stage2._entry_keys(_carry_entry("7.4", "7.5"), batch) == {"7.4"}  # start not in the batch
+
+
+def test_unclaimed_pending_keeps_what_the_reply_left_alone_and_yields_what_it_claimed():
+    batch = [_p(i, f"Line {i}") for i in range(40, 60)]
+    held = [_carry_entry(40, 42), _carry_entry(43, 44)]
+    assert stage2._unclaimed_pending(held, [], batch) == (held, [])
+    reply = [_carry_entry(44, 47), _carry_entry(48, 52)]  # claims 44: the second held entry is replaced
+    assert stage2._unclaimed_pending(held, reply, batch) == ([held[0]], reply)
+    assert stage2._unclaimed_pending(held, [_carry_entry(40, 47)], batch) == ([], [_carry_entry(40, 47)])
+    assert stage2._unclaimed_pending([], reply, batch) == ([], reply)
+    reversed_span = _carry_entry(47, 45)  # claims nothing, and is never dropped here
+    assert stage2._unclaimed_pending(held, [reversed_span], batch) == (held, [reversed_span])
+
+
+def test_unclaimed_pending_ignores_recovered_rows_as_claims_and_drops_the_duplicate():
+    batch = [{"idx": f"9.{r}", "type": "table_row", "text": f"row {r}"} for r in range(6)]
+    held = [_carry_entry("9.0", "9.1"), _carry_entry("9.2", recovered_row=True)]
+    recovered = [_carry_entry(f"9.{r}", recovered_row=True) for r in range(3)]
+    later = _carry_entry("9.3", "9.5")
+    restored, kept = stage2._unclaimed_pending(held, recovered + [later], batch)
+    assert restored == held  # a recovered row claims nothing
+    assert kept == [later]  # the rows the restored entries hold are not emitted twice
+
+
+
+# ------------------------------------------------- _gap_fill (#1226)
+
+def _gap(restored, reply, batch, repeated=frozenset()):
+    counts = stage2.BatchCarryCounts()
+    out = stage2._gap_fill(restored, reply, batch, set(repeated), counts)
+    return out, (counts.gap_filled_entries, counts.gap_filled_attached)
+
+
+def test_gap_fill_confidence_is_the_recovered_row_s_not_the_model_s():
+    assert stage2.GAP_FILL_CONFIDENCE == 0.5  # below the 1.0 a model delimiter defaults to
+
+
+def _gap_line(idx, text):
+    return {"element_idx_start": idx, "element_idx_end": idx, "element_type": "paragraph",
+            "confidence": stage2.GAP_FILL_CONFIDENCE, "text": text, "gap_filled": True}
+
+
+def test_gap_fill_puts_back_each_unclaimed_line_before_the_first_claim():
+    batch = [_p(40, "Held head"), _p(41, "Overall rating 5"), _p(42, "Comments:"), _p(43, "Clear lectures 4"),
+             _p(44, "Claimed record"), _p(45, "Late unclaimed line")]
+    held = [_carry_entry(40, text="Held head")]
+    out, counts = _gap(held, [_carry_entry(44, text="Claimed record")], batch)
+    assert out == held + [_gap_line(41, "Overall rating 5"), _gap_line(42, "Comments:"),
+                          _gap_line(43, "Clear lectures 4")]
+    assert counts == (3, 0)  # 45 sits after the first claim: out of scope
+
+
+def test_gap_fill_appends_a_line_that_runs_on_from_the_entry_above():
+    batch = [_p(40, "Held head that runs"), _p(41, "on to this line"), _p(42, "and this one."),
+             _p(43, "but not past a full stop"), _p(44, "Claimed")]
+    held = [_carry_entry(40, text="Held head that runs", element_type="paragraph")]
+    out, counts = _gap(held, [_carry_entry(44)], batch)
+    assert out == [{"element_idx_start": 40, "element_idx_end": 42, "element_type": "paragraph",
+                    "text": "Held head that runs\ton to this line\tand this one."},
+                   _gap_line(43, "but not past a full stop")]
+    assert counts == (1, 2)
+
+
+def test_gap_fill_chains_a_run_on_line_onto_a_filled_line():
+    batch = [_p(40, "Held."), _p(41, "Gap line that runs"), _p(42, "on here"), _p(43, "Claimed")]
+    out, counts = _gap([_carry_entry(40, text="Held.")], [_carry_entry(43)], batch)
+    assert out[1:] == [{**_gap_line(41, "Gap line that runs"), "element_idx_end": 42,
+                        "text": "Gap line that runs\ton here"}]
+    assert counts == (1, 1)
+
+
+def test_gap_fill_never_appends_across_a_blank_or_an_unfilled_line():
+    batch = [_p(40, "Held head"), _blank(41), _p(42, "after a blank"), _p(43, "12"), _p(44, "after page"),
+             _p(45, "Claimed")]
+    out, counts = _gap([_carry_entry(40, text="Held head")], [_carry_entry(45)], batch)
+    assert out[1:] == [_gap_line(42, "after a blank"), _gap_line(44, "after page")]
+    assert counts == (2, 0)
+
+
+def test_gap_fill_needs_a_claim_and_skips_held_lines_rows_and_recovered_rows():
+    batch = [_p(40, "Held head"), _p(41, "Held tail"), {"idx": "41.0", "type": "table_row", "text": "row text"},
+             _p(42, "Gap line"), _p(43, "Claimed")]
+    held = [_carry_entry(40, 41, text="Held head\tHeld tail")]
+    assert _gap(held, [], batch) == (held, (0, 0))  # nothing claimed: nothing filled
+    recovered_first = [_carry_entry("41.0", recovered_row=True), _carry_entry(43)]
+    out, counts = _gap(held, recovered_first, batch)
+    assert out == held + [_gap_line(42, "Gap line")]  # a recovered row is not the reply's first claim
+    assert counts == (1, 0)
+    out, _ = _gap([], [_carry_entry(43)], batch)
+    assert out == [_gap_line(40, "Held head"), _gap_line(41, "Held tail"), _gap_line(42, "Gap line")]
+
+
+def test_gap_fill_leaves_a_line_that_is_not_content():
+    batch = [_p(40, "Held."), _p(41, "- 3 -"), _p(42, "Page 4 of 9"), _p(43, "Strengths:"), _blank(44),
+             _p(45, "Weaknesses:"), _p(46, "Summary:"), _blank(47), _p(48, "Dr Name CV"),
+             _p(49, "Kept line here"), _p(50, "Claimed")]
+    out, counts = _gap([_carry_entry(40, text="Held.")], [_carry_entry(50)], batch, {"Dr Name CV"})
+    assert out[1:] == [_gap_line(49, "Kept line here")]
+    assert counts == (1, 0)
+
+
+@pytest.mark.parametrize("text", ["12", "3 of 10", "3/10", "- 4 -", "Page 7", "page7", "PAGE 2 OF 3", "***",
+                                  "12-34", "- 3 of 10 -"])
+def test_gap_line_page_numbers_and_letterless_lines_are_not_content(text):
+    assert not stage2._gap_line_is_content(0, [_p(0, text), _p(1, "Next line")], set())
+
+
+@pytest.mark.parametrize("text", ["Rated 5 of 5 by the class", "Lecture 3", "Pagemaster award"])
+def test_gap_line_with_a_number_inside_text_is_content(text):
+    assert stage2._gap_line_is_content(0, [_p(0, text), _p(1, "Next line")], set())
+
+
+def test_gap_line_a_bare_label_is_content_only_when_a_content_line_follows():
+    assert stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _p(1, "Clear lectures")], set())
+    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _p(1, "Weaknesses:")], set())
+    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:"), _blank(1)], set())
+    assert not stage2._gap_line_is_content(0, [_p(0, "Strengths:")], set())
+    assert stage2._gap_line_is_content(0, [_p(0, "Strengths: clear"), _blank(1)], set())
+
+
+def test_gap_line_a_short_repeated_line_is_a_running_footer_but_a_long_one_is_content():
+    short = "Teaching portfolio of a professor"  # 5 words
+    six = "Teaching portfolio of a full professor"
+    seven = "Teaching portfolio of a full professor here"
+    assert stage2.GAP_FILL_REPEAT_MAX_WORDS == 6
+    for text, kept in ((short, False), (six, False), (seven, True)):
+        assert stage2._gap_line_is_content(0, [_p(0, text), _p(1, "x")], {text}) is kept
+    assert stage2._gap_line_is_content(0, [_p(0, short), _p(1, "x")], set())
+
+
+def test_repeated_lines_counts_paragraph_text_once_normalised():
+    section = [_p(1, "Footer  text"), _p(2, "Footer text"), _p(3, "Once"),
+               {"idx": "4.0", "type": "table_row", "text": "Once"}, _blank(5), _blank(6)]
+    assert stage2._repeated_lines(section) == {"Footer text"}
+
+
+@pytest.mark.parametrize(("last", "line", "runs_on"), [
+    ("Taught the course", "to residents", True), ("Taught the course.", "to residents", False),
+    ("Taught the course!", "to residents", False), ("Taught the course?", "to residents", False),
+    ("Taught the course;", "to residents", False), ("Topic:", "residents", False),
+    ("Taught the course", "To residents", False), ("Taught the course", "", False),
+    ("", "to residents", False), ("first\tlast line  ", "goes on", True), ("first.\tlast line", "x", True),
+    ("first\tlast.", "x", False), ("first\tlast.  ", "x", False), ("first\t  ", "x", False),
+])
+def test_continues_line_reads_the_entry_s_last_line(last, line, runs_on):
+    assert stage2._continues_line(last, line) is runs_on
+
+
+def test_is_bare_label():
+    assert stage2._is_bare_label("Strengths:")
+    assert stage2._is_bare_label("Strengths :  ")
+    assert not stage2._is_bare_label("Strengths: clear")
+    assert not stage2._is_bare_label("Strengths")
+
+
+# ------------------------------------------------- fold_bare_trailing_dates (#1226)
+
+def _date_els(*lines):
+    """Elements 0..n from text lines; "" is a blank line."""
+    return [{"unified_idx": i, "type": "paragraph" if t else "empty", "text": t} for i, t in enumerate(lines)]
+
+
+def _date_fold(entries, elements):
+    return stage2.fold_bare_trailing_dates(entries, build_element_index_map({"elements": elements}))
+
+
+def _blank_break(idx):
+    return _fold_entry(idx, text="", etype="break")
+
+
+@pytest.mark.parametrize("date", ["2019", "June 2019", "7/2017 - 6/2019", "2018 \u2013 present", "Jan. 5, 2020"])
+def test_bare_date_fold_joins_a_trailing_date_across_a_blank(date):
+    elements = _date_els("Course title", "", "PGY-2 residents", "", date)
+    entries = [_fold_entry(0, 2, text="Course title\tPGY-2 residents", etype="table", conf=0.6),
+               _blank_break(1), _blank_break(3), _fold_entry(4, text=date)]
+    out = _date_fold(entries, elements)
+    assert out == [_blank_break(1),  # inside the record already: left as it was
+                   {"element_idx_start": 0, "element_idx_end": 4, "element_type": "table", "confidence": 0.6,
+                    "hierarchy": _HIER, "text": "Course title\tPGY-2 residents\t" + date}]
+
+
+def test_bare_date_fold_joins_an_adjacent_trailing_date():
+    elements = _date_els("Course title", "Level", "2019", "Next course")
+    entries = [_fold_entry(0, 1, text="Course title\tLevel"), _fold_entry(2, text="2019"),
+               _fold_entry(3, text="Next course")]
+    assert _spans(_date_fold(entries, elements)) == [(0, 2), (3, 3)]
+
+
+def test_bare_date_fold_never_joins_a_record_that_has_a_year():
+    elements = _date_els("Course title 2018", "", "2019")
+    entries = [_fold_entry(0, text="Course title 2018"), _fold_entry(2, text="2019")]
+    assert _date_fold(entries, elements) is entries
+
+
+def test_bare_date_fold_reads_the_records_full_text_not_a_truncated_one():
+    long_line = "Course " + "x" * 200 + " 2018"  # the year sits past the prompt's 150-character cut
+    elements = _date_els(long_line, "2019")
+    entries = [_fold_entry(0, text=long_line), _fold_entry(1, text="2019")]
+    assert _date_fold(entries, elements) is entries
+
+
+def test_bare_date_fold_never_crosses_a_non_blank_line():
+    elements = _date_els("Course title", "Unclaimed note", "2019")
+    entries = [_fold_entry(0, text="Course title"), _fold_entry(1, text="Unclaimed note", etype="break"),
+               _fold_entry(2, text="2019")]
+    assert _date_fold(entries, elements) is entries
+
+
+def test_bare_date_fold_leaves_a_run_of_bare_dates_alone():
+    elements = _date_els("Course one", "Course two", "", "2019", "2020")  # a stacked date column
+    entries = [_fold_entry(0, text="Course one"), _fold_entry(1, text="Course two"),
+               _fold_entry(3, text="2019"), _fold_entry(4, text="2020")]
+    assert _date_fold(entries, elements) is entries
+
+
+def test_bare_date_fold_needs_a_one_line_date_only_entry():
+    elements = _date_els("Course title", "2019", "2020", "Course two", "2019 Award")
+    two_line = [_fold_entry(0, text="Course title"), _fold_entry(1, 2, text="2019\t2020")]
+    assert _date_fold(two_line, elements) is two_line
+    date_and_blank = _date_els("Course title", "2019", "", "Next")
+    spans_a_blank = [_fold_entry(0, text="Course title"), _fold_entry(1, 2, text="2019")]  # text skips the blank
+    assert _date_fold(spans_a_blank, date_and_blank) is spans_a_blank
+    not_bare = [_fold_entry(3, text="Course two"), _fold_entry(4, text="2019 Award")]
+    assert _date_fold(not_bare, elements) is not_bare
+
+
+def test_bare_date_fold_stays_inside_one_section_and_out_of_table_rows():
+    elements = _date_els("Course title", "2019")
+    other_section = [_fold_entry(0, text="Course title"), _fold_entry(1, text="2019", hier=["Other"])]
+    assert _date_fold(other_section, elements) is other_section
+    rows = [{"unified_idx": 0, "type": "table_content", "text": "Course title"}, _date_els("", "2019")[1]]
+    row_record = [_fold_entry(0, text="Course title"), _fold_entry(1, text="2019")]
+    assert _date_fold(row_record, rows) is row_record
+    breaks = [_fold_entry(0, text="Course title", etype="break"), _fold_entry(1, text="2019")]
+    assert _date_fold(breaks, elements) is breaks  # an unclaimed line is not a record to complete
+    header = [_fold_entry(0, text="Course title", etype="header"), _fold_entry(1, text="2019")]
+    assert _date_fold(header, elements) is header
+
+
+def test_bare_date_fold_never_crosses_a_missing_element():
+    elements = [{"unified_idx": 0, "type": "paragraph", "text": "Course title"},
+                {"unified_idx": 2, "type": "paragraph", "text": "2019"}]
+    entries = [_fold_entry(0, text="Course title"), _fold_entry(2, text="2019")]
+    assert _date_fold(entries, elements) is entries
+
+
+def test_bare_date_fold_takes_one_date_per_record():
+    elements = _date_els("Course one", "", "2019", "", "Course two", "", "2020")
+    entries = [_fold_entry(0, text="Course one"), _fold_entry(2, text="2019"),
+               _fold_entry(4, text="Course two"), _fold_entry(6, text="2020")]
+    out = _date_fold(entries, elements)
+    assert _spans(out) == [(0, 2), (4, 6)]
+    assert [e["text"] for e in out] == ["Course one\t2019", "Course two\t2020"]
+
+
+@pytest.mark.parametrize("text", ["2018 - present", "2018 - current", "2018 to now", "2018\u2013ongoing",
+                                  "2019.", "June 2019,", "Sep 2019", "Sept. 2019", "1/2018, 3/2019"])
+def test_bare_date_regex_accepts_each_date_shape(text):
+    assert stage2.BARE_DATE_RE.match(text)
+
+
+@pytest.mark.parametrize("text", ["PGY-2", "Room 2019 A", "1234", "2019 Award", "Fall"])
+def test_bare_date_regex_rejects_text_that_is_not_only_a_date(text):
+    assert not stage2.BARE_DATE_RE.match(text)

@@ -103,6 +103,8 @@ jobs:
         run: python3 scripts/test_score_vs_autopsy.py
       - name: stage3b_layout_ab self-tests
         run: python3 scripts/test_stage3b_layout_ab.py
+      - name: stage2_replay self-tests
+        run: python3 scripts/test_stage2_replay.py
       - name: summary_claim_audit self-tests
         run: python3 scripts/test_summary_claim_audit.py
       - name: run_corpus_batch.sh self-tests
