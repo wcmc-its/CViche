@@ -214,11 +214,11 @@ export function costOutliers(rows: BatchRow[]): Map<string, CostOutlier> {
   return outliers
 }
 
-/** "About 9× larger than the others in this batch: estimated $23.10 against a median of $2.67."
+/** "About 9× the cost of the others in this batch: estimated $23.10 against a median of $2.67."
  *  The dollars only with `showCost` (admins, #1111). */
 export function outlierText({ ratio, cost, medianCost }: CostOutlier, showCost: boolean): string {
   const dollars = showCost && cost !== null && medianCost !== null ? `: estimated ${formatCost(cost)} against a median of ${formatCost(medianCost)}` : ''
-  return `About ${Math.round(ratio)}× larger than the others in this batch${dollars}.`
+  return `About ${Math.round(ratio)}× the cost of the others in this batch${dollars}.`
 }
 
 /** Flagged rows the user has not yet chosen to include. */
@@ -313,7 +313,7 @@ export function missingItems({ rows, multi, attested, quota }: MissingInput): st
   const shortfall = valid ? quotaShortfall(valid, quota) : ''
   if (shortfall) missing.push(shortfall)
   const outliers = unconfirmedOutliers(rows)
-  if (outliers) missing.push(`Include or remove ${outliers} unusually large ${plural(outliers, 'CV', 'CVs')}`)
+  if (outliers) missing.push(`Include or remove ${outliers} unusually costly ${plural(outliers, 'CV', 'CVs')}`)
   if (!attested) missing.push('Agree to the upload terms')
   return missing
 }
