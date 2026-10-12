@@ -44,6 +44,10 @@ spec:
             # so the 3rd concurrent run got the "at capacity" 429. Bump to 3 to
             # match prod now that the memory limit is 2Gi. The real fix for the
             # ceiling is the pub/sub->Streams + worker migration.
+            # No effect while CVICHE_DISPATCH_MODE=queue (kustomization.yaml): the
+            # worker replica counts cap runs then. Kept equal to the code default
+            # (test_release_guards) as the fallback if dev returns to in_process.
+            # See docs/TECHNICAL_README.md "Run Concurrency".
             - name: CVICHE_MAX_CONCURRENT_RUNS
               value: "3"
             # "Original file" downloads wait for GuardDuty's NO_THREATS_FOUND
