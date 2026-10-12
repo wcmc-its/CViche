@@ -38,6 +38,7 @@ Every person/entry named below is invented.
     python3 -m pytest src/unified_pipeline/tests/test_stage6_placeholder_shape_guard.py -p no:cacheprovider
 """
 import sys
+from datetime import date
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -219,7 +220,7 @@ def test_wrong_shaped_table_after_current_funding_is_untouched_and_the_grant_sti
 
     gen._fill_research_support(
         {'M2A': [_m2a_entry('Sentinel-Adjacent Project', 'NIH')], 'M2B': [], 'M2C': []},
-        current_year=2026)
+        as_of=date(2026, 1, 1))
 
     rows = [tuple(c.text for c in r.cells) for r in sentinel_table.rows]
     assert rows == [('SENTINEL-DO-NOT-TOUCH', 'Role', 'Dates')]
@@ -238,7 +239,7 @@ def test_n2s_exact_label_after_past_funding_is_not_removed():
     doc.add_paragraph().add_run(PENDING).bold = True
     gen.doc = doc
 
-    gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, current_year=2026)
+    gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, as_of=date(2026, 1, 1))
 
     assert n2_table._tbl in [t._tbl for t in gen.doc.tables]
     assert n2_table.rows[0].cells[0].text == N2_LABEL
@@ -323,7 +324,7 @@ def test_guard_is_safe_on_an_empty_table_in_the_render_flow():
 
     gen._fill_research_support(
         {'M2A': [_m2a_entry('Post-Empty-Table Project', 'NIH')], 'M2B': [], 'M2C': []},
-        current_year=2026)
+        as_of=date(2026, 1, 1))
 
     # No exception, and the grant still rendered.
     assert any(t.rows and t.rows[0].cells[0].text == 'Award Source:' for t in gen.doc.tables)
@@ -335,7 +336,7 @@ def test_real_template_no_entries_removes_only_m2_own_placeholder():
     gen = _real_template_generator()
     before = _table_labels(gen)
 
-    gen._fill_research_support({}, None, 'synthetic-uid', current_year=2026)
+    gen._fill_research_support({}, None, 'synthetic-uid', as_of=date(2026, 1, 1))
 
     after = _table_labels(gen)
     assert len(after) == len(before) - 1
@@ -349,7 +350,7 @@ def test_real_template_one_entry_leaves_n2_and_mentee_placeholders_in_place():
 
     gen._fill_research_support(
         {'M2A': [_m2a_entry('Synthetic Study of Widgets', 'NIH')]},
-        None, 'synthetic-uid', current_year=2026)
+        None, 'synthetic-uid', as_of=date(2026, 1, 1))
 
     after = _table_labels(gen)
     assert 'Award Source:' in after
@@ -376,7 +377,7 @@ def test_real_template_l3_content_with_no_grants_or_mentees_removes_both_mentee_
     """
     gen = _real_template_generator()
 
-    gen._fill_research_support({}, None, 'synthetic-uid', current_year=2026)
+    gen._fill_research_support({}, None, 'synthetic-uid', as_of=date(2026, 1, 1))
     gen._fill_mentoring({})
     l3_entry = {
         'text': 'Director, Synthetic Wound Care Program',

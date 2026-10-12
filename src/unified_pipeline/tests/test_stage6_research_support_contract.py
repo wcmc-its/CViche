@@ -36,6 +36,7 @@ Run with:
 import ast
 import logging
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import docx
@@ -64,7 +65,9 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     claim_goal_rows,
     fill_major_goals_from_text,
     filter_role_effort_headers,
+    grant_end_date,
     grant_end_year,
+    grant_has_ended,
     grant_id_tokens,
     is_role_effort_header,
     match_effort_for_title,
@@ -87,6 +90,11 @@ HEADERS = (CURRENT, COMPLETED, PENDING)
 # off the clock, so the boundary cases stay true after 2026 (thread 3932312407
 # item 7).
 TEST_YEAR = 2026
+# The date the date rules are judged against. New Year's Day, so an end date
+# anywhere in TEST_YEAR, at any precision, has not yet passed and the year-level
+# boundary cases read as they did before month precision (#1713); the
+# month-level cases pass their own `as_of`.
+TEST_AS_OF = date(TEST_YEAR, 1, 1)
 
 
 def _generator(emit_comments=False):
@@ -171,7 +179,7 @@ def test_under_review_status_moves_an_m2a_grant_to_pending():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Under Review Project', agency='NIH',
                         status='Under review', start_date='01/2026')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == []
     assert _titles_under(gen, COMPLETED) == []
@@ -189,7 +197,7 @@ def test_under_review_status_moves_an_m2b_grant_to_pending():
     gen._fill_research_support(
         {'M2B': [_entry('M2B', title='Resubmitted Project', agency='NIH',
                         status='Under review', start_date='01/2020')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, COMPLETED) == []
     assert _titles_under(gen, PENDING) == ['Resubmitted Project']
@@ -208,7 +216,7 @@ def test_past_m2a_grant_is_rendered_under_completed_funding():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Ended Project Study', agency='NIH',
                         start_date='01/2018', end_date='06/2020')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == []
     assert _titles_under(gen, COMPLETED) == ['Ended Project Study']
@@ -236,7 +244,7 @@ def test_current_end_date_does_not_move_m2a_grant(end_date):
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Ongoing Project Study', agency='NIH',
                         start_date='01/2019', end_date=end_date)]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Ongoing Project Study']
     assert _titles_under(gen, COMPLETED) == []
@@ -245,28 +253,28 @@ def test_current_end_date_does_not_move_m2a_grant(end_date):
 # --- item 4: a future end date stays current ------------------------------------
 
 def test_future_m2a_end_date_remains_current():
-    """The other side of the boundary: an end date after `current_year` stays M2A.
+    """The other side of the boundary: an end date after `as_of` stays M2A.
 
-    Judged against the injected year, so the test does not start failing when
+    Judged against the injected date, so the test does not start failing when
     the wall clock passes 2030 (review thread 3932451691 item 4).
     """
     gen = _sectioned_generator()
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Future Project Study', agency='NIH',
                         start_date='01/2026', end_date='2030-12')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Future Project Study']
     assert _titles_under(gen, COMPLETED) == []
 
 
-def test_end_date_in_the_current_year_remains_current():
-    """The comparison is `end_year < current_year`, so this year is still current."""
+def test_end_date_later_this_year_remains_current():
+    """An end month after `as_of`'s month has not passed, so the grant is current."""
     gen = _sectioned_generator()
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='This Year Project', agency='NIH',
                         start_date='01/2026', end_date=f'06/{TEST_YEAR}')]},
-        current_year=TEST_YEAR)
+        as_of=date(TEST_YEAR, 5, 15))
 
     assert _titles_under(gen, CURRENT) == ['This Year Project']
 
@@ -402,7 +410,7 @@ def test_principal_investigator_role_auto_fills_cv_owner():
                         pi_role='Principal Investigator', start_date='01/2019',
                         end_date='Present')]},
         cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     cells = _cells(_tables_under(gen, CURRENT)[0])
     assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
@@ -426,7 +434,7 @@ def test_bare_pi_role_auto_fills_cv_owner_through_the_grant_table():
         {'M2A': [_entry('M2A', title='Owner Led Trial', agency='NIH',
                         pi_role='PI', start_date='01/2019', end_date='Present')]},
         cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     cells = _cells(_tables_under(gen, CURRENT)[0])
     assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
@@ -458,7 +466,7 @@ def test_co_principal_investigator_role_leaves_the_pi_cell_empty_in_the_grant_ta
                         pi_role='Co-Principal Investigator', start_date='01/2019',
                         end_date='Present')]},
         cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     cells = _cells(_tables_under(gen, CURRENT)[0])
     assert cells['Name of Principal Investigator:'] == ''
@@ -1120,7 +1128,7 @@ def test_a_valued_effort_row_reaches_the_appendix_through_the_section():
     gen = _sectioned_generator()
     fragment = _entry('M2A', text='Percent Effort: | 35\nTotal Direct Costs: | $12,345',
                       percent_effort='35%', total_funding='$12,345')
-    gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2A': [fragment]}, as_of=TEST_AS_OF)
 
     assert [e['text'] for e in gen._declined_grant_entries] == [fragment['text']]
 
@@ -1134,7 +1142,7 @@ def test_a_blank_effort_label_with_value_rows_reaches_the_appendix_through_the_s
     gen = _sectioned_generator()
     fragment = _entry('M2A', text='Percent Effort: |\nTotal Direct Costs: | $12,345',
                       total_funding='$12,345')
-    gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2A': [fragment]}, as_of=TEST_AS_OF)
 
     assert [e['text'] for e in gen._declined_grant_entries] == [fragment['text']]
 
@@ -1155,7 +1163,7 @@ def test_a_value_the_header_shape_check_used_to_miss_reaches_the_appendix(text, 
     the list `generate()` sends to the Appendix."""
     gen = _sectioned_generator()
     fragment = _entry('M2A', text=text, **fields)
-    gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2A': [fragment]}, as_of=TEST_AS_OF)
 
     assert [e['text'] for e in gen._declined_grant_entries] == [text]
 
@@ -1168,7 +1176,7 @@ def test_a_titled_grant_that_starts_with_an_effort_row_is_rendered():
     gen = _sectioned_generator()
     entry = _entry('M2A', text='Percent Effort: | 35\nTitle of Grant: | Example Titled Study',
                    title='Example Titled Study', percent_effort='35%')
-    gen._fill_research_support({'M2A': [entry]}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2A': [entry]}, as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Example Titled Study']
 
@@ -1267,7 +1275,7 @@ def test_extracted_effort_reaches_the_rendered_percent_effort_cell():
             _entry('M2A', title='Project Beta', agency='NSF', start_date='01/2019',
                    end_date='Present'),
         ]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     rendered = {_cells(t)['Project title:']: _cells(t)['Your percent (%) effort:']
                 for t in _tables_under(gen, CURRENT)}
@@ -1280,7 +1288,7 @@ def test_role_effort_header_row_is_not_rendered_as_a_grant():
     gen._fill_research_support(
         {'M2A': [{'text': "Individual's role in project including percent effort\n"
                           'Project Alpha 0.01'}]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _tables_under(gen, CURRENT) == []
 
@@ -1308,7 +1316,7 @@ def test_extracted_percent_effort_takes_precedence_in_the_rendered_cell():
             _entry('M2A', title='Project Alpha', agency='NIH', percent_effort='12%',
                    start_date='01/2019', end_date='Present'),
         ]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _cells(_tables_under(gen, CURRENT)[0])['Your percent (%) effort:'] == '12%'
 
@@ -1341,7 +1349,7 @@ def test_prefix_related_projects_render_their_own_percent_effort():
             _entry('M2A', title='Project Alpha Extended', agency='NIH',
                    start_date='01/2019', end_date='Present'),
         ]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     rendered = {_cells(t)['Project title:']: _cells(t)['Your percent (%) effort:']
                 for t in _tables_under(gen, CURRENT)}
@@ -1638,7 +1646,7 @@ def test_section_fill_does_not_mutate_the_callers_entries():
                  for e in entries_by_code['M2A']]
 
     gen = _sectioned_generator()
-    gen._fill_research_support(entries_by_code, current_year=TEST_YEAR)
+    gen._fill_research_support(entries_by_code, as_of=TEST_AS_OF)
 
     assert entries_by_code['M2A'] == submitted
 
@@ -1986,7 +1994,7 @@ def test_section_fill_renders_the_claimed_goal_and_returns_the_row():
 
     gen = _sectioned_generator()
     claimed = gen._fill_research_support({'M2B': [grant], 'T': t_entries},
-                                         current_year=TEST_YEAR)
+                                         as_of=TEST_AS_OF)
 
     assert claimed == [row] and claimed[0] is row
     assert _cells(_tables_under(gen, COMPLETED)[0])['Major project goals:'] == _GOAL
@@ -2000,7 +2008,7 @@ def test_section_fill_renders_the_goal_from_the_grant_own_text(code, header):
     grant['taxonomy_code'] = code
 
     gen = _sectioned_generator()
-    claimed = gen._fill_research_support({code: [grant]}, current_year=TEST_YEAR)
+    claimed = gen._fill_research_support({code: [grant]}, as_of=TEST_AS_OF)
 
     assert claimed == []
     assert _cells(_tables_under(gen, header)[0])['Major project goals:'] == _GOAL
@@ -2013,7 +2021,7 @@ def test_a_row_claimed_by_a_declined_grant_is_not_returned():
 
     gen = _sectioned_generator()
     claimed = gen._fill_research_support({'M2B': [sparse], 'T': [_goal_row(238)]},
-                                         current_year=TEST_YEAR)
+                                         as_of=TEST_AS_OF)
 
     assert claimed == []
     assert gen._declined_grant_entries
@@ -2022,7 +2030,7 @@ def test_a_row_claimed_by_a_declined_grant_is_not_returned():
 def test_a_row_claimed_by_a_grant_under_a_missing_header_is_not_returned():
     gen = _generator()  # no funding headers: nothing renders
     claimed = gen._fill_research_support({'M2B': [_grant(236, 238)], 'T': [_goal_row(238)]},
-                                         current_year=TEST_YEAR)
+                                         as_of=TEST_AS_OF)
 
     assert claimed == []
 
@@ -2090,11 +2098,11 @@ def test_reclassification_note_is_attached_as_a_document_comment():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Ended Project Study', agency='NIH',
                         start_date='01/2018', end_date='06/2020')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
     assert notes == ['Reclassified from Current (M2A) to Completed (M2B): '
-                     f'end date 06/2020 is before {TEST_YEAR}']
+                     f'end date 06/2020 is before {TEST_AS_OF.isoformat()}']
     assert gen.stats['comments_added'] == 1
 
     # The comment must hang off the grant's own table, not off some other
@@ -2109,7 +2117,7 @@ def test_status_rebucket_note_is_attached_as_a_document_comment():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Under Review Project', agency='NIH',
                         status='Under review', start_date='01/2026')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
     assert notes == ["Reclassified to Pending (M2C): status is 'Under review'"]
@@ -2121,7 +2129,7 @@ def test_no_reclassification_leaves_no_reclassification_comment():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Ongoing Project Study', agency='NIH',
                         start_date='01/2019', end_date='Present')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert [c for c in gen._comments if c['author'] == 'Reclassification'] == []
 
@@ -2134,7 +2142,7 @@ def test_missing_section_header_renders_nothing_and_does_not_raise():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Homeless Project Study', agency='NIH',
                         start_date='01/2019')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert gen.doc.tables == []
     assert gen.stats['tables_populated'] == 0
@@ -2152,7 +2160,7 @@ def test_existing_template_table_is_removed_even_when_the_category_is_empty():
     gen.doc.add_paragraph().add_run(COMPLETED).bold = True
     gen.doc.add_paragraph().add_run(PENDING).bold = True
 
-    gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, as_of=TEST_AS_OF)
 
     assert gen.doc.tables == []
 
@@ -2169,7 +2177,7 @@ def test_existing_template_table_is_replaced_by_the_grant_tables():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Replacement Project Study', agency='NIH',
                         start_date='01/2019', end_date='Present')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Replacement Project Study']
     assert len(gen.doc.tables) == 1
@@ -2178,7 +2186,7 @@ def test_existing_template_table_is_replaced_by_the_grant_tables():
 def test_empty_category_renders_no_table():
     """An empty bucket contributes nothing under its header."""
     gen = _sectioned_generator()
-    gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, as_of=TEST_AS_OF)
 
     assert gen.doc.tables == []
     assert gen.stats['entries_inserted'] == 0
@@ -2194,7 +2202,7 @@ def test_grants_are_sorted_reverse_chronologically():
             _entry('M2A', title='Newer Project Study', agency='NIH',
                    start_date='01/2021', end_date='12/2030'),
         ]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Newer Project Study', 'Older Project Study']
 
@@ -2206,7 +2214,7 @@ def test_spacing_paragraph_sits_between_grants_but_not_after_the_last():
         {'M2A': [_entry('M2A', title=f'Spaced Project {n} Study', agency='NIH',
                         start_date='01/2019', end_date=f'12/20{30 - n}')
                  for n in (1, 2, 3)]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _tags_under(gen, CURRENT) == ['tbl', 'p', 'tbl', 'p', 'tbl']
 
@@ -2217,7 +2225,7 @@ def test_a_single_grant_gets_no_spacing_paragraph():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Lonely Project Study', agency='NIH',
                         start_date='01/2019', end_date='Present')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _tags_under(gen, CURRENT) == ['tbl']
 
@@ -2238,7 +2246,7 @@ def test_each_grant_table_lands_after_its_own_section_header():
             'M2C': [_entry('M2C', title='Pending Project Study', agency='NIH',
                            start_date='01/2027')],
         },
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Current Project Study']
     assert _titles_under(gen, COMPLETED) == ['Completed Project Study']
@@ -2273,7 +2281,7 @@ def test_not_funded_grants_are_kept_under_pending_with_a_review_note():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Declined Project Study', agency='NIH',
                         status='Not funded', start_date='01/2026')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, PENDING) == ['Declined Project Study']
     notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
@@ -2321,7 +2329,7 @@ def test_reclassify_past_m2a_grants_leaves_its_inputs_alone():
     m2a = [entry]
     m2b = []
 
-    current, completed, messages = reclassify_past_m2a_grants(m2a, m2b, TEST_YEAR)
+    current, completed, messages = reclassify_past_m2a_grants(m2a, m2b, TEST_AS_OF)
 
     assert m2a == [entry] and m2b == []
     assert current == [] and completed == [entry]
@@ -2416,7 +2424,7 @@ def test_an_application_coded_completed_renders_under_pending_as_a_request():
         {'M2B': [_under(['GRANTS APPLIED'], code='M2B', title='Kestrel Bone Density Study',
                         agency='Example Foundation', total_funding='$62,841',
                         start_date='12/2010', end_date='12/2010')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     (table,) = _tables_under(gen, PENDING)
     cells = _cells(table)
@@ -2448,7 +2456,7 @@ def test_not_funded_heading_keeps_the_grant_under_pending_with_a_review_note():
     gen._fill_research_support(
         {'M2B': [_under(['NOT FUNDED'], code='M2B', title='Declined Heading Study',
                         agency='NIH', start_date='01/2020')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, PENDING) == ['Declined Heading Study']
     notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
@@ -2469,7 +2477,7 @@ def test_a_current_grant_support_heading_moves_nothing():
 def test_an_m2b_grant_still_running_is_promoted_to_current(end_date):
     entry = _under(['Grants'], code='M2B', title='Running Study', end_date=end_date)
 
-    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
 
     assert (current, completed) == ([entry], [])
     assert entry['reclassification_note'].startswith('Reclassified from Completed (M2B)')
@@ -2485,7 +2493,7 @@ def test_an_m2b_grant_still_running_is_promoted_to_current(end_date):
 def test_an_m2b_grant_that_is_not_running_stays_completed(fields):
     entry = _under(['Grants'], code='M2B', title='Past Study', **fields)
 
-    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
 
     assert (current, completed, messages) == ([], [entry], [])
 
@@ -2499,7 +2507,7 @@ def test_an_m2b_grant_under_a_past_heading_is_not_promoted_on_an_open_end_date(h
     """"ongoing" in a grant filed under "Past Grant Support" does not outvote the heading."""
     entry = _under(heading, code='M2B', title='Past Study', end_date='ongoing')
 
-    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
 
     assert (current, completed) == ([], [entry])
 
@@ -2508,7 +2516,7 @@ def test_an_m2b_grant_under_a_past_and_present_heading_is_promoted_on_its_date()
     entry = _under(['Past and Present Funding'], code='M2B', title='Running Study',
                    end_date='2028')
 
-    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
 
     assert (current, completed) == ([entry], [])
 
@@ -2516,7 +2524,7 @@ def test_an_m2b_grant_under_a_past_and_present_heading_is_promoted_on_its_date()
 def test_an_m2b_grant_whose_heading_says_completed_stays_completed():
     entry = _under(['Completed Grants'], code='M2B', title='Past Study', end_date='2028')
 
-    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
 
     assert (current, completed) == ([], [entry])
 
@@ -2526,7 +2534,7 @@ def test_a_grant_already_moved_by_a_rule_is_not_promoted_back():
     entry = _under(['Grants'], code='M2B', title='Moved', end_date='2028')
     entry['reclassification_note'] = 'Reclassified from Current (M2A) to Completed (M2B)'
 
-    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
 
     assert (current, completed) == ([], [entry])
 
@@ -2535,7 +2543,7 @@ def test_promoting_leaves_its_inputs_alone():
     entry = _under(['Grants'], code='M2B', title='Running Study', end_date='present')
     m2a, m2b = [], [entry]
 
-    promote_open_ended_m2b_grants(m2a, m2b, TEST_YEAR)
+    promote_open_ended_m2b_grants(m2a, m2b, TEST_AS_OF)
 
     assert m2a == [] and m2b == [entry]
 
@@ -2545,7 +2553,7 @@ def test_fill_research_support_files_a_running_completed_coded_grant_under_curre
     gen._fill_research_support(
         {'M2B': [_under(['Grants'], code='M2B', title='Running Study', agency='NIH',
                         start_date='03/2024', end_date='12/2028')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, CURRENT) == ['Running Study']
     assert _titles_under(gen, COMPLETED) == []
@@ -2709,7 +2717,7 @@ def test_withdrawn_status_reaches_the_document_through_the_section_fill():
         {'M2B': [_entry('M2B', title='Withdrawn Cohort Study', agency='NIH',
                         status='withdrawn', notes='Update: withdrawn', start_date='01/2020',
                         end_date='06/2021')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
     (table,) = _tables_under(gen, COMPLETED)
     assert _cells(table)['Status:'] == 'withdrawn'
     assert _cells(table)['Notes:'] == 'Update: withdrawn'
@@ -2834,7 +2842,7 @@ def test_an_empty_pending_label_reaches_neither_bucket_nor_row_through_the_secti
                         title='Funded Cohort Study', agency='NIH',
                         status='PENDING \u2013 none', total_funding='900,000',
                         start_date='2014', end_date='2019')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     (table,) = _tables_under(gen, COMPLETED)
     assert _cells(table)['Project title:'] == 'Funded Cohort Study'
@@ -2897,7 +2905,7 @@ def test_a_current_grant_ending_past_the_shared_pivot_stays_current(end_date):
     """A five-year award starting mid-2026 ends 6/30/31: 2031, not 1931."""
     running = _entry('M2A', title='New Award Study', start_date='7/1/26', end_date=end_date)
 
-    current, completed, messages = reclassify_past_m2a_grants([running], [], TEST_YEAR)
+    current, completed, messages = reclassify_past_m2a_grants([running], [], TEST_AS_OF)
 
     assert (current, completed, messages) == ([running], [], [])
 
@@ -2906,16 +2914,16 @@ def test_a_current_grant_with_a_two_digit_year_end_in_the_past_moves_to_complete
     ended = _entry('M2A', title='Ended Study', start_date='4/1/09', end_date='4/15/14')
     running = _entry('M2A', title='Running Study', start_date='10/1/24', end_date='9/30/28')
 
-    current, completed, messages = reclassify_past_m2a_grants([ended, running], [], TEST_YEAR)
+    current, completed, messages = reclassify_past_m2a_grants([ended, running], [], TEST_AS_OF)
 
     assert (current, completed) == ([running], [ended])
-    assert ended['reclassification_note'].endswith(f'4/15/14 is before {TEST_YEAR}')
+    assert ended['reclassification_note'].endswith(f'4/15/14 is before {TEST_AS_OF.isoformat()}')
 
 
 def test_a_completed_grant_with_a_two_digit_year_end_still_running_is_promoted():
     running = _entry('M2B', title='Running Study', start_date='10/1/24', end_date='9/30/28')
 
-    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_YEAR)
+    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_AS_OF)
 
     assert (current, completed) == ([running], [])
 
@@ -2939,7 +2947,7 @@ def test_grant_end_year_reads_a_one_digit_year_against_the_start(start_date, end
 def test_a_current_grant_with_a_one_digit_year_end_in_the_past_moves_to_completed():
     ended = _entry('M2A', title='Ended Study', start_date='9/1/07', end_date='8/30/1')
 
-    current, completed, _ = reclassify_past_m2a_grants([ended], [], TEST_YEAR)
+    current, completed, _ = reclassify_past_m2a_grants([ended], [], TEST_AS_OF)
 
     assert (current, completed) == ([], [ended])
 
@@ -2947,7 +2955,7 @@ def test_a_current_grant_with_a_one_digit_year_end_in_the_past_moves_to_complete
 def test_a_completed_grant_with_a_one_digit_year_end_still_running_is_promoted():
     running = _entry('M2B', title='Running Study', start_date='7/1/25', end_date='6/30/9')
 
-    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_YEAR)
+    current, completed, _ = promote_open_ended_m2b_grants([], [running], TEST_AS_OF)
 
     assert (current, completed) == ([running], [])
 
@@ -2957,10 +2965,144 @@ def test_a_two_digit_year_end_reaches_past_funding_through_the_section_fill():
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Ended Study', agency='NIH',
                         start_date='4/1/09', end_date='4/15/14')]},
-        current_year=TEST_YEAR)
+        as_of=TEST_AS_OF)
 
     assert _titles_under(gen, COMPLETED) == ['Ended Study']
     assert _tables_under(gen, CURRENT) == []
+
+
+# --- #1713: an end date is judged at its own precision, not by year alone -------
+
+# The day UAURFU and SPIHVQ were rendered, when their grants that ended in
+# January to June 2026 still sat under Current funding.
+MONTH_AS_OF = date(TEST_YEAR, 10, 11)
+
+
+@pytest.mark.parametrize('end_date, expected', [
+    ('2026-05', (2026, 5, None)),
+    ('2026-05-01', (2026, 5, 1)),
+    ('05/2026', (2026, 5, None)),
+    ('May 2026', (2026, 5, None)),
+    ('6/30/26', (2026, 6, 30)),
+    ('6/30/31', (2031, 6, 30)),   # past the shared pivot, inside the horizon
+    ('6/30/95', (1995, 6, 30)),
+    ('2026', (2026, None, None)),
+    ('Fall 2026', (2026, None, None)),
+    ('2015-16', (2015, None, None)),
+    ('present', None),
+    ('', None),
+])
+def test_grant_end_date_keeps_the_precision_the_source_states(end_date, expected):
+    assert grant_end_date(end_date, MONTH_AS_OF) == expected
+
+
+def test_grant_end_date_reads_a_one_digit_year_against_the_start():
+    assert grant_end_date('8/30/1', MONTH_AS_OF, '9/1/07') == (2011, 8, 30)
+
+
+@pytest.mark.parametrize('end_date, ended', [
+    ('2026-05', True),       # an earlier month this year
+    ('2026-05-01', True),
+    ('6/30/26', True),
+    ('2026-09-30', True),
+    ('2026-10-10', True),    # yesterday
+    ('2026-10-11', False),   # ends today
+    ('2026-10', False),      # this month: not over yet
+    ('2026-12', False),
+    ('2026', False),         # a bare year this year may name any month of it
+    ('Fall 2026', False),
+    ('2025-12-31', True),
+    ('2027-01', False),
+])
+def test_grant_has_ended_compares_at_the_end_dates_precision(end_date, ended):
+    assert grant_has_ended(grant_end_date(end_date, MONTH_AS_OF), MONTH_AS_OF) is ended
+
+
+@pytest.mark.parametrize('as_of, ended', [
+    (date(TEST_YEAR, 12, 31), False),
+    (date(TEST_YEAR + 1, 1, 1), True),
+])
+def test_a_grant_ending_on_new_years_eve_ends_at_the_turn_of_the_year(as_of, ended):
+    """The boundary CODING_STANDARDS.md 7.4 asks to see pinned: December 31."""
+    end = grant_end_date(f'{TEST_YEAR}-12-31', as_of)
+    assert grant_has_ended(end, as_of) is ended
+
+
+@pytest.mark.parametrize('end_date, moved', [
+    ('2026-05', True),
+    ('2026-04', True),
+    ('2026-01-31', True),
+    ('2026-12', False),
+    ('2026', False),
+    ('2026-10', False),
+])
+def test_a_current_grant_that_ended_earlier_this_year_moves_to_completed(end_date, moved):
+    entry = _entry('M2A', title='Study', start_date='2021-05', end_date=end_date)
+
+    current, completed, _ = reclassify_past_m2a_grants([entry], [], MONTH_AS_OF)
+
+    assert (completed == [entry]) is moved
+    assert (current == [entry]) is not moved
+
+
+def test_the_reclassification_note_names_the_date_it_was_judged_against():
+    entry = _entry('M2A', title='Study', end_date='2026-05')
+
+    reclassify_past_m2a_grants([entry], [], MONTH_AS_OF)
+
+    assert entry['reclassification_note'] == (
+        'Reclassified from Current (M2A) to Completed (M2B): '
+        'end date 2026-05 is before 2026-10-11')
+
+
+@pytest.mark.parametrize('end_date, promoted', [
+    ('2026-04', False),
+    ('2026-09-30', False),
+    ('2026-10', True),
+    ('2026', True),
+    ('2026-12', True),
+])
+def test_a_completed_grant_ending_this_year_is_promoted_only_while_running(end_date, promoted):
+    entry = _under(['Grants'], code='M2B', title='Study', end_date=end_date)
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], MONTH_AS_OF)
+
+    assert (current == [entry]) is promoted
+    assert (completed == [entry]) is not promoted
+
+
+def test_grants_that_ended_this_year_render_under_completed_through_the_section_fill():
+    """The UAURFU shape, synthetic: one list of month-precision grants, three
+    ended earlier in the render year and one running to December."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title=title, agency='NIH', start_date='2021-05',
+                        end_date=end_date)
+                 for title, end_date in (('Ended April', '2026-04'),
+                                         ('Ended May', '2026-05-01'),
+                                         ('Ended January', '2026-01-31'),
+                                         ('Runs To December', '2026-12'))]},
+        as_of=MONTH_AS_OF)
+
+    assert _titles_under(gen, CURRENT) == ['Runs To December']
+    assert sorted(_titles_under(gen, COMPLETED)) == [
+        'Ended April', 'Ended January', 'Ended May']
+
+
+def test_the_section_fill_judges_against_today_when_no_date_is_passed():
+    """The default `as_of` is the render day, at day precision: a grant that
+    ended yesterday is Completed and one ending in 40 days is Current. Dates
+    are relative to today, so the test holds on any day it runs."""
+    today = date.today()
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2A': [_entry('M2A', title=title, agency='NIH', start_date='2021-05-01',
+                        end_date=end.isoformat())
+                 for title, end in (('Ended Yesterday', today - timedelta(days=1)),
+                                    ('Ends Later', today + timedelta(days=40)))]})
+
+    assert _titles_under(gen, CURRENT) == ['Ends Later']
+    assert _titles_under(gen, COMPLETED) == ['Ended Yesterday']
 
 
 # --- #1485: a "see above" / "Renewal" row takes its grant's title -----------------
@@ -3059,7 +3201,7 @@ def test_a_titled_renewal_is_not_retitled():
 def test_a_see_above_row_renders_with_its_grants_title_and_no_see_above_note():
     gen = _sectioned_generator()
     grants = _back_reference_grants()
-    gen._fill_research_support({'M2B': grants}, current_year=TEST_YEAR)
+    gen._fill_research_support({'M2B': grants}, as_of=TEST_AS_OF)
 
     tables = _tables_under(gen, COMPLETED)
     titles = [_cells(table).get('Project title:') for table in tables]
@@ -3077,3 +3219,18 @@ def test_a_back_reference_takes_the_nearest_earlier_grant_with_its_number():
     resolve_grant_back_references(_back_reference_grants() + [retitled, see_above])
 
     assert see_above['extracted_fields']['title'] == 'Alpha Second Cycle Title (continuation)'
+
+
+def test_grant_end_date_reads_a_two_digit_year_against_as_of():
+    # yy reads as 20yy up to GRANT_END_YEAR_HORIZON years past as_of's year,
+    # so the same "06/30/37" is 2037 seen from 2030 and 1937 seen from 2026.
+    assert grant_end_date('06/30/37', date(2030, 1, 1)).year == 2037
+    assert grant_end_date('06/30/37', date(2026, 1, 1)).year == 1937
+
+
+def test_promotion_note_names_the_full_as_of_date():
+    entry = _under(['Grants'], code='M2B', title='Running Study', end_date='06/2028')
+    promote_open_ended_m2b_grants([], [entry], TEST_AS_OF)
+    assert entry['reclassification_note'] == (
+        f"Reclassified from Completed (M2B) to Current (M2A): end date 06/2028 "
+        f"is not before {TEST_AS_OF.isoformat()}")

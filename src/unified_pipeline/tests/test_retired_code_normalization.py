@@ -12,6 +12,7 @@ Self-contained: no DB, no FastAPI app, no LLM, no template. Run with:
 """
 
 import sys
+from datetime import date
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -55,7 +56,7 @@ def test_a_finished_trial_ends_up_in_past_funding_not_current():
     # Stage 6 buckets by the normalized code, so the trial must reach M2A
     # first; the date rule only ever sees the M2A bucket.
     assert normalize_retired_code(trial) == "M2A"
-    current, past, _ = reclassify_past_m2a_grants([trial], [], current_year=2026)
+    current, past, _ = reclassify_past_m2a_grants([trial], [], as_of=date(2026, 10, 12))
     assert current == []
     assert past == [trial]
 

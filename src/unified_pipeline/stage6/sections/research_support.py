@@ -41,9 +41,9 @@ and are unchanged, word for word, from before this module was split out.
 """
 import logging
 import re
-from datetime import datetime
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import TypedDict, cast
+from typing import NamedTuple, TypedDict, cast
 
 try:
     from docx.oxml.xmlchemy import BaseOxmlElement
@@ -590,6 +590,50 @@ def grant_end_year(end_date: str | None, current_year: int,
     return year if year <= current_year + GRANT_END_YEAR_HORIZON else year - 100
 
 
+class GrantEndDate(NamedTuple):
+    """A grant's end date at the precision its stage-4 text states (#1713):
+    `month` and `day` are None where the source gave none."""
+    year: int
+    month: int | None
+    day: int | None
+
+
+def grant_end_date(end_date: str | None, as_of: date,
+                   start_date: str | None = None) -> GrantEndDate | None:
+    """The year, month and day a grant's stage-4 end date names, or None when
+    no year reads.
+
+    The year is `grant_end_year`'s, read against `as_of.year`; the month and
+    day are `_parse_date_components`'s. A two-digit or one-digit year is first
+    written out as the year `grant_end_year` read, so "6/30/31" carries its
+    month and day into 2031, not the shared pivot's 1931. A shape that parses
+    to no month ("2026", "Fall 2026", "2015-16") is year-only."""
+    year = grant_end_year(end_date, as_of.year, start_date)
+    if year is None:
+        return None
+    text = str(end_date or '').strip()
+    short = TWO_DIGIT_YEAR_DATE_RE.fullmatch(text)
+    if short:
+        text = f'{text[:short.start(1)]}{year}'
+    _, month, day = _parse_date_components(text)
+    return GrantEndDate(year, month, day)
+
+
+def grant_has_ended(end: GrantEndDate, as_of: date) -> bool:
+    """True when `end` is before `as_of` at the precision `end` states (#1713).
+
+    A full date compares as a date, a year and month as a year and month, and
+    a bare year as a year. A bare year equal to `as_of.year` has not ended: it
+    may name any month of it, so a grant whose source gives only "2026" stays
+    Current all of 2026, as it always has. A grant that ends on `as_of` itself
+    has not ended either."""
+    if end.month is None:
+        return end.year < as_of.year
+    if end.day is None:
+        return (end.year, end.month) < (as_of.year, as_of.month)
+    return (end.year, end.month, end.day) < (as_of.year, as_of.month, as_of.day)
+
+
 def explicit_status_target(entry: dict) -> tuple[str | None, str | None]:
     """The bucket a grant's own words put it in: its status field, or, when the
     status names no bucket (absent, or a word the vocabulary does not know, like
@@ -652,14 +696,16 @@ def rebucket_grants_by_status(
 
 
 def reclassify_past_m2a_grants(
-    m2a_entries: list[dict], m2b_entries: list[dict], current_year: int
+    m2a_entries: list[dict], m2b_entries: list[dict], as_of: date
 ) -> tuple[list[dict], list[dict], list[str]]:
     """Move M2A grants whose end date is already past into M2B, with a note.
 
-    `current_year` is a parameter rather than a `datetime.now()` read so the
-    boundary is testable and re-rendering an old document reproduces the buckets
-    it had (review thread 3932312407 item 7). Returns (M2A, M2B, verbose lines);
-    the inputs are left as they were.
+    "Past" is `grant_has_ended`: before `as_of` at the precision the end date
+    states, so a grant that ended in April is Completed by October (#1713).
+    `as_of` is a parameter rather than a clock read so the boundary is testable
+    and re-rendering an old document reproduces the buckets it had (review
+    thread 3932312407 item 7). Returns (M2A, M2B, verbose lines); the inputs are
+    left as they were.
     """
     current = list(m2a_entries)
     completed = list(m2b_entries)
@@ -673,10 +719,10 @@ def reclassify_past_m2a_grants(
 
         # Parse end date to check if it's in the past
         if end_date and end_date.lower() not in OPEN_ENDED_END_DATES:
-            end_year = grant_end_year(end_date, current_year, fields.get('start_date'))
-            if end_year is not None and end_year < current_year:
+            end = grant_end_date(end_date, as_of, fields.get('start_date'))
+            if end is not None and grant_has_ended(end, as_of):
                 # This grant has ended - reclassify to M2B
-                entries_to_move.append((entry, end_date, end_year))
+                entries_to_move.append((entry, end_date, end.year))
 
     # Move entries and add reclassification comments
     for entry, end_date, end_year in entries_to_move:
@@ -684,7 +730,7 @@ def reclassify_past_m2a_grants(
 
         # Add reclassification note to the entry
         if 'reclassification_note' not in entry:
-            entry['reclassification_note'] = f"Reclassified from Current (M2A) to Completed (M2B): end date {end_date} is before {current_year}"
+            entry['reclassification_note'] = f"Reclassified from Current (M2A) to Completed (M2B): end date {end_date} is before {as_of.isoformat()}"
 
         completed.append(entry)
 
@@ -695,12 +741,13 @@ def reclassify_past_m2a_grants(
 
 
 def promote_open_ended_m2b_grants(
-    m2a_entries: list[dict], m2b_entries: list[dict], current_year: int
+    m2a_entries: list[dict], m2b_entries: list[dict], as_of: date
 ) -> tuple[list[dict], list[dict], list[str]]:
     """Move M2B grants that are still running into M2A, with a note (#981).
 
-    The mirror of `reclassify_past_m2a_grants`: an end date of 'present' or a
-    year >= `current_year` is a current grant, however stage 3b coded it. A
+    The mirror of `reclassify_past_m2a_grants`: an end date of 'present', or
+    one that has not ended by `as_of` (`grant_has_ended`, #1713), is a current
+    grant, however stage 3b coded it. A
     grant with no end date is left alone -- nothing says it is running -- and so
     is one whose own status or heading names its bucket
     (`explicit_status_target`) or a heading that files it as past, which beats
@@ -718,17 +765,17 @@ def promote_open_ended_m2b_grants(
         if explicit_status_target(entry)[0] or grant_heading_is_past(
                 entry.get('hierarchy') or []):
             continue
-        end_year = grant_end_year(end_date, current_year, fields.get('start_date'))
+        end = grant_end_date(end_date, as_of, fields.get('start_date'))
         if end_date.lower() in OPEN_ENDED_END_DATES:
             running = True
         else:
-            running = end_year is not None and end_year >= current_year
+            running = end is not None and not grant_has_ended(end, as_of)
         if not running:
             continue
         completed.remove(entry)
         entry['reclassification_note'] = (
             f"Reclassified from Completed (M2B) to Current (M2A): end date "
-            f"{end_date} is not before {current_year}"
+            f"{end_date} is not before {as_of.isoformat()}"
         )
         current.append(entry)
         title = fields.get('title') or 'Unknown'
@@ -1389,7 +1436,7 @@ class ResearchSupportSection:
         entries_by_code: dict[str, list[dict]],
         cv_owner: dict | None = None,
         document_uid: str = '',
-        current_year: int | None = None,
+        as_of: date | None = None,
     ) -> list[dict]:
         """Fill research support section with individual tables per grant.
 
@@ -1410,7 +1457,8 @@ class ResearchSupportSection:
         - Pending Funding (M2C)
 
         Reclassification: Grants classified as M2A (current) but with end dates
-        before the current year are moved to M2B (completed) with a comment.
+        before today, at the precision the date states, are moved to M2B
+        (completed) with a comment.
 
         Every rule above lives in the module-level classifiers -- they take plain
         data and return plain data, so a bucket decision is testable without a
@@ -1422,8 +1470,8 @@ class ResearchSupportSection:
             entries_by_code: stage-4 entries keyed by taxonomy code.
             cv_owner: the CV owner's record, for auto-filling the PI name.
             document_uid: run-scoped document id, used to resolve the owner.
-            current_year: the year "current funding" is judged against. Defaults
-                to the system clock; pass it to make a boundary reproducible.
+            as_of: the date "current funding" is judged against. Defaults to
+                the system clock's today; pass it to make a boundary reproducible.
 
         Returns:
             The T-coded goals-row entries (#958) whose goal now renders inside a
@@ -1432,8 +1480,8 @@ class ResearchSupportSection:
         """
         # Get CV owner name for auto-filling PI when role is Principal Investigator
         owner_name = _get_cv_owner_name(cv_owner, document_uid)
-        if current_year is None:
-            current_year = datetime.now().year
+        if as_of is None:
+            as_of = date.today()
 
         # Classification, on this section's own copies of the records so nothing
         # below writes back into the caller's pipeline data.
@@ -1454,11 +1502,11 @@ class ResearchSupportSection:
         _print_verbose(messages, self.verbose)
 
         m2a_entries, m2b_entries, messages = reclassify_past_m2a_grants(
-            m2a_entries, m2b_entries, current_year)
+            m2a_entries, m2b_entries, as_of)
         _print_verbose(messages, self.verbose)
 
         m2a_entries, m2b_entries, messages = promote_open_ended_m2b_grants(
-            m2a_entries, m2b_entries, current_year)
+            m2a_entries, m2b_entries, as_of)
         _print_verbose(messages, self.verbose)
 
         grants = m2a_entries + m2b_entries + m2c_entries
