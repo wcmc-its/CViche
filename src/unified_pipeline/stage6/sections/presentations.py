@@ -36,6 +36,7 @@ from ..formatting import (
     format_date_for_section,
     format_date_range,
     further_date_spans,
+    with_event_status,
 )
 from ..sorting import sort_entries_reverse_chronological
 
@@ -255,11 +256,15 @@ class PresentationsSection:
                 if role.lower() == 'none':
                     role = ''
 
+                # A split record's own line, not every record's (#1445).
+                source_line = fallback_text(entry)
                 if not title:
-                    # A split record's own line, not every record's (#1445).
                     title = _untitled_talk_title(
-                        fallback_text(entry), role,
+                        source_line, role,
                         str(fields.get('event_name') or ''), institution, formatted_date)
+                # "(postponed due to COVID-19)" has no field, so stage 4 drops
+                # it and the talk would read as delivered (#1436).
+                title = with_event_status(title, source_line, institution)
 
                 # The R block is Title | Institution/Location | Dates, so the
                 # meeting that hosted the talk has no column of its own and

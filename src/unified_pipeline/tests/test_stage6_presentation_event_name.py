@@ -373,3 +373,56 @@ def test_a_further_date_follows_the_talks_own_date_unless_it_repeats_it():
 def test_a_talk_without_further_dates_keeps_its_own_cell():
     assert _rendered_date(date="2018") == "2018"
 
+
+
+# #1436: an event-status note on the source line has no R field, so stage 4
+# drops it and a postponed talk rendered as delivered (NDMRSO TVZDVF 451/494).
+_STATUS_TITLE = "Calibrating widgets at scale"
+
+
+def _status_title(text, **fields):
+    """The Title cell of one titled R entry whose source line is `text`."""
+    fields.setdefault("title", _STATUS_TITLE)
+    fields.setdefault("date", "2020-04-07")
+    return _untitled_row(text, **fields)[0]
+
+
+def test_a_trailing_postponed_parenthetical_stays_on_the_title():
+    text = ("10. Doe J. Calibrating widgets at scale. Department of Widgets, "
+            "Example University, April 7th, 2020 (postponed due to COVID-19).")
+    assert _status_title(text) == f"{_STATUS_TITLE} (postponed due to COVID-19)"
+
+
+def test_an_unbracketed_postponed_clause_stays_on_the_title():
+    text = "Calibrating widgets at scale. Widget Society, Springfield. Postponed due to a hurricane."
+    assert _status_title(text) == f"{_STATUS_TITLE} (Postponed due to a hurricane)"
+
+
+def test_a_bracketed_cancellation_stays_whole():
+    text = "Calibrating widgets at scale [Poster session canceled]. Widget Society Meeting."
+    assert _status_title(text) == f"{_STATUS_TITLE} (Poster session canceled)"
+
+
+def test_a_virtual_due_to_note_stays_on_the_title():
+    text = "Calibrating widgets at scale. Widget Society, 2020 (virtual due to COVID-19)."
+    assert _status_title(text) == f"{_STATUS_TITLE} (virtual due to COVID-19)"
+
+
+def test_a_source_line_without_a_status_word_leaves_the_title_unchanged():
+    text = "Calibrating widgets at scale. Widget Society, Springfield, April 7th, 2020."
+    assert _status_title(text) == _STATUS_TITLE
+
+
+def test_a_virtual_talk_with_no_status_clause_leaves_the_title_unchanged():
+    text = "Calibrating widgets at scale. Virtual seminar, Widget Society, 2020."
+    assert _status_title(text) == _STATUS_TITLE
+
+
+def test_a_status_word_already_in_the_title_is_not_repeated():
+    title = "Postponed surgery after the pandemic"
+    assert _status_title(f"{title}. Widget Society, 2020.", title=title) == title
+
+
+def test_a_status_word_already_in_the_venue_is_not_added_to_the_title():
+    text = "Calibrating widgets at scale. Widget Society (cancelled), 2020."
+    assert _status_title(text, location="Widget Society (cancelled)") == _STATUS_TITLE

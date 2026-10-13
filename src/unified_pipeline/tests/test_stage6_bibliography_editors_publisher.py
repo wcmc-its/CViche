@@ -1344,3 +1344,34 @@ def test_journal_trailer_never_leads_with_a_bare_separator():
 
         assert " ;" not in citation, citation
         assert " :" not in citation, citation
+
+
+# --- #1436: `event_status_note` / `with_event_status` ---
+
+
+def test_event_status_note_reads_the_parenthetical_or_the_clause():
+    from unified_pipeline.stage6.formatting.values import event_status_note
+    assert event_status_note("Talk. Venue, 2024 (postponed due to a hurricane)", "") == \
+        "postponed due to a hurricane"
+    assert event_status_note("Talk. Venue. Cancelled; rescheduled online.", "") == "Cancelled"
+    assert event_status_note("Talk [Session canceled]. Venue.", "") == "Session canceled"
+
+
+def test_event_status_note_is_empty_without_a_status_word_or_when_shown():
+    from unified_pipeline.stage6.formatting.values import event_status_note
+    assert event_status_note("Talk. Venue, 2024.", "") == ""
+    assert event_status_note("", "") == ""
+    assert event_status_note("Talk. Virtual seminar series, 2021.", "") == ""
+    assert event_status_note("Talk (postponed).", "Talk (Postponed)") == ""
+
+
+def test_with_event_status_leaves_text_without_a_note_unchanged():
+    from unified_pipeline.stage6.formatting.values import with_event_status
+    assert with_event_status("Talk", "Talk. Venue, 2024.") == "Talk"
+    assert with_event_status("Talk", "Talk. Venue (postponed).") == "Talk (postponed)"
+    assert with_event_status("Talk", "Talk. Venue (postponed).", "Venue (postponed)") == "Talk"
+
+
+def test_with_event_status_on_empty_text_is_the_note_alone():
+    from unified_pipeline.stage6.formatting.values import with_event_status
+    assert with_event_status("", "Venue, 2020 (postponed)") == "(postponed)"
