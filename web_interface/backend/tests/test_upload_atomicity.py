@@ -686,9 +686,65 @@ def test_extract_text_lets_an_unexpected_error_surface():
     read failure is a bug in the reader, and it propagates instead of being
     swallowed into a fail-open None (§5.4). Widening the tuple back to
     ``Exception`` fails this test."""
-    with patch("app.services.upload_validation.Document", side_effect=RuntimeError("reader bug")):
+    with patch("unified_pipeline.core.docx_structure_extractor.Document",
+               side_effect=RuntimeError("reader bug")):
         with pytest.raises(RuntimeError):
             _extract_text(_docx_bytes("hello"), ".docx")
+
+
+def _wrap_in_content_control(element) -> None:
+    """Move ``element`` inside a new w:sdt > w:sdtContent at its position."""
+    from docx.oxml import OxmlElement
+    sdt, content = OxmlElement("w:sdt"), OxmlElement("w:sdtContent")
+    sdt.append(content)
+    element.addprevious(sdt)
+    content.append(element)
+
+
+def _all_in_content_controls_docx(body_lines: list[str], cell_lines: list[str]) -> bytes:
+    """A .docx whose every paragraph sits in a content control: the body
+    paragraphs in one body-level w:sdt, and the paragraphs of a one-cell
+    table in an in-cell w:sdt (w:tc > w:sdt). Synthetic text only."""
+    doc = Document()
+    paragraphs = [doc.add_paragraph(line) for line in body_lines]
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    cell.paragraphs[0].text = cell_lines[0]
+    for line in cell_lines[1:]:
+        cell.add_paragraph(line)
+    body_sdt_content = None
+    for para in paragraphs:
+        if body_sdt_content is None:
+            _wrap_in_content_control(para._p)
+            body_sdt_content = para._p.getparent()
+        else:
+            body_sdt_content.append(para._p)
+    cell_paragraphs = list(cell.paragraphs)
+    _wrap_in_content_control(cell_paragraphs[0]._p)
+    for para in cell_paragraphs[1:]:
+        cell_paragraphs[0]._p.getparent().append(para._p)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_extract_text_reads_a_cv_held_entirely_in_content_controls():
+    """#1668: the empty-document guard read ``doc.paragraphs`` and
+    ``doc.tables`` straight off python-docx, which skip a body-level content
+    control and a cell's wrapped paragraphs. A CV held entirely in them read
+    as "" and was refused as blank. Opened through ``open_source_docx`` it
+    reads in full. Reverting to ``Document(tmp_path)`` fails this test."""
+    body = [f"Synthetic body line {i} about the Quillmoor Institute of Lanterns" for i in range(12)]
+    cell = ["Synthetic cell line about the Zorbrix Plover fellowship", "Second synthetic cell line"]
+    content = _all_in_content_controls_docx(body, cell)
+    plain = Document(io.BytesIO(content))
+    assert not any(p.text.strip() for p in plain.paragraphs)
+    assert not plain.tables[0].cell(0, 0).text.strip()
+
+    text = _extract_text(content, ".docx")
+
+    assert len(text) >= upload_validation.MIN_EXTRACTED_CHARS
+    for line in body + cell:
+        assert line in text
 
 
 def test_extract_text_returns_none_for_unrecognized_extension():

@@ -1033,10 +1033,11 @@ class PubMedEnricher:
                 logger.info("[%d/%d] publications searched by title", searched, len(candidates))
 
     def _enrich_by_title(self, entry: dict, title: str) -> None:
-        """Accept the best of the top title-search hits when its title
-        overlap clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the
-        CV, and its year is plausible for the CV's. A miss leaves the entry as it was: a miss is not evidence the
-        paper is unpublished (non-indexed journals, chapters, retitling)."""
+        """Accept the best of the top title-search hits that passes every
+        guard (`_title_hit_passes`). Hits rank by title overlap, then a
+        non-Comment over a Comment, then PubMed's order. A miss leaves the
+        entry as it was: a miss is not evidence the paper is unpublished
+        (non-indexed journals, chapters, retitling)."""
         if len(_title_words(title)) < MIN_TITLE_SEARCH_WORDS:
             return
         self.stats['title_searches'] += 1
@@ -1057,14 +1058,26 @@ class PubMedEnricher:
                    COMMENT_PUBTYPE not in r['publication_types'], r)
                   for r in records.values()
                   if not TITLE_SEARCH_EXCLUDED_PUBTYPES.intersection(r['publication_types'])]
-        if not scored:
-            return
-        overlap, _, best = max(scored, key=lambda hit: hit[:2])
+        # Each hit is guarded on its own (#1619): two hits can tie on overlap,
+        # and the first of them failing a guard said nothing about the other.
+        # A stable descending sort keeps PubMed's order among equal ranks, so
+        # the first hit tried is the one `max()` picked before.
+        for overlap, _, record in sorted(scored, key=lambda hit: hit[:2], reverse=True):
+            if self._title_hit_passes(entry, overlap, record):
+                self._accept_record(entry, record, TITLE_SEARCH_SOURCE)
+                return
+
+    @staticmethod
+    def _title_hit_passes(entry: dict, overlap: float, record: dict) -> bool:
+        """Whether a title-search hit may be accepted: its title overlap
+        clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the CV, and its
+        year is plausible for the CV's. `_accept_record`'s reply check
+        (#1438) cannot refuse such a hit: a record sharing a CV author is
+        never taken for the item a reply answers."""
         fields = entry.get('extracted_fields') or {}
-        if (overlap >= MIN_TITLE_SEARCH_OVERLAP
-                and shares_an_author(fields.get('authors'), best['authors'])
-                and plausible_publication_year(fields.get('year'), best['year'])):
-            self._accept_record(entry, best, TITLE_SEARCH_SOURCE)
+        return (overlap >= MIN_TITLE_SEARCH_OVERLAP
+                and shares_an_author(fields.get('authors'), record['authors'])
+                and plausible_publication_year(fields.get('year'), record['year']))
 
     def _search_pmids_by_title(self, title: str) -> list[str]:
         params = {

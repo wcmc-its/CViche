@@ -1605,6 +1605,49 @@ def test_article_title_search_keeps_the_author_guard(tmp_path, monkeypatch):
     assert 'enrichment_data' not in result
 
 
+# #1619: the guards ran on the single best hit only, so a tied hit that
+# passes them was never tried.
+SIBLING_PMID = '45678901'
+_GUARD_FAILURES = {'author': {'authors': ('Okonkwo A',)}, 'year': {'year': 2011}}
+
+
+@pytest.mark.parametrize('guard', sorted(_GUARD_FAILURES))
+def test_tied_title_hit_passing_the_guards_is_taken_when_the_first_fails(tmp_path, monkeypatch,
+                                                                         guard):
+    refused = _article(SIBLING_PMID, SHARED_TITLE, **_GUARD_FAILURES[guard])
+    found = [_hits(SIBLING_PMID, PAPER_PMID),
+             _article_set(refused, _article(PAPER_PMID, SHARED_TITLE))]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)], found)
+    assert (result['enrichment_status'], result['enrichment_source']) == ('enriched', 'title_search')
+    assert result['enrichment_data']['pubmed_pmid'] == PAPER_PMID
+
+
+def test_tied_title_hits_both_passing_keep_pubmeds_order(tmp_path, monkeypatch):
+    found = [_hits(SIBLING_PMID, PAPER_PMID),
+             _article_set(_article(SIBLING_PMID, SHARED_TITLE), _article(PAPER_PMID, SHARED_TITLE))]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)], found)
+    assert result['enrichment_data']['pubmed_pmid'] == SIBLING_PMID
+
+
+def test_weaker_title_hit_passing_the_guards_is_taken_when_the_best_fails(tmp_path, monkeypatch):
+    # 6 of the title's 7 counted words: 0.86, above MIN_TITLE_SEARCH_OVERLAP.
+    weaker_title = SHARED_TITLE.replace('spring', 'autumn')
+    refused = _article(SIBLING_PMID, SHARED_TITLE, authors=('Okonkwo A',))
+    found = [_hits(SIBLING_PMID, PAPER_PMID),
+             _article_set(refused, _article(PAPER_PMID, weaker_title))]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)], found)
+    assert result['enrichment_data']['pubmed_pmid'] == PAPER_PMID
+
+
+def test_title_hit_below_the_overlap_floor_is_not_taken_when_the_best_fails(tmp_path, monkeypatch):
+    refused = _article(SIBLING_PMID, SHARED_TITLE, authors=('Okonkwo A',))
+    found = [_hits(SIBLING_PMID, PAPER_PMID),
+             _article_set(refused, _article(PAPER_PMID, OTHER_PAPER_TITLE))]
+    [result], _, _ = _run_entries(tmp_path, monkeypatch, [_article_entry(10)], found)
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'enrichment_data' not in result
+
+
 def test_in_press_article_is_searched_once_by_the_in_press_step(tmp_path, monkeypatch):
     entry = _inpress_entry(code='S1')
     result, session, enricher = _run_stage5(tmp_path, monkeypatch, entry, _found())
