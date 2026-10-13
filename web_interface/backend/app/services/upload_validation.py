@@ -15,12 +15,12 @@ import zlib
 from enum import StrEnum
 from urllib.parse import unquote
 
-from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from lxml import etree
 from lxml.etree import XMLSyntaxError
 
 from app.services.pdf_sandbox import PdfText, extract_pdf_text
+from app.services.template_warning import _ensure_pipeline_on_path
 
 logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
@@ -294,6 +294,10 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
     Callers treat ``None`` as "cannot determine" and skip the guard rather
     than block a possibly-valid upload.
 
+    A .docx is opened the way the pipeline opens it (``open_source_docx``):
+    content controls at body and table level are unwrapped first, so a CV
+    held inside them is not read as empty (#1668).
+
     A PDF never fails open (#806): the run's conversion uses the same parser
     under the same limits, so a PDF this cannot read, the run cannot either.
 
@@ -307,11 +311,13 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         return extract_pdf_text(content)
     if file_ext != ".docx":
         return None
+    _ensure_pipeline_on_path()
+    from unified_pipeline.core.docx_structure_extractor import open_source_docx
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
     try:
-        doc = Document(tmp_path)
+        doc = open_source_docx(tmp_path)
         parts = [p.text for p in doc.paragraphs if p.text.strip()]
         for table in doc.tables:
             for row in table.rows:
