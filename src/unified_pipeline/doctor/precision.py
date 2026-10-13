@@ -73,7 +73,7 @@ STAGE6_OTHER_SHAPE = "other"
 #: stage6_render_warnings message -> shape, first match wins. Read from the
 #: emitters: stage6/sections/appendix.py `_diversion_message`,
 #: stage_6_word_template.py `reroute_warnings` and `_validate_output`,
-#: stage6/fan_out.py, stage6/sections/{memberships,board_certification}.py.
+#: stage6/fan_out.py, stage6/sections/{memberships,board_certification,research_support}.py.
 #: scripts/doctor_vs_autopsy.py scores by the same table.
 _STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (shape, re.compile(pattern)) for shape, pattern in (
@@ -96,6 +96,7 @@ _STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("bare_dates_in_table", r"rows have bare dates"),
         ("board_cert_row_skipped", r"reconstructed board certification row"),
         ("memberships_header_row_dropped", r"dropped as a source table header row"),
+        ("grant_protocol_number_only", r"names a protocol or IRB number and no funder"),
         ("fanout_list_not_split", r"holds (?:several )?records that were not split"),
         ("geo_scope_failed", r"geographic scope classification"),
         ("appendix_reclassification_failed", r"appendix entry reclassification"),

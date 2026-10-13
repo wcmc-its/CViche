@@ -206,6 +206,8 @@ def test_stage6_shape_names_each_emitter_message():
         "was skipped": "board_cert_row_skipped",
         "P: entry at element 12 dropped as a source table header row":
             "memberships_header_row_dropped",
+        "M2A: entry at element 7 names a protocol or IRB number and no funder; the number "
+        "renders under its own label, not as the Award Source": "grant_protocol_number_only",
         "2 D1 entries: `appointments` holds several records that were not split into separate "
         "rows (the entry's text holds content its fields do not carry); a record may be missing "
         "from the output": "fanout_list_not_split",

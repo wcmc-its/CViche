@@ -109,6 +109,7 @@ def _generator(emit_comments=False):
     gen._comment_id = 1
     gen._overflow_entries = []
     gen._declined_grant_entries = []  # #839: _create_grant_table's decline path appends here
+    gen._section_failures = []  # #1694: the protocol-number backstop's WARN lands here
     return gen
 
 
@@ -359,6 +360,123 @@ def test_grant_number_already_in_the_title_is_not_duplicated():
               'grant_number': 'R01 CA123456'}
     table = _generator()._create_grant_table(fields, 'M2A')
     assert _cells(table)['Award Source:'] == 'NIH'
+
+
+# --- #1694: a protocol or IRB number with no funder is not an Award Source ------
+
+PROTOCOL_TITLE = 'Synthetic Kestrel Cohort Study'
+
+
+@pytest.mark.parametrize('number', [
+    '7305918264', 'IRB # 3141-0277', 'IRB study #7305918264', 'irb#6620194',
+    'QXIRB #22-9047', 'Protocol 5520-883', 'Protocol No. 4417/2093',
+    'Protocol number: 9031.66', 'IRB 3141-0277', 'IRB no 3141-0277', 'IRB 3141-0277-15',
+    'Protocol  no. 3141-0277',
+])
+def test_protocol_number_shapes_are_recognised(number):
+    assert research_support.is_unfunded_protocol_number(number, '', 'M2A')
+
+
+@pytest.mark.parametrize('number', [
+    'R01 CA123456', 'K23-6620194', 'U54 6620194', 'NCT09990001', '5520-883A',
+    'IRB', 'Protocol', '22-', '-22', '22--9047', 'PROTOCOLS 5520', 'IRBX 5520',
+    'IRB study 5520 B', 'TIRBX #5520', '6620194 R01', 'Protocolnumber 5520',
+])
+def test_grant_number_shapes_are_not_protocol_numbers(number):
+    assert not research_support.is_unfunded_protocol_number(number, '', 'M2A')
+
+
+@pytest.mark.parametrize('code', ['M2A', 'M2B'])
+def test_an_unfunded_protocol_number_is_not_the_award_source(code):
+    """#1694: a study with only an IRB number renders no number as Award Source;
+    the number keeps a row of its own and the doctor gets a WARN."""
+    gen = _generator()
+    entry = {**_entry(code), 'element_idx_start': 31}
+    fields = {'title': PROTOCOL_TITLE, 'pi_role': 'Co-investigator',
+              'grant_number': '7305918264'}
+    cells = _cells(gen._create_grant_table(fields, code, entry))
+    assert cells[research_support.AWARD_SOURCE_LABEL] == ''
+    assert cells['Protocol/IRB number:'] == '7305918264'
+    assert gen._section_failures == [{
+        'check': 'grant_protocol_number_only',
+        'code': code,
+        'section': 'research_support',
+        'message': (f"{code}: entry at element 31 names a protocol or IRB number and "
+                    "no funder; the number renders under its own label, not as the "
+                    "Award Source"),
+        'evidence': ['element_idx_start=31'],
+        'severity': 'WARN',
+    }]
+
+
+def test_the_protocol_warning_without_an_entry_names_no_element():
+    gen = _generator()
+    gen._create_grant_table({'title': PROTOCOL_TITLE, 'grant_number': 'IRB # 3141-0277'}, 'M2A')
+    [warning] = gen._section_failures
+    assert warning['evidence'] == ['element_idx_start=?']
+    assert 'entry at element ? names' in warning['message']
+
+
+def test_an_entry_without_an_element_index_names_none():
+    warning = research_support.protocol_number_warning('M2B', {'text': 'x'})
+    assert warning['evidence'] == ['element_idx_start=?']
+
+
+def test_a_protocol_number_already_in_the_title_gets_no_row_of_its_own():
+    gen = _generator()
+    fields = {'title': f'{PROTOCOL_TITLE} (IRB # 3141-0277)', 'grant_number': 'irb # 3141-0277'}
+    cells = _cells(gen._create_grant_table(fields, 'M2A'))
+    assert research_support.PROTOCOL_NUMBER_LABEL not in cells
+    assert cells[research_support.AWARD_SOURCE_LABEL] == ''
+    assert len(gen._section_failures) == 1
+
+
+@pytest.mark.parametrize('funder', ['agency', 'funding_source', 'sponsor'])
+def test_a_protocol_number_beside_a_funder_stays_in_the_award_source(funder):
+    """A sponsored study's protocol number is the #291 mapping: unchanged."""
+    gen = _generator()
+    fields = {'title': PROTOCOL_TITLE, funder: 'Synthetic Pharma', 'grant_number': '7305918264'}
+    cells = _cells(gen._create_grant_table(fields, 'M2A'))
+    assert cells[research_support.AWARD_SOURCE_LABEL] == 'Synthetic Pharma (7305918264)'
+    assert research_support.PROTOCOL_NUMBER_LABEL not in cells
+    assert gen._section_failures == []
+
+
+def test_a_pending_record_keeps_its_number_in_the_award_source():
+    gen = _generator()
+    fields = {'title': PROTOCOL_TITLE, 'grant_number': '7305918264'}
+    cells = _cells(gen._create_grant_table(fields, 'M2C'))
+    assert cells[research_support.AWARD_SOURCE_LABEL] == '7305918264'
+    assert gen._section_failures == []
+
+
+@pytest.mark.parametrize('number', ['NCT09990001', 'R01 CA123456', 'K23-6620194'])
+def test_an_nct_id_or_grant_mechanism_without_a_funder_stays_in_the_award_source(number):
+    gen = _generator()
+    cells = _cells(gen._create_grant_table({'title': PROTOCOL_TITLE, 'grant_number': number}, 'M2B'))
+    assert cells[research_support.AWARD_SOURCE_LABEL] == number
+    assert gen._section_failures == []
+
+
+def test_the_protocol_row_comes_after_the_template_rows():
+    """Row 0 stays Award Source: the placeholder guard and the doctor read it there."""
+    fields = {'title': PROTOCOL_TITLE, 'grant_number': '7305918264', 'notes': 'Synthetic note'}
+    rows = _rows(_generator()._create_grant_table(fields, 'M2A'))
+    assert rows[0][0] == research_support.AWARD_SOURCE_LABEL
+    assert rows[-1] == (research_support.PROTOCOL_NUMBER_LABEL, '7305918264')
+
+
+def test_an_unfunded_protocol_study_renders_under_current_funding_with_its_warning():
+    """Through `_fill_research_support`: the WJUPAJ shape renders its table and
+    reaches the sidecar list once per record."""
+    gen = _sectioned_generator()
+    entries = [_entry('M2A', title=f'{PROTOCOL_TITLE} {n}', pi_role='Co-investigator',
+                      grant_number=number)
+               for n, number in enumerate(['7305918264', 'IRB # 3141-0277'])]
+    gen._fill_research_support({'M2A': entries}, as_of=TEST_AS_OF)
+    tables = _tables_under(gen, CURRENT)
+    assert [_cells(t)[research_support.AWARD_SOURCE_LABEL] for t in tables] == ['', '']
+    assert len(gen._section_failures) == 2
 
 
 # --- #839: a decline appends to _declined_grant_entries -------------------------

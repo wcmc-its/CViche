@@ -43,7 +43,7 @@ import logging
 import re
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import NamedTuple, TypedDict, cast
+from typing import Any, NamedTuple, TypedDict, cast
 
 try:
     from docx.oxml.xmlchemy import BaseOxmlElement
@@ -1331,6 +1331,81 @@ SUBMISSION_DATE_LABEL = 'Submitted:'
 # The owner's part of the award (`share_total`), beside the total and never
 # under "Annual direct costs:", which is a different quantity (#817).
 SHARE_LABEL = 'Your share of award:'
+# A study's protocol or IRB approval number, kept out of Award Source (#1694).
+PROTOCOL_NUMBER_LABEL = 'Protocol/IRB number:'
+# The sidecar check name for a funding record that names only a protocol
+# number. Its message carries `PROTOCOL_NUMBER_MESSAGE`, which the doctor's
+# precision table (`doctor/precision.py` `_STAGE6_SHAPES`) matches on.
+PROTOCOL_NUMBER_CHECK = 'grant_protocol_number_only'
+PROTOCOL_NUMBER_MESSAGE = 'names a protocol or IRB number and no funder'
+# The buckets the protocol-number backstop guards: current and completed
+# funding, where the record is read as an award (#1694). A pending (M2C)
+# record is an application, and the issue names no case there.
+PROTOCOL_NUMBER_CODES = frozenset({'M2A', 'M2B'})
+# A protocol or IRB approval number: an optional label -- "IRB", an
+# institution's own board name ending in "IRB", or "Protocol", then an
+# optional "study"/"no."/"number" and "#" or ":" -- before digits joined by
+# - / or . and nothing else. No letter survives in the number itself, so a
+# grant mechanism (R01, K23, U54), an agency's own letters or an NCT ID never
+# match (#1694).
+PROTOCOL_NUMBER_RE = re.compile(
+    r'(?:(?:[a-z]*irb|protocol)\b(?:\s*(?:study|no\.?|number))?\s*[#:]?\s*)?'
+    r'\d+(?:[-/.]\d+)*',
+    re.IGNORECASE,
+)
+
+
+def is_unfunded_protocol_number(grant_number: str, agency: str, code: str) -> bool:
+    """True when a current or completed funding record's only identifier is a
+    protocol or IRB number and it names no funder (#1694).
+
+    Stage 4 maps a study's protocol number to `grant_number` (the #291 trial
+    mapping), and Award Source carries `grant_number`. With no agency or
+    sponsor beside it, that put a local IRB approval number in the cell a
+    reader takes for the funder. A record with a funder keeps its number in
+    Award Source, as a sponsored trial's protocol number should.
+    """
+    return (code in PROTOCOL_NUMBER_CODES and not agency
+            and PROTOCOL_NUMBER_RE.fullmatch(grant_number) is not None)
+
+
+def protocol_number_warning(code: str, entry: dict | None) -> dict[str, Any]:
+    """The sidecar record for a funding record whose only identifier is a
+    protocol number, so the doctor sees a study that may not be funding at
+    all (#1694). The element index only, never the entry's text."""
+    element_idx = entry.get('element_idx_start', '?') if entry else '?'
+    return {
+        'check': PROTOCOL_NUMBER_CHECK,
+        'code': code,
+        'section': 'research_support',
+        'message': (f"{code}: entry at element {element_idx} {PROTOCOL_NUMBER_MESSAGE}; "
+                    "the number renders under its own label, not as the Award Source"),
+        'evidence': [f"element_idx_start={element_idx}"],
+        'severity': 'WARN',
+    }
+
+
+def award_source_text(agency: str, title: str, grant_number: str) -> str:
+    """The Award Source value: the agency, with the grant number appended.
+
+    The WCM template has no grant-number row -- its block is exactly eight rows
+    plus optional goals -- but the Award Source label itself reads "(funding
+    agency ...; type of grant)", so the identifier belongs there. Without this,
+    stage 4 extracts grant_number and no renderer ever consumes it: 528 of 537
+    corpus values reached no render (#478/#479). A number the agency or title
+    already holds is not repeated.
+    """
+    if grant_number and grant_number.casefold() not in f"{agency} {title}".casefold():
+        return f"{agency} ({grant_number})" if agency else grant_number
+    return agency
+
+
+def protocol_number_rows(grant_number: str, title: str) -> list[tuple[str, str]]:
+    """The protocol number's own row, unless the title already holds it --
+    the same-fact-via-two-paths guard Award Source applies (#829)."""
+    if grant_number.casefold() in title.casefold():
+        return []
+    return [(PROTOCOL_NUMBER_LABEL, grant_number)]
 
 
 def _optional_grant_rows(
@@ -1710,14 +1785,14 @@ class ResearchSupportSection:
 
         cost_rows = _format_grant_costs(annual_direct_costs, total_funding, code)
 
-        # Carry the grant/award identifier in Award Source. The WCM template has no
-        # grant-number row -- its block is exactly these 8 rows plus optional goals --
-        # but the Award Source label itself reads "(funding agency ...; type of grant)",
-        # so the identifier belongs there. Without this, stage 4 extracts grant_number
-        # and no renderer ever consumes it: 528 of 537 corpus values reached no render.
-        # (grant_number itself was already extracted above, for the sparsity guard.)
-        if grant_number and grant_number.casefold() not in f"{agency} {title}".casefold():
-            agency = f"{agency} ({grant_number})" if agency else grant_number
+        # The grant number rides in Award Source -- unless it is a protocol or
+        # IRB number with no funder, which is not an award source (#1694).
+        protocol_rows: list[tuple[str, str]] = []
+        if is_unfunded_protocol_number(grant_number, agency, code):
+            self._section_failures.append(protocol_number_warning(code, entry))
+            protocol_rows = protocol_number_rows(grant_number, title)
+        else:
+            agency = award_source_text(agency, title, grant_number)
 
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
@@ -1731,6 +1806,7 @@ class ResearchSupportSection:
             (YOUR_ROLE_LABEL, role),
             ('Your percent (%) effort:', percent_effort),
             *_optional_grant_rows(fields, title, pi_name, cost_rows),
+            *protocol_rows,
         ]
 
         # Create a new table with 2 columns
