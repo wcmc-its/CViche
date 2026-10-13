@@ -761,9 +761,10 @@ def test_5d_parse_llm_output_well_formed_direct_json():
 def test_5d_parse_llm_output_filters_out_an_id_the_llm_invented():
     # Unlike stage 5c, stage 5d's parse_llm_output DOES check membership in
     # id_to_entry, so a made-up id is dropped rather than passed through.
-    id_map = {"CIT-0001": {}}
+    # The kept citation matches its own entry's words (#1632).
+    id_map = {"CIT-0001": {"text": "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019."}}
     llm_output = json.dumps({
-        "CIT-0001": {"formatted_citation": "real one"},
+        "CIT-0001": {"formatted_citation": "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019."},
         "CIT-9999": {"formatted_citation": "the LLM invented this id"},
     })
     parsed = s5d.parse_llm_output(llm_output, id_map)
@@ -812,16 +813,110 @@ def test_5d_parse_llm_output_embedded_json_also_filters_invented_ids():
     # Forces the fallback (embedded-JSON) branch specifically, and confirms
     # the id_to_entry membership check applies there too, not just on the
     # direct-parse fast path.
-    id_map = {"CIT-0001": {}}
+    id_map = {"CIT-0001": {"text": "Vexley B. Kept citation words here. Fabl Rev. 2004."}}
     llm_output = (
         "Here you go:\n"
         + json.dumps({
-            "CIT-0001": {"formatted_citation": "kept"},
+            "CIT-0001": {"formatted_citation": "Vexley B. Kept citation words here. Fabl Rev. 2004."},
             "CIT-4242": {"formatted_citation": "invented, must be filtered"},
         })
     )
     parsed = s5d.parse_llm_output(llm_output, id_map)
     assert list(parsed.keys()) == ["CIT-0001"]
+
+
+# #1632: one entry answered as two ids moves every later citation onto the
+# entry before its own. Synthetic entries; the shapes are JUTBUZ 524-530
+# (shifted), BCTOGR/SPINJC (a trailing extra id, aligned) and a "b" id.
+_SPLIT_BATCH = {
+    "CIT-0001": {"text": "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019;4:10-12."},
+    "CIT-0002": {"text": "Quill A, Ostrow C. Pewter beetles in drizzle. Fabl Entomol. 2018. "
+                         "Also: Quill A. Brine dune crickets. Fabl Entomol. 2017."},
+    "CIT-0003": {"text": "Vexley B, Quill A. Velvet frogs and fog. Dune Herpetol. 2016;2:5."},
+    "CIT-0004": {"text": "Quill A. Bramble wasps in drizzle. Fabl Fauna Bull. 2015."},
+}
+_SPLIT_CITATIONS = [
+    "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019;4:10-12.",
+    "Quill A, Ostrow C. Pewter beetles in drizzle. Fabl Entomol. 2018.",
+    "Quill A. Brine dune crickets. Fabl Entomol. 2017.",
+    "Vexley B, Quill A. Velvet frogs and fog. Dune Herpetol. 2016;2:5.",
+    "Quill A. Bramble wasps in drizzle. Fabl Fauna Bull. 2015.",
+]
+
+
+def _reply(ids_and_citations):
+    return json.dumps({cid: {"formatted_citation": c} for cid, c in ids_and_citations})
+
+
+def test_5d_parse_llm_output_drops_citations_a_split_reply_shifted():
+    ids = [f"CIT-{n:04d}" for n in range(1, 6)]
+    parsed = s5d.parse_llm_output(_reply(zip(ids, _SPLIT_CITATIONS, strict=True)), _SPLIT_BATCH)
+    # CIT-0003 carries entry 2's second citation and CIT-0004 entry 3's:
+    # both fall back to the stage-4 render. CIT-0005 was never sent.
+    assert sorted(parsed) == ["CIT-0001", "CIT-0002"]
+    assert parsed["CIT-0002"]["formatted_citation"] == _SPLIT_CITATIONS[1]
+
+
+def test_5d_parse_llm_output_keeps_aligned_citations_beside_an_extra_id():
+    aligned = list(zip(_SPLIT_BATCH, [_SPLIT_CITATIONS[i] for i in (0, 1, 3, 4)], strict=True))
+    for extra_id in ("CIT-0005", "CIT-0002b"):
+        reply = json.loads(_reply(aligned))
+        reply[extra_id] = {"formatted_citation": _SPLIT_CITATIONS[2]}
+        parsed = s5d.parse_llm_output(json.dumps(reply), _SPLIT_BATCH)
+        assert {cid: f["formatted_citation"] for cid, f in parsed.items()} == dict(aligned)
+
+
+def test_5d_parse_llm_output_checks_nothing_when_every_id_was_sent():
+    # Without an unsent id the reply is taken as is, even a citation that
+    # shares no word with its entry.
+    reply = _reply([("CIT-0001", "Unrelated words entirely.")])
+    assert s5d.parse_llm_output(reply, {"CIT-0001": {"text": "Quill A. Lantern moths."}}) \
+        == {"CIT-0001": {"formatted_citation": "Unrelated words entirely."}}
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_reply_with_no_citation():
+    reply = json.loads(_reply([("CIT-0001", _SPLIT_CITATIONS[0])]))
+    reply["CIT-0002"] = {"authors": "Quill A, Ostrow C"}
+    reply["CIT-0003"] = "not an object"
+    reply["CIT-0005"] = "not an object"
+    parsed = s5d.parse_llm_output(json.dumps(reply), _SPLIT_BATCH)
+    assert sorted(parsed) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_citation_a_neighbour_matches_better():
+    # Same authors and venue: the moved citation holds most of its new
+    # entry's words, but all of its own entry's.
+    batch = {
+        "CIT-0001": {"text": "Quill A, Ostrow C. Pewter beetles drizzle. Fabl Entomol Glimmer."},
+        "CIT-0002": {"text": "Quill A, Ostrow C. Velvet frogs. Fabl Entomol Glimmer."},
+    }
+    moved = "Quill A, Ostrow C. Pewter beetles drizzle. Fabl Entomol Glimmer."
+    reply = _reply([("CIT-0001", moved), ("CIT-0002", moved), ("CIT-0003", "Quill A. Velvet frogs.")])
+    assert sorted(s5d.parse_llm_output(reply, batch)) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_citation_no_entry_matches():
+    # Its own entry is the best match, but holds too few of its words; a
+    # citation of numbers alone has no words to match.
+    reply = _reply([("CIT-0001", _SPLIT_CITATIONS[0]), ("CIT-0004", "Larkspur glimmer wobble tallies."),
+                    ("CIT-0003", "2016;2:5."), ("CIT-0009", "never sent")])
+    assert sorted(s5d.parse_llm_output(reply, _SPLIT_BATCH)) == ["CIT-0001"]
+
+
+def test_run_stage_5d_keeps_the_stage4_render_of_a_shifted_entry(tmp_path, monkeypatch):
+    entries = [{"taxonomy_code": "S1", "text": batch_entry["text"],
+                "enrichment_status": "no_identifier", "extracted_fields": {}}
+               for batch_entry in _SPLIT_BATCH.values()]
+    input_path = _write_json(tmp_path / "in.json", {"document_uid": "PLACEHOLD", "entries": entries})
+    output_path = str(tmp_path / "out.json")
+    ids = [f"CIT-{n:04d}" for n in range(1, 6)]
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result(_reply(zip(ids, _SPLIT_CITATIONS, strict=True))))
+    s5d.run_stage_5d(input_path, output_path=output_path, verbose=False)
+    with open(output_path, encoding="utf-8") as f:
+        out = json.load(f)
+    citations = [e["extracted_fields"].get("formatted_citation") for e in out["entries"]]
+    assert citations == [_SPLIT_CITATIONS[0], _SPLIT_CITATIONS[1], None, None]
+    assert out["stage_5d"]["formatted_count"] == 2
 
 
 def test_5d_parse_llm_output_empty_string_returns_empty_dict():
