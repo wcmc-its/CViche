@@ -85,12 +85,14 @@ from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
     _cell_text,
     _committee_cell_text,
 )
-from unified_pipeline.stage6.sections.service import (  # noqa: E402
+from unified_pipeline.stage6.normalization.residue import (  # noqa: E402
     _DATE_SPAN,
+    _organization_left_in_text,
+)
+from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _join_names,
     _journal_name_cell_text,
     _journal_names_contain,
-    _organization_left_in_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
 )

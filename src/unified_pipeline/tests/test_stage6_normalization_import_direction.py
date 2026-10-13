@@ -73,6 +73,9 @@ _DECLARED_INTERNAL_EDGES = frozenset({
     ("publication", "authors"),
     # #1259: the stage-5d owner restore reads the CV's own author run.
     ("citation_matching", "authors"),
+    # #1346: the source-line residue Q1, Q2 and P fall back to coerces its
+    # role and dates through the one field coercer.
+    ("residue", "fields"),
 })
 
 #: Dotted names that an import from inside `normalization/` may not reach.
