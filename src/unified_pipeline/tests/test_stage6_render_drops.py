@@ -25,7 +25,11 @@ from unified_pipeline.stage6.parsing import (
     _is_mentoring_outcome,
     _is_orphan_fragment,
 )
-from unified_pipeline.stage6.sections.mentoring import _partition_mentoring_entries
+from unified_pipeline.stage6.sections.mentoring import (
+    OUTCOME_MENTEE_CHECK,
+    OUTCOME_MENTEE_KEY,
+    _partition_mentoring_entries,
+)
 from unified_pipeline.stage6.sections.other_education import (
     _normalize_other_education_entry,
 )
@@ -832,3 +836,20 @@ def test_bare_n3_naming_no_one_and_saying_nothing_dated_stays_in_the_appendix(
     assert grouped["N3"] == [entry]
     assert entry["taxonomy_code"] == "N3" and "taxonomy_code_original" not in entry
     assert _bare_mentee_records(gen) == []
+
+
+# --- #1251: an N4 award line naming no one takes the mentee named on the
+# N3A/N3B line above it, as grouped -- a bare N3 resolved to a mentee code
+# counts. JFBPNC entries 211-221. Invented values.
+
+def test_grouping_gives_an_unnamed_n4_the_mentee_grouped_above_it() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    award = {"text": "Quillfeather Award", "taxonomy_code": "N4", "element_idx_start": 4,
+             "hierarchy": list(_MENTEE_HEADING), "extracted_fields": {"mentee_name": None}}
+    entries = [_mentee("N3", 3, name="Dorran Pethwick", start="2001", end="2004"), award]
+    grouped = gen._group_entries_by_code(entries)
+    assert grouped["N4"] == [award]
+    assert award[OUTCOME_MENTEE_KEY] == "Dorran Pethwick"
+    [record] = [w for w in gen._section_failures if w["check"] == OUTCOME_MENTEE_CHECK]
+    assert record["evidence"] == ["element_idx_start 4 <- 3"]
+    assert "Pethwick" not in json.dumps(record)

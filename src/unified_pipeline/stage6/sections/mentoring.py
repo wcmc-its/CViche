@@ -436,6 +436,109 @@ def _outcome_line_from_fields(entry: Mapping[str, Any]) -> str | None:
     return _OUTCOME_PART_SEPARATOR.join(parts)
 
 
+# #1251: under a students or mentees heading a CV often names the mentee once,
+# on an N3A/N3B line ("<Name> (<role>):"), then lists that
+# mentee's awards on the lines below it, none of which names anyone. Stage 3b
+# codes those lines N4 (stage3b/header_pin.py); rendered as written they say
+# nothing about whose award each one is. An N4 line that names no mentee takes
+# the name of the N3A/N3B entry it follows under the same heading path, with
+# only other such N4 lines in between. Anything else in between -- another
+# heading, another code, an N4 that names its own mentee -- leaves the line as
+# written, and so does an N3A/N3B entry that is one item of a list of mentees
+# (the entry before it under the heading is N3A/N3B too): a footnote or a
+# summary after a list belongs to no single line of it.
+#
+# The name is written as a tracked insertion: it is not in the source line, so
+# a reviewer sees CViche added it and can reject it, and the passes that ask
+# whether some other entry's text already renders (`_rendered_output_lines`,
+# which reads no w:ins by default) do not count it -- otherwise a grant whose
+# own prose says "award to <mentee>" stops being offered as a sub-point
+# (EHGXAL, 3 grant rows, in the corpus A/B of this change).
+OUTCOME_MENTEE_KEY = 'outcome_mentee_name'
+OUTCOME_MENTEE_AUTHOR = 'CViche: mentee named on the line above'
+OUTCOME_MENTEE_CHECK = 'outcome_mentee_inherited'
+_MENTEE_CODES = frozenset({'N3A', 'N3B'})
+
+
+def _heading_path(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The entry's stage-2 heading path, the key its siblings share."""
+    return tuple(str(heading) for heading in entry.get('hierarchy') or ())
+
+
+def _mentee_name(entry: Mapping[str, Any]) -> str:
+    """The mentee stage 4 named on this entry, or ''."""
+    fields = entry.get('extracted_fields') or {}
+    return _plain_text(fields.get('name')) or _plain_text(fields.get('mentee_name'))
+
+
+def _outcome_mentee_anchor(coded: Sequence[tuple[Mapping[str, Any], str]],
+                           index: int) -> int | None:
+    """Where in `coded` (document order, each entry with the code it is
+    grouped under) the N3A/N3B entry naming the mentee of the N4 entry at
+    `index` is, or None when the line names its own mentee or has no
+    unambiguous one (see the comment above)."""
+    entry, code = coded[index]
+    if code != _OUTCOME_CODE or _mentee_name(entry):
+        return None
+    heading = _heading_path(entry)
+
+    def under_heading(position: int) -> bool:
+        return _heading_path(coded[position][0]) == heading
+
+    position = index - 1
+    while (position >= 0 and under_heading(position) and coded[position][1] == _OUTCOME_CODE
+           and not _mentee_name(coded[position][0])):
+        position -= 1
+    if (position < 0 or not under_heading(position)
+            or coded[position][1] not in _MENTEE_CODES or not _mentee_name(coded[position][0])):
+        return None
+    if position > 0 and under_heading(position - 1) and coded[position - 1][1] in _MENTEE_CODES:
+        return None
+    return position
+
+
+def annotate_outcome_mentees(
+        coded: Sequence[tuple[dict[str, Any], str]]) -> list[tuple[object, object]]:
+    """Write the inherited mentee onto each N4 entry `_outcome_mentee_anchor`
+    finds one for, under `OUTCOME_MENTEE_KEY`; return (N4 element_idx_start,
+    mentee element_idx_start) per entry written, for the render warnings."""
+    inherited: list[tuple[object, object]] = []
+    for index, (entry, _code) in enumerate(coded):
+        anchor = _outcome_mentee_anchor(coded, index)
+        if anchor is not None:
+            mentee = coded[anchor][0]
+            entry[OUTCOME_MENTEE_KEY] = _mentee_name(mentee)
+            inherited.append((entry.get('element_idx_start'), mentee.get('element_idx_start')))
+    return inherited
+
+
+def outcome_mentee_warnings(inherited: Sequence[tuple[object, object]]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record naming each N4 entry that took its
+    mentee from the line above, by element_idx_start only (never CV text);
+    none when no entry did."""
+    if not inherited:
+        return []
+    return [{
+        'check': OUTCOME_MENTEE_CHECK,
+        'code': _OUTCOME_CODE,
+        'section': None,
+        'message': (f"{_OUTCOME_CODE} line with no mentee took the N3A/N3B mentee above it: "
+                    f"{len(inherited)} entr{'y' if len(inherited) == 1 else 'ies'}"),
+        'evidence': [f"element_idx_start {outcome} <- {mentee}" for outcome, mentee in inherited],
+        'severity': 'INFO',
+    }]
+
+
+def _outcome_mentee_suffix(text: str, entry: Mapping[str, Any]) -> str:
+    """What to append to the outcome line `text` for the mentee
+    `annotate_outcome_mentees` gave the entry, in the line's last (mentee)
+    slot: '' when there is none or the text already names that mentee."""
+    mentee = _plain_text(entry.get(OUTCOME_MENTEE_KEY))
+    if not (text and mentee) or _contains_words(text, mentee):
+        return ''
+    return f"{_OUTCOME_PART_SEPARATOR}{mentee}"
+
+
 def _partition_mentoring_entries(
     entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
@@ -984,28 +1087,37 @@ class MentoringSection:
         Reversed so that, with each insert landing immediately after the anchor
         and pushing the previous one down, the final document order matches
         ``entries``. An N4 line whose text is a scrambled table row renders
-        from its fields instead (`_outcome_line_from_fields`, #1434).
+        from its fields instead (`_outcome_line_from_fields`, #1434); one
+        that names no mentee is followed, as a tracked insertion, by the
+        mentee `annotate_outcome_mentees` found for it (#1251).
         """
         for entry in reversed(entries):
             source = _outcome_line_from_fields(entry) or (entry.get('text') or '').strip()
             text = _clean_inline_tabs(source)
             if text:
-                self._insert_mentoring_line(text, anchor, entry)
+                self._insert_mentoring_line(text, anchor, entry,
+                                            inserted=_outcome_mentee_suffix(text, entry))
 
     def _insert_mentoring_line(
         self,
         text: str,
         anchor: BaseOxmlElement,
         entry: Mapping[str, Any] | None = None,
+        *,
+        inserted: str = '',
     ) -> Paragraph:
         """Insert a plain mentoring paragraph directly after ``anchor``.
 
         Used for content that belongs in MENTORING but has no per-mentee table to
         live in: aggregate counts (N3A/N3B with no name) and outcome narrative (N4).
+        ``inserted`` follows ``text`` as a tracked insertion: words CViche
+        added that the source line does not say (#1251).
         """
         para = self.doc.add_paragraph()
         run = para.add_run(text)
         _set_font(run)
+        if inserted:
+            self._add_track_change_insertion(para, inserted, author=OUTCOME_MENTEE_AUTHOR)
         if entry:
             self._add_entry_comments(para, entry)
         _insert_after(anchor, para._element)
