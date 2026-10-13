@@ -44,6 +44,7 @@ from unified_pipeline.stage6.normalization.authors import (  # noqa: E402
     _parse_author_fallback,
     _parse_surname_initial_pairs,
     _source_authors_after,
+    carry_cv_suffixes,
 )
 
 
@@ -962,3 +963,81 @@ def test_source_authors_after_declines_an_anchor_it_cannot_trust(
 ])
 def test_one_edit_apart(a: str, b: str, apart: bool) -> None:
     assert _one_edit_apart(a, b) is apart
+
+
+# --------------------------------------------------------------------------
+# #1438: PubMed's list keeps no suffix; the CV's line puts it back
+# --------------------------------------------------------------------------
+
+_PUBMED = "Brask A, Nolvik CL, Quorn JD, Tarnby TL"
+
+
+@pytest.mark.parametrize("cv_text, expected", [
+    ("1. Brask A, Nolvik CL, Quorn JD 4th, Tarnby TL. A study.", "Quorn JD 4th"),
+    ("Brask A, Nolvik CL, Quorn JD 2nd, Tarnby TL.", "Quorn JD 2nd"),
+    ("Brask A, Nolvik CL, Quorn JD 3rd, Tarnby TL.", "Quorn JD 3rd"),
+    ("Brask, A., Quorn, J.D., Jr., Tarnby, T.L.", "Quorn JD Jr"),
+    ("Brask A, Quorn JD Sr, Tarnby TL.", "Quorn JD Sr"),
+    ("Brask A, Quorn J. D. II, Tarnby TL.", "Quorn JD II"),
+    ("Brask A, Quorn J-D III, Tarnby TL.", "Quorn JD III"),
+    ("Brask A, Quorn JDKL IV, Tarnby TL.", "Quorn JD IV"),
+    # The suffix before the initials.
+    ("Brask A, Quorn III JD, Tarnby TL.", "Quorn JD III"),
+    ("Brask, A., Quorn, Jr., J.D., Tarnby, T.L.", "Quorn JD Jr"),
+    ("Brask A, Quorn Jr. J, Tarnby TL.", "Quorn JD Jr"),
+    ("Brask A, Quorn II AD, Tarnby TL.", "Quorn JD"),
+    # ... and only initials: "IV, Jalo" is a surname's initials, then a name.
+    ("Brask A, Quorn IV, Jalo Tarnby.", "Quorn JD"),
+    ("Brask A, Quorn Jr Jalo, Tarnby TL.", "Quorn JD"),
+    # Given names first: the suffix follows the surname directly.
+    ("A. Brask, J. D. Quorn Jr., T. L. Tarnby.", "Quorn JD Jr"),
+    ("Ulvo Brask, Jalo Quorn II and Ilvane Tarnby.", "Quorn JD II"),
+    # ... after a given word that is one of the author's: "and" is not.
+    ("A. Brask, T. K. Quorn Jr., T. L. Tarnby.", "Quorn JD"),
+    ("A. Brask, X. Quorn Jr., T. L. Tarnby.", "Quorn JD"),
+    ("A. Brask and Quorn III, T. L. Tarnby.", "Quorn JD"),
+    # A surname straight after a list comma has initials, not a suffix.
+    ("Brask A, Quorn IV, Tarnby TL.", "Quorn JD"),
+    ("Brask A, 9 Quorn IV, Tarnby TL.", "Quorn JD"),
+    ("Brask A, Ulvo-J Quorn IV, Tarnby TL.", "Quorn JD"),
+    # Another author's initials: not this one's suffix.
+    ("Brask A, Quorn AD III, Tarnby TL.", "Quorn JD"),
+    # Two suffixes for one surname: the CV cannot say which.
+    ("Brask A, Quorn JD Jr, Tarnby TL. Quorn JD III.", "Quorn JD"),
+    # Inside a longer surname, or a hyphenated or apostrophe one.
+    ("Brask A, McQuorn JD Jr, Tarnby TL.", "Quorn JD"),
+    ("Brask A, Ulvo-Quorn JD Jr, Tarnby TL.", "Quorn JD"),
+    ("Brask A, O'Quorn JD Jr, Tarnby TL.", "Quorn JD"),
+    # A word that starts like a suffix is not one.
+    ("Brask A, Quorn JD Srakel, Tarnby TL.", "Quorn JD"),
+    ("Brask A, Quorn JD Jr-Tarnby TL.", "Quorn JD"),
+    ("Brask A, Quorn JD Jr'x, Tarnby TL.", "Quorn JD"),
+    # Five initials are not one author's.
+    ("Brask A, Quorn JDKLM IV, Tarnby TL.", "Quorn JD"),
+    ("Brask A, Quorn JD, Tarnby TL.", "Quorn JD"),
+])
+def test_carry_cv_suffixes_puts_the_cvs_suffix_back(cv_text, expected):
+    carried = carry_cv_suffixes(_PUBMED, cv_text)
+    assert carried == f"Brask A, Nolvik CL, {expected}, Tarnby TL"
+
+
+def test_carry_cv_suffixes_does_not_read_initials_as_a_suffix():
+    # PubMed's "Quorn IV" is the initials I.V.; the CV's "Quorn IV" too.
+    pubmed = "Brask A, Quorn IV, Tarnby TL"
+    assert carry_cv_suffixes(pubmed, "Brask A, Quorn IV, Tarnby TL. A study.") == pubmed
+    assert carry_cv_suffixes(pubmed, "Brask A, and Quorn IV. A study.") == pubmed
+
+
+@pytest.mark.parametrize("pubmed", [
+    # Two authors of one surname: the CV's line cannot say whose it is.
+    "Brask A, Quorn JD, Quorn AB",
+    # Already carrying something after the initials (a MEDLINE-capped tail).
+    "Brask A, Quorn JD Jr",
+    # No initials at all.
+    "Brask A, Quorn",
+    # Initials that are not PubMed's shape.
+    "Brask A, Quorn Jd",
+    "Brask A, Quorn JDKLM",
+])
+def test_carry_cv_suffixes_leaves_an_unplaceable_author_alone(pubmed):
+    assert carry_cv_suffixes(pubmed, "Brask A, Quorn JD III, Quorn JDKLM III, Quorn Jd III, Quorn III.") == pubmed

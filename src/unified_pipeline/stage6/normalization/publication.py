@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
 
-from .authors import _normalize_author_names
+from .authors import _normalize_author_names, carry_cv_suffixes
 from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_owner
 
 #: The value `extracted_fields['formatting_source']` carries when stage 5d's
@@ -179,6 +179,15 @@ def _scalar_text(value: object) -> str:
     return str(value)
 
 
+def _resolved_authors(entry: dict[str, Any], fields: dict, enrichment: dict) -> str:
+    """PubMed's author list when stage 5 kept one, with the CV's generational
+    suffixes put back (#1438); else stage 4's."""
+    pubmed_authors = _text(enrichment.get('pubmed_authors'))
+    if pubmed_authors:
+        return carry_cv_suffixes(pubmed_authors, _text(entry.get('text')))
+    return _text(fields.get('authors'))
+
+
 def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     """Read one raw bibliography entry and return the record a renderer prints.
 
@@ -249,8 +258,7 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
 
     return ResolvedPublication(
         # Normalized once, here, rather than inside the render loop (point 14).
-        authors=_normalize_author_names(
-            _text(enrichment.get('pubmed_authors')) or _text(fields.get('authors'))),
+        authors=_normalize_author_names(_resolved_authors(entry, fields, enrichment)),
         # #728. Stage 4's S4 (book chapter) schema has no `title` key at all:
         # it writes the chapter's title to `chapter_title` and the book's to
         # `book_title`. The renderer read only `title`, so every chapter that

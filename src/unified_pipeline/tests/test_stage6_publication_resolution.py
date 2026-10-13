@@ -382,6 +382,28 @@ def test_the_enriched_author_list_is_normalized_too():
     assert resolved.authors == 'Watson K'
 
 
+def test_the_pubmed_author_list_takes_the_cvs_suffix_back():
+    """#1438 (VXHPXT 236 shape): PubMed's list replaces the CV's, and the
+    suffix the CV's own line gives an author comes with it."""
+    resolved = resolve_publication({
+        'text': '1. Brask A, Quorn JD 4th, Tarnby TL. A study.',
+        'extracted_fields': {'authors': 'Brask A, 4th QJ, Tarnby TL'},
+        'enrichment_data': {'pubmed_authors': 'Brask A, Quorn JD, Tarnby TL'},
+    })
+
+    assert resolved.authors == 'Brask A, Quorn JD 4th, Tarnby TL'
+
+
+def test_the_extracted_author_list_is_not_given_a_suffix():
+    """Without a PubMed list the CV's own (stage 4's) list renders as is."""
+    resolved = resolve_publication({
+        'text': 'Brask A, Quorn JD Jr. A study.',
+        'extracted_fields': {'authors': 'Brask A, Quorn JD'},
+    })
+
+    assert resolved.authors == 'Brask A, Quorn JD'
+
+
 def test_author_normalization_runs_exactly_once_per_entry(monkeypatch):
     """Point 14's actual claim, not a proxy for it: rendering is no longer
     allowed to normalize, so the normalizer is called once while the record

@@ -1300,3 +1300,53 @@ def test_fill_bibliography_coauthor_target_initials_are_not_the_owners():
              for n in range(6)]
     coauthor = _citation_entry("Vard K, Doe J. A study of rats. J Med. 2020;1:1-2.", "Vard K", 2020)
     assert _bold_texts([*owner, coauthor], {})[-1] == []
+
+
+# --- #1438: PubMed indexes a compound-surname owner under one part ---------
+
+_COMPOUND_OWNER = "Varnoske Pellith"
+_OWNER_I = OwnerAlias((), frozenset("I"), frozenset(), frozenset())
+
+
+@pytest.mark.parametrize(
+    "citation, target_name, owner, alias, bolded",
+    [
+        # PubMed's one-part form, with the owner's initial, bolds whole.
+        ("Brask A, Pellith IVA, Nolvik B" + _TAIL, None, _COMPOUND_OWNER, _OWNER_I, "Pellith IVA"),
+        # The compound can come from the target alone.
+        ("Brask A, Pellith IVA" + _TAIL, "Varnoske Pellith I", "", _OWNER_I, "Pellith IVA"),
+        # Either part, and a hyphenated compound.
+        ("Brask A, Varnoske IP" + _TAIL, None, "Varnoske-Pellith", _OWNER_I, "Varnoske IP"),
+        # A co-author sharing a part, with another initial, is not the owner.
+        ("Brask A, Pellith RB" + _TAIL, None, _COMPOUND_OWNER, _OWNER_I, ""),
+        # Two authors sharing a part: neither bolds.
+        ("Pellith IA, Varnoske IB" + _TAIL, None, _COMPOUND_OWNER, _OWNER_I, ""),
+        ("Pellith IA, Pellith IB" + _TAIL, None, _COMPOUND_OWNER, _OWNER_I, ""),
+        # No owner initial known: nothing to check the author against.
+        ("Brask A, Pellith IVA" + _TAIL, None, _COMPOUND_OWNER, OwnerAlias(), ""),
+        # A one-part surname is the earlier steps' job, not this one's: its
+        # apostrophe-less spelling stays unbolded.
+        ("Brask A, OPellith IA" + _TAIL, None, "O'Pellith", _OWNER_I, ""),
+        # A marker inside the printed name: parsed, but not matched.
+        ("Brask A, Pel*lith IA" + _TAIL, None, _COMPOUND_OWNER, _OWNER_I, ""),
+        # A title word is not an author.
+        ("Brask A, Nolvik B. The Pellith method. J Things. 2023;1:1-9.", None,
+         _COMPOUND_OWNER, _OWNER_I, ""),
+    ],
+)
+def test_citation_author_split_compound_owner_part(citation, target_name, owner, alias, bolded):
+    assert bibliography._citation_author_split(citation, target_name, owner, alias)[1] == bolded
+
+
+def test_fill_bibliography_bolds_a_compound_owner_in_pubmed_form():
+    # UYQRUN 658/660 shape: the CV prints the compound, PubMed's list the
+    # last part with the first as an initial. A co-author sharing that part
+    # under another initial stays plain.
+    cv = [_citation_entry(f"Varnoske Pellith I, Brask A. A study of mice {n}. J Med. 2020;1:1-2.",
+                          "Varnoske Pellith I", 2020) for n in range(3)]
+    pubmed = _citation_entry("Brask A, Pellith IA, Nolvik B. A study of rats. J Med. 2020;1:1-2.",
+                             "Varnoske Pellith I", 2020)
+    coauthor = _citation_entry("Brask A, Pellith RB. A study of dogs. J Med. 2020;1:1-2.",
+                               "Varnoske Pellith I", 2020)
+    bolds = _bold_texts([*cv, pubmed, coauthor], {"last_name": _COMPOUND_OWNER, "first_name": "Ilvane"})
+    assert bolds == [["Varnoske Pellith I"]] * 3 + [["Pellith IA"], []]

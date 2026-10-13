@@ -68,6 +68,7 @@ from ..normalization.owner_alias import (
     fold_name,
     infer_owner_alias,
     name_parts,
+    parse_authors,
 )
 from ..normalization.publication import resolve_publication
 from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
@@ -297,6 +298,34 @@ def _find_alias_span(citation: str, alias: OwnerAlias) -> tuple[int, int] | None
     return None
 
 
+def _compound_parts(surnames: tuple[str, ...]) -> frozenset[str]:
+    """The name parts of every surname here that has two or more of them
+    ("Varnoske Pellith", "Brask-Nolvik"); a one-part surname gives none."""
+    compound = [parts for parts in map(name_parts, surnames) if len(parts) > 1]
+    return frozenset().union(*compound)
+
+
+def _find_compound_part_span(citation: str, owner_surnames: tuple[str, ...],
+                             alias: OwnerAlias) -> tuple[int, int] | None:
+    """Span of the one author in the author list whose surname is a part of
+    the owner's compound surname, when that author's initial is the owner's
+    (#1438). PubMed can index a compound surname under one part with the
+    other as an initial ("Varnoske Pellith IA" as "Pellith IVA"). Two
+    authors sharing a part with the owner -- the owner and a co-author, or
+    two co-authors -- bold neither, so a co-author who shares half the
+    surname is never marked."""
+    parts = _compound_parts(owner_surnames)
+    if not parts or not alias.initials:
+        return None
+    sharing = [a for a in parse_authors(citation) if name_parts(a.surname) & parts]
+    if len(sharing) != 1 or sharing[0].initial not in alias.initials:
+        return None
+    # The surname as the citation prints it: parse_authors drops markers
+    # ("Pel*lith IA" reads "Pellith"), and such a print is not matched.
+    span = _find_name_span(citation, sharing[0].surname)
+    return _surname_span_around(citation, *span, frozenset()) if span else None
+
+
 def _target_surname(target_name: str) -> str:
     """`target_name` without its trailing capital initials ("Pell-Rowan FM"
     -> "Pell-Rowan", "Tarn-Ellery, K." -> "Tarn-Ellery"), or unchanged
@@ -363,7 +392,9 @@ def _citation_author_split(citation: str, target_name: str | None,
     falls back to `cv_owner_last_name`, and last to `owner_alias`, the
     spellings `_infer_bibliography_owner_alias` read from the whole
     bibliography (#1393) -- matched only in the author list and only on an
-    author whose initial is the owner's. Every surname match is widened over
+    author whose initial is the owner's, then to the one author carrying a
+    part of a compound owner surname with an owner initial (#1438). Every
+    surname match is widened over
     adjacent owner name parts, so a spaced compound bolds whole. A
     `target_name` shaped like a title
     (a colon, or more than `_MAX_TARGET_NAME_TOKENS` words) is skipped. A surname match takes trailing capital
@@ -387,6 +418,9 @@ def _citation_author_split(citation: str, target_name: str | None,
         span = _find_surname_span(citation, cv_owner_last_name, alias.parts)
     if span is None:
         span = _find_alias_span(citation, alias)
+    if span is None:
+        owner_surnames = (cv_owner_last_name, _target_surname(target_name or ''))
+        span = _find_compound_part_span(citation, owner_surnames, alias)
     if span is None:
         return citation, '', ''
     start, end = span
