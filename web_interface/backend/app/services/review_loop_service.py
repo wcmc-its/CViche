@@ -37,7 +37,7 @@ from app.services.artifact_service import REVIEW_DOCX_SUFFIX, resolve_artifact
 from app.services.quality_score_service import DOCTOR_SUFFIX
 from app.services.review_comments import (
     COMMENT_AUTHOR,
-    REVIEW_NOTES_TITLE,
+    LEGACY_REVIEW_NOTES_TITLE,
     CommentFinding,
     comment_map_path,
     lint_of_flag,
@@ -212,7 +212,7 @@ def _comment_findings(db: Session, run_id: str, review: Path) -> tuple[dict[int,
         rows = [CommentFinding(**row) for row in json.loads(raw)]
         return {row.comment_id: row for row in rows}, FINDINGS_FROM_MAP
     return ({c.comment_id: CommentFinding(c.comment_id, lint_of_flag(c.text), None, None, None)
-             for c in Document(str(review)).comments},
+             for c in Document(str(review)).comments if c.author == COMMENT_AUTHOR},
             FINDINGS_FROM_WORDING)
 
 
@@ -251,13 +251,15 @@ def store_verdicts(db: Session, run_id: str, corrected: bytes) -> dict:
 
 
 def _without_review_notes(docx: bytes) -> bytes:
-    """The document without the review copy's closing review-notes box,
-    which the delivered document never had; stage 6's own boxes stay, as
-    the doctor read them on the delivered run."""
+    """The document without the review-notes box a review copy written
+    before the notes became a comment closes with, which the delivered
+    document never had; stage 6's own boxes stay, as the doctor read them on
+    the delivered run. A later copy's notes are a comment, outside the body
+    the doctor reads, so there is nothing to strip."""
     doc = Document(io.BytesIO(docx))
     for tbl in list(doc.element.body.iterchildren(qn("w:tbl"))):
         table = Table(tbl, doc)
-        if is_cviche_box(table) and table.cell(0, 0).paragraphs[0].text.startswith(REVIEW_NOTES_TITLE):
+        if is_cviche_box(table) and table.cell(0, 0).paragraphs[0].text.startswith(LEGACY_REVIEW_NOTES_TITLE):
             tbl.getparent().remove(tbl)
     out = io.BytesIO()
     doc.save(out)

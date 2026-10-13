@@ -183,6 +183,23 @@ def test_the_clean_document_uploaded_has_no_comments_to_follow(db, store, tmp_pa
     assert report["counts"] == {"fixed": 0, "not_a_problem": 0, "unknown": 3}
 
 
+def test_the_review_notes_comment_is_no_findings_comment(db, store, tmp_path):
+    """The notes are one comment by their own author (id 3, after the
+    findings'): it gets no verdict, and deleting it alone leaves the
+    findings' comments followed, as Delete All Comments would not."""
+    from app.services.review_comments import REVIEW_NOTES_AUTHOR
+
+    doc = _open(_with_review_copy(tmp_path, store))
+    assert [(c.comment_id, c.author) for c in doc.comments][-1] == (3, REVIEW_NOTES_AUTHOR)
+    _delete_comment(doc, 3)
+    report = svc.comment_verdicts(db, _RUN, _saved(doc))
+    assert report["comments_tracked"]
+    assert _verdicts(report) == [(0, "enrichment_failures", "unknown"), (1, "implausible_year", "unknown"),
+                                 (2, "pipe_leaks", "unknown")]
+    old_copy = svc.comment_verdicts(db, _RUN, _with_review_copy(tmp_path, store, with_map=False))
+    assert [f["comment_id"] for f in old_copy["findings"]] == [0, 1, 2]
+
+
 def test_a_review_copy_written_before_its_comment_map_reads_lints_from_the_wording(db, store, tmp_path):
     review = _with_review_copy(tmp_path, store, with_map=False)
     report = svc.comment_verdicts(db, _RUN, review)
@@ -219,16 +236,18 @@ def test_the_doctor_reruns_on_the_corrected_copy_and_counts_what_cleared(db, sto
     assert json.loads(store.get_file(_RUN, svc.corrected_doctor_compare_key(_RUN))) == comparison
 
 
-def test_the_rerun_drops_the_review_notes_box_but_not_stage6s_own(tmp_path):
+def test_the_rerun_drops_an_old_copys_review_notes_box_but_not_stage6s_own(tmp_path):
+    """A review copy delivered before the notes became a comment closes with
+    a box in the body; one uploaded later still has it stripped."""
     from docx import Document
 
-    from app.services.review_comments import REVIEW_NOTES_TITLE
+    from app.services.review_comments import LEGACY_REVIEW_NOTES_TITLE
     from unified_pipeline.stage6.formatting import add_cviche_box
 
     doc = Document()
     doc.add_paragraph(_CITES[0])
     add_cviche_box(doc, "CViche note: delete this box before sending")
-    add_cviche_box(doc, REVIEW_NOTES_TITLE)
+    add_cviche_box(doc, LEGACY_REVIEW_NOTES_TITLE)
     kept = _open(svc._without_review_notes(_saved(doc)))
     assert [t.cell(0, 0).paragraphs[0].text for t in kept.tables] == [
         "CViche note: delete this box before sending"]

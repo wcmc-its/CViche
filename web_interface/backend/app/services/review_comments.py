@@ -4,7 +4,7 @@ A reviewer sees each WARN or ERROR finding as a short Word comment on the text
 it is about: the year that looks wrong, the second copy of a duplicate. A
 finding with no one place in the document (a citation PubMed could not match,
 an entry removed as a near-duplicate, a step that fell back) is an item in the
-review-notes box closing the document, grouped by what to do about it. Where
+review notes, grouped by what to do about it. Where
 the Appendix entries came from goes in stage 6's own Appendix note box; how
 many entries meant for a section went there is a comment on that section's
 heading. The clean document is left as it is; this writes a copy beside it.
@@ -14,8 +14,15 @@ Precision gate (#1589): a finding is marked on the text only when its lint
 (`precision.shown_in_place`). A less certain finding is a review note, so a
 false alarm never sits on correct text.
 
-Every run's copy is written, even with nothing to flag: the box always closes
+Every run's copy is written, even with nothing to flag: the notes always close
 with what CViche does not check, since a quiet doctor is not a clean document.
+
+The review notes are one Word comment on the document's first paragraph, by
+their own author (REVIEW_NOTES_AUTHOR), not a box in the body: everything this
+copy adds is a comment or a tracked change, so Word's Review > Delete All
+Comments leaves the clean document's text, and the copy is the one download.
+A copy written before that closes with a review-notes box in the body
+(LEGACY_REVIEW_NOTES_TITLE), which review_loop_service still strips.
 
 One exception: a lint in REVIEW_COPY_ONLY_LINTS (citation_grounding, #1570)
 is commented whatever its severity, but only on the text it quotes, never on
@@ -44,6 +51,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from docx import Document
+from docx.comments import Comment
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -78,14 +86,6 @@ from unified_pipeline.doctor.precision import (  # noqa: E402
 )
 from unified_pipeline.doctor.shared import docx_table_rows  # noqa: E402
 from unified_pipeline.stage4.schemas import TAXONOMY_LABELS  # noqa: E402
-from unified_pipeline.stage6.formatting import (  # noqa: E402
-    add_cviche_box,
-    cviche_box_group,
-    cviche_box_item,
-    cviche_box_pair,
-    cviche_box_text,
-    space_around_cviche_box,
-)
 from unified_pipeline.stage6.sections.bibliography import (  # noqa: E402
     TRACKED_INSERTION_FONT_NAME,
     TRACKED_INSERTION_FONT_SIZE_HALF_POINTS,
@@ -247,9 +247,15 @@ _DEDUP_RE = re.compile(r"^(?:entry [^:]+: )?(?P<code>[A-Z][A-Z0-9]*) \(.*?\): "
 #: stage 6's appendix_diversion messages, after the code prefix the run page
 #: strips: "2 entries diverted to the Appendix ...", "1 entry ... recovered into the Appendix".
 _DIVERTED_RE = re.compile(r"(?P<count>\d+) (?P<noun>entr(?:y|ies))\b[^.]*?(?:diverted to|recovered into) the Appendix")
-#: The review notes are a CViche box (stage6/formatting add_cviche_box), the
-#: same kind as stage 6's Appendix note.
-REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
+#: The review notes: one comment, its first line this title. Its own author,
+#: so comment_fate (which follows COMMENT_AUTHOR's comments) never takes it
+#: for a finding's comment, and the comment map never lists it.
+REVIEW_NOTES_TITLE = "CViche review notes"
+REVIEW_NOTES_AUTHOR = "CViche notes"
+NOTE_BULLET = "\u2022 "
+#: The title of the review-notes box a copy written before the notes were a
+#: comment closes with: a CViche box (stage6/formatting add_cviche_box) in the body.
+LEGACY_REVIEW_NOTES_TITLE = "CViche review notes: delete this box before sending"
 DEDUP_TITLE = "Removed as near-duplicates"
 DEDUP_INSTRUCTION = ("We kept one copy of each. If any of these is a separate entry, "
                      "add it back in the section shown.")
@@ -290,7 +296,7 @@ class Flag:
 
 @dataclass(frozen=True)
 class Note:
-    """One item in the review-notes box, under the group its title and
+    """One item in the review notes, under the group its title and
     instruction name. ``removed`` and ``kept`` are a near-duplicate's two copies."""
     title: str
     instruction: str
@@ -595,7 +601,7 @@ def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]
     every grant table role_consistency reports as owner_pi_role_empty; return
     how many, and the messages of the findings now fixed on every table they
     report. A table with no "Your role:" row is skipped, and its finding
-    stays a comment. Reads the tables before the review notes add theirs."""
+    stays a comment."""
     if not isinstance(stage4, dict):
         return 0, set()
     tables = doc.tables
@@ -615,30 +621,38 @@ def _suggest_owner_pi_role(doc: Document, stage4: object) -> tuple[int, set[str]
     return inserted, set(reported.values()) - unfixed
 
 
-def _add_review_notes(doc: Document, notes: list[Note]) -> None:
-    """The review-notes box closing the document: a group per action, with
+def _note_line(comment: Comment, text: str, bold: bool = False, italic: str = "") -> None:
+    """One line of the review-notes comment; ``italic`` is a label before ``text``."""
+    para = comment.add_paragraph()
+    if italic:
+        para.add_run(f"{italic} ").italic = True
+    para.add_run(text).bold = bold
+
+
+def _add_review_notes(doc: Document, anchor: Paragraph, notes: list[Note]) -> None:
+    """The review notes as one comment on ``anchor``: a group per action, with
     its count and instruction, then an item per finding; last, what CViche
-    does not check. The space above the box is set on the document's last
-    paragraph, not a blank one."""
+    does not check."""
     groups: dict[tuple[str, str], list[Note]] = {}
     for note in notes:
         groups.setdefault((note.title, note.instruction), []).append(note)
-    space_around_cviche_box(doc.paragraphs[-1] if doc.paragraphs else None, None)
-    cell = add_cviche_box(doc, REVIEW_NOTES_TITLE)
-    for n, ((title, instruction), members) in enumerate(groups.items()):
-        cviche_box_group(cell, f"{title} ({len(members)})", first=n == 0)
-        cviche_box_text(cell, instruction)
+    comment = doc.add_comment(_runs(anchor, None), text="", author=REVIEW_NOTES_AUTHOR,
+                              initials=COMMENT_INITIALS)
+    comment.paragraphs[0].add_run(REVIEW_NOTES_TITLE).bold = True
+    for (title, instruction), members in groups.items():
+        _note_line(comment, f"{title} ({len(members)})", bold=True)
+        _note_line(comment, instruction)
         for note in dict.fromkeys(members):  # the same item once
             if note.item:
-                cviche_box_item(cell, note.item)
+                _note_line(comment, f"{NOTE_BULLET}{note.item}")
             if note.removed:
-                cviche_box_pair(cell, "Removed:", note.removed, last=not note.kept)
+                _note_line(comment, note.removed, italic="Removed:")
             if note.kept:
-                cviche_box_pair(cell, "Kept:", note.kept, last=True)
-    cviche_box_group(cell, NOT_CHECKED_TITLE, first=not groups)
-    cviche_box_text(cell, NOT_CHECKED_INSTRUCTION)
+                _note_line(comment, note.kept, italic="Kept:")
+    _note_line(comment, NOT_CHECKED_TITLE, bold=True)
+    _note_line(comment, NOT_CHECKED_INSTRUCTION)
     for spot in blind_spots():
-        cviche_box_item(cell, spot.sentence)
+        _note_line(comment, f"{NOTE_BULLET}{spot.sentence}")
 
 
 def write_review_docx(clean_docx: Path, doctor_payload: object,
@@ -687,7 +701,8 @@ def write_review_docx(clean_docx: Path, doctor_payload: object,
         comment = doc.add_comment(_runs(flag.paragraph, flag.span), text=flag.text,
                                   author=COMMENT_AUTHOR, initials=COMMENT_INITIALS)
         marked.append(asdict(_comment_finding(comment.comment_id, f, rows)))
-    _add_review_notes(doc, notes)
+    # Last, so the findings' comments keep the ids the map names.
+    _add_review_notes(doc, paragraphs[0][0], notes)
     out = review_docx_path(clean_docx)
     # The map first: a map that cannot be written raises before the copy is
     # saved, so no copy is left on disk that the caller reports as failed.
