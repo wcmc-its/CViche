@@ -350,6 +350,24 @@ def pubmed_list_is_capped(cv_authors: str | list[str] | None, pubmed_authors: li
     return shared >= _CAPPED_LIST_MIN_SHARED * len(surnames)
 
 
+def _cv_position(author: str, cv_names: list[str], expected: int) -> int | None:
+    """Where PubMed's `author` ("Surname Initials") sits in the CV's names, or
+    None when the CV names no one of that surname. Two CV coauthors sharing
+    the surname are told apart by the first initial, then by which sits
+    nearer `expected`, the author's place in PubMed's list, the earlier on
+    a tie: a CV "Lee A" first must not place PubMed's tenth, "Lee J"."""
+    surname_part, *initials = author.rsplit(' ', 1)
+    surname = _folded_words(surname_part, _MIN_SURNAME_WORD_LEN)
+    if not surname:
+        return None
+    found = [i for i, name in enumerate(cv_names)
+             if surname <= _folded_words(name, _MIN_SURNAME_WORD_LEN)]
+    initial = ''.join(initials)[:1].lower()
+    same_initial = [i for i in found
+                    if initial in {w[0] for w in _folded_words(cv_names[i], 1) - surname}]
+    return min(same_initial or found, key=lambda i: abs(i - expected), default=None)
+
+
 def capped_list_with_cv_tail(cv_authors: str | list[str] | None,
                              pubmed_authors: list[str]) -> str | None:
     """PubMed's capped list followed by the CV's authors after PubMed's last
@@ -363,11 +381,9 @@ def capped_list_with_cv_tail(cv_authors: str | list[str] | None,
     cv_names = _cv_author_names(cv_authors)
     if isinstance(cv_authors, str) and len(_AUTHOR_SEPARATOR.split(cv_authors)) != len(cv_names):
         return None
-    cv_words = [_folded_words(name, _MIN_SURNAME_WORD_LEN) for name in cv_names]
     cut = None
     for back, author in enumerate(reversed(pubmed_authors)):
-        surname = _folded_words(author.rsplit(' ', 1)[0], _MIN_SURNAME_WORD_LEN)
-        found = next((i for i, words in enumerate(cv_words) if surname and surname <= words), None)
+        found = _cv_position(author, cv_names, len(pubmed_authors) - 1 - back)
         if found is not None:
             cut = found + back
             break
