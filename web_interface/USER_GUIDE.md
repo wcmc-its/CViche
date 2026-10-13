@@ -145,6 +145,7 @@ The output is a Word (.docx) file organized into the WCM CV sections. Here is wh
 
 - **Track changes** (if enabled): Insertions and deletions are marked using Word's Track Changes feature. This shows you exactly what text was added, removed, or moved during conversion. You can accept or reject changes individually in Word.
 - **Comments** (if pipeline comments are enabled): Margin comments from the pipeline explain classification decisions, show confidence scores, and note any entries that required special handling. These can be deleted in bulk in Word when you no longer need them.
+- **CViche's notes** ("CViche check" and "CViche notes" comments): what CViche found worth checking, as Word comments on the text they are about, and one comment on the document's first line listing the rest and what CViche does not check. Once you have checked them, **Review → Delete All Comments** in Word removes every note and leaves the document ready to submit. A suggested fix is a tracked change instead: accept or reject it.
 - **Empty sections:** WCM sections that had no matching content in your CV are included as empty placeholders. You can fill these in manually if needed, or delete them.
 
 ---

@@ -199,9 +199,11 @@ def test_doctor_publishes_the_review_copy_beside_its_report(monkeypatch, tmp_pat
     assert files == ["/x/cv_wcm.docx", str(report), str(review), str(comment_map)]
     assert persisted == [str(report), str(review), str(comment_map)]
     assert json.loads(comment_map.read_text()) == []  # the one finding is a review note, not a comment
-    # The quoted text is not in the document, so it is a review note in the box closing the copy.
-    notes = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
-    assert notes[1:4] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022\t"Insert dates here (MM/YYYY)"']
+    # The quoted text is not in the document, so it is a review note: the
+    # one comment, by the notes' own author, on the first paragraph.
+    (comment,) = Document(str(review)).comments
+    notes = [p.text for p in comment.paragraphs]
+    assert notes[1:4] == ["Stray text to delete (1)", "Stray text: delete it.", '\u2022 "Insert dates here (MM/YYYY)"']
     assert len(list(Document(str(clean)).comments)) == 0
 
 
@@ -246,6 +248,8 @@ def test_a_corrupt_stage4_artifact_leaves_the_review_copy_comments_only(monkeypa
     the review copy is still written, with the finding as a comment."""
     from docx import Document
 
+    from app.services.review_comments import COMMENT_AUTHOR, REVIEW_NOTES_AUTHOR
+
     monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
     payload = {**_doctor_payload(), "findings": [{
         "lint": "role_consistency", "severity": "WARN", "status": "ran", "evidence": ["Example Project"],
@@ -266,7 +270,7 @@ def test_a_corrupt_stage4_artifact_leaves_the_review_copy_comments_only(monkeypa
         asyncio.run(o._run_doctor())
 
     review = Document(str(clean.with_name("DOC_BAD4_wcm_review.docx")))
-    assert len(list(review.comments)) == 1
+    assert [c.author for c in review.comments] == [COMMENT_AUTHOR, REVIEW_NOTES_AUTHOR]
     assert any("Stage-4 JSON unreadable" in r.message for r in caplog.records)
     assert not any("Review-comment docx failed" in r.message for r in caplog.records)
 
@@ -277,7 +281,7 @@ def test_a_run_with_nothing_to_flag_still_publishes_its_review_copy(monkeypatch,
     from docx import Document
 
     from app.models import Step
-    from app.services.review_comments import NOT_CHECKED_TITLE
+    from app.services.review_comments import NOT_CHECKED_TITLE, REVIEW_NOTES_AUTHOR
 
     monkeypatch.delenv("CVICHE_RUN_DOCTOR", raising=False)
     payload = {**_doctor_payload(), "findings": []}
@@ -292,8 +296,8 @@ def test_a_run_with_nothing_to_flag_still_publishes_its_review_copy(monkeypatch,
     review = clean.with_name("DOC_QT_wcm_review.docx")
     files = json.loads(db.query(Step).filter(Step.run_id == "DOC_QT").first().output_files)
     assert str(review) in files and str(review) in persisted
-    box = [p.text for p in Document(str(review)).tables[-1].cell(0, 0).paragraphs]
-    assert box[1] == NOT_CHECKED_TITLE
+    (notes,) = [c for c in Document(str(review)).comments if c.author == REVIEW_NOTES_AUTHOR]
+    assert [p.text for p in notes.paragraphs][1] == NOT_CHECKED_TITLE
 
 
 def test_an_unreadable_document_still_publishes_the_report(monkeypatch, tmp_path, db, caplog):

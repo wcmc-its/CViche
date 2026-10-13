@@ -103,8 +103,8 @@ _STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     ))
 
 #: #1589's gate: a finding whose shape is hand-checked below this precision is
-#: not marked on the text it is about (the review copy lists it in its closing
-#: box instead). Paul, 2026-10-08: a lint at about 50% is a review-copy
+#: not marked on the text it is about (the review copy lists it in its review
+#: notes instead). Paul, 2026-10-08: a lint at about 50% is a review-copy
 #: comment, so the bar is "below half", not "below the WARN bar".
 IN_PLACE_MIN_PRECISION = 0.50
 

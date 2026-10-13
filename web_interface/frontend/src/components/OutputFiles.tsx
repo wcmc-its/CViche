@@ -15,14 +15,14 @@ interface OutputFilesProps {
   showFinalOutput?: boolean
 }
 
-/** Label of the clean copy's download beside the main one, when the main
- *  Download is the review copy (#1589). */
-export const CLEAN_COPY_LABEL = 'Clean copy (no notes)'
+/** What the review copy's line under its name says: its notes are Word
+ *  comments, so deleting them all leaves the document ready to submit. */
+export const REVIEW_COPY_NOTE = "CViche's notes are Word comments: Review \u2192 Delete All Comments removes them."
 
-/** Sand panel with a DOCX tile, the file name and a primary Download button.
- *  When the run has a review copy (#1591), Download gets it: no output yet has
- *  been ready to submit unchecked, so the notes come first and the clean copy
- *  sits beside it. */
+/** Sand panel with a DOCX tile, the file name and a Download button, the
+ *  only one. When the run has a review copy (#1591), Download gets it: no
+ *  output yet has been ready to submit unchecked, so the notes come with it,
+ *  as comments a reviewer deletes once checked. */
 export function DocxDownloadCard({ runId, filename, reviewFilename = null }: { runId: string; filename: string; reviewFilename?: string | null }) {
   const primary = reviewFilename ?? filename
   return (
@@ -40,19 +40,9 @@ export function DocxDownloadCard({ runId, filename, reviewFilename = null }: { r
             ? "WCM institutional format Word document, with CViche's notes on what to check"
             : 'WCM institutional format Word document'}
         </div>
+        {reviewFilename && <div className="text-[13px] text-gray-500">{REVIEW_COPY_NOTE}</div>}
       </div>
       <div className="flex flex-wrap items-center gap-2.5">
-        {reviewFilename && (
-          <a
-            href={runRoutes.dataFile(runId, filename)}
-            download
-            title={filename}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-sand-400 hover:bg-sand-50 text-gray-900 font-medium rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 focus-visible:outline-none"
-          >
-            <Download className="w-4 h-4" aria-hidden="true" />
-            <span>{CLEAN_COPY_LABEL}</span>
-          </a>
-        )}
         <a
           href={runRoutes.dataFile(runId, primary)}
           download

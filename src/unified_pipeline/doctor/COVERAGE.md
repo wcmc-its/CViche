@@ -64,7 +64,7 @@ How to re-measure: score both arms with `scripts/doctor_vs_autopsy.py --json` ov
 
 ## Not checked
 
-What the document's reader is told the doctor did not check, one sentence per BLIND cell. Faculty read these sentences, so each starts with "CViche", not "The doctor". `doctor/blind_spots.py` reads these bullets for the review copy's "not checked" box (#1589); keep the shape "- `<type> / <level>`: <sentence>." and add or remove a bullet in the PR that changes a cell.
+What the document's reader is told the doctor did not check, one sentence per BLIND cell. Faculty read these sentences, so each starts with "CViche", not "The doctor". `doctor/blind_spots.py` reads these bullets for the review copy's "not checked" group of its review notes (#1589); keep the shape "- `<type> / <level>`: <sentence>." and add or remove a bullet in the PR that changes a cell.
 
 - `missing / entry`: CViche can miss a whole entry left out of a section when the rest of the section is there.
 - `invented / section`: CViche doesn't check whether the research summary's claims are supported by your CV.
