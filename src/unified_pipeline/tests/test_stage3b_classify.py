@@ -647,6 +647,211 @@ def test_m2_preferred_over_t_when_marking_the_duplicate():
     assert "is_duplicate" not in updated[1]
 
 
+# #1435: identical undated lines filed under two different years of one
+# section are two events, not one record written twice.
+
+_VENUE = "Quorvane Institute seminar series (Brellport)"
+_OTHER_VENUE = "Talmisk Society winter colloquium (Ondevar)"
+
+
+def _talk(text, hierarchy=("INVITED TALKS",), code="R"):
+    return {"text": text, "taxonomy_code": code, "hierarchy": list(hierarchy)}
+
+
+def _flags(entries):
+    updated, _ = classify.detect_duplicates(entries)
+    return [bool(e.get("is_duplicate")) for e in updated]
+
+
+def test_same_venue_in_two_year_opened_groups_is_kept_twice():
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"),
+        _talk(_VENUE),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)"),
+        _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False, False, False, False]
+
+
+def test_same_venue_twice_in_one_year_group_is_still_a_duplicate():
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"),
+        _talk(_VENUE),
+        _talk(_OTHER_VENUE),
+        _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False, False, False, True]
+
+
+def test_bare_year_lines_open_groups_and_colon_is_allowed():
+    entries = [
+        _talk("2011:"), _talk(_VENUE),
+        _talk("2012"), _talk(_VENUE),
+        _talk("1999 :"), _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False] * 6
+
+
+def test_year_heading_level_separates_groups():
+    entries = [
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2016")),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2017:")),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2017:")),
+    ]
+    assert _flags(entries) == [False, False, True]
+
+
+def test_hierarchy_level_that_only_starts_with_a_year_is_not_a_heading():
+    entries = [
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2016 Morrowfen")),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2017 Morrowfen")),
+    ]
+    assert _flags(entries) == [False, True]
+
+
+def test_year_heading_level_wins_over_an_open_group_of_its_section():
+    """A year-heading level dates the entry even after a year-opened line
+    in the same section: the two twins below are 2016 and 2017, not both
+    the open 2015 group."""
+    entries = [
+        _talk("2015 Zephrun Foundation lecture (Grenwick)"),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2016")),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2017")),
+    ]
+    assert _flags(entries) == [False, False, False]
+
+
+def test_twins_in_two_sections_are_still_duplicates():
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)", hierarchy=("TALKS",)),
+        _talk(_VENUE, hierarchy=("TALKS",)),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)", hierarchy=("SEMINARS",)),
+        _talk(_VENUE, hierarchy=("SEMINARS",)),
+    ]
+    assert _flags(entries) == [False, False, False, True]
+
+
+def test_year_opener_in_another_section_does_not_close_a_group():
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)", hierarchy=("TALKS",)),
+        _talk(_VENUE, hierarchy=("TALKS",)),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)", hierarchy=("SEMINARS",)),
+        _talk(_VENUE, hierarchy=("TALKS",)),
+    ]
+    assert _flags(entries) == [False, False, False, True]
+
+
+def test_twin_before_the_first_year_group_is_still_a_duplicate():
+    entries = [
+        _talk(_VENUE),
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"),
+        _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False, False, True]
+
+
+def test_twin_that_carries_its_own_year_is_still_a_duplicate():
+    dated = "Ystrel visiting lecture 2014, Kelvador campus"
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"), _talk(dated),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)"), _talk(dated),
+    ]
+    assert _flags(entries) == [False, False, False, True]
+
+
+@pytest.mark.parametrize("own_date", [
+    "2018 - 2020 Ystrel fellowship (Kelvador)",
+    "2018\u20132020 Ystrel fellowship (Kelvador)",
+    "2018 \u2014 2020 Ystrel fellowship (Kelvador)",
+    "2018 \u2013 2020 Ystrel fellowship (Kelvador)",
+    "2018 / 19 Ystrel fellowship (Kelvador)",
+    "201 Ystrel fellowship (Kelvador)",
+    "2018/19 Ystrel fellowship (Kelvador)",
+    "2018, Ystrel fellowship (Kelvador)",
+    "20181 Ystrel fellowship (Kelvador)",
+    "2118 Ystrel fellowship (Kelvador)",
+    "Ystrel fellowship 2018 (Kelvador)",
+])
+def test_a_line_with_its_own_date_does_not_open_a_new_group(own_date):
+    """A range, a year followed by punctuation, a longer number, a non-year,
+    or a year later in the line is that line's own date: the twins around
+    it stay in the 2019 group and the second is a duplicate."""
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"),
+        _talk(_VENUE),
+        _talk(own_date),
+        _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False, False, False, True]
+
+
+@pytest.mark.parametrize("first_level, second_level", [
+    (" 2016", "2017"),
+    ("2016 :", "2017"),
+    ("2016: ", "2017"),
+    ("1998", "1999"),
+])
+def test_year_heading_level_spacing_and_century(first_level, second_level):
+    entries = [
+        _talk(_VENUE, hierarchy=("INVITED TALKS", first_level)),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", second_level)),
+    ]
+    assert _flags(entries) == [False, False]
+
+
+def test_twin_with_a_twentieth_century_year_is_still_a_duplicate():
+    dated = "Ystrel visiting lecture 1987, Kelvador campus"
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"), _talk(dated),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)"), _talk(dated),
+    ]
+    assert _flags(entries) == [False, False, False, True]
+
+
+def test_digits_inside_a_longer_number_are_not_a_year_of_its_own():
+    """"31998" and "20157" are course numbers, not years: the twin stays
+    undated, so the two years keep it twice."""
+    undated = "Ystrel practicum, course 31998 and 20157 (Kelvador)"
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"), _talk(undated),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)"), _talk(undated),
+    ]
+    assert _flags(entries) == [False] * 4
+
+
+def test_grouped_twin_and_ungrouped_twin_in_another_section_are_duplicates():
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)", hierarchy=("TALKS",)),
+        _talk(_VENUE, hierarchy=("TALKS",)),
+        _talk(_VENUE, hierarchy=("SEMINARS",)),
+    ]
+    assert _flags(entries) == [False, False, True]
+
+
+def test_year_opener_may_be_indented():
+    entries = [
+        _talk("  2019 Zephrun Foundation lecture (Grenwick)"), _talk(_VENUE),
+        _talk("  2018 Vallomir Hospital grand rounds (Peskathe)"), _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False] * 4
+
+
+def test_year_groups_tolerate_missing_text_and_hierarchy():
+    entries = [
+        {"text": None, "taxonomy_code": "R", "hierarchy": None},
+        {"taxonomy_code": "R"},
+        {"text": 20190, "taxonomy_code": "R", "hierarchy": ["INVITED TALKS", 2017]},
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"), _talk(_VENUE),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)"), _talk(_VENUE),
+    ]
+    assert _flags(entries) == [False] * 7
+    groups = classify._undated_year_groups(entries)
+    assert groups[0] is None and groups[1] is None
+    assert groups[2] == classify._YearGroup(("INVITED TALKS",), "2017")
+    assert groups[4] == classify._YearGroup(("INVITED TALKS",), "2019")
+    assert groups[6] == classify._YearGroup(("INVITED TALKS",), "2018")
+
+
 def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
     # #651: stage 4's membership check and stage 3b's must be ONE list.
     from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy
