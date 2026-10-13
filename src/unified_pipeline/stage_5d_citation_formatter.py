@@ -211,14 +211,10 @@ def _reply_object(llm_output: str) -> dict | None:
 # its own entry's text. Words are letter runs of this length or more, so
 # initials and "In"/"ed" do not count.
 _OVERLAP_WORD_RE = re.compile(r"[^\W\d_]{4,}")
-# Share of a citation's words its own entry must hold. Over the 623
-# stored 5d replies an aligned citation held over 0.9 in every reply that
-# carried an unsent id, and 0.5 or more in 11,618 of 11,649 overall; a
-# citation moved one entry along held under 0.5 in 86% of 11,026 cases.
-# With the neighbour test in _matches_own_entry, a simulated split at
-# every position of every stored reply stores 557 of 106,763 moved
-# citations; in 514 of them the two neighbouring entries share at least
-# half their words (299 have the same words).
+# Share of a citation's words its own entry must hold. Over the 1,312
+# stored 5d replies (24,196 citations), 24,139 citations hold 0.5 or more
+# of their words in their own entry; moved one entry along, 3,209 of
+# 22,770 do.
 _MIN_OWN_WORD_OVERLAP = 0.5
 
 
@@ -232,15 +228,35 @@ def _word_overlap(citation_words: frozenset[str], text_words: frozenset[str]) ->
     return len(citation_words & text_words) / len(citation_words) if citation_words else 0.0
 
 
+def _word_likeness(citation_words: frozenset[str], text_words: frozenset[str]) -> float:
+    """Shared words over the words of either side (Jaccard); 0 when both are empty.
+    Unlike _word_overlap it falls as `text_words` grows."""
+    union = citation_words | text_words
+    return len(citation_words & text_words) / len(union) if union else 0.0
+
+
 def _matches_own_entry(citation: object, entry_id: str, entry_words: dict[str, frozenset[str]]) -> bool:
-    """Whether `citation` reads as its own entry's: it holds enough of that
-    entry's words, and no other entry in the batch holds more of them."""
+    """Whether `citation` reads as its own entry's: that entry holds enough
+    of its words, and no other entry in the batch both holds more of them
+    and is more like it (_word_likeness).
+
+    Both, because each alone misjudges an aligned citation: a long entry
+    holds many words, so it can hold more of a short neighbour's citation
+    than that citation's own entry, where the journal is spelled out; and
+    an entry holding several citations is less like each of them than a
+    short neighbour that shares their authors. Over the stored replies the
+    two together leave 114 of the 3,209 moved citations that clear the
+    floor (86 moved the other way, 59 moved two along) and drop 6 aligned
+    ones; the share test alone dropped 10 aligned ones."""
     if not isinstance(citation, str):
         return False
     words = _citation_words(citation)
-    overlaps = {other: _word_overlap(words, text_words) for other, text_words in entry_words.items()}
-    own = overlaps[entry_id]
-    return own >= _MIN_OWN_WORD_OVERLAP and own >= max(overlaps.values())
+    own_share = _word_overlap(words, entry_words[entry_id])
+    if own_share < _MIN_OWN_WORD_OVERLAP:
+        return False
+    own_likeness = _word_likeness(words, entry_words[entry_id])
+    return not any(_word_overlap(words, text_words) > own_share and _word_likeness(words, text_words) > own_likeness
+                   for text_words in entry_words.values())
 
 
 def _keep_own_citations(id_to_formatted: dict[str, dict], id_to_entry: dict[str, dict],
