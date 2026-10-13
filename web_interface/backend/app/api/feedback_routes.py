@@ -32,6 +32,7 @@ from app.services.run_service import check_run_access
 from app.services.runs_admin_query import load_run_feedback_with_reviewers
 from app.services.upload_validation import _validate_docx_magic
 from app.storage import get_storage
+from app.storage.base import RunStorage
 from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
@@ -419,7 +420,7 @@ async def upload_corrected_docx(
     return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
 
 
-def _listed_scan_state(storage, run_id: str, key: str) -> ScanState:
+def _listed_scan_state(storage: RunStorage, run_id: str, key: str) -> ScanState:
     """`scan_state` for one row of the copies list. A tag that can't be read
     (a backfilled row whose object is gone, no s3:GetObjectTagging, an outage)
     marks that copy unscannable instead of failing the whole list; the
