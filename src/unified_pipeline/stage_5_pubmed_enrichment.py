@@ -221,6 +221,9 @@ TITLE_SEARCH_CODES = PUBLISHED_ARTICLE_CODES
 # The `enrichment_source` of a record found by title search, not by an
 # identifier the CV gave.
 TITLE_SEARCH_SOURCE = 'title_search'
+# A doi.org link in an entry's text. The DOI ends at whitespace or a quote: a
+# Word HYPERLINK field code puts the link in quotes before its display text.
+DOI_URL_PATTERN = re.compile(r'https?://(?:dx\.)?doi\.org/(10\.\d{4,}/[^\s"]+)', re.I)
 
 
 def in_press_phrase(text: str, title: str = '') -> str | None:
@@ -673,6 +676,10 @@ class PubMedEnricher:
         if self.verbose:
             logger.info(f"\nFound {len(pub_entries)} publication entries to enrich")
 
+        # A `doi:` token copied from the neighbouring citation yields to the
+        # entry's own doi.org link before any DOI is looked up.
+        self._prefer_url_dois(pub_entries)
+
         # Categorize by available identifiers
         by_pmid = []
         by_pmcid = []
@@ -810,6 +817,28 @@ class PubMedEnricher:
         # Extract DOI pattern
         match = re.search(r'(10\.\d{4,}/[^\s]+)', doi_str)
         return match.group(1).rstrip('.,;') if match else None
+
+    def _prefer_url_dois(self, pub_entries: list[dict]) -> None:
+        """An entry whose `doi` is the DOI of the entry before or after it,
+        while its text links one other DOI through doi.org, takes the linked
+        DOI (#1219, RVTAQT 93): the CV's `doi:` token was copied from the
+        neighbouring citation and the link is the paper's own. Stage 4 sees
+        one entry at a time, so this is the first point where the neighbour's
+        DOI is visible, and it runs before the DOI is looked up. The replaced
+        value is kept as `doi_replaced`."""
+        dois = [(self._clean_doi((e.get('extracted_fields') or {}).get('doi')) or '').lower()
+                for e in pub_entries]
+        for i, entry in enumerate(pub_entries):
+            neighbours = {dois[j] for j in (i - 1, i + 1) if 0 <= j < len(dois)}
+            if not dois[i] or dois[i] not in neighbours:
+                continue
+            linked = {self._clean_doi(m).lower(): self._clean_doi(m)
+                      for m in DOI_URL_PATTERN.findall(entry.get('text') or '')}
+            if len(linked) != 1 or dois[i] in linked:
+                continue
+            fields = entry['extracted_fields']
+            entry['doi_replaced'] = fields['doi']
+            [fields['doi']] = linked.values()
 
     def _enrich_by_pmid(
         self, entries_with_pmid: list[tuple[dict, str]], source: str = 'pmid'
@@ -1670,6 +1699,15 @@ class PubMedEnricher:
             entry.setdefault('enriched_fields', []).append('doi')
 
         # Fill in missing citation fields
+        # A CV line with no year takes PubMed's (#1219, RVTAQT 70): a yearless
+        # article renders without one and sorts last among the newest-first.
+        # One the CV calls in press is left to `_resolve_in_press`, which
+        # sets the year only on a paper not already listed as published.
+        if (not fields.get('year') and pubmed_record.get('year')
+                and not listed_in_press(entry)):
+            fields['year'] = str(pubmed_record['year'])
+            entry.setdefault('enriched_fields', []).append('year')
+
         if not fields.get('volume') and pubmed_record.get('volume'):
             fields['volume'] = pubmed_record['volume']
             entry.setdefault('enriched_fields', []).append('volume')

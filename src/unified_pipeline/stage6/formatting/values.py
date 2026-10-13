@@ -303,6 +303,43 @@ def _format_currency(value: object) -> str:
         return value_str
 
 
+# An event-status note on a talk or abstract line: "(postponed due to
+# COVID-19)", "[Poster session canceled]", "virtual due to ...". No R or S8
+# schema field holds it, so stage 4 drops it and a postponed talk renders as
+# delivered (NDMRSO: SYWZJA 557, TVZDVF 451/494/496, #1436).
+_EVENT_STATUS_WORD = r'(?:postponed|cancell?ed|virtual(?:ly)?\s+due\s+to)'
+_EVENT_STATUS_WORD_RE = re.compile(rf'\b{_EVENT_STATUS_WORD}\b', re.IGNORECASE)
+# The whole parenthetical or bracket the status word sits in ...
+_BRACKETED_EVENT_STATUS_RE = re.compile(
+    rf'[(\[]([^()\[\]]*?\b{_EVENT_STATUS_WORD}\b[^()\[\]]*)[)\]]', re.IGNORECASE)
+# ... or, unbracketed, the status word to the end of its clause.
+_CLAUSE_EVENT_STATUS_RE = re.compile(
+    rf'\b{_EVENT_STATUS_WORD}\b[^.;()\[\]]*', re.IGNORECASE)
+_EVENT_STATUS_EDGES = ' \t,;:-–—'
+
+
+def event_status_note(source_text: str, shown_text: str) -> str:
+    """The event-status note in `source_text` ("postponed due to COVID-19"),
+    or '' when the line has none or `shown_text` -- what the row or citation
+    already prints -- already carries a status word (a title that is about
+    cancelled surgery, a 5d citation that kept "[Poster session canceled]")."""
+    if not _EVENT_STATUS_WORD_RE.search(source_text or ''):
+        return ''
+    if _EVENT_STATUS_WORD_RE.search(shown_text or ''):
+        return ''
+    bracketed = _BRACKETED_EVENT_STATUS_RE.search(source_text)
+    match = bracketed.group(1) if bracketed else _CLAUSE_EVENT_STATUS_RE.search(source_text).group(0)
+    return match.strip(_EVENT_STATUS_EDGES)
+
+
+def with_event_status(text: str, source_text: str, shown_text: str = '') -> str:
+    """`text` with the source line's event-status note appended in
+    parentheses (`event_status_note`); unchanged when there is none to add.
+    `shown_text` is anything else the row prints beside `text`."""
+    note = event_status_note(source_text, f"{text} {shown_text}")
+    return f"{text} ({note})".lstrip() if note else text
+
+
 #: A four-digit year inside a stored date value: "2005" in "2005-Summer" or
 #: "2006-06-21".
 _FOUR_DIGIT_YEAR_RE = re.compile(r'(?<!\d)\d{4}(?!\d)')

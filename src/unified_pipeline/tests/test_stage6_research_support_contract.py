@@ -1696,6 +1696,42 @@ def test_annual_direct_costs_wins_when_both_funding_keys_are_present():
     assert cells['Annual direct costs:'] == '$100,000'
 
 
+#: #1672: each bucket's own total key -- M2C's schema names it
+#: `total_funding_requested` -- and the label that total renders under.
+_PAST_AND_PENDING_TOTALS = [
+    ('M2B', 'total_funding', research_support.TOTAL_AWARD_LABEL),
+    ('M2C', 'total_funding_requested', research_support.TOTAL_REQUESTED_LABEL),
+]
+
+
+@pytest.mark.parametrize('code,total_key,total_label', _PAST_AND_PENDING_TOTALS)
+def test_past_and_pending_annual_funding_fills_the_annual_row_beside_the_total(
+        code, total_key, total_label):
+    """#1672 (RTBEJA, KDAZOM): M2B and M2C now ask stage 4 for `annual_funding`,
+    so a past or pending grant's yearly direct costs fill "Annual direct costs:"
+    and its total keeps its own row."""
+    fields = {'agency': 'NIH', 'title': 'Funded Cohort Study', 'start_date': '01/2019',
+              'annual_funding': '314174', total_key: '1512908'}
+    cells = _cells(_generator()._create_grant_table(fields, code))
+    assert cells[research_support.ANNUAL_COSTS_LABEL] == '$314,174'
+    assert cells[total_label] == '$1,512,908'
+
+
+@pytest.mark.parametrize('code,total_key,total_label', _PAST_AND_PENDING_TOTALS)
+@pytest.mark.parametrize('annual', [None, ''])
+def test_past_and_pending_render_is_unchanged_without_annual_funding(
+        code, total_key, total_label, annual):
+    """#1672 blast radius: no existing M2B/M2C record has the key, and a
+    replayed one that finds no yearly figure carries it null. Either way the
+    table is the one it was before the schema asked for it."""
+    before = {'agency': 'NIH', 'title': 'Funded Cohort Study', 'start_date': '01/2019',
+              total_key: '1512908'}
+    after = dict(before, annual_funding=annual)
+    rows = _rows(_generator()._create_grant_table(before, code))
+    assert _rows(_generator()._create_grant_table(after, code)) == rows
+    assert dict(rows)[total_label] == '$1,512,908'
+
+
 # --- item 15: currency formatting -----------------------------------------------
 
 @pytest.mark.parametrize('value, expected', [
