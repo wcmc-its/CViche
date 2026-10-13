@@ -785,3 +785,113 @@ def test_a_range_shaped_expiration_still_renders_as_the_range():
     """#1233: stage 4 sometimes returns a {start_date, end_date} mapping."""
     record = _one_licence_record(expiration_date={"start_date": "2013", "end_date": "2017"})
     assert record.last_registration_date == "2013-2017"
+
+
+# --- #1698: an expiry labelled only by the table's column header ---
+
+def _table_entry(idx, text, **fields):
+    base = {"state_country": None, "license_number": None,
+            "issue_date": None, "expiration_date": None}
+    base.update(fields)
+    return {"taxonomy_code": "F1", "element_idx_start": idx, "element_idx_end": idx,
+            "element_type": "table_row", "text": text, "extracted_fields": base}
+
+
+def _header_table(header="Region   Licence #  Exp date", gap=0):
+    """A column-header row, then two data rows carrying only state, number, date."""
+    return [
+        _table_entry(40, header),
+        _table_entry(41 + gap, "Wrenshire   77001  3/31/19",
+                     state_country="Wrenshire", license_number="77001",
+                     expiration_date="2019-03-31"),
+        _table_entry(42 + gap, "Ostmark   Q5502  8/31/18",
+                     state_country="Ostmark", license_number="Q5502",
+                     expiration_date="2018-08-31"),
+    ]
+
+
+def _dates_by_number(entries):
+    return {r.number: r.last_registration_date
+            for r in _resolve_licensure(entries).licenses if r.number}
+
+
+@pytest.mark.parametrize("header", [
+    "Region   Licence #  Exp date",
+    "Region  License Number  Expiration",
+    "State  No.  Expires",
+    "Jurisdiction  Licence #  Valid through",
+])
+def test_rows_under_an_expiry_column_header_render_as_expires(header):
+    """WBZIDP 913-918: the "Exp date" label is its own header entry."""
+    assert _dates_by_number(_header_table(header)) == {
+        "77001": "Expires 03/31/2019", "Q5502": "Expires 08/31/2018"}
+
+
+@pytest.mark.parametrize("header", [
+    "Region   Licence #  Issued",           # no expiry column
+    "Region   Exp date",                    # no number column
+    "Region  Licence #  Exp date 2019",     # a digit: a data row, not a header
+    "Region  Licence #  Experience",        # "Exp" inside a word
+])
+def test_a_header_that_names_no_expiry_column_changes_nothing(header):
+    assert _dates_by_number(_header_table(header)) == {
+        "77001": "03/31/2019", "Q5502": "08/31/2018"}
+
+
+def test_an_element_gap_after_the_header_ends_the_table():
+    assert _dates_by_number(_header_table(gap=1)) == {
+        "77001": "03/31/2019", "Q5502": "08/31/2018"}
+
+
+def test_a_non_licence_entry_ends_the_header_table():
+    """A prose entry between the header and a later licence ends the run."""
+    entries = _header_table()
+    entries.insert(2, _table_entry(42, "Board renewal pending"))
+    entries[3] = dict(entries[3], element_idx_start=43, element_idx_end=43)
+    assert _dates_by_number(entries) == {
+        "77001": "Expires 03/31/2019", "Q5502": "08/31/2018"}
+
+
+def test_an_entry_with_no_element_index_is_not_under_a_header():
+    entries = _header_table()
+    for entry in entries[1:]:
+        del entry["element_idx_start"], entry["element_idx_end"]
+    assert _dates_by_number(entries) == {
+        "77001": "03/31/2019", "Q5502": "08/31/2018"}
+
+
+def test_a_header_with_no_element_index_labels_nothing():
+    entries = _header_table()
+    del entries[0]["element_idx_start"], entries[0]["element_idx_end"]
+    for idx, entry in enumerate(entries[1:], start=1):
+        entry["element_idx_start"] = entry["element_idx_end"] = idx
+    assert _dates_by_number(entries) == {
+        "77001": "03/31/2019", "Q5502": "08/31/2018"}
+
+
+def test_a_licence_row_is_never_taken_for_a_column_header():
+    """A row with a state and no digit still names an expiry column word."""
+    entries = _header_table()
+    entries[0] = _table_entry(40, "Wrenshire licence no. expiration pending",
+                              state_country="Wrenshire")
+    assert _dates_by_number(entries) == {
+        "77001": "03/31/2019", "Q5502": "08/31/2018"}
+
+
+def test_a_header_labelled_open_end_still_says_active():
+    entries = _header_table()
+    entries[1]["extracted_fields"]["expiration_date"] = "present"
+    assert _dates_by_number(entries)["77001"] == "Active"
+
+
+def test_a_header_labelled_expiry_reaches_the_document(tmp_path):
+    import json
+
+    source, target = tmp_path / "in.json", tmp_path / "out.docx"
+    source.write_text(json.dumps({"document_uid": "TESTAB", "entries": _header_table()}))
+    WCMTemplateGenerator(verbose=False).generate(str(source), str(target), research_summary_path=None)
+    cells = {row.cells[1].text: row.cells[-1].text
+             for table in Document(str(target)).tables for row in table.rows
+             if len(row.cells) == 4}
+    assert cells["77001"] == "Expires 03/31/2019"
+    assert cells["Q5502"] == "Expires 08/31/2018"

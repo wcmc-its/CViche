@@ -186,8 +186,14 @@ _MIN_TOKENS_NPI_CELL = 1
 #   6/30/2023", "valid through 2024"): rendered "Expires 05/2011", never bare,
 #   which reads as the date the licence was last registered (MFJRKW 29). The
 #   label must be followed by a date, so "Expiration" in a board's name does
-#   not count. An expiry labelled only by a table's column header, a separate
-#   entry, is out of reach here (WBZIDP 914-918) and renders as before.
+#   not count.
+# - an expiry labelled only by a table's column header (WBZIDP 913-918): the
+#   header row reaches stage 6 as its own F1 entry -- no extracted field, no
+#   digit, an expiry label and a licence-number column word
+#   (`_is_expiry_column_header`) -- and each data row after it carries just
+#   "<state> <number> <date>". Rows that follow the header with no gap in
+#   element index are treated as labelled (`_rows_under_expiry_header`); the
+#   first gap or non-licence entry ends the table.
 _OPEN_END_EXPIRATIONS = CURRENT_DATE_VALUES | {'active'}
 _OPEN_END_STATUS = 'Active'
 _NOT_ACTIVE_RE = re.compile(
@@ -197,6 +203,12 @@ _EXPIRY_LABEL_RE = re.compile(
     r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\.?'
     r'(?:\s+date)?\s*:?\s*\d', re.IGNORECASE)
 _EXPIRES_PREFIX = 'Expires'
+_EXPIRY_COLUMN_LABEL_RE = re.compile(
+    r'\b(?:exp(?:ires|iration|iry)?|valid\s+(?:through|until))\b',
+    re.IGNORECASE)
+_NUMBER_COLUMN_LABEL_RE = re.compile(
+    r'(?:\blicen[cs]e\b|\bnumber\b|\bno\b|#)', re.IGNORECASE)
+_DIGIT_RE = re.compile(r'\d')
 
 # Classification results for one F1 entry.
 KIND_LICENSE = 'license'
@@ -220,6 +232,7 @@ class LicensureEntry:
     license_type: str = ''
     status: str = ''
     original_text: str = ''
+    expiry_by_column_header: bool = False
 
 
 @dataclass(frozen=True)
@@ -407,9 +420,65 @@ def _last_registration_cell(entry: LicensureEntry) -> str:
             status = _OPEN_END_STATUS
         return _with_qualifier('', status, '')
     date = format_date_for_section(expiration, 'F1') if expiration else ''
-    if date and _EXPIRY_LABEL_RE.search(entry.original_text):
+    if date and (entry.expiry_by_column_header
+                 or _EXPIRY_LABEL_RE.search(entry.original_text)):
         date = f"{_EXPIRES_PREFIX} {date}"
     return _with_qualifier(date, status, date)
+
+
+def _is_expiry_column_header(entry: LicensureEntry) -> bool:
+    """Whether an F1 entry is a licence table's column-header row whose end
+    date column is an expiry ("State  License #  Exp date", WBZIDP 913):
+    no extracted field, no digit, an expiry label and a number column."""
+    if (entry.state or entry.number or entry.issue_date
+            or entry.expiration_date):
+        return False
+    text = entry.original_text
+    return (not _DIGIT_RE.search(text)
+            and bool(_EXPIRY_COLUMN_LABEL_RE.search(text))
+            and bool(_NUMBER_COLUMN_LABEL_RE.search(text)))
+
+
+def _element_span(raw: Mapping[str, Any]) -> tuple[int, int] | None:
+    """An entry's (start, end) element index, or None when it has none."""
+    start = raw.get('element_idx_start')
+    if not isinstance(start, int) or isinstance(start, bool):
+        return None
+    end = raw.get('element_idx_end')
+    if not isinstance(end, int) or isinstance(end, bool):
+        end = start
+    return start, end
+
+
+def _rows_under_expiry_header(
+        entries: Sequence[Mapping[str, Any]]) -> set[int]:
+    """The `id()`s of the raw entries whose end date an expiry column header
+    labels (#1698, WBZIDP 914-918).
+
+    Walks the entries in document order, not the sorted order
+    `_resolve_licensure` renders in: a run starts at an
+    `_is_expiry_column_header` entry and takes each licence row (a state or
+    a number) that starts on the element right after the previous entry
+    ends. A gap, an entry with no element index, or any other entry ends it.
+    """
+    spans = [(span, raw) for raw in entries
+             if (span := _element_span(raw)) is not None]
+    spans.sort(key=lambda pair: pair[0])
+    labelled: set[int] = set()
+    under_header = False
+    previous_end: int | None = None
+    for (start, end), raw in spans:
+        entry = _normalize_licensure_entry(raw)
+        if _is_expiry_column_header(entry):
+            under_header = True
+        elif (under_header and previous_end is not None
+              and start == previous_end + 1
+              and (entry.state or entry.number)):
+            labelled.add(id(raw))
+        else:
+            under_header = False
+        previous_end = end
+    return labelled
 
 
 def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
@@ -570,9 +639,12 @@ def _resolve_licensure(
     npi_number: str | None = None
     dea_withheld = False
     licenses: list[LicenseRecord] = []
+    under_expiry_header = _rows_under_expiry_header(entries)
 
     for raw in sort_entries_reverse_chronological(entries):
         entry = _normalize_licensure_entry(raw)
+        if id(raw) in under_expiry_header:
+            entry = replace(entry, expiry_by_column_header=True)
 
         # NPI/DEA vs state licence: label first, shape as tiebreak (#573)
         kind = _classify_licensure_entry(entry.state, entry.number,
