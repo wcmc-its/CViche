@@ -691,6 +691,53 @@ def test_5d_s3_label_covers_edited_books_as_well_as_authored() -> None:
     assert "- S3: Book (authored or edited)\n" in s5d.CITATION_FORMATTER_PROMPT
 
 
+_TAXONOMY_PATH = _SRC / "unified_pipeline" / "core" / "taxonomy_v7.json"
+
+# #1723: the declared mapping from each code's taxonomy_v7.json label to the
+# 5d label. Every term must appear in BOTH labels (case-insensitive), so a
+# relabel on either side that names a different section fails the test.
+_SHARED_LABEL_TERMS = {
+    "S1": ("peer-reviewed research article",),
+    "S2": ("review", "editorial"),
+    "S3": ("book",),
+    "S4": ("chapter",),
+    "S5": ("non-peer-reviewed research publication",),
+    "S6": ("case report",),
+    "S7": ("in review", "submitted"),
+    "S8": ("abstract", "conference proceeding"),
+    "S9": ("other", "media"),
+}
+
+
+def _taxonomy_labels() -> dict[str, str]:
+    taxonomy = json.loads(_TAXONOMY_PATH.read_text(encoding="utf-8"))
+    return {entry["code"]: entry["label"] for entry in taxonomy["codes"]}
+
+
+@pytest.mark.parametrize("code", s5d.PUBLICATION_CODES)
+def test_5d_label_names_the_same_section_as_the_taxonomy(code) -> None:
+    """#1723: S5 was "Monograph" (a book, S3) and S6 "Letter or
+    correspondence" (S2), while taxonomy_v7 has S5 Non-peer-reviewed
+    Research Publications and S6 Case Reports."""
+    taxonomy_label = _taxonomy_labels()[code].lower()
+    label = s5d.PUBLICATION_TYPE_DESCRIPTIONS[code]
+    for term in _SHARED_LABEL_TERMS[code]:
+        assert term in taxonomy_label, (code, term, taxonomy_label)
+        assert term in label.lower(), (code, term, label)
+    assert f"- {code}: {label}\n" in s5d.CITATION_FORMATTER_PROMPT
+
+
+def test_5d_s5_and_s6_no_longer_carry_the_wrong_sections() -> None:
+    raw, _id_map = s5d.build_raw_content([
+        {"taxonomy_code": "S5", "text": "a technical report"},
+        {"taxonomy_code": "S6", "text": "a case report"},
+    ])
+    assert "Monograph" not in raw and "Letter or correspondence" not in raw
+    assert "Monograph" not in s5d.CITATION_FORMATTER_PROMPT
+    assert "Letter or correspondence" not in s5d.CITATION_FORMATTER_PROMPT
+    assert "(S6: Case report or case series)" in raw
+
+
 def test_5d_build_raw_content_defaults_missing_code_to_s1_description():
     entries = [{"text": "no taxonomy_code key at all"}]
     raw, _id_map = s5d.build_raw_content(entries)
