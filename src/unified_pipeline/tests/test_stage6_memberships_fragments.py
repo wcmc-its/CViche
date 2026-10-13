@@ -1145,3 +1145,58 @@ def test_split_gate_reads_every_dash_as_a_date_like_the_parser(dash):
 def test_trailing_dates_lift_every_open_end_word(end):
     assert _split_trailing_dates(f"Society of Zorblax, 2010-{end}") == (
         "Society of Zorblax", f"2010-{end}")
+
+
+# --- #1426: a membership the PII pass withheld renders no row ----------------
+
+def test_1426_a_withheld_congregation_membership_renders_no_date_only_row():
+    """The pass cut the text and dropped the organization (a congregation);
+    the dates left over would still describe the withheld membership."""
+    withheld = {"text": "", "_pii_withheld": True,
+                "extracted_fields": {"start_date": "1994", "end_date": "1999"}}
+    kept = {"text": "Member, Fictional Society of Examples",
+            "extracted_fields": {"organization": "Fictional Society of Examples",
+                                 "membership_type": "Member", "start_date": "2001"}}
+    rows = _render_memberships([withheld, kept])
+    assert [row[0] for row in rows] == ["Member, Fictional Society of Examples"]
+
+
+def test_1426_a_withheld_membership_with_only_its_type_left_renders_no_row():
+    """A membership type is not a religious word, so the pass leaves it in the
+    fields; on its own it would render as "Member, " beside the dates."""
+    withheld = {"text": "  ", "_pii_withheld": True,
+                "extracted_fields": {"membership_type": "Member", "start_date": "1994"}}
+    assert _render_memberships([withheld]) == []
+    blank_org = {"text": "", "_pii_withheld": True,
+                 "extracted_fields": {"organization": "  ", "membership_type": "Member",
+                                      "start_date": "1994"}}
+    assert _render_memberships([blank_org]) == []
+
+
+def test_1426_a_withheld_membership_with_text_left_still_renders_from_it():
+    entry = {"text": "Fictional Society of Examples, 2001", "_pii_withheld": True,
+             "extracted_fields": {}}
+    rows = _render_memberships([entry])
+    assert [row[0] for row in rows] == ["Fictional Society of Examples"]
+
+
+def test_1426_a_dates_only_membership_the_pass_never_touched_still_renders():
+    entry = {"text": "", "extracted_fields": {"start_date": "1990", "end_date": "present"}}
+    rows = _render_memberships([entry])
+    assert [row[1] for row in rows] == ["1990-Present"]
+
+
+def test_1426_a_touched_membership_with_an_organization_left_still_renders():
+    entry = {"text": "Member, Fictional Society of Examples", "_pii_withheld": True,
+             "extracted_fields": {"organization": "Fictional Society of Examples",
+                                  "start_date": "2001"}}
+    rows = _render_memberships([entry])
+    assert [row[0] for row in rows] == ["Fictional Society of Examples"]
+
+
+def test_1426_a_withheld_membership_whose_organization_field_survived_still_renders():
+    entry = {"text": "", "_pii_withheld": True,
+             "extracted_fields": {"organization": "Fictional Society of Examples",
+                                  "start_date": "2001"}}
+    rows = _render_memberships([entry])
+    assert [row[0] for row in rows] == ["Fictional Society of Examples"]

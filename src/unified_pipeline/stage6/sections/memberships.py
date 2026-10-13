@@ -98,6 +98,7 @@ from ..parsing import (
     is_membership_date_part,
 )
 from ..parsing.dates import DATE_DASH, OPEN_END, YEAR
+from ..pii_pass import PII_WITHHELD_KEY
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -703,6 +704,14 @@ class MembershipsSection:
                 self._section_failures.append(_header_skip_warning(entry, fields))
                 if self.verbose:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
+                continue
+
+            if (entry.get(PII_WITHHELD_KEY) and not original_text.strip()
+                    and not str(fields.get('organization') or '').strip()):
+                # #1426: the PII pass withheld this membership's whole text and
+                # its organization (a congregation). A type or dates left in
+                # the fields would still describe the withheld item, so no row
+                # renders; the withheld-data notice says why.
                 continue
 
             # Check if this entry contains multiple memberships (newline- or,
