@@ -761,9 +761,10 @@ def test_5d_parse_llm_output_well_formed_direct_json():
 def test_5d_parse_llm_output_filters_out_an_id_the_llm_invented():
     # Unlike stage 5c, stage 5d's parse_llm_output DOES check membership in
     # id_to_entry, so a made-up id is dropped rather than passed through.
-    id_map = {"CIT-0001": {}}
+    # The kept citation matches its own entry's words (#1632).
+    id_map = {"CIT-0001": {"text": "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019."}}
     llm_output = json.dumps({
-        "CIT-0001": {"formatted_citation": "real one"},
+        "CIT-0001": {"formatted_citation": "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019."},
         "CIT-9999": {"formatted_citation": "the LLM invented this id"},
     })
     parsed = s5d.parse_llm_output(llm_output, id_map)
@@ -812,16 +813,184 @@ def test_5d_parse_llm_output_embedded_json_also_filters_invented_ids():
     # Forces the fallback (embedded-JSON) branch specifically, and confirms
     # the id_to_entry membership check applies there too, not just on the
     # direct-parse fast path.
-    id_map = {"CIT-0001": {}}
+    id_map = {"CIT-0001": {"text": "Vexley B. Kept citation words here. Fabl Rev. 2004."}}
     llm_output = (
         "Here you go:\n"
         + json.dumps({
-            "CIT-0001": {"formatted_citation": "kept"},
+            "CIT-0001": {"formatted_citation": "Vexley B. Kept citation words here. Fabl Rev. 2004."},
             "CIT-4242": {"formatted_citation": "invented, must be filtered"},
         })
     )
     parsed = s5d.parse_llm_output(llm_output, id_map)
     assert list(parsed.keys()) == ["CIT-0001"]
+
+
+# #1632: one entry answered as two ids moves every later citation onto the
+# entry before its own. Synthetic entries; the shapes are JUTBUZ 524-530
+# (shifted), BCTOGR/SPINJC (a trailing extra id, aligned) and a "b" id.
+_SPLIT_BATCH = {
+    "CIT-0001": {"text": "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019;4:10-12."},
+    "CIT-0002": {"text": "Quill A, Zorbelt C. Pewter beetles in drizzle. Fabl Entomol. 2018. "
+                         "Also: Quill A. Brine dune crickets. Fabl Entomol. 2017."},
+    "CIT-0003": {"text": "Vexley B, Quill A. Velvet frogs and fog. Dune Herpetol. 2016;2:5."},
+    "CIT-0004": {"text": "Quill A. Bramble wasps in drizzle. Fabl Fauna Bull. 2015."},
+}
+_SPLIT_CITATIONS = [
+    "Quill A. Lantern moths of Ruritania. J Fabl Lore. 2019;4:10-12.",
+    "Quill A, Zorbelt C. Pewter beetles in drizzle. Fabl Entomol. 2018.",
+    "Quill A. Brine dune crickets. Fabl Entomol. 2017.",
+    "Vexley B, Quill A. Velvet frogs and fog. Dune Herpetol. 2016;2:5.",
+    "Quill A. Bramble wasps in drizzle. Fabl Fauna Bull. 2015.",
+]
+
+
+def _reply(ids_and_citations):
+    return json.dumps({cid: {"formatted_citation": c} for cid, c in ids_and_citations})
+
+
+def test_5d_parse_llm_output_drops_citations_a_split_reply_shifted():
+    ids = [f"CIT-{n:04d}" for n in range(1, 6)]
+    parsed = s5d.parse_llm_output(_reply(zip(ids, _SPLIT_CITATIONS, strict=True)), _SPLIT_BATCH)
+    # CIT-0003 carries entry 2's second citation and CIT-0004 entry 3's:
+    # both fall back to the stage-4 render. CIT-0005 was never sent.
+    assert sorted(parsed) == ["CIT-0001", "CIT-0002"]
+    assert parsed["CIT-0002"]["formatted_citation"] == _SPLIT_CITATIONS[1]
+
+
+def test_5d_parse_llm_output_keeps_aligned_citations_beside_an_extra_id():
+    aligned = list(zip(_SPLIT_BATCH, [_SPLIT_CITATIONS[i] for i in (0, 1, 3, 4)], strict=True))
+    for extra_id in ("CIT-0005", "CIT-0002b"):
+        reply = json.loads(_reply(aligned))
+        reply[extra_id] = {"formatted_citation": _SPLIT_CITATIONS[2]}
+        parsed = s5d.parse_llm_output(json.dumps(reply), _SPLIT_BATCH)
+        assert {cid: f["formatted_citation"] for cid, f in parsed.items()} == dict(aligned)
+
+
+def test_5d_parse_llm_output_checks_nothing_when_every_id_was_sent():
+    # Without an unsent id the reply is taken as is, even a citation that
+    # shares no word with its entry.
+    reply = _reply([("CIT-0001", "Unrelated words entirely.")])
+    assert s5d.parse_llm_output(reply, {"CIT-0001": {"text": "Quill A. Lantern moths."}}) \
+        == {"CIT-0001": {"formatted_citation": "Unrelated words entirely."}}
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_reply_with_no_citation():
+    reply = json.loads(_reply([("CIT-0001", _SPLIT_CITATIONS[0])]))
+    reply["CIT-0002"] = {"authors": "Quill A, Zorbelt C"}
+    reply["CIT-0003"] = "not an object"
+    reply["CIT-0005"] = "not an object"
+    parsed = s5d.parse_llm_output(json.dumps(reply), _SPLIT_BATCH)
+    assert sorted(parsed) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_citation_a_neighbour_matches_better():
+    # Same authors and venue: the moved citation holds most of its new
+    # entry's words, but all of its own entry's.
+    batch = {
+        "CIT-0001": {"text": "Quill A, Zorbelt C. Pewter beetles drizzle. Fabl Entomol Glimmer."},
+        "CIT-0002": {"text": "Quill A, Zorbelt C. Velvet frogs. Fabl Entomol Glimmer."},
+    }
+    moved = "Quill A, Zorbelt C. Pewter beetles drizzle. Fabl Entomol Glimmer."
+    reply = _reply([("CIT-0001", moved), ("CIT-0002", moved), ("CIT-0003", "Quill A. Velvet frogs.")])
+    assert sorted(s5d.parse_llm_output(reply, batch)) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_citation_no_entry_matches():
+    # Its own entry is the best match, but holds too few of its words; a
+    # citation of numbers alone has no words to match.
+    reply = _reply([("CIT-0001", _SPLIT_CITATIONS[0]), ("CIT-0004", "Larkspur glimmer wobble tallies."),
+                    ("CIT-0003", "2016;2:5."), ("CIT-0009", "never sent")])
+    assert sorted(s5d.parse_llm_output(reply, _SPLIT_BATCH)) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_keeps_a_citation_a_long_neighbour_holds_more_of():
+    # The own entry spells its journal out, so it holds 5 of the citation's
+    # 8 words; a long neighbour with the same author and topic holds 6. The
+    # neighbour holds more of them but is far less like the citation
+    # (6 of 20 words against 5 of 12), so the citation stays.
+    batch = {
+        "CIT-0001": {"text": "Quill A, Vexley B, Thistlewick C, Pennyworthe D, Mothwick E, Brambleton F, "
+                             "Zorbelt G. Survey of lantern moths, lore and fog beetles across the northern "
+                             "dunes of the valley. J Fabl Entomol. 2008;63(4):2211-19."},
+        "CIT-0002": {"text": "Quill A. 2011. Lantern moths. Journal of Fabled Entomology and Lore of "
+                             "Ruritania. 41(2):xvii-xx."},
+    }
+    own = "Quill A. Lantern moths. J Fabl Entomol Lore Rurit. 2004;41(2):xvii-xx."
+    reply = _reply([("CIT-0001", batch["CIT-0001"]["text"]), ("CIT-0002", own), ("CIT-0001b", "extra")])
+    parsed = s5d.parse_llm_output(reply, batch)
+    assert sorted(parsed) == ["CIT-0001", "CIT-0002"]
+    assert parsed["CIT-0002"]["formatted_citation"] == own
+
+
+def test_5d_parse_llm_output_split_reply_keeps_one_of_several_citations_in_its_entry():
+    # The own entry holds three citations, so a short neighbour sharing the
+    # authors is more like the first one; but the own entry holds all of its
+    # words and the neighbour 5 of 6, so it stays.
+    batch = {
+        "CIT-0001": {"text": "Quill A, Vexley B. Lantern moths in fog. Fabl Entomol. 2019. Also: "
+                             "Thistlewick C. Bramble wasps of the northern dunes. Dune Fauna Bull. 2018. "
+                             "Also: Pennyworthe D. Velvet frogs and beetles. Dune Herpetol. 2017."},
+        "CIT-0002": {"text": "Quill A, Vexley B. Lantern glow. Fabl Entomol. 2015."},
+    }
+    first = "Quill A, Vexley B. Lantern moths in fog. Fabl Entomol. 2019."
+    reply = _reply([("CIT-0001", first), ("CIT-0001b", "Thistlewick C. Bramble wasps."),
+                    ("CIT-0002", batch["CIT-0002"]["text"])])
+    parsed = s5d.parse_llm_output(reply, batch)
+    assert sorted(parsed) == ["CIT-0001", "CIT-0002"]
+    assert parsed["CIT-0001"]["formatted_citation"] == first
+
+
+@pytest.mark.parametrize(("entry_text", "citation", "kept"), [
+    ("Moth lore wing.", "Moth lore wing dust gale.", True),  # 3 of 5 words
+    ("Moth lore.", "Moth lore wing dust.", True),  # 2 of 4: exactly the floor
+    ("Moth lore.", "Moth lore wing dust gale.", False),  # 2 of 5
+])
+def test_5d_parse_llm_output_split_reply_needs_half_the_citation_words_in_its_entry(entry_text, citation, kept):
+    reply = _reply([("CIT-0001", citation), ("CIT-0002", "never sent")])
+    parsed = s5d.parse_llm_output(reply, {"CIT-0001": {"text": entry_text}})
+    assert ("CIT-0001" in parsed) is kept
+
+
+def test_5d_parse_llm_output_split_reply_matches_words_across_case_and_accents():
+    batch = {"CIT-0001": {"text": "QUILL Å. Lántern Mõths Of Rüritania. Fäbl Lore. 2019."}}
+    citation = "Quill A. Lantern moths of Ruritania. Fabl Lore. 2019."
+    parsed = s5d.parse_llm_output(_reply([("CIT-0001", citation), ("CIT-0002", "never sent")]), batch)
+    assert parsed == {"CIT-0001": {"formatted_citation": citation}}
+
+
+def test_5d_citation_words_are_folded_letter_runs_of_four_or_more():
+    assert s5d._citation_words("Ébène A, ed. Moth lore 2019;12 wing_dust ÅNGSTRÖM fog") \
+        == frozenset({"ebene", "moth", "lore", "wing", "dust", "angstrom"})
+
+
+def test_5d_word_likeness_is_shared_words_over_all_words():
+    assert s5d._word_likeness(frozenset({"moth", "lore"}), frozenset({"lore", "wing"})) == pytest.approx(1 / 3)
+    assert s5d._word_likeness(frozenset(), frozenset()) == 0.0
+
+
+def test_5d_parse_llm_output_split_reply_logs_the_unsent_and_dropped_ids(caplog):
+    ids = [f"CIT-{n:04d}" for n in range(1, 6)]
+    with caplog.at_level(logging.WARNING, logger=s5d.logger.name):
+        s5d.parse_llm_output(_reply(zip(ids, _SPLIT_CITATIONS, strict=True)), _SPLIT_BATCH)
+    assert [r.getMessage() for r in caplog.records] == [
+        "5d reply carried ids the batch never sent (CIT-0005); dropped 2 citation(s) that do not "
+        "match their own entry: CIT-0003, CIT-0004"]
+
+
+def test_run_stage_5d_keeps_the_stage4_render_of_a_shifted_entry(tmp_path, monkeypatch):
+    entries = [{"taxonomy_code": "S1", "text": batch_entry["text"],
+                "enrichment_status": "no_identifier", "extracted_fields": {}}
+               for batch_entry in _SPLIT_BATCH.values()]
+    input_path = _write_json(tmp_path / "in.json", {"document_uid": "PLACEHOLD", "entries": entries})
+    output_path = str(tmp_path / "out.json")
+    ids = [f"CIT-{n:04d}" for n in range(1, 6)]
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result(_reply(zip(ids, _SPLIT_CITATIONS, strict=True))))
+    s5d.run_stage_5d(input_path, output_path=output_path, verbose=False)
+    with open(output_path, encoding="utf-8") as f:
+        out = json.load(f)
+    citations = [e["extracted_fields"].get("formatted_citation") for e in out["entries"]]
+    assert citations == [_SPLIT_CITATIONS[0], _SPLIT_CITATIONS[1], None, None]
+    assert out["stage_5d"]["formatted_count"] == 2
 
 
 def test_5d_parse_llm_output_empty_string_returns_empty_dict():
@@ -1786,3 +1955,20 @@ def test_5d_ungrounded_reason_exempts_the_cv_owner():
 def test_5d_citation_owner_is_none_without_a_last_name(cv_owner):
     assert s5d.citation_owner(cv_owner) is None
 
+
+
+@pytest.mark.parametrize(("own_text", "neighbour_text"), [
+    # Both hold every word: a neighbour must hold MORE of them, so a tie keeps it.
+    ("Moth lore wing dust gale fern reed.", "Moth lore wing dust."),
+    # Both as like it (2 of 4 words against 3 of 6): a tie in likeness keeps it.
+    ("Moth lore.", "Moth lore wing gale fern."),
+])
+def test_5d_parse_llm_output_split_reply_keeps_a_citation_a_neighbour_only_ties(own_text, neighbour_text):
+    batch = {"CIT-0001": {"text": own_text}, "CIT-0002": {"text": neighbour_text}}
+    reply = _reply([("CIT-0001", "Moth lore wing dust."), ("CIT-0001b", "never sent")])
+    assert sorted(s5d.parse_llm_output(reply, batch)) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_citation_that_is_not_text():
+    reply = _reply([("CIT-0001", ["Moth lore wing dust."]), ("CIT-0001b", "never sent")])
+    assert s5d.parse_llm_output(reply, {"CIT-0001": {"text": "Moth lore wing dust."}}) == {}

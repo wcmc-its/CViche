@@ -185,43 +185,112 @@ def build_raw_content(entries: list[dict]) -> tuple[str, dict[str, dict]]:
     return '\n'.join(lines), id_to_entry
 
 
-def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str, dict]:
-    """
-    Parse LLM JSON output and extract formatted citations per entry ID.
-
-    Returns:
-        Dict mapping entry_id -> parsed fields dict
-    """
-    id_to_formatted = {}
-
-    if not llm_output:
-        return id_to_formatted
-
-    # Try to parse as JSON directly first (for json_object response format)
+def _reply_object(llm_output: str) -> dict | None:
+    """The JSON object in a 5d reply: the whole reply, else its first
+    brace-delimited span. None when neither parses."""
     try:
-        parsed = json.loads(llm_output)
-        for entry_id, fields in parsed.items():
-            if entry_id in id_to_entry:
-                id_to_formatted[entry_id] = fields
-        return id_to_formatted
+        return json.loads(llm_output)
     except json.JSONDecodeError:
         pass
-
-    # Try to extract JSON from the response
+    json_match = re.search(r'\{[\s\S]*\}', llm_output)
+    if not json_match:
+        return None
     try:
-        # Find JSON object in response
-        json_match = re.search(r'\{[\s\S]*\}', llm_output)
-        if json_match:
-            parsed = json.loads(json_match.group())
-
-            for entry_id, fields in parsed.items():
-                if entry_id in id_to_entry:
-                    id_to_formatted[entry_id] = fields
+        return json.loads(json_match.group())
     except json.JSONDecodeError as e:
         # parse_llm_output can run on a pool thread (#881 step 6), so this
         # log call is the only trace a malformed batch leaves in the run log.
         logger.warning("Could not parse LLM JSON output: %s (response preview: %s...)", e, llm_output[:500])
+        return None
 
+
+# #1632: a reply that answers one entry as two ids ("CIT-0013" and
+# "CIT-0014" for one entry holding two citations) moves every later
+# citation onto the entry before its own. Such a reply always carries an
+# id the batch never sent, so only then is each citation checked against
+# its own entry's text. Words are letter runs of this length or more, so
+# initials and "In"/"ed" do not count.
+_OVERLAP_WORD_RE = re.compile(r"[^\W\d_]{4,}")
+# Share of a citation's words its own entry must hold. Over the 1,312
+# stored 5d replies (24,196 citations), 24,139 citations hold 0.5 or more
+# of their words in their own entry; moved one entry along, 3,209 of
+# 22,770 do.
+_MIN_OWN_WORD_OVERLAP = 0.5
+
+
+def _citation_words(text: str) -> frozenset[str]:
+    """The casefolded, accent-free words of `text` that _word_overlap counts."""
+    return frozenset(_OVERLAP_WORD_RE.findall(_fold(text)))
+
+
+def _word_overlap(citation_words: frozenset[str], text_words: frozenset[str]) -> float:
+    """Share of the citation's words that `text_words` holds; 0 for a wordless citation."""
+    return len(citation_words & text_words) / len(citation_words) if citation_words else 0.0
+
+
+def _word_likeness(citation_words: frozenset[str], text_words: frozenset[str]) -> float:
+    """Shared words over the words of either side (Jaccard); 0 when both are empty.
+    Unlike _word_overlap it falls as `text_words` grows."""
+    union = citation_words | text_words
+    return len(citation_words & text_words) / len(union) if union else 0.0
+
+
+def _matches_own_entry(citation: object, entry_id: str, entry_words: dict[str, frozenset[str]]) -> bool:
+    """Whether `citation` reads as its own entry's: that entry holds enough
+    of its words, and no other entry in the batch both holds more of them
+    and is more like it (_word_likeness).
+
+    Both, because each alone misjudges an aligned citation: a long entry
+    holds many words, so it can hold more of a short neighbour's citation
+    than that citation's own entry, where the journal is spelled out; and
+    an entry holding several citations is less like each of them than a
+    short neighbour that shares their authors. Over the stored replies the
+    two together leave 114 of the 3,209 moved citations that clear the
+    floor (86 moved the other way, 59 moved two along) and drop 6 aligned
+    ones; the share test alone dropped 10 aligned ones."""
+    if not isinstance(citation, str):
+        return False
+    words = _citation_words(citation)
+    own_share = _word_overlap(words, entry_words[entry_id])
+    if own_share < _MIN_OWN_WORD_OVERLAP:
+        return False
+    own_likeness = _word_likeness(words, entry_words[entry_id])
+    return not any(_word_overlap(words, text_words) > own_share and _word_likeness(words, text_words) > own_likeness
+                   for text_words in entry_words.values())
+
+
+def _keep_own_citations(id_to_formatted: dict[str, dict], id_to_entry: dict[str, dict],
+                        unsent_ids: list[str]) -> dict[str, dict]:
+    """The replies of `id_to_formatted` whose citation matches its own entry
+    (#1632). A dropped entry keeps its stage-4 render."""
+    entry_words = {entry_id: _citation_words(entry.get('text') or '') for entry_id, entry in id_to_entry.items()}
+    kept = {entry_id: fields for entry_id, fields in id_to_formatted.items()
+            if isinstance(fields, dict)
+            and _matches_own_entry(fields.get('formatted_citation'), entry_id, entry_words)}
+    dropped = sorted(set(id_to_formatted) - set(kept))
+    logger.warning("5d reply carried ids the batch never sent (%s); dropped %d citation(s) that do not "
+                   "match their own entry: %s", ', '.join(unsent_ids), len(dropped), ', '.join(dropped))
+    return kept
+
+
+def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str, dict]:
+    """
+    Parse LLM JSON output and extract formatted citations per entry ID.
+    A reply id the batch never sent is dropped; when there is one, so is
+    every citation that does not match its own entry (_keep_own_citations).
+
+    Returns:
+        Dict mapping entry_id -> parsed fields dict
+    """
+    if not llm_output:
+        return {}
+    parsed = _reply_object(llm_output)
+    if parsed is None:
+        return {}
+    id_to_formatted = {entry_id: fields for entry_id, fields in parsed.items() if entry_id in id_to_entry}
+    unsent_ids = [entry_id for entry_id in parsed if entry_id not in id_to_entry]
+    if unsent_ids:
+        return _keep_own_citations(id_to_formatted, id_to_entry, unsent_ids)
     return id_to_formatted
 
 
