@@ -287,10 +287,10 @@ FIELD_SCHEMAS = {
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "status", "notes", "narrative"],
     },
     "M2B": {  # Past Research Funding (completed grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "percent_effort", "status", "notes", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "status", "notes", "narrative"],
     },
     "M2C": {  # Pending Research Funding (submitted grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "submission_date", "status", "notes", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "annual_funding", "submission_date", "status", "notes", "narrative"],
     },
     "M2D": {  # Patents & Innovations (formerly M3)
         "fields": ["patent_number", "title", "inventors", "filing_date", "issue_date", "status", "assignee", "narrative"],
@@ -430,6 +430,10 @@ GRANT_NOTES_DESCRIPTION = (
     "Any labelled remark on the entry that no other field holds (e.g. text after 'Update:' "
     "or 'Note:'), verbatim; null otherwise. Do NOT repeat the title, amounts or status here"
 )
+# M2B and M2C had no yearly field, so a past or pending grant's stated annual
+# direct costs reached no field and its "Annual direct costs:" row rendered
+# empty (#1672). M2A's wording, shared so the three buckets ask alike.
+GRANT_ANNUAL_FUNDING_DESCRIPTION = "Annual/yearly direct costs"
 
 FIELD_DESCRIPTIONS = {
     # A role held during the training ("Chief Resident") survived only in entry
@@ -584,7 +588,7 @@ FIELD_DESCRIPTIONS = {
         "start_date": "Funding period start",
         "end_date": "Funding period end",
         "total_funding": "Total award amount in dollars",
-        "annual_funding": "Annual/yearly direct costs",
+        "annual_funding": GRANT_ANNUAL_FUNDING_DESCRIPTION,
         "percent_effort": "FTE/effort percentage (convert '.08FTE' to '8%'); effort in calendar/person months stays as written ('0.24 Cal Months')",
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,
@@ -598,11 +602,13 @@ FIELD_DESCRIPTIONS = {
         "start_date": "Funding period start",
         "end_date": "Funding period end",
         "total_funding": "Total award amount",
+        "annual_funding": GRANT_ANNUAL_FUNDING_DESCRIPTION,
         "percent_effort": "FTE/effort (extract '.08FTE' as '8%'); effort in calendar/person months stays as written ('0.24 Cal Months')",
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,
     },
     "M2C": {
+        "annual_funding": GRANT_ANNUAL_FUNDING_DESCRIPTION,
         "status": GRANT_STATUS_DESCRIPTION,
         "notes": GRANT_NOTES_DESCRIPTION,
     },
