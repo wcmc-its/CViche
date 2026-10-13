@@ -22,7 +22,10 @@ def _seed_runs(db, *run_ids):
 
 
 def test_report_sums_stored_diffs_by_type_including_runs_without_feedback(db, tmp_path, monkeypatch):
-    """No run here has a feedback row: an upload without the form still counts."""
+    """No run here has a feedback row: an upload without the form still counts.
+    REP003 holds a copy stored before #1754 (the run's id alone) and one
+    uploader's copy beside it: both count."""
+    from app.services import review_loop_service as svc
     from app.storage.local_storage import LocalRunStorage
 
     _seed_runs(db, "REP001", "REP002", "REP003")
@@ -31,13 +34,16 @@ def test_report_sums_stored_diffs_by_type_including_runs_without_feedback(db, tm
                    json.dumps({"by_type": {"deleted": 2, "added": 1}}).encode())
     store.put_file("REP003", "corrected/REP003_diff.json",
                    json.dumps({"by_type": {"deleted": 1, "value_edited": 4}}).encode())
+    store.put_file("REP003", "corrected/REP003_u9_diff.json",
+                   json.dumps({"by_type": {"deleted": 5, "added": 2}}).encode())
     monkeypatch.setattr(script, "get_storage", lambda: store)
+    monkeypatch.setattr(svc, "get_storage", lambda: store)
 
     text = script.build_report(db)
 
-    assert "Corrected-copy changes (2 runs)" in text
+    assert "Corrected-copy changes (3 copies of 2 runs)" in text
     rows = {line.split()[0]: int(line.split()[1]) for line in text.splitlines()[1:]}
-    assert rows["deleted"] == 3
-    assert rows["added"] == 1
+    assert rows["deleted"] == 8
+    assert rows["added"] == 3
     assert rows["value_edited"] == 4
     assert rows["moved"] == 0

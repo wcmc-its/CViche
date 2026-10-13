@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import FeedbackForm from './FeedbackForm'
-import { getFeedback, getRunFeedbackAll, submitFeedback, uploadCorrectedDocx } from '../api/feedback'
+import { getFeedback, getRunFeedbackAll, submitFeedback } from '../api/feedback'
 import type { FeedbackDetail } from '../types'
 import { QUESTION_LABELS } from './feedbackQuestions'
 
@@ -10,7 +10,6 @@ vi.mock('../api/feedback', () => ({
   getFeedback: vi.fn(),
   submitFeedback: vi.fn(),
   getRunFeedbackAll: vi.fn(),
-  uploadCorrectedDocx: vi.fn(),
 }))
 
 vi.mock('../contexts/AuthContext', () => ({
@@ -152,10 +151,11 @@ describe('FeedbackForm summary', () => {
 })
 
 // ---------------------------------------------------------------------------
-// "Help improve CViche" (#1587). Synthetic data only.
+// "Help improve CViche" (#1587) moved beside the run's Download
+// (CorrectedUpload.test.tsx); the survey no longer carries it.
 // ---------------------------------------------------------------------------
 
-/** The keys today's form sends: the payload an untouched section must keep. */
+/** The keys today's form sends. */
 const TODAYS_PAYLOAD_KEYS = [
   'reviewer_role', 'overall_usefulness', 'overall_accuracy', 'overall_completeness',
   'manual_conversion_effort', 'correction_effort', 'enrichment_quality', 'summary_generated',
@@ -172,59 +172,19 @@ function answerRequired() {
   pick('4', 'How likely are you to recommend CViche to a colleague?')
 }
 
-const helpToggle = () => screen.getByRole('button', { name: /Help improve CViche/ })
-
-async function submitAndGetPayload() {
-  fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
-  await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1))
-  return vi.mocked(submitFeedback).mock.calls[0][1] as unknown as Record<string, unknown>
-}
-
-describe('FeedbackForm "Help improve CViche"', () => {
-  it('is collapsed by default and optional', async () => {
+describe('FeedbackForm without the corrected-copy upload', () => {
+  it('has no upload of its own, so the run page shows it once', async () => {
     await renderForm()
-    expect(helpToggle().getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText(/Help improve CViche/)).toBeNull()
     expect(screen.queryByTestId('file-input')).toBeNull()
-    // The required-answer rule is today's: the section is not part of it.
-    answerRequired()
-    expect((screen.getByRole('button', { name: 'Submit review' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('submitting without touching it sends exactly the payload the form sent before', async () => {
+  it('sends exactly the payload the form sent before', async () => {
     await renderForm()
     answerRequired()
-    const payload = await submitAndGetPayload()
+    fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
+    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1))
+    const payload = vi.mocked(submitFeedback).mock.calls[0][1] as unknown as Record<string, unknown>
     expect(Object.keys(payload).sort()).toEqual(TODAYS_PAYLOAD_KEYS)
-    expect(uploadCorrectedDocx).not.toHaveBeenCalled()
-  })
-
-  it('opening and closing it leaves the payload as it was', async () => {
-    await renderForm()
-    fireEvent.click(helpToggle())
-    expect(helpToggle().getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByTestId('file-input')).toBeTruthy()
-    fireEvent.click(helpToggle())
-    answerRequired()
-    const payload = await submitAndGetPayload()
-    expect(Object.keys(payload).sort()).toEqual(TODAYS_PAYLOAD_KEYS)
-  })
-
-  it('uploads a corrected copy and shows only the one-line confirmation', async () => {
-    vi.mocked(uploadCorrectedDocx).mockResolvedValue({ changes: 7, summary: '7 changes recorded' })
-    await renderForm()
-    fireEvent.click(helpToggle())
-    const file = new File(['x'], 'corrected.docx')
-    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [file] } })
-    expect((await screen.findByRole('status')).textContent).toBe('7 changes recorded. Thank you.')
-    expect(uploadCorrectedDocx).toHaveBeenCalledWith('run-1', file)
-  })
-
-  it('shows the server message when the upload is refused', async () => {
-    vi.mocked(uploadCorrectedDocx).mockRejectedValue({ status: 400, message: 'Upload a Word file.' })
-    await renderForm()
-    fireEvent.click(helpToggle())
-    fireEvent.change(screen.getByTestId('file-input'), { target: { files: [new File(['x'], 'a.pdf')] } })
-    expect(await screen.findByText('Upload a Word file.')).toBeTruthy()
-    expect(screen.getByTestId('file-input')).toBeTruthy()  // can try again
   })
 })
