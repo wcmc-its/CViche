@@ -742,3 +742,73 @@ def _source_authors_after(
         return None
     _, following, given_first = item
     return _authors_in_run(following, given_first)
+
+
+# ---------------------------------------------------------------------------
+# A CV's generational suffix, put back on PubMed's list (#1438)
+# ---------------------------------------------------------------------------
+
+#: A generational suffix as a CV prints it after an author: "Jr", "Sr", a
+#: Roman numeral, or an ordinal ("4th").
+_GENERATIONAL_SUFFIX = r"(?P<suffix>Jr|Sr|II|III|IV|[2-9](?:nd|rd|th))"
+
+#: PubMed's initials after a surname ("JD"); stage 5 writes no other shape.
+_PUBMED_INITIALS_RE = re.compile(r"^[A-Z]{1,4}$")
+
+
+#: What may follow a suffix: not more of a word or a name.
+_SUFFIX_END = r"\.?(?![\w'\-])"
+
+#: A CV's initials for one author ("JD", "J.D.", "J. D.", "J-D"), the first
+#: one captured.
+_CV_INITIALS = r"(?P<initial>[A-Z])(?:\.?\s?-?[A-Z]){0,3}\.?"
+
+
+def _cv_suffix_patterns(surname: str) -> tuple[re.Pattern[str], ...]:
+    """`surname` as a whole word with its suffix, in the three shapes a CV
+    prints one: initials then suffix ("Quorn JD 4th", "Quorn, J.D., Jr."),
+    suffix then initials ("Quorn III JD", "Quorn, Jr., J.D."), and a given
+    word then the surname ("Jalo D. Quorn III"). The first two capture the
+    initial, the third the given word: "Quorn IV" alone is a surname with
+    the initials I.V., not a suffix."""
+    name = rf"(?<![\w'\-]){re.escape(surname)},?\s+"
+    return (
+        re.compile(rf"{name}{_CV_INITIALS},?\s+{_GENERATIONAL_SUFFIX}{_SUFFIX_END}"),
+        re.compile(rf"{name}{_GENERATIONAL_SUFFIX}\.?,?\s+{_CV_INITIALS}(?![^\W\d_])"),
+        re.compile(rf"(?<![\w'\-])(?P<given>[^\W\d_]+)\.?\s+{name}"
+                   rf"{_GENERATIONAL_SUFFIX}{_SUFFIX_END}"),
+    )
+
+
+def _cv_suffix(surname: str, initials: str, cv_text: str) -> str:
+    """The one suffix `cv_text` prints after `surname`, or ''. A match with
+    initials must start with PubMed's first initial, and a given-name-first
+    one carry a given word opening with one of PubMed's initials ("and"
+    does not); anything else is another author. Two different suffixes
+    leave the name as PubMed writes it."""
+    *with_initials, given_first = _cv_suffix_patterns(surname)
+    suffixes = {m['suffix'] for pattern in with_initials for m in pattern.finditer(cv_text)
+                if m['initial'] == initials[0]}
+    suffixes |= {m['suffix'] for m in given_first.finditer(cv_text)
+                 if m['given'][0] in initials}
+    return suffixes.pop() if len(suffixes) == 1 else ''
+
+
+def carry_cv_suffixes(pubmed_authors: str, cv_text: str) -> str:
+    """PubMed's "Surname Initials" list with each author's generational
+    suffix the CV prints put back (#1438): stage 5 builds the list from
+    LastName and Initials only, so a CV's "Quorn JD 4th" renders as "Quorn
+    JD". Only an author whose surname is unique in the list takes a suffix,
+    since the CV's line cannot say which of two same-surname authors it
+    belongs to. An author already carrying something after the initials is
+    left as written."""
+    authors = pubmed_authors.split(', ')
+    surnames = [a.rpartition(' ')[0] for a in authors]
+    carried = []
+    for author, surname in zip(authors, surnames, strict=True):
+        initials = author.rpartition(' ')[2]
+        suffix = ''
+        if surname and _PUBMED_INITIALS_RE.match(initials) and surnames.count(surname) == 1:
+            suffix = _cv_suffix(surname, initials, cv_text)
+        carried.append(f"{author} {suffix}" if suffix else author)
+    return ', '.join(carried)
