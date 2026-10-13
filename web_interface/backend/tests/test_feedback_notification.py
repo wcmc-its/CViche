@@ -514,3 +514,21 @@ def test_a_clean_corrected_copy_is_served_with_the_gate_on(client, db, run_stora
     assert resp.status_code == 200
     assert resp.json() == {"url": None}  # local storage: the page then downloads from the route
     assert resp.headers["cache-control"] == "no-store"
+
+
+def test_one_unreadable_scan_tag_marks_only_that_copy_unscannable(client, db, run_storage, monkeypatch):
+    """A tag read that raises (object gone, no s3:GetObjectTagging) must not
+    hide the other copies: the list still answers, that row is unscannable."""
+    owner, staff = _owner_and_staff_copies(client, db, run_storage)
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    staff_key = _copy_key(staff, "corrected.docx")
+
+    def tag(run_id, key):
+        if key == staff_key:
+            raise RuntimeError("AccessDenied")
+        return "NO_THREATS_FOUND"
+
+    monkeypatch.setattr(run_storage, "get_malware_scan_status", tag)
+    resp = _list(client, owner)
+    assert resp.status_code == 200, resp.text
+    assert [c["download"] for c in resp.json()] == ["unscannable", "ready"]

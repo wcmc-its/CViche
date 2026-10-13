@@ -26,7 +26,7 @@ from app.schemas import (
 )
 from app.services import corrected_copy_service, review_loop_service
 from app.services.config_service import MAX_UPLOAD_SIZE
-from app.services.malware_scan import require_clean_scan, scan_state
+from app.services.malware_scan import ScanState, require_clean_scan, scan_state
 from app.services.run_creation import _reject_active_docx_content
 from app.services.run_service import check_run_access
 from app.services.runs_admin_query import load_run_feedback_with_reviewers
@@ -419,6 +419,18 @@ async def upload_corrected_docx(
     return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
 
 
+def _listed_scan_state(storage, run_id: str, key: str) -> ScanState:
+    """`scan_state` for one row of the copies list. A tag that can't be read
+    (a backfilled row whose object is gone, no s3:GetObjectTagging, an outage)
+    marks that copy unscannable instead of failing the whole list; the
+    download route still raises on it."""
+    try:
+        return scan_state(storage, run_id, key)
+    except Exception:
+        logger.exception("Scan tag unreadable for corrected copy %s of run %s", key, run_id)
+        return ScanState.UNSCANNABLE
+
+
 @router.get("/run/{run_id}/feedback/corrected-copies", response_model=list[CorrectedCopyDetail])
 def list_corrected_copies(
     run_id: str,
@@ -438,7 +450,7 @@ def list_corrected_copies(
         CorrectedCopyDetail(id=copy.id, uploader=copy.uploader, role=copy.role,
                             uploaded_at=copy.uploaded_at, changes=copy.changes,
                             mine=copy.user_id == current_user.id,
-                            download=scan_state(storage, run_id, copy.storage_key))
+                            download=_listed_scan_state(storage, run_id, copy.storage_key))
         for copy in corrected_copy_service.load_copies(db, [run_id]).get(run_id, [])
     ]
 
