@@ -64,6 +64,17 @@ describe('PipelineViewer "Original file"', () => {
   })
 })
 
+describe('PipelineViewer image tags (#1239)', () => {
+  it.each([['staff', true, 1], ['the owner', false, 0]])(
+    'shows %s the run\'s image', (_who, staff, count) => {
+      view.canViewAllRuns = staff
+      view.runStatus = { ...RUN_STATUS, image_tags: ['dev-235.1.f5e15871'] }
+      render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+      expect(screen.queryAllByText('Image dev-235.1.f5e15871')).toHaveLength(count)
+    },
+  )
+})
+
 describe('PipelineViewer on a finished run (#1589)', () => {
   const FINISHED: RunStatus = {
     ...RUN_STATUS, status: 'complete',

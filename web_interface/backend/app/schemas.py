@@ -91,6 +91,10 @@ class RunStatus(BaseModel):
     run_by: RunBySummary | None = None
     # A PDF's scanned pages, whose text is missing from the output (#1282).
     scanned_pages: list[int] = []
+    # The images the run executed on, oldest first (#1239): two or more when a
+    # resume or retry crossed a deploy. Admin and staff only; empty for
+    # everyone else and for runs claimed on an untagged image.
+    image_tags: list[str] = []
     steps: list[StepSummary]
 
     model_config = ConfigDict(from_attributes=True)
