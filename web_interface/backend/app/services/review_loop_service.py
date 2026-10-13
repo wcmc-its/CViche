@@ -15,10 +15,17 @@ Once the copy is stored, `review_corrected_copy` adds two more (#1654):
   review_comments.CommentFinding). No CV text.
 - the doctor re-run on the corrected copy, over the run's own stored
   artifacts, and its findings counted against the delivered run's report.
+
+Each uploader keeps one copy per run (#1754): the keys carry the uploader's
+user id, so an owner's and a staff member's copies never overwrite each other,
+and a second upload by the same user replaces that user's copy. A copy stored
+before that has the run's id alone in its keys (uploader None);
+`stored_uploaders` lists both kinds.
 """
 import io
 import json
 import logging
+import re
 import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -37,7 +44,7 @@ from app.services.artifact_service import REVIEW_DOCX_SUFFIX, resolve_artifact
 from app.services.quality_score_service import DOCTOR_SUFFIX
 from app.services.review_comments import (
     COMMENT_AUTHOR,
-    REVIEW_NOTES_TITLE,
+    LEGACY_REVIEW_NOTES_TITLE,
     CommentFinding,
     comment_map_path,
     lint_of_flag,
@@ -71,24 +78,43 @@ DELIVERED_DOCX_SUFFIX = "_wcm.docx"
 STAGE4_FIELDS_SUFFIX = "_fields.json"
 
 
-def corrected_docx_key(run_id: str) -> str:
-    return f"{CORRECTED_PREFIX}{run_id}_corrected.docx"
+_DIFF_SUFFIX = "_diff.json"
 
 
-def corrected_diff_key(run_id: str) -> str:
-    return f"{CORRECTED_PREFIX}{run_id}_diff.json"
+def _corrected_key(run_id: str, uploader_id: int | None, suffix: str) -> str:
+    """``corrected/<run>_u<user id><suffix>``; ``corrected/<run><suffix>`` for
+    a copy stored before copies were kept per uploader (uploader None)."""
+    owner = "" if uploader_id is None else f"_u{uploader_id}"
+    return f"{CORRECTED_PREFIX}{run_id}{owner}{suffix}"
 
 
-def corrected_verdicts_key(run_id: str) -> str:
-    return f"{CORRECTED_PREFIX}{run_id}_verdicts.json"
+def corrected_docx_key(run_id: str, uploader_id: int | None) -> str:
+    return _corrected_key(run_id, uploader_id, "_corrected.docx")
 
 
-def corrected_doctor_key(run_id: str) -> str:
-    return f"{CORRECTED_PREFIX}{run_id}_doctor.json"
+def corrected_diff_key(run_id: str, uploader_id: int | None) -> str:
+    return _corrected_key(run_id, uploader_id, _DIFF_SUFFIX)
 
 
-def corrected_doctor_compare_key(run_id: str) -> str:
-    return f"{CORRECTED_PREFIX}{run_id}_doctor_compare.json"
+def corrected_verdicts_key(run_id: str, uploader_id: int | None) -> str:
+    return _corrected_key(run_id, uploader_id, "_verdicts.json")
+
+
+def corrected_doctor_key(run_id: str, uploader_id: int | None) -> str:
+    return _corrected_key(run_id, uploader_id, "_doctor.json")
+
+
+def corrected_doctor_compare_key(run_id: str, uploader_id: int | None) -> str:
+    return _corrected_key(run_id, uploader_id, "_doctor_compare.json")
+
+
+def stored_uploaders(run_id: str) -> list[int | None]:
+    """Whose corrected copies of the run are stored, read from their diffs'
+    keys: a user id per uploader, None for a copy stored under the run's id
+    alone (before #1754). The pre-#1754 copy first, then by user id."""
+    diff_key = re.compile(rf"{re.escape(CORRECTED_PREFIX + run_id)}(?:_u(\d+))?{re.escape(_DIFF_SUFFIX)}")
+    found = [m for key in get_storage().list_files(run_id, CORRECTED_PREFIX) if (m := diff_key.fullmatch(key))]
+    return sorted((None if m[1] is None else int(m[1]) for m in found), key=lambda u: -1 if u is None else u)
 
 
 #: Where a verdict report's finding for each comment came from: the review
@@ -132,9 +158,10 @@ def _stage4_entries(db: Session, run_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def record_corrected_docx(db: Session, run_id: str, corrected: bytes) -> int:
+def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected: bytes) -> int:
     """Diff a reviewer's corrected copy against the delivered document, store
-    both the copy and the typed diff under CORRECTED_PREFIX, and return how
+    both the copy and the typed diff under CORRECTED_PREFIX as that uploader's
+    (replacing any copy the same user uploaded before), and return how
     many changes the diff found. The caller has already checked access, size
     and file type. Nothing is stored when the diff cannot be made.
 
@@ -156,9 +183,9 @@ def record_corrected_docx(db: Session, run_id: str, corrected: bytes) -> int:
             logger.warning("Corrected copy for run %s could not be diffed: %s", run_id, type(e).__name__)
             raise bad_request("We couldn't read this Word file. Re-save it in Word and try again.") from e
     storage = get_storage()
-    storage.put_file(run_id, corrected_docx_key(run_id), corrected)
+    storage.put_file(run_id, corrected_docx_key(run_id, uploader_id), corrected)
     report = json.dumps(to_report(run_id, diff), indent=1, sort_keys=True)
-    storage.put_file(run_id, corrected_diff_key(run_id), report.encode("utf-8"))
+    storage.put_file(run_id, corrected_diff_key(run_id, uploader_id), report.encode("utf-8"))
     return len(diff.changes)
 
 
@@ -180,26 +207,26 @@ class FindingVerdict:
     verdict: str
 
 
-def review_corrected_copy(db: Session, run_id: str, corrected: bytes) -> None:
-    """Store the verdicts and the doctor's re-run for the run's corrected
-    copy, once `record_corrected_docx` has stored it. Best-effort, each on its
+def review_corrected_copy(db: Session, run_id: str, uploader_id: int | None, corrected: bytes) -> None:
+    """Store the verdicts and the doctor's re-run for this uploader's
+    corrected copy of the run, once `record_corrected_docx` has stored it. Best-effort, each on its
     own: the copy and its diff are already stored, and a failure here is
     logged, never raised to the uploader."""
     for name, store in (("verdicts", store_verdicts), ("doctor re-run", store_corrected_doctor)):
         try:
-            store(db, run_id, corrected)
+            store(db, run_id, uploader_id, corrected)
         except Exception:  # noqa: BLE001 -- best-effort after a stored upload; logged with its traceback
-            logger.exception("Corrected copy of run %s: %s failed", run_id, name)
+            logger.exception("Corrected copy of run %s by user %s: %s failed", run_id, uploader_id, name)
 
 
-def review_corrected_copy_in_background(run_id: str, corrected: bytes) -> None:
+def review_corrected_copy_in_background(run_id: str, uploader_id: int, corrected: bytes) -> None:
     """`review_corrected_copy` with a DB session of its own, for the upload
     route's background task: the request's session is closed by then."""
     from app.database import SessionLocal
 
     db = SessionLocal()
     try:
-        review_corrected_copy(db, run_id, corrected)
+        review_corrected_copy(db, run_id, uploader_id, corrected)
     finally:
         db.close()
 
@@ -212,7 +239,7 @@ def _comment_findings(db: Session, run_id: str, review: Path) -> tuple[dict[int,
         rows = [CommentFinding(**row) for row in json.loads(raw)]
         return {row.comment_id: row for row in rows}, FINDINGS_FROM_MAP
     return ({c.comment_id: CommentFinding(c.comment_id, lint_of_flag(c.text), None, None, None)
-             for c in Document(str(review)).comments},
+             for c in Document(str(review)).comments if c.author == COMMENT_AUTHOR},
             FINDINGS_FROM_WORDING)
 
 
@@ -242,22 +269,24 @@ def comment_verdicts(db: Session, run_id: str, corrected: bytes) -> dict:
             "findings": [asdict(v) for v in verdicts]}
 
 
-def store_verdicts(db: Session, run_id: str, corrected: bytes) -> dict:
-    """Compute the verdict report and store it under CORRECTED_PREFIX."""
+def store_verdicts(db: Session, run_id: str, uploader_id: int | None, corrected: bytes) -> dict:
+    """Compute the verdict report and store it under CORRECTED_PREFIX, as the uploader's."""
     report = comment_verdicts(db, run_id, corrected)
-    get_storage().put_file(run_id, corrected_verdicts_key(run_id),
+    get_storage().put_file(run_id, corrected_verdicts_key(run_id, uploader_id),
                            json.dumps(report, indent=1, sort_keys=True).encode("utf-8"))
     return report
 
 
 def _without_review_notes(docx: bytes) -> bytes:
-    """The document without the review copy's closing review-notes box,
-    which the delivered document never had; stage 6's own boxes stay, as
-    the doctor read them on the delivered run."""
+    """The document without the review-notes box a review copy written
+    before the notes became a comment closes with, which the delivered
+    document never had; stage 6's own boxes stay, as the doctor read them on
+    the delivered run. A later copy's notes are a comment, outside the body
+    the doctor reads, so there is nothing to strip."""
     doc = Document(io.BytesIO(docx))
     for tbl in list(doc.element.body.iterchildren(qn("w:tbl"))):
         table = Table(tbl, doc)
-        if is_cviche_box(table) and table.cell(0, 0).paragraphs[0].text.startswith(REVIEW_NOTES_TITLE):
+        if is_cviche_box(table) and table.cell(0, 0).paragraphs[0].text.startswith(LEGACY_REVIEW_NOTES_TITLE):
             tbl.getparent().remove(tbl)
     out = io.BytesIO()
     doc.save(out)
@@ -332,18 +361,18 @@ def compare_doctor(delivered: dict, corrected: dict) -> dict:
     return {"not_compared": not_run, "totals": totals, "lints": lints}
 
 
-def store_corrected_doctor(db: Session, run_id: str, corrected: bytes) -> dict | None:
+def store_corrected_doctor(db: Session, run_id: str, uploader_id: int | None, corrected: bytes) -> dict | None:
     """Run the doctor on the corrected copy; store its report, and its
     comparison with the delivered run's report when that is stored. Returns
     the comparison, None without a delivered report."""
     storage = get_storage()
     report = doctor_on_corrected(db, run_id, corrected)
-    storage.put_file(run_id, corrected_doctor_key(run_id), json.dumps(report, indent=1).encode("utf-8"))
+    storage.put_file(run_id, corrected_doctor_key(run_id, uploader_id), json.dumps(report, indent=1).encode("utf-8"))
     delivered = _artifact_bytes(db, run_id, f"{run_id}{DOCTOR_SUFFIX}")
     if delivered is None:
         logger.info("Run %s has no doctor report to compare its corrected copy with", run_id)
         return None
     comparison = {"uid": run_id, **compare_doctor(json.loads(delivered), report)}
-    storage.put_file(run_id, corrected_doctor_compare_key(run_id),
+    storage.put_file(run_id, corrected_doctor_compare_key(run_id, uploader_id),
                      json.dumps(comparison, indent=1, sort_keys=True).encode("utf-8"))
     return comparison

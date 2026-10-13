@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import PipelineViewer from './PipelineViewer'
+import { REVIEW_COPY_NOTE } from './OutputFiles'
 import { getInputFileUrl } from '../api/runs'
 import type { ApiError } from '../api/client'
 import type { RunStatus } from '../types'
@@ -75,22 +76,41 @@ describe('PipelineViewer on a finished run (#1589)', () => {
   it.each([
     ['the owner', false, 'Owner Fix list', 'Staff quality and Run Doctor'],
     ['staff', true, 'Staff quality and Run Doctor', 'Owner Fix list'],
-  ])('makes the review copy %s the main download, the clean copy beside it, and the matching doctor card', (_who, staff, shown, hidden) => {
+  ])('makes the review copy %s the only download, says its notes are comments, and shows the matching doctor card', (_who, staff, shown, hidden) => {
     view.canViewAllRuns = staff
     view.runStatus = FINISHED
     render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
     const main = screen.getByRole('link', { name: 'Download review copy DEMO01_wcm_review.docx' })
     expect(main.getAttribute('href')).toContain('/api/run/ABCDEF/data/DEMO01_wcm_review.docx')
-    const clean = screen.getByRole('link', { name: /Clean copy \(no notes\)/ })
-    expect(clean.getAttribute('href')).toMatch(/\/data\/DEMO01_wcm\.docx$/)
+    expect(screen.getAllByRole('link', { name: /^Download/ })).toHaveLength(1)
+    expect(document.querySelector('a[href$="/data/DEMO01_wcm.docx"]')).toBeNull()
+    expect(screen.getByText(REVIEW_COPY_NOTE)).toBeTruthy()
     expect(screen.getByText(shown)).toBeTruthy()
     expect(screen.queryByText(hidden)).toBeNull()
   })
 
-  it('keeps the clean copy as the only download when no review copy was written', () => {
+  it.each([['the owner', false], ['staff', true]])(
+    'offers %s the corrected-copy upload right under the Download, and the survey does not repeat it',
+    (_who, staff) => {
+      view.canViewAllRuns = staff
+      view.runStatus = FINISHED
+      render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+      const upload = screen.getByRole('region', { name: 'Help improve CViche' })
+      expect(within(upload).getByTestId('file-input')).toBeTruthy()
+      expect(screen.getAllByTestId('file-input')).toHaveLength(1)
+    },
+  )
+
+  it('offers no upload before the run has a finished document', () => {
+    render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+    expect(screen.queryByRole('region', { name: 'Help improve CViche' })).toBeNull()
+  })
+
+  it('offers the finished document when no review copy was written', () => {
     view.runStatus = { ...FINISHED, steps: [{ ...FINISHED.steps[0], output_files: JSON.stringify(['/o/DEMO01_wcm.docx']) }] }
     render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
     expect(screen.getByRole('link', { name: 'Download final output file DEMO01_wcm.docx' })).toBeTruthy()
-    expect(screen.queryByRole('link', { name: /review copy|Clean copy/i })).toBeNull()
+    expect(screen.queryByRole('link', { name: /review copy/i })).toBeNull()
+    expect(screen.queryByText(REVIEW_COPY_NOTE)).toBeNull()
   })
 })
