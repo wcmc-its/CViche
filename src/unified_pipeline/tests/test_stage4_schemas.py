@@ -175,6 +175,19 @@ def test_grant_buckets_ask_the_llm_for_status_and_notes(code):
     assert {"status", "notes"} <= set(schemas_mod.FIELD_DESCRIPTIONS[code])
 
 
+@pytest.mark.parametrize("code", ["M2B", "M2C"])
+def test_past_and_pending_grants_ask_for_annual_funding_as_m2a_does(code):
+    """#1672: M2B and M2C had no yearly field, so RTBEJA's 13 and KDAZOM's 8
+    stated annual direct costs reached no field and "Annual direct costs:"
+    rendered empty. Same key and guide as M2A, so stage 6's one read
+    (`_first_rendering_amount`) serves all three buckets. Read off the ACTIVE
+    (config-merged) schema, which the prompt's field list is built from."""
+    assert "annual_funding" in schemas_mod.get_field_schema(code)["fields"]
+    assert "annual_funding" in schemas_mod.FIELD_SCHEMAS[code]["fields"]
+    assert (schemas_mod.FIELD_DESCRIPTIONS[code]["annual_funding"]
+            == schemas_mod.FIELD_DESCRIPTIONS["M2A"]["annual_funding"])
+
+
 @pytest.mark.parametrize("field", ["status", "filing_date", "issue_date"])
 def test_patent_schema_asks_the_llm_for_the_fields_the_patent_table_renders(field):
     """#1205 slice (b), EBYSBC E12: the M2D renderer (`stage6/sections/patents.py`)

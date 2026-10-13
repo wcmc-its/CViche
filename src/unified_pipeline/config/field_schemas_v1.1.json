@@ -424,6 +424,7 @@
         "start_date": {"extract": true, "category": "template"},
         "end_date": {"extract": true, "category": "template"},
         "total_funding": {"extract": true, "category": "template"},
+        "annual_funding": {"extract": true, "category": "template", "wcm_column": "Amount, yearly direct"},
         "status": {"extract": true, "category": "optional"},
         "notes": {"extract": true, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
@@ -441,6 +442,7 @@
         "co_investigators": {"extract": true, "category": "template"},
         "agency": {"extract": true, "category": "template"},
         "total_funding_requested": {"extract": true, "category": "template"},
+        "annual_funding": {"extract": true, "category": "template", "wcm_column": "Amount, yearly direct"},
         "submission_date": {"extract": true, "category": "template"},
         "status": {"extract": true, "category": "optional"},
         "notes": {"extract": true, "category": "optional"},
