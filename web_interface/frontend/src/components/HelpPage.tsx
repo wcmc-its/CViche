@@ -254,6 +254,10 @@ export default function HelpPage() {
                   CV template. Download this file from the Download card on the run page.
                 </p>
                 <p>
+                  CViche's notes on what to check are Word comments in the margin. Once you have checked them, use
+                  Review {'→'} Delete All Comments in Word to remove them all; the document is then ready to submit.
+                </p>
+                <p>
                   The CV Insights panel shows a summary of what CViche extracted: number of publications found, sections
                   identified, and any enrichment data added from PubMed. Review this to confirm your content was captured
                   correctly.
