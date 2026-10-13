@@ -54,14 +54,15 @@ STAGE5D_BATCH_WORKERS = workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS")
 # Publication codes that may need formatting
 PUBLICATION_CODES = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
 
-# Publication type descriptions for LLM context
+# Publication type descriptions for LLM context. Each names the same section
+# as its code's label in core/taxonomy_v7.json (#1723).
 PUBLICATION_TYPE_DESCRIPTIONS = {
     'S1': 'Peer-reviewed research article (journal article)',
     'S2': 'Review article or editorial',
     'S3': 'Book (authored or edited)',
     'S4': 'Book chapter (contributed chapter in edited volume)',
-    'S5': 'Monograph',
-    'S6': 'Letter or correspondence',
+    'S5': 'Non-peer-reviewed research publication (report, white paper, technical document)',
+    'S6': 'Case report or case series',
     'S7': 'Manuscript in review/submitted (unpublished)',
     'S8': 'Abstract or conference proceeding',
     'S9': 'Other publication (media coverage, podcast, etc.)',
@@ -76,8 +77,8 @@ Each entry includes a taxonomy code indicating the publication type:
 - S2: Review article or editorial
 - S3: Book (authored or edited)
 - S4: Book chapter (contributed chapter in edited volume)
-- S5: Monograph
-- S6: Letter or correspondence
+- S5: Non-peer-reviewed research publication (report, white paper, technical document)
+- S6: Case report or case series
 - S7: Manuscript in review/submitted (unpublished)
 - S8: Abstract or conference proceeding
 - S9: Other publication (media coverage, podcast, etc.)
@@ -98,7 +99,7 @@ FORMAT BY PUBLICATION TYPE:
 FOR JOURNAL ARTICLES (S1, S2, S6):
 - Format: Authors. Title. Journal. Year;Volume(Issue):Pages. doi:xxx.
 
-FOR BOOKS (S3, S5):
+FOR BOOKS AND REPORTS (S3, S5):
 - Format: Authors. Book Title. Edition. Location: Publisher; Year.
 
 FOR BOOK CHAPTERS (S4):
