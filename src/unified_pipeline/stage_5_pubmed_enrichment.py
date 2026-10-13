@@ -297,6 +297,85 @@ def pubmed_list_drops_the_owner(cv_authors: str | list[str] | None, target_name:
                 and not any(owner & s for s in surnames))
 
 
+# MEDLINE's cap on a record's author list, by publication year (NLM policy):
+# at most 10 names through 1995 and 25 for 1996-1999; from 2000 on, every
+# author is indexed. A record cut at its cap also carries
+# <AuthorList CompleteYN="N"> (the records behind KRSFSI e468 and RSVENL e166 do), which
+# no stored stage-5 artifact kept, so the year rule covers those runs.
+_MEDLINE_AUTHOR_CAPS = ((1995, 10), (1999, 25))
+# Share of a capped PubMed list's surnames the CV's list must name for the two
+# to be one byline. KRSFSI e468 and RSVENL e166 name 9 of 10 (a CV
+# misspelling; a coauthor the CV leaves out), KRSFSI e567 7 of 10 (a
+# misspelling, a two-word surname written as one, the owner's name garbled
+# by stage 4). The record already passed stage 5's title check.
+_CAPPED_LIST_MIN_SHARED = 0.7
+_AUTHOR_SEPARATOR = re.compile(r'\s*(?:[,;&]|\band\b)\s*')
+_ET_AL = re.compile(r'^et\.?\s+al\.?$', re.IGNORECASE)
+
+
+def medline_author_cap(year: int | None) -> int | None:
+    """The most authors MEDLINE indexed for a paper of `year`, or None when
+    the record holds every author."""
+    if year is None:
+        return None
+    return next((cap for last_year, cap in _MEDLINE_AUTHOR_CAPS if year <= last_year), None)
+
+
+def _cv_author_names(cv_authors: str | list[str] | None) -> list[str]:
+    """The CV's authors, one string each. A string list is split at commas,
+    semicolons, "&" and "and"; a piece with no lowercase letter is a
+    "Last, F." list's initials, not an author, and "et al." is not one."""
+    if isinstance(cv_authors, list):
+        return [str(a) for a in cv_authors if str(a).strip()]
+    pieces = _AUTHOR_SEPARATOR.split(str(cv_authors or ''))
+    return [p for p in pieces if re.search('[a-z]', p) and not _ET_AL.match(p)]
+
+
+def pubmed_list_is_capped(cv_authors: str | list[str] | None, pubmed_authors: list[str],
+                          pubmed_year: int | None, complete: bool = True) -> bool:
+    """Whether PubMed's author list is the CV's byline cut at MEDLINE's cap
+    (#1661): the record says its list is incomplete or holds exactly the cap
+    for its year, the CV names more authors, and the CV names most of
+    PubMed's surnames. KRSFSI e468: a pre-1996 paper whose CV byline names
+    the owner after the tenth author rendered as PubMed's first 10."""
+    cap = medline_author_cap(pubmed_year)
+    if not pubmed_authors or (complete and (cap is None or len(pubmed_authors) != cap)):
+        return False
+    cv_names = _cv_author_names(cv_authors)
+    if len(cv_names) <= len(pubmed_authors):
+        return False
+    surnames = [_folded_words(a.rsplit(' ', 1)[0], _MIN_SURNAME_WORD_LEN) for a in pubmed_authors]
+    cv_words = _folded_words(' '.join(cv_names), _MIN_SURNAME_WORD_LEN)
+    shared = sum(1 for s in surnames if s and s <= cv_words)
+    return shared >= _CAPPED_LIST_MIN_SHARED * len(surnames)
+
+
+def capped_list_with_cv_tail(cv_authors: str | list[str] | None,
+                             pubmed_authors: list[str]) -> str | None:
+    """PubMed's capped list followed by the CV's authors after PubMed's last
+    one, so the names PubMed gives keep its spelling and the CV supplies the
+    names MEDLINE cut. PubMed's last author is placed in the CV's list
+    through the last PubMed surname the CV names: KRSFSI e425's CV writes
+    the owner, PubMed's tenth, garbled, so the ninth places the cut. None,
+    for the CV's own byline to render, when the CV names none of them,
+    nobody after the cut (1996-1999 records keep the last author, not the
+    25th), or is a "Last, F." string whose pieces are not one author each."""
+    cv_names = _cv_author_names(cv_authors)
+    if isinstance(cv_authors, str) and len(_AUTHOR_SEPARATOR.split(cv_authors)) != len(cv_names):
+        return None
+    cv_words = [_folded_words(name, _MIN_SURNAME_WORD_LEN) for name in cv_names]
+    cut = None
+    for back, author in enumerate(reversed(pubmed_authors)):
+        surname = _folded_words(author.rsplit(' ', 1)[0], _MIN_SURNAME_WORD_LEN)
+        found = next((i for i, words in enumerate(cv_words) if surname and surname <= words), None)
+        if found is not None:
+            cut = found + back
+            break
+    if cut is None or cut >= len(cv_names) - 1:
+        return None
+    return ', '.join(pubmed_authors + [name.strip() for name in cv_names[cut + 1:]])
+
+
 def cites_a_reply(text: str, title: str = '') -> bool:
     """Whether the CV's citation text calls the entry a reply. A marker inside
     the title is the title's, so the text must hold more matches than the
@@ -1277,6 +1356,7 @@ class PubMedEnricher:
                 'pmcid': pmcid,
                 'authors': authors,
                 'authors_vancouver': ', '.join(authors),
+                'authors_complete': article.find(".//AuthorList[@CompleteYN='N']") is None,
                 'publication_types': pub_types,
                 'mesh_terms': mesh_terms
             }
@@ -1536,6 +1616,15 @@ class PubMedEnricher:
             enrichment = entry['enrichment_data']
             enrichment['pubmed_authors_without_owner'] = enrichment['pubmed_authors']
             enrichment['pubmed_authors'] = None
+        # A list MEDLINE cut at its cap renders with the CV's names after it,
+        # or as the CV's byline when those cannot be placed (#1661).
+        elif pubmed_list_is_capped(fields.get('authors'), pubmed_record.get('authors') or [],
+                                   pubmed_record.get('year'),
+                                   pubmed_record.get('authors_complete', True)):
+            enrichment = entry['enrichment_data']
+            enrichment['pubmed_authors_capped'] = enrichment['pubmed_authors']
+            enrichment['pubmed_authors'] = capped_list_with_cv_tail(
+                fields.get('authors'), pubmed_record['authors'])
 
         # Fill in missing identifier fields
         if not fields.get('pmid') and pubmed_record.get('pmid'):

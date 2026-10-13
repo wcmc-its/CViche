@@ -1337,15 +1337,16 @@ def test_title_search_ignores_a_preprint_record(tmp_path, monkeypatch):
 PAPER_PMID, NOTICE_PMID = '23456789', '34567890'
 
 
-def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',)):
+def _article(pmid, title, pubtypes=('Journal Article',), authors=('Garcia M',), year=2025,
+             author_list_attrs=''):
     """One PubmedArticle; `title` is raw XML, so it may hold inline markup."""
     names = ''.join(f'<Author><LastName>{a.rsplit(" ", 1)[0]}</LastName>'
                     f'<Initials>{a.rsplit(" ", 1)[1]}</Initials></Author>' for a in authors)
     types = ''.join(f'<PublicationType>{t}</PublicationType>' for t in pubtypes)
     return (f'<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>'
-            f'<Journal><JournalIssue><PubDate><Year>2025</Year></PubDate></JournalIssue>'
+            f'<Journal><JournalIssue><PubDate><Year>{year}</Year></PubDate></JournalIssue>'
             f'<Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>'
-            f'<AuthorList>{names}</AuthorList><PublicationTypeList>{types}</PublicationTypeList>'
+            f'<AuthorList{author_list_attrs}>{names}</AuthorList><PublicationTypeList>{types}</PublicationTypeList>'
             f'</Article></MedlineCitation></PubmedArticle>')
 
 
@@ -1788,6 +1789,107 @@ def test_pubmed_author_list_naming_the_owner_still_renders(monkeypatch):
     [result] = enricher._enrich_by_pmid([(_owner_entry(), PMID)])
     assert result['enrichment_data']['pubmed_authors'] == 'Abel A, Quill JA'
     assert 'pubmed_authors_without_owner' not in result['enrichment_data']
+
+
+# #1661 (KRSFSI e468): MEDLINE indexed at most 10 authors through 1995, so
+# PubMed's list cut a longer CV byline before the owner.
+CAPPED_CV = [f'{s} {i}' for s, i in (
+    ('Abel', 'A'), ('Brandt', 'B'), ('Cole', 'C'), ('Dane', 'D'), ('Eno', 'E'), ('Frey', 'F'),
+    ('Gale', 'G'), ('Hume', 'H'), ('Ives', 'I'), ('Jory', 'J'), ('Kemp', 'K'), ('Quill', 'JA'),
+    ('Wren', 'D'))]
+CAPPED_CV_TEXT = ', '.join(CAPPED_CV)
+# PubMed's first ten: one surname spelled differently from the CV's.
+CAPPED_PUBMED = CAPPED_CV[:7] + ['Hulme H'] + CAPPED_CV[8:10]
+
+
+@pytest.mark.parametrize('year, cap', [
+    (1975, 10), (1988, 10), (1995, 10), (1996, 25), (1999, 25), (2000, None), (None, None)])
+def test_medline_author_cap_by_year(year, cap):
+    assert stage5.medline_author_cap(year) == cap
+
+
+def test_pubmed_list_at_its_cap_with_a_longer_cv_byline_is_capped():
+    assert stage5.pubmed_list_is_capped(', '.join(CAPPED_CV), CAPPED_PUBMED, 1988)
+    assert stage5.pubmed_list_is_capped(CAPPED_CV, CAPPED_PUBMED, 1988)
+    # "Last, F." lists count one author per surname, not per comma.
+    last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV)
+    assert stage5.pubmed_list_is_capped(last_first, CAPPED_PUBMED, 1988)
+    ten_last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV[:10])
+    assert not stage5.pubmed_list_is_capped(ten_last_first, CAPPED_PUBMED, 1988)
+    # A record flagged incomplete is capped whatever its year or length.
+    assert stage5.pubmed_list_is_capped(CAPPED_CV, CAPPED_PUBMED[:4], 2012, complete=False)
+
+
+def test_pubmed_list_not_at_a_cap_or_not_the_cv_byline_is_kept():
+    cv = ', '.join(CAPPED_CV)
+    assert not stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED, 2005)  # no cap from 2000
+    assert not stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED[:9], 1988)  # under the cap
+    assert not stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED, None)
+    # The CV names no more authors than PubMed: "et al." is not one.
+    assert not stage5.pubmed_list_is_capped(', '.join(CAPPED_CV[:10]) + ', et al.', CAPPED_PUBMED, 1988)
+    # Fewer than 7 of PubMed's 10 surnames in the CV: another byline.
+    strangers = CAPPED_PUBMED[:6] + ['Uhl U', 'Xan X', 'Yell Y', 'Zorn Z']
+    assert not stage5.pubmed_list_is_capped(cv, strangers, 1988)
+    assert stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED[:7] + ['Xan X', 'Yell Y', 'Zorn Z'], 1988)
+    assert not stage5.pubmed_list_is_capped(cv, [], 1988, complete=False)
+
+
+def _capped_entry(authors=CAPPED_CV_TEXT):
+    return {'taxonomy_code': 'S1', 'text': f'{authors}. {INPRESS_TITLE}.',
+            'extracted_fields': {'title': INPRESS_TITLE, 'authors': authors,
+                                 'target_name': 'Quill JA', 'pmid': PMID}}
+
+
+@pytest.mark.parametrize('year, attrs', [(1988, ''), (2012, ' CompleteYN="N"')])
+def test_cv_byline_renders_when_pubmed_capped_the_list(monkeypatch, year, attrs):
+    xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_PUBMED, year=year,
+                                author_list_attrs=attrs))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_capped_entry(), PMID)])
+    data = result['enrichment_data']
+    # PubMed's ten, then the CV's names MEDLINE cut, the owner among them.
+    assert data['pubmed_authors'] == ', '.join(CAPPED_PUBMED + CAPPED_CV[10:])
+    assert data['pubmed_authors_capped'] == ', '.join(CAPPED_PUBMED)
+
+
+def test_capped_list_takes_the_cv_names_after_pubmeds_last():
+    tail = CAPPED_CV[10:]
+    assert stage5.capped_list_with_cv_tail(CAPPED_CV, CAPPED_PUBMED) == ', '.join(CAPPED_PUBMED + tail)
+    # PubMed's last surname written differently in the CV: the one before it
+    # places the cut. A CV that leaves a coauthor out shifts it back one.
+    garbled = CAPPED_CV[:9] + ['Jx Q'] + CAPPED_CV[10:]
+    assert stage5.capped_list_with_cv_tail(garbled, CAPPED_PUBMED) == ', '.join(CAPPED_PUBMED + tail)
+    omitted = ', '.join(CAPPED_CV[:3] + CAPPED_CV[4:])
+    assert stage5.capped_list_with_cv_tail(omitted, CAPPED_PUBMED) == ', '.join(CAPPED_PUBMED + tail)
+
+
+def test_capped_list_with_no_placeable_cv_tail_is_none():
+    # The CV names none of PubMed's authors, or nobody after PubMed's last
+    # (a 1996-1999 record keeps the last author), or a "Last, F." string.
+    assert stage5.capped_list_with_cv_tail(['Xan X', 'Yell Y'], ['Abel A']) is None
+    assert stage5.capped_list_with_cv_tail(CAPPED_CV, CAPPED_PUBMED[:9] + ['Wren D']) is None
+    last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV)
+    assert stage5.capped_list_with_cv_tail(last_first, CAPPED_PUBMED) is None
+
+
+def test_cv_byline_renders_when_the_capped_list_cannot_be_extended(monkeypatch):
+    last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV)
+    xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_PUBMED, year=1988))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_capped_entry(last_first), PMID)])
+    assert result['enrichment_data']['pubmed_authors'] is None  # stage 6 renders the CV's list
+
+
+@pytest.mark.parametrize('year, attrs', [(2012, ''), (1988, ' CompleteYN="Y"')])
+def test_uncapped_pubmed_list_still_renders(monkeypatch, year, attrs):
+    # 2012: no cap. 1988 with a 10-name CV byline: nothing longer to restore.
+    authors = ', '.join(CAPPED_CV) if year == 2012 else ', '.join(CAPPED_CV[:10])
+    xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_PUBMED, year=year,
+                                author_list_attrs=attrs))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    [result] = enricher._enrich_by_pmid([(_capped_entry(authors), PMID)])
+    assert result['enrichment_data']['pubmed_authors'] == ', '.join(CAPPED_PUBMED)
+    assert 'pubmed_authors_capped' not in result['enrichment_data']
 
 
 # #1438 (VYNARH, dev-246): PubMed indexes an author's reply under the letter
