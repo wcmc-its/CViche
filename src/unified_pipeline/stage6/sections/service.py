@@ -34,7 +34,12 @@ from ..formatting import (
     format_date_range,
     with_extra_date_spans,
 )
-from ..normalization import _cell_text, _organization_left_in_text, _squash
+from ..normalization import (
+    _cell_text,
+    _line_without_shown_role_and_dates,
+    _organization_left_in_text,
+    _squash,
+)
 from ..parsing import _ORPHAN_DATE, _UNDATED_ACTIVITY, _orphaned_dates_line_up
 from ..parsing.dates import YEAR_LIST, YEAR_OR_OPEN_SPAN, YEAR_OR_SPAN
 from ..sorting import sort_entries_reverse_chronological
@@ -187,6 +192,25 @@ def _default_board_role(entry: dict) -> str:
              _cell_text(fields.get('committee_name'))]
     if any(_MEMBERSHIP_BODY_RE.search(text) for text in texts):
         return DEFAULT_BOARD_ROLE
+    return ''
+
+
+# Where a Q2 row's Name of Committee is read from, in order: the schema's
+# `committee_name`, then the off-schema key stage 4 has filed a session or
+# consult title under while leaving `committee_name` null. `topic` is the one
+# observed (VYICGW 131, a quoted session title; FINSIS 355-357;
+# 5 rows across the local corpus, every one with `committee_name` null), and
+# no other Q2 field held it, so the title reached no cell (#1346).
+_BOARD_COMMITTEE_KEYS = ('committee_name', 'topic')
+
+
+def _board_committee_text(fields: dict) -> str:
+    """The Name of Committee of a Q2 row from its stage-4 fields
+    (`_BOARD_COMMITTEE_KEYS`); '' when none of them is filled."""
+    for key in _BOARD_COMMITTEE_KEYS:
+        text = _cell_text(fields.get(key))
+        if text:
+            return text
     return ''
 
 
@@ -927,7 +951,7 @@ class ServiceSection:
                 fields = entry.get('extracted_fields', {}) or {}
                 taxonomy_code = entry.get('taxonomy_code', 'Q2')
 
-                committee = _cell_text(fields.get('committee_name'))
+                committee = _board_committee_text(fields)
                 role = _cell_text(fields.get('role')) or _default_board_role(entry)
                 organization = _cell_text(fields.get('organization'))
 
@@ -952,15 +976,19 @@ class ServiceSection:
                                                    entry.get('text', ''))
 
                 # If we don't have structured fields, parse from raw text.
-                # A split record's row already shows its role and dates, so
-                # only what its own line holds beyond them is left (#1445,
-                # EOAHMI DUTAVD 79).
+                # The row already shows its role and dates, so only what the
+                # line holds beyond them is left: a split record's own line
+                # (#1445, EOAHMI DUTAVD 79), and any other entry's text less
+                # the role and dates at its ends, which printed whole beside
+                # them (#1346, YYVITM 353).
                 if not committee and is_split_record(entry):
                     committee = _organization_left_in_text(
                         fallback_text(entry), fields.get('role'),
                         fields.get('start_date'), fields.get('end_date'))
                 elif not committee:
-                    committee = entry.get('text', '')
+                    committee = _line_without_shown_role_and_dates(
+                        entry.get('text', ''), fields.get('role'),
+                        fields.get('start_date'), fields.get('end_date'))
 
                 # Add row to table
                 row = table.add_row()

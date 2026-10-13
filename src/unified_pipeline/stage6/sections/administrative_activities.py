@@ -50,13 +50,13 @@ from typing import TypedDict
 
 from unified_pipeline.core.render_check import entry_lines
 
-from ..fan_out import has_built_text
+from ..fan_out import fallback_text, has_built_text
 from ..formatting import (
     _set_font,
     format_date_range,
     with_extra_date_spans,
 )
-from ..normalization import _committee_cell_text
+from ..normalization import _committee_cell_text, _line_without_shown_role_and_dates
 from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 
@@ -401,7 +401,11 @@ class AdministrativeActivitiesSection:
                 rows.extend(parsed_rows)
             else:
                 if not activity:
-                    activity = original_text
+                    # The Role and Dates cells already show those parts of
+                    # the line; the whole line printed them twice (#1346,
+                    # KJJVVO 240 "<society> Advisor — 2018–Present").
+                    activity = _line_without_shown_role_and_dates(
+                        fallback_text(entry), role, record.start_date, record.end_date)
                 rows.append((
                     _name_with_institution(activity, record.institution),
                     role, dates))

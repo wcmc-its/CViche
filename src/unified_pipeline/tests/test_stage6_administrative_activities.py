@@ -723,3 +723,39 @@ class TestFurtherSpanReachesTheDateCell:
                                       "additional_period_end": "present"}}
         assert _rows(entry) == [("Fictional Review Committee", "Member",
                                  "1990-1993, 2001-Present")]
+
+
+class TestRawFallbackLeavesOutTheRoleAndDatesItsRowShows:
+    """#1346: an entry with no extracted committee rendered its whole line as
+    the Activity cell, repeating the role and dates beside it (KJJVVO 240)."""
+
+    def test_role_and_dates_at_the_ends_are_taken_out(self):
+        entry = {"text": "Zqsociety Advisor — 2018–Present", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": None, "role": "Advisor",
+                                      "start_date": "2018", "end_date": "present"}}
+        assert _rows(entry) == [("Zqsociety", "Advisor", "2018-Present")]
+
+    def test_a_line_of_only_role_and_dates_leaves_the_activity_blank(self):
+        entry = {"text": "Zqwebmaster July 2015 - October 2017", "taxonomy_code": "P",
+                 "extracted_fields": {"role": "Zqwebmaster", "start_date": "2015-07",
+                                      "end_date": "2017-10"}}
+        assert _rows(entry) == [("", "Zqwebmaster", "2015-2017")]
+
+    def test_a_date_the_dates_cell_does_not_show_stays(self):
+        entry = {"text": "Zqsociety Advisor 2018", "taxonomy_code": "P",
+                 "extracted_fields": {"role": "Advisor", "start_date": "2019"}}
+        assert _rows(entry) == [("Zqsociety Advisor 2018", "Advisor", "2019")]
+
+    def test_a_date_inside_a_parenthesis_keeps_the_parenthesis_whole(self):
+        text = "Zqstudent (Biology, Advisor: Zqmentor, 2013 – 2015)"
+        entry = {"text": text, "taxonomy_code": "P",
+                 "extracted_fields": {"start_date": "2013", "end_date": "2015"}}
+        assert _rows(entry) == [(text, "", "2013-2015")]
+
+    def test_an_extracted_committee_is_untouched(self):
+        """Blast radius: a row with a committee renders exactly as before."""
+        entry = {"text": "Zqsociety Advisor — 2018–Present", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Zqsociety Advisor — 2018",
+                                      "role": "Advisor", "start_date": "2018",
+                                      "end_date": "present"}}
+        assert _rows(entry) == [("Zqsociety Advisor — 2018", "Advisor", "2018-Present")]

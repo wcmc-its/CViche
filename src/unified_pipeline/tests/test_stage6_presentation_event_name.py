@@ -426,3 +426,53 @@ def test_a_status_word_already_in_the_title_is_not_repeated():
 def test_a_status_word_already_in_the_venue_is_not_added_to_the_title():
     text = "Calibrating widgets at scale. Widget Society (cancelled), 2020."
     assert _status_title(text, location="Widget Society (cancelled)") == _STATUS_TITLE
+
+
+# #1346: title-less talks whose source line still filled the Title cell with
+# the date, event and venue the other two cells show.
+
+def test_untitled_talk_drops_a_leading_numeric_date_and_its_talk_label():
+    """PZTNWT 118: '<mm/dd/yyyy> <event><TAB><venue>. Invited talk.' was the
+    whole Title cell."""
+    cells = _untitled_row("12/15/2025 2025 Zqgpcr Workshop\tKestrel Island, Varnoria. Invited talk.",
+                          date="2025-12-15", event_name="2025 Zqgpcr Workshop",
+                          location="Kestrel Island, Varnoria")
+    assert cells == ["2025 Zqgpcr Workshop, Invited talk", "Kestrel Island, Varnoria", "2025"]
+
+
+def test_untitled_talk_with_only_a_venue_and_a_talk_label_is_titled_by_the_label():
+    """PZTNWT 121: the venue came tab-separated where stage 4 wrote it with a
+    comma, so the whole line stayed in the Title cell."""
+    cells = _untitled_row("03/17/2025 Zqplanck Institute\tAshby, Varnoria. Invited talk.",
+                          date="2025-03-17", location="Zqplanck Institute, Ashby, Varnoria")
+    assert cells == ["Invited talk", "Zqplanck Institute, Ashby, Varnoria", "2025"]
+
+
+def test_untitled_talk_drops_a_two_digit_year_date_and_the_pieces_of_its_event():
+    """VPMMFM 524: '<mm/dd/yy>, <venue>,: <event part>, panelist, <event part>'."""
+    cells = _untitled_row("10/27/04, Ashby, ZZ,:  Zqfib Roundtable, panelist, ZZ chapter ACX",
+                          date="2004-10-27", role="Panelist", location="Ashby, ZZ",
+                          event_name="Zqfib Roundtable, ZZ chapter ACX")
+    assert cells == ["Panelist, Zqfib Roundtable, ZZ chapter ACX", "Ashby, ZZ", "2004"]
+
+
+def test_a_numeric_date_is_kept_when_the_dates_cell_shows_another_year():
+    cells = _untitled_row("10/27/04 Zqwidget Calibration at Scale, Northgate Hall",
+                          date="2006", location="Northgate Hall")
+    assert cells[0] == "10/27/04 Zqwidget Calibration at Scale"
+
+
+def test_untitled_talk_keeps_a_line_with_words_beyond_the_label():
+    """Only label words ('Invited talk') stop the line from counting as a
+    possible title; 'Virtual' and the series name are not shown elsewhere."""
+    cells = _untitled_row("08/19/2020 Zqcaltech, Kestrel, ZZ.\tSummer Zqpostdoc Series. Virtual. Invited talk.",
+                          date="2020-08-19", location="Zqcaltech, Kestrel, ZZ")
+    assert cells[0] == "Summer Zqpostdoc Series. Virtual. Invited talk."
+
+
+def test_a_titled_talk_renders_its_title_whatever_its_source_line_holds():
+    """Blast radius (#1346): a row with a stage-4 title is untouched."""
+    cells = _untitled_row("12/15/2025 Calibrating Zqwidgets\tBig Island. Invited talk.",
+                          date="2025-12-15", title="Calibrating Zqwidgets",
+                          location="Big Island")
+    assert cells == ["Calibrating Zqwidgets", "Big Island", "2025"]

@@ -3,8 +3,16 @@
 A row renders a few stage-4 fields in their own cells -- a role, dates -- and
 falls back to the entry's source line for the one cell stage 4 left empty. That
 line still holds what the other cells show, so the row printed it twice
-(#946, #1437). `_organization_left_in_text` takes the role and the dates stage 4
-extracted back out of the line and tidies what the removals strand.
+(#946, #1437). Two ways to take the role and the dates stage 4 extracted back
+out of the line:
+
+- `_organization_left_in_text` (Q1, and a Q2 split record's own line) removes
+  them wherever they stand and tidies what the removals strand.
+- `_line_without_shown_role_and_dates` (P, and any other Q2 row, #1346) removes
+  them only from the line's two ends. Those rows fall back to whole entries,
+  some of them sentences ("Member. Collaborated with ..."), and a removal from
+  the middle of a sentence or a parenthesis broke it; a role or a date at an
+  edge is the shape of a record line ("Webmaster July 2015 - October 2017").
 
 It lives here, not in one section, because more than one section falls back
 this way: Q1's Organization, a Q2 row's Name of Committee (both
@@ -14,7 +22,7 @@ one another (CODING_STANDARDS.md §1.3).
 """
 import re
 
-from ..parsing.dates import YEAR, YEAR_OR_OPEN_SPAN
+from ..parsing.dates import DATE_DASH, OPEN_END, SHORT_END_YEAR, YEAR, YEAR_OR_OPEN_SPAN
 from .fields import _cell_text
 
 # A year, or a year range ("2005-present", "1993-1996", "2001-"), used to find
@@ -116,3 +124,86 @@ def _organization_clause(clause: str) -> str:
     if len(clause) <= _RESIDUE_MAX_CHARS and not _SHORT_RESIDUE_KEPT_RE.fullmatch(clause):
         return ''
     return clause
+
+
+# One date at a line's edge: a year, optionally after a month name and day
+# ("March 21, 2015") or a numeric month ("09/2009", "12/15/2025").
+_MONTH_NAME = r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?'
+_DATE_POINT = (rf'(?:{_MONTH_NAME}\s+(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s+)?'
+               rf'|\d{{1,2}}/(?:\d{{1,2}}/)?)?{YEAR}(?!\d)')
+# A date or a range of them: "2005-present", "July 2015 - October 2017",
+# "2001 to 2014", "2019- now", "1991-92", "2019-".
+_DATE_RANGE = (rf'{_DATE_POINT}(?:\s*(?:{DATE_DASH}|\bto\b)\s*'
+               rf'(?:{_DATE_POINT}|{SHORT_END_YEAR}|{OPEN_END}|now)?)?')
+# Each alternative is balanced, so the ")" closing a parenthesis that holds more
+# than the date ("(Biology, Advisor: ..., 2013 – 2015)") is never taken.
+_EDGE_DATE = rf'(?:\(\s*{_DATE_RANGE}\s*\)|{_DATE_RANGE})'
+_LEADING_DATE_RE = re.compile(rf'^{_EDGE_DATE}', re.IGNORECASE)
+# A trailing date stands apart from what precedes it: "IL 2/09-2012" ends in a
+# range whose start the date grammar cannot read, not in the date "2012".
+_TRAILING_DATE_RE = re.compile(
+    rf'(?:^|(?<=[\s,;:(|]))(?:(?:in|since|from)\s+)?{_EDGE_DATE}$', re.IGNORECASE)
+# What a removal can leave at an edge: separators, a list bullet, a stop. Not a
+# quote or a bracket -- those close something the line opened.
+_LINE_EDGE_CHARS = ' \t\n,;:.|-–—•·▪◦*'
+# A role at the start of the line stands as its own segment ("Member. ...",
+# "Program Director, Ashby University"); in "Member of the Board" it does not.
+_ROLE_FOLLOWER = r'(?=\s*(?:[,;:.|(\-–—]|$))'
+
+
+def _role_pattern(role: str) -> str:
+    """`role` as a regex that tolerates the punctuation and spacing between its
+    words the source line may use ("co-chair" for "Co Chair")."""
+    return r'[\W_]*'.join(map(re.escape, re.findall(r'\w+', role)))
+
+
+def _strip_edge_date(line: str, known_years: set[str]) -> str:
+    """`line` without a date at its start or end whose years are all ones
+    the Dates cell shows (`known_years`)."""
+    for pattern in (_LEADING_DATE_RE, _TRAILING_DATE_RE):
+        match = pattern.search(line)
+        if match and set(_YEAR_RE.findall(match.group())) <= known_years:
+            line = line[:match.start()] + line[match.end():]
+    return line
+
+
+def _strip_edge_role(line: str, roles: list[str]) -> str:
+    """`line` without a role phrase at its start (set off by a separator) or
+    at its end ("Zqsociety Advisor", "Executive Committee Member")."""
+    for role in roles:
+        line = re.sub(rf'^{role}{_ROLE_FOLLOWER}', '', line, flags=re.IGNORECASE)
+        line = re.sub(rf'(?:^|(?<=[\s,;:|\-–—])){role}$', '', line, flags=re.IGNORECASE)
+    return line
+
+
+def _line_without_shown_role_and_dates(text: object, role: object, start_date: object,
+                                       end_date: object) -> str:
+    """The Name of Committee / Activity of a P or Q2 row whose stage-4 fields
+    name none: the entry text, less the role and the dates its other cells
+    show, where they stand at either end of the line (#1346).
+
+    KJJVVO 240 "<society> Advisor — 2018–Present" printed whole beside its
+    Advisor and 2018-Present cells; it renders "<society>". A line that is
+    nothing but its role and dates ("Webmaster July 2015 - October 2017",
+    YYVITM 308) renders ''. A date is removed only when the Dates cell shows
+    every year in it (`start_date`/`end_date`), and a role only as a whole
+    phrase. A `role` that is not a plain string is no text to remove. Text
+    with nothing at its edges to remove is returned exactly as given, and so
+    is text that still holds a year once its edges are gone: the line then
+    carries more than one record's dates ("Council Member, 1981, 1990-1994",
+    a fused "<committee> 1985-94<TAB><committee> 1986-2003"), and taking the
+    one the Dates cell shows would leave the others reading as undated.
+    """
+    text = _cell_text(text)
+    known_years = set(_YEAR_RE.findall(f'{_cell_text(start_date)} {_cell_text(end_date)}'))
+    roles = ([pattern for part in re.split(r'\s*;\s*', role)
+              if (pattern := _role_pattern(part))] if isinstance(role, str) else [])
+    line = text.strip(_LINE_EDGE_CHARS)
+    previous = None
+    while line != previous:
+        previous = line
+        line = _strip_edge_date(line, known_years).strip(_LINE_EDGE_CHARS)
+        line = _strip_edge_role(line, roles).strip(_LINE_EDGE_CHARS)
+    if line == text.strip(_LINE_EDGE_CHARS) or _YEAR_RE.search(line):
+        return text
+    return line
