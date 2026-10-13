@@ -983,3 +983,96 @@ def test_1223_ndmrso_the_appendix_leaks_are_findings_and_cap_the_score_red(tmp_p
     _write_flat_docx(tmp_path, ["T. APPENDIX", line])
     _fraction, _detail, cap = score_protected_data(tmp_path)
     assert cap == PROTECTED_DATA_CAP
+
+
+# --------------------------------------------------------------------------
+# #1426: a religious affiliation with no "Religion:" label. Invented names.
+# --------------------------------------------------------------------------
+
+_MEMBERSHIPS_HEADER = "I. PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS"
+
+
+@pytest.mark.parametrize("section", ["T. APPENDIX", "PERSONAL DATA", _MEMBERSHIPS_HEADER])
+def test_1426_a_congregation_line_is_a_religion_finding(section):
+    findings = lint_protected_data_in_output(
+        [_p(section), _p("Quillfern Church\tbell ringer\t1994-1999")])
+    assert len(findings) == 1
+    assert "(religion)" in findings[0]["message"]
+    assert "Quillfern" not in findings[0]["message"]
+
+
+def test_1426_a_congregation_line_in_a_body_section_is_not_a_finding():
+    """A routed talk "at <a> Church" is not the owner's affiliation."""
+    blocks = [_p("INVITATIONS TO SPEAK/PRESENT"), _p("Invited talk, Quillfern Church, 2018")]
+    assert lint_protected_data_in_output(blocks) == []
+
+
+@pytest.mark.parametrize("line", [
+    "Saint Kestrow Hospital, Attending Physician",
+    "Quillfern Presbyterian Hospital",
+    "Catholic University of Zorvane",
+    "Baptist Health Tamberlyn",
+    "Quillfern Church Medical Center",
+    "Varnholt AB, Church CD, Oxvale EF. A title.",
+])
+@pytest.mark.parametrize("section", ["T. APPENDIX", _MEMBERSHIPS_HEADER])
+def test_1426_a_hospital_university_or_author_list_is_not_a_finding(section, line):
+    assert lint_protected_data_in_output([_p(section), _p(line)]) == []
+
+
+@pytest.mark.parametrize("text, value", [
+    ("Quillfern Church\tbell ringer\t1994-1999", "Quillfern Church"),
+    ("Member, Congregation Zorvane", "Congregation Zorvane"),
+    ("Elder, Church of Varnholt", "Church of Varnholt"),
+    ("Board, Tamberlyn Synagogue", "Tamberlyn Synagogue"),
+    ("Volunteer, Pellingrove Mosque", "Pellingrove Mosque"),
+    ("Council, Saint Kestrow Parish", "Saint Kestrow Parish"),
+    ("Choir, Oxvale Cathedral", "Oxvale Cathedral"),
+    ("Greeter, Oxvale SDA Church", "Oxvale SDA Church"),
+])
+def test_1426_a_named_congregation_is_an_independent_shape(text, value):
+    """The lint's own shape: it also reads tracked deletions, which the
+    withhold's matcher never sees."""
+    assert [m.group("value") for pattern, _ in _INDEPENDENT_SHAPES
+            for m in pattern.finditer(text)] == [value]
+    assert _shape_categories(text) == ["religion"]
+
+
+def test_1426_a_congregation_in_a_tracked_deletion_is_a_finding():
+    blocks = [_p("T. APPENDIX"), _p("Volunteer work")]
+    deleted = [("p", ""), ("p", "Member, Quillfern Church")]
+    findings = lint_protected_data_in_output(blocks, deleted)
+    assert len(findings) == 1
+    assert "(religion)" in findings[0]["message"]
+    assert "tracked deletion" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("text", [
+    "Quillfern Church Hospital", "Quillfern Church Medical Staff", "Quillfern Church Health",
+    "Quillfern Church Clinic", "Quillfern Church University", "Quillfern Church College",
+    "Quillfern Church School", "Quillfern Church Institute", "Quillfern Church Center",
+    "Quillfern Church Centre", "Quillfern Church Medicine", "Quillfern Church Nursing",
+    "12 Quillfern Church Street", "Church Street, Oxvale", "Church St, Oxvale",
+    "Church Road", "Church Rd", "Church Avenue", "Church Ave", "Church Lane", "Church Ln",
+    "Church Hill", "Church Drive", "Church Dr",
+    "Varnholt AB, Church CD", "pat@church.example", "Churchmoor Varnholt",
+    "Quillfern Churchmoor", "Megachurch Varnholt", "Varnholt J Church",
+    "lunch at the church hall", "Lecturer, Oxvale University, Quillfern Church",
+])
+def test_1426_the_independent_shape_skips_institutions_streets_and_authors(text):
+    assert _shape_hits(text, []) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Quillfern Church, Centerville",
+    "Member, Quillfern Church Stanbury",
+    "Lecturer, Oxvale University\nVolunteer, Pellingrove Mosque",
+    "Volunteer, Pellingrove Mosque\nLecturer, Oxvale University",
+])
+def test_1426_the_independent_shape_reads_each_line_and_whole_words(text):
+    assert _shape_categories(text) == ["religion"]
+
+
+def test_1426_the_memberships_section_does_not_get_the_ambiguous_rows():
+    blocks = [_p(_MEMBERSHIPS_HEADER), _p("Children: Example Society Section")]
+    assert lint_protected_data_in_output(blocks) == []

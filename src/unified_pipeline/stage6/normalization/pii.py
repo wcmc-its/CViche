@@ -68,6 +68,10 @@ from typing import NamedTuple
 SCOPE_ALL_CODES = "ALL_CODES"
 #: Applied only to A-coded entries and entries headed for the Appendix.
 SCOPE_PERSONAL_AND_APPENDIX = "PERSONAL_AND_APPENDIX"
+#: #1426: a membership (section I) entry. As an entry's scope it gets the
+#: ALL_CODES rows plus the rows scoped here; as a row's scope it means "the
+#: membership entries, and everywhere SCOPE_PERSONAL_AND_APPENDIX reaches".
+SCOPE_MEMBERSHIPS = "MEMBERSHIPS"
 
 #: Decided in #820 (the detector issue) -- settled.
 DECIDED_820 = "#820"
@@ -76,6 +80,11 @@ DECIDED_821_PENDING = "#821 pending"
 #: Paul's #821 decision comment (2026-09-14): DEA template slot and home
 #: address/phone both move from render to withhold-with-notice.
 DECIDED_821 = "https://github.com/wcmc-its/CViche/issues/821#issuecomment-5671621909"
+#: #1426: the religion row's own wording asks for "a membership whose
+#: organization is a congregation/church" to be withheld like a labelled
+#: "Religion:" line; the label alone missed it in the membership rows (ATUVAL
+#: 844) and in the Appendix (HVSKET 148-150).
+DECIDED_1426_RELIGION = "https://github.com/wcmc-its/CViche/issues/1426"
 #: Paul's decision (2026-10-05, NDMRSO batch autopsy class ND1): an
 #: institutional, employee or student ID number and a tax ID are withheld like
 #: the other personal data. Before it, both reached the Appendix verbatim
@@ -465,6 +474,58 @@ def _id_number_shape(label: str) -> str:
     return _STEM_GUARD + label + _ID_NUMBER_NOUN + _ID_VALUE_SEP + _ID_NUMBER_VALUE
 
 
+# --- a religious affiliation with no label (#1426) ---------------------------
+# A congregation named in a membership row or in an Appendix line says what
+# the "Religion:" row withholds, without its label. Keyed on the ORGANIZATION: a
+# congregation noun, or a denomination's own governing body. Never on a
+# denomination word alone -- hospitals, universities and health systems carry
+# those in their names (a "<denomination> Hospital", a "<denomination>
+# University"), and a line naming one of `_RELIGIOUS_LINE_EXEMPT_WORDS` is left
+# alone whatever else it says: the cost of a miss is one religious line in the
+# Appendix, the cost of a false withhold is a hospital affiliation cut from the
+# CV. Scoped to membership rows and the full-policy scope (A-coded and
+# Appendix-bound entries, the E/G/J passthrough copies): a routed talk "at <a>
+# Church" or a paper on congregations is not the owner's affiliation.
+#
+# Each noun is guarded on the right against the shapes that are not a
+# congregation: a street ("<noun> Street"), a town ("<noun> Hill") and an
+# author list ("<surname noun> AB,"). "temple" is never part of an email
+# domain or a URL.
+_STREET_OR_PLACE_AFTER = (
+    r"(?! \s+ (?: st | street | rd | road | ave | avenue | ln | lane | dr | drive | hill ) \b )"
+)
+_AUTHOR_INITIALS_AFTER = r"(?! \s+ (?-i: [A-Z]{1,2} ) (?: [,.] | \s* $ | \s+ (?-i: [A-Z] ) ) )"
+_CONGREGATION_NOUN = (
+    r"(?: church (?: es )? | congregations? | synagogues? | mosques?"
+    r"  | parish (?: es )? | (?: arch )? diocese | cathedral"
+    r"  | (?<! [@.] ) temple (?! \. \w ) | chapel"
+    r"  | (?-i: SDA ) )"
+)
+_DENOMINATION = (
+    r"(?: adventist | baptist | methodist | lutheran | presbyterian | catholic | episcopal"
+    r"  | pentecostal | evangelical )"
+)
+_DENOMINATION_BODY = r"(?: conference | convention | synod | presbytery )"
+_RELIGIOUS_ORGANIZATION = (
+    r"\b (?: " + _CONGREGATION_NOUN + r" | " + _DENOMINATION + r" \s+ " + _DENOMINATION_BODY
+    + r" ) \b" + _STREET_OR_PLACE_AFTER + _AUTHOR_INITIALS_AFTER
+)
+#: Words that make a line an institution's, not a congregation's -- the
+#: hospitals and universities named after a saint, a denomination or a church.
+#: "Sunday school" is a congregation's own.
+_RELIGIOUS_LINE_EXEMPT_WORDS = (
+    r"\b (?: hospitals? | medical | health \w* | clinic \w* | universit \w* | college"
+    r"     | (?<! sunday [ ] ) school | institut \w* | cent (?: er | re ) s? | medicine"
+    r"     | nursing | hospice ) \b"
+)
+#: One whole line (never crossing `\n`) that names a religious organization
+#: and none of the exempt words.
+_RELIGIOUS_ORGANIZATION_LINE = (
+    r"(?: ^ | (?<= \n ) ) (?! [^\n]* " + _RELIGIOUS_LINE_EXEMPT_WORDS + r" )"
+    r"[^\n]*? " + _RELIGIOUS_ORGANIZATION + r" [^\n]*"
+)
+
+
 #: THE table. Row order is match-priority order within a scope: the engine
 #: tries every row and merges overlapping spans, keeping the category of
 #: the leftmost (then first-listed) match, so "Birth date and birth place:"
@@ -608,6 +669,12 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_AGE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"age"),
     WithholdRule(CAT_GENDER, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"gender"),
     WithholdRule(CAT_RELIGION, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"religion"),
+    # #1426: a line naming a congregation or a denomination's own body, no
+    # "Religion:" label (see `_RELIGIOUS_ORGANIZATION_LINE`). The whole line
+    # is the span, so no date or role is left behind as an orphan; render-time
+    # only, because that span can swallow a DOB the pre-LLM scrub must find.
+    WithholdRule(CAT_RELIGION, SCOPE_MEMBERSHIPS, DECIDED_1426_RELIGION,
+                 shape=_RELIGIOUS_ORGANIZATION_LINE, render_only=True),
     # #1071: "Race/Ethnicity:", "Race / Ethnicity:", "Race and Ethnicity:"
     # -- the "ethnicity" half alone never opened a label there, because the
     # boundary rule does not accept "/" or "and" before it. Never a bare
@@ -928,13 +995,21 @@ def _is_bare_label_span(text: str, start: int, end: int) -> bool:
     return False
 
 
+_ALL_CODES_POLICY = tuple((r, p) for r, p in _COMPILED_POLICY if r.scope == SCOPE_ALL_CODES)
+_MEMBERSHIP_POLICY = tuple((r, p) for r, p in _COMPILED_POLICY
+                           if r.scope in (SCOPE_ALL_CODES, SCOPE_MEMBERSHIPS))
+
+
 def _rules_for_scope(scope: str) -> tuple[tuple[WithholdRule, re.Pattern], ...]:
-    """The rows in force at `scope`: ALL_CODES rows always; the ambiguous
-    rows only for the Personal Data / Appendix scope."""
+    """The rows in force at `scope`: ALL_CODES rows always; the membership
+    rows for a membership entry (#1426); every row for the Personal Data /
+    Appendix scope."""
     if scope == SCOPE_PERSONAL_AND_APPENDIX:
         return _COMPILED_POLICY
+    if scope == SCOPE_MEMBERSHIPS:
+        return _MEMBERSHIP_POLICY
     if scope == SCOPE_ALL_CODES:
-        return tuple((r, p) for r, p in _COMPILED_POLICY if r.scope == SCOPE_ALL_CODES)
+        return _ALL_CODES_POLICY
     raise ValueError(f"unknown withhold scope {scope!r}")
 
 

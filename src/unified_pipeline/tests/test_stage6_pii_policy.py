@@ -63,9 +63,11 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     DECIDED_820,
     DECIDED_821,
     DECIDED_821_PENDING,
+    DECIDED_1426_RELIGION,
     DECIDED_ID_NUMBERS,
     PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
+    SCOPE_MEMBERSHIPS,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     WithheldItem,
@@ -99,6 +101,9 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
 # 'T' is not in RENDER_ROUTED_CODES, so generate() sends it to the Appendix;
 # 'S4' (book chapters) is a routed content code.
 A, APPENDIX, CONTENT = "A", "T", "S4"
+#: #1426: a membership (section I) entry, the one routed code the religious
+#: organization row also reaches.
+MEMBERSHIP = "I"
 
 DENIED, ALLOWED = True, False
 
@@ -126,6 +131,11 @@ _NEVER = {A: ALLOWED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
 #: A dash family label with no `Family` label ahead of it (#1223): withheld in
 #: the Personal Data block only.
 _DASH_PERSONAL_DATA_ONLY = {A: DENIED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
+#: #1426: the religious-organization row -- every full-policy destination and
+#: a membership row, never a routed content entry.
+_MEMBERSHIPS_AND_PERSONAL = {A: DENIED, APPENDIX: DENIED, MEMBERSHIP: DENIED, CONTENT: ALLOWED}
+_NEVER_INCLUDING_MEMBERSHIPS = {A: ALLOWED, APPENDIX: ALLOWED, MEMBERSHIP: ALLOWED,
+                                CONTENT: ALLOWED}
 #: A row withheld only in the Personal Data block (an A-coded entry) -- #1391's
 #: bare marital status word.
 _PERSONAL_DATA_BLOCK_ONLY = _DASH_PERSONAL_DATA_ONLY
@@ -197,6 +207,22 @@ PROBE_TABLE = [
     ("Driver's License: D1234567", CAT_DRIVERS_LICENSE, _ALL),
     ("DEA #: AB1234567", CAT_DEA, _PERSONAL_ONLY),
     ("Religion: Example", CAT_RELIGION, _PERSONAL_ONLY),
+    # #1426: a religious affiliation with no label, keyed on the organization.
+    ("Quillfern Church\tbell ringer\t1994-1999", CAT_RELIGION, _MEMBERSHIPS_AND_PERSONAL),
+    ("Member, Congregation Zorvane", CAT_RELIGION, _MEMBERSHIPS_AND_PERSONAL),
+    ("Oxvale SDA potluck coordinator", CAT_RELIGION, _MEMBERSHIPS_AND_PERSONAL),
+    ("Varnholt Adventist Conference treasurer (2008)", CAT_RELIGION, _MEMBERSHIPS_AND_PERSONAL),
+    ("Sunday School Teacher, Quillfern Church", CAT_RELIGION, _MEMBERSHIPS_AND_PERSONAL),
+    # ... never a hospital, university or health system named for a saint,
+    # a mountain or a denomination.
+    ("Saint Kestrow Hospital, Attending Physician", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Mount Varnholt Medical Center", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Quillfern Presbyterian Hospital", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Oxvale Jewish Hospital", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Baptist Health Tamberlyn", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Catholic University of Zorvane", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Pellingrove Methodist Church Hospital", None, _NEVER_INCLUDING_MEMBERSHIPS),
+    ("Varnholt AB, Church CD, Oxvale EF. A title.", None, _NEVER_INCLUDING_MEMBERSHIPS),
     ("Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
     # #1071: the combined race-and-ethnicity label (a bare "Race:" stays a
     # negative control below).
@@ -366,9 +392,10 @@ def test_every_policy_row_has_a_probe_that_reaches_it():
 
 def test_every_policy_row_carries_a_scope_and_a_decision():
     for rule in WITHHOLD_POLICY:
-        assert rule.scope in (SCOPE_ALL_CODES, SCOPE_PERSONAL_AND_APPENDIX), rule
+        assert rule.scope in (SCOPE_ALL_CODES, SCOPE_PERSONAL_AND_APPENDIX,
+                              SCOPE_MEMBERSHIPS), rule
         assert rule.decided_by in (DECIDED_820, DECIDED_821_PENDING, DECIDED_821,
-                                    DECIDED_ID_NUMBERS), rule
+                                    DECIDED_ID_NUMBERS, DECIDED_1426_RELIGION), rule
         assert (rule.label is None) != (rule.shape is None), rule
 
 
@@ -378,9 +405,12 @@ def test_the_scope_split_is_generate_s_own_routing_predicate():
     assert _entry_scope("A", RENDER_ROUTED_CODES) == SCOPE_PERSONAL_AND_APPENDIX
     assert _entry_scope("T", RENDER_ROUTED_CODES) == SCOPE_PERSONAL_AND_APPENDIX
     assert _entry_scope("ZZ", RENDER_ROUTED_CODES) == SCOPE_PERSONAL_AND_APPENDIX
-    for code in ("S4", "R", "F1", "B1", "M2A"):
+    for code in ("S4", "R", "F1", "B1", "M2A", "Q2"):
         assert code in RENDER_ROUTED_CODES
         assert _entry_scope(code, RENDER_ROUTED_CODES) == SCOPE_ALL_CODES
+    # #1426: memberships are routed, and get the membership rows on top.
+    assert MEMBERSHIP in RENDER_ROUTED_CODES
+    assert _entry_scope(MEMBERSHIP, RENDER_ROUTED_CODES) == SCOPE_MEMBERSHIPS
 
 
 def test_dea_pii_pass_scope_unchanged_licensure_withholds_it_at_render():
@@ -2664,3 +2694,166 @@ def test_1426_a_current_address_naming_no_workplace_is_home_contact(text, addres
 ])
 def test_1426_a_current_address_at_a_workplace_or_another_label_is_not(text, address):
     assert not _is_unlabelled_home_address(text, address)
+
+
+# --------------------------------------------------------------------------
+# #1426: a religious affiliation with no "Religion:" label
+#
+# Keyed on the ORGANIZATION (a congregation noun, or a denomination's own
+# governing body), withheld as one whole line, in a membership row and at
+# every full-policy destination. Every name below is invented.
+# --------------------------------------------------------------------------
+
+def _religion(text: str, code: str = APPENDIX) -> list[str]:
+    return [text[m.start:m.end] for m in _probe_matches(text, code)
+            if m.category == CAT_RELIGION]
+
+
+@pytest.mark.parametrize("noun", [
+    "Church", "Churches", "Congregation", "Congregations", "Synagogue", "Synagogues",
+    "Mosque", "Mosques", "Parish", "Parishes", "Diocese", "Archdiocese", "Cathedral",
+    "Temple", "Chapel", "SDA"])
+def test_1426_each_congregation_noun_withholds_its_line(noun):
+    line = f"Volunteer, Quillfern {noun}, 2001-2004"
+    assert _religion(line) == [line]
+    assert _religion(line, MEMBERSHIP) == [line]
+    assert _religion(line, CONTENT) == []
+
+
+@pytest.mark.parametrize("denomination", [
+    "Adventist", "Baptist", "Methodist", "Lutheran", "Presbyterian", "Catholic",
+    "Episcopal", "Pentecostal", "Evangelical"])
+@pytest.mark.parametrize("body", ["Conference", "Convention", "Synod", "Presbytery"])
+def test_1426_a_denominations_governing_body_withholds_its_line(denomination, body):
+    line = f"Auditor, Varnholt {denomination} {body}, 2006"
+    assert _religion(line) == [line]
+
+
+def test_1426_a_denomination_word_alone_is_not_a_religious_organization():
+    """A denomination names hospitals and health systems too; only its own
+    governing body (or a congregation noun) is an affiliation."""
+    assert _religion("Staff Physician, Varnholt Adventist Group, 2001") == []
+    assert _religion("Auditor, Varnholt Adventist Group") == []
+
+
+@pytest.mark.parametrize("word", [
+    "Hospital", "Hospitals", "Medical Group", "Health", "Healthcare", "Clinic",
+    "Clinics", "University", "College", "School", "Institute", "Center", "Centre",
+    "Centers", "Medicine", "Nursing", "Hospice"])
+def test_1426_a_line_naming_an_institution_is_never_withheld(word):
+    line = f"Quillfern Church {word}, Staff, 2001-2004"
+    assert _religion(line) == []
+    assert _religion(line, MEMBERSHIP) == []
+
+
+def test_1426_an_institution_word_on_another_line_does_not_exempt_this_one():
+    text = "Member, Quillfern Church\nLecturer, Oxvale University"
+    assert _religion(text) == ["Member, Quillfern Church"]
+    text = "Lecturer, Oxvale University\nMember, Quillfern Church"
+    assert _religion(text) == ["Member, Quillfern Church"]
+
+
+def test_1426_sunday_school_is_the_congregations_own_but_a_school_is_not():
+    assert _religion("Teacher, Sunday School, Quillfern Church") != []
+    assert _religion("Teacher, Quillfern Church School") == []
+
+
+@pytest.mark.parametrize("street", [
+    "St", "Street", "Rd", "Road", "Ave", "Avenue", "Ln", "Lane", "Dr", "Drive", "Hill"])
+def test_1426_a_street_or_a_town_named_for_a_church_is_not_withheld(street):
+    assert _religion(f"12 Church {street}, Oxvale") == []
+    # The same noun as an organization on the same street still is.
+    assert _religion(f"Member, Quillfern Church, 12 Church {street}") != []
+
+
+@pytest.mark.parametrize("author_list", [
+    "Varnholt AB, Church CD, Oxvale EF. A title.",
+    "Varnholt A, Church C. A title.",
+    "Varnholt A, Church C",
+    "Varnholt AB, Church CD Oxvale EF",
+])
+def test_1426_a_surname_in_an_author_list_is_not_withheld(author_list):
+    assert _religion(author_list) == []
+
+
+def test_1426_a_word_after_the_noun_is_not_mistaken_for_initials():
+    assert _religion("Member, Church Council") != []
+    assert _religion("Member, Church Of Oxvale") != []
+
+
+@pytest.mark.parametrize("text", [
+    "pat@temple.example", "Email pat.temple@example", "See temple.example/page"])
+def test_1426_temple_inside_an_email_or_a_domain_is_not_withheld(text):
+    assert _religion(text) == []
+
+
+def test_1426_sda_is_the_capitalised_abbreviation_only():
+    assert _religion("Varnholt sda probe") == []
+    assert _religion("Varnholt SDA hiking club") != []
+
+
+def test_1426_the_religious_row_is_render_time_only():
+    """Its whole-line span must not swallow a date of birth the pre-LLM
+    scrub has to replace."""
+    rule = next(r for r in WITHHOLD_POLICY if r.decided_by == DECIDED_1426_RELIGION)
+    assert rule.render_only is True
+    text = "Member, Quillfern Church, Date of Birth: 01/02/1970"
+    assert "01/02/1970" not in redact_pre_llm_values(text)
+
+
+def test_1426_pass_withholds_a_membership_row_and_its_organization_field():
+    entry = {"text": "Quillfern Church\tbell ringer\t1994-1999", "taxonomy_code": "I",
+             "extracted_fields": {"organization": "Quillfern Church",
+                                  "start_date": "1994", "end_date": "1999"}}
+    result = _run({"I": [entry]})
+    assert entry["text"] == ""
+    assert "organization" not in entry["extracted_fields"]
+    assert entry["_pii_withheld"] is True
+    assert result.withheld == [
+        WithheldItem(CAT_RELIGION, TAXONOMY_TO_SECTION["I"].replace("_", " ").title(), 0)]
+
+
+def test_1426_pass_withholds_an_appendix_line_and_keeps_its_other_lines():
+    entry = {"text": "Treasurer, Oxvale SDA fellowship, 2009\nVarnholt Food Bank volunteer",
+             "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert entry["text"].strip() == "Varnholt Food Bank volunteer"
+    assert result.withheld == [WithheldItem(CAT_RELIGION, APPENDIX_SECTION_LABEL, 0)]
+
+
+def test_1426_pass_leaves_a_routed_service_or_talk_entry_alone():
+    entries = {"R": [{"text": "Invited talk, Quillfern Church, Oxvale, 2018",
+                      "taxonomy_code": "R", "extracted_fields": {}}]}
+    result = _run(entries)
+    assert result.withheld == []
+    assert "_pii_withheld" not in entries["R"][0]
+
+
+@pytest.mark.parametrize("text", [
+    "Contact pat@temple",            # "temple" after an @ with no dot after it
+    "Speaker, Varnholt Pediatric Conference, 2006",   # a body word alone
+    "Board, Oxvalechurch Partners",  # a noun inside a longer word, either end
+    "Quillfern Churchmoor fellowship",
+])
+def test_1426_shapes_that_only_contain_a_religious_word_are_not_withheld(text):
+    assert _religion(text) == []
+
+
+def test_1426_initials_are_capitals_only():
+    """"Church AB," is an author; "Church AB council" names a body."""
+    assert _religion("Choir, Church AB council") != []
+
+
+def test_1426_an_exempt_word_must_be_a_whole_word():
+    assert _religion("Member, Quillfern Church, Collegeham") != []
+
+
+def test_1426_the_withheld_span_starts_at_its_own_line():
+    text = "Varnholt Food Bank volunteer\nMember, Quillfern Church"
+    assert _religion(text) == ["Member, Quillfern Church"]
+
+
+def test_1426_a_membership_row_gets_the_every_code_rows_but_not_the_ambiguous_ones():
+    assert _denied("SSN: 123-45-6789", MEMBERSHIP)
+    assert not _denied("Health: Example Society Annual Report", MEMBERSHIP)
+    assert not _denied("Children: Example Society Section", MEMBERSHIP)

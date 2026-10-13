@@ -62,6 +62,7 @@ from .normalization.pii import (  # noqa: F401
     CAT_SPOUSE,
     CAT_THIRD_PARTY_CONTACT,
     SCOPE_ALL_CODES,
+    SCOPE_MEMBERSHIPS,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     PiiMatch,
@@ -76,6 +77,10 @@ from .normalization.pii import (  # noqa: F401
 #: still gets the full policy.
 PERSONAL_DATA_CODE = "A"
 
+#: The taxonomy code of the memberships section (I): its entries also get the
+#: membership rows (`SCOPE_MEMBERSHIPS`, #1426).
+MEMBERSHIPS_CODE = "I"
+
 #: The section label recorded for an entry `generate()` does not route.
 APPENDIX_SECTION_LABEL = "Appendix"
 
@@ -83,6 +88,11 @@ APPENDIX_SECTION_LABEL = "Appendix"
 #: value (#892): a field-first writer reads it to tell a withheld award from
 #: one that never had a name field.
 PII_DROPPED_FIELDS_KEY = "_pii_dropped_fields"
+
+#: The entry key this pass sets True on every entry it touched (see
+#: `run_pii_pass`): a section writer reads it to tell a row emptied by a
+#: withhold from one that never had content (#1426).
+PII_WITHHELD_KEY = "_pii_withheld"
 
 PII_REDACTED_NOTICE = (
     "[Personal data from the source CV was withheld here "
@@ -410,9 +420,11 @@ def _entry_scope(code: str, routed_codes: frozenset[str] | set[str]) -> str:
     """Which policy scope an entry with taxonomy `code` is rendered under:
     the full policy for the Personal Data block and for anything
     `generate()` will send to the Appendix, the unambiguous rows for every
-    routed content code."""
+    routed content code, plus the membership rows for a membership entry."""
     if code == PERSONAL_DATA_CODE or code not in routed_codes:
         return SCOPE_PERSONAL_AND_APPENDIX
+    if code == MEMBERSHIPS_CODE:
+        return SCOPE_MEMBERSHIPS
     return SCOPE_ALL_CODES
 
 
@@ -727,7 +739,7 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             spans = [_extend_label_span(raw_text, m, scope) for m in matches]
             entry["_pii_fragments"] = [raw_text[m.start:s.end]
                                        for m, s in zip(matches, spans)]
-            entry["_pii_withheld"] = True
+            entry[PII_WITHHELD_KEY] = True
             # #848: the entry's position, so the residual's rendered location
             # (known only post-render) can be joined back to its WithheldItems.
             entry["_pii_entry_index"] = index

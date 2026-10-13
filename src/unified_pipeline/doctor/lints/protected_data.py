@@ -35,9 +35,11 @@ from unified_pipeline.stage6.normalization.pii import (
     CAT_INSTITUTIONAL_ID,
     CAT_MARITAL_STATUS,
     CAT_PLACE_OF_BIRTH,
+    CAT_RELIGION,
     CAT_SPOUSE,
     CAT_TAX_ID,
     SCOPE_ALL_CODES,
+    SCOPE_MEMBERSHIPS,
     SCOPE_PERSONAL_AND_APPENDIX,
     _dea_check_digit_ok,
     _pii_matches,
@@ -160,6 +162,9 @@ def _home_contact_value_leaked(block_text: str) -> bool:
 # get the full policy: the two places the pre-render pass applies it.
 _PERSONAL_DATA_SECTION = "personal data"
 _APPENDIX_SECTION = "appendix"
+#: #1426: the memberships section (I) is scanned with the membership rows too,
+#: as the pass renders it (`pii_pass._entry_scope`). The template's own header.
+_MEMBERSHIPS_SECTION = "professional organizations and society memberships"
 #: #821's own probe (see `_DEA_VALUE_RE` above) -- not part of the FULL
 #: policy pair above, since the label itself must stay unflagged there.
 #: Matched by PREFIX (`_is_licensure_section` below), not `==`: the real
@@ -275,6 +280,24 @@ _TAX_ID_LABEL = (r"(?i:(?:federal[ \t]*)?tax[ \t]*(?:payer[ \t]*)?(?:id|identifi
 _ID_LABEL_TAIL = r"(?![A-Za-z])(?:[ \t]*(?i:number|no\.?|#))?[ \t|]*(?:[:\-–—][ \t|]*)?"
 _ID_NUMBER = r"[A-Za-z]{0,4}-?\d(?:[ -]?\d){3,}"
 
+#: #1426: a religious affiliation with no "Religion:" label -- a congregation
+#: named with its own name ("<Name> Church", "Congregation <Name>", "Church of
+#: <Name>") on a line that names no hospital, university or other institution
+#: (a "<Saint> Hospital" or a "<denomination> Medical Center" is a workplace).
+#: The name must be capitalised, so an author list ("Church AB,") or a street
+#: ("<Name> Church Street") is not one.
+_CONGREGATION_WORD = r"(?i:church|congregation|synagogue|mosque|parish|cathedral)"
+_RELIGIOUS_LINE_EXEMPT = (r"(?i:hospital|medical|health|clinic|universit|college|school|institut"
+                          r"|cent(?:er|re)\b|medicine|nursing)")
+_CAPITALISED = r"(?-i:[A-Z][\w.'’-]+)"
+#: A name after the noun is a word, never an author's initials ("Church AB,").
+_CAPITALISED_WORD = r"(?-i:[A-Z][a-z][\w'’-]*)"
+_NOT_A_STREET = r"(?![ \t]+(?i:street|st|road|rd|avenue|ave|lane|ln|hill|drive|dr)\b)"
+_CONGREGATION_NAME = (
+    r"(?m:^)(?![^\n]*" + _RELIGIOUS_LINE_EXEMPT + r")[^\n]*?(?<!\w)(?P<value>"
+    r"(?:" + _CAPITALISED + r"[ \t]+){1,4}" + _CONGREGATION_WORD + _NOT_A_STREET
+    + r"|" + _CONGREGATION_WORD + _NOT_A_STREET + r"[ \t]+(?:(?i:of)[ \t]+)?"
+    + _CAPITALISED_WORD + r")\b")
 #: (shape, policy category). Every shape names its value `value`. Same line
 #: only (`[ \t]`, never `\s`): a Personal Data row's label and value sit on
 #: two "lines" of a table block, and `_home_contact_value_leaked` above owns
@@ -314,6 +337,7 @@ _INDEPENDENT_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
                 + r"(?P<value>" + _ID_NUMBER + ")"), CAT_INSTITUTIONAL_ID),
     (re.compile(r"(?<![\w-])" + _TAX_ID_LABEL + _ID_LABEL_TAIL
                 + r"(?P<value>" + _ID_NUMBER + ")"), CAT_TAX_ID),
+    (re.compile(_CONGREGATION_NAME), CAT_RELIGION),
 )
 
 #: `_locate_entries`: a value shorter than this (a lone given name, a year)
@@ -420,10 +444,13 @@ def _block_sections(blocks: list[tuple[str, str]]) -> list[str | None]:
 
 def _scan_scope(section: str | None) -> str:
     """The policy scope a rendered block is checked at: the full policy in
-    the Personal Data block and the Appendix, the unambiguous rows elsewhere
-    -- the same split `stage6/pii_pass.py` renders under."""
+    the Personal Data block and the Appendix, the membership rows in the
+    memberships section, the unambiguous rows elsewhere -- the same split
+    `stage6/pii_pass.py` renders under."""
     if section in (_PERSONAL_DATA_SECTION, _APPENDIX_SECTION):
         return SCOPE_PERSONAL_AND_APPENDIX
+    if section == _MEMBERSHIPS_SECTION:
+        return SCOPE_MEMBERSHIPS
     return SCOPE_ALL_CODES
 
 
