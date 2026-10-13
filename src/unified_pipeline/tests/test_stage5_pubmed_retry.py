@@ -1800,6 +1800,8 @@ CAPPED_CV = [f'{s} {i}' for s, i in (
 CAPPED_CV_TEXT = ', '.join(CAPPED_CV)
 # PubMed's first ten: one surname spelled differently from the CV's.
 CAPPED_PUBMED = CAPPED_CV[:7] + ['Hulme H'] + CAPPED_CV[8:10]
+CAPPED_MERGED = ', '.join(CAPPED_PUBMED + CAPPED_CV[10:])
+_TWENTY_FIVE = [f'{s}{t} A' for s in ('Bal', 'Cor', 'Dun', 'Fes', 'Gil') for t in 'bdkmt']
 
 
 @pytest.mark.parametrize('year, cap', [
@@ -1808,139 +1810,139 @@ def test_medline_author_cap_by_year(year, cap):
     assert stage5.medline_author_cap(year) == cap
 
 
-def test_pubmed_list_at_its_cap_with_a_longer_cv_byline_is_capped():
-    assert stage5.pubmed_list_is_capped(', '.join(CAPPED_CV), CAPPED_PUBMED, 1988)
-    assert stage5.pubmed_list_is_capped(CAPPED_CV, CAPPED_PUBMED, 1988)
-    # "Last, F." lists count one author per surname, not per comma.
-    last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV)
-    assert stage5.pubmed_list_is_capped(last_first, CAPPED_PUBMED, 1988)
-    ten_last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV[:10])
-    assert not stage5.pubmed_list_is_capped(ten_last_first, CAPPED_PUBMED, 1988)
-    # A record flagged incomplete is capped whatever its year or length.
-    assert stage5.pubmed_list_is_capped(CAPPED_CV, CAPPED_PUBMED[:4], 2012, complete=False)
+def test_capped_list_takes_the_cv_names_after_pubmeds():
+    assert stage5.capped_list_with_cv_tail(CAPPED_CV_TEXT, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    assert stage5.capped_list_with_cv_tail(CAPPED_CV, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    # A record flagged incomplete merges whatever its year or length.
+    assert stage5.capped_list_with_cv_tail(CAPPED_CV, CAPPED_PUBMED[:4], 2012, complete=False) == (
+        ', '.join(CAPPED_PUBMED[:4] + CAPPED_CV[4:]))
+    assert stage5.capped_list_with_cv_tail(CAPPED_CV, [], 2012, complete=False) is None
+    for sep in (' and ', '; ', ' & '):
+        text = ', '.join(CAPPED_CV[:-1]) + sep + CAPPED_CV[-1]
+        assert stage5.capped_list_with_cv_tail(text, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    # Blank list items are not authors; a padded one is trimmed.
+    padded = CAPPED_CV[:-1] + [f' {CAPPED_CV[-1]} ', '', '  ']
+    assert stage5.capped_list_with_cv_tail(padded, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    # A 1996-1999 record holds 25.
+    names = _TWENTY_FIVE + ['Pratt A']
+    assert stage5.capped_list_with_cv_tail(names, names[:25], 1997) == ', '.join(names)
 
 
-def test_pubmed_list_not_at_a_cap_or_not_the_cv_byline_is_kept():
-    cv = ', '.join(CAPPED_CV)
-    assert not stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED, 2005)  # no cap from 2000
-    assert not stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED[:9], 1988)  # under the cap
-    assert not stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED, None)
-    # The CV names no more authors than PubMed: "et al." is not one.
-    assert not stage5.pubmed_list_is_capped(', '.join(CAPPED_CV[:10]) + ', et al.', CAPPED_PUBMED, 1988)
-    # Fewer than 7 of PubMed's 10 surnames in the CV: another byline.
-    strangers = CAPPED_PUBMED[:6] + ['Uhl U', 'Xan X', 'Yell Y', 'Zorn Z']
-    assert not stage5.pubmed_list_is_capped(cv, strangers, 1988)
-    # A two-word surname counts only when the CV names both words.
-    half_named = CAPPED_PUBMED[:6] + ['Abel Uhl U', 'Cole Xan X', 'Eno Yell Y', 'Gale Zorn Z']
-    assert not stage5.pubmed_list_is_capped(cv, half_named, 1988)
-    # More names than the cap: MEDLINE did not cut this list.
-    assert not stage5.pubmed_list_is_capped(cv, CAPPED_CV[:11], 1988)
-    assert stage5.pubmed_list_is_capped(cv, CAPPED_PUBMED[:7] + ['Xan X', 'Yell Y', 'Zorn Z'], 1988)
-    assert not stage5.pubmed_list_is_capped(cv, [], 1988, complete=False)
+def test_capped_list_matches_names_written_differently():
+    # Given names first, or full; a surname one letter off; "van der Berg"
+    # written as one word. The CV's names after PubMed's take its format.
+    swapped = [f'{a.split()[1]}. {a.split()[0]}' for a in CAPPED_CV]
+    assert stage5.capped_list_with_cv_tail(swapped, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    full = ['Ann Bo Abel'] + CAPPED_CV[1:]
+    assert stage5.capped_list_with_cv_tail(full, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    for spelling in ('Hulm H', 'Hlme H', 'Hulmme H', 'Hulne H'):
+        cv = CAPPED_CV[:7] + [spelling] + CAPPED_CV[8:]
+        assert stage5.capped_list_with_cv_tail(cv, CAPPED_PUBMED, 1988) == CAPPED_MERGED
+    pubmed = CAPPED_PUBMED[:9] + ['van der Berg J']
+    for spelling in ('Vanderberg J', 'Van der Berg J.'):
+        cv = CAPPED_CV[:9] + [spelling] + CAPPED_CV[10:]
+        assert stage5.capped_list_with_cv_tail(cv, pubmed, 1988) == ', '.join(pubmed + CAPPED_CV[10:])
 
 
-def _capped_entry(authors=CAPPED_CV_TEXT):
+@pytest.mark.parametrize('name, styled', [
+    ('K. Kemp', 'Kemp K'), ('J. A. Quill', 'Quill JA'), ('JA Quill', 'Quill JA'),
+    ('Quill J.A.', 'Quill JA'), ('van der Berg J.', 'van der Berg J'),
+    ('J. van der Berg', 'van der Berg J'),
+    ('Karl Kemp', 'Karl Kemp'), (' The ABC Study Group ', 'The ABC Study Group')])
+def test_cv_tail_takes_pubmeds_name_format(name, styled):
+    cv = CAPPED_CV[:10] + [name]
+    assert stage5.capped_list_with_cv_tail(cv, CAPPED_CV[:10], 1988) == ', '.join(
+        CAPPED_CV[:10] + [styled])
+
+
+def test_capped_list_tells_namesakes_apart_by_place():
+    # PubMed's first and tenth share a surname: each matches the CV's name in
+    # its own place.
+    lee = ['Lee A'] + CAPPED_CV[1:9] + ['Lee J', 'Kemp K', 'Wren D']
+    assert stage5.capped_list_with_cv_tail(lee, lee[:10], 1988) == ', '.join(lee)
+
+
+@pytest.mark.parametrize('cv, pubmed, year', [
+    (CAPPED_CV, CAPPED_PUBMED, 2005),        # no cap from 2000
+    (CAPPED_CV, CAPPED_PUBMED[:9], 1988),    # under the cap
+    (CAPPED_CV, CAPPED_PUBMED, None),
+    (CAPPED_CV, CAPPED_CV[:11], 1988),       # over the cap
+    (CAPPED_CV[:10] + ['', '  '], CAPPED_PUBMED, 1988),  # nobody after PubMed's ten
+    (', '.join(CAPPED_CV[:10]) + ', et al.', CAPPED_PUBMED, 1988),
+    # A "Last, F." string's pieces are not one author each.
+    (', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV), CAPPED_PUBMED, 1988),
+    (CAPPED_CV, CAPPED_PUBMED[:9] + ['Jory Z'], 1988),   # another initial
+    (CAPPED_CV_TEXT + ', MD', CAPPED_PUBMED, 1988),      # a piece that is no author
+    (CAPPED_CV, CAPPED_PUBMED[:9] + ['Jorrey J'], 1988),  # two letters off
+    (CAPPED_CV, CAPPED_PUBMED[:9] + ['Jo J'], 1988),
+    (CAPPED_CV, CAPPED_PUBMED[:9] + ['Jry J'], 1988),     # one off, but three letters
+    (CAPPED_CV, CAPPED_PUBMED[:9] + ['Jory'], 1988),     # no initials
+    (CAPPED_CV[:9] + ['Jory'] + CAPPED_CV[10:], CAPPED_PUBMED, 1988),
+    # A 1996-1999 record's 25th is the CV's last author, one letter from the
+    # CV's 25th.
+    (_TWENTY_FIVE + ['Gilp A'], _TWENTY_FIVE[:24] + ['Gilp A'], 1997),
+])
+def test_capped_list_without_an_aligned_cv_byline_is_none(cv, pubmed, year):
+    assert stage5.capped_list_with_cv_tail(cv, pubmed, year) is None
+
+
+def _capped_entry(authors=CAPPED_CV_TEXT, target_name='Quill JA'):
     return {'taxonomy_code': 'S1', 'text': f'{authors}. {INPRESS_TITLE}.',
             'extracted_fields': {'title': INPRESS_TITLE, 'authors': authors,
-                                 'target_name': 'Quill JA', 'pmid': PMID}}
+                                 'target_name': target_name, 'pmid': PMID}}
 
 
 @pytest.mark.parametrize('year, attrs', [(1988, ''), (2012, ' CompleteYN="N"')])
-def test_cv_byline_renders_when_pubmed_capped_the_list(monkeypatch, year, attrs):
+def test_capped_pubmed_list_renders_with_the_cv_names_after_it(monkeypatch, year, attrs):
     xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_PUBMED, year=year,
                                 author_list_attrs=attrs))
     enricher, _, _ = _make(monkeypatch, [xml])
     [result] = enricher._enrich_by_pmid([(_capped_entry(), PMID)])
     data = result['enrichment_data']
     # PubMed's ten, then the CV's names MEDLINE cut, the owner among them.
-    assert data['pubmed_authors'] == ', '.join(CAPPED_PUBMED + CAPPED_CV[10:])
+    assert data['pubmed_authors'] == CAPPED_MERGED
     assert data['pubmed_authors_capped'] == ', '.join(CAPPED_PUBMED)
-
-
-def test_capped_list_takes_the_cv_names_after_pubmeds_last():
-    tail = CAPPED_CV[10:]
-    assert stage5.capped_list_with_cv_tail(CAPPED_CV, CAPPED_PUBMED) == ', '.join(CAPPED_PUBMED + tail)
-    # PubMed's last surname written differently in the CV: the one before it
-    # places the cut. A CV that leaves a coauthor out shifts it back one.
-    garbled = CAPPED_CV[:9] + ['Jx Q'] + CAPPED_CV[10:]
-    assert stage5.capped_list_with_cv_tail(garbled, CAPPED_PUBMED) == ', '.join(CAPPED_PUBMED + tail)
-    omitted = ', '.join(CAPPED_CV[:3] + CAPPED_CV[4:])
-    assert stage5.capped_list_with_cv_tail(omitted, CAPPED_PUBMED) == ', '.join(CAPPED_PUBMED + tail)
-
-
-def test_capped_list_cut_goes_at_pubmeds_last_author_not_an_earlier_namesake():
-    # PubMed's tenth shares a surname with the CV's first: the cut is at the
-    # tenth, so no name before it repeats.
-    middle = CAPPED_CV[1:9]
-    lee = ['Lee A'] + middle + ['Lee J', 'Kemp K', 'Wren D']
-    assert stage5.capped_list_with_cv_tail(lee, lee[:10]) == ', '.join(lee)
-    # Same surname and initial: the namesake nearer PubMed's tenth place.
-    yeo = ['Yeo Y'] + middle + ['Yeo Y', 'Kemp K', 'Yeo Y']
-    assert stage5.capped_list_with_cv_tail(yeo, yeo[:10]) == ', '.join(yeo)
-    # The initial tells namesakes apart before nearness: the CV leaves a
-    # coauthor out, so its "Lee A" sits where PubMed's tenth, "Lee J", would.
-    # The surname's own first letter is not an initial.
-    omitted = CAPPED_CV[:3] + CAPPED_CV[4:9]
-    for given in ('J', 'j', 'L'):
-        pubmed = CAPPED_CV[:9] + [f'Lee {given}']
-        cv = omitted + [f'Lee {given.upper()}', 'Lee A', 'Kemp K', 'Wren D']
-        assert stage5.capped_list_with_cv_tail(cv, pubmed) == ', '.join(
-            pubmed + ['Lee A', 'Kemp K', 'Wren D'])
-    # Namesakes alike in initial and nearness: the earlier places the cut.
-    pubmed = CAPPED_CV[:9] + ['Lee J']
-    cv = omitted + ['Lee J', 'Kemp K', 'Lee J', 'Wren D']
-    assert stage5.capped_list_with_cv_tail(cv, pubmed) == ', '.join(pubmed + cv[9:])
-
-
-def test_capped_list_places_the_cut_by_whole_surnames():
-    # PubMed's last has no surname word to match, or a two-word surname that
-    # shares one word with an earlier CV author: the author before it places
-    # the cut.
-    omitted = CAPPED_CV[:3] + CAPPED_CV[4:]
-    for last in ('Q R', 'Abel Lowe J'):
-        pubmed = CAPPED_CV[:9] + [last]
-        assert stage5.capped_list_with_cv_tail(omitted, pubmed) == ', '.join(
-            pubmed + CAPPED_CV[10:])
-
-
-def test_cv_author_names_split_at_each_separator_and_skip_blank_list_items():
-    expected = ', '.join(CAPPED_PUBMED + CAPPED_CV[10:])
-    for sep in (' and ', '; ', ' & '):
-        text = ', '.join(CAPPED_CV[:-1]) + sep + CAPPED_CV[-1]
-        assert stage5.capped_list_with_cv_tail(text, CAPPED_PUBMED) == expected
-    # Blank list items are not authors: ten names stay ten. A padded one is
-    # trimmed.
-    assert not stage5.pubmed_list_is_capped(CAPPED_CV[:10] + ['', '  '], CAPPED_PUBMED, 1988)
-    padded = CAPPED_CV[:-1] + [f' {CAPPED_CV[-1]} ', '', '  ']
-    assert stage5.capped_list_with_cv_tail(padded, CAPPED_PUBMED) == expected
-
-
-def test_capped_list_with_no_placeable_cv_tail_is_none():
-    # The CV names none of PubMed's authors, or nobody after PubMed's last
-    # (a 1996-1999 record keeps the last author), or a "Last, F." string.
-    assert stage5.capped_list_with_cv_tail(['Xan X', 'Yell Y'], ['Abel A']) is None
-    assert stage5.capped_list_with_cv_tail(CAPPED_CV, CAPPED_PUBMED[:9] + ['Wren D']) is None
-    last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV)
-    assert stage5.capped_list_with_cv_tail(last_first, CAPPED_PUBMED) is None
-
-
-def test_cv_byline_renders_when_the_capped_list_cannot_be_extended(monkeypatch):
-    last_first = ', '.join(f"{a.split()[0]}, {a.split()[1]}." for a in CAPPED_CV)
-    xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_PUBMED, year=1988))
-    enricher, _, _ = _make(monkeypatch, [xml])
-    [result] = enricher._enrich_by_pmid([(_capped_entry(last_first), PMID)])
-    assert result['enrichment_data']['pubmed_authors'] is None  # stage 6 renders the CV's list
 
 
 def test_owner_drop_guard_wins_over_the_capped_list(monkeypatch):
     # PubMed's ten are all in the CV's byline and the owner is past them: the
-    # owner-drop guard renders the CV's own list; the cap branch adds nothing.
+    # owner-drop guard renders the CV's own list, as on dev.
     xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_CV[:10], year=1988))
     enricher, _, _ = _make(monkeypatch, [xml])
     [result] = enricher._enrich_by_pmid([(_capped_entry(), PMID)])
     data = result['enrichment_data']
     assert data['pubmed_authors'] is None
     assert data['pubmed_authors_without_owner'] == ', '.join(CAPPED_CV[:10])
+    assert 'pubmed_authors_capped' not in data
+
+
+# A CV byline that does not start with PubMed's ten, one for one, leaves
+# stage 5 as it was before #1661: PubMed's list renders unless it dropped the
+# owner. The owner, "Owen", is past PubMed's ten in every CV but F1's.
+_TEN = CAPPED_CV[:10]
+_MISALIGNED = {
+    'F1 owner first': ['Owen O'] + _TEN[:9] + ['Kemp K', 'Wren D'],
+    'F2 ninth and tenth swapped': _TEN[:8] + [_TEN[9], _TEN[8], 'Owen O'],
+    'F3 PubMed tenth omitted': _TEN[:9] + ['Owen O', 'Kemp K', 'Wren D'],
+    'F4 coauthor omitted, namesakes': _TEN[:2] + _TEN[3:9] + ['Lee J', 'Lee J', 'Owen O'],
+}
+
+
+@pytest.mark.parametrize('case', sorted(_MISALIGNED))
+@pytest.mark.parametrize('owner', ['Owen O', 'Abel A', None])
+def test_misaligned_cv_byline_leaves_stage5_as_before(monkeypatch, case, owner):
+    cv = _MISALIGNED[case]
+    pubmed = _TEN[:9] + ['Lee J'] if case.startswith('F4') else _TEN
+    record = {'pmid': PMID, 'year': 1988, 'authors': pubmed, 'authors_vancouver': ', '.join(pubmed)}
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = _capped_entry(', '.join(cv), owner)
+    enricher._merge_pubmed_data(entry, record)
+    data = entry['enrichment_data']
+    # The guard drops PubMed's list only where every PubMed surname is in
+    # the CV and the owner is not among them.
+    dropped = owner == 'Owen O' and case.startswith('F2')
+    assert data['pubmed_authors'] == (None if dropped else ', '.join(pubmed))
+    assert data.get('pubmed_authors_without_owner') == (', '.join(pubmed) if dropped else None)
     assert 'pubmed_authors_capped' not in data
 
 
@@ -1956,7 +1958,7 @@ def test_record_without_a_completeness_flag_counts_as_complete(monkeypatch):
 @pytest.mark.parametrize('year, attrs', [(2012, ''), (1988, ' CompleteYN="Y"')])
 def test_uncapped_pubmed_list_still_renders(monkeypatch, year, attrs):
     # 2012: no cap. 1988 with a 10-name CV byline: nothing longer to restore.
-    authors = ', '.join(CAPPED_CV) if year == 2012 else ', '.join(CAPPED_CV[:10])
+    authors = CAPPED_CV_TEXT if year == 2012 else ', '.join(CAPPED_CV[:10])
     xml = _article_set(_article(PMID, INPRESS_TITLE, authors=CAPPED_PUBMED, year=year,
                                 author_list_attrs=attrs))
     enricher, _, _ = _make(monkeypatch, [xml])
