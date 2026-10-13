@@ -26,7 +26,8 @@ Prod uses managed MariaDB (`$CVICHE_USER@$CVICHE_HOST:3306/cviche`). Confirmed s
 | Point-in-Time Recovery (PITR) | Enabled | Recover to any second within retention; covers "oops I just ran `DELETE` without WHERE" |
 | Backup window | Off-peak (e.g., 06:00–07:00 UTC) | Backup-induced IO does not collide with user activity |
 | Storage encryption (KMS) | Enabled | Snapshots inherit; restore-as-snapshot still encrypted |
-| Multi-AZ | Enabled (prod tier) | Synchronous standby; takes over within minutes on primary failure |
+| Multi-AZ | **Off during the pilot** (enable at go-live) | Pilot accepts snapshot-restore RTO (~60 min) instead of a synchronous standby's minutes; saves ~$125/mo (#83). Re-enable: `aws rds modify-db-instance --db-instance-identifier cviche --multi-az --apply-immediately` |
+| Instance class | `db.t3.medium` during the pilot | Downsized from `db.t3.large` (#83): ~3% CPU, single-digit connections. Don't go below medium: `max_connections` ≈ 85 covers the backend HPA's pools; `db.t3.small` (~45) does not |
 | Final snapshot on delete | Required | A `DeleteDBInstance` without it loses everything |
 | Deletion protection | Enabled | Block accidental `DeleteDBInstance` outright |
 
@@ -160,7 +161,8 @@ The reader at `web_interface/backend/app/api/steps.py:442` is therefore reading 
 ## Verification checklist before go-live
 
 - [ ] RDS automated backups enabled, retention >= 30 days, PITR enabled
-- [ ] RDS Multi-AZ enabled and deletion protection on
+- [ ] RDS Multi-AZ re-enabled (off during the pilot, #83) and deletion protection on
+- [ ] RDS instance class re-sized for go-live load (`db.t3.medium` during the pilot, #83)
 - [ ] RDS storage encryption (KMS) on; snapshots inherit
 - [ ] Latest automated snapshot is within the last 24 hours
 - [ ] **A restore drill has been performed end-to-end** (option A and option B) within the last 90 days; runbook timing matches the doc; results recorded in this directory or a shared ops doc
