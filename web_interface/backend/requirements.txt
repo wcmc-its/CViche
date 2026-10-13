@@ -48,7 +48,7 @@ lxml==6.1.0
 Mako==1.4.3
 MarkupSafe==3.0.3
 pdf2image==1.17.0
-pdfminer.six==20251230
+pdfminer.six==20260107
 pdfplumber==0.11.9
 pillow==12.3.0
 pyasn1==0.6.4
