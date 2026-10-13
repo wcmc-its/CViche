@@ -1852,6 +1852,8 @@ def test_capped_list_matches_names_written_differently():
     (SWAPPED_CV[:10], 'Juan Garcia Lopez', 'Juan Garcia Lopez'),
     (SWAPPED_CV[:10], 'Jean-Paul Kemp', 'Jean-Paul Kemp'),
     (CAPPED_CV[:10], 'Wren D ABCDEF', 'Wren D ABCDEF'),
+    # A generational suffix is not initials: the name stays as the CV wrote it.
+    (CAPPED_CV[:10], 'Quill JA III', 'Quill JA III'), (CAPPED_CV[:10], 'J. A. Quill II', 'J. A. Quill II'),
     (SWAPPED_CV[:10], ' The ABC Study Group ', 'The ABC Study Group')])
 def test_cv_tail_takes_pubmeds_name_format(cv_ten, name, styled):
     assert stage5.capped_list_with_cv_tail(cv_ten + [name], CAPPED_CV[:10], 1988) == ', '.join(

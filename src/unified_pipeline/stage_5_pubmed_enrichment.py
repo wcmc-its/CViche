@@ -313,6 +313,7 @@ _ET_AL = re.compile(r'^et\.?\s+al\.?$', re.IGNORECASE)
 _SURNAME_FIRST = re.compile(r"^(\S*[a-z]\S*(?: \S*[a-z]\S*)*)((?: [A-Z]{1,3})+)$")
 _INITIALS_FIRST = re.compile(r"^((?:[A-Z]{1,3} )+)(\S*[a-z]\S*(?: \S*[a-z]\S*)*)$")
 _NAME_FIRST = re.compile(r"^([A-Z])[a-z]+((?: [A-Z])*) (\S*[a-z]\S*)$")
+_GENERATION = re.compile(r"\b(?:II|III|IV)\b")  # "Doe JA III": not initials
 
 
 def _cv_author_names(cv_authors: str | list[str] | None) -> list[str]:
@@ -360,6 +361,8 @@ def _pubmed_style(cv_name: str, given_first: bool) -> str:
     cleanly as a surname and initials, or as given names then a surname in
     a CV that writes them first; otherwise as the CV writes it."""
     name = ' '.join(cv_name.replace('.', ' ').split())
+    if _GENERATION.search(name):
+        return cv_name.strip()
     if match := _SURNAME_FIRST.match(name):
         return f"{match[1]} {match[2].replace(' ', '')}"
     if match := _INITIALS_FIRST.match(name):
