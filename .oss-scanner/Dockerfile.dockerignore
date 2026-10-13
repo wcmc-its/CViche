@@ -1,0 +1,17 @@
+# BuildKit uses this instead of the repo-root .dockerignore for .oss-scanner/Dockerfile.
+# The root file drops tests/, docs/ and the frontend from the production image;
+# the scanner needs all of them.
+.git
+**/node_modules
+**/__pycache__
+**/.env
+**/.env.*
+**/*.db
+**/*.sqlite3
+data/sample_cvs
+data/test_cvs
+src/unified_pipeline/outputs
+src/unified_pipeline/prompt_logs
+web_interface/outputs
+web_interface/uploads
+web_interface/backend/prompt_logs
