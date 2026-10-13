@@ -580,6 +580,10 @@ def test_pi_name_accepts_a_middle_initial():
      'trailing cell is 50 characters or longer'),
     ('NIH | $1 | 2019 | 2019-2021', 'trailing cell is digits and separators only'),
     ('NIH | $1 | 2019 | Smith, Jane', '"Last, First" is not a form the pattern accepts'),
+    ('2001-2003 | Acme Trust | Widget Assays | $7,250 | Principal Investigator',
+     "trailing cell is the owner's role, not a name (#1687)"),
+    ('NIH | $1 | 2019 | Senior Investigator', 'trailing cell is a role (#1687)'),
+    ('NIH | $1 | 2019 | Acme Foundation', 'trailing cell is a sponsor (#1687)'),
 ])
 def test_pi_name_is_not_extracted_from_a_rejected_trailing_cell(raw, reason):
     """Each documented reject of the pipe parser leaves the PI name empty.
@@ -593,6 +597,19 @@ def test_pi_name_is_not_extracted_from_a_rejected_trailing_cell(raw, reason):
     """
     assert resolve_pi_name({}, raw, '', '') == '', reason
 
+
+
+def test_a_role_trailing_cell_falls_through_to_the_owner_auto_fill():
+    """A pipe row ending in the owner's own role renders the owner, not the role.
+
+    The row shape is "<years> | <sponsor> | <title> | <amount> | Principal
+    Investigator" with stage 4's pi_name empty and pi_role "Principal
+    Investigator": the role cell matched the two-capitalised-words name shape,
+    so "Name of Principal Investigator:" read "Principal Investigator" (#1687).
+    """
+    raw = '2001-2003 | Acme Trust | Widget Assays | $7,250 | Principal Investigator'
+    assert resolve_pi_name({}, raw, 'Principal Investigator', 'Ada Testowner') == 'Ada Testowner'
+    assert resolve_pi_name({}, raw, 'Co-Investigator', 'Ada Testowner') == ''
 
 # --- #982: PI resolution -- no co_investigators fallback, a "PI:" label first ---
 

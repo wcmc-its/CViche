@@ -1242,7 +1242,15 @@ def resolve_pi_name(
                 # 4). Teaching the pattern the comma form would change rendered
                 # PI names across the corpus, so it is a measured change, not a
                 # comment fix.
-                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+$', potential_name):
+                # The trailing cell is often the owner's own role, not a name:
+                # "<years> | <sponsor> | <title> | <amount> | Principal
+                # Investigator" fits the two-capitalised-words shape, so the
+                # role rendered as the PI's name (#1687). The label veto
+                # (`_is_person_name_capture`, SPONSOR_OR_AWARD_WORDS) refuses
+                # a role or sponsor cell, which falls through to the owner
+                # auto-fill below.
+                if (re.match(r'^[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+$', potential_name)
+                        and _is_person_name_capture(potential_name)):
                     pi_name = potential_name
 
     # Auto-fill PI name when role indicates Principal Investigator and no PI name specified
