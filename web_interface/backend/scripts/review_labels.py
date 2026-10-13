@@ -12,6 +12,9 @@ Each label's `findings` are the stored corrected-copy diff's changes
 verdicts were never stored (a copy uploaded before #1654) gets them now,
 with the doctor's re-run beside them (review_loop_service.review_corrected_copy).
 `load_labels(OUT_DIR)` reads the directory as it reads an autopsy batch's.
+A run with several corrected copies (one per uploader, #1754, plus one stored
+before that under the run's id alone) gets one label holding every copy's
+changes and verdicts.
 
 --precision prints each (lint, shape) the verdicts judge: the gate's
 hand-checked precision, and the same with these verdicts folded in
@@ -40,13 +43,18 @@ from app.services.review_loop_service import (  # noqa: E402
     corrected_docx_key,
     corrected_verdicts_key,
     review_corrected_copy,
+    stored_uploaders,
 )
 from app.storage import get_storage  # noqa: E402
 from unified_pipeline.doctor.comment_fate import (  # noqa: E402
     LABEL_VERDICTS,
     doctor_review,
 )
-from unified_pipeline.doctor.docx_diff import from_report, to_label  # noqa: E402
+from unified_pipeline.doctor.docx_diff import (  # noqa: E402
+    DocxDiff,
+    from_report,
+    to_label,
+)
 from unified_pipeline.doctor.precision import (  # noqa: E402
     ShapeKey,
     fold_review_verdicts,
@@ -57,30 +65,38 @@ logger = logging.getLogger("review_labels")
 EXIT_NOTHING_TO_LABEL = 2
 
 
-def _verdicts(db: Session, run_id: str) -> dict:
-    """The run's stored verdict report, computed and stored first when missing."""
+def _verdicts(db: Session, run_id: str, uploader_id: int | None) -> dict:
+    """The uploader's stored verdict report, computed and stored first when missing."""
     storage = get_storage()
+    key = corrected_verdicts_key(run_id, uploader_id)
     try:
-        return json.loads(storage.get_file(run_id, corrected_verdicts_key(run_id)))
+        return json.loads(storage.get_file(run_id, key))
     except FileNotFoundError:
-        review_corrected_copy(db, run_id, storage.get_file(run_id, corrected_docx_key(run_id)))
-        return json.loads(storage.get_file(run_id, corrected_verdicts_key(run_id)))
+        review_corrected_copy(db, run_id, uploader_id,
+                              storage.get_file(run_id, corrected_docx_key(run_id, uploader_id)))
+        return json.loads(storage.get_file(run_id, key))
 
 
 def run_label(db: Session, run_id: str) -> dict | None:
-    """The run's review label; None when it has no stored corrected-copy diff,
-    or no verdicts and none could be made (logged, and the other runs go on)."""
-    try:
-        diff = json.loads(get_storage().get_file(run_id, corrected_diff_key(run_id)))
-    except FileNotFoundError:
+    """The run's review label, over every uploader's corrected copy; None
+    when no copy has both a diff and verdicts (a copy whose verdicts cannot
+    be made is logged and left out, and the others go on)."""
+    storage = get_storage()
+    changes, reviews, labelled = [], [], False
+    for uploader_id in stored_uploaders(run_id):
+        diff = from_report(json.loads(storage.get_file(run_id, corrected_diff_key(run_id, uploader_id))))
+        try:
+            verdicts = _verdicts(db, run_id, uploader_id)
+        except FileNotFoundError:
+            logger.warning("Run %s: user %s's corrected copy has a diff but no verdicts, and none "
+                           "could be made; skipped", run_id, uploader_id)
+            continue
+        changes += diff.changes
+        reviews += doctor_review(verdicts["findings"])
+        labelled = True
+    if not labelled:
         return None
-    try:
-        verdicts = _verdicts(db, run_id)
-    except FileNotFoundError:
-        logger.warning("Run %s has a corrected-copy diff but no verdicts, and none could be made; skipped",
-                       run_id)
-        return None
-    return to_label(run_id, from_report(diff), doctor_review(verdicts["findings"]))
+    return to_label(run_id, DocxDiff(changes=changes), reviews)
 
 
 def verdict_counts(labels: list[dict]) -> dict[ShapeKey, dict[str, int]]:

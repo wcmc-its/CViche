@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """What reviewers changed in their corrected copies (#1587): the changes in
 every stored corrected-copy diff (`review_loop_service.corrected_diff_key`),
-summed by change type. These are the doctor's misses and the reviewers' fixes
+summed by change type. A run can hold one copy per uploader, and copies
+stored before that under the run's id alone; every one is counted. These are the doctor's misses and the reviewers' fixes
 together; telling them apart from the review-copy comments is #1654.
 
     cd web_interface/backend
@@ -24,32 +25,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.models import Run  # noqa: E402
-from app.services.review_loop_service import corrected_diff_key  # noqa: E402
+from app.services.review_loop_service import (  # noqa: E402
+    corrected_diff_key,
+    stored_uploaders,
+)
 from app.storage import get_storage  # noqa: E402
 from unified_pipeline.doctor.docx_diff import CHANGE_TYPES  # noqa: E402
 
 logger = logging.getLogger("corrected_copy_report")
 
 
-def diff_changes(run_ids: Iterable[str]) -> tuple[int, dict[str, int]]:
-    """How many of these runs have a stored corrected-copy diff, and their
-    changes summed by type."""
+def diff_changes(run_ids: Iterable[str]) -> tuple[int, int, dict[str, int]]:
+    """How many of these runs have a stored corrected-copy diff, how many
+    diffs they hold (one per uploader), and their changes summed by type."""
     storage = get_storage()
-    runs, totals = 0, dict.fromkeys(CHANGE_TYPES, 0)
+    runs, copies, totals = 0, 0, dict.fromkeys(CHANGE_TYPES, 0)
     for run_id in sorted(set(run_ids)):
-        try:
-            report = json.loads(storage.get_file(run_id, corrected_diff_key(run_id)))
-        except FileNotFoundError:
-            continue
-        runs += 1
-        for kind in CHANGE_TYPES:
-            totals[kind] += int(report.get("by_type", {}).get(kind, 0))
-    return runs, totals
+        uploaders = stored_uploaders(run_id)
+        runs += bool(uploaders)
+        copies += len(uploaders)
+        for uploader_id in uploaders:
+            report = json.loads(storage.get_file(run_id, corrected_diff_key(run_id, uploader_id)))
+            for kind in CHANGE_TYPES:
+                totals[kind] += int(report.get("by_type", {}).get(kind, 0))
+    return runs, copies, totals
 
 
-def render(runs: int, totals: dict[str, int]) -> str:
+def render(runs: int, copies: int, totals: dict[str, int]) -> str:
     """The report as text."""
-    lines = [f"Corrected-copy changes ({runs} runs)"]
+    lines = [f"Corrected-copy changes ({copies} copies of {runs} runs)"]
     lines += [f"{kind:<32} {count:>6}" for kind, count in totals.items()]
     return "\n".join(lines) + "\n"
 

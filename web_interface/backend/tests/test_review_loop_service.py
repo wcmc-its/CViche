@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from app.services import review_loop_service as svc
 
 _RUN = "RVW001"
+_USER = 7  # the uploader: every copy is stored as one user's (#1754)
 
 
 def _docx(*paragraphs):
@@ -42,17 +43,33 @@ def test_record_corrected_docx_maps_changes_to_stage4_entries(db, store):
     stage4 = {"entries": [{"element_idx_start": 12, "taxonomy_code": "H", "text": _ENTRIES[1]}]}
     store.put_file(_RUN, f"outputs/{_RUN}_fields.json", json.dumps(stage4).encode())
 
-    assert svc.record_corrected_docx(db, _RUN, _docx(_ENTRIES[0])) == 1
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0])) == 1
 
-    report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN)))
+    report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, _USER)))
     assert [(c["change_type"], c["element_idx"]) for c in report["changes"]] == [("deleted", 12)]
+
+
+def test_each_uploader_keeps_one_copy_and_a_pre_1754_copy_is_still_listed(db, store):
+    """Two users' copies sit side by side; the same user again replaces
+    theirs; a copy stored under the run's id alone (before #1754) is listed
+    as uploader None."""
+    store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _docx(*_ENTRIES))
+    store.put_file(_RUN, f"corrected/{_RUN}_diff.json", b"{}")
+    svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]))
+    svc.record_corrected_docx(db, _RUN, 12, _docx(_ENTRIES[1]))
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(*_ENTRIES)) == 0
+
+    assert svc.stored_uploaders(_RUN) == [None, _USER, 12]
+    assert store.get_file(_RUN, f"corrected/{_RUN}_u{_USER}_corrected.docx") == _docx(*_ENTRIES)
+    assert json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, 12)))["by_type"]["deleted"] == 1
+    assert svc.corrected_diff_key(_RUN, None) == f"corrected/{_RUN}_diff.json"
 
 
 def test_record_corrected_docx_diffs_without_entries_when_stage4_is_unreadable(db, store):
     store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _docx(*_ENTRIES))
     store.put_file(_RUN, f"outputs/{_RUN}_fields.json", b"{not json")
-    assert svc.record_corrected_docx(db, _RUN, _docx(_ENTRIES[0])) == 1
-    report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN)))
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0])) == 1
+    report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, _USER)))
     assert report["changes"][0]["element_idx"] is None
 
 
@@ -65,7 +82,7 @@ def test_record_corrected_docx_stores_nothing_when_the_copy_cannot_be_read(db, s
             data = b"<not xml" if item.filename == "word/document.xml" else src.read(item)
             dst.writestr(item, data)
     with pytest.raises(HTTPException) as e:
-        svc.record_corrected_docx(db, _RUN, buf.getvalue())
+        svc.record_corrected_docx(db, _RUN, _USER, buf.getvalue())
     assert e.value.status_code == 400
     assert store.list_files(_RUN, svc.CORRECTED_PREFIX) == []
 
@@ -165,13 +182,13 @@ def test_a_resolved_edit_is_fixed_and_a_dismissed_comment_not_a_problem(db, stor
     _delete_comment(doc, 1)
     _delete_comment(doc, 2)
 
-    report = svc.store_verdicts(db, _RUN, _saved(doc))
+    report = svc.store_verdicts(db, _RUN, _USER, _saved(doc))
 
     assert _verdicts(report) == [(0, "enrichment_failures", "unknown"), (1, "implausible_year", "fixed"),
                                  (2, "pipe_leaks", "not_a_problem")]
     assert report["findings"][1] == {"comment_id": 1, "lint": "implausible_year", "shape": None,
                                      "severity": "ERROR", "entry_index": 12, "verdict": "fixed"}
-    stored = store.get_file(_RUN, svc.corrected_verdicts_key(_RUN)).decode()
+    stored = store.get_file(_RUN, svc.corrected_verdicts_key(_RUN, _USER)).decode()
     assert json.loads(stored) == report
     assert not any(cite[:30] in stored for cite in _CITES)
 
@@ -225,15 +242,15 @@ def test_the_doctor_reruns_on_the_corrected_copy_and_counts_what_cleared(db, sto
     store.put_file(_RUN, f"outputs/{_RUN}_doctor.json",
                    json.dumps(svc.doctor_on_corrected(db, _RUN, delivered)).encode())
 
-    comparison = svc.store_corrected_doctor(db, _RUN, _docx("BIBLIOGRAPHY", _LEAK[6:], _CITES[0]))
+    comparison = svc.store_corrected_doctor(db, _RUN, _USER, _docx("BIBLIOGRAPHY", _LEAK[6:], _CITES[0]))
 
-    rerun = json.loads(store.get_file(_RUN, svc.corrected_doctor_key(_RUN)))
+    rerun = json.loads(store.get_file(_RUN, svc.corrected_doctor_key(_RUN, _USER)))
     assert rerun["artifacts"]["stage_6_docx"].endswith(f"{_RUN}_wcm.docx")
     assert "output_hygiene" not in {f["lint"] for f in rerun["findings"]}
     rows = {r["lint"]: r for r in comparison["lints"]}
     assert (rows["output_hygiene"]["cleared"], rows["output_hygiene"]["new"]) == (1, 0)
     assert "owner_contact_missing" not in rows and "owner_contact_missing" in comparison["not_compared"]
-    assert json.loads(store.get_file(_RUN, svc.corrected_doctor_compare_key(_RUN))) == comparison
+    assert json.loads(store.get_file(_RUN, svc.corrected_doctor_compare_key(_RUN, _USER))) == comparison
 
 
 def test_the_rerun_drops_an_old_copys_review_notes_box_but_not_stage6s_own(tmp_path):
@@ -283,6 +300,6 @@ def test_a_failing_step_is_logged_and_the_other_still_runs(db, store, monkeypatc
 
     monkeypatch.setattr(svc, "store_verdicts", boom)
     monkeypatch.setattr(svc, "store_corrected_doctor", lambda *a: ran.append(a))
-    svc.review_corrected_copy(db, _RUN, b"docx")
+    svc.review_corrected_copy(db, _RUN, _USER, b"docx")
     assert len(ran) == 1
     assert "verdicts failed" in caplog.text

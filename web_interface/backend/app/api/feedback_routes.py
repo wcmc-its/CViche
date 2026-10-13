@@ -380,7 +380,9 @@ async def upload_corrected_docx(
 ) -> CorrectedDocxResponse:
     """Store a reviewer's corrected copy of the delivered document with the
     run, diff it against that document (doctor/docx_diff.py) and store the
-    typed diff beside it (#1587). Returns a one-line count only; the
+    typed diff beside it (#1587). Each uploader keeps one copy per run: a
+    second upload by the same user replaces theirs, never another user's
+    (#1754). Returns a one-line count only; the
     comment-fate verdicts and the doctor's re-run on the copy (#1654) follow
     in a background task.
 
@@ -397,12 +399,14 @@ async def upload_corrected_docx(
     if not _validate_docx_magic(content):
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
     await _reject_active_docx_content(content)
-    changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id, content)
+    changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id,
+                                     current_user.id, content)
     logger.info("Corrected copy recorded for run %s by user %s: %d changes", run_id, current_user.id, changes)
     # Verdicts from the review copy's comments and the doctor's re-run (#1654)
     # run after the response, so the confirmation never waits on them; their
     # failure is logged there, never shown to the uploader.
-    background_tasks.add_task(review_loop_service.review_corrected_copy_in_background, run_id, content)
+    background_tasks.add_task(review_loop_service.review_corrected_copy_in_background,
+                              run_id, current_user.id, content)
     return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
 
 

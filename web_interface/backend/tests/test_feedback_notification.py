@@ -217,6 +217,11 @@ _DELIVERED = ("Fellowship in Quorvane studies, Northfield Institute, 2011-2013",
               "Lecturer in Heliotropic Drift, Plesk College, 2016-2019")
 
 
+def _copy_key(user, suffix):
+    """Where the user's corrected copy of the run is stored: one per uploader (#1754)."""
+    return f"corrected/{_RUN_ID}_u{user.id}_{suffix}"
+
+
 @pytest.fixture
 def run_storage(tmp_path, monkeypatch):
     from app.storage.local_storage import LocalRunStorage
@@ -237,16 +242,16 @@ def test_corrected_docx_upload_stores_the_copy_and_its_diff_and_returns_one_line
     assert resp.json() == {"changes": 1, "summary": "1 change recorded"}
 
     import json
-    assert run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_corrected.docx") == corrected
-    report = json.loads(run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_diff.json"))
+    assert run_storage.get_file(_RUN_ID, _copy_key(user, "corrected.docx")) == corrected
+    report = json.loads(run_storage.get_file(_RUN_ID, _copy_key(user, "diff.json")))
     assert report["by_type"]["deleted"] == 1
     assert "Brennic" not in json.dumps(report)  # positions and counts only, no CV text
     # Never under outputs/: downloads and the scorer read only that prefix.
     assert run_storage.list_files(_RUN_ID, "outputs/") == [f"outputs/{_RUN_ID}_wcm.docx"]
     # #1654: the verdicts (this run has no review copy, and says so) and the doctor's re-run.
-    verdicts = json.loads(run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_verdicts.json"))
+    verdicts = json.loads(run_storage.get_file(_RUN_ID, _copy_key(user, "verdicts.json")))
     assert verdicts["note"] and verdicts["findings"] == []
-    rerun = json.loads(run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_doctor.json"))
+    rerun = json.loads(run_storage.get_file(_RUN_ID, _copy_key(user, "doctor.json")))
     assert rerun["document_uid"] == _RUN_ID and rerun["artifacts"]["stage_6_docx"]
 
 
@@ -263,10 +268,10 @@ def test_corrected_docx_upload_confirms_before_the_review_pass_runs(client, db, 
                            files={"file": ("corrected.docx", _docx(_DELIVERED[0]))})
     assert resp.status_code == 200
     assert run_storage.list_files(_RUN_ID, "corrected/") == [
-        f"corrected/{_RUN_ID}_corrected.docx", f"corrected/{_RUN_ID}_diff.json"]
+        _copy_key(user, "corrected.docx"), _copy_key(user, "diff.json")]
     (func, args), = queued
     func(*args)
-    assert f"corrected/{_RUN_ID}_verdicts.json" in run_storage.list_files(_RUN_ID, "corrected/")
+    assert _copy_key(user, "verdicts.json") in run_storage.list_files(_RUN_ID, "corrected/")
 
 
 def test_corrected_docx_upload_confirms_though_the_review_pass_fails(client, db, run_storage, monkeypatch):
@@ -283,7 +288,7 @@ def test_corrected_docx_upload_confirms_though_the_review_pass_fails(client, db,
                            files={"file": ("corrected.docx", _docx(_DELIVERED[0]))})
     assert resp.status_code == 200
     assert run_storage.list_files(_RUN_ID, "corrected/") == [
-        f"corrected/{_RUN_ID}_corrected.docx", f"corrected/{_RUN_ID}_diff.json"]
+        _copy_key(user, "corrected.docx"), _copy_key(user, "diff.json")]
 
 
 @pytest.mark.parametrize("name, message", [
@@ -350,12 +355,30 @@ def test_corrected_docx_upload_is_open_to_staff_on_any_run(client, db, run_stora
     _seed_run(db)
     run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
     corrected = _docx(_DELIVERED[0], _DELIVERED[2])
-    with _as_user(_staff(db)):
+    staff = _staff(db)
+    with _as_user(staff):
         resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
                            files={"file": ("corrected.docx", corrected)})
     assert resp.status_code == 200
     assert resp.json() == {"changes": 1, "summary": "1 change recorded"}
-    assert run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_corrected.docx") == corrected
+    assert run_storage.get_file(_RUN_ID, _copy_key(staff, "corrected.docx")) == corrected
+
+
+def test_corrected_docx_upload_keeps_one_copy_per_uploader(client, db, run_storage):
+    """#1754: the owner's and a staff member's copies of one run never
+    overwrite each other; a second upload by the same user replaces theirs."""
+    owner, staff = _seed_run(db), _staff(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    uploads = [(owner, _docx(_DELIVERED[0])), (staff, _docx(_DELIVERED[1])),
+               (owner, _docx(_DELIVERED[0], _DELIVERED[2]))]
+    for user, corrected in uploads:
+        with _as_user(user):
+            assert client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                               files={"file": ("corrected.docx", corrected)}).status_code == 200
+    copies = [k for k in run_storage.list_files(_RUN_ID, "corrected/") if k.endswith("_corrected.docx")]
+    assert sorted(copies) == sorted([_copy_key(owner, "corrected.docx"), _copy_key(staff, "corrected.docx")])
+    assert run_storage.get_file(_RUN_ID, _copy_key(owner, "corrected.docx")) == uploads[2][1]
+    assert run_storage.get_file(_RUN_ID, _copy_key(staff, "corrected.docx")) == uploads[1][1]
 
 
 def test_corrected_docx_upload_is_closed_to_another_plain_user(client, db, run_storage):
