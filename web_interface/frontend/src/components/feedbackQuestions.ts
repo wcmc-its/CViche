@@ -74,13 +74,13 @@ export const RATING_SCALES = {
 } as const satisfies Record<string, RatingScale>
 
 // ---------------------------------------------------------------------------
-// "Help improve CViche" (#1587): optional, collapsed by default
+// "Help improve CViche" (#1587): optional, under the run's Download (CorrectedUpload)
 // ---------------------------------------------------------------------------
 
 export const HELP_IMPROVE = {
   heading: 'Help improve CViche',
   intro: "If you corrected the WCM document, send us your copy. Comparing it with ours shows us what CViche got wrong.",
-  correctedIntro: "Tracked changes are fine; you don't need to accept them first.",
+  correctedIntro: "Tracked changes and CViche's notes can stay in; you don't need to accept or remove them first.",
   correctedTitle: 'Drop your corrected .docx here',
   correctedHint: 'Word (.docx) only',
   correctedPrivacy:

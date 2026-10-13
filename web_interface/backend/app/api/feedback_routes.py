@@ -384,12 +384,13 @@ async def upload_corrected_docx(
     comment-fate verdicts and the doctor's re-run on the copy (#1654) follow
     in a background task.
 
-    Same access as submitting feedback, and the CV upload's gates on the
-    file: its size cap, a .docx name, the docx magic and zip-bomb bounds, and
-    the active-content refusal. GuardDuty scans the bucket as for every
+    Owner, admin, and staff on any run (staff are read-only everywhere else
+    and still cannot submit the feedback survey), and the CV upload's gates
+    on the file: its size cap, a .docx name, the docx magic and zip-bomb
+    bounds, and the active-content refusal. GuardDuty scans the bucket as for every
     upload; the copy is never served back, so no download waits on the scan.
     """
-    check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db, allow_staff=True)
     if not file.filename or Path(file.filename).suffix.lower() != ".docx":
         raise bad_request("Upload the corrected document as a Word (.docx) file.")
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)

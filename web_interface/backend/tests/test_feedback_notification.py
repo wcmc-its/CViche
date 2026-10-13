@@ -343,11 +343,32 @@ def test_corrected_docx_upload_needs_a_delivered_document(client, db, run_storag
     assert run_storage.list_files(_RUN_ID, "corrected/") == []
 
 
-def test_corrected_docx_upload_is_closed_to_read_only_staff(client, db, run_storage):
-    """Same access as submitting feedback: staff may read a run, not upload to it."""
+def test_corrected_docx_upload_is_open_to_staff_on_any_run(client, db, run_storage):
+    """OFA staff may send a corrected copy of any run's CV, though they are
+    read-only everywhere else (the survey stays closed to them -- see
+    test_staff_can_read_but_not_submit_feedback_on_another_users_run)."""
     _seed_run(db)
     run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    corrected = _docx(_DELIVERED[0], _DELIVERED[2])
     with _as_user(_staff(db)):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", corrected)})
+    assert resp.status_code == 200
+    assert resp.json() == {"changes": 1, "summary": "1 change recorded"}
+    assert run_storage.get_file(_RUN_ID, f"corrected/{_RUN_ID}_corrected.docx") == corrected
+
+
+def test_corrected_docx_upload_is_closed_to_another_plain_user(client, db, run_storage):
+    """The staff grant is for staff only: a plain user who does not own the
+    run is still refused, with nothing stored."""
+    _seed_run(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    from app.models import User
+    stranger = User(email="stranger@example.com", display_name="Stranger", role="user")
+    db.add(stranger)
+    db.commit()
+    db.refresh(stranger)
+    with _as_user(stranger):
         resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
                            files={"file": ("corrected.docx", _docx(*_DELIVERED))})
     assert resp.status_code == 403

@@ -839,7 +839,7 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
 
 
 def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
-                     read_only: bool = False) -> Run:
+                     read_only: bool = False, allow_staff: bool = False) -> Run:
     """Verify run exists and user has access. Returns the Run.
 
     Pass *eager* a sequence of SQLAlchemy loader options (e.g.
@@ -852,10 +852,15 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
     default keeps every other caller -- start, cancel, restart, retry, feedback
     submit -- at owner-or-admin, so a route that forgets to say stays strict.
 
+    *allow_staff* lets staff through a route that writes, which read_only
+    must not be used for. It is a grant named at the call site, not a claim
+    about the route: only the corrected-copy upload passes it (OFA staff may
+    send a corrected copy of any run's CV).
+
     Raises:
         HTTPException 404 if run not found.
         HTTPException 403 if user does not own the run and is not admin (or,
-        with read_only=True, is neither admin nor staff).
+        with read_only=True or allow_staff=True, is neither admin nor staff).
     """
     query = db.query(Run).filter(Run.id == run_id)
     for option in eager:
@@ -865,7 +870,7 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
         raise not_found("Run not found")
     if current_user.role == UserRole.ADMIN or run.user_id == current_user.id:
         return run
-    if read_only and can_view_all_runs(current_user):
+    if (read_only or allow_staff) and can_view_all_runs(current_user):
         return run
     raise forbidden("Access denied")
 

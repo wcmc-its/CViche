@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import PipelineViewer from './PipelineViewer'
 import { getInputFileUrl } from '../api/runs'
 import type { ApiError } from '../api/client'
@@ -85,6 +85,23 @@ describe('PipelineViewer on a finished run (#1589)', () => {
     expect(clean.getAttribute('href')).toMatch(/\/data\/DEMO01_wcm\.docx$/)
     expect(screen.getByText(shown)).toBeTruthy()
     expect(screen.queryByText(hidden)).toBeNull()
+  })
+
+  it.each([['the owner', false], ['staff', true]])(
+    'offers %s the corrected-copy upload right under the Download, and the survey does not repeat it',
+    (_who, staff) => {
+      view.canViewAllRuns = staff
+      view.runStatus = FINISHED
+      render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+      const upload = screen.getByRole('region', { name: 'Help improve CViche' })
+      expect(within(upload).getByTestId('file-input')).toBeTruthy()
+      expect(screen.getAllByTestId('file-input')).toHaveLength(1)
+    },
+  )
+
+  it('offers no upload before the run has a finished document', () => {
+    render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+    expect(screen.queryByRole('region', { name: 'Help improve CViche' })).toBeNull()
   })
 
   it('keeps the clean copy as the only download when no review copy was written', () => {

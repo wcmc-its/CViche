@@ -14,6 +14,7 @@ import JsonViewerModal from './JsonViewerModal'
 import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
+import CorrectedUpload from './CorrectedUpload'
 import { OwnerFixList, RunQualitySections, ReviewNote } from './RunQualityPanel'
 import { canActOnRun, useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 
@@ -437,6 +438,8 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             {isComplete ? 'Your CV is ready to download.' : ''}
           </p>
           {isComplete && finalDocs && <DocxDownloadCard runId={runId} filename={finalDocs.docx} reviewFilename={finalDocs.review} />}
+          {/* Owner, admin and staff alike: staff may send a corrected copy of any run. */}
+          {isComplete && finalDocs && <CorrectedUpload runId={runId} />}
           {isComplete && !canViewAllRuns && <ReviewNote runId={runId} />}
         </PipelineHeader>
 
