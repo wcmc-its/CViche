@@ -2112,3 +2112,127 @@ def test_reply_marker_inside_the_title_is_not_a_reply():
     # "response" alone is a common title word, not a reply.
     assert not stage5.cites_a_reply('Quill JA. Immune response to vaccination. 2020.')
     assert not stage5.cites_a_reply('Quill JA. Dose-Response in cognition. 2020.')
+
+
+# ------------------- #1219: PubMed's year for a yearless CV line; a copied doi:
+
+def _yearless_entry(year=None):
+    return {'taxonomy_code': 'S1', 'extracted_fields': {'title': 'Whimbrel counts', 'year': year}}
+
+
+@pytest.mark.parametrize('cv_year', [None, ''])
+def test_yearless_cv_article_takes_pubmeds_year(monkeypatch, cv_year):
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = _yearless_entry(cv_year)
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': 2024})
+    assert entry['extracted_fields']['year'] == '2024'
+    assert 'year' in entry['enriched_fields']
+
+
+@pytest.mark.parametrize('cv_year, record_year, kept', [
+    ('2019', 2024, '2019'),  # the CV's own year is never overwritten
+    (None, None, None),      # PubMed gave no year either
+])
+def test_cv_year_or_missing_pubmed_year_leaves_year_alone(monkeypatch, cv_year, record_year, kept):
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = _yearless_entry(cv_year)
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': record_year})
+    assert entry['extracted_fields']['year'] == kept
+    assert 'year' not in entry.get('enriched_fields', [])
+
+
+def test_yearless_in_press_article_is_left_to_the_in_press_step(monkeypatch):
+    # An in-press listing PubMed also shows as an already-listed paper is
+    # rendered as a deletion with its year as the CV gave it.
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = _inpress_entry(code='S1')
+    entry['extracted_fields']['year'] = None
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': 2024})
+    assert entry['extracted_fields']['year'] is None
+    assert 'year' not in entry.get('enriched_fields', [])
+
+
+def test_yearless_article_matched_by_pmid_renders_pubmeds_year(monkeypatch):
+    xml = _article_set(_article(PMID, 'Whimbrel counts', year=2023))
+    enricher, _, _ = _make(monkeypatch, [xml])
+    entry = _yearless_entry()
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['extracted_fields']['year'] == '2023'
+
+
+PLOVER, CURLEW, DUNLIN = '10.5555/plover.1', '10.5555/curlew.2', '10.5555/dunlin.3'
+
+
+def _linked(doi, url_doi, link='HYPERLINK "https://doi.org/{0}" https://doi.org/{0}.'):
+    return {'taxonomy_code': 'S3',
+            'text': f'Godwit survey. doi: {doi}. ' + (link.format(url_doi) if url_doi else ''),
+            'extracted_fields': {'doi': doi}}
+
+
+def _plain(doi):
+    return {'taxonomy_code': 'S3', 'text': f'Godwit survey. doi: {doi}.',
+            'extracted_fields': {'doi': doi}}
+
+
+def _dois(entries):
+    return [e.get('extracted_fields', {}).get('doi') for e in entries]
+
+
+@pytest.mark.parametrize('order', ['copied from the entry before', 'copied from the entry after'])
+def test_doi_copied_from_a_neighbour_yields_to_the_entrys_own_link(monkeypatch, order):
+    enricher, _, _ = _make(monkeypatch, [])
+    entries = [_plain(PLOVER), _linked(PLOVER, CURLEW), _plain(DUNLIN)]
+    if order.endswith('after'):
+        entries = [_plain(DUNLIN), _linked(PLOVER, CURLEW), _plain(PLOVER)]
+    enricher._prefer_url_dois(entries)
+    assert entries[1]['extracted_fields']['doi'] == CURLEW  # no quote, no final period
+    assert entries[1]['doi_replaced'] == PLOVER
+    assert 'doi_replaced' not in entries[0] and 'doi_replaced' not in entries[2]
+    assert _dois(entries)[0::2] == ([PLOVER, DUNLIN] if order.endswith('before') else [DUNLIN, PLOVER])
+
+
+@pytest.mark.parametrize('link', [
+    'http://dx.doi.org/{0}', 'https://DOI.org/{0}', 'https://doi.org/{0};'])
+def test_link_forms_and_doi_case(monkeypatch, link):
+    enricher, _, _ = _make(monkeypatch, [])
+    entries = [_plain(PLOVER.upper()), _linked(PLOVER, CURLEW, link)]
+    enricher._prefer_url_dois(entries)
+    assert _dois(entries) == [PLOVER.upper(), CURLEW]
+
+
+@pytest.mark.parametrize('case, entries', [
+    ('link is the doi field', [_plain(PLOVER), _linked(PLOVER, PLOVER.upper())]),
+    ('doi field shared with no neighbour', [_plain(DUNLIN), _linked(PLOVER, CURLEW)]),
+    ('shared only with an entry two away',
+     [_plain(PLOVER), _plain(DUNLIN), _linked(PLOVER, CURLEW)]),
+    ('only the last entry, not a neighbour of the first, shares it',
+     [_linked(PLOVER, CURLEW), _plain(DUNLIN), _plain(PLOVER)]),
+    ('no link', [_plain(PLOVER), _linked(PLOVER, None)]),
+    ('no text', [_plain(PLOVER), {'taxonomy_code': 'S3', 'text': None,
+                                  'extracted_fields': {'doi': PLOVER}}]),
+    ('no extracted fields', [{'taxonomy_code': 'S3', 'text': 'https://doi.org/' + CURLEW},
+                             {'taxonomy_code': 'S3', 'text': 'https://doi.org/' + CURLEW}]),
+    ('two different links',
+     [_plain(PLOVER), _linked(PLOVER, CURLEW, 'https://doi.org/{0} https://doi.org/' + DUNLIN)]),
+    ('no doi field', [{'taxonomy_code': 'S3', 'text': 'https://doi.org/' + CURLEW,
+                       'extracted_fields': {}},
+                      {'taxonomy_code': 'S3', 'text': 'https://doi.org/' + CURLEW,
+                       'extracted_fields': {}}]),
+])
+def test_doi_field_is_kept_unless_copied_from_a_neighbour_with_one_other_link(monkeypatch, case, entries):
+    enricher, _, _ = _make(monkeypatch, [])
+    before = _dois(entries)
+    enricher._prefer_url_dois(entries)
+    assert _dois(entries) == before, case
+    assert not any('doi_replaced' in e for e in entries), case
+
+
+def test_stage5_looks_up_the_linked_doi_not_the_copied_one(tmp_path, monkeypatch):
+    # The wire: the correction runs before the DOI path searches PubMed.
+    empty = FakeResponse(200, json_data=ESEARCH_EMPTY_JSON)
+    entries, session, _ = _run_entries(tmp_path, monkeypatch,
+                                       [_plain(PLOVER), _linked(PLOVER, CURLEW)], [empty, empty])
+    terms = [params.get('term') for _, params in session.calls]
+    assert terms == [f'"{PLOVER}"[doi]', f'"{CURLEW}"[doi]']
+    assert entries[1]['doi_replaced'] == PLOVER
