@@ -864,6 +864,15 @@ def test_a_non_licence_entry_ends_the_header_table():
         "77001": "Expires 03/31/2019", "Q5502": "08/31/2018"}
 
 
+def test_a_non_licence_entry_on_a_row_s_element_ends_the_header_table():
+    """A prose entry sharing the first row's element still comes between it
+    and the next row."""
+    entries = _header_table()
+    entries.insert(2, _table_entry(41, "Board renewal pending"))
+    assert _dates_by_number(entries) == {
+        "77001": "Expires 03/31/2019", "Q5502": "08/31/2018"}
+
+
 def test_an_entry_with_no_element_index_is_not_under_a_header():
     entries = _header_table()
     for entry in entries[1:]:
@@ -938,6 +947,7 @@ def test_a_row_starting_inside_the_header_is_not_under_it():
 @pytest.mark.parametrize("index", [
     {"element_idx_start": "41.0", "element_idx_end": 41},   # a split-cell index
     {"element_idx_start": 41, "element_idx_end": None},       # None: no key
+    {"element_idx_start": 41, "element_idx_end": "41.1"},     # a split-cell end
 ])
 def test_a_row_without_two_integer_indices_breaks_the_run(index):
     """The row is outside the run, and the row after it is no longer adjacent."""

@@ -473,6 +473,8 @@ def _rows_under_expiry_header(
               and (entry.state or entry.number)):
             labelled.add(id(raw))
             run_end = end
+        else:
+            run_end = None
     return labelled
 
 
