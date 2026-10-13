@@ -78,4 +78,4 @@ typing_extensions==4.16.0
 urllib3==2.8.0
 uvicorn==0.49.0
 websockets==16.0
-xmlschema==2.5.1
+xmlschema==4.3.2
