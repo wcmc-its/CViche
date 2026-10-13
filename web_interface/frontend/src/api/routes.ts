@@ -81,6 +81,14 @@ export const feedbackRoutes = {
   all: (id: string) => `/api/run/${seg(id)}/feedback/all` as const,
   /** POST /api/run/:id/feedback/corrected-docx  (the reviewer's corrected copy, multipart) */
   correctedDocx: (id: string) => `/api/run/${seg(id)}/feedback/corrected-docx` as const,
+  /** GET /api/run/:id/feedback/corrected-copies  (every reviewer's corrected copy; owner, admin or staff) */
+  correctedCopies: (id: string) => `/api/run/${seg(id)}/feedback/corrected-copies` as const,
+  /** GET/href /api/run/:id/feedback/corrected-copies/:copyId  (one copy's download, behind the malware scan) */
+  correctedCopy: (id: string, copyId: number) =>
+    `/api/run/${seg(id)}/feedback/corrected-copies/${copyId}` as const,
+  /** GET .../corrected-copies/:copyId?as_url=true  ({url}: presigned S3 URL, or null on local storage) */
+  correctedCopyUrl: (id: string, copyId: number) =>
+    `/api/run/${seg(id)}/feedback/corrected-copies/${copyId}?as_url=true` as const,
 } as const
 
 export const adminRoutes = {

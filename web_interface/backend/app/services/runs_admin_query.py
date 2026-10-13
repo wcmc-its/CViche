@@ -33,6 +33,7 @@ from app.schemas import (
     StatusFilterCounts,
     SubmissionSplit,
 )
+from app.services.corrected_copy_service import has_corrected_copy
 from app.services.input_format import INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM
 from app.services.quality_score_service import BAND_RED
 
@@ -73,10 +74,12 @@ class InputFormatFilter(StrEnum):
 
 
 class StatusFilter(StrEnum):
-    """The ``status`` filter behind the runs-list pills. RED (score band) is admin-only."""
+    """The ``status`` filter behind the runs-list pills. RED (score band) is admin-only;
+    CORRECTED lists runs with at least one reviewer's corrected copy."""
     RUNNING = "running"
     FAILED = "failed"
     RED = "red"
+    CORRECTED = "corrected"
 
 
 @dataclass(frozen=True)
@@ -131,7 +134,7 @@ def parse_run_filters(run_by: str | None, faculty: str | None,
                       status: str | None = None) -> RunFilters:
     """Build RunFilters from the raw query params. ``run_by`` is a user id, "self"
     or "on_behalf", ``feedback`` is "given" or "needed", ``input_format`` is "wcm",
-    "other" or "unknown", ``status`` is "running", "failed" or "red"; anything else
+    "other" or "unknown", ``status`` is "running", "failed", "red" or "corrected"; anything else
     is a 422. Blank strings mean "no filter"."""
     run_by_user_id = None
     run_by_self = False
@@ -206,6 +209,8 @@ def status_clause(status: StatusFilter | None) -> ColumnElement[bool] | None:
         return Run.status == RunState.FAILED
     if status is StatusFilter.RED:
         return Run.quality_band == BAND_RED
+    if status is StatusFilter.CORRECTED:
+        return has_corrected_copy()
     return None
 
 
@@ -337,15 +342,16 @@ def _status_counts(db: Session, filters: RunFilters, *,
                  func.count(case((status_clause(StatusFilter.RUNNING), 1))),
                  func.count(case((status_clause(StatusFilter.FAILED), 1))),
                  func.count(case((status_clause(StatusFilter.RED), 1))),
-                 func.count(case((_needs_feedback(), 1))))
+                 func.count(case((_needs_feedback(), 1))),
+                 func.count(case((status_clause(StatusFilter.CORRECTED), 1))))
         .select_from(Run).outerjoin(User, Run.user_id == User.id)
         .filter(*_clauses(filters, skip_status=True))
     )
     if owner_user_id is not None:
         query = query.filter(Run.user_id == owner_user_id)
-    total, running, failed, red, awaiting = query.one()
+    total, running, failed, red, awaiting, corrected = query.one()
     return StatusFilterCounts(all=total, running=running, awaiting_feedback=awaiting,
-                              failed=failed, red=red)
+                              failed=failed, red=red, corrected=corrected)
 
 
 def my_status_counts(db: Session, user_id: int) -> StatusFilterCounts:

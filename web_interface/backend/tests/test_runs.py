@@ -445,6 +445,47 @@ def test_scope_all_status_filter(client, db, seed_simple_mode, value, expected):
     assert resp.json()["total"] == len(expected)
 
 
+def _seed_corrected_view(db):
+    """ADM001 (Alice's) has her own corrected copy and a staff member's;
+    ADM003 (Bob's) has one whose uploader is unknown (stored before #1754)."""
+    from app.models import CorrectedCopy
+
+    users = _seed_admin_view(db)
+    staff = User(email="staff@example.com", display_name="Sam Staff", role="staff", consent_version="1.0")
+    db.add(staff)
+    db.commit()
+    for run_id, user, day in (("ADM001", users["alice"], 10), ("ADM001", staff, 11), ("ADM003", None, 12)):
+        db.add(CorrectedCopy(run_id=run_id, user_id=user.id if user else None, changes=1,
+                             uploaded_at=datetime(2026, 10, day),
+                             storage_key=f"corrected/{run_id}_u{user.id if user else 0}_corrected.docx"))
+    db.commit()
+    return {**users, "staff": staff}
+
+
+def test_the_run_owner_sees_every_corrected_copy_of_their_run(client, db, seed_simple_mode):
+    users = _seed_corrected_view(db)
+    _auth(client, users["alice"])
+    by_id = {r["run_id"]: r["corrected_copies"] for r in client.get("/api/runs").json()["runs"]}
+    assert [(c["uploader"], c["role"]) for c in by_id["ADM001"]] == [("Sam Staff", "staff"),
+                                                                    ("Alice Tester", "owner")]
+    assert by_id["ADM002"] == []
+    _auth(client, users["admin"])
+    by_id = {r["run_id"]: r["corrected_copies"] for r in client.get("/api/runs?scope=all").json()["runs"]}
+    assert [(c["uploader"], c["role"]) for c in by_id["ADM003"]] == [(None, None)]
+
+
+def test_the_corrected_filter_lists_only_corrected_runs_in_both_scopes(client, db, seed_simple_mode):
+    users = _seed_corrected_view(db)
+    _auth(client, users["admin"])
+    resp = client.get("/api/runs?scope=all&status=corrected")
+    assert _ids(resp) == ["ADM003", "ADM001"]
+    assert resp.json()["total"] == 2
+    assert client.get("/api/runs/filter-options?scope=all").json()["status"]["corrected"] == 2
+    _auth(client, users["bob"])
+    assert _ids(client.get("/api/runs?status=corrected")) == ["ADM003"]
+    assert client.get("/api/runs/my-status-counts").json()["corrected"] == 1
+
+
 def test_scope_all_run_by_on_behalf_and_its_option_count(client, db, seed_simple_mode):
     users = _seed_admin_view(db)
     _auth(client, users["admin"])

@@ -228,6 +228,7 @@ def run_storage(tmp_path, monkeypatch):
 
     store = LocalRunStorage(str(tmp_path / "store"))
     monkeypatch.setattr("app.services.review_loop_service.get_storage", lambda: store)
+    monkeypatch.setattr("app.api.feedback_routes.get_storage", lambda: store)
     return store
 
 
@@ -396,3 +397,138 @@ def test_corrected_docx_upload_is_closed_to_another_plain_user(client, db, run_s
                            files={"file": ("corrected.docx", _docx(*_DELIVERED))})
     assert resp.status_code == 403
     assert run_storage.list_files(_RUN_ID, "corrected/") == []
+
+
+# --- the corrected copies, listed and served back -----------------------------
+
+_SCAN_FLAG = "CVICHE_REQUIRE_MALWARE_SCAN"
+
+
+def _stranger(db):
+    from app.models import User
+
+    stranger = User(email="stranger@example.com", display_name="Stranger", role="user")
+    db.add(stranger)
+    db.commit()
+    db.refresh(stranger)
+    return stranger
+
+
+def _upload(client, user, corrected):
+    with _as_user(user):
+        resp = client.post(f"/api/run/{_RUN_ID}/feedback/corrected-docx",
+                           files={"file": ("corrected.docx", corrected)})
+    assert resp.status_code == 200, resp.text
+
+
+def _owner_and_staff_copies(client, db, run_storage):
+    """The owner's and a staff member's copies of the run, staff's last."""
+    owner, staff = _seed_run(db), _staff(db)
+    run_storage.put_file(_RUN_ID, f"outputs/{_RUN_ID}_wcm.docx", _docx(*_DELIVERED))
+    _upload(client, owner, _docx(_DELIVERED[0]))
+    _upload(client, staff, _docx(_DELIVERED[0], _DELIVERED[2]))
+    return owner, staff
+
+
+def _list(client, user):
+    with _as_user(user):
+        return client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies")
+
+
+def test_the_run_owner_sees_staffs_corrected_copy_and_their_own(client, db, run_storage, monkeypatch):
+    monkeypatch.delenv(_SCAN_FLAG, raising=False)
+    owner, _ = _owner_and_staff_copies(client, db, run_storage)
+    resp = _list(client, owner)
+    assert resp.status_code == 200, resp.text
+    rows = [(c["uploader"], c["role"], c["changes"], c["mine"], c["download"]) for c in resp.json()]
+    assert rows == [("Staff User", "staff", 1, False, "ready"), ("Reviewer", "owner", 2, True, "ready")]
+
+
+def test_a_stranger_can_neither_list_nor_download_corrected_copies(client, db, run_storage):
+    owner, _ = _owner_and_staff_copies(client, db, run_storage)
+    copy_id = _list(client, owner).json()[0]["id"]
+    stranger = _stranger(db)
+    assert _list(client, stranger).status_code == 403
+    with _as_user(stranger):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies/{copy_id}")
+    assert resp.status_code == 403
+
+
+def test_a_corrected_copy_downloads_under_a_quoted_name(client, db, run_storage, monkeypatch):
+    """Local storage proxies the bytes; the name carries the upload's and the
+    uploader's names, percent-encoded (RFC 5987) as the other downloads are."""
+    from urllib.parse import quote
+
+    monkeypatch.delenv(_SCAN_FLAG, raising=False)
+    owner, staff = _owner_and_staff_copies(client, db, run_storage)
+    staff_copy = _list(client, owner).json()[0]
+    with _as_user(owner):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies/{staff_copy['id']}")
+    assert resp.status_code == 200, resp.text
+    assert resp.content == run_storage.get_file(_RUN_ID, _copy_key(staff, "corrected.docx"))
+    assert resp.headers["content-disposition"] == (
+        "attachment; filename*=utf-8''" + quote("cv - corrected by Staff User.docx", safe=""))
+
+
+def test_a_corrected_copy_of_another_run_is_not_found(client, db, run_storage):
+    owner, _ = _owner_and_staff_copies(client, db, run_storage)
+    with _as_user(owner):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies/9999")
+    assert resp.status_code == 404
+
+
+def test_a_corrected_copy_still_being_scanned_is_listed_as_scanning_and_refused_409(
+        client, db, run_storage, monkeypatch):
+    """The same gate as the original CV: local storage carries no scan tag, so
+    with the gate on every copy is still being scanned."""
+    owner, _ = _owner_and_staff_copies(client, db, run_storage)
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    copies = _list(client, owner).json()
+    assert [c["download"] for c in copies] == ["scanning", "scanning"]
+    with _as_user(owner):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies/{copies[0]['id']}?as_url=true")
+    assert resp.status_code == 409
+    assert "still being scanned" in resp.json()["detail"]["message"]
+    assert resp.headers["Retry-After"] == "60"
+
+
+def test_a_corrected_copy_flagged_by_the_scan_is_never_served(client, db, run_storage, monkeypatch):
+    owner, _ = _owner_and_staff_copies(client, db, run_storage)
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    monkeypatch.setattr(run_storage, "get_malware_scan_status", lambda run_id, key: "THREATS_FOUND")
+    copies = _list(client, owner).json()
+    assert [c["download"] for c in copies] == ["threats_found", "threats_found"]
+    with _as_user(owner):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies/{copies[0]['id']}")
+    assert resp.status_code == 403
+    assert "flagged by the malware scan" in resp.json()["detail"]["message"]
+
+
+def test_a_clean_corrected_copy_is_served_with_the_gate_on(client, db, run_storage, monkeypatch):
+    owner, _ = _owner_and_staff_copies(client, db, run_storage)
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    monkeypatch.setattr(run_storage, "get_malware_scan_status", lambda run_id, key: "NO_THREATS_FOUND")
+    copy_id = _list(client, owner).json()[0]["id"]
+    with _as_user(owner):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/corrected-copies/{copy_id}?as_url=true")
+    assert resp.status_code == 200
+    assert resp.json() == {"url": None}  # local storage: the page then downloads from the route
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_one_unreadable_scan_tag_marks_only_that_copy_unscannable(client, db, run_storage, monkeypatch):
+    """A tag read that raises (object gone, no s3:GetObjectTagging) must not
+    hide the other copies: the list still answers, that row is unscannable."""
+    owner, staff = _owner_and_staff_copies(client, db, run_storage)
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    staff_key = _copy_key(staff, "corrected.docx")
+
+    def tag(run_id, key):
+        if key == staff_key:
+            raise RuntimeError("AccessDenied")
+        return "NO_THREATS_FOUND"
+
+    monkeypatch.setattr(run_storage, "get_malware_scan_status", tag)
+    resp = _list(client, owner)
+    assert resp.status_code == 200, resp.text
+    assert [c["download"] for c in resp.json()] == ["unscannable", "ready"]

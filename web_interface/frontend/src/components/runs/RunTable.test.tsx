@@ -162,3 +162,36 @@ describe('RunTable phone cards', () => {
     expect(onSelectRun).not.toHaveBeenCalled()
   })
 })
+
+describe('RunTable Corrected line', () => {
+  const copy = (uploader: string, role: string) => ({ uploader, role, uploaded_at: '2026-10-13T14:00:00Z' })
+
+  it('shows nothing for a run with no corrected copy', () => {
+    renderTable([run({ corrected_copies: [] })])
+    expect(screen.queryByText(/^Corrected/)).toBeNull()
+  })
+
+  it('reads Corrected under the feedback state for one copy, titled with its uploader', () => {
+    renderTable([run({ corrected_copies: [copy('Sam Staff', 'staff')] })])
+    const line = screen.getByRole('link', { name: 'Corrected' })
+    expect(line.getAttribute('title')).toMatch(/^Sam Staff \(staff\) · /)
+    expect(line.getAttribute('href')).toBe('/run/RUNAAA#corrected-copies')
+    expect(line.closest('td')!.textContent).toContain('No feedback yet')
+    expect(line.querySelector('svg')).toBeNull() // a plain label, no icon
+  })
+
+  it('reads Corrected ×2 for two copies and opens the copies, not the row', () => {
+    renderTable([run({ corrected_copies: [copy('Sam Staff', 'staff'), copy('Pat Example', 'owner')] })])
+    const line = screen.getByRole('link', { name: 'Corrected ×2' })
+    expect(line.getAttribute('title')!.split('\n')).toHaveLength(2)
+    fireEvent.click(line)
+    expect(onSelectRun).not.toHaveBeenCalled()
+  })
+
+  it('reads Corrected beside the status on a phone card', () => {
+    mockViewport(639)
+    renderTable([run({ corrected_copies: [copy('Sam Staff', 'staff')] })])
+    const status = screen.getByText('Complete').closest('div')!
+    expect(within(status).getByRole('link', { name: 'Corrected' }).getAttribute('href')).toBe('/run/RUNAAA#corrected-copies')
+  })
+})

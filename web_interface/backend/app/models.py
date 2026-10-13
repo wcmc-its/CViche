@@ -174,6 +174,23 @@ class Feedback(Base):
     user = relationship("User", back_populates="feedback", lazy="raise_on_sql")
 
 
+class CorrectedCopy(Base):
+    """One reviewer's corrected copy of a run's delivered document, as stored
+    under ``storage_key`` (review_loop_service). One row per run and uploader:
+    a second upload by the same user replaces the row. ``user_id`` is NULL for
+    a copy stored before copies were kept per uploader (#1754), whose uploader
+    is unknown. The runs list reads these rows instead of listing storage."""
+    __tablename__ = "corrected_copies"
+    __table_args__ = (UniqueConstraint('run_id', 'user_id', name='uq_corrected_copies_run_user'),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    uploaded_at = Column(UTCDateTime, nullable=False)
+    changes = Column(Integer, nullable=False)
+    storage_key = Column(String(255), nullable=False, unique=True)
+
+
 # ==========================
 # Configuration Models
 # ==========================

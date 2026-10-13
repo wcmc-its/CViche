@@ -83,6 +83,13 @@ export const HELP_IMPROVE = {
   correctedIntro: "Tracked changes and CViche's notes can stay in; you don't need to accept or remove them first.",
   correctedTitle: 'Drop your corrected .docx here',
   correctedHint: 'Word (.docx) only',
+  /** Beside the drop zone once the viewer has a copy of this run: a second upload replaces it. */
+  correctedReplacesYours: '(replaces your own copy)',
+  copiesHeading: 'Corrected copies',
+  /** In place of a copy's Download link until the malware scan passes it. */
+  copyScanning: 'Scanning\u2026',
+  copyFlagged: 'Flagged by the malware scan',
+  copyUnscannable: "Couldn't be scanned",
   correctedPrivacy:
     "Your corrected file is kept with this run's other files and deleted with them. Only change counts and positions are used to measure CViche's accuracy, not the text of your CV.",
 } as const

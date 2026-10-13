@@ -101,6 +101,25 @@ describe('PipelineViewer on a finished run (#1589)', () => {
     },
   )
 
+  it('scrolls to the corrected copies when opened from the runs list\'s Corrected line', () => {
+    vi.useFakeTimers()
+    const scrolled: string[] = []
+    const scrollIntoView = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.id) }
+    window.history.replaceState(null, '', '#corrected-copies')
+    try {
+      view.runStatus = FINISHED
+      render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
+      act(() => { vi.advanceTimersByTime(500) })
+      expect(scrolled).toEqual(['corrected-copies'])
+      expect(document.getElementById('corrected-copies')?.getAttribute('aria-labelledby')).toBe('corrected-upload-heading')
+    } finally {
+      Element.prototype.scrollIntoView = scrollIntoView
+      window.history.replaceState(null, '', '#')
+      vi.useRealTimers()
+    }
+  })
+
   it('offers no upload before the run has a finished document', () => {
     render(<PipelineViewer runId={RUN_ID} onBack={() => {}} />)
     expect(screen.queryByRole('region', { name: 'Help improve CViche' })).toBeNull()

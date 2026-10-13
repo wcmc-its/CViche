@@ -2,6 +2,7 @@
 
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from app.services.config_service import MAX_UPLOAD_SIZE
 
@@ -320,6 +321,19 @@ class RunStorage(ABC):
 
         Returns:
             True if the file exists, False otherwise.
+        """
+        ...
+
+    @abstractmethod
+    def last_modified(self, run_id: str, key: str) -> datetime:
+        """When a file was last written, as aware UTC.
+
+        Args:
+            run_id: The run identifier.
+            key: Relative path within the run's storage.
+
+        Raises:
+            StorageKeyNotFound: If the file does not exist.
         """
         ...
 

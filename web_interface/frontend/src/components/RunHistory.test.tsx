@@ -57,7 +57,7 @@ async function renderAt(url: string) {
 beforeEach(() => {
   currentUser = MEMBER
   vi.mocked(getRuns).mockResolvedValue({ runs: [RUN], total: 1, has_more: false })
-  vi.mocked(getMyStatusCounts).mockResolvedValue({ all: 5, running: 1, awaiting_feedback: 2, failed: 0, red: 0 })
+  vi.mocked(getMyStatusCounts).mockResolvedValue({ all: 5, running: 1, awaiting_feedback: 2, failed: 0, red: 0, corrected: 2 })
   vi.mocked(listBatches).mockResolvedValue([SUMMARY])
   vi.mocked(getBatch).mockResolvedValue(DETAIL)
   vi.mocked(getQueue).mockResolvedValue({ dispatch_mode: 'queue', single: null, batch: null, completion_email_available: false })
@@ -97,7 +97,7 @@ describe('RunHistory batch filter', () => {
 
 const OPTIONS: RunFilterOptions = {
   departments: [], faculty: [], run_by: [], self_count: 0, on_behalf_count: 0,
-  status: { all: 9, running: 2, awaiting_feedback: 4, failed: 1, red: 3 },
+  status: { all: 9, running: 2, awaiting_feedback: 4, failed: 1, red: 3, corrected: 6 },
   feedback: { given: 0, needed: 4 }, input_format: { wcm: 0, other: 0, unknown: 0 },
 }
 const pill = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name}`) })
@@ -108,7 +108,7 @@ describe('RunHistory status pills', () => {
     await renderAt('/runs')
     const group = screen.getByRole('group', { name: 'Show runs' })
     expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(
-      ['All faculty5', 'Running1', 'Awaiting feedback2', 'Had failures0'])
+      ['All faculty5', 'Running1', 'Awaiting feedback2', 'Had failures0', 'Corrected2'])
     expect(getRunFilterOptions).not.toHaveBeenCalled()
     // Members get no Input format (or any other admin) filter.
     expect(screen.queryByRole('button', { name: /^Input format:/ })).toBeNull()
@@ -128,6 +128,15 @@ describe('RunHistory status pills', () => {
     expect(pill('Awaiting feedback').getAttribute('aria-pressed')).toBe('true')
   })
 
+  it('a member picking Corrected lists only their runs with a corrected copy', async () => {
+    await renderAt('/runs')
+    fireEvent.click(pill('Corrected'))
+    await flush()
+    expect(search).toBe('?status=corrected')
+    expect(lastParams()).toEqual({ status: 'corrected' })
+    expect(pill('Corrected').getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('ignores ?status=red for a member', async () => {
     await renderAt('/runs?status=red')
     expect(lastParams()).toEqual({})
@@ -141,13 +150,13 @@ describe('RunHistory status pills', () => {
     expect(getMyStatusCounts).not.toHaveBeenCalled()
   })
 
-  it('shows an admin all five pills with counts and sends the pill with the other filters', async () => {
+  it('shows an admin all six pills with counts and sends the pill with the other filters', async () => {
     currentUser = ADMIN
     vi.mocked(getRunFilterOptions).mockResolvedValue(OPTIONS)
     await renderAt('/runs?department=Medicine')
     const group = screen.getByRole('group', { name: 'Show runs' })
     expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(
-      ['All faculty9', 'Running2', 'Awaiting feedback4', 'Had failures1', 'Red score3'])
+      ['All faculty9', 'Running2', 'Awaiting feedback4', 'Had failures1', 'Corrected6', 'Red score3'])
     fireEvent.click(pill('Red score'))
     await flush()
     expect(search).toBe('?department=Medicine&status=red')

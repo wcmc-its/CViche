@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import type { RunFeedbackFilter, RunInputFormatFilter, RunListParams, RunStatusFilter } from '../../types'
+import { CORRECTED_LABEL } from './runFeedback'
 
 /** Literal run_by value for runs the faculty member uploaded themselves. */
 export const RUN_BY_SELF = 'self'
@@ -27,7 +28,7 @@ export function isInputFormatFilter(value: string): value is RunInputFormatFilte
 }
 
 /** The status filter values the API accepts; 'red' is admin only. */
-export const STATUS_FILTER_VALUES: readonly RunStatusFilter[] = ['running', 'failed', 'red']
+export const STATUS_FILTER_VALUES: readonly RunStatusFilter[] = ['running', 'failed', 'red', 'corrected']
 
 export function isStatusFilter(value: string): value is RunStatusFilter {
   return (STATUS_FILTER_VALUES as readonly string[]).includes(value)
@@ -112,13 +113,14 @@ export function toMemberListParams(filters: RunFilters): RunListParams {
 }
 
 /** One status pill. 'awaiting_feedback' is not a status: it is the feedback=needed filter. */
-export type StatusPillId = 'all' | 'running' | 'awaiting_feedback' | 'failed' | 'red'
+export type StatusPillId = 'all' | 'running' | 'awaiting_feedback' | 'failed' | 'corrected' | 'red'
 
 export const STATUS_PILLS: readonly { id: StatusPillId; label: string; adminOnly?: true }[] = [
   { id: 'all', label: 'All faculty' },
   { id: 'running', label: 'Running' },
   { id: 'awaiting_feedback', label: 'Awaiting feedback' },
   { id: 'failed', label: 'Had failures' },
+  { id: 'corrected', label: CORRECTED_LABEL },
   { id: 'red', label: 'Red score', adminOnly: true },
 ]
 

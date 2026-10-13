@@ -27,6 +27,7 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.rate_limiter import check_rate_limit
 from app.schemas import (
     CapacityResponse,
+    CorrectedCopySummary,
     PaginatedRuns,
     RestartRunResponse,
     RunActionResponse,
@@ -40,7 +41,7 @@ from app.schemas import (
     StatusFilterCounts,
     StepSummary,
 )
-from app.services import batch_completion, batch_service, quality_score_service
+from app.services import batch_completion, batch_service, corrected_copy_service, quality_score_service
 from app.services.run_quality_report import (
     build_owner_fix_list,
     build_run_quality_report,
@@ -254,7 +255,8 @@ def get_my_status_counts(
 
 
 def _run_summary(current_user: User, run: Run, all_scope: bool,
-                 feedback: RunFeedbackSummary) -> RunSummary:
+                 feedback: RunFeedbackSummary,
+                 corrected: list[corrected_copy_service.CopyRecord]) -> RunSummary:
     return RunSummary(
         run_id=run.id,
         filename=run.filename,
@@ -272,6 +274,8 @@ def _run_summary(current_user: User, run: Run, all_scope: bool,
         quality_cap=run.quality_cap if all_scope else None,
         feedback=feedback,
         batch_id=run.batch_id,
+        corrected_copies=[CorrectedCopySummary(uploader=c.uploader, role=c.role, uploaded_at=c.uploaded_at)
+                          for c in corrected],
     )
 
 
@@ -313,9 +317,10 @@ async def list_runs(
     three, and ``input_format`` ("wcm" = written in the WCM CV template, "other",
     "unknown" = not classified), are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
     feedback, "needed" = complete with none) and ``status`` ("running" = queued or
-    running, "failed" = failed; "red" = score band RED, scope=all only: 403 under scope=mine) apply in both
-    scopes. Every run
-    carries a ``feedback`` summary; scope=all adds the reviewer list.
+    running, "failed" = failed, "corrected" = has a reviewer's corrected copy; "red" = score
+    band RED, scope=all only: 403 under scope=mine) apply in both scopes. Every run
+    carries a ``feedback`` summary; scope=all adds the reviewer list. Every run
+    lists its ``corrected_copies`` (uploader, role, date), in both scopes.
     ``batch_id`` (#1114) narrows either scope to one batch's runs; every row
     carries its ``batch_id`` so the list can tag batch runs.
     """
@@ -334,8 +339,10 @@ async def list_runs(
     summaries = load_feedback_summaries(
         db, [run.id for run in runs], current_user.id, with_reviewers=all_scope)
     no_feedback = empty_feedback_summary(with_reviewers=all_scope)
+    copies = corrected_copy_service.load_copies(db, [run.id for run in runs])
     results = [
-        _run_summary(current_user, run, all_scope, summaries.get(run.id, no_feedback))
+        _run_summary(current_user, run, all_scope, summaries.get(run.id, no_feedback),
+                     copies.get(run.id, []))
         for run in runs
     ]
 

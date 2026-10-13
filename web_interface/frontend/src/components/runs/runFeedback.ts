@@ -1,5 +1,5 @@
-import type { RunSummary } from '../../types'
-import { formatRelativeDate } from '../../utils'
+import type { CorrectedCopySummary, RunSummary } from '../../types'
+import { formatDate, formatRelativeDate } from '../../utils'
 
 /** Run status the backend sends once a run has finished (RunState.COMPLETE). */
 const RUN_COMPLETE = 'complete'
@@ -48,4 +48,36 @@ export function feedbackGivenTitle(run: RunSummary, isAdmin: boolean): string {
     parts.push(`by ${reviewers.map((r) => r.display_name).join(', ')}`)
   }
   return parts.join(' · ')
+}
+
+/** A run with a reviewer's corrected copy: the Feedback column's second line and the status pill. */
+export const CORRECTED_LABEL = 'Corrected'
+
+/** Shown for a copy whose uploader is not known (stored before copies were kept per uploader). */
+export const UNKNOWN_UPLOADER_LABEL = 'unknown uploader'
+
+/** The runs list's line for a run's corrected copies: '' for none, "Corrected"
+ *  for one, "Corrected ×2" for two. */
+export function correctedLabel(copies: CorrectedCopySummary[] | undefined): string {
+  const count = copies?.length ?? 0
+  if (count === 0) return ''
+  return count === 1 ? CORRECTED_LABEL : `${CORRECTED_LABEL} \u00d7${count}`
+}
+
+/** "Pat Example (owner)", or the unknown-uploader label. */
+export function uploaderLabel(copy: CorrectedCopySummary): string {
+  if (!copy.uploader) return UNKNOWN_UPLOADER_LABEL
+  return copy.role ? `${copy.uploader} (${copy.role})` : copy.uploader
+}
+
+/** Tooltip for the Corrected line: one copy per line, uploader, role and date. */
+export function correctedTitle(copies: CorrectedCopySummary[]): string {
+  return copies.map((copy) => `${uploaderLabel(copy)} · ${formatDate(copy.uploaded_at)}`).join('\n')
+}
+
+/** The run page's corrected-copies section; the runs list's Corrected line links to it. */
+export const CORRECTED_COPIES_ANCHOR = 'corrected-copies'
+
+export function correctedCopiesPath(runId: string): string {
+  return `/run/${encodeURIComponent(runId)}#${CORRECTED_COPIES_ANCHOR}`
 }

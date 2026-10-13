@@ -1,11 +1,16 @@
 """The reviewer's corrected copy of the delivered document (#1587).
 
 The corrected copy is a CV. It is stored with the run's other artifacts under
-`CORRECTED_PREFIX`, which no download route and no scorer read reaches: those
-read `outputs/` only (artifact_service.resolve_artifact,
-quality_score_service). It is deleted with the run (storage.delete_run). What
-is kept beside it is `doctor/docx_diff.py`'s typed report: block positions,
-character counts and template section headings, no CV text.
+`CORRECTED_PREFIX`, which the artifact downloads and the scorer never read:
+those read `outputs/` only (artifact_service.resolve_artifact,
+quality_score_service). The copy is served back by its own route only
+(feedback_routes, GET /run/{id}/feedback/corrected-copies/{copy_id}): to the
+run's owner, admins and staff, and behind the malware-scan gate the original
+CV's download uses (services/malware_scan.py), since a reviewer uploaded it.
+It is deleted with the run (storage.delete_run, and its corrected_copies row
+with the run's rows). What is kept beside it is `doctor/docx_diff.py`'s typed
+report: block positions, character counts and template section headings, no
+CV text.
 
 Once the copy is stored, `review_corrected_copy` adds two more (#1654):
 
@@ -20,7 +25,8 @@ Each uploader keeps one copy per run (#1754): the keys carry the uploader's
 user id, so an owner's and a staff member's copies never overwrite each other,
 and a second upload by the same user replaces that user's copy. A copy stored
 before that has the run's id alone in its keys (uploader None);
-`stored_uploaders` lists both kinds.
+`stored_uploaders` lists both kinds. Each stored copy also has a
+corrected_copies row (corrected_copy_service), which the runs list reads.
 """
 import io
 import json
@@ -29,6 +35,7 @@ import re
 import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 from docx import Document
@@ -38,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import bad_request, conflict
 from app.services import (
+    corrected_copy_service,
     quality_score_service,  # noqa: F401  (puts src/ on sys.path for unified_pipeline)
 )
 from app.services.artifact_service import REVIEW_DOCX_SUFFIX, resolve_artifact
@@ -70,7 +78,7 @@ from unified_pipeline.stage_errors import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 #: Where a reviewer's corrected copy and its diff live in the run's storage.
-#: Never `outputs/`: downloads and the scorer read only that prefix.
+#: Never `outputs/`: the artifact downloads and the scorer read only that prefix.
 CORRECTED_PREFIX = "corrected/"
 #: The delivered document (orchestrator stage 6) and the stage-4 artifact
 #: whose entries the diff maps changes to.
@@ -158,12 +166,14 @@ def _stage4_entries(db: Session, run_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected: bytes) -> int:
+def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected: bytes,
+                          uploaded_at: datetime) -> int:
     """Diff a reviewer's corrected copy against the delivered document, store
     both the copy and the typed diff under CORRECTED_PREFIX as that uploader's
-    (replacing any copy the same user uploaded before), and return how
-    many changes the diff found. The caller has already checked access, size
-    and file type. Nothing is stored when the diff cannot be made.
+    (replacing any copy the same user uploaded before), record its
+    corrected_copies row, and return how many changes the diff found. The
+    caller has already checked access, size and file type. Nothing is stored
+    when the diff cannot be made.
 
     Raises a 409 when the run has no delivered document, and a 400 when the
     corrected file cannot be read as a Word document.
@@ -183,10 +193,25 @@ def record_corrected_docx(db: Session, run_id: str, uploader_id: int, corrected:
             logger.warning("Corrected copy for run %s could not be diffed: %s", run_id, type(e).__name__)
             raise bad_request("We couldn't read this Word file. Re-save it in Word and try again.") from e
     storage = get_storage()
-    storage.put_file(run_id, corrected_docx_key(run_id, uploader_id), corrected)
+    docx_key = corrected_docx_key(run_id, uploader_id)
+    storage.put_file(run_id, docx_key, corrected)
     report = json.dumps(to_report(run_id, diff), indent=1, sort_keys=True)
     storage.put_file(run_id, corrected_diff_key(run_id, uploader_id), report.encode("utf-8"))
+    corrected_copy_service.record_copy(db, run_id, uploader_id, changes=len(diff.changes),
+                                       storage_key=docx_key, uploaded_at=uploaded_at)
     return len(diff.changes)
+
+
+#: What a corrected copy's download is named after the run's upload.
+CORRECTED_DOWNLOAD_LABEL = "corrected"
+
+
+def corrected_download_name(run_filename: str | None, uploader: str | None) -> str:
+    """``<upload's name> - corrected by <uploader>.docx``; without the
+    uploader when unknown (a copy stored before #1754)."""
+    stem = Path((run_filename or "").strip()).stem or "CV"
+    by = f" by {uploader}" if uploader else ""
+    return f"{stem} - {CORRECTED_DOWNLOAD_LABEL}{by}.docx"
 
 
 def changes_summary(changes: int) -> str:

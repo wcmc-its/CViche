@@ -983,3 +983,48 @@ def test_local_storage_has_no_malware_scan_status(tmp_path):
     store = LocalRunStorage(base_dir=str(tmp_path))
     store.put_file("run1", "input/run1.docx", b"x")
     assert store.get_malware_scan_status("run1", "input/run1.docx") is None
+
+
+def test_last_modified_is_the_head_objects_time_in_utc():
+    from datetime import UTC, datetime, timedelta, timezone
+
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "head_object",
+        {"LastModified": datetime(2026, 10, 13, 5, 30, tzinfo=timezone(timedelta(hours=-4)))},
+        expected_params={"Bucket": "test-bucket", "Key": "cviche/runs/run1/corrected/run1_u7_corrected.docx"},
+    )
+    with stub:
+        when = storage.last_modified("run1", "corrected/run1_u7_corrected.docx")
+    assert when == datetime(2026, 10, 13, 9, 30, tzinfo=UTC) and when.tzinfo is UTC
+    stub.assert_no_pending_responses()
+
+
+def test_last_modified_of_a_missing_object_is_filenotfound():
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("head_object", service_error_code="404", http_status_code=404)
+    with stub, pytest.raises(FileNotFoundError):
+        storage.last_modified("run1", "corrected/run1_corrected.docx")
+
+
+def test_last_modified_accessdenied_propagates():
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("head_object", service_error_code="AccessDenied", http_status_code=403)
+    with stub, pytest.raises(ClientError):
+        storage.last_modified("run1", "corrected/run1_corrected.docx")
+
+
+def test_local_last_modified_is_the_files_mtime_in_utc(tmp_path):
+    import os
+    from datetime import UTC, datetime
+
+    store = LocalRunStorage(base_dir=str(tmp_path))
+    store.put_file("run1", "corrected/run1_corrected.docx", b"x")
+    stamp = datetime(2026, 10, 13, 9, 30, tzinfo=UTC).timestamp()
+    os.utime(store._resolve("run1", "corrected/run1_corrected.docx"), (stamp, stamp))
+    assert store.last_modified("run1", "corrected/run1_corrected.docx") == datetime(2026, 10, 13, 9, 30, tzinfo=UTC)
+    with pytest.raises(FileNotFoundError):
+        store.last_modified("run1", "corrected/absent.docx")
