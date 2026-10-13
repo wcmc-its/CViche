@@ -249,6 +249,10 @@ from unified_pipeline.stage6.sections.appendix import (
     labelled_email,
     reclassified_structural_reason,
 )
+from unified_pipeline.stage6.sections.mentoring import (
+    annotate_outcome_mentees,
+    outcome_mentee_warnings,
+)
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 from unified_pipeline.stage6.sections.presentations import _TALK_DATE_KEYS
 from unified_pipeline.stage6.sections.service import EXTRAMURAL_ORGANIZATION_FIELDS
@@ -1732,6 +1736,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY)
         mentee_siblings = _mentee_sibling_codes(entries)
+        coded: list[tuple[dict[str, Any], str]] = []
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code, reroutes)
@@ -1740,9 +1745,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
+            coded.append((entry, code))
         self._section_failures.extend(reroute_warnings(reroutes))
         self._section_failures.extend(precollegiate_reroute_warnings(precollegiate_moved))
         self._section_failures.extend(bare_mentee_resolution_warnings(bare_mentees_resolved))
+        self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")

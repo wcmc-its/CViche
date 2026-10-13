@@ -271,7 +271,7 @@ class _MentoringProbe(MentoringSection):
         self.tabled.append(record.source_entry if record else None)
         return None
 
-    def _insert_mentoring_line(self, text, anchor, entry=None):
+    def _insert_mentoring_line(self, text, anchor, entry=None, *, inserted=''):
         self.lines.append(text)
         return None
 
