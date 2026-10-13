@@ -124,7 +124,7 @@ jobs:
       # v3.97.4, published 2026-09-03), so no bump is outstanding as of
       # 2026-09-08. Re-run both calls before changing either line.
       - name: Scan full git history for secrets
-        uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
+        uses: trufflesecurity/trufflehog@e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9 # v3.99.2
         with:
           version: 3.97.4
           extra_args: --exclude-paths=.trufflehog-exclude.txt
