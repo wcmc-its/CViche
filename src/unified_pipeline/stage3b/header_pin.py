@@ -18,6 +18,8 @@ whose code does not depend on the heading at all. `is_note_not_record` names
 the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
 (#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
 An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
+An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
+journals heading, unless it is a short or meeting item or a proceedings venue.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
@@ -104,6 +106,40 @@ _GRANT_MARKER = re.compile(
 )
 _PI_ROLE_LEAD = re.compile(
     r"^[\s\d/\-\u2013\u2014,.:;*\u2022]*(?:(?i:(?:principal|co-?)\s*investigator)\b|(?i:co-?)?PI\b)"
+)
+
+# --- #1708: a journal article under a peer-reviewed journals heading is not an abstract ---
+#
+# Under a heading 3a pins to S1, an unsure S8 for a row with a PubMed ID or DOI is
+# the author's journal article: a 17-page paper whose title says "proceedings of
+# a meeting" rendered as the owner's first Abstract (RBPXCD, model at 0.65). The
+# model keeps its S8 for a confident answer, a one- or two-page item (the
+# supplement abstracts the corpus files under research articles), a row with no
+# page range that names a meeting or a supplement, and a proceedings venue
+# ("Annu Symp Proc. 2031", "Int Conf", "Lecture Notes"), which S8 names too.
+# The PMID or DOI is read off the row's own text: stage 3b runs before stage 4
+# extracts one or stage 5 looks one up.
+_S1_PIN = "S1"
+_ABSTRACT_CODE = "S8"
+_S1_PIN_MAX_MODEL_CONFIDENCE = 0.80
+_PUBLICATION_ID = re.compile(
+    r"\bPMID\b\W{0,3}\d"                    # PMID: 12345678
+    r"|\bpubmed\.ncbi\.nlm\.nih\.gov/\d"     # a PubMed link carries the PMID
+    r"|\b10\.\d{4,9}/\S",                    # a DOI, bare, after "doi:", or in a doi.org link
+    re.I,
+)
+# A page range after a volume's colon ("12:340-52") or "pp." ("pp. 340-352").
+# An end page shorter than the start page shares the start's leading digits.
+_PAGE_RANGE = re.compile(r"(?::\s*|\bpp?\.\s*)(\d{1,6})\s*[-\u2013\u2014]\s*(\d{1,6})\b", re.I)
+_MIN_ARTICLE_PAGES = 3
+_MEETING_MARKER = re.compile(r"\b(?:abstracts?|posters?|presented\s+at|suppl(?:ement)?)\b", re.I)
+# A venue that is itself a proceedings: "Proc"/"Proceedings" or "Symp" straight
+# before a year or volume, an abbreviated "Conf", "Lecture Notes". A title's
+# "Proceedings of the <meeting>" and a journal named "Proc <Society>" do not match.
+_PROCEEDINGS_VENUE = re.compile(
+    r"\b(?:Proc(?:eedings)?|Symp(?:osium)?)\b\.?,?\s*\d"
+    r"|\bConf\b|\bLecture\s+Notes\b",
+    re.I,
 )
 
 # Content pins: shapes whose code does not depend on the heading they sit under.
@@ -288,6 +324,35 @@ def _h_pin_takes(entry: dict) -> bool:
     )
 
 
+def _page_span(text: str) -> int:
+    """The longest page span in the row's citation, 0 when it gives none."""
+    spans = [0]
+    for first, last in _PAGE_RANGE.findall(text):
+        if len(last) < len(first):
+            last = first[:len(first) - len(last)] + last
+        spans.append(int(last) - int(first) + 1)
+    return max(spans)
+
+
+def _reads_as_journal_article(text: str) -> bool:
+    """A cited row with a PMID or DOI, at least three pages or no meeting marker, and no proceedings venue."""
+    if not _PUBLICATION_ID.search(text) or _PROCEEDINGS_VENUE.search(text):
+        return False
+    span = _page_span(text)
+    if span:
+        return span >= _MIN_ARTICLE_PAGES
+    return not _MEETING_MARKER.search(text)
+
+
+def _s1_pin_takes(entry: dict) -> bool:
+    """Whether an S1 pin recodes this model answer: an unsure S8 that reads as a journal article."""
+    return (
+        entry.get("taxonomy_code") == _ABSTRACT_CODE
+        and _safe_confidence(entry) <= _S1_PIN_MAX_MODEL_CONFIDENCE
+        and _reads_as_journal_article(entry.get("text") or "")
+    )
+
+
 def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | None:
     """The code the group's header pins this model answer to, or None to keep it."""
     code = entry.get("taxonomy_code")
@@ -297,6 +362,8 @@ def header_pin_code(entry: dict, pin: str | None, leaf: str | None) -> str | Non
         return pin
     if pin == _HONOR_CODE and _h_pin_takes(entry):
         return _HONOR_CODE
+    if pin == _S1_PIN and _s1_pin_takes(entry):
+        return _S1_PIN
     if leaf == _GRANT_REVIEW_PIN and code in _GRANT_REVIEW_OVERRIDABLE and _is_grant_review(entry):
         return _GRANT_REVIEW_PIN
     return None

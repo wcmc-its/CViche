@@ -361,6 +361,144 @@ def test_h_pin_is_not_flipped_back_by_the_reasoning_or_grant_status_checks():
     assert out["taxonomy_code"] == corrected["taxonomy_code"] == status["taxonomy_code"] == "H"
 
 
+# --- #1708: an unsure S8 with a PMID or DOI under an S1 pin ----------------------
+
+S1_CTX = _ctx(meta=_node("BIBLIOGRAPHY", "S1"), section=_node("Example refereed articles", "S1"))
+JOURNALS = ("BIBLIOGRAPHY", "Example refereed articles")
+_ARTICLE = ("Quillforth JA, Bravantel BC. Example outcomes after example surgery: Conference Proceedings of the "
+            "Example Planning Meeting 2031. Example J Med. 2032 41:210-226. PMID: 99000001")
+
+
+def _s8(text, confidence=0.65):
+    return _row("S8", text, confidence=confidence, hierarchy=JOURNALS)
+
+
+def test_unsure_s8_journal_article_under_s1_becomes_s1():
+    # The title names a meeting; the 17-page journal citation is what decides it.
+    (out,), n = apply_header_pin([_s8(_ARTICLE)], S1_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S1" and out["pre_pin_code"] == "S8"
+
+
+@pytest.mark.parametrize("ident", [
+    "PMID 99000001",
+    "PMID:\u00a099000001",
+    "https://pubmed.ncbi.nlm.nih.gov/99000001/",
+    "pmid: 99000001",
+    "doi: 10.99999/ab12",
+    "https://doi.org/10.99999/ab12",
+])
+def test_each_publication_id_shape_lets_the_s1_pin_take(ident):
+    text = f"Quillforth JA. Example signals in tissue. Example J Med. 2031;12(3):340-52. {ident}"
+    (out,), n = apply_header_pin([_s8(text)], S1_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S1"
+
+
+@pytest.mark.parametrize("text", [
+    "Quillforth JA. Example signals in tissue. Example J Med. 2031;12(3):340-52.",          # no PMID or DOI
+    "Quillforth JA. Example signals in tissue. Example J Med. 2031;12(3):340-52. PMID pending",
+    "Quillforth JA. Example signals. Example J Med. 2031;12:340. PMC 99000001",            # a PMCID alone
+])
+def test_s8_without_a_publication_id_stays(text):
+    entry = _s8(text)
+    (out,), n = apply_header_pin([entry], S1_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("text", [
+    # A one- or two-page item is a meeting abstract, marker or not.
+    "Quillforth JA. Example signals. Abstract presented at Example Society Meeting. Example J Med. 2031;12:340. PMID: 99000001",
+    "Quillforth JA. Example signals (EX123). Example J Med. 2031, 12: 616-617. DOI: 10.99999/ex.2031.002",
+    "Quillforth JA. Example signals. Example J Med. 2031;12:4418-9. PMID: 99000001",
+    # No page range, and it names a meeting or a supplement.
+    "Quillforth JA. Example signals. Example J Med. 2031;12 (Suppl 1). PMID: 99000001",
+    "Quillforth JA. Example signals. Example J Med, 12 (7 Supplement) 81, 2031. PMID: 99000001",
+    "Quillforth JA. Example signals. Poster, Example Society Meeting. DOI: 10.99999/ex.2031.003",
+    "Quillforth JA. Example signals. Example Society Meeting abstracts. PMID: 99000001",
+    "Quillforth JA. Example signals. Presented at the Example Society Meeting. PMID: 99000001",
+])
+def test_short_or_meeting_item_with_a_publication_id_stays_s8(text):
+    entry = _s8(text)
+    (out,), n = apply_header_pin([entry], S1_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("text", [
+    # Three pages or more decide it even when the row says "abstract".
+    "Quillforth JA. Example signals. Example J Med. 2031;12:340-342. Abstract not available. PMID: 99000001",
+    "Quillforth JA. Example signals. In: Example Book. PP. 100-112. Abstract. DOI: 10.99999/ex.2031.004",
+    "Quillforth JA. Example signals. Abstract. Example J Med. 2031, p.\u00a0100\u2014104. PMID: 99000001",
+    "Quillforth JA. Example signals. Abstract. Example J Med. 2031;12:100 \u2013 102. PMID: 99000001",
+    # The longest range decides: an erratum's two pages do not make the article short.
+    "Quillforth JA. Example signals. Example J Med. 2031;12:100-112. Erratum: 2032;13:5-6. PMID: 99000001",
+    # No page range and no meeting marker.
+    "Quillforth JA. Example signals. Example J Med. 2031;12:e0001. PMID: 99000001",
+    # A journal named "Proc <Society>" and a title's "Proceedings of" are not a proceedings venue.
+    "Quillforth JA. Example signals. Proc Example Acad Sci. 2031;12(3):130-139. PMID: 99000001",
+    "Quillforth JA. Proceedings of the Example Meeting. Example J Med. 2031;12:130-139. PMID: 99000001",
+])
+def test_journal_article_shapes_with_a_publication_id_become_s1(text):
+    (out,), n = apply_header_pin([_s8(text)], S1_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S1"
+
+
+@pytest.mark.parametrize("text", [
+    "Quillforth JA. Example signals. Example Annu Symp Proc. 2031; 2031: 731-739. PMID: 99000001",
+    "Quillforth JA. Example signals. Example Meeting Proceedings 2031, 2031: 604-12. PMID: 99000001",
+    "Quillforth JA. Example signals. example symposium, 2031: 804-816. PMID: 99000001",
+    "Quillforth JA. Example signals. Annu Int Conf Example Soc. 2031;2031:1-4. PMID: 99000001",
+    "Quillforth JA. Example signals. Conf Proc Example Soc. 2031;2031:100-104. PMID: 99000001",
+    "Quillforth JA. Example signals. Lecture Notes in Example Studies 2031, 9000: 811-825. DOI: 10.99999/ex.5",
+])
+def test_proceedings_venue_keeps_s8(text):
+    entry = _s8(text)
+    (out,), n = apply_header_pin([entry], S1_CTX)
+    assert n == 0 and out == entry
+
+
+def test_s1_pin_breaks_a_tie_and_does_not_overrule_a_firm_s8():
+    (at_ceiling,), _ = apply_header_pin([_s8(_ARTICLE, confidence=0.80)], S1_CTX)
+    assert at_ceiling["taxonomy_code"] == "S1"
+    for confidence in (0.81, 0.90):
+        firm = _s8(_ARTICLE, confidence=confidence)
+        (out,), n = apply_header_pin([firm], S1_CTX)
+        assert n == 0 and out == firm
+
+
+def test_s8_with_no_text_under_s1_stays():
+    entry = {**_s8(_ARTICLE), "text": None}
+    (out,), n = apply_header_pin([entry], S1_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("code", ["S2", "S6", "S7", "R"])
+def test_s1_pin_recodes_only_s8(code):
+    entry = _row(code, _ARTICLE, confidence=0.55, hierarchy=JOURNALS)
+    (out,), n = apply_header_pin([entry], S1_CTX)
+    assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("ctx", [
+    _ctx(meta=_node("BIBLIOGRAPHY", "S1", HEADER_PIN_MIN_CONFIDENCE - 0.01)),
+    _ctx(meta=_node("BIBLIOGRAPHY", "S8", 1.0), section=_node("Papers", "S1", 1.0)),   # mixed levels
+    _ctx(meta=_node("ABSTRACTS", "S8")),
+    _ctx(meta=_node("Example mixed heading", "S2", 0.6)),
+])
+def test_no_s1_pin_leaves_an_unsure_s8(ctx):
+    entry = _s8(_ARTICLE)
+    (out,), n = apply_header_pin([entry], ctx)
+    assert n == 0 and out == entry
+
+
+def test_s1_pin_is_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    entry = {**_s8(_ARTICLE), "classification_reasoning": "conference proceedings of a meeting (S8)"}
+    (out,), _ = apply_header_pin([entry], S1_CTX)
+    (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    assert out["taxonomy_code"] == corrected["taxonomy_code"] == "S1"
+
+
 # --- EBYSBC E11 (#312): content pins --------------------------------------------
 
 NO_PIN_CTX = _ctx(meta=_node("MISCELLANEOUS", "T", 0.4))
