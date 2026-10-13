@@ -60,7 +60,8 @@ except ImportError as exc:
 
 from unified_pipeline.core.text_norm import is_placeholder_title
 
-from ..formatting import _format_citation, _set_font
+from ..fan_out import fallback_text
+from ..formatting import _format_citation, _set_font, with_event_status
 from ..normalization import split_fused_citation_entries
 from ..normalization.owner_alias import (
     OwnerAlias,
@@ -74,6 +75,22 @@ from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
+
+# The bibliography subsections whose entries are talks or posters at an event,
+# so a "postponed"/"canceled" note on the source line is part of the citation
+# (#1436). An article or chapter has no event to postpone.
+_EVENT_STATUS_CODES = frozenset({'S8'})
+
+
+def _with_abstract_status(code: str, citation: str, pub: Mapping) -> str:
+    """`citation` with its source line's event-status note (`with_event_status`)
+    when `code` is an event subsection. A multi-line source is a fused block
+    of several citations (#208) whose note may belong to another of them, so
+    it is left as the citation reads."""
+    source = fallback_text(pub)
+    if code not in _EVENT_STATUS_CODES or '\n' in source.strip():
+        return citation
+    return with_event_status(citation, source)
 
 # Tracked-insertion citation runs are built as raw w:r XML -- python-docx has
 # no API to add a run *into* a w:ins element, so this path cannot call
@@ -642,6 +659,7 @@ class BibliographySection:
                     continue
                 citation_num += 1
                 citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
+                citation_text = _with_abstract_status(code, citation_text, pub)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status
 

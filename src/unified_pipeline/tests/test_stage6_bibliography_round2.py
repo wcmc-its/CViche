@@ -1300,3 +1300,52 @@ def test_fill_bibliography_coauthor_target_initials_are_not_the_owners():
              for n in range(6)]
     coauthor = _citation_entry("Vard K, Doe J. A study of rats. J Med. 2020;1:1-2.", "Vard K", 2020)
     assert _bold_texts([*owner, coauthor], {})[-1] == []
+
+
+# --- #1436: an S8 abstract's event-status note survives into the citation ---
+
+
+def _abstract_paragraphs(code, source_line, citation_body):
+    """The citation paragraphs `_fill_bibliography` writes for one entry."""
+    gen = _generator()
+    entry = _citation_entry(citation_body, "Doe J", 2020)
+    entry["text"] = source_line
+    gen._fill_bibliography({code: [entry]}, cv_owner={}, document_uid="")
+    return [p.text for p in gen.doc.paragraphs if p.text.startswith("1. ")]
+
+
+def test_an_s8_postponed_note_dropped_by_the_citation_is_appended():
+    # NDMRSO SYWZJA 557's shape: the note is a bare sentence, 5d dropped it.
+    source = ("19. Doe J, Roe R. (2020, March). Widget calibration. Oral presentation at "
+              "the Widget Society Conference, Springfield. Postponed due to COVID-19.")
+    body = "Doe J, Roe R. Widget calibration. Widget Society Conference; 2020 Mar; Springfield."
+    assert _abstract_paragraphs("S8", source, body) == \
+        [f"1. {body} (Postponed due to COVID-19)"]
+
+
+def test_an_s8_citation_that_kept_its_status_is_unchanged():
+    # SYWZJA 616's shape: 5d kept "[Poster session canceled]".
+    source = "Doe J. Widget calibration [Poster session canceled]. Widget Society Conference."
+    body = "Doe J. Widget calibration [Poster session canceled]. Widget Society Conference; 2020."
+    assert _abstract_paragraphs("S8", source, body) == [f"1. {body}"]
+
+
+def test_an_s8_source_line_without_a_status_word_is_unchanged():
+    source = "Doe J. Widget calibration. Widget Society Conference, Springfield, 2020."
+    body = "Doe J. Widget calibration. Widget Society Conference; 2020; Springfield."
+    assert _abstract_paragraphs("S8", source, body) == [f"1. {body}"]
+
+
+def test_a_journal_article_status_word_is_not_appended():
+    # Only S8 is an event; an S1 line is left exactly as the citation reads.
+    source = "Doe J. Widget calibration. J Widgets. 2020;1:1-2. Postponed due to COVID-19."
+    body = "Doe J. Widget calibration. J Widgets. 2020;1:1-2."
+    assert _abstract_paragraphs("S1", source, body) == [f"1. {body}"]
+
+
+def test_a_fused_multi_line_s8_source_is_left_as_the_citation_reads():
+    # A #208 fused block: the note may belong to another of its citations.
+    source = ("Doe J. Widget calibration. Widget Society Conference, 2020.\n"
+              "Doe J. Gadget tuning. Gadget Meeting, 2020. Postponed due to COVID-19.")
+    body = "Doe J. Widget calibration. Widget Society Conference; 2020."
+    assert _abstract_paragraphs("S8", source, body) == [f"1. {body}"]
