@@ -28,7 +28,6 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     read_docx_blocks,
     read_docx_table_rows,
 )
-from unified_pipeline.stage6.formatting import CVICHE_BOX_FILL  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     PI_NAME_LABEL,
     PROJECT_TITLE_LABEL,
@@ -82,10 +81,11 @@ def _report(*findings):
     return {"findings": list(findings)}
 
 
-def _comments(path: Path) -> list[tuple[str, str]]:
-    """(comment text, the exact text it is anchored to), in document order."""
+def _comments(path: Path, author: str = rc.COMMENT_AUTHOR) -> list[tuple[str, str]]:
+    """(comment text, the exact text it is anchored to), in document order,
+    of ``author``'s comments: the findings' by default, not the review notes."""
     doc = Document(str(path))
-    texts = {c.comment_id: c.text for c in doc.comments}
+    texts = {c.comment_id: c.text for c in doc.comments if c.author == author}
     anchored: dict[int, str] = {}
     open_ids: list[int] = []
     for el in doc.element.body.iter():
@@ -97,29 +97,52 @@ def _comments(path: Path) -> list[tuple[str, str]]:
         elif el.tag == qn("w:t"):
             for cid in open_ids:
                 anchored[cid] += el.text or ""
-    return [(texts[cid], body) for cid, body in anchored.items()]
+    return [(texts[cid], body) for cid, body in anchored.items() if cid in texts]
 
 
-def _box_lines(path: Path, title: str) -> list[str]:
-    """The lines of the CViche box whose first line starts with ``title``, after it."""
-    for table in Document(str(path)).tables:
-        lines = [p.text for p in table.cell(0, 0).paragraphs]
-        if lines[0].startswith(title):
-            return lines[1:]
-    return []
+def _notes_comment(path: Path):
+    """The review-notes comment: the one comment by REVIEW_NOTES_AUTHOR."""
+    (comment,) = [c for c in Document(str(path)).comments if c.author == rc.REVIEW_NOTES_AUTHOR]
+    return comment
+
+
+def _note_lines(path: Path) -> list[str]:
+    """The review-notes comment's lines after its title."""
+    lines = [p.text for p in _notes_comment(path).paragraphs]
+    assert lines[0] == rc.REVIEW_NOTES_TITLE
+    return lines[1:]
 
 
 def _notes(path: Path) -> list[str]:
-    """The review-notes box's lines under its title, up to its closing
+    """The review notes' lines under their title, up to the closing
     what-is-not-checked group."""
-    lines = _box_lines(path, rc.REVIEW_NOTES_TITLE)
+    lines = _note_lines(path)
     return lines[:lines.index(rc.NOT_CHECKED_TITLE)]
 
 
 def _not_checked(path: Path) -> list[str]:
-    """The review-notes box's closing group: what CViche does not check."""
-    lines = _box_lines(path, rc.REVIEW_NOTES_TITLE)
+    """The review notes' closing group: what CViche does not check."""
+    lines = _note_lines(path)
     return lines[lines.index(rc.NOT_CHECKED_TITLE):]
+
+
+def _delete_all_comments(path: Path) -> Document:
+    """What Word's Review > Delete All Comments does: every comment's range
+    marks, its reference run and the comment itself go."""
+    doc = Document(str(path))
+    for el in list(doc.element.body.iter(qn("w:commentRangeStart"), qn("w:commentRangeEnd"),
+                                         qn("w:commentReference"))):
+        gone = el.getparent() if el.tag == qn("w:commentReference") else el  # the reference's run
+        gone.getparent().remove(gone)
+    for comment in list(doc.comments):
+        comment._comment_elm.getparent().remove(comment._comment_elm)
+    return doc
+
+
+def _body_text(doc: Document) -> list[str]:
+    """Every body paragraph's text in document order, table cells included,
+    with tracked insertions (w:ins) read: what Paragraph.text skips."""
+    return ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in doc.element.body.iter(qn("w:p"))]
 
 
 @pytest.fixture(autouse=True)
@@ -145,15 +168,6 @@ def _flag(lint):
     return rc.REVIEW_FLAGS[lint]
 
 
-def _cv_blocks(path: Path) -> list:
-    """The blocks the doctor reads, without the review-notes box closing a copy."""
-    blocks = read_docx_blocks(str(path))
-    closing = blocks[-1] if blocks else None
-    if closing and closing[0] == "table" and closing[1].startswith(rc.REVIEW_NOTES_TITLE):
-        return blocks[:-1]
-    return blocks
-
-
 def test_every_lint_the_run_page_words_has_a_flag():
     assert set(LINT_COPY) <= set(rc.REVIEW_FLAGS)
 
@@ -163,7 +177,7 @@ def test_a_quoted_record_gets_its_short_flag(tmp_path):
         _finding("enrichment_failures", "1 publication(s) failed PubMed enrichment", [SECOND])))
     assert out == tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}" and n == 1
     assert _comments(out) == [(_flag("enrichment_failures"), SECOND)]
-    assert [c.author for c in Document(str(out)).comments] == [rc.COMMENT_AUTHOR]
+    assert [c.author for c in Document(str(out)).comments] == [rc.COMMENT_AUTHOR, rc.REVIEW_NOTES_AUTHOR]
 
 
 def test_a_duplicate_is_flagged_on_its_later_copy(tmp_path):
@@ -173,7 +187,8 @@ def test_a_duplicate_is_flagged_on_its_later_copy(tmp_path):
     doc = Document(str(out))
     starts = [i for i, p in enumerate(doc.element.body.iter(qn("w:p")))
               if p.find(qn("w:commentRangeStart")) is not None]
-    assert starts == [8]  # paragraphs: 7 is the first CITATION, 8 the repeat
+    # paragraphs: 7 is the first CITATION, 8 the repeat; 0 carries the review notes
+    assert starts == [0, 8]
     assert _comments(out) == [(_flag("duplicate_records"), CITATION)]
 
 
@@ -192,7 +207,7 @@ def test_a_wrong_year_is_flagged_on_the_year_alone(tmp_path):
                  [f"Grant Title: {GRANT}; Role: PI"])))
     assert _comments(out) == [(_flag("implausible_year"), "1912")]
     # Splitting the run to isolate the year leaves the text the doctor reads alone.
-    assert _cv_blocks(out) == read_docx_blocks(str(clean))
+    assert read_docx_blocks(str(out)) == read_docx_blocks(str(clean))
 
 
 def test_near_duplicates_are_one_group_naming_section_removed_and_kept(tmp_path):
@@ -204,9 +219,9 @@ def test_near_duplicates_are_one_group_naming_section_removed_and_kept(tmp_path)
     assert n == 2 and _comments(out) == []
     assert _notes(out) == [
         "Removed as near-duplicates (2)", rc.DEDUP_INSTRUCTION,
-        "\u2022\tDidactic Teaching", f'Removed:\t"{dropped}"', f'Kept:\t"{TEACHING}"',
-        "\u2022\tNon-peer-reviewed Publications", 'Removed:\t"(9) Quill AB. Squid optics."',
-        'Kept:\t"(11) Quill AB. Squid optics."',
+        "\u2022 Didactic Teaching", f'Removed: "{dropped}"', f'Kept: "{TEACHING}"',
+        "\u2022 Non-peer-reviewed Publications", 'Removed: "(9) Quill AB. Squid optics."',
+        'Kept: "(11) Quill AB. Squid optics."',
     ]
     assert "jaccard" not in "".join(_notes(out))
 
@@ -231,7 +246,7 @@ def test_a_window_that_recurs_across_records_does_not_anchor(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("enrichment_failures", "1 publication(s) failed PubMed enrichment", [other])))
     assert _comments(out) == []
-    assert _notes(out) == ["PubMed lookup failed (1)", _flag("enrichment_failures"), f'\u2022\t"{other}"']
+    assert _notes(out) == ["PubMed lookup failed (1)", _flag("enrichment_failures"), f'\u2022 "{other}"']
 
 
 def test_no_quote_falls_back_to_the_sections_template_heading(tmp_path):
@@ -240,14 +255,14 @@ def test_no_quote_falls_back_to_the_sections_template_heading(tmp_path):
     assert _comments(out) == [(_flag("section_lost"), PAST_FUNDING_HEADING)]
 
 
-def test_findings_with_no_place_are_review_notes_closing_the_document(tmp_path):
+def test_findings_with_no_place_are_review_notes(tmp_path):
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("implausible_year", "entry 9 (K1): date=1905"),  # no Didactic Teaching heading
         _finding("llm_fallback_served", "stage 4 S8: the content filter blocked the primary model"),
         _finding("llm_fallback_served", "stage 4 S5: the content filter blocked the primary model")))
     assert n == 1 and _comments(out) == []
     # A note with nothing to point at (no quote, no section) stays on the run page.
-    assert _notes(out) == ["Year probably wrong century (1)", _flag("implausible_year"), "\u2022\tDidactic Teaching"]
+    assert _notes(out) == ["Year probably wrong century (1)", _flag("implausible_year"), "\u2022 Didactic Teaching"]
 
 
 _DIVERSIONS = (
@@ -286,7 +301,7 @@ def test_a_diversion_with_no_heading_to_sit_on_is_a_note(tmp_path):
         _finding("stage6_render_warnings", "stage 6 self-check: 1 entry diverted to the "
                  "Appendix — no section named")))
     assert n == 2 and _comments(out) == []
-    assert _notes(out) == [f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_NOTE, "•\tDidactic Teaching",
+    assert _notes(out) == [f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_NOTE, "• Didactic Teaching",
                            f"{rc.DIVERSION_TITLE} (1)", rc.DIVERSION_UNPLACED_NOTE]
 
 
@@ -320,13 +335,13 @@ def test_a_finding_right_less_than_half_the_time_is_a_note_not_a_comment(tmp_pat
     assert n == 2
     assert _comments(out) == [(_flag("duplicate_records"), CITATION)]
     assert _notes(out) == [f"{LINT_COPY['pipe_leaks'].title} (1)",
-                           f"{_flag('pipe_leaks')} {rc.LESS_CERTAIN_NOTE}", f'\u2022\t"[bibliography] {SECOND}"']
+                           f"{_flag('pipe_leaks')} {rc.LESS_CERTAIN_NOTE}", f'\u2022 "[bibliography] {SECOND}"']
 
 
 def test_a_less_certain_diversion_is_a_note_naming_its_section(tmp_path):
     out, n = rc.write_review_docx(_clean_docx(tmp_path), _report(_DIVERSIONS[0]), rows=_GATE_ROWS)
     assert n == 1 and _comments(out) == []
-    assert _notes(out)[1:] == [f"{rc.DIVERSION_NOTE} {rc.LESS_CERTAIN_NOTE}", "\u2022\tPast Research Funding"]
+    assert _notes(out)[1:] == [f"{rc.DIVERSION_NOTE} {rc.LESS_CERTAIN_NOTE}", "\u2022 Past Research Funding"]
 
 
 def test_a_less_certain_appendix_code_diversion_is_not_a_note_either(tmp_path):
@@ -369,7 +384,7 @@ def test_a_dedup_drop_led_by_its_entry_number_and_cut_at_the_doctors_length(tmp_
     kept = ("Squid Optics Seminar Leader, Example School of Marine Biology, eight lectures yearly; " * 5)[:rc.DEDUP_TEXT_CHARS]
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("dedup_drops", "1 drop", [
         f"entry 12: K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Optics Seminar' vs kept '{kept}'"])))
-    assert _notes(out)[2:] == ["\u2022\tDidactic Teaching", 'Removed:\t"Squid Optics Seminar"', f'Kept:\t"{kept}\u2026"']
+    assert _notes(out)[2:] == ["\u2022 Didactic Teaching", 'Removed: "Squid Optics Seminar"', f'Kept: "{kept}\u2026"']
 
 
 def test_a_dedup_quote_the_doctor_cut_still_reads(tmp_path):
@@ -378,7 +393,7 @@ def test_a_dedup_quote_the_doctor_cut_still_reads(tmp_path):
                 "vs kept 'Core Squid Curriculum b Coordinator, Lecturer, Workshop Facilitator, Squid Opti'")
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("dedup_drops", "1 dedup drop(s)", [evidence + "\u2026"])))
-    assert _notes(out)[3] == 'Removed:\t"Core Squid Curriculum b Lecturer"'
+    assert _notes(out)[3] == 'Removed: "Core Squid Curriculum b Lecturer"'
 
 
 def test_protected_data_flag_never_carries_the_finding_text(tmp_path):
@@ -390,7 +405,7 @@ def test_protected_data_flag_never_carries_the_finding_text(tmp_path):
         _finding("protected_data_in_output", "a bare date found in the Personal Data block", severity="ERROR")))
     assert _comments(out) == []
     assert _notes(out) == ["Protected personal data in document (2)", _flag("protected_data_in_output"),
-                           "\u2022\tAppendix: children / dependents", "\u2022\tPersonal Data: a bare date"]
+                           "\u2022 Appendix: children / dependents", "\u2022 Personal Data: a bare date"]
 
 
 def test_info_and_skipped_findings_get_no_comment(tmp_path):
@@ -435,7 +450,7 @@ def test_a_source_line_coverage_finding_is_one_review_note_per_line_though_info(
                  "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")))
     assert n == 2 and _comments(out) == []
     assert _notes(out) == ["Text from your CV that may be missing (2)", _flag("source_line_coverage"),
-                           *(f'•\t"{line}"' for line in lost)]
+                           *(f'• "{line}"' for line in lost)]
 
 
 def test_a_source_line_coverage_finding_below_the_bar_is_still_its_notes(tmp_path):
@@ -449,53 +464,63 @@ def test_a_source_line_coverage_finding_below_the_bar_is_still_its_notes(tmp_pat
                  "anywhere in the output, Appendix included (lowest 0%)", lost, severity="INFO")), rows=rows)
     assert n == 1 and _comments(out) == []
     assert _notes(out) == ["Text from your CV that may be missing (1)", _flag("source_line_coverage"),
-                           f'•\t"{lost[0]}"']
+                           f'• "{lost[0]}"']
 
 
 def test_stray_text_is_titled_plainly_and_quotes_what_to_delete(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("output_hygiene", "1 boilerplate line(s) rendered in the appendix", ["Insert dates here (MM/YYYY)"])))
-    assert _notes(out) == ["Stray text to delete (1)", _flag("output_hygiene"), '\u2022\t"Insert dates here (MM/YYYY)"']
+    assert _notes(out) == ["Stray text to delete (1)", _flag("output_hygiene"), '\u2022 "Insert dates here (MM/YYYY)"']
 
 
-def test_review_notes_box_closes_the_document_in_its_own_type_and_spacing(tmp_path):
-    """One table, last in the document (deleting it is one step); the space
-    above it sits on the last CV paragraph, not a blank one; full width, 6/8pt
-    padding, a 9pt gray small-caps title and 10pt text."""
-    out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
+def test_review_notes_are_one_comment_on_the_first_paragraph_not_a_box(tmp_path):
+    """The notes add nothing to the body: one comment by their own author on
+    the document's first paragraph, its title and group labels bold."""
+    clean = _clean_docx(tmp_path)
+    out, _ = rc.write_review_docx(clean, _report(
         _finding("enrichment_failures", "1 failed", ["99. Nowhere AB. Unprinted paper. J Example. 2001."])))
     doc = Document(str(out))
-    body = [el for el in doc.element.body if el.tag != qn("w:sectPr")]
-    assert body[-1].tag == qn("w:tbl")
-    last_text = doc.paragraphs[-1]
-    assert last_text.text == APPENDIX_LINES[-1] and last_text.paragraph_format.space_after.pt == 6
-    tbl_pr = doc.tables[-1]._tbl.tblPr
-    assert (tbl_pr.find(qn("w:tblW")).get(qn("w:type")), tbl_pr.find(qn("w:tblW")).get(qn("w:w"))) == ("pct", "5000")
-    assert {e.tag.split("}")[1]: e.get(qn("w:w")) for e in tbl_pr.find(qn("w:tblCellMar"))} == {
-        "top": "120", "bottom": "120", "left": "160", "right": "160"}
-    cell = doc.tables[-1].cell(0, 0)
-    assert cell._tc.tcPr.find(qn("w:shd")).get(qn("w:fill")) == CVICHE_BOX_FILL
-    title, group, instruction, item = cell.paragraphs[:4]
-    assert title.text == rc.REVIEW_NOTES_TITLE and title.runs[0].font.small_caps
-    assert title.runs[0].font.size.pt == 9 and str(title.runs[0].font.color.rgb) == "595959"
-    assert group.runs[0].bold and group.runs[0].font.size.pt == 10
-    assert group.paragraph_format.space_before.pt == 0  # the first group
-    assert instruction.runs[0].font.size.pt == 10 and not instruction.runs[0].bold
-    assert item.paragraph_format.first_line_indent < 0  # hanging bullet
-    assert {r.font.name for p in cell.paragraphs for r in p.runs} == {"Arial"}
+    assert len(doc.tables) == len(Document(str(clean)).tables) == 0
+    assert _comments(out, rc.REVIEW_NOTES_AUTHOR) == [(_notes_comment(out).text, HEADER)]
+    title, group, instruction, item = _notes_comment(out).paragraphs[:4]
+    assert title.text == rc.REVIEW_NOTES_TITLE and all(r.bold for r in title.runs if r.text)
+    assert group.text == "PubMed lookup failed (1)" and group.runs[0].bold
+    assert instruction.text == _flag("enrichment_failures") and not instruction.runs[0].bold
+    assert item.text.startswith(rc.NOTE_BULLET)
 
 
-def test_removed_and_kept_are_parallel_italic_labels_with_hanging_quotes(tmp_path):
+def test_removed_and_kept_lead_with_italic_labels(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(_finding("dedup_drops", "1 drop", [
         "K1 (jaccard=1.00, 89% covered by kept): dropped 'Squid Lecture 5 hrs' vs kept 'Squid Lecture 4 hrs'"])))
-    paragraphs = Document(str(out)).tables[-1].cell(0, 0).paragraphs
+    paragraphs = _notes_comment(out).paragraphs
     at = next(i for i, p in enumerate(paragraphs) if p.text.startswith("Removed:"))
     removed, kept = paragraphs[at:at + 2]
-    for para, label in ((removed, "Removed:\t"), (kept, "Kept:\t")):
+    for para, label, text in ((removed, "Removed: ", '"Squid Lecture 5 hrs"'),
+                              (kept, "Kept: ", '"Squid Lecture 4 hrs"')):
         assert para.runs[0].text == label and para.runs[0].italic
-        assert para.paragraph_format.first_line_indent < 0
-    assert removed.paragraph_format.space_after.pt == 0 and removed.paragraph_format.keep_with_next
-    assert kept.paragraph_format.space_after.pt == 3
+        assert para.runs[1].text == text and not para.runs[1].italic
+
+
+def test_delete_all_comments_leaves_the_clean_documents_text(tmp_path):
+    """The copy is the one download: Word's Review > Delete All Comments
+    must leave exactly the clean document's text, tracked insertions
+    included, whatever the copy marked (a year split out of its run, a
+    heading, a citation in a w:ins) or listed in its review notes."""
+    clean = _with_appendix_note(tmp_path)
+    out, n = rc.write_review_docx(clean, _report(
+        _finding("implausible_year", "entry 3 (M2B): end_date=1912 -- before 1959", [f"Grant Title: {GRANT}"]),
+        _finding("enrichment_failures", "1 publication(s) failed PubMed enrichment", [ENRICHED]),
+        _finding("section_lost", "M2B: 1 entry absent from the RESEARCH section"),
+        _finding("output_hygiene", "1 boilerplate line(s)", ["Insert dates here (MM/YYYY)"]),
+        _finding("dedup_drops", "1 drop", ["K1 (jaccard=1.00): dropped 'Squid Lecture' vs kept 'Squid Talk'"])))
+    assert n == 5 and len(_comments(out)) == 3 and _notes(out)  # every kind of mark is in play
+    clean_doc = Document(str(clean))
+    assert _body_text(Document(str(out))) == _body_text(clean_doc)  # comments sit outside the text
+    deleted = _delete_all_comments(out)
+    assert list(deleted.comments) == []
+    assert _body_text(deleted) == _body_text(clean_doc)
+    assert [el.tag for el in deleted.element.body] == [el.tag for el in clean_doc.element.body]
+    assert not any(p.text.startswith(rc.REVIEW_NOTES_TITLE) for p in deleted.paragraphs)
 
 
 def test_a_copy_with_nothing_to_flag_is_written_and_says_what_is_not_checked(tmp_path):
@@ -506,14 +531,14 @@ def test_a_copy_with_nothing_to_flag_is_written_and_says_what_is_not_checked(tmp
     assert out == tmp_path / f"DOC{REVIEW_DOCX_SUFFIX}" and n == 0
     assert _comments(out) == [] and _notes(out) == []
     assert _not_checked(out) == [rc.NOT_CHECKED_TITLE, rc.NOT_CHECKED_INSTRUCTION,
-                                 *(f"\u2022\t{spot.sentence}" for spot in blind_spots())]
+                                 *(f"\u2022 {spot.sentence}" for spot in blind_spots())]
     assert len(_not_checked(out)) > 2  # COVERAGE.md lists at least one blind spot
 
 
 def test_what_is_not_checked_closes_a_box_that_has_notes(tmp_path):
     out, _ = rc.write_review_docx(_clean_docx(tmp_path), _report(
         _finding("output_hygiene", "1 boilerplate line(s)", ["Insert dates here (MM/YYYY)"])))
-    lines = _box_lines(out, rc.REVIEW_NOTES_TITLE)
+    lines = _note_lines(out)
     assert lines[0] == "Stray text to delete (1)"
     assert lines[-len(blind_spots()) - 2:] == _not_checked(out)
 
@@ -531,7 +556,7 @@ def test_comments_leave_the_body_the_doctor_reads_unchanged(tmp_path):
         _finding("pipe_leaks", "x", [CITATION]),
         _finding("section_lost", "M2B: 1 entry absent from the RESEARCH section")))
     assert _notes(out) == []
-    assert _cv_blocks(out) == read_docx_blocks(str(clean))
+    assert read_docx_blocks(str(out)) == read_docx_blocks(str(clean))
     assert len(list(Document(str(clean)).comments)) == 0  # the clean document is untouched
 
 
@@ -689,9 +714,7 @@ def test_the_fix_leaves_every_other_cell_as_delivered(tmp_path):
     clean = _with_grant_tables(tmp_path, ("Ada Testowner", ""))
     out, _ = rc.write_review_docx(clean, _report(OWNER_PI_ROLE_FINDING), _stage4("Testowner"))
     before, after = read_docx_table_rows(str(clean)), read_docx_table_rows(str(out))
-    # The copy's one table more is the review-notes box it always closes with (#1589).
-    assert len(after) == len(before) + 1
-    after = after[:len(before)]
+    assert len(after) == len(before)  # the review notes are a comment, not a table
     changed = [(t, r) for t, (a, b) in enumerate(zip(before, after, strict=True))
                for r, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
     assert changed == [(0, 3)]
@@ -709,7 +732,8 @@ def test_the_comment_map_names_each_comments_finding_by_its_id(tmp_path):
         _finding("dedup_drops", "1 entry dropped", ["entry 9: K1 (jaccard=1.00): dropped 'x' vs kept 'y'"])))
     marked = json.loads(rc.comment_map_path(out).read_text(encoding="utf-8"))
     assert rc.comment_map_path(out).name == "DOC_wcm_review_comments.json"
-    assert [m["comment_id"] for m in marked] == [c.comment_id for c in Document(str(out)).comments]
+    assert [m["comment_id"] for m in marked] == [c.comment_id for c in Document(str(out)).comments
+                                                 if c.author == rc.COMMENT_AUTHOR]
     assert [(m["lint"], m["shape"], m["severity"], m["entry_index"]) for m in marked] == [
         ("implausible_year", None, "ERROR", 3),
         ("stage6_render_warnings", "reroute_refused", "WARN", None)]

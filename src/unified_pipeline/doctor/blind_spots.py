@@ -4,7 +4,7 @@
 level, each cell either covered by named lints with measured recall or
 marked BLIND. Its "Not checked" section restates each BLIND cell as one
 plain-language sentence, and `blind_spots()` reads those sentences so the
-review copy's "not checked" box (#1589) can print them. The file is the one
+review copy's "not checked" notes (#1589) can print them. The file is the one
 definition; nothing here repeats it.
 
 Kept to the standard library: the backend imports it without python-docx.

@@ -73,10 +73,11 @@ def _docx(*paragraphs):
 
 
 def test_labels_load_in_the_autopsy_label_store(db, store, tmp_path):
-    """LBL001 has a diff and verdicts; LBL002 has neither and gets no label."""
+    """LBL001 has a diff and verdicts, stored before #1754 under the run's id
+    alone (uploader None); LBL002 has neither and gets no label."""
     _seed_runs(db, "LBL001", "LBL002")
-    store.put_file("LBL001", svc.corrected_diff_key("LBL001"), json.dumps(_DIFF).encode())
-    store.put_file("LBL001", svc.corrected_verdicts_key("LBL001"), json.dumps(_VERDICTS).encode())
+    store.put_file("LBL001", "corrected/LBL001_diff.json", json.dumps(_DIFF).encode())
+    store.put_file("LBL001", "corrected/LBL001_verdicts.json", json.dumps(_VERDICTS).encode())
 
     labels = script.write_labels(db, tmp_path / "labels")
 
@@ -92,21 +93,39 @@ def test_labels_load_in_the_autopsy_label_store(db, store, tmp_path):
 def test_a_copy_uploaded_before_its_verdicts_gets_them_on_the_way(db, store, tmp_path):
     _seed_runs(db, "LBL003")
     store.put_file("LBL003", "outputs/LBL003_wcm.docx", _docx("BIBLIOGRAPHY", "A synthetic line."))
-    svc.record_corrected_docx(db, "LBL003", _docx("BIBLIOGRAPHY"))
+    svc.record_corrected_docx(db, "LBL003", 5, _docx("BIBLIOGRAPHY"))
 
     label, = script.write_labels(db, tmp_path / "labels")
 
     assert [f["batch_class"] for f in label["findings"]] == ["deleted"] and label["doctor_review"] == []
-    assert json.loads(store.get_file("LBL003", svc.corrected_verdicts_key("LBL003")))["note"]
-    assert store.get_file("LBL003", svc.corrected_doctor_key("LBL003"))
+    assert json.loads(store.get_file("LBL003", svc.corrected_verdicts_key("LBL003", 5)))["note"]
+    assert store.get_file("LBL003", svc.corrected_doctor_key("LBL003", 5))
+
+
+def test_one_label_holds_every_uploaders_copy_and_a_pre_1754_one(db, store, tmp_path):
+    """#1754: LBL004 has a copy under the run's id alone and two users' copies
+    (owner and staff); its one label carries all three copies' changes and
+    verdicts, numbered once."""
+    _seed_runs(db, "LBL004")
+    for uploader_id in (None, 3, 8):
+        store.put_file("LBL004", svc.corrected_diff_key("LBL004", uploader_id), json.dumps(_DIFF).encode())
+        store.put_file("LBL004", svc.corrected_verdicts_key("LBL004", uploader_id),
+                       json.dumps(_VERDICTS).encode())
+
+    label, = script.write_labels(db, tmp_path / "labels")
+
+    assert [f["id"] for f in label["findings"]] == [f"LBL004-R{n:02d}" for n in range(1, 7)]
+    assert len(label["doctor_review"]) == 6
+    loaded = doctor_vs_autopsy.load_labels(tmp_path / "labels")
+    assert loaded.uids == {"LBL004"} and len(loaded.verified) == 6
 
 
 def test_a_run_whose_verdicts_are_missing_is_skipped_and_logged(db, store, tmp_path, caplog):
     """LBL005 has a diff but neither verdicts nor the copy to make them from."""
     _seed_runs(db, "LBL001", "LBL005")
     for run_id in ("LBL001", "LBL005"):
-        store.put_file(run_id, svc.corrected_diff_key(run_id), json.dumps(_DIFF).encode())
-    store.put_file("LBL001", svc.corrected_verdicts_key("LBL001"), json.dumps(_VERDICTS).encode())
+        store.put_file(run_id, svc.corrected_diff_key(run_id, 5), json.dumps(_DIFF).encode())
+    store.put_file("LBL001", svc.corrected_verdicts_key("LBL001", 5), json.dumps(_VERDICTS).encode())
 
     labels = script.write_labels(db, tmp_path / "labels")
 
