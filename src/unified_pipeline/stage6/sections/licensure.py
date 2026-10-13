@@ -440,14 +440,12 @@ def _is_expiry_column_header(entry: LicensureEntry) -> bool:
 
 
 def _element_span(raw: Mapping[str, Any]) -> tuple[int, int] | None:
-    """An entry's (start, end) element index, or None when it has none."""
-    start = raw.get('element_idx_start')
-    if not isinstance(start, int) or isinstance(start, bool):
-        return None
-    end = raw.get('element_idx_end')
-    if not isinstance(end, int) or isinstance(end, bool):
-        end = start
-    return start, end
+    """An entry's (start, end) element index, or None unless both are ints
+    (a split table cell's index is a string such as "37.1")."""
+    start, end = raw.get('element_idx_start'), raw.get('element_idx_end')
+    if isinstance(start, int) and isinstance(end, int):
+        return start, end
+    return None
 
 
 def _rows_under_expiry_header(
@@ -458,26 +456,23 @@ def _rows_under_expiry_header(
     Walks the entries in document order, not the sorted order
     `_resolve_licensure` renders in: a run starts at an
     `_is_expiry_column_header` entry and takes each licence row (a state or
-    a number) that starts on the element right after the previous entry
-    ends. A gap, an entry with no element index, or any other entry ends it.
+    a number) that starts on the element right after the run's last entry
+    ends, so a gap or any other entry in between ends it. An entry with no
+    integer element index is never in a run.
     """
     spans = [(span, raw) for raw in entries
              if (span := _element_span(raw)) is not None]
     spans.sort(key=lambda pair: pair[0])
     labelled: set[int] = set()
-    under_header = False
-    previous_end: int | None = None
+    run_end: int | None = None  # where the run's last entry ends
     for (start, end), raw in spans:
         entry = _normalize_licensure_entry(raw)
         if _is_expiry_column_header(entry):
-            under_header = True
-        elif (under_header and previous_end is not None
-              and start == previous_end + 1
+            run_end = end
+        elif (run_end is not None and start == run_end + 1
               and (entry.state or entry.number)):
             labelled.add(id(raw))
-        else:
-            under_header = False
-        previous_end = end
+            run_end = end
     return labelled
 
 
