@@ -94,6 +94,31 @@ def _unwrap_content_control(sdt: BaseOxmlElement) -> int:
     return held
 
 
+#: The table-level parents of a content control python-docx's table walks
+#: skip: `w:tbl > w:sdt` wraps rows (`table.rows`), `w:tr > w:sdt` wraps
+#: cells (`row.cells`), and `w:tc > w:sdt` wraps a cell's paragraphs and
+#: tables (`cell.paragraphs`, `cell.iter_inner_content()`).
+_TABLE_LEVEL_SDT_PARENTS = frozenset({qn('w:tbl'), qn('w:tr'), qn('w:tc')})
+
+
+def _unwrap_table_content_controls(body: BaseOxmlElement) -> None:
+    """Unwrap every content control whose parent is a table, row or cell,
+    anywhere under `body` (nested tables included), so its rows, cells or
+    cell content become ordinary children of that parent, in order (#1668).
+    Without this a wrapped row or cell, or a cell's wrapped paragraphs, are
+    invisible to stage 1 and the doctor: h2313 lost 81 paragraphs that way.
+
+    Document order visits an outer control before anything inside it. A
+    control nested directly in an outer one is unwrapped with it, and is then
+    detached (`getparent()` is None), so the parent check skips it. Table
+    positions do not move: `doc.tables` and `doc.paragraphs` index the same
+    elements before and after."""
+    for sdt in list(body.iter(_W_SDT)):
+        parent = sdt.getparent()
+        if parent is not None and parent.tag in _TABLE_LEVEL_SDT_PARENTS:
+            _unwrap_content_control(sdt)
+
+
 def unwrap_body_content_controls(doc: DocxDocument) -> list[range]:
     """Unwrap every body-level content control (`w:sdt`) of `doc` in place:
     its paragraphs and tables become direct body children, in document order,
@@ -108,10 +133,9 @@ def unwrap_body_content_controls(doc: DocxDocument) -> list[range]:
     stage 1 numbered `para_idx`, and `doc.tables[table_index]` the table it
     numbered `table_index`.
 
-    Only body-level controls are unwrapped. A run-level one sits inside a
-    w:p and `get_paragraph_text` already reads it. One inside a table cell,
-    or wrapping a row or a cell, is not unwrapped here, and python-docx's
-    row and cell walks skip it (#1668).
+    Table-level controls are unwrapped too, at any depth
+    (`_unwrap_table_content_controls`, #1668). A run-level one sits inside a
+    w:p and `get_paragraph_text` already reads it, so it is left in place.
 
     Returns the body-child positions each outermost control's content now
     occupies, so a caller can tell which paragraphs came from one (the
@@ -129,12 +153,14 @@ def unwrap_body_content_controls(doc: DocxDocument) -> list[range]:
         if held:
             spans.append(range(position, position + held))
         position += held
+    _unwrap_table_content_controls(body)
     return spans
 
 
 def open_source_docx(docx_path: str | Path) -> DocxDocument:
-    """The source CV, opened for reading, with its body-level content
-    controls unwrapped (`unwrap_body_content_controls`, #1656). Every
+    """The source CV, opened for reading, with its body-level and
+    table-level content controls unwrapped (`unwrap_body_content_controls`,
+    #1656, #1668). Every
     pipeline reader of a source document opens it through this, so stage 1's
     `para_idx` and `table_index` index this document's `paragraphs` and
     `tables` the same way everywhere."""

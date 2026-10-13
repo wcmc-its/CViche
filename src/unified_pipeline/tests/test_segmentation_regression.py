@@ -561,6 +561,31 @@ def test_iter_source_block_lines_reads_body_content_controls_with_their_own_bloc
     assert iter_source_lines(str(path)) == [line for _, line in pairs]
 
 
+def test_iter_source_block_lines_reads_table_level_content_controls(tmp_path):
+    """#1668: a row-wrapping, cell-wrapping or in-cell content control's text
+    is read with its table's block, in row order."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    def tc(text: str) -> str:
+        return "<w:tc>" + _p_xml(text) + "</w:tc>"
+
+    rows = ("<w:tr>" + tc("plain cell") + _sdt_xml(tc("wrapped cell")) + "</w:tr>"
+            + "<w:tr>" + tc("left cell") + "<w:tc>" + _sdt_xml(_p_xml("in-cell control line")) + "</w:tc></w:tr>"
+            + _sdt_xml("<w:tr>" + tc("wrapped row left") + tc("wrapped row right") + "</w:tr>"))
+    grid = '<w:gridCol w:w="3000"/><w:gridCol w:w="3000"/>'
+    doc = Document()
+    doc.element.body.insert(0, parse_xml(
+        f'<w:tbl {nsdecls("w")}><w:tblPr/><w:tblGrid>{grid}</w:tblGrid>{rows}</w:tbl>'))
+    path = tmp_path / "table_controls.docx"
+    doc.save(path)
+
+    assert iter_source_block_lines(str(path)) == [
+        (0, "plain cell"), (0, "wrapped cell"), (0, "left cell"), (0, "in-cell control line"),
+        (0, "wrapped row left"), (0, "wrapped row right"),
+    ]
+
+
 def test_a_content_control_lost_whole_is_a_lost_block_of_its_own_kind():
     covered = [_covered_line(i) for i in range(200)]
     lost = [_lost_line(i) for i in range(5)]

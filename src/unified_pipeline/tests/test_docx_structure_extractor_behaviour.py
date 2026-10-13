@@ -2666,20 +2666,88 @@ def test_unwrap_leaves_a_document_without_body_content_controls_byte_identical()
     assert doc.element.body.xml == before
 
 
-def test_a_run_level_or_cell_level_content_control_is_left_where_it_is():
-    """Only body-level controls are unwrapped: a run-level one is read by
-    `get_paragraph_text` already, and one inside a table cell is left to
-    python-docx's cell walk (#1668)."""
+def test_a_run_level_content_control_is_left_where_it_is():
+    """A run-level control sits inside a w:p and `get_paragraph_text` already
+    reads it, so the unwrap leaves it in place."""
     doc = Document()
     para = doc.add_paragraph("Name: ")
     para._p.append(parse_xml(f'<w:sdt {nsdecls("w")}><w:sdtContent><w:r><w:t>Example Person</w:t></w:r>'
                              '</w:sdtContent></w:sdt>'))
-    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
-    cell._tc.append(parse_xml(_w_sdt(_w_p("In a cell"), declare_ns=True)))
     before = doc.element.body.xml
     assert unwrap_body_content_controls(doc) == []
     assert doc.element.body.xml == before
     assert get_paragraph_text(doc.paragraphs[0]) == "Name: Example Person"
+
+
+def _w_tc(inner_xml: str) -> str:
+    return f"<w:tc>{inner_xml}</w:tc>"
+
+
+def _w_tr(cells_xml: str) -> str:
+    return f"<w:tr>{cells_xml}</w:tr>"
+
+
+#: A two-column table holding each table-level content control shape (#1668),
+#: as (rows as the XML gives them, rows as stage 1 should read them).
+TABLE_CONTROL_ROWS = [
+    (_w_tr(_w_tc(_w_p("Year")) + _w_tc(_w_p("Distinction"))), ["Year", "Distinction"]),
+    # Cell-wrapping: w:tr > w:sdt > w:sdtContent > w:tc.
+    (_w_tr(_w_tc(_w_p("1891")) + _w_sdt(_w_tc(_w_p("Plover Lantern Prize")))),
+     ["1891", "Plover Lantern Prize"]),
+    # In-cell: w:tc > w:sdt > w:sdtContent > w:p, two paragraphs kept in order.
+    (_w_tr(_w_tc(_w_p("1892")) + _w_tc(_w_sdt(_w_p("Quillon Medal") + _w_p("Second line of it"))
+                                       + _w_p("After the control"))),
+     ["1892", "Quillon Medal\nSecond line of it\nAfter the control"]),
+    # Row-wrapping: w:tbl > w:sdt > w:sdtContent > w:tr.
+    (_w_sdt(_w_tr(_w_tc(_w_p("1893")) + _w_tc(_w_p("Tamsin Grove Award")))),
+     ["1893", "Tamsin Grove Award"]),
+    # Nested: a row control holding a row control, and a cell control
+    # holding an in-cell control.
+    (_w_sdt(_w_sdt(_w_tr(_w_tc(_w_p("1894")) + _w_sdt(_w_tc(_w_sdt(_w_p("Vellum Ring Honour")))))))
+     , ["1894", "Vellum Ring Honour"]),
+]
+
+
+def _table_control_doc() -> Document:
+    grid = '<w:gridCol w:w="3000"/><w:gridCol w:w="3000"/>'
+    rows = "".join(xml for xml, _ in TABLE_CONTROL_ROWS)
+    doc = Document()
+    doc.add_paragraph("HONORS")
+    doc.element.body.insert(1, parse_xml(
+        f'<w:tbl {nsdecls("w")}><w:tblPr/><w:tblGrid>{grid}</w:tblGrid>{rows}</w:tbl>'))
+    doc.add_paragraph("After the table")
+    return doc
+
+
+def test_table_level_content_controls_are_unwrapped_in_order():
+    """Row-wrapping, cell-wrapping and in-cell controls, nested ones
+    included, become ordinary rows, cells and cell content (#1668); body
+    paragraph and table positions do not move."""
+    doc = _table_control_doc()
+    assert len(doc.tables[0].rows) == 3          # python-docx skips the wrapped rows
+    assert unwrap_body_content_controls(doc) == []
+    assert not doc.element.body.findall(f".//{qn('w:sdt')}")
+    table = doc.tables[0]
+    assert [[c.text for c in row.cells] for row in table.rows] == [cells for _, cells in TABLE_CONTROL_ROWS]
+    assert [p.text for p in doc.paragraphs] == ["HONORS", "After the table"]
+
+
+def test_a_table_level_content_control_inside_a_nested_table_is_unwrapped():
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1).cell(0, 0)
+    inner = outer.add_table(rows=1, cols=1)
+    inner.rows[0]._tr.append(parse_xml(_w_sdt(_w_tc(_w_p("Inner wrapped cell")), declare_ns=True)))
+    unwrap_body_content_controls(doc)
+    assert [c.text for c in outer.tables[0].rows[0].cells] == ["", "Inner wrapped cell"]
+
+
+def test_stage_1_reads_every_table_level_content_control(tmp_path):
+    path = tmp_path / "table_controls.docx"
+    _table_control_doc().save(str(path))
+    els = extract_unified_elements(str(path))["elements"]
+    table = next(e for e in els if e["type"] == "table")
+    assert [[c["text"] for c in row] for row in table["data"]] == [cells for _, cells in TABLE_CONTROL_ROWS]
+    assert [e["text"] for e in els if e["type"] == "paragraph"] == ["HONORS", "After the table"]
 
 
 def test_an_empty_body_content_control_is_dropped_and_holds_no_span():
