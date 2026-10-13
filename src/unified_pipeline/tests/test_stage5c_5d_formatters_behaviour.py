@@ -1955,3 +1955,20 @@ def test_5d_ungrounded_reason_exempts_the_cv_owner():
 def test_5d_citation_owner_is_none_without_a_last_name(cv_owner):
     assert s5d.citation_owner(cv_owner) is None
 
+
+
+@pytest.mark.parametrize(("own_text", "neighbour_text"), [
+    # Both hold every word: a neighbour must hold MORE of them, so a tie keeps it.
+    ("Moth lore wing dust gale fern reed.", "Moth lore wing dust."),
+    # Both as like it (2 of 4 words against 3 of 6): a tie in likeness keeps it.
+    ("Moth lore.", "Moth lore wing gale fern."),
+])
+def test_5d_parse_llm_output_split_reply_keeps_a_citation_a_neighbour_only_ties(own_text, neighbour_text):
+    batch = {"CIT-0001": {"text": own_text}, "CIT-0002": {"text": neighbour_text}}
+    reply = _reply([("CIT-0001", "Moth lore wing dust."), ("CIT-0001b", "never sent")])
+    assert sorted(s5d.parse_llm_output(reply, batch)) == ["CIT-0001"]
+
+
+def test_5d_parse_llm_output_split_reply_drops_a_citation_that_is_not_text():
+    reply = _reply([("CIT-0001", ["Moth lore wing dust."]), ("CIT-0001b", "never sent")])
+    assert s5d.parse_llm_output(reply, {"CIT-0001": {"text": "Moth lore wing dust."}}) == {}
