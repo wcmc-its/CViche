@@ -10,6 +10,7 @@ for local-only development.
 
 import logging
 import os
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -406,6 +407,20 @@ class S3RunStorage(RunStorage):
             if isinstance(translated, StorageKeyNotFound):
                 return False
             raise
+
+    def last_modified(self, run_id: str, key: str) -> datetime:
+        s3_key = self._s3_key(run_id, key)
+        try:
+            response = self._s3.head_object(Bucket=self._bucket, Key=s3_key)
+        except self._s3.exceptions.ClientError as e:
+            # The same mapping as exists(): a translated StorageKeyNotFound is
+            # an absent object; anything else (AccessDenied, an outage) propagates.
+            code = e.response.get("Error", {}).get("Code", "")
+            translated = _translate_client_error(code, f"s3://{self._bucket}/{s3_key}")
+            if isinstance(translated, StorageKeyNotFound):
+                raise translated from e
+            raise
+        return response["LastModified"].astimezone(UTC)
 
     def get_malware_scan_status(self, run_id: str, key: str) -> str | None:
         # A ClientError (AccessDenied without s3:GetObjectTagging, an outage)

@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.storage.base import (
@@ -253,6 +254,12 @@ class LocalRunStorage(RunStorage):
 
     def exists(self, run_id: str, key: str) -> bool:
         return self._resolve(run_id, key).exists()
+
+    def last_modified(self, run_id: str, key: str) -> datetime:
+        path = self._resolve(run_id, key)
+        if not path.exists():
+            raise StorageKeyNotFound(f"No such file: {path}")
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
 
     def get_malware_scan_status(self, run_id: str, key: str) -> str | None:
         # Files on a local disk carry no object tags, so nothing is ever scanned.

@@ -94,6 +94,7 @@ describe('status pills', () => {
     expect(member.result.current.search).toContain('status=failed')
     expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'red', feedback: 'needed' })).toEqual({ feedback: 'needed' })
     expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'running' })).toEqual({ status: 'running' })
+    expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'corrected' })).toEqual({ status: 'corrected' })
   })
 })
 

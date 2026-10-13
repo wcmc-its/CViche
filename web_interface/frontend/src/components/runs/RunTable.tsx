@@ -1,10 +1,13 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Clock, CheckCircle2, Check, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react'
 import { formatRelativeDate } from '../../utils'
 import { PHONE_QUERY, useMediaQuery } from '../../hooks/useMediaQuery'
 import type { RunSummary } from '../../types'
 import { OWNER_UNKNOWN_LABEL, earlierRunHasFeedback, runByFilterValue, runByLabel } from './runGroups'
-import { FEEDBACK_VALUE_LABEL, feedbackGivenTitle, feedbackState } from './runFeedback'
+import {
+  FEEDBACK_VALUE_LABEL, correctedCopiesPath, correctedLabel, correctedTitle, feedbackGivenTitle, feedbackState,
+} from './runFeedback'
 import type { RunGroup, SortDir, SortField } from './runGroups'
 import type { RunFilterKey } from './runFilters'
 import { BAND_STYLE, NO_SCORE_TEXT, scoreTitle } from './runQuality'
@@ -187,6 +190,24 @@ function FeedbackCell({ run, allRunsView, currentUserId, earlierGiven }: Feedbac
   }
 }
 
+/** "Corrected" (or "Corrected ×2") under the feedback state when reviewers sent corrected
+ *  copies; the tooltip names each uploader, role and date, and it opens the run page at the copies. */
+function CorrectedLine({ run }: { run: RunSummary }) {
+  const copies = run.corrected_copies ?? []
+  const label = correctedLabel(copies)
+  if (!label) return null
+  return (
+    <Link
+      to={correctedCopiesPath(run.run_id)}
+      title={correctedTitle(copies)}
+      onClick={(e) => e.stopPropagation()}
+      className={`text-xs font-medium text-gray-700 ${LINK_HOVER}`}
+    >
+      {label}
+    </Link>
+  )
+}
+
 interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir' | 'onSort' | 'onOpenBatch'> {
   run: RunSummary
   /** The cell shown first: faculty name + filename for a group row, filename for an earlier run. */
@@ -245,7 +266,10 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, allRuns
         </td>
       )}
       <td className={`${CELL} text-left ${muted}`}>
-        <FeedbackCell run={run} allRunsView={allRunsView} currentUserId={currentUserId} earlierGiven={earlierGiven} />
+        <div className="flex flex-col items-start gap-0.5">
+          <FeedbackCell run={run} allRunsView={allRunsView} currentUserId={currentUserId} earlierGiven={earlierGiven} />
+          <CorrectedLine run={run} />
+        </div>
       </td>
     </tr>
   )
@@ -319,7 +343,7 @@ interface CardProps {
   onSelectRun: (runId: string) => void
 }
 
-/** One run as a stacked card (phones): name, file, then status, score (admin) and started date. */
+/** One run as a stacked card (phones): name, file, then status, Corrected (when copies exist), score (admin) and started date. */
 function RunCard({ run, head, earlier = false, allRunsView, onSelectRun }: CardProps) {
   const { display, tooltip } = formatRelativeDate(run.started_at)
   const bg = run.status === 'running' ? 'bg-primary-50' : earlier ? 'bg-sand-50' : 'bg-white'
@@ -334,6 +358,7 @@ function RunCard({ run, head, earlier = false, allRunsView, onSelectRun }: CardP
       {head}
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
         <StatusBadge status={run.status} />
+        <CorrectedLine run={run} />
         {allRunsView && <ScoreCell run={run} earlier={earlier} />}
         <span title={tooltip} className="text-gray-500">{display}</span>
       </div>

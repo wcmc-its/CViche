@@ -5,6 +5,7 @@ export type {
   QualityBand, DoctorSeverity, QualityDimension, QualityGate, ScoreRowWording, DoctorFindingGroup, DoctorFindingInstance, RunDoctorReport, FixConfidence, FixEffort, FixListProblem, FixListItem, FixListGroup, RunFixList,
   RunQualityReport, RunReviewNote, RunFeedbackSummary, FeedbackReviewer, RunFeedbackFilter,
   RunInputFormatFilter, RunStatusFilter, StatusFilterCounts,
+  CorrectedCopySummary, CorrectedCopyDetail, CorrectedCopyDownload,
 } from './runs'
 export type { FeedbackFormData, FeedbackDetail, WcmSection, CorrectedDocxResult } from './feedback'
 export type { Stats, SubmissionSplit, DepartmentSubmissions, ConsentPublishPreview, AdminUser, AdminRun, AdminRunsResponse, QualityScoreResult, SystemConfig, FeedbackData, AggregatedScores } from './admin'

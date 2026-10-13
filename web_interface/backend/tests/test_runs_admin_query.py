@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from app.models import Run, User
+from app.models import CorrectedCopy, Run, User
 from app.services.runs_admin_query import (
     InputFormatFilter,
     RunFilters,
@@ -43,7 +43,7 @@ class TestParseRunFilters:
         assert filters.run_by_on_behalf is True and filters.run_by_user_id is None
 
     def test_status_filter_values(self):
-        for value in ("running", "failed", "red"):
+        for value in ("running", "failed", "red", "corrected"):
             assert parse_run_filters(None, None, None, None, None, value).status.value == value
         assert parse_run_filters(None, None, None, None, None, "").status is None
 
@@ -193,6 +193,24 @@ def test_status_failed_lists_only_the_failed_runs(db, status_runs):
 
 def test_status_red_is_the_red_score_band(db, status_runs):
     assert _status_ids(db, StatusFilter.RED) == ["Q00002"]
+
+
+def _correct(db, run_id, user_id):
+    db.add(CorrectedCopy(run_id=run_id, user_id=user_id, changes=1, uploaded_at=datetime(2026, 10, 13),
+                         storage_key=f"corrected/{run_id}_u{user_id}_corrected.docx"))
+    db.commit()
+
+
+def test_status_corrected_lists_only_runs_with_a_corrected_copy_and_counts_them(db, seeded, status_runs):
+    alice, bob = seeded
+    _correct(db, "Q00000", alice.id)
+    _correct(db, "Q00003", alice.id)
+    _correct(db, "Q00003", bob.id)  # two copies of one run: still one run
+    assert _status_ids(db, StatusFilter.CORRECTED) == ["Q00000", "Q00003"]
+    assert _status_ids(db, StatusFilter.CORRECTED, department="Medicine") == ["Q00000"]
+    assert build_filter_options(db, RunFilters()).status.corrected == 2
+    assert build_filter_options(db, RunFilters(department="Library")).status.corrected == 1
+    assert (my_status_counts(db, alice.id).corrected, my_status_counts(db, bob.id).corrected) == (1, 1)
 
 
 def test_status_composes_with_other_filters(db, status_runs):

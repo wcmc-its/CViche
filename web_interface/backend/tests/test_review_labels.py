@@ -9,6 +9,7 @@ import pytest
 
 from app.models import Run, User
 from app.services import review_loop_service as svc
+from app.timeutil import utc_now
 
 _BACKEND = Path(__file__).parent.parent
 _ROOT = _BACKEND.parent.parent
@@ -93,7 +94,7 @@ def test_labels_load_in_the_autopsy_label_store(db, store, tmp_path):
 def test_a_copy_uploaded_before_its_verdicts_gets_them_on_the_way(db, store, tmp_path):
     _seed_runs(db, "LBL003")
     store.put_file("LBL003", "outputs/LBL003_wcm.docx", _docx("BIBLIOGRAPHY", "A synthetic line."))
-    svc.record_corrected_docx(db, "LBL003", 5, _docx("BIBLIOGRAPHY"))
+    svc.record_corrected_docx(db, "LBL003", 5, _docx("BIBLIOGRAPHY"), utc_now())
 
     label, = script.write_labels(db, tmp_path / "labels")
 

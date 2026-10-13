@@ -3,17 +3,20 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from app.api.upload import _read_bounded
 from app.auth import get_current_user
 from app.database import get_db
-from app.errors import bad_request
+from app.errors import bad_request, not_found
 from app.models import Feedback, Run, RunState, Step, User
 from app.schemas import (
+    CorrectedCopyDetail,
     CorrectedDocxResponse,
     FeedbackDetail,
     FeedbackResponse,
@@ -21,16 +24,21 @@ from app.schemas import (
     RunFeedbackStatus,
     iso_with_offset,
 )
-from app.services import review_loop_service
+from app.services import corrected_copy_service, review_loop_service
 from app.services.config_service import MAX_UPLOAD_SIZE
+from app.services.malware_scan import require_clean_scan, scan_state
 from app.services.run_creation import _reject_active_docx_content
 from app.services.run_service import check_run_access
 from app.services.runs_admin_query import load_run_feedback_with_reviewers
 from app.services.upload_validation import _validate_docx_magic
+from app.storage import get_storage
+from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 # Complete WCM section mapping (matches runs.py)
@@ -390,7 +398,8 @@ async def upload_corrected_docx(
     and still cannot submit the feedback survey), and the CV upload's gates
     on the file: its size cap, a .docx name, the docx magic and zip-bomb
     bounds, and the active-content refusal. GuardDuty scans the bucket as for every
-    upload; the copy is never served back, so no download waits on the scan.
+    upload; the copy is served back only by download_corrected_copy, which
+    waits on that scan as the original CV's download does.
     """
     check_run_access(run_id, current_user, db, allow_staff=True)
     if not file.filename or Path(file.filename).suffix.lower() != ".docx":
@@ -400,7 +409,7 @@ async def upload_corrected_docx(
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
     await _reject_active_docx_content(content)
     changes = await run_in_threadpool(review_loop_service.record_corrected_docx, db, run_id,
-                                     current_user.id, content)
+                                     current_user.id, content, utc_now())
     logger.info("Corrected copy recorded for run %s by user %s: %d changes", run_id, current_user.id, changes)
     # Verdicts from the review copy's comments and the doctor's re-run (#1654)
     # run after the response, so the confirmation never waits on them; their
@@ -408,6 +417,79 @@ async def upload_corrected_docx(
     background_tasks.add_task(review_loop_service.review_corrected_copy_in_background,
                               run_id, current_user.id, content)
     return CorrectedDocxResponse(changes=changes, summary=review_loop_service.changes_summary(changes))
+
+
+@router.get("/run/{run_id}/feedback/corrected-copies", response_model=list[CorrectedCopyDetail])
+def list_corrected_copies(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[CorrectedCopyDetail]:
+    """Every reviewer's corrected copy of the run, newest first: who uploaded
+    it (and as owner, staff or admin), when, how many changes, and whether
+    the malware scan lets it be downloaded yet.
+
+    Run owner, admin or staff (403 otherwise, 404 for an unknown run): the
+    owner sees staff's copies of their run too.
+    """
+    check_run_access(run_id, current_user, db, read_only=True)
+    storage = get_storage()
+    return [
+        CorrectedCopyDetail(id=copy.id, uploader=copy.uploader, role=copy.role,
+                            uploaded_at=copy.uploaded_at, changes=copy.changes,
+                            mine=copy.user_id == current_user.id,
+                            download=scan_state(storage, run_id, copy.storage_key))
+        for copy in corrected_copy_service.load_copies(db, [run_id]).get(run_id, [])
+    ]
+
+
+@router.get("/run/{run_id}/feedback/corrected-copies/{copy_id}")
+def download_corrected_copy(
+    run_id: str,
+    copy_id: int,
+    as_url: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Download one reviewer's corrected copy of the run (copy_id from
+    list_corrected_copies), named after the run's upload and its uploader.
+
+    Run owner, admin or staff, as for the list. A reviewer uploaded the file,
+    so it is served only once the malware scan passes it, exactly as the
+    original CV is (malware_scan.require_clean_scan: 409 while scanning, 403
+    when flagged or unscannable). ``?as_url=true`` answers 200 ``{"url": ...}``
+    after the same checks, so the page can show a refusal's message; ``url``
+    is null on local storage.
+    """
+    run = check_run_access(run_id, current_user, db, read_only=True)
+    copies = corrected_copy_service.load_copies(db, [run_id]).get(run_id, [])
+    copy = next((c for c in copies if c.id == copy_id), None)
+    if copy is None:
+        raise not_found("Corrected copy not found")
+    name = review_loop_service.corrected_download_name(run.filename, copy.uploader)
+    storage = get_storage()
+    try:
+        if not storage.exists(run_id, copy.storage_key):
+            raise not_found("Corrected copy not found")
+        require_clean_scan(storage, run_id, copy.storage_key)
+        # S3 returns a presigned URL that names the download (quoted there);
+        # local storage returns None, so the bytes are proxied below.
+        url = storage.get_download_url(run_id, copy.storage_key, download_name=name)
+        if as_url:
+            # A presigned URL is a short-lived credential: never cache it.
+            return JSONResponse(content={"url": url}, headers={"Cache-Control": "no-store"})
+        if url:
+            return RedirectResponse(url, status_code=307)
+        data = storage.get_file(run_id, copy.storage_key)
+    except FileNotFoundError as e:
+        raise not_found("Corrected copy not found") from e
+    return Response(
+        content=data,
+        media_type=DOCX_MEDIA_TYPE,
+        # RFC 5987: headers are latin-1, and the name carries the CV's and
+        # the uploader's names.
+        headers={"Content-Disposition": f"attachment; filename*=utf-8''{quote(name, safe='')}"},
+    )
 
 
 @router.get("/runs/feedback-status", response_model=list[RunFeedbackStatus])

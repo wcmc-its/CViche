@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RunSummary } from '../../types'
-import { feedbackRank, feedbackState } from './runFeedback'
+import { correctedCopiesPath, correctedLabel, correctedTitle, feedbackRank, feedbackState } from './runFeedback'
 
 const ME = 1
 const OTHER = 2
@@ -37,5 +37,27 @@ describe('feedbackState', () => {
   it('sorts none < awaiting < needed < earlier < given', () => {
     const order = (['given', 'none', 'earlier', 'awaiting', 'needed'] as const).slice().sort((a, b) => feedbackRank(a) - feedbackRank(b))
     expect(order).toEqual(['none', 'awaiting', 'needed', 'earlier', 'given'])
+  })
+})
+
+describe('the Corrected line', () => {
+  const copy = (uploader: string | null, role: string | null) => ({ uploader, role, uploaded_at: '2026-10-13T14:00:00Z' })
+
+  it('reads nothing for no copy, Corrected for one, Corrected ×N for more', () => {
+    expect(correctedLabel(undefined)).toBe('')
+    expect(correctedLabel([])).toBe('')
+    expect(correctedLabel([copy('Pat Example', 'owner')])).toBe('Corrected')
+    expect(correctedLabel([copy('Pat Example', 'owner'), copy('Sam Staff', 'staff')])).toBe('Corrected ×2')
+  })
+
+  it('titles each copy with its uploader, role and date, and names an unknown uploader', () => {
+    const title = correctedTitle([copy('Sam Staff', 'staff'), copy(null, null)]).split('\n')
+    expect(title).toHaveLength(2)
+    expect(title[0]).toMatch(/^Sam Staff \(staff\) · .*Oct 13/)
+    expect(title[1]).toMatch(/^unknown uploader · /)
+  })
+
+  it('links to the run page at its corrected copies', () => {
+    expect(correctedCopiesPath('RUN 1')).toBe('/run/RUN%201#corrected-copies')
   })
 })

@@ -223,7 +223,7 @@ def test_admin_delete_running_run_is_409_and_untouched(client, db):
 
 
 def _seed_children(db, run_id, user_id):
-    from app.models import Feedback, LLMUsage, Log, RunMetrics
+    from app.models import CorrectedCopy, Feedback, LLMUsage, Log, RunMetrics
     db.add_all([
         Log(run_id=run_id, message="m"),
         LLMUsage(run_id=run_id, step_number=1, model="m", prompt_tokens=1,
@@ -233,11 +233,13 @@ def _seed_children(db, run_id, user_id):
                  correction_effort="1 hour", biggest_issue="none",
                  likelihood_to_recommend=3),
         RunMetrics(run_id=run_id),
+        CorrectedCopy(run_id=run_id, user_id=user_id, changes=1, uploaded_at=datetime.now(timezone.utc),
+                      storage_key=f"corrected/{run_id}_u{user_id}_corrected.docx"),
     ])
     db.commit()
 
 
-_CHILD_MODELS = ("Step", "Log", "LLMUsage", "Feedback", "RunMetrics")
+_CHILD_MODELS = ("Step", "Log", "LLMUsage", "Feedback", "RunMetrics", "CorrectedCopy")
 
 
 def _child_counts(db, run_id):

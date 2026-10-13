@@ -4,14 +4,18 @@ synthetic."""
 import io
 import json
 import zipfile
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
 
+from app.models import CorrectedCopy
 from app.services import review_loop_service as svc
 
 _RUN = "RVW001"
 _USER = 7  # the uploader: every copy is stored as one user's (#1754)
+_NOW = datetime(2026, 10, 13, 9, 30, tzinfo=UTC)
+_LATER = datetime(2026, 10, 13, 11, 0, tzinfo=UTC)
 
 
 def _docx(*paragraphs):
@@ -43,7 +47,7 @@ def test_record_corrected_docx_maps_changes_to_stage4_entries(db, store):
     stage4 = {"entries": [{"element_idx_start": 12, "taxonomy_code": "H", "text": _ENTRIES[1]}]}
     store.put_file(_RUN, f"outputs/{_RUN}_fields.json", json.dumps(stage4).encode())
 
-    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0])) == 1
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW) == 1
 
     report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, _USER)))
     assert [(c["change_type"], c["element_idx"]) for c in report["changes"]] == [("deleted", 12)]
@@ -55,20 +59,26 @@ def test_each_uploader_keeps_one_copy_and_a_pre_1754_copy_is_still_listed(db, st
     as uploader None."""
     store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _docx(*_ENTRIES))
     store.put_file(_RUN, f"corrected/{_RUN}_diff.json", b"{}")
-    svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]))
-    svc.record_corrected_docx(db, _RUN, 12, _docx(_ENTRIES[1]))
-    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(*_ENTRIES)) == 0
+    svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW)
+    svc.record_corrected_docx(db, _RUN, 12, _docx(_ENTRIES[1]), _NOW)
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(*_ENTRIES), _LATER) == 0
 
     assert svc.stored_uploaders(_RUN) == [None, _USER, 12]
     assert store.get_file(_RUN, f"corrected/{_RUN}_u{_USER}_corrected.docx") == _docx(*_ENTRIES)
     assert json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, 12)))["by_type"]["deleted"] == 1
     assert svc.corrected_diff_key(_RUN, None) == f"corrected/{_RUN}_diff.json"
+    # One corrected_copies row per uploader; the second upload replaced user 7's.
+    rows = {r.user_id: r for r in db.query(CorrectedCopy).all()}
+    assert set(rows) == {_USER, 12}
+    assert (rows[_USER].changes, rows[_USER].uploaded_at) == (0, _LATER)
+    assert rows[_USER].storage_key == svc.corrected_docx_key(_RUN, _USER)
+    assert (rows[12].changes, rows[12].storage_key) == (1, svc.corrected_docx_key(_RUN, 12))
 
 
 def test_record_corrected_docx_diffs_without_entries_when_stage4_is_unreadable(db, store):
     store.put_file(_RUN, f"outputs/{_RUN}_wcm.docx", _docx(*_ENTRIES))
     store.put_file(_RUN, f"outputs/{_RUN}_fields.json", b"{not json")
-    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0])) == 1
+    assert svc.record_corrected_docx(db, _RUN, _USER, _docx(_ENTRIES[0]), _NOW) == 1
     report = json.loads(store.get_file(_RUN, svc.corrected_diff_key(_RUN, _USER)))
     assert report["changes"][0]["element_idx"] is None
 
@@ -82,9 +92,19 @@ def test_record_corrected_docx_stores_nothing_when_the_copy_cannot_be_read(db, s
             data = b"<not xml" if item.filename == "word/document.xml" else src.read(item)
             dst.writestr(item, data)
     with pytest.raises(HTTPException) as e:
-        svc.record_corrected_docx(db, _RUN, _USER, buf.getvalue())
+        svc.record_corrected_docx(db, _RUN, _USER, buf.getvalue(), _NOW)
     assert e.value.status_code == 400
     assert store.list_files(_RUN, svc.CORRECTED_PREFIX) == []
+    assert db.query(CorrectedCopy).count() == 0
+
+
+@pytest.mark.parametrize("filename, uploader, name", [
+    ("Synthetic Person CV.docx", "Pat Staff", "Synthetic Person CV - corrected by Pat Staff.docx"),
+    ("Synthetic Person CV.pdf", None, "Synthetic Person CV - corrected.docx"),
+    (None, "Pat Staff", "CV - corrected by Pat Staff.docx"),
+])
+def test_corrected_download_name(filename, uploader, name):
+    assert svc.corrected_download_name(filename, uploader) == name
 
 
 @pytest.mark.parametrize("changes, line", [(0, "0 changes recorded"), (1, "1 change recorded"),

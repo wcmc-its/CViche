@@ -1,6 +1,6 @@
 import { api } from './client'
 import { feedbackRoutes } from './routes'
-import type { CorrectedDocxResult, FeedbackDetail, FeedbackFormData } from '../types'
+import type { CorrectedCopyDetail, CorrectedDocxResult, FeedbackDetail, FeedbackFormData } from '../types'
 
 export async function getFeedback(runId: string): Promise<any> {
   return api.get(feedbackRoutes.get(runId))
@@ -23,4 +23,17 @@ export async function uploadCorrectedDocx(runId: string, file: File): Promise<Co
   const body = new FormData()
   body.append('file', file)
   return api.post<CorrectedDocxResult>(feedbackRoutes.correctedDocx(runId), body)
+}
+
+/** Every reviewer's corrected copy of a run, newest first. Run owner, admin or staff. */
+export async function getCorrectedCopies(runId: string): Promise<CorrectedCopyDetail[]> {
+  return api.get<CorrectedCopyDetail[]>(feedbackRoutes.correctedCopies(runId))
+}
+
+/** Where to download one corrected copy: a presigned S3 URL, or null on local
+ *  storage (download from feedbackRoutes.correctedCopy instead). Rejects with the
+ *  backend's message when the download is refused (409 still scanning, 403 flagged). */
+export async function getCorrectedCopyUrl(runId: string, copyId: number): Promise<string | null> {
+  const { url } = await api.get<{ url: string | null }>(feedbackRoutes.correctedCopyUrl(runId, copyId))
+  return url
 }

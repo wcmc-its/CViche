@@ -128,6 +128,28 @@ class RunFeedbackSummary(BaseModel):
     reviewers: list[FeedbackReviewer] | None = None
 
 
+class CorrectedCopySummary(BaseModel):
+    """One reviewer's corrected copy of a run, as the runs list shows it.
+    ``uploader`` and ``role`` are null when the uploader is unknown (a copy
+    stored before #1754); ``role`` is "owner" for the run's submitter, else
+    the uploader's role ("staff" or "admin")."""
+    uploader: str | None = None
+    role: str | None = None
+    uploaded_at: TZDateTime
+
+
+class CorrectedCopyDetail(CorrectedCopySummary):
+    """GET /run/{id}/feedback/corrected-copies: one copy on the run page.
+    ``mine`` marks the caller's own copy, which their next upload replaces.
+    ``download`` is a malware_scan.ScanState value: "ready" when the copy can
+    be downloaded, "scanning" while the malware scan has not finished,
+    "threats_found" or "unscannable" when it will not be served."""
+    id: int
+    changes: int
+    mine: bool
+    download: str
+
+
 class RunSummary(BaseModel):
     """Summary of a run for the history list."""
     run_id: str
@@ -151,6 +173,8 @@ class RunSummary(BaseModel):
     feedback: RunFeedbackSummary = RunFeedbackSummary()
     # The batch upload this run belongs to (#1114), null for a single upload.
     batch_id: str | None = None
+    # Every reviewer's corrected copy of the run, newest first; in both scopes.
+    corrected_copies: list[CorrectedCopySummary] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -190,6 +214,7 @@ class StatusFilterCounts(BaseModel):
     awaiting_feedback: int
     failed: int
     red: int
+    corrected: int
 
 
 class RunFilterOptions(BaseModel):

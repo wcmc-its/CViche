@@ -15,6 +15,7 @@ import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
 import CorrectedUpload from './CorrectedUpload'
+import { CORRECTED_COPIES_ANCHOR } from './runs/runFeedback'
 import { OwnerFixList, RunQualitySections, ReviewNote } from './RunQualityPanel'
 import { canActOnRun, useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 
@@ -54,6 +55,12 @@ const STEP_WEIGHTS: Record<string, { weight: number; estimated_seconds: number }
   '6': { weight: 3, estimated_seconds: 15 },
 }
 const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weight, 0)
+
+/** URL hash -> the id of the section a finished run's page scrolls to. */
+const HASH_TARGETS: Record<string, string> = {
+  '#feedback': 'feedback-section',
+  [`#${CORRECTED_COPIES_ANCHOR}`]: CORRECTED_COPIES_ANCHOR,
+}
 
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
   const showCost = useCanSeeCost()
@@ -101,11 +108,13 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const logsEndRef = useRef<HTMLDivElement>(null)
   const [cvInsights, setCvInsights] = useState<any>(null)
 
-  // Automatic target window scroll tracker targeting live user context feedback triggers
+  // A link into a finished run's #feedback or #corrected-copies (the runs list's
+  // Corrected line) scrolls there once the section has rendered.
   useEffect(() => {
-    if (window.location.hash === '#feedback' && runStatus?.status === 'complete') {
+    const target = HASH_TARGETS[window.location.hash]
+    if (target && runStatus?.status === 'complete') {
       const timer = setTimeout(() => {
-        const el = document.getElementById('feedback-section')
+        const el = document.getElementById(target)
         if (el) el.scrollIntoView({ behavior: 'smooth' })
       }, 500)
       return () => clearTimeout(timer)

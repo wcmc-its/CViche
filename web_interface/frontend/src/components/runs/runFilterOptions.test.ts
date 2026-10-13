@@ -4,7 +4,7 @@ import { buildRunByModel } from './runFilterOptions'
 
 const OPTIONS: RunFilterOptions = {
   departments: [], faculty: [], run_by: [], self_count: 3, on_behalf_count: 5,
-  status: { all: 8, running: 0, awaiting_feedback: 0, failed: 0, red: 0 },
+  status: { all: 8, running: 0, awaiting_feedback: 0, failed: 0, red: 0, corrected: 0 },
   feedback: { given: 0, needed: 0 }, input_format: { wcm: 0, other: 0, unknown: 0 },
 }
 

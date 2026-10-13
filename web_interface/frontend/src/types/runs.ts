@@ -69,6 +69,28 @@ export interface RunFeedbackSummary {
   reviewers: FeedbackReviewer[] | null
 }
 
+/** One reviewer's corrected copy of a run. uploader and role are null when the
+ *  uploader is unknown (a copy stored before copies were kept per uploader). */
+export interface CorrectedCopySummary {
+  uploader: string | null
+  /** 'owner' for the run's submitter, else the uploader's role ('staff' or 'admin'). */
+  role: string | null
+  uploaded_at: string
+}
+
+/** Whether a corrected copy can be downloaded: 'scanning' until the malware scan
+ *  passes it; 'threats_found' and 'unscannable' are never served. */
+export type CorrectedCopyDownload = 'ready' | 'scanning' | 'threats_found' | 'unscannable'
+
+/** GET /run/:id/feedback/corrected-copies: one copy on the run page. */
+export interface CorrectedCopyDetail extends CorrectedCopySummary {
+  id: number
+  changes: number
+  /** The viewer's own copy, which their next upload replaces. */
+  mine: boolean
+  download: CorrectedCopyDownload
+}
+
 export interface RunSummary {
   run_id: string
   filename: string
@@ -92,6 +114,8 @@ export interface RunSummary {
   feedback: RunFeedbackSummary
   /** The batch upload this run belongs to; null for a single upload. */
   batch_id?: string | null
+  /** Every reviewer's corrected copy of the run, newest first. */
+  corrected_copies?: CorrectedCopySummary[]
 }
 
 export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'
@@ -243,8 +267,9 @@ export type RunFeedbackFilter = 'given' | 'needed'
 /** Whether the uploaded CV was written in the WCM CV template; 'unknown' = not classified. */
 export type RunInputFormatFilter = 'wcm' | 'other' | 'unknown'
 
-/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'red' = score band RED (scope 'all' only: 403 under scope 'mine'). */
-export type RunStatusFilter = 'running' | 'failed' | 'red'
+/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'corrected' = runs with a
+ *  reviewer's corrected copy; 'red' = score band RED (scope 'all' only: 403 under scope 'mine'). */
+export type RunStatusFilter = 'running' | 'failed' | 'red' | 'corrected'
 
 export interface RunListParams {
   scope?: RunListScope
@@ -280,6 +305,7 @@ export interface StatusFilterCounts {
   awaiting_feedback: number
   failed: number
   red: number
+  corrected: number
 }
 
 export interface RunFilterOptions {
