@@ -23,6 +23,17 @@ updates:
       interval: weekly
     target-branch: dev
     open-pull-requests-limit: 5
+    # Held pins; the reason for each is beside it in requirements.txt.
+    # Drop an entry once its blocker (ADOT image, pysaml2) moves.
+    ignore:
+      - dependency-name: anyio
+        versions: [">=4.15.0"]
+      - dependency-name: fastapi
+        versions: [">=0.142.0"]
+      - dependency-name: xmlschema
+        versions: [">=3.0.0"]
+      - dependency-name: elementpath
+        versions: [">=5.0.0"]
     groups:
       python-minor-patch:
         patterns: ["*"]
