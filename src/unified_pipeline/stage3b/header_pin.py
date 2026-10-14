@@ -277,9 +277,9 @@ _MENTEE_PIN_WHY = "Listed as the work of a student or trainee the CV owner mento
 # owner's own grants above it), "Sponsored Research", "Co-Investigator or
 # Sponsor on Grants" and "as Mentored Investigator" do not match.
 _MENTOR_GRANT_CODE = "N2"
-_MENTOR_ROLE = r"(?:primary\s+|co-?)?(?:mentor|sponsor)"
+_MENTOR_ROLE = r"(?:primary\s+|co[-\s]?)?(?:mentor|sponsor)"
 _MENTOR_GRANT_HEADING = re.compile(
-    rf"\bas\s+{_MENTOR_ROLE}\b|^\s*{_MENTOR_ROLE}(?:\s+or\s+{_MENTOR_ROLE})*[\s:]*$", re.I
+    rf"\bas\s+{_MENTOR_ROLE}\b|^\s*{_MENTOR_ROLE}(?:\s+(?:or|and)\s+{_MENTOR_ROLE})*[\s:]*$", re.I
 )
 _MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is a mentored trainee grant"
 

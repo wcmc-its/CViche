@@ -774,12 +774,15 @@ MENTEE_GRANT = "Example Institute (F32EX000001) Example trainee project. PI: Ale
     ("FUNDING", "Grants as Primary Mentor"),
     ("FUNDING", "Grants as Primary  Mentor"),
     ("FUNDING", "Grants as Co-Mentor"),
+    ("FUNDING", "Grants as Co Mentor"),
     ("FUNDING", "Grants as Comentor"),
     ("FUNDING", "Grants as Sponsor"),
     ("FUNDING", "Grants as  Mentor"),
     ("GRANT SUPPORT", "GRANTS, FELLOWSHIPS", "Mentor or Co-mentor"),        # 2087 shape
     ("GRANT SUPPORT", " Sponsor: "),
     ("GRANT SUPPORT", "Mentor or Sponsor or Co-mentor"),
+    ("GRANT SUPPORT", "Mentor or  Co-mentor"),
+    ("GRANT SUPPORT", "Mentor and Sponsor"),
     ("Grant Support as Mentor", "Current"),                                # any level names the role
 ])
 @pytest.mark.parametrize("code", ["M2", "M2A", "M2B", "M2C"])
@@ -804,6 +807,9 @@ def test_a_grant_under_a_mentor_role_heading_becomes_n2(code, hierarchy):
     ("FUNDING", "Grants as Advisor"),
     ("GRANT SUPPORT", "Industry Sponsor"),               # a funder, not the owner's role
     ("GRANT SUPPORT", "Mentor Program Sponsor"),
+    ("FUNDING", "Grants as Primary Investigator (Mentor)"),   # the owner's own grants
+    ("FUNDING", "Office of Mentor Development"),                # "of", not "as"
+    ("GRANT SUPPORT", "Mentor and Co-Investigator"),            # mixed: the owner's Co-I grants too
 ])
 def test_a_grant_under_another_heading_keeps_its_code(hierarchy):
     entry = _row("M2B", MENTEE_GRANT, confidence=0.9, hierarchy=hierarchy)
