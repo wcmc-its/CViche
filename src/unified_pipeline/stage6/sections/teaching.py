@@ -129,11 +129,12 @@ from ..formatting import (
     DATE_SPAN_SEPARATOR,
     envelope_date_spans,
     extra_date_spans,
+    format_date_range,
     normalize_iso_dates_in_text,
 )
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
-from ..parsing.dates import _parse_date_components
+from ..parsing.dates import _MONTH_NAME_TO_NUM, _SEASON_TOKENS, _parse_date_components
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -155,7 +156,9 @@ class _TeachingFields(TypedDict, total=False):
     fact that makes it necessary rather than defensive noise.
     """
     formatted_text: str
+    date: str
     start_date: str
+    end_date: str
     course_code: str | list[str]
     course_title: str | list[str]
     institution: str
@@ -201,6 +204,19 @@ _SEMICOLON_SPLIT_MIN_CHARS = 100
 # opening with it ("1982-1986", "1982 - present"). Not inside a longer number.
 _OWN_DATE_TOKEN = (r'(?<!\d){year}(?:\s*[-\u2013\u2014]\s*(?:\d{{2,4}}|present|current))?'
                    r'(?!\d)')
+
+
+# A record's own date as stage 5c wrote it, when it is one date and not a
+# range: the year, after a month or season word or a numeric month
+# ("December 2014", "12/2014"), with no dash or "to" and an end after it, and
+# no dotted or slashed month after it ("2014.12" is left alone).
+_MONTH_OR_SEASON_WORD = '|'.join(sorted({*_MONTH_NAME_TO_NUM, *_SEASON_TOKENS},
+                                        key=len, reverse=True))
+_LONE_DATE_TOKEN = (r'(?:\b(?:' + _MONTH_OR_SEASON_WORD + r')\.?,?\s+|(?<![\d/])\d{{1,2}}/)?'
+                    r'(?<!\d){year}(?!\d|[./]\d|\s*(?:[-\u2013\u2014]|\bto\b)\s*'
+                    r'(?:\d|present|current|ongoing))')
+# What `format_date_range` appends to a start the source leaves open.
+_OPEN_RANGE_SUFFIX = '-Present'
 
 
 def _item_parts(text: str | None) -> list[str]:
@@ -250,6 +266,39 @@ def _with_extra_spans(text: str, fields: _TeachingFields, taxonomy_code: str) ->
     return DATE_SPAN_SEPARATOR.join([text[:cut], *extras]) + text[cut:]
 
 
+def _lone_date(fields: _TeachingFields) -> str:
+    """The record's one date when it states no end: `start_date` with no
+    `end_date`, or, with neither, the single `date` K4 and K5 extract."""
+    if fields.get('end_date'):
+        return ''
+    return str(fields.get('start_date') or fields.get('date') or '').strip()
+
+
+def _with_open_end(text: str, fields: _TeachingFields, original_text: str,
+                   taxonomy_code: str) -> str:
+    """Stage 5c's `text` with the record's lone date written as the open
+    range the source states: "2014-Present - Lecturer, ..." (#1342).
+
+    Stage 4 keeps a "2014.12 - <institution>" teaching row's date as one
+    `date` with no end, and 5c formats that as one month, "December 2014"
+    (RCBKFG KUUKNJ N7, K4 421 and 429). `format_date_range` decides, from
+    the source text, whether the date is open, by the rule every dated row
+    follows (`_source_leaves_year_open`); a text that already writes a range
+    for the year, or does not name it, is left as it is.
+    """
+    lone = _lone_date(fields)
+    year = _parse_date_components(lone)[0] if lone else None
+    if year is None or not original_text:
+        return text
+    dates = format_date_range(lone, '', taxonomy_code, original_text)
+    if not dates.endswith(_OPEN_RANGE_SUFFIX):
+        return text
+    own_date = re.search(_LONE_DATE_TOKEN.format(year=year), text, re.IGNORECASE)
+    if own_date is None:
+        return text
+    return text[:own_date.start()] + dates + text[own_date.end():]
+
+
 # Stage 5c's prefix for a line that belongs to the record above it ("  - Notes:
 # ...", "  - Topics: ..."), as opposed to a line that opens a record of its own.
 _SUB_LINE_PREFIX = '- '
@@ -289,7 +338,7 @@ def _record_blocks(formatted_text: str) -> list[str]:
 
 
 def _record_bullets(formatted_text: str, fields: _TeachingFields,
-                    taxonomy_code: str) -> list[str]:
+                    taxonomy_code: str, original_text: str = '') -> list[str]:
     """One bullet per record of Stage 5c's text, markdown stripped (#1556 c).
 
     Each record used to share ONE bullet, its lines kept apart only by soft
@@ -303,12 +352,16 @@ def _record_bullets(formatted_text: str, fields: _TeachingFields,
     sub-heading 5c carried over after a blank line, which would otherwise
     render as a bullet of its own. The record's further date spans
     (`_with_extra_spans`) go on the first block that holds its own date, the
-    line they went on when the blocks shared one bullet.
+    line they went on when the blocks shared one bullet. A one-record entry's
+    lone date that `original_text` leaves open is written as its open range
+    first (`_with_open_end`, #1342).
     """
     bullets = [stripped for block in _record_blocks(formatted_text)
                if (stripped := _strip_markdown_for_word(block, preserve_newlines=True)).strip()]
     if len(bullets) != _record_count(fields):
         bullets = ['\n'.join(bullets)] if bullets else []
+    if _record_count(fields) == 1 and bullets:
+        bullets[0] = _with_open_end(bullets[0], fields, original_text, taxonomy_code)
     for i, bullet in enumerate(bullets):
         extended = _with_extra_spans(bullet, fields, taxonomy_code)
         if extended != bullet:
@@ -352,7 +405,7 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
         original_lines = entry_lines(original_text)
         if len(original_lines) > 1:
             return [row_text] if row_text else original_lines
-        bullets = _record_bullets(formatted_text, fields, taxonomy_code)
+        bullets = _record_bullets(formatted_text, fields, taxonomy_code, original_text)
         if bullets:
             return bullets
         # Stage 5c sent a formatted_text with no words in it ("   ", "**  **").
