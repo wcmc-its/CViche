@@ -1148,7 +1148,6 @@ class TestDeclinedListWarnsForEveryFieldRenderedCode:
         ('I', {'organization': 'Glade Society'}), ('Q1', {'role': 'Chair'}),
         ('Q2', {'committee_name': 'Alpha Council'}),
         # Silent until #1187: each writes the parent's fields and none of a list.
-        ('H', {'award_name': 'Glade Prize'}), ('O', {'institution': 'Glade Hospital'}),
         ('P', {'committee_name': 'Glade Board'}), ('Q3', {'panel_name': 'Glade Panel'}),
         ('R', {'event_name': 'Glade Meeting'})])
     def test_a_declined_list_warns(self, code, list_item):
@@ -1157,6 +1156,18 @@ class TestDeclinedListWarnsForEveryFieldRenderedCode:
         warnings = []
         assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
         assert [(w['check'], w['code']) for w in warnings] == [(fan_out.REJECTED_LIST_CHECK, code)]
+
+    @pytest.mark.parametrize('code,list_key', [('H', 'dates'), ('H', 'additional_dates'),
+                                               ('O', 'additional_dates')])
+    def test_a_declined_date_span_list_the_section_renders_does_not_warn(self, code, list_key):
+        # H and O write these lists into their date cell, so a declined one
+        # loses nothing and a warning would cost quality-score points.
+        entry = {'taxonomy_code': code, 'text': 'Zzunheld prose no field carries',
+                 'extracted_fields': {list_key: [{'start_date': '2001', 'end_date': '2002'},
+                                                 {'start_date': '2005', 'end_date': '2006'}]}}
+        warnings = []
+        assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings) == [entry]
+        assert warnings == []
 
 
 class TestParentKeepsItsOwnPart:

@@ -321,13 +321,20 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
 # Codes that keep the entry's text (K2/K4 refuse to split by design) lose
 # nothing to a declined list; warning on them put 31 false alarms in 16
 # corpus CVs.
-# H, O, P, Q3 and R were silent. Their sections write the parent's fields and
+# P, Q3 and R were silent. Their sections write the parent's fields and
 # nothing from a list left whole: on the 302-CV render set P's `committees`
-# and R's `additional_presentations` values are absent from the document, and
-# H's `dates` / O's `additional_dates` hold spans no parent field carries.
-# Q3 has no corpus case; its section is the same fields-only kind.
+# and R's `additional_presentations` values are absent from the document
+# (P also writes the stripped entry text, so a kept-whole P entry loses role
+# and date detail rather than the list). Q3 has no corpus case; its section is
+# the same fields-only kind. A period-only `additional_dates` list on P or R
+# is rendered (`with_extra_date_spans`, `further_date_spans`), so such a
+# warning can be a false alarm, as it can for Q1.
+# H and O stay out: H's `dates` / `additional_dates` (`honors._record_date`)
+# and O's `additional_dates` (`leadership.py`, `with_extra_date_spans`) are the
+# lists their sections do write, so on the corpus every H and O warning was a
+# false alarm (HZGJFM H 261/262, VNUAHA O 142 render the spans).
 _LIST_LOST_WHEN_KEPT_WHOLE = frozenset({
-    'B1', 'D1', 'D2', 'D3', 'F1', 'H', 'I', 'O', 'P', 'Q1', 'Q2', 'Q3', 'R'})
+    'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'P', 'Q1', 'Q2', 'Q3', 'R'})
 
 # #1187: a code whose section writes none of an entry's text and none of a
 # record list left whole, so `_fields_carry_text` has nothing to protect: the
