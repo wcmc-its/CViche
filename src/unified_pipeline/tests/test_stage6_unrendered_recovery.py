@@ -34,13 +34,16 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
+from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     _record_rendered,
     _whole_record_rendered,
+    segment_held_by_fields,
     segments_cover_source,
+    tab_aware_record_lines,
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
@@ -121,6 +124,84 @@ def test_record_lines_heuristics():
         "Chair | Committee on Extremely Long Titles | Guild of Meandering "
         "Auditors | 2011-2014",
     ]
+
+
+def test_tab_aware_record_lines_split_a_tab_fused_line_into_its_dated_records():
+    # #1243: one line, three posts joined by tabs. `_record_lines` counts the
+    # line once, so the entry never reached the recovery pass.
+    fused = ("Executive Committee of the Quokka Society 2013-present\t"
+             "President 5/2017-10/2020\tPresident Elect 5/2015-5/2017")
+    assert _record_lines(fused) == [fused]
+    assert tab_aware_record_lines(fused) == [
+        "Executive Committee of the Quokka Society 2013-present",
+        "President 5/2017-10/2020",
+        "President Elect 5/2015-5/2017",
+    ]
+    # A tab row with one dated part is one record line, as before.
+    row = "Chair\tCommittee on Extremely Long Titles\tGuild of Meandering Auditors\t2011-2014"
+    assert tab_aware_record_lines(row) == [row] == _record_lines(row)
+
+
+def test_tab_fused_entry_recovers_the_record_the_render_dropped():
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "element_idx_start": 281,
+        "text": ("Steering Committee of the Quokka Guild 2013-present\t"
+                 "Chairperson of Marsupial Outreach 5/2017-10/2020\t"
+                 "Secretary of Wallaby Affairs 5/2013-5/2015"),
+        "extracted_fields": {"organization": "Quokka Guild", "role": "Steering Committee"},
+    }
+    gen.doc.add_paragraph("Steering Committee of the Quokka Guild 2013-present")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Chairperson of Marsupial Outreach 5/2017-10/2020" in t for t in bullets)
+    assert any("Secretary of Wallaby Affairs 5/2013-5/2015" in t for t in bullets)
+    # The part that did render is never written a second time.
+    assert not any("Steering Committee of the Quokka Guild" in t for t in bullets)
+
+
+def test_tab_part_the_extracted_fields_hold_is_not_recovered():
+    # #1243: a mentee's name and level, then his fellowship, each dated. The
+    # row renders them cell by cell, so no output line carries the first part
+    # whole, but stage 4 holds every word of it.
+    gen = _generator()
+    text = ("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)\t"
+            "Marsupial Heart Association Fellowship (7/2009-6/2011)")
+    entry = {
+        "taxonomy_code": "N3B", "text": text,
+        "extracted_fields": {"mentee_name": "Quimby Farrow", "mentee_level": "MSPH, PhD (Epidemiology)",
+                             "funding_source": "Marsupial Heart Association Fellowship (7/2009-6/2011)"},
+    }
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"N3B": [entry]})
+
+    assert len(gen.doc.paragraphs) == before
+    assert segment_held_by_fields("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)", entry["extracted_fields"])
+    assert not segment_held_by_fields("Chairperson of Marsupial Outreach 5/2017-10/2020",
+                                      entry["extracted_fields"])
+
+
+def test_tab_parts_of_an_entry_stage_4_split_into_records_are_not_recovered():
+    # The records render as children of their own, reformatted; the parent's
+    # last child keeps the whole fused text.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("State Trauma Advisory Council (Appointed by Governor) 1995 - 2001\t"
+                 "Committee on Trauma Facilities, Chairman, 2002 - 2004"),
+        "extracted_fields": {"role": "Chairman", "organization": "State Trauma Advisory Council"},
+        "stage4_last_record": {"key": "stage4_records", "index": 1, "count": 2, "text": None},
+    }
+    entry.update({LAST_STAGE4_RECORD: entry.pop("stage4_last_record")})
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    assert len(gen.doc.paragraphs) == before
 
 
 # ------------------------------------------------ D1 positions path (KFGXBW)

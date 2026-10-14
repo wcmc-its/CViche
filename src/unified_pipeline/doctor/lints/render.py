@@ -31,6 +31,7 @@ from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
     looks_like_record,
     norm,
+    tab_record_segments,
 )
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import _is_date_key as _fan_out_date_key
@@ -470,6 +471,16 @@ def _record_lines(text: object) -> list[str]:
             if looks_like_record(line) or _is_date_record_line(line.strip())]
 
 
+def _tab_aware_record_lines(text: object) -> list[str]:
+    """`_record_lines`, with a line whose tab parts state two or more dated
+    records read as those parts, one record each (`tab_record_segments`,
+    #1243). The mirror of `stage6.render_check.tab_aware_record_lines`."""
+    lines = []
+    for line in str(text or "").split("\n"):
+        lines.extend(tab_record_segments(line) or _record_lines(line))
+    return lines
+
+
 def _bare_date_lines(text: object) -> int:
     """How many lines of an entry are a bare date column (see
     `_is_bare_date_line`)."""
@@ -595,7 +606,11 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
         code = e.get("taxonomy_code")
         if code == "T":
             continue
-        records = _record_lines(e.get("text"))
+        # Records stage 4 kept under `stage4_records` render as rows of their
+        # own, not as the entry's tab parts.
+        fields = e.get("extracted_fields") or {}
+        read_lines = _record_lines if STAGE4_RECORDS_KEY in fields else _tab_aware_record_lines
+        records = read_lines(e.get("text"))
         if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records

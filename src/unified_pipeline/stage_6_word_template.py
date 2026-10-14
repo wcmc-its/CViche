@@ -63,6 +63,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+from unified_pipeline.core.text_norm import tab_record_segments
 from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
     code_matches_expected,
     get_expected_codes_from_hierarchy,
@@ -200,7 +201,9 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     m1_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
+    segment_held_by_fields,
     segments_cover_source,
+    tab_aware_record_lines,
     t_recovery_lines,
     token_pairs,
 )
@@ -741,7 +744,10 @@ def _recovery_candidates(code: str, entry: dict) -> list[str]:
         if len(text) <= APPENDIX_MAX_CHARS:
             return []
         return t_recovery_lines(text)
-    records = _record_lines(text)
+    # An entry stage 4 split into records renders them from their own children;
+    # their tab parts are not lost, only reformatted (#1243).
+    read_lines = _record_lines if LAST_STAGE4_RECORD in entry else tab_aware_record_lines
+    records = read_lines(text)
     return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
 
 
@@ -3967,6 +3973,8 @@ Now analyze the text above:"""
                     fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
+                    tab_parts = {part for text_line in str(entry.get('text') or '').split('\n')
+                                 for part in tab_record_segments(text_line)}
                     for line in records:
                         if code == 'T' and _t_line_is_scaffolding(line, entry):
                             continue
@@ -3980,6 +3988,8 @@ Now analyze the text above:"""
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.
                             continue
+                        if line in tab_parts and segment_held_by_fields(line, fields):
+                            continue  # a tab part of the record stage 4 extracted (#1243)
                         if segment_already_rendered(line, fields):
                             # The record that DID render from extracted fields: a
                             # grant table splits its tokens across label/value

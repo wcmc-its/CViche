@@ -1587,6 +1587,33 @@ def test_unrendered_records_quiet_when_all_rendered_incl_reformatted():
     assert lint_unrendered_records(stage4, blocks) == []
 
 
+def test_unrendered_records_fires_on_a_tab_fused_entry():
+    # #1243: three posts fused with tabs into one line used to count as one
+    # record line, so the lint never looked at the entry.
+    fused = ("Steering Committee of the Quokka Guild 2013-present\t"
+             "Chairperson of Marsupial Outreach 5/2017-10/2020\t"
+             "Secretary of Wallaby Affairs 5/2013-5/2015")
+    stage4 = {"entries": [_entry(fused, start=281, taxonomy_code="Q1")]}
+    blocks = [("p", "EXTRAMURAL"), ("p", "Steering Committee of the Quokka Guild 2013-present")]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert len(findings) == 1
+    assert "entry 281 (Q1): 2 of 3 records absent" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["Chairperson of Marsupial Outreach 5/2017-10/2020",
+                                       "Secretary of Wallaby Affairs 5/2013-5/2015"]
+
+
+def test_unrendered_records_leaves_the_tab_parts_of_a_stage_4_split_entry_alone():
+    # #1243: stage 4 kept every post under `stage4_records`; they render as
+    # rows of their own, reformatted, so the entry's tab parts are not lost.
+    fused = ("Steering Committee of the Quokka Guild 2013-present\t"
+             "Chairperson of Marsupial Outreach 5/2017-10/2020\t"
+             "Secretary of Wallaby Affairs 5/2013-5/2015")
+    stage4 = {"entries": [_entry(fused, start=281, taxonomy_code="Q1",
+                                 extracted_fields={"role": "Secretary", "stage4_records": [{}, {}, {}]})]}
+    blocks = [("p", "EXTRAMURAL"), ("p", "Secretary, Quokka Guild")]
+    assert lint_unrendered_records(stage4, blocks) == []
+
+
 def test_unrendered_records_reads_a_sub_point_as_delivered():
     # #1205: the two dropped rows of the test above, written under the entry
     # as tracked-deleted sub-points, are offered for review, not absent. A
