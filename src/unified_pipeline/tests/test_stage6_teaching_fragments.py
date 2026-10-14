@@ -1203,6 +1203,8 @@ def test_an_open_source_rewrites_only_a_one_record_lone_date(fields, expected):
     ("December, 2014 - Fictional Course", "2014-Present - Fictional Course"),
     ("Sept. 2014 - Fictional Course", "2014-Present - Fictional Course"),
     ("Dec  2014 - Fictional Course", "2014-Present - Fictional Course"),
+    # A month word glued to the year is not taken: only the year is rewritten.
+    ("Dec2014 - Fictional Course", "Dec2014-Present - Fictional Course"),
     # So does a season word.
     ("Fall 2014 - Fictional Course", "2014-Present - Fictional Course"),
     # A month word must be a whole word: "Grammar" is not the month "mar".
@@ -1217,6 +1219,8 @@ def test_an_open_source_rewrites_only_a_one_record_lone_date(fields, expected):
     # The year inside a longer number is not the record's date.
     ("Fictional Course 12014", "Fictional Course 12014"),
     ("Fictional Course 20145", "Fictional Course 20145"),
+    # Only a dotted or slashed month stops it; a count after a space does not.
+    ("Fictional Course, 2014 3 credits", "Fictional Course, 2014-Present 3 credits"),
     # A slashed academic year ("2014/15") is a range already.
     ("2014/15 - Fictional Course", "2014/15 - Fictional Course"),
     # 5c already wrote a range: with "to", an en or em dash, or a word end.
