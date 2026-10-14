@@ -1839,6 +1839,66 @@ def test_a_parenthetical_title_span_becomes_a_second_record(monkeypatch):
     assert (titled["title"], titled["start_date"], titled["end_date"]) == ("Managing Partner", "2005", "2010")
 
 
+
+_JOINED_JOURNALS_TEXT = "2012-present Reviewer for Fern Review\tGlade Letters\tMoss Quarterly"
+_JOINED_JOURNALS_ITEM = {"journal_name": "Fern Review, Glade Letters, Moss Quarterly",
+                         "start_date": "2012", "end_date": "present"}
+
+
+def test_journals_joined_from_tab_cells_fan_out_one_row_each(monkeypatch):
+    # #1414 (JFGZFT 338): one item named three journals from three tab cells.
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    entry = {"text": _JOINED_JOURNALS_TEXT, "taxonomy_code": "Q4D",
+             "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, **_JOINED_JOURNALS_ITEM}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    records = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert [r["journal_name"] for r in records] == ["Fern Review", "Glade Letters", "Moss Quarterly"]
+    assert all((r["start_date"], r["end_date"]) == ("2012", "present") for r in records)
+    assert STAGE4_RECORDS_RETURNED_KEY not in out  # the model returned one item
+    children = fan_out_multi_record_entries([out], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+    assert [(c["extracted_fields"]["journal_name"], c["extracted_fields"]["start_date"])
+            for c in children] == [("Fern Review", "2012"), ("Glade Letters", "2012"),
+                                   ("Moss Quarterly", "2012")]
+
+
+def test_journals_joined_from_tab_cells_left_alone_outside_journal_codes(monkeypatch):
+    entry = {"text": _JOINED_JOURNALS_TEXT, "taxonomy_code": "Q4B",
+             "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, **_JOINED_JOURNALS_ITEM}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    assert STAGE4_RECORDS_KEY not in out["extracted_fields"]
+    assert out["extracted_fields"]["journal_name"] == _JOINED_JOURNALS_ITEM["journal_name"]
+
+
+def test_a_recovered_journal_row_loses_its_role_column(monkeypatch):
+    # #1414 (KHXOUF 1187): the role column joined the journal name.
+    entry = {"text": "Fern Review\tEditorial Board \u2013 2015 to present", "taxonomy_code": "Q4C",
+             "element_idx_start": 4, "element_idx_end": 4}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [{"entry_id": "4_4", "fields": {
+            "journal_name": "Fern Review, Editorial Board", "start_date": "2015",
+            "end_date": "present"}}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert (out["extracted_fields"]["journal_name"], out["extracted_fields"]["role"]) == (
+        "Fern Review", "Editorial Board")
+    assert STAGE4_RECORDS_KEY not in out["extracted_fields"]
+
+
 # --- a second record under an off-schema key (#1245) -------------------------
 
 def _one_item_reply(code_text: str, code: str, item: dict):
