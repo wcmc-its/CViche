@@ -185,6 +185,19 @@ RECLASSIFY_MIN_TOKEN_COVERAGE = 0.8
 # drops a token is covered instead by the entry-line check in
 # `_recover_unrendered_records`.
 T_RECORD_OVERLAP = 1.0
+# The output line that vouches for an M1 record must also repeat its wording:
+# at least this many of the record's adjacent distinctive-token pairs (two
+# consecutive `_RENDER_TOKEN_RE` words) sit adjacent in that line, or all of
+# them when the record has fewer (#1572). Token overlap alone lets a
+# same-topic row vouch: a project title and a publication on a related
+# question, or a short list item and a long summary paragraph, share 70-86%
+# of their words in a different order. Measured on the 38 M1 records the
+# overlap alone vouched for across 306 corpus runs: the 5 the autopsies
+# confirmed lost (#1572: two projects matched by a related publication, three
+# isolates matched by the summary or a publication) share 0-2 pairs with
+# their vouching line; 32 of the other 33 share 3 or more. The one at 2 is a
+# laboratory heading the summary names only by topic, and is now diverted.
+M1_RECORD_MIN_SHARED_PAIRS = 3
 # Unicode letters only (no digits/underscore): [a-z]{5,} on ASCII input (#541).
 #
 # CJK is EXCLUDED, not measured (#722). The 5-letter floor and
@@ -418,8 +431,15 @@ def _whole_record_rendered(line: str, haystack: str,
             or any(tokens <= cut for cut in cut_token_sets or ()))
 
 
-def m1_record_rendered(text: str, haystack: str,
-                       line_token_sets: list[set]) -> bool | None:
+def token_pairs(text: str) -> set[tuple[str, str]]:
+    """Adjacent pairs of a text's distinctive letter tokens, in reading order:
+    the wording `m1_record_rendered` asks a vouching line to repeat."""
+    tokens = _RENDER_TOKEN_RE.findall(_norm(text))
+    return set(zip(tokens, tokens[1:], strict=False))
+
+
+def m1_record_rendered(text: str, haystack: str, line_token_sets: list[set],
+                       line_pair_sets: list[set]) -> bool | None:
     """Whether a dated M1 record surfaces on the page as a WHOLE (#1429).
 
     `_record_rendered` lets any one fragment vouch for a line. An M1 record's
@@ -428,19 +448,24 @@ def m1_record_rendered(text: str, haystack: str,
     fragment matches a grant table, and its project title alone matches a long
     research-summary paragraph that only shares its topic words (NDMRSO: 24
     records on 4 CVs lost that way). Here the record is judged as one unit:
-    its squashed text sits in the output verbatim, or `RENDER_TOKEN_OVERLAP`
-    of ALL its distinctive letter tokens sit in ONE output line.
-    `line_token_sets` are those tokens of each output line, as for
-    `_record_rendered`. A record with too few distinctive tokens is None, as
-    there.
+    its squashed text sits in the output verbatim, or ONE output line holds
+    `RENDER_TOKEN_OVERLAP` of ALL its distinctive letter tokens AND repeats
+    `M1_RECORD_MIN_SHARED_PAIRS` of its adjacent token pairs (#1572: overlap
+    alone let a same-topic publication or summary vouch for a different
+    study). `line_token_sets` and `line_pair_sets` are those tokens and
+    `token_pairs` of each output line, index-aligned. A record with too few
+    distinctive tokens is None, as in `_record_rendered`.
     """
     if _squash(text) in haystack:
         return True
     tokens = set(_RENDER_TOKEN_RE.findall(_norm(text)))
     if len(tokens) < RENDER_TOKEN_MIN_COUNT:
         return None
+    pairs = token_pairs(text)
+    min_shared_pairs = min(M1_RECORD_MIN_SHARED_PAIRS, len(pairs))
     return any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
-               for line_tokens in line_token_sets)
+               and len(pairs & line_pairs) >= min_shared_pairs
+               for line_tokens, line_pairs in zip(line_token_sets, line_pair_sets, strict=True))
 
 
 def _record_rendered(line: str, haystack: str,

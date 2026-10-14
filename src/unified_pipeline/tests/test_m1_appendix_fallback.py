@@ -18,6 +18,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -29,6 +30,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     m1_record_rendered,
+    token_pairs,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -305,19 +307,25 @@ def _haystack(*lines: str) -> str:
     return "\x00".join(_squash(line) for line in lines)
 
 
+def _rendered(text: str, *lines: str) -> bool | None:
+    """`m1_record_rendered` of *text* against an output made of *lines*."""
+    return m1_record_rendered(text, _haystack(*lines), _letter_token_sets(*lines),
+                              [token_pairs(line) for line in lines])
+
+
 def test_m1_record_is_not_vouched_for_by_its_date_and_department_fragment():
     """The record's leading fragment matches an appointment row word for word;
     the record as a whole is not on the page."""
     text = _project_record()["text"]
     appointment = "2015-2017 Assistant Professor, Department of Gearwork, Tarnholm Widget University"
-    assert m1_record_rendered(text, _haystack(appointment), _letter_token_sets(appointment)) is False
+    assert _rendered(text, appointment) is False
 
 
 def test_m1_record_is_not_vouched_for_by_its_title_inside_a_summary_paragraph():
     summary = ("Dr. Public's program studies lubricant fatigue modelling in planetary gearboxes, "
                "with ongoing work on bearing wear, surface coatings and industrial reliability.")
     text = _project_record()["text"]
-    assert m1_record_rendered(text, _haystack(summary), _letter_token_sets(summary)) is False
+    assert _rendered(text, summary) is False
 
 
 def test_m1_record_rendered_whole_on_one_line_counts_as_rendered():
@@ -325,16 +333,16 @@ def test_m1_record_rendered_whole_on_one_line_counts_as_rendered():
     row = ("Principal Investigator Robin Gearwick | Department of Gearwork, Tarnholm Widget University | "
            f"{PROJECT_TOKEN} lubricant fatigue modelling in planetary gearboxes | 2015-2017")
     text = _project_record()["text"]
-    assert m1_record_rendered(text, _haystack(row), _letter_token_sets(row)) is True
+    assert _rendered(text, row) is True
 
 
 def test_m1_record_rendered_verbatim_counts_as_rendered():
     text = "2015 to 2017 Tarnholm gear study"
-    assert m1_record_rendered(text, _haystack("x", text), _letter_token_sets("x")) is True
+    assert m1_record_rendered(text, _haystack("x", text), _letter_token_sets("x"), [set()]) is True
 
 
 def test_m1_record_with_too_few_tokens_is_not_verifiable():
-    assert m1_record_rendered("2019-2020: Tarnholm lab", _haystack("x"), _letter_token_sets("x")) is None
+    assert _rendered("2019-2020: Tarnholm lab", "x") is None
 
 
 def test_dated_m1_record_whose_title_a_summary_shares_reaches_the_appendix(tmp_path):
@@ -419,3 +427,67 @@ def test_m1_project_with_only_narrative_but_an_investigator_credit_is_a_record(t
     text = _render(tmp_path, _record_entries(project), summary)
     assert text.count(CREDITED_PROJECT_TOKEN) == 1, "the credited M1 project rendered nowhere"
 
+
+
+# #1572 residual (AUTOPSY-YUYVIG-batch-2026-10-08): the overlap share alone let
+# a same-topic row vouch for a different study -- a project title against a
+# publication on a related question (LTTYWI 403, 415), a short list item against
+# the summary paragraph or a publication (ECXGAT 2287, 2290, 2291). The vouching
+# line must also repeat the record's wording: `M1_RECORD_MIN_SHARED_PAIRS`
+# adjacent token pairs. "Zorvane", "Fennimarsh" and "Kelpridge" are invented.
+def test_m1_project_is_not_vouched_for_by_a_same_topic_publication():
+    """6 of the project's 8 tokens sit in the publication row (0.75), but only
+    2 of its adjacent pairs: the row reports a different study."""
+    project = "31. Acoustic Survey of Zorvane Spindle Cracking.\tInvestigators: Drs. Kelpridge and Public, 1961-1963."
+    publication = ("44. Kelpridge RQ, Public JQ. Zorvane spindle loads measured by an acoustic probe "
+                   "for grading of cracking in turbines. Gear Guild; 1966.")
+    assert _rendered(project, publication) is False
+
+
+def test_m1_project_is_vouched_for_by_the_publication_of_the_same_study():
+    project = "62. Spindle Wear Under Fennimarsh Lubricant Cycling.\tInvestigators: Drs. Kelpridge and Public, 1968."
+    publication = ("77. Kelpridge RQ, Public JQ. Spindle wear under Fennimarsh lubricant cycling in "
+                   "bench gearboxes. Gear Rev. 1971.")
+    assert _rendered(project, publication) is True
+
+
+def test_m1_record_vouched_for_at_exactly_the_minimum_shared_pairs():
+    """All six tokens on one line both times; 3 adjacent pairs vouch, 2 do not."""
+    record = "Amber Birch Cedar Delta Ember Flint"
+    assert _rendered(record, "Amber Birch Cedar Delta | Flint Ember") is True
+    assert _rendered(record, "Cedar Amber Birch | Flint Delta Ember") is False
+
+
+def test_m1_record_with_fewer_pairs_than_the_minimum_needs_all_of_them():
+    """A three-token record has two pairs: both on the line vouch, one does not."""
+    assert _rendered("Amber Birch Cedar", "Amber and Birch and Cedar") is True
+    assert _rendered("Amber Birch Cedar", "Cedar and Amber and Birch") is False
+
+
+def test_m1_pair_and_overlap_tests_must_hold_on_the_same_line():
+    """One line carries the pairs, another the tokens: neither vouches alone."""
+    record = "Amber Birch Cedar Delta Ember Flint"
+    assert _rendered(record, "Amber Birch Cedar Delta", "Flint Ember Delta Cedar Birch Amber") is False
+
+
+def test_m1_list_item_whose_words_a_summary_shares_in_another_order_reaches_the_appendix(tmp_path):
+    """End to end: the summary carries every word of the isolate item, but not
+    its wording, so the item reaches the Appendix once."""
+    item = {"text": "Zorvane gear strain ZV-3 from Fennimarsh coastal turbines.",
+            "taxonomy_code": "M1", "hierarchy": LIST_HEADING, "element_idx_start": 34,
+            "extracted_fields": {"narrative": "Zorvane gear strain from coastal turbines"}}
+    summary = _summary("llm_generated",
+                       f"Dr. Public's {SUMMARY_TOKEN} group studies coastal turbines and strain in gears, "
+                       "including Fennimarsh and Zorvane gearboxes.")
+    text, diversions = _render_with_sidecar(tmp_path, _record_entries(_dated_list_item(), item), summary)
+    assert text.count("ZV-3") == 1, "the M1 list item the summary only paraphrases rendered nowhere"
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("M1", "m1_record_not_in_summary", 2)]
+
+
+def test_m1_record_rendered_rejects_unaligned_line_sets():
+    """Token and pair sets are index-aligned per output line; a caller that
+    builds them from different line lists fails loudly, not by mismatching."""
+    record = "Amber Birch Cedar Delta Ember Flint"
+    with pytest.raises(ValueError):
+        m1_record_rendered(record, _haystack("x"), _letter_token_sets("x", record), [set()])
