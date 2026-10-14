@@ -88,6 +88,8 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
 )
 from unified_pipeline.stage6.fan_out import (
     _RENDERED_FIELDS,
+    FANNED_OUT_FROM,
+    LAST_STAGE4_RECORD,
     fan_out_multi_record_entries,
     record_scope,
     record_text,
@@ -1207,6 +1209,84 @@ def bare_mentee_resolution_warnings(resolved: list[tuple[object, str]]) -> list[
     } for target, evidence in sorted(by_target.items())]
 
 
+# #1731 (TJDPJE 46-49, 50-54): stage 3b codes a whole hospital-employment
+# paragraph D2, and stage 4 splits it into one record per title. A record
+# whose title opens with a leadership title -- Director, Site Director,
+# Medical Director, Chief, Chair, Head -- then rendered under Hospital
+# Appointments, whose template instruction says "Do not list administrative
+# titles, such as Director or Chair here". It renders under Clinical
+# Leadership (L3) instead, whose instruction names "director/head of
+# service/clinic or procedure area": a D2 record is a hospital post, so its
+# leadership is clinical. Only a split record (`FANNED_OUT_FROM` /
+# `LAST_STAGE4_RECORD`) moves: stage 3b codes the entry, never the records
+# stage 4 later makes of it, so it cannot code them apart. A one-record D2
+# entry keeps the model's code. The title must OPEN with the leadership word,
+# so "Attending Physician, Section Head: ..." stays, and a chief or head
+# trainee ("Chief Resident", "Chief Medical Resident") stays.
+HOSPITAL_APPOINTMENT_CODE = 'D2'
+D2_LEADERSHIP_TARGET_CODE = 'L3'
+D2_LEADERSHIP_REROUTE_CHECK = 'd2_leadership_title_reroute'
+_LEADERSHIP_TITLE_RE = re.compile(
+    r"^\W*(?:(?:interim|acting|associate|assistant|deputy|co|vice|senior|executive"
+    r"|medical|clinical|site|program|section|division|service|unit)[\s-]+)*"
+    r"(?:director|chair(?:man|person|woman)?"
+    r"|(?:chief|head)(?!\W+(?:\w+\W+)?(?:resident|fellow|intern|registrar|house)s?\b))\b",
+    re.IGNORECASE)
+# D2 field -> the L3 field its renderer writes the same value from.
+_D2_TO_L3_FIELDS: Mapping[str, str] = MappingProxyType({
+    'title': 'leadership_role', 'department': 'unit_program'})
+
+
+def _split_record_position(entry: Mapping[str, Any]) -> tuple[int, int] | None:
+    """(index, count) of a record fanned out of a multi-record entry, or None."""
+    origin = entry.get(FANNED_OUT_FROM) or entry.get(LAST_STAGE4_RECORD)
+    if not isinstance(origin, Mapping):
+        return None
+    return origin.get('index'), origin.get('count')
+
+
+def _route_d2_leadership_title(entry: dict[str, Any], code: str,
+                               moved: list[tuple[object, tuple[int, int]]]) -> str:
+    """The code to group *entry* under: L3 for a split D2 record whose title
+    opens with a leadership title (see the comment above), its fields renamed
+    to L3's (`_D2_TO_L3_FIELDS`) and its element_idx_start and record position
+    appended to *moved*; *code* otherwise."""
+    position = _split_record_position(entry)
+    fields = entry.get('extracted_fields')
+    if code != HOSPITAL_APPOINTMENT_CODE or position is None or not isinstance(fields, dict):
+        return code
+    title = fields.get('title')
+    if not isinstance(title, str) or not _LEADERSHIP_TITLE_RE.match(title):
+        return code
+    for d2_key, l3_key in _D2_TO_L3_FIELDS.items():
+        if d2_key in fields and _is_blank_value(fields.get(l3_key)):
+            fields[l3_key] = fields.pop(d2_key)
+    entry.setdefault('taxonomy_code_original', code)
+    entry['taxonomy_code'] = D2_LEADERSHIP_TARGET_CODE
+    moved.append((entry.get('element_idx_start'), position))
+    return D2_LEADERSHIP_TARGET_CODE
+
+
+def d2_leadership_reroute_warnings(
+        moved: list[tuple[object, tuple[int, int]]]) -> list[dict[str, Any]]:
+    """One INFO render-warnings record naming every D2 record moved to L3 by
+    `_route_d2_leadership_title`, by element_idx_start and record position
+    only (never CV text); none when nothing moved."""
+    if not moved:
+        return []
+    return [{
+        'check': D2_LEADERSHIP_REROUTE_CHECK,
+        'code': HOSPITAL_APPOINTMENT_CODE,
+        'section': None,
+        'message': (f"leadership title in a hospital appointment moved "
+                    f"{HOSPITAL_APPOINTMENT_CODE}->{D2_LEADERSHIP_TARGET_CODE}: "
+                    f"{len(moved)} record{'' if len(moved) == 1 else 's'}"),
+        'evidence': [f"element_idx_start {idx} record {index + 1} of {count}"
+                     for idx, (index, count) in moved],
+        'severity': 'INFO',
+    }]
+
+
 def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
     """One render-warnings record per (outcome, assigned, target), naming the
     entries by element_idx_start only (never CV text). Sorted, so the sidecar
@@ -1751,6 +1831,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         reroutes: list[RerouteDecision] = []
         precollegiate_moved: list[object] = []
         bare_mentees_resolved: list[tuple[object, str]] = []
+        leadership_moved: list[tuple[object, tuple[int, int]]] = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY)
@@ -1761,6 +1842,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             code = self._correct_mismatch_if_needed(entry, code, reroutes)
             code = _route_precollegiate_education(entry, code, precollegiate_moved)
             code = _route_bare_mentee(entry, code, mentee_siblings, bare_mentees_resolved)
+            code = _route_d2_leadership_title(entry, code, leadership_moved)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
@@ -1768,6 +1850,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._section_failures.extend(reroute_warnings(reroutes))
         self._section_failures.extend(precollegiate_reroute_warnings(precollegiate_moved))
         self._section_failures.extend(bare_mentee_resolution_warnings(bare_mentees_resolved))
+        self._section_failures.extend(d2_leadership_reroute_warnings(leadership_moved))
         self._section_failures.extend(outcome_mentee_warnings(annotate_outcome_mentees(coded)))
 
         if self.verbose:
