@@ -38,6 +38,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_5_pubmed_enrichment as stage5  # noqa: E402
+from unified_pipeline.core.credentials import CREDENTIALS  # noqa: E402
 from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
     MIN_TITLE_WORD_OVERLAP,
     PubMedEnricher,
@@ -1949,6 +1950,10 @@ KIM_PUBMED = _THIRTY + ['Kim SJ']
     # AOJEQD: a group credit PubMed keeps as no author, here naming the owner.
     (CAPPED_CV[:10] + ['ABC Investigators (Quill JA)'], CAPPED_CV[:10],
      CAPPED_CV[:10] + ['ABC Investigators (Quill JA)']),
+    # The name PubMed lacks is the CV line's first.
+    (['Hart L'] + CAPPED_CV[:10], CAPPED_CV[:10], ['Hart L'] + CAPPED_CV[:10]),
+    # A name with a word that is also a credential or editor mark is a name.
+    (CAPPED_CV[:10] + ['Ed Wren', 'Do T'], CAPPED_CV[:10], CAPPED_CV[:10] + ['Ed Wren', 'Do T']),
 ])
 def test_shorter_pubmed_list_renders_the_cv_byline(cv, pubmed, rendered):
     assert _restored(cv, pubmed) == ', '.join(rendered)
@@ -1984,10 +1989,27 @@ def test_pubmed_list_not_cut_from_the_cv_byline_is_none(cv, pubmed):
     assert _restored(cv, pubmed) is None
 
 
-# GCFEBE e717: a CV note; RXYBVF e561: a suffix stage 4 cut from its name.
-@pytest.mark.parametrize('piece', ['(Equal 1st author contributorship)', 'Jr', 'Sr.', 'II', 'III', 'IV'])
+# GCFEBE e717: a CV note; RXYBVF e561: a suffix stage 4 cut from its name;
+# M7NDD0 e27: degrees after each name; an editor mark.
+@pytest.mark.parametrize('piece', [
+    '(Equal 1st author contributorship)', 'Jr', 'jr.', 'Sr.', 'II', 'III', 'IV',
+    'PhD', 'Ph.D.', 'M.D.', 'MD', 'MSc', 'MPH', 'MD PhD', 'Editors', 'Editor', 'Eds.', 'ed'])
 def test_cv_piece_that_is_no_name_is_none(piece):
     assert _restored(CAPPED_CV[:10] + [piece], CAPPED_CV[:10]) is None
+
+
+@pytest.mark.parametrize('credential', CREDENTIALS)
+def test_every_listed_credential_is_no_name(credential):
+    assert _restored(CAPPED_CV[:10] + [credential], CAPPED_CV[:10]) is None
+
+
+def test_degrees_after_names_in_a_cv_string_are_none():
+    # A ", PhD" after a name splits off as a piece with a lowercase letter.
+    text = ', '.join(f'{name}, PhD' for name in CAPPED_CV[:4])
+    assert _restored(text, CAPPED_CV[:4]) is None
+    text = ', '.join(CAPPED_CV[:3]) + ', PhD, ' + CAPPED_CV[3]
+    assert _restored(text, CAPPED_CV[:4]) is None
+    assert _restored(text, CAPPED_CV[:3]) is None
 
 
 def test_cv_name_the_cv_line_does_not_write_is_none():
@@ -2079,6 +2101,18 @@ def test_namesakes_leave_stage5_as_before(monkeypatch, cv):
     enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': 1988, 'authors': VANN_PUBMED,
                                         'authors_vancouver': ', '.join(VANN_PUBMED)})
     assert entry['enrichment_data']['pubmed_authors'] == ', '.join(VANN_PUBMED)
+    assert 'pubmed_authors_shorter' not in entry['enrichment_data']
+
+
+def test_cv_line_not_stage4_byline_decides_what_renders(monkeypatch):
+    # AOJEQD e1004: stage 4's byline holds "Team H5P", which the CV's own
+    # line does not write, so PubMed's list renders as before.
+    enricher, _, _ = _make(monkeypatch, [])
+    entry = _capped_entry(', '.join(CAPPED_CV[:10] + ['Team H5P']), 'Abel A')
+    entry['text'] = ', '.join(CAPPED_CV[:10]) + f', HVTN 505 Protocol Team. {INPRESS_TITLE}.'
+    enricher._merge_pubmed_data(entry, {'pmid': PMID, 'year': 1988, 'authors': CAPPED_CV[:10],
+                                        'authors_vancouver': ', '.join(CAPPED_CV[:10])})
+    assert entry['enrichment_data']['pubmed_authors'] == ', '.join(CAPPED_CV[:10])
     assert 'pubmed_authors_shorter' not in entry['enrichment_data']
 
 

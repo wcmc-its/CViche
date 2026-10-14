@@ -38,6 +38,7 @@ from typing import Any, NamedTuple, TypeVar
 
 import requests
 
+from unified_pipeline.core.credentials import CREDENTIALS
 from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
 from unified_pipeline.stage4.coercion import is_verbatim_author
 
@@ -322,7 +323,10 @@ _SURNAME_FIRST = re.compile(r"^(\S*[a-z]\S*(?: \S*[a-z]\S*)*)((?: [A-Z]{1,3})+)$
 _INITIALS_FIRST = re.compile(r"^((?:[A-Z]{1,3} )+)(\S*[a-z]\S*(?: \S*[a-z]\S*)*)$")
 _NAME_FIRST = re.compile(r"^([A-Z])[a-z]+((?: [A-Z])*) (\S*[a-z]\S*)$")
 _GENERATION = re.compile(r"\b(?:II|III|IV)\b")  # "Doe JA III": not initials
-_SUFFIX = re.compile(r"(?:Jr|Sr|II|III|IV)\.?")
+# Words that end a name rather than name an author, stops dropped: a suffix
+# ("Jr"), a degree or credential ("PhD", "M.D."), an editor mark ("Eds").
+_NOT_A_NAME_WORDS = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'ed', 'eds', 'editor', 'editors'}
+                              | {w for c in CREDENTIALS for w in c.replace('.', '').lower().split()})
 
 
 def _cv_author_names(cv_authors: str | list[str] | None) -> list[str]:
@@ -397,11 +401,13 @@ def _pubmed_positions(pubmed_authors: list[str], cv_names: list[str]) -> list[in
 
 def _restorable(cv_name: str, cv_text: str | None) -> bool:
     """Whether a CV name PubMed lacks can render: it is no parenthesised note
-    (GCFEBE e717's "(Equal 1st author contributorship)"), is not a suffix cut
-    from its name (RXYBVF e561's "Jr"), and the CV's line writes it, words in
-    order (not "Team H5P", stage 4's reading of "HVTN 505 Protocol Team")."""
+    (GCFEBE e717's "(Equal 1st author contributorship)"), is not only a
+    suffix, degree or editor mark cut from a name (RXYBVF e561's "Jr",
+    M7NDD0 e27's "MD, PhD"), and the CV's line writes it, words in order
+    (not "Team H5P", stage 4's reading of "HVTN 505 Protocol Team")."""
     words = ' '.join(_folded_tokens(cv_name)).lower()
-    return (not cv_name.startswith('(') and not _SUFFIX.fullmatch(cv_name)
+    return (not cv_name.startswith('(')
+            and not set(cv_name.replace('.', '').lower().split()) <= _NOT_A_NAME_WORDS
             and f' {words} ' in f" {' '.join(_folded_tokens(cv_text)).lower()} ")
 
 
