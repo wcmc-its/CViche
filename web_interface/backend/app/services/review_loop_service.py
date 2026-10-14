@@ -48,7 +48,11 @@ from app.services import (
     corrected_copy_service,
     quality_score_service,  # noqa: F401  (puts src/ on sys.path for unified_pipeline)
 )
-from app.services.artifact_service import REVIEW_DOCX_SUFFIX, resolve_artifact
+from app.services.artifact_service import (
+    REVIEW_DOCX_SUFFIX,
+    RUN_ID_RE,
+    resolve_artifact,
+)
 from app.services.quality_score_service import DOCTOR_SUFFIX
 from app.services.review_comments import (
     COMMENT_AUTHOR,
@@ -333,21 +337,33 @@ def doctor_on_stored_outputs(db: Session, run_id: str, document: bytes | None = 
     a PDF upload's converted source is not stored, so the source lints skip."""
     from unified_pipeline.run_doctor import artifact_layout, run_doctor
 
-    with tempfile.TemporaryDirectory(prefix=f"stored_doctor_{run_id}_") as tmp:
-        root = Path(tmp)
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise ValueError(f"Invalid run id: {run_id!r}")
+    with tempfile.TemporaryDirectory(prefix="stored_doctor_") as tmp:
+        root = Path(tmp).resolve()
         layout = artifact_layout(root, run_id)
         for key, path in layout.items():
             raw = (document if document is not None and key == DOCTOR_DOCX_ARTIFACT
                    else _artifact_bytes(db, run_id, path.name))
             if raw is not None:
+                path = _inside(root, path)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(raw)
         errors = _artifact_bytes(db, run_id, f"{run_id}{STAGE_ERRORS_SUFFIX}")
         if errors is not None:
-            stage_errors_path(root, run_id).parent.mkdir(parents=True, exist_ok=True)
-            stage_errors_path(root, run_id).write_bytes(errors)
+            errors_path = _inside(root, stage_errors_path(root, run_id))
+            errors_path.parent.mkdir(parents=True, exist_ok=True)
+            errors_path.write_bytes(errors)
         source = _source_docx(run_id, root)
         return run_doctor(root, run_id, source=source)
+
+
+def _inside(root: Path, path: Path) -> Path:
+    """``path`` resolved, refused unless it lies under ``root`` (resolved)."""
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"Artifact path escapes the scratch dir: {path}")
+    return resolved
 
 
 def _source_docx(run_id: str, root: Path) -> Path | None:
@@ -357,7 +373,7 @@ def _source_docx(run_id: str, root: Path) -> Path | None:
         raw = get_storage().get_file(run_id, f"input/{run_id}.docx")
     except FileNotFoundError:
         return None
-    path = root / "uploads" / f"{run_id}.docx"
+    path = _inside(root, root / "uploads" / f"{run_id}.docx")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
     return path

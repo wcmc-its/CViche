@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from app.audit_events import RUN_DELETED
 from app.config_loader import current_image_tag, get_config
-from app.errors import conflict, internal_error, not_found
+from app.errors import bad_request, conflict, internal_error, not_found
 from app.models import Feedback, Run, RunState, User
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
@@ -27,11 +27,13 @@ from app.schemas import (
     QueueStatsResponse,
     QueueStreamStats,
 )
+from app.services.artifact_service import RUN_ID_RE
 from app.services.quality_score_service import (
+    DOCTOR_STATUS_KEY,
     DOCTOR_SUFFIX,
     compute_and_cache_score,
+    doctor_status,
     get_cached_score,
-    get_doctor_report,
     persist_score_columns,
 )
 from app.services.review_loop_service import doctor_on_stored_outputs
@@ -224,10 +226,14 @@ def hard_delete_run(db: Session, run_id: str, admin: User) -> None:
 def score_run(db: Session, run_id: str) -> QualityScoreResult:
     """Compute (or refresh) a run's advisory quality score, cache it, and copy
     it onto the run row. 404 for an unknown run, and for one with nothing to score."""
-    if not find_run(db, run_id):
+    run = find_run(db, run_id)
+    if not run:
         raise not_found("Run not found")
+    run_id = run.id  # the stored id from here on, never the URL's string
 
-    result = compute_and_cache_score(run_id)
+    # A rescore can't see why the doctor didn't run; keep the reason the
+    # orchestrator cached (failed/skipped) rather than reset it to not_checked.
+    result = compute_and_cache_score(run_id, doctor_outcome=_cached_doctor_status(run_id))
     if not result:
         raise not_found("No scorable outputs available for this run")
 
@@ -239,15 +245,21 @@ def rerun_doctor(db: Session, run_id: str, admin: User) -> DoctorRerunResult:
     """Run the doctor over a completed run's stored outputs, store its report
     beside them and rescore the run from it (#1593): the way back for a run
     whose doctor failed, was switched off, or died with its pod. Only the
-    doctor runs: no pipeline stage, no LLM call. 404 for an unknown run; 409
-    for one not complete, or one that already has a report (the review copy's
-    comments and their verdicts were written against that one)."""
+    doctor runs: no pipeline stage, no LLM call. 400 for a malformed run id;
+    404 for an unknown run; 409 for one not complete, or one that already has
+    a report, readable or not (the review copy's comments and their verdicts
+    were written against that one)."""
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise bad_request("Invalid run ID")
     run = find_run(db, run_id)
     if not run:
         raise not_found("Run not found")
+    # Every storage key and temp path below is built from the stored id, never
+    # from the URL's string (CodeQL py/path-injection).
+    run_id = run.id
     if run.status != RunState.COMPLETE:
         raise conflict(DOCTOR_RERUN_NOT_COMPLETE)
-    if get_doctor_report(run_id) is not None:
+    if _has_doctor_report(run_id):
         raise conflict(DOCTOR_RERUN_HAS_REPORT)
 
     try:
@@ -266,6 +278,21 @@ def rerun_doctor(db: Session, run_id: str, admin: User) -> DoctorRerunResult:
         counts=payload.get("counts") or {},
         score=_score_result(run_id, result) if result else None,
     )
+
+
+def _cached_doctor_status(run_id: str) -> str | None:
+    """The doctor status the run's cached score recorded; None when no score
+    is cached or it recorded none."""
+    cached = get_cached_score(run_id)
+    return doctor_status(cached.get(DOCTOR_STATUS_KEY)) if isinstance(cached, dict) else None
+
+
+def _has_doctor_report(run_id: str) -> bool:
+    """Whether a doctor report is stored under the run's outputs. By key, not
+    by parsing it: an unreadable report still blocks an overwrite, and a
+    storage error raises rather than reading as "no report"."""
+    keys = get_storage().list_files(run_id, OUTPUTS_PREFIX)
+    return any(k.endswith(DOCTOR_SUFFIX) for k in keys)
 
 
 def _store_doctor_report(db: Session, run_id: str) -> dict:
