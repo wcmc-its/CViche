@@ -47,6 +47,7 @@ except ImportError as exc:
     ) from exc
 
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.two_digit_year import expand_two_digit_year
 
 from ..formatting import (
     _set_font,
@@ -55,8 +56,10 @@ from ..formatting import (
     with_extra_date_spans,
 )
 from ..normalization import _get_cleaned_institution_name
+from ..parsing.dates import _OPEN_ENDED, _ends_strictly_before, _overlap_boundary
 from ..parsing import (
     _dates_overlap_or_match,
+    _get_entry_date_range,
     _is_table_header_entry,
     _parse_date_components,
     split_appointment_title,
@@ -501,6 +504,42 @@ def _same_source_element(first: dict, second: dict) -> bool:
     cell = (first.get('table_index'), first.get('row_index'))
     return (cell[0] is not None and cell[1] is not None
             and cell == (second.get('table_index'), second.get('row_index')))
+
+
+# A position's month/two-digit-year boundary, "07/00" (#1703).
+_MONTH_SLASH_YY = re.compile(r'(\d{1,2})/(\d{2})')
+
+
+def _span_extends_beyond(header: dict, titled: list[dict]) -> bool:
+    """True only when the stated dates PROVE `header` starts before every
+    titled row or ends after every one -- a span no titled row carries (#1703).
+
+    Read at the CV's own granularity, like `_dates_overlap_or_match`: an
+    unreadable boundary proves nothing, so the header is dropped as before.
+    The shared parser leaves a bare mm/yy unread (it may be a day); on a
+    position's start or end it is a month and year, as in TJDPJE's "07/00".
+    """
+    def boundary(date_str: str, *, is_end: bool) -> tuple[int, int | None] | object | None:
+        parsed = _overlap_boundary(date_str, is_end=is_end)
+        m = _MONTH_SLASH_YY.fullmatch(str(date_str or '').strip())
+        if parsed is None and m and 1 <= int(m.group(1)) <= 12:
+            return (expand_two_digit_year(int(m.group(2))), int(m.group(1)))
+        return parsed
+
+    def bounds(entry: dict) -> tuple:
+        start, end = _get_entry_date_range(entry)
+        return boundary(start, is_end=False), boundary(end, is_end=True)
+
+    h_start, h_end = bounds(header)
+    spans = [bounds(t) for t in titled]
+    if h_start is None or h_end is None or any(None in span for span in spans):
+        return False
+    starts_earlier = all(t_start is not _OPEN_ENDED and _ends_strictly_before(h_start, t_start)
+                         for t_start, _ in spans)
+    ends_later = all(t_end is not _OPEN_ENDED
+                     and (h_end is _OPEN_ENDED or _ends_strictly_before(t_end, h_end))
+                     for _, t_end in spans)
+    return starts_earlier or ends_later
 
 
 def _is_one_appointment(first: dict, second: dict) -> bool:
@@ -1019,6 +1058,10 @@ class PositionsSection:
         # a title, on the rows beneath it.  Drop it so it does not render as a
         # blank-TITLE row.  Requires an overlapping *titled* sibling at the same
         # institution; a header with no such sibling is the sole record and kept.
+        # So is a header that names its own employer and that the titled
+        # siblings only partly cover (#1703): in
+        # "07/00-05/10 Practice (Managing Partner 2005-2010)" the 2000-2005
+        # employment is on the header alone, and dropping it loses that span.
         for i, entry in enumerate(ordered):
             if i in dropped:
                 continue
@@ -1027,17 +1070,17 @@ class PositionsSection:
             employer = _entry_employer(entry)
             if not employer:
                 continue
-            for j, other in enumerate(ordered):
-                if j == i or j in dropped:
-                    continue
-                if not cls._position_title(other) or not cls._position_has_dates(other):
-                    continue
-                if _entry_employer(other) != employer:
-                    continue
-                if _dates_overlap_or_match(entry, other):
-                    dropped.add(i)
-                    merged += 1
-                    break
+            titled = [other for j, other in enumerate(ordered)
+                      if j != i and j not in dropped
+                      and cls._position_title(other) and cls._position_has_dates(other)
+                      and _entry_employer(other) == employer
+                      and _dates_overlap_or_match(entry, other)]
+            # A header that only inherited its employer keeps the old drop: its
+            # extra span is not on any employer the CV names for it (CBNXND 50).
+            if titled and (_inherited_institution(entry)
+                           or not _span_extends_beyond(entry, titled)):
+                dropped.add(i)
+                merged += 1
 
         if verbose and unmatched_employer:
             logger.info("%d merged row(s) matched no employer name; one row "
