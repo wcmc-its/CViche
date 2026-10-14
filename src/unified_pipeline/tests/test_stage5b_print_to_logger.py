@@ -437,6 +437,44 @@ def test_run_stage5b_enriches_c3_fellowship_entries(monkeypatch, tmp_path):
     assert out["entries"][0]["institution_enrichment"]["city"] == "Ithaca"
 
 
+# --- run_stage5b: the lookup's city against the entry's own text (#1257) -----
+
+def test_run_stage5b_does_not_write_a_city_the_entry_text_contradicts(monkeypatch, tmp_path):
+    """The real run_stage5b wire: a city the entry states replaces the
+    lookup's in both institution_enrichment (which stage 6 renders) and the
+    extracted fields 5b fills; a generic name with no city gets none."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(s5b_lookup, "call_llm", lambda **kw: _fake_llm_result(json.dumps({
+        "INST-0001": {"cleaned_name": "Example Health Network", "city": "Tampa",
+                      "state": "Florida", "country": "United States", "country_code": "US"},
+        "INST-0002": {"cleaned_name": "University Hospital", "city": "Gainesville",
+                      "state": "Florida", "country": "United States", "country_code": "US"},
+    })))
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({"document_uid": "test-uid", "entries": [
+        {"taxonomy_code": "D2", "extracted_fields": {"institution": "Example Health Network"},
+         "text": "Clinical Pharmacist 2018-2021\tExample Health Network\tOrlando, Florida"},
+        {"taxonomy_code": "C", "extracted_fields": {"institution": "University Hospital"},
+         "text": "Pharmacy Residency, University Hospital \u2014 06/30/2007"},
+    ]}))
+    output_path = tmp_path / "output.json"
+
+    s5b.run_stage5b(str(input_path), output_path=str(output_path), refresh_cache=True, verbose=False)
+
+    stated, generic = json.loads(output_path.read_text())["entries"]
+    assert stated["institution_enrichment"]["city"] == "Orlando"
+    assert stated["institution_enrichment"]["location_source"] == "entry_text"
+    assert stated["institution_enrichment"]["llm_location"] == "Tampa, FL"
+    assert stated["extracted_fields"]["location"] == "Orlando, FL"
+    assert generic["institution_enrichment"]["city"] == ""
+    assert generic["institution_enrichment"]["location_source"] == "withheld"
+    assert "city" not in generic["extracted_fields"]
+    assert "location" not in generic["extracted_fields"]
+
+
 # --- run_stage5b: the web path keeps no disk cache (#1238) --------------------
 
 def _one_cornell_entry(tmp_path):
