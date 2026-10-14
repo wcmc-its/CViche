@@ -7,6 +7,7 @@ notifications.build_feedback_payload / notify_feedback_submitted helpers
 themselves are covered in test_notifications.py; a helper test alone doesn't
 prove the route actually calls them with the right arguments.
 """
+import json
 import os
 from contextlib import contextmanager
 from datetime import datetime
@@ -193,6 +194,50 @@ def test_feedback_all_matches_the_single_feedback_serialisation(client, db):
 
     listed.pop("display_name")
     assert listed == single
+
+
+# --- section labels come from core/taxonomy_v7.json (#1782) --------------------
+
+
+def test_section_labels_are_exactly_the_taxonomy_codes_and_labels():
+    """Every code the feedback form can name, with its label, is taxonomy_v7's own."""
+    from app.api.feedback_routes import _taxonomy_section_labels
+    from unified_pipeline.stage3b.io import load_taxonomy
+
+    taxonomy = {c["code"]: c["label"] for c in load_taxonomy()["codes"]}
+    assert dict(_taxonomy_section_labels()) == taxonomy
+    # The retired scheme the hand-kept map carried (S3 'Letters to Editor', S10-S15, T1-T7).
+    assert _taxonomy_section_labels()["S3"] == "Books"
+    assert {"S10", "S13", "S15", "T1", "T7"}.isdisjoint(_taxonomy_section_labels())
+
+
+def _seed_populated_outputs(root, run_id, *section_codes):
+    """A stage-4 metadata file plus one stage-2d enriched file per section code."""
+    stage_4 = root / run_id / "stage_4_wcm_templates"
+    stage_4.mkdir(parents=True)
+    (stage_4 / "x_template_metadata.json").write_text(
+        json.dumps({"records_processed": {"publications": 2}}), encoding="utf-8")
+    enriched = root / run_id / "stage_2d_enriched"
+    enriched.mkdir()
+    for code in section_codes:
+        (enriched / f"section_{code}_enriched.json").write_text("{}", encoding="utf-8")
+
+
+def test_get_feedback_names_populated_sections_by_their_taxonomy_label(client, db, tmp_path, monkeypatch):
+    from app.models import Step
+
+    owner = _seed_run(db)
+    db.add(Step(run_id=_RUN_ID, step_number=12, stage_id="6", step_name="WCM", status="complete"))
+    db.commit()
+    monkeypatch.setattr("app.api.feedback_routes.OUTPUTS_ROOT", tmp_path)
+    _seed_populated_outputs(tmp_path, _RUN_ID, "S3", "S5", "S13")
+
+    with _as_user(owner):
+        sections = client.get(f"/api/run/{_RUN_ID}/feedback").json()["run_context"]["wcm_sections"]
+
+    named = {s["section_id"]: s["section_name"] for s in sections if "section_id" in s}
+    # S13 is not a taxonomy_v7 code, so it is not offered at all.
+    assert named == {"S3": "Books", "S5": "Non-peer-reviewed Research Publications"}
 
 
 # --- the review loop (#1587): the corrected copy -------------------------------
