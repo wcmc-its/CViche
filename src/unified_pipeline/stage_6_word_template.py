@@ -1252,9 +1252,9 @@ def _route_d2_leadership_title(entry: dict[str, Any], code: str,
     to L3's (`_D2_TO_L3_FIELDS`) and its element_idx_start and record position
     appended to *moved*; *code* otherwise."""
     position = _split_record_position(entry)
-    fields = entry.get('extracted_fields')
-    if code != HOSPITAL_APPOINTMENT_CODE or position is None or not isinstance(fields, dict):
+    if code != HOSPITAL_APPOINTMENT_CODE or position is None:
         return code
+    fields = entry['extracted_fields']  # fan-out gives every record a dict
     title = fields.get('title')
     if not isinstance(title, str) or not _LEADERSHIP_TITLE_RE.match(title):
         return code

@@ -931,7 +931,9 @@ def test_the_last_record_moves_too_and_its_department_names_the_unit() -> None:
     assert moved["extracted_fields"]["leadership_role"] == "Medical Director"
     assert moved["extracted_fields"]["unit_program"] == "Example Service"
     assert "department" not in moved["extracted_fields"]
-    assert _d2_leadership_records(gen)[0]["evidence"] == ["element_idx_start 46 record 2 of 2"]
+    [record] = _d2_leadership_records(gen)
+    assert record["evidence"] == ["element_idx_start 46 record 2 of 2"]
+    assert record["message"].endswith(": 1 record")
 
 
 @pytest.mark.parametrize("title", [
@@ -953,6 +955,21 @@ def test_each_leadership_title_form_moves(title: str) -> None:
     groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code(
         [_d2_paragraph([title, "Attending Physician"])])
     assert [e["extracted_fields"]["leadership_role"] for e in groups["L3"]] == [title]
+
+
+def test_a_moved_record_keeps_a_leadership_role_stage4_already_wrote() -> None:
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([_d2_paragraph(
+        ["Director", "Attending Physician"], leadership_role="Director, Example Unit")])
+    [moved] = groups["L3"]
+    assert moved["extracted_fields"]["leadership_role"] == "Director, Example Unit"
+
+
+@pytest.mark.parametrize("title", [None, ["Director, Example Unit"]], ids=["none", "list"])
+def test_a_split_record_whose_title_is_not_text_stays_a_hospital_appointment(title) -> None:
+    entry = _d2_paragraph(["Director, Example Unit", "Attending Physician"])
+    entry["extracted_fields"]["stage4_records"][0]["title"] = title
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    assert "L3" not in groups and len(groups["D2"]) == 2
 
 
 def test_an_unsplit_d2_entry_keeps_the_models_code() -> None:
