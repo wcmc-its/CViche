@@ -53,6 +53,7 @@ from unified_pipeline.stage5b.normalize import (  # noqa: F401  (re-exports)
     format_location,
     is_likely_internal_unit,
     normalize_institution_name,
+    reconcile_location_with_source,
 )
 
 # Paths
@@ -63,6 +64,10 @@ INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'C3', 'D1', 'D2', 'D3']
 
 # LLM batch size
 BATCH_SIZE = 10
+
+# Provenance reconcile_location_with_source adds when it replaces or drops
+# the lookup's location; copied onto institution_enrichment as-is (#1257).
+RECONCILIATION_KEYS = ('location_source', 'llm_location')
 
 
 def __getattr__(name: str):
@@ -94,6 +99,11 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
         The same entry dict, with enriched location data added
     """
     fields = entry.get('extracted_fields', {})
+    # The lookup never saw the entry text: a city the text contradicts, or
+    # guessed for a generic name or an online course, does not stand (#1257).
+    result = reconcile_location_with_source(
+        result, fields.get('institution') or '', entry.get('text') or '',
+        entry.get('taxonomy_code'))
 
     # Store enrichment data (backward-compatible with Stage 6 readers)
     entry['institution_enrichment'] = {
@@ -103,7 +113,8 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
         'state': result.get('state', ''),
         'country': result.get('country', ''),
         'country_code': result.get('country_code', ''),
-        'source': 'llm'
+        'source': 'llm',
+        **{key: result[key] for key in RECONCILIATION_KEYS if key in result},
     }
 
     # Update extracted_fields with location if missing
@@ -191,7 +202,7 @@ def _build_institution_enrichment_stats(
 
     ``entry.get('institution_enrichment')`` is a presence check. No code
     writes ``{}``: in 5b, ``enrich_entry_with_result`` always assigns a
-    7-key dict, and stage 6's positions.py only copies an existing truthy
+    non-empty dict, and stage 6's positions.py only copies an existing truthy
     mapping (after 5b has counted). An explicit ``{}`` counts as absent.
     """
     enriched_count = sum(

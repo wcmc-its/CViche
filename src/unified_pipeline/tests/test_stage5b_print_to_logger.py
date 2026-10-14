@@ -437,6 +437,71 @@ def test_run_stage5b_enriches_c3_fellowship_entries(monkeypatch, tmp_path):
     assert out["entries"][0]["institution_enrichment"]["city"] == "Ithaca"
 
 
+# --- run_stage5b: the lookup's city against the entry's own text (#1257) -----
+
+def test_run_stage5b_does_not_write_a_city_the_entry_text_contradicts(monkeypatch, tmp_path):
+    """The real run_stage5b wire: a city the entry states replaces the
+    lookup's in both institution_enrichment (which stage 6 renders) and the
+    extracted fields 5b fills; a generic name with no city gets none, and
+    neither does a course taken online, but an appointment that mentions an
+    online course it developed keeps its city."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    _isolate_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(s5b_lookup, "call_llm", lambda **kw: _fake_llm_result(json.dumps({
+        "INST-0001": {"cleaned_name": "Example Health Network", "city": "Tampa",
+                      "state": "Florida", "country": "United States", "country_code": "US"},
+        "INST-0002": {"cleaned_name": "University Hospital", "city": "Gainesville",
+                      "state": "Florida", "country": "United States", "country_code": "US"},
+        "INST-0003": {"cleaned_name": "Example Academy", "city": "Washington",
+                      "state": "District of Columbia", "country": "United States", "country_code": "US"},
+        "INST-0004": {"cleaned_name": "Example College", "city": "Chicago",
+                      "state": "Illinois", "country": "United States", "country_code": "US"},
+    })))
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({"document_uid": "test-uid", "entries": [
+        {"taxonomy_code": "D2", "extracted_fields": {"institution": "Example Health Network"},
+         "text": "Clinical Pharmacist 2018-2021\tExample Health Network\tOrlando, Florida"},
+        {"taxonomy_code": "C", "extracted_fields": {"institution": "University Hospital"},
+         "text": "Pharmacy Residency, University Hospital \u2014 06/30/2007"},
+        {"taxonomy_code": "B2", "extracted_fields": {"institution": "Example Academy"},
+         "text": "Waiver Training\tMay 2020\tExample Academy, online"},
+        {"taxonomy_code": "D1", "extracted_fields": {"institution": "Example College"},
+         "text": "Online course development with Example College faculty, Example College, 2015-2020"},
+    ]}))
+    output_path = tmp_path / "output.json"
+
+    s5b.run_stage5b(str(input_path), output_path=str(output_path), refresh_cache=True, verbose=False)
+
+    stated, generic, online_course, online_programme = json.loads(output_path.read_text())["entries"]
+    assert stated["institution_enrichment"]["city"] == "Orlando"
+    assert stated["institution_enrichment"]["location_source"] == "entry_text"
+    assert stated["institution_enrichment"]["llm_location"] == "Tampa, FL"
+    assert stated["extracted_fields"]["location"] == "Orlando, FL"
+    assert generic["institution_enrichment"]["city"] == ""
+    assert generic["institution_enrichment"]["location_source"] == "withheld"
+    assert "city" not in generic["extracted_fields"]
+    assert "location" not in generic["extracted_fields"]
+    assert online_course["institution_enrichment"]["location_source"] == "withheld"
+    assert online_programme["institution_enrichment"]["city"] == "Chicago"
+    assert "location_source" not in online_programme["institution_enrichment"]
+    assert online_programme["institution_enrichment"]["source"] == "llm"
+
+
+def test_enrich_entry_with_result_reads_null_institution_and_text_as_empty():
+    """Stage 4 can write None for the institution or the text; the #1257 check
+    reads either as empty rather than raising."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+
+    for institution, text in ((None, "Fellow"), ("Example Hospital", None)):
+        entry = {"taxonomy_code": "C", "extracted_fields": {"institution": institution}, "text": text}
+        s5b.enrich_entry_with_result(entry, {"cleaned_name": "Example Hospital", "city": "Otherton",
+                                             "state": "Ohio", "country": "United States",
+                                             "country_code": "US"})
+        assert entry["institution_enrichment"]["source"] == "llm"
+
+
 # --- run_stage5b: the web path keeps no disk cache (#1238) --------------------
 
 def _one_cornell_entry(tmp_path):
