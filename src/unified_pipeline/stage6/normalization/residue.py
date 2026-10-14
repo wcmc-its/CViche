@@ -141,14 +141,20 @@ _EDGE_DATE = rf'(?:\(\s*{_DATE_RANGE}\s*\)|{_DATE_RANGE})'
 _LEADING_DATE_RE = re.compile(rf'^{_EDGE_DATE}', re.IGNORECASE)
 # A trailing date stands apart from what precedes it: "IL 2/09-2012" ends in a
 # range whose start the date grammar cannot read, not in the date "2012".
-_TRAILING_DATE_RE = re.compile(
-    rf'(?:^|(?<=[\s,;:(|]))(?:(?:in|since|from)\s+)?{_EDGE_DATE}$', re.IGNORECASE)
+_TRAILING_DATE_RE = re.compile(rf'(?:^|(?<=[\s,;:(|])){_EDGE_DATE}$', re.IGNORECASE)
+# A date a word like "in" or "since" leads into ends a sentence ("... was
+# reaccredited by the Council (CEPH) in 2021.", AQCLHS 88), not a record's
+# date column; taking it cut the sentence short (#1346).
+_DATE_LEAD_IN_RE = re.compile(
+    rf'\b(?:{"|".join(sorted(_CONNECTIVE_WORDS | {"since", "until"}))})\W*$', re.IGNORECASE)
 # What a removal can leave at an edge: separators, a list bullet, a stop. Not a
 # quote or a bracket -- those close something the line opened.
 _LINE_EDGE_CHARS = ' \t\n,;:.|-–—•·▪◦*'
 # A role at the start of the line stands as its own segment ("Member. ...",
-# "Program Director, Ashby University"); in "Member of the Board" it does not.
-_ROLE_FOLLOWER = r'(?=\s*(?:[,;:.|(\-–—]|$))'
+# "Program Director, Ashby University"); in "Member of the Board" it does not,
+# nor before a parenthesis, which would be left as the cell on its own
+# ("<role> (Organic Chemistry, ...)", REOYVH 218).
+_ROLE_FOLLOWER = r'(?=\s*(?:[,;:.|\-–—]|$))'
 
 
 def _role_pattern(role: str) -> str:
@@ -162,7 +168,8 @@ def _strip_edge_date(line: str, known_years: set[str]) -> str:
     the Dates cell shows (`known_years`)."""
     for pattern in (_LEADING_DATE_RE, _TRAILING_DATE_RE):
         match = pattern.search(line)
-        if match and set(_YEAR_RE.findall(match.group())) <= known_years:
+        if (match and set(_YEAR_RE.findall(match.group())) <= known_years
+                and not _DATE_LEAD_IN_RE.search(line[:match.start()])):
             line = line[:match.start()] + line[match.end():]
     return line
 

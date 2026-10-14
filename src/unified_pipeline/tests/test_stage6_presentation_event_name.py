@@ -476,3 +476,19 @@ def test_a_titled_talk_renders_its_title_whatever_its_source_line_holds():
                           date="2025-12-15", title="Calibrating Zqwidgets",
                           location="Big Island")
     assert cells == ["Calibrating Zqwidgets", "Big Island", "2025"]
+
+
+def test_a_two_digit_year_numeric_date_opening_a_title_is_dropped():
+    """VPMMFM 524 (#1346): '<mm/dd/yy>' names the year the Dates cell shows."""
+    cells = _untitled_row("10/27/04 Zqwidget Calibration at Scale, Northgate Hall",
+                          date="2004-10-27", location="Northgate Hall")
+    assert cells[0] == "Zqwidget Calibration at Scale"
+
+
+def test_untitled_talk_drops_the_bracketed_piece_of_its_event():
+    """An event written 'A (B)' appears in the line as 'A, B': both pieces
+    are shown, so the title is the event (#1346)."""
+    cells = _untitled_row("05/01/2019 Zqfib Roundtable, ZZ chapter. Northgate Hall",
+                          date="2019-05-01", event_name="Zqfib Roundtable (ZZ chapter)",
+                          location="Northgate Hall")
+    assert cells == ["Zqfib Roundtable (ZZ chapter)", "Northgate Hall", "2019"]

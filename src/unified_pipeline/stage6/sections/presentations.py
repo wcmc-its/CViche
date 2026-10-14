@@ -62,7 +62,7 @@ _CONNECTIVES = frozenset({'at', 'the', 'of', 'and', 'in', 'on', 'for', 'to', 'an
 # is its year, two digits when the source wrote it short (PZTNWT 118-164,
 # VPMMFM 524, #1346).
 _LEADING_NUMERIC_DATE_RE = re.compile(
-    r'^\s*\d{1,2}/(?:\d{1,2}/)?(\d{4}|\d{2})(?![\d/])[\s.,:;\-–—]*')
+    r'^\s*\d{1,2}/(?:\d{1,2}/)?(\d{4}|\d{2})[\s.,:;\-–—]*')
 _SHORT_YEAR_DIGITS = 2
 # The pieces of a role, event or venue value, each of which the row already
 # shows: a source line gives "<institution><TAB><city>" for the venue stage 4

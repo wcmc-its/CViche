@@ -87,6 +87,7 @@ from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
 )
 from unified_pipeline.stage6.normalization.residue import (  # noqa: E402
     _DATE_SPAN,
+    _line_without_shown_role_and_dates,
     _organization_left_in_text,
 )
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
@@ -1259,3 +1260,41 @@ def test_q2_committee_name_wins_over_topic():
                   role="Zqchair", organization=None, topic="Zqwidget repair",
                   start_date="2015")
     assert row == ["Ashby Panel", "Zqchair", "", "2015"]
+
+
+@pytest.mark.parametrize("text, role, start, end, expected", [
+    # Nothing at the edges to take: the line is returned exactly as given,
+    # its closing stop included.
+    ("Zqsociety Steering Group.", "Advisor", "2018", None, "Zqsociety Steering Group."),
+    # A parenthesis holding only the shown dates goes with them.
+    ("Zqsociety Advisor (2018-2020)", "Advisor", "2018", "2020", "Zqsociety"),
+    # "2/09-2012" is a range the grammar cannot read; its "2012" is not a date
+    # standing apart, so the line keeps its year and stays whole.
+    ("Zqsociety, IL 2/09-2012", None, "2012", None, "Zqsociety, IL 2/09-2012"),
+    # Each of a ';'-joined role's parts is a role the Role cell shows.
+    ("Zqsociety Treasurer \u2014 2019", "Advisor; Treasurer", "2019", None, "Zqsociety"),
+    # Taking the role exposes a date at the new edge, which goes too.
+    ("Zqsociety, 2018, Advisor", "Advisor", "2018", None, "Zqsociety"),
+    # Numeric months, an open "now" end and "to" between two years.
+    ("Zqsociety Advisor 09/2009 - 06/2012", "Advisor", "2009-09", "2012-06", "Zqsociety"),
+    ("Zqsociety Advisor 2019- now", "Advisor", "2019", "present", "Zqsociety"),
+    ("Zqsociety Advisor 2001 to 2014", "Advisor", "2001", "2014", "Zqsociety"),
+    # The role's words, whatever punctuation the line puts between them.
+    ("Zqsociety Co-Chair 2015", "Co Chair", "2015", None, "Zqsociety"),
+    # A date a word leads into ends a sentence: the sentence stays whole
+    # (AQCLHS 88 shape), as does a "since" line.
+    ("Zqdirector, I helped Zqcollege earn reaccreditation by the Zqcouncil (ZQEP) in 2021.",
+     "Zqdirector", "2021", None,
+     "Zqdirector, I helped Zqcollege earn reaccreditation by the Zqcouncil (ZQEP) in 2021."),
+    ("Zqsociety Member since 2015", "Member", "2015", None, "Zqsociety Member since 2015"),
+    # Only a whole word leads in: "Toronto" ends in "to" but is a place.
+    ("Zqsociety, Toronto 2015", None, "2015", None, "Zqsociety, Toronto"),
+    # A leading role before a parenthesis stays: taking it left the
+    # parenthesis alone as the cell (REOYVH 218 shape).
+    ("1997-2000 Zqtutor (Organic Zqchem, Physical Zqchem)", "Zqtutor", "1997", "2000",
+     "Zqtutor (Organic Zqchem, Physical Zqchem)"),
+])
+def test_line_without_shown_role_and_dates(text, role, start, end, expected):
+    """#1346: what a P or Q2 row's fallback line holds beyond the role and
+    dates at its ends."""
+    assert _line_without_shown_role_and_dates(text, role, start, end) == expected

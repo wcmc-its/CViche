@@ -36,7 +36,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
-from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+    fan_out_multi_record_entries,
+)
 from unified_pipeline.stage6.formatting import format_date_range  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -751,6 +755,16 @@ class TestRawFallbackLeavesOutTheRoleAndDatesItsRowShows:
         entry = {"text": text, "taxonomy_code": "P",
                  "extracted_fields": {"start_date": "2013", "end_date": "2015"}}
         assert _rows(entry) == [(text, "", "2013-2015")]
+
+    def test_the_last_split_record_falls_back_to_its_own_line(self):
+        """A split entry's last record carries the parent's whole line as
+        `text`; it falls back to its own line (`fallback_text`), so the cell
+        does not print the other record's words (#1346)."""
+        entry = {"text": "Zqalpha Advisor 2018; Zqsociety Treasurer \u2014 2019",
+                 "taxonomy_code": "P",
+                 LAST_STAGE4_RECORD: {OWN_TEXT_KEY: "Zqsociety Treasurer \u2014 2019"},
+                 "extracted_fields": {"role": "Treasurer", "start_date": "2019"}}
+        assert _rows(entry) == [("Zqsociety", "Treasurer", "2019")]
 
     def test_an_extracted_committee_is_untouched(self):
         """Blast radius: a row with a committee renders exactly as before."""
