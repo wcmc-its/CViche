@@ -518,6 +518,49 @@ def test_a_damaged_stage4_list_gives_way_to_the_cvs_own_line() -> None:
         'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse GM, Holly H. A title. J Wood. 2020.')
 
 
+def _group_twin(**overrides):
+    """An S8 talk dated only by its year group (#1803), 5d's citation yearless."""
+    entry = {
+        'text': 'Quillfern Retreat (Larchmere, ZZ)',
+        'group_year': '1983',
+        'extracted_fields': {
+            'year': '1983', 'location': 'Larchmere, ZZ',
+            'formatted_citation': 'Quillfern Retreat; Larchmere, ZZ.',
+            'formatting_source': 'stage_5d_llm'}}
+    fields = overrides.pop('fields', {})
+    entry.update(overrides)
+    entry['extracted_fields'].update(fields)
+    return entry
+
+
+def test_a_group_filled_year_reaches_the_stage5d_citation():
+    """#1810: the year stage 4 took from the line's year group."""
+    assert resolve_publication(_group_twin()).formatted_citation == (
+        'Quillfern Retreat; 1983; Larchmere, ZZ.')
+
+
+@pytest.mark.parametrize('overrides', [
+    {'group_year': None},                       # not a group twin
+    {'group_year': 1983},                       # not 3b's string
+    {'group_year': '1982'},                     # stage 4 dated it otherwise
+    {'fields': {'year': None}},                 # no year to add
+    {'group_year': 'True', 'fields': {'year': True}},  # a bool is not a year
+    {'fields': {'formatting_source': 'other'}},  # not a 5d citation
+])
+def test_only_a_group_filled_year_is_added(overrides):
+    """A year 5d left out for any other reason may be one stage 4 misread."""
+    resolved = resolve_publication(_group_twin(**overrides))
+    # '' for the citation stage 5d did not write, which is not printed at all.
+    assert resolved.formatted_citation in ('Quillfern Retreat; Larchmere, ZZ.', '')
+
+
+def test_an_int_year_equal_to_the_group_year_is_added():
+    """Stage 4 can hand back the year as a number; it is the same year."""
+    entry = _group_twin(fields={'year': 1983})
+    assert resolve_publication(entry).formatted_citation == (
+        'Quillfern Retreat; 1983; Larchmere, ZZ.')
+
+
 # ---------------------------------------------------------------------------
 # Drift guard against stage 4's own schemas
 # ---------------------------------------------------------------------------
@@ -535,11 +578,12 @@ _PUBLICATION_CODES = ('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9')
 #:
 #: `chapter_title` left this list in round 5 (#728): stage 4's own S4 schema
 #: writes the chapter's title there and never writes `title`, so 53 farm book
-#: chapters rendered the book and never the chapter. `narrative` and the rest
+#: chapters rendered the book and never the chapter. `location` left it in
+#: #1810: it places a group-filled year in a meeting citation. `narrative` and the rest
 #: are genuinely not part of a Vancouver citation.
 _SCHEMA_KEYS_NOT_RENDERED = frozenset({
     'abstract_number', 'conference_name', 'edition', 'isbn',
-    'location', 'media_type', 'narrative', 'publication_venue',
+    'media_type', 'narrative', 'publication_venue',
     'report_number', 'status', 'target_journal', 'url', 'venue',
 })
 
