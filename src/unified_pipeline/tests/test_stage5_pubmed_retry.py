@@ -1993,7 +1993,9 @@ def test_pubmed_list_not_cut_from_the_cv_byline_is_none(cv, pubmed):
 # M7NDD0 e27: degrees after each name; an editor mark.
 @pytest.mark.parametrize('piece', [
     '(Equal 1st author contributorship)', 'Jr', 'jr.', 'Sr.', 'II', 'III', 'IV',
-    'PhD', 'Ph.D.', 'M.D.', 'MD', 'MSc', 'MPH', 'MD PhD', 'Editors', 'Editor', 'Eds.', 'ed'])
+    'PhD', 'Ph.D.', 'M.D.', 'MD', 'MSc', 'MPH', 'MD PhD', 'Editors', 'Editor', 'Eds.', 'ed',
+    # one word is no author, listed degree or not; several listed ones aren't either
+    'MBChB', 'FRCSEd', 'PhD(c)', 'MSc(Med)', 'Hons', 'Ng', 'MD, PhD', 'Ed Eds', 'Sr Jr', 'II III', 'IV Editors', 'Editor Eds'])
 def test_cv_piece_that_is_no_name_is_none(piece):
     assert _restored(CAPPED_CV[:10] + [piece], CAPPED_CV[:10]) is None
 
@@ -2027,10 +2029,16 @@ def test_cv_name_the_cv_line_does_not_write_is_none():
     # One name that cannot render keeps PubMed's list, whatever the others.
     assert _restored(CAPPED_CV[:11] + ['Jr'], CAPPED_CV[:10]) is None
     # A name only starting like a suffix renders, written in another case, as
-    # do a two-letter surname alone and a group named from a number.
-    line = ', '.join(CAPPED_CV[:10]) + ', SRINIVASAN R, Ng, 5199 Study Team'
-    more = ['Srinivasan R', 'Ng', '5199 Study Team']
+    # does a group named from a number.
+    line = ', '.join(CAPPED_CV[:10]) + ', SRINIVASAN R, 5199 Study Team'
+    more = ['Srinivasan R', '5199 Study Team']
     assert _restored(CAPPED_CV[:10] + more, CAPPED_CV[:10], line) == ', '.join(CAPPED_CV[:10] + more)
+
+
+@pytest.mark.parametrize('name', ['Ma JD', 'Ma D', 'Deng D', 'Bao MS', 'Do MD', 'Ed Wren', 'Jr Quill', 'Lu Lu'])
+def test_a_surname_spelt_like_a_credential_still_renders(name):
+    # The credential words are compared as written: "Ma" is a surname, "MA" a degree.
+    assert _restored(CAPPED_CV[:10] + [name], CAPPED_CV[:10]) == ', '.join(CAPPED_CV[:10] + [name])
 
 
 def _capped_entry(authors=CAPPED_CV_TEXT, target_name='Quill JA'):

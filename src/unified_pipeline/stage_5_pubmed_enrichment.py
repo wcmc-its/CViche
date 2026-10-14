@@ -323,10 +323,11 @@ _SURNAME_FIRST = re.compile(r"^(\S*[a-z]\S*(?: \S*[a-z]\S*)*)((?: [A-Z]{1,3})+)$
 _INITIALS_FIRST = re.compile(r"^((?:[A-Z]{1,3} )+)(\S*[a-z]\S*(?: \S*[a-z]\S*)*)$")
 _NAME_FIRST = re.compile(r"^([A-Z])[a-z]+((?: [A-Z])*) (\S*[a-z]\S*)$")
 _GENERATION = re.compile(r"\b(?:II|III|IV)\b")  # "Doe JA III": not initials
-# Words that end a name rather than name an author, stops dropped: a suffix
-# ("Jr"), a degree or credential ("PhD", "M.D."), an editor mark ("Eds").
-_NOT_A_NAME_WORDS = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'ed', 'eds', 'editor', 'editors'}
-                              | {w for c in CREDENTIALS for w in c.replace('.', '').lower().split()})
+# Words that end a name rather than name an author, stops dropped and case
+# kept ("MA" is a degree, "Ma" a surname): a suffix ("Jr"), a degree or
+# credential ("PhD", "M.D."), an editor mark ("Eds").
+_NOT_A_NAME_WORDS = frozenset({'Jr', 'Sr', 'II', 'III', 'IV', 'Ed', 'Eds', 'Editor', 'Editors'}
+                              | {w for c in CREDENTIALS for w in c.replace('.', '').split()})
 
 
 def _cv_author_names(cv_authors: str | list[str] | None) -> list[str]:
@@ -403,11 +404,14 @@ def _restorable(cv_name: str, cv_text: str | None) -> bool:
     """Whether a CV name PubMed lacks can render: it is no parenthesised note
     (GCFEBE e717's "(Equal 1st author contributorship)"), is not only a
     suffix, degree or editor mark cut from a name (RXYBVF e561's "Jr",
-    M7NDD0 e27's "MD, PhD"), and the CV's line writes it, words in order
+    M7NDD0 e27's "MD, PhD"; any one-word piece, "MBChB" too, since a CV
+    author has a surname and initials or is a group of several words), and
+    the CV's line writes it, words in order
     (not "Team H5P", stage 4's reading of "HVTN 505 Protocol Team")."""
     words = ' '.join(_folded_tokens(cv_name)).lower()
+    pieces = cv_name.replace('.', '').replace(',', ' ').split()
     return (not cv_name.startswith('(')
-            and not set(cv_name.replace('.', '').lower().split()) <= _NOT_A_NAME_WORDS
+            and len(pieces) > 1 and not set(pieces) <= _NOT_A_NAME_WORDS
             and f' {words} ' in f" {' '.join(_folded_tokens(cv_text)).lower()} ")
 
 
