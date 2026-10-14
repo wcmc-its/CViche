@@ -223,8 +223,8 @@ def merge_into_parent(entries: list[dict[str, Any]], idx: int) -> str | None:
     parent_idx = resolve_parent(entries, idx)
     parent = entries[parent_idx]
     parent["text"] = _joined(
-        str(parent.get("text") or ""),
-        str(entries[idx].get("text") or ""),
+        parent.get("text") or "",
+        entries[idx].get("text") or "",
         _direction(idx, parent_idx),
     )
     entries[idx][MERGED_FLAG] = True

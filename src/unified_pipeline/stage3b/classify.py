@@ -681,7 +681,7 @@ def _is_mentee_row_continuation(entries: list[dict], idx: int, reasoning: str) -
         and str(row.get("taxonomy_code")).startswith(MENTEE_CODE_PREFIX)
         and entry.get("hierarchy") == row.get("hierarchy")
         and bool(_ROW_NUMBER_RE.match(str(row.get("text"))))
-        and not _ROW_NUMBER_RE.match(str(entry.get("text")))
+        and not _ROW_NUMBER_RE.match(entry.get("text", ""))
     )
 
 

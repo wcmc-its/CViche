@@ -61,6 +61,12 @@ def test_a_fragment_without_text_adds_no_text_to_its_parent():
     assert entries[0]["text"].strip() == "Grand Rounds: Rare Tumours"
 
 
+def test_a_parent_without_text_takes_the_fragment_text():
+    entries = [_entry(None), _fragment("Springfield, IL", 0)]
+    merge_fragment_text(entries)
+    assert entries[0]["text"].strip() == "Springfield, IL"
+
+
 def test_previous_fragment_after_sentence_punctuation_takes_a_new_line():
     entries = [_entry("Visiting lecture, 2015."), _fragment("Springfield, IL", 0)]
     merge_fragment_text(entries)
