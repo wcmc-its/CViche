@@ -76,6 +76,7 @@ from unified_pipeline.core.render_check import (  # noqa: E402
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
     INHERITED_INSTITUTION_KEY,
     _child_position_records,
+    _contact_block_appointments,
     _employers_match,
     _institution_from_raw_text,
     _position_row_cells,
@@ -1716,3 +1717,139 @@ def test_a_record_with_its_own_enrichment_keeps_it_when_it_inherits():
 
     assert _institution_of(child) == "Lincoln Hospital"
     assert child["institution_enrichment"] == {"city": "Kestrel Bay"}
+
+
+# --- #1697: an appointment held only in the header contact block -------------
+
+CONTACT_TITLE = "Professor of Medicine"
+
+
+def _contact_entry(title=CONTACT_TITLE, idx=0, **fields):
+    """An A record: a header contact block with its appointment fields."""
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": "A",
+        "text": f"Jane Example\t{title}\tDepartment of Medicine\tExample University"
+                "\tjane@example.edu\t555-0100",
+        "extracted_fields": {
+            "name": "Jane Example", "email": "jane@example.edu", "phone": "555-0100",
+            "title": title, "department": "Department of Medicine",
+            "institution": "Example University", **fields,
+        },
+    }
+
+
+def _render_with_contact(entries_by_code, anchor="Academic Appointments"):
+    gen, table = _positions_generator(anchor)
+    gen._fill_positions(entries_by_code)
+    return _rendered_rows(table)
+
+
+def test_a_contact_block_title_with_no_d1_renders_one_academic_row():
+    """The issue's gate, first half: OQBDNQ's shape, no D-coded entry at all."""
+    assert _render_with_contact({"A": [_contact_entry()]}) == [
+        [CONTACT_TITLE, "Example University, Department of Medicine", ""]]
+
+
+@pytest.mark.parametrize("d1_title", [CONTACT_TITLE, "  professor of medicine. ", "PROFESSOR  OF MEDICINE"])
+def test_a_contact_block_title_a_d1_row_names_adds_no_row(d1_title):
+    """The issue's gate, second half: the same title, after normalization."""
+    d1 = _position_entry(5, d1_title, "Example University", ["Appointments"], start="2015")
+    d1["taxonomy_code"] = "D1"
+    rows = _render_with_contact({"A": [_contact_entry()], "D1": [d1]})
+    assert len(rows) == 1
+    assert rows[0][2] == "2015-Present"
+
+
+@pytest.mark.parametrize("code", ["D2", "D3"])
+def test_a_contact_block_title_another_position_table_names_adds_no_row(code):
+    """A title the CV already lists as a hospital or other position is not
+    repeated as an academic one."""
+    other = _position_entry(5, CONTACT_TITLE, "Example University", ["Positions"], start="2015")
+    other["taxonomy_code"] = code
+    assert _render_with_contact({"A": [_contact_entry()], code: [other]}) == []
+
+
+def test_a_contact_block_title_beside_a_different_d1_adds_its_row():
+    d1 = _position_entry(5, "Associate Professor of Medicine", "Example University",
+                         ["Appointments"], start="2010", end="2015")
+    d1["taxonomy_code"] = "D1"
+    rows = _render_with_contact({"A": [_contact_entry()], "D1": [d1]})
+    assert sorted(row[0] for row in rows) == ["Associate Professor of Medicine", CONTACT_TITLE]
+
+
+@pytest.mark.parametrize("title", [None, "", "   ", " ; ", {"rank": "Professor"}, [None, ""]])
+def test_a_contact_block_without_a_usable_title_adds_no_row(title):
+    assert _render_with_contact({"A": [_contact_entry(title=title)]}) == []
+
+
+def test_two_contact_blocks_with_one_title_add_one_row():
+    rows = _render_with_contact({"A": [_contact_entry(idx=0), _contact_entry(idx=9)]})
+    assert [row[0] for row in rows] == [CONTACT_TITLE]
+
+
+def test_the_contact_row_carries_no_contact_line():
+    """Only title, department and institution reach the table: no email or
+    phone from the A record's text or fields."""
+    rows = _render_with_contact({"A": [_contact_entry()]})
+    flat = " ".join(" ".join(row) for row in rows)
+    assert "jane@example.edu" not in flat
+    assert "555-0100" not in flat
+    assert "Jane Example" not in flat
+
+
+def test_a_contact_block_title_renders_into_the_generic_positions_table():
+    assert _render_with_contact({"A": [_contact_entry()]}, anchor=GENERIC_TABLE_ANCHOR) == [
+        [CONTACT_TITLE, "Example University, Department of Medicine", ""]]
+
+
+def test_the_contact_block_records_are_not_modified():
+    contact = _contact_entry()
+    before = copy.deepcopy(contact)
+    entries_by_code = {"A": [contact]}
+    _render_with_contact(entries_by_code)
+    assert contact == before
+    assert "D1" not in entries_by_code
+
+
+def test_the_contact_row_holds_only_the_appointment_fields():
+    """The new record is built from title, department and institution alone:
+    no contact field and none of the contact block's text, which the
+    renderer would otherwise scan for an employer."""
+    [row] = _contact_block_appointments([_contact_entry()], [])
+    assert row == {
+        "taxonomy_code": "D1", "element_idx_start": 0, "text": "",
+        "extracted_fields": {"title": CONTACT_TITLE, "department": "Department of Medicine",
+                             "institution": "Example University"},
+    }
+
+
+def test_a_contact_block_title_another_section_renders_adds_no_row():
+    """A post the CV already lists elsewhere -- a leadership role, say -- is
+    in that record's text, and is not repeated as an appointment."""
+    leadership = {"element_idx_start": 7, "taxonomy_code": "O",
+                  "text": "2018-present  Vice Chair for Research, Department of Medicine",
+                  "extracted_fields": {"leadership_role": "Vice Chair for Research"}}
+    contact = _contact_entry(title="Vice Chair for Research")
+    assert _render_with_contact({"A": [contact], "O": [leadership]}) == []
+
+
+def test_another_records_text_must_hold_the_title_as_whole_words():
+    other = {"element_idx_start": 7, "taxonomy_code": "O",
+             "text": "Directorate of Example Studies", "extracted_fields": {}}
+    rows = _render_with_contact({"A": [_contact_entry(title="Director")], "O": [other]})
+    assert [row[0] for row in rows] == ["Director"]
+
+
+@pytest.mark.parametrize("title", [
+    f"{CONTACT_TITLE}; Director of Example Imaging",
+    f"{CONTACT_TITLE}\nDirector of Example Imaging",
+    [CONTACT_TITLE, "Director of Example Imaging"],
+])
+def test_a_contact_block_with_two_posts_adds_only_the_one_not_named(title):
+    """A block stating two posts: the one a D1 row already names is dropped,
+    the other still gains its row."""
+    d1 = _position_entry(5, CONTACT_TITLE, "Example University", ["Appointments"], start="2015")
+    d1["taxonomy_code"] = "D1"
+    rows = _render_with_contact({"A": [_contact_entry(title=title)], "D1": [d1]})
+    assert sorted(row[0] for row in rows) == ["Director of Example Imaging", CONTACT_TITLE]

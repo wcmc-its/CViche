@@ -89,6 +89,7 @@ class ExtractedFields(TypedDict, total=False):
     dates_attended: Any
     dea_number: Any
     degree: Any
+    department: Any
     description: Any
     discipline: Any
     doi: Any
