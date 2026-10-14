@@ -563,10 +563,19 @@ def _fields_carry_text(entry: Mapping[str, Any],
     every token of the entry's text -- see `_STOPWORDS` for what is not counted.
     A schema key the renderer never reads, and a key outside the schema, hold
     nothing."""
+    uncovered = _uncovered_tokens(entry, child_fields)
+    return uncovered is not None and not uncovered
+
+
+def _uncovered_tokens(entry: Mapping[str, Any],
+                      child_fields: Sequence[Mapping[str, Any]]) -> Counter[str] | None:
+    """The tokens of the entry's text that no field the renderer writes holds
+    (`_fields_carry_text` is "none"); None for a code with no
+    `_RENDERED_FIELDS`, whose text cannot be checked."""
     code = str(entry.get('taxonomy_code'))
     rendered = _RENDERED_FIELDS.get(code)
     if rendered is None:
-        return False
+        return None
     held: Counter[str] = Counter()
     for fields in child_fields:
         for key, value in fields.items():
@@ -575,7 +584,7 @@ def _fields_carry_text(entry: Mapping[str, Any],
             elif _is_written_date(code, key, value, fields):
                 held += _tokens(_leaf_text(value))
     text = _text_to_cover(str(entry.get('text') or ''), child_fields, rendered, code)
-    return not _tokens(text) - held
+    return _tokens(text) - held
 
 
 def _record_list(value: object, schema: frozenset[str],
@@ -770,6 +779,35 @@ def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> 
             'severity': _WARN_SEVERITY,
         })
     return out
+
+
+def _unlisted_year_warnings(unlisted: Mapping[tuple[str, str], int]) -> list[dict[str, Any]]:
+    """One sidecar WARN per (code, list key) for entries that fanned out
+    without the text coverage test (`_NO_TEXT_COVERAGE_CODES`) while their text
+    names a year no record holds: a dated record stage 4 left out of the list,
+    which the skipped test would have flagged (#1187)."""
+    out = []
+    for (code, key), count in sorted(unlisted.items()):
+        noun = 'entry' if count == 1 else 'entries'
+        out.append({
+            'check': REJECTED_LIST_CHECK,
+            'code': code,
+            'section': None,
+            'message': (f"{count} {code} {noun}: `{key}` was split into separate "
+                        "rows, but the entry's text names a year no record "
+                        "holds; a record may be missing from the output"),
+            'evidence': [f"{code}.{key}: {count} {noun}"],
+            'severity': _WARN_SEVERITY,
+        })
+    return out
+
+
+def _lists_a_year_no_record_holds(entry: Mapping[str, Any],
+                                  children: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the entry's text names a year (a dated record) that none of its
+    children's fields hold (#1187)."""
+    uncovered = _uncovered_tokens(entry, [child['extracted_fields'] for child in children])
+    return any(_YEAR_TOKEN_RE.fullmatch(token) for token in uncovered or ())
 
 
 def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> dict[str, list[str]]:
@@ -1067,14 +1105,19 @@ def fan_out_multi_record_entries(
     """
     out: list[dict[str, Any]] = []
     rejected: dict[tuple[str, str], list[list[str]]] = {}
+    unlisted: Counter[tuple[str, str]] = Counter()
     for entry in entries:
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema, records_key)
+        if (children and code in _NO_TEXT_COVERAGE_CODES and FANNED_OUT_FROM in children[0]
+                and _lists_a_year_no_record_holds(entry, children)):
+            unlisted[(str(code), children[0][FANNED_OUT_FROM]['key'])] += 1
         if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
             for key, stray in _declined_record_lists(entry, schema).items():
                 rejected.setdefault((str(code), key), []).append(stray)
         out.extend(children if children is not None else [entry])
     if warnings is not None:
         warnings.extend(_rejection_warnings(rejected))
+        warnings.extend(_unlisted_year_warnings(unlisted))
     return out

@@ -590,6 +590,9 @@ class TestB1DatesAttended:
                               {'dates_attended': '2006-2008', 'start_date': '2008'}])
         children = [dict(item) for item in entry['extracted_fields']['degrees']]
         assert not fan_out._fields_carry_text(entry, children)
+        # B1 skips that test, so the degrees still fan out; the years it
+        # leaves unheld are what the warning reports.
+        assert [c['extracted_fields']['degree'] for c in _fan(entry)] == ['BSc', 'MSc']
 
     def test_discipline_is_a_rendered_field_so_a_degree_with_one_fans_out(self):
         entry = _two_degrees(_NESTED_DATES)
@@ -614,14 +617,23 @@ class TestB1DatesAttended:
         assert _fan(entry) == [entry]
 
     def test_both_degrees_render(self, tmp_path):
+        self._assert_degrees_render(tmp_path, _two_degrees(_NESTED_DATES))
+
+    def test_both_degrees_render_beside_a_section_label_and_a_place(self, tmp_path):
+        # The text shape the coverage skip is for (#1187 "Check" line).
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'
+        self._assert_degrees_render(tmp_path, entry)
+
+    @staticmethod
+    def _assert_degrees_render(tmp_path, entry):
         import json
 
         from docx import Document
 
         from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
         source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
-        source.write_text(json.dumps({'document_uid': 'TESTAA',
-                                      'entries': [_two_degrees(_NESTED_DATES)]}))
+        source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
         WCMTemplateGenerator(verbose=False).generate(
             str(source), str(target), research_summary_path=None)
         body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
@@ -644,6 +656,36 @@ class TestRejectedListWarning:
         assert (warning['code'], warning['severity']) == ('B1', 'WARN')
         assert 'gpa' in warning['evidence']
         assert '3.9' not in str(warning)
+
+    def test_a_degree_stage_4_left_out_of_a_fanned_out_list_warns(self):
+        # The text names three degrees and the list holds two. B1 skips the
+        # coverage test, so the list fans out, and the third degree's year is
+        # reported instead of dropped without a signal (#1187).
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] += '\tPhD Quillmere University 2012'
+        assert len(_fan(entry)) == 2
+        (warning,) = self._warnings(entry)
+        assert (warning['check'], warning['code'], warning['severity']) == (
+            fan_out.REJECTED_LIST_CHECK, 'B1', 'WARN')
+        assert warning['evidence'] == ['B1.degrees: 1 entry']
+        assert '2012' not in str(warning) and 'Quillmere' not in str(warning)
+
+    def test_words_no_field_holds_without_a_year_do_not_warn(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'
+        assert len(_fan(entry)) == 2
+        assert self._warnings(entry) == []
+
+    def test_a_year_no_record_holds_does_not_warn_for_a_code_that_tests_coverage(self):
+        # Q2 still keeps the entry whole on any unheld token, and then the
+        # existing declined-list warning is the only one raised.
+        entry = {'taxonomy_code': 'Q2', 'element_idx_start': 3,
+                 'text': 'Alpha Council 2001\tBeta Council 2004\tGlade Panel 2009',
+                 'extracted_fields': {'committees': [
+                     {'committee_name': 'Alpha Council', 'start_date': '2001'},
+                     {'committee_name': 'Beta Council', 'start_date': '2004'}]}}
+        (warning,) = self._warnings(entry)
+        assert 'was split' not in warning['message']
 
     def test_a_declined_record_list_warns_without_stray_keys(self):
         entry = _two_degrees([{}, {}])
