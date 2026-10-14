@@ -63,6 +63,7 @@ from ..shared import (
     _output_section_header,
     _owner_surname_words,
     _template_haystack,
+    normalise_hyphens,
     offered_as_subpoint,
 )
 from .extraction import _is_prose, _leaf_strings
@@ -2712,16 +2713,18 @@ def _shape_is_defect(shape: str, date: _RenderedDate, entry: _DatedEntry) -> boo
     entry's own text writes it is the CV's wording, never a defect. An open
     range is a defect only outside DATE_CELL_OPEN_BY_DECISION_CODES and the
     CV's latest D1 rank, and only when neither the entry's text nor its
-    headings carry an open marker. A dotted date is raw however the source
-    writes it."""
+    headings carry an open marker, any source hyphen read as "-"
+    (`normalise_hyphens`: "2015\u2011" is open). A dotted date is raw
+    however the source writes it."""
     if date.rendered in entry.text and not _DOTTED_RE.search(date.rendered):
         return False
     if shape != DATE_SHAPE_OPEN_RANGE:
         return True
     if entry.code in DATE_CELL_OPEN_BY_DECISION_CODES or entry.open_by_decision:
         return False
-    return not (_OPEN_MARKER_WORD_RE.search(f"{entry.text}\n{entry.headings}")
-                or _OPEN_MARKER_DASH_RE.search(entry.text))
+    text = normalise_hyphens(entry.text)
+    return not (_OPEN_MARKER_WORD_RE.search(f"{text}\n{entry.headings}")
+                or _OPEN_MARKER_DASH_RE.search(text))
 
 
 def lint_date_cell_shape(stage4: dict, table_rows: list[list[list[str]]],

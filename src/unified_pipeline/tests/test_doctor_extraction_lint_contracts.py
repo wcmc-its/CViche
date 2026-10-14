@@ -3506,6 +3506,50 @@ def test_year_not_in_source_new_shapes_do_not_vouch_for_a_day_or_a_number_run(fi
     assert len(_not_in_source(_fields_entry("C", fields, text=text))) == 1
 
 
+@pytest.mark.parametrize("fields, text", [
+    # Batch NECRGC (#1585): two runs type a range's dash as a
+    # non-breaking hyphen (U+2011); the other source hyphens read the same.
+    ({"start_date": "1971", "end_date": "1974"}, "Example board 1971\u201174"),
+    ({"start_date": "1983", "end_date": "1988"}, "Example board 1983\u201088"),
+    ({"start_date": "1966", "end_date": "1969"}, "Example board 1966\u201269"),
+    ({"start_date": "2004", "end_date": "2006"}, "Example board 2004\u201106 and 2009"),
+    # Grant periods written "m-yy to m-yy" (#1585, batch NECRGC).
+    ({"start_date": "1991-06", "end_date": "1994-05"}, "Example grant 6-91 to 5-94"),
+    ({"start_date": "2017-04", "end_date": "2022-08"}, "Example grant 4-17 - 8-22"),
+    ({"start_date": "2019-11", "end_date": "2024-02"}, "Example grant 11-19 through 2-24"),
+    ({"start_date": "2012-05", "end_date": "2014-09"}, "Example grant 05-12 thru 9-14"),
+    ({"start_date": "2012-05", "end_date": "2014-09"}, "Example grant 5-12 thru 09-14"),
+    ({"start_date": "2001-10", "end_date": "2003-03"}, "Example grant 10-01 until 3-03"),
+    ({"start_date": "2017-04", "end_date": "2022-08"}, "Example grant 4-17 \u2013 8-22"),
+    ({"start_date": "2017-04", "end_date": "2022-08"}, "Example grant 4-17 \u2011 8-22"),
+    ({"start_date": "2017-04", "end_date": "2022-08"}, "Example grant 4-17 TO 8-22"),
+])
+def test_year_not_in_source_reads_source_hyphens_and_month_year_ranges(fields, text):
+    assert _not_in_source(_fields_entry("C", fields, text=text)) == []
+
+
+@pytest.mark.parametrize("fields, text", [
+    # A day range states no year at all.
+    ({"start_date": "2009-03-08"}, "Example course, March 8\u201112, Example Hall"),
+    # A dash-joined run, unspaced: no m-yy range.
+    ({"end_date": "2022"}, "Example grant 4-17-8-22"),
+    # Neither 0 nor 13 is a month.
+    ({"end_date": "2022"}, "Example grant 4-17 to 0-22"),
+    ({"start_date": "2017", "end_date": "2022"}, "Example grant 0-17 to 8-22"),
+    # Part of a longer number, on either side.
+    ({"end_date": "2022"}, "Example grant 24-17 to 8-22"),
+    ({"end_date": "2022"}, "Example grant 4-17 to 8-225"),
+    ({"end_date": "2022"}, "Example grant 4-17 to 8-22/4"),
+    ({"end_date": "2022"}, "Example grant 4-17 to 8-22-5"),
+    # The day of an m-d-yy or a dotted or slashed date is no month.
+    ({"end_date": "2022"}, "Example grant 5-3-17 to 8-22"),
+    ({"end_date": "2022"}, "Example grant 5/3-17 to 8-22"),
+    ({"end_date": "2022"}, "Example grant 5.3-17 to 8-22"),
+])
+def test_year_not_in_source_month_year_ranges_need_months_and_a_spaced_join(fields, text):
+    assert len(_not_in_source(_fields_entry("C", fields, text=text))) == 1
+
+
 def test_year_not_in_source_skips_personal_data_and_publications():
     """Code A is personal data. A citation's year renders through 5d and
     PubMed; on the farm each publication hit was a split citation or a
