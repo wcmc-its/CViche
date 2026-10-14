@@ -183,7 +183,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.changes.outputs.frontend == 'true'
         with:
-          node-version: "20"  # match the build image (node:20-alpine)
+          node-version: "22"  # match the build image (node:22-alpine); jsdom 30 needs >=22.22.2
           cache: npm
           cache-dependency-path: web_interface/frontend/package-lock.json
       - run: npm ci
