@@ -486,6 +486,20 @@ def test_run_stage5b_does_not_write_a_city_the_entry_text_contradicts(monkeypatc
     assert online_course["institution_enrichment"]["location_source"] == "withheld"
     assert online_programme["institution_enrichment"]["city"] == "Chicago"
     assert "location_source" not in online_programme["institution_enrichment"]
+    assert online_programme["institution_enrichment"]["source"] == "llm"
+
+
+def test_enrich_entry_with_result_reads_null_institution_and_text_as_empty():
+    """Stage 4 can write None for the institution or the text; the #1257 check
+    reads either as empty rather than raising."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+
+    for institution, text in ((None, "Fellow"), ("Example Hospital", None)):
+        entry = {"taxonomy_code": "C", "extracted_fields": {"institution": institution}, "text": text}
+        s5b.enrich_entry_with_result(entry, {"cleaned_name": "Example Hospital", "city": "Otherton",
+                                             "state": "Ohio", "country": "United States",
+                                             "country_code": "US"})
+        assert entry["institution_enrichment"]["source"] == "llm"
 
 
 # --- run_stage5b: the web path keeps no disk cache (#1238) --------------------

@@ -103,7 +103,7 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
     # guessed for a generic name or an online course, does not stand (#1257).
     result = reconcile_location_with_source(
         result, fields.get('institution') or '', entry.get('text') or '',
-        entry.get('taxonomy_code') or '')
+        entry.get('taxonomy_code'))
 
     # Store enrichment data (backward-compatible with Stage 6 readers)
     entry['institution_enrichment'] = {
