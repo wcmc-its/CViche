@@ -616,6 +616,12 @@ class PubMedEnricher:
     - DOI (via esearch)
     """
 
+    # Circuit breaker: until NCBI answers one request it is down, and the
+    # efetch split and the second pass would only add retry waits that can
+    # push the stage past the orchestrator's stage timeout (#1387). Set on the
+    # instance by the first answered request.
+    _ncbi_answered = False
+
     def __init__(self, api_key: str | None = None, verbose: bool = True):
         self.api_key = api_key or NCBI_API_KEY
         self.verbose = verbose
@@ -948,7 +954,7 @@ class PubMedEnricher:
         pass's, whose failure counts come off first."""
         doi_failed, self._doi_api_failed = self._doi_api_failed, []
         retry = pmid_failed + doi_failed
-        if not retry:
+        if not retry or not self._ncbi_answered:
             return
         if self.verbose:
             logger.info(f"\n🔄 Re-running {len(retry)} lookups an NCBI error failed "
@@ -1292,6 +1298,7 @@ class PubMedEnricher:
         for attempt in range(MAX_ATTEMPTS):
             outcome = self._attempt_get(url, params, parse)
             if outcome.error is None:
+                self._ncbi_answered = True
                 return outcome.value
             last_error = outcome.error
             if attempt == MAX_ATTEMPTS - 1:
@@ -1349,7 +1356,7 @@ class PubMedEnricher:
         records = self._fetch_pubmed_batch(pmids)
         if records is not None:
             return records
-        if len(pmids) <= EFETCH_SPLIT_FLOOR:
+        if len(pmids) <= EFETCH_SPLIT_FLOOR or not self._ncbi_answered:
             self._efetch_failed.update(pmids)
             return {}
         half = len(pmids) // 2

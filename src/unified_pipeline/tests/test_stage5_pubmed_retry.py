@@ -2240,6 +2240,32 @@ def test_stage5_looks_up_the_linked_doi_not_the_copied_one(tmp_path, monkeypatch
 
 # --------- #1387 steps 3-4: split a failed efetch batch; second pass for API errors
 
+@pytest.fixture
+def ncbi_up(monkeypatch):
+    """NCBI has answered an earlier request this run, so the split and the
+    second pass are not held back by the circuit breaker."""
+    monkeypatch.setattr(stage5.PubMedEnricher, '_ncbi_answered', True)
+
+
+def test_an_answered_request_closes_the_circuit_breaker(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
+    assert enricher._ncbi_answered is False
+    enricher._fetch_pubmed_batch([PMID])
+    assert enricher._ncbi_answered is True
+
+
+def test_with_ncbi_down_a_failed_batch_is_not_split_and_no_second_pass_runs(tmp_path, monkeypatch):
+    """An outage: no request has been answered, so stage 5 makes the requests
+    it made before #1387 and no more."""
+    pmids = _pmids(50)
+    enricher, session, _ = _make(monkeypatch, [FakeResponse(404)])
+    assert enricher._fetch_pubmed_records(pmids) == {}
+    assert _ids_sent(session) == [pmids]
+    [result], session, enricher = _run_entries(tmp_path, monkeypatch, [_pmid_entry()], [FakeResponse(404)])
+    assert result['enrichment_status'] == 'lookup_failed'
+    assert len(session.calls) == 1
+    assert enricher.stats['second_pass_failed'] == 0
+
 def _pmids(n, start=20000001):
     return [str(i) for i in range(start, start + n)]
 
@@ -2248,7 +2274,7 @@ def _ids_sent(session):
     return [params['id'].split(',') for _, params in session.calls]
 
 
-def test_a_failed_efetch_batch_is_split_and_each_half_fetched(monkeypatch):
+def test_a_failed_efetch_batch_is_split_and_each_half_fetched(monkeypatch, ncbi_up):
     pmids = _pmids(50)
     enricher, session, _ = _make(monkeypatch, [
         FakeResponse(404),
@@ -2262,7 +2288,7 @@ def test_a_failed_efetch_batch_is_split_and_each_half_fetched(monkeypatch):
 
 
 @pytest.mark.parametrize('size, calls', [(25, 1), (26, 3)])
-def test_a_failed_batch_is_split_only_above_the_floor(monkeypatch, size, calls):
+def test_a_failed_batch_is_split_only_above_the_floor(monkeypatch, ncbi_up, size, calls):
     pmids = _pmids(size)
     enricher, session, _ = _make(monkeypatch, [FakeResponse(404)] * calls)
     assert enricher._fetch_pubmed_records(pmids) == {}
@@ -2278,7 +2304,7 @@ def _doi_article_entry():
     return {'taxonomy_code': 'S1', 'extracted_fields': {'title': 'A Test Article', 'doi': DOI}}
 
 
-def test_pmid_lookup_an_efetch_error_failed_is_recovered_by_the_second_pass(tmp_path, monkeypatch):
+def test_pmid_lookup_an_efetch_error_failed_is_recovered_by_the_second_pass(tmp_path, monkeypatch, ncbi_up):
     [result], session, enricher = _run_entries(
         tmp_path, monkeypatch, [_pmid_entry()], [FakeResponse(404), FakeResponse(200, content=PUBMED_XML)])
     assert result['enrichment_status'] == 'enriched'
@@ -2287,7 +2313,7 @@ def test_pmid_lookup_an_efetch_error_failed_is_recovered_by_the_second_pass(tmp_
     assert (enricher.stats['second_pass_recovered'], enricher.stats['second_pass_failed']) == (1, 0)
 
 
-def test_second_pass_waits_out_the_pause_first(monkeypatch, caplog):
+def test_second_pass_waits_out_the_pause_first(monkeypatch, ncbi_up, caplog):
     enricher, _, sleeps = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         enricher._retry_api_failures([(_pmid_entry(), PMID)], progress_total=1)
@@ -2312,7 +2338,7 @@ def test_a_pmid_ncbi_answered_without_a_record_is_not_retried(tmp_path, monkeypa
     (_pmid_entry, 'lookup_failed'),
     (_doi_article_entry, 'doi_lookup_failed'),
 ])
-def test_a_lookup_the_second_pass_also_fails_keeps_its_status(tmp_path, monkeypatch, entry, status):
+def test_a_lookup_the_second_pass_also_fails_keeps_its_status(tmp_path, monkeypatch, ncbi_up, entry, status):
     [result], session, enricher = _run_entries(
         tmp_path, monkeypatch, [entry()], [FakeResponse(404), FakeResponse(404)])
     assert result['enrichment_status'] == status
@@ -2321,7 +2347,7 @@ def test_a_lookup_the_second_pass_also_fails_keeps_its_status(tmp_path, monkeypa
     assert (enricher.stats['second_pass_recovered'], enricher.stats['second_pass_failed']) == (0, 1)
 
 
-def test_a_quiet_second_pass_logs_nothing(monkeypatch, caplog):
+def test_a_quiet_second_pass_logs_nothing(monkeypatch, ncbi_up, caplog):
     enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
     enricher.verbose = False
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
@@ -2333,7 +2359,7 @@ def test_a_quiet_second_pass_logs_nothing(monkeypatch, caplog):
     [FakeResponse(404)],                                                     # esearch error
     [FakeResponse(200, json_data=ESEARCH_JSON), FakeResponse(404)],          # efetch error
 ])
-def test_doi_lookup_an_api_error_failed_is_recovered_by_the_second_pass(tmp_path, monkeypatch, first_pass):
+def test_doi_lookup_an_api_error_failed_is_recovered_by_the_second_pass(tmp_path, monkeypatch, ncbi_up, first_pass):
     [result], session, enricher = _run_entries(
         tmp_path, monkeypatch, [_doi_article_entry()],
         first_pass + [FakeResponse(200, json_data=ESEARCH_JSON), FakeResponse(200, content=PUBMED_XML)])
@@ -2341,9 +2367,11 @@ def test_doi_lookup_an_api_error_failed_is_recovered_by_the_second_pass(tmp_path
     assert result['extracted_fields']['pmid'] == PMID
     assert enricher.stats['failed_lookups'] == 0
     assert enricher.stats['second_pass_recovered'] == 1
+    # The second pass searches the entry's DOI again, not its PMID.
+    assert [params['term'] for _, params in session.calls if 'term' in params][-1] == f'"{DOI}"[doi]'
 
 
-def test_second_pass_progress_ends_the_bar_at_its_total(tmp_path, monkeypatch, caplog):
+def test_second_pass_progress_ends_the_bar_at_its_total(tmp_path, monkeypatch, ncbi_up, caplog):
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         _run_entries(tmp_path, monkeypatch, [_pmid_entry(), _doi_article_entry()], [
             FakeResponse(200, content=PUBMED_XML), FakeResponse(404),
