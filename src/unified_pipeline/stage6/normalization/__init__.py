@@ -55,7 +55,8 @@ normalization, stage-5d reconciliation -- and the renderer receives a record
 whose every field is already the text it will print.
 
 Dependencies run one way, inside this package and out of it. `publication`
-imports `citation_matching` and `authors`; `citation_matching` imports
+imports `citation_matching`, `authors` and the one key name it reads from
+stage 3b (`stage3b/io.py`'s `GROUP_YEAR_KEY`, #1810); `citation_matching` imports
 `authors` (the stage-5d owner restore reads a CV's own author run, #1259);
 nothing imports `publication`. `residue` imports `fields` and the date
 grammar in `parsing/dates.py`. Nothing
