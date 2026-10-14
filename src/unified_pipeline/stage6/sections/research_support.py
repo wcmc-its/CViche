@@ -1453,6 +1453,11 @@ UNFUNDED_GRANT_MESSAGES = {
 }
 
 
+# Set on a diverted record's Appendix copy to its check, which
+# `appendix.build_appendix_diversion_warnings` reads back (#1805).
+GRANT_DIVERSION_MARKER_KEY = 'grant_diversion_check'
+
+
 class DivertedGrant(NamedTuple):
     """A grant record kept out of the funding tables, and why."""
     code: str
@@ -1728,6 +1733,9 @@ class ResearchSupportSection:
         m2a_entries, m2b_entries, m2c_entries, diverted = divert_unfunded_grants(
             m2a_entries, m2b_entries, m2c_entries)
         for grant in diverted:
+            # Tells the Appendix summary why (#1805). The entry is already
+            # this section's own copy, so marking it touches no input.
+            grant.entry[GRANT_DIVERSION_MARKER_KEY] = grant.check
             self._declined_grant_entries.append(grant.entry)
             self._section_failures.append(unfunded_grant_warning(grant))
 

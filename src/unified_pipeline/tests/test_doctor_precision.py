@@ -194,6 +194,11 @@ def test_stage6_shape_names_each_emitter_message():
         "taxonomy code": "appendix_no_route",
         "M2B: 1 entry diverted to the Appendix — declined by the research-support renderer as "
         "too sparse to table": "appendix_grant_too_sparse",
+        "M2B: 1 entry diverted to the Appendix — names no funder, grant number, amount or "
+        "role, under a heading stage 3b flagged as not research (see the "
+        "grant_no_funding_signal records)": "appendix_grant_no_funding_signal",
+        "M2C: 2 entries diverted to the Appendix — the source marks the application not "
+        "funded (see the grant_not_funded_application records)": "appendix_grant_not_funded",
         "M1: 2 entries diverted to the Appendix — stage 3b T-validation recoded them from T to "
         "M1, which only the research summary renders": "appendix_t_validation_recoded",
         "K (Teaching): No visible bulleted content found - may be using track changes only":

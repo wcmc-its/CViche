@@ -3600,3 +3600,14 @@ def test_divert_unfunded_grants_keeps_order_and_leaves_the_inputs_alone():
         ('M2B', 'grant_no_funding_signal'), ('M2C', 'grant_not_funded_application')]
     assert [d.entry for d in diverted] == [study, dead]
     assert (m2b, m2c) == ([funded, study], [live, dead])
+
+
+def test_a_diverted_grant_is_marked_with_its_check():
+    """#1805: the Appendix entry carries the check that diverted it, and the
+    caller's record (copied before the section reads it) is left unmarked."""
+    entry = _application(heading=('Not Funded',))
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2C': [entry]}, as_of=TEST_AS_OF)
+    [copy] = gen._declined_grant_entries
+    assert copy['grant_diversion_check'] == 'grant_not_funded_application'
+    assert 'grant_diversion_check' not in entry

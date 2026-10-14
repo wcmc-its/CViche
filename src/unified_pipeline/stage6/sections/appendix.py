@@ -1061,6 +1061,19 @@ REASON_RENDERER_DECLINED = "renderer_declined"
 # apart from the M1 no-research-summary case, which the shared `_REASON_TEXT`
 # string actually describes.
 _DECLINED_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
+# A grant the research-support renderer diverted for what it says, not for
+# being too sparse (#1701, #1439): `research_support.py` marks the Appendix
+# copy with its check under this key. The strings are duplicated rather than
+# imported (peers do not import peers, CODING_STANDARDS 1.3); each check name
+# is also the warning's reason (#1805).
+_GRANT_DIVERSION_MARKER_KEY = 'grant_diversion_check'
+REASON_GRANT_NO_FUNDING_SIGNAL = 'grant_no_funding_signal'
+REASON_GRANT_NOT_FUNDED = 'grant_not_funded_application'
+_GRANT_DIVERSION_TEXT = {
+    REASON_GRANT_NO_FUNDING_SIGNAL: ('names no funder, grant number, amount or role, under '
+                                     'a heading stage 3b flagged as not research'),
+    REASON_GRANT_NOT_FUNDED: 'the source marks the application not funded',
+}
 # A record `_add_remaining_to_appendix` bulleted on behalf of
 # `_reconsider_appendix_entries` / `_recover_unrendered_records` (#531-R2
 # finding F1) -- distinct from the two reasons above because it is not
@@ -1203,6 +1216,8 @@ def _diversion_message(code: str, count: int, reason: str,
       any of the ~20 routed sections could be the one whose renderer raised
       -- and points at the section-failure record rather than repeating the
       section name (`_diversion_message` has no `label`, only `code`).
+    - REASON_GRANT_NO_FUNDING_SIGNAL / REASON_GRANT_NOT_FUNDED (#1805): a
+      grant diverted for what it says, named by its check, checked first.
     - REASON_T_VALIDATION_RECODED (and REASON_INVALID_CODE): stage 3b's
       recode named as the cause, checked before any routing-based reason.
     - REASON_M1_RECORD_NOT_IN_SUMMARY: a dated record the generated research
@@ -1211,6 +1226,9 @@ def _diversion_message(code: str, count: int, reason: str,
       for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
     noun = _plural_entries(count)
+    if reason in _GRANT_DIVERSION_TEXT:
+        return (f"{code}: {count} {noun} diverted to the Appendix — "
+                f"{_GRANT_DIVERSION_TEXT[reason]} (see the {reason} records)")
     if reason == REASON_INVALID_CODE:
         return (f"{code}: {count} {noun} diverted to the Appendix — stage 4 "
                 f"quarantined {'it' if count == 1 else 'them'}: the stage 3b "
@@ -1363,7 +1381,9 @@ def build_appendix_diversion_warnings(
     counts: Counter[tuple[str, str, str]] = Counter()
     for entry in written:
         code = entry.get("taxonomy_code") or "?"
-        if entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
+        if entry.get(_GRANT_DIVERSION_MARKER_KEY) in _GRANT_DIVERSION_TEXT:
+            reason = str(entry[_GRANT_DIVERSION_MARKER_KEY])
+        elif entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
             reason = REASON_INVALID_CODE
         elif is_t_validation_recoded_m1(entry):
             reason = REASON_T_VALIDATION_RECODED
