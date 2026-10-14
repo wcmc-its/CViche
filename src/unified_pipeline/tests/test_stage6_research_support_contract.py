@@ -2008,11 +2008,34 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
     (f'The major goals of this project are: {_GOAL}. Role: Consultant', f'{_GOAL}.'),
     (f'The major goals of this project are: {_GOAL}. Your Role : Co-I', f'{_GOAL}.'),
     (f'The major goals of this project are: {_GOAL}.\xa0Role: Co-I', f'{_GOAL}.'),
-    # A tab-joined role ends the goal with or without a colon.
+    # A tab-joined role ends the goal with or without a colon, "your" or not...
     (f'The major goals of this project are: {_GOAL}\tRole Co-I', _GOAL),
+    (f'The major goals of this project are: {_GOAL}\tYour role Co-I', _GOAL),
+    # ...but a tab-joined wrapped line that starts with a longer word is goal.
+    (f'The major goals of this project are: {_GOAL}\troles of bees',
+     f'{_GOAL}\troles of bees'),
+    # Extracted text can double the space inside "Your  Role:".
+    (f'The major goals of this project are: {_GOAL}. Your  Role: Co-I', f'{_GOAL}.'),
     # ...but "role" in the goal's own prose, with no colon, does not.
     (f'The major goals of this project are: {_GOAL} and the role of bees',
      f'{_GOAL} and the role of bees'),
+    # A space-joined "Role:" right after an unpunctuated goal ends it at the
+    # label, not one word earlier.
+    (f'The major goals of this project are: {_GOAL} Role: Consultant', _GOAL),
+    # Only "role" itself, as a whole word followed by a colon, ends the goal:
+    # another "<word>:" (GHWROW 398's "benefit: risk ratio"), a word that ends
+    # in "role" ("parole:", the run-together "yourrole:"), and "role" before a
+    # pipe or semicolon are all goal prose.
+    (f'The major goals of this project are: {_GOAL} for benefit: risk ratio.',
+     f'{_GOAL} for benefit: risk ratio.'),
+    (f'The major goals of this project are: {_GOAL} and track parole: outcomes',
+     f'{_GOAL} and track parole: outcomes'),
+    (f'The major goals of this project are: {_GOAL} via the yourrole: survey',
+     f'{_GOAL} via the yourrole: survey'),
+    (f'The major goals of this project are: {_GOAL} to define the role | scope',
+     f'{_GOAL} to define the role | scope'),
+    (f'The major goals of this project are: {_GOAL} to define the role; scope',
+     f'{_GOAL} to define the role; scope'),
     # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
     # not the misspelled label.
     (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
@@ -2053,6 +2076,10 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     # would be read as an unbounded whole-sentence claim.
     'Our major goals include improving efficiencies across the department.',
     'The committee highlighted major goals for the coming year during the review.',
+    # The `proj` anchor needs "of", then nothing or this/the, before the noun.
+    'The major goals of every study are reviewed by the board.',
+    'Faculty discussed the major goals with this program director.',
+    'The major goals ofthe study are reviewed by the board.',
     # "of the <noun>" anchors only for project, program or study (#1678).
     'The major goals of the department are listed in the annual report.',
     'The major goals of the students are to finish the course.',
@@ -2232,12 +2259,31 @@ def test_a_goal_stage4_put_in_notes_renders_once_under_its_own_label():
     ('0.2 calendar months', 'Aim 1: map the corridors of the valley', True),
     # The goals text is too short to render, so the note is the only copy.
     ('Map valley', 'Map valley', True),
+    # Goals that only repeat the title do not render either.
+    ('Corridor Study', 'Example Corridor Study', True),
+    # A note no longer than the goals' own minimum is a remark, not a copy of
+    # the goals, even when the goals contain it (#1678)...
+    ('Pending', 'Aim 1 is pending IRB approval for the cohort', True),
+    ('map valley', 'Aim 1: map valley corridors', True),
+    # ...one character longer, it is a copy.
+    ('map valleys', 'Aim 1: map valleys and corridors', False),
 ])
 def test_a_note_is_dropped_only_when_the_rendered_goals_contain_it(notes, goals, notes_kept):
     fields = {'title': 'Example Corridor Study', 'notes': notes, 'major_goals': goals,
               'start_date': '01/2019'}
     labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
     assert (NOTES_LABEL in labels) is notes_kept
+
+
+@pytest.mark.parametrize('goals, shown', [
+    # Ten characters is not substantive however much whitespace pads it.
+    ('   Map valley   ', False),
+    ('Map valleys', True),
+])
+def test_the_goals_row_needs_more_than_ten_characters_of_text(goals, shown):
+    fields = {'title': 'Example Corridor Study', 'major_goals': goals, 'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert ('Major project goals:' in labels) is shown
 
 
 def test_a_row_claimed_by_a_declined_grant_is_not_returned():

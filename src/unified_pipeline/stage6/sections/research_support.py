@@ -1337,6 +1337,10 @@ SUBMISSION_DATE_LABEL = 'Submitted:'
 SHARE_LABEL = 'Your share of award:'
 # A study's protocol or IRB approval number, kept out of Award Source (#1694).
 PROTOCOL_NUMBER_LABEL = 'Protocol/IRB number:'
+# Goals text renders only past this many characters. A note no longer than
+# this is never read as a copy of the goals: "Pending" inside "pending IRB
+# approval" is a status remark, not the goal sentence (#1678).
+_SUBSTANTIVE_TEXT_MIN_CHARS = 10
 # The sidecar check name for a funding record that names only a protocol
 # number. Its message carries `PROTOCOL_NUMBER_MESSAGE`, which the doctor's
 # precision table (`doctor/precision.py` `_STAGE6_SHAPES`) matches on.
@@ -1573,7 +1577,8 @@ def _optional_grant_rows(
     guard as title/agency/funding -- same fact via two paths (#829, BYFQBG#82).
     So is a note the rendered goals text already contains: stage 4 often puts
     the goal sentence in `notes`, and `fill_major_goals_from_text` parses the
-    same sentence into `major_goals` (UHBORP, #1678).
+    same sentence into `major_goals` (UHBORP, #1678). A note too short to be
+    goals text itself stays, even when the goals happen to contain it.
     """
     title_text = (title or '').strip().lower()
     rows = []
@@ -1593,9 +1598,10 @@ def _optional_grant_rows(
     if status and not grant_status_is_empty_section_label(status):
         rows.append((STATUS_LABEL, status))
     goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
-    shows_goals = len(goals.strip()) > 10 and goals.strip().lower() != title_text  # Only if substantive
+    shows_goals = len(goals.strip()) > _SUBSTANTIVE_TEXT_MIN_CHARS and goals.strip().lower() != title_text
     notes = str(fields.get('notes') or '').strip()
-    if notes and notes.lower() != title_text and not (shows_goals and notes.lower() in goals.lower()):
+    repeats_goals = shows_goals and len(notes) > _SUBSTANTIVE_TEXT_MIN_CHARS and notes.lower() in goals.lower()
+    if notes and notes.lower() != title_text and not repeats_goals:
         rows.append((NOTES_LABEL, notes))
     if shows_goals:
         rows.append(('Major project goals:', goals))
