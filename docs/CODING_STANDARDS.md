@@ -446,13 +446,13 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 0 | ratchet |
-| 5.4 blind `except Exception` (BLE001) | falling | 78 | ratchet |
+| 5.4 blind `except Exception` (BLE001) | falling | 67 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
-| 7.1 print() in library code (T201) | falling | 676 | ratchet |
+| 7.1 print() in library code (T201) | falling | 634 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 0 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 489 | ratchet |
-| 8.4 pyflakes findings (F) | falling | 191 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 478 | ratchet |
+| 8.4 pyflakes findings (F) | falling | 185 | ratchet |
 | 8.4 bugbear findings (B) | falling | 142 | ratchet |
 
 <!-- check_standards:auto:end -->

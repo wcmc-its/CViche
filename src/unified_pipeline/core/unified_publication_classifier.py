@@ -130,7 +130,7 @@ def classify_publication_any(input_payload: dict) -> ClassificationResult:
             - pmid: str (optional)
             - pmcid: str (optional)
             - doi: str (optional)
-            - pubmed_record: Dict (optional, from BulkPubMedFetcher)
+            - pubmed_record: Dict (optional, a parsed PubMed record)
             - citation_text: str (optional, raw citation string)
             - url_hint: str (optional)
 
@@ -172,7 +172,7 @@ def build_features_from_pubmed(pubmed_record: dict) -> Features:
     Build features from a rich PubMed record.
 
     Args:
-        pubmed_record: Dict from BulkPubMedFetcher
+        pubmed_record: Dict, a parsed PubMed record
 
     Returns:
         Features object
