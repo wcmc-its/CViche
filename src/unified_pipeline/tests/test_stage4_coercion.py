@@ -44,7 +44,10 @@ to a specific bug fix:
   - #1704: a month the source never gives ("(2022)" stored as 01/22), and a
     title's first word left on the end of the organization. #1703: a title
     in a parenthetical with its own years given the outer span. See the
-    last section.
+    section after the title-word one.
+  - #1414: several journals from separate tab cells joined into one
+    `journal_name`, or a role/section column folded into it. See the last
+    section.
 
 Self-contained: no LLM calls, no I/O, no PII.
 """
@@ -66,6 +69,7 @@ from unified_pipeline.stage4.coercion import (  # noqa: E402
     coerce_field_value_types,
     normalize_authors_vancouver,
     normalize_dates,
+    split_joined_journals,
     split_parenthetical_title_span,
 )
 
@@ -1140,3 +1144,145 @@ def test_parenthetical_title_span_left_alone(text, item):
 
     assert split_parenthetical_title_span(text, item, {}) is None
     assert item == before
+
+
+# --- #1414: journals joined from separate tab cells --------------------------
+
+@pytest.mark.parametrize("joined", [
+    "Fern Review, Glade Letters, Moss Quarterly",
+    "Fern Review; Glade Letters; Moss Quarterly",
+    "Fern Review - Glade Letters - Moss Quarterly",
+    "Fern Review\tGlade Letters\tMoss Quarterly",
+])
+def test_journals_from_separate_cells_become_one_record_each(joined):
+    text = "2012-present Reviewer for Fern Review\tGlade Letters\tMoss Quarterly"
+    item: ExtractedFields = {"journal_name": joined, "start_date": "2012", "end_date": "present"}
+    reformatted: ReformattedFields = {}
+
+    earlier = split_joined_journals(text, item, reformatted)
+
+    assert earlier == [{"journal_name": "Fern Review", "start_date": "2012", "end_date": "present"},
+                       {"journal_name": "Glade Letters", "start_date": "2012", "end_date": "present"}]
+    assert item == {"journal_name": "Moss Quarterly", "start_date": "2012", "end_date": "present"}
+    assert reformatted["journal_name"]["original"] == joined
+    assert reformatted["journal_name"]["reason"] == "Split journals named in separate source cells"
+    assert "role" not in item and "role" not in reformatted
+
+
+def test_two_journals_whose_second_cell_is_undated_are_both_journals():
+    # "Editors" is not the role word "Editor": the name is a journal.
+    item: ExtractedFields = {"journal_name": "Fern Review, Glade Editors Quarterly",
+                             "start_date": "2009"}
+
+    earlier = split_joined_journals("2009-present Reviewer for Fern Review\tGlade Editors Quarterly",
+                                    item, {})
+
+    assert [record["journal_name"] for record in earlier] == ["Fern Review"]
+    assert item["journal_name"] == "Glade Editors Quarterly" and "role" not in item
+
+
+@pytest.mark.parametrize("text,joined,role", [
+    # a role cell, wherever it sits
+    ("Fern Review\tEditorial Board \u2013 2015 to present", "Fern Review, Editorial Board",
+     "Editorial Board"),
+    ("Fern Review\tMember Editorial Board\t2001-2005", "Fern Review; Member Editorial Board",
+     "Member Editorial Board"),
+    ("Associate Editor\tFern Review\t2010", "Associate Editor, Fern Review", "Associate Editor"),
+    # the dated second column of a two-column row: a section, not a journal
+    ("Fern Review\tLaboratory Section \u2013 2004 to 2007", "Fern Review, Laboratory Section",
+     "Laboratory Section"),
+    ("Fern Review\tStone Studies/Clay Studies (2010 to 2013)",
+     "Fern Review - Stone Studies/Clay Studies", "Stone Studies/Clay Studies"),
+])
+def test_role_or_section_column_leaves_the_journal_name(text, joined, role):
+    item: ExtractedFields = {"journal_name": joined, "start_date": "2004"}
+    reformatted: ReformattedFields = {}
+
+    assert split_joined_journals(text, item, reformatted) == []
+
+    assert (item["journal_name"], item["role"]) == ("Fern Review", role)
+    assert reformatted["role"]["reformatted"] == role
+    assert reformatted["journal_name"]["reformatted"] == "Fern Review"
+    assert reformatted["journal_name"]["reason"] == (
+        "Moved a role or section column out of the journal name")
+
+
+def test_role_column_does_not_overwrite_a_role_already_extracted():
+    item: ExtractedFields = {"journal_name": "Fern Review, Editorial Board", "role": "Chair"}
+    reformatted: ReformattedFields = {}
+
+    split_joined_journals("Fern Review\tEditorial Board \u2013 2015", item, reformatted)
+
+    assert (item["journal_name"], item["role"]) == ("Fern Review", "Chair")
+    assert "role" not in reformatted
+
+
+def test_role_column_is_shared_by_every_journal_record():
+    item: ExtractedFields = {"journal_name": "Fern Review, Glade Letters, Editorial Board"}
+
+    earlier = split_joined_journals("Fern Review\tGlade Letters\tEditorial Board", item, {})
+
+    assert earlier == [{"journal_name": "Fern Review", "role": "Editorial Board"}]
+    assert item == {"journal_name": "Glade Letters", "role": "Editorial Board"}
+
+
+@pytest.mark.parametrize("text,journal_name", [
+    # one cell holds the whole name: a title with a comma in it
+    ("Editorial Board\tFern, Glade and Moss Review", "Fern, Glade and Moss Review"),
+    # a piece still joins names inside one cell: a comma list wrapped by a tab
+    ("Reviewer for: Fern Review, Glade Letters,\tMoss Quarterly",
+     "Fern Review, Glade Letters, Moss Quarterly"),
+    # the separator was lost before stage 4 (KUUKNJ): nothing to split on
+    ("Fern Review Glade Letters", "Fern Review; Glade Letters"),
+    # a cell holds the whole name, though earlier cells hold its parts
+    ("Fern Review\tFern Review, Glade Section", "Fern Review, Glade Section"),
+    # a part of the name no cell holds
+    ("Fern Review\tGlade Letters\t2001-2004", "Fern Review, Glade Letters, Moss Quarterly"),
+    # an empty part, even beside a cell with no words
+    ("***\tFern Review\tGlade Letters", ", Fern Review, Glade Letters"),
+    # a part that is only part of a cell's word
+    ("Fern Reviews\tGlade Letters", "Fern Review, Glade Letters"),
+    # a single cell
+    ("2001 Reviewer, Fern Review", "Fern Review"),
+    # every piece is a role: no journal to keep
+    ("Editorial Board\tReviewer \u2013 2004", "Editorial Board, Reviewer"),
+    # not a string
+    ("Fern Review\tGlade Letters", ["Fern Review", "Glade Letters"]),
+    ("Fern Review\tGlade Letters", None),
+])
+def test_joined_journals_left_alone(text, journal_name):
+    item: ExtractedFields = {"journal_name": journal_name, "start_date": "2001"}
+    before = dict(item)
+    reformatted: ReformattedFields = {}
+
+    assert split_joined_journals(text, item, reformatted) == []
+    assert item == before and reformatted == {}
+
+
+def test_joined_journals_left_alone_without_entry_text():
+    item: ExtractedFields = {"journal_name": "Fern Review, Glade Letters"}
+
+    assert split_joined_journals("", item, {}) == []
+    assert item == {"journal_name": "Fern Review, Glade Letters"}
+
+
+@pytest.mark.parametrize("text,joined,expected_journals", [
+    # the first cell is not the journal alone: two journals, not a section
+    ("2001 Fern Review\tGlade Letters \u2013 2004", "Fern Review, Glade Letters",
+     ["Fern Review", "Glade Letters"]),
+    # the second cell is not followed by its dates: two journals
+    ("Fern Review\tGlade Letters, Moss Press", "Fern Review, Glade Letters",
+     ["Fern Review", "Glade Letters"]),
+    # the second cell does not start with its piece: two journals
+    ("Fern Review\tSee Glade Letters \u2013 2004", "Fern Review, Glade Letters",
+     ["Fern Review", "Glade Letters"]),
+])
+def test_two_column_row_needs_the_journal_alone_and_a_dated_second_cell(
+        text, joined, expected_journals):
+    item: ExtractedFields = {"journal_name": joined}
+
+    earlier = split_joined_journals(text, item, {})
+
+    assert [record["journal_name"] for record in earlier] + [item["journal_name"]] == expected_journals
+    assert "role" not in item
+

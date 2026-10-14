@@ -210,6 +210,7 @@ class ReformattedFields(TypedDict, total=False):
     expiration_date: ReformattedField
     filing_date: ReformattedField
     issue_date: ReformattedField
+    journal_name: ReformattedField
     launch_date: ReformattedField
     notes: ReformattedField
     orcid: ReformattedField
@@ -217,6 +218,7 @@ class ReformattedFields(TypedDict, total=False):
     pmcid: ReformattedField
     pmid: ReformattedField
     recertification_date: ReformattedField
+    role: ReformattedField
     start_date: ReformattedField
     submission_date: ReformattedField
     title: ReformattedField
@@ -1676,6 +1678,126 @@ def split_parenthetical_title_span(
             }
         return outer
     return None
+
+
+
+#: Editorial board service (Q4C) and journal reviewing (Q4D): one journal per
+#: row (#1414).
+JOURNAL_LIST_TAXONOMY_CODES = ('Q4C', 'Q4D')
+
+#: What stage 4 joins the names of several source cells with in one
+#: `journal_name`: "A, B", "A; B", "A - B", or the source's own tab.
+_JOINED_JOURNALS_SEPARATOR = re.compile(r'\s*[,;\t]\s*|\s+[-\u2013\u2014]\s+')
+
+#: A cell that names a role on the board, not a journal: "Editorial Board",
+#: "Associate Editor", "Member Editorial Board", "Ad hoc Reviewer",
+#: "Editor-in-Chief". Matched whole against the cell's words.
+_ROLE_CELL_PATTERN = re.compile(
+    r'(?:(?:member|chair)\s+(?:of\s+(?:the\s+)?)?)?'
+    r'(?:(?:ad\s+hoc|advisory|associate|assistant|consulting|contributing|deputy|editorial'
+    r'|executive|founding|guest|international|journal|managing|peer|review|scientific'
+    r'|section|senior|statistical)\s+)*'
+    r'(?:board|editor(?:\s+in\s+chief)?|member|referee|reviewer)(?:\s+member)?',
+    re.IGNORECASE,
+)
+
+#: What follows the role or section name in a two-column journal row's dated
+#: cell: "<section> – 2004 to 2007", "<role> (2014 to 2017)".
+_DATED_CELL_REST = r'[\s,(\u2013\u2014-]*\d{4}\b'
+
+_JOINED_JOURNALS_REASON = "Split journals named in separate source cells"
+_ROLE_COLUMN_REASON = "Moved a role or section column out of the journal name"
+
+
+def _folded_words(text: str) -> str:
+    """`text`'s words, lower-cased and space-joined, punctuation dropped."""
+    return ' '.join(re.sub(r'[\W_]+', ' ', text).lower().split())
+
+
+def _cell_holds(cell: str, name: str) -> bool:
+    """Whether `name` is a run of whole words in `cell`, punctuation aside."""
+    folded = _folded_words(name)
+    return bool(folded) and f' {folded} ' in f' {_folded_words(cell)} '
+
+
+def _journal_cell_pieces(journal_name: str, cells: list[str]) -> list[tuple[str, int]] | None:
+    """`journal_name` cut at its separators into the longest runs that each
+    sit in one tab cell, the cells taken in order: [(piece, cell index)].
+    None unless the cells hold every part of it."""
+    bounds = [0]
+    for match in _JOINED_JOURNALS_SEPARATOR.finditer(journal_name):
+        bounds += [match.start(), match.end()]
+    spans = list(zip(bounds[::2], [*bounds[1::2], len(journal_name)], strict=True))
+    pieces: list[tuple[str, int]] = []
+    first = 0
+    for cell_index, cell in enumerate(cells):
+        for last in range(len(spans), first, -1):
+            piece = journal_name[spans[first][0]:spans[last - 1][1]]
+            if _cell_holds(cell, piece):
+                pieces.append((piece, cell_index))
+                first = last
+                break
+    return pieces if first == len(spans) else None
+
+
+def _is_role_cell(piece: str) -> bool:
+    return _ROLE_CELL_PATTERN.fullmatch(_folded_words(piece)) is not None
+
+
+def _is_dated_second_column(pieces: list[tuple[str, int]], cells: list[str]) -> bool:
+    """Whether two pieces are a "<journal> TAB <role or section> – <dates>"
+    row: the first cell is the journal alone, undated, and the second cell is
+    its piece followed by the dates (KHXOUF 1181, 1193)."""
+    if len(pieces) != 2:
+        return False
+    (journal, journal_cell), (label, label_cell) = pieces
+    if _folded_words(cells[journal_cell]) != _folded_words(journal):
+        return False
+    return re.match(re.escape(label) + _DATED_CELL_REST, cells[label_cell], re.IGNORECASE) is not None
+
+
+def split_joined_journals(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> list[ExtractedFields]:
+    """One record per journal for a `journal_name` that joins tab cells (#1414).
+
+    "2012-present Reviewer for <A> TAB <B> TAB <C>" came back as one item,
+    journal_name "<A>, <B>, <C>", and rendered one row (JFGZFT 338). Each
+    journal now has its own record with the item's other fields; `updated`
+    keeps the last and the earlier ones are returned. A cell that is a role
+    ("Editorial Board") or the dated role/section column of a two-column row
+    is taken out of the journal name, into an empty `role`. Left alone: a
+    name that one cell holds whole (a title with a comma in it), a piece that
+    still joins names inside one cell (a comma list), a lost separator.
+    """
+    journal_name = updated.get('journal_name')
+    if not isinstance(journal_name, str):
+        return []
+    cells = [cell.strip() for cell in original_text.split('\t') if cell.strip()]
+    # A cell that holds the whole name (one title with a comma in it) keeps
+    # it whole; this also refuses a "split" into one piece.
+    if any(_cell_holds(cell, journal_name) for cell in cells):
+        return []
+    pieces = _journal_cell_pieces(journal_name, cells)
+    if pieces is None or any(_JOINED_JOURNALS_SEPARATOR.search(piece) for piece, _ in pieces):
+        return []
+    roles = [piece for piece, _ in pieces if _is_role_cell(piece)]
+    journals = [piece for piece, _ in pieces if not _is_role_cell(piece)]
+    if not roles and _is_dated_second_column(pieces, cells):
+        roles, journals = journals[1:], journals[:1]
+    if not journals:
+        return []
+    if roles and not updated.get('role'):
+        updated['role'] = '; '.join(roles)
+        reformatted['role'] = {'original': None, 'reformatted': updated['role'],
+                               'reason': _ROLE_COLUMN_REASON}
+    earlier: list[ExtractedFields] = [{**updated, 'journal_name': name} for name in journals[:-1]]
+    updated['journal_name'] = journals[-1]
+    reformatted['journal_name'] = {
+        'original': journal_name, 'reformatted': journals[-1],
+        'reason': _JOINED_JOURNALS_REASON if len(journals) > 1 else _ROLE_COLUMN_REASON,
+    }
+    return earlier
 
 
 def apply_regex_post_processing(

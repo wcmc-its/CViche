@@ -35,11 +35,13 @@ from unified_pipeline.llm_provenance import (
 )
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
+    JOURNAL_LIST_TAXONOMY_CODES,
     POSITION_TAXONOMY_CODES,
     ReformattedFields,
     apply_regex_post_processing,
     coerce_field_value_types,
     normalize_dates,
+    split_joined_journals,
     split_parenthetical_title_span,
 )
 from unified_pipeline.stage4.error_codes import (
@@ -370,6 +372,9 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
         outer = split_parenthetical_title_span(entry_text, cleaned[-1][0], last_reformatted)
         if outer is not None:
             cleaned.insert(-1, (dict(outer), {}))
+    if taxonomy_code in JOURNAL_LIST_TAXONOMY_CODES:
+        for journal in split_joined_journals(entry_text, cleaned[-1][0], last_reformatted):
+            cleaned.insert(-1, (dict(journal), {}))
     cleaned = _with_offschema_records(cleaned, taxonomy_code)
     last_fields = cleaned[-1][0]
     if len(cleaned) < _MIN_RECORDS_PER_ENTRY:
