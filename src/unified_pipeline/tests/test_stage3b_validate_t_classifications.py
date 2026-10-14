@@ -439,7 +439,7 @@ def _recode_rest(monkeypatch, new_code="N3B", reasoning=_FRAGMENT_REASONING):
 
 
 def _validate(entries):
-    return classify.validate_t_classifications(entries, _taxonomy(("H", "T", "N3A", "N3B")))
+    return classify.validate_t_classifications(entries, _taxonomy(("H", "T", "N3A", "N3B", "N4")))
 
 
 def test_mentee_row_rest_called_a_fragment_joins_its_numbered_row(monkeypatch):
@@ -508,6 +508,7 @@ def test_each_row_number_shape_takes_the_rest(monkeypatch, row_text):
     {"reasoning": "Fragile X research of a mentee, award and position"},
     {"reasoning": "Continuation piece of the previous mentee row"},
     {"new_code": "H"},
+    {"new_code": "N4"},
     {"row_code": "H"},
     {"row_code": None},
     {"row_hierarchy": ("Other mentees",)},
@@ -518,7 +519,7 @@ def test_each_row_number_shape_takes_the_rest(monkeypatch, row_text):
     {"row_text": "Dr. Jane Example, MD"},
     {"row_text": None},
     {"rest_text": "31.Rowan Placeholder\tMS\t2031-present"},
-], ids=["no-fragment-word", "frag-without-fragment", "piece-not-fragment", "not-a-mentee-code", "row-not-mentee", "row-without-code",
+], ids=["no-fragment-word", "frag-without-fragment", "piece-not-fragment", "not-a-mentee-code", "other-n-code", "row-not-mentee", "row-without-code",
         "other-hierarchy", "row-unnumbered", "row-opens-with-a-year", "row-opens-with-a-time",
         "row-opens-with-punctuation", "row-opens-with-a-title",
         "row-without-text", "rest-numbered"])
