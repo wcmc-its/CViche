@@ -52,6 +52,19 @@ _LINE_SENTINEL = "\x00"
 TABLE_ROW_JOINER = " | "
 
 
+#: The hyphens a source can type a date range or an open end with in place
+#: of "-": hyphen, non-breaking hyphen, figure dash, en dash (#1585, batch
+#: NECRGC: a source writing "yyyy\u2011yy" and an open "yyyy\u2011" with the
+#: non-breaking one, 50 false WARNs on two runs). The em dash is left as
+#: it is: the patterns that read one as a range dash already list it.
+_SOURCE_HYPHENS = str.maketrans(dict.fromkeys("\u2010\u2011\u2012\u2013", "-"))
+
+
+def normalise_hyphens(text: str) -> str:
+    """`text` with every `_SOURCE_HYPHENS` character written as "-"."""
+    return text.translate(_SOURCE_HYPHENS)
+
+
 #: A word of a name: letters only.
 _NAME_WORD_RE = re.compile(r"[^\W\d_]+")
 

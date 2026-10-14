@@ -20,6 +20,8 @@ the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code
 An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
 An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
+A content pin (#1695) recodes a per-article citation-metrics line ("<Surname> et
+al. (<year>) <journal> JIF: <x>") from a publication or editorial code to S0.
 
 Pure functions over one hierarchy group's classified entries and its
 `TaxonomyContext`; no LLM, no I/O. Imports only `.context`.
@@ -201,6 +203,36 @@ _TEACHING_CERTIFICATE = re.compile(
 # #88", "(publication #90)") is not a second copy of that citation.
 _PUBLICATION_POINTER = re.compile(r"\bpublications?\s*#\s*\d+", re.I)
 _PUBLICATION_CODE = re.compile(r"^S\d$")
+
+# --- #1695: a per-article metrics line is a bibliometric record, not a citation ---
+#
+# Some CVs repeat the bibliography as a metrics table: "<n>. <Surname> et al.
+# (<year>) <journal> JIF: <x> cited <n> times", one line per article, under the
+# same sub-headings as the bibliography (LFFKVV: 120 lines coded S1, S2 and Q4C
+# at 0.95). Each line renders as a title-less duplicate of an article already
+# listed in full. A line is a metrics stub when it carries a per-article metric
+# and everything before the metric is an author-year lead plus a short venue
+# with no digits: no title, no volume, no pages. A full citation that also
+# prints its impact factor has a title or a volume before the metric and keeps
+# the model's code.
+_BIBLIOMETRIC_CODE = "S0"
+_EDITORIAL_CODE = "Q4C"
+_PER_ARTICLE_METRIC = re.compile(
+    r"\bJIF\b|\bimpact\s+factor\b|\bIF\s*[:=]\s*\d"
+    r"|\bcited\s+\d[\d,]*\s+times\b|\btimes\s+cited\b|\bcitations?\s*[:=]\s*\d",
+    re.I,
+)
+_STUB_SURNAME = r"[A-Z][\w'\u2019]+(?:[\s-]+[A-Z][\w'\u2019]+){0,2}"
+# Optional list number, one or two surnames, optional "et al.", the year, then the venue.
+# The venue holds no digit: a volume or page range after a short title marks a full citation.
+_METRICS_STUB_LEAD = re.compile(
+    r"^[\s\u2022*\-]*(?:\d{1,4}[.)]\s*)?"
+    + _STUB_SURNAME + r"(?:\s+(?:and|&)\s+" + _STUB_SURNAME + r")?(?:,?\s+et\s+al\.?)?"
+    r",?\s*\(?(?:19|20)\d{2}(?P<venue>[^\d]*)$"
+)
+# A journal name; a longer span before the metric reads as a title.
+_STUB_MAX_VENUE_WORDS = 8
+_METRICS_STUB_WHY = "A per-article citation-metrics line is a bibliometric record, not a citation"
 
 # --- #1251: a mentee's accomplishments are the mentee's, not the owner's ---
 #
@@ -390,7 +422,8 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
     Attended courses are B2, never K4, unless the row names a teaching role;
     a training title at the head of a position row is C (postdoctoral training);
     a life-support or teaching certificate is B2, not a medical licence (F1);
-    a publication code on a note that points at a numbered publication is T.
+    a publication code on a note that points at a numbered publication is T;
+    a publication or editorial code on a per-article metrics line is S0.
     """
     code, text = entry.get("taxonomy_code"), entry.get("text") or ""
     heading = _heading_text(entry)
@@ -402,7 +435,18 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return "B2", "A life-support or teaching certificate is not a medical licence"
     if code and _PUBLICATION_CODE.match(code) and _PUBLICATION_POINTER.search(text):
         return "T", "A note pointing at a numbered publication is not a second citation"
+    if code and (_PUBLICATION_CODE.match(code) or code == _EDITORIAL_CODE) and _is_metrics_stub(text):
+        return _BIBLIOMETRIC_CODE, _METRICS_STUB_WHY
     return None
+
+
+def _is_metrics_stub(text: str) -> bool:
+    """A per-article metric after only an author-year lead and a short, digit-free venue (#1695)."""
+    metric = _PER_ARTICLE_METRIC.search(text)
+    if not metric:
+        return False
+    lead = _METRICS_STUB_LEAD.match(text[:metric.start()])
+    return bool(lead) and len(re.findall(r"[A-Za-z]+", lead.group("venue"))) <= _STUB_MAX_VENUE_WORDS
 
 
 def _is_mentee_accomplishment(code: str, heading: str) -> bool:

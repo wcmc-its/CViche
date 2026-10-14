@@ -3325,6 +3325,12 @@ def test_date_cell_shape_does_not_tie_a_date_to_an_entry_by_function_words(word)
     "Example Widget Committee\n2015 - member of the board",
     # The line-opening "YYYY - " marker after a bullet or bracket.
     "\u2022 2015 - Example Widget Committee, member",
+    # Batch NECRGC (#1585): a run types the open dash as a non-breaking
+    # hyphen (U+2011); the other source hyphens read the same.
+    "Example Widget Committee, member, 2015\u2011",
+    "Example Widget Committee, member, 2015\u2010",
+    "Example Widget Committee, member, 2015\u2012 ",
+    "Example Widget Committee, member, 2015 \u2011 date",
 ])
 def test_date_cell_shape_spares_an_open_range_the_source_states(text):
     stage4 = {"entries": [_dated4(text, "P", "2015", "present", idx=12)]}
@@ -3350,6 +3356,16 @@ def test_date_cell_shape_does_not_read_a_closed_range_as_a_trailing_dash():
     a year, not the trailing dash that marks an open range, so the open
     '-Present' row is still reported."""
     stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015-2016",
+                                  "P", "2015", "present", idx=12)]}
+    findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
+    assert [(f["severity"], f["evidence"]) for f in findings] == [
+        ("WARN", ["2015-Present"])]
+
+
+def test_date_cell_shape_does_not_read_a_closed_source_hyphen_range_as_open():
+    """A range closed with a non-breaking hyphen ("2015\u20112016") is no
+    open marker once the hyphen reads as "-": the open row still warns."""
+    stage4 = {"entries": [_dated4("Example Widget Committee, member, 2015\u20112016",
                                   "P", "2015", "present", idx=12)]}
     findings = lint_date_cell_shape(stage4, [_COMMITTEE_ROW], [])
     assert [(f["severity"], f["evidence"]) for f in findings] == [
