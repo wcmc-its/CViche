@@ -226,7 +226,13 @@ from ..formatting import (
 )
 from ..normalization import _clean_inline_tabs
 from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
-from ..render_check import _is_column_header_row
+from ..render_check import (
+    UNRENDERED_MIN_RECORD_LINES,
+    _is_column_header_row,
+    _record_lines,
+    _record_tokens,
+    t_recovery_lines,
+)
 
 if TYPE_CHECKING:
     from docx.text.paragraph import Paragraph
@@ -1762,3 +1768,41 @@ class AppendixSection:
             # Per-entry comments (e.g. why it was classified T).
             self._add_entry_comments(entry_para, entry)
             self.stats['entries_inserted'] += 1
+
+
+def t_line_is_scaffolding(line: str, entry: dict) -> bool:
+    """Whether the Appendix's own filter would drop this line of a T entry
+    (template furniture, a confirmed header row, ...). Recovery must not
+    resurrect what the Appendix deliberately omits (#1230)."""
+    return _appendix_drop_reason(
+        line, line, 'T',
+        entry.get('classification_reasoning')) is not None
+
+
+def recovery_candidates(code: str, entry: dict) -> list[str]:
+    """Lines of an entry the unrendered-record pass should look for.
+
+    A fused multi-record entry (two or more record-shaped lines) for any code.
+    A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
+    record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
+    a single-record entry qualifies (#1230). The Appendix renders a T body
+    whole (`_appendix_body`) unless the overflow re-splits it, so these lines
+    are usually found on the page; the scan still catches what a re-split
+    reply or dedup left out. A shorter T entry has none.
+    """
+    text = str(entry.get('text') or '')
+    if code == 'T':
+        if len(text) <= APPENDIX_MAX_CHARS:
+            return []
+        return t_recovery_lines(text)
+    records = _record_lines(text)
+    return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
+
+
+def other_entry_line_tokens(entries_by_code: dict) -> list[set]:
+    """`_record_tokens` of every line of every non-T entry (#1230). A T line
+    whose tokens all sit in one of them is a record that has its own entry."""
+    return [_record_tokens(line)
+            for code, entries in entries_by_code.items() if code != 'T'
+            for entry in entries
+            for line in str(entry.get('text') or '').split('\n') if line.strip()]

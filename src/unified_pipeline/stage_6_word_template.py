@@ -238,19 +238,20 @@ from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
 )
 from unified_pipeline.stage6.sections.appendix import (
-    APPENDIX_MAX_CHARS,
     CODE_ORIGIN_ENTRY,
     CODE_ORIGIN_RECONSIDER,
     OwnerTokens,
     RecoveredLine,
     UnmappedEntry,
-    _appendix_drop_reason,
     _owner_signature_tokens,
     build_appendix_diversion_warnings,
     is_page_furniture,
     is_t_validation_recoded_m1,
     labelled_email,
+    other_entry_line_tokens,
     reclassified_structural_reason,
+    recovery_candidates,
+    t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.mentoring import (
     annotate_outcome_mentees,
@@ -714,44 +715,6 @@ def parse_reclassified_segments(
             resolved = (original_code if original_code != '?' else None) if code == _KEEP_SENTINEL else code
             segments.append((segment_text, resolved))
     return segments or None
-
-
-def _t_line_is_scaffolding(line: str, entry: dict) -> bool:
-    """Whether the Appendix's own filter would drop this line of a T entry
-    (template furniture, a confirmed header row, ...). Recovery must not
-    resurrect what the Appendix deliberately omits (#1230)."""
-    return _appendix_drop_reason(
-        line, line, 'T',
-        entry.get('classification_reasoning')) is not None
-
-
-def _recovery_candidates(code: str, entry: dict) -> list[str]:
-    """Lines of an entry the unrendered-record pass should look for.
-
-    A fused multi-record entry (two or more record-shaped lines) for any code.
-    A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
-    record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
-    a single-record entry qualifies (#1230). The Appendix renders a T body
-    whole (`_appendix_body`) unless the overflow re-splits it, so these lines
-    are usually found on the page; the scan still catches what a re-split
-    reply or dedup left out. A shorter T entry has none.
-    """
-    text = str(entry.get('text') or '')
-    if code == 'T':
-        if len(text) <= APPENDIX_MAX_CHARS:
-            return []
-        return t_recovery_lines(text)
-    records = _record_lines(text)
-    return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
-
-
-def _other_entry_line_tokens(entries_by_code: dict) -> list[set]:
-    """`_record_tokens` of every line of every non-T entry (#1230). A T line
-    whose tokens all sit in one of them is a record that has its own entry."""
-    return [_record_tokens(line)
-            for code, entries in entries_by_code.items() if code != 'T'
-            for entry in entries
-            for line in str(entry.get('text') or '').split('\n') if line.strip()]
 
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
@@ -3957,18 +3920,18 @@ Now analyze the text above:"""
             # A T entry can repeat a table whose rows are also entries of their
             # own that render (#1230): a line such a row carries in full is not
             # lost, however the render reformatted it.
-            t_cut_token_sets += _other_entry_line_tokens(entries_by_code)
+            t_cut_token_sets += other_entry_line_tokens(entries_by_code)
 
             for code, entries in entries_by_code.items():
                 for entry in entries:
-                    records = _recovery_candidates(code, entry)
+                    records = recovery_candidates(code, entry)
                     if not records:
                         continue  # not a fused multi-record entry
                     fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
                     for line in records:
-                        if code == 'T' and _t_line_is_scaffolding(line, entry):
+                        if code == 'T' and t_line_is_scaffolding(line, entry):
                             continue
                         if code == 'T':
                             rendered = _whole_record_rendered(

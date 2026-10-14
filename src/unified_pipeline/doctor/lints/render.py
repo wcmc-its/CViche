@@ -40,6 +40,13 @@ from unified_pipeline.stage6.parsing import (
     _mid_sentence_joins,
     _refold_shattered,
 )
+from unified_pipeline.stage6.render_check import _record_tokens, _whole_record_rendered
+from unified_pipeline.stage6.sections.appendix import (
+    _TRUNCATION_MARKER,
+    other_entry_line_tokens,
+    recovery_candidates,
+    t_line_is_scaffolding,
+)
 from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 from unified_pipeline.stage6.sections.licensure import (
     _LICENSURE_HEADER_CELLS,
@@ -573,13 +580,52 @@ def _record_rendered(line: str, haystack: str,
     return rendered
 
 
+class _TVouching(NamedTuple):
+    """What vouches for a T-coded record line in the rendered output (#1230),
+    built once per document, as `_recover_unrendered_records` builds it."""
+    line_tokens: list[set[str]]  # `_record_tokens` of each whole output line
+    cut_tokens: list[set[str]]   # of lines the Appendix cap cut, plus the lines of non-T entries
+
+
+def _t_vouching(stage4: dict, blocks: list[tuple[str, str]]) -> _TVouching:
+    """A line the Appendix cap cut may have lost the tail of its record, so it
+    vouches only for a line it carries in full; so does a line of a non-T
+    entry, which is a record with its own entry."""
+    lines = [line for _, text in blocks for line in str(text).split("\n")
+             if line.strip()]
+    by_code: dict[str, list[dict]] = defaultdict(list)
+    for entry in stage4.get("entries", []):
+        by_code[entry.get("taxonomy_code")].append(entry)
+    return _TVouching(
+        [_record_tokens(line) for line in lines if not line.endswith(_TRUNCATION_MARKER)],
+        [_record_tokens(line) for line in lines if line.endswith(_TRUNCATION_MARKER)]
+        + other_entry_line_tokens(by_code))
+
+
+def _t_absent_records(entry: dict, haystack: str,
+                      vouching: _TVouching) -> tuple[list[str], list[str]]:
+    """(records, absent) of a long T-coded entry: the lines stage 6's own
+    recovery pass looks for (`recovery_candidates`), minus what the Appendix
+    deliberately omits, and those that fail `_whole_record_rendered`."""
+    records = [line for line in recovery_candidates("T", entry)
+               if not t_line_is_scaffolding(line, entry)]
+    absent = [line for line in records
+              if _whole_record_rendered(line, haystack, vouching.line_tokens,
+                                        vouching.cut_tokens) is False]
+    return records, absent
+
+
 def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
                             subpoints: SubpointText | None = None) -> list[dict]:
     """Per-record render check over fused multi-record stage-4 entries: the
     structured-fields-only render paths keep the extracted record and drop
     the unextracted remainder lines with no bullet fallback (#221). No
-    element_type filter — the KFGXBW loss was on a 'break' entry; 'T' is
-    skipped (appendix catch-all).
+    element_type filter -- the KFGXBW loss was on a 'break' entry.
+
+    A T entry is checked too when it holds `UNRENDERED_MIN_RECORD_LINES` or
+    more record lines (`_t_absent_records`): the Appendix renders its body
+    whole, but an overflow re-split or dedup can still drop a record, and
+    stage 6's own recovery looks for the same lines (#1230).
 
     `subpoints` (optional: the rendered docx's sub-points): a record line a
     tracked-deleted sub-point offers (#1205) is delivered for review, not
@@ -590,17 +636,20 @@ def lint_unrendered_records(stage4: dict, blocks: list[tuple[str, str]],
     # scattered across unrelated sections can't vouch for a dropped record.
     h = _haystacks(blocks)
     output = _rendered_lines(blocks)
+    vouching = _t_vouching(stage4, blocks)
     findings = []
     for e in stage4.get("entries", []):
         code = e.get("taxonomy_code")
         if code == "T":
-            continue
-        records = _record_lines(e.get("text"))
-        if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
-            continue
-        absent = [r for r in records
-                  if _record_rendered(r, h.text, output) is False
-                  and not offered_as_subpoint(r, subpoints)]
+            records, absent = _t_absent_records(e, h.text, vouching)
+            if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                continue
+        else:
+            records = _record_lines(e.get("text"))
+            if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
+                continue
+            absent = [r for r in records if _record_rendered(r, h.text, output) is False]
+        absent = [r for r in absent if not offered_as_subpoint(r, subpoints)]
         if not absent:
             continue
         findings.append(_finding(
