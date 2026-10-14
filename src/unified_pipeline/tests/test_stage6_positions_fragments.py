@@ -1853,3 +1853,48 @@ def test_a_contact_block_with_two_posts_adds_only_the_one_not_named(title):
     d1["taxonomy_code"] = "D1"
     rows = _render_with_contact({"A": [_contact_entry(title=title)], "D1": [d1]})
     assert sorted(row[0] for row in rows) == ["Director of Example Imaging", CONTACT_TITLE]
+
+
+@pytest.mark.parametrize("header_span, titled_spans, kept", [
+    # #1703: the titled row covers only the tail of the employment span
+    (("07/00", "05/10"), [("2005", "2010")], True),
+    # the header runs on after every titled row ends
+    (("2005", "present"), [("2005", "2010")], True),
+    # covered by one titled row, or by two between them: still redundant
+    (("2005", "2010"), [("2005", "2010")], False),
+    (("2000", "2010"), [("2000", "2005"), ("2005", "2010")], False),
+    # same year, month on one side only: nothing proven, dropped as before
+    (("07/05", "2010"), [("2005", "2010")], False),
+    (("2005", "present"), [("2008", "present")], True),
+    (("2008", "present"), [("2005", "present")], False),
+])
+def test_an_employer_summary_is_dropped_only_when_titled_rows_cover_its_span(
+        header_span, titled_spans, kept):
+    """Pins Rule 3 to containment, not overlap (#1703).
+
+    An untitled employer row is redundant only when its titled siblings carry
+    its whole span; one they only partly cover is the sole record of the rest.
+    """
+    header = _position_entry(1, "", "Example Practice", ["Employment"], *header_span)
+    titled = [_position_entry(2 + k, f"Role {k}", "Example Practice", ["Employment"], *span)
+              for k, span in enumerate(titled_spans)]
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments([header, *titled])
+
+    assert (header in merged) is kept
+    assert all(t in merged for t in titled)
+
+
+def test_an_employer_summary_that_inherited_its_employer_is_still_dropped():
+    """Pins the #1703 keep to a header that names its own employer.
+
+    A bare "07/90 - present" line inherits the row above's employer; its
+    extra span would render as a wrong "Employer | 07/90-Present" row.
+    """
+    titled = _position_entry(1, "Professor", "Example University", ["Faculty"], "1989-09", "1990-07")
+    header = _position_entry(2, "", "Example University", ["Faculty"], "1990-07", "present")
+    header[INHERITED_INSTITUTION_KEY] = 1
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments([titled, header])
+
+    assert merged == [titled]
