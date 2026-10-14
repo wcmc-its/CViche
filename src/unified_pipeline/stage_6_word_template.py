@@ -886,6 +886,17 @@ _SAME_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingProx
     ('S4', 'S1'): frozenset({'book_title', 'editors', 'publisher'}),
 })
 
+# (assigned, target) cross-family pairs a low-confidence hierarchy mismatch
+# does not reroute when the record fills one of the listed fields, for the
+# reason above. The target renders the entry's text, so
+# `_fields_lost_in_reroute` sees no loss, but a record that names a committee
+# is a committee row, never clinical teaching (#1428, SIYORB 462: a P row
+# under a mentoring heading). A membership or a fieldless entry still goes to
+# a text-rendered target as before.
+_CROSS_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingProxyType({
+    ('P', 'K2'): frozenset({'committee_name'}),
+})
+
 # Fields a target's renderer also reads under another schema's name
 # (`_RENDERED_FIELDS` is probed with the target's own schema only): R takes a
 # talk's date from `year` or `start_date`, Q1 its organization from a
@@ -1025,24 +1036,29 @@ def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
     """The outcome refusing a cross-family reroute, or None to apply it: the
     heading must not name the assigned code (`_heading_names_assigned_code`),
     a mentee never becomes an owner record, and any other record must fit the
-    target (`_fields_fit_reroute_target`) and keep every field the assigned
-    code's renderer writes (`_fields_lost_in_reroute`)."""
+    target (`_fields_fit_reroute_target`), fill no field marking it as the
+    assigned code's kind (`_CROSS_FAMILY_KIND_FIELDS`), and keep every field
+    the assigned code's renderer writes (`_fields_lost_in_reroute`)."""
     if _heading_names_assigned_code(entry, assigned_code):
         return REROUTE_REFUSED_HEADING
     if assigned_code in _MENTEE_CODES and target_code[:1] in _OWNER_RECORD_FAMILIES:
         return REROUTE_REFUSED_MENTEE
-    if not _fields_fit_reroute_target(entry, target_code):
+    if (not _fields_fit_reroute_target(entry, target_code)
+            or _holds_assigned_kind_fields(entry, assigned_code, target_code,
+                                           _CROSS_FAMILY_KIND_FIELDS)):
         return REROUTE_REFUSED_FIELDS
     if _fields_lost_in_reroute(entry, assigned_code, target_code):
         return REROUTE_REFUSED_FIELDS_LOST
     return None
 
 
-def _holds_assigned_kind_fields(entry: Mapping[str, Any], assigned_code: str,
-                                target_code: str) -> bool:
-    """Whether a same-family reroute would move a record that fills a field
-    marking it as the assigned code's kind (`_SAME_FAMILY_KIND_FIELDS`)."""
-    kind_fields = _SAME_FAMILY_KIND_FIELDS.get((assigned_code, target_code), frozenset())
+def _holds_assigned_kind_fields(
+        entry: Mapping[str, Any], assigned_code: str, target_code: str,
+        kind_fields_by_pair: Mapping[tuple[str, str], frozenset[str]] = _SAME_FAMILY_KIND_FIELDS,
+) -> bool:
+    """Whether a reroute would move a record that fills a field marking it as
+    the assigned code's kind (`_SAME_FAMILY_KIND_FIELDS`, or the table given)."""
+    kind_fields = kind_fields_by_pair.get((assigned_code, target_code), frozenset())
     return bool(_filled_field_names(entry) & kind_fields)
 
 
@@ -1476,7 +1492,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
           Nor when the heading, read by the flagger's current table, names
           the assigned code after all, or when the move would drop a field
           the assigned code's renderer writes and the target's does not
-          (`_fields_lost_in_reroute`, #1428).
+          (`_fields_lost_in_reroute`, #1428), or when the record fills a
+          field marking it as the assigned code's kind
+          (`_CROSS_FAMILY_KIND_FIELDS`: a committee's name, SIYORB 462).
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
           heading whose expected codes tie across WCM sections
           (`_pick_mismatch_target`) (#946).
