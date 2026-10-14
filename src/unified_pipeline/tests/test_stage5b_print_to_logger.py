@@ -444,7 +444,7 @@ def test_run_stage5b_does_not_write_a_city_the_entry_text_contradicts(monkeypatc
     lookup's in both institution_enrichment (which stage 6 renders) and the
     extracted fields 5b fills; a generic name with no city gets none, and
     neither does a course taken online, but an appointment that mentions an
-    online programme keeps its city."""
+    online course it developed keeps its city."""
     from unified_pipeline import stage_5b_institution_enrichment as s5b
     from unified_pipeline.stage5b import lookup as s5b_lookup
 
@@ -468,7 +468,7 @@ def test_run_stage5b_does_not_write_a_city_the_entry_text_contradicts(monkeypatc
         {"taxonomy_code": "B2", "extracted_fields": {"institution": "Example Academy"},
          "text": "Waiver Training\tMay 2020\tExample Academy, online"},
         {"taxonomy_code": "D1", "extracted_fields": {"institution": "Example College"},
-         "text": "Director, Online Program in Example Studies, Example College, 2015-2020"},
+         "text": "Online course development with Example College faculty, Example College, 2015-2020"},
     ]}))
     output_path = tmp_path / "output.json"
 

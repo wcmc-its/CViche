@@ -312,6 +312,9 @@ def test_stated_us_locations_needs_the_state_to_end_its_segment():
                   " 2010", " — 2010", "  USA", ""):
         assert stated_us_locations("", f"Fellow\tExampleton, OH{after}") == [("Exampleton", "Ohio")], after
     assert stated_us_locations("", "Fellow\tExampleton, OH Fellow") == []
+    # "USA" must be the whole word, after a space.
+    assert stated_us_locations("", "Fellow\tExampleton, OH USC") == []
+    assert stated_us_locations("", "Fellow\tExampleton, OHUSA") == []
 
 
 def test_stated_us_locations_skips_a_city_followed_by_a_credential():
@@ -319,6 +322,9 @@ def test_stated_us_locations_skips_a_city_followed_by_a_credential():
     assert stated_us_locations("", "Fellow\tExampleton, OH, FACS") == []
     # Only a credential straight after the state counts.
     assert stated_us_locations("", "Fellow\tExampleton, OH, Fellow, PhD") == [("Exampleton", "Ohio")]
+    # A word that only starts like a credential is not one.
+    for after in (", Philadelphia", ", FALL 2015"):
+        assert stated_us_locations("", f"Fellow\tExampleton, OH{after}") == [("Exampleton", "Ohio")], after
 
 
 def test_stated_us_locations_skips_an_institution_word_before_the_state():
