@@ -1383,6 +1383,33 @@ def test_segments_cover_source_ignores_a_repeated_page_header_the_reply_drops():
     assert segments_cover_source(lines[:-1], source) is False
 
 
+def test_segments_cover_source_rejects_a_reply_that_drops_a_near_duplicate_sibling():
+    """Six committee rows told apart by one word: a reply that keeps five of
+    them carries 92% of the sixth row's tokens, so the pooled per-line share
+    forgave the loss. A row with a sibling must sit whole in one segment (#1230)."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Member | {n} Committee | Example Department of Synthetic Geology | "
+            f"Example College of Sciences | Example University | 1987-1992" for n in names]
+    source = "\n".join(rows)
+    assert segments_cover_source(rows, source) is True
+    assert segments_cover_source(rows[:-1], source) is False
+    assert segments_cover_source(rows[1:], source) is False
+    # Two sibling rows merged into one segment still carry both whole.
+    assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
+
+
+def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
+    """The whole-segment rule is for sibling rows only: a line with no near
+    duplicate keeps the pooled share, so a reply that splits it across two
+    segments is still believed (#1230)."""
+    pairs = (("zeolite", "geyser"), ("marigold", "estuary"), ("quartzite", "lagoon"),
+             ("nasturtium", "tundra"), ("basalt", "savanna"), ("obsidian", "fjord"))
+    lines = [f"Doe J. Synthetic {a} and {b} outcomes {i}." for i, (a, b) in enumerate(pairs)]
+    source = "\n".join(lines)
+    halves = [half for line in lines for half in line.split(" and ", 1)]
+    assert segments_cover_source(halves, source) is True
+
+
 def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():
     """Committee rows with the same years and place, told apart by one word:
     the complete row on the page must not vouch for its siblings (#1230)."""
