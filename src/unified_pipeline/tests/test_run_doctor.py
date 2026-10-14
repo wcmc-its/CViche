@@ -1652,6 +1652,16 @@ def test_unrendered_records_t_sibling_rows_are_judged_whole():
     assert findings[0]["evidence"] == [rows[2][:100]]
 
 
+def test_unrendered_records_reads_a_t_entry_as_stage_6_renders_it_after_the_pii_pass():
+    # A referee's email is cut from an Appendix-bound entry, so the page holds
+    # the residual of each line, not the line: not a loss (#1230).
+    refs = [f"Email: {user}@example-clinic.org\tDr. {name} Fairweather, Chair of the Department of Synthetic Geology, Example Clinic of Sciences"
+            for user, name in (("a.hargreave", "Ada"), ("b.lindqvist", "Bram"), ("c.okonkwo", "Cleo"))]
+    stage4 = {"entries": [_entry("\n".join(refs), start=9, taxonomy_code="T")]}
+    residual = [("p", f"Dr. {name} Fairweather, Chair of the Department of Synthetic Geology, Example Clinic of Sciences") for name in ("Ada", "Bram", "Cleo")]
+    assert lint_unrendered_records(stage4, residual) == []
+
+
 def test_unrendered_records_ignores_header_rows_of_a_t_entry():
     # A header row stage 3b confirmed is what the Appendix deliberately omits,
     # so it is not a record to look for (#1230).
