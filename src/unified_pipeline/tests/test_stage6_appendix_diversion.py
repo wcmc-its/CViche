@@ -754,6 +754,42 @@ def test_diversion_message_declined_grant_text_for_all_three_codes(code):
         f"research-support renderer as too sparse to table")
 
 
+@pytest.mark.parametrize("check, message", [
+    ("grant_no_funding_signal",
+     "M2B: 1 entry diverted to the Appendix — names no funder, grant number, amount or "
+     "role, under a heading stage 3b flagged as not research (see the "
+     "grant_no_funding_signal records)"),
+    ("grant_not_funded_application",
+     "M2B: 1 entry diverted to the Appendix — the source marks the application not "
+     "funded (see the grant_not_funded_application records)"),
+    # An unknown marker value is not a reason: the routing split applies.
+    ("some_other_check",
+     "M2B: 1 entry diverted to the Appendix — declined by the research-support "
+     "renderer as too sparse to table"),
+])
+def test_a_grant_diverted_for_what_it_says_is_not_called_too_sparse(check, message):
+    """#1805: the summary names the research-support check that diverted it."""
+    written = [{"text": "x", "taxonomy_code": "M2B", "grant_diversion_check": check}]
+    [warning] = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES,
+                                                  PASSTHROUGH_CODES)
+    assert warning["message"] == message
+    assert warning["reason"] == (REASON_RENDERER_DECLINED if check == "some_other_check"
+                                 else check)
+
+
+def test_a_not_funded_application_reaches_the_appendix_with_its_own_reason(tmp_path):
+    """#1805 wire: a pending application under a not-funded heading lands in
+    the Appendix, and its summary says not funded rather than too sparse."""
+    entry = {"text": "NOT_FUNDED_M2C_TOKEN", "taxonomy_code": "M2C",
+             "extracted_fields": {"title": "A Synthetic Application Title", "agency": "NIH"},
+             "hierarchy": ["Grants", "Not Funded"], "element_idx_start": 1}
+    doc, sidecar = _render(tmp_path, "T1805", [_OWNER_ENTRY, entry])
+    [diversion] = _diversion_warnings(sidecar)
+    assert (diversion["code"], diversion["reason"]) == ("M2C", "grant_not_funded_application")
+    assert "too sparse" not in diversion["message"]
+    assert any("NOT_FUNDED_M2C_TOKEN" in line for line in _appendix_numbered_lines(doc))
+
+
 _WELLFORMED_M2B_ENTRY = {
     "text": "WELLFORMED_M2B_GRANT_TOKEN", "taxonomy_code": "M2B",
     "extracted_fields": {"title": "Longitudinal Study of a Distinctive Grant Title",

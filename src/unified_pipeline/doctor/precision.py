@@ -85,6 +85,8 @@ _STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("appendix_no_route_T", r"^T: .*no stage 6 section is routed"),
         ("appendix_no_route", r"no stage 6 section is routed"),
         ("appendix_grant_too_sparse", r"too sparse to table"),
+        ("appendix_grant_no_funding_signal", r"diverted to the Appendix — names no funder"),
+        ("appendix_grant_not_funded", r"diverted to the Appendix — the source marks"),
         ("appendix_t_validation_recoded", r"T-validation recoded"),
         ("appendix_invalid_code", r"quarantined"),
         ("appendix_passthrough_refused", r"refused by the passthrough writer"),
