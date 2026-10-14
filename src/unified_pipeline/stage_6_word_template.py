@@ -200,6 +200,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     segment_already_rendered,
     segments_cover_source,
     t_recovery_lines,
+    token_pairs,
 )
 from unified_pipeline.stage6.resolution import (  # noqa: F401
     _get_cv_owner_name,
@@ -1918,11 +1919,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         lines = self._rendered_output_lines(exclude_instruction_box=True, include_tracked_insertions=True)
         haystack = "\x00".join(_squash(line) for line in lines)
         line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line))) for line in lines]
+        line_pair_sets = [token_pairs(line) for line in lines]
         record_ids = _m1_record_ids(m1_entries)
         return [entry for entry in m1_entries
                 if is_t_validation_recoded_m1(entry)
                 or (id(entry) in record_ids
-                    and m1_record_rendered(str(entry.get('text') or ''), haystack, line_token_sets) is False)]
+                    and m1_record_rendered(str(entry.get('text') or ''), haystack,
+                                           line_token_sets, line_pair_sets) is False)]
 
     def generate(self, input_path: str, output_path: str | None = None, research_summary_path: str | None = None,
                  original_doc_path: str | None = None, discover_original_doc: bool = True) -> str:

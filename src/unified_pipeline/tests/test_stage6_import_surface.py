@@ -184,6 +184,7 @@ RELOCATED_BY_398_RESIDUE = {
         "segment_already_rendered",
         "segments_cover_source",
         "t_recovery_lines",
+        "token_pairs",
     ),
 }
 
@@ -244,7 +245,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 35, (
+    assert len(_RELOCATED_CASES) == 36, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
