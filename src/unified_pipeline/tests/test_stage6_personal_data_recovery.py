@@ -1566,14 +1566,24 @@ def test_a_cell_label_at_another_number_does_not_make_this_one_a_cell(tmp_path):
     assert rows["Office address:"] == "1 Sample Way, Exampleton, ZZ 00000"
 
 
-@pytest.mark.parametrize("line, phone", [
-    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102 (home)", None),
-    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102(home)", None),
+@pytest.mark.parametrize("line, phone, home_number", [
+    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102 (home)", None, "555-555-0102"),
+    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102(home)", None, "555-555-0102"),
     # the home number shares only its last digits with the work number
-    ("555-555-0100 (work); 555-123-0100 (home)", "555-555-0100"),
+    ("555-555-0100 (work); 555-123-0100 (home)", "555-555-0100", "555-123-0100"),
+    # "(home)" need not end the line
+    ("555-555-0100 (work); 555-555-0102 (home); email a@example.org", "555-555-0100",
+     "555-555-0102"),
+    # every home label is dropped, not just the first
+    ("555-555-0100 (work); 555-555-0101 (home); 555-555-0102 (home)", "555-555-0100",
+     "555-555-0101"),
+    # more than one blank before the label
+    ("555-555-0100 (work); 555-555-0102  (home)", "555-555-0100", "555-555-0102"),
+    # an area code in parentheses starts the home number, not the work one
+    ("555-555-0100 (555) 555-0102 (home)", "555-555-0100", "(555) 555-0102"),
 ])
 def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
-        tmp_path, line, phone):
+        tmp_path, line, phone, home_number):
     """YOXXOH-05: every label trails its number, and the "(home)" after the
     last one sent the work number to the withheld home slot as well, so
     Office telephone was empty and the whole line, home number included,
@@ -1583,7 +1593,6 @@ def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
     rows = _contact_rows(tmp_path, entries)
 
     assert rows["Office telephone:"].startswith("555-555-0100")
-    home_number = line.rsplit("; ", 1)[1].removesuffix("(home)").strip()
     assert home_number not in _render(tmp_path, entries)
 
 
@@ -1597,6 +1606,16 @@ def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
     # only a bare "(home)" is that number's label alone
     ("555-555-0101 (home office); 555-555-0102", "555-555-0102"),
     ("555-555-0101 (homephone); 555-555-0102", "555-555-0102"),
+    # a "(home):" labels the number after it, the one the value holds
+    ("555-555-0101 (home): 555-555-0102", "555-555-0102"),
+    # the work label belongs to the number before it, not the home number
+    ("555-555-0100 (work) 555-555-0102 (home)", "555-555-0102"),
+    # two numbers read as one: the value holds the home one (#1823 review)
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "555-555-0102"),
+    # the value spells the home number without its area code
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-0102"),
+    # the value lists the home number first
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-555-0102; 555-555-0100"),
 ])
 def test_a_home_label_the_value_may_own_still_withholds_it(tmp_path, text, phone):
     rows = _contact_rows(tmp_path, [_a(text, {"phone": phone})])

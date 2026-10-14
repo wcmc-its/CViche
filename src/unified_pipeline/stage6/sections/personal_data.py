@@ -462,10 +462,20 @@ def _without_other_numbers_home_labels(phone: _JsonValue, text: str) -> str:
     hold (#1222, pilot YOXXOH-05): in "555-0100 (work); 555-0101 (fax);
     555-0102 (home)" the home number is withheld on its own, and its label
     sent the work number to the withheld home slot too, leaving Office
-    telephone empty. A `phone` that still holds the home number keeps it."""
+    telephone empty. A `phone` that still holds the home number keeps it.
+
+    The number group can join two space-separated numbers, "555-0100
+    555-0102 (home)", so a span is kept when either digit string holds the
+    other: a value holding only 555-0102 keeps that span's label (#1823)."""
     held = _digits(str(phone))
     return _HOME_LABEL_AFTER_NUMBER_RE.sub(
-        lambda m: m.group(0) if _digits(m.group('number')) in held else '', text)
+        lambda m: m.group(0) if _holds_either(held, _digits(m.group('number'))) else '',
+        text)
+
+
+def _holds_either(held: str, found: str) -> bool:
+    """Whether one digit string holds the other."""
+    return found in held or held in found
 
 
 def _cell_label_is_at_another_number(phone: _JsonValue, text: str) -> bool:
