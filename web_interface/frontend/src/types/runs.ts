@@ -122,6 +122,8 @@ export interface RunSummary {
 }
 
 export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'
+/** Whether the doctor checked a scored run, and why not (#1593). */
+export type DoctorStatus = 'ran' | 'failed' | 'skipped' | 'not_checked'
 export type DoctorSeverity = 'ERROR' | 'WARN' | 'INFO'
 
 /** Plain wording for a score row; every field is null for a row named by an
@@ -247,6 +249,8 @@ export interface RunQualityReport {
   earned: number | null
   total_weight: number | null
   data_complete: boolean | null
+  /** Null for a score cached before the status was recorded. */
+  doctor_status: DoctorStatus | null
   /** Weighted dimensions in the scorer's order. */
   dimensions: QualityDimension[]
   /** Weight-0 rows whose cap fired. */

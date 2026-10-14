@@ -391,7 +391,7 @@ def test_completed_run_gets_its_quality_columns(monkeypatch, tmp_path, db):
     monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
     monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
     score = {"totalScore": 62, "raw_score_before_caps": 62.0, "hard_fail_caps_applied": []}
-    monkeypatch.setattr(quality_score_service, "compute_and_cache_score", lambda _rid: score)
+    monkeypatch.setattr(quality_score_service, "compute_and_cache_score", lambda _rid, _outcome: score)
 
     o = _orchestrator(monkeypatch, tmp_path, db, "DOC_SCORE")
     asyncio.run(o.execute())
@@ -443,10 +443,26 @@ def test_a_run_whose_doctor_raises_is_scored_not_checked(monkeypatch, tmp_path, 
     asyncio.run(o.execute())
 
     cached = json.loads(storage.files[svc.CACHE_KEY])
-    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_NOT_CHECKED
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_FAILED
     assert cached["data_complete"] is False
     notifications.flush()
-    assert "not checked" in _facts(posts[-1])["Quality score"]
+    assert "not checked (the doctor failed)" in _facts(posts[-1])["Quality score"]
+
+
+def test_a_run_with_the_doctor_switched_off_is_scored_skipped(monkeypatch, tmp_path, db):
+    """#1593: CVICHE_RUN_DOCTOR=0 is recorded as skipped, not as a failure."""
+    from app.services import quality_score_service as svc
+
+    monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+    storage = _ScoreStorage()
+    _score_against(monkeypatch, storage)
+
+    asyncio.run(_orchestrator(monkeypatch, tmp_path, db, "DOC_SKIP").execute())
+
+    cached = json.loads(storage.files[svc.CACHE_KEY])
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_SKIPPED
+    assert cached["data_complete"] is False
 
 
 def test_the_score_sees_the_report_the_doctor_just_stored(monkeypatch, tmp_path, db):
@@ -467,5 +483,5 @@ def test_the_score_sees_the_report_the_doctor_just_stored(monkeypatch, tmp_path,
     asyncio.run(o.execute())
 
     cached = json.loads(storage.files[svc.CACHE_KEY])
-    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_CHECKED
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_RAN
     assert cached["data_complete"] is True

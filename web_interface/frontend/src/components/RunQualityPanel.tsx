@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { AlertCircle, EyeOff, Info, Lock, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { getRunFixList, getRunQuality, getRunReviewNote } from '../api/runs'
-import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, FixConfidence, FixEffort, FixListGroup, FixListItem, FixListProblem, QualityDimension, QualityGate, RunDoctorReport, RunFixList, RunQualityReport, ScoreRowWording } from '../types'
+import type { DoctorFindingGroup, DoctorFindingInstance, DoctorSeverity, DoctorStatus, FixConfidence, FixEffort, FixListGroup, FixListItem, FixListProblem, QualityDimension, QualityGate, RunDoctorReport, RunFixList, RunQualityReport, ScoreRowWording } from '../types'
 import { BAND_STYLE } from './runs/runQuality'
 
 const CARD = 'flex flex-col bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6'
@@ -95,9 +95,18 @@ function SectionHeading({ title, blurb }: { title: string; blurb: string }) {
   )
 }
 
+/** Why the Run Doctor did not check a scored run (#1593); a status absent
+ *  here ('ran', or null on an older score) gets no label. */
+export const NOT_CHECKED_REASON: Partial<Record<DoctorStatus, string>> = {
+  failed: 'the Run Doctor failed',
+  skipped: 'the Run Doctor is switched off',
+  not_checked: 'no Run Doctor report',
+}
+
 function ScoreBox({ report }: { report: RunQualityReport }) {
   const style = report.band ? BAND_STYLE[report.band] : null
   const border = report.cap != null ? 'border-red-700 bg-error-50' : (style?.box ?? '')
+  const notChecked = report.doctor_status ? NOT_CHECKED_REASON[report.doctor_status] : undefined
   return (
     <div className={`flex items-center gap-3 rounded-[10px] border-[1.5px] px-4 py-2.5 ${border}`}>
       <span className={`text-[32px] font-bold leading-none tabular-nums ${style?.text ?? ''}`}>{report.score}</span>
@@ -106,6 +115,12 @@ function ScoreBox({ report }: { report: RunQualityReport }) {
         <span className="text-xs text-gray-500">
           {report.band_meaning}{report.provisional ? ' · Provisional' : ''}
         </span>
+        {notChecked && (
+          <span className="flex items-center gap-1 text-xs font-semibold text-amber-700">
+            <EyeOff className="h-3 w-3 flex-none" aria-hidden="true" />
+            Not checked: {notChecked}
+          </span>
+        )}
       </span>
     </div>
   )
