@@ -402,7 +402,7 @@ def _unmask_parentheticals(text: str, originals: list[str]) -> str:
     return _PAREN_MASK_RE.sub(lambda m: originals[int(m.group(1))], text)
 
 
-def _is_verbatim_author(author: str) -> bool:
+def is_verbatim_author(author: str) -> bool:
     """A collective author, or any token carrying a parenthesis, is passed through as written (#1705)."""
     return bool(
         _COLLECTIVE_AUTHOR_RE.search(author)
@@ -463,7 +463,7 @@ def normalize_authors_vancouver(authors_string: str) -> str:
         if not author:
             continue
 
-        if _is_verbatim_author(author):
+        if is_verbatim_author(author):
             normalized_authors.append(
                 re.sub(r'\s+', ' ', _unmask_parentheticals(author, parentheticals))
             )

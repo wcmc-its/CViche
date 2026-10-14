@@ -39,6 +39,7 @@ from typing import Any, NamedTuple, TypeVar
 import requests
 
 from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
+from unified_pipeline.stage4.coercion import is_verbatim_author
 
 logger = logging.getLogger(__name__)
 
@@ -313,11 +314,6 @@ def pubmed_list_drops_the_owner(cv_authors: str | list[str] | None, target_name:
                 and not any(owner & s for s in surnames))
 
 
-# MEDLINE indexed at most the first 10 authors of a paper published through
-# 1995 (NLM policy). A 1996-1999 record holds the first 24 and the LAST author,
-# and CompleteYN="N" says only that some author is missing, so neither shows
-# where the cut fell: only the pre-1996 cap is extended.
-_MEDLINE_CAP, _MEDLINE_CAP_LAST_YEAR = 10, 1995
 _AUTHOR_SEPARATOR = re.compile(r'\s*(?:[,;&]|\band\b)\s*')
 _ET_AL = re.compile(r'^et\.?\s+al\.?$', re.IGNORECASE)
 # A CV author written "Surname J.A." or "J. A. Surname", for PubMed's "Surname JA",
@@ -326,6 +322,7 @@ _SURNAME_FIRST = re.compile(r"^(\S*[a-z]\S*(?: \S*[a-z]\S*)*)((?: [A-Z]{1,3})+)$
 _INITIALS_FIRST = re.compile(r"^((?:[A-Z]{1,3} )+)(\S*[a-z]\S*(?: \S*[a-z]\S*)*)$")
 _NAME_FIRST = re.compile(r"^([A-Z])[a-z]+((?: [A-Z])*) (\S*[a-z]\S*)$")
 _GENERATION = re.compile(r"\b(?:II|III|IV)\b")  # "Doe JA III": not initials
+_SUFFIX = re.compile(r"(?:Jr|Sr|II|III|IV)\.?")
 
 
 def _cv_author_names(cv_authors: str | list[str] | None) -> list[str]:
@@ -371,9 +368,10 @@ def _same_author(pubmed_name: str, cv_name: str, given_first: tuple[bool, ...] =
 def _pubmed_style(cv_name: str, given_first: bool) -> str:
     """`cv_name` as PubMed writes an author, "Surname JA", when it reads
     cleanly as a surname and initials, or as given names then a surname in
-    a CV that writes them first; otherwise as the CV writes it."""
+    a CV that writes them first; otherwise as the CV writes it, as is a
+    group stage 4 keeps as written ("HIV Neuroimaging Consortium", AOJEQD e1050)."""
     name = ' '.join(cv_name.replace('.', ' ').split())
-    if _GENERATION.search(name):
+    if _GENERATION.search(name) or is_verbatim_author(name):
         return cv_name.strip()
     if match := _SURNAME_FIRST.match(name):
         return f"{match[1]} {match[2].replace(' ', '')}"
@@ -384,27 +382,53 @@ def _pubmed_style(cv_name: str, given_first: bool) -> str:
     return cv_name.strip()
 
 
-def capped_list_with_cv_tail(cv_authors: str | list[str] | None, pubmed_authors: list[str] | None,
-                             pubmed_year: int | None) -> str | None:
-    """PubMed's author list followed by the CV's authors MEDLINE cut (#1661),
-    or None. The record must be pre-1996 and hold exactly MEDLINE's ten, the
-    CV's first ten must be PubMed's, one for one in PubMed's order, and none
-    after them may be one of PubMed's. KRSFSI e468: a pre-1996 paper whose CV
-    byline names the owner after PubMed's ten. A "Last, F." string, whose
-    pieces are not one author each, is None."""
-    if (pubmed_year is None or pubmed_year > _MEDLINE_CAP_LAST_YEAR
-            or len(pubmed_authors or []) != _MEDLINE_CAP):
-        return None
-    cv_names = _cv_author_names(cv_authors)
+def _pubmed_positions(pubmed_authors: list[str], cv_names: list[str]) -> list[int] | None:
+    """Each PubMed author's place in the CV's list, in PubMed's order, or None
+    when one of them is not there."""
+    positions: list[int] = []
+    for pubmed_name in pubmed_authors:
+        start = positions[-1] + 1 if positions else 0
+        place = next((k for k in range(start, len(cv_names)) if _same_author(pubmed_name, cv_names[k])), None)
+        if place is None:
+            return None
+        positions.append(place)
+    return positions
+
+
+def _restorable(cv_name: str, cv_text: str | None) -> bool:
+    """Whether a CV name PubMed lacks can render: it is no parenthesised note
+    (GCFEBE e717's "(Equal 1st author contributorship)"), is not a suffix cut
+    from its name (RXYBVF e561's "Jr"), and the CV's line writes it, words in
+    order (not "Team H5P", stage 4's reading of "HVTN 505 Protocol Team")."""
+    words = ' '.join(_folded_tokens(cv_name)).lower()
+    return (not cv_name.startswith('(') and not _SUFFIX.fullmatch(cv_name)
+            and f' {words} ' in f" {' '.join(_folded_tokens(cv_text)).lower()} ")
+
+
+def cv_byline_over_shorter_pubmed_list(cv_authors: str | list[str] | None,
+                                       pubmed_authors: list[str] | None, cv_text: str | None) -> str | None:
+    """The CV's byline, with each of PubMed's authors in PubMed's form and
+    the CV's other names after `_pubmed_style`, when PubMed's list is the
+    CV's with names cut (#1661), else None. Every PubMed author must be one
+    of the CV's, in PubMed's order, the CV must name someone more, and each
+    of those more must be `_restorable` and none of PubMed's. The cut names
+    are MEDLINE's cap (KRSFSI e468: pre-1996, ten authors, the owner twelfth), a group credit
+    PubMed keeps as no author (AOJEQD: "...; <name> Study Team"), and
+    co-authors PubMed's record lacks (UAURFU e790: 34 CV names, 21 PubMed).
+    A "Last, F." string, whose pieces are not one author each, is None."""
+    cv_names, pubmed_authors = _cv_author_names(cv_authors), pubmed_authors or []
     if isinstance(cv_authors, str) and len(_AUTHOR_SEPARATOR.split(cv_authors)) != len(cv_names):
         return None
-    pairs = list(zip(pubmed_authors, cv_names, strict=False))
-    tail = cv_names[len(pubmed_authors):]
-    if (not tail or not all(_same_author(p, c) for p, c in pairs)
-            or any(_same_author(p, t) for p in pubmed_authors for t in tail)):
+    positions = _pubmed_positions(pubmed_authors, cv_names)
+    if not positions:
         return None
-    given_first = all(_same_author(p, c, (True,)) for p, c in pairs)
-    return ', '.join(pubmed_authors + [_pubmed_style(t, given_first) for t in tail])
+    pubmed_at = dict(zip(positions, pubmed_authors, strict=True))
+    more = [name for k, name in enumerate(cv_names) if k not in pubmed_at]
+    if (not more or not all(_restorable(name, cv_text) for name in more)
+            or any(_same_author(p, name) for p in pubmed_at.values() for name in more)):
+        return None
+    given_first = all(_same_author(p, cv_names[k], (True,)) for k, p in pubmed_at.items())
+    return ', '.join(pubmed_at.get(k) or _pubmed_style(name, given_first) for k, name in enumerate(cv_names))
 
 
 def cites_a_reply(text: str, title: str = '') -> bool:
@@ -1742,14 +1766,13 @@ class PubMedEnricher:
             enrichment = entry['enrichment_data']
             enrichment['pubmed_authors_without_owner'] = enrichment['pubmed_authors']
             enrichment['pubmed_authors'] = None
-        # A list MEDLINE cut at its cap renders with the CV's names after it
-        # when the CV's byline starts with PubMed's list (#1661).
-        elif extended := capped_list_with_cv_tail(
-                fields.get('authors'), pubmed_record.get('authors'),
-                pubmed_record.get('year')):
+        # A PubMed list that is the CV's byline with names cut renders as the
+        # CV's byline, in PubMed's form (#1661).
+        elif cv_byline := cv_byline_over_shorter_pubmed_list(
+                fields.get('authors'), pubmed_record.get('authors'), entry.get('text')):
             enrichment = entry['enrichment_data']
-            enrichment['pubmed_authors_capped'] = enrichment['pubmed_authors']
-            enrichment['pubmed_authors'] = extended
+            enrichment['pubmed_authors_shorter'] = enrichment['pubmed_authors']
+            enrichment['pubmed_authors'] = cv_byline
 
         # Fill in missing identifier fields
         if not fields.get('pmid') and pubmed_record.get('pmid'):
