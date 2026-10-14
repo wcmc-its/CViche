@@ -120,6 +120,7 @@ from .records import (  # noqa: F401
     grant_heading_is_past,
     grant_heading_rebucket_target,
     grant_status_is_empty_section_label,
+    grant_says_not_funded,
     grant_status_rebucket_target,
     split_fused_citation_entries,
 )

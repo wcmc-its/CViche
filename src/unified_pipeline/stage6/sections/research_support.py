@@ -65,6 +65,7 @@ from ..normalization import (
     _deduplicate_repeated_content,
     grant_heading_is_past,
     grant_heading_rebucket_target,
+    grant_says_not_funded,
     grant_status_is_empty_section_label,
     grant_status_rebucket_target,
 )
@@ -1408,6 +1409,132 @@ def protocol_number_rows(grant_number: str, title: str) -> list[tuple[str, str]]
     return [(PROTOCOL_NUMBER_LABEL, grant_number)]
 
 
+
+# #1701 (EYTHNB 249): stage 3b coded a dated study line under a committee and
+# service heading M2B, stage 4 moved the study's own label into `agency`, and a
+# Past (Completed) Funding table showed it as the Award Source. Stage 3b had
+# flagged the heading as expecting other codes, none of them research, and the
+# record names nothing only a funding record names. Such a record is listed in
+# the Appendix instead. A pending (M2C) record is an application, which names no
+# award by nature, so it is not guarded here.
+NO_FUNDING_SIGNAL_CODES = frozenset({'M2A', 'M2B'})
+# The research family: a heading stage 3b expects any M code under may well
+# hold funding, so a mismatch flag there says nothing about this record.
+RESEARCH_FAMILY_PREFIX = 'M'
+# The stage-4 fields that only a funding record fills: an identifier, an
+# amount, the owner's role on the award, or effort on it. `agency` is not one:
+# stage 4 fills it with whatever label the line has when the schema asks for a
+# funder, which is how the study's label got there.
+FUNDING_SIGNAL_FIELDS = (
+    'grant_number', 'nct_number', 'total_funding', 'annual_direct_costs',
+    'annual_funding', 'pi_role', 'role', 'percent_effort',
+)
+# A word naming funding, in the heading or the record's own text. A career
+# development award or a foundation grant filed under an awards heading is
+# funding, with a flag on it and no number or amount (EBYSBC, YUYVIG and
+# NECRGC farms: 18 such records on 12 CVs), so either one keeps the table.
+FUNDING_WORD_RE = re.compile(
+    r'\b(?:grants?|fund(?:s|ed|ing)?|support(?:ed)?|research|awards?|awarded'
+    r'|contracts?|fellowships?|sponsor(?:s|ed)?|foundation|scholars?)\b',
+    re.IGNORECASE)
+NO_FUNDING_SIGNAL_CHECK = 'grant_no_funding_signal'
+NO_FUNDING_SIGNAL_MESSAGE = (
+    'names no funding word, grant number, amount, role or effort under a heading flagged '
+    'as not research')
+# #1439: an application the source says was not funded is not pending. The
+# vocabulary is `grant_says_not_funded`'s, shared with the status rebucket.
+NOT_FUNDED_CODES = frozenset({PENDING_GRANT_CODE})
+NOT_FUNDED_CHECK = 'grant_not_funded_application'
+NOT_FUNDED_MESSAGE = 'is an application the source marks not funded'
+UNFUNDED_GRANT_MESSAGES = {
+    NO_FUNDING_SIGNAL_CHECK: NO_FUNDING_SIGNAL_MESSAGE,
+    NOT_FUNDED_CHECK: NOT_FUNDED_MESSAGE,
+}
+
+
+class DivertedGrant(NamedTuple):
+    """A grant record kept out of the funding tables, and why."""
+    code: str
+    check: str
+    entry: dict
+
+
+def _has_value(value: object) -> bool:
+    return value is not None and bool(str(value).strip())
+
+
+def lacks_funding_signal(entry: dict) -> bool:
+    """True for a record under a heading stage 3b flagged as expecting only
+    non-research codes, whose heading and text name no funding word
+    (`FUNDING_WORD_RE`) and which fills none of `FUNDING_SIGNAL_FIELDS` (#1701)."""
+    if not entry.get('hierarchy_mismatch_flag'):
+        return False
+    detail = entry.get('hierarchy_mismatch_detail') or {}
+    expected = [str(code) for code in detail.get('expected_codes') or []]
+    if not expected or any(code.startswith(RESEARCH_FAMILY_PREFIX) for code in expected):
+        return False
+    words = ' '.join([*(str(level) for level in entry.get('hierarchy') or []),
+                      str(entry.get('text') or '')])
+    if FUNDING_WORD_RE.search(words):
+        return False
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    return not any(_has_value(fields.get(key)) for key in FUNDING_SIGNAL_FIELDS)
+
+
+def says_not_funded(entry: dict) -> bool:
+    """True when the record's status or notes, its heading, or its own text
+    outside the title says the application was not funded (#1439). The title
+    is left out: a project can be about a declined or rejected thing."""
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    text = str(entry.get('text') or '')
+    title = _grant_title(fields)
+    if title:
+        text = re.sub(re.escape(title), ' ', text, flags=re.IGNORECASE)
+    return any(grant_says_not_funded(value) for value in (
+        str(fields.get('status') or ''), str(fields.get('notes') or ''),
+        ' > '.join(str(level) for level in entry.get('hierarchy') or []), text,
+    ))
+
+
+def divert_unfunded_grants(
+    m2a_entries: list[dict], m2b_entries: list[dict], m2c_entries: list[dict]
+) -> tuple[list[dict], list[dict], list[dict], list[DivertedGrant]]:
+    """Take out of the three buckets the records that are not funding to show:
+    a current or completed one with no funding signal (`lacks_funding_signal`,
+    #1701) and a pending one the source says was not funded
+    (`says_not_funded`, #1439). Returns the buckets in M2A/M2B/M2C order and
+    the records taken out, for the Appendix; the inputs are left as they were."""
+    diverted: list[DivertedGrant] = []
+    buckets: list[list[dict]] = []
+    for code, entries in (('M2A', m2a_entries), ('M2B', m2b_entries), ('M2C', m2c_entries)):
+        kept = []
+        for entry in entries:
+            if code in NO_FUNDING_SIGNAL_CODES and lacks_funding_signal(entry):
+                diverted.append(DivertedGrant(code, NO_FUNDING_SIGNAL_CHECK, entry))
+            elif code in NOT_FUNDED_CODES and says_not_funded(entry):
+                diverted.append(DivertedGrant(code, NOT_FUNDED_CHECK, entry))
+            else:
+                kept.append(entry)
+        buckets.append(kept)
+    return buckets[0], buckets[1], buckets[2], diverted
+
+
+def unfunded_grant_warning(diverted: DivertedGrant) -> dict[str, Any]:
+    """The WARN sidecar record for a grant record listed in the Appendix
+    rather than a funding table. The element index only, never entry text."""
+    element_idx = diverted.entry.get('element_idx_start', '?')
+    return {
+        'check': diverted.check,
+        'code': diverted.code,
+        'section': 'research_support',
+        'message': (f"{diverted.code}: entry at element {element_idx} "
+                    f"{UNFUNDED_GRANT_MESSAGES[diverted.check]}; listed in the Appendix, "
+                    "not as a funding table"),
+        'evidence': [f"element_idx_start={element_idx}"],
+        'severity': 'WARN',
+    }
+
+
 def _optional_grant_rows(
     fields: GrantFields, title: str, pi_name: str | None,
     cost_rows: list[tuple[str, str]],
@@ -1591,6 +1718,14 @@ class ResearchSupportSection:
         m2a_entries, m2b_entries, messages = promote_open_ended_m2b_grants(
             m2a_entries, m2b_entries, as_of)
         _print_verbose(messages, self.verbose)
+
+        # Not funding, by the record's own words or its lack of any: listed in
+        # the Appendix with a WARN, the same way a declined sparse grant is.
+        m2a_entries, m2b_entries, m2c_entries, diverted = divert_unfunded_grants(
+            m2a_entries, m2b_entries, m2c_entries)
+        for grant in diverted:
+            self._declined_grant_entries.append(grant.entry)
+            self._section_failures.append(unfunded_grant_warning(grant))
 
         grants = m2a_entries + m2b_entries + m2c_entries
         fill_major_goals_from_text(grants)
