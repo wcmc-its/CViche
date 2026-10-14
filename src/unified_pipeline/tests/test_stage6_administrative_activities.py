@@ -36,7 +36,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY  # noqa: E402
-from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
+from unified_pipeline.stage6.fan_out import (  # noqa: E402
+    LAST_STAGE4_RECORD,
+    OWN_TEXT_KEY,
+    fan_out_multi_record_entries,
+)
 from unified_pipeline.stage6.formatting import format_date_range  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -723,3 +727,49 @@ class TestFurtherSpanReachesTheDateCell:
                                       "additional_period_end": "present"}}
         assert _rows(entry) == [("Fictional Review Committee", "Member",
                                  "1990-1993, 2001-Present")]
+
+
+class TestRawFallbackLeavesOutTheRoleAndDatesItsRowShows:
+    """#1346: an entry with no extracted committee rendered its whole line as
+    the Activity cell, repeating the role and dates beside it (KJJVVO 240)."""
+
+    def test_role_and_dates_at_the_ends_are_taken_out(self):
+        entry = {"text": "Zqsociety Advisor — 2018–Present", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": None, "role": "Advisor",
+                                      "start_date": "2018", "end_date": "present"}}
+        assert _rows(entry) == [("Zqsociety", "Advisor", "2018-Present")]
+
+    def test_a_line_of_only_role_and_dates_leaves_the_activity_blank(self):
+        entry = {"text": "Zqwebmaster July 2015 - October 2017", "taxonomy_code": "P",
+                 "extracted_fields": {"role": "Zqwebmaster", "start_date": "2015-07",
+                                      "end_date": "2017-10"}}
+        assert _rows(entry) == [("", "Zqwebmaster", "2015-2017")]
+
+    def test_a_date_the_dates_cell_does_not_show_stays(self):
+        entry = {"text": "Zqsociety Advisor 2018", "taxonomy_code": "P",
+                 "extracted_fields": {"role": "Advisor", "start_date": "2019"}}
+        assert _rows(entry) == [("Zqsociety Advisor 2018", "Advisor", "2019")]
+
+    def test_a_date_inside_a_parenthesis_keeps_the_parenthesis_whole(self):
+        text = "Zqstudent (Biology, Advisor: Zqmentor, 2013 – 2015)"
+        entry = {"text": text, "taxonomy_code": "P",
+                 "extracted_fields": {"start_date": "2013", "end_date": "2015"}}
+        assert _rows(entry) == [(text, "", "2013-2015")]
+
+    def test_the_last_split_record_falls_back_to_its_own_line(self):
+        """A split entry's last record carries the parent's whole line as
+        `text`; it falls back to its own line (`fallback_text`), so the cell
+        does not print the other record's words (#1346)."""
+        entry = {"text": "Zqalpha Advisor 2018; Zqsociety Treasurer \u2014 2019",
+                 "taxonomy_code": "P",
+                 LAST_STAGE4_RECORD: {OWN_TEXT_KEY: "Zqsociety Treasurer \u2014 2019"},
+                 "extracted_fields": {"role": "Treasurer", "start_date": "2019"}}
+        assert _rows(entry) == [("Zqsociety", "Treasurer", "2019")]
+
+    def test_an_extracted_committee_is_untouched(self):
+        """Blast radius: a row with a committee renders exactly as before."""
+        entry = {"text": "Zqsociety Advisor — 2018–Present", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": "Zqsociety Advisor — 2018",
+                                      "role": "Advisor", "start_date": "2018",
+                                      "end_date": "present"}}
+        assert _rows(entry) == [("Zqsociety Advisor — 2018", "Advisor", "2018-Present")]

@@ -58,7 +58,26 @@ _DATE_WORD_RE = re.compile(rf'\b{_MONTH}(?!\w)|\d+(?:st|nd|rd|th)?\b', re.IGNORE
 # Joining words left over once role, event and venue are taken out of a source
 # line: "Invited Speaker at the <event>" says nothing more than its parts.
 _CONNECTIVES = frozenset({'at', 'the', 'of', 'and', 'in', 'on', 'for', 'to', 'an', 'by', 'with'})
+# A numeric date opening the line ("12/15/2025", "10/27/04", "03/2019"); group 1
+# is its year, two digits when the source wrote it short (PZTNWT 118-164,
+# VPMMFM 524, #1346).
+_LEADING_NUMERIC_DATE_RE = re.compile(
+    r'^\s*\d{1,2}/(?:\d{1,2}/)?(\d{4}|\d{2})[\s.,:;\-–—]*')
+_SHORT_YEAR_DIGITS = 2
+# The pieces of a role, event or venue value, each of which the row already
+# shows: a source line gives "<institution><TAB><city>" for the venue stage 4
+# wrote as "<institution>, <city>", and "Roundtable, panelist, <chapter>" for
+# the event "Roundtable, <chapter>" (#1346).
+_VALUE_PIECE_SPLIT_RE = re.compile(r'\s*[,;()]\s*')
+# Words naming the kind of appearance, not its subject. A line left with only
+# these beyond role, event and venue ("<date> <event><TAB><venue>. Invited
+# talk.", 17 rows of PZTNWT) is titled by role and event, with the words kept
+# after them, instead of by the whole source line.
+_TALK_LABEL_WORDS = frozenset({'invited', 'talk', 'lecture', 'presentation'})
 _TITLE_EDGES = ' \t,;:|-–—'
+# A stop can only open a title once a venue that led the line is gone
+# ("<venue>. <series>. Invited talk."); at the end it may close one.
+_TITLE_START_EDGES = _TITLE_EDGES + '.'
 _SEPARATOR_RUN_RE = re.compile(r'\s*([,;:|\-–—])(?:\s*[,;:|.\-–—])+\s*')
 
 
@@ -86,37 +105,69 @@ def _remove_venue(text: str, venue: str) -> str:
         ' ', text, flags=re.IGNORECASE)
 
 
+def _year_is_shown(year: str, shown_years: set[str]) -> bool:
+    """Whether the Dates cell shows `year`; a two-digit year ("04") matches the
+    shown year it ends ("2004")."""
+    if len(year) == _SHORT_YEAR_DIGITS:
+        return any(shown.endswith(year) for shown in shown_years)
+    return year in shown_years
+
+
+def _strip_leading_date(line: str, shown_years: set[str]) -> str:
+    """`line` without the year or numeric date that opens it, when the Dates
+    cell shows its year."""
+    for pattern in (_LEADING_YEAR_RE, _LEADING_NUMERIC_DATE_RE):
+        match = pattern.match(line)
+        if match and _year_is_shown(match.group(1), shown_years):
+            return line[match.end():]
+    return line
+
+
+def _shown_phrases(venue: str, role: str, event_name: str) -> list[str]:
+    """The phrases of the source line the row already shows, in the order
+    they are taken out: the whole venue, the whole role and event name
+    (longest first), then each comma, semicolon or bracket piece of the
+    three (longest first), so a whole value goes before its parts."""
+    wholes = [_normalize_space(v or '') for v in (venue, role, event_name)]
+    pieces = {piece for whole in wholes for piece in _VALUE_PIECE_SPLIT_RE.split(whole)}
+    ordered = [wholes[0], *sorted(wholes[1:], key=len, reverse=True),
+               *sorted(pieces, key=len, reverse=True)]
+    return [phrase for phrase in ordered if phrase]
+
+
 def _untitled_talk_title(text: str, role: str, event_name: str, venue: str,
                          date_cell: str) -> str:
     """The Title cell of an R entry stage 4 found no title for.
 
     The source line restates what the Institution and Dates cells already
-    show. Strip its list number, the year the Dates cell shows when it opens
-    or closes the line, and the venue. When nothing is left beyond role,
-    event name and date words, the title is role + event name ("Visiting
-    Professor, <event>"); anything more may be the talk title stage 4 missed
-    (#475), so the stripped line renders instead.
+    show. Strip its list number, the year or numeric date the Dates cell
+    shows when it opens or closes the line, and the venue. When nothing is
+    left beyond role, event name, venue (or a piece of any of them), date
+    words and words naming the kind of appearance, the title is role + event
+    name ("Visiting Professor, <event>"), then those words ("Invited talk");
+    anything more may be the talk title stage 4 missed (#475), so the
+    stripped line renders instead.
     """
     shown_years = set(_YEAR_RE.findall(date_cell or ''))
     line = _LIST_NUMBER_RE.sub('', _normalize_space(text or ''), count=1)
-    leading_year = _LEADING_YEAR_RE.match(line)
-    if leading_year and leading_year.group(1) in shown_years:
-        line = line[leading_year.end():]
+    line = _strip_leading_date(line, shown_years)
     line = _remove_venue(line, _normalize_space(venue or ''))
     trailing_date = _TRAILING_DATE_RE.search(line)
     if trailing_date and trailing_date.group(1) in shown_years:
         line = line[:trailing_date.start()]
 
-    residue = _remove_phrase(line, _normalize_space(venue or ''))
-    for phrase in sorted((_normalize_space(role or ''), _normalize_space(event_name or '')),
-                         key=len, reverse=True):
+    residue = line
+    for phrase in _shown_phrases(venue, role, event_name):
         residue = _remove_phrase(residue, phrase)
-    residue = _DATE_WORD_RE.sub(' ', residue)
-    if not any(w.casefold() not in _CONNECTIVES for w in _WORD_RE.findall(residue)):
+    words = _WORD_RE.findall(_DATE_WORD_RE.sub(' ', residue))
+    if not any(w.casefold() not in _CONNECTIVES | _TALK_LABEL_WORDS for w in words):
+        label = ' '.join(w for w in words if w.casefold() in _TALK_LABEL_WORDS)
         # The stage-4 values as given, so the venue's own duplicate check
         # in `_fill_presentations` recognises them in the title.
-        return ', '.join(part.strip() for part in (role or '', event_name or '') if part.strip())
-    return _SEPARATOR_RUN_RE.sub(r'\1 ', _normalize_space(line)).strip(_TITLE_EDGES)
+        return ', '.join(part.strip() for part in (role or '', event_name or '', label)
+                         if part.strip())
+    title = _SEPARATOR_RUN_RE.sub(r'\1 ', _normalize_space(line)).strip(_TITLE_EDGES)
+    return title.lstrip(_TITLE_START_EDGES)
 
 
 # The field names a talk's date arrives under, most specific first.

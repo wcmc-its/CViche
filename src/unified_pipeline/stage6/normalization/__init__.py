@@ -28,6 +28,8 @@ a change to the other.
     publication.py   a raw publication entry in, one resolved record out
     owner_alias.py   a bibliography's citations in, the owner's surname as they
                      spell it out (#1393)
+    residue.py       a source line and the role and dates its row already
+                     shows in, what is left of the line out (#1437, #1346)
 
 The first six were one module, `text.py`, until they were split apart. "Value
 in, cleaner value out" is a shared signature, not a shared reason to change: an
@@ -55,7 +57,8 @@ whose every field is already the text it will print.
 Dependencies run one way, inside this package and out of it. `publication`
 imports `citation_matching` and `authors`; `citation_matching` imports
 `authors` (the stage-5d owner restore reads a CV's own author run, #1259);
-nothing imports `publication`. Nothing
+nothing imports `publication`. `residue` imports `fields` and the date
+grammar in `parsing/dates.py`. Nothing
 here imports `formatting/`, `sections/`, or `stage_6_word_template` -- those
 import this, so a back-edge would be an import cycle that fails at load rather
 than at render.
@@ -123,6 +126,10 @@ from .records import (  # noqa: F401
 from .rendering import (  # noqa: F401
     _clean_inline_tabs,
     _strip_markdown_for_word,
+)
+from .residue import (  # noqa: F401
+    _line_without_shown_role_and_dates,
+    _organization_left_in_text,
 )
 from .taxonomy import (  # noqa: F401
     _TAXONOMY_CODE_PREFIX,

@@ -85,12 +85,15 @@ from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
     _cell_text,
     _committee_cell_text,
 )
-from unified_pipeline.stage6.sections.service import (  # noqa: E402
+from unified_pipeline.stage6.normalization.residue import (  # noqa: E402
     _DATE_SPAN,
+    _line_without_shown_role_and_dates,
+    _organization_left_in_text,
+)
+from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _join_names,
     _journal_name_cell_text,
     _journal_names_contain,
-    _organization_left_in_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
 )
@@ -1191,9 +1194,109 @@ def test_q2_split_record_committee_is_what_its_line_holds_beyond_role_and_dates(
         ["", "Zqcouncil Member", "", "1981"], ["", "Zqcouncil Member", "", "1990-1994"]]
 
 
-def test_q2_unsplit_entry_still_falls_back_to_its_whole_text(tmp_path):
+def test_q2_unsplit_entry_falls_back_to_its_text_less_the_role_and_dates_at_its_ends(tmp_path):
+    """#1346: the Committee cell printed the whole line beside the Role and
+    Dates cells that already showed its role and years."""
     entry = _entry("Q2", role="Zqcouncil Member", start_date="1990", end_date="1994")
     entry["text"] = "Zqcouncil Member, Ashby Society 1990-1994"
     doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"), entry])
     assert list(_rows_containing(doc, "Zqcouncil")) == [
-        ["Zqcouncil Member, Ashby Society 1990-1994", "Zqcouncil Member", "", "1990-1994"]]
+        ["Ashby Society", "Zqcouncil Member", "", "1990-1994"]]
+
+
+def _q2_row(text, **fields):
+    """Render one Q2 entry with `text` through `_fill_service_boards` and
+    return the row holding its Role cell."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    entry = _entry("Q2", **fields)
+    entry["text"] = text
+    gen._fill_service_boards([entry])
+    rows = list(_rows_containing(gen.doc, fields["role"]))
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_q2_line_of_only_role_and_dates_leaves_the_committee_cell_blank():
+    """YYVITM 353 (#1346): 'Elected Board Member December 2019 - April 2021'
+    printed whole in Name of Committee beside the role and 2019-2021."""
+    row = _q2_row("Zqboard Member December 2019 - April 2021", committee_name=None,
+                  role="Zqboard Member", organization=None,
+                  start_date="2019-12", end_date="2021-04")
+    assert row == ["", "Zqboard Member", "", "2019-2021"]
+
+
+def test_q2_line_holding_more_than_one_records_dates_still_renders_whole():
+    """A year left once the edges are gone means the line carries another
+    record's dates; taking only the shown one would leave that one undated."""
+    text = "Zqcouncil Member, 1981, 1990-1994"
+    row = _q2_row(text, committee_name=None, role="Zqcouncil Member",
+                  organization=None, start_date="1990", end_date="1994")
+    assert row[0] == text
+
+
+def test_q2_role_inside_a_phrase_is_not_taken_out():
+    """Only a role standing as its own segment at the start goes: in
+    'Member of the ...' the role word is part of the name."""
+    row = _q2_row("Zqmember of the Ashby Steering Group", committee_name=None,
+                  role="Zqmember", organization=None)
+    assert row[0] == "Zqmember of the Ashby Steering Group"
+
+
+def test_q2_topic_renders_as_the_committee_when_committee_name_is_null():
+    """VYICGW 131 (#1346): stage 4 filed the quoted session title under an
+    off-schema `topic`; the row showed the organization as its Committee and
+    the title nowhere."""
+    row = _q2_row("2015: Ashby Legislature: 'Advancing Zqwidget Care'.",
+                  committee_name=None, role="Zqspeaker", organization="Ashby Legislature",
+                  topic="Advancing Zqwidget Care", start_date="2015", end_date="2015")
+    assert row == ["Advancing Zqwidget Care", "Zqspeaker", "Ashby Legislature", "2015"]
+
+
+def test_q2_committee_name_wins_over_topic():
+    """Blast radius (#1346): a row with a `committee_name` renders exactly as
+    before, whatever else stage 4 filed."""
+    row = _q2_row("Zqchair, Ashby Panel 2015", committee_name="Ashby Panel",
+                  role="Zqchair", organization=None, topic="Zqwidget repair",
+                  start_date="2015")
+    assert row == ["Ashby Panel", "Zqchair", "", "2015"]
+
+
+@pytest.mark.parametrize("text, role, start, end, expected", [
+    # Nothing at the edges to take: the line is returned exactly as given,
+    # its closing stop included.
+    ("Zqsociety Steering Group.", "Advisor", "2018", None, "Zqsociety Steering Group."),
+    # A parenthesis holding only the shown dates goes with them.
+    ("Zqsociety Advisor (2018-2020)", "Advisor", "2018", "2020", "Zqsociety"),
+    # "2/09-2012" is a range the grammar cannot read; its "2012" is not a date
+    # standing apart, so the line keeps its year and stays whole.
+    ("Zqsociety, IL 2/09-2012", None, "2012", None, "Zqsociety, IL 2/09-2012"),
+    # Each of a ';'-joined role's parts is a role the Role cell shows.
+    ("Zqsociety Treasurer \u2014 2019", "Advisor; Treasurer", "2019", None, "Zqsociety"),
+    # Taking the role exposes a date at the new edge, which goes too.
+    ("Zqsociety, 2018, Advisor", "Advisor", "2018", None, "Zqsociety"),
+    # Numeric months, an open "now" end and "to" between two years.
+    ("Zqsociety Advisor 09/2009 - 06/2012", "Advisor", "2009-09", "2012-06", "Zqsociety"),
+    ("Zqsociety Advisor 2019- now", "Advisor", "2019", "present", "Zqsociety"),
+    ("Zqsociety Advisor 2001 to 2014", "Advisor", "2001", "2014", "Zqsociety"),
+    # The role's words, whatever punctuation the line puts between them.
+    ("Zqsociety Co-Chair 2015", "Co Chair", "2015", None, "Zqsociety"),
+    # A date a word leads into ends a sentence: the sentence stays whole
+    # (AQCLHS 88 shape), as does a "since" line.
+    ("Zqdirector, I helped Zqcollege earn reaccreditation by the Zqcouncil (ZQEP) in 2021.",
+     "Zqdirector", "2021", None,
+     "Zqdirector, I helped Zqcollege earn reaccreditation by the Zqcouncil (ZQEP) in 2021."),
+    ("Zqsociety Member since 2015", "Member", "2015", None, "Zqsociety Member since 2015"),
+    # Only a whole word leads in: "Toronto" ends in "to" but is a place.
+    ("Zqsociety, Toronto 2015", None, "2015", None, "Zqsociety, Toronto"),
+    # A leading role before a parenthesis stays: taking it left the
+    # parenthesis alone as the cell (REOYVH 218 shape).
+    ("1997-2000 Zqtutor (Organic Zqchem, Physical Zqchem)", "Zqtutor", "1997", "2000",
+     "Zqtutor (Organic Zqchem, Physical Zqchem)"),
+    # A role is cut only as a whole word: "Chair" ends "Wheelchair".
+    ("Fictional Wheelchair", "Chair", "2019", "2020", "Fictional Wheelchair"),
+])
+def test_line_without_shown_role_and_dates(text, role, start, end, expected):
+    """#1346: what a P or Q2 row's fallback line holds beyond the role and
+    dates at its ends."""
+    assert _line_without_shown_role_and_dates(text, role, start, end) == expected
