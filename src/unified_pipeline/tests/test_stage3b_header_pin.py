@@ -592,6 +592,7 @@ def test_content_pins_leave_other_rows(code, text, hierarchy):
     ("D3", "2031-2032 Intern, Example Medicine, Example Hospital", NO_PIN_CTX),
     ("F1", "Basic Life Support provider card, 2031-2033", NO_PIN_CTX),
     ("S2", "Wrote an invited example article (see publication #12).", NO_PIN_CTX),
+    ("S1", "2. Quorlenby et al. (2031) Example Membrane Letters JIF: 9.9 cited 3 times", NO_PIN_CTX),
 ])
 def test_no_new_pin_is_flipped_back_by_the_reasoning_check(code, text, ctx):
     from unified_pipeline.core.validators.reasoning_consistency_checker import (
@@ -613,6 +614,66 @@ def test_fallback_entries_get_no_content_pin():
     entry = {**_row("F1", "Basic Life Support, 2031"), "classification_source": "fallback"}
     (out,), n = apply_header_pin([entry], NO_PIN_CTX)
     assert n == 0 and out == entry
+
+
+# --- #1695: a per-article citation-metrics line is S0 -----------------------------
+
+_VENUE = "Example Membrane Letters"
+
+
+@pytest.mark.parametrize("code,text", [
+    ("S1", f"1. Quorlenby et al. (2031) {_VENUE} JIF: 7.071 cited 12 times"),
+    ("S2", f"12) Vashtrel et al., 2031b, {_VENUE}, JIF 4.1"),
+    ("S1", f"\u2022 Pemberwick and Zandquist (2031) {_VENUE} impact factor 3.2"),
+    ("Q4C", f"Pemberwick & Zandquist (2031): {_VENUE} IF: 3.2"),
+    ("S1", f"- Quorlenby et al. (2031) {_VENUE} IF=3.2"),
+    ("S1", f"* Quorlenby et al. (2031) {_VENUE} Impact Factor 3.2"),
+    ("S7", f"Thornvalle-Quorlenby et al. 2031. {_VENUE} cited 1,204 times"),
+    ("S1", f"Van Quorlenby et al. (2031) {_VENUE} times cited 9"),
+    ("S1", f"De La Quorlenby et al. (2031) {_VENUE} JIF: 2.0"),
+    ("S1", f"Vashtrel, et al. (2031) {_VENUE} Citations: 4"),
+    ("S1", f"O\u2019Vashtrel et al. (2031) {_VENUE} Citation= 4"),
+    ("S1", f"D'Vashtrel et al (2031) {_VENUE} JIF: 1.0"),
+    ("S1", f"Quorlenby (2031) {_VENUE} JIF: 1.2"),
+    ("S2", f"Quorlenby et al. (1987) {_VENUE} JIF: 1.2"),
+    # Eight words of venue (the "&" is not a word) is still a journal name.
+    ("S1", "Quorlenby et al. (2031) Example Membrane & Letters of Science and Light Today JIF: 1.0"),
+])
+def test_metrics_stub_is_recoded_to_s0(code, text):
+    # A firm 0.95 answer is recoded too: the shape, not the model's doubt, decides it.
+    (out,), n = apply_header_pin([_row(code, text, confidence=0.95)], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S0" and out["pre_pin_code"] == code
+
+
+def test_metrics_stub_under_a_pinned_journals_heading_is_s0():
+    stub = _row("S1", f"3. Quorlenby et al. (2031) {_VENUE} JIF: 9.9 cited 3 times", 0.95, JOURNALS)
+    (out,), n = apply_header_pin([stub], S1_CTX)
+    assert n == 1 and out["taxonomy_code"] == "S0"
+
+
+@pytest.mark.parametrize("code,text", [
+    # A full citation that also prints its impact factor keeps the model's code.
+    ("S1", f"Quorlenby A, Vashtrel B. Signals in an example membrane. {_VENUE}. 2031;4:12-19. (IF=3.2)"),
+    ("S1", f"Quorlenby et al. (2031) Signals in an example membrane under light. {_VENUE} 4:12 JIF: 3.2"),
+    # A short title is told apart from a journal name by the volume and pages after it.
+    ("S1", f"Quorlenby et al. (2031). Membrane signals. {_VENUE} 4:12-19. JIF: 3.2"),
+    ("S1", f"Quorlenby et al. (2031) Signals in an example membrane under polarised light. {_VENUE} JIF: 3.2"),
+    ("S1", "Quorlenby et al. (2031) Example Membrane & Letters of Science and Light Today Online JIF: 1.0"),
+    ("S1", f"Quorlenby et al. (2031) {_VENUE}"),
+    ("Q4C", f"2031- Editor, {_VENUE}. IF: 3.2"),
+    ("H", f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9"),
+    ("S0", f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9"),
+])
+def test_metrics_pin_leaves_other_rows(code, text):
+    entry = _row(code, text)
+    assert content_pin_code(entry) is None or content_pin_code(entry)[0] == code
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+def test_metrics_pin_reads_no_code_as_no_answer():
+    entry = _row(None, f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9")
+    assert content_pin_code(entry) is None
 
 
 # --- #1251: a mentee's accomplishments are N4 ----------------------------------
