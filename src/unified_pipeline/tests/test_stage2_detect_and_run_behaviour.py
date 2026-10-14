@@ -573,6 +573,22 @@ def test_remove_subset_delimiters_collapses_subset_keeps_larger_span(monkeypatch
     assert entries[0]["text"] == "P0\tP1\tP2\tP3\tP4\tP5"
 
 
+def test_overlapping_windows_reach_the_section_as_one_entry(monkeypatch):
+    """#1433: windows that start inside one another, none containing the
+    other, survive remove_subset_delimiters; the section returns them merged.
+    The reply is out of order and carries a subset: the merge relies on
+    remove_subset_delimiters sorting and pruning first."""
+    elements = [_para(10 + i, f"P{i}") for i in range(6)]  # idx 10..15
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": 12, "element_idx_end": 14, "element_type": "paragraph", "confidence": 0.9},
+        {"element_idx_start": 10, "element_idx_end": 13, "element_type": "paragraph", "confidence": 0.5},
+        {"element_idx_start": 11, "element_idx_end": 12, "element_type": "paragraph", "confidence": 0.9},
+    ]}))
+    entries, _ = stage2.detect_entries_for_section(["Sec"], elements, 10, 15, element_index_map=_idx_map(elements))
+    assert [(e["element_idx_start"], e["element_idx_end"], e["text"]) for e in entries] == [
+        (10, 14, "P0\tP1\tP2\tP3\tP4")]
+
+
 def test_malformed_and_out_of_bounds_delimiters_are_silently_ignored(monkeypatch):
     # The malformed and out-of-bounds delimiters must be individually SKIPPED
     # (the isinstance/bounds guards `continue` past them), not treated as a
