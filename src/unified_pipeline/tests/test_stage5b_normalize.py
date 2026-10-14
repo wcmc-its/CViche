@@ -191,6 +191,7 @@ def test_stated_us_locations_ignores_institutions_people_and_credentials():
         "Jane Q. Example, MD\tAssistant Professor of Medicine",          # a name heading the text
         "Fellow\tExample Program\tPI: Jane Example, MD",                  # not a segment of its own
         "Fellow\tExample Program\tJane Example, MD, PhD",                 # credentials follow
+        "Fellow\tExample Program\tExampleton, MD, PhD",                   # ... after a one-word name
         "Ph.D., Psychology, Ohio State University",                        # a state starting a name
         "Fellowship, MS Society (Summer 2015)",                            # MS not ending a segment
         "Example University, NY, NY",                                       # all-caps, no city word
