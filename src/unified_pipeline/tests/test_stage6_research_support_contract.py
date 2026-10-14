@@ -2036,6 +2036,20 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
      f'{_GOAL} to define the role | scope'),
     (f'The major goals of this project are: {_GOAL} to define the role; scope',
      f'{_GOAL} to define the role; scope'),
+    # Other punctuation after "role" is prose too, as is a parenthesised or
+    # plural label; any whitespace before the colon still makes a label.
+    (f'The major goals of this project are: {_GOAL} on the role, if any, of bees',
+     f'{_GOAL} on the role, if any, of bees'),
+    (f'The major goals of this project are: {_GOAL} to define the role. Then survey',
+     f'{_GOAL} to define the role. Then survey'),
+    (f'The major goals of this project are: {_GOAL} and the role - scope',
+     f'{_GOAL} and the role - scope'),
+    (f'The major goals of this project are: {_GOAL} (Role: Co-I)', f'{_GOAL} (Role: Co-I)'),
+    (f'The major goals of this project are: {_GOAL} Roles: PI, Co-I', f'{_GOAL} Roles: PI, Co-I'),
+    (f'The major goals of this project are: {_GOAL} Your Role  : Co-I', _GOAL),
+    (f'The major goals of this project are: {_GOAL} Role\xa0: Co-I', _GOAL),
+    (f'The major goals of this project are: {_GOAL} and the youth role: outcomes',
+     f'{_GOAL} and the youth'),
     # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
     # not the misspelled label.
     (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
@@ -2083,6 +2097,7 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     # "of the <noun>" anchors only for project, program or study (#1678).
     'The major goals of the department are listed in the annual report.',
     'The major goals of the students are to finish the course.',
+    'The major goals of the studies are to finish the course.',
     # A5IZ6Q's measured typo is the plural "gals"; the singular "gal" is not a
     # measured variant, so the anchor deliberately does not accept it.
     f'The major gal of this project is: {_GOAL}',
