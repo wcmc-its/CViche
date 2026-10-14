@@ -102,7 +102,8 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
     # The lookup never saw the entry text: a city the text contradicts, or
     # guessed for a generic name or an online course, does not stand (#1257).
     result = reconcile_location_with_source(
-        result, fields.get('institution') or '', entry.get('text') or '')
+        result, fields.get('institution') or '', entry.get('text') or '',
+        entry.get('taxonomy_code') or '')
 
     # Store enrichment data (backward-compatible with Stage 6 readers)
     entry['institution_enrichment'] = {

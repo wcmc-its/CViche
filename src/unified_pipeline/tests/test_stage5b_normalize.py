@@ -12,6 +12,7 @@ from unified_pipeline.stage5b.normalize import (
     LOCATION_SOURCE_WITHHELD,
     format_location,
     is_likely_internal_unit,
+    names_city,
     normalize_institution_name,
     reconcile_location_with_source,
     stated_us_locations,
@@ -107,7 +108,7 @@ def test_reconcile_replaces_a_city_the_entry_text_contradicts():
     # lookup, which never saw it, answered another city in the same state.
     out = reconcile_location_with_source(
         _lookup("Tampa", "Florida"), "Example Health Network",
-        "Clinical Pharmacist 2018-2021\tExample Health Network\tOrlando, Florida")
+        "Clinical Pharmacist 2018-2021\tExample Health Network\tOrlando, Florida", "D2")
     assert (out["city"], out["state"], out["country_code"]) == ("Orlando", "Florida", "US")
     assert out["location_source"] == LOCATION_SOURCE_ENTRY_TEXT
     assert out["llm_location"] == "Tampa, FL"
@@ -116,21 +117,21 @@ def test_reconcile_replaces_a_city_the_entry_text_contradicts():
 def test_reconcile_replaces_a_foreign_lookup_with_the_stated_us_city():
     out = reconcile_location_with_source(
         _lookup("Lille", "Hauts-de-France", "France", "FR"),
-        "Example Institutes, Bethesda, MD", "2016-2018\tExample Institutes, Bethesda, MD")
+        "Example Institutes, Bethesda, MD", "2016-2018\tExample Institutes, Bethesda, MD", "C")
     assert (out["city"], out["state"], out["country"]) == ("Bethesda", "Maryland", "United States")
 
 
 def test_reconcile_keeps_a_city_the_entry_names():
     result = _lookup("Saint Louis", "Missouri")
     assert reconcile_location_with_source(
-        result, "Example University", "MD, Example University, St. Louis, MO") is result
+        result, "Example University", "MD, Example University, St. Louis, MO", "B1") is result
 
 
 def test_reconcile_keeps_a_city_for_a_distinct_name_the_entry_says_nothing_about():
     # The enrichment 5b exists to make: "Example University" -> its city.
     result = _lookup("Providence", "Rhode Island")
     assert reconcile_location_with_source(
-        result, "Example University", "Teacher Training\t2021 - present") is result
+        result, "Example University", "Teacher Training\t2021 - present", "B2") is result
 
 
 def test_reconcile_withholds_a_city_guessed_for_a_generic_name():
@@ -138,7 +139,7 @@ def test_reconcile_withholds_a_city_guessed_for_a_generic_name():
     # owner's current city.
     out = reconcile_location_with_source(
         _lookup("Gainesville", "Florida"), "University Hospital",
-        "Postgraduate Year-1 Pharmacy Residency, University Hospital \u2014 06/30/2007")
+        "Postgraduate Year-1 Pharmacy Residency, University Hospital \u2014 06/30/2007", "C")
     assert (out["city"], out["state"], out["country"], out["country_code"]) == ("", "", "", "")
     assert out["location_source"] == LOCATION_SOURCE_WITHHELD
     assert out["llm_location"] == "Gainesville, FL"
@@ -152,7 +153,7 @@ def test_reconcile_withholds_a_city_for_a_course_taken_online():
         ("Example Education Center, Virtual via Zoom", "Summit, Example Education Center, Virtual via Zoom (May 2020)"),
         ("Example Society", "2017-2018 Online course, Example Society \u201cCurriculum Design\u201d"),
     ):
-        out = reconcile_location_with_source(_lookup("Boston", "Massachusetts"), institution, text)
+        out = reconcile_location_with_source(_lookup("Boston", "Massachusetts"), institution, text, "B2")
         assert out["city"] == "", institution
 
 
@@ -160,16 +161,16 @@ def test_reconcile_keeps_a_city_when_only_part_of_a_course_was_online():
     result = _lookup("Providence", "Rhode Island")
     assert reconcile_location_with_source(
         result, "Example University",
-        "Teacher Training\tcoursework online and an additional 115 hours in person") is result
+        "Teacher Training\tcoursework online and an additional 115 hours in person", "B2") is result
     assert reconcile_location_with_source(
         result, "Example School of Business",
-        "flipped classroom model of online coursework followed by in-residence learning") is result
+        "flipped classroom model of online coursework followed by in-residence learning", "B2") is result
 
 
 def test_reconcile_withholds_when_the_entry_states_several_other_cities():
     out = reconcile_location_with_source(
         _lookup("Boston", "Massachusetts"), "Example Hospital; Example Clinic",
-        "Example Hospital, Manhasset, NY;\tExample Clinic, Albany, NY\tResident 1989-1992")
+        "Example Hospital, Manhasset, NY;\tExample Clinic, Albany, NY\tResident 1989-1992", "C")
     assert out["city"] == "" and out["location_source"] == LOCATION_SOURCE_WITHHELD
 
 
@@ -195,3 +196,76 @@ def test_stated_us_locations_ignores_institutions_people_and_credentials():
         "Example University, NY, NY",                                       # all-caps, no city word
     ):
         assert stated_us_locations("", text) == [], text
+
+
+def test_stated_us_locations_reads_an_institution_field_that_starts_with_the_city():
+    assert stated_us_locations("Springfield, Illinois", "") == [("Springfield", "Illinois")]
+
+
+def test_stated_us_locations_reads_a_state_followed_by_usa():
+    assert stated_us_locations("", "Fellowship\tExample Institute\tDenver, CO USA") == [
+        ("Denver", "Colorado")]
+
+
+def test_stated_us_locations_counts_two_spellings_of_one_place_once():
+    text = "Example Hospital, Saint Louis, Missouri; Example Clinic, St. Louis, MO"
+    assert stated_us_locations("", text) == [("Saint Louis", "Missouri")]
+    out = reconcile_location_with_source(_lookup("Kansas City", "Missouri"), "Example Hospital", text, "C")
+    assert (out["city"], out["location_source"]) == ("Saint Louis", LOCATION_SOURCE_ENTRY_TEXT)
+
+
+def test_names_city_is_false_for_a_city_with_no_words():
+    assert not names_city("", "-")
+
+
+# A person's name with a degree that is also a state code ("<Name>, MD") is
+# not "City, State" (web068 el 115 shape; names invented).
+
+def test_stated_us_locations_reads_a_name_and_a_state_code_degree_as_a_person():
+    for degree in ("MD", "MS", "MA", "PA"):
+        for text in (
+            f"Research Assistant, John Example, {degree}, Surgery Department, Example University, 2013",
+            f"Mentor (Jane Q. Example, {degree})",
+            f"2009 – | Jane Example, {degree} | Attending Physician",
+            f"Mentors: Jane Example, MD, PhD; John Example, {degree}\tProject: Example",
+        ):
+            assert stated_us_locations("", text) == [], text
+
+
+def test_stated_us_locations_keeps_a_one_word_city_or_a_spelled_out_state_with_a_degree_code():
+    assert stated_us_locations("", "Fellow\tExample Hospital, Baltimore, MD | 2010-2012") == [
+        ("Baltimore", "Maryland")]
+    assert stated_us_locations("", "Fellow\tExample Hospital, Boston, MA") == [("Boston", "Massachusetts")]
+    assert stated_us_locations("", "Fellow\tExample Hospital, Jackson, MS") == [("Jackson", "Mississippi")]
+    assert stated_us_locations("", "Fellow\tExample Hospital, Pittsburgh, PA") == [("Pittsburgh", "Pennsylvania")]
+    assert stated_us_locations("", "Fellow\tExample Institute, Silver Spring, Maryland") == [
+        ("Silver Spring", "Maryland")]
+    # Two words and a degree code that end the line are a place, not a name.
+    assert stated_us_locations("Example Institute, Silver Spring, MD", "") == [("Silver Spring", "Maryland")]
+    assert stated_us_locations("", "Fellow\tExample Clinic\tWind Gap, PA.\nAttending 2010") == [
+        ("Wind Gap", "Pennsylvania")]
+    # Two words with a non-degree code are a city as before.
+    assert stated_us_locations("", "Fellow\tExample Hospital, New Haven, CT") == [("New Haven", "Connecticut")]
+
+
+def test_reconcile_keeps_the_lookup_city_when_the_text_names_a_person_with_a_degree():
+    result = _lookup("New Orleans", "Louisiana")
+    assert reconcile_location_with_source(
+        result, "Example University",
+        "Research Assistant studying example cells in example patients, John Example, MD, "
+        "Surgery Department, Example University, 1/2013-2/2014.", "C") is result
+
+
+# "Online" puts only a course the owner took nowhere: an appointment that
+# mentions an online programme happened at the institution.
+
+def test_reconcile_withholds_for_online_only_in_a_course_entry():
+    for code, text in (
+        ("D1", "Director, Online Program in Example Studies, Example University, 2015-2020"),
+        ("D3", "Supervisor: Jane Example | Online course development with Example University."),
+        ("C", "Example Academy of Psychiatry, online"),
+    ):
+        result = _lookup("New York", "New York")
+        assert reconcile_location_with_source(result, "Example University", text, code) is result, code
+        out = reconcile_location_with_source(result, "Example University", text, "B2")
+        assert out["location_source"] == LOCATION_SOURCE_WITHHELD, code

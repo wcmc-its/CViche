@@ -180,6 +180,18 @@ _STATED_LOCATION_RE: Final[re.Pattern] = re.compile(
 _CREDENTIAL_AFTER_RE: Final[re.Pattern] = re.compile(
     r"[ \t]*[,/][ \t]*(?:Ph\.? ?D|M\.?P\.?H|M\.?B\.?A|M\.?Sc?|F\.?A\.?C\.?\w*|DrPH|RN)\b")
 
+#: State codes that are also degrees a name is written with. Two or more
+#: words before one of them, with more of the line after, read as a person
+#: ("..., Charles Bellows, MD, Surgery Department, ..." naming a mentor,
+#: web068 el 115; "Peter Pryor, MD | Attending", web054), not a city. A
+#: one-word city ("Baltimore, MD"), the spelled-out state ("Silver Spring,
+#: Maryland"), and a place that ends the line ("..., Silver Spring, MD")
+#: still count.
+_CREDENTIAL_STATE_CODES: Final[frozenset] = frozenset({'MD', 'MS', 'MA', 'PA'})
+
+#: The rest of a line that ends after the state: nothing, or a full stop.
+_ENDS_THE_LINE_RE: Final[re.Pattern] = re.compile(r"[ \t]*\.?[ \t]*(?:\n|$)")
+
 #: Words that make a "<words>, <State>" segment an institution or a unit
 #: ("Boston College, MA"), not a city.
 _NOT_A_CITY_WORDS: Final[frozenset] = frozenset({
@@ -204,11 +216,18 @@ _GENERIC_NAME_WORDS: Final[frozenset] = frozenset({
 #: "online"/"virtual"/"remote" (", online", "(online)", "Virtual via Zoom"),
 #: or an online course or programme. Not "online coursework followed by
 #: in-residence" (VECUUM el 115), which happened somewhere.
+#: Read only in an entry of `ONLINE_COURSE_CODES`.
 _DELIVERED_ONLINE_RE: Final[re.Pattern] = re.compile(
     r"(?:^|[,\t\n|;(])[ \t]*(?:online|virtual|remote)(?:[ \t]+via[ \t]+\w+)?"
     r"[ \t]*(?=$|[,\t\n|;)])"
     r"|\bonline[ \t]+(?:course|program|programme|training|certificate|module)s?\b",
     re.IGNORECASE | re.MULTILINE)
+
+#: Taxonomy codes for a course or certificate the owner took, the one kind
+#: of entry that can be taken online. An appointment that mentions an online
+#: programme ("Director, Online Program in ...", D1; "Online course
+#: development with ...", web206 D3 el 24) still happened at the institution.
+ONLINE_COURSE_CODES: Final[frozenset] = frozenset({'B2'})
 
 #: Long forms a place name is also written in short, folded together.
 _PLACE_PREFIXES: Final[tuple] = (('saint', 'st'), ('fort', 'ft'), ('mount', 'mt'))
@@ -237,6 +256,14 @@ def _is_city_shaped(candidate: str) -> bool:
                    for word in candidate.split())
 
 
+def _reads_as_a_person(match: re.Match) -> bool:
+    """True when a `_STATED_LOCATION_RE` match is shaped like "<Firstname
+    Lastname>, MD" with more of the line after it."""
+    return (match.group('state') in _CREDENTIAL_STATE_CODES
+            and len(match.group('city').split()) > 1
+            and not _ENDS_THE_LINE_RE.match(match.string, match.end()))
+
+
 def stated_us_locations(institution: str, text: str) -> list[tuple[str, str]]:
     """Each distinct "<City>, <US state>" the institution field or the entry
     text states, as (city, full state name), in order of first appearance."""
@@ -244,7 +271,8 @@ def stated_us_locations(institution: str, text: str) -> list[tuple[str, str]]:
     for source in (f"\n{institution}", text):
         for match in _STATED_LOCATION_RE.finditer(source):
             city, state = match.group('city'), match.group('state')
-            if not _is_city_shaped(city) or _CREDENTIAL_AFTER_RE.match(source, match.end()):
+            if (not _is_city_shaped(city) or _reads_as_a_person(match)
+                    or _CREDENTIAL_AFTER_RE.match(source, match.end())):
                 continue
             state = _US_STATE_NAMES_BY_ABBREVIATION.get(state, state)
             found.setdefault((_place_key(city), state), (city, state))
@@ -257,10 +285,12 @@ def is_generic_institution_name(name: str) -> bool:
     return bool(words) and all(word in _GENERIC_NAME_WORDS for word in words)
 
 
-def is_delivered_online(institution: str, text: str) -> bool:
-    """True when the institution field or the entry text says the entry was
-    taken online rather than at the institution's site."""
-    return any(_DELIVERED_ONLINE_RE.search(source) for source in (institution, text))
+def is_delivered_online(institution: str, text: str, taxonomy_code: str) -> bool:
+    """True when the entry is a course (`ONLINE_COURSE_CODES`) and its
+    institution field or text says it was taken online rather than at the
+    institution's site."""
+    return taxonomy_code in ONLINE_COURSE_CODES and any(
+        _DELIVERED_ONLINE_RE.search(source) for source in (institution, text))
 
 
 def _with_lookup_location_replaced(result: dict, city: str, state: str,
@@ -282,7 +312,8 @@ def _with_lookup_location_replaced(result: dict, city: str, state: str,
     }
 
 
-def reconcile_location_with_source(result: dict, institution: str, text: str) -> dict:
+def reconcile_location_with_source(result: dict, institution: str, text: str,
+                                   taxonomy_code: str) -> dict:
     """The lookup `result` with its location checked against the entry (#1257).
 
     Unchanged when the result has no city, or the institution field or the
@@ -301,6 +332,7 @@ def reconcile_location_with_source(result: dict, institution: str, text: str) ->
         stated_city, stated_state = stated[0]
         return _with_lookup_location_replaced(
             result, stated_city, stated_state, LOCATION_SOURCE_ENTRY_TEXT)
-    if stated or is_generic_institution_name(institution) or is_delivered_online(institution, text):
+    if (stated or is_generic_institution_name(institution)
+            or is_delivered_online(institution, text, taxonomy_code)):
         return _with_lookup_location_replaced(result, '', '', LOCATION_SOURCE_WITHHELD)
     return result
