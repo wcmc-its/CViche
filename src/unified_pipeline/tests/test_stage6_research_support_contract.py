@@ -3531,12 +3531,13 @@ def _application(heading=('Grant Applications',), text='Synthetic application', 
 
 @pytest.mark.parametrize('entry', [
     _application(text='NIH, Synthetic Pending Project, 2019. Not funded'),
-    _application(heading=('GRANTS', 'SUBMITTED OR NOT FUNDED')),
+    _application(heading=('GRANTS', 'NOT FUNDED')),
     _application(heading=('Submitted - But Not Funded',)),
+    _application(heading=('Submitted grant proposals', 'Submitted - But Not Funded')),
     _application(status='Unfunded'),
     _application(notes='Declined by sponsor'),
     _application(text='Synthetic Pending Project - not awarded'),
-], ids=['text', 'heading-or', 'heading-but', 'status', 'notes', 'not-awarded'])
+], ids=['text', 'heading', 'heading-but', 'heading-but-under-submitted', 'status', 'notes', 'not-awarded'])
 def test_a_not_funded_application_renders_no_pending_table(entry):
     gen = _sectioned_generator()
     gen._fill_research_support({'M2C': [entry]}, as_of=TEST_AS_OF)
@@ -3557,10 +3558,13 @@ def test_a_not_funded_application_renders_no_pending_table(entry):
 @pytest.mark.parametrize('entry', [
     _application(status='In review'),
     _application(heading=('Grants Submitted',), text='NIH, Synthetic Pending Project. Submitted'),
+    # A heading that names pending work too is silent: its entries may be pending.
+    _application(heading=('GRANTS', 'SUBMITTED OR NOT FUNDED')),
+    _application(heading=('Submitted but Not Funded or Pending',)),
     # The title is the project's subject, not its outcome.
     _application(title='Outcomes of Declined Donor Offers',
                  text='NIH, Outcomes of Declined Donor Offers, 2026'),
-], ids=['in-review', 'submitted', 'title-word'])
+], ids=['in-review', 'submitted', 'heading-or', 'heading-or-pending', 'title-word'])
 def test_a_live_application_still_renders_under_pending(entry):
     assert not says_not_funded(entry)
     gen = _sectioned_generator()

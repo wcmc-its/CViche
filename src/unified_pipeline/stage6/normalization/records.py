@@ -204,6 +204,21 @@ def grant_says_not_funded(text: str) -> bool:
     return bool(_NOT_FUNDED_STATUS_RE.search((text or '').lower()))
 
 
+# "Submitted - But" before a not-funded phrase: the outcome of a submission.
+_SUBMITTED_BUT_RE = re.compile(
+    r'\bsubmitted\W+(?:but\W+)?(?=(?:not|non)[\s-]?funded|unfunded|declined|rejected|not\s+awarded)')
+
+
+def grant_heading_says_not_funded(heading: str) -> bool:
+    """Whether a section heading files its grants as not funded and nothing
+    else. A heading that also names pending or submitted work ("Submitted
+    but Not Funded or Pending") is silent, as in `grant_heading_rebucket_target`:
+    the entries under it may still be pending (#1439). "Submitted but not
+    funded" is one outcome, not two, so its "submitted" is not a pending word."""
+    lowered = _SUBMITTED_BUT_RE.sub(' ', (heading or '').lower())
+    return grant_says_not_funded(lowered) and not _PENDING_STATUS_RE.search(lowered)
+
+
 def grant_heading_rebucket_target(
     hierarchy: list[str]
 ) -> tuple[str | None, str | None]:

@@ -65,6 +65,7 @@ from ..normalization import (
     _deduplicate_repeated_content,
     grant_heading_is_past,
     grant_heading_rebucket_target,
+    grant_heading_says_not_funded,
     grant_says_not_funded,
     grant_status_is_empty_section_label,
     grant_status_rebucket_target,
@@ -1484,16 +1485,19 @@ def lacks_funding_signal(entry: dict) -> bool:
 def says_not_funded(entry: dict) -> bool:
     """True when the record's status or notes, its heading, or its own text
     outside the title says the application was not funded (#1439). The title
-    is left out: a project can be about a declined or rejected thing."""
+    is left out: a project can be about a declined or rejected thing. A
+    heading that also names pending work does not count."""
     fields = cast(GrantFields, entry.get('extracted_fields') or {})
     text = str(entry.get('text') or '')
     title = _grant_title(fields)
     if title:
         text = re.sub(re.escape(title), ' ', text, flags=re.IGNORECASE)
-    return any(grant_says_not_funded(value) for value in (
-        str(fields.get('status') or ''), str(fields.get('notes') or ''),
-        ' > '.join(str(level) for level in entry.get('hierarchy') or []), text,
-    ))
+    # Level by level: a parent "Submitted grant proposals" over a "Submitted -
+    # But Not Funded" leaf does not make the leaf mixed.
+    return any(grant_heading_says_not_funded(str(level))
+               for level in entry.get('hierarchy') or []) or any(
+        grant_says_not_funded(value)
+        for value in (str(fields.get('status') or ''), str(fields.get('notes') or ''), text))
 
 
 def divert_unfunded_grants(
