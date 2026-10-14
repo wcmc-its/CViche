@@ -211,6 +211,14 @@ def test_map_hierarchy_node_leaves_a_long_line_that_only_opens_with_the_heading_
     assert mapped["element_idx"] is None
 
 
+def test_map_hierarchy_node_leaves_a_colon_and_one_blank_unplaced():
+    # A colon then one blank is not a run-in gap (a decision left to #1252's
+    # residual: 46 corpus lines have this shape, some of them sub-labels).
+    elements = [_elem(0, "A. Person"), _elem(1, "EDUCATION: Ph.D., Example University, Sampletown, NY, 2001")]
+    mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] is None
+
+
 # ------------------------------------------------------------- find_header_in_sequence
 
 def test_find_header_in_sequence_matches_in_document_order():
