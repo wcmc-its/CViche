@@ -60,8 +60,11 @@ def test_fakeredis_supports_every_stream_primitive_the_queue_uses(fake_redis):
     assert fake_redis.xinfo_groups(run_queue.STREAM)[0]["name"] == run_queue.GROUP
     assert run_queue.stats()["pending"] == 1
     run_queue.ack(eid)
+    # lag 0: the one entry was delivered, so nothing is outstanding. fakeredis
+    # before 2.39.0 answered -1 here, a value Redis never returns; 2.39.0 made
+    # entries-read and lag follow Redis' rules (fakeredis #583).
     assert run_queue.stats() == {
-        "stream_length": 0, "pending": 0, "lag": -1, "consumers": 2, "owners": [], "dead": 0,
+        "stream_length": 0, "pending": 0, "lag": 0, "consumers": 2, "owners": [], "dead": 0,
     }
 
 

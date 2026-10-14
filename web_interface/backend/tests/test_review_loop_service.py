@@ -254,6 +254,21 @@ def test_a_run_with_no_review_copy_says_so(db, store, tmp_path):
 _LEAK = "[M2A] Quorvane T. Brennic coupling in moorland lattices. Synth Rep. 2018;5:1-9."
 
 
+@pytest.mark.parametrize("bad", ["../RVW001", "RVW/001", "RVW001\n", ""])
+def test_the_stored_outputs_doctor_refuses_a_malformed_run_id(db, store, bad):
+    """No temp path or storage key is built from a run id outside RUN_ID_RE."""
+    with pytest.raises(ValueError, match="Invalid run id"):
+        svc.doctor_on_stored_outputs(db, bad)
+
+
+def test_an_artifact_path_outside_the_scratch_dir_is_refused(tmp_path):
+    root = (tmp_path / "scratch").resolve()
+    root.mkdir()
+    assert svc._inside(root, root / "outputs" / "a.json") == root / "outputs" / "a.json"
+    with pytest.raises(ValueError, match="escapes"):
+        svc._inside(root, root / ".." / "elsewhere.json")
+
+
 def test_the_doctor_reruns_on_the_corrected_copy_and_counts_what_cleared(db, store, tmp_path):
     """The delivered document leaks a taxonomy code; the reviewer removes it.
     Both reports are the real doctor's, over the same stored artifacts."""

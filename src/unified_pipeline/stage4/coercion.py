@@ -89,6 +89,7 @@ class ExtractedFields(TypedDict, total=False):
     dates_attended: Any
     dea_number: Any
     degree: Any
+    department: Any
     description: Any
     discipline: Any
     doi: Any
@@ -1502,6 +1503,181 @@ def _fill_grant_goal_notes(original_text: str, updated: ExtractedFields,
     updated['notes'] = merged
 
 
+#: The position codes whose items carry a title, an organization and a span
+#: (#1703, #1704): appointments, hospital and other employment, training,
+#: other professional positions and leadership roles.
+POSITION_TAXONOMY_CODES = ('D1', 'D2', 'D3', 'C', 'O', 'L3')
+
+#: A stored month-precision date value: "2022-01"; or "01/22", "1/2022". A
+#: full date is left alone: day ranges ("3/13-20/2007", "6/28-29/18") give
+#: their month in shapes too many to read safely.
+_ISO_MONTH_VALUE_PATTERN = re.compile(r'(\d{4})-(\d{2})')
+_SLASH_MONTH_VALUE_PATTERN = re.compile(r'(\d{1,2})/(\d{2}|\d{4})')
+#: Any word starting with a month's first three letters, with or without a
+#: year after it, so "June-August 2015" counts for June, a misspelt
+#: "Sepember" for September and "June2010" for June. A word that only looks like one ("Junior")
+#: keeps a month it should not: the safe direction.
+_ANY_MONTH_NAME_PATTERN = re.compile(
+    r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*', re.IGNORECASE)
+#: A season names no month, but stage 4 may map it to one; nothing here can
+#: tell that mapping from an invented month, so such text is left alone.
+_SEASON_PATTERN = re.compile(r'\b(?:spring|summer|fall|autumn|winter)\b', re.IGNORECASE)
+_UNSTATED_MONTH_REASON = 'Reduced to the year: the source text gives no date in that month'
+
+
+def _value_month_and_year(value: str) -> tuple[int, int] | None:
+    """`(month, year)` a stored date value names, or None when it names no
+    month ("2022", "present")."""
+    iso = _ISO_MONTH_VALUE_PATTERN.fullmatch(value)
+    if iso is not None:
+        return int(iso.group(2)), int(iso.group(1))
+    slash = _SLASH_MONTH_VALUE_PATTERN.fullmatch(value)
+    if slash is None:
+        return None
+    month, year = slash.groups()
+    return int(month), int(year) if len(year) == 4 else expand_two_digit_year(int(year))
+
+
+def _source_states_month(month: int, year: int, original_text: str) -> bool:
+    """True when `original_text` gives `month` for `year`, or may: any
+    mention of that month's name, the month
+    number before a slash or dash anywhere ("07/25-2024", "5//11", "06 - 8/2000"),
+    after a dash in a pair of numbers ("01-03, 1995"), beside the year
+    ("2015.06", "06.2015"), or a season. Any of these keeps the value: a
+    month written in a shape this does not read is not taken for an invented
+    one."""
+    if any(_MONTH_NAME_PREFIXES.index(name[:3].lower()) + 1 == month
+           for name in _ANY_MONTH_NAME_PATTERN.findall(original_text)):
+        return True
+    numbered = (rf'(?<![\d.])0?{month}\s*(?:/|-|\u2013)'
+                rf'|(?<![\d/])\d{{1,2}}\s*(?:-|\u2013)\s*0?{month}(?!\d)'
+                rf'|(?<!\d){year}\s*[-./]\s*0?{month}(?!\d)'
+                rf'|(?<![\d.])0?{month}\.\s*(?:{year}|{year % 100:02d})(?!\d)')
+    return bool(re.search(numbered, original_text) or _SEASON_PATTERN.search(original_text))
+
+
+def reduce_unstated_month(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Reduce a start or end date to its year when the source never gives its month.
+
+    The stage-4 LLM, on the recovery path above all, turns a bare "(2022)"
+    into "01/22" and borrows "09/22" from an unrelated "Sept. 2022" (#1704,
+    WBZIDP). A month the text gives anywhere is kept, as is any value whose
+    year the text does not write (the year repairs above own those). An
+    empty `original_text` (an earlier record of a multi-record entry) judges
+    nothing.
+    """
+    if not original_text:
+        return
+    for field_name in _RANGE_FIELD_NAMES:
+        value = updated.get(field_name)
+        if not isinstance(value, str):
+            continue
+        month_year = _value_month_and_year(value.strip())
+        if month_year is None:
+            continue
+        month, year = month_year
+        if not _source_writes_year(str(year), original_text):
+            continue
+        if _source_states_month(month, year, original_text):
+            continue
+        updated[field_name] = str(year)
+        reformatted[field_name] = {
+            'original': value, 'reformatted': str(year), 'reason': _UNSTATED_MONTH_REASON,
+        }
+
+
+_TITLE_WORD_IN_ORGANIZATION_REASON = "Removed the title's first word from the organization"
+
+
+def _normalized_words(value: str) -> list[str]:
+    return value.lower().split()
+
+
+def strip_title_words_from_organization(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Take the title's first word(s) off the end of the organization when
+    the source writes them only once, as the title's start.
+
+    "Example  Scientific Founder" came back as organization "Example
+    Scientific", title "Scientific Founder" (#1704, WBZIDP). A word the text
+    writes twice ("Boston Scientific, Scientific Advisor") may belong to
+    both, and is left alone; so is an organization that would be emptied.
+    """
+    organization, title = updated.get('organization'), updated.get('title')
+    if not (original_text and isinstance(organization, str) and isinstance(title, str)):
+        return
+    if ' '.join(_normalized_words(title)) not in ' '.join(_normalized_words(original_text)):
+        return
+    org_words, title_words = organization.split(), title.split()
+    for count in range(min(len(org_words) - 1, len(title_words)), 0, -1):
+        shared = org_words[-count:]
+        if [word.lower() for word in shared] != _normalized_words(' '.join(title_words[:count])):
+            continue
+        shared_pattern = r'\s+'.join(re.escape(word) for word in shared)
+        if len(re.findall(rf'(?<!\w){shared_pattern}(?!\w)', original_text, re.IGNORECASE)) != 1:
+            return
+        stripped = ' '.join(org_words[:-count]).rstrip(' ,;-')
+        updated['organization'] = stripped
+        reformatted['organization'] = {
+            'original': organization, 'reformatted': stripped,
+            'reason': _TITLE_WORD_IN_ORGANIZATION_REASON,
+        }
+        return
+
+
+#: A parenthetical whose words end in its own year span: "(Managing Partner
+#: 2005-2010)", "(Chief 2012 - present)".
+_PARENTHETICAL_SPAN_PATTERN = re.compile(
+    r'\(([^()]*?\S)\s*,?\s+(\d{4})\s*(?:-|\u2013|\u2014|to)\s*(\d{4}|present|current)\s*\)',
+    re.IGNORECASE,
+)
+_PARENTHETICAL_SPAN_REASON = "Gave the title its own parenthetical years"
+
+
+def _stored_year(value: object) -> str:
+    """The year a stored date value gives, as four digits; any other value
+    as written, lower-cased ("present")."""
+    text = str(value or '').strip()
+    month_year = _value_month_and_year(text)
+    return str(month_year[1]) if month_year else text.lower()
+
+
+def split_parenthetical_title_span(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> ExtractedFields | None:
+    """Give a title held for part of an employment span its own years (#1703).
+
+    "7/00-5/10 <practice> (Managing Partner 2005-2010)" came back as one
+    item, Managing Partner 07/00-05/10, so the title claimed five years the
+    source does not give it (TJDPJE). When the item's title is inside such a
+    parenthetical and its dates are not that span, the item takes the span,
+    and the returned item, with no title, keeps the outer dates and the
+    organization. None when nothing changes.
+    """
+    title = updated.get('title')
+    if not (original_text and isinstance(title, str) and title.strip()):
+        return None
+    for words, start, end in _PARENTHETICAL_SPAN_PATTERN.findall(original_text):
+        if ' '.join(_normalized_words(title)) not in ' '.join(_normalized_words(words)):
+            continue
+        end = end if end.isdigit() else end.lower()
+        outer_start, outer_end = updated.get('start_date'), updated.get('end_date')
+        if (_stored_year(outer_start), _stored_year(outer_end)) == (start, end):
+            return None
+        outer: ExtractedFields = {key: value for key, value in updated.items() if key != 'title'}
+        updated['start_date'], updated['end_date'] = start, end
+        for field_name, original in (('start_date', outer_start), ('end_date', outer_end)):
+            reformatted[field_name] = {
+                'original': original, 'reformatted': updated[field_name],
+                'reason': _PARENTHETICAL_SPAN_REASON,
+            }
+        return outer
+    return None
+
+
 def apply_regex_post_processing(
     original_text: str,
     extracted_fields: ExtractedFields,
@@ -1585,7 +1761,15 @@ def apply_regex_post_processing(
 
     # Restore a dropped end_date when the schema declares both dates and the
     # source text unambiguously carries the closed range (#556)
+    # Reduce a position's month the source never gives to the year (#1704).
+    # After the year repairs, which may rewrite the year it is checked against.
+    if taxonomy_code in POSITION_TAXONOMY_CODES:
+        reduce_unstated_month(original_text, updated, reformatted)
+
     if taxonomy_code in DATE_RANGE_TAXONOMY_CODES:
         reconcile_date_range(original_text, updated, reformatted)
+
+    if taxonomy_code in POSITION_TAXONOMY_CODES:
+        strip_title_words_from_organization(original_text, updated, reformatted)
 
     return updated, reformatted

@@ -205,6 +205,24 @@ def test_payload_score_unchecked_by_the_doctor_says_so(monkeypatch, missing, exp
     assert f"score {expected}" in payload["summary"]
 
 
+@pytest.mark.parametrize("status, expected", [
+    ("failed", "97 (GREEN (ship)) — not checked (the doctor failed)"),
+    ("skipped", "97 (GREEN (ship)) — not checked (the doctor is switched off)"),
+    ("ran", "97 (GREEN (ship))"),
+    ("checked", "97 (GREEN (ship))"),  # a score cached by #1601
+])
+def test_payload_score_says_why_the_doctor_did_not_check_it(monkeypatch, status, expected):
+    """#1593: a doctor that raised and one switched off read differently."""
+    from app.services.quality_score_service import DOCTOR_STATUS_KEY
+
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    complete = status in ("ran", "checked")
+    score = {"totalScore": 97, "band": "GREEN (ship)", "data_complete": complete,
+             "missing_evidence": [], DOCTOR_STATUS_KEY: status}
+
+    assert _facts(notifications.build_teams_payload(_run_facts(), score))["Quality score"] == expected
+
+
 def test_payload_run_link_uses_first_allowed_origin(monkeypatch):
     monkeypatch.setenv(
         "CVICHE_ALLOWED_ORIGINS",

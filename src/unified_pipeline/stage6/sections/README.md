@@ -13,7 +13,7 @@ and for mixins-not-composition is in `__init__.py`; this file is the index.
 | `education.py` | B1 | Conferred academic degrees | `_fill_education`, `_degree_is_in_progress` |
 | `other_education.py` | B2 | Non-degree training, certificates, workshops | `_fill_other_education` |
 | `postdoc_training.py` | C, C1, C2, C3 | Postdoctoral training, residency, fellowship | `_fill_postdoc_training` |
-| `positions.py` | D1–D3 | Academic, hospital and other appointments | `_fill_positions`, `_merge_grouped_appointments`, `_add_position_row`, … |
+| `positions.py` | D1–D3 (+ an A title, #1697) | Academic, hospital and other appointments | `_fill_positions`, `_merge_grouped_appointments`, `_add_position_row`, … |
 | `passthrough.py` | E, G and J | Employment status; institutional/hospital affiliation; percent effort | `_fill_passthrough_sections`, `_fill_employment_status`, `_fill_hospital_affiliation`, `_fill_percent_effort` |
 | `licensure.py` | F1 | State licences, plus the DEA and NPI numbers | `_fill_licensure`, `_fill_dea_npi` |
 | `board_certification.py` | F2 | Specialty board certifications | `_fill_board_certification`, `_parse_and_add_multiple_certifications`, `_add_board_cert_row` |

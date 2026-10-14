@@ -1784,6 +1784,39 @@ def test_a_single_item_recovery_drops_the_count_an_earlier_pass_wrote(monkeypatc
     assert list(out)[-1] == "llm_recovery_applied"
 
 
+def test_a_recovered_item_with_an_unstated_month_is_reduced_to_the_year(monkeypatch):
+    # #1704: the recovery reply turned a bare "(2022)" into a January start.
+    entry = {"text": "Example  Scientific Founder (2022), signed 8/2022.", "taxonomy_code": "D3",
+             "element_idx_start": 4, "element_idx_end": 4}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [{"entry_id": "4_4", "fields": {
+            "title": "Scientific Founder", "organization": "Example Scientific",
+            "start_date": "01/22"}}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert out["extracted_fields"]["start_date"] == "2022"
+    assert out["extracted_fields"]["organization"] == "Example"
+
+
+def test_a_parenthetical_title_span_becomes_a_second_record(monkeypatch):
+    # #1703: one item paired the parenthetical title with the outer span.
+    entry = {"text": "7/00-5/10 Example Practice, Town ST (Managing Partner 2005-2010)",
+             "taxonomy_code": "D3", "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, "title": "Managing Partner",
+                                    "organization": "Example Practice",
+                                    "start_date": "07/00", "end_date": "05/10"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    outer, titled = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert "title" not in outer and (outer["start_date"], outer["end_date"]) == ("07/00", "05/10")
+    assert (titled["title"], titled["start_date"], titled["end_date"]) == ("Managing Partner", "2005", "2010")
+
+
 # --- a second record under an off-schema key (#1245) -------------------------
 
 def _one_item_reply(code_text: str, code: str, item: dict):

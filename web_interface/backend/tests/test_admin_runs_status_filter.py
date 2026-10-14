@@ -286,7 +286,7 @@ def _admin_post(client, url):
     from app.auth import require_admin
     from app.main import app
 
-    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin", email="admin@example.org")
     try:
         return client.post(url)
     finally:
@@ -321,7 +321,7 @@ def test_compute_score_returns_score_evidence(client, db, monkeypatch):
     from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
-    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: _INCOMPLETE_SCORE)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid, **_kw: _INCOMPLETE_SCORE)
 
     resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 
@@ -340,7 +340,7 @@ def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
     _seed_mixed_status_runs(db)
     capped = {**_INCOMPLETE_SCORE, "totalScore": 25, "raw_score_before_caps": 80.0,
               "hard_fail_caps_applied": [25]}
-    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: capped)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid, **_kw: capped)
 
     assert _admin_post(client, "/api/admin/run/SF_COMPLETE/score").status_code == 200
 
@@ -355,7 +355,7 @@ def test_compute_score_404s_for_an_unknown_run_and_for_no_scorable_outputs(clien
     from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
-    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: None)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid, **_kw: None)
 
     unknown = _admin_post(client, "/api/admin/run/NOSUCH/score")
     unscorable = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
@@ -371,7 +371,7 @@ def test_compute_score_fills_defaults_for_keys_the_result_lacks(client, db, monk
     from app.services import admin_run_service
 
     _seed_mixed_status_runs(db)
-    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: {"totalScore": 50})
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid, **_kw: {"totalScore": 50})
 
     resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 
@@ -391,7 +391,7 @@ def test_compute_score_returns_each_dimension_as_the_scorer_built_it(client, db,
 
     _seed_mixed_status_runs(db)
     scored = {**_INCOMPLETE_SCORE, "dimensionScores": [_DIMENSION]}
-    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid: scored)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", lambda _rid, **_kw: scored)
 
     resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
 
@@ -421,3 +421,159 @@ def test_the_response_schema_documents_the_dimension_fields():
 
     assert schema["properties"]["dimensionScores"]["items"] == {"$ref": "#/$defs/DimensionScore"}
     assert sorted(schema["$defs"]["DimensionScore"]["required"]) == ["detail", "max", "name", "penalty", "score"]
+
+
+def _stored_run(tmp_path, monkeypatch, files):
+    """A LocalRunStorage holding ``files`` for SF_COMPLETE, seen by every
+    service the doctor re-run reads or writes through."""
+    from app.services import (
+        admin_run_service,
+        quality_score_service,
+        review_loop_service,
+    )
+    from app.storage.local_storage import LocalRunStorage
+
+    store = LocalRunStorage(str(tmp_path))
+    for key, data in files.items():
+        store.put_file("SF_COMPLETE", key, data)
+    for module in (admin_run_service, quality_score_service, review_loop_service):
+        monkeypatch.setattr(module, "get_storage", lambda: store)
+    return store
+
+
+_LEAK = "[M2A] Quorvane T. Brennic coupling in moorland lattices. Synth Rep. 2018;5:1-9."
+
+
+def _wcm_docx():
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    for text in ("BIBLIOGRAPHY", _LEAK):
+        doc.add_paragraph(text)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_rerun_doctor_stores_a_report_and_rescores_the_run_as_checked(client, db, tmp_path, monkeypatch):
+    """#1593: a completed run with no doctor report gets one from its stored
+    outputs alone, and its score is rebuilt from it as ran."""
+    import json
+
+    from app.models import Run
+    from app.services import quality_score_service as qss
+
+    _seed_mixed_status_runs(db)
+    monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-9.tag")
+    store = _stored_run(tmp_path, monkeypatch, {"outputs/SF_COMPLETE_wcm.docx": _wcm_docx()})
+
+    resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/doctor")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    report = json.loads(store.get_file("SF_COMPLETE", f"outputs/SF_COMPLETE{qss.DOCTOR_SUFFIX}"))
+    assert report["image_tag"] == "dev-9.tag"
+    assert report["artifacts"]["stage_6_docx"].endswith("SF_COMPLETE_wcm.docx")
+    assert "output_hygiene" in {f["lint"] for f in report["findings"]}  # the [M2A] leak
+    assert (body["worst_severity"], body["counts"]) == (report["worst_severity"], report["counts"])
+    cached = json.loads(store.get_file("SF_COMPLETE", qss.CACHE_KEY))
+    assert cached[qss.DOCTOR_STATUS_KEY] == qss.DOCTOR_RAN
+    assert body["score"]["totalScore"] == cached["totalScore"]
+    db.expire_all()
+    assert db.get(Run, "SF_COMPLETE").quality_score == cached["totalScore"]
+
+
+def test_rerun_doctor_refuses_a_run_that_is_unknown_unfinished_or_already_checked(client, db, tmp_path, monkeypatch):
+    """404 unknown; 409 for a run not complete and for one whose report the
+    review copy was written against. Nothing is stored for any of them."""
+    from app.services import admin_run_service
+    from app.services import quality_score_service as qss
+
+    _seed_mixed_status_runs(db)
+    report_key = f"outputs/SF_COMPLETE{qss.DOCTOR_SUFFIX}"
+    store = _stored_run(tmp_path, monkeypatch, {report_key: b'{"findings": []}'})
+
+    unknown = _admin_post(client, "/api/admin/run/NOSUCH/doctor")
+    running = _admin_post(client, "/api/admin/run/SF_RUNNING/doctor")
+    checked = _admin_post(client, "/api/admin/run/SF_COMPLETE/doctor")
+
+    assert unknown.status_code == 404
+    assert running.json()["detail"]["message"] == admin_run_service.DOCTOR_RERUN_NOT_COMPLETE
+    assert checked.json()["detail"]["message"] == admin_run_service.DOCTOR_RERUN_HAS_REPORT
+    assert (running.status_code, checked.status_code) == (409, 409)
+    assert store.get_file("SF_COMPLETE", report_key) == b'{"findings": []}'
+    assert qss.CACHE_KEY not in store.list_files("SF_COMPLETE", "")
+
+
+def test_a_doctor_rerun_that_raises_is_a_500_and_stores_nothing(client, db, tmp_path, monkeypatch):
+    from app.services import admin_run_service
+    from app.services import quality_score_service as qss
+
+    _seed_mixed_status_runs(db)
+    store = _stored_run(tmp_path, monkeypatch, {})
+
+    def _boom(_db, _run_id):
+        raise OSError("storage unreachable")
+
+    monkeypatch.setattr(admin_run_service, "doctor_on_stored_outputs", _boom)
+
+    resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/doctor")
+
+    assert resp.status_code == 500
+    assert store.list_files("SF_COMPLETE", "") == []
+    assert qss.CACHE_KEY not in store.list_files("SF_COMPLETE", "")
+
+
+def test_rerun_doctor_rejects_a_malformed_run_id_before_any_lookup(client, db, tmp_path, monkeypatch):
+    """The route's run id must be one the app could have issued (RUN_ID_RE)."""
+    _seed_mixed_status_runs(db)
+    store = _stored_run(tmp_path, monkeypatch, {})
+
+    resp = _admin_post(client, "/api/admin/run/SF.COMPLETE/doctor")
+
+    assert resp.status_code == 400
+    assert store.list_files("SF_COMPLETE", "") == []
+
+
+def test_an_unreadable_stored_report_still_blocks_a_doctor_rerun(client, db, tmp_path, monkeypatch):
+    """The has-report guard goes by key: a report that won't parse is never
+    overwritten by a re-run."""
+    from app.services import admin_run_service
+    from app.services import quality_score_service as qss
+
+    _seed_mixed_status_runs(db)
+    report_key = f"outputs/SF_COMPLETE{qss.DOCTOR_SUFFIX}"
+    store = _stored_run(tmp_path, monkeypatch, {report_key: b"not json"})
+
+    resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/doctor")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["message"] == admin_run_service.DOCTOR_RERUN_HAS_REPORT
+    assert store.get_file("SF_COMPLETE", report_key) == b"not json"
+
+
+def test_an_admin_rescore_keeps_the_cached_doctor_reason(client, db, monkeypatch):
+    """A run cached as failed stays failed through a rescore (the rescore
+    can't see why the doctor didn't run); with nothing cached it passes None."""
+    from app.services import admin_run_service
+    from app.services import quality_score_service as qss
+
+    _seed_mixed_status_runs(db)
+    cached = {"SF_COMPLETE": {"totalScore": 40, qss.DOCTOR_STATUS_KEY: qss.DOCTOR_FAILED}}
+    outcomes = []
+
+    def _compute(run_id, doctor_outcome=None):
+        outcomes.append(doctor_outcome)
+        return {"totalScore": 40}
+
+    monkeypatch.setattr(admin_run_service, "get_cached_score", cached.get)
+    monkeypatch.setattr(admin_run_service, "compute_and_cache_score", _compute)
+
+    first = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
+    cached.clear()
+    second = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert outcomes == [qss.DOCTOR_FAILED, None]

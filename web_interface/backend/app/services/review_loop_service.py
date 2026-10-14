@@ -48,7 +48,11 @@ from app.services import (
     corrected_copy_service,
     quality_score_service,  # noqa: F401  (puts src/ on sys.path for unified_pipeline)
 )
-from app.services.artifact_service import REVIEW_DOCX_SUFFIX, resolve_artifact
+from app.services.artifact_service import (
+    REVIEW_DOCX_SUFFIX,
+    RUN_ID_RE,
+    resolve_artifact,
+)
 from app.services.quality_score_service import DOCTOR_SUFFIX
 from app.services.review_comments import (
     COMMENT_AUTHOR,
@@ -322,23 +326,44 @@ def doctor_on_corrected(db: Session, run_id: str, corrected: bytes) -> dict:
     """The doctor's report on the corrected copy, read with the run's own
     stored artifacts in place of what stage 6 wrote. An artifact the run no
     longer has leaves its lints skipped, as on any run."""
+    return doctor_on_stored_outputs(db, run_id, _without_review_notes(corrected))
+
+
+def doctor_on_stored_outputs(db: Session, run_id: str, document: bytes | None = None) -> dict:
+    """The doctor's report on the run's stored artifacts, with ``document`` in
+    place of the stage-6 document when given (a corrected copy). Pure file
+    reads: no stage re-runs, no LLM call. The run's prompt logs stay on the
+    pod that ran it, so llm_fallback_served sees none of their fallbacks, and
+    a PDF upload's converted source is not stored, so the source lints skip."""
     from unified_pipeline.run_doctor import artifact_layout, run_doctor
 
-    with tempfile.TemporaryDirectory(prefix=f"corrected_doctor_{run_id}_") as tmp:
-        root = Path(tmp)
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise ValueError(f"Invalid run id: {run_id!r}")
+    with tempfile.TemporaryDirectory(prefix="stored_doctor_") as tmp:
+        root = Path(tmp).resolve()
         layout = artifact_layout(root, run_id)
         for key, path in layout.items():
-            raw = (_without_review_notes(corrected) if key == DOCTOR_DOCX_ARTIFACT
+            raw = (document if document is not None and key == DOCTOR_DOCX_ARTIFACT
                    else _artifact_bytes(db, run_id, path.name))
             if raw is not None:
+                path = _inside(root, path)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(raw)
         errors = _artifact_bytes(db, run_id, f"{run_id}{STAGE_ERRORS_SUFFIX}")
         if errors is not None:
-            stage_errors_path(root, run_id).parent.mkdir(parents=True, exist_ok=True)
-            stage_errors_path(root, run_id).write_bytes(errors)
+            errors_path = _inside(root, stage_errors_path(root, run_id))
+            errors_path.parent.mkdir(parents=True, exist_ok=True)
+            errors_path.write_bytes(errors)
         source = _source_docx(run_id, root)
         return run_doctor(root, run_id, source=source)
+
+
+def _inside(root: Path, path: Path) -> Path:
+    """``path`` resolved, refused unless it lies under ``root`` (resolved)."""
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"Artifact path escapes the scratch dir: {path}")
+    return resolved
 
 
 def _source_docx(run_id: str, root: Path) -> Path | None:
@@ -348,7 +373,7 @@ def _source_docx(run_id: str, root: Path) -> Path | None:
         raw = get_storage().get_file(run_id, f"input/{run_id}.docx")
     except FileNotFoundError:
         return None
-    path = root / "uploads" / f"{run_id}.docx"
+    path = _inside(root, root / "uploads" / f"{run_id}.docx")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
     return path
