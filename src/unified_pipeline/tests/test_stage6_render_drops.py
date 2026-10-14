@@ -38,6 +38,7 @@ from unified_pipeline.stage_6_word_template import (
     _SAME_FAMILY_KIND_FIELDS,
     _TAXONOMY_WARNED_CONFUSIONS,
     BARE_MENTEE_RESOLVE_CHECK,
+    D2_LEADERSHIP_REROUTE_CHECK,
     PRECOLLEGIATE_REROUTE_CHECK,
     REROUTE_ACCEPTED_CROSS_FAMILY,
     REROUTE_ACCEPTED_SAME_FAMILY,
@@ -883,3 +884,127 @@ def test_grouping_gives_an_unnamed_n4_the_mentee_grouped_above_it() -> None:
     [record] = [w for w in gen._section_failures if w["check"] == OUTCOME_MENTEE_CHECK]
     assert record["evidence"] == ["element_idx_start 4 <- 3"]
     assert "Pethwick" not in json.dumps(record)
+
+
+# --- #1731: stage 3b codes a hospital-employment paragraph D2 as one entry,
+# stage 4 splits it into one record per title, and a record whose title opens
+# with a leadership title renders under Clinical Leadership (L3), not Hospital
+# Appointments. TJDPJE 46-49, 50-54. Invented values.
+
+def _d2_paragraph(titles: list[str], idx: int = 46, **record_fields) -> dict:
+    from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+    records = [{"title": title, "institution": "Example Hospital",
+                "start_date": "2010-05", "end_date": "2012-09", **record_fields}
+               for title in titles]
+    return {"taxonomy_code": "D2", "element_idx_start": idx,
+            "text": "\n".join(f"{title}, Example Hospital, 2010-2012" for title in titles),
+            "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+
+
+def _d2_leadership_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == D2_LEADERSHIP_REROUTE_CHECK]
+
+
+def test_leadership_records_of_a_d2_paragraph_move_to_clinical_leadership() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_d2_paragraph(
+        ["Director, Example Care Unit", "Site Director, Example Lab", "Physician Advisor, Example"])])
+    assert [e["extracted_fields"]["leadership_role"] for e in groups["L3"]] == [
+        "Director, Example Care Unit", "Site Director, Example Lab"]
+    assert all("title" not in e["extracted_fields"] for e in groups["L3"])
+    assert all((e["taxonomy_code"], e["taxonomy_code_original"]) == ("L3", "D2")
+               for e in groups["L3"])
+    assert [e["extracted_fields"]["title"] for e in groups["D2"]] == ["Physician Advisor, Example"]
+    [record] = _d2_leadership_records(gen)
+    assert (record["code"], record["severity"]) == ("D2", "INFO")
+    assert "D2->L3" in record["message"] and "2 records" in record["message"]
+    assert record["evidence"] == ["element_idx_start 46 record 1 of 3",
+                                  "element_idx_start 46 record 2 of 3"]
+    assert "Example" not in json.dumps(record)
+
+
+def test_the_last_record_moves_too_and_its_department_names_the_unit() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_d2_paragraph(
+        ["Attending Physician", "Medical Director"], department="Example Service")])
+    [moved] = groups["L3"]
+    assert moved["extracted_fields"]["leadership_role"] == "Medical Director"
+    assert moved["extracted_fields"]["unit_program"] == "Example Service"
+    assert "department" not in moved["extracted_fields"]
+    [record] = _d2_leadership_records(gen)
+    assert record["evidence"] == ["element_idx_start 46 record 2 of 2"]
+    assert record["message"].endswith(": 1 record")
+
+
+@pytest.mark.parametrize("title", [
+    "Chief Resident", "Chief Medical Resident", "Head Fellow", "Physician Advisor, Example",
+    "Attending Physician, Section Head", "Example Committee, Chair Subcommittee",
+    "Directory Editor", "Assistant Attending; Director of Example"])
+def test_a_title_that_does_not_open_with_leadership_stays_a_hospital_appointment(title: str) -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([_d2_paragraph([title, "Attending Physician"])])
+    assert "L3" not in groups and len(groups["D2"]) == 2
+    assert _d2_leadership_records(gen) == []
+
+
+@pytest.mark.parametrize("title", [
+    "Chief, Example Service", "Section Chief", "Head of Example Clinic", "Co-Director, Example",
+    "Associate Program Director", "Interim Chair, Example", "Executive Vice Chair",
+    "Chairman", "Assistant Medical Director"])
+def test_each_leadership_title_form_moves(title: str) -> None:
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code(
+        [_d2_paragraph([title, "Attending Physician"])])
+    assert [e["extracted_fields"]["leadership_role"] for e in groups["L3"]] == [title]
+
+
+def test_a_moved_record_keeps_a_leadership_role_stage4_already_wrote() -> None:
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([_d2_paragraph(
+        ["Director", "Attending Physician"], leadership_role="Director, Example Unit")])
+    [moved] = groups["L3"]
+    assert moved["extracted_fields"]["leadership_role"] == "Director, Example Unit"
+
+
+@pytest.mark.parametrize("title", [None, ["Director, Example Unit"]], ids=["none", "list"])
+def test_a_split_record_whose_title_is_not_text_stays_a_hospital_appointment(title) -> None:
+    entry = _d2_paragraph(["Director, Example Unit", "Attending Physician"])
+    entry["extracted_fields"]["stage4_records"][0]["title"] = title
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    assert "L3" not in groups and len(groups["D2"]) == 2
+
+
+def test_an_unsplit_d2_entry_keeps_the_models_code() -> None:
+    entry = {"taxonomy_code": "D2", "element_idx_start": 9, "text": "Director, Example Unit",
+             "extracted_fields": {"title": "Director, Example Unit", "institution": "Example Hospital"}}
+    gen, code = _gen_and_code(entry)
+    assert code == "D2" and "taxonomy_code_original" not in entry
+    assert _d2_leadership_records(gen) == []
+
+
+@pytest.mark.parametrize("code", ["D1", "D3"])
+def test_a_split_record_of_another_position_code_keeps_its_code(code: str) -> None:
+    entry = _d2_paragraph(["Director, Example Unit", "Professor"])
+    entry["taxonomy_code"] = code
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    assert sorted(groups) == [code] and len(groups[code]) == 2
+
+
+def test_a_moved_record_renders_under_clinical_leadership_not_hospital_appointments(tmp_path) -> None:
+    from docx import Document
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None  # no LLM, deterministic
+    source = tmp_path / "in.json"
+    source.write_text(json.dumps({"document_uid": "TESTAA", "entries": [
+        {"taxonomy_code": "A", "element_idx_start": 0, "text": "Name: Pat Example, MD",
+         "extracted_fields": {}},
+        _d2_paragraph(["Director, Quillmoor Unit", "Physician Advisor, Fernhollow"])]}))
+    out = tmp_path / "out.docx"
+    gen.generate(str(source), str(out), research_summary_path=None)
+    document = Document(str(out))
+    paragraphs = [p.text for p in document.paragraphs]
+    leadership = next(i for i, text in enumerate(paragraphs) if text.startswith("Clinical Leadership"))
+    assert [i for i, text in enumerate(paragraphs) if "Quillmoor" in text] == [leadership + 2]
+    table_rows = [" | ".join(cell.text for cell in row.cells)
+                  for table in document.tables for row in table.rows]
+    assert not any("Quillmoor" in row for row in table_rows)
+    assert sum("Fernhollow" in row for row in table_rows) == 1
