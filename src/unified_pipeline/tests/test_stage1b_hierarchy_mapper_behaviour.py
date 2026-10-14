@@ -175,6 +175,42 @@ def test_map_hierarchy_node_places_a_heading_that_follows_a_separator_run():
     assert mapped["element_idx"] == 1
 
 
+@pytest.mark.parametrize("line", [
+    "EDUCATION  Ph.D., Example University, Sampletown, 2001",
+    "***** EDUCATION   Ph.D., Example University, Sampletown, 2001",
+    "Education:\n\nPh.D., Example University, Sampletown, 2001",
+])
+def test_map_hierarchy_node_places_a_run_in_heading_and_flags_its_line(line):
+    # #1252: the heading shares its line with the section's first record,
+    # past the strict 3x length cap. It is placed, and flagged so stage 2
+    # still extracts the record on that line.
+    elements = [_elem(0, "A. Person"), _elem(1, line), _elem(2, "M.S., Sample College, 1998")]
+    mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] == 1
+    assert mapped["run_in"] is True
+
+
+def test_map_hierarchy_node_does_not_flag_a_heading_line_the_strict_match_accepts():
+    elements = [_elem(0, "A. Person"), _elem(1, "INVITED SEMINARS  (Since 1995)")]
+    mapped, _ = map_hierarchy_node({"text": "INVITED SEMINARS", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] == 1
+    assert "run_in" not in mapped
+
+
+def test_map_hierarchy_node_does_not_flag_a_heading_with_a_trailing_rule_and_no_gap():
+    # No two blanks in a row, so no record shares the line.
+    elements = [_elem(0, "A. Person"), _elem(1, "EDUCATION" + "*" * 40)]
+    mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
+    assert "run_in" not in mapped
+
+
+def test_map_hierarchy_node_leaves_a_long_line_that_only_opens_with_the_heading_unplaced():
+    # One blank after the heading's words is running text, not a run-in heading.
+    elements = [_elem(0, "A. Person"), _elem(1, "Education program director, Sample School of Nursing, 2001-2005")]
+    mapped, _ = map_hierarchy_node({"text": "EDUCATION", "level": "H1"}, elements, [], 0)
+    assert mapped["element_idx"] is None
+
+
 # ------------------------------------------------------------- find_header_in_sequence
 
 def test_find_header_in_sequence_matches_in_document_order():

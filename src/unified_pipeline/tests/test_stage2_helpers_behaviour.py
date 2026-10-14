@@ -470,6 +470,13 @@ def test_collect_header_indices_recurses_and_skips_missing_or_none_idx():
     assert collect_header_indices(hierarchy) == {1, 2, 5}
 
 
+def test_collect_header_indices_leaves_out_a_run_in_heading_line():
+    # #1252: the line also holds the section's first record, so stage 2
+    # must extract it rather than skip it as a heading.
+    hierarchy = [{"text": "A", "element_idx": 0}, {"text": "B", "element_idx": 5, "run_in": True}]
+    assert collect_header_indices(hierarchy) == {0}
+
+
 def test_collect_header_indices_empty_hierarchy_returns_empty_set():
     assert collect_header_indices([]) == set()
 
