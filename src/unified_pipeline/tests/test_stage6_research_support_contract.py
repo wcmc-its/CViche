@@ -63,6 +63,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     _pi_name_from_label,
     apply_effort_to_grants,
     claim_goal_rows,
+    divert_unfunded_grants,
     fill_major_goals_from_text,
     filter_role_effort_headers,
     grant_end_date,
@@ -70,6 +71,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     grant_has_ended,
     grant_id_tokens,
     is_role_effort_header,
+    lacks_funding_signal,
     match_effort_for_title,
     normalize_percent_effort,
     parse_major_goals,
@@ -78,6 +80,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     reclassify_past_m2a_grants,
     resolve_grant_back_references,
     resolve_pi_name,
+    says_not_funded,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -2425,7 +2428,9 @@ def test_each_grant_table_lands_after_its_own_section_header():
 
 
 @pytest.mark.parametrize('status, expected_code', [
-    ('Not funded', 'M2C'),      # kept under Pending rather than dropped
+    ('Not funded', 'M2C'),      # filed Pending, then listed in the Appendix (#1439)
+    ('Not awarded', 'M2C'),     # #1439
+    ('Not scored', 'M2C'),      # #1439
     ('Under review', 'M2C'),
     ('Completed', 'M2B'),
     ('Awarded', None),          # no move: an award is not a rebucketing signal
@@ -2446,17 +2451,22 @@ def test_grant_status_rebucket_target_branches(status, expected_code):
     assert (note is not None) is (expected_code is not None)
 
 
-def test_not_funded_grants_are_kept_under_pending_with_a_review_note():
-    """"Not funded" is filed under Pending with a note, never silently dropped."""
+def test_not_funded_grants_go_to_the_appendix_with_a_review_note():
+    """"Not funded" is never silently dropped: since #1439 the record goes to
+    the Appendix, not Pending, carrying a note that says so."""
     gen = _sectioned_generator(emit_comments=True)
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Declined Project Study', agency='NIH',
                         status='Not funded', start_date='01/2026')]},
         as_of=TEST_AS_OF)
 
-    assert _titles_under(gen, PENDING) == ['Declined Project Study']
-    notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
-    assert notes and 'confirm whether to keep this entry on the CV' in notes[0]
+    assert [_titles_under(gen, header) for header in HEADERS] == [[], [], []]
+    [declined] = gen._declined_grant_entries
+    assert declined['extracted_fields']['title'] == 'Declined Project Study'
+    assert declined['reclassification_note'] == (
+        "Status is 'Not funded' — not funded, so listed in the Appendix rather than "
+        "under Pending Funding; confirm whether to keep this entry on the CV")
+    assert [w['check'] for w in gen._section_failures] == ['grant_not_funded_application']
 
 
 def test_rebucketing_leaves_a_grant_alone_when_the_status_names_its_own_bucket():
@@ -2622,16 +2632,19 @@ def test_a_status_field_beats_the_heading():
     assert (current, completed, pending) == ([], [entry], [])
 
 
-def test_not_funded_heading_keeps_the_grant_under_pending_with_a_review_note():
+def test_not_funded_heading_sends_the_grant_to_the_appendix_with_a_review_note():
+    """The heading rebucket files it Pending; #1439 then lists it in the Appendix."""
     gen = _sectioned_generator(emit_comments=True)
     gen._fill_research_support(
         {'M2B': [_under(['NOT FUNDED'], code='M2B', title='Declined Heading Study',
                         agency='NIH', start_date='01/2020')]},
         as_of=TEST_AS_OF)
 
-    assert _titles_under(gen, PENDING) == ['Declined Heading Study']
-    notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
-    assert notes and 'confirm whether to keep this entry on the CV' in notes[0]
+    assert [_titles_under(gen, header) for header in HEADERS] == [[], [], []]
+    [declined] = gen._declined_grant_entries
+    assert 'confirm whether to keep this entry on the CV' in declined['reclassification_note']
+    assert [(w['check'], w['code']) for w in gen._section_failures] == [
+        ('grant_not_funded_application', 'M2C')]
 
 
 def test_a_current_grant_support_heading_moves_nothing():
@@ -3405,3 +3418,185 @@ def test_promotion_note_names_the_full_as_of_date():
     assert entry['reclassification_note'] == (
         f"Reclassified from Completed (M2B) to Current (M2A): end date 06/2028 "
         f"is not before {TEST_AS_OF.isoformat()}")
+
+
+# --- #1701: a record with no funding signal, under a flagged non-research heading --
+
+# EYTHNB 249's shape, synthetic: a study label stage 4 moved into `agency`, a
+# title and two years, under a service heading stage 3b flagged as expecting
+# service codes.
+SERVICE_HEADING = ['Committee and Service Responsibilities', 'Departmental']
+SERVICE_EXPECTED_CODES = ['Q2', 'O', 'P', 'Q']
+
+
+def _flagged_study(code='M2B', expected_codes=SERVICE_EXPECTED_CODES, **fields):
+    fields = {'agency': 'Synthetic Assessment Tool Study',
+              'title': 'Validation of a synthetic assessment tool',
+              'start_date': '2011', 'end_date': '2012', **fields}
+    entry = _under(SERVICE_HEADING, code=code, **fields)
+    entry['text'] = 'Synthetic Assessment Tool Study, Validation of a synthetic tool, 2011-2012'
+    entry['element_idx_start'] = 249
+    entry['hierarchy_mismatch_flag'] = True
+    entry['hierarchy_mismatch_detail'] = {
+        'hierarchy': SERVICE_HEADING, 'assigned_code': code, 'expected_codes': expected_codes}
+    return entry
+
+
+@pytest.mark.parametrize('code, end_date', [('M2B', '2012'), ('M2A', 'present')])
+def test_a_flagged_record_with_no_funding_signal_renders_no_funding_table(code, end_date):
+    gen = _sectioned_generator()
+    entry = _flagged_study(code, end_date=end_date)
+    gen._fill_research_support({code: [entry]}, as_of=TEST_AS_OF)
+
+    assert [_titles_under(gen, h) for h in HEADERS] == [[], [], []]
+    assert [d['element_idx_start'] for d in gen._declined_grant_entries] == [249]
+    assert gen._section_failures == [{
+        'check': 'grant_no_funding_signal',
+        'code': code,
+        'section': 'research_support',
+        'message': (f'{code}: entry at element 249 names no funding word, grant number, '
+                    'amount, role or effort under a heading flagged as not research; listed '
+                    'in the Appendix, not as a funding table'),
+        'evidence': ['element_idx_start=249'],
+        'severity': 'WARN',
+    }]
+
+
+@pytest.mark.parametrize('key, value', [
+    ('grant_number', 'R01 XX000000'), ('nct_number', 'NCT00000000'),
+    ('total_funding', '$100,000'), ('annual_direct_costs', '50000'),
+    ('annual_funding', '25,000'), ('pi_role', 'PI'), ('role', 'Co-Investigator'),
+    ('percent_effort', '10%'),
+])
+def test_one_funding_signal_keeps_the_funding_table(key, value):
+    """An M2B with an agency plus a grant number (or any other signal) renders as before."""
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2B': [_flagged_study(**{key: value})]}, as_of=TEST_AS_OF)
+
+    assert _titles_under(gen, COMPLETED) == ['Validation of a synthetic assessment tool']
+    assert gen._declined_grant_entries == []
+    assert 'grant_no_funding_signal' not in [w['check'] for w in gen._section_failures]
+
+
+@pytest.mark.parametrize('flag, expected_codes', [
+    (False, SERVICE_EXPECTED_CODES),  # stage 3b saw no mismatch
+    (True, []),                       # a flag with no expected code says nothing
+    (True, ['Q2', 'M1']),             # a heading that may hold research may hold funding
+    (True, ['M2B']),
+])
+def test_no_funding_signal_alone_keeps_the_table_without_a_non_research_flag(flag, expected_codes):
+    entry = _flagged_study(expected_codes=expected_codes)
+    entry['hierarchy_mismatch_flag'] = flag
+    assert not lacks_funding_signal(entry)
+
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2B': [entry]}, as_of=TEST_AS_OF)
+    assert _titles_under(gen, COMPLETED) == ['Validation of a synthetic assessment tool']
+
+
+@pytest.mark.parametrize('heading, text', [
+    (['Honors and Awards'], 'Synthetic Career Development K08, 2001-2003'),
+    (SERVICE_HEADING, 'Synthetic Foundation Grant, 2001-2003'),
+    (SERVICE_HEADING, 'Synthetic study, supported by a departmental fund'),
+], ids=['heading-award', 'text-grant', 'text-supported'])
+def test_a_funding_word_keeps_the_funding_table(heading, text):
+    """A career award under an awards heading is funding with no number:
+    18 such records on 12 farm CVs carry the same flag as EYTHNB 249."""
+    entry = _flagged_study()
+    entry['hierarchy'] = heading
+    entry['text'] = text
+    assert not lacks_funding_signal(entry)
+
+def test_a_blank_funding_field_is_no_signal():
+    assert lacks_funding_signal(_flagged_study(grant_number='  ', pi_role=None, total_funding=''))
+    assert not lacks_funding_signal(_flagged_study(total_funding=0))
+
+
+def test_a_pending_record_is_not_held_to_the_funding_signal_rule():
+    """An application names no award by nature; #1701 guards M2A/M2B only."""
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2C': [_flagged_study('M2C')]}, as_of=TEST_AS_OF)
+    assert _titles_under(gen, PENDING) == ['Validation of a synthetic assessment tool']
+
+
+# --- #1439: an application the source marks not funded is not Pending ---------
+
+def _application(heading=('Grant Applications',), text='Synthetic application', **fields):
+    fields = {'agency': 'NIH', 'title': 'Synthetic Pending Project', **fields}
+    entry = _under(list(heading), code='M2C', **fields)
+    entry['text'] = text
+    entry['element_idx_start'] = 541
+    return entry
+
+
+@pytest.mark.parametrize('entry', [
+    _application(text='NIH, Synthetic Pending Project, 2019. Not funded'),
+    _application(heading=('GRANTS', 'NOT FUNDED')),
+    _application(heading=('Submitted - But Not Funded',)),
+    _application(heading=('Submitted grant proposals', 'Submitted - But Not Funded')),
+    _application(status='Unfunded'),
+    _application(notes='Declined by sponsor'),
+    _application(text='Synthetic Pending Project - not awarded'),
+], ids=['text', 'heading', 'heading-but', 'heading-but-under-submitted', 'status', 'notes', 'not-awarded'])
+def test_a_not_funded_application_renders_no_pending_table(entry):
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2C': [entry]}, as_of=TEST_AS_OF)
+
+    assert [_titles_under(gen, h) for h in HEADERS] == [[], [], []]
+    assert [d['element_idx_start'] for d in gen._declined_grant_entries] == [541]
+    assert gen._section_failures == [{
+        'check': 'grant_not_funded_application',
+        'code': 'M2C',
+        'section': 'research_support',
+        'message': ('M2C: entry at element 541 is an application the source marks not '
+                    'funded; listed in the Appendix, not as a funding table'),
+        'evidence': ['element_idx_start=541'],
+        'severity': 'WARN',
+    }]
+
+
+@pytest.mark.parametrize('entry', [
+    _application(status='In review'),
+    _application(heading=('Grants Submitted',), text='NIH, Synthetic Pending Project. Submitted'),
+    # A heading that names pending work too is silent: its entries may be pending.
+    _application(heading=('GRANTS', 'SUBMITTED OR NOT FUNDED')),
+    _application(heading=('Submitted but Not Funded or Pending',)),
+    # The title is the project's subject, not its outcome.
+    _application(title='Outcomes of Declined Donor Offers',
+                 text='NIH, Outcomes of Declined Donor Offers, 2026'),
+], ids=['in-review', 'submitted', 'heading-or', 'heading-or-pending', 'title-word'])
+def test_a_live_application_still_renders_under_pending(entry):
+    assert not says_not_funded(entry)
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2C': [entry]}, as_of=TEST_AS_OF)
+    assert len(_titles_under(gen, PENDING)) == 1
+    assert gen._declined_grant_entries == []
+
+
+def test_the_not_funded_rule_reads_only_pending_records():
+    """A completed award's own text can say a later renewal was not funded;
+    the award itself was. #1439 is about applications, so M2B stays."""
+    entry = _under(['Completed Grants'], code='M2B', title='Synthetic Completed Award',
+                   agency='NIH', grant_number='R01 XX000000', start_date='2015',
+                   end_date='2020')
+    entry['text'] = 'NIH R01 XX000000, Synthetic Completed Award. Renewal not funded'
+    gen = _sectioned_generator()
+    gen._fill_research_support({'M2B': [entry]}, as_of=TEST_AS_OF)
+
+    assert _titles_under(gen, COMPLETED) == ['Synthetic Completed Award']
+    assert gen._declined_grant_entries == []
+
+def test_divert_unfunded_grants_keeps_order_and_leaves_the_inputs_alone():
+    funded = _flagged_study(grant_number='R01 XX000000')
+    study = _flagged_study()
+    live = _application(status='In review')
+    dead = _application(status='Not funded')
+    m2b, m2c = [funded, study], [live, dead]
+
+    current, completed, pending, diverted = divert_unfunded_grants([], m2b, m2c)
+
+    assert (current, completed, pending) == ([], [funded], [live])
+    assert [(d.code, d.check) for d in diverted] == [
+        ('M2B', 'grant_no_funding_signal'), ('M2C', 'grant_not_funded_application')]
+    assert [d.entry for d in diverted] == [study, dead]
+    assert (m2b, m2c) == ([funded, study], [live, dead])

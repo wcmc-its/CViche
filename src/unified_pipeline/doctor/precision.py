@@ -97,6 +97,8 @@ _STAGE6_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("board_cert_row_skipped", r"reconstructed board certification row"),
         ("memberships_header_row_dropped", r"dropped as a source table header row"),
         ("grant_protocol_number_only", r"names a protocol or IRB number and no funder"),
+        ("grant_no_funding_signal", r"names no funding word, grant number, amount, role or effort"),
+        ("grant_not_funded_application", r"is an application the source marks not funded"),
         ("fanout_list_not_split", r"holds (?:several )?records that were not split"),
         ("geo_scope_failed", r"geographic scope classification"),
         ("appendix_reclassification_failed", r"appendix entry reclassification"),

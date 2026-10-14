@@ -208,6 +208,12 @@ def test_stage6_shape_names_each_emitter_message():
             "memberships_header_row_dropped",
         "M2A: entry at element 7 names a protocol or IRB number and no funder; the number "
         "renders under its own label, not as the Award Source": "grant_protocol_number_only",
+        "M2B: entry at element 249 names no funding word, grant number, amount, role or effort "
+        "under a heading flagged as not research; listed in the Appendix, not as a funding "
+        "table":
+            "grant_no_funding_signal",
+        "M2C: entry at element 541 is an application the source marks not funded; listed in "
+        "the Appendix, not as a funding table": "grant_not_funded_application",
         "2 D1 entries: `appointments` holds several records that were not split into separate "
         "rows (the entry's text holds content its fields do not carry); a record may be missing "
         "from the output": "fanout_list_not_split",

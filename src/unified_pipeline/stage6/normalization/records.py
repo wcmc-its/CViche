@@ -25,8 +25,12 @@ import re
 # code, not config: the words change only when the function beside them does,
 # and any rebucketing change needs a corpus render A/B regardless of where
 # the vocabulary lives.
+# "Not awarded" and "Not scored" (an application the study section did not
+# score, so it cannot be funded) joined the list with #1439, whose NECRGC
+# applications carried both.
 _NOT_FUNDED_STATUS_RE = re.compile(
-    r'\b(?:(?:not|non)[\s-]?funded|unfunded|declined|rejected)\b')
+    r'\b(?:(?:not|non)[\s-]?funded|unfunded|declined|rejected'
+    r'|not\s+awarded|not\s+scored)\b')
 _PENDING_STATUS_RE = re.compile(
     # 'awaiting' alone would also match post-award statuses that lack the
     # 'award' substring ("Awaiting contract execution", "Awaiting IRB
@@ -171,8 +175,9 @@ def grant_status_rebucket_target(
 
     An explicit status beats date inference: "Under review" / "In review" /
     "Submitted" / "Awaiting sponsor decision" is Pending (M2C) no matter what
-    dates say; "Not funded" is kept under Pending with a review comment
-    rather than silently dropped. An empty-section label ("PENDING - none")
+    dates say; "Not funded" goes to Pending too, with a review comment, and
+    research support then lists it in the Appendix rather than under Pending
+    Funding (`grant_says_not_funded`, #1439). An empty-section label ("PENDING - none")
     is no status at all (`grant_status_is_empty_section_label`).
     """
     status = (status or '').strip()
@@ -181,14 +186,37 @@ def grant_status_rebucket_target(
     lowered = status.lower()
     if _NOT_FUNDED_STATUS_RE.search(lowered):
         return 'M2C', (
-            f"{label} is '{status}' — kept under Pending Funding rather than "
-            "dropped; confirm whether to keep this entry on the CV"
+            f"{label} is '{status}' — not funded, so listed in the Appendix "
+            "rather than under Pending Funding; confirm whether to keep this "
+            "entry on the CV"
         )
     if 'award' not in lowered and _PENDING_STATUS_RE.search(lowered):
         return 'M2C', f"Reclassified to Pending (M2C): {label.lower()} is '{status}'"
     if _COMPLETED_STATUS_RE.search(lowered):
         return 'M2B', f"Reclassified to Completed (M2B): {label.lower()} is '{status}'"
     return None, None
+
+
+def grant_says_not_funded(text: str) -> bool:
+    """Whether a grant's status, heading or own words say the application was
+    not funded (#1439): the same vocabulary `grant_status_rebucket_target`
+    files under Pending, so the two cannot disagree about which words count."""
+    return bool(_NOT_FUNDED_STATUS_RE.search((text or '').lower()))
+
+
+# "Submitted - But" before a not-funded phrase: the outcome of a submission.
+_SUBMITTED_BUT_RE = re.compile(
+    r'\bsubmitted\W+(?:but\W+)?(?=(?:not|non)[\s-]?funded|unfunded|declined|rejected|not\s+awarded)')
+
+
+def grant_heading_says_not_funded(heading: str) -> bool:
+    """Whether a section heading files its grants as not funded and nothing
+    else. A heading that also names pending or submitted work ("Submitted
+    but Not Funded or Pending") is silent, as in `grant_heading_rebucket_target`:
+    the entries under it may still be pending (#1439). "Submitted but not
+    funded" is one outcome, not two, so its "submitted" is not a pending word."""
+    lowered = _SUBMITTED_BUT_RE.sub(' ', (heading or '').lower())
+    return grant_says_not_funded(lowered) and not _PENDING_STATUS_RE.search(lowered)
 
 
 def grant_heading_rebucket_target(
