@@ -1398,6 +1398,31 @@ def test_segments_cover_source_rejects_a_reply_that_drops_a_near_duplicate_sibli
     assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
 
 
+def test_segments_cover_source_accepts_a_sibling_row_split_across_segments():
+    """The prompt asks for one segment per responsibility, so a reply that
+    keeps every token of a sibling row but splits it at its separators is a
+    faithful reply and must not be rejected (#1230). Only a lost token fails."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Director, {n} Laboratory, Example Hospital, 2004-2010; supervised residents; "
+            f"chaired the quality committee" for n in names]
+    source = "\n".join(rows)
+    split = [part for row in rows for part in row.split("; ")]
+    assert segments_cover_source(split, source) is True
+    # A split reply that loses the one word telling a sibling apart is rejected.
+    lost = [part.replace("Hyacinth", "") for part in split]
+    assert segments_cover_source(lost, source) is False
+
+
+def test_segments_cover_source_short_line_counts_as_carried():
+    """A line too short to verify (under RENDER_TOKEN_MIN_COUNT tokens) cannot
+    be held against the reply, though the long lines are all kept (#1230)."""
+    pairs = (("zeolite", "geyser"), ("marigold", "estuary"), ("quartzite", "lagoon"),
+             ("nasturtium", "tundra"), ("basalt", "savanna"), ("obsidian", "fjord"))
+    lines = [f"Doe J. Synthetic {a} and {b} outcomes {i}." for i, (a, b) in enumerate(pairs)]
+    source = "\n".join(lines + ["Page 2"])
+    assert segments_cover_source(lines, source) is True
+
+
 def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
     """The whole-segment rule is for sibling rows only: a line with no near
     duplicate keeps the pooled share, so a reply that splits it across two

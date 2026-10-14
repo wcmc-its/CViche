@@ -1652,6 +1652,43 @@ def test_unrendered_records_t_sibling_rows_are_judged_whole():
     assert findings[0]["evidence"] == [rows[2][:100]]
 
 
+def test_unrendered_records_t_entry_with_one_candidate_line_stays_quiet():
+    # #1230: stage 6's recovery also recovers a single-record long T entry, but
+    # the doctor reports a T entry only at UNRENDERED_MIN_RECORD_LINES or more.
+    prose = ("Served as the principal organizer of the annual synthetic geology "
+             "symposium and mentored junior colleagues through the faculty "
+             "development program over many years of sustained service")
+    stage4 = {"entries": [_entry(prose + "\n" + _ROW_SILVERLAKE, start=9, taxonomy_code="T")]}
+    assert lint_unrendered_records(stage4, [("p", "APPENDIX")]) == []
+
+
+def test_unrendered_records_t_row_a_non_t_entry_carries_is_not_lost():
+    # #1230: a T row that is a line of a non-T entry has its own entry, so the
+    # page lacking it as a verbatim line (the entry reformats it) is not a T
+    # loss. Nothing on the page vouches for the row except that entry.
+    own = _entry(_ROW_FOXGLOVE + " Renewal pending.", start=3, taxonomy_code="P")
+    t_entry = _entry("\n".join(_T_ROWS), start=9, taxonomy_code="T")
+    blocks = [("p", "APPENDIX")]
+    alone = lint_unrendered_records({"entries": [t_entry]}, blocks)
+    assert "3 of 3 records absent" in alone[0]["message"]
+    both = lint_unrendered_records({"entries": [t_entry, own]}, blocks)
+    assert "2 of 3 records absent" in both[0]["message"]
+    assert _ROW_FOXGLOVE[:100] not in both[0]["evidence"]
+
+
+def test_unrendered_records_reads_a_sub_point_as_delivered_for_a_t_entry():
+    # #1205 + #1230: a T record offered as a tracked-deleted sub-point is
+    # delivered for review, not absent.
+    from unified_pipeline.doctor.shared import subpoint_text
+
+    stage4 = {"entries": [_entry("\n".join(_T_ROWS), start=9, taxonomy_code="T")]}
+    blocks = [("p", "APPENDIX")]
+    assert lint_unrendered_records(stage4, blocks, subpoint_text(list(_T_ROWS))) == []
+    one = lint_unrendered_records(stage4, blocks, subpoint_text([_ROW_SILVERLAKE, _ROW_FOXGLOVE]))
+    assert "1 of 3 records absent" in one[0]["message"]
+    assert one[0]["evidence"] == [_ROW_BLUERIDGE[:100]]
+
+
 def test_unrendered_records_reads_a_t_entry_as_stage_6_renders_it_after_the_pii_pass():
     # A referee's email is cut from an Appendix-bound entry, so the page holds
     # the residual of each line, not the line: not a loss (#1230).

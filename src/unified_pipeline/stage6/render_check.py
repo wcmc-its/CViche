@@ -352,18 +352,18 @@ def t_recovery_lines(text: str | None) -> list[str]:
     return kept
 
 
-def _line_carried(tokens: set[str], pooled: set[str],
-                  segment_tokens: list[set[str]], has_sibling: bool) -> bool:
+def _line_carried(tokens: set[str], pooled: set[str], has_sibling: bool) -> bool:
     """Whether a source line's `_record_tokens` survive the reply's segments.
 
-    A line with a near-duplicate sibling must sit WHOLE in one segment: the
-    sibling's segment carries nearly all of its tokens, so the pooled share
-    forgives a dropped row that differs from its sibling in one name, amount
-    or year (#1230). Any other line needs `RECLASSIFY_MIN_TOKEN_COVERAGE` of
-    its tokens in the pooled segment tokens.
+    A line with a near-duplicate sibling needs EVERY token in the pooled
+    segment tokens: the sibling's segment carries nearly all of them, so the
+    pooled share forgives a dropped row that differs from its sibling in one
+    name, amount or year (#1230). The row may be split across segments (the
+    prompt asks for one segment per responsibility); only a lost token fails.
+    Any other line needs `RECLASSIFY_MIN_TOKEN_COVERAGE` of its tokens.
     """
     if has_sibling:
-        return any(tokens <= segment for segment in segment_tokens)
+        return tokens <= pooled
     return len(tokens & pooled) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE
 
 
@@ -393,13 +393,12 @@ def segments_cover_source(segments: list[str], source_text: str) -> bool:
         carried.update(_RENDER_TOKEN_RE.findall(_norm(segment)))
     if len(source_tokens & carried) / len(source_tokens) < RECLASSIFY_MIN_TOKEN_COVERAGE:
         return False
-    segment_tokens = [_record_tokens(segment) for segment in segments]
-    pooled = set().union(*segment_tokens)
+    pooled = set().union(*(_record_tokens(segment) for segment in segments))
     lines = [line.strip() for line in str(source_text or "").split("\n") if line.strip()]
     counts = Counter(lines)
     all_line_tokens = [_record_tokens(line) for line in counts]
     return all(
-        _line_carried(tokens, pooled, segment_tokens, _has_sibling(tokens, all_line_tokens))
+        _line_carried(tokens, pooled, _has_sibling(tokens, all_line_tokens))
         for line, tokens in zip(counts, all_line_tokens, strict=True)
         if counts[line] == 1
         and len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) >= RENDER_TOKEN_MIN_COUNT)

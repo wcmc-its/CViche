@@ -596,7 +596,10 @@ class _TVouching(NamedTuple):
 def _as_rendered(entries: list[dict]) -> list[dict]:
     """Copies of stage-4 entries with the protected-data pass applied, as
     stage 6 sees them: a referee's email or phone is cut from a T entry before
-    it renders, so a line carrying one is not lost when the page lacks it."""
+    it renders, so a line carrying one is not lost when the page lacks it.
+    The pass sees the stage-4 code, not the one `generate()` routes to after
+    its reroutes (`normalize_retired_code` and the like), so a rerouted
+    entry's protected-data scope can differ from stage 6's."""
     seen = copy.deepcopy(entries)
     by_code: dict[str, list[dict]] = defaultdict(list)
     for entry in seen:
@@ -613,7 +616,7 @@ def _t_vouching(entries: list[dict], blocks: list[tuple[str, str]]) -> _TVouchin
              if line.strip()]
     by_code: dict[str, list[dict]] = defaultdict(list)
     for entry in entries:
-        by_code[entry.get("taxonomy_code")].append(entry)
+        by_code[entry.get("taxonomy_code") or "?"].append(entry)
     return _TVouching(
         [_record_tokens(line) for line in lines if not line.endswith(_TRUNCATION_MARKER)],
         [_record_tokens(line) for line in lines if line.endswith(_TRUNCATION_MARKER)]
