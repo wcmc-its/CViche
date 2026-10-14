@@ -1566,6 +1566,43 @@ def test_a_cell_label_at_another_number_does_not_make_this_one_a_cell(tmp_path):
     assert rows["Office address:"] == "1 Sample Way, Exampleton, ZZ 00000"
 
 
+@pytest.mark.parametrize("line, phone", [
+    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102 (home)", None),
+    ("555-555-0100 (work); 555-555-0101 (fax); 555-555-0102(home)", None),
+    # the home number shares only its last digits with the work number
+    ("555-555-0100 (work); 555-123-0100 (home)", "555-555-0100"),
+])
+def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
+        tmp_path, line, phone):
+    """YOXXOH-05: every label trails its number, and the "(home)" after the
+    last one sent the work number to the withheld home slot as well, so
+    Office telephone was empty and the whole line, home number included,
+    went to the Appendix."""
+    entries = [_a(f"TELEPHONE\t{line}", {"phone": phone or line})]
+
+    rows = _contact_rows(tmp_path, entries)
+
+    assert rows["Office telephone:"].startswith("555-555-0100")
+    home_number = line.rsplit("; ", 1)[1].removesuffix("(home)").strip()
+    assert home_number not in _render(tmp_path, entries)
+
+
+@pytest.mark.parametrize("text, phone", [
+    # the home label is this number's own
+    ("Phone: 555-555-0102 (home)", "555-555-0102"),
+    # the value still holds the home number beside the work one
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-555-0100; 555-555-0102"),
+    # a number straight after "(home)" may be the one it labels
+    ("555-555-0101 (home) 555-555-0102", "555-555-0102"),
+    # only a bare "(home)" is that number's label alone
+    ("555-555-0101 (home office); 555-555-0102", "555-555-0102"),
+    ("555-555-0101 (homephone); 555-555-0102", "555-555-0102"),
+])
+def test_a_home_label_the_value_may_own_still_withholds_it(tmp_path, text, phone):
+    rows = _contact_rows(tmp_path, [_a(text, {"phone": phone})])
+    assert rows["Office telephone:"] == ""
+
+
 def test_off_schema_street_and_phone_keys_fill_the_office_rows(tmp_path):
     """YYVHNN-02: stage 4 left `address` and `phone` null and set the parts
     under keys of their own."""
