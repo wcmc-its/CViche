@@ -40,8 +40,11 @@ to a specific bug fix:
     whole as a year-month date, and an "01/09" MM/YY date read as 2001-09.
     See the two sections after the century repair.
   - #1205 slice (a), EBYSBC class E12: a grant's own goal statement reached
-    `notes` for some grants and not for identical siblings. See the last
-    section.
+    `notes` for some grants and not for identical siblings.
+  - #1704: a month the source never gives ("(2022)" stored as 01/22), and a
+    title's first word left on the end of the organization. #1703: a title
+    in a parenthetical with its own years given the outer span. See the
+    last section.
 
 Self-contained: no LLM calls, no I/O, no PII.
 """
@@ -63,6 +66,7 @@ from unified_pipeline.stage4.coercion import (  # noqa: E402
     coerce_field_value_types,
     normalize_authors_vancouver,
     normalize_dates,
+    split_parenthetical_title_span,
 )
 
 # --- #3819054910: FTE decimal -> percent conversion ------------------------
@@ -1026,3 +1030,113 @@ def test_grant_goal_statement_left_alone_when_absent_or_ambiguous(text, fields):
 
     assert updated.get("notes") is None
     assert "notes" not in reformatted
+
+
+# --- #1704: unstated months; title word in the organization ------------------
+
+@pytest.mark.parametrize(
+    "text,fields,expected",
+    [
+        ("Example  Scientific Founder (2022), term sheets signed 8/2022. Closed in Sept. 2022.",
+         {"start_date": "01/22", "end_date": "09/22"}, {"start_date": "2022", "end_date": "09/22"}),
+        ("Example Pharma Founder (2017-2020)", {"start_date": "2017-01"}, {"start_date": "2017"}),
+        ("Example Pharma Founder (2017-2020)", {"start_date": "1/2017"}, {"start_date": "2017"}),
+    ],
+)
+def test_unstated_month_is_reduced_to_the_year(text, fields, expected):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "D3")
+
+    assert {key: updated[key] for key in expected} == expected
+    assert reformatted["start_date"]["original"] == fields["start_date"]
+
+
+def test_unstated_month_left_alone_outside_position_codes():
+    updated, _ = apply_regex_post_processing("Example mentee, MPH 2002", {"end_date": "2002-12"}, "N3B")
+
+    assert updated["end_date"] == "2002-12"
+
+
+@pytest.mark.parametrize(
+    "text,fields",
+    [
+        ("September 2013 - November 2014", {"start_date": "09/13", "end_date": "11/14"}),
+        ("7/00-5/10 Example Practice", {"start_date": "07/00", "end_date": "05/10"}),
+        ("July 2000-Sepember 2001: Lecturer", {"end_date": "2001-09"}),
+        ("01-03, 1995: Visiting Professor", {"start_date": "1995-01", "end_date": "1995-03"}),
+        ("03-08/2004 Instructor", {"start_date": "2004-03"}),
+        ("Year: September 2009 - June2010", {"end_date": "2010-06"}),
+        ("5//11, session chair", {"start_date": "2011-05"}),
+        ("Fall 2015 Example course", {"start_date": "2015-09"}),
+        # a full date's day range is not read here
+        ("3/13-20/2007 Lecture tour", {"start_date": "2007-03-13"}),
+        # the year is not in the text: the year repairs own that
+        ("Example Founder", {"start_date": "01/22"}),
+        # an earlier record of a multi-record entry has no text to judge by
+        ("", {"start_date": "01/22"}),
+    ],
+)
+def test_stated_or_unjudgeable_month_is_left_alone(text, fields):
+    updated, _ = apply_regex_post_processing(text, dict(fields), "D3")
+
+    assert {key: updated[key] for key in fields} == fields
+
+
+def test_title_first_word_is_taken_off_the_organization():
+    updated, reformatted = apply_regex_post_processing(
+        "Example  Scientific Founder (2022)",
+        {"organization": "Example Scientific", "title": "Scientific Founder"}, "D3")
+
+    assert updated["organization"] == "Example"
+    assert reformatted["organization"]["original"] == "Example Scientific"
+
+
+@pytest.mark.parametrize(
+    "text,fields,code",
+    [
+        # the word is written twice: it belongs to both
+        ("Boston Scientific, Scientific Advisor", {"organization": "Boston Scientific",
+                                                   "title": "Scientific Advisor"}, "D3"),
+        # the whole organization would go
+        ("Scientific Founder", {"organization": "Scientific", "title": "Scientific Founder"}, "D3"),
+        # not a position code
+        ("Example  Scientific Founder", {"organization": "Example Scientific",
+                                         "title": "Scientific Founder"}, "Q2"),
+    ],
+)
+def test_title_word_in_organization_left_alone(text, fields, code):
+    updated, _ = apply_regex_post_processing(text, dict(fields), code)
+
+    assert updated["organization"] == fields["organization"]
+
+
+# --- #1703: a parenthetical title with its own years -------------------------
+
+_PARENTHETICAL_TEXT = "7/00-5/10 Example Practice, Town ST (Managing Partner 2005-2010)"
+
+
+def test_parenthetical_title_takes_its_own_years():
+    item: ExtractedFields = {"title": "Managing Partner", "organization": "Example Practice",
+                             "start_date": "07/00", "end_date": "05/10"}
+    reformatted: ReformattedFields = {}
+
+    outer = split_parenthetical_title_span(_PARENTHETICAL_TEXT, item, reformatted)
+
+    assert (item["title"], item["start_date"], item["end_date"]) == ("Managing Partner", "2005", "2010")
+    assert outer == {"organization": "Example Practice", "start_date": "07/00", "end_date": "05/10"}
+    assert sorted(reformatted) == ["end_date", "start_date"]
+
+
+@pytest.mark.parametrize(
+    "text,item",
+    [
+        ("7/00-5/10 Example Practice (Managing Partner)",
+         {"title": "Managing Partner", "start_date": "07/00", "end_date": "05/10"}),
+        (_PARENTHETICAL_TEXT, {"title": "Managing Partner", "start_date": "2005", "end_date": "2010"}),
+        (_PARENTHETICAL_TEXT, {"title": "Physician", "start_date": "07/00", "end_date": "05/10"}),
+    ],
+)
+def test_parenthetical_title_span_left_alone(text, item):
+    before = dict(item)
+
+    assert split_parenthetical_title_span(text, item, {}) is None
+    assert item == before
