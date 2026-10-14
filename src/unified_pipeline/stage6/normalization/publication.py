@@ -45,8 +45,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
 
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
+
 from .authors import _normalize_author_names, carry_cv_suffixes
-from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_owner
+from .citation_matching import (
+    _append_missing_stage5d_values,
+    _insert_missing_stage5d_year,
+    _restore_stage5d_owner,
+)
 
 #: The value `extracted_fields['formatting_source']` carries when stage 5d's
 #: LLM wrote `formatted_citation`. It is the only source the renderer trusts
@@ -83,6 +89,8 @@ class PublicationFields(TypedDict, total=False):
     editors: str
     publisher: str
     year: str
+    #: Read only to place a group-filled year before a meeting's place (#1810).
+    location: str
     volume: str
     issue: str
     pages: str
@@ -188,6 +196,16 @@ def _resolved_authors(entry: dict[str, Any], fields: dict, enrichment: dict) -> 
     return _text(fields.get('authors'))
 
 
+def _group_filled_year(entry: dict[str, Any], fields: dict) -> str:
+    """The entry's year when stage 4 took it from the year group stage 3b
+    filed the line under (#1803), else ''. Only that year is put into a
+    stage-5d citation (#1810): 5d formatted the line, which has no year.
+    Any other year 5d left out may be one stage 4 misread, so it stays out."""
+    group_year = entry.get(GROUP_YEAR_KEY)
+    year = _scalar_text(fields.get('year'))
+    return year if year == group_year else ''
+
+
 def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     """Read one raw bibliography entry and return the record a renderer prints.
 
@@ -196,9 +214,11 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     which is why it is annotated as the mapping it is rather than a
     TypedDict that would describe only part of it. The keys taken here are
     `extracted_fields` (`PublicationFields`), `enrichment_data`
-    (`PubMedEnrichment`), `enriched_fields`, and `text` -- the CV's own
+    (`PubMedEnrichment`), `enriched_fields`, `text` -- the CV's own
     line, which the stage-5d owner restore reads when stage 4's author list
-    is damaged (#1259), coerced by `_text` like any other value.
+    is damaged (#1259), coerced by `_text` like any other value -- and
+    stage 3b's `GROUP_YEAR_KEY`, which says a year came from the line's
+    year group and not the line (#1810).
 
     Each is guarded with `or` and then a type check, not with a `.get`
     default (#659): a default only applies when the key is *absent*, so an
@@ -251,6 +271,8 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
             _text(fields.get('target_name')))
         formatted_citation = _append_missing_stage5d_values(
             formatted_citation, editors, publisher)
+        formatted_citation = _insert_missing_stage5d_year(
+            formatted_citation, _group_filled_year(entry, fields), _text(fields.get('location')))
     else:
         formatted_citation = ''
 
