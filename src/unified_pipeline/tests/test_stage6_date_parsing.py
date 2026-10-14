@@ -1064,8 +1064,10 @@ def test_a_year_month_item_is_one_date_not_a_range():
 
 
 def test_a_range_item_with_a_word_end_that_is_not_ongoing_stays_whole():
+    """One item, never a range ending in "Spring": it renders as the year
+    the season names (#1342), as "Spring 2022" already did."""
     fields = _spans(additional_dates="2022-Spring")
-    assert extra_date_spans(fields, "O") == ["2022-Spring"]
+    assert extra_date_spans(fields, "O") == ["2022"]
 
 
 def test_consecutive_years_of_an_envelope_read_back_as_ranges():
@@ -1236,4 +1238,54 @@ def test_further_date_spans_lists_every_span_once_without_an_own_range():
 
 def test_further_date_spans_is_empty_without_a_span_key():
     assert further_date_spans({"date": "2019"}, "R") == []
+
+
+# --- #1342: a season after the year, and a year start with a month end -------
+
+@pytest.mark.parametrize("date_str, expected", [
+    # Stage 4 stores a CV's "Summer 2020" year-first (YYVHNN 590-599).
+    ("2020-Summer", (2020, None, None)),
+    ("2019-Fall", (2019, None, None)),
+    ("2018 spring", (2018, None, None)),
+    ("2020 - Summer", (2020, None, None)),
+    # Not a season: still unread, as "Foo 2021" is.
+    ("2020-Foo", (None, None, None)),
+    # Not a four-digit year, or more after the season: unread.
+    ("12-Fall", (None, None, None)),
+    ("2020-Summer 2021", (None, None, None)),
+])
+def test_a_season_after_the_year_keeps_the_year(date_str, expected):
+    assert _parse_date_components(date_str) == expected
+
+
+def test_a_season_after_the_year_renders_and_sorts_as_its_year():
+    assert format_date_for_section("2020-Summer", "B2") == "2020"
+    assert format_date_range("2007-Summer", "2008-Spring", "K2") == "2007-2008"
+    assert _sort("2019-Fall") == (2019, 1, 1)
+
+
+@pytest.mark.parametrize("start, end, code, expected", [
+    # GKAQHB N5: 2016 to June 2018 read "2016-06/18", an ISO month and a year.
+    ("2016", "2018-06", "D3", "2016-2018"),
+    ("2014", "2018-06", "M2B", "2014-2018"),
+    ("2016", "2018-06", "B1", "2016-2018"),
+    # The end's year is the start's: one year.
+    ("2018", "2018-06", "D3", "2018"),
+])
+def test_a_year_start_renders_its_month_end_as_a_year(start, end, code, expected):
+    assert format_date_range(start, end, code) == expected
+
+
+@pytest.mark.parametrize("start, end, code, expected", [
+    # A start with a month, or an end with none, already reads as a range.
+    ("2016-03", "2018", "D3", "03/16-2018"),
+    ("2016-03", "2018-06", "D3", "03/16-06/18"),
+    ("2016", "present", "D3", "2016-Present"),
+    ("2016", "2018", "D3", "2016-2018"),
+    # A start that is not a four-digit year alone keeps the end's month.
+    ("16", "2018-06", "D3", "16-06/18"),
+    ("2016-ish", "2018-06", "D3", "2016-ish-06/18"),
+])
+def test_a_range_whose_start_has_a_month_or_end_has_none_is_unchanged(start, end, code, expected):
+    assert format_date_range(start, end, code) == expected
 

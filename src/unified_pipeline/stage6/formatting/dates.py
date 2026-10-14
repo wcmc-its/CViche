@@ -52,9 +52,10 @@ logger = logging.getLogger(__name__)
 # entry's text, and decides the D1 rank ladder and the latest D1 rank there), O and Q1 (leadership posts held for a term), I
 # (memberships are ongoing), Q4/Q4A/Q4B/Q4C (editorial posts held for a
 # term), and Q4D (a journal reviewer lists the year reviewing began).
-# H, R and K4 reach no `format_date_range` caller today -- their renderers
+# H and R reach no `format_date_range` caller today -- their renderers
 # format a single date -- so for them this set only fixes what a future
-# range caller would print.
+# range caller would print. K4 reaches one: teaching.py's `_with_open_end`
+# asks it whether a lone date's source leaves the date open (#1342).
 # A member renders the bare start even when its caller passes no source text.
 # Every other code gets the same rule wherever its caller does pass the
 # entry's text: a start with no end is that year alone, unless the source
@@ -253,6 +254,29 @@ def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
     return date_str
 
 
+# A formatted date that is a year alone.
+_FORMATTED_YEAR_ONLY_RE = re.compile(r'\d{4}')
+
+
+def _end_at_start_precision(formatted_start: str, formatted_end: str,
+                            end_date: object) -> str:
+    """`formatted_end` as its year alone when the start is a year alone.
+
+    A year start and a month end joined by the range dash read as one ISO
+    month and a stray year: "2016-06/18" for 2016 to June 2018 (RCBKFG
+    GKAQHB N5, D3 61 and grant 211, #1342). Both ends at the start's
+    precision read as the range they are, "2016-2018". The month the end
+    loses is the only thing dropped; a start with a month keeps both
+    ("03/16-2018" reads right). An end with no year ("present", "TBD")
+    is left as formatted.
+    """
+    if _FORMATTED_YEAR_ONLY_RE.fullmatch(formatted_start):
+        end_year = _parse_date_components(str(end_date).strip())[0]
+        if end_year:
+            return str(end_year)
+    return formatted_end
+
+
 def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
                       source_text: str = '') -> str:
     """
@@ -276,7 +300,9 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
         Formatted date range string (e.g., "08/17-07/21" or "2017-Present")
     """
     formatted_start = format_date_for_section(start_date, taxonomy_code)
-    formatted_end = format_date_for_section(end_date, taxonomy_code, is_end_date=True)
+    formatted_end = _end_at_start_precision(
+        formatted_start, format_date_for_section(end_date, taxonomy_code, is_end_date=True),
+        end_date)
 
     if formatted_start and formatted_end:
         # Avoid redundant ranges like "2024-2024" when both resolve to the same string

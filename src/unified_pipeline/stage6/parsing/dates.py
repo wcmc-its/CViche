@@ -168,6 +168,12 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
         if token in _SEASON_TOKENS:
             return (year, None, None)
         return (None, None, None)
+    # YYYY-Season / YYYY Season -- the year first, as stage 4 sometimes stores
+    # a CV's "Summer 2020" ("2020-Summer", EBYSBC YYVHNN 590-599, #1342).
+    # Read like "Fall 2016" above; unread, it rendered as the raw value.
+    m = re.fullmatch(r'(\d{4})[-\s]+([a-zA-Z]+)', s)
+    if m and m.group(2).lower() in _SEASON_TOKENS:
+        return (int(m.group(1)), None, None)
     return (None, None, None)
 
 
