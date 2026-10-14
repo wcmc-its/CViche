@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 
 interface LogViewerProps {
   logs: string[]
-  logsEndRef: React.RefObject<HTMLDivElement>
+  logsEndRef: React.RefObject<HTMLDivElement | null>
 }
 
 // Lines arrive as "[HH:MM:SS] message" (usePipelineRun formats them).
