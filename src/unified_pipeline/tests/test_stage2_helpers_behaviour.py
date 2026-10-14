@@ -5,7 +5,8 @@ split_merged_row_into_pseudo_rows, extract_leaf_sections_with_boundaries,
 collect_header_indices, collect_header_info, remove_subset_delimiters,
 recover_unclaimed_table_rows, _dedup_idx_key, filter_extraction_noise,
 fold_labelled_detail_entries (#986), collect_unlocated_headings and
-promote_unlocated_headings (autopsy 2026-10-02 class 6), _entry_sort_key.
+promote_unlocated_headings (autopsy 2026-10-02 class 6), _entry_sort_key,
+merge_overlapping_spans (#1433).
 
 The first seven of those have NO existing coverage anywhere in the test
 suite. The last four (remove_subset_delimiters, recover_unclaimed_table_rows,
@@ -861,6 +862,74 @@ def test_remove_subset_delimiters_true_subset_of_dotted_range_still_removed():
     assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
         ("9.0", "9.3"),
     ]
+
+
+# ------------------------------------------------------ merge_overlapping_spans
+
+def _lines(first, last, blank=()):
+    """An element_index_map of paragraphs ``first``..``last`` reading "L<idx>";
+    the indices in ``blank`` are empty lines."""
+    return {i: {"type": "paragraph", "text": "" if i in blank else f"L{i}"} for i in range(first, last + 1)}
+
+
+def _spans(entries):
+    return [(e["element_idx_start"], e["element_idx_end"]) for e in entries]
+
+
+def test_merge_overlapping_spans_collapses_sliding_windows_over_a_flattened_table():
+    """#1433: a dates column then a roles column, returned as three windows
+    each two lines later. One entry holds every line once, blanks skipped."""
+    lines = _lines(10, 22, blank=(11, 13, 15, 17, 19))
+    del lines[21]  # a line the map does not hold is skipped, like a blank one
+    windows = [{**_d(10, 18, "w1"), "confidence": 0.7, "gap_filled": True}, _d(12, 20, "w2"), _d(14, 22, "w3")]
+    merged = stage2.merge_overlapping_spans(windows, lines)
+    assert merged == [{"element_idx_start": 10, "element_idx_end": 22, "confidence": 0.7, "gap_filled": True,
+                       "text": "L10\tL12\tL14\tL16\tL18\tL20\tL22"}]
+
+
+def test_merge_overlapping_spans_two_spans_sharing_two_lines_become_one():
+    assert _spans(stage2.merge_overlapping_spans([_d(57, 59), _d(58, 60)], _lines(57, 60))) == [(57, 60)]
+
+
+def test_merge_overlapping_spans_two_spans_sharing_one_line_become_one():
+    assert _spans(stage2.merge_overlapping_spans([_d(27, 29), _d(29, 30)], _lines(27, 30))) == [(27, 30)]
+
+
+def test_merge_overlapping_spans_leaves_adjacent_spans_and_untouched_entries_alone():
+    entries = [_d(1, 3, "a"), _d(4, 6, "b"), _d(8, 8, "c")]
+    assert stage2.merge_overlapping_spans(entries, _lines(1, 8)) == entries
+
+
+def test_merge_overlapping_spans_never_merges_a_table_row_or_into_one():
+    """Only int (paragraph) spans merge: a table-row span neither absorbs the
+    paragraph after it nor is absorbed by the one before it."""
+    entries = [_d(5, 9, "para"), _d("7.1", "7.2", "row"), _d(8, 10, "para after row")]
+    assert stage2.merge_overlapping_spans(entries, _lines(5, 10)) == entries
+    rows_first = [_d("7.1", "7.2", "row"), _d(7, 9, "para")]
+    assert stage2.merge_overlapping_spans(rows_first, _lines(7, 9)) == rows_first
+    table_first = [_d("table_5", 9, "whole table, the model wrote an int end"), _d(8, 10, "para")]
+    assert stage2.merge_overlapping_spans(table_first, _lines(8, 10)) == table_first
+
+
+def test_merge_overlapping_spans_never_merges_a_row_or_table_after_a_paragraph():
+    """A row or whole-table span with an int end, after a paragraph span it
+    would overlap, stays as it is (its string start is never compared)."""
+    for later in (_d("table_5", 9, "table"), _d("9.1", 9, "mixed row")):
+        entries = [_d(5, 9, "para"), later]
+        assert stage2.merge_overlapping_spans(entries, _lines(5, 9)) == entries
+
+
+def test_merge_overlapping_spans_merges_each_group_into_its_own_start():
+    """#1433 XUTTKJ: several overlap groups in one section, after a span that
+    overlaps nothing. Each group merges into its own first span."""
+    entries = [_d(140, 142), _d(148, 151), _d(149, 152), _d(157, 160), _d(158, 161), _d(159, 162),
+               _d(163, 166), _d(164, 170), _d(171, 174), _d(173, 176)]
+    assert _spans(stage2.merge_overlapping_spans(entries, _lines(140, 176))) == [
+        (140, 142), (148, 152), (157, 162), (163, 170), (171, 176)]
+
+
+def test_merge_overlapping_spans_empty_input():
+    assert stage2.merge_overlapping_spans([], {}) == []
 
 
 # ------------------------------------------------ recover_unclaimed_table_rows

@@ -1469,21 +1469,52 @@ def _validated_entries(
         if not isinstance(start_idx, int) or not isinstance(end_idx, int):
             continue
         if start_idx >= start_elem_idx and end_idx <= end_elem_idx:
-            # Extract full text for all elements in the entry range
-            full_text_parts = []
-            for idx in range(start_idx, end_idx + 1):
-                if idx in element_index_map:
-                    elem_text = get_element_text(element_index_map[idx])
-                    if elem_text:
-                        full_text_parts.append(elem_text)
             entries.append({
                 "element_idx_start": start_idx,
                 "element_idx_end": end_idx,
                 "element_type": delim.get("element_type", "paragraph"),
                 "confidence": delim.get("confidence", 1.0),
-                "text": "\t".join(full_text_parts)  # Tab-separated for compact format
+                "text": _paragraph_span_text(start_idx, end_idx, element_index_map),
             })
     return entries, claimed_row_keys
+
+
+def _paragraph_span_text(start_idx: int, end_idx: int, element_index_map: dict) -> str:
+    """The non-empty texts of the elements ``start_idx``..``end_idx``
+    (inclusive), tab-separated for compact format."""
+    texts = (get_element_text(element_index_map[idx])
+             for idx in range(start_idx, end_idx + 1) if idx in element_index_map)
+    return "\t".join(text for text in texts if text)
+
+
+def _starts_inside(entry: dict, prev: dict) -> bool:
+    """Both are paragraph spans and ``entry`` starts on or before ``prev``'s
+    last line. An int start means a paragraph span: a table row's or a whole
+    table's start is a string, and an int start always pairs with an int end."""
+    paragraphs = isinstance(prev["element_idx_start"], int) and isinstance(entry["element_idx_start"], int)
+    return paragraphs and entry["element_idx_start"] <= prev["element_idx_end"]
+
+
+def merge_overlapping_spans(entries: list[dict], element_index_map: dict) -> list[dict]:
+    """``entries`` (sorted by start, as remove_subset_delimiters returns them)
+    with each paragraph span that starts inside the one before it merged into
+    that one: the earlier start, the later end, the text of the whole range.
+
+    Over a flattened table (a column of dates, then a column of roles) the
+    model can return sliding windows -- 598-606, 600-608, 602-610, each one
+    two lines later (#1433). None contains another, so remove_subset_delimiters
+    keeps all three: the shared lines then render in two or three records and
+    the dates pair with the wrong roles. The merged entry holds each line
+    once; stage 4 splits it into its records."""
+    merged: list[dict] = []
+    for entry in entries:
+        if merged and _starts_inside(entry, merged[-1]):
+            prev, end = merged[-1], entry["element_idx_end"]  # no subsets left: ends only grow
+            merged[-1] = {**prev, "element_idx_end": end,
+                          "text": _paragraph_span_text(prev["element_idx_start"], end, element_index_map)}
+        else:
+            merged.append(entry)
+    return merged
 
 
 @dataclass
@@ -1665,8 +1696,9 @@ def detect_entries_for_section(
     entries, cost_info = _detect_in_batches(
         section_elements, full_hierarchy, start_elem_idx, end_elem_idx, element_index_map, unlocated_headings)
 
-    # Remove subset/duplicate entries from all batches
-    return remove_subset_delimiters(entries), cost_info
+    # Remove subset/duplicate entries from all batches, then merge the
+    # overlapping windows that survive it (#1433)
+    return merge_overlapping_spans(remove_subset_delimiters(entries), element_index_map), cost_info
 
 
 # Detail-line fold (#986). A dateless line that opens with one of these labels
