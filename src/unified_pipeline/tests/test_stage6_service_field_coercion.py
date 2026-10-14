@@ -1293,6 +1293,8 @@ def test_q2_committee_name_wins_over_topic():
     # parenthesis alone as the cell (REOYVH 218 shape).
     ("1997-2000 Zqtutor (Organic Zqchem, Physical Zqchem)", "Zqtutor", "1997", "2000",
      "Zqtutor (Organic Zqchem, Physical Zqchem)"),
+    # A role is cut only as a whole word: "Chair" ends "Wheelchair".
+    ("Fictional Wheelchair", "Chair", "2019", "2020", "Fictional Wheelchair"),
 ])
 def test_line_without_shown_role_and_dates(text, role, start, end, expected):
     """#1346: what a P or Q2 row's fallback line holds beyond the role and

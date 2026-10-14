@@ -17,6 +17,7 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -492,3 +493,11 @@ def test_untitled_talk_drops_the_bracketed_piece_of_its_event():
                           date="2019-05-01", event_name="Zqfib Roundtable (ZZ chapter)",
                           location="Northgate Hall")
     assert cells == ["Zqfib Roundtable (ZZ chapter)", "Northgate Hall", "2019"]
+
+
+@pytest.mark.parametrize("label", ["Invited lecture", "Invited presentation"])
+def test_untitled_talk_counts_lecture_and_presentation_as_label_words(label):
+    """'lecture' and 'presentation' are talk labels like 'talk' (#1346)."""
+    cells = _untitled_row(f"2019 Zq Event, Zq Hall. {label}.", date="2019",
+                          role="Speaker", event_name="Zq Event", location="Zq Hall")
+    assert cells[0] == f"Speaker, Zq Event, {label}"
