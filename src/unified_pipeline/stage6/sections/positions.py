@@ -81,6 +81,18 @@ CellContent = list[tuple[str, bool, str]]
 POSITION_TAXONOMY_CODES = ('D1', 'D2', 'D3')
 ACADEMIC_APPOINTMENT_CODE, HOSPITAL_APPOINTMENT_CODE, OTHER_POSITION_CODE = POSITION_TAXONOMY_CODES
 
+# Personal/Contact Information. A header contact block ("Professor, Department
+# of ..., University of ...") is coded A, and may be the only place a CV states
+# the owner's appointment (#1697). `_contact_block_appointments` renders its
+# title as an Academic Appointments row when no position row already names it.
+CONTACT_BLOCK_CODE = 'A'
+# The A fields that go with its title into the appointment row: the rest of an
+# A record is contact data (email, phone, address) and never reaches a
+# position table.
+_CONTACT_EMPLOYER_FIELDS = ('department', 'institution')
+# Where one contact-block `title` string separates two posts.
+_CONTACT_TITLE_SEPARATOR_RE = re.compile(r'[\n\t;]')
+
 # A start-only D row renders "<start>-Present" only when its source text
 # leaves that year open ("2019 -", "2019 - present"), else the bare start
 # (#1342, decision 2026-10-02, superseding #946's 2026-09-24 one). The CV's
@@ -367,6 +379,64 @@ def _crosses_source_boundary(donor: dict, entry: dict) -> bool:
     entry_table = entry.get('table_index')
     return (donor_table is not None and entry_table is not None
             and donor_table != entry_table)
+
+
+def _title_key(title: str) -> str:
+    """`title` for a compare: lowercased, whitespace collapsed, edge
+    punctuation dropped."""
+    return ' '.join(title.split()).strip(' .,;:').lower()
+
+
+def _contact_titles(title: object) -> list[str]:
+    """The titles one A record's `title` field holds: each string of a list,
+    or a string split at a line break, tab or semicolon -- a contact block
+    can state two posts ("Professor of X; Director of Y")."""
+    values = title if isinstance(title, list) else [title]
+    return [part.strip() for value in values if isinstance(value, str)
+            for part in _CONTACT_TITLE_SEPARATOR_RE.split(value) if _title_key(part)]
+
+
+def _named_elsewhere(key: str, position_titles: set[str], other_texts: list[str]) -> bool:
+    """True when a position record's title is `key`, or another record's
+    text holds it as whole words: the CV already renders that post, as an
+    appointment or in another section (a leadership role, say)."""
+    pattern = re.compile(r'(?<!\w)' + re.escape(key) + r'(?!\w)')
+    return key in position_titles or any(pattern.search(text) for text in other_texts)
+
+
+def _contact_block_appointments(contact_entries: list[dict],
+                                other_entries: list[dict]) -> list[dict]:
+    """One new D1 record per title an A record states that the rest of the CV
+    does not (#1697).
+
+    *other_entries* is every non-A record. A title is dropped when a D1, D2
+    or D3 record's title equals it after `_title_key`, or any record's text
+    holds it (`_named_elsewhere`); two A records with one title add one row.
+
+    The new record carries only the A record's title, department and
+    institution (`_CONTACT_EMPLOYER_FIELDS`), never its text, so no contact
+    line can reach the table. The A records are not modified.
+    """
+    position_titles = {_title_key(PositionsSection._position_title(entry))
+                       for entry in other_entries
+                       if entry.get('taxonomy_code') in POSITION_TAXONOMY_CODES}
+    other_texts = [_title_key(entry.get('text') or '') for entry in other_entries]
+    rows = []
+    for entry in contact_entries:
+        fields = entry.get('extracted_fields') or {}
+        for title in _contact_titles(fields.get('title')):
+            if _named_elsewhere(_title_key(title), position_titles, other_texts):
+                continue
+            position_titles.add(_title_key(title))
+            appointment = {key: fields[key] for key in _CONTACT_EMPLOYER_FIELDS
+                           if isinstance(fields.get(key), str) and fields[key].strip()}
+            rows.append({
+                'taxonomy_code': ACADEMIC_APPOINTMENT_CODE,
+                'element_idx_start': entry.get('element_idx_start'),
+                'text': '',
+                'extracted_fields': {'title': title, **appointment},
+            })
+    return rows
 
 
 def _entry_employer(entry: dict) -> str:
@@ -1009,6 +1079,11 @@ class PositionsSection:
             if merged is not entry_list:
                 entry_list[:] = merged
                 entries_by_code[code] = entry_list
+        # An appointment stated only in the header contact block (#1697).
+        d1_entries = d1_entries + _contact_block_appointments(
+            entries_by_code.get(CONTACT_BLOCK_CODE, []),
+            [entry for code, entries in entries_by_code.items() if code != CONTACT_BLOCK_CODE
+             for entry in entries])
 
         total_positions = len(d1_entries) + len(d2_entries) + len(d3_entries)
         if self.verbose:
