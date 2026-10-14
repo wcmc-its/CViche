@@ -297,6 +297,8 @@ def extract_leaf_sections_with_boundaries(
 def collect_header_indices(hierarchy_with_indices: list[dict]) -> set:
     """
     Recursively collect all element indices that are section/subsection headers.
+    A run-in heading's line is left out: it also holds the section's first
+    record, which stage 2 must extract (#1252).
 
     Args:
         hierarchy_with_indices: Hierarchy structure from Stage 1b with element_idx
@@ -308,7 +310,7 @@ def collect_header_indices(hierarchy_with_indices: list[dict]) -> set:
 
     def walk_hierarchy(items):
         for item in items:
-            if "element_idx" in item and item["element_idx"] is not None:
+            if item.get("element_idx") is not None and not item.get("run_in"):
                 header_indices.add(item["element_idx"])
             if "children" in item:
                 walk_hierarchy(item["children"])

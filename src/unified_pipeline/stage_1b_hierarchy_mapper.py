@@ -17,6 +17,7 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 
 import bisect
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -63,6 +64,7 @@ class MappedNode(TypedDict):
     level: str
     element_idx: int | None
     synthetic: bool
+    run_in: NotRequired[bool]  # True when the line also holds the first record (#1252)
     children: NotRequired[list[MappedNode]]
 
 
@@ -103,6 +105,15 @@ def normalize_text(text: str) -> str:
 # listed so the set reads as the separators a CV uses, not as what survives
 # normalization.
 _LEADING_SEPARATOR_CHARS = "*-_= "
+
+# A run-in heading shares its line with the section's first record, set apart
+# by two or more blanks in a row ("EDUCATION<tab><tab>Pharm.D., ..."; the
+# extractor reads each tab as a space). The strict 3x length cap rejected the
+# whole line, so the heading went unplaced and its section's records folded
+# into the section before (#1252). Splitting at the first two blanks leaves
+# the heading as the head.
+_RUN_IN_GAP = re.compile(r"\s\s")
+
 
 # Element types that can carry a header line (from extract_unified_elements).
 _HEADER_LINE_TYPES = ("paragraph", "table_header")
@@ -171,6 +182,17 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     return False
 
 
+def _is_run_in_line(expected_header: str, line_text: str) -> bool:
+    """True when the line is the header, a gap of two or more blanks, then
+    text the strict match finds too long for a heading: the section's first
+    record (#1252). A line the strict match already accepts is not one."""
+    head = _RUN_IN_GAP.split(line_text.lstrip(_LEADING_SEPARATOR_CHARS))[0]
+    return (
+        normalize_text(head) == expected_header
+        and not is_header_match(expected_header, normalize_text(line_text), strict=True)
+    )
+
+
 def _find_header_element(
     elements: list[dict[str, Any]],
     expected_header: str,
@@ -216,7 +238,10 @@ def _find_header_element(
             return found
         if exact_only or found[1] < partial_floor or para_text in excluded_headers:
             continue
-        if first_partial is None and is_header_match(expected_header, para_text, strict=True):
+        if first_partial is None and (
+            is_header_match(expected_header, para_text, strict=True)
+            or _is_run_in_line(expected_header, elem_text)
+        ):
             if len(para_text) > len(expected_header):
                 # The header sits inside a longer paragraph: the old
                 # first-match behaviour, no exact paragraph is sought.
@@ -450,6 +475,10 @@ def map_hierarchy_node(
         "element_idx": element_idx,
         "synthetic": is_synthetic
     }
+    if element_idx is not None and _is_run_in_line(
+        normalize_text(node_text), elements[element_idx]["text"]
+    ):
+        mapped_node["run_in"] = True
 
     # Track where to search next
     next_search_idx = element_idx + 1 if element_idx is not None else start_search_idx
