@@ -911,6 +911,23 @@ def test_merge_overlapping_spans_never_merges_a_table_row_or_into_one():
     assert stage2.merge_overlapping_spans(table_first, _lines(8, 10)) == table_first
 
 
+def test_merge_overlapping_spans_never_merges_a_row_or_table_after_a_paragraph():
+    """A row or whole-table span with an int end, after a paragraph span it
+    would overlap, stays as it is (its string start is never compared)."""
+    for later in (_d("table_5", 9, "table"), _d("9.1", 9, "mixed row")):
+        entries = [_d(5, 9, "para"), later]
+        assert stage2.merge_overlapping_spans(entries, _lines(5, 9)) == entries
+
+
+def test_merge_overlapping_spans_merges_each_group_into_its_own_start():
+    """#1433 XUTTKJ: several overlap groups in one section, after a span that
+    overlaps nothing. Each group merges into its own first span."""
+    entries = [_d(140, 142), _d(148, 151), _d(149, 152), _d(157, 160), _d(158, 161), _d(159, 162),
+               _d(163, 166), _d(164, 170), _d(171, 174), _d(173, 176)]
+    assert _spans(stage2.merge_overlapping_spans(entries, _lines(140, 176))) == [
+        (140, 142), (148, 152), (157, 162), (163, 170), (171, 176)]
+
+
 def test_merge_overlapping_spans_empty_input():
     assert stage2.merge_overlapping_spans([], {}) == []
 
