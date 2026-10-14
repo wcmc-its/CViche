@@ -30,7 +30,8 @@ What is deliberately NOT fanned out:
   raw text would be lost;
 - an entry a stage-5 formatter already rendered whole (`formatted_text` /
   `formatted_citation`), which would repeat that rendering on every child;
-- an entry whose text has a token no rendered field holds (`_fields_carry_text`);
+- an entry whose text has a token no rendered field holds (`_fields_carry_text`),
+  except a code that writes no text at all (`_NO_TEXT_COVERAGE_CODES`, B1);
 - an entry that carries more than one such list, or an item that carries a key
   outside the schema next to schema keys (web228's K4 `sessions: [{date, title,
   duration}]`: `title` is the session's own name and no K4 renderer reads it, so
@@ -320,7 +321,23 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
 # Codes that keep the entry's text (K2/K4 refuse to split by design) lose
 # nothing to a declined list; warning on them put 31 false alarms in 16
 # corpus CVs.
-_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1', 'D1', 'D2', 'D3', 'F1', 'I', 'Q1', 'Q2'})
+# H, O, P, Q3 and R were silent. Their sections write the parent's fields and
+# nothing from a list left whole: on the 302-CV render set P's `committees`
+# and R's `additional_presentations` values are absent from the document, and
+# H's `dates` / O's `additional_dates` hold spans no parent field carries.
+# Q3 has no corpus case; its section is the same fields-only kind.
+_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({
+    'B1', 'D1', 'D2', 'D3', 'F1', 'H', 'I', 'O', 'P', 'Q1', 'Q2', 'Q3', 'R'})
+
+# #1187: a code whose section writes none of an entry's text and none of a
+# record list left whole, so `_fields_carry_text` has nothing to protect: the
+# words no field holds are missing from the document whether the entry fans
+# out or not, and declining only loses the records too. B1:
+# `sections/education.py` writes a row from the degree and institution fields
+# and nothing from the text. Four corpus entries (`degrees` lists whose text
+# names a section label such as "Graduate:" or a country or city no B1 field
+# holds) were kept whole by that test and lost every degree in them.
+_NO_TEXT_COVERAGE_CODES = frozenset({'B1'})
 
 # Date fields a section writes on top of its `_RENDERED_FIELDS`, which names
 # schema fields only: stage 4 emits these from the active (config-file) schema
@@ -950,7 +967,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str],
     records = ([_own_values(scalars, items)] if own else []) \
         + [dict(item) for item in items]
     child_fields = [{**copy.deepcopy(scalars), **copy.deepcopy(record)} for record in records]
-    if not _fields_carry_text(entry, child_fields):
+    if str(entry.get('taxonomy_code')) not in _NO_TEXT_COVERAGE_CODES \
+            and not _fields_carry_text(entry, child_fields):
         return None
     texts = _child_texts(entry.get('text'), records)
     built = _texts_are_built(entry.get('text'), records)

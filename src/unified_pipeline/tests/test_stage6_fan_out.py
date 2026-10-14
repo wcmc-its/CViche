@@ -588,13 +588,30 @@ class TestB1DatesAttended:
         # never writes the string, so its tokens are not held.
         entry = _two_degrees([{'dates_attended': '2001-2005', 'start_date': '2005'},
                               {'dates_attended': '2006-2008', 'start_date': '2008'}])
-        assert _fan(entry) == [entry]
+        children = [dict(item) for item in entry['extracted_fields']['degrees']]
+        assert not fan_out._fields_carry_text(entry, children)
 
     def test_discipline_is_a_rendered_field_so_a_degree_with_one_fans_out(self):
         entry = _two_degrees(_NESTED_DATES)
         entry['text'] += ' Zzfield'
         entry['extracted_fields']['degrees'][0]['discipline'] = 'Zzfield'
         assert [c['extracted_fields']['degree'] for c in _fan(entry)] == ['BSc', 'MSc']
+
+    def test_a_section_label_and_a_place_no_field_holds_do_not_keep_the_degrees_whole(self):
+        # B1 writes no text, so declining on a word no field holds lost the
+        # degrees too (#1187: four corpus entries).
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'
+        children = _fan(entry)
+        assert [c['extracted_fields']['degree'] for c in children] == ['BSc', 'MSc']
+
+    def test_another_code_still_keeps_an_entry_whole_for_a_word_no_field_holds(self):
+        entry = {'taxonomy_code': 'Q2', 'element_idx_start': 3,
+                 'text': 'Zzlabel: Alpha Council 2001\tBeta Council 2004',
+                 'extracted_fields': {'committees': [
+                     {'committee_name': 'Alpha Council', 'start_date': '2001'},
+                     {'committee_name': 'Beta Council', 'start_date': '2004'}]}}
+        assert _fan(entry) == [entry]
 
     def test_both_degrees_render(self, tmp_path):
         import json
@@ -630,7 +647,7 @@ class TestRejectedListWarning:
 
     def test_a_declined_record_list_warns_without_stray_keys(self):
         entry = _two_degrees([{}, {}])
-        entry['text'] = entry['text'] + ' Zzunheld'
+        entry['extracted_fields']['formatted_text'] = 'Rendered whole by stage 5c'
         (warning,) = self._warnings(entry)
         assert warning['evidence'] == ['B1.degrees: 1 entry']
 
@@ -1129,7 +1146,11 @@ class TestDeclinedListWarnsForEveryFieldRenderedCode:
         ('D1', {'title': 'Instructor'}), ('D2', {'title': 'Attending'}),
         ('D3', {'title': 'Consultant'}), ('F1', {'state_country': 'Arden'}),
         ('I', {'organization': 'Glade Society'}), ('Q1', {'role': 'Chair'}),
-        ('Q2', {'committee_name': 'Alpha Council'})])
+        ('Q2', {'committee_name': 'Alpha Council'}),
+        # Silent until #1187: each writes the parent's fields and none of a list.
+        ('H', {'award_name': 'Glade Prize'}), ('O', {'institution': 'Glade Hospital'}),
+        ('P', {'committee_name': 'Glade Board'}), ('Q3', {'panel_name': 'Glade Panel'}),
+        ('R', {'event_name': 'Glade Meeting'})])
     def test_a_declined_list_warns(self, code, list_item):
         entry = {'taxonomy_code': code, 'text': 'Zzunheld prose no field carries',
                  'extracted_fields': {'records': [dict(list_item), dict(list_item)]}}
