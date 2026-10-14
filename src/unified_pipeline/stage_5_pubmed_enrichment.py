@@ -88,6 +88,15 @@ NCBI_MAX_IDS_PER_REQUEST = 200
 # least this long after the failure.
 PMCID_RERUN_PAUSE_SECONDS = 15.0
 
+# An efetch request that fails after its retries is split in half and each
+# half fetched, down to this many ids (#1387): one PMID that breaks a batch,
+# or a response NCBI cuts off, then costs a few entries instead of 200.
+EFETCH_SPLIT_FLOOR = 25
+
+# PMID- and DOI-path entries an NCBI error (not a no-match) left unenriched
+# are looked up once more at the end of stage 5, after this pause (#1387).
+SECOND_PASS_PAUSE_SECONDS = 30.0
+
 # Minimum share of the shorter title's words that the PubMed record's title
 # must share with the source title before the record replaces the citation
 # (#1043). Over 105 local CVs, every wrong-paper substitution scored below 0.4
@@ -607,6 +616,12 @@ class PubMedEnricher:
     - DOI (via esearch)
     """
 
+    # Circuit breaker: until NCBI answers one request it is down, and the
+    # efetch split and the second pass would only add retry waits that can
+    # push the stage past the orchestrator's stage timeout (#1387). Set on the
+    # instance by the first answered request.
+    _ncbi_answered = False
+
     def __init__(self, api_key: str | None = None, verbose: bool = True):
         self.api_key = api_key or NCBI_API_KEY
         self.verbose = verbose
@@ -635,6 +650,8 @@ class PubMedEnricher:
             'in_press_resolved': 0,
             'in_press_duplicates': 0,
             'in_press_promoted': 0,
+            'second_pass_recovered': 0,
+            'second_pass_failed': 0,
         }
 
         # (operation, status/exception) classes already logged at ERROR this run
@@ -642,6 +659,11 @@ class PubMedEnricher:
 
         # This document's accepted records, for _release_weaker_shared_pmids
         self._acceptances: list[_Acceptance] = []
+
+        # PMIDs whose efetch failed, and DOI-path entries an API error left
+        # unenriched: the second pass's work (_retry_api_failures).
+        self._efetch_failed: set[str] = set()
+        self._doi_api_failed: list[tuple[dict, str]] = []
 
     def enrich_stage4_output(self, stage4_path: str) -> dict[str, Any]:
         """
@@ -724,6 +746,7 @@ class PubMedEnricher:
             enriched_entries.extend(self._enrich_by_pmid(by_pmid))
             if self.verbose:
                 logger.info("[%d/%d] publications looked up", len(by_pmid), progress_total)
+        pmid_api_failed = [(entry, pmid) for entry, pmid in by_pmid if pmid in self._efetch_failed]
 
         # 2. PMCID conversions then lookup
         if by_pmcid:
@@ -750,6 +773,11 @@ class PubMedEnricher:
         # path has given idconv's throttle time to clear. Before 4b, so a
         # record the re-run accepts is checked for a shared PMID too.
         self._rerun_failed_pmcid_lookups(by_pmcid)
+
+        # 4a'. The same for PMID and DOI entries an NCBI error left
+        # unenriched. Before 4b, so a DOI the re-run finds absent from PubMed
+        # is title-searched.
+        self._retry_api_failures(pmid_api_failed, progress_total)
 
         # 4b. Articles still without a record: guarded title search (#1598).
         # Before 4c, so a title match that shares a PMID is weighed there too.
@@ -919,6 +947,26 @@ class PubMedEnricher:
             self._shift_failure_counts(PMCID_LOOKUP_FAILED, -1)
         self._enrich_by_pmcid(rerun)
 
+    def _retry_api_failures(self, pmid_failed: list[tuple[dict, str]], progress_total: int) -> None:
+        """Look up once more, after a pause, the PMID- and DOI-path entries an
+        NCBI error left unenriched (#1387). A PMID NCBI answered without a
+        record is not retried. The re-run's outcome replaces the first
+        pass's, whose failure counts come off first."""
+        doi_failed, self._doi_api_failed = self._doi_api_failed, []
+        retry = pmid_failed + doi_failed
+        if not retry or not self._ncbi_answered:
+            return
+        if self.verbose:
+            logger.info(f"\n🔄 Re-running {len(retry)} lookups an NCBI error failed "
+                        f"in {SECOND_PASS_PAUSE_SECONDS:g}s...")
+        time.sleep(SECOND_PASS_PAUSE_SECONDS)
+        self.stats['failed_lookups'] -= len(retry)
+        self._enrich_by_pmid(pmid_failed)
+        self._enrich_by_doi(doi_failed, progress_total - len(doi_failed), progress_total)
+        recovered = sum(entry['enrichment_status'] == 'enriched' for entry, _ in retry)
+        self.stats['second_pass_recovered'] = recovered
+        self.stats['second_pass_failed'] = len(retry) - recovered
+
     def _bare_digits_pmid(self, entry: dict) -> str | None:
         """The PMID-length digit run of a "PMCID" value that has no PMC prefix
         (#1219: a CV labelled 8-digit PMIDs as PMCIDs). "PMCID-123..." and
@@ -997,7 +1045,9 @@ class PubMedEnricher:
 
             if pmid:
                 records = self._fetch_pubmed_batch([pmid])
-                if pmid in records:
+                if records is None:
+                    self._doi_api_failed.append((entry, doi))
+                if pmid in (records or {}):
                     if self._accept_record(entry, records[pmid], 'doi_search'):
                         # Store discovered PMID
                         if 'extracted_fields' in entry:
@@ -1006,6 +1056,7 @@ class PubMedEnricher:
                     entry['enrichment_status'] = 'doi_found_but_fetch_failed'
                     self.stats['failed_lookups'] += 1
             elif search_failed:
+                self._doi_api_failed.append((entry, doi))
                 entry['enrichment_status'] = 'doi_lookup_failed'
                 self.stats['failed_lookups'] += 1
             else:
@@ -1078,7 +1129,7 @@ class PubMedEnricher:
             return
         finally:
             time.sleep(RATE_LIMIT_DELAY)
-        records = self._fetch_pubmed_batch(pmids) if pmids else {}
+        records = self._fetch_pubmed_batch(pmids) or {}
         # A preprint is the paper's earlier version, never what "in press"
         # names (QZWBKQ, dev-239: an "Appl Environ Microbiol, in press" entry
         # matched its bioRxiv record, PubMed type Preprint); an erratum is a
@@ -1247,6 +1298,7 @@ class PubMedEnricher:
         for attempt in range(MAX_ATTEMPTS):
             outcome = self._attempt_get(url, params, parse)
             if outcome.error is None:
+                self._ncbi_answered = True
                 return outcome.value
             last_error = outcome.error
             if attempt == MAX_ATTEMPTS - 1:
@@ -1294,12 +1346,26 @@ class PubMedEnricher:
         for i, chunk in enumerate(_chunks(pmids, NCBI_MAX_IDS_PER_REQUEST)):
             if i:
                 time.sleep(RATE_LIMIT_DELAY)
-            records.update(self._fetch_pubmed_batch(chunk))
+            records.update(self._fetch_or_split(chunk))
         return records
 
-    def _fetch_pubmed_batch(self, pmids: list[str]) -> dict[str, dict]:
+    def _fetch_or_split(self, pmids: list[str]) -> dict[str, dict]:
+        """efetch `pmids`; a failed request is split in half and each half
+        fetched, down to EFETCH_SPLIT_FLOOR ids. PMIDs no request fetched go
+        into _efetch_failed."""
+        records = self._fetch_pubmed_batch(pmids)
+        if records is not None:
+            return records
+        if len(pmids) <= EFETCH_SPLIT_FLOOR or not self._ncbi_answered:
+            self._efetch_failed.update(pmids)
+            return {}
+        half = len(pmids) // 2
+        return {**self._fetch_or_split(pmids[:half]), **self._fetch_or_split(pmids[half:])}
+
+    def _fetch_pubmed_batch(self, pmids: list[str]) -> dict[str, dict] | None:
         """
-        Fetch multiple PubMed records via efetch.
+        Fetch multiple PubMed records via efetch. None when the request
+        failed, so an API error is told apart from records NCBI lacks.
         """
         if not pmids:
             return {}
@@ -1334,7 +1400,7 @@ class PubMedEnricher:
             if self.verbose:
                 # Info, not error: see the note at _enrich_by_doi's DOI search error above.
                 logger.info(f"    ❌ API error: {_sanitize_error(e)}")
-            return {}
+            return None
 
     def _parse_pubmed_article(self, article: ET.Element) -> tuple[str | None, dict | None]:
         """

@@ -320,7 +320,7 @@ def test_quiet_mode_suppresses_warning_and_info_on_mocked_failure_path(monkeypat
     with caplog.at_level(logging.INFO, logger=stage5.__name__):
         records = enricher._fetch_pubmed_batch(['12345678'])
 
-    assert records == {}
+    assert records is None
     assert not any(r.levelno == logging.WARNING for r in caplog.records)
     assert not any('❌ API error' in r.getMessage() for r in caplog.records)
 
