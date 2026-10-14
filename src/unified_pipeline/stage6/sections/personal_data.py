@@ -465,17 +465,21 @@ def _without_other_numbers_home_labels(phone: _JsonValue, text: str) -> str:
     telephone empty. A `phone` that still holds the home number keeps it.
 
     The number group can join two space-separated numbers, "555-0100
-    555-0102 (home)", so a span is kept when either digit string holds the
-    other: a value holding only 555-0102 keeps that span's label (#1823)."""
-    held = _digits(str(phone))
+    555-0102 (home)", so a span is kept when a number in the value lies
+    inside the span's digits: a value "+1 555-0102" keeps that span's label
+    (#1823)."""
     return _HOME_LABEL_AFTER_NUMBER_RE.sub(
-        lambda m: m.group(0) if _holds_either(held, _digits(m.group('number'))) else '',
+        lambda m: m.group(0) if _value_may_hold(str(phone), _digits(m.group('number'))) else '',
         text)
 
 
-def _holds_either(held: str, found: str) -> bool:
-    """Whether one digit string holds the other."""
-    return found in held or held in found
+def _value_may_hold(value: str, found: str) -> bool:
+    """Whether a number in `value` may be inside the digit string `found`, by
+    its last seven digits, so a country code or an extension on either side
+    still pairs. Errs towards yes: a wrong yes keeps a home label, which
+    only withholds, and a value with no number keeps every label."""
+    numbers = [_digits(number) for number in re.findall(_PHONE_NUMBER_PATTERN, value)]
+    return not numbers or any(number[-_MIN_PHONE_DIGITS_TO_PAIR:] in found for number in numbers)
 
 
 def _cell_label_is_at_another_number(phone: _JsonValue, text: str) -> bool:

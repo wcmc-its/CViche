@@ -1579,6 +1579,10 @@ def test_a_cell_label_at_another_number_does_not_make_this_one_a_cell(tmp_path):
      "555-555-0101"),
     # more than one blank before the label
     ("555-555-0100 (work); 555-555-0102  (home)", "555-555-0100", "555-555-0102"),
+    # a line break before the label
+    ("555-555-0100 (work); 555-555-0102\n(home)", "555-555-0100", "555-555-0102"),
+    # the home number shares six final digits with the work number, not seven
+    ("555-555-0100 (work); 555-655-0100 (home)", "555-555-0100", "555-655-0100"),
     # an area code in parentheses starts the home number, not the work one
     ("555-555-0100 (555) 555-0102 (home)", "555-555-0100", "(555) 555-0102"),
 ])
@@ -1612,6 +1616,14 @@ def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
     ("555-555-0100 (work) 555-555-0102 (home)", "555-555-0102"),
     # two numbers read as one: the value holds the home one (#1823 review)
     ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "555-555-0102"),
+    # ...and with a country code or an extension on the value (#1823 review 2)
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "+1 555-555-0102"),
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "1-555-555-0102"),
+    ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "555-555-0102 ext 7"),
+    # the line drops the home number's area code, the value keeps it
+    ("555-0100 555-0102 (home)", "+1 212-555-0102"),
+    # a value with no digits keeps every home label
+    ("555-555-0100 (work); 555-555-0102 (home)", "see cv"),
     # the value spells the home number without its area code
     ("555-555-0100 (work); 555-555-0102 (home)", "555-0102"),
     # the value lists the home number first
