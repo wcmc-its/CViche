@@ -626,6 +626,8 @@ _VENUE = "Example Membrane Letters"
     ("S2", f"12) Vashtrel et al., 2031b, {_VENUE}, JIF 4.1"),
     ("S1", f"\u2022 Pemberwick and Zandquist (2031) {_VENUE} impact factor 3.2"),
     ("Q4C", f"Pemberwick & Zandquist (2031): {_VENUE} IF: 3.2"),
+    ("Q4D", f"Pemberwick et al. (2031) {_VENUE} JIF: 3.2 cited 2 times"),
+    ("Q4", f"Pemberwick et al. (2031) {_VENUE} JIF: 3.2"),
     ("S1", f"- Quorlenby et al. (2031) {_VENUE} IF=3.2"),
     ("S1", f"* Quorlenby et al. (2031) {_VENUE} Impact Factor 3.2"),
     ("S7", f"Thornvalle-Quorlenby et al. 2031. {_VENUE} cited 1,204 times"),
@@ -661,6 +663,9 @@ def test_metrics_stub_under_a_pinned_journals_heading_is_s0():
     ("S1", "Quorlenby et al. (2031) Example Membrane & Letters of Science and Light Today Online JIF: 1.0"),
     ("S1", f"Quorlenby et al. (2031) {_VENUE}"),
     ("Q4C", f"2031- Editor, {_VENUE}. IF: 3.2"),
+    ("Q4D", f"Associate Editor, 2031-present, {_VENUE} (Impact Factor: 3.2)"),
+    ("Q4C", f"Section Editor, 2031\u2013Present, {_VENUE} (JIF 5.1)"),
+    ("Q1", f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9"),
     ("H", f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9"),
     ("S0", f"Quorlenby et al. (2031) {_VENUE} JIF: 9.9"),
 ])

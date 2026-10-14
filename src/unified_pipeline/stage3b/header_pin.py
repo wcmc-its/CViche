@@ -218,7 +218,8 @@ _PUBLICATION_CODE = re.compile(r"^S\d$")
 # prints its impact factor has a title or a volume before the metric and keeps
 # the model's code.
 _BIBLIOMETRIC_CODE = "S0"
-_EDITORIAL_CODE = "Q4C"
+# Any editorial code (Q4C in LFFKVV; the same lines came back Q4D on a re-run, XNAVXT).
+_EDITORIAL_CODE = re.compile(r"^Q4[A-Z]?$")
 _PER_ARTICLE_METRIC = re.compile(
     r"\bJIF\b|\bimpact\s+factor\b|\bIF\s*[:=]\s*\d"
     r"|\bcited\s+\d[\d,]*\s+times\b|\btimes\s+cited\b|\bcitations?\s*[:=]\s*\d",
@@ -234,6 +235,7 @@ _METRICS_STUB_LEAD = re.compile(
 )
 # A journal name; a longer span before the metric reads as a title.
 _STUB_MAX_VENUE_WORDS = 8
+_YEAR_RANGE_TAIL = re.compile(r"\s*[-\u2013\u2014]")
 _METRICS_STUB_WHY = "A per-article citation-metrics line is a bibliometric record, not a citation"
 
 # --- #1251: a mentee's accomplishments are the mentee's, not the owner's ---
@@ -455,7 +457,7 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return "B2", "A life-support or teaching certificate is not a medical licence"
     if code and _PUBLICATION_CODE.match(code) and _PUBLICATION_POINTER.search(text):
         return "T", "A note pointing at a numbered publication is not a second citation"
-    if code and (_PUBLICATION_CODE.match(code) or code == _EDITORIAL_CODE) and _is_metrics_stub(text):
+    if code and (_PUBLICATION_CODE.match(code) or _EDITORIAL_CODE.match(code)) and _is_metrics_stub(text):
         return _BIBLIOMETRIC_CODE, _METRICS_STUB_WHY
     return None
 
@@ -466,7 +468,8 @@ def _is_metrics_stub(text: str) -> bool:
     if not metric:
         return False
     lead = _METRICS_STUB_LEAD.match(text[:metric.start()])
-    return bool(lead) and len(re.findall(r"[A-Za-z]+", lead.group("venue"))) <= _STUB_MAX_VENUE_WORDS
+    # "<role>, 2015-present, <journal> (IF 3.2)" is an editorial row, not a stub.
+    return bool(lead) and not _YEAR_RANGE_TAIL.match(lead.group("venue")) and len(re.findall(r"[A-Za-z]+", lead.group("venue"))) <= _STUB_MAX_VENUE_WORDS
 
 
 def _is_mentee_accomplishment(code: str, heading: str) -> bool:
