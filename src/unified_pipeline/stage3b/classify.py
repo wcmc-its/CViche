@@ -25,7 +25,7 @@ from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
 from .header_pin import is_note_not_record
-from .io import _safe_float, taxonomy_code_set
+from .io import GROUP_YEAR_KEY, _safe_float, taxonomy_code_set
 from .prompt import (
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     _PER_CV_USER_PREFIX,
@@ -1186,6 +1186,11 @@ def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
             if idx1 in seen_duplicates and idx2 in seen_duplicates:
                 continue
 
+            if key1 == key2 and _in_different_year_groups(year_groups[idx1], year_groups[idx2]):
+                # Kept apart only by the group year, which their text does
+                # not carry: hand it to stage 4 so each renders dated (#1435).
+                entry1[GROUP_YEAR_KEY] = year_groups[idx1].year
+                entry2[GROUP_YEAR_KEY] = year_groups[idx2].year
             if key1 == key2 and not _in_different_year_groups(year_groups[idx1], year_groups[idx2]):
                 # A duplicate pair is recorded once per (idx1, idx2)
                 # comparison that matches -- the loop above only *skips* a

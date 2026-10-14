@@ -18,6 +18,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+#: The classified-entry key holding the year of the year group an undated
+#: entry sits in ("2019"), written by `detect_duplicates` on the twins it
+#: keeps apart by that year, and read by stage 4 to date the entry (#1435).
+GROUP_YEAR_KEY = "group_year"
+
 
 def _safe_float(value, default: float) -> float:
     """Coerce an LLM-provided numeric (e.g. a confidence) to a finite float.

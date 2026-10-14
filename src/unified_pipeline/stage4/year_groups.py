@@ -13,6 +13,11 @@ post-checks cannot catch it: the token's digits are in the text. The year that
 governs the line is in the group's first entry, which only a pass over the
 entries in document order can see. `date_year_group_members` is that pass.
 
+Other CVs write the year once per group and nothing on the other lines
+(#1435). Stage 3b keeps two identical such lines in two years apart and
+stamps each with its group's year (`GROUP_YEAR_KEY`); the stage-4 LLM sees
+no year in the line and returns no date. `date_group_year_twins` dates them.
+
 Pure and offline: no LLM, no I/O. Imports nothing from the other stage-4
 modules (the multi-record key comes in as an argument), and never mutates
 its input.
@@ -20,6 +25,8 @@ its input.
 
 import re
 from typing import Any
+
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 
 #: The first entry of a year group: a four-digit year, a colon, then the
 #: group's first "MM-DD" token and its colon ("2016:  03-16: <title>").
@@ -142,3 +149,54 @@ def date_year_group_members(entries: list[dict[str, Any]],
             group = None
         out.append(entry)
     return out
+
+
+#: Where a group year goes, by the date fields stage 4 returned for the
+#: entry's code: the one date of a talk or award (`date`, or `year`), else
+#: both ends of a span (a course taught within that one year). The first
+#: group whose first field the entry has is used.
+_GROUP_YEAR_TARGETS = (('date',), ('year',), ('start_date', 'end_date'))
+
+#: The one-date fields that are not named "*_date".
+_UNSUFFIXED_DATE_FIELDS = ('date', 'year')
+_DATE_FIELD_SUFFIX = '_date'
+
+_GROUP_YEAR_REASON = "Dated an undated line from its year group's year"
+
+
+def _holds_a_date(fields: dict[str, Any]) -> bool:
+    """True when stage 4 put a value in any of the entry's date fields."""
+    return any(value for name, value in fields.items()
+               if name in _UNSUFFIXED_DATE_FIELDS or name.endswith(_DATE_FIELD_SUFFIX))
+
+
+def _date_from_group_year(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """A copy of `entry` with its group year in its date fields, or None
+    when it has no group year, stage 4 found a date, or its fields have no
+    date field to hold one."""
+    year = entry.get(GROUP_YEAR_KEY)
+    fields = entry.get('extracted_fields')
+    if not isinstance(year, str) or not isinstance(fields, dict) or _holds_a_date(fields):
+        return None
+    targets = next((names for names in _GROUP_YEAR_TARGETS if names[0] in fields), ())
+    if not targets:
+        return None
+    changes = {name: {'original': fields.get(name), 'reformatted': year,
+                      'reason': _GROUP_YEAR_REASON} for name in targets}
+    dated = dict(entry)
+    dated['extracted_fields'] = {**fields, **dict.fromkeys(targets, year)}
+    dated['reformatted_fields'] = {**(entry.get('reformatted_fields') or {}), **changes}
+    return dated
+
+
+def date_group_year_twins(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`entries` with each undated entry stage 3b stamped with a group year
+    (`GROUP_YEAR_KEY`) dated in that year (see the module docstring).
+
+    A date stage 4 extracted is never replaced: an entry with a value in
+    any date field is left as it is. 3b stamps only lines with no year in
+    their own text. Only the entry's own fields are filled, not a
+    multi-record entry's records: a one-line twin holds one record.
+    Changed entries are copies.
+    """
+    return [_date_from_group_year(entry) or entry for entry in entries]

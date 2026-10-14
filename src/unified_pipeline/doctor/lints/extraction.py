@@ -2305,8 +2305,9 @@ def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[d
     `IMPLAUSIBLE_YEAR_CEILING` (implausible_year reports the years outside
     that band), that the entry's text does not state (`_year_in_source`):
     stage 4 took it from somewhere else. WARN, one finding per entry.
-    Skipped: `_YEAR_NOT_IN_SOURCE_SKIPPED_CODES`, and a year a stage-5
-    formatter replaced (`_year_renders`). Report-only."""
+    Skipped: `_YEAR_NOT_IN_SOURCE_SKIPPED_CODES`, a year a stage-5
+    formatter replaced (`_year_renders`), and the entry's group year, which
+    the line the group opens with states (#1435). Report-only."""
     entries = _fields_entries(stage4)
     floor = _year_floor(entries)
     formatted = _formatter_texts(stage5d)
@@ -2317,6 +2318,7 @@ def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[d
         bad = [f"{key}={year}" for key, year in _date_field_years(entry.fields)
                if floor.year <= year <= IMPLAUSIBLE_YEAR_CEILING
                and not _year_in_source(year, entry.text)
+               and str(year) != entry.group_year
                and _year_renders(year, entry, formatted)]
         if bad:
             findings.append(_finding(

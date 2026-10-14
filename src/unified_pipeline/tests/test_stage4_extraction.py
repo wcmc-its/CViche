@@ -42,6 +42,7 @@ import unified_pipeline.stage4.owner_name as owner_name  # noqa: E402
 import unified_pipeline.stage_6_word_template as stage_6_word_template  # noqa: E402
 from unified_pipeline.core import prompt_logger  # noqa: E402
 from unified_pipeline.core.batch_pool import workers_from_config  # noqa: E402
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY  # noqa: E402
 from unified_pipeline.tests.test_stage4_owner_side_channel import (  # noqa: E402
     LETTERHEAD,
     letterhead_docx,
@@ -273,6 +274,27 @@ def test_workers_config_knob_is_read_from_env(monkeypatch):
     # from instead: workers_from_config("CVICHE_STAGE4_BATCH_WORKERS").
     monkeypatch.setenv("CVICHE_STAGE4_BATCH_WORKERS", "2")
     assert workers_from_config("CVICHE_STAGE4_BATCH_WORKERS") == 2
+
+
+# ---------------------------------------------------------------------------
+# #1435: the extraction dates the year-group twins stage 3b stamped
+# ---------------------------------------------------------------------------
+
+def test_a_stamped_twin_leaves_stage_4_dated_in_its_group_year(monkeypatch):
+    _stub_owner(monkeypatch)
+
+    def undated(entries, batch_idx, total, cv_owner_name, cancel_check=None):
+        return _batch_result([dict(e, extracted_fields={"location": "Example City", "date": None})
+                              for e in entries])
+
+    monkeypatch.setattr(extraction, "extract_fields_batch", undated)
+    twins = [{"text": "Example seminar, Example City", "element_idx_start": idx,
+              "taxonomy_code": "R", GROUP_YEAR_KEY: year}
+             for idx, year in ((4, "2019"), (9, "2017"))]
+
+    out = extraction.extract_fields_from_mapped_entries(twins, batch_size=1, workers=1)
+
+    assert [e["extracted_fields"]["date"] for e in out["entries"]] == ["2019", "2017"]
 
 
 # ---------------------------------------------------------------------------

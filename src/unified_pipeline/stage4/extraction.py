@@ -70,7 +70,7 @@ from unified_pipeline.stage4.schemas import (
     get_field_schema,
     get_taxonomy_label,
 )
-from unified_pipeline.stage4.year_groups import date_year_group_members
+from unified_pipeline.stage4.year_groups import date_group_year_twins, date_year_group_members
 
 logger = logging.getLogger(__name__)
 
@@ -1502,6 +1502,7 @@ def extract_fields_from_mapped_entries(
             return default
     all_entries.sort(key=lambda e: (safe_int(e.get("element_idx_start")), safe_int(e.get("element_idx_end"))))
     all_entries = date_year_group_members(all_entries, STAGE4_RECORDS_KEY)  # document order (E26)
+    all_entries = date_group_year_twins(all_entries)  # 3b's group year (#1435)
 
     # Fallback: Add target_name via regex matching if LLM didn't extract it
     cv_owner_last_name = cv_owner_name.get('last_name', '')
