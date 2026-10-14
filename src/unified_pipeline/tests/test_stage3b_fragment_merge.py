@@ -55,6 +55,12 @@ def test_previous_fragment_is_appended_with_a_space():
     assert stats["fragments_merged"] == 1
 
 
+def test_a_fragment_without_text_adds_no_text_to_its_parent():
+    entries = [_entry("Grand Rounds: Rare Tumours"), _fragment(None, 0)]
+    merge_fragment_text(entries)
+    assert entries[0]["text"].strip() == "Grand Rounds: Rare Tumours"
+
+
 def test_previous_fragment_after_sentence_punctuation_takes_a_new_line():
     entries = [_entry("Visiting lecture, 2015."), _fragment("Springfield, IL", 0)]
     merge_fragment_text(entries)
@@ -105,6 +111,7 @@ def test_a_label_the_reasoning_names_is_not_merged():
     assert entries[1]["text"] == "1. Invited talk"
     assert entries[0][SKIPPED_FIELD] == SKIP_LABEL
     assert stats["fragments_not_merged"] == {SKIP_LABEL: 1}
+    assert stats["fragments_merged"] == 0
 
 
 def test_header_like_is_a_hedge_not_a_label():

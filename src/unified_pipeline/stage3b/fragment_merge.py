@@ -32,7 +32,9 @@ extracted once. Two kinds of fragment are left alone, and say why in
 
 Runs once, at the end of stage 3b, after every pass that reads entry text, so
 replaying it over a stored `_classified.json` gives exactly what the stage
-would have written. Pure: no LLM, no I/O.
+would have written. Pure: no LLM, no I/O. `merge_into_parent` is also the
+merge T-validation uses for a mentee row's continuation (#1702); that
+fragment's text is already in its parent by the time this pass runs.
 """
 
 import re
@@ -211,6 +213,24 @@ def _merge_order(entries: list[dict[str, Any]]) -> list[int]:
     return forward + backward[::-1]
 
 
+def merge_into_parent(entries: list[dict[str, Any]], idx: int) -> str | None:
+    """Fold fragment `idx`'s text into its parent and flag it, in place.
+
+    Returns why it must not be merged instead, leaving both entries untouched."""
+    reason = merge_skip_reason(entries, idx)
+    if reason is not None:
+        return reason
+    parent_idx = resolve_parent(entries, idx)
+    parent = entries[parent_idx]
+    parent["text"] = _joined(
+        str(parent.get("text") or ""),
+        str(entries[idx].get("text") or ""),
+        _direction(idx, parent_idx),
+    )
+    entries[idx][MERGED_FLAG] = True
+    return None
+
+
 def merge_fragment_text(
     entries: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -228,19 +248,11 @@ def merge_fragment_text(
             entry[MERGED_FLAG] = True
             already += 1
             continue
-        reason = merge_skip_reason(entries, idx)
+        reason = merge_into_parent(entries, idx)
         if reason is not None:
             entry[SKIPPED_FIELD] = reason
             skipped[reason] += 1
             continue
-        parent_idx = resolve_parent(entries, idx)
-        parent = entries[parent_idx]
-        parent["text"] = _joined(
-            str(parent.get("text") or ""),
-            str(entry.get("text") or ""),
-            _direction(idx, parent_idx),
-        )
-        entry[MERGED_FLAG] = True
         merged += 1
     return entries, {
         "fragments_merged": merged,

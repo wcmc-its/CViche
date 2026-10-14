@@ -416,3 +416,117 @@ def test_running_header_is_compared_with_the_lowest_indexed_line_not_the_first_l
 
     assert stats["t_entries_reviewed"] == 1
     assert [e["taxonomy_code"] for e in updated] == ["T", "A", "H"]
+
+
+# ---------------------------------------------------------------------------
+# A mentee row's unnumbered rest joins its numbered row (#1702)
+# ---------------------------------------------------------------------------
+
+_MENTEE_ROW = "30.Jane Example,\tMD\t2031-present\tAttending physician,\tExample Clinic"
+_ROW_REST = "Example Consortium Rowan Placeholder\tScholar Award\tAttending physician,\tExample Clinic"
+_FRAGMENT_REASONING = "Fragment describing a mentee's award and current position, fits mentees"
+
+
+def _mentee_list(row_text=_MENTEE_ROW, rest_text=_ROW_REST, row_code="N3A", row_hierarchy=("Mentees",)):
+    row = {"text": row_text, "hierarchy": list(row_hierarchy), "taxonomy_code": row_code}
+    rest = {"text": rest_text, "hierarchy": ["Mentees"], "taxonomy_code": "T"}
+    return [row, rest]
+
+
+def _recode_rest(monkeypatch, new_code="N3B", reasoning=_FRAGMENT_REASONING):
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {"content": json.dumps([
+        {"entry_index": 1, "new_code": new_code, "confidence": 0.8, "reasoning": reasoning}])})
+
+
+def _validate(entries):
+    return classify.validate_t_classifications(entries, _taxonomy(("H", "T", "N3A", "N3B")))
+
+
+def test_mentee_row_rest_called_a_fragment_joins_its_numbered_row(monkeypatch):
+    _recode_rest(monkeypatch)
+    next_row = {"text": "2031 Example Teaching Award", "hierarchy": ["Mentees"], "taxonomy_code": "H"}
+
+    updated, stats = _validate([*_mentee_list(), next_row])
+
+    rest = updated[1]
+    assert rest["is_fragment"] is True and rest["fragment_merged"] is True
+    assert rest["fragment_of"] == 0
+    assert rest["fragment_reasoning"] == f"{classify.ROW_CONTINUATION_TAG} {_FRAGMENT_REASONING}"
+    assert rest["taxonomy_code"] == "N3B"
+    assert updated[0]["text"] == f"{_MENTEE_ROW} {_ROW_REST}"
+    assert updated[2]["text"] == next_row["text"]
+    assert stats["t_entries_reclassified"] == 1
+
+
+def test_fragmentary_counts_as_the_reasoning_calling_it_a_fragment(monkeypatch):
+    _recode_rest(monkeypatch, reasoning="Fragmentary line: a mentee's award and position")
+
+    updated, _ = _validate(_mentee_list())
+
+    assert updated[1].get("is_fragment") is True
+
+
+@pytest.mark.parametrize("row_text", [
+    "7) Jane Example, PhD",
+    "  12. Jane Example, PhD",
+    "101. Jane Example, PhD",
+])
+def test_each_row_number_shape_takes_the_rest(monkeypatch, row_text):
+    _recode_rest(monkeypatch)
+
+    updated, _ = _validate(_mentee_list(row_text=row_text))
+
+    assert updated[1].get("is_fragment") is True
+    assert updated[0]["text"].endswith(_ROW_REST)
+
+
+@pytest.mark.parametrize("case", [
+    {"reasoning": "Describes a mentee's award and current position"},
+    {"new_code": "H"},
+    {"row_code": "H"},
+    {"row_code": None},
+    {"row_hierarchy": ("Other mentees",)},
+    {"row_text": "Jane Example, MD\t2031-present"},
+    {"row_text": "2031. Jane Example, MD"},
+    {"row_text": "10:30 Jane Example, MD"},
+    {"row_text": None},
+    {"rest_text": "31.Rowan Placeholder\tMS\t2031-present"},
+], ids=["no-fragment-word", "not-a-mentee-code", "row-not-mentee", "row-without-code",
+        "other-hierarchy", "row-unnumbered", "row-opens-with-a-year", "row-opens-with-a-time",
+        "row-without-text", "rest-numbered"])
+def test_a_recode_outside_the_numbered_row_shape_stays_its_own_entry(monkeypatch, case):
+    _recode_rest(monkeypatch, **{k: case[k] for k in ("new_code", "reasoning") if k in case})
+    entries = _mentee_list(**{k: case[k] for k in ("row_text", "rest_text", "row_code", "row_hierarchy")
+                              if k in case})
+    row_text = entries[0]["text"]
+
+    updated, _ = _validate(entries)
+
+    assert "is_fragment" not in updated[1]
+    assert updated[1]["taxonomy_code"] == case.get("new_code", "N3B")
+    assert updated[0]["text"] == row_text
+
+
+def test_a_rest_the_merge_refuses_keeps_its_recode_untagged(monkeypatch):
+    """An organisation-only line is a sub-heading as often as a continuation,
+    so `merge_into_parent` refuses it; tagged but unmerged, its text would be
+    dropped by stage 4 (#1365 R2), so the tags come off again."""
+    _recode_rest(monkeypatch)
+
+    updated, _ = _validate(_mentee_list(rest_text="Example Children's Hospital"))
+
+    assert {"is_fragment", "fragment_of", "fragment_reasoning"}.isdisjoint(updated[1])
+    assert updated[1]["taxonomy_code"] == "N3B"
+    assert updated[0]["text"] == _MENTEE_ROW
+
+
+def test_the_first_entry_never_joins_the_last(monkeypatch):
+    rest = {"text": _ROW_REST, "hierarchy": ["Mentees"], "taxonomy_code": "T"}
+    row = {"text": _MENTEE_ROW, "hierarchy": ["Mentees"], "taxonomy_code": "N3A"}
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {"content": json.dumps([
+        {"entry_index": 0, "new_code": "N3B", "confidence": 0.8, "reasoning": _FRAGMENT_REASONING}])})
+
+    updated, _ = _validate([rest, row])
+
+    assert "is_fragment" not in updated[0]
+    assert updated[1]["text"] == _MENTEE_ROW

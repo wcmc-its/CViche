@@ -24,6 +24,7 @@ from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
+from .fragment_merge import merge_into_parent
 from .header_pin import is_note_not_record
 from .io import GROUP_YEAR_KEY, _safe_float, taxonomy_code_set
 from .prompt import (
@@ -66,6 +67,16 @@ NO_HIERARCHY_KEY = "(no hierarchy)"
 # (AUTOPSY-s7ab-batch-2026-10-02 class 11). Such an entry keeps T and reaches
 # the Appendix instead.
 T_VALIDATION_FORBIDDEN_CODES = frozenset({"M1"})
+
+# Stage 2 can cut a mentee list's row in two: the numbered start, then the
+# unnumbered rest ("Scholar Award  Attending physician, ..."). T-validation
+# moves the rest to a mentee code while its reasoning calls it a fragment;
+# recoded on its own it became a mentee row, and stage 4 took the person an
+# award is named after as the mentee (#1702). It joins its row instead.
+MENTEE_CODE_PREFIX = "N3"
+_ROW_NUMBER_RE = re.compile(r"\s*\d{1,3}[.)]")  # used with .match: anchored
+_FRAGMENT_REASONING_RE = re.compile("fragment", re.IGNORECASE)
+ROW_CONTINUATION_TAG = "[T-validation: continues the numbered row before it]"
 
 
 @dataclass
@@ -658,6 +669,42 @@ def _opening_line(entries: list[dict]) -> tuple[dict | None, str | None]:
     return first, first.get("text")
 
 
+def _is_mentee_row_continuation(entries: list[dict], idx: int, reasoning: str) -> bool:
+    """Whether recoded entry `idx` is the unnumbered rest of the numbered
+    mentee row right before it, by the reasoning's own word "fragment".
+    For entry 0 the "row" is the last entry; `merge_into_parent` refuses that
+    pairing (no parent), so it needs no check here."""
+    entry, row = entries[idx], entries[idx - 1]
+    return (
+        bool(_FRAGMENT_REASONING_RE.search(reasoning))
+        and entry["taxonomy_code"].startswith(MENTEE_CODE_PREFIX)
+        and str(row.get("taxonomy_code")).startswith(MENTEE_CODE_PREFIX)
+        and entry.get("hierarchy") == row.get("hierarchy")
+        and bool(_ROW_NUMBER_RE.match(str(row.get("text"))))
+        and not _ROW_NUMBER_RE.match(str(entry.get("text")))
+    )
+
+
+def _fold_into_mentee_row(entries: list[dict], idx: int, reasoning: str) -> None:
+    """Merge a mentee row's continuation into the row (#1702), in place.
+
+    Tagged a `previous` fragment, as `reconnect_fragments` would tag it, so
+    stage 4 skips it and extracts the row from the whole text. A fragment
+    `merge_into_parent` refuses keeps its recode and no tag: a tag on text
+    that never reached the row would drop the line (#1365 R2)."""
+    if not _is_mentee_row_continuation(entries, idx, reasoning):
+        return
+    fragment_tags = {
+        "is_fragment": True,
+        "fragment_of": idx - 1,
+        "fragment_reasoning": f"{ROW_CONTINUATION_TAG} {reasoning}",
+    }
+    entries[idx].update(fragment_tags)
+    if merge_into_parent(entries, idx) is not None:
+        for key in fragment_tags:
+            del entries[idx][key]
+
+
 def validate_t_classifications(
     entries: list[dict],
     taxonomy: dict
@@ -807,6 +854,7 @@ Respond with a JSON array of objects, one per entry:
                 updated_entries[entry_idx]["taxonomy_confidence"] = confidence
                 updated_entries[entry_idx]["classification_reasoning"] = f"[T-validation reclassified from T] {reasoning}"
                 updated_entries[entry_idx]["t_validation_applied"] = True
+                _fold_into_mentee_row(updated_entries, entry_idx, reasoning)
                 reclassified_count += 1
             elif old_code == "T" and new_code == "T":
                 # T was confirmed for real, or the LLM proposed a code that
