@@ -17,6 +17,8 @@ disagrees (`leaf_header_code`); and `content_pin_code`, a handful of shapes
 whose code does not depend on the heading at all. `is_note_not_record` names
 the T lines stage 3b's T-validation must not turn into records. `mentee_pin_code`
 (#1251) recodes a mentee's own awards, listed under the owner's mentoring, to N4.
+`mentor_grant_pin_code` (#1710) recodes a grant listed under a heading that names
+the owner as mentor or sponsor to N2.
 An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
 An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
@@ -263,6 +265,24 @@ _NAMED_PERSON_LEAD = re.compile(
 )
 _MENTEE_PIN_WHY = "Listed as the work of a student or trainee the CV owner mentored"
 
+# --- #1710: a grant listed under the owner's mentor or sponsor role is the trainee's ---
+#
+# "Grant Support as Mentor" (UAURFU, 29 rows), "As sponsor or primary mentor"
+# (LWMSPJ), "Grants as Mentor" (CTWLTR) and "Mentor or Co-mentor" (2087) list the
+# F32s, K08s and R03s the owner's trainees won. Coded M2A/M2B, each renders as a
+# Research Support table of the owner's own funding with the trainee as PI; the
+# template's slot for them is N2. A heading level must name the role: "as
+# <role>" anywhere in it, or the role words alone. "Advisor and Mentor" (2087,
+# whose group also holds the owner's Co-I grants), "MENTORED GRANTS" (BYFQBG, the
+# owner's own grants above it), "Sponsored Research", "Co-Investigator or
+# Sponsor on Grants" and "as Mentored Investigator" do not match.
+_MENTOR_GRANT_CODE = "N2"
+_MENTOR_ROLE = r"(?:primary\s+|co-?)?(?:mentor|sponsor)"
+_MENTOR_GRANT_HEADING = re.compile(
+    rf"\bas\s+{_MENTOR_ROLE}\b|^\s*{_MENTOR_ROLE}(?:\s+or\s+{_MENTOR_ROLE})*[\s:]*$", re.I
+)
+_MENTOR_GRANT_WHY = "A grant listed under the owner's mentor or sponsor role is a mentored trainee grant"
+
 # A line that only points elsewhere ("<label> - see section N") or is only a
 # URL is a note, not a record: a T it was given must survive T-validation.
 _POINTER = re.compile(r"\(?\bsee\s+(?:sections?|items?|pages?|above|below|publications?)\b[^)]*\)?", re.I)
@@ -483,6 +503,15 @@ def mentee_pin_code(entry: dict, after_mentee: bool) -> tuple[str, str] | None:
     return None
 
 
+def mentor_grant_pin_code(entry: dict) -> tuple[str, str] | None:
+    """(N2, why) for a grant code under a heading level naming the owner as mentor or sponsor (#1710)."""
+    if entry.get("taxonomy_code") not in _GRANT_CODES:
+        return None
+    if not any(_MENTOR_GRANT_HEADING.search(str(level)) for level in entry.get("hierarchy") or []):
+        return None
+    return _MENTOR_GRANT_CODE, _MENTOR_GRANT_WHY
+
+
 def is_note_not_record(text: str, opening_line: str | None = None) -> bool:
     """A T line T-validation must leave T: a bare URL, a pointer-only line, or the running header.
 
@@ -523,11 +552,11 @@ def _recode(entry: dict, code: str, why: str) -> dict:
 
 
 def _pin_for(entry: dict, pin: str | None, leaf: str | None, after_mentee: bool) -> tuple[str, str] | None:
-    """(code, why) for one model answer: the header pin, then the mentee pin, then a content pin."""
+    """(code, why) for one model answer: the header pin, then the mentor-grant, mentee and content pins."""
     header_code = header_pin_code(entry, pin, leaf)
     if header_code:
         return header_code, _HEADER_PIN_WHY
-    return mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
+    return mentor_grant_pin_code(entry) or mentee_pin_code(entry, after_mentee) or content_pin_code(entry)
 
 
 def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext) -> tuple[list[dict], int]:
@@ -536,7 +565,7 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext) -> tuple
     Returns (entries, number recoded). A recoded entry keeps the model's answer
     in `pre_pin_code` / `pre_pin_reasoning`; `classification_source` stays
     "llm" (stage 3b's zero-classification gate counts it). The header pin is
-    checked first, then the mentee pin (#1251), then a content pin.
+    checked first, then the mentor-grant pin (#1710), the mentee pin (#1251) and a content pin.
     """
     pin, leaf = pinned_header_code(context), leaf_header_code(context)
     out, recoded, after_mentee = [], 0, False

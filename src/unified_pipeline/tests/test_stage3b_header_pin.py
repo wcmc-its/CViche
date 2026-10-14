@@ -762,6 +762,78 @@ def test_header_pin_wins_over_the_mentee_pin():
     assert out[-1]["taxonomy_code"] == "R"
 
 
+# --- #1710: a grant under the owner's mentor or sponsor role is N2 ---------------
+
+MENTEE_GRANT = "Example Institute (F32EX000001) Example trainee project. PI: Alex Example. Role: Mentor. 2031-2033"
+
+
+@pytest.mark.parametrize("hierarchy", [
+    ("GRANT SUPPORT", "Grant Support as Mentor"),                          # UAURFU shape
+    ("GRANTS/FELLOWSHIPS", "Previous", "As sponsor or primary mentor"),     # LWMSPJ shape
+    ("Grant History", "Grants as Mentor"),
+    ("FUNDING", "Grants as Primary Mentor"),
+    ("FUNDING", "Grants as Primary  Mentor"),
+    ("FUNDING", "Grants as Co-Mentor"),
+    ("FUNDING", "Grants as Comentor"),
+    ("FUNDING", "Grants as Sponsor"),
+    ("FUNDING", "Grants as  Mentor"),
+    ("GRANT SUPPORT", "GRANTS, FELLOWSHIPS", "Mentor or Co-mentor"),        # 2087 shape
+    ("GRANT SUPPORT", " Sponsor: "),
+    ("GRANT SUPPORT", "Mentor or Sponsor or Co-mentor"),
+    ("Grant Support as Mentor", "Current"),                                # any level names the role
+])
+@pytest.mark.parametrize("code", ["M2", "M2A", "M2B", "M2C"])
+def test_a_grant_under_a_mentor_role_heading_becomes_n2(code, hierarchy):
+    entry = _row(code, MENTEE_GRANT, confidence=0.9, hierarchy=hierarchy)
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "N2" and out["pre_pin_code"] == code
+    assert out["classification_reasoning"].startswith("A grant listed under the owner's mentor or sponsor role")
+
+
+@pytest.mark.parametrize("hierarchy", [
+    ("GRANT SUPPORT", "Grant Support as Investigator"),
+    ("GRANTS", "As Principal Investigator"),
+    ("GRANT SUPPORT", "Advisor and Mentor"),            # 2087: the group also holds the owner's Co-I grants
+    ("GRANT SUPPORT", "MENTORED GRANTS"),               # BYFQBG: the owner's own grants sit above it
+    ("Career Awards as Mentored Investigator",),        # the owner's own K award
+    ("SPONSORED RESEARCH", "Completed (Funded)"),
+    ("GRANT SUPPORT", "Extramural Sponsorship"),
+    ("PROFESSIONAL ACTIVITIES", "Co-Investigator or Sponsor on Grants"),
+    ("GRANT SUPPORT", "Overseas Sponsor Grants"),
+    ("GRANT SUPPORT", "Mentor or Co-mentor Awards"),
+    ("FUNDING", "Grants as Advisor"),
+    ("GRANT SUPPORT", "Industry Sponsor"),               # a funder, not the owner's role
+    ("GRANT SUPPORT", "Mentor Program Sponsor"),
+])
+def test_a_grant_under_another_heading_keeps_its_code(hierarchy):
+    entry = _row("M2B", MENTEE_GRANT, confidence=0.9, hierarchy=hierarchy)
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+def test_a_mentee_row_under_a_mentor_heading_is_left_alone():
+    entry = _row("N3B", "Alex Example, PhD student, 2031-2033", hierarchy=("MENTORING", "As Primary Mentor"))
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+def test_header_pin_wins_over_the_mentor_grant_pin():
+    # An honors heading's "Awards as Mentor" lists the owner's own mentoring awards.
+    entry = _row("M2B", "Example Society Outstanding Mentor Award", hierarchy=("HONORS", "Awards as Mentor"))
+    (out,), _ = apply_header_pin([entry], _ctx(meta=_node("HONORS", "H")))
+    assert out["taxonomy_code"] == "H"
+
+
+def test_mentor_grant_pin_is_not_flipped_back_by_the_reasoning_check():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    entry = _row("M2B", MENTEE_GRANT, confidence=0.9, hierarchy=("GRANT SUPPORT", "Grant Support as Mentor"))
+    (out,), _ = apply_header_pin([entry], NO_PIN_CTX)
+    (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    assert corrected["taxonomy_code"] == "N2"
+
+
 # --- is_note_not_record ---------------------------------------------------------
 
 @pytest.mark.parametrize("text", [
