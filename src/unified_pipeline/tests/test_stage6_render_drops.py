@@ -300,6 +300,36 @@ def test_text_rendered_target_and_fieldless_entry_keep_the_old_rule() -> None:
     assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(membership, "I") == "K2"
 
 
+# #1428 residual (SIYORB 462): K2 renders the text, so a committee row moved
+# there loses no field, yet a record that names a committee is not clinical
+# teaching. Synthetic records, invented values.
+_COMMITTEE = {"committee_name": "Quorvan Steering Group", "role": "Member",
+              "institution": "Example U", "start_date": "2004", "end_date": "2009"}
+
+
+def test_committee_record_is_not_rerouted_into_clinical_teaching() -> None:
+    entry = _fielded("P", ["K2", "N"], dict(_COMMITTEE), idx=462)
+    gen, code = _gen_and_code(entry)
+    assert code == "P"
+    assert entry["taxonomy_code"] == "P" and "taxonomy_code_original" not in entry
+    [record] = _reroute_records(gen)
+    assert (record["code"], record["severity"]) == ("P", "INFO")
+    assert "P->K2" in record["message"]
+    assert REROUTE_REFUSED_FIELDS.replace("_", " ") in record["message"]
+    assert record["evidence"] == ["element_idx_start 462"]
+
+
+def test_committee_kind_refusal_needs_the_committee_name_and_the_pair() -> None:
+    # No committee named (blank, or absent): nothing marks it a committee row.
+    for fields in ({**_COMMITTEE, "committee_name": " "},
+                   {k: v for k, v in _COMMITTEE.items() if k != "committee_name"}):
+        assert _gen_and_code(_fielded("P", ["K2", "N"], fields))[1] == "K2"
+    # Another pair is not in the table: Q2 still moves to K2.
+    q2 = _fielded("Q2", ["K2"], {"committee_name": "Board X", "organization": "Society X",
+                                 "role": "Chair", "start_date": "2017"})
+    assert _gen_and_code(q2)[1] == "K2"
+
+
 def test_every_reroute_is_logged_without_entry_text() -> None:
     same = _mismatched("S6", ["S8"], "Abstracts")
     same["element_idx_start"] = 3
