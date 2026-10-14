@@ -1247,8 +1247,12 @@ def test_further_date_spans_is_empty_without_a_span_key():
     ("2020-Summer", (2020, None, None)),
     ("2019-Fall", (2019, None, None)),
     ("2018 spring", (2018, None, None)),
+    ("2020 - Summer", (2020, None, None)),
     # Not a season: still unread, as "Foo 2021" is.
     ("2020-Foo", (None, None, None)),
+    # Not a four-digit year, or more after the season: unread.
+    ("12-Fall", (None, None, None)),
+    ("2020-Summer 2021", (None, None, None)),
 ])
 def test_a_season_after_the_year_keeps_the_year(date_str, expected):
     assert _parse_date_components(date_str) == expected
@@ -1278,6 +1282,9 @@ def test_a_year_start_renders_its_month_end_as_a_year(start, end, code, expected
     ("2016-03", "2018-06", "D3", "03/16-06/18"),
     ("2016", "present", "D3", "2016-Present"),
     ("2016", "2018", "D3", "2016-2018"),
+    # A start that is not a four-digit year alone keeps the end's month.
+    ("16", "2018-06", "D3", "16-06/18"),
+    ("2016-ish", "2018-06", "D3", "2016-ish-06/18"),
 ])
 def test_a_range_whose_start_has_a_month_or_end_has_none_is_unchanged(start, end, code, expected):
     assert format_date_range(start, end, code) == expected

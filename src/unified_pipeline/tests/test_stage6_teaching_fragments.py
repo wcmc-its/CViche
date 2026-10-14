@@ -1186,9 +1186,51 @@ def test_with_open_end_needs_the_source_text():
     # A dotted month after the year is left alone, not split by the range.
     ({"formatted_text": "**2014.12** - Fictional Course", "start_date": "2014"},
      ["2014.12 - Fictional Course"]),
+    # `start_date` is the record's date ahead of a `date` stage 4 also wrote.
+    ({"formatted_text": "**2014** - Fictional Course", "start_date": "2014", "date": "2009"},
+     ["2014-Present - Fictional Course"]),
 ])
 def test_an_open_source_rewrites_only_a_one_record_lone_date(fields, expected):
     """Each case has an open source ("2014 –") and 5c text that does not
     already write the range, so only the guard named in it keeps the output."""
     assert _teaching_entry_lines(fields, "2014 – Fictional Course",
                                  taxonomy_code="K1") == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A month word, abbreviated or followed by a comma, goes with its year.
+    ("Dec. 2014 - Fictional Course", "2014-Present - Fictional Course"),
+    ("December, 2014 - Fictional Course", "2014-Present - Fictional Course"),
+    ("Sept. 2014 - Fictional Course", "2014-Present - Fictional Course"),
+    ("Dec  2014 - Fictional Course", "2014-Present - Fictional Course"),
+    # So does a season word.
+    ("Fall 2014 - Fictional Course", "2014-Present - Fictional Course"),
+    # A month word must be a whole word: "Grammar" is not the month "mar".
+    ("Fictional Grammar 2014", "Fictional Grammar 2014-Present"),
+    # A one-digit numeric month goes with it too.
+    ("3/2014 - Fictional Course", "2014-Present - Fictional Course"),
+    # A day/month/year date: the "12/" after a slash is not a month before
+    # the year, so only the year is rewritten and "1/" is not welded to it.
+    ("1/12/2014 - Fictional Course", "1/12/2014-Present - Fictional Course"),
+    # Text before the date is kept.
+    ("Lecturer, 2014 - Fictional Course", "Lecturer, 2014-Present - Fictional Course"),
+    # The year inside a longer number is not the record's date.
+    ("Fictional Course 12014", "Fictional Course 12014"),
+    ("Fictional Course 20145", "Fictional Course 20145"),
+    # A slashed academic year ("2014/15") is a range already.
+    ("2014/15 - Fictional Course", "2014/15 - Fictional Course"),
+    # 5c already wrote a range: with "to", an en or em dash, or a word end.
+    ("2014 to 2016 - Fictional Course", "2014 to 2016 - Fictional Course"),
+    ("2014 TO 2016 - Fictional Course", "2014 TO 2016 - Fictional Course"),
+    ("2014 to2016 - Fictional Course", "2014 to2016 - Fictional Course"),
+    ("2014–2016 - Fictional Course", "2014–2016 - Fictional Course"),
+    ("2014—2016 - Fictional Course", "2014—2016 - Fictional Course"),
+    ("2014 - Present - Fictional Course", "2014 - Present - Fictional Course"),
+    ("2014 - Current - Fictional Course", "2014 - Current - Fictional Course"),
+    ("2014 - ongoing", "2014 - ongoing"),
+])
+def test_with_open_end_finds_the_lone_date_5c_wrote(text, expected):
+    """Each piece of `_LONE_DATE_TOKEN`: what it takes into the range, and
+    what it leaves alone because 5c already wrote the range."""
+    assert teaching._with_open_end(text, {"start_date": "2014"},
+                                   "2014 – Fictional Course", "K1") == expected

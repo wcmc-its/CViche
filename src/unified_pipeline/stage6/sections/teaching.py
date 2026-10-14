@@ -213,7 +213,7 @@ _OWN_DATE_TOKEN = (r'(?<!\d){year}(?:\s*[-\u2013\u2014]\s*(?:\d{{2,4}}|present|c
 _MONTH_OR_SEASON_WORD = '|'.join(sorted({*_MONTH_NAME_TO_NUM, *_SEASON_TOKENS},
                                         key=len, reverse=True))
 _LONE_DATE_TOKEN = (r'(?:\b(?:' + _MONTH_OR_SEASON_WORD + r')\.?,?\s+|(?<![\d/])\d{{1,2}}/)?'
-                    r'(?<!\d){year}(?!\d|[./]\d|\s*(?:[-\u2013\u2014]|\bto\b)\s*'
+                    r'(?<!\d){year}(?!\d|[./]\d|\s*(?:[-\u2013\u2014]|to)\s*'
                     r'(?:\d|present|current|ongoing))')
 # What `format_date_range` appends to a start the source leaves open.
 _OPEN_RANGE_SUFFIX = '-Present'
