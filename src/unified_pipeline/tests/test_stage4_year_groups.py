@@ -16,7 +16,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
-from unified_pipeline.stage4.year_groups import date_year_group_members  # noqa: E402
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY  # noqa: E402
+from unified_pipeline.stage4.year_groups import date_group_year_twins, date_year_group_members  # noqa: E402
 
 _H = ["Teaching Record"]
 
@@ -161,3 +162,89 @@ def test_the_change_is_recorded_and_the_input_is_not_mutated():
     assert reformatted["end_date"]["original"] == "2009"
     assert reformatted["end_date"]["reformatted"] == ""
     assert reformatted["start_date"]["reason"] != reformatted["end_date"]["reason"]
+
+
+# #1435: an undated twin stage 3b kept apart by its group year, and stamped
+# with it, is dated in that year.
+
+def _twin(stamp, text="Example seminar series, Example City", **fields):
+    entry = {"text": text, "hierarchy": ["Invited Talks"], "extracted_fields": fields}
+    if stamp is not None:
+        entry[GROUP_YEAR_KEY] = stamp
+    return entry
+
+
+def _twin_fields(*entries):
+    return [e["extracted_fields"] for e in date_group_year_twins(list(entries))]
+
+
+@pytest.mark.parametrize("fields, expected", [
+    # a talk or award: its one date
+    ({"location": "Example City", "date": None},
+     {"location": "Example City", "date": "2019"}),
+    # a code whose one date is a year
+    ({"title": "Example abstract", "year": None},
+     {"title": "Example abstract", "year": "2019"}),
+    # a course: both ends of its span, within the one year
+    ({"course_title": "Example course", "start_date": None, "end_date": None},
+     {"course_title": "Example course", "start_date": "2019", "end_date": "2019"}),
+    # a span whose end field stage 4 left out: both ends all the same
+    ({"start_date": ""}, {"start_date": "2019", "end_date": "2019"}),
+    # `date` wins over `year` and a span, `year` over a span
+    ({"date": None, "year": None}, {"date": "2019", "year": None}),
+    ({"date": None, "start_date": None}, {"date": "2019", "start_date": None}),
+    ({"year": None, "start_date": None}, {"year": "2019", "start_date": None}),
+])
+def test_an_undated_twin_is_dated_in_its_group_year(fields, expected):
+    assert _twin_fields(_twin("2019", **fields)) == [expected]
+
+
+@pytest.mark.parametrize("fields", [
+    {"date": "2021-05"},                                   # stage 4 found its date
+    {"date": None, "year": "2021"},
+    {"date": None, "start_date": "2003", "end_date": "2004"},
+    {"date": None, "issue_date": "2010"},                   # any *_date field
+    {"title": "Example title"},                             # no date field to fill
+    {},
+])
+def test_a_date_stage_4_extracted_or_no_date_field_leaves_the_twin_alone(fields):
+    entry = _twin("2019", **fields)
+    assert date_group_year_twins([entry])[0] is entry
+
+
+@pytest.mark.parametrize("entry", [
+    _twin(None, date=None),                                 # not a twin
+    {**_twin(None, date=None), GROUP_YEAR_KEY: None},
+    {**_twin(None, date=None), GROUP_YEAR_KEY: 2019},       # not 3b's string
+    {"text": "Example", GROUP_YEAR_KEY: "2019", "extracted_fields": None},
+    {"text": "Example", GROUP_YEAR_KEY: "2019"},
+])
+def test_an_entry_without_a_group_year_or_fields_is_left_alone(entry):
+    assert date_group_year_twins([entry])[0] is entry
+
+
+def test_the_group_year_fill_is_recorded_and_the_input_is_not_mutated():
+    entry = _twin("2018", start_date="", end_date=None)
+    entry["reformatted_fields"] = {"title": {"original": "x", "reformatted": "y", "reason": "r"}}
+    other = _twin(None, date=None)
+    before = copy.deepcopy([entry, other])
+
+    out = date_group_year_twins([entry, other])
+
+    assert [entry, other] == before
+    assert out[1] is other
+    reformatted = out[0]["reformatted_fields"]
+    assert reformatted["title"] == before[0]["reformatted_fields"]["title"]
+    assert reformatted["start_date"]["original"] == ""
+    assert reformatted["end_date"]["original"] is None
+    assert reformatted["start_date"]["reformatted"] == "2018"
+    assert reformatted["end_date"]["reformatted"] == "2018"
+    assert "year group" in reformatted["start_date"]["reason"]
+    assert out[0][GROUP_YEAR_KEY] == "2018"
+    assert out[0]["text"] == entry["text"]
+
+
+def test_identical_twins_in_two_years_come_out_with_two_dates():
+    first, second = _twin("2019", date=None), _twin("2017", date=None)
+
+    assert [f["date"] for f in _twin_fields(first, second)] == ["2019", "2017"]

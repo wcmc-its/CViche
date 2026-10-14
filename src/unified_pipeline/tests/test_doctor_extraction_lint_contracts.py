@@ -105,6 +105,7 @@ from unified_pipeline.doctor.shared import (  # noqa: E402
     docx_body_blocks,
 )
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY  # noqa: E402
 from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     ANNUAL_COSTS_LABEL,
@@ -3577,6 +3578,15 @@ def test_year_not_in_source_skips_a_year_a_formatter_replaced():
                             "extracted_fields": {"formatted_text": "2017-2019 Example course"}}]}
     assert len(_not_in_source(entry)) == 1
     assert _not_in_source(entry, stage5d=stage5d) == []
+
+
+def test_year_not_in_source_takes_the_group_year_as_stated():
+    """#1435: stage 4 dates a year-group twin from the year its group opens
+    with, which the twin's own line does not repeat."""
+    twin = _fields_entry("R", {"date": "2019"}, text="Example seminar, Example City")
+    assert len(_not_in_source(twin)) == 1
+    assert _not_in_source({**twin, GROUP_YEAR_KEY: "2019"}) == []
+    assert len(_not_in_source({**twin, GROUP_YEAR_KEY: "2018"})) == 1
 
 
 def test_year_not_in_source_leaves_the_value_alone():

@@ -26,6 +26,7 @@ if str(_SRC) not in sys.path:
 
 import unified_pipeline.stage3b.classify as classify  # noqa: E402
 from unified_pipeline.stage3b.context import TaxonomyContext  # noqa: E402
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY  # noqa: E402
 
 
 def _taxonomy(codes=("H", "T", "S1", "M1", "M2A")):
@@ -850,6 +851,55 @@ def test_year_groups_tolerate_missing_text_and_hierarchy():
     assert groups[2] == classify._YearGroup(("INVITED TALKS",), "2017")
     assert groups[4] == classify._YearGroup(("INVITED TALKS",), "2019")
     assert groups[6] == classify._YearGroup(("INVITED TALKS",), "2018")
+
+
+# #1435: the twins kept apart by their group year carry that year to stage 4,
+# which dates them from it (`stage4.year_groups.date_group_year_twins`).
+
+def _group_years(entries):
+    updated, _ = classify.detect_duplicates(entries)
+    return [e.get(GROUP_YEAR_KEY) for e in updated]
+
+
+def test_group_year_key_is_the_classified_artifact_field_name():
+    # Stage 4 reads it back out of the stored classified.json.
+    assert GROUP_YEAR_KEY == "group_year"
+
+
+def test_twins_in_two_year_opened_groups_carry_their_group_years():
+    entries = [
+        _talk("2019 Zephrun Foundation lecture (Grenwick)"),
+        _talk(_VENUE),
+        _talk(_OTHER_VENUE),
+        _talk("2018 Vallomir Hospital grand rounds (Peskathe)"),
+        _talk(_VENUE),
+    ]
+    assert _group_years(entries) == [None, "2019", None, None, "2018"]
+
+
+def test_twins_under_year_heading_levels_carry_the_heading_years():
+    entries = [
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2016")),
+        _talk(_VENUE, hierarchy=("INVITED TALKS", "2017:")),
+    ]
+    assert _group_years(entries) == ["2016", "2017"]
+
+
+@pytest.mark.parametrize("entries", [
+    # one year group: a real repeat, flagged, not dated
+    [_talk("2019 Zephrun Foundation lecture (Grenwick)"), _talk(_VENUE), _talk(_VENUE)],
+    # two sections: compared as before
+    [_talk("2019 Zephrun Foundation lecture (Grenwick)", hierarchy=("TALKS",)),
+     _talk(_VENUE, hierarchy=("TALKS",)),
+     _talk("2018 Vallomir Hospital grand rounds (Peskathe)", hierarchy=("SEMINARS",)),
+     _talk(_VENUE, hierarchy=("SEMINARS",))],
+    # a twin before the first group
+    [_talk(_VENUE), _talk("2019 Zephrun Foundation lecture (Grenwick)"), _talk(_VENUE)],
+    # too short to be compared at all
+    [_talk("2019:"), _talk("Example venue"), _talk("2018:"), _talk("Example venue")],
+])
+def test_no_group_year_outside_the_twins_it_keeps_apart(entries):
+    assert set(_group_years(entries)) == {None}
 
 
 def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():

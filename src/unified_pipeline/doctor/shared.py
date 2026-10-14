@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, NamedTuple
 
 from unified_pipeline.core.text_norm import norm, squash
+from unified_pipeline.stage3b.io import GROUP_YEAR_KEY
 
 # The render-overlap/verbatim-piece constants and `_entry_pieces` used to be
 # parallel COPIES of stage6/render_check.py's own (by-name, not by-import --
@@ -358,13 +359,15 @@ class _FieldsEntry(NamedTuple):
     `fields` is empty when `extracted_fields` is absent or not an object.
     `element_idx_end` completes the span a later stage's copy of the entry
     is found by (`_span`). `hierarchy` is the entry's heading path, empty
-    when absent."""
+    when absent. `group_year` is the year of the year group stage 3b filed
+    an undated line under (`GROUP_YEAR_KEY`, #1435), None when it has none."""
     element_idx: object
     code: str
     text: str
     fields: Mapping[str, object]
     element_idx_end: object = None
     hierarchy: tuple[str, ...] = ()
+    group_year: str | None = None
 
 
 def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
@@ -379,5 +382,6 @@ def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
             str(raw.get("text") or ""),
             fields if isinstance(fields, Mapping) else {},
             raw.get("element_idx_end"),
-            tuple(str(h) for h in raw.get("hierarchy") or ())))
+            tuple(str(h) for h in raw.get("hierarchy") or ()),
+            raw.get(GROUP_YEAR_KEY)))
     return entries
