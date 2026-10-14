@@ -6,6 +6,7 @@ the error each failure maps to, and the audit lines live here; the route
 handlers parse the request and shape the response. The run delete and the
 reaper's sweep themselves are run_service's.
 """
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,31 +14,42 @@ import redis
 from sqlalchemy.orm import Session, contains_eager
 
 from app.audit_events import RUN_DELETED
-from app.config_loader import get_config
+from app.config_loader import current_image_tag, get_config
 from app.errors import conflict, internal_error, not_found
 from app.models import Feedback, Run, RunState, User
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
     AdminRunEntry,
     AdminRunsResponse,
+    DoctorRerunResult,
     QualityScoreResult,
     QueueDbView,
     QueueStatsResponse,
     QueueStreamStats,
 )
 from app.services.quality_score_service import (
+    DOCTOR_SUFFIX,
     compute_and_cache_score,
     get_cached_score,
+    get_doctor_report,
     persist_score_columns,
 )
+from app.services.review_loop_service import doctor_on_stored_outputs
 from app.services.run_service import (
     delete_run_and_artifacts,
     find_run,
     queue_db_view,
     reap_orphaned_created_runs,
 )
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
+
+# Where the orchestrator mirrors a run's outputs in durable storage
+# (_persist_outputs_to_storage); the re-run doctor's report goes there too.
+OUTPUTS_PREFIX = "outputs/"
+DOCTOR_RERUN_NOT_COMPLETE = "Only a completed run's doctor can be re-run."
+DOCTOR_RERUN_HAS_REPORT = "This run already has a doctor report."
 
 
 def list_runs(
@@ -220,7 +232,56 @@ def score_run(db: Session, run_id: str) -> QualityScoreResult:
         raise not_found("No scorable outputs available for this run")
 
     persist_score_columns(db, run_id, result)
+    return _score_result(run_id, result)
 
+
+def rerun_doctor(db: Session, run_id: str, admin: User) -> DoctorRerunResult:
+    """Run the doctor over a completed run's stored outputs, store its report
+    beside them and rescore the run from it (#1593): the way back for a run
+    whose doctor failed, was switched off, or died with its pod. Only the
+    doctor runs: no pipeline stage, no LLM call. 404 for an unknown run; 409
+    for one not complete, or one that already has a report (the review copy's
+    comments and their verdicts were written against that one)."""
+    run = find_run(db, run_id)
+    if not run:
+        raise not_found("Run not found")
+    if run.status != RunState.COMPLETE:
+        raise conflict(DOCTOR_RERUN_NOT_COMPLETE)
+    if get_doctor_report(run_id) is not None:
+        raise conflict(DOCTOR_RERUN_HAS_REPORT)
+
+    try:
+        payload = _store_doctor_report(db, run_id)
+    except Exception as e:
+        logger.exception("Doctor re-run for run %s failed", run_id)
+        raise internal_error("The doctor re-run failed; it is safe to retry.") from e
+    logger.info("Doctor re-run for run %s by %s: worst severity %s",
+                run_id, admin.email, payload.get("worst_severity"))
+
+    result = compute_and_cache_score(run_id)
+    persist_score_columns(db, run_id, result)
+    return DoctorRerunResult(
+        run_id=run_id,
+        worst_severity=payload.get("worst_severity"),
+        counts=payload.get("counts") or {},
+        score=_score_result(run_id, result) if result else None,
+    )
+
+
+def _store_doctor_report(db: Session, run_id: str) -> dict:
+    """The doctor's report on the run's stored outputs, stamped with this
+    image's tag and stored under outputs/ where the orchestrator mirrors it."""
+    from app.pipeline.orchestrator import DOCTOR_IMAGE_TAG_KEY
+
+    payload = doctor_on_stored_outputs(db, run_id)
+    payload[DOCTOR_IMAGE_TAG_KEY] = current_image_tag()
+    get_storage().put_file(run_id, f"{OUTPUTS_PREFIX}{run_id}{DOCTOR_SUFFIX}",
+                           json.dumps(payload, indent=2).encode("utf-8"))
+    return payload
+
+
+def _score_result(run_id: str, result: dict) -> QualityScoreResult:
+    """The rescore response for a freshly computed score dict."""
     return QualityScoreResult(
         run_id=run_id,
         totalScore=result.get("totalScore", 0),

@@ -1102,22 +1102,12 @@ class PipelineOrchestrator:
             # outputs just written (pure local file reads, no LLM). Gated by
             # CVICHE_RUN_DOCTOR and best-effort: the run is already committed
             # complete above, so a doctor problem can never fail the run.
-            doctor = None
-            try:
-                doctor = await self._run_doctor()
-            except Exception as e:
-                logger.warning("Run doctor failed for run %s: %s", self.run_id, e)
-                try:
-                    # A failed output_files commit would leave the session in
-                    # pending-rollback and strip the submitter off the card.
-                    self.db.rollback()
-                except Exception:
-                    pass
+            doctor, doctor_outcome = await self._run_doctor_best_effort()
 
             # Compute & cache the advisory quality score for the admin view.
             # Best-effort, run off the event loop; never affects run status.
             # After the doctor: the score records whether its report was
-            # stored, and marks the run unchecked when it was not (#1593).
+            # stored, and why not when it was not (#1593).
             score = None
             try:
                 from app.services.quality_score_service import (
@@ -1125,7 +1115,7 @@ class PipelineOrchestrator:
                     persist_score_columns,
                 )
                 score = await asyncio.get_running_loop().run_in_executor(
-                    None, compute_and_cache_score, self.run_id
+                    None, compute_and_cache_score, self.run_id, doctor_outcome
                 )
                 # On this thread: self.db must not be touched from the executor.
                 persist_score_columns(self.db, self.run_id, score)
@@ -1288,6 +1278,26 @@ class PipelineOrchestrator:
         (#1298). Own session, off the event loop; DB errors are logged inside."""
         from app.services.batch_completion import notify_if_batch_complete
         await asyncio.get_running_loop().run_in_executor(None, notify_if_batch_complete, run.batch_id)
+
+    async def _run_doctor_best_effort(self) -> tuple[dict | None, str]:
+        """Run the doctor without letting it fail the run; returns its report
+        (None when it did not produce one) and its outcome for the score:
+        DOCTOR_RAN, DOCTOR_SKIPPED (CVICHE_RUN_DOCTOR=0) or DOCTOR_FAILED."""
+        from app.services.quality_score_service import DOCTOR_FAILED, DOCTOR_RAN, DOCTOR_SKIPPED
+
+        try:
+            doctor = await self._run_doctor()
+        except Exception as e:
+            logger.warning("Run doctor failed for run %s: %s", self.run_id, e)
+            try:
+                # A failed output_files commit would leave the session in
+                # pending-rollback and strip the submitter off the card.
+                self.db.rollback()
+            except Exception:
+                logger.warning("Rollback after the doctor failed for run %s also failed",
+                               self.run_id, exc_info=True)
+            return None, DOCTOR_FAILED
+        return doctor, (DOCTOR_SKIPPED if doctor is None else DOCTOR_RAN)
 
     async def _run_doctor(self):
         """Run cross-stage lints over this run's artifacts and publish the report.

@@ -322,13 +322,22 @@ def doctor_on_corrected(db: Session, run_id: str, corrected: bytes) -> dict:
     """The doctor's report on the corrected copy, read with the run's own
     stored artifacts in place of what stage 6 wrote. An artifact the run no
     longer has leaves its lints skipped, as on any run."""
+    return doctor_on_stored_outputs(db, run_id, _without_review_notes(corrected))
+
+
+def doctor_on_stored_outputs(db: Session, run_id: str, document: bytes | None = None) -> dict:
+    """The doctor's report on the run's stored artifacts, with ``document`` in
+    place of the stage-6 document when given (a corrected copy). Pure file
+    reads: no stage re-runs, no LLM call. The run's prompt logs stay on the
+    pod that ran it, so llm_fallback_served sees none of their fallbacks, and
+    a PDF upload's converted source is not stored, so the source lints skip."""
     from unified_pipeline.run_doctor import artifact_layout, run_doctor
 
-    with tempfile.TemporaryDirectory(prefix=f"corrected_doctor_{run_id}_") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f"stored_doctor_{run_id}_") as tmp:
         root = Path(tmp)
         layout = artifact_layout(root, run_id)
         for key, path in layout.items():
-            raw = (_without_review_notes(corrected) if key == DOCTOR_DOCX_ARTIFACT
+            raw = (document if document is not None and key == DOCTOR_DOCX_ARTIFACT
                    else _artifact_bytes(db, run_id, path.name))
             if raw is not None:
                 path.parent.mkdir(parents=True, exist_ok=True)

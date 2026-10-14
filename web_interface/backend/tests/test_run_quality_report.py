@@ -422,6 +422,15 @@ def test_report_degrades_each_part_to_null_independently():
         k: None for k in nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"})}
 
 
+@pytest.mark.parametrize("cached, shown", [
+    ("failed", "failed"), ("skipped", "skipped"), ("not_checked", "not_checked"),
+    ("ran", "ran"), ("checked", "ran"), (None, None)])
+def test_the_report_carries_the_doctor_status_for_the_score_box(cached, shown):
+    """#1593: the run page labels a score the doctor did not check."""
+    score = {**_score(total=84, raw=84.0, caps=[], flags=[]), "doctor_status": cached}
+    assert rqr.build_run_quality_report("R1", score, None).doctor_status == shown
+
+
 # --- the Fix list (#1589) -----------------------------------------------------
 
 

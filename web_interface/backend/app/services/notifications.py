@@ -47,7 +47,7 @@ import requests
 
 from app.config_loader import get_config
 from app.models import Run, is_bulk_batch
-from app.services.quality_score_service import DOCTOR_NOT_CHECKED, DOCTOR_STATUS_KEY
+from app.services.quality_score_service import DOCTOR_STATUS_KEY, unchecked_reason
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,9 @@ _STATUS_COLOR = {
 }
 _DEFAULT_COLOR = "default"
 
-# Appended to the Quality score fact when no doctor report was stored (#1593).
-_NOT_CHECKED_TEXT = " — not checked (no doctor report)"
+# Appended to the Quality score fact when no doctor report was stored (#1593),
+# filled with quality_score_service.unchecked_reason.
+_NOT_CHECKED_TEXT = " — not checked ({reason})"
 
 # POST timeout (seconds) per attempt. Kept short so one attempt never sits on
 # the delivery worker for long; _deliver bounds the total worst case anyway
@@ -489,21 +490,22 @@ def _score_text(score: ScoreSummary | None) -> str:
     (#745), so a reader does not take it for a measured result. Only the
     count goes on the card, never the missing_evidence strings: an
     "ambiguous" entry names the matched files, and those are CV filenames.
-    A score with no doctor report beside it says "not checked" (#1593).
+    A score with no doctor report beside it says "not checked", and why when
+    the orchestrator knew (#1593).
     """
     if not score or score.get("totalScore") is None:
         return "n/a"
     text = f"{score.get('totalScore')} ({score.get('band') or 'n/a'})"
-    unchecked = score.get(DOCTOR_STATUS_KEY) == DOCTOR_NOT_CHECKED
+    reason = unchecked_reason(score.get(DOCTOR_STATUS_KEY))
     if score.get("data_complete") is False:
         missing = score.get("missing_evidence")
         count = len(missing) if isinstance(missing, list) else 0
         if count:
             text += f" — incomplete: {count} file(s) missing or unreadable"
-        elif not unchecked:
+        elif reason is None:
             text += " — incomplete"
-    if unchecked:
-        text += _NOT_CHECKED_TEXT
+    if reason is not None:
+        text += _NOT_CHECKED_TEXT.format(reason=reason)
     return text
 
 
