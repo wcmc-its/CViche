@@ -155,6 +155,7 @@ from ..shared import (
     _output_section_header,
     _owner_surname_words,
     _piece_in_template,
+    normalise_hyphens,
     offered_as_subpoint,
 )
 
@@ -2131,6 +2132,14 @@ _OPEN_TWO_DIGIT_YEAR_RE = re.compile(
     re.IGNORECASE)
 _SOURCE_ONLY_TWO_DIGIT_YEAR_RES = (_DASHED_DATE_YEAR_RE, _MONTH_TWO_DIGIT_YEAR_RE,
                                    _OPEN_TWO_DIGIT_YEAR_RE)
+#: A range of two month-year dates written m-yy: "6-91 to 5-94", "4-17 - 8-22"
+#: (#1585, batch NECRGC: 11 false WARNs on one run's grants). Each month is
+#: 1-12, and a bare dash joins the two only with a space on both sides, so a
+#: run of dash-joined numbers ("3-24-11-26") still states no year.
+_MONTH_YEAR_RANGE_RE = re.compile(
+    r"(?<![\d\-/.])(?:0?[1-9]|1[0-2])-(\d{2})"
+    r"(?:\s+(?:to|through|thru|until)\s+|\s+-\s+)"
+    r"(?:0?[1-9]|1[0-2])-(\d{2})(?![\d\-/])", re.IGNORECASE)
 
 
 def _source_two_digit_years(text: str) -> set[int]:
@@ -2140,6 +2149,8 @@ def _source_two_digit_years(text: str) -> set[int]:
               for yy in pattern.findall(text)}
     for tails in _YEAR_LIST_TAILS_RE.findall(text):
         years |= {int(yy) for yy in re.findall(r"\d{2}", tails)}
+    for first, second in _MONTH_YEAR_RANGE_RE.findall(text):
+        years |= {int(first), int(second)}
     return years
 
 
@@ -2151,8 +2162,8 @@ def _year_in_source(year: int, text: str) -> bool:
     last two digits as a two-digit year token, a stand-alone two-digit
     range or one of `_source_two_digit_years`'s shapes ("5/31/34" states
     2034, "64-66" both years, "3-30-00" 2000); or a range shorthand's end
-    ("2011-2")."""
-    text = _OCR_LEADING_ONE_RE.sub("1", text)
+    ("2011-2"). Any source hyphen reads as "-" (`normalise_hyphens`)."""
+    text = _OCR_LEADING_ONE_RE.sub("1", normalise_hyphens(text))
     return (str(year) in text or year % 100 in _source_two_digit_years(text)
             or year in _range_shorthand_ends(text))
 
