@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, OwnerFixList, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, NOT_CHECKED_REASON, OwnerFixList, ReviewNote, RunQualitySections, seenOn } from './RunQualityPanel'
 import { getRunFixList, getRunQuality, getRunReviewNote } from '../api/runs'
 import type { RunDoctorReport, RunFixList, RunQualityReport, RunReviewNote } from '../types'
 
@@ -14,7 +14,7 @@ vi.mock('../api/runs', () => ({
 const EMPTY: RunQualityReport = {
   run_id: 'ABCDEF', score: null, band: null, band_meaning: null, provisional: true,
   cap: null, cap_reason: null, cap_lint: null, earned: null, total_weight: null,
-  data_complete: null, dimensions: [], gates_fired: [], doctor: null,
+  data_complete: null, doctor_status: null, dimensions: [], gates_fired: [], doctor: null,
 }
 const SCORED: RunQualityReport = { ...EMPTY, score: 87, band: 'GREEN', band_meaning: 'Ship', earned: 87, total_weight: 95 }
 
@@ -52,6 +52,25 @@ describe('RunQualitySections', () => {
     for (let i = 0; i < EMPTY_REPORT_RETRIES + 3; i++) await tick()
     expect(getRunQuality).toHaveBeenCalledTimes(1 + EMPTY_REPORT_RETRIES)
     expect(screen.getByText(NO_SCORE)).toBeTruthy()
+  })
+
+  it.each([
+    ['failed', NOT_CHECKED_REASON.failed],
+    ['skipped', NOT_CHECKED_REASON.skipped],
+    ['not_checked', NOT_CHECKED_REASON.not_checked],
+  ] as const)('labels a score the Run Doctor did not check (%s, #1593)', async (status, reason) => {
+    vi.mocked(getRunQuality).mockResolvedValue({ ...SCORED, score: 84, band: 'YELLOW', doctor_status: status })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.getByText(`Not checked: ${reason}`)).toBeTruthy()
+  })
+
+  it.each(['ran', null] as const)('puts no Not checked label on a %s score', async (status) => {
+    vi.mocked(getRunQuality).mockResolvedValue({ ...SCORED, doctor_status: status })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.getByText('87')).toBeTruthy()
+    expect(screen.queryByText(/Not checked:/)).toBeNull()
   })
 
   it('does not fetch again when the first report already has a score', async () => {

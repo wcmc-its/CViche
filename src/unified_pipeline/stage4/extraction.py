@@ -35,10 +35,12 @@ from unified_pipeline.llm_provenance import (
 )
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
+    POSITION_TAXONOMY_CODES,
     ReformattedFields,
     apply_regex_post_processing,
     coerce_field_value_types,
     normalize_dates,
+    split_parenthetical_title_span,
 )
 from unified_pipeline.stage4.error_codes import (
     LLM_PROVIDER_ERROR,
@@ -364,6 +366,10 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
     cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
     cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code))
     last_reformatted = cleaned[-1][1]
+    if taxonomy_code in POSITION_TAXONOMY_CODES:
+        outer = split_parenthetical_title_span(entry_text, cleaned[-1][0], last_reformatted)
+        if outer is not None:
+            cleaned.insert(-1, (dict(outer), {}))
     cleaned = _with_offschema_records(cleaned, taxonomy_code)
     last_fields = cleaned[-1][0]
     if len(cleaned) < _MIN_RECORDS_PER_ENTRY:

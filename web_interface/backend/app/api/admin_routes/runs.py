@@ -1,5 +1,5 @@
 """Admin routes over runs: the paginated listing, hard delete, the orphan
-reaper, rescoring and the run-queue diagnostics -- plus deleting one feedback
+reaper, rescoring, the doctor re-run and the run-queue diagnostics -- plus deleting one feedback
 row, since a feedback row belongs to a run (the feedback CSV is in exports)."""
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -7,13 +7,19 @@ from sqlalchemy.orm import Session
 from app.auth import require_admin
 from app.database import get_db
 from app.models import User
-from app.schemas import AdminRunsResponse, QualityScoreResult, QueueStatsResponse
+from app.schemas import (
+    AdminRunsResponse,
+    DoctorRerunResult,
+    QualityScoreResult,
+    QueueStatsResponse,
+)
 from app.services.admin_run_service import (
     hard_delete_feedback,
     hard_delete_run,
     list_runs,
     queue_stats,
     reap_orphans,
+    rerun_doctor,
     score_run,
 )
 
@@ -158,3 +164,19 @@ def compute_run_score(
     re-run. Sync def so FastAPI runs the (blocking) storage I/O off the loop.
     """
     return score_run(db, run_id)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/run/{run_id}/doctor  -- re-run only the doctor (#1593)
+# ---------------------------------------------------------------------------
+@router.post("/admin/run/{run_id}/doctor", response_model=DoctorRerunResult)
+def rerun_run_doctor(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> DoctorRerunResult:
+    """Re-run the doctor over a completed run's stored outputs and rescore it,
+    for a run left with no doctor report. No pipeline stage re-runs and no
+    LLM is called. 404 unknown run; 409 not complete or already has a report.
+    Sync def so the blocking storage I/O and lints run off the event loop."""
+    return rerun_doctor(db, run_id, admin)

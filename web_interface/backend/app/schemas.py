@@ -783,6 +783,8 @@ class AdminConfigUpdate(BaseModel):
 
 DoctorSeverity = Literal["ERROR", "WARN", "INFO"]
 QualityBand = Literal["GREEN", "YELLOW", "RED"]
+# quality_score_service.DOCTOR_RAN / _FAILED / _SKIPPED / _NOT_CHECKED (#1593).
+DoctorStatus = Literal["ran", "failed", "skipped", "not_checked"]
 
 
 class QualityDimension(BaseModel):
@@ -897,9 +899,22 @@ class RunQualityReport(BaseModel):
     earned: int | None = None  # weighted total before the cap
     total_weight: int | None = None
     data_complete: bool | None = None
+    # Whether the doctor checked the scored run, and why not (#1593); null
+    # for a score cached before the status was recorded.
+    doctor_status: DoctorStatus | None = None
     dimensions: list[QualityDimension] = []
     gates_fired: list[QualityGate] = []  # weight-0 rows whose cap fired
     doctor: RunDoctorReport | None = None
+
+
+class DoctorRerunResult(BaseModel):
+    """POST /admin/run/{run_id}/doctor (#1593): the re-run doctor's verdict on
+    a completed run's stored outputs, and the run's score rebuilt from it
+    (null when the outputs held nothing to score)."""
+    run_id: str
+    worst_severity: DoctorSeverity | None = None
+    counts: dict[str, int] = {}
+    score: QualityScoreResult | None = None
 
 
 class RunReviewNote(BaseModel):

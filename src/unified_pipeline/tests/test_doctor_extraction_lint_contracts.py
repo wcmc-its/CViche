@@ -3536,6 +3536,9 @@ def test_year_not_in_source_reads_source_hyphens_and_month_year_ranges(fields, t
     # Neither 0 nor 13 is a month.
     ({"end_date": "2022"}, "Example grant 4-17 to 0-22"),
     ({"start_date": "2017", "end_date": "2022"}, "Example grant 0-17 to 8-22"),
+    ({"start_date": "2017", "end_date": "2022"}, "Example grant 13-17 to 8-22"),
+    # The spaced dash needs space on both sides.
+    ({"end_date": "2022"}, "Example grant 4-17- 8-22"),
     # Part of a longer number, on either side.
     ({"end_date": "2022"}, "Example grant 24-17 to 8-22"),
     ({"end_date": "2022"}, "Example grant 4-17 to 8-225"),

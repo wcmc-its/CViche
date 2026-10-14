@@ -110,8 +110,50 @@ def test_a_score_beside_a_doctor_report_is_marked_checked(monkeypatch):
     svc.compute_and_cache_score("R1")
 
     cached = json.loads(storage.put[svc.CACHE_KEY])
-    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_CHECKED
+    assert cached[svc.DOCTOR_STATUS_KEY] == svc.DOCTOR_RAN
     assert cached["data_complete"] is True
+
+
+@pytest.mark.parametrize("has_report, outcome, expected", [
+    (False, svc.DOCTOR_FAILED, svc.DOCTOR_FAILED),
+    (False, svc.DOCTOR_SKIPPED, svc.DOCTOR_SKIPPED),
+    # Ran, but its report never reached storage: nothing says why.
+    (False, svc.DOCTOR_RAN, svc.DOCTOR_NOT_CHECKED),
+    (False, None, svc.DOCTOR_NOT_CHECKED),
+    # A stored report is what checks a run, whatever the caller said.
+    (True, svc.DOCTOR_FAILED, svc.DOCTOR_RAN),
+])
+def test_the_cached_status_says_why_a_run_was_not_checked(monkeypatch, has_report, outcome, expected):
+    """#1593: the orchestrator's outcome tells a doctor that raised from one
+    switched off; only a stored report reads as ran."""
+    files = {"outputs/R1_fields.json": b"{}"}
+    if has_report:
+        files[f"outputs/R1{svc.DOCTOR_SUFFIX}"] = b"{}"
+    storage = _Storage(files)
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run",
+                        lambda _d, _r: {"totalScore": 97, "data_complete": True})
+
+    svc.compute_and_cache_score("R1", outcome)
+
+    cached = json.loads(storage.put[svc.CACHE_KEY])
+    assert cached[svc.DOCTOR_STATUS_KEY] == expected
+    assert cached["data_complete"] is (expected == svc.DOCTOR_RAN)
+
+
+@pytest.mark.parametrize("stored, status, reason", [
+    (svc.DOCTOR_RAN, svc.DOCTOR_RAN, None),
+    (svc.LEGACY_DOCTOR_CHECKED, svc.DOCTOR_RAN, None),  # cached by #1601
+    (svc.DOCTOR_FAILED, svc.DOCTOR_FAILED, "the doctor failed"),
+    (svc.DOCTOR_SKIPPED, svc.DOCTOR_SKIPPED, "the doctor is switched off"),
+    (svc.DOCTOR_NOT_CHECKED, svc.DOCTOR_NOT_CHECKED, "no doctor report"),
+    (None, None, None),  # cached before #1601
+    ("bogus", None, None),
+])
+def test_a_cached_doctor_status_is_read_with_its_reason(stored, status, reason):
+    raw = {"totalScore": 90, svc.DOCTOR_STATUS_KEY: stored}
+    assert svc.parse_score(raw).doctor_status == status
+    assert svc.unchecked_reason(stored) == reason
 
 
 def _scored_dir_listing(monkeypatch, storage):

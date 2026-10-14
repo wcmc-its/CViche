@@ -27,10 +27,10 @@
         "address": {"extract": true, "category": "template", "wcm_column": "Office address"},
         "npi_number": {"extract": true, "category": "template", "wcm_column": "NPI number (optional)"},
         "dea_number": {"extract": true, "category": "template", "wcm_column": "DEA number (optional)"},
-        "title": {"extract": false, "category": "optional", "notes": "Rarely needed separately"},
+        "title": {"extract": true, "category": "template", "notes": "A contact block may be the only statement of the current appointment; stage 6 renders it as an Academic Appointments row when no position row names it (#1697)"},
         "degrees": {"extract": false, "category": "optional", "notes": "Usually part of name"},
-        "department": {"extract": false, "category": "optional"},
-        "institution": {"extract": false, "category": "optional"},
+        "department": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
         "narrative": {"extract": false, "category": "optional"}
       }
     },

@@ -967,6 +967,7 @@ def build_run_quality_report(run_id: str, score_raw: object, doctor_raw: object)
         earned=round(snapshot.earned),
         total_weight=sum(d.weight for d in snapshot.dimensions),
         data_complete=snapshot.data_complete,
+        doctor_status=snapshot.doctor_status,
         dimensions=[_dimension(d) for d in snapshot.dimensions],
         gates_fired=fired_zero_weight_gates(snapshot),
         doctor=summarize_doctor(doctor_raw, cap_lint),

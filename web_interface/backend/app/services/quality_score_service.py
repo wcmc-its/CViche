@@ -53,13 +53,56 @@ CACHE_KEY = "quality_score.json"
 # admin rescore. Null when that image was built without a tag.
 IMAGE_TAG_KEY = "image_tag"
 
-# The cached score's record of whether a doctor report was stored when it was
-# computed (#1593). A score with no report beside it was never checked: the
-# doctor failed, was switched off, or its pod died first (IXJMKS scored 97
-# GREEN that way), so it is also marked data_complete false.
+# The cached score's record of the doctor's outcome when it was computed
+# (#1593). Only a stored report makes a score checked (DOCTOR_RAN). With none
+# beside it the run was never checked -- IXJMKS scored 97 GREEN that way -- so
+# it is also marked data_complete false, and the status says why when the
+# orchestrator knew: the doctor raised (DOCTOR_FAILED) or CVICHE_RUN_DOCTOR=0
+# switched it off (DOCTOR_SKIPPED). DOCTOR_NOT_CHECKED is "no report, reason
+# unknown": its pod died first, the report never reached storage, or an admin
+# rescored a run that never had one.
 DOCTOR_STATUS_KEY = "doctor_status"
-DOCTOR_CHECKED = "checked"
+DOCTOR_RAN = "ran"
+DOCTOR_FAILED = "failed"
+DOCTOR_SKIPPED = "skipped"
 DOCTOR_NOT_CHECKED = "not_checked"
+# What a score cached between #1601 and the ran/failed/skipped split called a
+# run whose report was stored.
+LEGACY_DOCTOR_CHECKED = "checked"
+
+# Why a score is not checked, per status, in the words the Teams card uses.
+DOCTOR_UNCHECKED_REASONS = {
+    DOCTOR_FAILED: "the doctor failed",
+    DOCTOR_SKIPPED: "the doctor is switched off",
+    DOCTOR_NOT_CHECKED: "no doctor report",
+}
+
+
+def doctor_status(status: object) -> str | None:
+    """A cached score's doctor status, the pre-split "checked" read as
+    DOCTOR_RAN; None when absent (a cache from before #1601) or unknown."""
+    if status == LEGACY_DOCTOR_CHECKED:
+        return DOCTOR_RAN
+    if status == DOCTOR_RAN or status in DOCTOR_UNCHECKED_REASONS:
+        return str(status)
+    return None
+
+
+def unchecked_reason(status: object) -> str | None:
+    """Why the doctor did not check a score with this status; None when it
+    did, or when the cache does not say."""
+    return DOCTOR_UNCHECKED_REASONS.get(doctor_status(status) or "")
+
+
+def _outcome_status(has_report: bool, outcome: str | None) -> str:
+    """The status to cache: DOCTOR_RAN only when a report is stored; without
+    one, the orchestrator's reason when it gave one, else DOCTOR_NOT_CHECKED
+    (a doctor that ran but whose report never reached storage included)."""
+    if has_report:
+        return DOCTOR_RAN
+    if outcome is not None and outcome in DOCTOR_UNCHECKED_REASONS:
+        return outcome
+    return DOCTOR_NOT_CHECKED
 
 BAND_GREEN = "GREEN"
 BAND_YELLOW = "YELLOW"
@@ -87,12 +130,15 @@ def load_cached_score(run_id: str) -> object | None:
         return None
 
 
-def compute_and_cache_score(run_id: str) -> dict | None:
+def compute_and_cache_score(run_id: str, doctor_outcome: str | None = None) -> dict | None:
     """Score a completed run from its persisted outputs and cache the result.
 
-    The score is built from the doctor report (#1595) and records whether one
-    was stored (DOCTOR_STATUS_KEY), so the orchestrator runs the doctor first.
-    A run with none is capped out of GREEN by the scorer itself. Best-effort: returns None on any failure and never raises.
+    The score is built from the doctor report (#1595) and records the
+    doctor's status (DOCTOR_STATUS_KEY), so the orchestrator runs the doctor
+    first and passes ``doctor_outcome`` (DOCTOR_RAN / DOCTOR_FAILED /
+    DOCTOR_SKIPPED); None, as from an admin rescore, means not known. A run
+    with no stored report is capped out of GREEN by the scorer itself.
+    Best-effort: returns None on any failure and never raises.
     """
     try:
         from unified_pipeline.quality_score import score_run
@@ -115,10 +161,9 @@ def compute_and_cache_score(run_id: str) -> dict | None:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        if any(k.endswith(DOCTOR_SUFFIX) for k in keys):
-            result[DOCTOR_STATUS_KEY] = DOCTOR_CHECKED
-        else:
-            result[DOCTOR_STATUS_KEY] = DOCTOR_NOT_CHECKED
+        status = _outcome_status(any(k.endswith(DOCTOR_SUFFIX) for k in keys), doctor_outcome)
+        result[DOCTOR_STATUS_KEY] = status
+        if status != DOCTOR_RAN:
             result["data_complete"] = False
 
         cached = {**result, IMAGE_TAG_KEY: current_image_tag()}
@@ -156,6 +201,7 @@ class ScoreSnapshot:
     dimensions: tuple[DimensionPoints, ...]
     flags: tuple[str, ...]
     data_complete: bool | None
+    doctor_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +252,7 @@ def parse_score(raw: object) -> ScoreSnapshot | None:
         dimensions=_parse_dimensions(raw.get("dimensionScores")),
         flags=tuple(f for f in flags if isinstance(f, str)) if isinstance(flags, list) else (),
         data_complete=raw.get("data_complete") if isinstance(raw.get("data_complete"), bool) else None,
+        doctor_status=doctor_status(raw.get(DOCTOR_STATUS_KEY)),
     )
 
 
