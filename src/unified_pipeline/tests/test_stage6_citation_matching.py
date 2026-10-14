@@ -32,6 +32,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.citation_matching import (  # noqa: E402
     _append_missing_stage5d_values,
+    _insert_missing_stage5d_year,
     _owner_words,
     _prints_junk_author,
     _restore_stage5d_owner,
@@ -380,3 +381,52 @@ def test_stage5d_author_segment(citation: str, segment: str) -> None:
 
 def test_owner_words_leave_out_credentials() -> None:
     assert _owner_words('Juno Wren PhD') == {'juno', 'wren'}
+
+
+# #1810: a year stage 4 filled from the line's year group, which 5d never saw.
+_PLACE = 'Larchmere, ZZ'
+
+
+@pytest.mark.parametrize('citation, year, location, expected', [
+    # A meeting: the year goes before the place, as 5d writes a dated talk.
+    ('Quillfern Retreat; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat; 1983; Larchmere, ZZ.'),
+    # A journal: before the volume, as `_journal_trailer_parts` writes it.
+    ('Tamsel Q. A title. Brindlewood Rev. 12(3):45-67.', '1971', '',
+     'Tamsel Q. A title. Brindlewood Rev. 1971;12(3):45-67.'),
+    ('Tamsel Q. A title. Brindlewood Rev. 12:45-67.', '1971', '',
+     'Tamsel Q. A title. Brindlewood Rev. 1971;12:45-67.'),
+    # A volume with no sentence break before it is not a trailer.
+    ('Tamsel Q. A title; 12:45-67.', '1971', '', 'Tamsel Q. A title; 12:45-67. 1971.'),
+    # Neither shape, or a place 5d did not write last: the year closes it.
+    ('Quillfern Retreat.', '1983', _PLACE, 'Quillfern Retreat. 1983.'),
+    ('Quillfern Retreat; Larchmere, ZZ, USA.', '1983', _PLACE,
+     'Quillfern Retreat; Larchmere, ZZ, USA. 1983.'),
+    ('Quillfern Retreat; Larchmere, ZZ.', '1983', '', 'Quillfern Retreat; Larchmere, ZZ. 1983.'),
+    # Any year already there, its own or not, leaves the citation alone.
+    ('Quillfern Retreat; 1983; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat; 1983; Larchmere, ZZ.'),
+    ('Quillfern Retreat 1969; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat 1969; Larchmere, ZZ.'),
+    # Digits that are not a year do not count as one.
+    ('Quillfern Retreat 119834; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat 119834; 1983; Larchmere, ZZ.'),
+    ('Quillfern Retreat 1883; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat 1883; 1983; Larchmere, ZZ.'),
+    ('Quillfern Retreat 11983; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat 11983; 1983; Larchmere, ZZ.'),
+    ('Quillfern Retreat 19834; Larchmere, ZZ.', '1983', _PLACE,
+     'Quillfern Retreat 19834; 1983; Larchmere, ZZ.'),
+    # A "Vol:Pages" that does not close the citation is not its trailer, and
+    # a number with no pages is not one either.
+    ('Tamsel Q. A title. 12:45 session. Brindlewood Rev.', '1971', '',
+     'Tamsel Q. A title. 12:45 session. Brindlewood Rev. 1971.'),
+    ('Tamsel Q. A title. 12.', '1971', '', 'Tamsel Q. A title. 12. 1971.'),
+    # No place known: "; ." is not a place.
+    ('Quillfern Retreat; .', '1983', '', 'Quillfern Retreat; . 1983.'),
+    # No year to add.
+    ('Quillfern Retreat; Larchmere, ZZ.', '', _PLACE, 'Quillfern Retreat; Larchmere, ZZ.'),
+])
+def test_insert_missing_stage5d_year(citation: str, year: str, location: str,
+                                     expected: str) -> None:
+    assert _insert_missing_stage5d_year(citation, year, location) == expected

@@ -36,6 +36,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _distinct_bare_names,
     _drop_is_safe,
     _drop_split_siblings,
+    _field_dates_text,
     _lists_name,
     _names_a_sibling,
     _names_record,
@@ -44,7 +45,9 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _place_only_event,
     _record_name,
     _row_residue,
+    _split_record_family,
     _title_only_fragment,
+    _undated_split_record_absorbs_date,
     _verbatim_contained,
     recovered_row_already_rendered,
 )
@@ -2313,3 +2316,161 @@ def test_a_sibling_the_parent_was_dropped_against_stays():
     drop_indices = {1}
     _drop_split_siblings(children, [(1, 0)], drop_indices, "Q1", None, set())
     assert drop_indices == {1}
+
+
+# ---------------- #666 OWACZM 255: an undated split record absorbs a dated talk
+
+_ZQ_VENUE = "Zqorbin Gizmo Guild (Quillford, ZZ)"
+_ZQ_OTHER = "Zqmarrow Toy Works (Pellby, ZZ)"
+
+
+def _split_r(text, records, idx=196):
+    """The children stage 6 fans a two-line R entry's stage-4 records out into."""
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    entry = {"taxonomy_code": "R", "element_idx_start": idx, "text": text,
+             "hierarchy": ["Talks"],
+             "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    return fan_out_multi_record_entries([entry], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+
+
+def _talk(location, date=None, idx=255):
+    return {"taxonomy_code": "R", "element_idx_start": idx, "text": location,
+            "hierarchy": ["Talks"], "extracted_fields": {"location": location, "date": date}}
+
+
+def _r_records(date=None):
+    return [{"location": _ZQ_VENUE, "date": None}, {"location": _ZQ_OTHER, "date": date}]
+
+
+def _dedup_r(entries):
+    return deduplicate_entries(entries, code="R", document=list(entries))
+
+
+def test_an_undated_split_record_keeps_a_dated_talk_at_its_venue():
+    """OWACZM 255: the 2019 talk was dropped as a copy of the undated first
+    line of entry 196, a two-line entry that states no year anywhere."""
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER}", _r_records())
+    dated = _talk(_ZQ_VENUE, "2019")
+    assert children[0][FANNED_OUT_FROM]
+    assert _dedup_r([*children, dated]) == [*children, dated]
+    assert _drop_is_safe(dated, children[0], "R", [*children, dated]) is False
+
+
+def test_an_undated_talk_still_goes_against_an_undated_split_record():
+    # KVWVHT 255: no date on either side, the verbatim copy goes as before.
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER}", _r_records())
+    assert _dedup_r([*children, _talk(_ZQ_VENUE)]) == children
+
+
+@pytest.mark.parametrize("parent_text, records", [
+    (f"{_ZQ_VENUE} 2019\t{_ZQ_OTHER}", _r_records()),
+    (f"{_ZQ_VENUE}\t{_ZQ_OTHER} 2019", _r_records("2019")),
+], ids=["year-in-the-entry-text", "year-on-a-sibling-record"])
+def test_a_split_record_whose_entry_states_the_date_still_absorbs_it(parent_text, records):
+    # The multi-record entry states 2019 somewhere, so it can be that talk.
+    children = _split_r(parent_text, records)
+    dated = _talk(_ZQ_VENUE, "2019")
+    assert not _undated_split_record_absorbs_date(dated, children[0], [*children, dated])
+    assert _drop_is_safe(dated, children[0], "R", [*children, dated]) is True
+
+
+def test_another_year_in_the_entry_does_not_vouch_for_the_date():
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER} 2021", _r_records("2021"))
+    dated = _talk(_ZQ_VENUE, "2019")
+    assert _undated_split_record_absorbs_date(dated, children[0], [*children, dated])
+    assert _dedup_r([*children, dated]) == [*children, dated]
+
+
+def test_the_same_line_twice_one_copy_undated_still_collapses():
+    # Two whole entries, neither split out of a multi-record entry: the dated
+    # copy goes as a copy of the undated one, as before. (The other way
+    # round, the dated copy kept and the undated one dropped, was already
+    # refused before this rule; that is not this shape.)
+    undated = _talk(_ZQ_VENUE, idx=120)
+    dated = _talk(_ZQ_VENUE, "2019")
+    assert _dedup_r([undated, dated]) == [undated]
+    assert _drop_is_safe(dated, undated, "R", [undated, dated]) is True
+    assert not _undated_split_record_absorbs_date(dated, undated, [undated, dated])
+
+
+def test_a_dated_split_record_is_left_to_the_date_checks():
+    children = _split_r(f"{_ZQ_VENUE} 2018\t{_ZQ_OTHER}",
+                        [{"location": _ZQ_VENUE, "date": "2018"}, {"location": _ZQ_OTHER}])
+    dated = _talk(_ZQ_VENUE, "2019")
+    assert children[0]["extracted_fields"]["date"] == "2018"
+    assert not _undated_split_record_absorbs_date(dated, children[0], [*children, dated])
+
+
+@pytest.mark.parametrize("date", [None, "", "n.d.", "  "])
+def test_a_dropped_record_with_no_year_is_not_this_shape(date):
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER}", _r_records())
+    talk = _talk(_ZQ_VENUE, date)
+    assert not _undated_split_record_absorbs_date(talk, children[0], [*children, talk])
+
+
+def test_a_range_on_the_dropped_record_needs_an_overlapping_range():
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER} 2014-2016", _r_records())
+    talk = _talk(_ZQ_VENUE)
+    talk["extracted_fields"] = {"location": _ZQ_VENUE, "start_date": "2015", "end_date": "2018"}
+    assert not _undated_split_record_absorbs_date(talk, children[0], [*children, talk])
+    talk["extracted_fields"].update(start_date="2017", end_date="2019")
+    assert _undated_split_record_absorbs_date(talk, children[0], [*children, talk])
+
+
+@pytest.mark.parametrize("change", [
+    {"element_idx_start": 12},
+    {"fanned_out_from": {"key": "roles", "index": 1, "count": 2}},
+    {"fanned_out_from": {"key": "stage4_records", "index": 1, "count": 3}},
+], ids=["another-entry", "another-list", "another-count"])
+def test_only_the_same_multi_record_entry_vouches_for_the_date(change):
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER}", _r_records())
+    stranger = {**children[0], "text": f"{_ZQ_OTHER} 2019", **change}
+    dated = _talk(_ZQ_VENUE, "2019")
+    document = [*children, stranger, dated]
+    assert stranger not in _split_record_family(children[0], document)
+    assert _undated_split_record_absorbs_date(dated, children[0], document)
+
+
+def test_the_family_is_the_records_of_one_entry():
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER}", _r_records())
+    dated = _talk(_ZQ_VENUE, "2019")
+    family = _split_record_family(children[0], [*children, dated])
+    assert family == children
+    assert _split_record_family(children[0], None) == [children[0]]
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"date": "2019"}, "2019"),
+    ({"start_date": "2015", "end_date": "2018"}, "2015 - 2018"),
+    ({"start_date": "2019", "end_date": "2019"}, "2019"),
+    ({"start_date": " 2015 ", "end_date": " "}, "2015"),
+    ({"start_date": "", "end_date": "2018"}, "2018"),
+    ({}, ""),
+])
+def test_field_dates_text(fields, expected):
+    assert _field_dates_text({"extracted_fields": fields}) == expected
+
+
+def test_a_sibling_records_date_field_vouches_for_the_date():
+    # A list fanned out of the fields (not stage 4's records): the sibling's
+    # date sits in its fields, in no record's text.
+    def record(index, text, **fields):
+        return {"taxonomy_code": "R", "element_idx_start": 40, "text": text,
+                "extracted_fields": fields,
+                FANNED_OUT_FROM: {"key": "talks", "index": index, "count": 2}}
+    kept = record(0, _ZQ_VENUE, location=_ZQ_VENUE)
+    dated = _talk(_ZQ_VENUE, "2019")
+    for sibling_date, absorbs in (("2019", False), ("2021", True)):
+        sibling = record(1, _ZQ_OTHER, location=_ZQ_OTHER, date=sibling_date)
+        assert _undated_split_record_absorbs_date(dated, kept, [kept, sibling, dated]) is absorbs
+
+
+def test_a_whole_entry_at_the_same_source_position_is_not_a_record_of_it():
+    # Another code's entry read off the same source line is no split record.
+    children = _split_r(f"{_ZQ_VENUE}\t{_ZQ_OTHER}", _r_records())
+    neighbour = {**_talk(f"{_ZQ_OTHER} 2019", idx=196), "taxonomy_code": "Q1"}
+    dated = _talk(_ZQ_VENUE, "2019")
+    document = [*children, neighbour, dated]
+    assert _split_record_family(children[0], document) == children
+    assert _undated_split_record_absorbs_date(dated, children[0], document)

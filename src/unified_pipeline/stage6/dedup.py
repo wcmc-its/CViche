@@ -27,7 +27,12 @@ from .fan_out import (
 )
 from .normalization import _squash
 from .normalization.publication import ResolvedPublication, resolve_publication
-from .parsing import _MONTH_NAME_TO_NUM, _dates_overlap_or_match, _parse_date_components
+from .parsing import (
+    _MONTH_NAME_TO_NUM,
+    _dates_overlap_or_match,
+    _get_entry_date_range,
+    _parse_date_components,
+)
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
 
 _STOP_WORDS = frozenset({
@@ -938,6 +943,52 @@ def _group_header_between(dropped_entry: dict, kept_entry: dict,
                for entry in document or ())
 
 
+def _split_record_family(entry: dict, document: list[dict] | None) -> list[dict]:
+    """`entry` and every other record of `document` split out of the same
+    multi-record entry: the same source position and the same records list
+    (`FANNED_OUT_FROM`, or `LAST_STAGE4_RECORD` on the last record, which
+    keeps the parent's whole text)."""
+    provenance = entry.get(FANNED_OUT_FROM) or {}
+    family = [entry]
+    for other in document or ():
+        marker = other.get(FANNED_OUT_FROM) or other.get(LAST_STAGE4_RECORD) or {}
+        if (other is not entry
+                and other.get('element_idx_start') == entry.get('element_idx_start')
+                and marker.get('key') == provenance.get('key')
+                and marker.get('count') == provenance.get('count')):
+            family.append(other)
+    return family
+
+
+def _field_dates_text(entry: dict) -> str:
+    """The date span `entry`'s fields state, as text `_dates_compatible`
+    reads ("2019", "2015 - 2018"), or '' when they state none."""
+    values = (str(value).strip() for value in _get_entry_date_range(entry))
+    return ' - '.join(dict.fromkeys(filter(None, values)))
+
+
+def _undated_split_record_absorbs_date(dropped_entry: dict, kept_entry: dict,
+                                       document: list[dict] | None) -> bool:
+    """True when the kept entry is an undated record split out of a
+    multi-record entry and the dropped entry's fields state a date that
+    entry states nowhere: in no record's text and no record's date fields
+    (#666, OWACZM 255: a 2019 talk dropped as a copy of the undated first
+    line of a two-line entry 196).
+
+    A split record carries none of its parent's context (#983), so its lack
+    of a date is not evidence of the same date; `_dates_overlap_or_match`'s
+    "one side undated, cannot prove different" lets every dated listing of
+    the same venue fall into it. When the multi-record entry does state the
+    dropped date somewhere, the drop stands as before. Two whole entries,
+    one dated and one not, are not this shape and still collapse."""
+    if not kept_entry.get(FANNED_OUT_FROM) or _field_dates_text(kept_entry):
+        return False
+    dropped_dates = _field_dates_text(dropped_entry)
+    family_text = ' '.join(f"{entry.get('text') or ''} {_field_dates_text(entry)}"
+                           for entry in _split_record_family(kept_entry, document))
+    return not _dates_compatible(dropped_dates, family_text)
+
+
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
                   code: str | None = None,
                   document: list[dict] | None = None,
@@ -992,6 +1043,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
                              == kept_entry.get('extracted_fields'))
     if _group_header_between(dropped_entry, kept_entry, code, document):
         return False  # #666: listed under two group lines, so two records
+    if _undated_split_record_absorbs_date(dropped_entry, kept_entry, document):
+        return False  # #666: an undated split record does not vouch for a date
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())

@@ -18,6 +18,7 @@ its own text omitted -- so the dependency runs `publication` ->
 
     _value_referenced                is this value already present in this text?
     _append_missing_stage5d_values   top a stage-5d citation up with what it omits
+    _insert_missing_stage5d_year     put back a group-filled year 5d never saw (#1810)
     _restore_stage5d_owner           give back the CV owner 5d's "et al." cut (#1259)
 
 All take text and return text. None reads an entry, a field dict or any
@@ -124,6 +125,35 @@ def _append_missing_stage5d_values(
     if not additions:
         return formatted_citation
     return f"{formatted_citation} " + " ".join(additions)
+
+
+#: A four-digit year anywhere in a citation. One is enough to leave the
+#: citation alone: stage 5d wrote some year, and a second would contradict it.
+_CITATION_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d\d(?!\d)")
+#: The journal trailer 5d writes with no year in front of it, "Vol(Issue):Pages."
+#: closing the citation after a sentence break.
+_YEARLESS_JOURNAL_TRAILER_RE = re.compile(r"(?<=\. )\d+\w*(?:\([^)]*\))?:\S+$")
+
+
+def _insert_missing_stage5d_year(formatted_citation: str, year: str, location: str) -> str:
+    """Put `year` into a stage-5d citation that has no year at all (#1810).
+
+    Stage 5d's LLM formats the CV's own line. A line dated only by its year
+    group's heading (#1803) holds no year, so the citation has none either,
+    although stage 4 filled one. The year goes where Vancouver puts it: before
+    the place of a meeting ("Meeting; Year; Place.", the shape 5d writes for a
+    dated talk), before a journal's volume ("Year;Vol(Issue):Pages.", as
+    `formatting/values.py`'s `_journal_trailer_parts` writes it), else last.
+    """
+    if not year or _CITATION_YEAR_RE.search(formatted_citation):
+        return formatted_citation
+    place = f"; {location}."
+    if location and formatted_citation.endswith(place):
+        return f"{formatted_citation[:-len(place)]}; {year}{place}"
+    trailer = _YEARLESS_JOURNAL_TRAILER_RE.search(formatted_citation)
+    if trailer:
+        return f"{formatted_citation[:trailer.start()]}{year};{trailer.group()}"
+    return f"{formatted_citation} {year}."
 
 
 #: The "et al." that closes a Vancouver author list.
