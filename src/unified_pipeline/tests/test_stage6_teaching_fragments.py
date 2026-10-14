@@ -1169,3 +1169,26 @@ def test_with_open_end_needs_the_source_text():
     not taken as open, as `format_date_range` alone would take it."""
     assert teaching._with_open_end("2021 - Fictional Course", {"start_date": "2021"},
                                    "", "K1") == "2021 - Fictional Course"
+
+
+@pytest.mark.parametrize("fields, expected", [
+    # The record states its end, and 5c's text does not show it: the stated
+    # end, not the open source, decides (`_lone_date`'s end_date guard).
+    ({"formatted_text": "**2014** - Fictional Course", "start_date": "2014", "end_date": "2016"},
+     ["2014 - Fictional Course"]),
+    # A multi-record entry's fields are not its first line's: no rewrite.
+    ({"formatted_text": "**2014** - Fictional Course One\n**2015** - Fictional Course Two",
+      "start_date": "2014", "stage4_records": _records(2)},
+     ["2014 - Fictional Course One", "2015 - Fictional Course Two"]),
+    # A numeric month before the year goes with it into the range.
+    ({"formatted_text": "**12/2014** - Fictional Course", "start_date": "2014"},
+     ["2014-Present - Fictional Course"]),
+    # A dotted month after the year is left alone, not split by the range.
+    ({"formatted_text": "**2014.12** - Fictional Course", "start_date": "2014"},
+     ["2014.12 - Fictional Course"]),
+])
+def test_an_open_source_rewrites_only_a_one_record_lone_date(fields, expected):
+    """Each case has an open source ("2014 –") and 5c text that does not
+    already write the range, so only the guard named in it keeps the output."""
+    assert _teaching_entry_lines(fields, "2014 – Fictional Course",
+                                 taxonomy_code="K1") == expected
