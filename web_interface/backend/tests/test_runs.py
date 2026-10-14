@@ -80,6 +80,46 @@ def test_run_status_carries_scanned_pages(client, db, seed_simple_mode):
     assert client.get(f"/api/run/{run.id}/status").json()["scanned_pages"] == [3, 5]
 
 
+_SPLIT_HISTORY = '["dev-234.1.270d0c5d", "dev-235.1.f5e15871"]'
+
+
+@pytest.mark.parametrize("role, expected", [
+    ("admin", ["dev-234.1.270d0c5d", "dev-235.1.f5e15871"]),
+    ("staff", ["dev-234.1.270d0c5d", "dev-235.1.f5e15871"]),
+    ("user", []),
+])
+def test_run_status_carries_admin_only_image_tags(client, db, seed_simple_mode, role, expected):
+    """#1239: a run resumed across a deploy lists both images, oldest first,
+    to admin and staff; the run's owner sees none."""
+    user, run = _owner_with_run(db, role)
+    run.image_tag = "dev-235.1.f5e15871"
+    run.image_tag_history = _SPLIT_HISTORY
+    db.commit()
+    _auth(client, user)
+    assert client.get(f"/api/run/{run.id}/status").json()["image_tags"] == expected
+
+
+@pytest.mark.parametrize("history", [None, "not json", '{"tag": "x"}', "[1, 2]"])
+def test_run_status_image_tags_fall_back_to_the_latest_image(client, db, seed_simple_mode, history):
+    """#1239: a run claimed before image_tag_history existed, or one whose
+    history is corrupt, shows its latest image rather than failing the page."""
+    user, run = _owner_with_run(db, "admin")
+    run.image_tag = "dev-235.1.f5e15871"
+    run.image_tag_history = history
+    db.commit()
+    _auth(client, user)
+    resp = client.get(f"/api/run/{run.id}/status")
+    assert resp.status_code == 200
+    assert resp.json()["image_tags"] == ["dev-235.1.f5e15871"]
+
+
+def test_run_status_image_tags_empty_for_an_untagged_run(client, db, seed_simple_mode):
+    """#1239: no image recorded reads as [], not [null]."""
+    user, run = _owner_with_run(db, "admin")
+    _auth(client, user)
+    assert client.get(f"/api/run/{run.id}/status").json()["image_tags"] == []
+
+
 # ---------------------------------------------------------------------------
 # #801: query-parameter bounds and response models.
 # ---------------------------------------------------------------------------

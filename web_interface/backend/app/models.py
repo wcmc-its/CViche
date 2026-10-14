@@ -1,4 +1,6 @@
 """SQLAlchemy database models."""
+import json
+import logging
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -19,8 +21,25 @@ from sqlalchemy.sql import func
 from app.base_class import Base
 from app.timeutil import UTCDateTime
 
+logger = logging.getLogger(__name__)
+
 # Length of a hex-encoded sha256 digest.
 SHA256_HEX_LENGTH = 64
+
+
+def parse_image_tag_history(raw: str | None) -> list[str]:
+    """The tags stored in ``runs.image_tag_history``, oldest first.
+
+    NULL is an empty history. A value that is not a JSON array of strings
+    raises ValueError: the column is written only by
+    ``run_service._record_image_tag_history``, so that means a corrupt row.
+    """
+    if raw is None:
+        return []
+    history = json.loads(raw)
+    if not isinstance(history, list) or not all(isinstance(t, str) for t in history):
+        raise ValueError(f"image_tag_history is not a JSON list of tags: {raw[:80]!r}")
+    return history
 
 
 class RunState(StrEnum):
@@ -314,6 +333,24 @@ class Run(Base):
     @property
     def scanned_page_numbers(self) -> list[int]:
         return [int(n) for n in self.scanned_pages.split(",")] if self.scanned_pages else []
+
+    @property
+    def image_tags(self) -> list[str]:
+        """Every image the run executed on, oldest first (#1239), for display.
+
+        Falls back to ``[image_tag]`` when the history is empty (a run claimed
+        before ``image_tag_history`` existed), and to that same fallback, with
+        a warning, when the history is corrupt: a display read must not fail
+        the run page or the Teams card.
+        """
+        latest = [self.image_tag] if self.image_tag else []
+        try:
+            history = parse_image_tag_history(self.image_tag_history)
+        except ValueError:
+            logger.warning("Run %s: unreadable image_tag_history %r", self.id, self.image_tag_history,
+                           exc_info=True)
+            return latest
+        return history or latest
     # The batch upload this run belongs to (#1114), NULL for a single upload.
     # A bulk batch (is_bulk_batch: two or more files) also routes the run's
     # queue token to the batch queue (run_queue.queue_for) and suppresses its

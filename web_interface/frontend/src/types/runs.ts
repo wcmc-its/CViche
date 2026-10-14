@@ -41,6 +41,9 @@ export interface RunStatus {
   run_by?: RunBy | null
   /** A PDF's scanned pages, whose text is missing from the output (#1282). */
   scanned_pages?: number[]
+  /** The images the run executed on, oldest first (#1239); two or more when a
+   *  resume or retry crossed a deploy. Admin and staff only; empty otherwise. */
+  image_tags?: string[]
   steps: StepSummary[]
 }
 

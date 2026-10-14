@@ -9,6 +9,9 @@ import { useCanSeeCost } from '../contexts/AuthContext'
 import type { RunState } from '../types'
 import { groupStepsIntoPhases } from './StepSidebar'
 
+/** Joins a run's image tags, oldest first, when it was resumed across a deploy (#1239). */
+const IMAGE_TAG_SEPARATOR = ' → '
+
 interface HeaderStep {
   step_number: number
   stage_id?: string
@@ -24,6 +27,8 @@ interface PipelineHeaderProps {
   runDate?: string | null
   /** Admin only: who ran it. */
   runByName?: string | null
+  /** Admin and staff only: the images the run executed on, oldest first (#1239). */
+  imageTags?: string[]
   status: RunState
   steps: HeaderStep[]
   stepProgress: Record<number, { current: number; total: number; message: string }>
@@ -109,12 +114,18 @@ function StatusPill({ status }: { status: RunState }) {
   }
 }
 
+/** "Image <tag>", or "Images <a> → <b>" for a run resumed across a deploy (#1239). */
+function formatImageTags(tags: string[]): string {
+  return `${tags.length > 1 ? 'Images' : 'Image'} ${tags.join(IMAGE_TAG_SEPARATOR)}`
+}
+
 export default function PipelineHeader({
   runId,
   filename,
   title,
   runDate,
   runByName,
+  imageTags,
   status,
   steps,
   stepProgress,
@@ -227,6 +238,11 @@ export default function PipelineHeader({
               {!isRunning && runDate && <span>{formatDate(runDate)}</span>}
               {!isRunning && elapsedSeconds > 0 && <span>{formatDuration(elapsedSeconds)}</span>}
               {runByName && <span className="min-w-0 [overflow-wrap:anywhere]">Run by {runByName}</span>}
+              {!!imageTags?.length && (
+                <span className="min-w-0 [overflow-wrap:anywhere]" title="Image the run executed on">
+                  {formatImageTags(imageTags)}
+                </span>
+              )}
               {!isRunning && showCost && totalCost !== null && <span>{formatCost(totalCost, 2)}</span>}
             </div>
           </div>

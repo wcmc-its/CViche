@@ -405,6 +405,7 @@ async def get_run_status(
         cv_owner_name=run.cv_owner_name,
         run_by=run_by_summary(run.user) if can_view_all_runs(current_user) else None,
         scanned_pages=run.scanned_page_numbers,
+        image_tags=run.image_tags if can_view_all_runs(current_user) else [],
         steps=step_summaries
     )
 
