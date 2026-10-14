@@ -27,6 +27,7 @@ from app.models import (
     User,
     UserRole,
     can_view_all_runs,
+    parse_image_tag_history,
 )
 from app.pipeline import concurrency, run_queue
 from app.services import auto_retry, batch_completion, batch_service, notifications
@@ -35,21 +36,6 @@ from app.storage.base import RunStorage
 from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
-
-
-def parse_image_tag_history(raw: str | None) -> list[str]:
-    """The tags stored in ``runs.image_tag_history``, oldest first.
-
-    NULL is an empty history. A value that is not a JSON array of strings
-    raises ValueError: the column is written only by
-    ``_record_image_tag_history``, so that means a corrupt row.
-    """
-    if raw is None:
-        return []
-    history = json.loads(raw)
-    if not isinstance(history, list) or not all(isinstance(t, str) for t in history):
-        raise ValueError(f"image_tag_history is not a JSON list of tags: {raw[:80]!r}")
-    return history
 
 
 def _record_image_tag_history(db: Session, run_id: str) -> None:

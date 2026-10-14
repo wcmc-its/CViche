@@ -306,6 +306,45 @@ def test_started_payload_action_uses_first_allowed_origin(monkeypatch):
     )
 
 
+# --- image line on the terminal card (#1239) -------------------------------
+
+def test_payload_names_the_runs_image(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    facts = _facts(notifications.build_teams_payload(_run_facts(image_tags=["dev-235.1.f5e15871"])))
+    assert facts["Image"] == "dev-235.1.f5e15871"
+
+
+def test_payload_lists_every_image_of_a_run_split_across_a_deploy(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    run = _run_facts(image_tags=["dev-234.1.270d0c5d", "dev-235.1.f5e15871"])
+    facts = _facts(notifications.build_teams_payload(run))
+    assert facts["Image"] == "dev-234.1.270d0c5d \u2192 dev-235.1.f5e15871"
+
+
+@pytest.mark.parametrize("image_tags", [[], None])
+def test_payload_omits_image_when_none_recorded(monkeypatch, image_tags):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    facts = _facts(notifications.build_teams_payload(_run_facts(image_tags=image_tags)))
+    assert "Image" not in facts
+
+
+def test_payload_image_is_sanitised_and_bounded(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    run = _run_facts(image_tags=["dev-1\x07" + "x" * 500])
+    value = _facts(notifications.build_teams_payload(run))["Image"]
+    assert "\x07" not in value
+    assert len(value) <= notifications._FACT_MAX_CHARS
+
+
+def test_run_facts_reads_image_tags_off_the_orm_run():
+    """from_run reads Run.image_tags (the parsed history), not the raw column."""
+    from app.models import Run
+
+    run = Run(id="A1B2C3", filename="cv.docx", status="complete",
+              image_tag="dev-235.1.f5e15871", image_tag_history='["dev-234.1.270d0c5d", "dev-235.1.f5e15871"]')
+    assert notifications.RunFacts.from_run(run).image_tags == ("dev-234.1.270d0c5d", "dev-235.1.f5e15871")
+
+
 # --- doctor line on the terminal card ---------------------------------------
 
 def test_payload_includes_doctor_summary(monkeypatch):

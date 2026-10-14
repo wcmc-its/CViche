@@ -75,6 +75,10 @@ _POST_TIMEOUT = 10
 # STANDARDS §8.2 rather than an inline literal in _card_text's call sites.
 _FACT_MAX_CHARS = 200
 
+# Joins a run's image tags on the Teams card when a resume or retry crossed a
+# deploy (#1239): "dev-234... → dev-235...", oldest first.
+_IMAGE_TAG_SEPARATOR = " → "
+
 # C0 and C1 control characters -- stripped from card text so a pathological
 # filename or run id can't inject formatting/control bytes into a rendered
 # Adaptive Card.
@@ -303,6 +307,8 @@ class RunFacts:
     total_duration_seconds: int | None
     # The run's batch (#1114), or None for a single upload.
     batch_id: str | None = None
+    # The images the run executed on, oldest first (Run.image_tags, #1239).
+    image_tags: tuple[str, ...] = ()
 
     @classmethod
     def from_run(cls, run: object) -> RunFacts:
@@ -313,6 +319,7 @@ class RunFacts:
             total_cost=getattr(run, "total_cost", None),
             total_duration_seconds=getattr(run, "total_duration_seconds", None),
             batch_id=getattr(run, "batch_id", None),
+            image_tags=tuple(getattr(run, "image_tags", None) or ()),
         )
 
 
@@ -500,6 +507,14 @@ def _score_text(score: ScoreSummary | None) -> str:
     return text
 
 
+def _image_text(image_tags: tuple[str, ...]) -> str:
+    """The run's images for the card's "Image" fact (#1239), empty when the run
+    recorded none. A run resumed across a deploy lists each image, oldest
+    first. Run through _card_text: a tag comes from the CVICHE_IMAGE_TAG env
+    var, not a code literal."""
+    return _card_text(_IMAGE_TAG_SEPARATOR.join(image_tags), _FACT_MAX_CHARS)
+
+
 def build_teams_payload(
     facts: RunFacts,
     score: ScoreSummary | None = None,
@@ -552,6 +567,10 @@ def build_teams_payload(
     doctor_text = _doctor_text(doctor_report)
     if doctor_text:
         card_facts.append({"name": "Doctor", "value": doctor_text})
+
+    image_text = _image_text(facts.image_tags)
+    if image_text:
+        card_facts.append({"name": "Image", "value": image_text})
 
     color = _STATUS_COLOR.get(status, _DEFAULT_COLOR)
     # One-line summary for the non-card surfaces (mobile / activity feed /

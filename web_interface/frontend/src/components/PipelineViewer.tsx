@@ -426,6 +426,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           title={isComplete ? runStatus.cv_owner_name?.trim() || runStatus.filename : undefined}
           runDate={runStatus.started_at}
           runByName={canViewAllRuns ? runStatus.run_by?.display_name : null}
+          imageTags={canViewAllRuns ? runStatus.image_tags : undefined}
           status={runStatus.status}
           steps={runStatus.steps}
           stepProgress={stepProgress}

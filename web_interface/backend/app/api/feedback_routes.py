@@ -1,8 +1,11 @@
 """Feedback API endpoints for collecting user feedback on pipeline runs."""
 import asyncio
+import functools
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
@@ -34,94 +37,30 @@ from app.services.upload_validation import _validate_docx_magic
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.timeutil import utc_now
+from unified_pipeline.stage3b.io import load_taxonomy
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# web_interface/outputs/: where _get_populated_wcm_sections looks for a run's files.
+OUTPUTS_ROOT = Path(__file__).parent.parent.parent.parent / "outputs"
 
 
-# Complete WCM section mapping (matches runs.py)
-ALL_WCM_SECTIONS = {
-    'A': 'Personal Data',
-    'B1': 'Academic Degrees',
-    'B2': 'Other Educational Experiences',
-    'B3': 'Residency & Fellowship Training',
-    'C': 'Postdoctoral Training',
-    'D1': 'Academic Appointments',
-    'D2': 'Hospital Appointments',
-    'D3': 'Other Professional Positions',
-    'D4': 'Visiting/Adjunct Appointments',
-    'E': 'Employment Status',
-    'F1': 'Licensure',
-    'F2': 'Board Certification',
-    'G': 'Institutional Affiliation',
-    'H': 'Honors & Awards',
-    'I': 'Professional Organizations',
-    'J': 'Percent Effort',
-    'K1': 'Didactic Teaching',
-    'K2': 'Clinical Teaching',
-    'K3': 'Administrative Teaching',
-    'K4': 'Continuing Education',
-    'K5': 'Educational Outreach',
-    'K6': 'Curriculum Development',
-    'K7': 'Assessment & Examinations',
-    'K8': 'Simulation Education',
-    'K9': 'Educational Materials',
-    'L1': 'Clinical Practice',
-    'L2': 'Clinical Innovations',
-    'L3': 'Clinical Leadership',
-    'L4': 'Quality Improvement',
-    'M': 'Research/Grants',
-    'M1': 'Research Activities',
-    'M2': 'Research Support',
-    'M3': 'Patents & Inventions',
-    'M4': 'Clinical Trials',
-    'N1': 'Mentoring Programs',
-    'N2': 'Training Grants',
-    'N3': 'Current Mentees',
-    'N4': 'Past Mentees',
-    'N5': 'Dissertation Committees',
-    'N6': 'Career Advising',
-    'O': 'Institutional Leadership',
-    'P': 'Administrative Activities',
-    'Q1': 'Leadership in Organizations',
-    'Q2': 'Boards & Committees',
-    'Q3': 'Grant Reviewing',
-    'Q4': 'Editorial Activities',
-    'Q5': 'Ad Hoc Reviewing',
-    'R': 'Invitations to Speak',
-    'S': 'Bibliography',
-    'S1': 'Peer-Reviewed Articles',
-    'S2': 'Reviews & Editorials',
-    'S3': 'Letters to Editor',
-    'S4': 'Book Chapters',
-    'S5': 'Books',
-    'S6': 'Case Reports',
-    'S7': 'In Press/Submitted',
-    'S8': 'Abstracts',
-    'S9': 'Non-Peer-Reviewed',
-    'S10': 'Conference Proceedings',
-    'S11': 'Online Publications',
-    'S12': 'Newsletters',
-    'S13': 'Monographs',
-    'S14': 'Other Scholarly Works',
-    'S15': 'Patents & Copyrights',
-    'T': 'Supplemental',
-    'T1': 'Media Appearances',
-    'T2': 'Public Lectures',
-    'T3': 'Community Service',
-    'T4': 'Languages',
-    'T5': 'Professional Development',
-    'T6': 'Advisory Boards',
-    'T7': 'Other Activities',
-}
+@functools.cache
+def _taxonomy_section_labels() -> Mapping[str, str]:
+    """Code -> label for every code in core/taxonomy_v7.json. Read from the
+    taxonomy, not a hand-kept copy: the old copy had drifted to a retired
+    code scheme (S3 'Letters to Editor', S10-S15, T1-T7; #1782)."""
+    return MappingProxyType({
+        entry["code"]: entry["label"] for entry in load_taxonomy()["codes"]
+    })
 
 
 def _get_populated_wcm_sections(run_id: str) -> list[dict]:
     """Return list of WCM sections that have data, based on stage 4 output files."""
-    outputs_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
+    outputs_dir = OUTPUTS_ROOT / run_id
     stage_4_dir = outputs_dir / "stage_4_wcm_templates"
 
     if not stage_4_dir.exists():
@@ -153,7 +92,8 @@ def _get_populated_wcm_sections(run_id: str) -> list[dict]:
             section_match = re.search(r'section_([A-Z]\d*)_', enriched_file.name)
             if section_match:
                 section_id = section_match.group(1)
-                if section_id in ALL_WCM_SECTIONS:
+                section_labels = _taxonomy_section_labels()
+                if section_id in section_labels:
                     # Check it's not already covered by entity_type entries
                     already_listed = any(
                         p.get("section_id") == section_id for p in populated
@@ -161,7 +101,7 @@ def _get_populated_wcm_sections(run_id: str) -> list[dict]:
                     if not already_listed:
                         populated.append({
                             "section_id": section_id,
-                            "section_name": ALL_WCM_SECTIONS[section_id],
+                            "section_name": section_labels[section_id],
                         })
 
     return populated

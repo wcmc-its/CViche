@@ -105,3 +105,32 @@ describe('PipelineHeader status pill (#298)', () => {
     expect(screen.getByText('archived')).toBeTruthy()
   })
 })
+
+describe('PipelineHeader image tags (#1239)', () => {
+  afterEach(cleanup)
+
+  const renderWithImages = (imageTags?: string[]) =>
+    render(
+      <PipelineHeader
+        runId={RUN_ID} filename="cv.docx" status="complete" steps={[]} stepProgress={{}}
+        displayProgress={100} totalCost={null} inputTokens={0} outputTokens={0}
+        elapsedSeconds={0} isCancelling={false} onBack={() => {}} onError={() => {}}
+        imageTags={imageTags}
+      />,
+    )
+
+  it('names the image the run executed on', () => {
+    renderWithImages(['dev-235.1.f5e15871'])
+    expect(screen.getByText('Image dev-235.1.f5e15871')).toBeTruthy()
+  })
+
+  it('lists every image, oldest first, for a run resumed across a deploy', () => {
+    renderWithImages(['dev-234.1.270d0c5d', 'dev-235.1.f5e15871'])
+    expect(screen.getByText('Images dev-234.1.270d0c5d → dev-235.1.f5e15871')).toBeTruthy()
+  })
+
+  it.each([[undefined], [[]]])('shows nothing when no image is recorded (%j)', (imageTags) => {
+    renderWithImages(imageTags)
+    expect(screen.queryByText(/^Images?\b/)).toBeNull()
+  })
+})

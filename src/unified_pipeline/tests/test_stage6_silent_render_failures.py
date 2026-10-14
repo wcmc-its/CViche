@@ -68,12 +68,19 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     N1_HEADING,
     N2_HEADING,
     N2_INSTRUCTION,
+    OUTCOME_MENTEE_AUTHOR,
+    OUTCOME_MENTEE_CHECK,
+    OUTCOME_MENTEE_KEY,
     MenteeRecord,
     _looks_like_training_grant_table,
     _outcome_line_from_fields,
+    _outcome_mentee_anchor,
+    _outcome_mentee_suffix,
     _program_leadership_line,
     _training_grant_is_sparse,
     _training_grant_rows,
+    annotate_outcome_mentees,
+    outcome_mentee_warnings,
 )
 from unified_pipeline.stage6.sections.patents import (  # noqa: E402
     DESCRIPTION_LABEL,
@@ -471,6 +478,158 @@ def test_mentoring_real_template_renders_a_scrambled_outcome_from_its_fields():
                                 _n4('One mentee now leads a lab.')]})
     assert _body_after(gen.doc, "MENTORING", 2) == [
         ('p', _OUTCOME_LINE), ('p', 'One mentee now leads a lab.')]
+
+
+# --- N4: a line naming no mentee takes the one above it (#1251) ---------------
+
+# The shape: a students heading, one N3A/N3B line naming the student, then
+# that student's awards, none of which names anyone. Invented values.
+_STUDENTS = ['Example Trainee Prizes']
+_OTHER_HEADING = ['Example Advising']
+
+
+def _coded(code: str, idx: int, name: str | None = None, heading=None,
+           text: str = 'Brindlemoor Prize (2020)', key: str = 'mentee_name') -> tuple[dict, str]:
+    entry = {'taxonomy_code': code, 'text': text, 'element_idx_start': idx,
+             'hierarchy': list(_STUDENTS if heading is None else heading),
+             'extracted_fields': {key: name}}
+    return entry, code
+
+
+def _inherited(coded) -> list:
+    return [entry.get(OUTCOME_MENTEE_KEY) for entry, _code in coded]
+
+
+def test_each_award_line_takes_the_student_named_above_it():
+    coded = [_coded('N3B', 1, 'Vantrel Quillfeather', heading=_OTHER_HEADING),
+             _coded('N3B', 2, 'Ilsabet Corvane'), _coded('N4', 3), _coded('N4', 4),
+             _coded('N3A', 5, 'Dorran Pethwick'), _coded('N4', 6)]
+    coded[-1][0]['extracted_fields'] = None  # stage 4 extracted nothing
+    assert annotate_outcome_mentees(coded) == [(3, 2), (4, 2), (6, 5)]
+    assert _inherited(coded) == [None, None, 'Ilsabet Corvane', 'Ilsabet Corvane',
+                                 None, 'Dorran Pethwick']
+
+
+def test_a_mentee_first_under_its_heading_with_nothing_before_it_is_unambiguous():
+    # The trailing mentee is no predecessor of the first one: index 0 has none.
+    coded = [_coded('N3B', 1, 'Ilsabet Corvane'), _coded('N4', 2),
+             _coded('N3B', 3, 'Dorran Pethwick')]
+    assert _outcome_mentee_anchor(coded, 1) == 0
+
+
+def test_the_name_field_wins_over_mentee_name_as_it_does_for_the_table():
+    entry, code = _coded('N3B', 1, 'Ilsabet Corvane', key='name')
+    entry['extracted_fields']['mentee_name'] = 'Dorran Pethwick'
+    coded = [(entry, code), _coded('N4', 2)]
+    annotate_outcome_mentees(coded)
+    assert _inherited(coded)[1] == 'Ilsabet Corvane'
+
+
+@pytest.mark.parametrize('coded', [
+    # A summary after a list of mentees belongs to no single one of them.
+    [_coded('N3B', 1, 'Dorran Pethwick'), _coded('N3B', 2, 'Ilsabet Corvane'), _coded('N4', 3)],
+    # Even when the list's first item is a summary line naming no one.
+    [_coded('N3B', 1), _coded('N3B', 2, 'Ilsabet Corvane'), _coded('N4', 3)],
+    # An N4 that names its own mentee starts a new owner for the lines below.
+    [_coded('N3B', 1, 'Ilsabet Corvane'), _coded('N4', 2, 'Dorran Pethwick'), _coded('N4', 3)],
+    # Another code under the same heading stands between them.
+    [_coded('N3B', 1, 'Ilsabet Corvane'), _coded('H', 2), _coded('N4', 3)],
+    # Another heading stands between them.
+    [_coded('N3B', 1, 'Ilsabet Corvane'), _coded('N4', 2, heading=_OTHER_HEADING),
+     _coded('N4', 3)],
+    # The mentee is under a different heading than the line.
+    [_coded('N3B', 1, 'Ilsabet Corvane', heading=_OTHER_HEADING), _coded('N4', 2)],
+    # The line above is a mentee code that names no one.
+    [_coded('N3A', 1), _coded('N4', 2)],
+    # Nothing above it at all -- the mentee after it is not "above" it.
+    [_coded('N4', 1)],
+    [_coded('N4', 1), _coded('N3B', 2, 'Ilsabet Corvane')],
+    # An N4 naming its own mentee is no N3A/N3B line, even with nothing above it.
+    [_coded('N4', 1, 'Dorran Pethwick'), _coded('N4', 2)],
+], ids=['after-a-list', 'after-a-list-led-by-a-summary', 'n4-names-its-own',
+        'other-code-between', 'other-heading-between', 'mentee-under-other-heading',
+        'unnamed-mentee-line', 'first-entry', 'first-entry-mentee-below',
+        'named-n4-alone'])
+def test_no_unambiguous_mentee_leaves_the_line_as_written(coded):
+    assert annotate_outcome_mentees(coded) == []
+    assert _inherited(coded) == [None] * len(coded)
+
+
+def test_only_an_n4_line_with_no_mentee_of_its_own_is_considered():
+    coded = [_coded('N3B', 1, 'Ilsabet Corvane'), _coded('N4', 2, 'Dorran Pethwick'),
+             _coded('N3B', 3), _coded('N3B', 4, 'Ilsabet Corvane'), _coded('H', 5)]
+    assert [_outcome_mentee_anchor(coded, i) for i in range(5)] == [None] * 5
+
+
+def test_outcome_mentee_warning_names_entries_by_index_only():
+    [record] = outcome_mentee_warnings([(3, 2), (4, 2)])
+    assert (record['check'], record['code'], record['severity']) == (
+        'outcome_mentee_inherited', 'N4', 'INFO')
+    assert record['check'] == OUTCOME_MENTEE_CHECK
+    assert record['section'] is None
+    assert record['message'] == (
+        "N4 line with no mentee took the N3A/N3B mentee above it: 2 entries")
+    assert record['evidence'] == ['element_idx_start 3 <- 2', 'element_idx_start 4 <- 2']
+    assert outcome_mentee_warnings([(3, 2)])[0]['message'].endswith(': 1 entry')
+    assert outcome_mentee_warnings([]) == []
+
+
+@pytest.mark.parametrize('text,mentee,expected', [
+    ('Brindlemoor Prize (2020)', 'Ilsabet Corvane', ' — Ilsabet Corvane'),
+    ('Brindlemoor Prize to ilsabet corvane', 'Ilsabet Corvane', ''),
+    ('Brindlemoor Prize (2020)', None, ''),
+    ('Brindlemoor', None, ''),
+    ('Brindlemoor Prize (2020)', '  ', ''),
+    ('', 'Ilsabet Corvane', ''),
+], ids=['appended', 'already-named', 'no-mentee', 'no-mentee-word-only', 'blank-mentee',
+        'no-text'])
+def test_outcome_mentee_suffix(text, mentee, expected):
+    entry = {} if mentee is None else {OUTCOME_MENTEE_KEY: mentee}
+    assert _outcome_mentee_suffix(text, entry) == expected
+
+
+def _inserted_runs(paragraph) -> list[tuple[str, str]]:
+    """(author, text) of each tracked insertion in `paragraph`."""
+    return [(ins.get(qn('w:author')), ''.join(t.text for t in ins.iter(qn('w:t'))))
+            for ins in paragraph.iter(qn('w:ins'))]
+
+
+def test_mentoring_real_template_renders_an_award_line_with_its_mentee():
+    """End to end: the inherited mentee follows the N4 line as a tracked
+    insertion -- CViche's words, not the source's, so the plain text is the
+    source line alone; a line with none is still written verbatim."""
+    gen = _template_generator()
+    award = {**_n4('Ospry Fellowship (2021)'), OUTCOME_MENTEE_KEY: 'Ilsabet Corvane'}
+    gen._fill_mentoring({'N4': [award, _n4('One mentee now leads a lab.')]})
+    assert _body_after(gen.doc, "MENTORING", 2) == [
+        ('p', 'Ospry Fellowship (2021)'), ('p', 'One mentee now leads a lab.')]
+    body = list(gen.doc.element.body)
+    heading = next(p for p in gen.doc.paragraphs if p.text.strip() == "MENTORING")
+    award_p, plain_p = body[body.index(heading._element) + 1:body.index(heading._element) + 3]
+    assert _inserted_runs(award_p) == [(OUTCOME_MENTEE_AUTHOR, ' — Ilsabet Corvane')]
+    assert OUTCOME_MENTEE_AUTHOR == 'CViche: mentee named on the line above'
+    assert _inserted_runs(plain_p) == []
+    assert gen.stats['track_changes_added'] == 1
+
+
+def test_inherited_mentee_is_not_rendered_text_for_the_recovery_passes():
+    """The haystack the sub-point and recovery passes read skips w:ins, so
+    the added name cannot vouch for another entry's prose (EHGXAL A/B)."""
+    gen = _template_generator()
+    award = {**_n4('Ospry Fellowship (2021)'), OUTCOME_MENTEE_KEY: 'Ilsabet Corvane'}
+    gen._fill_mentoring({'N4': [award]})
+    lines = gen._rendered_output_lines()
+    assert 'Ospry Fellowship (2021)' in lines
+    assert not any('Corvane' in line for line in lines)
+
+
+def test_without_track_changes_the_inherited_mentee_is_plain_text():
+    gen = _template_generator()
+    gen.emit_track_changes = False
+    award = {**_n4('Ospry Fellowship (2021)'), OUTCOME_MENTEE_KEY: 'Ilsabet Corvane'}
+    gen._fill_mentoring({'N4': [award]})
+    assert _body_after(gen.doc, "MENTORING", 1) == [
+        ('p', 'Ospry Fellowship (2021) — Ilsabet Corvane')]
 
 
 # --- N1/N2: pure builders (#529) -------------------------------------------------
