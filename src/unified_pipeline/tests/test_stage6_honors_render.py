@@ -642,13 +642,82 @@ def test_a_dated_program_line_naming_an_award_noun_stays_its_own_award():
 
 
 def test_a_program_line_led_by_a_year_is_not_a_program():
-    # `_numeric_line_date` reads the year that leads the line, as
-    # `_line_date` does, not the numeric date it ends with.
+    # `_PROGRAM_LINE_RE` takes no digit in the program's name.
     for second_line in ("2005 Imaginary Outreach Program 02/07/2005",
-                        "2005 Imaginary Outreach Program"):
+                        "2005 Imaginary Outreach Program",
+                        "2005 Imaginary Outreach Program — 02/07/2005",
+                        "Imaginary 2005 Outreach Program — 02/07/2005"):
         rows = _award_over_program_line(second_line)
         assert len(rows) == 2, second_line
         assert all(" - " not in row[0] for row in rows), second_line
+
+
+@pytest.mark.parametrize("text, award_name", [
+    ("Young Investigator Award, 2005\nNIH Loan Repayment Program, 07/2005",
+     "Young Investigator Award"),
+    ("Teaching Award 2005\nLeadership Development Program 09/2005", "Teaching Award"),
+    ("Teaching Award, 2005\nSelected, Leadership Development Program (06/2005)",
+     "Teaching Award"),
+])
+def test_a_program_line_dated_to_the_month_stays_its_own_honor(text, award_name):
+    """PR #1847 review round 4: a month-dated program line under a
+    year-dated award is a second honor, as on dev; only the day-dated
+    "<Program> — dd/mm/yyyy" shape joins."""
+    rows = _render_honors([_h_entry(text, award_name=award_name,
+                                    granting_body="", date="2005")])
+    assert len(rows) == 2, rows
+    assert rows[0][0] == award_name
+    assert rows[1][0] == text.split("\n")[1]
+
+
+@pytest.mark.parametrize("second_line", [
+    "Imaginary Outreach Program, 02/07/2005",
+    "Imaginary Outreach Program (02/07/2005)",
+    "Imaginary Outreach Program 02/07/2005",
+    "Selected, Imaginary Outreach Program — 02/07/2005",
+    "Imaginary Outreach Program — 07/2005",
+    "• Imaginary Outreach Program — 02/07/2005",
+])
+def test_only_the_dashed_day_dated_program_shape_joins(second_line):
+    rows = _award_over_program_line(second_line)
+    assert len(rows) == 2, rows
+    assert rows[0][0] == "Made-up Award for Pretend Outreach"
+    assert all(" - " not in row[0] for row in rows)
+
+
+def test_a_join_that_would_split_on_a_comma_is_not_made():
+    # With no granting body, "Award, University - Program" would re-split
+    # into award "Award" and organization "University - Program".
+    rows = _render_honors([_h_entry(
+        "Made-up Award, Fictional University (2005)\n"
+        "Imaginary Outreach Program — 02/07/2005",
+        award_name="Made-up Award, Fictional University", granting_body="", date="2005")])
+    assert [row[0] for row in rows] == [
+        "Made-up Award, Fictional University", "Imaginary Outreach Program — 02/07/2005"]
+
+
+def test_a_comma_in_the_award_joins_when_the_granting_body_is_known():
+    # A known granting body means the name is never re-split, so the
+    # comma in stage 4's award name does not block the join.
+    rows = _render_honors([_h_entry(
+        "Made-up Award, Fictional University (2005)\n"
+        "Imaginary Outreach Program — 02/07/2005",
+        award_name="Made-up Award, Fictional University",
+        granting_body="Fictional Agency", date="2005")])
+    assert rows == [["Made-up Award, Fictional University - Imaginary Outreach Program",
+                     "Fictional Agency", "2005"]]
+
+
+def test_an_award_line_ending_in_a_date_cell_does_not_take_a_program_line():
+    # The tab-joined award line is a date cell (`_has_date_cell`): its
+    # year is that row's own, so the entry is a list.
+    rows = _render_honors([_h_entry(
+        "Fictional Agency Made-up Award for Pretend Outreach\t2005\n"
+        "Imaginary Outreach Program — 02/07/2005",
+        award_name="Made-up Award for Pretend Outreach",
+        granting_body="Fictional Agency", date="2005")])
+    assert [row[0] for row in rows] == [
+        "Made-up Award for Pretend Outreach", "Imaginary Outreach Program — 02/07/2005"]
 
 
 def test_a_fanned_out_child_is_one_row_with_its_own_dates():

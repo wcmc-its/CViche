@@ -812,31 +812,22 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
 # What joins an award's name and the program line it was given to, the
 # shape stage 4 itself writes when it keeps both ("Award - Program").
 _PROGRAM_LINE_JOIN = ' - '
-# Separator punctuation left at the end of a line once its date is removed.
-_LINE_DATE_SEPARATOR_CHARS = ' ,;:(–—-'
-# The last word of a line that names what an award was given to rather
-# than a second honor ("SHOUT (Student-Driven HCV Outreach) Program").
-_PROGRAM_NOUN_RE = re.compile(r'(?:program|programme|project|initiative)')
+# The one shape a program line may have (PR #1847 review round 4): a name
+# with no comma and no digit that ends in a program noun, a spaced dash, and
+# a date to the day ("SHOUT (Student-Driven HCV Outreach) Program —
+# 02/07/2005", X6 KJJVVO 286). An allow-list: a comma, a month-only date, a
+# year, parentheses around the date or no dash all leave the line its own
+# honor, as on dev.
+_PROGRAM_LINE_RE = re.compile(
+    r'(?P<program>[a-z][^,\d]*?\b(?:program|programme|project|initiative))'
+    r'\s+[–—-]\s+\d{1,2}/\d{1,2}/(?:19|20)\d{2}',
+    re.IGNORECASE)
 
 
 def _names_any_award(line: str) -> bool:
     """Whether any word of `line` is an award noun or an award's own
     wording ("Award", "Prize", "Scholarship", "Finalist", ...)."""
     return any(_ends_in_award_noun(word) for word in _WORD_RE.findall(line.casefold()))
-
-
-def _numeric_line_date(line: str) -> tuple[str, str]:
-    """`line` split into the text before the numeric date it ends with
-    ("SHOUT Program — 02/07/2005", "... — 06/2005") and that date, with the
-    separator between them dropped; (`line`, '') when it ends in no such
-    date or names a year `_split_award_year` reads, as `_line_date` does."""
-    if _split_award_year(line)[1]:
-        return line.strip(), ''
-    match = _TRAILING_NUMERIC_DATE_RE.search(line)
-    if not match:
-        return line.strip(), ''
-    head = line[:match.start(1)].rstrip(_LINE_DATE_SEPARATOR_CHARS).strip()
-    return head, match.group(1)
 
 
 def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
@@ -847,40 +838,38 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
     "<Agency> <Award> (2005)" over "<Program name> — 02/07/2005" rendered the
     program as a second award row with an empty organization (X6 KJJVVO 286,
     #1245): the award's own line is dated, so `_is_one_award_over_lines`
-    reads the entry as a list. The line is the award's when all of these
-    hold: exactly one of the two lines names stage 4's award; the other
-    names no award noun, is not the granting body, and once its date is
-    removed ends in a program noun ("Program", "Project", "Initiative");
-    it carries a numeric date of its own; and every date either line names is one
-    of the record's own. An undated line is never taken, so a list whose
-    only date is on stage 4's award stays a list. The program noun keeps
-    two separate same-year honors apart ("<Award> 2005" over "Chief
-    Resident — 06/2005", PR #1847 review): a line with no award noun is
-    not on that alone a continuation of the award above it.
+    reads the entry as a list. The line is the award's only when all of
+    these hold: exactly one of the two lines names stage 4's award and
+    neither is a date cell; the other has exactly the program-line shape
+    (`_PROGRAM_LINE_RE`), names no award noun and is not the granting body;
+    the award's line is not itself dated to the month or day; every date
+    either line names is one of the record's own; and the joined name does
+    not split again on a comma into an award and an organization.
 
-    The program line must also date itself to the month or the day
-    ("02/07/2005") while the award's line does not: the program's own
-    date, finer than the award's year. A list of same-year honors dates
-    each line alike, so "Phi Beta Kappa 2005" over "University Honors
-    Program — 2005" stays two rows (PR #1847 review round 3).
+    Each of these is an allow-list condition, not a guard against one
+    reported shape: three review rounds found same-year honors that a
+    permissive rule merged ("Young Investigator Award, 2005" over "NIH Loan
+    Repayment Program, 07/2005", "Teaching Award, 2005" over "Selected,
+    Leadership Development Program (06/2005)"), and each stays two rows.
     """
     if len(lines) != 2 or any(_has_date_cell(line) for line in lines):
         return ''
     named = [_names_award(line, award_name) for line in lines]
     if named.count(True) != 1:
         return ''
-    other = lines[named.index(False)]
-    program, program_date = _numeric_line_date(other)
-    if _names_any_award(other) or not program_date:
+    award_line, other = lines[named.index(True)], lines[named.index(False)]
+    match = _PROGRAM_LINE_RE.fullmatch(other.strip())
+    if not match or _names_any_award(other):
         return ''
-    if _numeric_line_date(lines[named.index(True)])[1]:
+    if _TRAILING_NUMERIC_DATE_RE.search(award_line):
         return ''
     if not _start_years('\n'.join(lines)) <= _start_years(date):
         return ''
+    program = match.group('program')
     if _comparable(program) == _comparable(granting_body):
         return ''
-    words = _WORD_RE.findall(program.casefold())
-    if not words or not _PROGRAM_NOUN_RE.fullmatch(words[-1]):
+    joined = f"{award_name}{_PROGRAM_LINE_JOIN}{program}"
+    if not granting_body and _extract_organization_from_award(joined):
         return ''
     return program
 

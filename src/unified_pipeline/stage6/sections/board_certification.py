@@ -302,14 +302,15 @@ _RECERTIFICATION_YEARS_RE = re.compile(
 _LISTED_YEAR_RE = re.compile(_YEAR)
 # How the Dates cell joins several recertification years.
 _RECERTIFICATION_YEAR_JOIN = ', '
-# A line that is only a further recertification of the certification
-# above it ("Recertified 2015"), not a certification of its own.
-_RECERTIFICATION_LINE_RE = re.compile(r'\s*recertif', re.IGNORECASE)
-# What makes a recertification line name a certification of its own: a
-# specialty after "in" ("Recertified in Cardiovascular Disease") or a
-# board acronym in parentheses ("(ABIM)"). "Recertified in 2015" names none.
-_NAMES_A_CERTIFICATION_RE = re.compile(
-    rf'\b[Ii]n\s+(?!{_YEAR})[A-Za-z]|\(\s*[A-Z]{{2,}}\s*\)')
+# A line that is only a further recertification of the certification above
+# it: a recertification word and years, nothing else ("Recertified 2015",
+# "Recertification: 2015, 2018", "re-certified 2015 and 2025."). An
+# allow-list, not a deny-list (PR #1847 review round 4): any other word on the
+# line (a specialty, a board, "in", an acronym, "expires") makes it a line of
+# its own, which ends the run.
+_BARE_RECERTIFICATION_LINE_RE = re.compile(
+    rf'(?:re-?certified|recertification)[\s:,]*(?:{_YEAR}(?:[\s,;&]+|\s*and\s*)?)+\.?',
+    re.IGNORECASE)
 
 
 def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
@@ -345,11 +346,10 @@ def _own_certification_lines(lines: list[str], index: int) -> list[str]:
     bare recertification line ("Recertified 2025"), the run of them it
     sits in and the certification line they follow ("ABIM, 2005\n
     Recertified 2015\nRecertified 2025", PR #1847 review); otherwise the
-    bare recertification lines that follow it. A line naming a board
+    bare recertification lines that follow it. Any line that is not bare
     ends the run, so another certification's years stay out, including a
-    recertification line that names its own specialty or board
-    ("Recertified in Cardiovascular Disease (ABIM), 2005; recertified
-    2015", PR #1847 review round 3)."""
+    recertification line that names its own specialty ("Recertified Sleep
+    Medicine 2005, recertified 2015", PR #1847 review round 4)."""
     start = index
     while start > 0 and _is_bare_recertification_line(lines[start]):
         start -= 1
@@ -360,10 +360,9 @@ def _own_certification_lines(lines: list[str], index: int) -> list[str]:
 
 
 def _is_bare_recertification_line(line: str) -> bool:
-    """Whether `line` is only a further recertification ("Recertified
-    2015"), naming no specialty or board of its own."""
-    return (_RECERTIFICATION_LINE_RE.match(line) is not None
-            and _NAMES_A_CERTIFICATION_RE.search(line) is None)
+    """Whether `line` is only a recertification word and its years
+    (`_BARE_RECERTIFICATION_LINE_RE`), naming nothing else."""
+    return _BARE_RECERTIFICATION_LINE_RE.fullmatch(line.strip()) is not None
 
 
 def _recertification_years(line: str) -> list[str]:

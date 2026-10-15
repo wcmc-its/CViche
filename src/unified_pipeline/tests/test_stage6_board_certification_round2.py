@@ -35,6 +35,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _bare_year,
     _classify_cert_token,
     _format_certification_date_str,
+    _is_bare_recertification_line,
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
@@ -1555,9 +1556,60 @@ class TestEveryRecertificationYearOnTheLine:
         text = "Example Board of Testing, 2005, recertified 2015\n" + second_line
         assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
 
-    def test_recertified_in_a_year_is_still_a_bare_line(self):
+    @pytest.mark.parametrize("second_line", [
+        "Recertified Sleep Medicine 2005, recertified 2015",
+        "Recertified in Sleep Medicine 2005, recertified 2015",
+        "Recertified Sleep Medicine, 2005; recertified 2015",
+        "Recertified ABSM 2005, recertified 2015",
+    ])
+    def test_a_recertification_line_naming_any_specialty_is_its_own_certification(
+            self, second_line):
+        # PR #1847 review round 4: with or without "in", a specialty after
+        # the recertification word is another certification, so the first
+        # line's 2011 stays out, as on dev.
+        text = "Internal Medicine, 2001, Recertified 2011\n" + second_line
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    def test_the_rendered_row_ignores_a_recertification_line_naming_a_specialty(self):
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2005", "2015")
+        entry["text"] = ("Internal Medicine, 2001, Recertified 2011\n"
+                         "Recertified Sleep Medicine 2005, recertified 2015")
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2005 (recertified 2015)")]
+
+    @pytest.mark.parametrize("line", [
+        "Recertified 2015",
+        "recertified 2015.",
+        "Re-certified 2015",
+        "Recertification: 2015",
+        "Recertification 2015, 2018",
+        "Recertified 2015; 2018 & 2021",
+        "Recertified 2015 and 2025",
+        "  Recertified 2015  ",
+    ])
+    def test_a_recertification_word_and_years_alone_is_a_bare_line(self, line):
+        assert _is_bare_recertification_line(line)
+
+    @pytest.mark.parametrize("line", [
+        "Recertified in 2025",
+        "Recertified Sleep Medicine 2015",
+        "Recertified 2015 Sleep Medicine",
+        "Recertified (ABIM) 2015",
+        "Recertified 2015 (expires 2025)",
+        "Recertified",
+        "Board certified 2015",
+        "Recertified 1815",
+        "Example Board, 2005",
+    ])
+    def test_any_other_word_on_the_line_is_not_a_bare_line(self, line):
+        assert not _is_bare_recertification_line(line)
+
+    def test_recertified_in_a_year_ends_the_run(self):
+        # Round 4 allow-list: "in" is a word the allow-list does not name.
         text = "Example Board of Testing, 2005\nRecertified 2015\nRecertified in 2025"
-        assert self._bare_dates("2015", text) == "2005 (recertified 2015, 2025)"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
 
     def test_an_indented_bare_recertification_line_is_read(self):
         text = "Example Board of Testing, 2005\nRecertified 2015\n  Recertified 2025"
