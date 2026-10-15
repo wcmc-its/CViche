@@ -141,7 +141,7 @@ export default function AdminUsers() {
         </div>
       )}
 
-      <div className="bg-white rounded-lg shadow-sm border border-sand-300 overflow-hidden">
+      <div className="bg-white rounded-lg shadow-xs border border-sand-300 overflow-hidden">
         <AddUserForm onAdd={addUser} />
         {config && config.auth_mode !== 'simple' && (
           <p className="px-4 py-2 text-xs text-gray-500 border-b border-sand-200">
@@ -215,7 +215,7 @@ export default function AdminUsers() {
                         disabled={blocked !== null}
                         title={blocked ?? (isAdmin ? 'Switch to Member' : 'Switch to Admin')}
                         aria-label={`${isAdmin ? 'Admin' : user.role === 'staff' ? 'Staff' : 'Member'}: switch ${user.display_name} to ${isAdmin ? 'Member' : 'Admin'}`}
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed ${
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed ${
                           isAdmin
                             ? 'bg-purple-100 text-purple-700 enabled:hover:bg-purple-200'
                             : 'bg-gray-100 text-gray-600 enabled:hover:bg-gray-200'
@@ -270,7 +270,7 @@ export default function AdminUsers() {
                             onChange={(e) =>
                               setEditLimits((prev) => ({ ...prev, daily: e.target.value }))
                             }
-                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
+                            className="w-16 text-xs border border-gray-300 rounded-sm px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-hidden"
                           />
                           <label className="sr-only" htmlFor={`monthly-${user.id}`}>Monthly limit</label>
                           <input
@@ -282,7 +282,7 @@ export default function AdminUsers() {
                             onChange={(e) =>
                               setEditLimits((prev) => ({ ...prev, monthly: e.target.value }))
                             }
-                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
+                            className="w-16 text-xs border border-gray-300 rounded-sm px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-hidden"
                           />
                           <button
                             onClick={() => saveLimits(user)}
@@ -313,7 +313,7 @@ export default function AdminUsers() {
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       <button
                         onClick={() => toggleStatus(user)}
-                        className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${
+                        className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-1 ${
                           user.status === 'active'
                             ? 'text-red-600 hover:bg-red-50 focus-visible:ring-red-400'
                             : 'text-green-600 hover:bg-green-50 focus-visible:ring-green-400'

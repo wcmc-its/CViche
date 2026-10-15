@@ -13,7 +13,7 @@ import type { RunFilterKey } from './runFilters'
 import { BAND_STYLE, NO_SCORE_TEXT, scoreTitle } from './runQuality'
 
 const CELL = 'px-2 first:pl-5 last:pr-5 py-3'
-const WRAP = 'break-words [overflow-wrap:anywhere]'
+const WRAP = 'wrap-break-word wrap-anywhere'
 const LINK_HOVER = 'hover:underline underline-offset-[3px] cursor-pointer'
 
 function StatusIcon({ status }: { status: string }) {
@@ -102,7 +102,7 @@ export function BatchTag({ batchId, onOpenBatch }: { batchId: string | null | un
       type="button"
       title="Show the whole batch"
       onClick={(e) => { e.stopPropagation(); onOpenBatch(batchId) }}
-      className="flex-none rounded px-1.5 py-px text-[11px] font-semibold text-[#6B5E45] bg-[#F1E8D6] hover:bg-[#E6D9BE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+      className="flex-none rounded-sm px-1.5 py-px text-[11px] font-semibold text-[#6B5E45] bg-[#F1E8D6] hover:bg-[#E6D9BE] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
     >
       Batch
     </button>
@@ -379,7 +379,7 @@ function CardFile({ run, label, onOpenBatch }: { run: RunSummary; label?: string
 function CardGroupHead({ group, expanded, allRunsView, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
   const { owner, latest, older } = group
   const runCount = older.length + 1
-  const nameClass = 'min-w-0 break-words text-left text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]'
+  const nameClass = 'min-w-0 wrap-break-word text-left text-sm font-semibold text-gray-900 wrap-anywhere'
   return (
     <div className="flex items-start gap-2">
       {older.length > 0 && (

@@ -93,7 +93,7 @@ function FileRow({ row, index, showCost, editable, onRemove, onRunAgain, outlier
             onClick={() => onRemove(row.key)}
             aria-label={`Remove ${row.file.name}`}
             title="Remove"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
           >
             <X className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden="true" />
           </button>

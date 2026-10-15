@@ -52,13 +52,13 @@ export function groupStepsIntoPhases<T extends { stage_id?: string; step_number:
 export function StepStatusIcon({ status, className = 'w-5 h-5' }: { status: string; className?: string }) {
   switch (status) {
     case 'complete':
-      return <CheckCircle2 className={`${className} text-green-600 flex-shrink-0`} aria-hidden="true" />
+      return <CheckCircle2 className={`${className} text-green-600 shrink-0`} aria-hidden="true" />
     case 'running':
-      return <Loader2 className={`${className} text-primary-600 animate-spin flex-shrink-0`} aria-hidden="true" />
+      return <Loader2 className={`${className} text-primary-600 animate-spin shrink-0`} aria-hidden="true" />
     case 'error':
-      return <XCircle className={`${className} text-red-600 flex-shrink-0`} aria-hidden="true" />
+      return <XCircle className={`${className} text-red-600 shrink-0`} aria-hidden="true" />
     default:
-      return <Circle className={`${className} text-gray-300 flex-shrink-0`} aria-hidden="true" />
+      return <Circle className={`${className} text-gray-300 shrink-0`} aria-hidden="true" />
   }
 }
 
@@ -107,7 +107,7 @@ export default function StepSidebar({
                       onClick={() => onSelectStep(step.step_number)}
                       aria-current={isActive ? 'step' : undefined}
                       style={{ touchAction: 'manipulation' }}
-                      className={`w-full grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-2.5 text-left px-2.5 py-2 rounded-lg border-[1.5px] transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
+                      className={`w-full grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-2.5 text-left px-2.5 py-2 rounded-lg border-[1.5px] transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden ${
                         stepRowClass(isActive, step.status === 'running')
                       }`}
                     >
