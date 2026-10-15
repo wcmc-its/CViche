@@ -23,7 +23,9 @@ An H pin (#1577) keeps an unsure grant answer with no grant marker in Honors.
 An S1 pin (#1708) keeps an unsure S8 with a PMID or DOI under a peer-reviewed
 journals heading, unless it is a short or meeting item or a proceedings venue.
 A content pin (#1695) recodes a per-article citation-metrics line ("<Surname> et
-al. (<year>) <journal> JIF: <x>") from a publication or editorial code to S0.
+al. (<year>) <journal> JIF: <x>") from a publication or editorial code to S0,
+and a teaching code under a student-evaluations heading to T (under a
+combined "X and Evaluations" heading, only an evaluation-summary row).
 A reviewer pin (#1413) recodes an unsure Q4C journal name to Q4D when the
 "Reviewer for the following journals:" line heading its list went to the model
 in an earlier batch.
@@ -241,6 +243,38 @@ _STUB_MAX_VENUE_WORDS = 8
 _YEAR_RANGE_TAIL = re.compile(r"\s*[-\u2013\u2014]")
 _METRICS_STUB_WHY = "A per-article citation-metrics line is a bibliometric record, not a citation"
 
+# --- #1695 part 2: a student's evaluation of the owner's teaching is not a course taught ---
+#
+# An appendix of course evaluations holds verbatim student comments, rated survey
+# items ("The course was effectively organized 9") and notes on how the survey was
+# run. Each mentions a course, so the model answers K1 (LFFKVV, "Appendix III
+# Student Evaluations": 36 K1 and 1 K4 at 0.55-0.75) and they render as Didactic
+# Teaching rows. A K answer under a heading level that is itself an evaluations
+# heading ("Student Evaluations", "Students' Evaluations of Teaching", optionally
+# after an "Appendix III" label) is T.
+#
+# A combined heading ("Courses Taught and Student Evaluations", "Teaching Awards
+# and Evaluations") also lists real courses, so there only a row that opens as an
+# evaluation summary ("Teaching evaluations from 1991-1998 ...", JJYBKP) moves. A
+# heading naming an evaluations committee or policy is service either way.
+_APPENDIX_CODE = "T"
+_TEACHING_CODE = re.compile(r"^K\d$")
+_EVALUATION_SUBJECT = r"(?:students?|course|teaching|learners?|instructors?)['’]?"
+_EVALUATIONS_HEADING = re.compile(
+    r"\s*(?:appendix\s+(?:[ivxlc]+|\d+[a-z]?|[a-z])\s*[.:\-\u2013\u2014]?\s*)?"
+    rf"(?:{_EVALUATION_SUBJECT}\s+(?:(?:course|teaching)\s+)?(?:self[-\s])?evaluations"
+    r"(?:\s+of\s+(?:my\s+)?(?:teaching|instruction))?"
+    r"|evaluations\s+(?:of|by)\s+(?:my\s+)?(?:teaching|students|learners))\s*:?\s*",
+    re.I,
+)
+_EVALUATIONS_WORD = re.compile(
+    r"\bevaluations\b"
+    r"(?!\s+(?:committee|subcommittee|task\s+force|working\s+group|policy))",
+    re.I,
+)
+_EVALUATION_SUMMARY_LEAD = re.compile(rf"\W*{_EVALUATION_SUBJECT}\s+evaluations\b", re.I)
+_TEACHING_EVALUATION_WHY = "A student's rating or comment on the owner's teaching is an evaluation, not a course taught"
+
 # --- #1251: a mentee's accomplishments are the mentee's, not the owner's ---
 #
 # Under a heading that names students, mentees, trainees, advisees or fellows
@@ -254,6 +288,19 @@ _MENTEE_RECORD_CODES = frozenset({"N3A", "N3B"})
 _MENTEE_HEADING = re.compile(
     r"\b(?:students?|mentees?|trainees?|advisees?|fellows\s+mentored)\b", re.I
 )
+# The same people in the plural: a heading listing them, so its rows are theirs
+# without a mentee line above (2082_Dr_Scot "Undergraduate Honor Students'
+# Achievements", 2068_Yount_Cv "MENTORING MASTERS STUDENT TRAINEES"). The singular
+# is the owner's own student-era record ("Student/Trainee Awards", web210).
+_MENTEE_PLURAL_HEADING = re.compile(
+    r"\b(?:students|mentees|trainees|advisees|fellows\s+mentored)\b", re.I
+)
+# Only the level holding the row, or its parent, can say the row is a mentee's:
+# a plural further up is a section title over the owner's own records.
+_MENTEE_PLURAL_LEVELS = 2
+# A level about the owner's teaching names students as the people taught, not as
+# the owners of its rows ("Teaching of Students in Courses", a Harvard-format CV).
+_TEACHING_LEVEL = re.compile(r"\b(?:teach\w*|courses?|class(?:es)?|lectures?|curricul\w*)\b", re.I)
 # K and D rows are recoded only when the heading also says these are accomplishments.
 _ACCOMPLISHMENT_HEADING = re.compile(r"\b(?:accomplishments?|achievements?|awards?)\b", re.I)
 _HONOR_CODE = "H"
@@ -483,7 +530,9 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
     a training title at the head of a position row is C (postdoctoral training);
     a life-support or teaching certificate is B2, not a medical licence (F1);
     a publication code on a note that points at a numbered publication is T;
-    a publication or editorial code on a per-article metrics line is S0.
+    a publication or editorial code on a per-article metrics line is S0;
+    a teaching code under a student, course or teaching evaluations heading is T
+    (under a combined heading, only a row that opens as an evaluation summary).
     """
     code, text = entry.get("taxonomy_code"), entry.get("text") or ""
     heading = _heading_text(entry)
@@ -497,7 +546,18 @@ def content_pin_code(entry: dict) -> tuple[str, str] | None:
         return "T", "A note pointing at a numbered publication is not a second citation"
     if code and (_PUBLICATION_CODE.match(code) or _EDITORIAL_CODE.match(code)) and _is_metrics_stub(text):
         return _BIBLIOMETRIC_CODE, _METRICS_STUB_WHY
+    if code and _TEACHING_CODE.match(code) and _is_under_teaching_evaluations(entry):
+        return _APPENDIX_CODE, _TEACHING_EVALUATION_WHY
     return None
+
+
+def _is_under_teaching_evaluations(entry: dict) -> bool:
+    """An evaluations heading level, or a combined one over an evaluation-summary row (#1695 part 2)."""
+    levels = [str(level) for level in entry.get("hierarchy") or []]
+    if any(_EVALUATIONS_HEADING.fullmatch(level) for level in levels):
+        return True
+    return (any(_EVALUATIONS_WORD.search(level) for level in levels)
+            and bool(_EVALUATION_SUMMARY_LEAD.match(entry.get("text") or "")))
 
 
 def _is_metrics_stub(text: str) -> bool:
@@ -529,15 +589,23 @@ def _is_named_trainee_work(code: str, heading: str, text: str) -> bool:
     )
 
 
+def _level_lists_mentees(entry: dict) -> bool:
+    """The row's own heading level, or its parent, names mentees in the plural and is not about teaching."""
+    levels = [str(level) for level in (entry.get("hierarchy") or [])[-_MENTEE_PLURAL_LEVELS:]]
+    return any(_MENTEE_PLURAL_HEADING.search(level) and not _TEACHING_LEVEL.search(level) for level in levels)
+
+
 def mentee_pin_code(entry: dict, after_mentee: bool) -> tuple[str, str] | None:
     """(N4, why) when the row is a mentee's accomplishment, not the owner's, else None.
 
     `after_mentee` says a named-mentee line (N3A/N3B) came earlier in the same
-    hierarchy group; the heading alone never pins (#1251).
+    hierarchy group; without one, only the row's own heading level or its parent
+    naming mentees in the plural pins (#1251).
     """
     code, text = entry.get("taxonomy_code") or "", entry.get("text") or ""
     heading = _heading_text(entry)
-    if after_mentee and _is_mentee_accomplishment(code, heading):
+    lists_mentees = after_mentee or _level_lists_mentees(entry)
+    if lists_mentees and _is_mentee_accomplishment(code, heading):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
     if _is_named_trainee_work(code, heading, text):
         return _MENTEE_OUTPUT_CODE, _MENTEE_PIN_WHY
