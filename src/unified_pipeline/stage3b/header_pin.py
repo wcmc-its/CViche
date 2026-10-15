@@ -315,6 +315,12 @@ _REVIEWER_WORD = re.compile(r"\breviewers?\b|\bad[\s-]hoc\b", re.I)
 # names a board. "EDITORIAL ACTIVITIES" names no board: the reviewer list sits under it.
 _JOURNAL_ROLE_WORD = re.compile(r"board|editor|member|panel|consult|advis|chair|committee", re.I)
 _BOARD_HEADING = re.compile(r"board", re.I)
+# A row that names a section, not a journal: its last word is a plural section noun
+# ("Journal Service Activities"; "Memberships" already carries the role word "member").
+# Only the last word: "Health Services Research" is a journal. A firm Q4 answer on
+# such a row, or on one with a role word, opens a new list, so the reviewer list ends.
+_HEADING_ROW = re.compile(
+    r"\b(?:activities|positions|roles|appointments|services|responsibilities)\W*$", re.I)
 _REVIEWER_PIN_WHY = "Listed under a line naming the owner as a reviewer for these journals"
 
 # A line that only points elsewhere ("<label> - see section N") or is only a
@@ -578,18 +584,22 @@ def reviewer_pin_code(entry: dict, after_unseen_reviewer_lead_in: bool) -> tuple
 def _next_reviewer_lead_in(entry: dict, position: int, current: int | None) -> int | None:
     """The position of the reviewer lead-in still open after `entry`, or None.
 
-    A lead-in line opens a run (a reviewer one) or closes it (any other); a
-    model row confidently coded outside the editorial family ends the list. An
-    unsure, empty or fallback row changes nothing.
+    A lead-in line opens a run (a reviewer one) or closes it (any other). A
+    model row confidently coded outside the editorial family ends the list, and
+    so does a confident editorial row that names a role or reads as a heading
+    ("Editorial Board Memberships" at Q4C 0.9). An unsure, empty or fallback
+    row changes nothing.
     """
     text = entry.get("text") or ""
     if is_lead_in(text):
         return position if is_reviewer_lead_in(text) else None
-    code = entry.get("taxonomy_code") or ""
-    leaves_the_list = (entry.get("classification_source") == _MODEL_SOURCE
-                       and not _EDITORIAL_CODE.match(code)
-                       and _safe_confidence(entry) > _REVIEWER_PIN_MAX_MODEL_CONFIDENCE)
-    return None if leaves_the_list else current
+    if entry.get("classification_source") != _MODEL_SOURCE:
+        return current
+    if _safe_confidence(entry) <= _REVIEWER_PIN_MAX_MODEL_CONFIDENCE:
+        return current
+    editorial = bool(_EDITORIAL_CODE.match(entry.get("taxonomy_code") or ""))
+    opens_another_list = bool(_JOURNAL_ROLE_WORD.search(text) or _HEADING_ROW.search(text))
+    return None if not editorial or opens_another_list else current
 
 
 def is_note_not_record(text: str, opening_line: str | None = None) -> bool:

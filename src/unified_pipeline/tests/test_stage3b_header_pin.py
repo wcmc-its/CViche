@@ -950,6 +950,53 @@ def test_an_unsure_non_editorial_row_does_not_end_the_reviewer_list():
     assert n == 1 and out[-1]["taxonomy_code"] == "Q4D" and out[2] == group[2]
 
 
+def test_a_confident_board_heading_row_ends_the_reviewer_list():
+    # PR #1830 review: the board heading is a row, not a lead-in; it is Q4 so it
+    # does not leave the editorial family, yet the journal after it is a board seat.
+    group = [
+        _row("Q4D", "Reviewer for the following journals:", confidence=0.85, hierarchy=EDITORIAL_HEADING),
+        _row("Q4D", "Journal A", confidence=0.95, hierarchy=EDITORIAL_HEADING),
+        _row("Q4C", "Editorial Board Memberships", confidence=0.9, hierarchy=EDITORIAL_HEADING),
+        _row("Q4C", "Journal B", confidence=0.7, hierarchy=EDITORIAL_HEADING),
+    ]
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+@pytest.mark.parametrize("row", [
+    # Reads as a heading, no role word: one row per section noun.
+    *(("Q4D", f"Journal Service {noun}", 0.9) for noun in (
+        "Memberships", "Activities", "Positions", "Roles", "Appointments", "Services", "Responsibilities.")),
+    ("Q4D", "Associate Editor, Example Review", 0.9),  # names a role
+])
+def test_a_confident_editorial_row_naming_a_role_or_heading_ends_the_reviewer_list(row):
+    group = _reviewer_group(row, ("Q4C", "Example Health Services Review", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 0 and out == group
+
+
+@pytest.mark.parametrize("row", [
+    ("Q4D", "Example Journal of Care", 0.95),          # a confident journal name: still the list
+    ("Q4D", "Health Services Research", 0.95),         # a section noun, but not the last word
+    ("Q4C", "Editorial Board Memberships", 0.6),       # an unsure heading row changes nothing
+    ("Q4D", "Journal Service Activities", 0.8),        # at the gate is not above it
+])
+def test_a_plain_or_unsure_editorial_row_keeps_the_reviewer_list(row):
+    group = _reviewer_group(row, ("Q4C", "Example Health Services Review", 0.5))
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 1 and out[-1]["taxonomy_code"] == "Q4D"
+
+
+def test_a_fallback_row_does_not_end_the_reviewer_list():
+    # Not a model answer: its confidence says nothing about where the list ends.
+    fallback = {**_row("I", "Example Society of Medicine", confidence=0.9, hierarchy=EDITORIAL_HEADING),
+                "classification_source": "fallback"}
+    group = [*_reviewer_group(), fallback,
+             _row("Q4C", "Example Health Services Review", confidence=0.5, hierarchy=EDITORIAL_HEADING)]
+    out, n = apply_header_pin(group, NO_PIN_CTX, batch_size=_TWO_PER_CALL)
+    assert n == 1 and out[-1]["taxonomy_code"] == "Q4D"
+
+
 def test_another_lead_in_ends_the_reviewer_list():
     group = [*_reviewer_group(), _row("Q4C", "Editorial board positions:", confidence=0.9,
                                       hierarchy=EDITORIAL_HEADING),
