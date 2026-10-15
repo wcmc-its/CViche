@@ -234,6 +234,7 @@ A section renderer receives its region and its entries, and returns what it prod
 **4.7 A log line or artifact does not carry PII beyond what it is scoped to serve. [judgement] — preventive, no incident yet.**
 No log statement, debug artifact, or diagnostic dump writes verbatim CV text, `home_address`, `phone`, or another faculty member's identifying detail, unless that content is the log's entire stated purpose — and even then, scoped per §4.2.
 *Why:* every PII incident this document already has is adjacent to this gap, not squarely inside an existing rule. §4.2's two leaks were about *whose run* a prompt log lands under, not whether the log should carry verbatim CV text at all — that's the open policy question #593 tracks. §8.1's `home_address`/`phone` incidents (#442, #450) were about a renderer crashing or silently dropping the field, not about where else that data can end up once it's read into memory. Nothing today says a stage or a stray debug print can't dump PII to a shared log, a temp file, or stdout — only that *if* it does, §4.2 says the write must be scoped per-run.
+*Exception text:* `str(e)` counts as content this rule covers — a provider error can echo a response body, and an error raised over a CV entry can quote it (#639). A WARNING-or-above line, or an exception message a log line or stored record carries, names the exception with `unified_pipeline.log_redaction.redacted_error_label` (its class plus a detail the caller has checked is safe, such as a botocore error code); the raw text goes to DEBUG on its own line. `llm/retry.py`, `LLMOutageError`, and `config.py`'s `llm_config.yaml` loader follow it; older `{e}` log sites predate it and are not retroactive.
 
 ## 5. Failure, retries, and run provenance
 
@@ -442,7 +443,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 0 | ✓ |
 | 2.1 no `db.query(` in `api/` | falling | 9 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 1089 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 1078 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 0 | ratchet |

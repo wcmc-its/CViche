@@ -1,4 +1,6 @@
 """app.services.run_quality_report: cap source, doctor grouping, owner flag."""
+import re
+
 import pytest
 
 from app.services import quality_score_service as qss
@@ -590,3 +592,148 @@ def test_fix_list_reads_held_out_verdicts_folded_in():
 
 def test_every_effort_names_a_known_worded_lint():
     assert set(rqr.LINT_EFFORT) <= set(rqr.LINT_COPY) <= set(KNOWN_LINTS)
+
+
+# --- #1388: advise a rerun only where a rerun can help ------------------------
+
+#: Lints (and, through CAP_SOURCE_BY_GATE_NAME, their score rows) whose
+#: what-to-do may tell the user to rerun the same CV: the failure can pass.
+RERUN_CAN_HELP = frozenset({"stage3b_fallback_ratio", "no_output"})
+#: Lints whose what-to-do may say rerun only after the source CV is corrected.
+RERUN_AFTER_SOURCE_EDIT = frozenset({"owner_contact_missing", "segmentation_collapse"})
+_RERUN_RE = re.compile(r"\bre-?run", re.IGNORECASE)
+#: The negated mention the reworded copy uses to say a rerun is no use.
+_NO_RERUN_RE = re.compile(
+    r"rerunning (?:the same file gives the same result|will not help)"
+    r"|a rerun fails the same way", re.IGNORECASE)
+
+
+def _advice():
+    """(lint or None, advice text) for every what-to-do and score-row if_lost."""
+    for lint, copy in rqr.LINT_COPY.items():
+        yield lint, copy.what_to_do
+    for name, copy in rqr.ROW_COPY_BY_GATE_NAME.items():
+        source = rqr.CAP_SOURCE_BY_GATE_NAME.get(name)
+        yield (source.lint if source else None), copy.if_lost
+
+
+def test_no_advice_says_rerun_where_a_rerun_cannot_help():
+    """#1388: "Remove it in Word and rerun" for protected data the source CV
+    holds and a fixed filter misses: the rerun finds it again and throws away
+    the Word edit. A rerun is advice only where the failure can pass, or after
+    the source CV is corrected."""
+    offenders = []
+    for lint, text in _advice():
+        if not _RERUN_RE.search(_NO_RERUN_RE.sub("", text)) or lint in RERUN_CAN_HELP:
+            continue
+        if lint in RERUN_AFTER_SOURCE_EDIT and "source CV" in text:
+            continue
+        offenders.append((lint, text))
+    assert offenders == []
+
+
+def test_the_contract_rejects_the_old_protected_data_advice():
+    """Positive control: the pre-#1388 wording fails the check above."""
+    old = "Remove it in Word and rerun before sending anything on."
+    assert _RERUN_RE.search(_NO_RERUN_RE.sub("", old))
+    assert "protected_data_in_output" not in RERUN_CAN_HELP | RERUN_AFTER_SOURCE_EDIT
+
+
+def test_the_rerun_allowlists_name_known_worded_lints():
+    assert RERUN_CAN_HELP | RERUN_AFTER_SOURCE_EDIT | set(rqr.TEMPORARY_FAILURE_WHAT_TO_DO) <= set(rqr.LINT_COPY)
+
+
+@pytest.mark.parametrize("lint", ["protected_data_in_output", "stage6_render_warnings",
+                                  "pipeline_errors_present", "stage_failure_recorded"])
+def test_advice_for_a_cause_a_rerun_cannot_fix_says_so_and_names_the_fix(lint):
+    text = rqr.LINT_COPY[lint].what_to_do
+    assert "Rerunning will not help" in text
+    assert "CViche team" in text
+
+
+@pytest.mark.parametrize("text", [
+    "ReadTimeoutError: Read timeout on endpoint URL",
+    "the call timed out after 300s",
+    "ModelTimeoutException: model took too long",
+    "ThrottlingException: Too many requests, please wait",
+    "Rate exceeded",
+    "ServiceUnavailableException: Bedrock is unavailable",
+    "InternalServerException: internal failure",
+    "ModelNotReadyException",
+    "EndpointConnectionError: Could not connect",
+    "Connection reset by peer",
+    "Error code: 429 - overloaded",
+    "Error code: 503",
+])
+def test_a_passing_failure_is_told_by_its_text(text):
+    assert rqr._is_temporary_failure({"message": "x", "evidence": [text]})
+    assert rqr._is_temporary_failure({"message": text, "evidence": None})
+
+
+@pytest.mark.parametrize("text", [
+    "name 'response' is not defined",  # the 12 capped runs on S3, 2026-10-14
+    "BedrockEmptyResponseError: Bedrock Converse returned no text content (stopReason='content_filtered')",
+    "JSONDecodeError: Expecting value: line 1 column 1",  # parse_error
+    "llm_response_invalid",  # invalid_response
+    "ValidationException: Input is too long for requested model",  # token_limit
+    "FileNotFoundError: [Errno 2] No such file",  # file_error
+    "Error code: 400 - invalid_request_error",
+    "",
+])
+def test_an_error_that_recurs_is_not_a_passing_failure(text):
+    assert not rqr._is_temporary_failure({"message": text, "evidence": [text, 7]})
+
+
+def _stage_failure_findings(*errors):
+    from unified_pipeline.doctor.lints.runtime import lint_stage_failure_recorded
+    from unified_pipeline.stage_errors import StageError
+    return lint_stage_failure_recorded([StageError("4", name, message, True) for name, message in errors])
+
+
+def test_a_recorded_timeout_advises_a_rerun_in_both_views():
+    """Runs the real lint, so a reworded message or evidence fails here."""
+    findings = _stage_failure_findings(("ReadTimeoutError", "Read timeout on endpoint URL"))
+    report = _fix_list(findings)
+    expected = rqr.TEMPORARY_FAILURE_WHAT_TO_DO["stage_failure_recorded"]
+    assert report.findings[0].what_to_do == expected
+    assert report.fix_list[0].items[0].problems[0].what_to_do == expected
+
+
+def test_the_recorded_content_filter_failure_advises_no_rerun_in_both_views():
+    """The one stage-error record on S3 (2026-10-14): a content-filter refusal
+    on both calls, which a rerun meets again."""
+    findings = _stage_failure_findings((
+        "BedrockEmptyResponseError",
+        "Bedrock Converse returned no text content on the initial call "
+        "(stopReason='content_filtered') or the retry (stopReason='content_filtered')"))
+    report = _fix_list(findings)
+    expected = rqr.LINT_COPY["stage_failure_recorded"].what_to_do
+    assert report.findings[0].what_to_do == expected
+    assert report.fix_list[0].items[0].problems[0].what_to_do == expected
+
+
+def test_one_recurring_error_among_passing_ones_advises_no_rerun_for_the_row():
+    findings = _stage_failure_findings(
+        ("ReadTimeoutError", "Read timeout"), ("NameError", "name 'response' is not defined"))
+    group = _fix_list(findings).findings[0]
+    assert group.what_to_do == rqr.LINT_COPY["stage_failure_recorded"].what_to_do
+
+
+@pytest.mark.parametrize("error, temporary", [
+    ("NameError: name 'response' is not defined", False),
+    ("ThrottlingException: Error code: 429 - Too many requests", True),
+])
+def test_pipeline_errors_advice_follows_the_real_lints_evidence(error, temporary):
+    from unified_pipeline.doctor.lints.runtime import lint_pipeline_errors
+
+    findings = lint_pipeline_errors({"T1_classified.json": {"meta": {"stats": {"t_validation": {"error": error}}}}})
+    assert [f["lint"] for f in findings] == ["pipeline_errors_present"]
+
+    expected = (rqr.TEMPORARY_FAILURE_WHAT_TO_DO if temporary else
+                {k: c.what_to_do for k, c in rqr.LINT_COPY.items()})["pipeline_errors_present"]
+    assert _fix_list(findings).findings[0].what_to_do == expected
+
+
+def test_a_lint_with_no_temporary_wording_keeps_its_own_advice_on_a_timeout_message():
+    group = _fix_list([_finding("stage4_group_failures", message="llm_timeout")]).findings[0]
+    assert group.what_to_do == rqr.LINT_COPY["stage4_group_failures"].what_to_do
