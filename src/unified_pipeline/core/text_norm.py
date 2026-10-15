@@ -75,6 +75,12 @@ _DATE_RANGE_RE = re.compile(
 DATED_SEGMENT_MIN_CHARS = 20
 DATED_SEGMENT_MAX_CHARS = 200
 DATED_SEGMENT_EDGE_CHARS = 12
+# A line is a run of records only when its dated parts give at least this many
+# different date ranges and make up at least this share of all its parts.
+DATED_SEGMENT_MIN_DISTINCT_RANGES = 2
+DATED_SEGMENT_MIN_SHARE = 0.5
+# A part states a record only with words beside its date range.
+_WORDS_BESIDE_RANGE_RE = re.compile(r"[A-Za-z]{3,}")
 
 
 def _join_wrapped_parts(parts: list[str]) -> list[str]:
@@ -118,9 +124,11 @@ def tab_record_segments(line: str) -> list[str]:
     ranges = {part: _edge_date_range(part) for part in parts}
     dated = [part for part in parts
              if ranges[part] and DATED_SEGMENT_MIN_CHARS <= len(part) <= DATED_SEGMENT_MAX_CHARS
-             and re.search(r"[A-Za-z]{3,}", _DATE_RANGE_RE.sub(" ", part))]
+             and _WORDS_BESIDE_RANGE_RE.search(_DATE_RANGE_RE.sub(" ", part))]
     distinct = {ranges[part] for part in dated}
-    return dated if len(distinct) >= 2 and 2 * len(dated) >= len(parts) else []
+    run_of_records = (len(distinct) >= DATED_SEGMENT_MIN_DISTINCT_RANGES
+                      and len(dated) / len(parts) >= DATED_SEGMENT_MIN_SHARE)
+    return dated if run_of_records else []
 
 
 #: A whole value in square brackets: "[Title not provided]".

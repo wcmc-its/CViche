@@ -249,6 +249,48 @@ def test_recovered_tab_part_does_not_vouch_for_its_sibling():
     assert any("Vice Chair, Program Committee of the Quokka Society 2012-2015" in t for t in bullets)
 
 
+def _quokka_entry(*dated_parts):
+    return {
+        "taxonomy_code": "Q1",
+        "text": "\t".join(("Member of the Quokka Society 1989-present",) + dated_parts),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member"},
+    }
+
+
+def test_a_tab_part_recovered_from_one_entry_vouches_for_its_duplicate_in_another():
+    # #1243: dedup keeps near-duplicate entries apart until later, so the same
+    # fused entry can reach the pass twice; each part is written once.
+    gen = _generator()
+    parts = ("Chair, Program Committee of the Quokka Society 2015-2017",
+             "Treasurer of the Wombat Panel 2012-2014")
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+
+    gen._recover_unrendered_records({"Q1": [_quokka_entry(*parts), _quokka_entry(*parts)]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    for part in parts:
+        assert sum(part in t for t in bullets) == 1
+    assert gen.stats["unrendered_records_recovered"] == 2
+
+
+def test_a_recovered_tab_part_does_not_vouch_for_a_later_entry_that_differs_in_its_years():
+    # #1243: two entries of one society share their vocabulary; the second
+    # one's part carries other years, so it is its own record.
+    gen = _generator()
+    first = "Chair, Program Committee of the Quokka Society 2015-2017"
+    second = "Chair, Program Committee of the Quokka Society 2009-2011"
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+
+    gen._recover_unrendered_records({"Q1": [
+        _quokka_entry(first, "Treasurer of the Wombat Panel 2012-2014"),
+        _quokka_entry(second, "Auditor of the Numbat Panel 2005-2007"),
+    ]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any(first in t for t in bullets)
+    assert any(second in t for t in bullets)
+
+
 def test_record_line_held_by_fields_is_still_recovered_when_it_is_not_a_tab_part():
     # The held-by-fields skip is for tab parts only: an ordinary record line
     # whose words the fields hold, and that the render dropped, is lost.

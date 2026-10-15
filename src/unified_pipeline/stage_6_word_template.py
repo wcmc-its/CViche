@@ -188,6 +188,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     RETIRED_TAXONOMY_CODES,
+    T_RECORD_OVERLAP,
     UNRENDERED_MIN_RECORD_LINES,
     _entry_pieces,
     _is_column_header_row,
@@ -203,8 +204,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     segment_already_rendered,
     segment_held_by_fields,
     segments_cover_source,
-    tab_aware_record_lines,
     t_recovery_lines,
+    tab_aware_record_lines,
     token_pairs,
 )
 from unified_pipeline.stage6.resolution import (  # noqa: F401
@@ -738,6 +739,29 @@ def _vouch_for_lines(lines: list[str], haystack: str,
         t_line_token_sets.append(_record_tokens(line))
         line_token_sets.append(set(_RENDER_TOKEN_RE.findall(_norm(line))))
     return haystack
+
+
+def _vouch_for_tab_parts(parts: list[str], t_line_token_sets: list[set],
+                         part_token_sets: list[set]) -> None:
+    """Count recovered tab `parts` as rendered, DATE-AWARE (#1243): a part
+    vouches for a later line only when that line's letter tokens AND number
+    runs all sit in it (`T_RECORD_OVERLAP`), so an identical part in a
+    duplicate entry is still verified rendered but a sibling that shares the
+    vocabulary and differs in its years is not. Unlike `_vouch_for_lines` the
+    part stays out of the haystack: `_record_rendered` looks up the dateless
+    head of a line there verbatim, which would let a sibling through."""
+    for part in parts:
+        tokens = _record_tokens(part)
+        t_line_token_sets.append(tokens)
+        part_token_sets.append(tokens)
+
+
+def _tab_part_recovered(line: str, part_token_sets: list[set]) -> bool:
+    """Whether every token (letters and number runs) of a tab `line` sits in
+    one tab part recovered earlier (#1243)."""
+    tokens = _record_tokens(line)
+    return bool(tokens) and any(
+        len(tokens & held) / len(tokens) >= T_RECORD_OVERLAP for held in part_token_sets)
 
 
 def _recovery_candidates(code: str, entry: dict) -> list[str]:
@@ -3976,6 +4000,8 @@ Now analyze the text above:"""
             # own that render (#1230): a line such a row carries in full is not
             # lost, however the render reformatted it.
             t_cut_token_sets += _other_entry_line_tokens(entries_by_code)
+            # Tokens (letters and number runs) of the tab parts recovered so far.
+            part_token_sets: list[set] = []
 
             for code, entries in entries_by_code.items():
                 for entry in entries:
@@ -4003,6 +4029,8 @@ Now analyze the text above:"""
                             continue
                         if line in tab_parts and segment_held_by_fields(line, fields):
                             continue  # a tab part of the record stage 4 extracted (#1243)
+                        if line in tab_parts and _tab_part_recovered(line, part_token_sets):
+                            continue  # the same part, recovered from an earlier entry
                         if segment_already_rendered(line, fields):
                             # The record that DID render from extracted fields: a
                             # grant table splits its tokens across label/value
@@ -4046,8 +4074,7 @@ Now analyze the text above:"""
                                 [line], haystack, t_line_token_sets, line_token_sets)
                         self.stats['unrendered_records_recovered'] += 1
                         n_recovered += 1
-                    haystack = _vouch_for_lines(
-                        deferred, haystack, t_line_token_sets, line_token_sets)
+                    _vouch_for_tab_parts(deferred, t_line_token_sets, part_token_sets)
 
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,

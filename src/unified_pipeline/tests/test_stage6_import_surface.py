@@ -164,6 +164,7 @@ RELOCATED_BY_398_RESIDUE = {
         "RENDER_PIECE_WINDOW",
         "RENDER_TOKEN_MIN_COUNT",
         "RENDER_TOKEN_OVERLAP",
+        "T_RECORD_OVERLAP",
         "RETIRED_TAXONOMY_CODES",
         "UNRENDERED_MIN_RECORD_LINES",
         "_COLUMN_HEADER_WORDS",
@@ -250,7 +251,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 38, (
+    assert len(_RELOCATED_CASES) == 39, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
