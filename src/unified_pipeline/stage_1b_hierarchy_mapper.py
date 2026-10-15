@@ -537,6 +537,72 @@ def map_hierarchy_node(
     return mapped_node, next_search_idx
 
 
+def _is_line_owner(node: MappedNode, line_text: str) -> bool:
+    """True when the line is the node's own heading line: its whole
+    normalized text is the node's text, or it is the node's run-in line (the
+    heading, a gap, then the section's first record, #1252). A partial match
+    (a fragment of the header, or the header inside a longer line) is not."""
+    expected = normalize_text(node["text"])
+    return normalize_text(line_text) == expected or node.get("run_in", False)
+
+
+def _mapped_nodes_in_order(
+    nodes: list[MappedNode], path: tuple[str, ...] = ()
+) -> list[tuple[int, tuple[str, ...], MappedNode]]:
+    """(element index, hierarchy path, node) for every mapped node, parents
+    before children, siblings in hierarchy order."""
+    found: list[tuple[int, tuple[str, ...], MappedNode]] = []
+    for node in nodes:
+        node_path = path + (node["text"],)
+        if (idx := node["element_idx"]) is not None:
+            found.append((idx, node_path, node))
+        found.extend(_mapped_nodes_in_order(node.get("children") or [], node_path))
+    return found
+
+
+def release_shared_header_lines(
+    mapped_hierarchy: list[MappedNode], elements: list[dict[str, Any]]
+) -> list[str]:
+    """Give a heading line that is one header's own line to that header only.
+
+    Mapping places each node on its own, so two nodes could end on one line:
+    a top-level node's partial match onto another heading's exact line (a
+    "Publications" H1 on "Non-refereed Publications", an H1 "GRANT SUPPORT"
+    on its first child's "CURRENT GRANT SUPPORT" line, DXAGUS ND8), or a
+    stage-1a duplicate heading on the one line both copies name (a doubled
+    PERSONAL DATA). Both covered sections then got the same range, and stage
+    2 extracted it once per section (#916).
+
+    On a line where at least one node is the line's owner (`_is_line_owner`),
+    the first owner in hierarchy order keeps it; every other node on that
+    line is unmapped (`element_idx` None), the same state as a header with no
+    line of its own, so its children still map and its content stays in the
+    kept header's range. A line with no owner (two headings fused in one
+    paragraph, "Administrative Positions: Board Certification:") stays
+    shared, since it carries both.
+
+    Mutates `mapped_hierarchy` in place. Returns the released nodes' paths,
+    each joined with " > ".
+    """
+    by_line: dict[int, list[tuple[tuple[str, ...], MappedNode]]] = {}
+    for idx, path, node in _mapped_nodes_in_order(mapped_hierarchy):
+        by_line.setdefault(idx, []).append((path, node))
+
+    released: list[str] = []
+    for idx, claimants in by_line.items():
+        line_text = elements[idx].get("text", "")
+        owners = [node for _, node in claimants if _is_line_owner(node, line_text)]
+        if not owners:
+            continue
+        for path, node in claimants:
+            if node is owners[0]:
+                continue
+            node["element_idx"] = None
+            node.pop("run_in", None)
+            released.append(" > ".join(path))
+    return released
+
+
 def _subtree_texts(node: HierarchyNode) -> frozenset[str]:
     """Normalized text of the node and of every node under it."""
     texts = {normalize_text(node.get("text", ""))}
@@ -1168,6 +1234,7 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
             scope=ForwardScope(followers=later, claimed=claimed),
         )
         mapped_hierarchy.append(mapped_node)
+    released_headers = release_shared_header_lines(mapped_hierarchy, elements)
 
     print(f"✓ Mapped {len(mapped_hierarchy)} top-level sections")
     print()
@@ -1223,6 +1290,7 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
                 "synthetic_sections_added": len(synthetic_sections)
             },
             "headers_absent_from_document": absent_headers,
+            "headers_released_from_shared_lines": released_headers,
         }
     }
 
