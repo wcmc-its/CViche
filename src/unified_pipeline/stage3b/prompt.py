@@ -311,7 +311,8 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
      * Major funders: NIH, NSF, CDC, NIOSH, DOD, VA, AHRQ, HRSA,
        foundations, etc.
      * Role indicators: PI, Co-PI, Co-I, Site PI, Mentor
-     * Funding period: dates like "2019–2024"
+     * Funding period: dates like "2019–2024", alongside one of the
+       signals above. Dates alone do not make a study a grant (rule 10).
      * Dollar amounts linked to projects: "$X,XXX,XXX"
    - Subtypes (DETERMINISTIC RULES - HIERARCHY OVERRIDES DATES):
      * HIERARCHY SIGNALS TAKE PRECEDENCE over date-based inference:
@@ -346,13 +347,22 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
      sponsors, without project titles, roles, or dates, are fragments
      of grants; classify as T (low confidence), not M2.
 
-10. CLINICAL TRIALS → M2A OR M2B (BY END DATE)
+10. CLINICAL TRIALS → M2A OR M2B (BY END DATE); UNFUNDED STUDIES → M1
     - The WCM CV has no clinical-trials section. A trial the CV owner
       conducts (interventional, observational/registry, or device/diagnostic)
-      is research support:
-      * Presence of NCT-XXXX identifiers.
-      * Descriptions of interventional/observational/diagnostic trials.
-    - The end date decides, not the enrollment or results status:
+      is research support when the entry carries a trial or funding signal:
+      * An NCT-XXXX identifier.
+      * A named sponsor, funder or agency (NIH, a foundation, a company).
+      * A grant or award number, or a dollar amount.
+      * The words "trial", "funded", "grant" or "sponsored", or a grants,
+        funding or research-support heading above it.
+    - A study or protocol with none of these signals is M1 (Research
+      Activities), not M2A/M2B, whatever its dates, the owner's role or the
+      heading it sits under. An IRB or protocol number, a role such as
+      "Co-investigator", "randomized" or a study title is not funding:
+      * 'Co-investigator, "<study title>" (IRB study # 1234567890)' → M1
+      * '<Study label>   <study title>   2011-2012' → M1
+    - With a signal, the end date decides, not the enrollment or results status:
       * No end date, or "present"/"ongoing" → M2A
       * An end date in the past → M2B
     - A publication reporting a trial's results is S1, not M2.

@@ -350,3 +350,31 @@ def test_attendance_rule_lets_a_teaching_heading_make_bare_titles_taught_1691():
     assert '"Continuing Medical Education - Teaching"' in rule
     assert "taught (K4) or presented" in rule
     assert 'An entry that\n      opens as attendance ("Attended ...") is still B2.' in rule
+
+
+def test_rule_10_needs_a_trial_or_funding_signal_for_m2_1694_1701():
+    """WJUPAJ (#1694): eight IRB-numbered studies with a Co-investigator role
+    and no sponsor were coded M2A and rendered as current awards. EYTHNB
+    (#1701): a dated study line under a service heading was coded M2B. Rule 10
+    sent any study the owner conducts to M2, and rule 7 counted a bare period
+    as a strong M2 signal."""
+    rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
+    for signal in ("NCT-XXXX", "sponsor, funder or agency", "grant or award number",
+                   '"trial", "funded", "grant" or "sponsored"'):
+        assert signal in rule, signal
+    assert "none of these signals is M1" in rule
+    assert "(IRB study # 1234567890)' → M1" in rule
+    assert "'<Study label>   <study title>   2011-2012' → M1" in rule
+    # Positive control: a trial with a signal still files by end date.
+    assert 'No end date, or "present"/"ongoing" → M2A' in rule
+    assert "An end date in the past → M2B" in rule
+    period = _rule_block("     * Funding period:", "     * Dollar amounts")
+    assert "Dates alone do not make a study a grant (rule 10)" in period
+
+
+def test_taxonomy_m1_m2_agree_with_rule_10_1694_1701():
+    m1, m2a, m2b = (_taxonomy_code(code) for code in ("M1", "M2A", "M2B"))
+    assert any("an IRB number and a role alone" in rule and "→ M1, not M2A/M2B" in rule
+               for rule in m1["key_rules"])
+    for code in (m2a, m2b):
+        assert any("clinical trial" in rule and "trial or funding signal" in rule for rule in code["key_rules"])
