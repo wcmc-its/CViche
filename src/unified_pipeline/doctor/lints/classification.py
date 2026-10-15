@@ -34,7 +34,7 @@ from typing import NamedTuple
 
 from unified_pipeline.stage6.parsing.text import (
     ATTENDANCE_OPENING_RE,
-    TEACHING_ROLE_RE,
+    heading_names_teaching_role,
     names_teaching_or_authorship_role,
 )
 
@@ -274,7 +274,8 @@ def _is_subheading_paragraph(entry: _ClassifiedEntry) -> bool:
 def _attendance_contexts(entries: list[_ClassifiedEntry]) -> list[bool]:
     """Per entry, whether its leaf heading, with the nearest sub-heading
     paragraph before it under that path, names an attendance heading
-    (`_ATTENDANCE_HEADING_RE`) and no teaching role."""
+    (`_ATTENDANCE_HEADING_RE`) and no teaching role
+    (`heading_names_teaching_role`, the stage-6 refusal's carve-out too)."""
     subheading: dict[tuple[str, ...], str] = {}
     contexts = []
     for entry in entries:
@@ -283,7 +284,7 @@ def _attendance_contexts(entries: list[_ClassifiedEntry]) -> list[bool]:
         leaf = entry.heading_path[-1] if entry.heading_path else ""
         context = f"{leaf} > {subheading.get(entry.heading_path, '')}"
         contexts.append(bool(_ATTENDANCE_HEADING_RE.search(context))
-                        and not TEACHING_ROLE_RE.search(context))
+                        and not heading_names_teaching_role(context))
     return contexts
 
 

@@ -539,6 +539,23 @@ def test_taught_course_is_still_rerouted_to_continuing_education() -> None:
     assert _gen_and_code(training)[1] == "K4"
 
 
+@pytest.mark.parametrize("heading", ["CME Lectures Given",
+                                     "Continuing Medical Education - Teaching"])
+def test_bare_title_under_a_teaching_heading_is_rerouted_to_k4(heading) -> None:
+    """PR #1829 review: a heading that names teaching makes its bare titles
+    taught, as the doctor lint's carve-out already reads it
+    (`heading_names_teaching_role`). Attendance still wins over the heading."""
+    taught = _continuing_education("Example Sepsis Update, 2019")
+    taught["hierarchy_mismatch_detail"]["hierarchy"] = ["Teaching", heading]
+    assert _gen_and_code(taught)[1] == "K4"
+    assert taught["taxonomy_code_original"] == "B2"
+    attended = _continuing_education("Attended the Example Sepsis Update, 2019")
+    attended["hierarchy_mismatch_detail"]["hierarchy"] = ["Teaching", heading]
+    gen, code = _gen_and_code(attended)
+    assert code == "B2"
+    assert REROUTE_REFUSED_NO_TEACHING_ROLE.replace("_", " ") in _refusal(gen)
+
+
 # --- #983: multi-record entries fan out before the PII pass and dedup --------
 # Invented values. Driven through `_group_entries_by_code` and the two calls
 # `generate()` makes next, so a test fails if the fan-out stops preceding either.

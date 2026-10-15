@@ -340,3 +340,13 @@ def test_taxonomy_k4_b2_s8_agree_with_the_attendance_rule_1691():
     assert any("bare meeting name" in rule and "→ B2, never S8" in rule for rule in s8["key_rules"])
     mappings = json.loads(_TAXONOMY_PATH.read_text())["disambiguation_notes"]["teaching_codes"]["mappings"]
     assert "professional development" not in mappings["K4 - CME & Professional Education"]
+
+
+def test_attendance_rule_lets_a_teaching_heading_make_bare_titles_taught_1691():
+    """PR #1829 review: "CME Lectures Given" lists talks the owner gave, as
+    the stage-6 refusal and the doctor lint both read it."""
+    rule = _rule_block("39a. ATTENDED, NOT TAUGHT", "40. MENTORING")
+    assert '"CME Lectures Given"' in rule
+    assert '"Continuing Medical Education - Teaching"' in rule
+    assert "taught (K4) or presented" in rule
+    assert 'An entry that\n      opens as attendance ("Attended ...") is still B2.' in rule

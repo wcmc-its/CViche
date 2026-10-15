@@ -101,6 +101,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _parse_multi_membership_entry,
     _refold_shattered,
     _strip_appended_initials,
+    heading_names_teaching_role,
     is_membership_date_part,
     names_teaching_or_authorship_role,
     split_appointment_title,
@@ -797,3 +798,34 @@ def test_attendance_opening_outranks_a_role_word_later_in_the_text():
     assert TEACHING_ROLE_RE.search("Attended the Example Speaker Series")
     assert ATTENDANCE_OPENING_RE.search("2019 Attended the Example Speaker Series")
     assert not names_teaching_or_authorship_role("2019 Attended the Example Speaker Series")
+
+
+@pytest.mark.parametrize("text", [
+    "Invited talk, Example Society Annual Meeting, 2019",
+    "Department of Medicine Grand Rounds, Example Hospital, 2018",
+    "Invited, Example Visiting Professor Program, 2020",
+])
+def test_talk_invited_and_grand_rounds_name_a_role(text):
+    assert names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Attended the Example Talk Series, 2019",
+    "2018 Attended Department of Medicine Grand Rounds",
+    "Participated in an invited workshop on example methods",
+])
+def test_attendance_opening_outranks_talk_invited_and_grand_rounds(text):
+    assert not names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("heading, names_role", [
+    ("CME Lectures Given", True),
+    ("Continuing Medical Education - Teaching", True),
+    ("Invited Talks", True),
+    ("Grand Rounds", True),
+    ("Professional Development", False),
+    ("Certifications / Continuing Education", False),
+    ("Career Development > ", False),
+])
+def test_heading_names_teaching_role(heading, names_role):
+    assert heading_names_teaching_role(heading) is names_role

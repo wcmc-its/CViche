@@ -894,9 +894,12 @@ ATTENDANCE_OPENING_RE = re.compile(
     re.IGNORECASE)
 # A word that names the owner teaching, leading or presenting the activity
 # (#1691). "Directors Course" and "Speakers Series" name the event, not the
-# owner's role, so only the singular forms count.
+# owner's role, so only the singular forms count. "Talk", "invited" and
+# "grand rounds" name a talk the owner gave ("Invited Talks", "Grand Rounds
+# Presentations"); an attended talk opens as attendance, which outranks them.
 TEACHING_ROLE_RE = re.compile(
     r'\b(?:lectur(?:e|er|es|ed|ing)|speaker|keynote|faculty|instructor|tutor|trainer|taught'
+    r'|talk|invited|grand\s+rounds'
     r'|teach(?:er|es|ing)?|(?:co-?)?director|course\s+chair'
     r'|present(?:er|ed|ing|ation)|organi[sz](?:er|ed|ing)|moderat(?:or|ed|ing)'
     r'|facilitat(?:or|ed|ing)|precept(?:or|ed|ing)|panelist)\b',
@@ -909,6 +912,15 @@ _QUOTED_TITLE_RE = re.compile(r'["“][^"“”]{6,}["”]')
 _AUTHOR_NAME_RE = re.compile(r"\b[A-Z][a-z'’\-]+,?\s(?:[A-Z]\.?){1,3}(?=\s*[,;.&]|\s+and\b)")
 _AUTHOR_LIST_MIN_NAMES = 2
 _CITATION_MARKER_RE = re.compile(r"\bet al\b|\((?:19|20)\d{2}[a-z]?(?:,[^)]*)?\)\.\s+[A-Z]")
+
+
+def heading_names_teaching_role(heading: str) -> bool:
+    """Whether a heading names a teaching or presenting role ("CME Lectures
+    Given", "Continuing Medical Education - Teaching"): its bare entries are
+    what the owner taught or presented, not what he attended. One carve-out
+    for the stage-6 B2->K4 refusal and the doctor's `attended_as_teacher`
+    lint (#1691)."""
+    return bool(TEACHING_ROLE_RE.search(heading))
 
 
 def names_teaching_or_authorship_role(text: str) -> bool:

@@ -402,6 +402,9 @@ def test_subheading_paragraph_coded_t_gives_the_attendance_context_1691():
      "Formal Teaching of Peers (e.g., CME and other continuing education courses)"),
     ("2015-present National Trainer, Example Psychotherapy Program", "K4",
      "National Teaching and Training"),
+    # PR #1829 review: the stage-6 refusal shares this carve-out.
+    ("Example Sepsis Update, 2019", "K4", "CME Lectures Given"),
+    ("Example Sepsis Update, 2019", "K4", "Continuing Medical Education - Teaching"),
     # A parent heading that names training does not reach a grants list.
     ("Example Symposium talk, 2021", "S8", "Research and Training"),
     # B2 is the right code: nothing to flag.

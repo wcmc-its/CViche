@@ -838,6 +838,11 @@ H. TEACHING, MENTORING, AND STUDENTS (K, N)
       Development", "Training", "Certifications" or "Continuing
       Education" does not make its entries teaching. It usually lists
       what the owner attended → B2 unless the entry names a teaching role.
+    - A heading that names teaching or presenting ("CME Lectures Given",
+      "Continuing Medical Education - Teaching", "Invited Talks", "Grand
+      Rounds Presentations") does: its bare titles are what the owner
+      taught (K4) or presented (S8/R), not what he attended. An entry that
+      opens as attendance ("Attended ...") is still B2.
     - Examples:
       * "2017 Bold Leadership Strategies Conference" (under
         "Professional Development") → B2

@@ -166,6 +166,7 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
+from unified_pipeline.stage6.parsing.text import ATTENDANCE_OPENING_RE, heading_names_teaching_role
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -1037,12 +1038,17 @@ def _heading_names_assigned_code(entry: Mapping[str, Any], assigned_code: str) -
     flagger's current keyword table, expects the assigned code after all
     (#1428): stage 3b's stored `expected_codes` predate the table's
     board-of-directors terms (BNYLDF 285)."""
+    expected = get_expected_codes_from_hierarchy(_mismatch_hierarchy(entry))
+    return bool(expected) and code_matches_expected(assigned_code, expected)
+
+
+def _mismatch_hierarchy(entry: Mapping[str, Any]) -> list[str]:
+    """The heading path the hierarchy-mismatch flagger read, else the entry's."""
     detail = entry.get('hierarchy_mismatch_detail') or {}
     hierarchy = detail.get('hierarchy') or entry.get('hierarchy') or []
     if isinstance(hierarchy, str):
         hierarchy = [hierarchy]
-    expected = get_expected_codes_from_hierarchy([str(level) for level in hierarchy])
-    return bool(expected) and code_matches_expected(assigned_code, expected)
+    return [str(level) for level in hierarchy]
 
 
 def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
@@ -1073,13 +1079,20 @@ def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
 
 def _entry_names_teaching_role(entry: Mapping[str, Any]) -> bool:
     """Whether the entry's stage-4 `role`, read ahead of its text, gives the
-    owner a teaching part. A role of "Attendee" or "Participant" opens the
-    pair as attendance, so it never does (#1691, NECRGC LFFKVV 608-618)."""
+    owner a teaching part, or its leaf heading names one ("CME Lectures
+    Given": its bare titles are what the owner taught; the doctor lint's
+    carve-out, `heading_names_teaching_role`). A role or text opening as
+    attendance ("Attendee", "Attended the ...") never does, under any heading
+    (#1691, NECRGC LFFKVV 608-618)."""
     role = (entry.get('extracted_fields') or {}).get('role')
     text = str(entry.get('text') or '')
     if isinstance(role, str) and role.strip():
         text = f"{role.strip()}. {text}"
-    return names_teaching_or_authorship_role(text)
+    if ATTENDANCE_OPENING_RE.search(text):
+        return False
+    hierarchy = _mismatch_hierarchy(entry)
+    return (names_teaching_or_authorship_role(text)
+            or bool(hierarchy) and heading_names_teaching_role(hierarchy[-1]))
 
 
 def _holds_assigned_kind_fields(
