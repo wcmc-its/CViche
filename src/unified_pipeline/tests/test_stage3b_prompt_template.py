@@ -350,3 +350,26 @@ def test_attendance_rule_lets_a_teaching_heading_make_bare_titles_taught_1691():
     assert '"Continuing Medical Education - Teaching"' in rule
     assert "taught (K4) or presented" in rule
     assert 'An entry that\n      opens as attendance ("Attended ...") is still B2.' in rule
+
+
+def test_d2_rule_sends_an_opening_leadership_title_to_l3_or_o_1731():
+    """HZGJFM 63-76, HU4DXA 28.x, NJHLUR 74: a one-record hospital line whose
+    title opens with Director, Medical Director or Chief was coded D2 and
+    rendered under Hospital Appointments, whose template text says not to
+    list Director or Chair there."""
+    d2 = _rule_block("      * D2: Hospital/clinical appointments", "      * D3: ")
+    assert "NOT a title that opens with Director, Chief, Chair or Head" in d2
+    rule = _rule_block("14. KEY DISTINCTION: POSITION VS LEADERSHIP", "15. CONSULTANTSHIPS")
+    assert "OPENS with a leadership title" in rule
+    assert 'even under a "Hospital Appointments"' in rule
+    assert '"Chief, Nuclear Medicine Service, VA Medical Center" → L3' in rule
+    assert '"Director, Pediatric Graduate Medical Education" → O' in rule
+    # Negative controls: a staff title first keeps D2; a chief trainee is not leadership.
+    assert '"Attending Physician and Assistant\n        Director"' in rule
+    assert '"Chief Resident"' in rule and "code it as the other rules say" in rule
+
+
+def test_taxonomy_d2_agrees_with_the_leadership_title_rule_1731():
+    d2 = _taxonomy_code("D2")
+    assert any("OPENS with a leadership title" in rule and "NOT D2" in rule
+               for rule in d2["key_rules"])
