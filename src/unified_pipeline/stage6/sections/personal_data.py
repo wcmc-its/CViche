@@ -447,7 +447,42 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
         return nearest == _PHONE_LABEL_CELL, nearest == _PHONE_LABEL_HOME
     return (bool(_CELL_KEYWORD_AS_LABEL_RE.search(text))
             and not _cell_label_is_at_another_number(phone, text),
-            _label_word_present('home', text, pii_fragments))
+            _label_word_present('home', _without_other_numbers_home_labels(phone, text),
+                                pii_fragments))
+
+
+#: A home label written after its number, "555-0102 (home)", with no number
+#: straight after it to claim it instead.
+_HOME_LABEL_AFTER_NUMBER_RE = re.compile(
+    rf'(?P<number>{_PHONE_NUMBER_PATTERN})\s*\(home\){_NO_NUMBER_FOLLOWS}')
+
+
+def _without_other_numbers_home_labels(phone: _JsonValue, text: str) -> str:
+    """`text` less each "<number> (home)" whose number `phone` does not
+    hold (#1222, pilot YOXXOH-05): in "555-0100 (work); 555-0101 (fax);
+    555-0102 (home)" the home number is withheld on its own, and its label
+    sent the work number to the withheld home slot too, leaving Office
+    telephone empty. A `phone` that still holds the home number keeps it.
+
+    The number group can join two space-separated numbers, "555-0100
+    555-0102 (home)", so a span is kept when a number in the value lies
+    inside the span's digits: a value "+1 555-0102" keeps that span's label
+    (#1823)."""
+    return _HOME_LABEL_AFTER_NUMBER_RE.sub(
+        lambda m: m.group(0) if _value_may_hold(str(phone), _digits(m.group('number'))) else '',
+        text)
+
+
+def _value_may_hold(value: str, found: str) -> bool:
+    """Whether `value` and the digit string `found` may share a number, by
+    last seven digits each way: a number in `value` inside `found`, or the
+    end of `found` inside `value` (either side can join two numbers into
+    one match, or carry a country code or an extension). Errs towards yes:
+    a wrong yes keeps a home label, which only withholds, and a value with
+    no number keeps every label."""
+    numbers = [_digits(number) for number in re.findall(_PHONE_NUMBER_PATTERN, value)]
+    return (not numbers or found[-_MIN_PHONE_DIGITS_TO_PAIR:] in _digits(value)
+            or any(number[-_MIN_PHONE_DIGITS_TO_PAIR:] in found for number in numbers))
 
 
 def _cell_label_is_at_another_number(phone: _JsonValue, text: str) -> bool:
