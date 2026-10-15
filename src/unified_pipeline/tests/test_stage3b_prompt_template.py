@@ -352,6 +352,84 @@ def test_attendance_rule_lets_a_teaching_heading_make_bare_titles_taught_1691():
     assert 'An entry that\n      opens as attendance ("Attended ...") is still B2.' in rule
 
 
+def test_rule_10_needs_a_trial_or_funding_signal_for_m2_1694_1701():
+    """WJUPAJ (#1694): eight IRB-numbered studies with a Co-investigator role
+    and no sponsor were coded M2A and rendered as current awards. EYTHNB
+    (#1701): a dated study line under a service heading was coded M2B. Rule 10
+    sent any study the owner conducts to M2, and rule 7 counted a bare period
+    as a strong M2 signal."""
+    rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
+    for signal in ("NCT-XXXX", 'trial phase ("Phase II")', "sponsor, funder or agency", "grant or award number",
+                   '"trial", "grant" or "sponsored"'):
+        assert signal in rule, signal
+    assert "none of these signals is M1" in rule
+    assert "(IRB study # 1234567890)' → M1" in rule
+    assert "'<Study label>   <study title>   2011-2012' → M1" in rule
+    # Positive control: a trial with a signal still files by end date.
+    assert 'No end date, or "present"/"ongoing" → M2A' in rule
+    assert "An end date in the past → M2B" in rule
+    period = _rule_block("     * Funding period:", "     * Dollar amounts")
+    assert "Dates alone do not make a study a grant (rule 10)" in period
+    role = _rule_block("     * Role indicators:", "     * Funding period:")
+    assert "A role alone does not make a study a grant\n       (rule 10)" in role
+
+
+def test_rule_10_trial_design_company_heading_and_unfunded_1694_1701():
+    """Decisions on the #1694/#1701 signal list. XWNZWW's unsponsored
+    Sub-Investigator pharma studies ("Multi-Center, Double-Blind,
+    Placebo-Controlled") stay M2, as do WJUPAJ's rows that name a company or
+    device (BD Intelliport, MarrowStim) and VYNARH's rows under "Clinical
+    Trial Participation". SIYORB's IRB protocols marked "Unfunded" are M1:
+    the substring "funded" is not a signal, and rule 7's "Not Funded" -> M2C
+    is for grant applications only."""
+    rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
+    assert '"multicenter", "randomized", "double-blind"\n        or "placebo-controlled"' in rule
+    assert '"randomized" or a study title is not funding' not in rule
+    assert '("BD Intelliport", "MarrowStim PAD Kit")' in rule
+    assert 'A generic\n        drug or cell name alone ("metformin") is not a sponsor' in rule
+    assert '"Clinical Trial Participation"), grants, funding or research' in rule
+    assert '"funded" as a word\n        of its own ("Industry Funded"). "Unfunded" is not a signal.' in rule
+    assert 'A study or protocol marked "Unfunded" or "Not funded" is M1' in rule
+    assert "Unfunded' → M1" in rule
+    assert "Rule 7's \"Not Funded\" → M2C is for grant applications only." in rule
+    hierarchy = _rule_block('       - Section labeled "Pending"', "     * M2C (Pending)")
+    assert "grant applications only; an unfunded study or protocol is M1" in hierarchy
+    m1 = _taxonomy_code("M1")
+    assert any("multicenter, randomized, double-blind, placebo-controlled" in rule
+               and "company or branded product" in rule and "marked Unfunded" in rule
+               for rule in m1["key_rules"])
+
+
+def test_rule_10_any_signal_overrides_role_and_irb_number_1694_1701():
+    """The #1694/#1701 A/B: MFJRKW's 'Principal Investigator - Phase II Study
+    of Fenoldopam ... trial' went M2B -> M1 in both fix rolls, and WJUPAJ's
+    'Randomized, prospective, double blind study ... (IRB study #)' went M1 in
+    one of two. The "a role or IRB number is not funding" wording outweighed
+    the signals, so a signal now overrides it, with a worked M2 example for
+    each shape beside the M1 example."""
+    rule = _rule_block("10. CLINICAL TRIALS", "11. CLINICAL ACTIVITY CODES")
+    assert "ANY one of these signals makes the entry M2A/M2B." in rule
+    assert "overrides the role, an IRB or protocol number, and a missing\n      sponsor or dollar amount" in rule
+    assert "never reason that these make it M1" in rule
+    assert ("'Principal Investigator – Phase II Study of <drug> ... a\n"
+            "        dose-finding pharmacokinetic trial' → M2A/M2B") in rule
+    assert ("'Co-investigator, \"Randomized, prospective, double blind\n"
+            "        study of <drug> ...\" (IRB study # 1234567890)' → M2A/M2B") in rule
+    # The M1 wording is scoped to entries without a signal.
+    assert "Without\n      a signal, an IRB or protocol number" in rule
+    # The positive examples come before the M1 examples they outrank.
+    assert rule.index("→ M2A/M2B\n    - A study or protocol with none") < rule.index("(IRB study # 1234567890)' → M1")
+    assert all(len(line) < 80 for line in rule.splitlines()), max(rule.splitlines(), key=len)
+
+
+def test_taxonomy_m1_m2_agree_with_rule_10_1694_1701():
+    m1, m2a, m2b = (_taxonomy_code(code) for code in ("M1", "M2A", "M2B"))
+    assert any("an IRB number and a role alone" in rule and "→ M1, not M2A/M2B" in rule
+               for rule in m1["key_rules"])
+    for code in (m2a, m2b):
+        assert any("clinical trial" in rule and "trial or funding signal" in rule for rule in code["key_rules"])
+
+
 def test_d2_rule_sends_an_opening_leadership_title_to_l3_or_o_1731():
     """HZGJFM 63-76, HU4DXA 28.x, NJHLUR 74: a one-record hospital line whose
     title opens with Director, Medical Director or Chief was coded D2 and

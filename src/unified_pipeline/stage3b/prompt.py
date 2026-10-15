@@ -310,14 +310,19 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
        F31, F32, etc.
      * Major funders: NIH, NSF, CDC, NIOSH, DOD, VA, AHRQ, HRSA,
        foundations, etc.
-     * Role indicators: PI, Co-PI, Co-I, Site PI, Mentor
-     * Funding period: dates like "2019–2024"
+     * Role indicators: PI, Co-PI, Co-I, Site PI, Mentor, alongside one
+       of the signals above. A role alone does not make a study a grant
+       (rule 10).
+     * Funding period: dates like "2019–2024", alongside one of the
+       signals above. Dates alone do not make a study a grant (rule 10).
      * Dollar amounts linked to projects: "$X,XXX,XXX"
    - Subtypes (DETERMINISTIC RULES - HIERARCHY OVERRIDES DATES):
      * HIERARCHY SIGNALS TAKE PRECEDENCE over date-based inference:
        - Section labeled "Funded", "Active", "Current" → M2A or M2B (not M2C)
        - Section labeled "Completed", "Past" → M2B (not M2A)
        - Section labeled "Pending", "Submitted", "Not Funded" → M2C
+         (grant applications only; an unfunded study or protocol is M1,
+         rule 10)
      * M2C (Pending) - use if ANY of these are true:
        - Listed under "Pending", "Submitted", or "Not Funded" hierarchy
        - Grant number contains "TBA", "TBD", "Pending", or is blank
@@ -346,13 +351,44 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
      sponsors, without project titles, roles, or dates, are fragments
      of grants; classify as T (low confidence), not M2.
 
-10. CLINICAL TRIALS → M2A OR M2B (BY END DATE)
+10. CLINICAL TRIALS → M2A OR M2B (BY END DATE); UNFUNDED STUDIES → M1
     - The WCM CV has no clinical-trials section. A trial the CV owner
       conducts (interventional, observational/registry, or device/diagnostic)
-      is research support:
-      * Presence of NCT-XXXX identifiers.
-      * Descriptions of interventional/observational/diagnostic trials.
-    - The end date decides, not the enrollment or results status:
+      is research support when the entry carries a trial or funding signal:
+      * An NCT-XXXX identifier, or a trial phase ("Phase II").
+      * Trial-design wording: "multicenter", "randomized", "double-blind"
+        or "placebo-controlled".
+      * A named sponsor, funder or agency (NIH, a foundation, a company),
+        including a company or a branded product or device named in the
+        study line ("BD Intelliport", "MarrowStim PAD Kit"). A generic
+        drug or cell name alone ("metformin") is not a sponsor.
+      * A grant or award number, or a dollar amount.
+      * The words "trial", "grant" or "sponsored", or "funded" as a word
+        of its own ("Industry Funded"). "Unfunded" is not a signal.
+      * A heading above it that names clinical trials ("Clinical Trials",
+        "Clinical Trial Participation"), grants, funding or research
+        support.
+    - ANY one of these signals makes the entry M2A/M2B. A signal
+      overrides the role, an IRB or protocol number, and a missing
+      sponsor or dollar amount; never reason that these make it M1:
+      * 'Principal Investigator – Phase II Study of <drug> ... a
+        dose-finding pharmacokinetic trial' → M2A/M2B
+      * 'Co-investigator, "Randomized, prospective, double blind
+        study of <drug> ..." (IRB study # 1234567890)' → M2A/M2B
+    - A study or protocol with none of these signals is M1 (Research
+      Activities), not M2A/M2B, whatever its dates or the owner's role,
+      and under any other heading (research activity, service). Without
+      a signal, an IRB or protocol number, a role such as
+      "Co-investigator", or a study title is not funding:
+      * 'Co-investigator, "<study title>" (IRB study # 1234567890)' → M1
+      * '<Study label>   <study title>   2011-2012' → M1
+    - A study or protocol marked "Unfunded" or "Not funded" is M1, even
+      with a role, a protocol number or dates:
+      * '<study title> (Protocol #59622)   Principal Investigator: <name>
+        Unfunded' → M1
+      Rule 7's "Not Funded" → M2C is for grant applications only.
+    - With a signal, the end date decides, not the enrollment or results
+      status:
       * No end date, or "present"/"ongoing" → M2A
       * An end date in the past → M2B
     - A publication reporting a trial's results is S1, not M2.

@@ -903,6 +903,7 @@
         "RESEARCH INTERESTS AND THEMES → M1. Topical research-interest phrases describing research areas are M1, NEVER T.",
         "Fieldwork, excavations, and field research expeditions → M1.",
         "Funded support and clinical trials go to M2; publications go to S1–S9.",
+        "A study or protocol with no funder, sponsor, company or branded product, award number, amount, NCT ID, trial phase, trial wording (trial, multicenter, randomized, double-blind, placebo-controlled) or clinical-trials/grants heading (an IRB number and a role alone), or one marked Unfunded → M1, not M2A/M2B.",
         "If the work is primarily local QI without research protocol, use L2 instead."
       ]
     },
@@ -956,7 +957,7 @@
       ],
       "key_rules": [
         "Ongoing, active grants → M2A.",
-        "A clinical trial (interventional, observational/registry, or device/diagnostic) with no end date → M2A.",
+        "A clinical trial (interventional, observational/registry, or device/diagnostic) with a trial or funding signal and no end date → M2A.",
         "If the grant has ended, it should be in M2B.",
         "If the grant is submitted and awaiting decision, use M2C."
       ]
@@ -980,7 +981,7 @@
       ],
       "key_rules": [
         "Use M2B for grants whose funding period has ended.",
-        "A clinical trial with an end date that has passed → M2B.",
+        "A clinical trial with a trial or funding signal and an end date that has passed → M2B.",
         "Do not list them under current funding once they have expired."
       ]
     },
