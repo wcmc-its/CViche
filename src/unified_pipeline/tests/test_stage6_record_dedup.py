@@ -447,6 +447,35 @@ def test_article_copies_with_no_pmid_or_doi_stay() -> None:
     assert _indexes(grouped) == [10, 50] and decisions == []
 
 
+_WHOLE_CITATION = "Quenby A, Norvale B. Widget flux in quenby cells. J Widget Res Clin. 2031;12(1):1-9."
+
+
+def _split_half(code: str, idx: int, text: str, citation: str = _WHOLE_CITATION, **fields) -> dict:
+    """A stage-2 split half 5d completed into the whole citation (VGHNZD-07)."""
+    return _entry(code, idx, text, formatted_citation=citation,
+                  formatting_source="stage_5d_llm", **fields)
+
+
+def test_a_split_citation_coded_in_two_lists_renders_once() -> None:
+    """VGHNZD-07: 3b coded the head S2 and the tail S1, with no PMID or DOI;
+    5d completed both into one citation, which printed in both lists."""
+    head = _split_half("S2", 1654, "(47) Quenby A, Norvale B. Widget flux in quenby cells. J Widget Res",
+                       title="Widget flux in quenby cells", journal="J Widget Res", year="2031")
+    tail = _split_half("S1", 1655, "Clin 2031;12(1):1-9.", title="Widget flux in quenby cells.",
+                       journal="Clin", year="2031", volume="12", pages="1-9")
+    grouped, decisions, _ = _run([head, tail])
+    assert _indexes(grouped) == [1655]
+    assert decisions[0]["metric"] == "record=paper_identifier"
+
+
+def test_article_copies_with_different_citations_and_no_id_stay() -> None:
+    first = _split_half("S1", 10, "Quenby A. Widget flux. 2031.", title="Widget flux")
+    second = _split_half("S2", 50, "Quenby A. Gizmo drift. 2031.", title="Gizmo drift",
+                         citation="Quenby A. Gizmo drift. J Widget Res. 2031.")
+    grouped, decisions, _ = _run([first, second])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
 def test_a_title_less_note_under_the_papers_doi_stays() -> None:
     """web172: an "Editorial in <journal> DOI: ..." line coded S2 carries the
     DOI of the S1 paper it comments on; it is a note, not a second listing."""
