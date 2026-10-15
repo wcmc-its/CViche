@@ -15,14 +15,14 @@ the waiver mechanism (WAIVABLE_ROWS) -- a waived hit is excused from its
 row's count but not forgotten, and the waived count itself ratchets; then
 the six ruff-backed rows (5.4 BLE001, 7.1 print(), both 8.3 rows, both 8.4
 rows) -- the count is summed from ruff's own statistics, a rise blocks, and a missing ruff is a
-hard failure rather than a zero; then the staleness helpers, which run
-against the real repo rather than the fixture since there's no git history
-to fake in a plain tempdir.
+hard failure rather than a zero; then the staleness helpers, which parse
+the real doc's measured-at stamp and gate on its age in days.
 
 Needs `ruff` on PATH (CI installs the pinned version in the function-size
 job); the ruff-backed rows are exercised for real, not mocked.
 """
 
+import datetime
 import json
 import os
 import shutil
@@ -82,7 +82,8 @@ DOC_TEMPLATE = """# CODING_STANDARDS.md (fixture)
 placeholder -- will be replaced
 <!-- check_standards:auto:end -->
 
-Some hand-written prose after the block, which --update must leave alone.
+Some hand-written prose after the block, which --update must leave alone,
+measured against `origin/dev` @ `0000000` ({today}).
 """
 
 
@@ -101,7 +102,9 @@ def build_tree(tree):
     # the real ruff.toml, not a fixture copy of its rule list: the test
     # proves the committed config is what the rows count
     shutil.copy(RUFF_TOML, os.path.join(tree, "ruff.toml"))
-    _write(os.path.join(tree, "docs", "CODING_STANDARDS.md"), DOC_TEMPLATE)
+    # stamped today, so the fixture's own runs never trip the staleness gate
+    _write(os.path.join(tree, "docs", "CODING_STANDARDS.md"),
+           DOC_TEMPLATE.format(today=datetime.date.today().isoformat()))
 
     # 7.1 print() / 8.3 typing syntax / 8.3 annotations -- one library file
     # with a known count per family, plus a tests/ file whose ANN and T201
@@ -531,21 +534,20 @@ def main():
         assert r.returncode == 1 and "stale" in r.stderr, "fixing a non-ratcheted violation without --update must show as doc drift"
         print("fixed non-ratcheted violation shows as doc drift  exit=1  ok")
 
-    # Staleness helpers run against the real repo, not the fixture -- a
-    # plain tempdir has no git history to fake a commit-distance from.
+    # Staleness helpers read the real doc's stamp, then gate on dates built
+    # around it, so the result doesn't depend on the day the test runs.
     sys.path.insert(0, HERE)
     import check_standards
-    sha = check_standards._table_verified_sha()
-    assert sha, "expected a `measured against `origin/dev` @ `<sha>`` sentence in CODING_STANDARDS.md"
-    # None is the correct answer, not a failure, on a shallow clone -- CI's
-    # own checkout is fetch-depth: 1, where `git rev-list SHA..HEAD` can't
-    # see far enough back to answer. Assert the shape of whichever one it
-    # gives, not that it must be the full-history value.
-    behind = check_standards._commits_behind(sha)
-    assert behind is None or behind >= 0
-    behind_self = check_standards._commits_behind("HEAD")
-    assert behind_self is None or behind_self == 0
-    print("staleness helpers parse the doc's sha and count real commits   ok")
+    stamp = check_standards._table_verified_stamp()
+    assert stamp, "expected a `measured against `origin/dev` @ `<sha>` (<date>)` sentence in CODING_STANDARDS.md"
+    _, measured = stamp
+    day = datetime.timedelta(days=1)
+    warn, fail = check_standards.STALE_WARN_DAYS, check_standards.STALE_FAIL_DAYS
+    assert check_standards._staleness_failure(stamp, measured + warn * day) == 0
+    assert check_standards._staleness_failure(stamp, measured + fail * day) == 0
+    assert check_standards._staleness_failure(stamp, measured + (fail + 1) * day) == 1
+    assert check_standards._staleness_failure(None, measured) == 1, "a missing stamp must fail closed"
+    print("staleness helpers parse the doc's stamp and gate on its age     ok")
 
     # WAIVER_RE must anchor to an actual comment, not just the substring
     # appearing anywhere on the line -- a nearby line that merely mentions
