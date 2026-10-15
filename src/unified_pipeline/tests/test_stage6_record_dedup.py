@@ -16,7 +16,14 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.record_dedup import deduplicate_record_groups  # noqa: E402
+from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM  # noqa: E402
+from unified_pipeline.stage6.record_dedup import (  # noqa: E402
+    PUBLISHED_ARTICLE_CODES,
+    deduplicate_record_groups,
+)
+from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
+    PUBLISHED_ARTICLE_CODES as STAGE5_ARTICLE_CODES,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -396,6 +403,82 @@ def test_an_undated_row_with_no_title_stays_and_does_not_raise(title: str) -> No
     assert _indexes(grouped) == [8, 23] and decisions == []
 
 
+# Journal articles: one paper coded S1 in one list and S2 or S6 in another (#446,
+# a partner reviewer's returned CV: one PMID printed in two bibliography lists).
+
+def _paper(code: str, idx: int, pmid: str = "31234567", doi: str = "", **extra) -> dict:
+    fields = {"authors": "Quenby A, Norvale B", "title": "Widget flux in quenby cells",
+              "journal": "J Widget Res", "year": "2031", "pmid": pmid, "doi": doi}
+    fields.update(extra)
+    return _entry(code, idx, f"Quenby A, Norvale B. Widget flux in quenby cells. "
+                             f"J Widget Res. 2031. {idx}", **fields)
+
+
+@pytest.mark.parametrize("other_code", ["S2", "S6"])
+def test_one_pmid_in_two_article_lists_keeps_the_fuller_copy(other_code: str) -> None:
+    sparse = _paper("S1", 10)
+    full = _paper(other_code, 50, volume="12", pages="1-9")
+    grouped, decisions, dropped = _run([sparse, full])
+    assert grouped["S1"] == [] and grouped[other_code] == [full]
+    assert dropped == {id(sparse)}
+    assert decisions[0]["metric"] == "record=paper_identifier"
+    assert (decisions[0]["code"], decisions[0]["kept_code"]) == ("S1", other_code)
+
+
+def test_one_doi_in_two_article_lists_drops_one_and_an_equal_pair_keeps_s1() -> None:
+    first = _paper("S2", 10, pmid="", doi="https://doi.org/10.1234/WIDGET.5")
+    second = _paper("S1", 50, pmid="", doi="10.1234/widget.5")
+    grouped, _decisions, _ = _run([first, second])
+    assert grouped["S1"] == [second] and grouped["S2"] == []
+
+
+@pytest.mark.parametrize("other", [
+    {"pmid": "39999999"},                                  # another PMID
+    {"title": "Gizmo drift in barrow tissue"},             # another paper's title
+    {"year": "2029"},                                      # another year
+])
+def test_article_copies_that_disagree_stay(other: dict) -> None:
+    grouped, decisions, _ = _run([_paper("S1", 10), _paper("S2", 50, **other)])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_article_copies_with_no_pmid_or_doi_stay() -> None:
+    grouped, decisions, _ = _run([_paper("S1", 10, pmid=""), _paper("S2", 50, pmid="")])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_title_less_note_under_the_papers_doi_stays() -> None:
+    """web172: an "Editorial in <journal> DOI: ..." line coded S2 carries the
+    DOI of the S1 paper it comments on; it is a note, not a second listing."""
+    note = _entry("S2", 50, "Editorial in J Widget Res DOI: 10.1234/widget.5",
+                  journal="J Widget Res", doi="10.1234/widget.5")
+    grouped, decisions, _ = _run([_paper("S1", 10, doi="10.1234/widget.5"), note])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_paper_in_a_non_article_list_is_not_paired() -> None:
+    """An abstract (S8) of the paper keeps its own listing: only S1/S2/S6 pair."""
+    grouped, decisions, _ = _run([_paper("S1", 10), _paper("S8", 50)])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_a_same_list_pair_is_left_to_the_group_rule() -> None:
+    grouped, decisions, _ = _run([_paper("S1", 10), _paper("S1", 50)])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+@pytest.mark.parametrize("exempt", [{"in_press_superseded": True},
+                                    {FANNED_OUT_FROM: {"key": "k", "count": 2}}])
+def test_a_superseded_or_fanned_out_article_is_never_dropped(exempt: dict) -> None:
+    sparse = {**_paper("S1", 10), **exempt}
+    grouped, decisions, _ = _run([sparse, _paper("S2", 50, volume="12", pages="1-9")])
+    assert _indexes(grouped) == [10, 50] and decisions == []
+
+
+def test_the_article_codes_are_stage_5s() -> None:
+    assert frozenset(PUBLISHED_ARTICLE_CODES) == STAGE5_ARTICLE_CODES
+
+
 def test_stage6_dedup_runs_the_record_rules_and_records_the_drop() -> None:
     """The wire: `_dedup_grouped_entries` drops the cross-code grant copy and
     writes its decision for the sidecar."""
@@ -406,3 +489,13 @@ def test_stage6_dedup_runs_the_record_rules_and_records_the_drop() -> None:
     assert [e["element_idx_start"] for e in grouped.get("M2A", []) + grouped.get("M2B", [])] == [50]
     assert any(d["metric"] == "record=grant_family" for d in decisions)
     assert any(e["element_idx_start"] == 10 for group in pre_dedup.values() for e in group)
+
+
+def test_stage6_dedup_drops_a_paper_listed_in_two_article_lists() -> None:
+    """The wire for #446: one PMID under S1 and S2 renders once."""
+    gen = WCMTemplateGenerator(verbose=False)
+    sparse, full = _paper("S1", 10), _paper("S2", 50, volume="12", pages="1-9")
+    grouped, _pre_dedup, decisions = gen._dedup_grouped_entries(
+        gen._group_entries_by_code([sparse, full]))
+    assert [e["element_idx_start"] for e in grouped.get("S1", []) + grouped.get("S2", [])] == [50]
+    assert any(d["metric"] == "record=paper_identifier" for d in decisions)

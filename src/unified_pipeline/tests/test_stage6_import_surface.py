@@ -210,7 +210,8 @@ HOME_ONLY_IMPORTS = {
                                       "_rank_qualifiers",
                                       "_PART_NUMBER_RE", "_TRIAL_PHASE_RE", "_trial_phases",
                                       "SPLIT_SIBLING_METRIC", "_drop_split_siblings",
-                                      "_citation_identity_text",
+                                      "_citation_identity_text", "_citation_doi", "_citation_fullness",
+                                      "_citation_pmid", "_citations_conflict",
                                       "_field_dates_text", "_split_record_family",
                                       "_undated_split_record_absorbs_date"),
 }

@@ -8,7 +8,9 @@ four kinds of copy reach the page twice:
   (EOSAFF-06);
 - one fellowship or leadership role listed once under a university and once
   under its affiliated hospital (EQGGRB-07);
-- an undated header line repeating a dated appointment (RVROVQ-05, OTBUCZ-03).
+- an undated header line repeating a dated appointment (RVROVQ-05, OTBUCZ-03);
+- one paper coded S1 in one bibliography list and S2 or S6 in another, under
+  one PMID or DOI (#446, a partner reviewer's returned CV).
 
 Each rule here reads `extracted_fields`, never the text, and drops only when
 the two records agree on everything that tells two records of the code apart:
@@ -25,6 +27,10 @@ from types import MappingProxyType
 
 from .dedup import (
     _YEAR_RE,
+    _citation_doi,
+    _citation_fullness,
+    _citation_pmid,
+    _citations_conflict,
     _decision_fields,
     _entry_signature_words,
     _is_subsequence,
@@ -33,6 +39,8 @@ from .dedup import (
     _part_numbers,
     _rank_qualifiers,
 )
+from .fan_out import FANNED_OUT_FROM
+from .normalization.publication import resolve_publication
 
 # The grant codes, one record whatever its status: grant_status_corrector moves
 # a copy with an amount to M2B and leaves a copy without one in M2A (AKPQEB-04).
@@ -41,6 +49,15 @@ HONOR_CODE = 'H'
 TRAINING_CODE = 'C'
 LEADERSHIP_CODE = 'L3'
 APPOINTMENT_CODE = 'D1'
+# The journal-article lists: peer-reviewed, reviews and editorials, case
+# reports. A paper belongs in one of them, so one PMID or DOI in two is a copy
+# (#446). Stage 5's `PUBLISHED_ARTICLE_CODES` names the same three; stage 6
+# keeps its own copy so it does not import stage 5, and a test pins the two
+# equal. In this order, so an equal pair keeps its peer-reviewed copy.
+PUBLISHED_ARTICLE_CODES = ('S1', 'S2', 'S6')
+# The identifiers that name one paper, each with its normalised reader, in the
+# order a shared one is reported: `dedup._citation_identity_keys`'s kinds.
+_PAPER_ID_READERS = (('pmid', _citation_pmid), ('doi', _citation_doi))
 # The sidecar decision's metric for a drop made here, followed by the rule's
 # name. The doctor's dedup_drops lint reads it: these drops match on fields,
 # so the text coverage it tests for a text-similarity drop says nothing.
@@ -148,6 +165,32 @@ def _same_grant(first: dict, second: dict) -> dict | None:
             and _compatible(_field(first, 'agency'), _field(second, 'agency'))):
         return None
     return _fuller_first(first, second)[1]
+
+
+def _same_paper(first: dict, second: dict) -> dict | None:
+    """The less full copy (`dedup._citation_fullness`) when two article
+    records share a PMID or DOI and `dedup._citations_conflict` finds nothing
+    apart: the bibliography-group rule of `dedup._drop_citation_copies`,
+    asked across codes. An equal pair drops `second`.
+
+    Its exemptions are that rule's too: a fanned-out record (#983) and an
+    in-press listing stage 5 superseded, which stage 6 renders as a tracked
+    deletion of the published copy it names (BMAMWE), are never dropped.
+    Both copies must name a title: a title-less line in another list is a
+    note about the paper, not a second listing of it (web172: "Editorial in
+    Radiology: Artificial Intelligence DOI: ..." under the paper's own DOI,
+    which stage 4 also wrote onto the paper)."""
+    if any(entry.get(FANNED_OUT_FROM) or entry.get('in_press_superseded') is True
+           for entry in (first, second)):
+        return None
+    pubs = resolve_publication(first), resolve_publication(second)
+    if not (pubs[0].title and pubs[1].title):
+        return None
+    kind = next((kind for kind, read in _PAPER_ID_READERS
+                 if read(pubs[0]) and read(pubs[0]) == read(pubs[1])), None)
+    if kind is None or _citations_conflict(kind, (first, pubs[0]), (second, pubs[1])):
+        return None
+    return first if _citation_fullness(first, pubs[0]) < _citation_fullness(second, pubs[1]) else second
 
 
 def _same_honor(first: dict, second: dict) -> dict | None:
@@ -320,6 +363,7 @@ _PAIR_RULES = (
     ((HONOR_CODE,), _same_honor, 'honor_name', False),
     ((TRAINING_CODE,), _same_training, 'training_affiliate', False),
     ((LEADERSHIP_CODE,), _same_leadership, 'leadership_affiliate', False),
+    (PUBLISHED_ARTICLE_CODES, _same_paper, 'paper_identifier', True),
 )
 
 
