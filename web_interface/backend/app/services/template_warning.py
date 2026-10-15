@@ -97,5 +97,6 @@ def detect_wcm_template(extracted_text: str | None) -> tuple[bool, float | None]
         ratio = matched / checked
         return ratio >= _WARN_RATIO, round(ratio, 3)
     except Exception as e:  # pragma: no cover - defensive: never block an upload
-        logger.warning("WCM template detection skipped (non-fatal): %s", e)
+        logger.warning("WCM template detection skipped (non-fatal): %s", type(e).__name__)
+        logger.debug("WCM template detection skipped (non-fatal): %s", e)
         return False, None

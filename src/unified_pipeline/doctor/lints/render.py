@@ -4608,3 +4608,158 @@ def lint_glyph_field(table_rows: list[list[list[str]]], stage4: dict | None) -> 
             f"rendered cell shows one",
             fields[:GLYPH_FIELD_EVIDENCE_LIMIT])]
     return []
+
+
+# --- session_title_missing ---------------------------------------------------
+#
+# A talk or session that stage 4 found no title for (EBYSBC E23, #1346). Two
+# shapes, both INFO until their precision is measured on more runs:
+#  - Q2: `committee_name` is empty and the source line quotes a title no field
+#    holds, so the row reads only '<meeting> | Moderator | <year>' (KYOPUV 450,
+#    451, 454). Reads stage 4; with the docx, a title the document shows
+#    anywhere is not lost (BZZNRL 131 renders its raw line).
+#  - R: the Title cell is the source line itself -- it holds a year and
+#    equals an R entry's raw text, or opens with the year (RNKYST 259 before
+#    #1785, VVRTUC 339 after). Reads the docx's table rows as well; a cell that is
+#    some R entry's own stage-4 title is the title, even when it opens with a
+#    year ("2020 update on ..."), and a cell with no year restates no Dates
+#    cell.
+SESSION_TITLE_SEVERITY = "INFO"
+SESSION_TITLE_Q2_CODE = "Q2"
+SESSION_TITLE_R_CODE = "R"
+SESSION_TITLE_SHAPE_Q2 = "q2_quoted_title_unheld"
+SESSION_TITLE_SHAPE_R = "r_raw_line_title"
+#: The committee field a Q2 row's Name of Committee cell shows.
+_SESSION_COMMITTEE_FIELD = "committee_name"
+#: The stage-4 fields an R row's Title cell shows (`_fill_presentations`).
+_TALK_TITLE_FIELDS = ("title", "presentation_title")
+#: The R tables' header row, as the template writes it (Regional, National and
+#: International all share it).
+_TALK_TABLE_HEADER = ("title", "institution/location", "dates (yyyy)")
+#: A quoted span of a source line: straight or curly double quotes.
+_QUOTED_SPAN_RE = re.compile(r"[\"“”]([^\"“”]+)[\"“”]")
+#: A quoted span with fewer words than this is a nickname or a label
+#: ("the 'Grand Rounds'"), not a session title.
+SESSION_TITLE_MIN_WORDS = 2
+#: A Title cell opening with a four-digit year is the source line's date.
+_LEADING_YEAR_CELL_RE = re.compile(r"^\s*(?:19|20)\d{2}(?!\d)")
+#: Characters of a quoted title or a cell repeated in a finding.
+SESSION_TITLE_EXCERPT_CHARS = 80
+#: Punctuation a quoted title may close on inside its quotes ("... liver.").
+_QUOTED_TITLE_EDGES = " .,;:"
+#: Placeholder strings stage 4 writes for "no value".
+_EMPTY_FIELD_STRINGS = frozenset({"", "none", "null", "n/a"})
+
+
+def _squash(text: str) -> str:
+    """`text` with whitespace runs collapsed, casefolded."""
+    return " ".join(str(text).split()).casefold()
+
+
+def _is_empty_value(value: object) -> bool:
+    return value is None or (isinstance(value, str)
+                             and value.strip().casefold() in _EMPTY_FIELD_STRINGS)
+
+
+def _unheld_quoted_titles(entry: _FieldsEntry) -> list[str]:
+    """The quoted spans of `entry`'s source line, of at least
+    `SESSION_TITLE_MIN_WORDS` words, that no stage-4 field value holds."""
+    held = [_squash(leaf) for leaf in _leaf_strings(entry.fields)]
+    spans = [" ".join(span.split()) for span in _QUOTED_SPAN_RE.findall(entry.text)]
+    return [span for span in spans
+            if len(_LETTER_WORD_RE.findall(span)) >= SESSION_TITLE_MIN_WORDS
+            and not any(_squash(span) in value for value in held)]
+
+
+def _q2_untitled_problems(stage4: dict, shown: str | None) -> list[tuple[str, list[str]]]:
+    """(message, evidence) per Q2 entry with a record whose `committee_name`
+    is empty while the source line quotes a title no field holds and, when
+    `shown` (the document's text, squashed) is given, the document does not
+    show."""
+    problems = []
+    for entry in _fields_entries(stage4):
+        if entry.code != SESSION_TITLE_Q2_CODE:
+            continue
+        if not any(_is_empty_value(record.get(_SESSION_COMMITTEE_FIELD))
+                   for record in _split_records(entry.fields) or [entry.fields]):
+            continue
+        titles = [title for title in _unheld_quoted_titles(entry)
+                  if shown is None or _squash(title.strip(_QUOTED_TITLE_EDGES)) not in shown]
+        if titles:
+            problems.append((
+                f"entry {entry.element_idx} ({entry.code}): {_SESSION_COMMITTEE_FIELD} is "
+                f"empty, and the source line quotes a title no field holds: "
+                f"'{titles[0][:SESSION_TITLE_EXCERPT_CHARS]}'",
+                [f"shape: {SESSION_TITLE_SHAPE_Q2}", *titles]))
+    return problems
+
+
+def _talk_title_cells(table_rows: list[list[list[str]]]) -> list[str]:
+    """The non-empty Title cell of every data row of every R table."""
+    cells = []
+    for table in table_rows:
+        if not table:
+            continue
+        header = tuple(_squash(cell) for cell in table[0])
+        if header[:len(_TALK_TABLE_HEADER)] == _TALK_TABLE_HEADER:
+            cells += [" ".join(row[0].split()) for row in table[1:] if row and row[0].strip()]
+    return cells
+
+
+def _talk_cell_entry(cell: str, talks: list[_FieldsEntry]) -> _FieldsEntry | None:
+    """The R entry whose source line holds `cell`, else the first whose line
+    holds every word of it (stage 6 cut the venue out of the middle)."""
+    squashed = _squash(cell)
+    words = set(_LETTER_WORD_RE.findall(squashed))
+    return (next((talk for talk in talks if squashed in _squash(talk.text)), None)
+            or next((talk for talk in talks
+                     if words <= set(_LETTER_WORD_RE.findall(_squash(talk.text)))), None))
+
+
+def _r_raw_line_problems(stage4: dict,
+                         table_rows: list[list[list[str]]]) -> list[tuple[str, list[str]]]:
+    """(message, evidence) per R Title cell that holds a year and is an R entry's
+    whole source line or opens with that year, unless it is an R entry's
+    stage-4 title."""
+    talks = [entry for entry in _fields_entries(stage4) if entry.code == SESSION_TITLE_R_CODE]
+    raw_lines = {_squash(talk.text) for talk in talks if talk.text.strip()}
+    titles = {_squash(leaf) for talk in talks for key in _TALK_TITLE_FIELDS
+              for record in _split_records(talk.fields) or [talk.fields]
+              for leaf in _leaf_strings(record.get(key))}
+    problems = []
+    for cell in _talk_title_cells(table_rows):
+        squashed = _squash(cell)
+        # A line with no year restates no Dates cell: it may be all the
+        # source says ("<department> Grand Rounds", JNATFN 494).
+        if squashed in titles or not _FOUR_DIGIT_YEAR_RE.search(cell):
+            continue
+        if squashed in raw_lines:
+            why = "is the entry's whole source line, year included"
+        elif _LEADING_YEAR_CELL_RE.match(cell):
+            why = "opens with a year"
+        else:
+            continue
+        talk = _talk_cell_entry(cell, talks)
+        where = (f"entry {talk.element_idx} ({talk.code})" if talk
+                 else f"an {SESSION_TITLE_R_CODE} row")
+        problems.append((
+            f"{where}: stage 4 found no talk title, and the Title cell {why}: "
+            f"'{cell[:SESSION_TITLE_EXCERPT_CHARS]}'",
+            [f"shape: {SESSION_TITLE_SHAPE_R}", cell]))
+    return problems
+
+
+def lint_session_title_missing(stage4: dict,
+                               table_rows: list[list[list[str]]] | None = None,
+                               blocks: list[tuple[str, str]] | None = None) -> list[dict]:
+    """A Q2 session or R talk stage 4 found no title for (#1346): a Q2 entry
+    whose `committee_name` is empty while its source line quotes a title the
+    document does not show, and an R Title cell that is the raw source line.
+    INFO, one finding per entry or cell. The R shape reads the docx's table
+    rows, so it runs only when the docx was read."""
+    shown = None if blocks is None else _squash(" ".join(text for _, text in blocks))
+    problems = _q2_untitled_problems(stage4, shown)
+    if table_rows is not None:
+        problems += _r_raw_line_problems(stage4, table_rows)
+    return [_finding("session_title_missing", SESSION_TITLE_SEVERITY, message, evidence)
+            for message, evidence in problems]

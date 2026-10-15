@@ -662,5 +662,7 @@ def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, c
     monkeypatch.setattr(subprocess, "run", fake_run)
     stage4_facade.run_validation(str(tmp_path / "out.json"))  # caught, must not raise
     out = caplog.text  # #875: run_validation logs, it no longer prints
-    assert "Validation error: boom" in out
+    # #639: the ERROR line names the class; str(e) and the traceback go to DEBUG.
+    assert "Validation error: RuntimeError" in out
+    assert "boom" not in out
     assert "Extraction still successful" in out
