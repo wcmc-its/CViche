@@ -909,6 +909,90 @@ def test_record_rule_counts_only_enumerated_paragraphs_for_a_citation():
     assert lint_duplicate_records(blocks, stage_5d) == []
 
 
+# --- #1585: the source lists the record twice, or two papers share a title ---
+#
+# Synthetic stand-ins for YUYVIG/NECRGC shapes: two source entries whose own
+# text each states the title (OKRTPJ 558/560), one source entry copied into
+# two (a pipeline duplicate), an abstract recoded as an article (SQMWHM 448),
+# and one paper co-published in two journals under two PMIDs (YIXQFB 2980/2981).
+
+def _listed_entry(idx, title, end=None, hierarchy=("Publications",), text=None, **fields):
+    return {"element_idx_start": idx, "element_idx_end": idx if end is None else end,
+            "taxonomy_code": "S1", "hierarchy": list(hierarchy),
+            "text": f"{idx}. Doe A. {title}. J Ex. 2020." if text is None else text,
+            "extracted_fields": {"title": title, "year": "2020", **fields}}
+
+
+_TWICE_BLOCKS = [("p", f"1. Doe A. {_TITLE_X}. J Ex. 2020."),
+                 ("p", f"2. Doe A. {_TITLE_X}. Journal of Examples. 2020.")]
+
+
+def _severities(findings):
+    return [f["severity"] for f in findings]
+
+
+def test_source_listing_a_record_twice_is_info_not_warn():
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X), _listed_entry(12, _TITLE_X)]}
+    findings = lint_duplicate_records(_TWICE_BLOCKS, stage_5d)
+    assert _severities(findings) == ["INFO"]
+    assert "the source CV itself lists twice" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("entry 10 repeats as entry 12 (S1/S1, same title)")
+
+
+def test_one_source_entry_rendered_twice_still_warns():
+    """Two entries over one source span: a stage copied the entry."""
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X, end=11), _listed_entry(11, _TITLE_X)]}
+    assert _severities(lint_duplicate_records(_TWICE_BLOCKS, stage_5d)) == ["WARN"]
+
+
+def test_a_copy_whose_source_text_lacks_the_title_still_warns():
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X),
+                            _listed_entry(12, _TITLE_X, text="12. Doe A. J Ex. 2020.")]}
+    assert _severities(lint_duplicate_records(_TWICE_BLOCKS, stage_5d)) == ["WARN"]
+
+
+def test_a_copy_without_an_integer_start_still_warns():
+    entry = _listed_entry(12, _TITLE_X)
+    entry["element_idx_start"] = "12"
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X), entry]}
+    assert _severities(lint_duplicate_records(_TWICE_BLOCKS, stage_5d)) == ["WARN"]
+
+
+def test_an_abstract_recoded_as_an_article_still_warns():
+    """The abstract list's copy coded S1 is the recode's duplicate (#446)."""
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X, hierarchy=("Publications", "Refereed")),
+                            _listed_entry(40, _TITLE_X, hierarchy=("Publications", "Abstracts"))]}
+    assert _severities(lint_duplicate_records(_TWICE_BLOCKS, stage_5d)) == ["WARN"]
+
+
+def test_source_text_running_two_title_words_together_still_states_it():
+    fused = _TITLE_X.replace("repeated listings", "repeatedlistings")
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X),
+                            _listed_entry(12, _TITLE_X, text=f"12. Doe A. {fused}. 2020.")]}
+    assert _severities(lint_duplicate_records(_TWICE_BLOCKS, stage_5d)) == ["INFO"]
+
+
+def test_pipeline_pairs_warn_beside_source_pairs():
+    blocks = _TWICE_BLOCKS + [("p", f"3. Roe B. {_TITLE_Y}. 2020."),
+                              ("p", f"4. Roe B. {_TITLE_Y}. J Ex. 2020.")]
+    stage_5d = {"entries": [_listed_entry(10, _TITLE_X), _listed_entry(12, _TITLE_X),
+                            _listed_entry(20, _TITLE_Y, end=21), _listed_entry(21, _TITLE_Y)]}
+    findings = lint_duplicate_records(blocks, stage_5d)
+    assert _severities(findings) == ["WARN", "INFO"]
+    assert findings[0]["message"].startswith("1 duplicated record(s)")
+    assert findings[0]["evidence"] == [
+        f"entry 20 repeats as entry 21 (S1/S1, same title): {_TITLE_Y.lower()}"]
+
+
+def test_record_rule_quiet_on_one_title_under_two_pmids():
+    """One consensus paper co-published in two journals: two PubMed records."""
+    stage_5d = {"entries": [_cite_entry(10, _TITLE_X, pmid="35606197"),
+                            _cite_entry(11, _TITLE_X, pmid="35606166")]}
+    assert lint_duplicate_records(_TWICE_BLOCKS, stage_5d) == []
+    stage_5d["entries"][1]["extracted_fields"]["pmid"] = None
+    assert _severities(lint_duplicate_records(_TWICE_BLOCKS, stage_5d)) == ["WARN"]
+
+
 def test_run_doctor_wires_stage_5d_into_duplicate_records(tmp_path):
     """`stage_5d` is an optional view: drop the registry wiring and the
     record rule goes silently dead while the block rule still runs."""
