@@ -358,18 +358,28 @@ def test_d2_rule_sends_an_opening_leadership_title_to_l3_or_o_1731():
     rendered under Hospital Appointments, whose template text says not to
     list Director or Chair there."""
     d2 = _rule_block("      * D2: Hospital/clinical appointments", "      * D3: ")
-    assert "NOT a title that opens with Director, Chief, Chair or Head" in d2
+    assert "NOT a hospital line whose title opens with Director, Chief" in d2
     rule = _rule_block("14. KEY DISTINCTION: POSITION VS LEADERSHIP", "15. CONSULTANTSHIPS")
+    assert "This applies ONLY to a line you would\n      otherwise code D2" in rule
     assert "OPENS with a leadership title" in rule
-    assert 'even under a "Hospital Appointments"' in rule
     assert '"Chief, Nuclear Medicine Service, VA Medical Center" → L3' in rule
     assert '"Director, Pediatric Graduate Medical Education" → O' in rule
-    # Negative controls: a staff title first keeps D2; a chief trainee is not leadership.
+    # Negative controls: a staff title first keeps D2.
     assert '"Attending Physician and Assistant\n        Director"' in rule
-    assert '"Chief Resident"' in rule and "code it as the other rules say" in rule
+
+
+def test_d2_leadership_rule_leaves_committee_chairs_o_l3_and_trainees_alone_1731():
+    """The D2 split must not pull a committee chair out of P, re-sort an
+    O/L3 leadership line, or move a chief trainee."""
+    rule = _rule_block("14. KEY DISTINCTION: POSITION VS LEADERSHIP", "15. CONSULTANTSHIPS")
+    scope = rule[rule.index("Out of scope of this D2 split"):]
+    assert "Committee\") stays P." in scope
+    assert "this split does not\n          move it between O and L3" in scope
+    assert '"Chief Resident"' in scope and '"Chief\n          Fellow"' in scope
 
 
 def test_taxonomy_d2_agrees_with_the_leadership_title_rule_1731():
     d2 = _taxonomy_code("D2")
-    assert any("OPENS with a leadership title" in rule and "NOT D2" in rule
-               for rule in d2["key_rules"])
+    rule = next(r for r in d2["key_rules"] if "OPENS with a leadership title" in r)
+    assert "NOT D2" in rule
+    assert "A committee chair stays P" in rule

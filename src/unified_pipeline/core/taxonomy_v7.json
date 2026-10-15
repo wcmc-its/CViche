@@ -415,7 +415,7 @@
       ],
       "key_rules": [
         "Position/appointment lines at hospitals → D2.",
-        "A hospital line whose title OPENS with a leadership title (Director, Medical Director, Chief, Chair, Head) → L3 for a clinical service or unit, O for a department, division or program; NOT D2.",
+        "A hospital line whose title OPENS with a leadership title (Director, Medical Director, Chief, Chair, Head) → L3 for a clinical service or unit, O for a department, division or program; NOT D2. A committee chair stays P; a chief trainee is out of scope.",
         "Narrative about clinical duties and workload goes to L1, not D2.",
         "If the appointment doubles as an academic title, use D1 instead."
       ]
