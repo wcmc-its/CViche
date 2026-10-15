@@ -514,7 +514,7 @@ Lints, ranked by the severity of the failure class they catch:
                           and is the entry's whole source line or opens with
                           the year (RNKYST 259). INFO, one per entry or
                           cell. Reads stage 4; the docx when present
-14aw. institution_cleaned_name an institution name stage 5b's lookup gave
+14ax. institution_cleaned_name an institution name stage 5b's lookup gave
                           that loses the CV's own text in the document
                           (#1257): it drops a department, platform, parent
                           institution, second hospital or the CV's own city

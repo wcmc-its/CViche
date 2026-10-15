@@ -2306,7 +2306,7 @@ def test_enrichment_lints_run_from_the_stage_5_artifact(tmp_path):
     assert sorted(lints) == ["enrichment_pubtype_mismatch", "pubmed_title_truncated"]
 
 
-# ---------------------------- lint 14av: stage-5b institution names (#1257)
+# ---------------------------- lint 14ax: stage-5b institution names (#1257)
 
 
 def _looked_up(idx, raw, cleaned, city="Brackenridge", state="Ohio", country="United States",
@@ -2419,6 +2419,54 @@ def test_institution_cleaned_name_reads_the_row_with_the_entrys_year():
                               "2001-2005"))
     [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
     assert "'primary', 'appointment'" in finding["message"]
+
+
+def test_institution_cleaned_name_quiet_when_the_cv_itself_says_unknown():
+    """The CV wrote "Unknown" as the institution: the row prints the CV's
+    own text, so the placeholder is not stage 5b's."""
+    entry = _looked_up(600, "Unknown", "Unknown", code="B2",
+                       text="Tidal Self-Care Institute. Unknown. 2011")
+    rows = _institution_rows(("Tidal Self-Care Institute", "Unknown", "06/11"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+def test_institution_cleaned_name_reads_a_month_and_two_digit_year_cell():
+    """Stage 6 prints a date cell "07/21": it is 2021, so of two rows that
+    otherwise tie, the one dated 07/21 is the entry's July 2021 row."""
+    entry = _looked_up(600, "", "Unknown", code="B2",
+                       text="Tidal Workshop, Brackenridge, OH, July 2021")
+    rows = _institution_rows(("Tidal Workshop", "Unknown, Brackenridge, OH", "05/08"),
+                             ("Tidal Workshop", "Unknown, Brackenridge, OH", "07/21"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert finding["evidence"][1] == (
+        "rendered: 'Tidal Workshop | Unknown, Brackenridge, OH | 07/21'")
+
+
+def test_institution_cleaned_name_does_not_blame_another_entrys_unknown_row():
+    """Only another entry's row prints "Unknown": it shares no word with
+    this entry's text, so this entry gets no finding."""
+    entry = _looked_up(600, "Brackenridge, OH", "Unknown", code="B2",
+                       text="Tidal Self-Care Institute. Brackenridge, OH. 2011")
+    rows = _institution_rows(("Another Workshop", "Unknown, Marrowby, KY", "05/08"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
+
+
+def test_institution_cleaned_name_gives_a_placeholder_entry_one_finding():
+    """A placeholder name also drops the CV's department; the entry still
+    gets one finding, the placeholder."""
+    entry = _looked_up(600, "Department of Tidal Studies, Brackenridge, OH", "Unknown",
+                       code="B2", text="Tidal Seminar. Department of Tidal Studies. 2011")
+    rows = _institution_rows(("Tidal Seminar", "Unknown, Brackenridge, OH", "06/11"))
+    [finding] = lint_institution_cleaned_name({"entries": [entry]}, rows)
+    assert "placeholder_name" in finding["message"]
+
+
+def test_institution_cleaned_name_quiet_when_the_name_is_only_filler_words():
+    """A name of filler words only ("The") has no word to look for, so it
+    matches no row, rather than every row."""
+    entry = _looked_up(7, "Quillfeather University of the Tides", "The")
+    rows = _institution_rows(("Lecturer", "Marrowby Hospital", "2014-2018"))
+    assert lint_institution_cleaned_name({"entries": [entry]}, rows) == []
 
 
 def test_institution_cleaned_name_prevalence_is_the_measured_fraction():

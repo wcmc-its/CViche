@@ -489,7 +489,7 @@ def _placeholder_row(name: _CleanedName, rows: list[_Row]) -> _Row | None:
 def lint_institution_cleaned_name(stage5b: dict, table_rows: list[list[list[str]]],
                                   blocks: list[tuple[str, str]] | None = None) -> list[dict]:
     """Institution names stage 5b's lookup gave that lose the CV's own text
-    in the document (#1257). One finding per entry, in two shapes:
+    in the document (#1257). One finding per entry, in four shapes:
       - qualifier_dropped: the name drops words of stage 4's `institution`
         (a department, a platform, a parent institution, a second hospital)
         that are not 5b's location, and no row showing the name prints them.

@@ -284,7 +284,6 @@ def test_trailing_stray_punctuation_after_the_org_is_absorbed() -> None:
     ) == "Award"
 
 
-
 def test_words_beyond_location_are_the_remainder_stage_6_restores() -> None:
     """The doctor's institution_cleaned_name lint reads these words (#1257):
     the department is beyond the location, 5b's own city and state code are
