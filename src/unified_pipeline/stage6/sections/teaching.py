@@ -200,6 +200,13 @@ _STRUCTURAL_COLUMN_LABELS = frozenset({'title', 'institution', 'dates', 'role'})
 # it was guarding against (§8.2).
 _SEMICOLON_SPLIT_MIN_CHARS = 100
 
+# The source CV's own list number at the head of a raw line ("10. ", "2) ",
+# "(3) "). A line rendered raw (no stage-5c text, no course title) is already a
+# bullet, so the number is the CV's numbering, not content: a K5 line 5c's
+# post-check rejected rendered as "10. ..." (#1345, RCBKFG GKAQHB K5 166,
+# OIEPQD XAYKXA). The same shape as clinical_practice's and stage 5d's.
+_LEADING_LIST_NUMBER_RE = re.compile(r'^(?:\(\d{1,3}\)|\d{1,3}[.)])\s+')
+
 # Stage 5c's own date for a record starting in `year`: the year, or a range
 # opening with it ("1982-1986", "1982 - present"). Not inside a longer number.
 _OWN_DATE_TOKEN = (r'(?<!\d){year}(?:\s*[-\u2013\u2014]\s*(?:\d{{2,4}}|present|current))?'
@@ -444,7 +451,7 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
 
     lines: list[str] = []
     for line in original_text.split('\n'):
-        line = line.strip()
+        line = _LEADING_LIST_NUMBER_RE.sub('', line.strip(), count=1)
         if not line or line.lower() in _STRUCTURAL_COLUMN_LABELS:
             continue
         if ';' in line and len(line) > _SEMICOLON_SPLIT_MIN_CHARS:
