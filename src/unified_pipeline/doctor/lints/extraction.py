@@ -2700,12 +2700,18 @@ def _year_span(years: frozenset[str]) -> YearSpan | None:
     return YearSpan(int(min(years)), int(max(years))) if years else None
 
 
+def _split_records(fields: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """Each `stage4_records` child that is a mapping, or the record itself
+    when stage 4 did not split it."""
+    children = fields.get(STAGE4_RECORDS_KEY)
+    if isinstance(children, list) and children:
+        return [child for child in children if isinstance(child, Mapping)]
+    return [fields]
+
+
 def _record_spans(fields: Mapping[str, object]) -> tuple[YearSpan, ...]:
     """The record's year span, or each `stage4_records` child's."""
-    children = fields.get(STAGE4_RECORDS_KEY)
-    records = ([child for child in children if isinstance(child, Mapping)]
-               if isinstance(children, list) and children else [fields])
-    return tuple(span for span in map(_year_span, map(_years_of, records)) if span)
+    return tuple(span for span in map(_year_span, map(_years_of, _split_records(fields))) if span)
 
 
 def _record_words(fields: Mapping[str, object]) -> RecordWords:
@@ -4892,10 +4898,13 @@ def lint_cross_entry_value(stage4: dict, stage3b: dict | None = None) -> list[di
 #: Editors", "(Elite Reviewer)", "Ad hoc", "Consultant Panel", "(... section)".
 #: Searched for, unlike stage 4's whole-cell `_ROLE_CELL_PATTERN`; a bare
 #: "Board" or "Review" is left out, since journal titles carry both
-#: ("American Board of ...", "Obesity Reviews").
+#: ("American Board of ...", "Obesity Reviews"), and so is "Section" followed
+#: by a capital letter or a numeral, which is part of the title ("Acta
+#: Crystallographica Section E", "... Section IV").
 _JOURNAL_NAME_ROLE_RE = re.compile(
     r"\b(?:(?:editorial|advisory|review)(?:\s+review)?\s+board|editors?|reviewers?"
-    r"|referees?|ad\s+hoc|section|panel)\b", re.IGNORECASE)
+    r"|referees?|ad\s+hoc|section(?!\s+(?-i:[A-Z]|[IVXLC]+)\b|\s+\d+\b)|panel)\b",
+    re.IGNORECASE)
 #: Separators no single journal title holds: a semicolon, or a run of two or
 #: more spaces where a lost column separator left them.
 _JOURNAL_LIST_SEPARATOR_RE = re.compile(r"\s*;\s*|\s{2,}")
@@ -4970,10 +4979,7 @@ def journal_name_shapes(name: str) -> list[str]:
 
 def _journal_names(fields: Mapping[str, object]) -> list[str]:
     """The `journal_name` of the record, or of each `stage4_records` child."""
-    children = fields.get(STAGE4_RECORDS_KEY)
-    records = ([child for child in children if isinstance(child, Mapping)]
-               if isinstance(children, list) and children else [fields])
-    return [name for record in records
+    return [name for record in _split_records(fields)
             if isinstance(name := record.get(_BARE_NAME_FIELD), str) and name.strip()]
 
 

@@ -5495,6 +5495,13 @@ def _journal_findings(*entries):
     ("Example Cardiology (Elite Reviewer)", ["role word 'Reviewer'"]),
     ("Example Science - Board of Reviewing Editors", ["role word 'Editors'"]),
     ("Example Hepatology (Example Elsewhere section)", ["role word 'section'"]),
+    ("Example Psychiatry Consultant Panel", ["role word 'Panel'"]),
+    ("Example Medicine (Referee)", ["role word 'Referee'"]),
+    ("Example Medicine (Invited Referees)", ["role word 'Referees'"]),
+    # "Section" not followed by a letter or numeral is a section of the journal.
+    ("Example Section Alpha Journal", ["role word 'Section'"]),
+    # Only a capital letter or a numeral names a lettered section.
+    ("Example Oncology (section a)", ["role word 'section'"]),
     # Two journals joined by a semicolon or by a double space.
     ("Example Cancer; Example Journal of Cancer", ["joined"]),
     ("Example Cancer Therapeutics  Example Surgical Endoscopy", ["joined"]),
@@ -5505,6 +5512,8 @@ def _journal_findings(*entries):
     # A long last piece after one title is a journal, not a subject list.
     ("Child Development, Journal of the American Academy of Child and Adolescent Psychiatry",
      ["joined"]),
+    # One word past the subject-list bound (JOURNAL_SUBJECT_LIST_MAX_WORDS).
+    ("Journal of Example, Neurosurgery and Clinical Child Psychiatry", ["joined"]),
 ])
 def test_journal_name_shapes_flags(name, shapes):
     assert journal_name_shapes(name) == shapes
@@ -5522,15 +5531,22 @@ def test_journal_name_shapes_flags(name, shapes):
     # A subject list after one title.
     "Journal of Neurology, Neurosurgery and Psychiatry",
     "Global Health, Epidemiology & Genomics",
+    # A subject list at exactly JOURNAL_SUBJECT_LIST_MAX_WORDS words.
+    "Journal of Example, Neurosurgery and Clinical Psychiatry",
     # A continuation, a publisher, a subtitle.
     "Child Abuse and Neglect, The International Journal",
     "Advances in Medicine, Hindawi Publishing",
+    "Example Clinical Medicine, Elsevier Science",
     "Revista Example, Official Journal of the Example Society (EXS), Elsevier",
     # A parenthetical cut out leaves no double space to read as a join.
     "Bio Medical Central (BMC) Psychiatry",
     # A bare "Board" or "Review" is a title word, not a role.
     "Journal of the American Board of Example Medicine",
     "Obesity Reviews",
+    # "Section" with a letter or numeral is part of the title.
+    "Acta Crystallographica Section E",
+    "Example Physics Section IV",
+    "Example Annals Section 2",
     "Example Journal",
 ])
 def test_journal_name_shapes_silent(name):
@@ -5552,6 +5568,7 @@ def test_journal_name_joined_reads_each_stage4_record():
         {"journal_name": "Example Journal"},
         {"journal_name": "Example Journal of Pharmacology, Editorial Board"},
         {"journal_name": None},
+        "Example Journal; a stage4_records child that is not a record",
     ]
     findings = _journal_findings(entry)
     assert len(findings) == 1
