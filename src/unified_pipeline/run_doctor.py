@@ -258,7 +258,9 @@ Lints, ranked by the severity of the failure class they catch:
                           as appointments or degrees (RCBKFG, #1415), an ABIM
                           line as a membership, BLS/ACLS as a licence, grant
                           reviews as committees,
-                          courses attended as teaching, a thesis-committee
+                          courses attended as teaching, courses and meetings
+                          attended as continuing education taught or as
+                          abstracts (NECRGC, #1691), a thesis-committee
                           block as institutional committees, a 'see section'
                           line or bare URL as a record, a journal article
                           with volume and pages as a non-peer-reviewed report

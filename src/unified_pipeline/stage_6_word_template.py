@@ -63,6 +63,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+from unified_pipeline.core.text_norm import tab_record_segments
 from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (
     code_matches_expected,
     get_expected_codes_from_hierarchy,
@@ -163,8 +164,10 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     _parse_date_components,
     _parse_multi_membership_entry,
     _refold_shattered,
+    names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
+from unified_pipeline.stage6.parsing.text import ATTENDANCE_OPENING_RE, heading_names_teaching_role
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -187,6 +190,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     RETIRED_TAXONOMY_CODES,
+    T_RECORD_OVERLAP,
     UNRENDERED_MIN_RECORD_LINES,
     _entry_pieces,
     _is_column_header_row,
@@ -200,8 +204,10 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     m1_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
+    segment_held_by_fields,
     segments_cover_source,
     t_recovery_lines,
+    tab_aware_record_lines,
     token_pairs,
 )
 from unified_pipeline.stage6.resolution import (  # noqa: F401
@@ -238,19 +244,20 @@ from unified_pipeline.stage6.sections.appendix import (
     _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
 )
 from unified_pipeline.stage6.sections.appendix import (
-    APPENDIX_MAX_CHARS,
     CODE_ORIGIN_ENTRY,
     CODE_ORIGIN_RECONSIDER,
     OwnerTokens,
     RecoveredLine,
     UnmappedEntry,
-    _appendix_drop_reason,
     _owner_signature_tokens,
     build_appendix_diversion_warnings,
     is_page_furniture,
     is_t_validation_recoded_m1,
     labelled_email,
+    other_entry_line_tokens,
     reclassified_structural_reason,
+    recovery_candidates,
+    t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.mentoring import (
     annotate_outcome_mentees,
@@ -716,42 +723,39 @@ def parse_reclassified_segments(
     return segments or None
 
 
-def _t_line_is_scaffolding(line: str, entry: dict) -> bool:
-    """Whether the Appendix's own filter would drop this line of a T entry
-    (template furniture, a confirmed header row, ...). Recovery must not
-    resurrect what the Appendix deliberately omits (#1230)."""
-    return _appendix_drop_reason(
-        line, line, 'T',
-        entry.get('classification_reasoning')) is not None
+def _vouch_for_lines(lines: list[str], haystack: str,
+                     t_line_token_sets: list[set], line_token_sets: list[set]) -> str:
+    """Count recovered `lines` as rendered, so a near-identical variant in
+    another pre-dedup entry (trailing period, 'Sep' vs 'Sept') is verified
+    rendered instead of inserted a second time. Returns the new haystack."""
+    for line in lines:
+        haystack += "\x00" + _squash(line)
+        t_line_token_sets.append(_record_tokens(line))
+        line_token_sets.append(set(_RENDER_TOKEN_RE.findall(_norm(line))))
+    return haystack
 
 
-def _recovery_candidates(code: str, entry: dict) -> list[str]:
-    """Lines of an entry the unrendered-record pass should look for.
-
-    A fused multi-record entry (two or more record-shaped lines) for any code.
-    A T entry longer than `APPENDIX_MAX_CHARS` is the exception: every
-    record-shaped or dated line of it is a candidate (`t_recovery_lines`), and
-    a single-record entry qualifies (#1230). The Appendix renders a T body
-    whole (`_appendix_body`) unless the overflow re-splits it, so these lines
-    are usually found on the page; the scan still catches what a re-split
-    reply or dedup left out. A shorter T entry has none.
-    """
-    text = str(entry.get('text') or '')
-    if code == 'T':
-        if len(text) <= APPENDIX_MAX_CHARS:
-            return []
-        return t_recovery_lines(text)
-    records = _record_lines(text)
-    return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
+def _vouch_for_tab_parts(parts: list[str], t_line_token_sets: list[set],
+                         part_token_sets: list[set]) -> None:
+    """Count recovered tab `parts` as rendered, DATE-AWARE (#1243): a part
+    vouches for a later line only when that line's letter tokens AND number
+    runs all sit in it (`T_RECORD_OVERLAP`), so an identical part in a
+    duplicate entry is still verified rendered but a sibling that shares the
+    vocabulary and differs in its years is not. Unlike `_vouch_for_lines` the
+    part stays out of the haystack: `_record_rendered` looks up the dateless
+    head of a line there verbatim, which would let a sibling through."""
+    for part in parts:
+        tokens = _record_tokens(part)
+        t_line_token_sets.append(tokens)
+        part_token_sets.append(tokens)
 
 
-def _other_entry_line_tokens(entries_by_code: dict) -> list[set]:
-    """`_record_tokens` of every line of every non-T entry (#1230). A T line
-    whose tokens all sit in one of them is a record that has its own entry."""
-    return [_record_tokens(line)
-            for code, entries in entries_by_code.items() if code != 'T'
-            for entry in entries
-            for line in str(entry.get('text') or '').split('\n') if line.strip()]
+def _tab_part_recovered(line: str, part_token_sets: list[set]) -> bool:
+    """Whether every token (letters and number runs) of a tab `line` sits in
+    one tab part recovered earlier (#1243)."""
+    tokens = _record_tokens(line)
+    return bool(tokens) and any(
+        len(tokens & held) / len(tokens) >= T_RECORD_OVERLAP for held in part_token_sets)
 
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
@@ -900,6 +904,14 @@ _CROSS_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingPro
     ('P', 'K2'): frozenset({'committee_name'}),
 })
 
+# (assigned, target) cross-family pairs a hierarchy mismatch does not reroute
+# unless the entry gives the owner a teaching part
+# (`names_teaching_or_authorship_role`). A "Continuing Education" heading
+# expects K4, but lists what the owner attended as often as what he taught:
+# NECRGC MQLKPQ 29, an attended program correctly coded B2, rendered under
+# "Continuing education ... as teacher" (#1691).
+_TEACHING_ROLE_REQUIRED_PAIRS = frozenset({('B2', 'K4')})
+
 # Fields a target's renderer also reads under another schema's name
 # (`_RENDERED_FIELDS` is probed with the target's own schema only): R takes a
 # talk's date from `year` or `start_date`, Q1 its organization from a
@@ -929,6 +941,7 @@ REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
 REROUTE_REFUSED_MENTEE = 'refused_mentee_to_owner_record'
 REROUTE_REFUSED_FIELDS_LOST = 'refused_fields_would_be_dropped'
 REROUTE_REFUSED_HEADING = 'refused_heading_names_assigned_code'
+REROUTE_REFUSED_NO_TEACHING_ROLE = 'refused_no_teaching_role'
 
 # Render-warnings `check` value for every reroute record, and each outcome's
 # severity: an accepted cross-family move is a low-confidence guess that moved
@@ -941,6 +954,7 @@ _REROUTE_SEVERITY = MappingProxyType({
     REROUTE_REFUSED_MENTEE: 'INFO',
     REROUTE_REFUSED_FIELDS_LOST: 'INFO',
     REROUTE_REFUSED_HEADING: 'INFO',
+    REROUTE_REFUSED_NO_TEACHING_ROLE: 'INFO',
 })
 
 
@@ -1026,12 +1040,17 @@ def _heading_names_assigned_code(entry: Mapping[str, Any], assigned_code: str) -
     flagger's current keyword table, expects the assigned code after all
     (#1428): stage 3b's stored `expected_codes` predate the table's
     board-of-directors terms (BNYLDF 285)."""
+    expected = get_expected_codes_from_hierarchy(_mismatch_hierarchy(entry))
+    return bool(expected) and code_matches_expected(assigned_code, expected)
+
+
+def _mismatch_hierarchy(entry: Mapping[str, Any]) -> list[str]:
+    """The heading path the hierarchy-mismatch flagger read, else the entry's."""
     detail = entry.get('hierarchy_mismatch_detail') or {}
     hierarchy = detail.get('hierarchy') or entry.get('hierarchy') or []
     if isinstance(hierarchy, str):
         hierarchy = [hierarchy]
-    expected = get_expected_codes_from_hierarchy([str(level) for level in hierarchy])
-    return bool(expected) and code_matches_expected(assigned_code, expected)
+    return [str(level) for level in hierarchy]
 
 
 def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
@@ -1041,11 +1060,16 @@ def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
     a mentee never becomes an owner record, and any other record must fit the
     target (`_fields_fit_reroute_target`), fill no field marking it as the
     assigned code's kind (`_CROSS_FAMILY_KIND_FIELDS`), and keep every field
-    the assigned code's renderer writes (`_fields_lost_in_reroute`)."""
+    the assigned code's renderer writes (`_fields_lost_in_reroute`). An
+    attended course never becomes a course taught
+    (`_TEACHING_ROLE_REQUIRED_PAIRS`, #1691)."""
     if _heading_names_assigned_code(entry, assigned_code):
         return REROUTE_REFUSED_HEADING
     if assigned_code in _MENTEE_CODES and target_code[:1] in _OWNER_RECORD_FAMILIES:
         return REROUTE_REFUSED_MENTEE
+    if ((assigned_code, target_code) in _TEACHING_ROLE_REQUIRED_PAIRS
+            and not _entry_names_teaching_role(entry)):
+        return REROUTE_REFUSED_NO_TEACHING_ROLE
     if (not _fields_fit_reroute_target(entry, target_code)
             or _holds_assigned_kind_fields(entry, assigned_code, target_code,
                                            _CROSS_FAMILY_KIND_FIELDS)):
@@ -1053,6 +1077,24 @@ def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
     if _fields_lost_in_reroute(entry, assigned_code, target_code):
         return REROUTE_REFUSED_FIELDS_LOST
     return None
+
+
+def _entry_names_teaching_role(entry: Mapping[str, Any]) -> bool:
+    """Whether the entry's stage-4 `role`, read ahead of its text, gives the
+    owner a teaching part, or its leaf heading names one ("CME Lectures
+    Given": its bare titles are what the owner taught; the doctor lint's
+    carve-out, `heading_names_teaching_role`). A role or text opening as
+    attendance ("Attendee", "Attended the ...") never does, under any heading
+    (#1691, NECRGC LFFKVV 608-618)."""
+    role = (entry.get('extracted_fields') or {}).get('role')
+    text = str(entry.get('text') or '')
+    if isinstance(role, str) and role.strip():
+        text = f"{role.strip()}. {text}"
+    if ATTENDANCE_OPENING_RE.search(text):
+        return False
+    hierarchy = _mismatch_hierarchy(entry)
+    return (names_teaching_or_authorship_role(text)
+            or bool(hierarchy) and heading_names_teaching_role(hierarchy[-1]))
 
 
 def _holds_assigned_kind_fields(
@@ -3957,18 +3999,23 @@ Now analyze the text above:"""
             # A T entry can repeat a table whose rows are also entries of their
             # own that render (#1230): a line such a row carries in full is not
             # lost, however the render reformatted it.
-            t_cut_token_sets += _other_entry_line_tokens(entries_by_code)
+            t_cut_token_sets += other_entry_line_tokens(entries_by_code)
+            # Tokens (letters and number runs) of the tab parts recovered so far.
+            part_token_sets: list[set] = []
 
             for code, entries in entries_by_code.items():
                 for entry in entries:
-                    records = _recovery_candidates(code, entry)
+                    records = recovery_candidates(code, entry)
                     if not records:
                         continue  # not a fused multi-record entry
                     fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
+                    tab_parts = {part for text_line in str(entry.get('text') or '').split('\n')
+                                 for part in tab_record_segments(text_line)}
+                    deferred: list[str] = []
                     for line in records:
-                        if code == 'T' and _t_line_is_scaffolding(line, entry):
+                        if code == 'T' and t_line_is_scaffolding(line, entry):
                             continue
                         if code == 'T':
                             rendered = _whole_record_rendered(
@@ -3979,6 +4026,12 @@ Now analyze the text above:"""
                         if rendered is not False:
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.
+                            continue
+                        if line in tab_parts and segment_held_by_fields(line, fields):
+                            continue  # a tab part of the record stage 4 extracted (#1243)
+                        if _tab_part_recovered(line, part_token_sets):
+                            # The same record, recovered earlier as a tab part
+                            # (this line may be a tab part or a plain line).
                             continue
                         if segment_already_rendered(line, fields):
                             # The record that DID render from extracted fields: a
@@ -4013,12 +4066,17 @@ Now analyze the text above:"""
                         # instead of inserted a second time — dedup drops entries
                         # precisely because they near-duplicate a kept one, so
                         # exact-squash matching is not enough.
-                        haystack += "\x00" + _squash(line)
-                        t_line_token_sets.append(_record_tokens(line))
-                        line_token_sets.append(
-                            set(_RENDER_TOKEN_RE.findall(_norm(line))))
+                        # Tab siblings share their vocabulary and differ in the
+                        # dates: one recovered part must not vouch for the next
+                        # (#1243), so they vouch once the entry is done.
+                        if line in tab_parts:
+                            deferred.append(line)
+                        else:
+                            haystack = _vouch_for_lines(
+                                [line], haystack, t_line_token_sets, line_token_sets)
                         self.stats['unrendered_records_recovered'] += 1
                         n_recovered += 1
+                    _vouch_for_tab_parts(deferred, t_line_token_sets, part_token_sets)
 
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,

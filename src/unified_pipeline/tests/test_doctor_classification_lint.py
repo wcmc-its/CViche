@@ -335,3 +335,125 @@ def test_an_editorial_board_entry_with_a_role_or_board_context_is_quiet(text, he
                                                                        sibling_code):
     sibling = _entry("Journal of Invented Widgets", sibling_code, heading, idx=330)
     assert _run(sibling, _entry(text, "Q4C", heading, idx=342)) == []
+
+
+# --- #1691: courses and meetings attended, coded K4 or S8 (NECRGC) ----------
+
+def test_attended_list_under_professional_development_is_flagged_1691():
+    """HVSKET's shape: three courses and a bare meeting line under
+    "Professional Development", coded K4 and S8."""
+    findings = _run(
+        _entry("2021 Invented Inclusion Workshop by the Office of Example Education", "K4",
+               "Professional Development", idx=94),
+        _entry("2019 Invented Society Annual Meeting – Example City, ST", "S8",
+               "Professional Development", idx=98),
+        _entry("2017 Bold Example Leadership Conference", "K4",
+               "Professional Development", idx=103),
+        _entry("2018-2019 Leadership in Example Medicine Program", "B2",
+               "Professional Development", idx=99))
+    assert _shapes(findings) == ["attended_as_teacher"]
+    assert "3 entries under 'Professional Development' coded K4, S8" in findings[0]["message"]
+    assert findings[0]["message"].endswith("the source points to B2 (attended, not taught or presented)")
+    assert findings[0]["severity"] == "WARN"
+
+
+def test_attendance_opening_is_flagged_under_any_heading_1691():
+    """LFFKVV's shape: "Participated in" / "Attended the" lines coded K4
+    under a heading that names no attendance."""
+    findings = _run(
+        _entry("Participated in the Department of Example Summer Series on Inclusion", "K4",
+               "INCLUSION ACTIVITIES", idx=608),
+        _entry("Attended the Example Speaker Series “Time and Health” (April 2021)", "K4",
+               "INCLUSION ACTIVITIES", idx=610))
+    assert _shapes(findings) == ["attended_as_teacher"]
+    assert "2 entries" in findings[0]["message"]
+
+
+def test_subheading_paragraph_coded_t_gives_the_attendance_context_1691():
+    """YMDTEE's shape: "Career Development" was a paragraph stage 1b did not
+    take as a heading; the courses after it carry only the parent heading."""
+    sub = _entry("Career Development____________", "T", "EMS EXPERIENCE", idx=192)
+    course = _entry("Example Medicine Basic Research Skills Workshop   2009-2010", "K4",
+                    "EMS EXPERIENCE", idx=193)
+    assert _shapes(_run(sub, course)) == ["attended_as_teacher"]
+    # Without the sub-heading, nothing names attendance.
+    assert _run(course) == []
+    # Only an unclassified paragraph is a sub-heading: a short record coded
+    # B2 that names a career development program is not.
+    program = _entry("Career Development Program", "B2", "EMS EXPERIENCE", idx=192)
+    assert _run(program, course) == []
+    # A later sub-heading under the same path replaces it.
+    teaching = _entry("Teaching", "T", "EMS EXPERIENCE", idx=196)
+    assert _run(sub, teaching, dict(course, element_idx_start=197)) == []
+
+
+@pytest.mark.parametrize("text, code, heading", [
+    # A teaching role, a quoted talk title, or an author list.
+    ("Course Director, Annual Example CME Course, 2019", "K4", "Continuing Education"),
+    ("Lecturer, Example Board Review, 2020", "K4", "Professional Development"),
+    ("“Managing Example Disease in Clinic”, Example CME Day, 2019", "K4", "Training"),
+    ("Quill AB, Brook CD. Outcomes of things. Invented Society Annual Meeting, 2019", "S8",
+     "Certifications"),
+    ("Quill, Ann & Brook, Carl (2020). Outcomes of things. Invented Society Meeting.", "S8",
+     "Continuing Education"),
+    ("2007 Participant/Presenter, Invented Research Summit", "S8", "Training"),
+    # A heading that names teaching lists what the owner taught.
+    ("Example Sunrise Session, Invented Society Annual Meeting", "S8",
+     "Formal Teaching of Peers (e.g., CME and other continuing education courses)"),
+    ("2015-present National Trainer, Example Psychotherapy Program", "K4",
+     "National Teaching and Training"),
+    # PR #1829 review: the stage-6 refusal shares this carve-out.
+    ("Example Sepsis Update, 2019", "K4", "CME Lectures Given"),
+    ("Example Sepsis Update, 2019", "K4", "Continuing Medical Education - Teaching"),
+    # A parent heading that names training does not reach a grants list.
+    ("Example Symposium talk, 2021", "S8", "Research and Training"),
+    # B2 is the right code: nothing to flag.
+    ("2019 Invented Society Annual Meeting – Example City, ST", "B2", "Professional Development"),
+])
+def test_taught_authored_or_correctly_coded_entries_are_quiet_1691(text, code, heading):
+    headings = (heading, "Co-Investigator on Grants") if heading == "Research and Training" \
+        else (heading,)
+    assert _run(_entry(text, code, *headings)) == []
+
+
+@pytest.mark.parametrize("heading", ["Continuing Education - CME Lectures Attended",
+                                     "Professional Development: Grand Rounds Attended",
+                                     "Training - Conferences and Talks Attended"])
+def test_attendance_heading_is_no_teaching_carve_out_1691(heading):
+    """PR #1829 review: a heading that names attendance is no teaching
+    carve-out (`heading_names_teaching_role`), whatever role word it also
+    has. S8 keeps `courses_attended_as_teaching` (K codes only) out of it."""
+    findings = _run(_entry("Example Sepsis Update, 2019", "S8", heading))
+    assert _shapes(findings) == ["attended_as_teacher"]
+
+
+@pytest.mark.parametrize("heading", ["CME Lectures Attended", "Grand Rounds Attended"])
+def test_k4_under_an_attended_heading_is_flagged_once_1691(heading):
+    """The heading's attendance word is `courses_attended_as_teaching`'s;
+    `attended_as_teacher` does not repeat it."""
+    findings = _run(_entry("Example Sepsis Update, 2019", "K4", heading))
+    assert _shapes(findings) == ["courses_attended_as_teaching"]
+
+
+@pytest.mark.parametrize("text", [
+    "Medicine Grand Rounds, Example Hospital, 2018",
+    "Invited to participate, Example Leadership Program, 2018",
+])
+def test_grand_rounds_or_invitation_under_ce_is_flagged_1691(text):
+    """PR #1829 review: "grand rounds" and "invited" name a role in a
+    heading only."""
+    for heading in ("Certifications / Continuing Education", "Professional Development"):
+        assert _shapes(_run(_entry(text, "K4", heading))) == ["attended_as_teacher"]
+
+
+def test_talks_given_heading_is_quiet_1691():
+    assert _run(_entry("Example Sepsis Update, 2019", "S8", "Continuing Education - Talks Given")) == []
+    assert _shapes(_run(_entry("Example Sepsis Update, 2019", "S8",
+                               "Continuing Education - Talks Attended"))) == ["attended_as_teacher"]
+
+
+def test_lint_reads_the_leaf_heading_only_1691():
+    """A teaching ancestor over an attendance leaf is no carve-out."""
+    findings = _run(_entry("Example Sepsis Update, 2019", "S8", "Invited Talks",
+                           "Professional Development"))
+    assert _shapes(findings) == ["attended_as_teacher"]

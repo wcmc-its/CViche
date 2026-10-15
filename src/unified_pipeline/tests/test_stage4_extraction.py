@@ -1929,6 +1929,45 @@ def test_a_numbered_schema_field_is_a_second_record_that_fans_out(monkeypatch):
     assert [c["extracted_fields"]["organization"] for c in children] == ["Glade Society", "Fern Guild"]
 
 
+def test_a_numbered_panel_name_alone_joins_the_parent_panel(monkeypatch):
+    # PR #1826 made Q3 `panel_name` a schema field, so `panel_name_2` alone
+    # became a second record: a Q3 row with no role, agency or dates, and the
+    # entry's last record, so it replaced the parent's scalars too.
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    entry, reply = _one_item_reply("2019-2023 Reviewer, NIH Study Section Alpha; Beta; Gamma", "Q3", {
+        "agency": "NIH", "role": "Reviewer", "panel_name": "Study Section Alpha",
+        "panel_name_2": "Beta", "panel_name_3": "Gamma", "start_date": "2019", "end_date": "2023"})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    fields = out["extracted_fields"]
+    assert STAGE4_RECORDS_KEY not in fields
+    assert (fields["agency"], fields["role"], fields["panel_name"]) == (
+        "NIH", "Reviewer", "Study Section Alpha; Beta; Gamma")
+    assert not any(key.startswith("panel_name_") for key in fields)
+    assert len(fan_out_multi_record_entries([out], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)) == 1
+
+
+def test_a_numbered_panel_name_with_no_parent_panel_is_the_panel(monkeypatch):
+    entry, reply = _one_item_reply("Reviewer, NIH Beta", "Q3", {
+        "agency": "NIH", "role": "Reviewer", "panel_name": None, "panel_name_2": "Beta"})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    assert out["extracted_fields"]["panel_name"] == "Beta"
+
+
+def test_a_numbered_panel_with_its_own_agency_is_still_a_second_record(monkeypatch):
+    entry, reply = _one_item_reply("Reviewer, NIH Alpha; AHA Beta", "Q3", {
+        "agency": "NIH", "role": "Reviewer", "panel_name": "Alpha",
+        "agency_2": "AHA", "panel_name_2": "Beta"})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    first, second = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert (first["panel_name"], second) == ("Alpha", {"agency": "AHA", "panel_name": "Beta"})
+
+
 def test_an_object_sharing_schema_keys_is_the_parent_at_another_venue(monkeypatch):
     entry, reply = _one_item_reply("Heron talk, Ashby Dinner, 2016; Wren Seminar, 2017", "R", {
         "title": "Heron talk", "location": "Ashby", "date": "2016",
