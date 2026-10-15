@@ -578,6 +578,11 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_SSN, SCOPE_ALL_CODES, DECIDED_820, shape=_BARE_SSN_SHAPE),
     WithholdRule(CAT_PASSPORT, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"passport (?: \s* (?: number | no\.? ) )?"),
+    # #1859: "Passport No. X1234567" -- no colon, so the label row above never
+    # fires. A number word plus an ID token that carries a digit is a passport
+    # number on its own ("Passport number required" has no digit token).
+    WithholdRule(CAT_PASSPORT, SCOPE_ALL_CODES, DECIDED_820, anchored=True,
+                 shape=r"passport \s* (?: number | no\.? ) \s* \#? \s* (?= [a-z0-9]* \d ) [a-z0-9]{6,} \b"),
     WithholdRule(CAT_ALIEN_REGISTRATION, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"alien \s* registration (?: \s* (?: number | no\.? ) )?"),
     WithholdRule(CAT_DRIVERS_LICENSE, SCOPE_ALL_CODES, DECIDED_820,
@@ -1037,6 +1042,16 @@ _PII_LABEL_RE = re.compile(
 _LIST_MARKER_RE = re.compile(r"^(?:[•·\-–—*]|\d{1,3}[.)])$")
 
 
+#: #1859: a year or date span heading the fragment ("2005 Spouse: ...",
+#: "June 2015 - 2018 Salary: ..."): a dated label is still a label, and the
+#: date belongs to the protected fact, so the span starts at the date.
+_DATE_POINT = r"(?:" + _MONTH_NAMES + r"\.?\s+)?(?:\d{1,2}/){0,2}(?:19|20)\d{2}"
+_LEADING_DATE_RE = re.compile(
+    r"(?:[•·*–—-]\s*)?" + _DATE_POINT
+    + r"(?:\s*(?:[-–—]|to)\s*(?:" + _DATE_POINT + r"|present|current))?\s*[-–—:,.]?",
+    re.I)
+
+
 def _boundary_ok(prefix_since_last_delim: str) -> bool:
     """True when a label match is fragment-initial OR immediately follows
     one of the issue's separators: `,`, `:`, `(`, or start-of-line (`;` is
@@ -1097,7 +1112,8 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
     """(start, end) of every fragment `pattern` opens in `text`: from the
     opener's own start to the next hard delimiter (or end of string), kept
     only where `_boundary_ok` accepts the text since the previous delimiter,
-    the opener follows a known field label in the same fragment
+    that text is only a date (`_LEADING_DATE_RE`, which pulls the date into
+    the span), the opener follows a known field label in the same fragment
     (`_after_known_field`), or it is an explicit DOB label with a whole date
     after it."""
     spans = []
@@ -1106,9 +1122,12 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
         prev_delim_end = 0
         for d in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, start):
             prev_delim_end = d.end()
-        if not (_boundary_ok(text[prev_delim_end:start])
-                or _after_known_field(text, prev_delim_end, start)
-                or (category == CAT_DATE_OF_BIRTH and _explicit_dob_label(text, m))):
+        prefix = text[prev_delim_end:start]
+        if _LEADING_DATE_RE.fullmatch(prefix.strip()):
+            start = prev_delim_end + len(prefix) - len(prefix.lstrip())
+        elif not (_boundary_ok(prefix)
+                  or _after_known_field(text, prev_delim_end, start)
+                  or (category == CAT_DATE_OF_BIRTH and _explicit_dob_label(text, m))):
             continue
         nxt = _PII_FRAGMENT_SPLIT_RE.search(text, start)
         end = nxt.start() if nxt else len(text)
