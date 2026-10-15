@@ -86,7 +86,9 @@ Lints, ranked by the severity of the failure class they catch:
                           construction (#446); with stage 5d, also two
                           entries naming one article (title, PMID, DOI) or
                           one grant across M2A/M2B/M2C, rendered twice at
-                          any distance (EBYSBC E16/E28)
+                          any distance (EBYSBC E16/E28). Two source entries
+                          that each state the record are the CV listing it
+                          twice: INFO, not WARN (#1585)
 14b. invented_records     a rendered stage-4 record built entirely from the
                           WCM template's own field labels rather than real
                           content (the F2 board-certification header row
@@ -132,7 +134,9 @@ Lints, ranked by the severity of the failure class they catch:
                           talks from the 2000s rendered in the 1900s); WARN.
                           Also a year after 2100: INFO when the source has
                           the typo, WARN when it does not. A year a stage-5
-                          formatter replaced (stage 5d) is not judged
+                          formatter replaced (stage 5d) is not judged, nor
+                          one the rendered docx never prints (an mm/yy
+                          duration hides the century, #1585)
 
 14h. stage4_group_failures a stage-4 taxonomy group's extraction call failed
                           (invalid reply, timeout, provider error such as a
@@ -394,7 +398,12 @@ Lints, ranked by the severity of the failure class they catch:
                           heading or lead line (ECXGAT 2156-2204) and INFO
                           elsewhere, where most hits are the owner's own
                           group-authored papers or the owner under another
-                          surname. Reads stage 4 and the docx
+                          surname; and H, I or D entries, or K under an
+                          accomplishments heading, beneath a heading naming
+                          students or mentees in the plural or holding a
+                          mentoring-coded entry (#1251, JFBPNC 569-582),
+                          WARN, with the count per code. Reads stage 4 and
+                          the docx
 14ai. citation_grounding  a citation stage 5d wrote that names an author,
                           an initial or an ordinal its source line lacks
                           (#1570, YUYVIG): a bare initials token joined to
@@ -1679,7 +1688,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",),
              optional=("blocks", "subpoints")),
     LintSpec("implausible_year", lint_implausible_year, ("stage_4",),
-             optional=("stage_5d",)),
+             optional=("stage_5d", "blocks")),
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
     LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
