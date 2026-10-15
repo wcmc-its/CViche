@@ -281,3 +281,62 @@ def test_per_cv_context_str_fills_the_template_slot_ahead_of_the_rules():
         context_str=per_cv_context_str(["  Top-level: ALPHA"]), taxonomy_ref="TAX_MARKER_XYZ")
     assert rendered.index("GROUP 1:") < rendered.index("TAX_MARKER_XYZ") \
         < rendered.index("CV TAXONOMY CLASSIFICATION RULES")
+
+
+# ---------------------------------------------------------------------------
+# #1691: an activity the owner attended is B2, not K4 or S8
+# ---------------------------------------------------------------------------
+
+def _taxonomy_code(code: str) -> dict:
+    codes = json.loads(_TAXONOMY_PATH.read_text())["codes"]
+    return next(entry for entry in codes if entry["code"] == code)
+
+
+def test_k4_rule_requires_the_owner_to_have_taught_1691():
+    """NECRGC: courses, trainings and meetings under "Professional
+    Development", "Training" or "Continuing Education" headings were coded
+    K4 and rendered as continuing education the owner taught. K4's rule
+    named "professional development workshops", the same words B2 claims."""
+    k4 = _rule_block("    - K4 = ", "    - K5 = ")
+    assert "professional development" not in k4.lower()
+    assert "the owner taught" in k4
+    assert "Did the owner TEACH practicing professionals" in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    assert "Is the audience practicing professionals" not in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    # The T-vs-entry contrast no longer files a bare course name as K4.
+    assert '"Causal Inference Workshop, 2019" → K4' not in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_attendance_rule_sends_attended_activities_to_b2_1691():
+    rule = _rule_block("39a. ATTENDED, NOT TAUGHT", "40. MENTORING")
+    for signal in ('"Attended"', '"Participated in"', '"Completed"', '"Participant"',
+                   '"Attendee"', "bare course, program or event name"):
+        assert signal in rule, signal
+    for heading in ('"Professional', 'Development", "Training"', '"Certifications"',
+                    'Education" does not make its entries teaching'):
+        assert heading in rule, heading
+    # Positive control: a stated teaching role keeps K4.
+    assert '"Course Director, Annual Cardiology CME Course, 2019" → K4' in rule
+    assert '"Lecturer, ' in rule and "→ K4" in rule
+    for attended in ('"Attended the Department Upstander Workshop (April 2021)" → B2',
+                     '"2019 <Society> Annual Meeting – Chicago, IL" → B2 (not S8)'):
+        assert attended in rule, attended
+
+
+def test_s8_rule_sends_a_bare_meeting_name_to_b2_1691():
+    """HVSKET: five "<society> Annual Meeting – <city>" lines were coded S8
+    and rendered as abstracts with no title."""
+    s8 = _rule_block("35. CONFERENCE PRESENTATIONS", "36. SYMPOSIUM")
+    assert "A meeting ATTENDED is not a presentation" in s8
+    assert "a title or an author list" in s8
+    assert "→ B2 (rule 39a), never S8" in s8
+
+
+def test_taxonomy_k4_b2_s8_agree_with_the_attendance_rule_1691():
+    k4, b2, s8 = (_taxonomy_code(code) for code in ("K4", "B2", "S8"))
+    assert not any("professional development" in rule.lower() for rule in k4["key_rules"])
+    assert any("attended" in rule and "→ B2, NOT K4" in rule for rule in k4["key_rules"])
+    assert any("attended" in c and "instead of B2" in c for c in k4["common_confusions"])
+    assert any("attended" in rule and "→ B2, NOT K4 or S8" in rule for rule in b2["key_rules"])
+    assert any("bare meeting name" in rule and "→ B2, never S8" in rule for rule in s8["key_rules"])
+    mappings = json.loads(_TAXONOMY_PATH.read_text())["disambiguation_notes"]["teaching_codes"]["mappings"]
+    assert "professional development" not in mappings["K4 - CME & Professional Education"]

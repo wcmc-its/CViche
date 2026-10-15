@@ -222,7 +222,7 @@ A. GLOBAL PRINCIPLES AND "T" (APPENDIX/OTHER)
       * "Service to the University" → T (header, category label)
       * "Member, Faculty Senate, 2018-2022" → P (specific service entry)
       * "SHORT COURSES" → T (header)
-      * "Causal Inference Workshop, 2019" → K4 (specific course)
+      * "Instructor, Causal Inference Workshop, 2019" → K4 (specific course)
    c) Stray location/institution fragments:
       - Short lines like "Boston, MA", "Harvard Medical School",
         "University, Columbus, OH"
@@ -730,6 +730,11 @@ G. PRESENTATIONS, CONFERENCES, WORKSHOPS, AND INVITED TALKS
       * Society/association meetings.
     - Even if the presentation is "invited" at a conference, default
       to S8 unless it is a clearly designated keynote/plenary (R).
+    - A meeting ATTENDED is not a presentation. S8 needs the owner's
+      talk or abstract: a title or an author list. A bare meeting name
+      with a year and a place ("2019 <Society> Annual Meeting – Chicago,
+      IL"), with no title and no author list, is a meeting the owner
+      attended → B2 (rule 39a), never S8.
 
 36. SYMPOSIUM CHAIRING/ORGANIZATION → Q2 (NOT S8)
     - Organizing or chairing a symposium is SERVICE, not a presentation:
@@ -776,7 +781,8 @@ H. TEACHING, MENTORING, AND STUDENTS (K, N)
     ════════════════════════════════════════════════════════════════════
     DECISION TREE:
     1. Is this about RUNNING a program (director, coordinator)? → K3
-    2. Is the audience practicing professionals or for CME credit? → K4
+    2. Did the owner TEACH practicing professionals or for CME credit? → K4
+       (attended, not taught → B2; rule 39a)
     3. Is this research mentoring, thesis work, or lab supervision? → K2
     4. Is this clinical teaching (precepting, rounds, bedside)? → K2
     5. Is this formal classroom/didactic teaching? → K1
@@ -807,7 +813,7 @@ H. TEACHING, MENTORING, AND STUDENTS (K, N)
       * The key distinction: K3 = RUNNING programs. Direct teaching is K1/K2.
 
     - K4 = CME & PROFESSIONAL EDUCATION (practicing professionals):
-      * CME courses, grand rounds, professional development workshops.
+      * CME courses, grand rounds and workshops the owner taught.
       * Lectures to practicing clinicians, residents, fellows outside
         formal curriculum (noon conferences, journal clubs).
       * The key distinction: K4 = teaching PRACTICING professionals.
@@ -816,6 +822,29 @@ H. TEACHING, MENTORING, AND STUDENTS (K, N)
     - K5 = Community/patient education:
       * Education aimed at non-academic audiences (patients, community
         groups) as a formal teaching activity (not just outreach talk).
+
+39a. ATTENDED, NOT TAUGHT → B2 (NOT K4, NOT S8)
+    - K4 only when the owner delivered, organized or directed the
+      activity: a role such as lecturer, faculty, instructor, course
+      director, speaker, presenter, moderator or organizer, or the title
+      of the owner's talk.
+    - A course, workshop, webinar, program, symposium or meeting the
+      owner attended, completed or participated in is B2 (Other
+      Educational Experiences). Attendance signals:
+      * "Attended", "Participated in", "Completed", "Participant",
+        "Attendee".
+      * A bare course, program or event name with a date and no role.
+    - A heading such as "Professional Development", "Career
+      Development", "Training", "Certifications" or "Continuing
+      Education" does not make its entries teaching. It usually lists
+      what the owner attended → B2 unless the entry names a teaching role.
+    - Examples:
+      * "2017 Bold Leadership Strategies Conference" (under
+        "Professional Development") → B2
+      * "Attended the Department Upstander Workshop (April 2021)" → B2
+      * "2019 <Society> Annual Meeting – Chicago, IL" → B2 (not S8)
+      * "Course Director, Annual Cardiology CME Course, 2019" → K4
+      * "Lecturer, 'Managing Sepsis', CME Lecture Series, 2020" → K4
 
 40. MENTORING & STUDENT PROJECTS (N-CODES)
     - Student research projects, theses, dissertations, capstones,

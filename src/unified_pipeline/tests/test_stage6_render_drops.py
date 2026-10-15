@@ -47,6 +47,7 @@ from unified_pipeline.stage_6_word_template import (
     REROUTE_REFUSED_FIELDS_LOST,
     REROUTE_REFUSED_HEADING,
     REROUTE_REFUSED_MENTEE,
+    REROUTE_REFUSED_NO_TEACHING_ROLE,
     WCMTemplateGenerator,
 )
 
@@ -496,6 +497,46 @@ def test_heading_that_names_the_assigned_code_keeps_it() -> None:
     society = _fielded("Q2", ["I"], {"organization": "Society X", "start_date": "1998"})
     society["hierarchy_mismatch_detail"]["hierarchy"] = ["Professional Societies"]
     assert _gen_and_code(society)[1] == "I"
+
+
+# --- #1691: an attended course is not rerouted into the teacher table -------
+# NECRGC MQLKPQ 29's shape: a program the owner attended, correctly coded B2,
+# under "Certifications / Continuing Education" (expected K4). Invented values.
+
+def _continuing_education(text: str, fields: dict | None = None) -> dict:
+    entry = _fielded("B2", ["K4"], fields or {"program_name": "Program X"}, idx=29)
+    entry["text"] = text
+    entry["hierarchy_mismatch_detail"]["hierarchy"] = ["Certifications / Continuing Education"]
+    return entry
+
+
+def test_attended_program_is_not_rerouted_to_continuing_education_taught() -> None:
+    for entry in (_continuing_education("Example Communications Project  July 2016"),
+                  _continuing_education("Attended the Example Speaker Series, 2019"),
+                  _continuing_education("Example CME Lecture Series, 2019",
+                                        {"program_name": "Lecture Series X", "role": "Attendee"})):
+        gen, code = _gen_and_code(entry)
+        assert code == "B2", entry["text"]
+        assert "taxonomy_code_original" not in entry
+        message = _refusal(gen)
+        assert "B2->K4" in message
+        assert REROUTE_REFUSED_NO_TEACHING_ROLE.replace("_", " ") in message
+        assert _reroute_records(gen)[0]["severity"] == "INFO"
+
+
+def test_taught_course_is_still_rerouted_to_continuing_education() -> None:
+    for entry in (_continuing_education("Course Director, Example CME Course, 2019"),
+                  _continuing_education("Example CME Course, 2019",
+                                        {"program_name": "Course X", "role": "Lecturer"})):
+        gen, code = _gen_and_code(entry)
+        assert code == "K4", entry["text"]
+        assert entry["taxonomy_code_original"] == "B2"
+    # The refusal is for the B2->K4 pair only: a fieldless C entry under the
+    # same heading still moves to K4, as before #1691.
+    training = _continuing_education("Example Workshop, 2019", {})
+    training["taxonomy_code"] = "C"
+    training["hierarchy_mismatch_detail"]["assigned_code"] = "C"
+    assert _gen_and_code(training)[1] == "K4"
 
 
 # --- #983: multi-record entries fan out before the PII pass and dedup --------

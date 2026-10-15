@@ -87,6 +87,8 @@ import pytest  # noqa: E402
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     APPOINTMENT_DUTY_VERBS,
     APPOINTMENT_ROLE_MIN_CHARS,
+    ATTENDANCE_OPENING_RE,
+    TEACHING_ROLE_RE,
     ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
@@ -100,6 +102,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _refold_shattered,
     _strip_appended_initials,
     is_membership_date_part,
+    names_teaching_or_authorship_role,
     split_appointment_title,
 )
 
@@ -753,3 +756,44 @@ def test_split_needs_a_role_of_minimum_length_in_front():
 @pytest.mark.parametrize("title", ["", None, "   "])
 def test_split_of_an_empty_title(title):
     assert split_appointment_title(title) == ("", "")
+
+
+# --- #1691: an attended course is not a course taught -----------------------
+# Shapes from the NECRGC autopsy (HVSKET, YMDTEE, XUTTKJ, LFFKVV, MQLKPQ);
+# invented names and places.
+
+@pytest.mark.parametrize("text", [
+    "2017 Bold Leadership Strategies and Tools Conference",
+    "2019 Example Society Annual Meeting – Chicago, IL",
+    "National Association of Example Physicians Medical Directors Course 2008",
+    "Attended the Example Speaker Series “Time, Trauma, and Health” (2021)",
+    "Participated in the Department of Medicine Summer Series on Inclusion",
+    "2020-2021 Completed the online module “Unconscious Bias”",
+    "Example Healthy Pets Certification  August 2017",
+    # One surname-and-initials pair is a place, not an author list.
+    "2019 Example Society Annual Meeting, Chicago, IL.",
+])
+def test_attended_activity_names_no_teaching_role(text):
+    assert not names_teaching_or_authorship_role(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Course Director, Annual Example CME Course, 2019",
+    "Lecturer, Example CME Lecture Series, 2020",
+    "Grand Rounds presentation, Department of Medicine, 2018",
+    "Faculty, Example Board Review Course",
+    "“Managing Sepsis in the Emergency Department”, Example CME Day, 2019",
+    "Doe JA, Roe B. Outcomes of X. Example Society Annual Meeting, 2019",
+    "Moderator, Example Society Annual Meeting, 2019",
+    "2015-present National Trainer, Example Psychotherapy Program",
+    "Quill, Ann. (2021, January). Outcomes of things. Example Society Meeting.",
+])
+def test_taught_or_authored_activity_names_a_role(text):
+    assert names_teaching_or_authorship_role(text)
+
+
+def test_attendance_opening_outranks_a_role_word_later_in_the_text():
+    # "Speaker" names the series, not the owner (LFFKVV 610's shape).
+    assert TEACHING_ROLE_RE.search("Attended the Example Speaker Series")
+    assert ATTENDANCE_OPENING_RE.search("2019 Attended the Example Speaker Series")
+    assert not names_teaching_or_authorship_role("2019 Attended the Example Speaker Series")

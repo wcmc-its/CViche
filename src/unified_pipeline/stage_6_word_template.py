@@ -163,6 +163,7 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     _parse_date_components,
     _parse_multi_membership_entry,
     _refold_shattered,
+    names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
@@ -900,6 +901,14 @@ _CROSS_FAMILY_KIND_FIELDS: Mapping[tuple[str, str], frozenset[str]] = MappingPro
     ('P', 'K2'): frozenset({'committee_name'}),
 })
 
+# (assigned, target) cross-family pairs a hierarchy mismatch does not reroute
+# unless the entry gives the owner a teaching part
+# (`names_teaching_or_authorship_role`). A "Continuing Education" heading
+# expects K4, but lists what the owner attended as often as what he taught:
+# NECRGC MQLKPQ 29, an attended program correctly coded B2, rendered under
+# "Continuing education ... as teacher" (#1691).
+_TEACHING_ROLE_REQUIRED_PAIRS = frozenset({('B2', 'K4')})
+
 # Fields a target's renderer also reads under another schema's name
 # (`_RENDERED_FIELDS` is probed with the target's own schema only): R takes a
 # talk's date from `year` or `start_date`, Q1 its organization from a
@@ -929,6 +938,7 @@ REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
 REROUTE_REFUSED_MENTEE = 'refused_mentee_to_owner_record'
 REROUTE_REFUSED_FIELDS_LOST = 'refused_fields_would_be_dropped'
 REROUTE_REFUSED_HEADING = 'refused_heading_names_assigned_code'
+REROUTE_REFUSED_NO_TEACHING_ROLE = 'refused_no_teaching_role'
 
 # Render-warnings `check` value for every reroute record, and each outcome's
 # severity: an accepted cross-family move is a low-confidence guess that moved
@@ -941,6 +951,7 @@ _REROUTE_SEVERITY = MappingProxyType({
     REROUTE_REFUSED_MENTEE: 'INFO',
     REROUTE_REFUSED_FIELDS_LOST: 'INFO',
     REROUTE_REFUSED_HEADING: 'INFO',
+    REROUTE_REFUSED_NO_TEACHING_ROLE: 'INFO',
 })
 
 
@@ -1041,11 +1052,16 @@ def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
     a mentee never becomes an owner record, and any other record must fit the
     target (`_fields_fit_reroute_target`), fill no field marking it as the
     assigned code's kind (`_CROSS_FAMILY_KIND_FIELDS`), and keep every field
-    the assigned code's renderer writes (`_fields_lost_in_reroute`)."""
+    the assigned code's renderer writes (`_fields_lost_in_reroute`). An
+    attended course never becomes a course taught
+    (`_TEACHING_ROLE_REQUIRED_PAIRS`, #1691)."""
     if _heading_names_assigned_code(entry, assigned_code):
         return REROUTE_REFUSED_HEADING
     if assigned_code in _MENTEE_CODES and target_code[:1] in _OWNER_RECORD_FAMILIES:
         return REROUTE_REFUSED_MENTEE
+    if ((assigned_code, target_code) in _TEACHING_ROLE_REQUIRED_PAIRS
+            and not _entry_names_teaching_role(entry)):
+        return REROUTE_REFUSED_NO_TEACHING_ROLE
     if (not _fields_fit_reroute_target(entry, target_code)
             or _holds_assigned_kind_fields(entry, assigned_code, target_code,
                                            _CROSS_FAMILY_KIND_FIELDS)):
@@ -1053,6 +1069,17 @@ def _cross_family_refusal(entry: Mapping[str, Any], assigned_code: str,
     if _fields_lost_in_reroute(entry, assigned_code, target_code):
         return REROUTE_REFUSED_FIELDS_LOST
     return None
+
+
+def _entry_names_teaching_role(entry: Mapping[str, Any]) -> bool:
+    """Whether the entry's stage-4 `role`, read ahead of its text, gives the
+    owner a teaching part. A role of "Attendee" or "Participant" opens the
+    pair as attendance, so it never does (#1691, NECRGC LFFKVV 608-618)."""
+    role = (entry.get('extracted_fields') or {}).get('role')
+    text = str(entry.get('text') or '')
+    if isinstance(role, str) and role.strip():
+        text = f"{role.strip()}. {text}"
+    return names_teaching_or_authorship_role(text)
 
 
 def _holds_assigned_kind_fields(
