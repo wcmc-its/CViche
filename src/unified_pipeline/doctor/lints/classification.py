@@ -10,7 +10,8 @@ teaching, a thesis-committee block as institutional committees, a
 cross-reference line as a record, and guideline articles with a journal,
 volume and pages as non-peer-reviewed reports. The doctor had no lint for
 this shape. The RCBKFG autopsy added one more: training rows filed as degrees
-(#1415).
+(#1415). The NECRGC autopsy added courses and meetings attended, filed as
+continuing education taught or as the owner's abstracts (#1691).
 
 Each shape is one `HeadingCodeRule`: a heading pattern, a text pattern, the
 codes that contradict them, and the code the source points to. The rules
@@ -30,6 +31,12 @@ its text. One finding per shape and heading path, naming up to three entries.
 import re
 from collections import Counter, defaultdict
 from typing import NamedTuple
+
+from unified_pipeline.stage6.parsing.text import (
+    ATTENDANCE_OPENING_RE,
+    heading_names_teaching_role,
+    names_teaching_or_authorship_role,
+)
 
 from ..shared import _finding
 
@@ -89,6 +96,25 @@ _JOURNAL_ROLE_WORD_RE = re.compile(
 _BOARD_HEADING_RE = re.compile(r"board", re.IGNORECASE)
 #: Researcher Profile & Bibliometric Summary (core/taxonomy_v7.json).
 PROFILE_SUMMARY_CODE = "S0"
+
+#: Codes that state the owner taught an event (K4, rendered under "Continuing
+#: education ... as teacher") or wrote for it (S8, rendered as an abstract).
+ATTENDED_AS_TEACHER_CODES = frozenset({"K4", "S8"})
+#: Headings that list what the owner attended as often as what he taught
+#: (NECRGC HVSKET, XUTTKJ, MQLKPQ, YMDTEE; #1691). Read on the leaf heading
+#: only: "Research and Training" over a grants list says nothing of its rows.
+#: A heading that also names teaching ("Formal Teaching of Peers (e.g., CME
+#: and other continuing education courses)", "National Teaching and
+#: Training") lists what the owner taught, unless it names attendance too
+#: ("Continuing Education - Lectures Attended"; PR #1829 review).
+_ATTENDANCE_HEADING_RE = re.compile(
+    r"professional development|career development|\btraining\b|certifications?\b"
+    r"|continuing education", re.IGNORECASE)
+#: A paragraph entry stage 1b did not take as a heading (YMDTEE 192, "Career
+#: Development____", coded T): unclassified, no year, at most this many words.
+SUBHEADING_MAX_WORDS = 6
+_SUBHEADING_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_WORD_RE = re.compile(r"[^\W\d_]+")
 
 
 class HeadingCodeRule(NamedTuple):
@@ -240,6 +266,40 @@ def _is_reviewer_journal_as_board(entry: _ClassifiedEntry, sibling_codes: Counte
             and not _BOARD_HEADING_RE.search(leaf))
 
 
+def _is_subheading_paragraph(entry: _ClassifiedEntry) -> bool:
+    """An unclassified entry that reads as a heading: no year, few words."""
+    return (entry.code == UNCLASSIFIED_CODE and not _SUBHEADING_YEAR_RE.search(entry.text)
+            and 0 < len(_WORD_RE.findall(entry.text)) <= SUBHEADING_MAX_WORDS)
+
+
+def _attendance_contexts(entries: list[_ClassifiedEntry]) -> list[bool]:
+    """Per entry, whether its leaf heading, with the nearest sub-heading
+    paragraph before it under that path, names an attendance heading
+    (`_ATTENDANCE_HEADING_RE`) and no teaching role
+    (`heading_names_teaching_role`, the stage-6 refusal's carve-out too)."""
+    subheading: dict[tuple[str, ...], str] = {}
+    contexts = []
+    for entry in entries:
+        if _is_subheading_paragraph(entry):
+            subheading[entry.heading_path] = entry.text
+        leaf = entry.heading_path[-1] if entry.heading_path else ""
+        context = f"{leaf} > {subheading.get(entry.heading_path, '')}"
+        contexts.append(bool(_ATTENDANCE_HEADING_RE.search(context))
+                        and not heading_names_teaching_role(context))
+    return contexts
+
+
+def _is_attended_as_teacher(entry: _ClassifiedEntry, in_attendance_context: bool) -> bool:
+    """A K4 or S8 entry that opens as attendance, or that sits under an
+    attendance heading and gives the owner no teaching or authoring part
+    (`names_teaching_or_authorship_role`; NECRGC, #1691)."""
+    if entry.code not in ATTENDED_AS_TEACHER_CODES:
+        return False
+    if ATTENDANCE_OPENING_RE.search(entry.text):
+        return True
+    return in_attendance_context and not names_teaching_or_authorship_role(entry.text)
+
+
 def _group_message(shape: str, expected: str, heading_path: tuple[str, ...],
                    entries: list[_ClassifiedEntry]) -> tuple[str, list[str]]:
     """(message, evidence) of one finding: a shape under one heading path."""
@@ -261,7 +321,7 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
         siblings[entry.heading_path][entry.code] += 1
 
     groups: dict[tuple[str, str, tuple[str, ...]], list[_ClassifiedEntry]] = defaultdict(list)
-    for entry in entries:
+    for entry, in_attendance_context in zip(entries, _attendance_contexts(entries), strict=True):
         for rule in HEADING_CODE_RULES:
             if _matches(rule, entry):
                 groups[(rule.shape, rule.expected, entry.heading_path)].append(entry)
@@ -270,6 +330,9 @@ def lint_section_consistency(stage3b: dict) -> list[dict]:
                     entry.heading_path)].append(entry)
         if _is_reviewer_journal_as_board(entry, siblings[entry.heading_path]):
             groups[("reviewer_journal_as_editorial_board", "Q4D (journal reviewer)",
+                    entry.heading_path)].append(entry)
+        if _is_attended_as_teacher(entry, in_attendance_context):
+            groups[("attended_as_teacher", "B2 (attended, not taught or presented)",
                     entry.heading_path)].append(entry)
     return [_finding("section_consistency", SECTION_CONSISTENCY_SEVERITY,
                      *_group_message(shape, expected, path, members))
