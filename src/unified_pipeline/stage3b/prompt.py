@@ -357,8 +357,8 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
       * The words "trial", "funded", "grant" or "sponsored", or a grants,
         funding or research-support heading above it.
     - A study or protocol with none of these signals is M1 (Research
-      Activities), not M2A/M2B, whatever its dates, the owner's role or the
-      heading it sits under. An IRB or protocol number, a role such as
+      Activities), not M2A/M2B, whatever its dates or the owner's role, and
+      under any other heading (research activity, service). An IRB or protocol number, a role such as
       "Co-investigator", "randomized" or a study title is not funding:
       * 'Co-investigator, "<study title>" (IRB study # 1234567890)' → M1
       * '<Study label>   <study title>   2011-2012' → M1
