@@ -970,6 +970,34 @@ def test_twins_with_an_appendix_copy_are_still_duplicates(first_code, second_cod
     assert _flags([_placed(first_code, 306), _placed(second_code, 320)]) == expected
 
 
+@pytest.mark.parametrize("text", [
+    "University of Vermont",                                    # CXRYCF
+    "Medical College of Wisconsin (1987-2004)",                 # UJNBIT
+    "At Purdue University:",                                    # JJYBKP
+    "Project Title:\tRole:\tMajor Goals:",                      # ZASOTV
+    "Title Institution, city and state Dates (mm/yy - mm/yy)",  # RLADNC
+    "Funding Agency:\tGrant Number:\tTitle of Grant | Clinical Research",  # web198
+    "Visiting lecturer appointments listed below:",
+])
+def test_place_or_label_twins_under_two_codes_are_still_duplicates(text):
+    entries = [_placed("O", 59), _placed("P", 107)]
+    for entry in entries:
+        entry["text"] = text
+    assert _flags(entries) == [False, True]
+
+
+@pytest.mark.parametrize("text", [
+    "Journal of the American College of Surgeons",              # FVQANK
+    "Research Fellow in Epidemiology, Karolinska Institute",
+    "American Osteopathic Association",
+])
+def test_record_lines_naming_a_place_word_are_kept_under_two_codes(text):
+    entries = [_placed("Q4D", 306), _placed("Q4C", 320)]
+    for entry in entries:
+        entry["text"] = text
+    assert _flags(entries) == [False, False]
+
+
 def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
     # #651: stage 4's membership check and stage 3b's must be ONE list.
     from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy

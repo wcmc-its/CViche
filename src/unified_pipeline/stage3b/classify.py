@@ -1175,18 +1175,56 @@ def _in_different_year_groups(first: _YearGroup | None, second: _YearGroup | Non
             and first.section == second.section and first.year != second.year)
 
 
+# A line that names only a place or a form label, not a record: a CV repeats
+# these under several sections as sub-headings or template rows, so a second
+# copy is noise, not a second record (#1435 narrowing: CXRYCF "University of
+# Vermont", UJNBIT "Medical College of Wisconsin (1987-2004)", ZASOTV
+# "Project Title:\tRole:", RLADNC "Title Institution, city and state Dates
+# (mm/yy - mm/yy)").
+_PLACE_WORD_RE = re.compile(
+    r"\b(?:university|college|school|hospital|health|department|institute|center|centre)\b",
+    re.IGNORECASE)
+_PLACE_LINE_MAX_WORDS = 8
+# A comma marks a role or title before the place ("Research Fellow,
+# Karolinska Institute"); "Journal" marks a venue that names a college
+# ("Journal of the American College of Surgeons", FVQANK's own target row).
+_NOT_A_PLACE_LINE_RE = re.compile(r",|\bjournal\b", re.IGNORECASE)
+_FORM_LABEL_RE = re.compile(r"\w:(?:\s|$)")
+_FORM_LABEL_MIN_LABELS = 2
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"\b(?:mm/yy|mm/dd|yyyy)\b", re.IGNORECASE)
+_PARENTHESISED_RE = re.compile(r"\([^)]*\)?")
+
+
+def _is_place_or_label_line(text: str) -> bool:
+    """True when `text` is a bare institution name (short, a place word, no
+    comma or journal), a line ending in a colon, a row of two or more
+    "Label:" cells, or a template placeholder."""
+    stripped = text.strip()
+    if stripped.endswith(":") or _TEMPLATE_PLACEHOLDER_RE.search(stripped):
+        return True
+    if len(_FORM_LABEL_RE.findall(stripped)) >= _FORM_LABEL_MIN_LABELS:
+        return True
+    if _NOT_A_PLACE_LINE_RE.search(stripped):
+        return False
+    words = _PARENTHESISED_RE.sub(" ", stripped).split()
+    return len(words) <= _PLACE_LINE_MAX_WORDS and bool(_PLACE_WORD_RE.search(stripped))
+
+
 class _SourcePlacement(NamedTuple):
-    """Where a duplicate candidate came from: its taxonomy code and the span
-    of source elements it was cut from (None when the entry has none)."""
+    """Where a duplicate candidate came from: its taxonomy code, the span of
+    source elements it was cut from (None when the entry has none), and
+    whether its text reads as a record rather than a place or label line."""
 
     code: str
     span: tuple[int, int] | None
+    record_shaped: bool
 
 
 def _source_placement(entry: dict) -> _SourcePlacement:
     start, end = entry.get("element_idx_start"), entry.get("element_idx_end")
     has_span = isinstance(start, int) and isinstance(end, int)
-    return _SourcePlacement(entry.get("taxonomy_code") or "", (start, end) if has_span else None)
+    return _SourcePlacement(entry.get("taxonomy_code") or "", (start, end) if has_span else None,
+                            not _is_place_or_label_line(entry.get("text") or ""))
 
 
 def _filed_twice_by_the_cv(first: _SourcePlacement, second: _SourcePlacement) -> bool:
@@ -1199,8 +1237,10 @@ def _filed_twice_by_the_cv(first: _SourcePlacement, second: _SourcePlacement) ->
     upstream (in one corpus CV a single service line, element 168, came
     out under both O and P, with no second copy in the source), and a
     pair with a T copy still resolves by the M-over-T preference: both
-    stay duplicates, as does a pair with no element span to compare."""
-    if first.span is None or second.span is None:
+    stay duplicates, as does a pair with no element span to compare, and
+    a place or label line (`_is_place_or_label_line`), which a CV repeats
+    as a sub-heading rather than lists as a record."""
+    if first.span is None or second.span is None or not first.record_shaped:
         return False
     apart = first.span[1] < second.span[0] or second.span[1] < first.span[0]
     return (apart and bool(first.code) and bool(second.code) and first.code != second.code
