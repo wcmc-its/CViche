@@ -180,6 +180,7 @@ async def _stale_run_reaper_loop(interval_seconds: int):
         finally:
             db.close()
 
+    rowless_reported: frozenset[str] = frozenset()
     while True:
         await asyncio.sleep(interval_seconds)
         try:
@@ -195,6 +196,45 @@ async def _stale_run_reaper_loop(interval_seconds: int):
                 "Periodic stale-run reaper sweep failed; will retry next interval",
                 exc_info=True,
             )
+        rowless_reported = await _report_rowless_archives(rowless_reported)
+
+
+def _sweep_rowless_archives() -> list[str]:
+    """find_rowless_archives in its own session (run from a worker thread)."""
+    from app.database import SessionLocal
+    from app.services.run_service import find_rowless_archives
+
+    db = SessionLocal()
+    try:
+        return find_rowless_archives(db)
+    finally:
+        db.close()
+
+
+async def _report_rowless_archives(last_reported: frozenset[str]) -> frozenset[str]:
+    """One rowless-archive sweep (#802) on the stale-run reaper's interval.
+
+    Logs a WARNING naming the input archives that have no run row whenever
+    that set changes, not on every interval, so a backlog that cannot be
+    deleted yet (#1216) does not repeat the same line every few minutes on
+    every replica. Returns the set to compare the next sweep against. A failed
+    sweep is logged with its traceback and keeps the previous set, the same
+    way the stale-run sweep above survives one.
+    """
+    try:
+        found = frozenset(await asyncio.to_thread(_sweep_rowless_archives))
+    except Exception:
+        logger.warning(
+            "Periodic rowless-archive sweep failed; will retry next interval",
+            exc_info=True,
+        )
+        return last_reported
+    if found and found != last_reported:
+        logger.warning(
+            "%d input archive(s) in storage have no run row (#802): %s",
+            len(found), ", ".join(sorted(found)),
+        )
+    return found
 
 
 # How long shutdown waits for this pod's in-flight runs before failing them

@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.storage.base import (
+    RUN_ID_PATTERN,
+    RUN_INPUT_DIR,
     RunStorage,
     StorageKeyExists,
     StorageKeyNotFound,
@@ -177,6 +179,13 @@ class LocalRunStorage(RunStorage):
             str(path.relative_to(base))
             for path in base.rglob("*")
             if path.is_file() and str(path.relative_to(base)).startswith(prefix)
+        )
+
+    def list_run_ids(self) -> list[str]:
+        return sorted(
+            path.name
+            for path in self._base.iterdir()
+            if RUN_ID_PATTERN.match(path.name) and (path / RUN_INPUT_DIR).is_dir()
         )
 
     def _delete_tree(self, path: Path) -> int:
