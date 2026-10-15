@@ -1114,6 +1114,8 @@ def _coverage_entry(code: str, pct: float | None, length: int, **fields) -> dict
     (_coverage_entry("T", 14.0, 1000), False),
     (_coverage_entry("K4", 1.0, 5000), False),
     (_coverage_entry("S1", 1.0, 5000), False),
+    (_coverage_entry("M1", 1.0, 5000), False),
+    (_coverage_entry("M2A", 1.0, 5000), True),
     (_coverage_entry("T", 1.0, 5000, formatted_text="done"), False),
     (_coverage_entry("T", 1.0, 5000, formatting_source="stage_5c_llm"), False),
     (_coverage_entry("T", 0.0, 5000), False),
