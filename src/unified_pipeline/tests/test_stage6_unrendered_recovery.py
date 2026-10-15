@@ -2161,6 +2161,14 @@ def _society_entry(code="I", **fields):
     }
 
 
+def _fieldless_society_entry(code="I"):
+    # Stage 4 extracted nothing, so dev's renderer shows the text: the only
+    # entries the split rewrites (#983 review round 3).
+    entry = _society_entry(code=code)
+    entry["extracted_fields"] = {}
+    return entry
+
+
 def _all_paragraph_texts(path):
     """Every paragraph's w:t text, table cells and tracked insertions included."""
     body = Document(path).element.body
@@ -2171,7 +2179,7 @@ def test_date_led_sibling_records_render_one_line_each(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "unified_pipeline.stage_6_word_template.call_llm",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
-    payload = {"document_uid": "TESTUID983", "entries": [_society_entry()],
+    payload = {"document_uid": "TESTUID983", "entries": [_fieldless_society_entry()],
                "cv_owner": {"full_name": "Quenby Marblegate"}}
     input_path = tmp_path / "TESTUID983_fields.json"
     input_path.write_text(json.dumps(payload))
@@ -2179,9 +2187,8 @@ def test_date_led_sibling_records_render_one_line_each(tmp_path, monkeypatch):
     texts = _all_paragraph_texts(run_stage6(str(input_path), str(tmp_path / "out.docx"),
                                             verbose=False))
 
-    # Each record is its own paragraph, once: the 2001 membership stage 4 did
-    # not extract renders, and the Treasurer record is not recovered a second
-    # time beside it.
+    # Each record is its own paragraph, once, where dev rendered the three
+    # fused into one line; none is recovered a second time beside it.
     for record in _SOCIETY_RECORDS:
         assert texts.count(record) == 1, record
     assert not [t for t in texts if "Treasurer" in t and "President" in t]
@@ -2195,14 +2202,31 @@ def _grouped_text(entry):
 
 
 def test_grouping_puts_date_led_siblings_on_lines_and_keeps_stage2_text():
-    entry = _grouped_text(_society_entry())
+    entry = _grouped_text(_fieldless_society_entry())
     assert entry["text"] == "\n".join(_SOCIETY_RECORDS)
     assert entry[DATE_LED_SOURCE_TEXT] == "\t".join(_SOCIETY_RECORDS)
 
 
+@pytest.mark.parametrize("fields, splits", [
+    ({}, True),
+    (None, True),
+    ({"organization": "", "start_date": None, "offices": []}, True),  # nothing extracted
+    ({"organization": "Guild of Meandering Auditors"}, False),
+    ({"end_date": "2009"}, False),
+])
+def test_only_an_entry_stage4_extracted_nothing_from_is_split(fields, splits):
+    # #983 review round 3: an entry whose fields render showed only them on
+    # dev, so splitting it put source lines on the page dev kept off it.
+    entry = _society_entry()
+    entry["extracted_fields"] = fields
+    entry = _grouped_text(entry)
+    assert ("\n" in entry["text"]) is splits
+    assert (DATE_LED_SOURCE_TEXT in entry) is splits
+
+
 @pytest.mark.parametrize("code", ["M2A", "M2B", "M2C", "M2D"])
 def test_a_grant_keeps_its_tabs(code):
-    entry = _grouped_text(_society_entry(code=code, title="Example Grant"))
+    entry = _grouped_text(_fieldless_society_entry(code=code))
     assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
     assert DATE_LED_SOURCE_TEXT not in entry
 
@@ -2210,7 +2234,7 @@ def test_a_grant_keeps_its_tabs(code):
 @pytest.mark.parametrize("code", ["K1", "K2", "K4"])
 def test_a_teaching_entry_keeps_its_tabs(code):
     # The teaching renderer splits the text on its tabs itself.
-    entry = _grouped_text(_society_entry(code=code, course_title="Example Course"))
+    entry = _grouped_text(_fieldless_society_entry(code=code))
     assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
 
 
@@ -2228,7 +2252,7 @@ def test_records_stage4_separated_keep_their_tabs():
 def test_a_record_fan_out_made_keeps_its_tabs(marker):
     # PR #1850 review: no test held the fan-out exclusion. A record fan-out
     # made is one of stage 4's records; dedup reads its marker, not its lines.
-    entry = _society_entry()
+    entry = _fieldless_society_entry()
     entry[marker] = {"key": "records", "index": 0, "count": 2}
     entry = _grouped_text(entry)
     assert entry["text"] == "\t".join(_SOCIETY_RECORDS)
@@ -2252,9 +2276,7 @@ def test_recovery_reads_stage2_text_not_the_date_led_lines():
     entry = _grouped_text({
         "taxonomy_code": "Q1",
         "text": "\t".join(_FORUM_PARTS),
-        "extracted_fields": {"role": "Example Fellowship Director",
-                             "organization": "Example Rehabilitation Forum",
-                             "start_date": "2016", "end_date": "present"},
+        "extracted_fields": {},
     })
     assert "\n" in entry["text"]  # the lines render ...
     # ... but the recovery pass reads records as it did before the split.
@@ -2264,10 +2286,10 @@ def test_recovery_reads_stage2_text_not_the_date_led_lines():
     assert recovery_candidates("Q1", lines_only) != []
 
 
-def test_a_date_led_part_the_fields_hold_is_not_recovered_after_the_split():
+def test_a_date_led_entry_whose_fields_render_is_not_split_or_recovered():
     # The mentee shape of `test_tab_part_the_extracted_fields_hold_is_not_recovered`,
-    # with both parts date-led, so grouping puts them on two lines. Stage 4
-    # holds every word of both; the pass still sees them as stage 2's tab parts.
+    # with both parts date-led. Its fields render, so grouping leaves stage 2's
+    # tab (#983 review round 3), and recovery adds nothing, as on dev.
     gen = _generator()
     entry = {
         "taxonomy_code": "N3B",
@@ -2278,7 +2300,8 @@ def test_a_date_led_part_the_fields_hold_is_not_recovered_after_the_split():
                              "funding_source": "Marsupial Heart Association Fellowship (2009-2011)"},
     }
     grouped = gen._group_and_cut_entries([entry])
-    assert "\n" in grouped["N3B"][0]["text"]
+    assert "\n" not in grouped["N3B"][0]["text"]
+    assert DATE_LED_SOURCE_TEXT not in grouped["N3B"][0]
     before = len(gen.doc.paragraphs)
 
     gen._recover_unrendered_records(grouped)
@@ -2295,7 +2318,7 @@ def test_a_withheld_fragment_in_a_date_led_record_is_not_recovered(tmp_path, mon
     monkeypatch.setattr(
         "unified_pipeline.stage_6_word_template.call_llm",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
-    entry = _society_entry(code=code)
+    entry = _fieldless_society_entry(code=code)
     entry["text"] = "\t".join([_SOCIETY_RECORDS[0], f"{_SOCIETY_RECORDS[1]} {pii}",
                                _SOCIETY_RECORDS[2]])
     payload = {"document_uid": "TESTUID983P", "entries": [entry],
@@ -2319,6 +2342,12 @@ def test_a_withheld_fragment_in_a_date_led_record_is_not_recovered(tmp_path, mon
 # (stage6/pii_pass.py is dev's file). The pass must get the same input, cut the
 # same spans, and leave every protected value in the docx the same number of
 # times. Synthetic names and values throughout.
+#
+# Round 3 adds the render side. For every case, each of stage 2's tab parts
+# that reaches the branch's docx reached dev's too (an entry whose fields
+# render is not split, so it renders exactly as on dev), and no part reaches it
+# cut across two paragraphs unless dev's cut it too (a trailing ID or phone
+# number read as the date column).
 
 _PII_DATED_LEAD = ["2001-2005 Member, Guild of Meandering Auditors",
                    "2006-2008 Treasurer, Guild of Meandering Auditors"]
@@ -2352,8 +2381,16 @@ _PII_SHAPES = {
                           ["qfarrow@example.org"], False),
     "third-party phone": (["2009-2011 Liaison, Quimby Farrow, (212) 555-0147"],
                           ["555-0147"], False),
+    # A protected label after a leading date: outside the pass's vocabulary
+    # on dev and here alike (#1859), so only the render side above keeps the
+    # split from putting it on a page dev kept it off.
+    "spouse after a date": (["2005 Spouse: Jane Quillfeather"], ["Jane Quillfeather"], False),
+    "salary after a date": (["2015 Salary: $250,000"], ["$250,000"], False),
+    "passport number after a date": (["2015 Passport No. X1234567"], ["X1234567"], False),
 }
-_PII_CODES = ["T", "A", "I", "D1", "Q1"]
+_PII_UNRECOGNISED_SHAPES = {"spouse after a date", "salary after a date",
+                            "passport number after a date"}
+_PII_CODES = ["T", "A", "I", "D1", "Q1", "O", "P"]
 # Codes whose entries get the full Personal Data / Appendix cut; a routed code
 # withholds only the shapes in `_PII_ROUTED_SHAPES`.
 _PII_FULL_SCOPE_CODES = {"T", "A"}
@@ -2365,6 +2402,8 @@ _PII_THIRD_PARTY_SHAPES = {"third-party email", "third-party phone"}
 
 
 def _pii_case_withholds(code, shape):
+    if shape in _PII_UNRECOGNISED_SHAPES:
+        return False
     if shape in _PII_THIRD_PARTY_SHAPES:
         return code == "T"
     return code in _PII_FULL_SCOPE_CODES or shape in _PII_ROUTED_SHAPES
@@ -2422,19 +2461,42 @@ def _render_watching_pii_pass(tmp_path, monkeypatch, entries, *, dev_split_order
     return seen, _docx_part_texts(out)
 
 
-def _pii_case_entry(code, lead, shape):
-    entry = _society_entry(code=code)
+def _pii_case_entry(code, lead, shape, *, fields=False):
+    entry = _society_entry(code=code) if fields else _fieldless_society_entry(code=code)
     entry["text"] = "\t".join(lead + _PII_SHAPES[shape][0])
     return entry
 
 
+def _squashed(text):
+    return "".join(text.split())
+
+
+def _parts_on_page(texts, parts):
+    """The `parts` whose text is in the docx: in one paragraph, or run on
+    across paragraphs (a number cut into two cells still reached the page)."""
+    page = _squashed("".join(texts))
+    return {part for part in parts if _squashed(part) in page}
+
+
+def _parts_cut_across_paragraphs(texts, parts):
+    """The `parts` on the page that no single paragraph holds whole."""
+    return {part for part in _parts_on_page(texts, parts)
+            if not any(_squashed(part) in _squashed(text) for text in texts)}
+
+
+# (whether stage 4 extracted fields, the lead). An entry whose fields render
+# is the round-3 case; its undated lead adds nothing the dated one does not.
+_PII_VARIANTS = [(False, "dated"), (False, "undated"), (True, "dated")]
+
+
 @pytest.mark.parametrize("code", _PII_CODES)
-@pytest.mark.parametrize("lead", ["dated", "undated"])
+@pytest.mark.parametrize("fields,lead", _PII_VARIANTS)
 @pytest.mark.parametrize("shape", list(_PII_SHAPES))
 def test_the_pii_pass_cuts_what_dev_cuts_with_or_without_the_split(tmp_path, monkeypatch,
-                                                                   code, lead, shape):
+                                                                   code, fields, lead, shape):
     _parts, protected, parts_split_alone = _PII_SHAPES[shape]
-    entry = _pii_case_entry(code, _PII_DATED_LEAD if lead == "dated" else _PII_UNDATED_LEAD, shape)
+    entry = _pii_case_entry(code, _PII_DATED_LEAD if lead == "dated" else _PII_UNDATED_LEAD,
+                            shape, fields=fields)
     # The case is what it says: stage 2's text splits behind a dated lead, and
     # behind an undated one only when the PII parts alone hold two records.
     assert (split_date_led_records(entry["text"]) != entry["text"]) == (
@@ -2450,15 +2512,24 @@ def test_the_pii_pass_cuts_what_dev_cuts_with_or_without_the_split(tmp_path, mon
     assert seen["withheld"] == dev_seen["withheld"]
     withholds = _pii_case_withholds(code, shape)
     assert bool(seen["withheld"]) == withholds
+    # Round 3: the split puts no source line on the page that dev left off it,
+    # and cuts none across two paragraphs.
+    source_parts = entry["text"].split("\t")
+    assert _parts_on_page(texts, source_parts) <= _parts_on_page(dev_texts, source_parts)
+    assert (_parts_cut_across_paragraphs(texts, source_parts)
+            <= _parts_cut_across_paragraphs(dev_texts, source_parts))
     for value in protected:
         assert (sum(t.count(value) for t in texts)
                 == sum(t.count(value) for t in dev_texts)), value
         if withholds and code in _PII_FULL_SCOPE_CODES:
             assert not [t for t in texts if value in t], value
+    if fields:
+        assert texts == dev_texts  # its fields render: not split, so dev's docx
 
 
 def test_an_entry_the_pii_pass_cut_is_not_split():
     # Its text and the recovery pass's input stay dev's cut text, tabs and all.
+    # Field-less, so only the pass's mark keeps its dated lead unsplit.
     entry = _grouped_text(_pii_case_entry("T", _PII_DATED_LEAD, "children, year-led continuation cells"))
     assert entry["_pii_withheld"] is True
     assert entry["text"] == "\t".join(_PII_DATED_LEAD)
@@ -2467,8 +2538,8 @@ def test_an_entry_the_pii_pass_cut_is_not_split():
 
 @pytest.mark.parametrize("fields", [{"date_of_birth": "01/02/1960"}, {"notes": "SSN 123-45-6789"}])
 def test_an_entry_the_pii_pass_touched_through_its_fields_is_not_split(fields):
-    # No fragment in the text, so only the pass's own mark, set before the
-    # split runs, keeps the entry as dev renders it.
+    # No fragment in the text: the pass's own mark, set before the split runs,
+    # and the fields it touched each keep the entry as dev renders it.
     entry = _society_entry(code="Q1", organization="Guild of Meandering Auditors", **fields)
     entry = _grouped_text(entry)
     assert entry["_pii_withheld"] is True
@@ -2477,7 +2548,8 @@ def test_an_entry_the_pii_pass_touched_through_its_fields_is_not_split(fields):
 
 def test_a_routed_entry_holding_protected_data_is_not_split():
     # An I entry gets the routed scope, which does not withhold a children
-    # list, so the pass leaves it alone; dev rendered its fields, not the names.
+    # list, so the pass leaves it alone. Field-less, so only the full-scope
+    # fragment test keeps its lines as dev renders them.
     entry = _grouped_text(_pii_case_entry("I", _PII_DATED_LEAD, "children, year-led continuation cells"))
     assert "_pii_withheld" not in entry
     assert "\n" not in entry["text"]

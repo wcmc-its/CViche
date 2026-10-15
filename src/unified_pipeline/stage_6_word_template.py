@@ -1316,17 +1316,18 @@ def _route_d2_leadership_title(entry: dict[str, Any], code: str,
     return D2_LEADERSHIP_TARGET_CODE
 
 
-def _holds_stage4_records(entry: Mapping[str, Any]) -> bool:
-    """Stage 4 already separated *entry*'s records: an extracted field holds a
-    list of records (stage 4's own `STAGE4_RECORDS_KEY` is one), or the entry
-    is one fan-out made. Their renderers and dedup read those records, not
-    the text's lines (#983: a split entry's lines made dedup drop a mentee's
-    table that its `mentees` list rendered)."""
+def _renders_stage4_fields(entry: Mapping[str, Any]) -> bool:
+    """Stage 4 extracted a value for *entry*, or the entry is one fan-out
+    made. A renderer then shows the fields, and a date-led part they leave
+    out never reached the page on dev; splitting would put that line on the
+    page unvetted (#983 review round 3: "2015 Passport No. X1234567" in an I
+    or O entry whose fields render, with the label outside the PII
+    vocabulary, #1859). It also covers the records stage 4 separated, whose
+    renderers and dedup read the records, not the lines (#983: a split
+    entry's lines made dedup drop a mentee table its `mentees` list rendered)."""
     fields = entry.get('extracted_fields')
-    record_lists = isinstance(fields, Mapping) and any(
-        isinstance(value, list) and any(isinstance(item, Mapping) for item in value)
-        for value in fields.values())
-    return record_lists or FANNED_OUT_FROM in entry or LAST_STAGE4_RECORD in entry
+    extracted = isinstance(fields, Mapping) and any(fields.values())
+    return extracted or FANNED_OUT_FROM in entry or LAST_STAGE4_RECORD in entry
 
 
 def _split_date_led_siblings(entry: dict[str, Any], code: str) -> None:
@@ -1338,7 +1339,8 @@ def _split_date_led_siblings(entry: dict[str, Any], code: str) -> None:
       newline join collapsed a grant section in the 2026-09-29 scoping;
     - a teaching entry: its renderer splits the text on its tabs, so the
       corpus render put one split K2 entry's lines into a single paragraph;
-    - records stage 4 already separated (`_holds_stage4_records`);
+    - an entry whose stage-4 fields render (`_renders_stage4_fields`), so
+      the split adds no source line to the page that dev left off it;
     - protected data: an entry the PII pass cut, or whose text holds a
       fragment the full Personal Data / Appendix scope withholds. A routed
       code withholds less, and dev rendered such an entry's fields, not
@@ -1346,7 +1348,7 @@ def _split_date_led_siblings(entry: dict[str, Any], code: str) -> None:
       entry rendered the names once split)."""
     text = entry.get('text')
     if (code in supplementary.GRANT_CODES or code in TEACHING_CODES
-            or not isinstance(text, str) or _holds_stage4_records(entry)
+            or not isinstance(text, str) or _renders_stage4_fields(entry)
             or entry.get(PII_WITHHELD_KEY) or _pii_fragments(text)):
         return
     split = split_date_led_records(text)

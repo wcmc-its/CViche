@@ -616,6 +616,21 @@ def test_committee_range_may_end_in_a_century_less_year(line, expected):
     assert _parse_flattened_committee_lines([line]) == [expected]
 
 
+# #983 review round 3: a line split out of a date-led entry rendered
+# "(212) 555-" and "0147" in two cells of an O or P row.
+@pytest.mark.parametrize("line, expected", [
+    ("2009-2011 Liaison, Example Society, (212) 555-0147",
+     ParsedActivityLine("2009-2011 Liaison, Example Society, (212) 555-0147", (), "")),
+    ("2015 Passport No. X1234567", ParsedActivityLine("2015 Passport No. X1234567", (), "")),
+    # still a date column: after a space, a comma or a dash that follows a word
+    ("Zorblax Board 2001-2005", ParsedActivityLine("Zorblax Board", (), "2001-2005")),
+    ("Zorblax Board, 2015", ParsedActivityLine("Zorblax Board,", (), "2015")),
+    ("Zorblax Board-2015", ParsedActivityLine("Zorblax Board-", (), "2015")),
+])
+def test_a_trailing_number_is_not_cut_into_a_date(line, expected):
+    assert _parse_flattened_committee_lines([line]) == [expected]
+
+
 # --- #1583: one paragraph cut at its printed lines ---------------------------
 
 _PRINTED_LINES = ["Division Chief, Example Unit. I led the establishment",

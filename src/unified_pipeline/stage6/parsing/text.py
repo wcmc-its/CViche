@@ -492,8 +492,12 @@ class ParsedActivityLine(NamedTuple):
 _COMMITTEE_HEADER_LABELS = ('dates', 'role', 'committee', 'institution')
 # A line that is nothing but a year or a year range ("1999", "1999-2010").
 _DATE_ONLY_LINE = re.compile(rf'^({YEAR_OR_SPAN})$', re.IGNORECASE)
-# A year or a year range at the end of a line ("Committee    1999-2010").
-_TRAILING_DATE = re.compile(rf'({YEAR_OR_SPAN})\s*$', re.IGNORECASE)
+# A year or a year range at the end of a line ("Committee    1999-2010"). Not
+# the last four digits of a longer number: an ID ("Passport No. X1234567") or a
+# phone's line number ("(212) 555-0147") is the line's text, not a date
+# column, and cutting it split the number across two cells (#983 review
+# round 3).
+_TRAILING_DATE = re.compile(rf'(?<!\w)(?<!\d{DATE_DASH})({YEAR_OR_SPAN})\s*$', re.IGNORECASE)
 # Parenthetical role+date: "(Chair 1999-2010)" or "(Vice Chair 2006-2008 )".
 _PAREN_ROLE_DATE = re.compile(
     rf'\(([^)]*?)({YEAR})\s*{DATE_DASH}\s*({RANGE_END})\s*\)', re.IGNORECASE)
@@ -814,8 +818,10 @@ def _refold_shattered(parts: list[str]) -> list[str]:
 # grants alone, and its text is what stages 3b and 4 read -- changing it there
 # is a behaviour change to two LLM stages. Without stage 2's paragraph
 # boundaries an in-line tab could also be split here; over the 126 stored
-# corpus artifacts every entry stage 6 splits (25, in 8 CVs) has two or more
-# date-led paragraphs in its source document (measured for #983).
+# corpus artifacts every entry this function splits (25, in 8 CVs) has two or
+# more date-led paragraphs in its source document (measured for #983). Stage 6
+# calls it only for an entry stage 4 extracted nothing from (#983 review
+# round 3), and none of those 25 is one.
 #
 # A month name or a numeric month/day before the year: "Jan 2019",
 # "04/2020", "04/22/2020".
