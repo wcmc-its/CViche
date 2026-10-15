@@ -513,6 +513,153 @@ def test_call_bedrock_attaches_forced_tool_config_for_json_schema(monkeypatch: p
     )
 
     assert fake.calls[0]["toolConfig"]["toolChoice"] == {"tool": {"name": "extract"}}
+    # strict is off for every model until a Bedrock A/B turns it on (#629).
+    assert "strict" not in fake.calls[0]["toolConfig"]["tools"][0]["toolSpec"]
+
+
+# ---------------------------------------------------------------------------
+# bedrock.py -- per-model capabilities (#629, #631)
+# ---------------------------------------------------------------------------
+
+_EXTRACT_SCHEMA_RF = {
+    "type": "json_schema",
+    "json_schema": {"name": "extract", "schema": {"type": "object"}},
+}
+# Priced in config.py's PRICING but matched by no BEDROCK_MODEL_CAPABILITIES
+# prefix: a non-Claude Bedrock model.
+UNVERIFIED_BEDROCK_MODEL = "meta.llama3-1-70b-instruct-v1:0"
+
+
+def _configured_models(node: object) -> list[str]:
+    """Every `model:` value in a parsed llm_config.yaml, at any depth."""
+    if isinstance(node, dict):
+        found = [v for k, v in node.items() if k == "model" and isinstance(v, str)]
+        for value in node.values():
+            found += _configured_models(value)
+        return found
+    if isinstance(node, list):
+        return [m for item in node for m in _configured_models(item)]
+    return []
+
+
+def test_every_configured_and_fallback_model_supports_the_forced_tool() -> None:
+    configured = _configured_models(pipeline_config._load_yaml_config())
+    assert configured, "llm_config.yaml names no model"
+    for model in [*configured, *bedrock.CONTENT_FILTER_FALLBACK_MODELS]:
+        capabilities = bedrock._bedrock_model_capabilities(model)
+        assert capabilities.supports_forced_tool_choice, model
+        assert not capabilities.supports_strict_tool_use, model
+        assert capabilities.default_max_tokens == bedrock.DEFAULT_MAX_TOKENS, model
+
+
+@pytest.mark.parametrize("model", [UNVERIFIED_BEDROCK_MODEL, "mistral.mistral-large-2407-v1:0", ""])
+def test_unmatched_model_gets_unverified_capabilities(model: str) -> None:
+    assert bedrock._bedrock_model_capabilities(model) is bedrock.UNVERIFIED_MODEL_CAPABILITIES
+    assert not bedrock.UNVERIFIED_MODEL_CAPABILITIES.supports_forced_tool_choice
+
+
+def test_longest_capability_prefix_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    family = bedrock.BedrockModelCapabilities(
+        supports_forced_tool_choice=True, supports_strict_tool_use=False)
+    one_model = bedrock.BedrockModelCapabilities(
+        supports_forced_tool_choice=True, supports_strict_tool_use=True)
+    monkeypatch.setattr(bedrock, "BEDROCK_MODEL_CAPABILITIES", {
+        "anthropic.claude-": family, "anthropic.claude-sonnet-5": one_model})
+
+    assert bedrock._bedrock_model_capabilities("us.anthropic.claude-sonnet-5") is one_model
+    assert bedrock._bedrock_model_capabilities("us.anthropic.claude-sonnet-4-6") is family
+
+
+def test_schema_tool_config_strict_sets_tool_spec_strict() -> None:
+    cfg = bedrock._schema_tool_config(_EXTRACT_SCHEMA_RF, strict=True)
+    assert cfg["tools"][0]["toolSpec"]["strict"] is True
+    assert cfg["toolChoice"] == {"tool": {"name": "extract"}}
+
+
+def test_call_bedrock_sends_strict_for_a_strict_capable_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeBedrockClient([_converse_response("hi")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+    monkeypatch.setattr(bedrock, "BEDROCK_MODEL_CAPABILITIES", {
+        BEDROCK_MODEL: bedrock.BedrockModelCapabilities(
+            supports_forced_tool_choice=True, supports_strict_tool_use=True)})
+
+    bedrock._call_bedrock(
+        BEDROCK_MODEL, [{"role": "user", "content": "hi"}], 0.1,
+        response_format=_EXTRACT_SCHEMA_RF, max_tokens=None, enable_prompt_caching=False,
+    )
+
+    assert fake.calls[0]["toolConfig"]["tools"][0]["toolSpec"]["strict"] is True
+
+
+def test_call_bedrock_unverified_model_takes_the_prompt_hint_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeBedrockClient([_converse_response("{}")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    bedrock._call_bedrock(
+        UNVERIFIED_BEDROCK_MODEL, [{"role": "user", "content": "hi"}], 0.1,
+        response_format=_EXTRACT_SCHEMA_RF, max_tokens=None, enable_prompt_caching=False,
+    )
+
+    sent = fake.calls[0]
+    assert "toolConfig" not in sent
+    # Without the tool, the JSON prompt hint is the only instruction left.
+    assert any("JSON" in block["text"] for block in sent["system"])
+
+
+def test_call_bedrock_default_max_tokens_comes_from_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeBedrockClient([_converse_response("hi")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+    monkeypatch.setattr(bedrock, "BEDROCK_MODEL_CAPABILITIES", {
+        BEDROCK_MODEL: bedrock.BedrockModelCapabilities(
+            supports_forced_tool_choice=True, supports_strict_tool_use=False,
+            default_max_tokens=4096)})
+
+    bedrock._call_bedrock(
+        BEDROCK_MODEL, [{"role": "user", "content": "hi"}], 0.1,
+        response_format=None, max_tokens=None, enable_prompt_caching=False,
+    )
+
+    assert fake.calls[0]["inferenceConfig"]["maxTokens"] == 4096
+
+
+def test_handle_bedrock_unverified_model_returns_text_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = _FakeBedrockClient([_converse_response('{"foo": "bar"}')])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        result = bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=_EXTRACT_SCHEMA_RF,
+            cfg=_bedrock_cfg(model=UNVERIFIED_BEDROCK_MODEL),
+        )
+
+    # The text path, not BedrockToolCallDidNotFireError: the response is read
+    # the way the request was sent.
+    assert json.loads(result["content"]) == {"foo": "bar"}
+    assert len(fake.calls) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(UNVERIFIED_BEDROCK_MODEL in w and "not enforced" in w for w in warnings)
+
+
+def test_handle_bedrock_claude_json_schema_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    canned = {
+        "output": {"message": {"content": [{"toolUse": {"name": "extract", "input": {}}}]}},
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 5, "outputTokens": 1},
+    }
+    fake = _FakeBedrockClient([canned])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=_EXTRACT_SCHEMA_RF,
+            cfg=_bedrock_cfg(),
+        )
+
+    assert not [r for r in caplog.records if "not enforced" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------

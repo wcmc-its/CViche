@@ -642,13 +642,15 @@ def test_run_stage_5c_multi_record_entry_missing_a_line_is_left_unformatted(tmp_
 
 
 def test_run_stage_5c_rejected_line_falls_back_and_is_recorded(tmp_path, monkeypatch):
+    # A line that shows a year, just not the record's, is misstated, not
+    # missing its date: it is rejected rather than restored.
     entries = [
         {"taxonomy_code": "K4", "element_idx_start": 7, "text": "Participant in Supper Club 2004",
          "extracted_fields": {"activity_title": "Supper Club", "role": "Participant", "date": "2004"}},
         {"taxonomy_code": "K4", "element_idx_start": 9, "text": "2006 Kite Building Day",
          "extracted_fields": {"activity_title": "Kite Building Day", "date": "2006"}},
     ]
-    reply = ('- [EC-0001] Participant, "Supper Club"\n'
+    reply = ('- [EC-0001] **2006** - Participant, "Supper Club"\n'
              "- [EC-0002] **2006** - Kite Building Day\n")
     out = _run_5c(tmp_path, monkeypatch, entries, reply)
     assert "formatted_text" not in out["entries"][0]["extracted_fields"]
@@ -657,6 +659,86 @@ def test_run_stage_5c_rejected_line_falls_back_and_is_recorded(tmp_path, monkeyp
     assert out["stage_5c"]["entries_formatted"] == 1
     assert out["stage_5c"]["entries_rejected"] == [
         {"element_idx_start": 7, "taxonomy_code": "K4", "reason": "EC-0001:year_missing:2004"}]
+    assert out["stage_5c"]["entries_date_restored"] == []
+
+
+# ---------------------------------------------------------------------------
+# stage_5c date restore (#1345): a line with no year gets its record's date
+# ---------------------------------------------------------------------------
+
+_SUPPER_CLUB = {"activity_title": "Supper Club", "role": "Participant", "date": "2004"}
+_SUPPER_CLUB_SOURCE = "Participant in Supper Club 2004"
+
+
+def test_5c_restore_puts_the_record_date_in_front_of_a_line_with_no_year():
+    # XWNZWW 505/507, XELRLZ K4 674/676/678: every word right, the year left out.
+    assert s5c.restore_missing_date('Participant, "Supper Club"', _SUPPER_CLUB, _SUPPER_CLUB_SOURCE) \
+        == '**2004** - Participant, "Supper Club"'
+
+
+def test_5c_restore_sends_a_start_end_range_as_the_line_would():
+    record = {"teaching_role": "Simulation Lab Leader", "start_date": "1981", "end_date": "1990"}
+    assert s5c.restore_missing_date("Simulation Lab Leader", record,
+                                    "Simulation Lab Leader 1981-1990") \
+        == "**1981-1990** - Simulation Lab Leader"
+
+
+def test_5c_restore_leaves_a_line_that_shows_some_other_year():
+    assert s5c.restore_missing_date('**2006** - Participant, "Supper Club"', _SUPPER_CLUB,
+                                    _SUPPER_CLUB_SOURCE) is None
+    # A year the source does hold: putting the range in front would pass the
+    # post-check, but the line misstated its dates, it did not leave them out.
+    record = {"teaching_role": "Simulation Lab Leader", "start_date": "1981", "end_date": "1990"}
+    assert s5c.restore_missing_date("**1990** - Simulation Lab Leader", record,
+                                    "Simulation Lab Leader 1981-1990") is None
+
+
+def test_5c_restore_leaves_a_record_with_no_date():
+    assert s5c.restore_missing_date('"Supper Club"', {"activity_title": "Supper Club"},
+                                    _SUPPER_CLUB_SOURCE) is None
+
+
+def test_5c_restore_leaves_a_line_whose_words_are_another_entrys():
+    # EQGGRB-06: a line shifted onto the wrong id; a date in front would hide it.
+    line = "Faculty Advisor, Springboard Mentoring Program (Health Sciences)"
+    assert s5c._words_in_source(line, _SUPPER_CLUB, _SUPPER_CLUB_SOURCE) \
+        < s5c._RESTORE_MIN_WORDS_IN_SOURCE
+    assert s5c.restore_missing_date(line, _SUPPER_CLUB, _SUPPER_CLUB_SOURCE) is None
+
+
+def test_5c_restore_needs_the_whole_postcheck_to_pass():
+    # OIYKZE 274 on the old prompt: no year AND an invented 'Attendee'.
+    record = {"activity_title": "Rope Knots", "role": None, "date": "2015"}
+    assert s5c.restore_missing_date('Attendee, "Rope Knots"', record,
+                                    'Doe, J. (2015). "Rope Knots" workshop') is None
+
+
+def test_run_stage_5c_stores_a_restored_line_and_records_it(tmp_path, monkeypatch):
+    entries = [
+        {"taxonomy_code": "K4", "element_idx_start": 7, "text": _SUPPER_CLUB_SOURCE,
+         "extracted_fields": dict(_SUPPER_CLUB)},
+        {"taxonomy_code": "K4", "element_idx_start": 9, "text": "2006 Kite Building Day",
+         "extracted_fields": {"activity_title": "Kite Building Day", "date": "2006"}},
+    ]
+    reply = ('- [EC-0001] Participant, "Supper Club"\n'
+             "- [EC-0002] **2006** - Kite Building Day\n")
+    out = _run_5c(tmp_path, monkeypatch, entries, reply)
+    fields = out["entries"][0]["extracted_fields"]
+    assert fields["formatted_text"] == '**2004** - Participant, "Supper Club"'
+    assert fields["formatting_source"] == "stage_5c_llm"
+    assert out["stage_5c"]["entries_formatted"] == 2
+    assert out["stage_5c"]["entries_rejected"] == []
+    assert out["stage_5c"]["entries_date_restored"] == [
+        {"element_idx_start": 7, "taxonomy_code": "K4", "ids": ["EC-0001"]}]
+
+
+def test_run_stage_5c_restores_one_record_of_a_multi_record_entry(tmp_path, monkeypatch):
+    reply = ("- [EC-0001] Simulation Lab Leader\n"
+             "- [EC-0002] **1995-2001** - Simulation Lab Leader\n")
+    out = _run_5c(tmp_path, monkeypatch, [_two_record_entry()], reply)
+    assert out["entries"][0]["extracted_fields"]["formatted_text"] == \
+        "**1981-1990** - Simulation Lab Leader\n**1995-2001** - Simulation Lab Leader"
+    assert out["stage_5c"]["entries_date_restored"][0]["ids"] == ["EC-0001"]
 
 
 # ---------------------------------------------------------------------------

@@ -451,7 +451,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 7.1 print() in library code (T201) | falling | 634 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 0 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 478 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 476 | ratchet |
 | 8.4 pyflakes findings (F) | falling | 185 | ratchet |
 | 8.4 bugbear findings (B) | falling | 142 | ratchet |
 

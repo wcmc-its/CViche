@@ -25,6 +25,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -242,6 +243,17 @@ _RECORD_TITLE_KEYS = ('program_name', 'activity_title')
 _RECORD_ROLE_KEYS = ('teaching_role',)
 
 
+def _date_text(fields: Mapping[str, Any], per_record: bool) -> str:
+    """The record's date as its line sends it: `start-end` when either is
+    set, else (for `per_record`, or a date put back by `restore_missing_date`)
+    its one-off `date`."""
+    start_date = fields.get('start_date', '')
+    end_date = fields.get('end_date', '')
+    if start_date or end_date:
+        return f"{start_date or ''}-{end_date or ''}".strip('-')
+    return _first_text(fields, _RECORD_DATE_KEYS) if per_record else ''
+
+
 def _record_parts(fields: Mapping[str, Any], per_record: bool = False) -> list[str]:
     """The structured fields of one record, in the order the prompt sends them.
 
@@ -251,14 +263,9 @@ def _record_parts(fields: Mapping[str, Any], per_record: bool = False) -> list[s
     `Original:` line already holds the rest.
     """
     parts = []
-    start_date = fields.get('start_date', '')
-    end_date = fields.get('end_date', '')
-    if start_date or end_date:
-        date_str = f"{start_date or ''}-{end_date or ''}".strip('-')
-        if date_str:
-            parts.append(date_str)
-    elif per_record and _first_text(fields, _RECORD_DATE_KEYS):
-        parts.append(_first_text(fields, _RECORD_DATE_KEYS))
+    date_str = _date_text(fields, per_record)
+    if date_str:
+        parts.append(date_str)
 
     course_code = fields.get('course_code', '')
     course_title = fields.get('course_title', '')
@@ -519,6 +526,53 @@ def postcheck_line(line: str, record: Mapping[str, Any], entry_text: str) -> str
     return None
 
 
+# ---------------------------------------------------------------------------
+# Date restore (#1345): a line the model wrote with no year at all, for a
+# record that holds a date, gets that date put back in front instead of being
+# rejected. Rejected, the entry rendered as its raw source line, list number
+# included (XELRLZ K4 674/676/678, OIYKZE 274, RCBKFG GKAQHB K5 166, OIEPQD
+# XAYKXA's six K lines): every other word of the line was right.
+# ---------------------------------------------------------------------------
+
+_YEAR_MISSING = 'year_missing'
+# How the restored date leads the line: the prompt's Template A/D shape.
+_RESTORED_DATE_LINE = '**{date}** - {line}'
+# A line is restored only when at least this share of its words (of at least
+# `_OVERLAP_WORD_MIN_CHARS` letters) are in the entry's text or fields. A line
+# the model put on the wrong id (EQGGRB-06) shares few, and a date put in
+# front of it would hide the shift that its missing year exposed.
+_RESTORE_MIN_WORDS_IN_SOURCE = 0.5
+_OVERLAP_WORD_MIN_CHARS = 4
+_OVERLAP_WORD = re.compile(rf'[^\W\d_]{{{_OVERLAP_WORD_MIN_CHARS},}}')
+
+
+def _words_in_source(line: str, record: Mapping[str, Any], entry_text: str) -> float:
+    """The share of the line's words found in the entry's text and fields
+    (1.0 for a line with no such word)."""
+    words = set(_OVERLAP_WORD.findall(_normalized(line)))
+    if not words:
+        return 1.0
+    source = _normalized(' '.join([entry_text, *_strings(record)]))
+    return sum(1 for word in words if word in source) / len(words)
+
+
+def restore_missing_date(line: str, record: Mapping[str, Any], entry_text: str) -> str | None:
+    """`line` with the record's date in front, when that is all that kept
+    `postcheck_line` from accepting it; else None.
+
+    Only a line that shows no year at all is restored: one that shows some
+    years but not every one has misstated its dates, not left them out. The
+    restored line must then pass the whole post-check.
+    """
+    date = _date_text(record, per_record=True)
+    if not date or _years_shown(_normalized(line)):
+        return None
+    if _words_in_source(line, record, entry_text) < _RESTORE_MIN_WORDS_IN_SOURCE:
+        return None
+    restored = _RESTORED_DATE_LINE.format(date=date, line=line)
+    return restored if postcheck_line(restored, record, entry_text) is None else None
+
+
 # `accepted_formatted_text`'s reason prefix for an id the reply did not hold:
 # not a rejection, the entry was simply not formatted (as before E20).
 _MISSING = 'missing:'
@@ -536,26 +590,83 @@ def _ids_by_entry(id_to_entry: Mapping[str, dict]) -> list[tuple[dict, list[str]
     return groups
 
 
+@dataclass(frozen=True)
+class Acceptance:
+    """What `accepted_formatted_text` decided for one entry.
+
+    `text` is the formatted text to store, or None with `reason` saying why
+    not. `restored_ids` are the ids whose line had its record's date put back
+    (`restore_missing_date`); run_stage_5c records them in its artifact.
+    """
+    text: str | None
+    reason: str | None = None
+    restored_ids: tuple[str, ...] = ()
+
+
 def accepted_formatted_text(entry: Mapping[str, Any], entry_ids: list[str],
-                            id_to_formatted: Mapping[str, str]) -> tuple[str | None, str | None]:
-    """`(formatted_text, None)` for an entry whose every record's line came
-    back and passes `postcheck_line`, else `(None, reason)`.
+                            id_to_formatted: Mapping[str, str]) -> Acceptance:
+    """The formatted text of an entry whose every record's line came back and
+    passes `postcheck_line` (a line that only left out its date gets it back,
+    `restore_missing_date`), else no text and the reason.
 
     The lines of a multi-record entry are joined one per line, in record
     order. One missing or rejected line rejects the entry: stage 6 then
     renders all its records from stage 4 rather than some formatted and the
     rest lost.
     """
+    entry_text = entry.get('text', '') or ''
     lines = []
+    restored_ids = []
     for entry_id, record in zip(entry_ids, entry_records(entry)):
         line = id_to_formatted.get(entry_id)
         if not line:
-            return None, f'{_MISSING}{entry_id}'
-        reason = postcheck_line(line, record, entry.get('text', '') or '')
+            return Acceptance(None, f'{_MISSING}{entry_id}')
+        reason = postcheck_line(line, record, entry_text)
+        if reason and reason.startswith(_YEAR_MISSING):
+            restored = restore_missing_date(line, record, entry_text)
+            if restored is not None:
+                line, reason = restored, None
+                restored_ids.append(entry_id)
         if reason:
-            return None, f'{entry_id}:{reason}'
+            return Acceptance(None, f'{entry_id}:{reason}')
         lines.append(line)
-    return '\n'.join(lines), None
+    return Acceptance('\n'.join(lines), restored_ids=tuple(restored_ids))
+
+
+_FORMATTED_TEXT_KEY = 'formatted_text'
+_FORMATTING_SOURCE_KEY = 'formatting_source'
+_STAGE_5C_SOURCE = 'stage_5c_llm'
+
+
+def _entry_ref(entry: Mapping[str, Any], **extra: object) -> dict[str, Any]:
+    """How the artifact's `entries_rejected` / `entries_date_restored` name an entry."""
+    return {'element_idx_start': entry.get('element_idx_start'),
+            'taxonomy_code': entry.get('taxonomy_code'), **extra}
+
+
+def _store_formatted_text(id_to_entry: dict[str, dict], id_to_formatted: Mapping[str, str]
+                          ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Write each accepted entry's formatted text onto it, in place.
+
+    Returns (entries formatted, entries the post-check rejected, entries
+    formatted after a date restore). An entry the reply left out is neither.
+    """
+    formatted_count = 0
+    rejected: list[dict[str, Any]] = []
+    restored: list[dict[str, Any]] = []
+    for entry, entry_ids in _ids_by_entry(id_to_entry):
+        acceptance = accepted_formatted_text(entry, entry_ids, id_to_formatted)
+        if acceptance.text is None:
+            if not acceptance.reason.startswith(_MISSING):
+                rejected.append(_entry_ref(entry, reason=acceptance.reason))
+            continue
+        fields = entry.setdefault('extracted_fields', {})
+        fields[_FORMATTED_TEXT_KEY] = acceptance.text
+        fields[_FORMATTING_SOURCE_KEY] = _STAGE_5C_SOURCE
+        formatted_count += 1
+        if acceptance.restored_ids:
+            restored.append(_entry_ref(entry, ids=list(acceptance.restored_ids)))
+    return formatted_count, rejected, restored
 
 
 def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
@@ -668,6 +779,7 @@ def run_stage_5c(input_path: str, output_path: str | None = None,
     # Each stage output is self-contained with complete state
     entries_formatted_count = 0
     rejected: list[dict[str, Any]] = []
+    date_restored: list[dict[str, Any]] = []
     total_cost = 0.0
 
     # llm_result['cost'] is the per-provider, per-model cost from
@@ -683,22 +795,8 @@ def run_stage_5c(input_path: str, output_path: str | None = None,
         if verbose:
             print(f"  Parsed {len(id_to_formatted)} formatted entries from LLM output")
 
-        # Update K-code entries in place with formatted text
-        for entry, entry_ids in _ids_by_entry(id_to_entry):
-            formatted_text, reason = accepted_formatted_text(entry, entry_ids, id_to_formatted)
-            if formatted_text is None:
-                if not reason.startswith(_MISSING):
-                    rejected.append({'element_idx_start': entry.get('element_idx_start'),
-                                     'taxonomy_code': entry.get('taxonomy_code'),
-                                     'reason': reason})
-                continue
-
-            # Store formatted text in extracted_fields
-            if 'extracted_fields' not in entry:
-                entry['extracted_fields'] = {}
-            entry['extracted_fields']['formatted_text'] = formatted_text
-            entry['extracted_fields']['formatting_source'] = 'stage_5c_llm'
-            entries_formatted_count += 1
+        entries_formatted_count, rejected, date_restored = _store_formatted_text(
+            id_to_entry, id_to_formatted)
         for item in rejected:
             logger.warning("stage 5c line rejected, entry renders unformatted: %s %s (%s)",
                            item['taxonomy_code'], item['element_idx_start'], item['reason'])
@@ -714,8 +812,12 @@ def run_stage_5c(input_path: str, output_path: str | None = None,
         'k_entries_processed': total_k_entries,
         'entries_formatted': entries_formatted_count,
         # Entries whose formatted line failed `postcheck_line` (E20); each
-        # renders from its stage-4 fields and text instead.
+        # renders unformatted, from its stage-4 course fields or else its
+        # source text.
         'entries_rejected': rejected,
+        # Entries stored formatted after a line that left out its record's
+        # date got it back (`restore_missing_date`, #1345).
+        'entries_date_restored': date_restored,
         'model': usage.get('model') if usage else None,
         'timestamp': datetime.now().isoformat(),
         'total_cost': total_cost,

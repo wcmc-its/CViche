@@ -707,6 +707,18 @@ def test_structural_column_labels_are_filtered_from_raw_lines():
         {}, "Title of course: Attending rounds") == ["Title of course: Attending rounds"]
 
 
+def test_raw_line_fallback_drops_the_cvs_list_number():
+    """#1345 (RCBKFG GKAQHB K5 166, OIEPQD XAYKXA): an entry stage 5c's
+    post-check rejected renders its raw line, and the CV's own list number
+    ("10.") rendered with it ahead of the bullet. Each shape the source
+    numbers with goes; a number that is content stays."""
+    assert _teaching_entry_lines(
+        {}, "10. Kite Building Day, Sample Hall, 2006\n2) Lantern Making\n(3) Paper Boats") == \
+        ["Kite Building Day, Sample Hall, 2006", "Lantern Making", "Paper Boats"]
+    assert _teaching_entry_lines({}, "2006 Kite Building Day\n1.5 hour pond walk") == \
+        ["2006 Kite Building Day", "1.5 hour pond walk"]
+
+
 def test_structural_column_labels_constant_is_the_sections_vocabulary():
     """Review thread 3927100368 item 9. The labels are a module-level frozenset
     with one definition rather than a list literal rebuilt per line; pinned so

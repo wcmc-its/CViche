@@ -141,15 +141,16 @@ def _formatted_line_reasons(entry: Mapping[str, Any]) -> list[str]:
 
 
 def _rejection_findings(stage_5d: Mapping[str, Any]) -> list[dict]:
-    """INFO per line stage 5c's post-check rejected: the entry renders from
-    its stage-4 fields instead, unformatted."""
+    """INFO per line stage 5c's post-check rejected: the entry renders
+    unformatted, from its stage-4 course fields or else its source text
+    (stage 6 `_teaching_entry_lines`)."""
     meta = stage_5d.get(_STAGE_5C_META_KEY)
     rejected = (meta.get(_REJECTED_KEY) or []) if isinstance(meta, Mapping) else []
     return [_finding(
         "teaching_postcheck", "INFO",
         f"entry {item.get('element_idx_start')} ({item.get('taxonomy_code')}): "
         f"stage 5c rejected its formatted line ({item.get('reason')}); the entry "
-        f"renders from its stage-4 fields, unformatted")
+        f"renders unformatted, from its stage-4 course fields or else its source text")
         for item in rejected if isinstance(item, Mapping)]
 
 
