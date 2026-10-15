@@ -43,6 +43,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _whole_record_rendered,
     segment_held_by_fields,
     segments_cover_source,
+    short_tab_part_rendered,
+    short_tab_part_words,
     tab_aware_record_lines,
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
@@ -328,6 +330,99 @@ def test_record_line_held_by_fields_is_still_recovered_when_it_is_not_a_tab_part
     texts = [p.text for p in gen.doc.paragraphs]
     assert "2012-2014 Chair of the Wombat Panel for three years" in texts
     assert gen.stats['unrendered_records_recovered'] == 2
+
+
+def test_short_officer_tab_parts_the_render_dropped_are_recovered():
+    # #1243: an officer post under its society's line has one distinctive word
+    # and its years, too few for the overlap test, so the pass skipped it. Its
+    # word and its years identify it: a line naming the same office with other
+    # years does not vouch for it.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("American Board of Quokka Surgery, term: 2007-2015\t"
+                 "• Chairman, Credentials Committee, 2009-2011\t"
+                 "• Secretary, 2009-2011\t• Vice President, 2011-2012"),
+        "extracted_fields": {"role": "Member", "organization": "American Board of Quokka Surgery",
+                             "additional_roles": [{"role": "Secretary"}, {"role": "Vice President"}]},
+    }
+    gen.doc.add_paragraph("Member, American Board of Quokka Surgery 2007-2015")
+    gen.doc.add_paragraph("Chairman, Credentials Committee 2009-2011")
+    gen.doc.add_paragraph("Secretary of the Wombat Panel, 2005-2007")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Secretary, 2009-2011" in t for t in bullets)
+    assert any("Vice President, 2011-2012" in t for t in bullets)
+    assert not any("Chairman" in t for t in bullets)
+    assert gen.stats["unrendered_records_recovered"] == 2
+
+
+def test_short_tab_part_rendered_elsewhere_or_held_by_fields_is_not_recovered():
+    # #1243: the short part that did render, and a mentee line whose name a
+    # scalar field holds (its "Dates:" label and years render in rows of their
+    # own), are never written a second time.
+    gen = _generator()
+    officers = {
+        "taxonomy_code": "Q1",
+        "text": ("Member of the Quokka Society 1989-present\t"
+                 "Treasurer, 2004-2005\tSecond Vice President 2006-2007"),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member"},
+    }
+    mentee = {
+        "taxonomy_code": "N3B",
+        "text": ("Dr. Lisa Quokkason, Ph.D.    Dates: 1989-1990\t"
+                 "Assistant Professor of Wombat Surgery (1991-1996)\tNorvale University"),
+        "extracted_fields": {"mentee_name": "Lisa Quokkason", "mentee_level": "Ph.D.",
+                             "current_position": "Assistant Professor of Wombat Surgery (1991-1996)"},
+    }
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+    gen.doc.add_paragraph("Treasurer 2004-2005")
+    gen.doc.add_paragraph("Second Vice President 2006-2007")
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [officers], "N3B": [mentee]})
+
+    assert len(gen.doc.paragraphs) == before
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_short_record_line_outside_tabs_stays_unverifiable():
+    # The words-and-years check reads tab parts only: a short line of a
+    # newline entry is still too short to verify, and is never written.
+    gen = _generator()
+    entry = {"taxonomy_code": "Q1", "extracted_fields": {},
+             "text": "2009-2011 Secretary of it\n2012-2014 Treasurer of it"}
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    assert len(gen.doc.paragraphs) == before
+
+
+@pytest.mark.parametrize("part, words", [
+    ("• Secretary, 2009-2011", {"secretary"}),
+    ("Secretary, July, 1993 - October 1994", {"secretary"}),
+    ("President Elect 5/2015-5/2017", {"president", "elect"}),
+    ("1996-97 Vice-President, Acting President", {"president", "acting"}),
+    ("2008-present Africa Liaison", {"africa", "liaison"}),
+    ("Dr. Lisa Quokkason, Ph.D.    Dates: 1989-1990", {"quokkason"}),
+    # Nothing to check it by: a heading with a year, a head count, a bare date.
+    ("COMMITTEES 1993-1994", None),
+    ("students 2013-2014: 12", None),
+    ("July 1992 - October 1994", None),
+])
+def test_short_tab_part_words(part, words):
+    assert short_tab_part_words(part) == words
+
+
+def test_short_tab_part_rendered_needs_its_years_on_the_line():
+    sets = [{"secretary", "wombat", "panel", "2005", "2007"}]
+    assert short_tab_part_rendered("Secretary, 2009-2011", {}, sets) is False
+    assert short_tab_part_rendered("Secretary, 2005-2007", {}, sets) is True
+    assert short_tab_part_rendered("Secretary, 2009-2011", {"role": "Secretary"}, []) is True
+    assert short_tab_part_rendered("COMMITTEES 1993-1994", {}, []) is None
 
 
 # ------------------------------------------------ D1 positions path (KFGXBW)
