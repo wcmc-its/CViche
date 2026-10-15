@@ -1998,7 +1998,7 @@ def test_pubmed_list_not_cut_from_the_cv_byline_is_none(cv, pubmed):
     'MBChB', 'FRCSEd', 'PhD(c)', 'MSc(Med)', 'Hons', 'Ng', 'MD, PhD', 'Ed Eds', 'Sr Jr', 'II III', 'IV Editors', 'Editor Eds',
     # unlisted degrees by shape: mixed case, parenthesised, four or more capitals
     'MBChB PhD', 'PharmD BCPS', 'PhD ABPP', 'MD (Hons)', 'MD (Hons', 'MD MSc(Med)', 'MBChB MD',
-    'MD DPhil', 'MPhil MD', 'PhDr MD', 'MD MScMed', 'MD FAAOS', 'MD FACMGG'])
+    'MD DPhil', 'MPhil MD', 'PhDr MD', 'MD MScMed', 'MD FAAOS', 'MD FACMGG', 'MD MSc-PhD'])
 def test_cv_piece_that_is_no_name_is_none(piece):
     assert _restored(CAPPED_CV[:10] + [piece], CAPPED_CV[:10]) is None
 
@@ -2041,7 +2041,8 @@ def test_cv_name_the_cv_line_does_not_write_is_none():
 @pytest.mark.parametrize('name', ['Ma JD', 'Ma D', 'Deng D', 'Bao MS', 'Do MD', 'Ed Wren', 'Jr Quill', 'Lu Lu',
                                   'McDonald JD', 'DeLuca MS', 'LeBlanc MA', 'MacKay DM', 'Quill,J',
                                   'LEE JD', 'LI JA', 'DiMaggio MD', 'deLuca MD', 'McDonald-Smith MD', "'tHooft MD",
-                                  'KEMPson MD'])
+                                  'KEMPson MD', 'Curran-Everett D', 'Farr-Jones MA', 'Al-Khatib MS',
+                                  'Ben-Ami D', "O'Neil-Ray JD", 'Garcia-LOPEZ MD', 'LOPEZ-Garcia MD'])
 def test_a_surname_spelt_like_a_credential_still_renders(name):
     # The credential words are compared as written: "Ma" is a surname, "MA" a degree.
     assert _restored(CAPPED_CV[:10] + [name], CAPPED_CV[:10]) == ', '.join(CAPPED_CV[:10] + [name])
