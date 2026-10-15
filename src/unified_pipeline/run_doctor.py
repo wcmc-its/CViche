@@ -86,7 +86,9 @@ Lints, ranked by the severity of the failure class they catch:
                           construction (#446); with stage 5d, also two
                           entries naming one article (title, PMID, DOI) or
                           one grant across M2A/M2B/M2C, rendered twice at
-                          any distance (EBYSBC E16/E28)
+                          any distance (EBYSBC E16/E28). Two source entries
+                          that each state the record are the CV listing it
+                          twice: INFO, not WARN (#1585)
 14b. invented_records     a rendered stage-4 record built entirely from the
                           WCM template's own field labels rather than real
                           content (the F2 board-certification header row
@@ -132,7 +134,9 @@ Lints, ranked by the severity of the failure class they catch:
                           talks from the 2000s rendered in the 1900s); WARN.
                           Also a year after 2100: INFO when the source has
                           the typo, WARN when it does not. A year a stage-5
-                          formatter replaced (stage 5d) is not judged
+                          formatter replaced (stage 5d) is not judged, nor
+                          one the rendered docx never prints (an mm/yy
+                          duration hides the century, #1585)
 
 14h. stage4_group_failures a stage-4 taxonomy group's extraction call failed
                           (invalid reply, timeout, provider error such as a
@@ -381,8 +385,13 @@ Lints, ranked by the severity of the failure class they catch:
                           with no pending grant, funding with no grant,
                           mentoring with no mentoring, or a funder (NIH, NSF,
                           DoD, ...) no entry or source line names. WARN, one
-                          per kind; no score cap. Reads stage 4.5 and 4, and
-                          the source when present
+                          per kind. And at INFO, one per kind, a sentence
+                          its named grant's own record contradicts (#1554,
+                          YUYVIG/NECRGC): a status against the grant's end
+                          date or heading, a declined award counted, a
+                          funder the grant's line does not name, a lead
+                          role it does not give. No score cap. Reads stage
+                          4.5 and 4, and the source when present
 14ah. owner_attribution   other people's content rendered as the CV owner's
                           (#1573, YUYVIG): mentee entries (N3, N3A, N3B)
                           under a heading or lead line naming reviewers or
@@ -394,7 +403,12 @@ Lints, ranked by the severity of the failure class they catch:
                           heading or lead line (ECXGAT 2156-2204) and INFO
                           elsewhere, where most hits are the owner's own
                           group-authored papers or the owner under another
-                          surname. Reads stage 4 and the docx
+                          surname; and H, I or D entries, or K under an
+                          accomplishments heading, beneath a heading naming
+                          students or mentees in the plural or holding a
+                          mentoring-coded entry (#1251, JFBPNC 569-582),
+                          WARN, with the count per code. Reads stage 4 and
+                          the docx
 14ai. citation_grounding  a citation stage 5d wrote that names an author,
                           an initial or an ordinal its source line lacks
                           (#1570, YUYVIG): a bare initials token joined to
@@ -478,6 +492,12 @@ Lints, ranked by the severity of the failure class they catch:
                           section; with the docx, only lines that render
                           nowhere. Reads stage 2; stage 1a and the docx when
                           present
+14at. stage2_span_overlap a stage-2 record entry that shares two or more
+                          source elements (paragraphs or table rows) with an
+                          entry before it, so the shared lines render twice,
+                          often under the wrong section (#1433; ATUVAL
+                          867-869, web172 112.x). WARN, one per pair of
+                          sections. Reads stage 2 only
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -688,6 +708,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_record_date_shift,
     lint_segmentation,
     lint_segmentation_collapse,
+    lint_stage2_span_overlap,
     lint_stage2_text_break,
     lint_stage2_unaccounted,
     lint_table_lost,
@@ -857,6 +878,7 @@ KNOWN_LINTS = (
     "record_date_shift",
     "header_consumed_record",
     "stage2_text_break",
+    "stage2_span_overlap",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -1090,13 +1112,14 @@ LINT_PREVALENCE = {
     # stage-4 artifacts carries it, measured 2026-10-07. The zero-observed
     # floor, as for research_summary_call_failed above.
     "stage4_unplaced_items": 0.001,
-    # summary_unsupported_claim (#1554, OIE-SUM in doctor/PRECISION.md): 3 of
-    # the 107 stored stage-4.5 summaries of the EBYSBC/s7ab/pilot (63),
-    # NDMRSO (29), EOAHMI (9) and X6 (6) farms, and 9 of the 14 OIEPQD runs
-    # (dev-258, after #1542's pending-application prompt line), measured
-    # 2026-10-07. The farm rate is the one before #1542; same mixed-corpus
-    # caveat as above.
-    "summary_unsupported_claim": 0.028,
+    # summary_unsupported_claim (#1554, S1554-PC in doctor/PRECISION.md): 34
+    # of 224 distinct stored stage-4.5 summaries (the main checkout's
+    # analysis/, the eb, ndm, x6, eo and wave1 farms and
+    # src/unified_pipeline/outputs) at any severity once the per-claim INFO
+    # checks were added, measured 2026-10-14; 20 of 224 before them (WARN
+    # only). Most of those summaries predate #1558's prompt; same
+    # mixed-corpus caveat as above.
+    "summary_unsupported_claim": 0.152,
     # owner_attribution (#1573, YUY-OA in doctor/PRECISION.md): 36 of the 145
     # runs of the YUYVIG (37), EBYSBC/s7ab/pilot (63), NDMRSO (30), EOAHMI (9)
     # and X6 (6) farms at any severity, 3 at WARN, over fresh renders of
@@ -1141,6 +1164,12 @@ LINT_PREVALENCE = {
     # measured 2026-10-12. Same mixed-corpus caveat as above; the old farm
     # runs carry far more text breaks than current ones.
     "stage2_text_break": 0.354,
+    # stage2_span_overlap (#1433; S2-SO in doctor/PRECISION.md): 19 of 278
+    # local stage-2 runs -- the 106 under src/unified_pipeline/outputs, the
+    # 2026-09-11 and 2026-09-17 _autopsy_artifacts batches (40 and 20) and
+    # the 112 under analysis/ -- measured 2026-10-15. Same mixed-corpus
+    # caveat as above.
+    "stage2_span_overlap": 0.068,
 }
 
 
@@ -1679,7 +1708,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",),
              optional=("blocks", "subpoints")),
     LintSpec("implausible_year", lint_implausible_year, ("stage_4",),
-             optional=("stage_5d",)),
+             optional=("stage_5d", "blocks")),
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
     LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
@@ -1747,6 +1776,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              optional=("blocks",)),
     LintSpec("stage2_text_break", lint_stage2_text_break, ("stage_2",),
              optional=("stage_1a", "blocks")),
+    LintSpec("stage2_span_overlap", lint_stage2_span_overlap, ("stage_2",)),
 )
 
 #: The views read from the stage-6 docx.
