@@ -5879,8 +5879,9 @@ def test_run_doctor_hands_offschema_fields_the_rendered_document(tmp_path):
     assert [f for f in payload["findings"] if f["lint"] == "offschema_fields"] == []
 
 
-def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
-    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+def _implausible_year_hits(tmp_path, rendered_line):
+    """run_doctor's implausible_year findings for one wrong-century talk
+    whose rendered line is `rendered_line`; invented values."""
     root = _build_clean_run(tmp_path)
     fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
     data = json.loads(fields.read_text())
@@ -5889,13 +5890,25 @@ def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
         "element_idx_start": 96, "text": "Invited talk, Example City 11/02",
         "extracted_fields": {"title": "Invited talk", "date": "1902-11"}})
     fields.write_text(json.dumps(data))
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_paragraph(rendered_line)
+    output.save(str(docx_path))
+    return [f for f in run_doctor(root, _UID)["findings"] if f["lint"] == "implausible_year"]
 
-    payload = run_doctor(root, _UID)
 
-    hits = [f for f in payload["findings"] if f["lint"] == "implausible_year"]
+def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
+    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+    hits = _implausible_year_hits(tmp_path, "Invited talk, Example City, November 1902")
     assert len(hits) == 1
     assert hits[0]["severity"] == "WARN"
     assert "entry 96 (R): date=1902" in hits[0]["message"]
+
+
+def test_run_doctor_hands_implausible_year_the_render(tmp_path):
+    """The row must also hand it the docx (#1585): a wrong-century year the
+    page never prints, as an mm/yy date, is not reported."""
+    assert _implausible_year_hits(tmp_path, "Invited talk, Example City, 11/02") == []
 
 
 def test_run_doctor_hands_the_year_lints_stage_5d(tmp_path):
@@ -5913,6 +5926,11 @@ def test_run_doctor_hands_the_year_lints_stage_5d(tmp_path):
          "element_idx_end": 98, "text": "Example course 2017-2019",
          "extracted_fields": {"start_date": "2016"}}]
     fields.write_text(json.dumps(data))
+    # The page prints the wrong year, so implausible_year judges it (#1585).
+    docx_path = root / "stage_6_wcm_documents" / f"{_UID}_cv_wcm.docx"
+    output = Document(str(docx_path))
+    output.add_paragraph("Example lecture, March 3, 1900")
+    output.save(str(docx_path))
 
     def year_hits():
         payload = run_doctor(root, _UID)

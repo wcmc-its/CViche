@@ -1527,6 +1527,24 @@ DUPLICATE_RECORD_ID_TITLE_OVERLAP = 0.8
 _RECORD_PMID_MIN_DIGITS = 5
 _DOI_PREFIX_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 _YEAR_IN_VALUE_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_PMID_ID_PREFIX = "pmid:"
+
+# Two more answers to "is this pair one record rendered twice" (#1585,
+# batches YUYVIG and NECRGC):
+#   - Two citations with two different PMIDs are two papers, whatever their
+#     titles: one guideline or consensus paper co-published in two journals
+#     (NECRGC YIXQFB, three pairs, each two PubMed records).
+#   - When each copy is its own source entry (spans that do not overlap) and
+#     each entry's own source text states the title, the CV lists the record
+#     twice and the output is faithful to it (YUYVIG BLBVPD, OKRTPJ, RLADNC,
+#     ULHCAP, UVZNIC; NECRGC FVQANK, GNONHA, JEFZWH, SPIHVQ: 11 pairs the
+#     verifiers judged false as pipeline defects). That pair is reported at
+#     INFO, not WARN: the owner may still want to delete one copy, but no
+#     stage made it. A copy under a source heading naming abstracts but coded
+#     as an article (S1-S3) is not the source listing the article twice: the
+#     abstract was recoded, and that recode is what put a second copy among
+#     the articles (YUYVIG SQMWHM, #446), so it stays WARN.
+_ABSTRACT_HEADING_RE = re.compile(r"\babstracts?\b", re.IGNORECASE)
 
 
 class _RecordIdentity(NamedTuple):
@@ -1540,6 +1558,12 @@ class _RecordIdentity(NamedTuple):
     funder: str
     grant_number: str
     pi: str
+    # Where the copy came from (`_source_lists_twice`): its source span, None
+    # without an integer start; whether its own source text states the
+    # title; and whether it is an abstract the classifier coded as an article.
+    span: tuple[int, int] | None = None
+    source_states_title: bool = False
+    recoded_abstract: bool = False
 
 
 def _value_year(value: object) -> int | None:
@@ -1551,7 +1575,7 @@ def _record_ids(fields: Mapping) -> frozenset[str]:
     ids = set()
     pmid = re.sub(r"\D", "", str(fields.get("pmid") or ""))
     if len(pmid) >= _RECORD_PMID_MIN_DIGITS:
-        ids.add(f"pmid:{pmid}")
+        ids.add(f"{_PMID_ID_PREFIX}{pmid}")
     doi = _DOI_PREFIX_RE.sub("", str(fields.get("doi") or "").strip()).lower()
     if doi.startswith("10."):
         ids.add(f"doi:{doi}")
@@ -1576,8 +1600,47 @@ def _record_identities(stage_5d: Mapping) -> list[_RecordIdentity]:
         identities.append(_RecordIdentity(
             entry.element_idx, entry.code, title,
             _value_year(entry.fields.get("start_date" if grant else "year")),
-            ids, grant_key("agency"), grant_key("grant_number"), grant_key("pi_name")))
+            ids, grant_key("agency"), grant_key("grant_number"), grant_key("pi_name"),
+            _entry_span(entry), _states_title(title, entry.text),
+            not grant and _is_recoded_abstract(entry.hierarchy)))
     return identities
+
+
+def _entry_span(entry: _FieldsEntry) -> tuple[int, int] | None:
+    """The entry's (first, last) source element, or None without an
+    integer start; a missing end is the start."""
+    start, end = entry.element_idx, entry.element_idx_end
+    if not isinstance(start, int):
+        return None
+    return start, end if isinstance(end, int) else start
+
+
+def _states_title(title: str, source_text: str) -> bool:
+    """Whether an entry's source text states its title. Spaces are dropped
+    from both, so a source that runs two words together ("anesthésiepéridurale",
+    YUYVIG ZDOAZO 801) still states it."""
+    return bool(title) and title.replace(" ", "") in _passage_key(source_text).replace(" ", "")
+
+
+def _is_recoded_abstract(hierarchy: tuple[str, ...]) -> bool:
+    """A citation-coded entry whose own source heading names abstracts."""
+    return bool(hierarchy) and _ABSTRACT_HEADING_RE.search(hierarchy[-1]) is not None
+
+
+def _source_lists_twice(a: _RecordIdentity, b: _RecordIdentity) -> bool:
+    """Whether a pair is two source entries that each state the record: the
+    CV lists it twice, rather than a stage copying one entry."""
+    return (a.source_states_title and b.source_states_title
+            and not (a.recoded_abstract or b.recoded_abstract)
+            and a.span is not None and b.span is not None
+            and (a.span[1] < b.span[0] or b.span[1] < a.span[0]))
+
+
+def _distinct_pmids(a: _RecordIdentity, b: _RecordIdentity) -> bool:
+    """Both citations carry a PMID and they share none: two PubMed records."""
+    pmids_a = {i for i in a.ids if i.startswith(_PMID_ID_PREFIX)}
+    pmids_b = {i for i in b.ids if i.startswith(_PMID_ID_PREFIX)}
+    return bool(pmids_a and pmids_b) and not pmids_a & pmids_b
 
 
 def _title_overlap(a: str, b: str) -> float:
@@ -1601,6 +1664,8 @@ def _same_record(a: _RecordIdentity, b: _RecordIdentity) -> str | None:
     if a.code in _DUPLICATE_GRANT_CODES:
         return _same_grant(a, b)
     if a.code != b.code or (a.year is not None and b.year is not None and a.year != b.year):
+        return None
+    if _distinct_pmids(a, b):
         return None
     if a.title and a.title == b.title:
         return "title"
@@ -1671,28 +1736,43 @@ def lint_duplicate_records(blocks: list[tuple[str, str]],
     record by title, PMID or DOI, or one grant under two funding codes, at
     any distance (`_duplicate_entry_pairs`). Its evidence leads with the
     entry index; a block pair both of whose blocks a record pair already
-    names is not counted twice.
+    names is not counted twice. Two citations with different PMIDs are two
+    records; a pair whose copies are two source entries that each state the
+    title is the CV listing the record twice, reported at INFO
+    (`_source_lists_twice`, #1585).
     """
     entry_pairs = _duplicate_entry_pairs(blocks, stage_5d) if stage_5d else []
     named_blocks = set().union(*(rendered for *_rest, rendered in entry_pairs))
     block_pairs = [(first, second) for first, second in _duplicate_block_pairs(blocks)
                    if not {first, second} <= named_blocks]
-    count = len(entry_pairs) + len(block_pairs)
-    if count < DUPLICATE_RECORD_WARN_COUNT:
-        return []
+    in_source = [pair for pair in entry_pairs if _source_lists_twice(pair[0], pair[1])]
+    made = [pair for pair in entry_pairs if not _source_lists_twice(pair[0], pair[1])]
+    findings = []
+    count = len(made) + len(block_pairs)
+    if count >= DUPLICATE_RECORD_WARN_COUNT:
+        evidence = [_entry_pair_evidence(pair) for pair in made]
+        evidence += [f"block {first} repeats at {second}: "
+                     f"{str(blocks[first][1])[:100]}" for first, second in block_pairs]
+        findings.append(_finding(
+            "duplicate_records", "WARN",
+            f"{count} duplicated record(s) — the same entry appears twice: one "
+            f"enumerated entry within the same output section, or one article or "
+            f"grant listed twice",
+            evidence[:5]))
+    if in_source:
+        findings.append(_finding(
+            "duplicate_records", "INFO",
+            f"{len(in_source)} record(s) the source CV itself lists twice, "
+            f"rendered twice as listed — each copy is its own source entry",
+            [_entry_pair_evidence(pair) for pair in in_source][:5]))
+    return findings
 
-    evidence = [f"entry {first.element_idx} repeats as entry {second.element_idx} "
-                f"({first.code}/{second.code}, same {why}): "
-                f"{(first.title or second.title)[:80]}"
-                for first, second, why, _rendered in entry_pairs]
-    evidence += [f"block {first} repeats at {second}: "
-                 f"{str(blocks[first][1])[:100]}" for first, second in block_pairs]
-    return [_finding(
-        "duplicate_records", "WARN",
-        f"{count} duplicated record(s) — the same entry appears twice: one "
-        f"enumerated entry within the same output section, or one article or "
-        f"grant listed twice",
-        evidence[:5])]
+
+def _entry_pair_evidence(pair: tuple[_RecordIdentity, _RecordIdentity, str, set[int]]) -> str:
+    first, second, why, _rendered = pair
+    return (f"entry {first.element_idx} repeats as entry {second.element_idx} "
+            f"({first.code}/{second.code}, same {why}): "
+            f"{(first.title or second.title)[:80]}")
 
 
 # A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -
