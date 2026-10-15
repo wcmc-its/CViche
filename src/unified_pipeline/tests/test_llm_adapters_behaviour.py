@@ -1688,6 +1688,38 @@ def test_call_with_retry_outage_budget_exhausted_raises_llmoutageerror(monkeypat
     assert attempts["n"] == 7  # 1+2+4+8+16+32=63s elapsed by the 7th failure >= the 50s budget
 
 
+def test_llm_outage_error_message_names_the_provider_error_by_label_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # #639: the LLMOutageError message reaches the stage-errors record and
+    # the drivers' log lines, so the provider's own message text must not be
+    # in it -- only the class and botocore code. The raw text goes to DEBUG.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(retry.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "5")
+
+    def always_unavailable() -> str:
+        if clock["t"] > 1000:
+            raise AssertionError("budget never exhausted")
+        raise ClientError(
+            {"Error": {"Code": "ServiceUnavailableException", "Message": _PROVIDER_DETAIL_SENTINEL}},
+            "Converse",
+        )
+
+    with (
+        caplog.at_level(logging.DEBUG, logger=retry.__name__),
+        pytest.raises(retry.LLMOutageError) as exc_info,
+    ):
+        retry._call_with_retry(always_unavailable, retry_count=1)
+
+    message = str(exc_info.value)
+    assert message.endswith(": ClientError[ServiceUnavailableException]")
+    assert _PROVIDER_DETAIL_SENTINEL not in message
+    _, debugs = _warning_and_debug_messages(caplog)
+    assert any("budget exhausted" in m and _PROVIDER_DETAIL_SENTINEL in m for m in debugs)
+
+
 def test_call_with_retry_outage_honors_retry_after_capped_at_60(monkeypatch: pytest.MonkeyPatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))

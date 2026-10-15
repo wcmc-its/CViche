@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from unified_pipeline.config import get_llm_env_config
+from unified_pipeline.log_redaction import redacted_error_label
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,9 @@ class LLMOutageError(Exception):
     down for N seconds" from an ordinary parse/validation error and choose
     to fail the run rather than silently default-code everything in flight
     (#810). Always raised with `from <the last provider error>`, so
-    `__cause__` carries it.
+    `__cause__` carries it. The message names that error only by its
+    redacted label (log_redaction, #639): it reaches the stage-errors record
+    and log lines, so the provider's own text stays out of it.
     """
 
     def __init__(self, message: str, seconds_waited: float) -> None:
@@ -233,14 +236,13 @@ def _redacted_error_label(e: Exception) -> str:
     class, plus botocore's error code when the error carries one -- e.g.
     "ClientError[ThrottlingException]" or "ReadTimeoutError". str(e) is never
     part of it: a provider message can carry response-body fragments, request
-    URLs, or IDs, so the retry sites log it at DEBUG only.
+    URLs, or IDs, so the retry sites log it at DEBUG only. The policy is
+    log_redaction's; this adds the one safe detail a provider error has.
     """
-    label = type(e).__name__
+    code = ""
     if isinstance(e, _BotoClientError):
         code = e.response.get("Error", {}).get("Code", "")
-        if code:
-            label = f"{label}[{code}]"
-    return label
+    return redacted_error_label(e, code)
 
 
 # Guards construction of the module-level Bedrock client (llm/bedrock.py).
@@ -357,9 +359,11 @@ def _call_with_retry(
                 elapsed = now - outage_started
                 budget = _get_outage_budget_seconds()
                 if elapsed >= budget:
+                    logger.debug("LLM provider outage detail (budget exhausted): %s", e)
                     raise LLMOutageError(
                         f"LLM provider outage exceeded the {budget:.0f}s budget "
-                        f"({elapsed:.0f}s elapsed, {outage_retries} pauses): {e}",
+                        f"({elapsed:.0f}s elapsed, {outage_retries} pauses): "
+                        f"{_redacted_error_label(e)}",
                         seconds_waited=elapsed,
                     ) from e
                 wait = _outage_backoff_wait(outage_retries, _retry_after_seconds(e))
