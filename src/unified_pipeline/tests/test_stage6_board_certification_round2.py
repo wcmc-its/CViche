@@ -1612,6 +1612,11 @@ class TestBareYearUnderARecertifiedEntryIsAFurtherRecertification:
         for year in ("2005", "2001"):
             entries = [_recertified_entry(), {"text": year, "extracted_fields": {}}]
             assert _attach_bare_years(entries, current_year=2026) == (entries[:1], [year])
+        # A future recertification (an expiry) can never have a later year
+        # that is not itself in the future, so this bound alone rejects it.
+        entries = [_recertified_entry(recertification_date="2030"),
+                   {"text": "2015", "extracted_fields": {}}]
+        assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2015"])
 
     def test_a_year_before_an_already_attached_one_still_warns(self):
         # 2010 is after the stated 2005 but before the 2015 already joined.
@@ -1637,13 +1642,17 @@ class TestBareYearUnderARecertifiedEntryIsAFurtherRecertification:
         assert unattached == []
 
     def test_a_recertification_that_reads_as_an_end_still_warns(self):
-        # Future recertification (an expiry) renders a range, not an event.
-        future = _recertified_entry(recertification_date="2030")
+        # Both pass the year bounds (2005 < 2015 <= 2026); only the Dates
+        # cell, which reads as a range rather than an event, rejects them.
         # The source line writes "1998-2005" itself: a range, not an event.
         stated_range = {"text": "Sample Medicine 1998-2005",
                         "extracted_fields": {"specialty": "Sample Medicine", "year_certified": "1998",
                                              "recertification_date": "2005"}}
-        for previous in (future, stated_range):
+        # A stated end date wins the cell: "1998-2010", no recertification named.
+        stated_end = {"text": "Sample Medicine, October 1998\tRecertification 2005",
+                      "extracted_fields": {"specialty": "Sample Medicine", "year_certified": "1998",
+                                           "end_date": "2010", "recertification_date": "2005"}}
+        for previous in (stated_range, stated_end):
             entries = [previous, {"text": "2015", "extracted_fields": {}}]
             assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2015"])
 
@@ -1663,3 +1672,44 @@ class TestBareYearUnderARecertifiedEntryIsAFurtherRecertification:
         assert _RECERTIFIED_CELL_RE.search("1998 (recertified 2005, 2015)")
         assert not _RECERTIFIED_CELL_RE.search("1998-2005")
         assert not _RECERTIFIED_CELL_RE.search("1998 (recertification: not required)")
+
+    def test_an_entry_sent_to_the_text_reparse_still_warns(self):
+        # A fused entry (two boards) and one with no structured board, number
+        # or specialty are both reparsed from text, which recovers its own
+        # year and never reads an attached one: the year must stay a warning
+        # rather than vanish.
+        fused = {"text": "Pediatrics | 12345 | 1998",
+                 "extracted_fields": {"certifying_board": "American Board of Pediatrics; Board of X",
+                                      "year_certified": "1998", "recertification_date": "2005"}}
+        unstructured = {"text": "Pediatrics\n12345\n1998",
+                        "extracted_fields": {"year_certified": "1998",
+                                             "recertification_date": "2005"}}
+        for previous in (fused, unstructured):
+            entries = [previous, {"text": "2015", "extracted_fields": {}}]
+            assert _attach_bare_years(entries, current_year=2026) == (entries[:1], ["2015"])
+            gen = _generator()
+            gen._fill_board_certification(entries)
+            assert _rows_after_board(gen) == [("Pediatrics", "12345", "1998")]
+            assert [f["evidence"] for f in gen._section_failures] == [["year=2015"]]
+
+    def test_the_pinned_year_also_pins_the_date_cell(self):
+        # With 2030 pinned, a 2027 recertification is past, so the cell names
+        # it as an event and 2029 joins it; the run's own clock is not read.
+        entry = _recertified_entry(recertification_date="2027")
+        assert _format_certification_date_str(entry["extracted_fields"], current_year=2030) == \
+            "1998 (recertified 2027)"
+        kept, unattached = _attach_bare_years(
+            [entry, {"text": "2029", "extracted_fields": {}}], current_year=2030)
+        assert unattached == []
+        assert kept[0]["extracted_fields"][LATER_RECERTIFICATIONS_FIELD] == ("2029",)
+
+
+def test_a_one_item_certificate_number_list_renders_as_its_number():
+    # LLM extraction sometimes returns certificate_number as a list; one
+    # number is one certification and renders as that number, not "['12345']".
+    gen = _generator()
+    gen._fill_board_certification([
+        {"text": "American Board of Pediatrics 12345 1998",
+         "extracted_fields": {"certifying_board": "American Board of Pediatrics",
+                              "certificate_number": ["12345"], "year_certified": "1998"}}])
+    assert _rows_after_board(gen) == [("American Board of Pediatrics", "12345", "1998")]

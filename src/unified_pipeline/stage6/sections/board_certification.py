@@ -216,7 +216,9 @@ def _board_cell_text(fields: dict) -> str:
     return board
 
 
-def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
+def _format_certification_date_str(
+    fields: dict, source_text: str = '', current_year: int | None = None,
+) -> str:
     """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
     entry's structured fields.
 
@@ -232,7 +234,8 @@ def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
     unless the entry's `source_text` writes the two years as one range: see
     `_with_recertification`. Further recertification years attached from
     bare-year entries below (`LATER_RECERTIFICATIONS_FIELD`, #1270) join it as
-    one list: "1998 (recertified 2005, 2015)".
+    one list: "1998 (recertified 2005, 2015)". `current_year` is passed on to
+    `_with_recertification`, so a caller that pins the year pins both clocks.
     """
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
     end_date = fields.get('end_date') or ''
@@ -252,7 +255,7 @@ def _format_certification_date_str(fields: dict, source_text: str = '') -> str:
         later_years = _later_recertification_years(fields)
         if later_years:
             recert_fmt = ', '.join((recert_fmt, *later_years))
-        return _with_recertification(start_fmt, recert_fmt, source_text)
+        return _with_recertification(start_fmt, recert_fmt, source_text, current_year)
     if start_fmt:
         return start_fmt
     if end_fmt:
@@ -636,13 +639,20 @@ def _with_further_recertification(entry: dict, year: str, current_year: int) -> 
     year is later than every recertification already named, so it continues
     the list rather than contradicting it; and the year is not after
     `current_year`, since a future year is an expiry, not a recertification.
-    Anything else returns None, and the caller keeps the skipped-row warning.
+    The entry must also render as one row from its structured fields
+    (`_renders_as_structured_row`): a text reparse that recovers its own year
+    never reads the attached one, so the year would vanish without the
+    warning. Anything else returns None, and the caller keeps the skipped-row
+    warning.
     """
     fields = entry.get('extracted_fields') or {}
     latest = _latest_recertification_year(fields)
     if not latest or not int(latest) < int(year) <= current_year:
         return None
-    date_cell = _format_certification_date_str(fields, entry.get('text') or '')
+    text = entry.get('text') or ''
+    if not _renders_as_structured_row(fields, text):
+        return None
+    date_cell = _format_certification_date_str(fields, text, current_year)
     if not _RECERTIFIED_CELL_RE.search(date_cell):
         return None
     later_years = (*_later_recertification_years(fields), year)
@@ -718,6 +728,26 @@ def _is_clean_specialty_only(fields: dict, text: str) -> bool:
     return len(data_lines) <= 1
 
 
+def _certificate_number_text(value: object) -> str:
+    """An entry's `certificate_number` as one string; LLM extraction
+    sometimes returns it as a list."""
+    if isinstance(value, list):
+        return ', '.join(str(n).strip() for n in value if n)
+    return str(value) if value else ''
+
+
+def _renders_as_structured_row(fields: dict, text: str) -> bool:
+    """True when `_fill_board_certification` renders this entry as one row
+    built from its structured fields, False when it sends the entry to the
+    text reparse (`_parse_and_add_multiple_certifications`). The dispatch and
+    the bare-year attach (#1270) both ask this, so they cannot disagree."""
+    certificate_number = _certificate_number_text(fields.get('certificate_number', ''))
+    if not (fields.get('certifying_board') or certificate_number
+            or _is_clean_specialty_only(fields, text)):
+        return False
+    return not _is_fused_certification(fields, _split_multi(certificate_number))
+
+
 class BoardCertificationSection:
     """Section F2 writers, mixed into `WCMTemplateGenerator`."""
 
@@ -777,36 +807,15 @@ class BoardCertificationSection:
             fields = entry.get('extracted_fields', {}) or {}
             original_text = entry.get('text', '')
 
-            certifying_board = fields.get('certifying_board', '')
-            certificate_number = fields.get('certificate_number', '')
-
-            # Handle certificate_number being a list (from LLM extraction) or string
-            if isinstance(certificate_number, list):
-                cert_numbers = [str(n).strip() for n in certificate_number if n]
-                certificate_number = ', '.join(cert_numbers)  # Also update for single cert case
+            # Structured fields (a board, a number, or a clean specialty alone,
+            # #1234) for one certification render as one row; fused entries
+            # (#625 thread 3850459808) and entries with no structured fields
+            # are reparsed from text. See _renders_as_structured_row.
+            if _renders_as_structured_row(fields, original_text):
+                certificate_number = _certificate_number_text(fields.get('certificate_number', ''))
+                date_str = _format_certification_date_str(fields, original_text)
+                self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
-                certificate_number = str(certificate_number) if certificate_number else ''
-
-            # Check if we have structured fields. A clean specialty alone counts
-            # (#1234): a record with a specialty and dates but no board name
-            # used to fall to the raw-text reparse, which put the whole source
-            # line in the name cell.
-            if certifying_board or certificate_number or _is_clean_specialty_only(fields, original_text):
-                # Multiple certifications merged into one entry? (#625 thread
-                # 3850459808: considers certifying_board too, not just the
-                # certificate-number count -- see _is_fused_certification.)
-                cert_numbers = _split_multi(certificate_number)
-
-                if _is_fused_certification(fields, cert_numbers):
-                    # Multiple certifications merged - try to parse from original text
-                    # Original text pattern: "Specialty1\n\nSpecialty2 | CertNum1\n\nCertNum2 | Year1\nYear2"
-                    self._parse_and_add_multiple_certifications(table, original_text, entry)
-                else:
-                    # Single certification - format dates as yyyy-yyyy per WCM template
-                    date_str = _format_certification_date_str(fields, original_text)
-                    self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
-            else:
-                # No structured fields - try to parse from text
                 self._parse_and_add_multiple_certifications(table, original_text, entry)
 
     def _parse_and_add_multiple_certifications(self, table, text: str, entry: dict):
