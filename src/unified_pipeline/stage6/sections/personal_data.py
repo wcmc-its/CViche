@@ -474,12 +474,15 @@ def _without_other_numbers_home_labels(phone: _JsonValue, text: str) -> str:
 
 
 def _value_may_hold(value: str, found: str) -> bool:
-    """Whether a number in `value` may be inside the digit string `found`, by
-    its last seven digits, so a country code or an extension on either side
-    still pairs. Errs towards yes: a wrong yes keeps a home label, which
-    only withholds, and a value with no number keeps every label."""
+    """Whether `value` and the digit string `found` may share a number, by
+    last seven digits each way: a number in `value` inside `found`, or the
+    end of `found` inside `value` (either side can join two numbers into
+    one match, or carry a country code or an extension). Errs towards yes:
+    a wrong yes keeps a home label, which only withholds, and a value with
+    no number keeps every label."""
     numbers = [_digits(number) for number in re.findall(_PHONE_NUMBER_PATTERN, value)]
-    return not numbers or any(number[-_MIN_PHONE_DIGITS_TO_PAIR:] in found for number in numbers)
+    return (not numbers or found[-_MIN_PHONE_DIGITS_TO_PAIR:] in _digits(value)
+            or any(number[-_MIN_PHONE_DIGITS_TO_PAIR:] in found for number in numbers))
 
 
 def _cell_label_is_at_another_number(phone: _JsonValue, text: str) -> bool:

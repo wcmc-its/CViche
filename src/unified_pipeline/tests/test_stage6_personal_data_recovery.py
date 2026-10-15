@@ -1622,6 +1622,18 @@ def test_a_home_label_trailing_another_number_leaves_the_work_number_in_office(
     ("TELEPHONE: 555-555-0100 555-555-0102 (home)", "555-555-0102 ext 7"),
     # the line drops the home number's area code, the value keeps it
     ("555-0100 555-0102 (home)", "+1 212-555-0102"),
+    # the value joins the home number before the work one with a space (#1823 review 3)
+    ("TELEPHONE: 555-555-0100 (work); 555-555-0102 (home)", "555-555-0102 555-555-0100"),
+    ("TELEPHONE: 555-555-0100 (work); 555-555-0102 (home)", "555.555.0102 555.555.0100"),
+    # the joined span's first number is the value's
+    ("TELEPHONE: 555-555-0102 555-555-0100 (home)", "555-555-0102"),
+    # one side drops an area code inside a joined pair
+    ("555-555-0100 (work); 555-555-0102 (home)", "555-0102 555-555-0100"),
+    ("TELEPHONE: 555-0102 555-555-0100 (home)", "+1 212-555-0102"),
+    # a value listing the joined span's first number beside another one
+    ("TELEPHONE: 555-555-0102 555-555-0100 (home)", "555-555-0102; 555-555-0199"),
+    # the text writes the home number shorter than the value
+    ("212-555-0100 (work); 55-0102 (home)", "212-555-0102"),
     # a value with no digits keeps every home label
     ("555-555-0100 (work); 555-555-0102 (home)", "see cv"),
     # the value spells the home number without its area code
