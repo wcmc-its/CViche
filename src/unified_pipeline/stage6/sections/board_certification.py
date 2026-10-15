@@ -313,7 +313,7 @@ _BARE_RECERTIFICATION_LINE_RE = re.compile(
     re.IGNORECASE)
 
 
-def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
+def _every_recertification_year(recert_fmt: str, source_text: str, current_year: int) -> str:
     """Every recertification year the record's own lines name, oldest
     first, when stage 4 kept only one of them.
 
@@ -336,8 +336,11 @@ def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
                  if recert_fmt in _recertification_years(line)]
     if len(naming_it) != 1:
         return recert_fmt
+    # A later year past `current_year` is an expiry, not a recertification,
+    # as on the single-value path (PR #1847 review round 4).
     years = {year for line in _own_certification_lines(lines, naming_it[0])
-             for year in _recertification_years(line)}
+             for year in _recertification_years(line)
+             if int(year) <= current_year}
     return _RECERTIFICATION_YEAR_JOIN.join(sorted(years))
 
 
@@ -406,7 +409,7 @@ def _with_recertification(
     if _cv_states_the_range(start_fmt, recert_fmt, source_text):
         return f"{start_fmt}-{recert_fmt}"
     if own_line:
-        recert_fmt = _every_recertification_year(recert_fmt, source_text)
+        recert_fmt = _every_recertification_year(recert_fmt, source_text, current_year)
     if recert_fmt[0].isdigit():
         return f"{start_fmt} ({_RECERTIFIED_LABEL} {recert_fmt})"
     return f"{start_fmt} (recertification: {recert_fmt})"

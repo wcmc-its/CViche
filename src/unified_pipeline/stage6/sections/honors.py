@@ -854,10 +854,11 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
     """
     if len(lines) != 2 or any(_has_date_cell(line) for line in lines):
         return ''
-    named = [_names_award(line, award_name) for line in lines]
-    if named.count(True) != 1:
+    # The award line comes first; a program line above the award is its own
+    # honor, as on dev (PR #1847 review round 4).
+    if [_names_award(line, award_name) for line in lines] != [True, False]:
         return ''
-    award_line, other = lines[named.index(True)], lines[named.index(False)]
+    award_line, other = lines
     match = _PROGRAM_LINE_RE.fullmatch(other.strip())
     if not match or _names_any_award(other):
         return ''

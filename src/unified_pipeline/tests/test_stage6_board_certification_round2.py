@@ -1533,6 +1533,13 @@ class TestEveryRecertificationYearOnTheLine:
         text = "Example Board of Testing, 2005, recertified 2010\nRecertified 2015"
         assert self._bare_dates("2015", text) == "2005 (recertified 2010, 2015)"
 
+    def test_a_future_bare_line_year_is_not_a_recertification(self):
+        # PR #1847 review round 4: a future year reads as an expiry.
+        text = "Example Board of Testing, 2005\nRecertified 2015\nRecertified 2030"
+        fields = {"year_certified": "2005", "recertification_date": "2015"}
+        assert (_format_certification_date_str(fields, text, own_line=True, current_year=2026)
+                == "2005 (recertified 2015)")
+
     def test_bare_lines_under_another_certification_are_not_read(self):
         text = ("Example Board of Testing, 2001\nRecertified 2011\n"
                 "Example Board of Sample, 2005\nRecertified 2015\nRecertified 2025")

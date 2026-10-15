@@ -652,6 +652,14 @@ def test_a_program_line_led_by_a_year_is_not_a_program():
         assert all(" - " not in row[0] for row in rows), second_line
 
 
+def test_a_program_line_above_its_award_stays_its_own_honor():
+    """PR #1847 review round 4: only a program line BELOW the award joins."""
+    text = "Leadership Development Program — 09/01/2005\nTeaching Award 2005"
+    rows = _render_honors([_h_entry(text, award_name="Teaching Award",
+                                    granting_body="Weill Cornell Medicine", date="2005")])
+    assert len(rows) == 2, rows
+
+
 @pytest.mark.parametrize("text, award_name", [
     ("Young Investigator Award, 2005\nNIH Loan Repayment Program, 07/2005",
      "Young Investigator Award"),
