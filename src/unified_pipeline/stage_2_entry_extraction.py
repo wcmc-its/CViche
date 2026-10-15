@@ -671,11 +671,19 @@ def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
     is what remove_subset_delimiters trusts, and a span wider than its text
     let that drop the #420-recovered rows as "contained" -- AV00TQ's 24
     teaching lines in row 80.2 vanished behind a header-row-only entry
-    (#1126). When the span can't be resolved row by row (another table, an
-    end before the start, or a row missing from the batch), the entry shrinks
-    to its start row, so the span stays honest and #420 recovery emits the
-    rest. The keys must be the index text the model wrote
-    (``delimiter_index_text``): a float-parsed "80.10" is "80.1", row 1.
+    (#1126).
+
+    A span may also run on past its table, through the paragraphs and tables
+    after it: one WCM grant is a five-row table, a "Your role" line and a
+    two-row table, and the model answers "236.0" to "238.1" (YDSVDB, #1873).
+    The span is then every batch element from the start row to the end, in
+    batch order, and the text holds each of them.
+
+    When the span can't be resolved (an end before the start, or an end or a
+    row missing from the batch), the entry shrinks to its start row, so the
+    span stays honest and #420 recovery emits the rest. The keys must be the
+    index text the model wrote (``delimiter_index_text``): a float-parsed
+    "80.10" is "80.1", row 1.
 
     Returns (None, []) when the start row is not in the batch.
     """
@@ -690,6 +698,11 @@ def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
         span = [f"{start_parent}.{r}" for r in range(int(start_row), int(end_row) + 1)]
         if all(k in batch_elem_lookup for k in span):
             keys = span
+    elif start_parent != end_parent and end_key in batch_elem_lookup:
+        order = list(batch_elem_lookup)  # the batch's own element order
+        start, end = order.index(start_key), order.index(end_key)
+        if end > start:
+            keys = order[start:end + 1]
     elem = batch_elem_lookup[start_key]
     texts = [str(batch_elem_lookup[k].get("full_text", batch_elem_lookup[k].get("text", "")))
              for k in keys]
@@ -2027,12 +2040,15 @@ def _extract_section(
         # anything here -- the string form itself is never read by any
         # consumer (#856's _bound_coverage_indices filters int-only by
         # construction too). Mark the parent table index as assigned to
-        # prevent it from being added as a "break" entry.
+        # prevent it from being added as a "break" entry; for a span that runs
+        # on past its table (#1873), every element up to the end's parent.
         if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
-            start_idx_str = str(start_idx_entry)
-            if "." in start_idx_str:
-                parent_idx = int(start_idx_str.split(".")[0])
-                section_assigned.add(parent_idx)
+            start_parent = str(start_idx_entry).split(".")[0]
+            if start_parent.isdigit():
+                parent_idx = int(start_parent)
+                end_parent = str(end_idx_entry).split(".")[0]
+                last = int(end_parent) if end_parent.isdigit() else parent_idx
+                section_assigned.update(range(parent_idx, max(parent_idx, last) + 1))
         else:
             # Integer range for paragraph entries
             for idx in range(start_idx_entry, end_idx_entry + 1):

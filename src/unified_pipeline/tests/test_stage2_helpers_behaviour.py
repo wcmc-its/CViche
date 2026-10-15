@@ -1004,6 +1004,39 @@ def test_row_range_entry_reads_row_10_and_row_1_as_two_different_rows():
     assert entry["element_idx_start"] == "474.10"
 
 
+def _grant_batch() -> dict:
+    """One synthetic WCM grant as stage 2 shows it: a two-row table, a
+    "Your role" line, a two-row table, then the next grant's first row."""
+    elements = [
+        _row("5.0", "Award Source: | Synthetic Brennic Foundation", parent_idx=5),
+        _row("5.1", "Project title: | Moorland lattice survey", parent_idx=5),
+        {"idx": 6, "type": "paragraph", "text": "Your role*\tCo-PI"},
+        {"idx": 7, "type": "empty", "text": ""},
+        _row("8.0", "Your percent (%) effort: | 2%", parent_idx=8),
+        _row("8.1", "The major goals of this project are: | Map the lattices", parent_idx=8),
+        _row("9.0", "Award Source: | Synthetic Quorvane Trust", parent_idx=9),
+    ]
+    return {str(e["idx"]): e for e in elements}
+
+
+def test_row_range_entry_follows_a_span_past_its_table_through_the_batch():
+    """#1873 (YDSVDB): the model answered "236.0" to "238.1" for one grant; it
+    shrank to its first row and recovery split the rest into one entry each."""
+    entry, claimed = row_range_entry("5.0", "8.1", _grant_batch(), 0.95)
+    assert claimed == ["5.0", "5.1", "6", "7", "8.0", "8.1"]
+    assert (entry["element_idx_start"], entry["element_idx_end"]) == ("5.0", "8.1")
+    assert entry["text"] == ("Award Source: | Synthetic Brennic Foundation\nProject title: | Moorland lattice survey\n"
+                             "Your role*\tCo-PI\nYour percent (%) effort: | 2%\n"
+                             "The major goals of this project are: | Map the lattices")
+
+
+@pytest.mark.parametrize("end_key", ["5.0", "12.0"])  # an end before the start; one not in the batch
+def test_row_range_entry_shrinks_a_span_past_its_table_it_cannot_resolve(end_key):
+    entry, claimed = row_range_entry("8.0", end_key, _grant_batch(), 0.95)
+    assert claimed == ["8.0"]
+    assert entry["element_idx_end"] == "8.0"
+
+
 
 # ---------------------------------------------------------- unreverse_paragraph_spans
 
