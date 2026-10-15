@@ -704,7 +704,11 @@ def test_quoted_student_comments_under_student_evaluations_become_t():
     ("K4", "N802 Example Grant Writing", STUDENT_EVALUATIONS),
     ("K1", "EX305 Example Statistics STUDENT SATISFACTION EVALUATIONS - Fall 2031 24 .36 4.38",
      ("Course Evaluations",)),
-    ("K1", "Overall instructor rating for Fall 2031 was 4.56/5.00.", ("Teaching Awards and Evaluations",)),
+    ("K1", "Teaching evaluations from 2031-present: overall instructor rating 4.56/5.00.",
+     ("Teaching Awards and Evaluations",)),
+    ("K1", "Student evaluations for Example Course averaged 4.7/5.", ("Courses Taught and Student Evaluations",)),
+    ("K1", "Example Course, 2031: mean 4.7", ("Appendix B: Teaching Evaluations",)),
+    ("K1", "Example Course, 2031: mean 4.7", ("Student Course Evaluations",)),
     ("K2", "Resident rating of bedside teaching, 2031: 4.8/5", ("Students' Evaluations of Teaching",)),
     ("K1", "Example Course, 2031: mean 4.7", ("TEACHING", "Evaluations of my teaching")),
 ])
@@ -718,6 +722,7 @@ def test_teaching_code_under_an_evaluations_heading_becomes_t(code, text, hierar
     # names an activity the owner may lead, not a survey of students.
     ("K3", "Chair, 2031-present", ("Teaching Evaluations Committee",)),
     ("K3", "Member, 2031", ("Course Evaluations Policy",)),
+    ("K3", "Teaching evaluations redesign working group, chair, 2031", ("Teaching Evaluations Committee",)),
     ("K3", "Led redesign of the example clerkship assessment, 2031", ("Curriculum and Course Evaluation",)),
     ("K1", "Example Course, Lecturer, 2031", ("Teaching",)),
     ("K1", "Example Course, Lecturer, 2031", ("Teaching", "Self-Evaluation")),
@@ -731,6 +736,43 @@ def test_evaluations_pin_leaves_other_rows(code, text, hierarchy):
     assert content_pin_code(entry) is None
     (out,), n = apply_header_pin([entry], NO_PIN_CTX)
     assert n == 0 and out == entry
+
+
+@pytest.mark.parametrize("heading", [
+    "Courses Taught and Student Evaluations",
+    "Teaching Activities and Evaluations",
+    "Teaching and Evaluations",
+    "Teaching Awards and Evaluations",
+    "Student Evaluations and Courses Taught",
+])
+@pytest.mark.parametrize("code,text", [
+    ("K1", "Example Pharmacology 101, Course Director, 2031-2033"),
+    ("K1", "EX305 Example Statistics, Lecturer, Fall 2031 (evaluations 4.6/5)"),
+    ("K2", "Example Clerkship, attending preceptor for third-year students, 2031"),
+])
+def test_course_rows_under_a_combined_evaluations_heading_stay_teaching(heading, code, text):
+    # A combined heading lists the courses as well as their evaluations: a course
+    # with its role and year, even one quoting its score, is still a course taught.
+    entry = _row(code, text, confidence=0.75, hierarchy=(heading,))
+    assert content_pin_code(entry) is None
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+def test_evaluations_pin_applies_under_a_pinned_teaching_header():
+    # A K1-pinned "TEACHING" header does not override K, so the header pin passes
+    # and the content pin still decides: the evaluation moves, the course stays.
+    teaching_ctx = _ctx(meta=_node("TEACHING", "K1", 1.0), section=_node("Courses and Student Evaluations", "K1", 1.0))
+    assert pinned_header_code(teaching_ctx) == "K1"
+    hierarchy = ("TEACHING", "Courses and Student Evaluations")
+    course = _row("K1", "Example Pharmacology 101, Lecturer, 2031", confidence=0.75, hierarchy=hierarchy)
+    summary = _row("K1", "Student evaluations for 2031 averaged 4.6/5.", confidence=0.75, hierarchy=hierarchy)
+    appendix = _row("K1", '"Best instructor I have had."', confidence=0.75,
+                    hierarchy=("TEACHING", "Appendix III Student Evaluations"))
+    out, n = apply_header_pin([course, summary, appendix], teaching_ctx)
+    assert n == 2
+    assert [e["taxonomy_code"] for e in out] == ["K1", "T", "T"]
+    assert out[0] == course and out[1]["pre_pin_code"] == "K1" and out[2]["pre_pin_code"] == "K1"
 
 
 # --- #1251: a mentee's accomplishments are N4 ----------------------------------
