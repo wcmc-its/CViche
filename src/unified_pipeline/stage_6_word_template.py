@@ -168,9 +168,16 @@ from unified_pipeline.stage6.parsing import (  # noqa: F401
     names_teaching_or_authorship_role,
 )
 from unified_pipeline.stage6.parsing.dates import _SEASON_TOKENS, CURRENT_DATE_VALUES
-from unified_pipeline.stage6.parsing.text import ATTENDANCE_OPENING_RE, heading_names_teaching_role
+from unified_pipeline.stage6.parsing.text import (
+    ATTENDANCE_OPENING_RE,
+    DATE_LED_SOURCE_TEXT,
+    heading_names_teaching_role,
+    split_date_led_records,
+)
+from unified_pipeline.stage6.normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
+    PII_WITHHELD_KEY,
     WITHHELD_COMMENT_AUTHOR,
     PiiPassResult,
     relocate_withheld,
@@ -258,6 +265,7 @@ from unified_pipeline.stage6.sections.appendix import (
     other_entry_line_tokens,
     reclassified_structural_reason,
     recovery_candidates,
+    recovery_text,
     t_line_is_scaffolding,
 )
 from unified_pipeline.stage6.sections.mentoring import (
@@ -1326,6 +1334,69 @@ def _route_d2_leadership_title(entry: dict[str, Any], code: str,
     return D2_LEADERSHIP_TARGET_CODE
 
 
+def _holds_stage4_records(entry: Mapping[str, Any]) -> bool:
+    """Stage 4 already separated *entry*'s records: an extracted field holds a
+    list of records, or the entry is one fan-out made. Their renderers and
+    dedup read those records, not the text's lines (#983: a split entry's
+    lines made dedup drop a mentee table that its `mentees` list rendered)."""
+    fields = entry.get('extracted_fields')
+    record_lists = isinstance(fields, Mapping) and any(
+        isinstance(value, list) and any(isinstance(item, Mapping) for item in value)
+        for value in fields.values())
+    return record_lists or FANNED_OUT_FROM in entry or LAST_STAGE4_RECORD in entry
+
+
+# A phone, an email or an ID-like run of five or more digits. The PII
+# vocabulary withholds none of them in a routed code (third-party contact
+# details render by policy), and the O/P line parser reads the last four
+# digits of "(212) 555-0147" or "X1234567" as a date column (`_TRAILING_DATE`),
+# cutting the number across two cells. An entry holding one keeps its tabs,
+# so it renders as on dev (#983 review round 3).
+_CONTACT_OR_ID_RE = re.compile(rf'{_BARE_PHONE_SHAPE}|{_BARE_EMAIL_SHAPE}|\d{{5,}}')
+
+
+def _split_date_led_siblings(entry: dict[str, Any], code: str) -> None:
+    """Put each date-led sibling record of *entry*'s text on its own line
+    (`split_date_led_records`, #983), so a section that renders the text
+    renders one line per record, and keep stage 2's text under
+    `DATE_LED_SOURCE_TEXT` for the unrendered-record pass. An entry whose
+    single-record fields render is split too: its renderer then writes the
+    lines, so the sibling records the fields left out reach the page.
+    Not for:
+    - a grant: one grant's paragraphs can each open with a date, and a
+      newline join collapsed a grant section in the 2026-09-29 scoping;
+    - a teaching entry: its renderer splits the text on its tabs, so the
+      corpus render put one split K2 entry's lines into a single paragraph;
+    - records stage 4 already separated (`_holds_stage4_records`);
+    - protected data: an entry the PII pass cut, or whose text holds a
+      fragment the full Personal Data / Appendix scope withholds -- since
+      #1859 that includes a label after a leading date ("2005 Spouse: ...").
+      A routed code withholds less, and dev rendered such an entry's fields,
+      not its lines (#983 review rounds 2 and 3);
+    - contact details or an ID number (`_CONTACT_OR_ID_RE`)."""
+    text = entry.get('text')
+    if (code in supplementary.GRANT_CODES or code in TEACHING_CODES
+            or not isinstance(text, str) or _holds_stage4_records(entry)
+            or entry.get(PII_WITHHELD_KEY) or _pii_fragments(text)
+            or _CONTACT_OR_ID_RE.search(text)):
+        return
+    split = split_date_led_records(text)
+    if split != text:
+        entry[DATE_LED_SOURCE_TEXT] = text
+        entry['text'] = split
+
+
+def _split_date_led_groups(entries_by_code: Mapping[str, Sequence[dict[str, Any]]]) -> None:
+    """`_split_date_led_siblings` over every grouped entry. `generate()` calls
+    it AFTER the PII deny pass (#983 review round 2): that pass's bare-label
+    and continuation-cell cuts stop at a line break and run on over a tab,
+    so it must see stage 2's tabs, as on dev. An entry that pass cut is not
+    split at all, so it renders, and is recovered, as on dev."""
+    for code, entries in entries_by_code.items():
+        for entry in entries:
+            _split_date_led_siblings(entry, code)
+
+
 def d2_leadership_reroute_warnings(
         moved: list[tuple[object, tuple[int, int]]]) -> list[dict[str, Any]]:
     """One INFO render-warnings record naming every D2 record moved to L3 by
@@ -1963,6 +2034,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         return entries_by_code, pre_dedup_entries_by_code, dedup_decisions
 
+    def _group_and_cut_entries(
+        self, entries: list[dict[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """`_group_entries_by_code`, then `_run_pii_deny_pass` on the groups,
+        then the #983 date-led split (`_split_date_led_groups`), in that order:
+        the PII pass must see stage 2's tabs, as on dev (#983 review round 2)."""
+        entries_by_code = self._group_entries_by_code(entries)
+        self._run_pii_deny_pass(entries_by_code)
+        _split_date_led_groups(entries_by_code)
+        return entries_by_code
+
     def _run_pii_deny_pass(
         self, entries_by_code: dict[str, list[dict[str, Any]]]
     ) -> None:
@@ -2132,9 +2214,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Group entries by taxonomy code (#843, split into
         # _group_entries_by_code / _dedup_grouped_entries so the #820
         # piece-2 PII deny pass can run between them -- see
-        # _run_pii_deny_pass's docstring for why the ordering matters).
-        entries_by_code = self._group_entries_by_code(entries)
-        self._run_pii_deny_pass(entries_by_code)
+        # _run_pii_deny_pass's docstring for why the ordering matters). The
+        # #983 date-led split runs after that pass, on the already-cut text.
+        entries_by_code = self._group_and_cut_entries(entries)
         entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
             self._dedup_grouped_entries(entries_by_code)
 
@@ -4033,7 +4115,7 @@ Now analyze the text above:"""
                     fields = entry.get('extracted_fields') or {}
                     coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
-                    tab_parts = {part for text_line in str(entry.get('text') or '').split('\n')
+                    tab_parts = {part for text_line in recovery_text(entry).split('\n')
                                  for part in tab_record_segments(text_line)}
                     deferred: list[str] = []
                     for line in records:

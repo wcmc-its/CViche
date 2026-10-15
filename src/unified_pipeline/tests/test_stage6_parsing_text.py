@@ -88,6 +88,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     APPOINTMENT_DUTY_VERBS,
     APPOINTMENT_ROLE_MIN_CHARS,
     ATTENDANCE_OPENING_RE,
+    DATE_LED_MIN_RECORDS,
     TEACHING_ROLE_RE,
     ParsedActivityLine,
     _extract_last_name_from_uid,
@@ -105,6 +106,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     is_membership_date_part,
     names_teaching_or_authorship_role,
     split_appointment_title,
+    split_date_led_records,
 )
 
 # --- item 1: the strip is a guess and lives at the call site (#665) --------
@@ -858,3 +860,80 @@ def test_attendance_opening_outranks_talk_invited_and_grand_rounds(text):
 ])
 def test_heading_names_teaching_role(heading, names_role):
     assert heading_names_teaching_role(heading) is names_role
+
+
+# --- split_date_led_records (#983) -------------------------------------------
+# Synthetic entries in the shapes the corpus carries: stage 2 joined each
+# source paragraph of one entry with a tab, and two or more of them open with
+# their own date.
+
+_SOCIETY_RECORDS = [
+    "2001-    Example Society of Child Psychiatry (ESCP)",
+    "2004-2008  Executive Board Member, Treasurer.",
+    "2007-2009 President, Organizing Committee, 44th Annual Meeting",
+]
+
+
+def test_each_date_led_record_gets_its_own_line():
+    assert split_date_led_records("\t".join(_SOCIETY_RECORDS)) == "\n".join(_SOCIETY_RECORDS)
+
+
+def test_a_lead_in_stays_on_the_first_line():
+    # "Ad Hoc Reviewer:" heads the records; it is not a record of its own.
+    text = "Ad Hoc Reviewer:\t2020-present Example Journal\t2019-2021 Other Journal"
+    assert split_date_led_records(text) == (
+        "Ad Hoc Reviewer:\n2020-present Example Journal\n2019-2021 Other Journal")
+
+
+def test_a_part_that_opens_with_words_stays_with_its_record():
+    # "Workshop Faculty Member" continues the 2011 record; it opens no record.
+    text = ("2011- Example Workshop on Methods\tWorkshop Faculty Member"
+            "\t2015-  Workshop Co-Director\t50 graduate students, 40 hours/year")
+    assert split_date_led_records(text) == (
+        "2011- Example Workshop on Methods\tWorkshop Faculty Member"
+        "\n2015-  Workshop Co-Director\t50 graduate students, 40 hours/year")
+
+
+@pytest.mark.parametrize("first, second", [
+    ("04/22/2020. Example Session I. 1hr", "04/29/2020. Example Session II. 1hr"),
+    ("03/2009  Example Student, 1 week", "01/2014  Other Student, 2 wks"),
+    ("Jan 2019 - present Example Chair", "March 2015-2018 Example Member"),
+    ("2016-23 Example Organizer", "2010- Example Advisory Board"),
+    ("1999 - 2001: Example Fellow", "2002 | Example Lecturer"),
+], ids=["month/day/year", "month/year", "month name", "two-digit end", "colon and pipe"])
+def test_every_date_shape_opens_a_record(first, second):
+    assert split_date_led_records(f"{first}\t{second}") == f"{first}\n{second}"
+
+
+@pytest.mark.parametrize("text", [
+    pytest.param("2004-2008 Executive Board Member\tExample Society, Example City",
+                 id="one dated record and its details"),
+    pytest.param("Example Board\t2015-present\tEditorial Board Member\t2014-present\tEditor",
+                 id="bare date columns"),
+    pytest.param("2013-2014;   Example Magazine Top Doctor\t2016-2021  Example Specialty",
+                 id="a semicolon continues a list of dates"),
+    pytest.param("Department address:\t4401 Example Avenue\t3117 Example Street, Suite 2",
+                 id="house numbers are not years"),
+    pytest.param("2015-present\tpresent Example", id="an open end is no word"),
+    pytest.param("2001- Example Society\n2004-2008 Treasurer\t2007-2009 President",
+                 id="already line-structured"),
+    pytest.param("2001- Example Society", id="no tab"),
+    pytest.param("", id="empty"),
+])
+def test_text_without_date_led_siblings_is_unchanged(text):
+    assert split_date_led_records(text) == text
+
+
+def test_two_records_are_the_minimum():
+    assert DATE_LED_MIN_RECORDS == 2
+    one = "Example lead-in\t2010- Example Record"
+    assert split_date_led_records(one) == one
+    assert split_date_led_records(f"{one}\t2012- Second Record") == (
+        "Example lead-in\n2010- Example Record\n2012- Second Record")
+
+
+def test_the_split_keeps_every_character_but_the_separators():
+    text = "\t".join(_SOCIETY_RECORDS)
+    split = split_date_led_records(text)
+    assert split.replace("\n", "\t") == text
+    assert split_date_led_records(split) == split  # a second pass changes nothing
