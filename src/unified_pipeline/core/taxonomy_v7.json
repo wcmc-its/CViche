@@ -415,6 +415,7 @@
       ],
       "key_rules": [
         "Position/appointment lines at hospitals → D2.",
+        "A hospital line whose title OPENS with a leadership title (Director, Medical Director, Chief, Chair, Head) → L3 for a clinical service or unit, O for a department, division or program; NOT D2. A clinic, lab or clinical-service leader is L3 under any heading. A committee chair stays P. A chief trainee (Chief Resident, Chief Fellow) is C, never this rule.",
         "Narrative about clinical duties and workload goes to L1, not D2.",
         "If the appointment doubles as an academic title, use D1 instead."
       ]

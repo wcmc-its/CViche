@@ -384,6 +384,8 @@ D. POSITIONS, APPOINTMENTS, AND LEADERSHIP (C, D, O, Q1)
       * D2: Hospital/clinical appointments
         - Attending physician, Staff Physician, clinical appointments
           without explicit academic title.
+        - NOT a hospital line whose title opens with Director, Chief,
+          Chair or Head: that is L3 or O (rule 14).
       * D3: Other professional/industry positions
         - Research Scientist, Staff Scientist, Analyst, Biostatistician,
           industry roles, government staff roles lacking explicit
@@ -420,6 +422,37 @@ D. POSITIONS, APPOINTMENTS, AND LEADERSHIP (C, D, O, Q1)
       * "Director of Research, Age-Friendly Innovation Center" → O
       * "Associate Dean for Research" → O (administrative role)
       * "John Smith Endowed Chair in Gerontology" → D1 (prestigious appointment)
+    - The same split holds for D2. This applies ONLY to a line you would
+      otherwise code D2: a hospital or clinical staff appointment line
+      (Attending, Staff Physician, Active Medical Staff), e.g. one under a
+      "Hospital Appointments" or "Hospital positions" heading. If that
+      line's title OPENS with a leadership title (Director, Medical
+      Director, Site Director, Laboratory Director, Chief, Site Chief,
+      Assistant Chief, Division Chief, Chair, Vice Chair, Head), it is
+      leadership, NOT D2. Ignore a leading date when finding the title.
+      * Leads a clinical service, unit, clinic, lab, imaging center or
+        procedure area → L3:
+        - "Chief, Nuclear Medicine Service, VA Medical Center" → L3
+        - "Medical Director, Inpatient General Pediatrics" → L3
+        - "Assistant Medical Director, [Hospice]" → L3
+      * Leads a department, division, or an administrative, education or
+        research program → O:
+        - "Director, Pediatric Graduate Medical Education" → O
+        - "Executive Vice Chair, Administration" → O
+      * Still D2: the title opens with the staff appointment and names a
+        leadership role later ("Attending Physician and Assistant
+        Director", "Active Medical Staff and Clinical Director of ...").
+      * The L3/O line is the same everywhere, under any heading, as in
+        rule 11: a leader of a clinic, lab or clinical service is L3; a
+        leader of a department, division, or an administrative or
+        education program is O.
+      * A committee chair ("Chair, Pharmacy and Therapeutics Committee")
+        stays P; this split does not apply to it.
+      * A chief trainee ("Chief Resident", "Chief Residency", "Chief
+        Fellow") is a training position: C, per C's definition (a
+        residency or fellowship after the terminal degree). This rule
+        never applies to it, even with a leading date or under an
+        appointments or hospital heading.
 
 15. CONSULTANTSHIPS: ADVISORY (Q2) VS PROFESSIONAL (D3)
     - ADVISORY CONSULTING → Q2 (external service):

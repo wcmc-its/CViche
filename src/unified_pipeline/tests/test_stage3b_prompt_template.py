@@ -350,3 +350,46 @@ def test_attendance_rule_lets_a_teaching_heading_make_bare_titles_taught_1691():
     assert '"Continuing Medical Education - Teaching"' in rule
     assert "taught (K4) or presented" in rule
     assert 'An entry that\n      opens as attendance ("Attended ...") is still B2.' in rule
+
+
+def test_d2_rule_sends_an_opening_leadership_title_to_l3_or_o_1731():
+    """HZGJFM 63-76, HU4DXA 28.x, NJHLUR 74: a one-record hospital line whose
+    title opens with Director, Medical Director or Chief was coded D2 and
+    rendered under Hospital Appointments, whose template text says not to
+    list Director or Chair there."""
+    d2 = _rule_block("      * D2: Hospital/clinical appointments", "      * D3: ")
+    assert "NOT a hospital line whose title opens with Director, Chief" in d2
+    rule = _rule_block("14. KEY DISTINCTION: POSITION VS LEADERSHIP", "15. CONSULTANTSHIPS")
+    assert "This applies ONLY to a line you would\n      otherwise code D2" in rule
+    assert "OPENS with a leadership title" in rule
+    assert '"Chief, Nuclear Medicine Service, VA Medical Center" → L3' in rule
+    assert '"Director, Pediatric Graduate Medical Education" → O' in rule
+    # Negative controls: a staff title first keeps D2.
+    assert '"Attending Physician and Assistant\n        Director"' in rule
+
+
+def test_d2_leadership_rule_sorts_l3_o_everywhere_and_keeps_chief_trainees_c_1731():
+    """A/B on #1731: five O lines leading a clinic, lab or clinical service
+    (NJHLUR 497, GCFEBE 86, CTWLTR 16, RNKYST 36, MIFYLG 29) moved to L3,
+    which is rule 11's L3, so the rule states that line everywhere. NJHLUR
+    25, a date-prefixed "Chief Resident" under Academic Appointments, went
+    D2 -> D3/D1: a chief trainee is C and the rule never applies to it."""
+    rule = _rule_block("14. KEY DISTINCTION: POSITION VS LEADERSHIP", "15. CONSULTANTSHIPS")
+    assert "move it between O and L3" not in rule
+    assert "The L3/O line is the same everywhere, under any heading, as in\n        rule 11" in rule
+    assert "a leader of a clinic, lab or clinical service is L3" in rule
+    assert "leader of a department, division, or an administrative or\n        education program is O" in rule
+    assert 'Committee")\n        stays P' in rule
+    trainee = rule[rule.index("A chief trainee"):]
+    assert '"Chief Resident"' in trainee and '"Chief\n        Fellow"' in trainee
+    assert "is a training position: C, per C's definition" in trainee
+    assert "This rule\n        never applies to it" in trainee
+
+
+def test_taxonomy_d2_agrees_with_the_leadership_title_rule_1731():
+    d2 = _taxonomy_code("D2")
+    rule = next(r for r in d2["key_rules"] if "OPENS with a leadership title" in r)
+    assert "NOT D2" in rule
+    assert "A committee chair stays P" in rule
+    assert "clinical-service leader is L3 under any heading" in rule
+    assert "A chief trainee (Chief Resident, Chief Fellow) is C, never this rule" in rule
