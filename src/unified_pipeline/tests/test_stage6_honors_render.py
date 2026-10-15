@@ -12,6 +12,8 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -601,6 +603,52 @@ def test_a_dated_granting_body_ending_in_a_program_noun_is_not_a_program():
                                     granting_body="Imaginary Outreach Program")
     assert [row[0] for row in rows][0] == "Made-up Award for Pretend Outreach"
     assert len(rows) == 2
+
+
+@pytest.mark.parametrize("text, award_name", [
+    ("Phi Beta Kappa 2005\nUniversity Honors Program — 2005", "Phi Beta Kappa"),
+    ("Young Investigator Award, 2005\nNIH Loan Repayment Program, 2005",
+     "Young Investigator Award"),
+    ("Teaching Award 2005\nSelected for Leadership Development Program, 2005",
+     "Teaching Award"),
+    ("Best Poster 2005\nResearch Project 2005", "Best Poster"),
+])
+def test_two_same_year_honors_dated_alike_stay_two_rows(text, award_name):
+    """PR #1847 review round 3: a second line ending in a program noun and
+    dated with the award's own year is a second honor, as on dev."""
+    rows = _render_honors([_h_entry(text, award_name=award_name,
+                                    granting_body="", date="2005")])
+    assert len(rows) == 2, rows
+    assert rows[0][0] == award_name
+    assert " - " not in rows[0][0] + rows[1][0]
+
+
+def test_an_award_line_dated_to_the_day_does_not_take_a_program_line():
+    rows = _render_honors([_h_entry(
+        "Fictional Agency Made-up Award for Pretend Outreach — 01/03/2005\n"
+        "Imaginary Outreach Program — 02/07/2005",
+        award_name="Made-up Award for Pretend Outreach",
+        granting_body="Fictional Agency", date="2005")])
+    assert len(rows) == 2
+    assert all(" - " not in row[0] for row in rows)
+
+
+def test_a_dated_program_line_naming_an_award_noun_stays_its_own_award():
+    # The award-noun half: the line ends in a program noun and is dated to
+    # the day, so only its "Scholarship" keeps it a second honor.
+    rows = _award_over_program_line("Imaginary Scholarship Program — 02/07/2005")
+    assert len(rows) == 2
+    assert rows[0][0] == "Made-up Award for Pretend Outreach"
+
+
+def test_a_program_line_led_by_a_year_is_not_a_program():
+    # `_numeric_line_date` reads the year that leads the line, as
+    # `_line_date` does, not the numeric date it ends with.
+    for second_line in ("2005 Imaginary Outreach Program 02/07/2005",
+                        "2005 Imaginary Outreach Program"):
+        rows = _award_over_program_line(second_line)
+        assert len(rows) == 2, second_line
+        assert all(" - " not in row[0] for row in rows), second_line
 
 
 def test_a_fanned_out_child_is_one_row_with_its_own_dates():

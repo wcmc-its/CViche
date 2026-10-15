@@ -18,6 +18,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -1536,6 +1537,29 @@ class TestEveryRecertificationYearOnTheLine:
         text = ("Example Board of Sample, 2005\nRecertified 2015\n"
                 "Example Board of Testing, 2001\nRecertified 2011")
         assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    def test_a_recertification_line_naming_its_own_specialty_ends_the_run(self):
+        # PR #1847 review round 3: the second line starts "Recertified" but
+        # is another certification; the first line's 2011 is not this one's.
+        text = ("Example Board of Testing Internal Medicine, 2001, recertified 2011\n"
+                "Recertified in Sample Disease (EBT), 2005; recertified 2015")
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    @pytest.mark.parametrize("second_line", [
+        "Recertified in Sample Disease, 2010; recertified 2020",
+        "Recertified (EBT) 2010; recertified 2020",
+    ])
+    def test_a_following_line_naming_a_specialty_or_board_is_not_read(self, second_line):
+        text = "Example Board of Testing, 2005, recertified 2015\n" + second_line
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
+    def test_recertified_in_a_year_is_still_a_bare_line(self):
+        text = "Example Board of Testing, 2005\nRecertified 2015\nRecertified in 2025"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015, 2025)"
+
+    def test_an_indented_bare_recertification_line_is_read(self):
+        text = "Example Board of Testing, 2005\nRecertified 2015\n  Recertified 2025"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015, 2025)"
 
     def test_a_line_that_is_not_the_records_own_is_not_read(self):
         assert self._dates("2018", self._LINE, own_line=False) == "2012 (recertified 2018)"

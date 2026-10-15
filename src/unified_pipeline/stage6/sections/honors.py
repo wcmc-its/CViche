@@ -825,14 +825,18 @@ def _names_any_award(line: str) -> bool:
     return any(_ends_in_award_noun(word) for word in _WORD_RE.findall(line.casefold()))
 
 
-def _without_line_date(line: str) -> str:
-    """`line` less the date it ends with (`_line_date`) and the separator
-    before it."""
-    date = _line_date(line)
-    if not date or not line.rstrip(' .)').endswith(date):
-        return line.strip()
-    head = line.rstrip(' .)')[:-len(date)]
-    return head.rstrip(_LINE_DATE_SEPARATOR_CHARS).strip()
+def _numeric_line_date(line: str) -> tuple[str, str]:
+    """`line` split into the text before the numeric date it ends with
+    ("SHOUT Program — 02/07/2005", "... — 06/2005") and that date, with the
+    separator between them dropped; (`line`, '') when it ends in no such
+    date or names a year `_split_award_year` reads, as `_line_date` does."""
+    if _split_award_year(line)[1]:
+        return line.strip(), ''
+    match = _TRAILING_NUMERIC_DATE_RE.search(line)
+    if not match:
+        return line.strip(), ''
+    head = line[:match.start(1)].rstrip(_LINE_DATE_SEPARATOR_CHARS).strip()
+    return head, match.group(1)
 
 
 def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
@@ -847,12 +851,18 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
     hold: exactly one of the two lines names stage 4's award; the other
     names no award noun, is not the granting body, and once its date is
     removed ends in a program noun ("Program", "Project", "Initiative");
-    it carries a date of its own; and every date either line names is one
+    it carries a numeric date of its own; and every date either line names is one
     of the record's own. An undated line is never taken, so a list whose
     only date is on stage 4's award stays a list. The program noun keeps
     two separate same-year honors apart ("<Award> 2005" over "Chief
     Resident — 06/2005", PR #1847 review): a line with no award noun is
     not on that alone a continuation of the award above it.
+
+    The program line must also date itself to the month or the day
+    ("02/07/2005") while the award's line does not: the program's own
+    date, finer than the award's year. A list of same-year honors dates
+    each line alike, so "Phi Beta Kappa 2005" over "University Honors
+    Program — 2005" stays two rows (PR #1847 review round 3).
     """
     if len(lines) != 2 or any(_has_date_cell(line) for line in lines):
         return ''
@@ -860,11 +870,13 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
     if named.count(True) != 1:
         return ''
     other = lines[named.index(False)]
-    if _names_any_award(other) or not _line_date(other):
+    program, program_date = _numeric_line_date(other)
+    if _names_any_award(other) or not program_date:
+        return ''
+    if _numeric_line_date(lines[named.index(True)])[1]:
         return ''
     if not _start_years('\n'.join(lines)) <= _start_years(date):
         return ''
-    program = _without_line_date(other)
     if _comparable(program) == _comparable(granting_body):
         return ''
     words = _WORD_RE.findall(program.casefold())
