@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from unified_pipeline.core.validators.prose_mentee_corrector import (  # noqa: E402
+    apply_bare_mentee_resolution,
     apply_prose_mentee_corrections,
 )
 
@@ -129,3 +130,155 @@ def test_stats_shape_and_no_spurious_corrections():
     assert stats["corrections_made"] == 1
     assert len(stats["correction_details"]) == 1
     assert stats["correction_details"][0]["corrected_to"] == "N3A"
+
+
+# --- bare N3 -> N3A/N3B (#1574) ---------------------------------------------
+# Synthetic names only; the shapes are the YUYVIG ones (LTTYWI-06, RLADNC-07,
+# IZIXVF-01) and the corpus lines the step must leave alone.
+
+TEACHING = ["Teaching Responsibilities", "Clinical Service Teaching"]
+
+
+def _resolve(entries):
+    out, stats = apply_bare_mentee_resolution(entries)
+    return [e["taxonomy_code"] for e in out], stats
+
+
+def test_bare_names_after_a_past_mentee_run_take_n3b():
+    # LTTYWI-06: one trainee list, the first names coded N3B, the rest bare
+    # N3, under a teaching heading with no mentoring word in it.
+    entries = [
+        _entry("Participated in the residency training of:", code="K2", hierarchy=TEACHING),
+        _entry("Alma Quist", code="N3B", hierarchy=TEACHING),
+        _entry("Boris Ulam", code="N3", hierarchy=TEACHING),
+        _entry("Cora Van Dyke", code="N3", hierarchy=TEACHING),
+    ]
+    codes, stats = _resolve(entries)
+    assert codes == ["K2", "N3B", "N3B", "N3B"]
+    assert stats["corrections_made"] == 2
+    assert entries[2]["bare_mentee_resolution"] == {"original_code": "N3", "resolved_to": "N3B"}
+    assert entries[2]["classification_reasoning"].startswith("[bare-mentee resolved N3->N3B]")
+
+
+def test_bare_name_before_a_run_takes_the_following_code():
+    entries = [
+        _entry("Dana Whit", code="N3", hierarchy=TEACHING),
+        _entry("Ezra Holm, PhD student, 2001-2005", code="N3B", hierarchy=TEACHING),
+    ]
+    assert _resolve(entries)[0] == ["N3B", "N3B"]
+
+
+def test_numbered_names_under_mentoring_heading_default_to_n3a():
+    # RLADNC-07: no N3A/N3B sibling, no dates, a mentoring heading.
+    heading = ["N. MENTORING", "Junior Faculty Mentees"]
+    entries = [
+        _entry("Formally mentored research projects", code="K2", hierarchy=heading),
+        _entry("1. Farid Oster - Primary Mentor for the Leadership Fellowship Program", code="N3", hierarchy=heading),
+        _entry("2. Gemma Rao Patel", code="N3", hierarchy=heading),
+        _entry("3. Hugo O'Neal, MD, Faculty member", code="N3", hierarchy=heading),
+    ]
+    assert _resolve(entries)[0] == ["K2", "N3A", "N3A", "N3A"]
+
+
+def test_own_dates_outrank_the_run():
+    # A closed range is past, an open one current, whatever the neighbours say.
+    closed_after_current = [
+        _entry("Ivo Lind, MS student, 2015 - present", code="N3A"),
+        _entry("Jill Moss: thesis project (November 2007- June 2008)", code="N3"),
+    ]
+    assert _resolve(closed_after_current)[0] == ["N3A", "N3B"]
+    open_after_past = [
+        _entry("Lena Ortiz (2010-2012)", code="N3B"),
+        _entry("Kurt Nash, PhD student, 2023 - .", code="N3"),
+    ]
+    assert _resolve(open_after_past)[0] == ["N3B", "N3A"]
+
+
+def test_neighbour_resolved_in_the_same_pass_does_not_settle_the_run():
+    # The run is read off the codes stage 3b produced, so the result does not
+    # depend on the order entries are visited in.
+    entries = [
+        _entry("Mia Park (1999-2001)", code="N3"),
+        _entry("Nils Quade", code="N3"),
+    ]
+    assert _resolve(entries)[0] == ["N3B", "N3A"]
+
+
+def test_staff_heading_keeps_n3():
+    # IZIXVF-01: technical staff and lab managers are not mentees, even after
+    # an N3B run under the same heading.
+    for heading in (
+        ["5. Laboratory Staff", "C. Technical Staff and Laboratory Managers."],
+        ["Research Staff"],
+        ["Lab Managers"],
+        ["Technicians Supervised"],
+        ["Personnel Supervised"],
+        ["Employees"],
+    ):
+        entries = [
+            _entry("15. Omar Pike, PGR", code="N3B", hierarchy=heading),
+            _entry("16. Pia Quinn, PGR/Lab manager", code="N3", hierarchy=heading),
+        ]
+        codes, stats = _resolve(entries)
+        assert codes == ["N3B", "N3"], heading
+        assert stats["corrections_made"] == 0
+
+
+def test_lines_that_name_nobody_keep_n3():
+    for text in (
+        "Name Dates Current Position",
+        "Name Degree, Years, Current Position",
+        "Honors Theses:",
+        "Student Name   Program     Role",
+        "Doctoral Advising:",
+        "Graduate Students and Postdoctoral Associates:",
+        "Louisiana State University",
+        "At Purdue University:",
+        "Not applicable",
+        "N/A",
+        "Ravi",
+        "2014 – 2016",
+        "Supervision of honors thesis projects, 1995-2004.",
+        "I have mentored the following residents on research projects:",
+        "Thesis Advisor, 2015-2018",
+        "Primary Mentor: weekly meetings",
+        "Journal Club Facilitator, 2019-present",
+    ):
+        codes, _ = _resolve([_entry(text, code="N3"), _entry("Sara Tull (2001-2003)", code="N3B")])
+        assert codes[0] == "N3", text
+
+
+def test_no_mentoring_heading_and_no_run_keeps_n3():
+    # A name under a flattened heading with no N3A/N3B entry next to it.
+    heading = ["Personal Data"]
+    entries = [
+        _entry("Tom Ueda", code="N3", hierarchy=heading),
+        _entry("Committee member, Honors Thesis", code="K2", hierarchy=heading),
+        _entry("Una Voss, 2001-2003", code="N3B", hierarchy=heading),
+    ]
+    assert _resolve(entries)[0] == ["N3", "K2", "N3B"]
+
+
+def test_run_stops_at_a_different_heading():
+    entries = [
+        _entry("Vera Wolf", code="N3B", hierarchy=["Past Mentees"]),
+        _entry("Will Xu", code="N3", hierarchy=TEACHING),
+    ]
+    assert _resolve(entries)[0] == ["N3B", "N3"]
+
+
+def test_run_does_not_step_over_another_heading():
+    # A bare N3 under another heading ends the run, even though it is N3 too.
+    entries = [
+        _entry("Xena Yost", code="N3B", hierarchy=TEACHING),
+        _entry("Yuri Zell", code="N3", hierarchy=["Personal Data"]),
+        _entry("Zoe Abbot", code="N3", hierarchy=TEACHING),
+    ]
+    assert _resolve(entries)[0] == ["N3B", "N3", "N3"]
+
+
+def test_only_bare_n3_is_touched():
+    entries = [_entry("Yara Zane", code=code) for code in ("N3A", "N3B", "K2", "N4", "T")]
+    codes, stats = _resolve(entries)
+    assert codes == ["N3A", "N3B", "K2", "N4", "T"]
+    assert stats["corrections_made"] == 0

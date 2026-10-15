@@ -49,7 +49,10 @@ from core.validators.leadership_level_corrector import (
 from core.validators.position_subcode_reconciler import (
     apply_position_subcode_reconciliation,
 )
-from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
+from core.validators.prose_mentee_corrector import (
+    apply_bare_mentee_resolution,
+    apply_prose_mentee_corrections,
+)
 from core.validators.reasoning_consistency_checker import apply_reasoning_corrections
 
 # Post-classification auto-correction validators
@@ -221,6 +224,34 @@ def _person_name_from_uid(document_uid: str | None) -> str | None:
     # Skip the numeric prefix and CV/vita/resume suffixes.
     name_parts_clean = [p for p in name_parts if not p.isdigit() and p.lower() not in ('cv', 'vita', 'resume')]
     return ' '.join(name_parts_clean)
+
+
+def _apply_mentee_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
+    """Stage 3b's named-mentee post-corrections, in order; returns (entries,
+    {stats key: that step's stats}) for post_correction_stats.
+
+    10b-2. Prose named-mentee corrections (named individual mentee under an
+           advising/mentoring section, misclassified as a K teaching code,
+           -> N3A/N3B). Runs AFTER 10b so structured mentee rows are already
+           N3A/N3B, and BEFORE 10c so a real named mentee is never demoted to T.
+    10b-3. (#1574) Bare N3 named mentee -> N3A/N3B, so stage 4 extracts the
+           current/past mentee schema. After 10b/10b-2 so their N3A/N3B rows
+           can settle a bare N3's run, and before 10c for the same reason.
+    """
+    print()
+    print("10b-2. Prose named-mentee corrections...")
+    entries, prose_mentee_stats = apply_prose_mentee_corrections(entries)
+    if prose_mentee_stats['corrections_made'] > 0:
+        print(f"   ✓ Corrected {prose_mentee_stats['corrections_made']} prose mentee codes")
+        for detail in prose_mentee_stats['correction_details'][:3]:
+            print(f"     - {detail['original']} → {detail['corrected_to']}: {detail['reason']}")
+    else:
+        print("   ✓ No prose mentee corrections needed")
+
+    entries, bare_mentee_stats = apply_bare_mentee_resolution(entries)
+    logger.info("Stage 3b: %d bare N3 mentee row(s) resolved to N3A/N3B",
+                bare_mentee_stats['corrections_made'])
+    return entries, {'prose_mentee': prose_mentee_stats, 'bare_mentee': bare_mentee_stats}
 
 
 def run_stage_3b(
@@ -609,20 +640,9 @@ def run_stage_3b(
     else:
         print("   ✓ No WCM table corrections needed")
 
-    # 10b-2. Prose named-mentee corrections (named individual mentee under an
-    #        advising/mentoring section, misclassified as a K teaching code,
-    #        -> N3A/N3B). Runs AFTER 10b so structured mentee rows are already
-    #        N3A/N3B, and BEFORE 10c so a real named mentee is never demoted to T.
-    print()
-    print("10b-2. Prose named-mentee corrections...")
-    all_classified, prose_mentee_stats = apply_prose_mentee_corrections(all_classified)
-    post_correction_stats['prose_mentee'] = prose_mentee_stats
-    if prose_mentee_stats['corrections_made'] > 0:
-        print(f"   ✓ Corrected {prose_mentee_stats['corrections_made']} prose mentee codes")
-        for detail in prose_mentee_stats['correction_details'][:3]:
-            print(f"     - {detail['original']} → {detail['corrected_to']}: {detail['reason']}")
-    else:
-        print("   ✓ No prose mentee corrections needed")
+    # 10b-2, 10b-3. Named-mentee corrections (see _apply_mentee_corrections).
+    all_classified, mentee_stats = _apply_mentee_corrections(all_classified)
+    post_correction_stats.update(mentee_stats)
 
     # 10c. Template-scaffold suppression (filled-template instruction text → T)
     #      Runs AFTER 10b so pure template strings (e.g. the board-table header

@@ -409,6 +409,31 @@ def test_run_folds_fragment_text_into_the_written_artifact(monkeypatch, tmp_path
     assert output["meta"]["stats"]["fragment_merge"] == {"fragments_merged": 1}
 
 
+def test_run_resolves_a_bare_n3_mentee_in_the_written_artifact(monkeypatch, tmp_path):
+    """#1574: a named trainee the model leaves on the parent N3 reaches the
+    artifact as N3B (its own range is closed), with the step's stats under
+    meta.stats.post_classification_corrections, so stage 4 extracts the
+    past-mentee schema."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="N3"))
+    mappings = [{"title": "MENTORING",
+                 "taxonomy_options": [{"code": "N3", "confidence": 0.9}], "children": []}]
+    entries = [{"element_type": "text", "text": "Ava Bloom, PhD student, 2019-2021",
+                "hierarchy": ["MENTORING"]}]
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, mappings)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    assert output["entries"][0]["taxonomy_code"] == "N3B"
+    assert output["meta"]["stats"]["post_classification_corrections"]["bare_mentee"]["corrections_made"] == 1
+    assert output["meta"]["stats"]["post_classification_corrections"]["prose_mentee"]["corrections_made"] == 0
+
+
 def test_run_with_zero_entries_does_not_raise_zero_llm_error(monkeypatch, tmp_path):
     """Zero entries (empty content list) is NOT the same state as "entries
     exist but their text is blank" (see test_run_with_only_empty_entries_does_not_fail
