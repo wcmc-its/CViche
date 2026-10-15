@@ -496,6 +496,12 @@ LINT_COPY = {
         "the wrong record.",
         "Delete the copy in the wrong section, and check the flagged entries' dates against "
         "the source CV."),
+    "cross_entry_value": LintCopy(
+        "Value from another entry",
+        "A date, amount, effort, grant number, role or name on this entry is not in its own "
+        "text but is in another entry of the same kind that was read with it, so it may be "
+        "that entry's value.",
+        "Check the flagged values against this entry in the source CV and correct them."),
     "record_boundary": LintCopy(
         "A line of one entry opens the next",
         "A labelled line that belongs to one entry, such as a trainee's current position, "

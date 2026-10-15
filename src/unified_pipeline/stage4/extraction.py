@@ -62,6 +62,7 @@ from unified_pipeline.stage4.schemas import (
     FIELD_DESCRIPTIONS,
     FIELD_SCHEMA_VERSION,
     NUMBERED_FIELD_RE,
+    STAGE4_BATCH_SIZE,
     STAGE4_BORROWED_FIELDS_KEY,
     STAGE4_FOREIGN_RECORDS_KEY,
     STAGE4_RECORDS_KEY,
@@ -1420,7 +1421,7 @@ def _split_skippable_entries(
 
 def extract_fields_from_mapped_entries(
     mapped_entries: list[dict[str, Any]],
-    batch_size: int = 10,
+    batch_size: int = STAGE4_BATCH_SIZE,
     document_uid: str = "",
     cancel_check: Callable[[], None] | None = None,
     docx_path: str | None = None,  # #456 owner-name side channel; None = pre-#456 behavior
@@ -1431,7 +1432,7 @@ def extract_fields_from_mapped_entries(
 
     Args:
         mapped_entries: List of taxonomy-mapped entries from Stage 3
-        batch_size: Number of entries to process per batch (default: 10)
+        batch_size: Number of entries to process per batch (default: STAGE4_BATCH_SIZE)
         document_uid: Document identifier for extracting CV owner name
         cancel_check: Raises to abort; never returns True. Checked at the
             top of each batch and forwarded into every per-taxonomy-group
