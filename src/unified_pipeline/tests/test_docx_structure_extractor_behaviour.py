@@ -575,6 +575,35 @@ def test_split_merged_cells_two_line_aligned_cells_not_split():
     assert split_merged_cells_in_row(row, min_chars=50, min_newlines=2) == [row]
 
 
+def _row_texts(rows):
+    return [[c["text"] for c in r] for r in rows]
+
+
+def test_split_merged_cells_whitespace_blank_lines_complete_a_parallel_split():
+    # #259, YDSVDB: the title cell's blank paragraphs arrive as " ", so a
+    # "\n\n" split left every title in the first sub-row.
+    row = [{"text": "Chief\n \n \n Director\n \n Librarian"},
+           {"text": "NIH\n\nWRAIR\n\nVA Erie"},
+           {"text": "2012-2014\n\n\n2007-2010\n\n\n1985-1991"}]
+    assert _row_texts(split_merged_cells_in_row(row)) == [
+        ["Chief", "NIH", "2012-2014"],
+        ["Director", "WRAIR", "2007-2010"],
+        ["Librarian", "VA Erie", "1985-1991"]]
+
+
+def test_split_merged_cells_whitespace_blank_lines_need_the_same_count():
+    # Two whitespace-separated titles against three records: the strict split stands.
+    row = [{"text": "Chief\n \n Director"},
+           {"text": "NIH\n\nWRAIR\n\nVA Erie"},
+           {"text": "2012-2014\n\n2007-2010\n\n1985-1991"}]
+    assert _row_texts(split_merged_cells_in_row(row))[1] == ["", "WRAIR", "2007-2010"]
+    # Three apiece, but the whitespace split also cuts records the strict split kept whole.
+    row = [{"text": "Chief\n \n Director\n \n Librarian"},
+           {"text": "NIH\n \nBethesda\n\nWRAIR"},
+           {"text": "2012-2014\n \nrenewed\n\n2007-2010"}]
+    assert len(split_merged_cells_in_row(row)) == 2
+
+
 def _all_lines(rows):
     return sorted(
         line.strip() for r in rows for c in r for line in c["text"].split("\n") if line.strip()
