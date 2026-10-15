@@ -880,6 +880,8 @@ def test_rows_before_the_mentee_line_are_left_alone():
     ("H", ("Mentees",)),
     ("H", ("Advisees",)),
     ("H", ("Fellows mentored",)),
+    # 2082_Dr_Scot 621 (#1573): a student's degree and law school, not the owner's education.
+    ("B1", ("Teaching", "Undergraduate Honor Students’ Achievements: (NIU Only)")),
 ])
 def test_a_plural_mentee_heading_pins_without_a_mentee_line(code, heading):
     entry = _row(code, "Example Student, 2031. Winner of the Example Thesis Prize.", hierarchy=heading)
@@ -895,6 +897,10 @@ def test_a_plural_mentee_heading_pins_without_a_mentee_line(code, heading):
     ("H", ("TEACHING", "Report of Local Teaching and Training", "Teaching of Students in Courses")),
     # A plural above the row's parent is a section title, not the row's owner.
     ("H", ("Trainees", "Program Leadership", "Awards")),
+    # The owner's own degree: a singular, a teaching level, or a plural too far up (#1573).
+    ("B1", ("Education", "Student Awards and Degrees")),
+    ("B1", ("Teaching", "Teaching of Medical Students")),
+    ("B1", ("Trainees", "Education", "Doctoral Degree")),
 ])
 def test_a_plural_mentee_heading_keeps_the_other_guards(code, heading):
     assert mentee_pin_code(_row(code, "Example row, 2031", hierarchy=heading), after_mentee=False) is None
@@ -905,6 +911,7 @@ def test_a_plural_mentee_heading_keeps_the_other_guards(code, heading):
     ("D1", ("MENTORING", "Trainees")),
     ("S1", STUDENT_HEADING),                                     # a publication stays a publication
     ("H", ("PROFESSIONAL ACCOMPLISHMENTS",)),                    # no mentee word in the heading
+    ("B1", STUDENT_HEADING),                                     # education needs the plural level (#1573)
 ])
 def test_mentee_pin_needs_both_the_heading_and_the_code(code, heading):
     entry = _row(code, "Example row, 2031", hierarchy=heading)
