@@ -54,7 +54,6 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     _record_lines,
-    _split_date_led_groups,
     run_stage6,
     segment_already_rendered,
 )
@@ -2187,9 +2186,7 @@ def test_date_led_sibling_records_render_one_line_each(tmp_path, monkeypatch):
 
 def _grouped_text(entry):
     gen = _generator()
-    grouped = gen._group_entries_by_code([entry])
-    gen._run_pii_deny_pass(grouped)
-    _split_date_led_groups(grouped)
+    grouped = gen._group_and_cut_entries([entry])
     (only,) = [e for entries in grouped.values() for e in entries]
     return only
 
@@ -2277,8 +2274,7 @@ def test_a_date_led_part_the_fields_hold_is_not_recovered_after_the_split():
                              "start_date": "2007", "end_date": "2011",
                              "funding_source": "Marsupial Heart Association Fellowship (2009-2011)"},
     }
-    grouped = gen._group_entries_by_code([entry])
-    _split_date_led_groups(grouped)
+    grouped = gen._group_and_cut_entries([entry])
     assert "\n" in grouped["N3B"][0]["text"]
     before = len(gen.doc.paragraphs)
 

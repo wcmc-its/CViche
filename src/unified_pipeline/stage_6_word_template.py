@@ -2001,6 +2001,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         return entries_by_code, pre_dedup_entries_by_code, dedup_decisions
 
+    def _group_and_cut_entries(
+        self, entries: list[dict[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """`_group_entries_by_code`, then `_run_pii_deny_pass` on the groups,
+        then the #983 date-led split (`_split_date_led_groups`), in that order:
+        the PII pass must see stage 2's tabs, as on dev (#983 review round 2)."""
+        entries_by_code = self._group_entries_by_code(entries)
+        self._run_pii_deny_pass(entries_by_code)
+        _split_date_led_groups(entries_by_code)
+        return entries_by_code
+
     def _run_pii_deny_pass(
         self, entries_by_code: dict[str, list[dict[str, Any]]]
     ) -> None:
@@ -2172,9 +2183,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # piece-2 PII deny pass can run between them -- see
         # _run_pii_deny_pass's docstring for why the ordering matters). The
         # #983 date-led split runs after that pass, on the already-cut text.
-        entries_by_code = self._group_entries_by_code(entries)
-        self._run_pii_deny_pass(entries_by_code)
-        _split_date_led_groups(entries_by_code)
+        entries_by_code = self._group_and_cut_entries(entries)
         entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
             self._dedup_grouped_entries(entries_by_code)
 
