@@ -903,7 +903,8 @@ LINT_FIX_MINUTES = {
         "stage6_render_warnings", "taxonomy_code_coverage", "teaching_postcheck",
     ), FIX_MINUTES_MISPLACED),
     **dict.fromkeys((
-        "appointment_title_overlong", "citation_field_dropped", "citation_grounding", "date_cell_shape",
+        "appointment_title_overlong", "citation_field_dropped", "citation_grounding",
+        "cross_entry_value", "date_cell_shape",
         "enrichment_pubtype_mismatch", "etal_added", "fanout_cell_residue", "footer_in_record",
         "glyph_field", "grant_boundary", "grant_facts",
         "implausible_year", "licensure_fallback_truncated", "owner_missing_from_citation",
@@ -914,6 +915,7 @@ LINT_FIX_MINUTES = {
     ), FIX_MINUTES_FIELD_WRONG),
     **dict.fromkeys((
         "duplicate_passages", "duplicate_records", "identical_rendered_rows", "junk_or_header_row",
+        "stage2_span_overlap",
     ), FIX_MINUTES_DUPLICATE),
     **dict.fromkeys((
         "date_only_lines", "llm_refusal_in_output", "output_hygiene", "pipe_leaks",

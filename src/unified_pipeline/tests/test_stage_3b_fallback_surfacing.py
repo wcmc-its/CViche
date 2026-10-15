@@ -18,6 +18,7 @@ Self-contained: ``call_llm`` stubbed at the module attribute, no Bedrock/OpenAI.
 
 import json
 import logging
+import re
 import sys
 import threading
 from pathlib import Path
@@ -406,6 +407,31 @@ def test_run_folds_fragment_text_into_the_written_artifact(monkeypatch, tmp_path
     assert seen["sources"] == ["llm"]
     assert output["entries"][0]["text"].endswith(" (merged tail)")
     assert output["meta"]["stats"]["fragment_merge"] == {"fragments_merged": 1}
+
+
+def test_run_resolves_a_bare_n3_mentee_in_the_written_artifact(monkeypatch, tmp_path):
+    """#1574: a named trainee the model leaves on the parent N3 reaches the
+    artifact as N3B (its own range is closed), with the step's stats under
+    meta.stats.post_classification_corrections, so stage 4 extracts the
+    past-mentee schema."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="N3"))
+    mappings = [{"title": "MENTORING",
+                 "taxonomy_options": [{"code": "N3", "confidence": 0.9}], "children": []}]
+    entries = [{"element_type": "text", "text": "Ava Bloom, PhD student, 2019-2021",
+                "hierarchy": ["MENTORING"]}]
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, mappings)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))
+    assert output["entries"][0]["taxonomy_code"] == "N3B"
+    assert output["meta"]["stats"]["post_classification_corrections"]["bare_mentee"]["corrections_made"] == 1
+    assert output["meta"]["stats"]["post_classification_corrections"]["prose_mentee"]["corrections_made"] == 0
 
 
 def test_run_with_zero_entries_does_not_raise_zero_llm_error(monkeypatch, tmp_path):
@@ -947,3 +973,42 @@ def test_per_cv_flag_on_sends_every_group_one_cached_prompt(monkeypatch, tmp_pat
     assert [c["messages"][1]["content"].split(" (")[0] for c in calls] == [
         "These entries come from GROUP 1", "These entries come from GROUP 2"]
     assert all("enable_prompt_caching" not in c for c in calls)  # stage default: cachePoint kept
+
+
+# --- run_stage_3b: #1413 the reviewer pin sees the real batch boundaries -------
+
+_REVIEWER_LEAD_IN = "Reviewer for the following journals and conferences:"
+_REVIEWER_MAPPINGS = [
+    {"title": "EDITORIAL ACTIVITIES",
+     "taxonomy_options": [{"code": "Q4D", "confidence": 0.6}], "children": []},
+]
+# The lead-in and 16 journals: one more row than CLASSIFY_BATCH_SIZE holds, so the
+# last two journals reach the model in a second call without the lead-in.
+_REVIEWER_ENTRIES = [
+    {"element_type": "text", "hierarchy": ["EDITORIAL ACTIVITIES"], "text": text}
+    for text in [_REVIEWER_LEAD_IN, *(f"Example Journal of Topic {n}" for n in range(16))]
+]
+
+
+def _reviewer_llm(**kwargs):
+    """Q4D for a batch that holds the lead-in, an unsure Q4C for one that does not (JJUQDF)."""
+    user = kwargs["messages"][-1]["content"]
+    indices = [int(i) for i in re.findall(r"^\[(\d+)\]", user, re.M)]
+    if _REVIEWER_LEAD_IN in user:
+        return _ok_response(indices, code="Q4D")
+    return {**_ok_response([]), "content": json.dumps({"classifications": [
+        {"index": i, "code": "Q4C", "confidence": 0.5} for i in indices]})}
+
+
+def test_reviewer_journals_in_a_batch_without_the_lead_in_come_out_q4d(monkeypatch, tmp_path):
+    assert len(_REVIEWER_ENTRIES) == stage_3b.CLASSIFY_BATCH_SIZE + 2
+    monkeypatch.setattr(stage3b_classify, "call_llm", _reviewer_llm)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _REVIEWER_ENTRIES, _REVIEWER_MAPPINGS)
+
+    result = stage_3b.run_stage_3b("9999_Doe_Jane_CV", stage_2_path=str(stage_2),
+                                   stage_3a_path=str(stage_3a), output_dir=str(tmp_path / "out"))
+
+    entries = json.loads(Path(result["output_path"]).read_text(encoding="utf-8"))["entries"]
+    assert {e["taxonomy_code"] for e in entries} == {"Q4D"}
+    assert [e["text"] for e in entries if e.get("pre_pin_code") == "Q4C"] == [
+        "Example Journal of Topic 14", "Example Journal of Topic 15"]

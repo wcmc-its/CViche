@@ -34,13 +34,16 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
+from unified_pipeline.stage6.fan_out import LAST_STAGE4_RECORD  # noqa: E402
 from unified_pipeline.stage6.normalization import _clean_inline_tabs  # noqa: E402
 from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     _record_rendered,
     _whole_record_rendered,
+    segment_held_by_fields,
     segments_cover_source,
+    tab_aware_record_lines,
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
@@ -121,6 +124,210 @@ def test_record_lines_heuristics():
         "Chair | Committee on Extremely Long Titles | Guild of Meandering "
         "Auditors | 2011-2014",
     ]
+
+
+def test_tab_aware_record_lines_split_a_tab_fused_line_into_its_dated_records():
+    # #1243: one line, three posts joined by tabs. `_record_lines` counts the
+    # line once, so the entry never reached the recovery pass.
+    fused = ("Executive Committee of the Quokka Society 2013-present\t"
+             "President 5/2017-10/2020\tPresident Elect 5/2015-5/2017")
+    assert _record_lines(fused) == [fused]
+    assert tab_aware_record_lines(fused) == [
+        "Executive Committee of the Quokka Society 2013-present",
+        "President 5/2017-10/2020",
+        "President Elect 5/2015-5/2017",
+    ]
+    # A tab row with one dated part is one record line, as before.
+    row = "Chair\tCommittee on Extremely Long Titles\tGuild of Meandering Auditors\t2011-2014"
+    assert tab_aware_record_lines(row) == [row] == _record_lines(row)
+
+
+def test_tab_fused_entry_recovers_the_record_the_render_dropped():
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "element_idx_start": 281,
+        "text": ("Steering Committee of the Quokka Guild 2013-present\t"
+                 "Chairperson of Marsupial Outreach 5/2017-10/2020\t"
+                 "Secretary of Wallaby Affairs 5/2013-5/2015"),
+        "extracted_fields": {"organization": "Quokka Guild", "role": "Steering Committee"},
+    }
+    gen.doc.add_paragraph("Steering Committee of the Quokka Guild 2013-present")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Chairperson of Marsupial Outreach 5/2017-10/2020" in t for t in bullets)
+    assert any("Secretary of Wallaby Affairs 5/2013-5/2015" in t for t in bullets)
+    # The part that did render is never written a second time.
+    assert not any("Steering Committee of the Quokka Guild" in t for t in bullets)
+
+
+def test_tab_part_the_extracted_fields_hold_is_not_recovered():
+    # #1243: a mentee's name and level, then his fellowship, each dated. The
+    # row renders them cell by cell, so no output line carries the first part
+    # whole, but stage 4 holds every word of it.
+    gen = _generator()
+    text = ("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)\t"
+            "Marsupial Heart Association Fellowship (7/2009-6/2011)")
+    entry = {
+        "taxonomy_code": "N3B", "text": text,
+        "extracted_fields": {"mentee_name": "Quimby Farrow", "mentee_level": "MSPH, PhD (Epidemiology)",
+                             "funding_source": "Marsupial Heart Association Fellowship (7/2009-6/2011)"},
+    }
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"N3B": [entry]})
+
+    assert len(gen.doc.paragraphs) == before
+    assert segment_held_by_fields("2007-2011 Quimby Farrow, MSPH, PhD (Epidemiology)", entry["extracted_fields"])
+    assert not segment_held_by_fields("Chairperson of Marsupial Outreach 5/2017-10/2020",
+                                      entry["extracted_fields"])
+
+
+def test_tab_parts_of_an_entry_stage_4_split_into_records_are_not_recovered():
+    # The records render as children of their own, reformatted; the parent's
+    # last child keeps the whole fused text.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("Regional Quokka Advisory Council (Appointed by Governor) 1995 - 2001\t"
+                 "Committee on Quokka Facilities, Chairman, 2002 - 2004"),
+        "extracted_fields": {"role": "Chairman", "organization": "Regional Quokka Advisory Council"},
+        "stage4_last_record": {"key": "stage4_records", "index": 1, "count": 2, "text": None},
+    }
+    entry.update({LAST_STAGE4_RECORD: entry.pop("stage4_last_record")})
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    assert len(gen.doc.paragraphs) == before
+
+
+def test_tab_part_held_only_by_a_list_field_is_still_recovered():
+    # #1243: `additional_roles` items are not always printed (fan-out declined,
+    # or a field the section does not name), so a part whose words only a list
+    # holds is not the extracted record.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "I",
+        "text": ("Member of the Quokka Society 2009-present\t"
+                 "Chairman, Credentials Committee, 2009-2011\t"
+                 "Secretary of the Wombat Panel 2012-2014"),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member",
+                             "additional_roles": ["Chairman, Credentials Committee",
+                                                  "Secretary of the Wombat Panel"]},
+    }
+    gen.doc.add_paragraph("Member of the Quokka Society 2009-present")
+
+    gen._recover_unrendered_records({"I": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Chairman, Credentials Committee, 2009-2011" in t for t in bullets)
+    assert any("Secretary of the Wombat Panel 2012-2014" in t for t in bullets)
+    assert not segment_held_by_fields("Chairman, Credentials Committee, 2009-2011",
+                                      entry["extracted_fields"])
+
+
+def test_recovered_tab_part_does_not_vouch_for_its_sibling():
+    # #1243: siblings of one society share their vocabulary and differ in the
+    # dates. The first one written must not make the next read as rendered.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("Member of the Quokka Society 1989-present\t"
+                 "Chair, Program Committee of the Quokka Society 2015-2017\t"
+                 "Vice Chair, Program Committee of the Quokka Society 2012-2015"),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member"},
+    }
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Chair, Program Committee of the Quokka Society 2015-2017" in t for t in bullets)
+    assert any("Vice Chair, Program Committee of the Quokka Society 2012-2015" in t for t in bullets)
+
+
+def _quokka_entry(*dated_parts):
+    return {
+        "taxonomy_code": "Q1",
+        "text": "\t".join(("Member of the Quokka Society 1989-present",) + dated_parts),
+        "extracted_fields": {"organization": "Quokka Society", "role": "Member"},
+    }
+
+
+def test_a_tab_part_recovered_from_one_entry_vouches_for_its_duplicate_in_another():
+    # #1243: dedup keeps near-duplicate entries apart until later, so the same
+    # fused entry can reach the pass twice; each part is written once.
+    gen = _generator()
+    parts = ("Chair, Program Committee of the Quokka Society 2015-2017",
+             "Treasurer of the Wombat Panel 2012-2014")
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+
+    gen._recover_unrendered_records({"Q1": [_quokka_entry(*parts), _quokka_entry(*parts)]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    for part in parts:
+        assert sum(part in t for t in bullets) == 1
+    assert gen.stats["unrendered_records_recovered"] == 2
+
+
+@pytest.mark.parametrize("tab_first", [True, False])
+def test_a_record_recovered_as_a_tab_part_is_not_rewritten_from_a_newline_entry(tab_first):
+    # #1243: the same records, fused by tabs in one entry and one per line in
+    # another; each is written once whichever entry the pass reads first.
+    gen = _generator()
+    parts = ("2015-2017 Chair, Program Committee of the Quokka Society",
+             "2012-2014 Treasurer of the Wombat Panel")
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+    newline_entry = {"taxonomy_code": "Q1", "text": "\n".join(parts), "extracted_fields": {}}
+    entries = [_quokka_entry(*parts), newline_entry]
+
+    gen._recover_unrendered_records({"Q1": entries if tab_first else entries[::-1]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    for part in parts:
+        assert sum(part in t for t in bullets) == 1
+    assert gen.stats["unrendered_records_recovered"] == 2
+
+
+def test_a_recovered_tab_part_does_not_vouch_for_a_later_entry_that_differs_in_its_years():
+    # #1243: two entries of one society share their vocabulary; the second
+    # one's part carries other years, so it is its own record.
+    gen = _generator()
+    first = "Chair, Program Committee of the Quokka Society 2015-2017"
+    second = "Chair, Program Committee of the Quokka Society 2009-2011"
+    gen.doc.add_paragraph("Member of the Quokka Society 1989-present")
+
+    gen._recover_unrendered_records({"Q1": [
+        _quokka_entry(first, "Treasurer of the Wombat Panel 2012-2014"),
+        _quokka_entry(second, "Auditor of the Numbat Panel 2005-2007"),
+    ]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any(first in t for t in bullets)
+    assert any(second in t for t in bullets)
+
+
+def test_record_line_held_by_fields_is_still_recovered_when_it_is_not_a_tab_part():
+    # The held-by-fields skip is for tab parts only: an ordinary record line
+    # whose words the fields hold, and that the render dropped, is lost.
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "Q1",
+        "text": ("2009-2011 Member of the Quokka Society in good standing\n"
+                 "2012-2014 Chair of the Wombat Panel for three years"),
+        "extracted_fields": {"notes": "2009-2011 Member of the Quokka Society in good standing "
+                                      "2012-2014 Chair of the Wombat Panel for three years"},
+    }
+    gen.doc.add_paragraph("Unrelated line about marsupial husbandry in the highlands")
+
+    gen._recover_unrendered_records({"Q1": [entry]})
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    assert "2012-2014 Chair of the Wombat Panel for three years" in texts
+    assert gen.stats['unrendered_records_recovered'] == 2
 
 
 # ------------------------------------------------ D1 positions path (KFGXBW)
@@ -1381,6 +1588,68 @@ def test_segments_cover_source_ignores_a_repeated_page_header_the_reply_drops():
     source = "\n".join(lines[:4] + [header] + lines[4:] + [header])
     assert segments_cover_source(lines, source) is True
     assert segments_cover_source(lines[:-1], source) is False
+
+
+def test_segments_cover_source_rejects_a_reply_that_drops_a_near_duplicate_sibling():
+    """Six committee rows told apart by one word: a reply that keeps five of
+    them carries 92% of the sixth row's tokens, so the pooled per-line share
+    forgave the loss. A row with a sibling needs every one of its tokens in
+    the reply (#1230)."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Member | {n} Committee | Example Department of Synthetic Geology | "
+            f"Example College of Sciences | Example University | 1987-1992" for n in names]
+    source = "\n".join(rows)
+    assert segments_cover_source(rows, source) is True
+    assert segments_cover_source(rows[:-1], source) is False
+    assert segments_cover_source(rows[1:], source) is False
+    # Two sibling rows merged into one segment still carry both whole.
+    assert segments_cover_source(["; ".join(rows[:2])] + rows[2:], source) is True
+
+
+def test_segments_cover_source_accepts_a_sibling_row_split_across_segments():
+    """The prompt asks for one segment per responsibility, so a reply that
+    keeps every token of a sibling row but splits it at its separators is a
+    faithful reply and must not be rejected (#1230). Only a lost token fails."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Director, {n} Laboratory, Example Hospital, 2004-2010; supervised residents; "
+            f"chaired the quality committee" for n in names]
+    source = "\n".join(rows)
+    split = [part for row in rows for part in row.split("; ")]
+    assert segments_cover_source(split, source) is True
+    # A split reply that loses the one word telling a sibling apart is rejected.
+    lost = [part.replace("Hyacinth", "") for part in split]
+    assert segments_cover_source(lost, source) is False
+
+
+def test_segments_cover_source_short_line_counts_as_carried():
+    """A line too short to verify (under RENDER_TOKEN_MIN_COUNT tokens) cannot
+    be held against the reply, though the long lines are all kept (#1230)."""
+    pairs = (("zeolite", "geyser"), ("marigold", "estuary"), ("quartzite", "lagoon"),
+             ("nasturtium", "tundra"), ("basalt", "savanna"), ("obsidian", "fjord"))
+    lines = [f"Doe J. Synthetic {a} and {b} outcomes {i}." for i, (a, b) in enumerate(pairs)]
+    source = "\n".join(lines + ["Page 2"])
+    assert segments_cover_source(lines, source) is True
+
+
+def test_segments_cover_source_pools_tokens_for_a_line_without_a_sibling():
+    """The all-tokens rule is for sibling rows only: a line with no near
+    duplicate keeps the pooled share, so a reply that splits it across two
+    segments, or loses one of its five tokens (0.8 carried), is still
+    believed (#1230)."""
+    triples = (("zeolite", "geyser", "basalt"), ("marigold", "estuary", "savanna"),
+               ("quartzite", "lagoon", "granite"), ("nasturtium", "tundra", "prairie"),
+               ("obsidian", "fjord", "meadow"), ("hyacinth", "glacier", "plateau"))
+    lines = [f"Synthetic {a} {b} {c} outcomes." for a, b, c in triples]
+    source = "\n".join(lines)
+    halves = [half for line in lines for half in line.split(" ", 2)]
+    assert segments_cover_source(halves, source) is True
+    # One token of a non-sibling line lost: 4 of 5 still carried, accepted.
+    # A strict all-tokens rule on every line would reject this reply.
+    lossy = [line.replace("geyser ", "") for line in lines]
+    assert segments_cover_source(lossy, source) is True
+    # Two tokens lost from the same line: 3 of 5, rejected.
+    assert segments_cover_source([line.replace("geyser ", "").replace("basalt ", "")
+                                  for line in lines[:1]] + lines[1:], source) is False
 
 
 def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():

@@ -62,6 +62,7 @@ from unified_pipeline.stage4.schemas import (
     FIELD_DESCRIPTIONS,
     FIELD_SCHEMA_VERSION,
     NUMBERED_FIELD_RE,
+    STAGE4_BATCH_SIZE,
     STAGE4_BORROWED_FIELDS_KEY,
     STAGE4_FOREIGN_RECORDS_KEY,
     STAGE4_RECORDS_KEY,
@@ -258,6 +259,13 @@ _MIN_RECORDS_PER_ENTRY = 2
 # against: none, so the regex pass fills nothing from the entry's text into it.
 _NO_ENTRY_TEXT = ""
 
+# Fields that qualify a record without making one. A numbered record holding
+# only these (`panel_name_2` and nothing else) joins its parent's value: alone
+# it renders a Q3 row with no role, agency or dates, and as the entry's last
+# record it would replace the parent's scalars (#470, PR #1826).
+_QUALIFIER_ONLY_FIELDS = frozenset({"panel_name"})
+_QUALIFIER_SEPARATOR = "; "
+
 
 class _EntryExtraction(NamedTuple):
     """What the reply's items for one entry become on that entry."""
@@ -299,7 +307,8 @@ def _offschema_records(fields: dict[str, Any], taxonomy_code: str,
 
     - `<field>_<n>` keys: the numbered fields alone make record n. The
       parent's other fields are not copied: in a two-column list the parent's
-      date belongs to the first column only.
+      date belongs to the first column only. A record n holding only
+      `_QUALIFIER_ONLY_FIELDS` is folded into the parent instead.
     - an object under a key outside the schema, sharing a key with it
       (`additional_entry`, `additional_presentation`, `additional_period`):
       the parent's fields with the object's laid over them, since it most
@@ -323,9 +332,25 @@ def _offschema_records(fields: dict[str, Any], taxonomy_code: str,
             nested.append(value)
         else:
             kept[key] = value
-    extra = [record for _, record in sorted(numbered.items(), key=lambda kv: int(kv[0]))]
+    in_order = [record for _, record in sorted(numbered.items(), key=lambda kv: int(kv[0]))]
+    extra = _fold_qualifier_records(kept, in_order)
     extra += [{**kept, **record} for record in nested]
     return kept, extra
+
+
+def _fold_qualifier_records(kept: dict[str, Any], records: list[dict[str, Any]],
+                            ) -> list[dict[str, Any]]:
+    """`records` without those holding only `_QUALIFIER_ONLY_FIELDS`, whose
+    values are joined onto `kept`'s, in order."""
+    rows = []
+    for record in records:
+        if not set(record) <= _QUALIFIER_ONLY_FIELDS:
+            rows.append(record)
+            continue
+        for field, value in record.items():
+            parts = [str(part) for part in (kept.get(field), value) if not _is_blank(part)]
+            kept[field] = _QUALIFIER_SEPARATOR.join(parts)
+    return rows
 
 
 def _is_blank(value: object) -> bool:
@@ -1396,7 +1421,7 @@ def _split_skippable_entries(
 
 def extract_fields_from_mapped_entries(
     mapped_entries: list[dict[str, Any]],
-    batch_size: int = 10,
+    batch_size: int = STAGE4_BATCH_SIZE,
     document_uid: str = "",
     cancel_check: Callable[[], None] | None = None,
     docx_path: str | None = None,  # #456 owner-name side channel; None = pre-#456 behavior
@@ -1407,7 +1432,7 @@ def extract_fields_from_mapped_entries(
 
     Args:
         mapped_entries: List of taxonomy-mapped entries from Stage 3
-        batch_size: Number of entries to process per batch (default: 10)
+        batch_size: Number of entries to process per batch (default: STAGE4_BATCH_SIZE)
         document_uid: Document identifier for extracting CV owner name
         cancel_check: Raises to abort; never returns True. Checked at the
             top of each batch and forwarded into every per-taxonomy-group

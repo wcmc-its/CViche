@@ -126,12 +126,14 @@ def test_cell_counts_adds_mutations_and_catches_per_cell(measurement: Measuremen
 
 
 def test_known_catches_and_misses_are_credited_to_the_right_mutation(measurement: Measurement) -> None:
-    """Pins two known catches and one known miss, so a harness that credited
+    """Pins three known catches and one known miss, so a harness that credited
     every lint that fires, or none, fails here and not only in the table diff."""
     caught_by = {o.mutation.name: {f.lint for f in o.caught_by} for o in measurement.outcomes}
     assert "owner_missing_from_citation" in caught_by["truncate_authors_dropping_owner"]
     assert "year_not_in_source" in caught_by["shift_grant_end_year"]
-    assert caught_by["swap_pi_and_coi"] == set()
+    # #1575: each grant's swapped role is the role the other grant's text states.
+    assert caught_by["swap_pi_and_coi"] == {"cross_entry_value"}
+    assert caught_by["shift_publication_year"] == set()
 
 
 def test_the_harness_refuses_an_llm_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
