@@ -33,6 +33,9 @@ def test_reaper_loop_sweeps_repeatedly_and_survives_errors(monkeypatch):
         return 2
 
     monkeypatch.setattr("app.services.run_service.reconcile_stale_runs", fake_reconcile)
+    # #802: the loop also runs the rowless-archive sweep each interval; a real
+    # one opens a DB session and lists storage, which can starve the 0.1 s window.
+    monkeypatch.setattr(main_mod, "_sweep_rowless_archives", lambda: [])
 
     async def run_briefly():
         task = asyncio.create_task(main_mod._stale_run_reaper_loop(0.01))
@@ -59,6 +62,7 @@ def test_reaper_loop_also_sweeps_queued_runs(monkeypatch):
         "app.services.run_service.reconcile_queued_runs",
         lambda db: queued_calls.append(1) or 0,
     )
+    monkeypatch.setattr(main_mod, "_sweep_rowless_archives", lambda: [])  # #802, see above
 
     async def run_briefly():
         task = asyncio.create_task(main_mod._stale_run_reaper_loop(0.01))
