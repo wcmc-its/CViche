@@ -4,7 +4,7 @@ import type { SendProgress } from './batchRows'
 
 const CARD = 'rounded-xl border border-sand-300 bg-white shadow-[0_1px_2px_rgba(60,40,10,0.05)]'
 const SECONDARY_BUTTON =
-  'rounded-lg border border-sand-400 bg-white px-3.5 py-[9px] text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500'
+  'rounded-lg border border-sand-400 bg-white px-3.5 py-[9px] text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500'
 
 /** "Uploading N of M · Two files at a time", the bar, and the keep-tab-open note. */
 export function UploadingBanner({ progress }: { progress: SendProgress }) {
@@ -18,7 +18,7 @@ export function UploadingBanner({ progress }: { progress: SendProgress }) {
         </span>
         <span className="text-[13px] text-[#1E40AF]">{inFlightText()}</span>
       </div>
-      <div className="h-2 overflow-hidden rounded bg-primary-100">
+      <div className="h-2 overflow-hidden rounded-sm bg-primary-100">
         <div className="h-full bg-primary-600 transition-[width] duration-300" style={{ width: `${pct}%` }} />
       </div>
       <p className="text-[13px] text-[#1E40AF]">
@@ -60,7 +60,7 @@ export function DoneCard({ progress, aheadBefore, finishMinutes, onViewBatch, on
         <button
           type="button"
           onClick={onViewBatch}
-          className="rounded-lg bg-primary-600 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-primary-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
+          className="rounded-lg bg-primary-600 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-primary-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
         >
           View batch in Runs
         </button>

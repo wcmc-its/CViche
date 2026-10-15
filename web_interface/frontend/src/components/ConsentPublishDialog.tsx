@@ -84,7 +84,7 @@ export default function ConsentPublishDialog({ preview, publishing, error, onCon
             type="button"
             onClick={onClose}
             disabled={publishing}
-            className="rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:outline-none disabled:opacity-50"
+            className="rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:outline-hidden disabled:opacity-50"
           >
             Cancel
           </button>
@@ -92,7 +92,7 @@ export default function ConsentPublishDialog({ preview, publishing, error, onCon
             type="button"
             onClick={onConfirm}
             disabled={publishing}
-            className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium bg-ink text-white hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium bg-ink text-white hover:bg-gray-800 transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden disabled:opacity-50"
           >
             {publishing && <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />}
             Publish {preview.next_version}

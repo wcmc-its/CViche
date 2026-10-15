@@ -222,7 +222,7 @@ export default function AdminFeedbackInsights() {
 
   if (feedback.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-12 text-center">
+      <div className="bg-white rounded-lg shadow-xs border border-sand-300 p-12 text-center">
         <MessageSquare className="h-12 w-12 text-gray-300 mx-auto mb-4" aria-hidden="true" />
         <h3 className="text-lg font-medium text-gray-900 mb-2">No feedback collected yet</h3>
         <p className="text-sm text-gray-500 max-w-md mx-auto">
@@ -249,7 +249,7 @@ export default function AdminFeedbackInsights() {
       <div className="flex justify-end">
         <button
           onClick={handleExport}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
         >
           <Download className="w-4 h-4" aria-hidden="true" />
           Export CSV
@@ -257,7 +257,7 @@ export default function AdminFeedbackInsights() {
       </div>
 
       {/* Average Scores */}
-      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+      <div className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Average Scores</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
           <ScoreCard
@@ -289,7 +289,7 @@ export default function AdminFeedbackInsights() {
 
       {/* Time Savings Analysis */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+        <div className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
           <h3 className="text-sm font-semibold text-gray-900 mb-4">
             Manual Conversion Effort
           </h3>
@@ -298,7 +298,7 @@ export default function AdminFeedbackInsights() {
           </p>
           <EffortBars distribution={manualEffortDist} total={feedback.length} />
         </div>
-        <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+        <div className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
           <h3 className="text-sm font-semibold text-gray-900 mb-4">
             Correction Effort
           </h3>
@@ -310,7 +310,7 @@ export default function AdminFeedbackInsights() {
       </div>
 
       {/* Summary stats */}
-      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+      <div className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-2">
           Total Responses: {feedback.length}
         </h3>
@@ -322,7 +322,7 @@ export default function AdminFeedbackInsights() {
 
       {/* Individual submissions — lets an admin purge a garbage/abusive
           response that would otherwise pollute the aggregates above. */}
-      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+      <div className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">
           Individual Submissions
         </h3>
@@ -353,12 +353,12 @@ export default function AdminFeedbackInsights() {
                     return (
                       <div key={key} className="min-w-0">
                         <dt className="text-gray-400">{label}</dt>
-                        <dd className="text-gray-800 break-words">{val}</dd>
+                        <dd className="text-gray-800 wrap-break-word">{val}</dd>
                       </div>
                     )
                   })}
                 </dl>
-                <p className="mt-2 text-sm text-gray-800 break-words">
+                <p className="mt-2 text-sm text-gray-800 wrap-break-word">
                   <span className="text-xs text-gray-400">Biggest issue: </span>
                   {f.biggest_issue.trim() || (
                     <span className="italic text-gray-400">(no biggest-issue text)</span>
@@ -371,7 +371,7 @@ export default function AdminFeedbackInsights() {
                     setDeleteError(null)
                     setPendingDelete(f)
                   }}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
                   aria-label={`Delete feedback for run ${f.run_id}`}
                 >
                   <Trash2 className="h-4 w-4" aria-hidden="true" />

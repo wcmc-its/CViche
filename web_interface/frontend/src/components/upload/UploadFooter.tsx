@@ -36,7 +36,7 @@ export default function UploadFooter({ summary, finish, quota, missing, label, b
       <button
         onClick={onStart}
         disabled={disabled}
-        className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
+        className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
         style={{ touchAction: 'manipulation' }}
       >
         {busy ? (

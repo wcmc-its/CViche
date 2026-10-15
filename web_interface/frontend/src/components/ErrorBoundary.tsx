@@ -36,7 +36,7 @@ export default class ErrorBoundary extends Component<Props, State> {
 
     return (
       <main className="max-w-2xl mx-auto px-4 py-16">
-        <div role="alert" className="bg-white border border-red-200 rounded-lg shadow-sm p-6 text-center">
+        <div role="alert" className="bg-white border border-red-200 rounded-lg shadow-xs p-6 text-center">
           <AlertTriangle className="w-8 h-8 text-red-500 mx-auto mb-3" aria-hidden="true" />
           <h2 className="text-lg font-semibold text-gray-900 mb-1">
             Something went wrong displaying this page
@@ -46,21 +46,21 @@ export default class ErrorBoundary extends Component<Props, State> {
             let the CViche team know which page caused it.
           </p>
           {this.state.error?.message && (
-            <pre className="text-xs text-left text-gray-500 bg-gray-50 rounded p-3 mb-4 overflow-x-auto whitespace-pre-wrap">
+            <pre className="text-xs text-left text-gray-500 bg-gray-50 rounded-sm p-3 mb-4 overflow-x-auto whitespace-pre-wrap">
               {this.state.error.message}
             </pre>
           )}
           <div className="flex items-center justify-center gap-3">
             <a
               href="/"
-              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-700 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-700 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden"
             >
               Back to home
             </a>
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden"
             >
               Reload
             </button>

@@ -116,7 +116,7 @@ export default function AdminConfig() {
       )}
 
       {/* Rate Limits */}
-      <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+      <section className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Default Rate Limits</h3>
         <p className="text-xs text-gray-500 mb-4">
           System-wide defaults. Individual user overrides can be set in the Users tab.
@@ -132,7 +132,7 @@ export default function AdminConfig() {
               min="1"
               value={rateLimitDaily}
               onChange={(e) => setRateLimitDaily(e.target.value)}
-              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
+              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-hidden"
             />
           </div>
           <div>
@@ -145,14 +145,14 @@ export default function AdminConfig() {
               min="1"
               value={rateLimitMonthly}
               onChange={(e) => setRateLimitMonthly(e.target.value)}
-              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
+              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-hidden"
             />
           </div>
           {limitsChanged(config, rateLimitDaily, rateLimitMonthly) && (
             <button
               onClick={saveRateLimits}
               disabled={saving}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
             >
               {saving ? (
                 <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
@@ -168,7 +168,7 @@ export default function AdminConfig() {
       <ConsentPublishCard currentVersion={config.consent_version} onPublished={onConsentPublished} />
 
       {/* Export Data */}
-      <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
+      <section className="bg-white rounded-lg shadow-xs border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Export Data</h3>
         <p className="text-xs text-gray-500 mb-4">
           Download data as CSV files for analysis.
@@ -178,7 +178,7 @@ export default function AdminConfig() {
             <button
               key={type}
               onClick={() => handleExport(type)}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500"
             >
               <Download className="w-4 h-4" aria-hidden="true" />
               {type.charAt(0).toUpperCase() + type.slice(1)}

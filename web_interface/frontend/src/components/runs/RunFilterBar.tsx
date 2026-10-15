@@ -120,7 +120,7 @@ export function StatusPills({ controls, counts, allRunsView }: StatusPillsProps)
             type="button"
             aria-pressed={on}
             onClick={() => controls.setStatusPill(pill.id as StatusPillId)}
-            className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 ${
+            className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-[13px] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-600 ${
               on ? 'border-ink bg-ink text-white' : 'border-sand-300 bg-white text-gray-700 hover:bg-sand-50'
             }`}
           >
@@ -219,7 +219,7 @@ export function FiltersPanel({ activeCount, children }: FiltersPanelProps) {
         aria-expanded={open}
         aria-controls="run-filters-panel"
         onClick={() => setOpen((o) => !o)}
-        className={`flex h-9 items-center gap-1.5 rounded-lg border bg-white pl-3 pr-2.5 text-[13px] font-medium text-gray-900 hover:border-sand-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+        className={`flex h-9 items-center gap-1.5 rounded-lg border bg-white pl-3 pr-2.5 text-[13px] font-medium text-gray-900 hover:border-sand-400 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 ${
           activeCount > 0 ? 'border-ink' : 'border-sand-400'
         }`}
       >
@@ -251,7 +251,7 @@ function FilterChip({ label, value, onRemove }: ChipProps) {
         onClick={onRemove}
         aria-label={`Remove ${label} filter`}
         title="Remove filter"
-        className="flex h-[18px] w-[18px] items-center justify-center rounded-full hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+        className="flex h-[18px] w-[18px] items-center justify-center rounded-full hover:bg-white/20 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white"
       >
         <X className="h-[11px] w-[11px]" aria-hidden="true" />
       </button>

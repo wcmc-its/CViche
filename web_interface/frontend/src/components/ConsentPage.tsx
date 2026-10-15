@@ -63,11 +63,11 @@ export default function ConsentPage() {
         </div>
 
         <form onSubmit={handleSubmit}>
-          <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8">
+          <section className="bg-white/95 backdrop-blur-xs rounded-lg shadow-lg p-6 md:p-8">
             {/* Header */}
             <div className="flex items-center justify-between gap-3 mb-6">
               <div className="flex items-center gap-3 min-w-0">
-                <ShieldCheck className="h-6 w-6 text-primary-600 flex-shrink-0" aria-hidden="true" />
+                <ShieldCheck className="h-6 w-6 text-primary-600 shrink-0" aria-hidden="true" />
                 <div className="min-w-0">
                   <h1 className="text-xl font-bold text-gray-900">Consent to Participate</h1>
                   <p className="text-sm text-gray-500">Version {consentStatus.version}</p>
@@ -144,7 +144,7 @@ export default function ConsentPage() {
                   type="checkbox"
                   checked={agreed}
                   onChange={(e) => setAgreed(e.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus-visible:ring-primary-500"
+                  className="mt-1 h-4 w-4 rounded-sm border-gray-300 text-primary-600 focus-visible:ring-primary-500"
                 />
                 <span className="text-sm text-gray-700">
                   I have read the information above and consent to participate in the CViche pilot program.
@@ -158,7 +158,7 @@ export default function ConsentPage() {
             <button
               type="submit"
               disabled={!agreed || submitting}
-              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none flex items-center justify-center gap-2"
+              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-hidden flex items-center justify-center gap-2"
             >
               {submitting ? (
                 <>

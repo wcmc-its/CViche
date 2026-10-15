@@ -156,8 +156,10 @@ def test_run_list_accepts_the_ui_page_size(client, db, seed_simple_mode):
 ])
 def test_run_action_routes_declare_their_response_model(path, model):
     from app.main import app
-    routes = [r for r in app.routes if getattr(r, "path", None) == path]
-    assert [r.response_model for r in routes] == [model]
+    # The OpenAPI schema, not app.routes: FastAPI 0.141 nests included routers.
+    ops = app.openapi()["paths"][path].values()
+    assert [op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+            for op in ops] == [f"#/components/schemas/{model.__name__}"]
 
 
 def test_capacity_body_is_byte_identical(client, db, seed_simple_mode):

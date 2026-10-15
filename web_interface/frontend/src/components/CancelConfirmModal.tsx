@@ -98,7 +98,7 @@ export default function CancelConfirmModal({
       >
         {/* Header */}
         <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-200">
-          <AlertTriangle className="h-6 w-6 text-red-600 flex-shrink-0" aria-hidden="true" />
+          <AlertTriangle className="h-6 w-6 text-red-600 shrink-0" aria-hidden="true" />
           <h2 id={titleId} className="text-lg font-bold text-gray-900">
             Cancel this run?
           </h2>
@@ -135,14 +135,14 @@ export default function CancelConfirmModal({
             ref={keepRunningButtonRef}
             onClick={onClose}
             disabled={isCancelling}
-            className="rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:outline-hidden disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Keep running
           </button>
           <button
             onClick={onConfirm}
             disabled={isCancelling}
-            className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-colors focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-colors focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:outline-hidden disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isCancelling ? 'Cancelling...' : 'Cancel run'}
           </button>

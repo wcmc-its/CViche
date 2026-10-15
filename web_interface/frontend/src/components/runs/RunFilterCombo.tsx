@@ -64,8 +64,8 @@ function OptionRow({ id, option, active, highlighted, onPick, onHover }: OptionR
     >
       <span className="flex">{active && <Check className="w-3.5 h-3.5 text-primary-700" aria-hidden="true" />}</span>
       <span className="min-w-0 flex flex-col">
-        <span className="text-[13px] font-medium text-gray-900 break-words">{option.label}</span>
-        {option.meta && <span className="text-xs text-gray-500 break-words">{option.meta}</span>}
+        <span className="text-[13px] font-medium text-gray-900 wrap-break-word">{option.label}</span>
+        {option.meta && <span className="text-xs text-gray-500 wrap-break-word">{option.meta}</span>}
       </span>
       <span className="text-xs text-gray-500 tabular-nums">{option.count ?? ''}</span>
     </li>
@@ -164,7 +164,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
           setQuery('')
           setHighlight(0)
         }}
-        className={`flex h-9 items-center ${fullWidth ? 'w-full' : 'max-w-[260px]'} gap-1.5 whitespace-nowrap rounded-lg border bg-white pl-3 pr-2.5 text-[13px] text-gray-500 hover:border-sand-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+        className={`flex h-9 items-center ${fullWidth ? 'w-full' : 'max-w-[260px]'} gap-1.5 whitespace-nowrap rounded-lg border bg-white pl-3 pr-2.5 text-[13px] text-gray-500 hover:border-sand-400 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary-500 ${
           activeId ? 'border-ink' : 'border-sand-400'
         }`}
       >
@@ -192,7 +192,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
                 setHighlight(0)
               }}
               onKeyDown={onInputKeyDown}
-              className="flex-1 bg-transparent text-[13px] outline-none placeholder:text-gray-400"
+              className="flex-1 bg-transparent text-[13px] outline-hidden placeholder:text-gray-400"
             />
           </div>
           <ul id={listId} role="listbox" aria-label={label} className="max-h-[340px] overflow-auto p-1.5">
