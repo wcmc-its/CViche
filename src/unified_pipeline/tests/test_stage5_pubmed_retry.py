@@ -1158,7 +1158,7 @@ def test_title_match_published_years_after_the_cv_year_is_another_paper(tmp_path
     result, _, _ = _run_stage5(tmp_path, monkeypatch, entry, _found())
     assert 'enrichment_data' not in result
     assert result['taxonomy_code'] == 'S1'  # #1166 text fallback, not the match
-    assert 'in_press_note' not in result
+    assert 'PMID' not in result.get('in_press_note', '')  # the refused record is not cited
 
 
 def test_publication_year_window():
@@ -1286,6 +1286,26 @@ def test_unmatched_in_press_article_leaves_s7_for_s1_with_its_journal(tmp_path, 
     assert 'Moved from S7 to S1' in result['classification_reasoning']
     assert 'in_press_note' not in result  # nothing was changed in the faculty's text
     assert enricher.stats['in_press_promoted'] == 1
+
+
+def test_stale_unmatched_in_press_entry_carries_a_note(tmp_path, monkeypatch):
+    """#1871: an in-press entry years old that PubMed never matched gets a Word
+    comment; it is still promoted (#1166)."""
+    entry = _unmatched(f'Garcia M. {INPRESS_TITLE}. Heart Journal. 2001, in press.',
+                       target_journal='Heart Journal', year='2001')
+    result, _, enricher = _run_stage5(tmp_path, monkeypatch, entry, _NO_HITS)
+    assert result['taxonomy_code'] == 'S1'
+    assert result['in_press_note'].startswith('The CV lists this as in press (2001)')
+    assert enricher.stats['in_press_stale'] == 1
+
+
+def test_stale_in_press_note_only_past_the_window():
+    assert stage5.stale_in_press_note('in press', '2024', 2026)
+    assert stage5.stale_in_press_note('accepted', 2010, 2026)
+    assert stage5.stale_in_press_note('in press', '2025', 2026) is None
+    assert stage5.stale_in_press_note('in press', '2026', 2026) is None
+    assert stage5.stale_in_press_note('in press', None, 2026) is None
+    assert stage5.stale_in_press_note('in press', '2019-2020', 2026) is None
 
 
 def test_unmatched_in_press_chapter_goes_to_s4():
