@@ -27,13 +27,26 @@ when that block still holds it. A comment is "still there" when the
 corrected copy has a comment by the same author with the same wording on that
 block.
 
+Two anchors are judged by more than their own text, since a fix never
+touches it (YDSVDB, the first real corrected copy: 11 of 13 comments read
+`unknown` after the reviewer had fixed at least 5):
+
+    heading  a WCM template paragraph ("Current Research Funding"), where an
+             Appendix diversion or a finding with no quote sits. The fix is
+             under it, so it is judged by the blocks up to the next template
+             paragraph.
+    label    a form label ("Award Source:"). The fix fills the value beside
+             it, so it is judged by its whole block.
+
 PII: the anchored text and the comment wording never leave this module. A
 `CommentFate` is a comment id and a verdict.
 """
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from unified_pipeline.core.text_norm import norm
 from unified_pipeline.doctor.docx_diff import (
     _REMOVED_WRAPPERS,
     _W_NS,
@@ -61,6 +74,8 @@ _W15_NS = "{http://schemas.microsoft.com/office/word/2012/wordml}"
 #: The part where Word records a comment as resolved: a w15:commentEx with
 #: w15:done="1" whose w15:paraId is the comment's last paragraph's w14:paraId.
 COMMENTS_EXTENDED_PART = "/word/commentsExtended.xml"
+#: How a form label ends: its value sits beside it in the same block.
+LABEL_END = ":"
 
 
 #: A verdict as doctor_vs_autopsy.py's `doctor_review` reads it. `unknown`
@@ -143,21 +158,50 @@ def read_anchors(doc: DocumentType, author: str) -> tuple[list[Block], list[Anch
     return [block for block, _element in blocks], anchors
 
 
-def _verdict(anchor: Anchor, counterpart: int | None, after: list[Block],
+@functools.cache
+def _template_texts() -> frozenset[str]:
+    """Every paragraph of the WCM template, normalised: the headings and
+    instructions a review copy keeps, never a CV's own record."""
+    from docx import Document
+
+    from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH
+    return frozenset(norm(p.text) for p in Document(_TEMPLATE_DOCX_PATH).paragraphs if p.text.strip())
+
+
+def _under(blocks: list[Block], heading: int) -> list[str]:
+    """The texts of the blocks after ``heading``, up to the next template paragraph."""
+    out = []
+    for block in blocks[heading + 1:]:
+        if norm(block.text) in _template_texts():
+            break
+        out.append(block.text)
+    return out
+
+
+def _changed(anchor: Anchor, counterpart: int, before: list[Block], after: list[Block]) -> bool:
+    """Whether the reviewer changed what the comment is about: a heading's
+    blocks, a label's block, else the anchored text itself."""
+    if norm(anchor.text) in _template_texts():
+        return _under(before, anchor.block) != _under(after, counterpart)
+    if anchor.text.endswith(LABEL_END):
+        return before[anchor.block].text != after[counterpart].text
+    return anchor.text not in after[counterpart].text
+
+
+def _verdict(anchor: Anchor, counterpart: int | None, before: list[Block], after: list[Block],
              left: dict[tuple[int, str], list[bool]], tracked: bool) -> str:
     """One comment's verdict; ``left`` holds the corrected copy's comments
     by (block, wording) not yet claimed by an earlier comment, each as
     whether it is resolved."""
-    # ponytail: a comment on a section heading (an Appendix diversion, a
-    # finding with no quote) reads `fixed` only if the heading itself
-    # changes, so moving entries into that section reads not_a_problem or
-    # unknown. And a duplicate's two copies line up by difflib's earliest
-    # match: deleting the earlier copy, not the flagged later one, reads as
-    # the flagged copy unchanged. If the hand-checked sample (#1654) shows
-    # either, judge heading comments by their section's blocks instead.
+    # ponytail: a heading comment reads `fixed` on any edit under that
+    # heading, so two findings under one heading are both credited by one
+    # fix. And a duplicate's two copies line up by difflib's earliest match:
+    # deleting the earlier copy, not the flagged later one, reads as the
+    # flagged copy unchanged. Anchor each finding on its own entry in
+    # review_comments.py if the sample keeps showing either.
     if anchor.block is None or not anchor.text:
         return REVIEW_UNKNOWN
-    if counterpart is None or anchor.text not in after[counterpart].text:
+    if counterpart is None or _changed(anchor, counterpart, before, after):
         return REVIEW_FIXED
     if not tracked:
         return REVIEW_UNKNOWN
@@ -182,7 +226,7 @@ def comment_fates(review: Path, corrected: Path, author: str) -> FateReport:
     tracked = bool(kept)
     fates = [CommentFate(a.comment_id,
                          _verdict(a, counterparts[a.block] if a.block is not None else None,
-                                  after, left, tracked))
+                                  before, after, left, tracked))
              for a in anchors]
     return FateReport(tracked, fates)
 
