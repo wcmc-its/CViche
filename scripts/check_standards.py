@@ -51,6 +51,7 @@ and a shared cache would only save the few hundred ms this already costs.
 
 import argparse
 import ast
+import datetime
 import functools
 import json
 import os
@@ -132,16 +133,17 @@ def _split_waived(hits, rule_label):
     return net, waived
 
 
-# §9's hand-narrated table cites the `origin/dev` sha it was last measured
-# against in its own prose (one definition, per §1.5, not a second field
-# that could disagree with it). Past this many commits behind HEAD it's
-# worth a human re-read (warn); past this many, treat it as failed rather
-# than trust a table that's almost certainly stale (§5.10's recourse
-# ladder). 144 commits was enough to drift the last time this was measured
-# by hand -- these thresholds are a guess at "notice early" and "stop
-# trusting it," not a measured bound; tighten if either proves wrong.
-STALE_WARN_COMMITS = 50
-STALE_FAIL_COMMITS = 200
+# §9's hand-narrated table cites the `origin/dev` sha and date it was last
+# measured against in its own prose (one definition, per §1.5, not a second
+# field that could disagree with it). Past this many days it's worth a human
+# re-read (warn); past this many, treat it as failed rather than trust a table
+# that's almost certainly stale (§5.10's recourse ladder). Days, not commits
+# (#762): dev ran ~80 commits a day in 2026-10, so the old 200-commit limit
+# would have failed CI every ~2.5 days, and a commit count needs full history
+# that CI's depth-1 checkout doesn't have -- the check silently skipped itself
+# there for two months while the table fell 3,457 commits behind.
+STALE_WARN_DAYS = 30
+STALE_FAIL_DAYS = 60
 
 
 def iter_py_files(root, include_tests=False):
@@ -382,29 +384,37 @@ def _load_baseline():
         return {}
 
 
-def _table_verified_sha():
-    """The `origin/dev @ <sha>` §9's hand-narrated table was last measured
-    against, parsed from the doc's own sentence rather than a second field
-    that could disagree with it (§1.5). None if the sentence isn't there."""
+TABLE_STAMP_RE = re.compile(
+    r"measured against `origin/dev` @ `([0-9a-f]{7,40})` \((\d{4}-\d{2}-\d{2})\)")
+
+
+def _table_verified_stamp():
+    """The `origin/dev @ <sha> (<date>)` §9's hand-narrated table was last
+    measured against, parsed from the doc's own sentence rather than a second
+    field that could disagree with it (§1.5). None if the sentence isn't there."""
     with open(DOC, encoding="utf-8") as fh:
-        text = fh.read()
-    m = re.search(r"measured against `origin/dev` @ `([0-9a-f]{7,40})`", text)
-    return m.group(1) if m else None
+        m = TABLE_STAMP_RE.search(fh.read())
+    return (m.group(1), datetime.date.fromisoformat(m.group(2))) if m else None
 
 
-def _commits_behind(sha):
-    """How many commits HEAD is ahead of `sha`. None if git can't answer
-    (shallow checkout, sha not reachable, no .git at all) -- the caller
-    skips the staleness check rather than guess at a number that isn't
-    grounded in anything."""
-    try:
-        r = subprocess.run(
-            ["git", "rev-list", "--count", f"{sha}..HEAD"],
-            capture_output=True, text=True, cwd=ROOT, check=True,
-        )
-        return int(r.stdout.strip())
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        return None
+def _staleness_failure(stamp, today):
+    """Print the staleness WARN/FAIL for `stamp` as of `today` and return 1 on
+    a FAIL, 0 otherwise. A missing stamp fails closed (§5.5): without it the
+    check can't run, and a check that can't run must not read as passing."""
+    if stamp is None:
+        print("FAIL: §9's 'measured against `origin/dev` @ `<sha>` (<yyyy-mm-dd>)' sentence "
+              "is missing, so the hand-narrated table's age can't be checked.", file=sys.stderr)
+        return 1
+    sha, measured = stamp
+    age = (today - measured).days
+    if age > STALE_WARN_DAYS:
+        print(f"WARN: §9's hand-narrated table was last measured at {sha} on {measured}, "
+              f"{age} days ago -- unlike the auto table above, it can't re-verify itself "
+              f"by regenerating. Worth a re-read.", file=sys.stderr)
+    if age > STALE_FAIL_DAYS:
+        print(f"FAIL: {age} days is past the hard limit ({STALE_FAIL_DAYS}).", file=sys.stderr)
+        return 1
+    return 0
 
 
 # 7.9 -- the backend image tag is the runtime's one definition (1.5); every
@@ -717,16 +727,8 @@ def main():
         print("Run: python3 scripts/check_standards.py --update", file=sys.stderr)
         return 1
 
-    sha = _table_verified_sha()
-    if sha:
-        behind = _commits_behind(sha)
-        if behind is not None and behind > STALE_WARN_COMMITS:
-            print(f"WARN: §9's hand-narrated table was last measured at {sha}, now {behind} "
-                  f"commits behind HEAD -- unlike the auto table above, it can't re-verify "
-                  f"itself by regenerating. Worth a re-read.", file=sys.stderr)
-            if behind > STALE_FAIL_COMMITS:
-                print(f"FAIL: {behind} commits behind is past the hard limit ({STALE_FAIL_COMMITS}).", file=sys.stderr)
-                return 1
+    if _staleness_failure(_table_verified_stamp(), datetime.date.today()):
+        return 1
 
     print("OK: CODING_STANDARDS.md's auto-generated §9 rows match current dev")
     return 0
