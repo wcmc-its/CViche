@@ -278,11 +278,14 @@ _RECERTIFICATION_YEARS_RE = re.compile(
 _LISTED_YEAR_RE = re.compile(_YEAR)
 # How the Dates cell joins several recertification years.
 _RECERTIFICATION_YEAR_JOIN = ', '
+# A line that is only a further recertification of the certification
+# above it ("Recertified 2015"), not a certification of its own.
+_RECERTIFICATION_LINE_RE = re.compile(r'\s*recertif', re.IGNORECASE)
 
 
 def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
-    """Every recertification year the source line names, oldest first,
-    when stage 4 kept only one of them.
+    """Every recertification year the record's own lines name, oldest
+    first, when stage 4 kept only one of them.
 
     `recertification_date` holds one value, so a line "Board certified 2012
     / Recertification 2015 / Recertification 2018" kept 2018 and lost 2015
@@ -290,20 +293,38 @@ def _every_recertification_year(recert_fmt: str, source_text: str) -> str:
     year is one of them, so a year from another clause is never added;
     anything else returns `recert_fmt` unchanged.
 
-    Only the one text line that names stage 4's year is read. A record that
+    Only the one text line that names stage 4's year is read, with the
+    certification it continues (`_own_certification_lines`). A record that
     is not fanned can still carry two certifications' lines when stage 4
     returned one record for them ("ABIM, 2005, recertified 2015\nABIM
     Cardiovascular Disease, 2008, recertified 2018"), and the first line's
     2015 is the other certification's (PR #1847 review). When no line or
     more than one line names it, `recert_fmt` is returned unchanged.
     """
-    lines_naming_it = [
-        years for years in (_recertification_years(line)
-                            for line in str(source_text).splitlines())
-        if recert_fmt in years]
-    if len(lines_naming_it) != 1:
+    lines = str(source_text).splitlines()
+    naming_it = [index for index, line in enumerate(lines)
+                 if recert_fmt in _recertification_years(line)]
+    if len(naming_it) != 1:
         return recert_fmt
-    return _RECERTIFICATION_YEAR_JOIN.join(sorted(lines_naming_it[0]))
+    years = {year for line in _own_certification_lines(lines, naming_it[0])
+             for year in _recertification_years(line)}
+    return _RECERTIFICATION_YEAR_JOIN.join(sorted(years))
+
+
+def _own_certification_lines(lines: list[str], index: int) -> list[str]:
+    """Line `index` with the lines of the same certification: when it is a
+    bare recertification line ("Recertified 2025"), the run of them it
+    sits in and the certification line they follow ("ABIM, 2005\n
+    Recertified 2015\nRecertified 2025", PR #1847 review); otherwise the
+    bare recertification lines that follow it. A line naming a board
+    ends the run, so another certification's years stay out."""
+    start = index
+    while start > 0 and _RECERTIFICATION_LINE_RE.match(lines[start]):
+        start -= 1
+    end = index + 1
+    while end < len(lines) and _RECERTIFICATION_LINE_RE.match(lines[end]):
+        end += 1
+    return lines[start:end]
 
 
 def _recertification_years(line: str) -> list[str]:

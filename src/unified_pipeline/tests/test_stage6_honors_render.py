@@ -578,6 +578,31 @@ def test_a_dated_granting_body_line_is_not_a_program():
     assert rows[0] == ["Made-up Award for Pretend Outreach", "Fictional Agency", "2005"]
 
 
+def test_two_distinct_same_year_honors_stay_separate():
+    """PR #1847 review: a second line with no award noun and the record's
+    own year is a separate honor unless it ends in a program noun."""
+    for second_line in ("Chief Resident — 06/2005",
+                        "Dean's List — 2005",
+                        "Imaginary Outreach Program Coordinator — 02/07/2005"):
+        rows = _award_over_program_line(second_line)
+        assert len(rows) == 2, second_line
+        assert rows[0][0] == "Made-up Award for Pretend Outreach"
+        assert rows[1][0].startswith(second_line.split(" — ")[0]), second_line
+
+
+def test_a_second_line_that_is_only_a_date_is_not_a_program():
+    rows = _award_over_program_line("— 02/07/2005")
+    assert rows[0][0] == "Made-up Award for Pretend Outreach"
+    assert all(" - " not in row[0] for row in rows)
+
+
+def test_a_dated_granting_body_ending_in_a_program_noun_is_not_a_program():
+    rows = _award_over_program_line("Imaginary Outreach Program — 02/07/2005",
+                                    granting_body="Imaginary Outreach Program")
+    assert [row[0] for row in rows][0] == "Made-up Award for Pretend Outreach"
+    assert len(rows) == 2
+
+
 def test_a_fanned_out_child_is_one_row_with_its_own_dates():
     """ZCTARO-04: fan-out gives the first record the built line "Award | Org |
     YYYY-MM | YYYY-MM", which the '|' parser split into four rows, and the

@@ -814,6 +814,9 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
 _PROGRAM_LINE_JOIN = ' - '
 # Separator punctuation left at the end of a line once its date is removed.
 _LINE_DATE_SEPARATOR_CHARS = ' ,;:(–—-'
+# The last word of a line that names what an award was given to rather
+# than a second honor ("SHOUT (Student-Driven HCV Outreach) Program").
+_PROGRAM_NOUN_RE = re.compile(r'(?:program|programme|project|initiative)')
 
 
 def _names_any_award(line: str) -> bool:
@@ -842,10 +845,14 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
     #1245): the award's own line is dated, so `_is_one_award_over_lines`
     reads the entry as a list. The line is the award's when all of these
     hold: exactly one of the two lines names stage 4's award; the other
-    names no award noun and is not the granting body; it carries a date of
-    its own; and every date either line names is one of the record's own.
-    An undated line is never taken, so a list whose only date is on stage
-    4's award stays a list.
+    names no award noun, is not the granting body, and once its date is
+    removed ends in a program noun ("Program", "Project", "Initiative");
+    it carries a date of its own; and every date either line names is one
+    of the record's own. An undated line is never taken, so a list whose
+    only date is on stage 4's award stays a list. The program noun keeps
+    two separate same-year honors apart ("<Award> 2005" over "Chief
+    Resident — 06/2005", PR #1847 review): a line with no award noun is
+    not on that alone a continuation of the award above it.
     """
     if len(lines) != 2 or any(_has_date_cell(line) for line in lines):
         return ''
@@ -859,6 +866,9 @@ def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
         return ''
     program = _without_line_date(other)
     if _comparable(program) == _comparable(granting_body):
+        return ''
+    words = _WORD_RE.findall(program.casefold())
+    if not words or not _PROGRAM_NOUN_RE.fullmatch(words[-1]):
         return ''
     return program
 

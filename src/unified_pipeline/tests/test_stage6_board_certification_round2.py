@@ -1509,6 +1509,34 @@ class TestEveryRecertificationYearOnTheLine:
         assert _rows_after_board(gen) == [
             ("Example Board of Sample", "A12345", "2008 (recertified 2018)")]
 
+    _BARE_LINES = ("Example Board of Testing, 2005\n"
+                   "Recertified 2015\n"
+                   "Recertified 2025")
+
+    def _bare_dates(self, recertified, text):
+        fields = {"year_certified": "2005", "recertification_date": recertified}
+        return _format_certification_date_str(fields, text, own_line=True)
+
+    def test_bare_recertification_lines_under_one_certification_are_read(self):
+        # PR #1847 review: one certification whose recertifications are
+        # each a line of their own.
+        assert self._bare_dates("2025", self._BARE_LINES) == "2005 (recertified 2015, 2025)"
+
+    def test_an_earlier_bare_line_reads_the_later_ones(self):
+        assert self._bare_dates("2015", self._BARE_LINES) == "2005 (recertified 2015, 2025)"
+
+    def test_the_certification_line_above_bare_lines_is_read(self):
+        text = "Example Board of Testing, 2005, recertified 2010\nRecertified 2015"
+        assert self._bare_dates("2015", text) == "2005 (recertified 2010, 2015)"
+
+    def test_bare_lines_under_another_certification_are_not_read(self):
+        text = ("Example Board of Testing, 2001\nRecertified 2011\n"
+                "Example Board of Sample, 2005\nRecertified 2015\nRecertified 2025")
+        assert self._bare_dates("2025", text) == "2005 (recertified 2015, 2025)"
+        text = ("Example Board of Sample, 2005\nRecertified 2015\n"
+                "Example Board of Testing, 2001\nRecertified 2011")
+        assert self._bare_dates("2015", text) == "2005 (recertified 2015)"
+
     def test_a_line_that_is_not_the_records_own_is_not_read(self):
         assert self._dates("2018", self._LINE, own_line=False) == "2012 (recertified 2018)"
 
