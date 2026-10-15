@@ -105,6 +105,7 @@ def commit_inserts_retrying_conflict(db: Session) -> None:
         if not (inserts_only and is_retryable_write_conflict(e)):
             raise
         db.rollback()
-        logger.warning("Commit hit a write conflict; retrying once in a fresh transaction: %s", e)
+        logger.warning("Commit hit a write conflict; retrying once in a fresh transaction: %s", type(e).__name__)
+        logger.debug("Commit hit a write conflict; retrying once in a fresh transaction: %s", e)
         db.add_all(staged)
         db.commit()

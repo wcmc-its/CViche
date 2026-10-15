@@ -332,7 +332,8 @@ def generate_preview_from_path(file_path: Path) -> OutputPreview | None:
             data = json.load(f)
         return parse_json_to_preview(data)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, KeyError) as exc:
-        logger.warning("Error generating preview from %s: %s", file_path, exc)
+        logger.warning("Error generating preview from %s: %s", file_path, type(exc).__name__)
+        logger.debug("Error generating preview from %s: %s", file_path, exc)
         return None
 
 
@@ -357,5 +358,6 @@ def generate_preview(db: Session, run_id: str, filename: str) -> OutputPreview |
     try:
         return parse_json_to_preview(json.loads(raw))
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, KeyError) as exc:
-        logger.warning("Error generating preview from storage %s/%s: %s", run_id, resolved.storage_key, exc)
+        logger.warning("Error generating preview from storage %s/%s: %s", run_id, resolved.storage_key, type(exc).__name__)
+        logger.debug("Error generating preview from storage %s/%s: %s", run_id, resolved.storage_key, exc)
         return None

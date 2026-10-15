@@ -210,8 +210,9 @@ def test_lookup_failure_logs_error_no_exc_info_and_redacts_api_key(monkeypatch, 
 
 def test_parse_error_logs_warning_no_exc_info(caplog):
     """The "Parse error" line (converted from print, stays WARNING per the
-    severity map) must carry the exception text but never exc_info -- same
-    never-exc_info rule as the other converted sites.
+    severity map) must name the exception class but never exc_info -- same
+    never-exc_info rule as the other converted sites. The exception text
+    goes to DEBUG only (#639, CODING_STANDARDS §4.7).
 
     Mutant that kills this: add exc_info=True to
     stage_5_pubmed_enrichment.py:575's logger.warning() call. Verified:
@@ -228,15 +229,17 @@ def test_parse_error_logs_warning_no_exc_info(caplog):
         def find(self, path):
             raise ValueError('malformed article XML')
 
-    with caplog.at_level(logging.WARNING, logger=stage5.__name__):
+    with caplog.at_level(logging.DEBUG, logger=stage5.__name__):
         pmid, record = enricher._parse_pubmed_article(_MalformedArticle())
 
     assert pmid is None
     assert record is None
     warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warn_records) == 1
-    assert warn_records[0].getMessage() == '    ⚠️ Parse error: malformed article XML'
+    assert warn_records[0].getMessage() == '    ⚠️ Parse error: ValueError'
     assert warn_records[0].exc_info is None
+    debug_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert '    ⚠️ Parse error: malformed article XML' in debug_messages
 
 
 def test_main_missing_input_logs_error_no_exc_info(monkeypatch, caplog):

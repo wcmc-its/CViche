@@ -59,6 +59,7 @@ except ImportError as exc:
     ) from exc
 
 from unified_pipeline.core.text_norm import is_placeholder_title
+from unified_pipeline.log_redaction import redacted_error_label
 
 from ..fan_out import fallback_text
 from ..formatting import _format_citation, _set_font, with_event_status
@@ -914,7 +915,8 @@ class BibliographySection:
                 self.stats['target_names_bolded'] += 1
 
         except Exception as e:
-            logger.warning("Could not add citation as insertion: %s", e)
+            logger.warning("Could not add citation as insertion: %s", redacted_error_label(e))
+            logger.debug("Citation insertion failure detail: %s", e)
             # Fall back to normal citation
             self._add_citation_with_bold_author(para, citation, target_name,
                                                 cv_owner_last_name, owner_alias)

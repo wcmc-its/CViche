@@ -622,7 +622,8 @@ async def restart_run(
                 manifest,
             )
         except Exception as e:
-            logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
+            logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, type(e).__name__)
+            logger.debug("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
 
         # Create new Run record, inheriting submission_type and the user's
         # output-rendering choices (issues #153, #199) from the original. Without

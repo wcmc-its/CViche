@@ -64,6 +64,7 @@ from app.timeutil import utc_now
 from unified_pipeline.core.prompt_logger import reset_current_run_id, set_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.llm_client import LlmUsage
+from unified_pipeline.log_redaction import redacted_error_label
 from unified_pipeline.repair.protected_data import (
     REPAIR_FLAG_ENV,
     repair_flag_on,
@@ -1120,7 +1121,8 @@ class PipelineOrchestrator:
                 # On this thread: self.db must not be touched from the executor.
                 persist_score_columns(self.db, self.run_id, score)
             except Exception as e:
-                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
+                logger.warning("Quality score caching failed for run %s: %s", self.run_id, redacted_error_label(e))
+                logger.debug("Quality score caching failed for run %s: %s", self.run_id, e)
 
             # Notify on terminal success, passing the freshly-computed score so
             # the Teams message includes it. Fully decoupled and best-effort:
@@ -1253,7 +1255,8 @@ class PipelineOrchestrator:
                 None, notify_run_started, run, submitter, batch_files_submitted
             )
         except Exception as e:  # pragma: no cover - defensive
-            logger.warning("Run start notification failed for run %s: %s", self.run_id, e)
+            logger.warning("Run start notification failed for run %s: %s", self.run_id, redacted_error_label(e))
+            logger.debug("Run start notification failed for run %s: %s", self.run_id, e)
 
     async def _notify_terminal(self, run, score, doctor=None):
         """Best-effort outbound notification for a terminal run.
@@ -1270,7 +1273,8 @@ class PipelineOrchestrator:
                 None, notify_run_terminal, run, score, submitter, doctor
             )
         except Exception as e:  # pragma: no cover - defensive
-            logger.warning("Run notification failed for run %s: %s", self.run_id, e)
+            logger.warning("Run notification failed for run %s: %s", self.run_id, redacted_error_label(e))
+            logger.debug("Run notification failed for run %s: %s", self.run_id, e)
         await self._notify_batch_complete(run)
 
     async def _notify_batch_complete(self, run: Run) -> None:
@@ -1288,7 +1292,8 @@ class PipelineOrchestrator:
         try:
             doctor = await self._run_doctor()
         except Exception as e:
-            logger.warning("Run doctor failed for run %s: %s", self.run_id, e)
+            logger.warning("Run doctor failed for run %s: %s", self.run_id, redacted_error_label(e))
+            logger.debug("Run doctor failed for run %s: %s", self.run_id, e)
             try:
                 # A failed output_files commit would leave the session in
                 # pending-rollback and strip the submitter off the card.
@@ -1543,7 +1548,8 @@ class PipelineOrchestrator:
         try:
             entries = list(run_log_dir.iterdir())
         except OSError as exc:
-            logger.warning("Could not list prompt logs dir: %s", exc)
+            logger.warning("Could not list prompt logs dir: %s", redacted_error_label(exc))
+            logger.debug("Could not list prompt logs dir: %s", exc)
             return
 
         for path in entries:
