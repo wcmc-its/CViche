@@ -227,6 +227,7 @@ from ..formatting import (
 from ..fan_out import LAST_STAGE4_RECORD
 from ..normalization import _clean_inline_tabs
 from ..normalization.pii import _BARE_EMAIL_SHAPE, _BARE_PHONE_SHAPE
+from ..parsing.text import DATE_LED_SOURCE_TEXT
 from ..render_check import (
     UNRENDERED_MIN_RECORD_LINES,
     _is_column_header_row,
@@ -1781,6 +1782,14 @@ def t_line_is_scaffolding(line: str, entry: dict) -> bool:
         entry.get('classification_reasoning')) is not None
 
 
+def recovery_text(entry: Mapping[str, object]) -> str:
+    """The text the unrendered-record pass reads records out of: stage 2's
+    text as it arrived, before stage 6 put date-led siblings on their own
+    lines (`DATE_LED_SOURCE_TEXT`, #983). Those lines are what renders; the
+    pass judges what was lost by the tab parts it was written for."""
+    return str(entry.get(DATE_LED_SOURCE_TEXT) or entry.get('text') or '')
+
+
 def recovery_candidates(code: str, entry: dict) -> list[str]:
     """Lines of an entry the unrendered-record pass should look for.
 
@@ -1792,7 +1801,7 @@ def recovery_candidates(code: str, entry: dict) -> list[str]:
     are usually found on the page; the scan still catches what a re-split
     reply or dedup left out. A shorter T entry has none.
     """
-    text = str(entry.get('text') or '')
+    text = recovery_text(entry)
     if code == 'T':
         if len(text) <= APPENDIX_MAX_CHARS:
             return []
