@@ -155,14 +155,17 @@ _ELECTED_FELLOW_RE = re.compile(
     re.IGNORECASE)
 #: A fellowship as a title: a line that opens with "Fellow, <body>", "Fellow
 #: of/in <body>" or "Distinguished Fellow ...", or that names a body and then
-#: "Fellow" ("<Society> Fellow", "<ACRONYM> Fellow"). A fellowship programme
-#: ("Fellowship") is training or an award, not this shape.
+#: "Fellow" ("<Society> Fellow"). "Fellow" must be followed by a comma, of/in,
+#: a bracket or a digit, so "Fellow Travel Award" and "Fellow - <programme>"
+#: stay quiet. A fellowship programme ("Fellowship") is training or an award,
+#: not this shape. "<ACRONYM> Fellow" is not matched: "NIH Fellow 1998" and
+#: "AHA Fellow" name a training or funding fellowship as often as an honorific
+#: one (SQMWHM 1536 "NATA Fellow" is the one corpus hit it cost).
 _FELLOW_TITLE_RE = re.compile(
     r"^[\W\d]*(?:(?i:present)\W*)?"
     r"(?:(?i:distinguished|founding|honorary|associate)\s+)?(?i:fellow)\b"
     r"(?:\s*,|\s+(?i:of|in)\b|\s*\(|\s+\d)"
-    r"|\b(?i:association|society|college|academy|institute)\s+(?i:fellow)\b"
-    r"|\b[A-Z]{2,6}\s+Fellow\b")
+    r"|\b(?i:association|society|college|academy|institute)\s+(?i:fellow)\b")
 
 
 class HeadingCodeRule(NamedTuple):

@@ -542,7 +542,6 @@ def test_elected_fellowship_coded_as_membership_is_reported_under_any_heading_15
     "1988     Founding Fellow, Invented Informatics Association",
     "2024 Distinguished Fellow of the Invented Psychiatric Association",
     "2009 Invented Gastroenterological Association Fellow",
-    "INVA Fellow, June 2012",
     "2018-Present Fellow, Invented College of Examples",
     "Honorary Fellow, Invented Royal College of Examples",
     "Associate Fellow, Invented Aerospace Association",
@@ -581,6 +580,15 @@ def test_fellowship_title_under_an_honors_path_is_reported_1577(text):
     ("1988-1991 Invented Society Fellowship", "I", ("Honors",)),
     ("Research Fellow, Invented Institute", "I", ("Honors",)),
     ("Member, Invented Society of Examples", "I", ("Honors",)),
+    # "Fellow" not followed by a comma, of/in, a bracket or a digit: an award
+    # or programme named for fellows, not a fellowship title.
+    ("2015 Fellow Travel Award, Invented Society of Examples", "I", ("Honors and Awards",)),
+    ("Fellow - Invented Leadership Programme, 2012", "I", ("Honors and Awards",)),
+    # An acronym before "Fellow": a training or funding fellowship as often
+    # as an honorific one.
+    ("NIH Fellow 1998", "I", ("Honors and Awards",)),
+    ("AHA Fellow", "I", ("Honors and Awards",)),
+    ("INVA Fellow, June 2012", "I", ("Honors and Awards",)),
     # Already Honors, or a different code.
     ("Elected Fellow, Invented Society of Examples", "H", ("Honors",)),
     ("Elected Fellow, Invented Society of Examples", "Q1", ("Service",)),
