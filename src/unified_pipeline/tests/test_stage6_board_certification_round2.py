@@ -1447,6 +1447,17 @@ class TestRecertificationIsNeverTheRangeEnd:
         assert _with_recertification("2008", "2027", current_year=2026) == "2008-2027"
         assert _with_recertification("2008", "2026", current_year=2026) == "2008 (recertified 2026)"
 
+    def test_a_stated_expiry_ends_the_range_over_an_end_date_of_present(self):
+        # TXTATQ 364/365 (#1245): end_date "present" returned "2008-Present"
+        # before recertification_date was read, losing the 2028 expiry.
+        fields = {"year_certified": "2008", "end_date": "present", "recertification_date": "2028"}
+        assert _format_certification_date_str(fields, current_year=2026) == "2008-2028"
+
+    def test_a_past_recertification_year_leaves_an_end_date_of_present(self):
+        for recert in ("2026", "2015", "not required", ""):
+            fields = {"year_certified": "2008", "end_date": "present", "recertification_date": recert}
+            assert _format_certification_date_str(fields, current_year=2026) == "2008-Present", recert
+
     def test_the_current_year_is_a_recertification_not_an_expiry(self):
         this_year = str(datetime.now().year)
         assert self._dates(year_certified="2008", recertification_date=this_year) == f"2008 (recertified {this_year})"
