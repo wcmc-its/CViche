@@ -196,11 +196,11 @@
         "K1 - Didactic Teaching": "Formal classroom instruction: courses, lectures, seminars in educational settings",
         "K2 - Research Mentoring & Clinical Teaching": "Research mentorship, thesis supervision, lab rotations, clinical precepting, bedside teaching",
         "K3 - Educational Program Leadership": "Program director roles, curriculum leadership, educational administration",
-        "K4 - CME & Professional Education": "CME courses, grand rounds, professional development, lectures to practicing professionals"
+        "K4 - CME & Professional Education": "CME courses, grand rounds and lectures the owner taught to practicing professionals"
       },
       "decision_tree": [
         "1. Is this about RUNNING a program (director, coordinator, curriculum chair)? → K3",
-        "2. Is the audience practicing professionals or for CME credit? → K4",
+        "2. Did the owner TEACH practicing professionals or for CME credit? → K4 (attended, not taught → B2)",
         "3. Is this research mentoring, thesis work, or lab supervision? → K2",
         "4. Is this clinical teaching (precepting, rounds, bedside)? → K2",
         "5. Is this formal classroom/didactic teaching? → K1",
@@ -210,6 +210,7 @@
         "Classifying all teaching under 'TEACHING' section as K1 - must distinguish by type",
         "Mixing research mentoring (K2) with classroom teaching (K1)",
         "Putting grand rounds or CME lectures under K1 instead of K4",
+        "Putting courses, workshops or meetings the owner attended under K4 instead of B2",
         "Not recognizing program leadership (K3) vs direct teaching (K1/K2)"
       ]
     },
@@ -303,10 +304,11 @@
       ],
       "common_confusions": [
         "Postdoctoral training positions mistakenly mapped to B2 instead of C.",
-        "Short workshops or single-day CME sessions that belong in K4 rather than B2."
+        "Short workshops or single-day CME sessions the owner taught belong in K4; ones the owner attended stay in B2."
       ],
       "key_rules": [
         "Non-degree extended training or certificate programs → B2.",
+        "Courses, workshops, webinars and meetings the owner attended, completed or participated in → B2, NOT K4 or S8.",
         "Professional development (legacy T3) routes to B2.",
         "Formal postdoctoral training with mentor attribution → C, not B2."
       ]
@@ -742,14 +744,14 @@
       "family": "K",
       "group": "Educational Contributions",
       "purpose": "Capture continuing education for professionals already in practice, including CME and lectures to professional trainees (residents, fellows) outside of formal curriculum.",
-      "description": "Design or delivery of CME and other professional education activities targeted at practicing clinicians, residents, fellows, and other healthcare professionals. Includes grand rounds, CME courses, professional development lectures, and educational sessions aimed at already-credentialed or advanced trainees.",
+      "description": "Design or delivery of CME and other professional education activities targeted at practicing clinicians, residents, fellows, and other healthcare professionals. Includes grand rounds, CME courses, professional lectures, and educational sessions the owner delivered to already-credentialed or advanced trainees.",
       "typical_entries": [
         "Organizer, Annual CME Course in Cardiology",
         "CME-accredited webinar series for practicing physicians",
         "Continuing education course for nurse practitioners",
         "Grand Rounds presentation to faculty and residents",
         "Invited lecture at resident/fellow educational conference",
-        "Professional development workshop for clinical staff",
+        "Workshop taught to clinical staff",
         "Noon conference lecture for internal medicine residents",
         "Journal club facilitator for fellows"
       ],
@@ -757,10 +759,12 @@
         "Formal curriculum-based teaching (didactic) misclassified as K4 instead of K1.",
         "Research mentoring misclassified as K4 instead of K2.",
         "Community or patient education misclassified as K4 instead of K5.",
-        "Invited external talks misclassified as K4 instead of R."
+        "Invited external talks misclassified as K4 instead of R.",
+        "Courses, workshops and meetings the owner attended misclassified as K4 instead of B2."
       ],
       "key_rules": [
-        "CME courses and professional development for practicing professionals → K4.",
+        "CME courses and professional education the owner taught to practicing professionals → K4.",
+        "An activity the owner attended, completed or participated in, with no teaching role → B2, NOT K4.",
         "Grand rounds and professional lectures to mixed audiences (faculty, residents, fellows) → K4.",
         "Formal degree-program curriculum teaching (didactic) → K1, NOT K4.",
         "Research mentoring and thesis supervision → K2, NOT K4.",
@@ -1700,10 +1704,12 @@
       ],
       "common_confusions": [
         "Invited talks misclassified as S8 instead of R.",
-        "Full-length papers in proceedings misclassified as S8 instead of S1/S5."
+        "Full-length papers in proceedings misclassified as S8 instead of S1/S5.",
+        "A meeting the owner attended (a bare meeting name and place, no title or authors) misclassified as S8 instead of B2."
       ],
       "key_rules": [
         "Abstract-driven or proceedings-based contributions → S8.",
+        "An abstract needs a title or an author list; a bare meeting name with a year and a place is attendance → B2, never S8.",
         "Explicitly invited talks (keynotes, plenaries) → R.",
         "If a peer-reviewed full paper appears in proceedings, consider S1 instead of S8."
       ]
