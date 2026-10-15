@@ -141,10 +141,17 @@ def _find_uid(outputs_dir: Path) -> str | None:
     two-suffix search reported that run as having no uid at all. Raises if the
     directory's files name more than one uid: a malformed or partially synced
     run must never have `sweep()` silently pick one.
+
+    Each file is stripped of its LONGEST matching suffix:
+    `<uid>_institution_enriched.json` also ends with `_enriched.json`, and
+    stripping that would read a second uid `<uid>_institution`.
     """
-    uids = {f.name[: -len(suffix)]
-            for suffix in SUFFIX_DIR
-            for f in outputs_dir.glob(f"*{suffix}")}
+    uids = set()
+    for f in outputs_dir.glob("*"):
+        suffix = max((s for s in SUFFIX_DIR if f.name.endswith(s)),
+                     key=len, default=None)
+        if suffix:
+            uids.add(f.name[: -len(suffix)])
     if len(uids) > 1:
         raise MultipleUidsInRunError(
             f"{outputs_dir}: {len(uids)} distinct uids present, expected one: "
