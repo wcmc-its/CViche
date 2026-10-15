@@ -227,6 +227,44 @@ def test_two_comments_of_one_wording_on_one_block_each_need_their_own_copy(tmp_p
         cf.REVIEW_NOT_A_PROBLEM, cf.REVIEW_UNKNOWN]
 
 
+CURRENT = "Current Research Funding"  # template paragraphs: headings a diversion sits on
+PAST = "Past (Completed) Funding"
+LABEL = "Award Source:"
+GRANT = "Synthetic Brennic Foundation, Moorland Lattice Survey, 2019-2021"
+
+
+def _funding() -> Document:
+    """Two template headings, each with a comment (ids 0, 1), and a label
+    under the first whose comment (id 2) is on the label alone."""
+    doc = Document()
+    current = doc.add_paragraph(CURRENT)
+    label = doc.add_paragraph(LABEL)
+    past = doc.add_paragraph(PAST)
+    doc.add_paragraph(GRANT)
+    for p in (current, past, label):
+        doc.add_comment(p.runs, text=FLAG, author=AUTHOR)
+    return doc
+
+
+def _funding_fates(tmp_path: Path, corrected: Document) -> dict[int, str]:
+    review = _save(_funding(), tmp_path / "review.docx")
+    return _verdicts(cf.comment_fates(review, _save(corrected, tmp_path / "corrected.docx"), AUTHOR))
+
+
+def test_a_heading_comment_is_fixed_by_an_edit_under_its_heading_only(tmp_path):
+    """YDSVDB: the reviewer filled in the grant under Past; the heading text never changes."""
+    doc = _funding()
+    _paragraph(doc, "Synthetic Brennic").runs[0].text = GRANT.replace("2021", "2022")
+    assert _funding_fates(tmp_path, doc) == {0: cf.REVIEW_UNKNOWN, 1: cf.REVIEW_FIXED, 2: cf.REVIEW_UNKNOWN}
+
+
+def test_a_label_comment_is_fixed_by_filling_the_value_beside_it(tmp_path):
+    """YDSVDB comment 13: the value is added to the label's block, the label kept."""
+    doc = _funding()
+    _paragraph(doc, LABEL).add_run(" Brennic")
+    assert _funding_fates(tmp_path, doc) == {0: cf.REVIEW_FIXED, 1: cf.REVIEW_UNKNOWN, 2: cf.REVIEW_FIXED}
+
+
 def test_doctor_review_writes_fixed_as_tp_and_dismissed_as_fp_and_drops_unknown():
     findings = [
         {"lint": "implausible_year", "shape": None, "severity": "WARN", "entry_index": 12, "verdict": "fixed"},
