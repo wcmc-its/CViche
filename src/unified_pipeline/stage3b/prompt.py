@@ -442,14 +442,17 @@ D. POSITIONS, APPOINTMENTS, AND LEADERSHIP (C, D, O, Q1)
       * Still D2: the title opens with the staff appointment and names a
         leadership role later ("Attending Physician and Assistant
         Director", "Active Medical Staff and Clinical Director of ...").
-      * Out of scope of this D2 split (code these as the other rules say):
-        - A committee chair ("Chair, Pharmacy and Therapeutics
-          Committee") stays P.
-        - A leadership line that the other rules already make O or L3
-          (not a D2 staff line) keeps that code; this split does not
-          move it between O and L3.
-        - A chief trainee ("Chief Resident", "Chief Residency", "Chief
-          Fellow").
+      * The L3/O line is the same everywhere, under any heading, as in
+        rule 11: a leader of a clinic, lab or clinical service is L3; a
+        leader of a department, division, or an administrative or
+        education program is O.
+      * A committee chair ("Chair, Pharmacy and Therapeutics Committee")
+        stays P; this split does not apply to it.
+      * A chief trainee ("Chief Resident", "Chief Residency", "Chief
+        Fellow") is a training position: C, per C's definition (a
+        residency or fellowship after the terminal degree). This rule
+        never applies to it, even with a leading date or under an
+        appointments or hospital heading.
 
 15. CONSULTANTSHIPS: ADVISORY (Q2) VS PROFESSIONAL (D3)
     - ADVISORY CONSULTING → Q2 (external service):

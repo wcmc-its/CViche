@@ -368,14 +368,22 @@ def test_d2_rule_sends_an_opening_leadership_title_to_l3_or_o_1731():
     assert '"Attending Physician and Assistant\n        Director"' in rule
 
 
-def test_d2_leadership_rule_leaves_committee_chairs_o_l3_and_trainees_alone_1731():
-    """The D2 split must not pull a committee chair out of P, re-sort an
-    O/L3 leadership line, or move a chief trainee."""
+def test_d2_leadership_rule_sorts_l3_o_everywhere_and_keeps_chief_trainees_c_1731():
+    """A/B on #1731: five O lines leading a clinic, lab or clinical service
+    (NJHLUR 497, GCFEBE 86, CTWLTR 16, RNKYST 36, MIFYLG 29) moved to L3,
+    which is rule 11's L3, so the rule states that line everywhere. NJHLUR
+    25, a date-prefixed "Chief Resident" under Academic Appointments, went
+    D2 -> D3/D1: a chief trainee is C and the rule never applies to it."""
     rule = _rule_block("14. KEY DISTINCTION: POSITION VS LEADERSHIP", "15. CONSULTANTSHIPS")
-    scope = rule[rule.index("Out of scope of this D2 split"):]
-    assert "Committee\") stays P." in scope
-    assert "this split does not\n          move it between O and L3" in scope
-    assert '"Chief Resident"' in scope and '"Chief\n          Fellow"' in scope
+    assert "move it between O and L3" not in rule
+    assert "The L3/O line is the same everywhere, under any heading, as in\n        rule 11" in rule
+    assert "a leader of a clinic, lab or clinical service is L3" in rule
+    assert "leader of a department, division, or an administrative or\n        education program is O" in rule
+    assert 'Committee")\n        stays P' in rule
+    trainee = rule[rule.index("A chief trainee"):]
+    assert '"Chief Resident"' in trainee and '"Chief\n        Fellow"' in trainee
+    assert "is a training position: C, per C's definition" in trainee
+    assert "This rule\n        never applies to it" in trainee
 
 
 def test_taxonomy_d2_agrees_with_the_leadership_title_rule_1731():
@@ -383,3 +391,5 @@ def test_taxonomy_d2_agrees_with_the_leadership_title_rule_1731():
     rule = next(r for r in d2["key_rules"] if "OPENS with a leadership title" in r)
     assert "NOT D2" in rule
     assert "A committee chair stays P" in rule
+    assert "clinical-service leader is L3 under any heading" in rule
+    assert "A chief trainee (Chief Resident, Chief Fellow) is C, never this rule" in rule
