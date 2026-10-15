@@ -89,7 +89,10 @@ class PublicationFields(TypedDict, total=False):
     editors: str
     publisher: str
     year: str
-    #: Read only to place a group-filled year before a meeting's place (#1810).
+    #: An S8 meeting and its place. Both render on an entry with no stage-5d
+    #: citation (#1570), and `location` also places a group-filled year in
+    #: one that has a citation (#1810).
+    conference_name: str
     location: str
     volume: str
     issue: str
@@ -141,6 +144,11 @@ class ResolvedPublication:
     editors: str = ''
     publisher: str = ''
     year: str = ''
+    #: An S8 meeting and its place (#1570). Before they were resolved, an
+    #: S8 entry without a stage-5d citation rendered its title and year and
+    #: lost both, so 5d could not reject a citation without losing them too.
+    conference_name: str = ''
+    location: str = ''
     volume: str = ''
     issue: str = ''
     pages: str = ''
@@ -308,6 +316,8 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         # would have rendered its brackets the same way. An absent year and
         # a null year now both render no year.
         year=_scalar_text(fields.get('year')),
+        conference_name=_text(fields.get('conference_name')),
+        location=_text(fields.get('location')),
         volume=(_scalar_text(enrichment.get('pubmed_volume'))
                 or _scalar_text(fields.get('volume'))),
         issue=(_scalar_text(enrichment.get('pubmed_issue'))

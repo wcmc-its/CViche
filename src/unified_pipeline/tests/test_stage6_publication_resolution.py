@@ -91,7 +91,7 @@ def test_resolve_publication_reads_a_non_dict_extracted_fields_as_empty():
 #: no guard at all before this module existed.
 _PROSE_FIELDS = (
     'authors', 'title', 'journal', 'book_title', 'editors', 'publisher',
-    'formatted_citation',
+    'conference_name', 'location', 'formatted_citation',
 )
 
 #: The shapes raw stage-4 LLM JSON has actually been observed to produce for
@@ -579,10 +579,11 @@ _PUBLICATION_CODES = ('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9')
 #: `chapter_title` left this list in round 5 (#728): stage 4's own S4 schema
 #: writes the chapter's title there and never writes `title`, so 53 farm book
 #: chapters rendered the book and never the chapter. `location` left it in
-#: #1810: it places a group-filled year in a meeting citation. `narrative` and the rest
-#: are genuinely not part of a Vancouver citation.
+#: #1810: it places a group-filled year in a meeting citation. `conference_name`
+#: left it in #1570: an S8 entry with no stage-5d citation renders its meeting
+#: and place. `narrative` and the rest are genuinely not part of a Vancouver citation.
 _SCHEMA_KEYS_NOT_RENDERED = frozenset({
-    'abstract_number', 'conference_name', 'edition', 'isbn',
+    'abstract_number', 'edition', 'isbn',
     'media_type', 'narrative', 'publication_venue',
     'report_number', 'status', 'target_journal', 'url', 'venue',
 })

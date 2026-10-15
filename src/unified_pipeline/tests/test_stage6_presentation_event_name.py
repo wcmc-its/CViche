@@ -67,6 +67,20 @@ def test_event_name_already_in_the_title_is_not_repeated():
                   institution="Denver, CO", event_name="SAGES 2022") == "Denver, CO"
 
 
+def test_an_s8_conference_name_is_read_as_the_event():
+    # #1570: an S8 abstract a hierarchy mismatch moved to R keeps its meeting
+    # (YUYVIG SQMWHM 1047 rendered "Orlando, FL" alone). Invented values.
+    assert _venue(location="Larchmere, ZZ",
+                  conference_name="Annual Meeting of the Quillfern Society") == \
+        "Annual Meeting of the Quillfern Society, Larchmere, ZZ"
+
+
+def test_an_event_name_outranks_a_conference_name():
+    assert _venue(institution="Larchmere, ZZ", event_name="Quillfern Lecture",
+                  conference_name="Quillfern Annual Meeting") == \
+        "Quillfern Lecture, Larchmere, ZZ"
+
+
 def test_venue_is_untouched_when_no_event_name_was_extracted():
     assert _venue(institution="Baton Rouge, LA") == "Baton Rouge, LA"
 

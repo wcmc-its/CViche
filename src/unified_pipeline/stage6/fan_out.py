@@ -259,8 +259,20 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'S5': frozenset({'authors', 'title', 'year'}),
     'S6': frozenset({'authors', 'doi', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
     'S7': frozenset({'authors', 'title', 'year'}),
-    'S8': frozenset({'authors', 'doi', 'title', 'year'}),
+    # #1570: a meeting with no 5d citation renders its meeting and place.
+    'S8': frozenset({'authors', 'conference_name', 'doi', 'location', 'title', 'year'}),
     'S9': frozenset({'authors', 'title', 'year'}),
+})
+
+# Rendered fields that do not on their own make a record worth its own item.
+# S8 prints a meeting and its place (#1570), but a record holding nothing
+# else has no title or year, and the bibliography sends such an item to the
+# Appendix (`_lacks_title_and_year`, #446). Splitting a list of bare
+# meetings put one meeting there twice, once alone and once in the whole
+# line the last child keeps (NDMRSO QFQLNF 181), so such a list stays whole,
+# as it did before S8 rendered those fields.
+_NON_ANCHOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
+    'S8': frozenset({'conference_name', 'location'}),
 })
 
 # The codes whose section renders the entry's text, not its fields (see above).
@@ -926,7 +938,8 @@ def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
     records = fields[records_key]
     if rendered is None or fields.get(_FORMATTED_TEXT_KEY):
         return None
-    if not all(_renders_something(record, rendered) for record in records):
+    anchors = rendered - _NON_ANCHOR_FIELDS.get(code, frozenset())
+    if not all(_renders_something(record, anchors) for record in records):
         return None
     cited = _citation_record(fields, records)
     if fields.get(_FORMATTED_CITATION_KEY) and cited is None:

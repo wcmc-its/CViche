@@ -477,6 +477,16 @@ def test_target_that_reads_the_field_under_another_name_keeps_the_reroute() -> N
     assert _gen_and_code(abstract)[1] == "R"
 
 
+def test_an_abstract_with_a_meeting_and_place_keeps_its_reroute_to_talks() -> None:
+    # #1570: S8 renders `conference_name` and `location` now, and R reads both
+    # (the meeting as its event, the place as its venue), so the move still
+    # loses nothing (YUYVIG SQMWHM 1047, EBYSBC MQSUIC 433's shape).
+    abstract = _fielded("S8", ["R"], {"authors": "Doe J", "title": "Abstract X",
+                                      "conference_name": "Meeting X",
+                                      "location": "City X", "year": "2003"})
+    assert _gen_and_code(abstract)[1] == "R"
+
+
 def test_plain_member_role_is_not_lost_to_memberships() -> None:
     member = _fielded("Q2", ["I"], {"organization": "Society X", "role": " Members ",
                                     "start_date": "2015"})

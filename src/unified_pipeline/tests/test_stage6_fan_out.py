@@ -776,6 +776,21 @@ class TestStage4Records:
             {'key': _RECORDS, 'index': 0, 'count': 3}, {'key': _RECORDS, 'index': 1, 'count': 3}]
         assert all(LAST_STAGE4_RECORD not in c for c in children[:-1])
 
+    def test_a_list_of_bare_s8_meetings_stays_whole(self):
+        # #1570, NDMRSO QFQLNF 181's shape: records holding only a meeting, a
+        # place and a status. S8 renders the meeting and place, but a record
+        # with no title or year goes to the Appendix, so splitting printed the
+        # first meeting there twice. Invented values.
+        records = [{'conference_name': 'Quillfern Meeting', 'location': 'Larchmere, ZZ',
+                    'status': 'pending'},
+                   {'conference_name': 'Sable Symposium', 'location': 'Rookby, ZZ',
+                    'status': 'pending'}]
+        parent = _stage4_entry(records, code='S8', text=(
+            'Quillfern Meeting (Larchmere, ZZ)-pending Sable Symposium (Rookby, ZZ)-pending'))
+        assert _fan4(copy.deepcopy(parent)) == [parent]
+        titled = [dict(record, title=f'Talk {i}') for i, record in enumerate(records)]
+        assert len(_fan4(_stage4_entry(titled, code='S8'))) == 2
+
     def test_an_earlier_record_inherits_no_scalar_from_the_last(self):
         records = [{'committee_name': 'Glade Board'}, _committee('Moss Panel')]
         first, last = _fan4(_stage4_entry(records))

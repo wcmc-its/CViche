@@ -313,8 +313,10 @@ def _without_placeholder(citation: str, placeholder: str) -> str:
 # ordinal the line does not hold puts invented text in the document
 # (YUYVIG: FLBFRK 25, SIJYJZ 732, QQGKXR 481/483). The doctor's
 # `citation_grounding` lint applies it to every 5d citation that renders.
-# Stage 5d does not yet reject on it: the stage-4 render a rejected entry
-# would fall back to drops an S8 entry's meeting and place (#1570).
+# Stage 5d does not yet reject on it. The stage-4 render a rejected entry
+# falls back to keeps an S8 entry's meeting and place since #1570's stage-6
+# fix, but on the YUYVIG flags it still drops more source words than the
+# 5d citation does (abstract numbers, months, a presentation type).
 
 # One Vancouver author: surname, 1-4 capital initials, optional generational suffix.
 _VANCOUVER_AUTHOR_RE = re.compile(
