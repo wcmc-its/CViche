@@ -37,9 +37,12 @@ def map_in_order(
     Each call runs in a copy of the caller's contextvars.Context: prompt_logger
     scopes its per-run log directory (#580) with a ContextVar, and a bare pool
     thread starts with an empty context and would write into the shared flat
-    directory instead. The first exception cancels the queued calls and
-    re-raises; calls already in flight finish, since a thread cannot be
-    interrupted, so at most ``workers`` complete after a failure.
+    directory instead. The first exception to *complete* cancels the queued
+    calls and re-raises -- first in completion order, not submission order,
+    so when two calls fail, whichever finishes first is the one raised. Calls
+    already in flight are not cancelled (a thread cannot be interrupted): the
+    function waits for them, so at most ``workers`` complete after a failure
+    and nothing is left running when it returns.
 
     ``on_result(index, result)``, when given, fires once per call on the
     CALLING thread -- never on a pool thread -- so a caller that prints
@@ -48,7 +51,9 @@ def map_in_order(
     pool threads are never registered with it, so anything printed from one
     bypasses the run's capture entirely. In the pool path ``on_result`` fires
     in completion order, not submission order -- the returned list is still
-    in submission order regardless.
+    in submission order regardless. ``on_result`` is progress reporting only:
+    an exception from it is logged and the run continues, because the call
+    it reports on has already succeeded (and been paid for) (#1862).
 
     ``workers=1`` is a true serial loop: no pool, no threads, one context.
     """
@@ -66,8 +71,7 @@ def map_in_order(
         for i, a in enumerate(arg_list):
             result = ctx.run(fn, *a)
             results.append(result)
-            if on_result is not None:
-                on_result(i, result)
+            _notify(on_result, i, result)
         return results
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -84,8 +88,7 @@ def map_in_order(
                 result = future.result()
                 idx = future_index[future]
                 results[idx] = result
-                if on_result is not None:
-                    on_result(idx, result)
+                _notify(on_result, idx, result)
             return results
         except BaseException:
             # Count calls that finished before the failure so the caller
@@ -107,8 +110,22 @@ def map_in_order(
                     completed,
                     len(futures),
                 )
-            pool.shutdown(wait=False, cancel_futures=True)
+            # Cancels the calls not yet started, then waits for the in-flight
+            # ones -- which leaving the ``with`` block would wait for anyway;
+            # wait=True just says so here (#1862).
+            pool.shutdown(wait=True, cancel_futures=True)
             raise
+
+
+def _notify(on_result: Callable[[int, T], None] | None, index: int, result: T) -> None:
+    """Fire ``on_result``, logging rather than raising if it fails: a broken
+    progress line must not discard a call that already succeeded."""
+    if on_result is None:
+        return
+    try:
+        on_result(index, result)
+    except Exception:
+        logger.exception("map_in_order: on_result failed for call %d; continuing", index)
 
 
 def make_progress_printer(
