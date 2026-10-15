@@ -619,6 +619,64 @@ def test_fallback_entries_get_no_content_pin():
     assert n == 0 and out == entry
 
 
+# --- #1731: a chief resident or chief fellow is C, not a position or leadership role ---
+
+@pytest.mark.parametrize("code,text,hierarchy", [
+    # NJHLUR 25: D1/D3 in all four fix rolls; the non-breaking hyphen hid the date.
+    ("D1", "2031‑32 Chief Resident B Example Medicine, Example Hospital, Example Center",
+     ("ACADEMIC APPOINTMENTS",)),
+    ("D3", "2031‑32 Chief Resident B Example Medicine, Example Hospital, Example Center",
+     ("ACADEMIC APPOINTMENTS",)),
+    ("D2", "2031‑32 Chief Resident B Example Medicine, Example Hospital, Example Center",
+     ("ACADEMIC APPOINTMENTS",)),
+    # IO4DEA 190.1: "Chief Residency" is not the trainee pin's "resident" word.
+    ("D2", "Chief Residency, Example Medicine | Example Cancer Center\nExample City | 07/2031-06/2032",
+     ("PERSONAL DATA",)),
+    # web40 173: under an institutional-service heading the model answered O.
+    ("O", "2031 – 2032 Chief Resident – Department of Example Medicine",
+     ("Administrative Service", "Institutional Service")),
+    ("L3", "July 2031 - June 2032 Chief Resident, Example Clinic, Example Hospital", ("Leadership",)),
+    ("O", "Chief Fellow, Example Fellowship Program, 2031-2032", ("Leadership",)),
+    ("D2", "• 2031-present: chief resident, Example Hospital", ("Appointments",)),
+    # A month/year range; O, so the older trainee pin (D1/D2/D3 only) cannot answer first.
+    ("O", "07/2031 – 07/2032 Chief Resident, Example Department", ("Leadership",)),
+])
+def test_chief_trainee_line_is_recoded_to_c_1731(code, text, hierarchy):
+    entry = _row(code, text, confidence=0.75, hierarchy=hierarchy)
+    assert content_pin_code(entry)[0] == "C"
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 1 and out["taxonomy_code"] == "C" and out["pre_pin_code"] == code
+
+
+@pytest.mark.parametrize("code,text", [
+    # RVOPTG 60: the staff appointment opens the line; Chief Resident comes later.
+    ("D2", "2031-2032 Attending Staff Physician and Chief Resident, Example Hospital"),
+    ("L3", "Chief, Mental Hygiene Clinic, Example Hospital, 2031-2032"),
+    ("O", "Chief, Example Residency Program, 2031-2032"),
+    ("O", "Chief Residents Council, Example Hospital, 2031"),
+    # A committee line keeps its P: P is outside the overridable codes.
+    ("P", "2031-2032 Chief Residency Selection Committee, Example Hospital"),
+    # A code outside D1/D2/D3/L3/O keeps the model's answer.
+    ("H", "2031 Chief Resident, Example Hospital"),
+    ("K4", "2031 - 2032 Chief Resident Rounds, 8 interns, 1 hour/day"),
+])
+def test_chief_trainee_pin_leaves_other_lines_1731(code, text):
+    entry = _row(code, text, confidence=0.75)
+    assert content_pin_code(entry) is None
+    (out,), n = apply_header_pin([entry], NO_PIN_CTX)
+    assert n == 0 and out == entry
+
+
+def test_chief_trainee_pin_is_not_flipped_back_by_the_reasoning_check_1731():
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    (out,), n = apply_header_pin([_row("O", "2031 – 2032 Chief Resident – Example Medicine")], NO_PIN_CTX)
+    assert n == 1
+    (corrected,), _ = apply_reasoning_corrections([{**out, "taxonomy_confidence": 0.95}], min_confidence=0.80)
+    assert corrected["taxonomy_code"] == "C"
+
+
 # --- #1695: a per-article citation-metrics line is S0 -----------------------------
 
 _VENUE = "Example Membrane Letters"

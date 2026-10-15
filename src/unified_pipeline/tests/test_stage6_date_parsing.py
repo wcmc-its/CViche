@@ -915,6 +915,7 @@ def test_a_mapping_dated_entry_sorts_among_string_dated_entries():
 from unified_pipeline.stage6.formatting import (  # noqa: E402
     envelope_date_spans,
     extra_date_spans,
+    format_date_list,
     further_date_spans,
     with_extra_date_spans,
 )
@@ -1238,6 +1239,22 @@ def test_further_date_spans_lists_every_span_once_without_an_own_range():
 
 def test_further_date_spans_is_empty_without_a_span_key():
     assert further_date_spans({"date": "2019"}, "R") == []
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("1999-09-30; 1999-10-14; 1999-10-26", "1999"),   # GOWQKA 531 (#1245)
+    ("1997-10-15; 1997-10-22; 2001-03", "1997, 2001"),
+    ("2001; 2003-2005", "2001, 2003-2005"),
+])
+def test_format_date_list_formats_each_date_of_a_list(value, expected):
+    assert format_date_list(value, "R") == expected
+
+
+@pytest.mark.parametrize("value", [
+    "1999-09-30", "2018", "Spring 2018, Fall 2019", "", None,
+    {"start_date": "2001", "end_date": "2003"}])
+def test_format_date_list_is_empty_for_anything_but_a_list_of_dates(value):
+    assert format_date_list(value, "R") == ""
 
 
 # --- #1342: a season after the year, and a year start with a month end -------

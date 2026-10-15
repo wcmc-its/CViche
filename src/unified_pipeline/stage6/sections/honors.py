@@ -30,6 +30,8 @@ is testable on strings alone.
                                     off-schema ranges and lists included
     _is_one_award_over_lines        whether several lines are one award
                                     rather than a list of them (#1245)
+    _program_line                   the dated line naming what a two-line
+                                    award was given to (#1245)
     parse_honor_entry               the whole entry -> `list[HonorRecord]`
     HonorsSection._add_honors_row   the only part that touches the table
 
@@ -807,6 +809,72 @@ def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
                    for line in lines)
 
 
+# What joins an award's name and the program line it was given to, the
+# shape stage 4 itself writes when it keeps both ("Award - Program").
+_PROGRAM_LINE_JOIN = ' - '
+# The one shape a program line may have (PR #1847 review round 4): a name
+# with no comma and no digit that ends in a program noun, a spaced dash, and
+# a date to the day ("SHOUT (Student-Driven HCV Outreach) Program —
+# 02/07/2005", X6 KJJVVO 286). An allow-list: a comma, a month-only date, a
+# year, parentheses around the date or no dash all leave the line its own
+# honor, as on dev.
+_PROGRAM_LINE_RE = re.compile(
+    r'(?P<program>[a-z][^,\d]*?\b(?:program|programme|project|initiative))'
+    r'\s+[–—-]\s+\d{1,2}/\d{1,2}/(?:19|20)\d{2}',
+    re.IGNORECASE)
+
+
+def _names_any_award(line: str) -> bool:
+    """Whether any word of `line` is an award noun or an award's own
+    wording ("Award", "Prize", "Scholarship", "Finalist", ...)."""
+    return any(_ends_in_award_noun(word) for word in _WORD_RE.findall(line.casefold()))
+
+
+def _program_line(lines: Sequence[str], award_name: str, granting_body: str,
+                  date: str) -> str:
+    """The second line of a two-line award that names what the award was
+    given to rather than a second award, or ''.
+
+    "<Agency> <Award> (2005)" over "<Program name> — 02/07/2005" rendered the
+    program as a second award row with an empty organization (X6 KJJVVO 286,
+    #1245): the award's own line is dated, so `_is_one_award_over_lines`
+    reads the entry as a list. The line is the award's only when all of
+    these hold: exactly one of the two lines names stage 4's award and
+    neither is a date cell; the other has exactly the program-line shape
+    (`_PROGRAM_LINE_RE`), names no award noun and is not the granting body;
+    the award's line is not itself dated to the month or day; every date
+    either line names is one of the record's own; and the joined name does
+    not split again on a comma into an award and an organization.
+
+    Each of these is an allow-list condition, not a guard against one
+    reported shape: three review rounds found same-year honors that a
+    permissive rule merged ("Young Investigator Award, 2005" over "NIH Loan
+    Repayment Program, 07/2005", "Teaching Award, 2005" over "Selected,
+    Leadership Development Program (06/2005)"), and each stays two rows.
+    """
+    if len(lines) != 2 or any(_has_date_cell(line) for line in lines):
+        return ''
+    # The award line comes first; a program line above the award is its own
+    # honor, as on dev (PR #1847 review round 4).
+    if [_names_award(line, award_name) for line in lines] != [True, False]:
+        return ''
+    award_line, other = lines
+    match = _PROGRAM_LINE_RE.fullmatch(other.strip())
+    if not match or _names_any_award(other):
+        return ''
+    if _TRAILING_NUMERIC_DATE_RE.search(award_line):
+        return ''
+    if not _start_years('\n'.join(lines)) <= _start_years(date):
+        return ''
+    program = match.group('program')
+    if _comparable(program) == _comparable(granting_body):
+        return ''
+    joined = f"{award_name}{_PROGRAM_LINE_JOIN}{program}"
+    if not granting_body and _extract_organization_from_award(joined):
+        return ''
+    return program
+
+
 def _comparable(text: str) -> str:
     """`text` with case, runs of whitespace and edge punctuation ignored."""
     return ' '.join(text.split()).strip(' .,;:').casefold()
@@ -960,7 +1028,8 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     it (#1556 a: three records rendered as five rows). A line that is only the granting body
     is that record's organization, not an award. And lines that are one
     award written over several lines are read as that award, not as a list
-    (`_is_one_award_over_lines`, ZDCXIV-02).
+    (`_is_one_award_over_lines`, ZDCXIV-02), as is an award's dated program
+    line, which joins its name (`_program_line`, KJJVVO 286).
     """
     fields = entry.get('extracted_fields') or {}
     original_text = str(entry.get('text') or '')
@@ -987,8 +1056,11 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
               if not _is_granting_body_line(award, granting_body)]
 
     if len(awards) > 1 and not _is_one_award_over_lines(parts, award_name, date):
-        return _records_for_award_list(awards, years, award_name,
-                                       granting_body, date)
+        program = _program_line(parts, award_name, granting_body, date)
+        if not program:
+            return _records_for_award_list(awards, years, award_name,
+                                           granting_body, date)
+        award_name = f"{award_name}{_PROGRAM_LINE_JOIN}{program}"
     # What the single-award record falls back to: the entry's own parts
     # minus any column-header line among them. Everything else is kept
     # verbatim, so a pipe shape the parser declined to guess at still

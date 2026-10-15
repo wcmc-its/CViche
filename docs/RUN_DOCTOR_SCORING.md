@@ -326,10 +326,106 @@ carry a verified HIGH, so GREEN can only be honest if it is rare. Runs under
 3.5 estimated minutes: 5, none with a HIGH; under 4: 8, 1 with a HIGH; under 5:
 14, 5 with a HIGH. The 85/60 lines themselves are unchanged.
 
+### Ground truth
+
+The score and the doctor are graded against labels: one `<uid>.json` per run,
+in the schema `scripts/doctor_vs_autopsy.py` reads, converted from each batch's
+verified autopsy. The label store is local, not in the repo. On 2026-10-15 it
+held 207 runs from 11 batches (186 distinct CVs) and 2,419 findings: 255 HIGH,
+953 MED and 1,211 LOW. Paul set the rules below on 2026-10-15.
+
+**One severity scale (R1).** A finding is graded from its fix action and
+`records`, the number of records it affects.
+
+- HIGH: a record is lost, at any count. The run produced no document.
+  Protected data is shown (date of birth, ID numbers, family or home contact
+  details). A value, field, placement or claim is wrong on 20 or more records.
+  Or the finding is flagged `misleads`, at any count.
+- MED: 1-19 records in the wrong section. A field lost, a value wrong or a
+  summary claim unsupported, on 2-19 records. The owner's contact block lost or
+  blank. Spurious or duplicate rows on 20 or more records.
+- LOW: a field lost, a value wrong or a claim unsupported, on one record.
+  Spurious rows (headings, footers, junk) or duplicate rows, under 20.
+  Formatting only. A process note with no document fix, such as a failed
+  batch; this is better kept out of findings.
+
+`misleads` means the output states a false fact about the owner that a reader
+would believe: a wrong date, role, amount, funder, authorship or funding
+status. Without the flag, one wrong value is LOW.
+
+**Required fields.** From the next batch, every autopsy finding records
+`records` (an integer) and `misleads` (true or false). Of the 2,419 stored
+findings, 1,532 have no `records`, and 80 carry a hand-set `misleads` flag (a
+sample, not a full pass). The stored labels carry the mechanical R1 grade, with
+each batch's own grade kept beside it as `severity_original`. The re-grade
+changed 1,214 of the 2,419 grades (HIGH 255 → 432).
+
+**Held out.** A batch is held out when none of its run uids is named anywhere
+in origin/dev `src/`, `scripts/`, `docs/` or `web_interface/`:
+
+```bash
+git grep -l -w -F <uid> origin/dev -- src scripts docs web_interface   # empty for every uid
+```
+
+Today only the next new batch passes. As a small interim set, use EMHFMB's 6
+runs whose uids the check above does not find. RSFOYB fed `table_lost` (#1656),
+GHWROW fed `protected_data_in_output` (#1658), and KRSFSI is named in stage-5
+PubMed code (#1661). Naming a run's uid in any of those paths, a doc included,
+takes it out of the held-out set.
+
+**Graded per batch.** Each batch was graded by its own autopsy, and the graders
+differ: a lost record is HIGH in 35 of 41 EBYSBC findings and in 0 of 27
+OIEPQD findings. So rank r and GREEN with a HIGH are reported per batch, and
+the one cross-batch figure is the batch-stratified rank r: each batch's rank r,
+weighted by its run count. `scripts/score_vs_autopsy.py` prints both and labels
+everything else pooled. Don't compare images or fit the score on a pooled
+number.
+
 ### Measured (#1595)
 
-`scripts/score_vs_autopsy.py`, label cost = 3 x HIGH + 1 x MED + 0.25 x LOW.
-Base is origin/dev `8e29dd24` re-scored over the same artifacts.
+Baseline on 2026-10-15: the 207 labelled runs, re-doctored and re-scored at
+origin/dev `f4411540` from their stored artifacts, then
+`scripts/score_vs_autopsy.py <runs> <labels>`. Label cost = 3 x HIGH + 1 x MED
++ 0.25 x LOW, on each batch's own grades (before R1). The labels are local, not
+in the repo.
+
+| Batch | Runs | Score rank r with cost | GREEN with a verified HIGH | Runs named in origin/dev (`be637b0d`) |
+|---|---|---|---|---|
+| EBYSBC (score fit set) | 40 | -0.69 | 0 of 4 | 40 |
+| s7ab (score fit set) | 10 | -0.61 | 0 of 0 | 10 |
+| pilot (score fit set) | 12 | -0.34 | 0 of 0 | 12 |
+| NDMRSO (lints written from it) | 30 | -0.54 | 0 of 3 | 29 |
+| X6 (lints written from it) | 6 | -0.68 | 0 of 0 | 6 |
+| YUYVIG | 37 | -0.69 | 16 of 25 | 36 |
+| NECRGC | 34 | -0.61 | 13 of 19 | 28 |
+| JAFPFP | 6 | -0.70 | 5 of 5 | 5 |
+| EOAHMI | 9 | -0.54 | 1 of 3 | 8 |
+| OIEPQD | 14 | -0.39 | 1 of 10 | 13 |
+| EMHFMB | 9 | -0.65 | 3 of 6 | 3 |
+| **Batch-stratified** | 207 | **-0.60** | | |
+| Pooled (mixes graders) | 207 | -0.33 | 39 of 75 | |
+
+On the R1 grades, the same 207 runs give a batch-stratified rank r of -0.51 and
+a pooled -0.29, with 53 of 75 GREEN runs carrying a HIGH. A consistent scale
+makes the GREEN problem larger, not smaller. The 33 PDF runs in the table were
+first re-doctored without their source docx; rebuilt from the archived PDF with
+the image's own converter, their score and band are unchanged.
+
+- Within each batch the score's rank r with cost is between -0.34 and -0.70.
+  Pooled across graders, the same runs give -0.33.
+- 39 of 75 GREEN runs carry a verified HIGH: 0 of 7 on the five batches the
+  score or the lints were fitted on, and 39 of 68 on the others. Goal 4 (under
+  1 in 10) is met only on the fit sets.
+- A batch of 6 to 14 runs does not support a decision on its own: the 95%
+  bootstrap intervals of EMHFMB, OIEPQD and EOAHMI cross zero.
+- The labels set a ceiling. Two blind autopsies of the same 6 CVs agree on
+  severity at kappa 0.27. Simulated against one EBYSBC-style autopsy, a perfect
+  doctor reaches a median rank r of 0.65, so EBYSBC's -0.69 is at that ceiling.
+- 33 of the 207 runs (YUYVIG 22, OIEPQD 8, EMHFMB 3) are PDF uploads
+  re-doctored without a source docx, so their source lints did not run.
+
+The #1595 change itself, measured on its own sets with the same script. Base
+is origin/dev `8e29dd24` re-scored over the same artifacts.
 
 | Batch | Doctor | Score rank r with cost, base → #1595 | GREEN with a verified HIGH, base → #1595 |
 |---|---|---|---|

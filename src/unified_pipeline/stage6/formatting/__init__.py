@@ -23,6 +23,7 @@ from .dates import (  # noqa: F401
     envelope_date_spans,
     extra_date_spans,
     format_date_for_section,
+    format_date_list,
     format_date_range,
     further_date_spans,
     normalize_iso_dates_in_text,
