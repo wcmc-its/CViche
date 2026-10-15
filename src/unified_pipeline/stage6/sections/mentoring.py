@@ -104,6 +104,11 @@ _ROLE_LINE_RE = re.compile(r'(?:^|[\t\n])\s*Role:\s*([^\t\n]+)')
 #: Teaching", and blank for mentees with no level.
 _SUPERVISION_ROW_RE = re.compile(r'Type of Supervision[^|\t\n]*\| *([^|\t\n]+)', re.I)
 
+#: The revised template's "Goals/expected Outcomes | <value>" row (YDSVDB,
+#: #829). No schema field holds it and the WCM table has no goals row, so it
+#: joins Project/Accomplishments; before, all 5 of YDSVDB's goals were lost.
+_GOALS_ROW_RE = re.compile(r'Goals/expected Outcomes[^|\t\n]*\| *([^|\t\n]+)', re.I)
+
 #: An end_date value, whole, that means the mentorship is still running.
 #: Any end_date containing "present" ("2019-present") counts as well.
 _ONGOING_END_WORDS = frozenset({'ongoing', 'current', 'now'})
@@ -694,6 +699,10 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     narrative = _text(fields.get('narrative')).strip()
     if narrative and narrative.casefold() not in project.casefold():
         project = f"{project}\n{narrative}" if project else narrative
+    goals_match = _GOALS_ROW_RE.search(_text(entry.get('text')))
+    goals = goals_match.group(1).strip() if goals_match else ''
+    if goals and goals.casefold() not in project.casefold():
+        project = f"{project}\nGoals: {goals}" if project else f"Goals: {goals}"
 
     supervision_type = _text(fields.get('supervision_type'))
     if not supervision_type:
