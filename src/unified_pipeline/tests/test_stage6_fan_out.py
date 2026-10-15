@@ -670,6 +670,18 @@ class TestRejectedListWarning:
         assert warning['evidence'] == ['B1.degrees: 1 entry']
         assert '2012' not in str(warning) and 'Quillmere' not in str(warning)
 
+    def test_a_stage4_records_list_with_attendance_years_does_not_warn(self):
+        # Years held only by attendance ranges in the text are not a missing
+        # record when stage 4 split the reply itself (#1187).
+        records = [{'degree': 'BS', 'institution': 'Harrowfield University', 'year': '1999'},
+                   {'degree': 'MD', 'institution': 'Birch Hollow University', 'year': '2003'}]
+        entry = _stage4_entry(records, code='B1', text=(
+            'Harrowfield University 1995-1999 BS\tBirch Hollow University 1999-2003 MD'))
+        warnings = []
+        children = fan_out_multi_record_entries([entry], FIELD_SCHEMAS, warnings, _RECORDS)
+        assert len(children) == 2
+        assert warnings == []
+
     def test_words_no_field_holds_without_a_year_do_not_warn(self):
         entry = _two_degrees(_NESTED_DATES)
         entry['text'] = 'Qualifications:\t' + entry['text'] + ', Zzcountry'

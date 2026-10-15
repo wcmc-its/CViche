@@ -784,8 +784,8 @@ def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> 
 def _unlisted_year_warnings(unlisted: Mapping[tuple[str, str], int]) -> list[dict[str, Any]]:
     """One sidecar WARN per (code, list key) for entries that fanned out
     without the text coverage test (`_NO_TEXT_COVERAGE_CODES`) while their text
-    names a year no record holds: a dated record stage 4 left out of the list,
-    which the skipped test would have flagged (#1187)."""
+    names a year no record holds: a dated record stage 4 left out of the list
+    (#1187). Not raised for stage 4's own records list."""
     out = []
     for (code, key), count in sorted(unlisted.items()):
         noun = 'entry' if count == 1 else 'entries'
@@ -1110,7 +1110,10 @@ def fan_out_multi_record_entries(
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema, records_key)
+        # Only a generic list: stage 4's own records list reads its years from
+        # the reply, and B1 attendance ranges there are not lost records.
         if (children and code in _NO_TEXT_COVERAGE_CODES and FANNED_OUT_FROM in children[0]
+                and children[0][FANNED_OUT_FROM]['key'] != records_key
                 and _lists_a_year_no_record_holds(entry, children)):
             unlisted[(str(code), children[0][FANNED_OUT_FROM]['key'])] += 1
         if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
