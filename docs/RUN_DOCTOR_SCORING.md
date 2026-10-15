@@ -355,9 +355,10 @@ status. Without the flag, one wrong value is LOW.
 
 **Required fields.** From the next batch, every autopsy finding records
 `records` (an integer) and `misleads` (true or false). Of the 2,419 stored
-findings, 1,532 have no `records` and none has `misleads`. The stored labels
-keep each batch's own grades; a mechanical R1 re-grade, kept beside them,
-changes 1,214 of the 2,419 grades (HIGH 255 → 432).
+findings, 1,532 have no `records`, and 80 carry a hand-set `misleads` flag (a
+sample, not a full pass). The stored labels carry the mechanical R1 grade, with
+each batch's own grade kept beside it as `severity_original`. The re-grade
+changed 1,214 of the 2,419 grades (HIGH 255 → 432).
 
 **Held out.** A batch is held out when none of its run uids is named anywhere
 in origin/dev `src/`, `scripts/`, `docs/` or `web_interface/`:
@@ -366,11 +367,11 @@ in origin/dev `src/`, `scripts/`, `docs/` or `web_interface/`:
 git grep -l -w -F <uid> origin/dev -- src scripts docs web_interface   # empty for every uid
 ```
 
-Today only the next new batch passes. As a small interim set, use EMHFMB's 7
-runs other than RSFOYB and GHWROW: RSFOYB fed `table_lost` (#1656) and GHWROW
-fed `protected_data_in_output` (#1658). One of the 7, KRSFSI, is named in
-stage-5 PubMed code (#1661), but in no doctor or score code. Naming a run's uid
-in any of those paths, a doc included, takes it out of the held-out set.
+Today only the next new batch passes. As a small interim set, use EMHFMB's 6
+runs whose uids the check above does not find. RSFOYB fed `table_lost` (#1656),
+GHWROW fed `protected_data_in_output` (#1658), and KRSFSI is named in stage-5
+PubMed code (#1661). Naming a run's uid in any of those paths, a doc included,
+takes it out of the held-out set.
 
 **Graded per batch.** Each batch was graded by its own autopsy, and the graders
 differ: a lost record is HIGH in 35 of 41 EBYSBC findings and in 0 of 27
@@ -403,6 +404,12 @@ in the repo.
 | EMHFMB | 9 | -0.65 | 3 of 6 | 3 |
 | **Batch-stratified** | 207 | **-0.60** | | |
 | Pooled (mixes graders) | 207 | -0.33 | 39 of 75 | |
+
+On the R1 grades, the same 207 runs give a batch-stratified rank r of -0.51 and
+a pooled -0.29, with 53 of 75 GREEN runs carrying a HIGH. A consistent scale
+makes the GREEN problem larger, not smaller. The 33 PDF runs in the table were
+first re-doctored without their source docx; rebuilt from the archived PDF with
+the image's own converter, their score and band are unchanged.
 
 - Within each batch the score's rank r with cost is between -0.34 and -0.70.
   Pooled across graders, the same runs give -0.33.
