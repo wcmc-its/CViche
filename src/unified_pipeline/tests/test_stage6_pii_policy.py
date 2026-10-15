@@ -171,6 +171,10 @@ PROBE_TABLE = [
     ("Date of Birth (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
     ("Date of Birth (mm/dd/yyyy): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
     ("Birth-date (January 2, 1970):", CAT_DATE_OF_BIRTH, _ALL),
+    # #847: the DOB abbreviation takes the same parenthetical.
+    ("DOB (mm/dd/yyyy): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("D.O.B. (MM/DD/YYYY): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("DOB (" + "x" * 41 + "): 01/02/1970", None, _NEVER),
     # ...bounded at 40 characters (`_DOB_PAREN_MAX`): a longer
     # parenthetical, or one with no colon after it, opens no label.
     ("Date of Birth (" + "x" * 40 + "): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
@@ -1515,6 +1519,10 @@ def test_redact_pre_llm_values_replaces_dob_value_colonless_keeps_label():
      f"Date of Birth (mm/dd/yyyy): {PRE_LLM_PLACEHOLDER}"),
     ("Date of Birth (mm/dd/yyyy):\t01/02/1970",
      f"Date of Birth (mm/dd/yyyy):\t{PRE_LLM_PLACEHOLDER}"),
+    # #847: the same for the DOB abbreviation, which took no parenthetical.
+    ("DOB (mm/dd/yyyy): 01/02/1970", f"DOB (mm/dd/yyyy): {PRE_LLM_PLACEHOLDER}"),
+    ("D.O.B. (MM/DD/YYYY):\t01/02/1970", f"D.O.B. (MM/DD/YYYY):\t{PRE_LLM_PLACEHOLDER}"),
+    ("DOB (01/02/1970):", f"DOB ({PRE_LLM_PLACEHOLDER}):"),
     # A race/ethnicity value is render-time only (#847 scrubs DOB/SSN).
     ("Race/Ethnicity: Example", "Race/Ethnicity: Example"),
 ])
@@ -1536,6 +1544,8 @@ def test_1071_pre_llm_scrub_reaches_a_dob_label_parenthetical(text, expected):
      f"Date of Birth (as of {PRE_LLM_PLACEHOLDER}): {PRE_LLM_PLACEHOLDER}, Appointed 07/01/2005"),
     ("Date of Birth: 01/02/1970, Appointed 2005",
      f"Date of Birth: {PRE_LLM_PLACEHOLDER}, Appointed 2005"),
+    ("DOB (as of 2020): 01/02/1970",
+     f"DOB (as of {PRE_LLM_PLACEHOLDER}): {PRE_LLM_PLACEHOLDER}"),
 ])
 def test_847_dob_label_parenthetical_year_does_not_spend_the_value(text, expected):
     assert redact_pre_llm_values(text) == expected
@@ -1555,12 +1565,15 @@ def test_1071_bare_dob_label_with_a_format_hint_names_its_category():
     -- its own text is scrubbed instead."""
     assert pre_llm_bare_label_category("Date of Birth (mm/dd/yyyy):") == CAT_DATE_OF_BIRTH
     assert pre_llm_bare_label_category("Birth Date (01/02/1970):") is None
+    assert pre_llm_bare_label_category("DOB (mm/dd/yyyy):") == CAT_DATE_OF_BIRTH
+    assert pre_llm_bare_label_category("DOB (01/02/1970):") is None
 
 
 @pytest.mark.parametrize("text", [
     "Jane Example Date of Birth (mm/dd/yyyy): 01/02/1970",
     "Jane Example Birth Date (MM/DD/YYYY): 01/02/1970",
     "Jane Example Birth Date and Birth Place: 01/02/1970",
+    "Jane Example DOB (mm/dd/yyyy): 01/02/1970",
 ])
 def test_1071_explicit_dob_label_with_a_parenthetical_skips_the_boundary_rule(text):
     """#847 residual: an explicit DOB label then a whole date is a DOB
@@ -1572,6 +1585,7 @@ def test_1071_explicit_dob_label_with_a_parenthetical_skips_the_boundary_rule(te
 
 @pytest.mark.parametrize("text", [
     "Date of Birth (" * 20_000,
+    "DOB (" * 40_000,
     "Birth Date (" + "a" * 200_000,
     "Birth Date " + "(" * 200_000,
     "Race / " * 20_000 + "Ethnicity",
