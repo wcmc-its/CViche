@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from app.storage.base import (
+    RUN_ID_PATTERN,
     RunStorage,
     StorageError,
     StorageKeyExists,
@@ -256,6 +257,20 @@ class S3RunStorage(RunStorage):
         ):
             keys.extend(obj["Key"][len(root):] for obj in page.get("Contents", []))
         return sorted(keys)
+
+    def list_run_ids(self) -> list[str]:
+        # Delimiter="/" returns one CommonPrefix per run namespace instead of
+        # every object in every run, so a sweep costs one LIST per 1,000 runs.
+        runs_root = f"{self._key_prefix()}runs/"
+        run_ids: list[str] = []
+        for page in self._s3.get_paginator("list_objects_v2").paginate(
+            Bucket=self._bucket, Prefix=runs_root, Delimiter="/"
+        ):
+            for common in page.get("CommonPrefixes", []):
+                run_id = common["Prefix"][len(runs_root):].rstrip("/")
+                if RUN_ID_PATTERN.match(run_id):
+                    run_ids.append(run_id)
+        return sorted(run_ids)
 
     def _delete_by_prefix(self, s3_prefix: str) -> int:
         """List and bulk-delete every object under a full S3 key prefix.

@@ -55,7 +55,7 @@ from app.services.upload_validation import (
     is_mostly_scanned,
 )
 from app.storage import get_storage
-from app.storage.base import StorageKeyExists
+from app.storage.base import INPUT_MANIFEST_KEY, StorageKeyExists
 from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
@@ -316,7 +316,7 @@ def create_run_archive(
         try:
             # Manifest first: it is the collision sentinel, so a colliding id
             # is caught before any CV content byte is written (see docstring).
-            storage.put_file_exclusive(run_id, "input/manifest.json", manifest)
+            storage.put_file_exclusive(run_id, INPUT_MANIFEST_KEY, manifest)
             storage.put_file_exclusive(run_id, f"input/{stored_name}", content)
         except StorageKeyExists:
             # Same run id already has an archive: another request won the
@@ -371,8 +371,9 @@ def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> bool:
     this request is left in storage.
 
     # ponytail: compensation runs in-process; a crash between archive and
-    # this block still orphans -- a storage-keyed sweep is the upgrade path
-    # (#802 option 2).
+    # this block still orphans. run_service.find_rowless_archives (the
+    # periodic reaper's log and admin reap-orphans) reports what is left;
+    # deleting it from that sweep is the upgrade path once #1216 lands.
     """
     storage = get_storage()
     removed = True

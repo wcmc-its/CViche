@@ -556,3 +556,87 @@ def test_drain_stops_leftover_runs_before_failing_them(monkeypatch):
     asyncio.run(main_mod._drain_runs_before_exit(budget_seconds=0))
 
     assert order == [("stop", "ORDR01"), ("fail", ("ORDR01",))]
+
+
+# ---------------------------------------------------------------------------
+# #802: the rowless-archive sweep runs on the same interval and reports a
+# changed set once, not every sweep.
+# ---------------------------------------------------------------------------
+
+def _rowless_warnings(caplog):
+    return [r.getMessage() for r in caplog.records if "have no run row (#802)" in r.getMessage()]
+
+
+def test_rowless_report_warns_once_per_changed_set(monkeypatch, caplog):
+    import logging
+    found = [["SBGBHZ"], ["SBGBHZ"], ["AAAAAA", "SBGBHZ"], []]
+    monkeypatch.setattr(main_mod, "_sweep_rowless_archives", lambda: found.pop(0))
+
+    async def four_sweeps():
+        seen = frozenset()
+        for _ in range(4):
+            seen = await main_mod._report_rowless_archives(seen)
+        return seen
+
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(four_sweeps()) == frozenset()
+    assert _rowless_warnings(caplog) == [
+        "1 input archive(s) in storage have no run row (#802): SBGBHZ",
+        "2 input archive(s) in storage have no run row (#802): AAAAAA, SBGBHZ",
+    ]
+
+
+def test_rowless_report_survives_a_failed_sweep_and_keeps_the_previous_set(monkeypatch, caplog):
+    import logging
+
+    def boom():
+        raise RuntimeError("storage outage")
+
+    monkeypatch.setattr(main_mod, "_sweep_rowless_archives", boom)
+    with caplog.at_level(logging.WARNING):
+        kept = asyncio.run(main_mod._report_rowless_archives(frozenset({"SBGBHZ"})))
+    assert kept == frozenset({"SBGBHZ"})
+    failed = [r for r in caplog.records if "rowless-archive sweep failed" in r.getMessage()]
+    assert failed and failed[0].exc_info is not None
+
+
+def test_reaper_loop_also_sweeps_rowless_archives(monkeypatch):
+    rowless_calls = []
+    monkeypatch.setattr("app.services.run_service.reconcile_stale_runs", lambda db: 0)
+    monkeypatch.setattr("app.services.run_service.reconcile_queued_runs", lambda db: 0)
+    monkeypatch.setattr(main_mod, "_sweep_rowless_archives", lambda: rowless_calls.append(1) or [])
+
+    async def run_briefly():
+        task = asyncio.create_task(main_mod._stale_run_reaper_loop(0.01))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run_briefly())
+    assert len(rowless_calls) >= 1
+
+
+def test_rowless_sweep_runs_in_its_own_session(monkeypatch):
+    """_sweep_rowless_archives opens a session, passes it to the sweep, and
+    closes it even when the sweep raises."""
+    closed = []
+
+    class _Session:
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr("app.database.SessionLocal", _Session)
+    monkeypatch.setattr("app.services.run_service.find_rowless_archives",
+                        lambda db: ["SBGBHZ"] if isinstance(db, _Session) else [])
+    assert main_mod._sweep_rowless_archives() == ["SBGBHZ"]
+
+    def boom(db):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("app.services.run_service.find_rowless_archives", boom)
+    with pytest.raises(RuntimeError):
+        main_mod._sweep_rowless_archives()
+    assert closed == [1, 1]

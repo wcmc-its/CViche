@@ -66,6 +66,10 @@ async def reap_orphan_runs(
     WCM-template upload, or a failed/abandoned start -- and are hidden from the
     Runs dashboard but stay visible in S3. Call with ?dry_run=true first to
     preview which runs would be removed.
+
+    The response also reports ``rowless_archives`` / ``rowless_run_ids``: input
+    archives in storage that have no run row at all (#802). Those are listed,
+    not deleted.
     """
     return reap_orphans(db, admin, older_than_hours=older_than_hours, dry_run=dry_run)
 

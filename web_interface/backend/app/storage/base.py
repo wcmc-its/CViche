@@ -48,6 +48,13 @@ class ArtifactTooLarge(ValueError):
 # would start raising.
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# Where a run's uploaded input lives inside its namespace, and the manifest
+# create_run_archive (services/run_creation.py) writes there first. The
+# rowless-archive sweep (#802) reads the manifest's age, so the writer and the
+# sweep must agree on this key.
+RUN_INPUT_DIR = "input"
+INPUT_MANIFEST_KEY = f"{RUN_INPUT_DIR}/manifest.json"
+
 # Largest single artifact any write may store. Uploads are capped at
 # MAX_UPLOAD_SIZE before they reach storage; generated Word documents, stage
 # JSON and prompt-log transcripts are the other writers, so the ceiling is a
@@ -219,6 +226,19 @@ class RunStorage(ABC):
         """Every top-level key under ``prefix`` (a literal key-prefix match,
         like S3's Prefix), as full relative keys, sorted. ``prefix`` must be
         non-empty."""
+        ...
+
+    @abstractmethod
+    def list_run_ids(self) -> list[str]:
+        """Every run id with objects stored under its run namespace, sorted.
+
+        Keyed on storage alone, so a namespace no Run row points at is listed
+        too: that is what the rowless-archive sweep (#802) needs it for. A
+        name that is not a valid run id (RUN_ID_PATTERN) is never returned.
+        LocalRunStorage shares its root with global keys (by-submitter/,
+        inbound/), so it counts a top-level directory as a run namespace only
+        when that directory holds an input/ directory.
+        """
         ...
 
     @abstractmethod
