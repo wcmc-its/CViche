@@ -76,8 +76,9 @@ run pipeline:render-doctor-gates python3 scripts/test_render_doctor_gates.py
 run pipeline:render-gate-integ python3 scripts/test_render_gate_integration.py
 run pipeline:corpus-batch-sh bash -c 'for t in scripts/test_run_corpus_batch_*.sh; do echo "=== $t"; bash "$t" || exit 1; done'
 run pipeline:local-ci-selftest bash scripts/test_local_ci_trufflehog_resolution.sh
-# function-size: CI checks out depth 1, where check_standards' local-only
-# "commits behind" probe returns None -- run it on a .git-less copy.
+# function-size: CI checks out depth 1 -- run it on a .git-less copy so no
+# check here can lean on history CI doesn't have. (§9's staleness gate reads
+# a date from the doc since #762, so it no longer needs git at all.)
 FS=$S/ci-$LABEL-fs; rm -rf "$FS"; rsync -a --exclude .git "$WT/" "$FS/"
 ( cd "$FS" && python3 scripts/check_function_size.py ) > "$OUT/function-size.log" 2>&1; rc=$?
 printf '%-28s rc=%s  %s\n' function-size "$rc" "$(tail -1 "$OUT/function-size.log")" | tee -a "$OUT/summary.txt"

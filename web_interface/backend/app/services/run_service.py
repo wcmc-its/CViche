@@ -32,7 +32,7 @@ from app.models import (
 from app.pipeline import concurrency, run_queue
 from app.services import auto_retry, batch_completion, batch_service, notifications
 from app.storage import get_storage
-from app.storage.base import RunStorage
+from app.storage.base import INPUT_MANIFEST_KEY, RunStorage, StorageKeyNotFound
 from app.timeutil import utc_now
 
 logger = logging.getLogger(__name__)
@@ -100,6 +100,11 @@ DEFAULT_QUEUED_RECONCILE_MINUTES = 5
 # storage. Generous so a just-uploaded run that is about to be started is never
 # swept.
 DEFAULT_ORPHAN_REAP_HOURS = 24
+
+# An input archive with no Run row is reported only once its manifest is this
+# old (#802). Every upload writes its archive before it inserts the row, so a
+# younger rowless archive is most likely an upload still in flight.
+ROWLESS_ARCHIVE_MIN_AGE = timedelta(hours=1)
 
 # Where an upload's pod-local copy lives. Owned here (services/), not
 # app/api/upload.py, so the worker process (#701) can resolve a run's input
@@ -593,6 +598,40 @@ def reap_orphaned_created_runs(
         result["reaped"], result["candidates"], older_than_hours, result["objects_deleted"],
     )
     return result
+
+
+def find_rowless_archives(
+    db: Session, storage: RunStorage | None = None, *, now: datetime | None = None,
+) -> list[str]:
+    """Run ids whose input archive is in storage with no Run row (#802), sorted.
+
+    The storage-keyed half of the orphan sweep: reap_orphaned_created_runs
+    enumerates Run rows, so it cannot see an archive whose row was never
+    committed -- a compensation that could not delete (#1216), or a pod killed
+    between the archive and the compensation. Only archives whose manifest is
+    at least ROWLESS_ARCHIVE_MIN_AGE old count; a namespace with no manifest
+    is not an upload archive and is skipped. Reports only: deleting these
+    waits on the live role getting s3:DeleteObject (#1216).
+
+    ``now`` is the clock the age is measured against (utc_now() by default),
+    passed in so a test can pin it.
+    """
+    storage = storage or get_storage()
+    cutoff = (now or utc_now()) - ROWLESS_ARCHIVE_MIN_AGE
+    stored_ids = storage.list_run_ids()
+    with_rows = set(db.execute(select(Run.id).where(Run.id.in_(stored_ids))).scalars())
+    return [
+        run_id for run_id in stored_ids
+        if run_id not in with_rows and _archived_before(storage, run_id, cutoff)
+    ]
+
+
+def _archived_before(storage: RunStorage, run_id: str, cutoff: datetime) -> bool:
+    """True when run_id's input manifest exists and was written before cutoff."""
+    try:
+        return storage.last_modified(run_id, INPUT_MANIFEST_KEY) < cutoff
+    except StorageKeyNotFound:
+        return False
 
 
 def _claim_stale_run(db: Session, run: Run, seen_started_at: datetime, **values: object) -> bool:

@@ -973,6 +973,7 @@ def test_twins_with_an_appendix_copy_are_still_duplicates(first_code, second_cod
 @pytest.mark.parametrize("text", [
     "University of Vermont",                                    # CXRYCF
     "Medical College of Wisconsin (1987-2004)",                 # UJNBIT
+    "University of Florida College of Medicine, Department of Anesthesiology",  # ULHCAP
     "At Purdue University:",                                    # JJYBKP
     "Project Title:\tRole:\tMajor Goals:",                      # ZASOTV
     "Title Institution, city and state Dates (mm/yy - mm/yy)",  # RLADNC
@@ -989,6 +990,9 @@ def test_place_or_label_twins_under_two_codes_are_still_duplicates(text):
 @pytest.mark.parametrize("text", [
     "Journal of the American College of Surgeons",              # FVQANK
     "Research Fellow in Epidemiology, Karolinska Institute",
+    "Director, Global Health Institute, College of Medicine",
+    "Stanford University, Visiting Scholar in Biostatistics",
+    "Department of Medicine Grand Rounds Lecture Series on Cardiovascular Outcomes",
     "American Osteopathic Association",
 ])
 def test_record_lines_naming_a_place_word_are_kept_under_two_codes(text):

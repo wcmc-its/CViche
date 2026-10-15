@@ -1028,3 +1028,50 @@ def test_local_last_modified_is_the_files_mtime_in_utc(tmp_path):
     assert store.last_modified("run1", "corrected/run1_corrected.docx") == datetime(2026, 10, 13, 9, 30, tzinfo=UTC)
     with pytest.raises(FileNotFoundError):
         store.last_modified("run1", "corrected/absent.docx")
+
+
+# ---------------------------------------------------------------------------
+# list_run_ids: the storage-keyed enumeration the rowless-archive sweep needs (#802)
+# ---------------------------------------------------------------------------
+
+def test_s3_list_run_ids_reads_run_namespaces_with_a_delimiter():
+    """One CommonPrefix per run namespace, not every object; a prefix that is
+    not a valid run id is dropped, and the result is sorted."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "list_objects_v2",
+        {"CommonPrefixes": [
+            {"Prefix": "cviche/runs/ZZ9999/"},
+            {"Prefix": "cviche/runs/bad.id/"},
+            {"Prefix": "cviche/runs/AB12CD/"},
+        ]},
+        expected_params={"Bucket": "test-bucket", "Prefix": "cviche/runs/", "Delimiter": "/"},
+    )
+    with stub:
+        assert storage.list_run_ids() == ["AB12CD", "ZZ9999"]
+    stub.assert_no_pending_responses()
+
+
+def test_s3_list_run_ids_of_an_empty_store_is_empty():
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "list_objects_v2", {},
+        expected_params={"Bucket": "test-bucket", "Prefix": "cviche/runs/", "Delimiter": "/"},
+    )
+    with stub:
+        assert storage.list_run_ids() == []
+
+
+def test_local_list_run_ids_counts_only_directories_holding_an_input_archive(tmp_path):
+    """The local root also holds global keys (by-submitter/, inbound/), so a
+    top-level directory is a run only when it has an input/ directory."""
+    store = LocalRunStorage(base_dir=str(tmp_path))
+    store.put_file("RUN002", "input/manifest.json", b"{}")
+    store.put_file("RUN001", "input/cv.docx", b"x")
+    store.put_file("NOINPT", "outputs/cv.docx", b"x")
+    store.put_global("by-submitter/e@x.edu/RUN001/manifest.json", b"{}")
+    (tmp_path / "stray.file").write_bytes(b"x")
+    (tmp_path / "bad.id" / "input").mkdir(parents=True)
+    assert store.list_run_ids() == ["RUN001", "RUN002"]

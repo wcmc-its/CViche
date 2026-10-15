@@ -257,6 +257,20 @@ def test_find_uid_rejects_a_run_dir_naming_two_uids(tmp_path):
         raise AssertionError("expected MultipleUidsInRunError")
 
 
+def test_find_uid_reads_institution_enriched_as_the_same_uid(tmp_path):
+    """A current S3 run carries both `_enriched.json` and
+    `_institution_enriched.json`. The latter also ends with `_enriched.json`;
+    stripping the shorter suffix read a second uid `aaa111_institution` and
+    raised MultipleUidsInRunError on every such run.
+    """
+    cli = _load_cli()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    for suffix in cli.SUFFIX_DIR:
+        (outputs / f"aaa111{suffix}").write_text("{}", encoding="utf-8")
+    assert cli._find_uid(outputs) == "aaa111"
+
+
 def test_sweep_records_failure_for_a_run_id_escaping_corpus_dir(tmp_path):
     """T1.5: run_id "../x" must not resolve outside corpus_dir."""
     cli = _load_cli()
