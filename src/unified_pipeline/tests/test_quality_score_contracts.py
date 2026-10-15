@@ -1140,7 +1140,6 @@ def test_a_findings_cost_is_precision_times_severity_times_fix_minutes(monkeypat
 
 
 @pytest.mark.parametrize("finding", [
-    _finding("multi_record_coverage", severity="INFO"),       # a note, not a problem
     _finding("multi_record_coverage", status="skipped"),      # the lint did not run
     _finding("multi_record_coverage", severity="DEBUG"),      # not a doctor severity
     {"severity": "WARN"},                                     # no lint name
@@ -1156,6 +1155,33 @@ def test_an_error_finding_counts_like_a_warning(monkeypatch):
     warn, = qs.estimate_cleanup([_finding("junk_or_header_row")])
     error, = qs.estimate_cleanup([_finding("junk_or_header_row", severity="ERROR")])
     assert error.minutes == warn.minutes == pytest.approx(qs.FIX_MINUTES_DUPLICATE)
+
+
+def test_an_info_finding_counts_at_its_precision_like_a_warning(monkeypatch):
+    """The measured precision is the discount, not the severity: an INFO note
+    on a lint the ledger trusts 15% of the time (source_line_coverage's row)
+    costs 0.15 x its fix minutes, exactly what the same finding at WARN costs.
+
+    The expected minutes are a literal, so a change to the INFO weight has to
+    change this test too."""
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(source_line_coverage=(3, 20)))
+    info, = qs.estimate_cleanup([_finding("source_line_coverage", severity="INFO")])
+    warn, = qs.estimate_cleanup([_finding("source_line_coverage")])
+    assert (info.findings, info.precision) == (1, pytest.approx(0.15))
+    assert info.minutes == warn.minutes == pytest.approx(0.15)
+
+
+def test_a_run_with_only_info_findings_is_not_scored_as_clean(tmp_path, monkeypatch):
+    """The wire, not just the helper: a doctor report holding only INFO notes
+    lowers the dimension and names its lint in the detail string."""
+    monkeypatch.setattr(qs, "load_gate_ledger", _ledger(multi_record_coverage=(1, 1)))
+    _write_json(tmp_path, "X_doctor.json",
+                {"findings": [_finding("multi_record_coverage", severity="INFO")] * 3})
+    fraction, detail, cap = qs.score_doctor_findings(tmp_path)
+    minutes = 3 * qs.FIX_MINUTES_RECORD_LOST
+    assert cap is None
+    assert fraction == pytest.approx(minutes / (minutes + qs.DOCTOR_HALF_WEIGHT_MINUTES))
+    assert "multi_record_coverage 3x" in detail, detail
 
 
 def test_an_unmeasured_lint_gets_the_stated_prior(monkeypatch):

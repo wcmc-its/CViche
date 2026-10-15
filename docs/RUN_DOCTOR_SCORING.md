@@ -11,7 +11,7 @@ answer different questions.
 | Where it runs | orchestrator post-run, `stage_7_doctor/<uid>_doctor.json` | `quality_score_service`, cached at `runs/{id}/quality_score.json` |
 
 The doctor does not compute a 0-100 score, but since #1595 the score is built
-from the doctor's report: its WARN and ERROR findings, weighted by each lint's
+from the doctor's report: its findings, INFO included, weighted by each lint's
 measured precision and typical fix minutes, are the score's one weighted
 dimension, and a run with no report cannot be GREEN. The doctor also reports
 all five of the score's hard-fail gates, each as an ERROR lint that calls the
@@ -146,8 +146,12 @@ fraction = minutes / (minutes + 5)
   code is unchanged since dev-259 (`HELD_OUT_CHANGED` lists the rest). The score
   and the gate read the same numbers (Paul, 2026-10-08). A finding with no
   verdicts gets `UNMEASURED_PRECISION_PRIOR`, 0.5.
-- **severity weight** is 1 for WARN and ERROR, 0 for INFO. INFO findings are not
-  shown as problems.
+- **severity weight** (`SEVERITY_WEIGHT`) is 1 for every severity, INFO
+  included: the precision is the discount, and the severity is not a second
+  one. An INFO note the ledger seldom confirms costs little
+  (`source_line_coverage`, 15%: 0.15 minutes per finding); one it usually
+  confirms costs what a WARN does. INFO weighed 0 until 2026-10-15; the
+  measurement that changed it is under "INFO findings count" below.
 - **fix minutes** come from `LINT_FIX_MINUTES`, #822's strawman unit costs per
   kind of defect: protected data 5, owner contact block 2, a lost record 1, an
   entry in the wrong place 0.5, a wrong field 0.3, a duplicate or a header row
@@ -324,7 +328,9 @@ Gate modes: `off` (always passes), `advisory` (computes, never blocks —
 pilot (62 runs; labels converted from their verified autopsies). 48 of the 62
 carry a verified HIGH, so GREEN can only be honest if it is rare. Runs under
 3.5 estimated minutes: 5, none with a HIGH; under 4: 8, 1 with a HIGH; under 5:
-14, 5 with a HIGH. The 85/60 lines themselves are unchanged.
+14, 5 with a HIGH. The 85/60 lines themselves are unchanged. The line was not
+refitted when INFO findings started to count (below): the same 3 minutes now
+admit fewer runs.
 
 ### Measured (#1595)
 
@@ -352,6 +358,40 @@ line can: three YUYVIG runs with a verified HIGH have no WARN finding at all
 (0 estimated minutes), so a score built from the doctor is bounded by the
 doctor's recall (goal 1). The one cap on a zero-HIGH YUYVIG run is IXJMKS's,
 which had no doctor report (#1593).
+
+### INFO findings count (2026-10-15)
+
+INFO weight 0 against 1, re-scored at $0 over the stored doctor reports of the
+207 labelled runs (origin/dev `f4411540`; no doctor or scorer change since).
+The weight was chosen on six batches (EBYSBC 40, s7ab 10, pilot 12, NDMRSO 30,
+X6 6, EOAHMI 9) out of INFO 0, 0.25, 0.5, 1 and "INFO counts when its measured
+precision is at least 0.5 / 0.8", by the run-weighted mean of the per-batch rank r
+against the R1-graded labels. It was then read once on the other five
+(YUYVIG 37, NECRGC 34, JAFPFP 6, OIEPQD 14, EMHFMB 9). Label cost is
+3 x HIGH + 1 x MED + 0.25 x LOW, under R1 and as each batch graded it.
+
+| Batches | Labels | Stratified rank r, INFO 0 → 1 | Change, paired bootstrap 95% | GREEN / with a HIGH, INFO 0 → 1 |
+|---|---|---|---|---|
+| fit, 107 runs | R1 | -0.51 → -0.55 | -0.12 to +0.04 | 10 / 2 → 6 / 0 |
+| fit, 107 runs | as graded | -0.59 → -0.57 | -0.06 to +0.11 | 10 / 1 → 6 / 0 |
+| other five, 100 runs | R1 | -0.51 → -0.58 | -0.19 to +0.03 | 65 / 51 → 38 / 29 |
+| other five, 100 runs | as graded | -0.62 → -0.65 | -0.14 to +0.08 | 65 / 38 → 38 / 21 |
+
+Read it with these limits:
+- Every change is inside its bootstrap interval. Under each label set, 6 of
+  the 11 batches rank worse and 5 better.
+- The GREEN change is what a stricter GREEN line would do. Of the old score's
+  GREEN runs, the 38 with the fewest minutes hold 28 (R1) and 20 (as graded)
+  HIGHs, against 29 and 21 here. Refit on the fit batches by the rule above,
+  in half-minute steps, the line would be 3.5 minutes at INFO 1 and 2 at
+  INFO 0. On the other five those lines leave 49 and 52 GREEN runs, of which
+  38 and 40 carry an R1 HIGH: the same share.
+- The other five are held out for this choice only. Most of their runs fed
+  lints, and YUYVIG's verdicts are in the precision weights.
+- On ten injected-defect runs, a whole dropped record now lowers the score on
+  15 of 58 drops, up from 1. The mean fall is 0.16 points, against 3.6 if the
+  doctor charged the record's full minute. The ten un-mutated controls lose
+  4.6 points on average, and 3 of the 10 leave GREEN.
 
 ### Calibration caveat (read this before trusting an absolute number)
 

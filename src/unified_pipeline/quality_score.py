@@ -24,9 +24,11 @@ weight w costs w * fraction points::
     final = min(raw, *caps)
 
 Since #1595 the score is built from the run doctor's findings
-(``score_doctor_findings``, weight 40): each WARN or ERROR finding costs its
-hand-checked precision times the minutes its kind of defect typically takes to
-fix (``LINT_FIX_MINUTES``), and the estimated minutes set the penalty. The
+(``score_doctor_findings``, weight 40): each finding, INFO, WARN or ERROR,
+costs its hand-checked precision times the minutes its kind of defect typically
+takes to fix (``LINT_FIX_MINUTES``), and the estimated minutes set the penalty.
+The precision is the discount; the severity is not a second one
+(``SEVERITY_WEIGHT``). The
 precision is the one the review copy's gate reads
 (``doctor.precision.finding_precision`` over ``load_gate_ledger``): the
 ``doctor/PRECISION.md`` row of the finding's own shape, with YUYVIG's held-out
@@ -932,10 +934,17 @@ LINT_FIX_MINUTES = {
 #: costs what a wrong field does, the most common kind of finding.
 DEFAULT_FIX_MINUTES = FIX_MINUTES_FIELD_WRONG
 
-#: The doctor severities a finding counts at, as a multiplier. INFO findings
-#: are notes the run page does not show as problems, so they cost nothing; the
-#: WARN count was the signal that tracked defects on batch YUYVIG (#1595).
-SEVERITY_WEIGHT = {"ERROR": 1.0, "WARN": 1.0, "INFO": 0.0}
+#: The doctor severities a finding counts at, as a multiplier. Every severity
+#: counts in full: a finding's measured precision is its discount, so an INFO
+#: note the ledger seldom confirms (source_line_coverage, 15%) costs little and
+#: one it usually confirms costs what a WARN does. INFO weighed 0 until the
+#: 2026-10-15 ground-truth refit (Refs #1595): of 0, 0.25, 0.5, 1 and two
+#: precision gates, 1 ranked the six fit batches (EBYSBC, s7ab, pilot, NDMRSO,
+#: X6, EOAHMI) best by batch-stratified rank r against the R1-graded labels,
+#: -0.51 to -0.55, and moved the five other labelled batches from -0.51 to
+#: -0.58 (R1) and -0.62 to -0.65 (as graded). Every change is inside its
+#: paired-bootstrap 95% interval; docs/RUN_DOCTOR_SCORING.md has the table.
+SEVERITY_WEIGHT = {"ERROR": 1.0, "WARN": 1.0, "INFO": 1.0}
 
 #: The precision a finding is given when the gate's ledger records no
 #: hand-checked verdict for its shape or lint: a stated prior, not a measurement. On the
@@ -958,7 +967,9 @@ DOCTOR_FINDINGS_WEIGHT = 100 - BAND_YELLOW
 #: of the 62 carry a verified HIGH, so GREEN can only be honest if it is rare.
 #: Under 3.5 minutes, 5 runs and none with a HIGH; under 4, 8 runs and 1 with a
 #: HIGH; under 5, 14 and 5. Goal 4 in docs/RUN_DOCTOR_SCORING.md asks for under
-#: 1 in 10 GREEN runs with a HIGH, so 3. Refit on each labelled batch.
+#: 1 in 10 GREEN runs with a HIGH, so 3. Refit on each labelled batch. Not
+#: refitted when INFO findings started to count (SEVERITY_WEIGHT): the same 3
+#: minutes then admit fewer runs.
 GREEN_MAX_CLEANUP_MINUTES = 3.0
 
 #: The estimated minutes at which the dimension takes half its weight. The
